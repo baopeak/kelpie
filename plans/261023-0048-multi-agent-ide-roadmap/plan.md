@@ -8,7 +8,7 @@ tags: [roadmap, multi-agent, acp, performance, ux, security]
 created: 2026-10-23
 supersedes: [261023-0036-vibe-coder-gaps]
 blockedBy: []
-blocks: []
+blocks: [261024-1205-phone-remote-control]  # phase 12 (notify.rs, mobile.rs) must land first
 ---
 
 # Multi-agent IDE roadmap
@@ -46,7 +46,7 @@ tests and a performance budget. Supersedes [261023-0036-vibe-coder-gaps](../2610
 | 9 | [Composer & context attach](phase-09-composer-context.md) | P1 | 3d | 1 | pending |
 | 10 | [Spec workspace](phase-10-spec-workspace.md) | P2 | 3d | 8, 9 | pending |
 | 11 | [Event-triggered automations](phase-11-event-automations.md) | P2 | 3d | 1, 7 | pending |
-| 12 | [Off-machine notify & limit actions](phase-12-notify-limits-redaction.md) | P1 | 3d | 1, 3, 5 | pending |
+| 12 | [Off-machine notify & limit actions](phase-12-notify-limits-redaction.md) | P1 | 3d | 1, 3, 5 | completed |
 | 13 | [Processes, ports & preview](phase-13-processes-ports.md) | P2 | 3d | 1 | pending |
 | 14 | [Agent setup: MCP, instructions, skills](phase-14-agent-setup.md) | P2 | 3d | 1 | pending |
 | 15 | [Platform & hygiene](phase-15-platform-hygiene.md) | P3 | 3d | 1, 2 | pending |
@@ -132,6 +132,7 @@ feature on an older daemon; never assume app and daemon are the same release.
 - Phase 6: snapshots default off (0.35 s + 0.15 s start look on 10k files); 100k-file numbers, echo-during-snapshot and `ui_tour.py` not run; CRLF restore not byte-exact (disclosed).
 - Phase 7: cold 20-worktree summary ≈ 2 s; checks join the Job object after start; no resume state after a crash past branch deletion; `ui_tour.py` not run.
 - `attention.py` flaked once (11/12) under heavy parallel load, then 12/12 three times (incl. at 100 % CPU): watch it.
+- Phase 12: manual checks pending (real Telegram bot, ntfy.sh, a real Claude usage limit, Codex resume after switch account, phone link); no limit signal for Codex/chat; non-Windows idle unit-tested only.
 - Perf gate `bench` measures unfocused sessions, which the CPU-priority work (separate change) deliberately slows under load: compare bench with `daemon.set_priority {enabled:false}` or budget it separately.
 
 ## Unresolved questions

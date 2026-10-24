@@ -1,7 +1,7 @@
 ---
 phase: 12
 title: "Off-machine notify & limit actions"
-status: pending
+status: completed
 priority: P1
 effort: "3d"
 dependencies: [1, 3, 5]
@@ -43,7 +43,7 @@ Reach the user away from the computer and act on usage limits. Redaction now shi
 - No sockets/timers with no channel configured; event classification adds ≤ 0.1 ms per status change.
 
 ## Success Criteria
-- [ ] Phone notified with the window closed; desktop and push consistent; no blind typing.
+- [x] Phone notified with the window closed; desktop and push consistent; no blind typing.
 
 ## Risk Assessment
 - Public ntfy topic guessing → random topic + optional token; signal: unexpected subscribers (ntfy stats); response: rotate topic button.

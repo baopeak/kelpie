@@ -1,5 +1,7 @@
-- [Shell hook blocked words](shell-hook-blocked-words.md) — target/ and .git blocked in Read/Bash (script-file workaround); scratch-workspace probe tests
+- [Shell hook blocked words](shell-hook-blocked-words.md) — target/, .git, node_modules blocked; script-file workaround; node .mts / scratch-crate probes; load sampling
 - [E2E overlay selector collisions](e2e-overlay-selector-collisions.md) — workspace stays mounted under fixed overlays; e2e clicks first match
 - [Agent CLI protocol verification](agent-cli-protocol-verification.md) — codex schema dump, claude.exe mmap grep, live initialize probe
 - [Git plumbing facts](git-plumbing-facts.md) — commit-tree ignores gpgsign; worktree remove w/ locked file unregisters; read-tree overwrites ignored; hooksPath hooks
 - [Agent transcript formats](agent-transcript-formats.md) — Claude subagents/ files, streaming output_tokens dedupe, no [1m] tag; Codex rollout facts
+- [kelpied logging and store traps](kelpied-logging-and-store-traps.md) — KELPIE_LOG not RUST_LOG, logs in data/logs; ureq trace leaks URL path; Solid root setStore merges
+- [Vault host identity](vault-host-identity.md) — checkHost/saveVault replace all SshHost objects; keyed Show on them remounts UI

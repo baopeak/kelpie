@@ -1,0 +1,55 @@
+{
+  "label": "phase12-review",
+  "created": "2026-10-25T01:00:14+07:00",
+  "machine": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "cpu": "Intel(R) Core(TM) i5-6440HQ CPU @ 2.60GHz",
+    "python": "3.14.6",
+    "cores": "4 physical / 4 logical",
+    "ram_gb": 7.9,
+    "commit": "cb3a77f"
+  },
+  "runs": 3,
+  "metrics": {
+    "entry_gz_kb": 319.0,
+    "bench_wall_s": 3.75
+  },
+  "spread_pct": {},
+  "range": {},
+  "bundle": {
+    "entry_file": "index-BSBtwzoA.js",
+    "lazy_chunks": 238,
+    "lazy_gz_kb": 1716.47,
+    "largest_lazy": {
+      "chunk-FOHPRMQF-DD4dKubD.js": 143.15,
+      "cytoscape.esm-BegBNzOV.js": 137.75,
+      "terminal-host-BV101Fhd.js": 137.01,
+      "katex-DJhrJSbw.js": 77.43,
+      "i18n-qgwSAoKo.js": 53.82
+    }
+  },
+  "bench": {
+    "bench_runs_s": [
+      3.75,
+      3.72,
+      3.93
+    ],
+    "bench_mib_s": 16.0
+  },
+  "comparison": [
+    {
+      "metric": "entry_gz_kb",
+      "current": 319.0,
+      "baseline": 323.6,
+      "limit": "<= 338.60 KB",
+      "verdict": "ok"
+    },
+    {
+      "metric": "bench_wall_s",
+      "current": 3.75,
+      "baseline": 3.72,
+      "limit": "<= 3.91 s",
+      "verdict": "ok"
+    }
+  ]
+}
