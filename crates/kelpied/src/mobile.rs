@@ -179,6 +179,16 @@ impl Mobile {
 // ---------- RPCs (from the desktop app) ----------
 
 impl Mobile {
+    /// A project's name as the app last sent it.
+    pub fn project_name(&self, id: &str) -> Option<String> {
+        self.projects.lock().get(id).cloned()
+    }
+
+    /// The phone web app's address while phone access is on.
+    pub fn running_url(&self) -> Option<String> {
+        self.running.lock().as_ref().map(|r| r.url.clone())
+    }
+
     pub fn set_projects(&self, params: &Value) {
         let map = params.get("projects").and_then(Value::as_object).map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
         *self.projects.lock() = map;

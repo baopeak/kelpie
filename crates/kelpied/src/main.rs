@@ -27,11 +27,13 @@ mod daemon;
 mod echo_bench;
 mod meta;
 mod mobile;
+mod notify;
 mod oneshot;
 mod persist;
 mod proc_tree;
 mod runtimes;
 mod runs;
+mod scheduled_input;
 mod server;
 mod session;
 mod status;
@@ -274,7 +276,12 @@ fn init_logging(data_dir: &std::path::Path) {
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
     let file = std::fs::OpenOptions::new().create(true).append(true).open(&path);
-    let filter = tracing_subscriber::EnvFilter::try_from_env("KELPIE_LOG").unwrap_or_else(|_| "info".into());
+    // The HTTP client logs the address of each request (a bot token is part of Telegram's): never,
+    // whatever level the user asks for.
+    let mut filter = tracing_subscriber::EnvFilter::try_from_env("KELPIE_LOG").unwrap_or_else(|_| "info".into());
+    for quiet in ["ureq=warn", "ureq_proto=warn"] {
+        filter = filter.add_directive(quiet.parse().expect("log directive"));
+    }
     if let Ok(file) = file {
         tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
     }

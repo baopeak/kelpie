@@ -380,7 +380,7 @@ def main():
             time.sleep(0.1)
     if c is None:
         raise SystemExit("the daemon did not start")
-    spawn("driver", [TAURI_DRIVER, "--port", str(DRIVER_PORT), "--native-driver", NATIVE])
+    spawn("driver", [TAURI_DRIVER, "--port", str(DRIVER_PORT), "--native-port", str(free_port()), "--native-driver", NATIVE])
     if not until(port_open, 30):
         raise SystemExit("tauri-driver did not open its port")
 

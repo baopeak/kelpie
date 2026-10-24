@@ -41,6 +41,8 @@ import { applyLocale } from "../lib/i18n";
 import { VoicePill } from "./voice";
 import { startUpdater } from "../lib/updater";
 import { CHECKPOINT_API } from "../lib/checkpoint-api";
+import { initNotifySync } from "../lib/notify-sync";
+import { initLimits } from "../lib/limits";
 
 const Board = lazy(() => import("./board").then((m) => ({ default: m.Board })));
 const FinishDialog = lazy(() => import("./finish-dialog"));
@@ -59,6 +61,8 @@ function syncDaemonTheme() {
 export function App() {
   createEffect(syncDaemonTheme);
   startUpdater();
+  initNotifySync();
+  initLimits();
   createEffect(() => applyLocale(store.state.settings.language));
   // Plugin agents go to the daemon on every connection (it may have restarted without them).
   createEffect(() => store.connected() && void syncPluginAgents(true));

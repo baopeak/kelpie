@@ -17,11 +17,13 @@ use crate::awake::{self, Awake};
 use crate::chat::ChatSession;
 use crate::checkpoints::{self, Checkpoints};
 use crate::meta::MetaStore;
+use crate::notify::{self, Notifier, Raised};
 use crate::status::Status;
 use crate::persist::{write_atomic, SavedSession, Store};
 use crate::runs::{self, Action, NewRun, Runs, SessionView, TaskStatus};
+use crate::scheduled_input::{ScheduledInputs, CONTINUE_TEXT};
 use crate::session::{json_out, now_millis, ClientTx, Session, SessionInfo, SessionSpec};
-use crate::status::{hook_event_failed, hook_event_status, turn_event};
+use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, turn_event};
 
 #[derive(Clone)]
 pub enum Entry {
@@ -87,6 +89,12 @@ pub struct Daemon {
     checkpoints: Arc<Checkpoints>,
     /// Sessions of automations that deliver to review: session id -> folder, until their turn ends.
     deliver_review: Mutex<HashMap<String, String>>,
+    /// Events for the user (inbox, desktop, phone) and the channels that carry them away.
+    pub notifier: Notifier,
+    /// "Continue at reset" timers.
+    scheduled: ScheduledInputs,
+    /// This daemon, for threads that outlive a call.
+    me: std::sync::Weak<Daemon>,
 }
 
 #[derive(Deserialize)]
@@ -157,9 +165,15 @@ fn handle_of(params: &Value) -> Result<u32> {
 
 impl Daemon {
     pub fn new(data_dir: PathBuf, exe: PathBuf) -> Arc<Daemon> {
+        Self::with_secrets(data_dir, exe, Arc::new(notify::Keyring))
+    }
+
+    /// `secrets` keeps the notification channels' secrets (tests use memory, never the user's).
+    pub fn with_secrets(data_dir: PathBuf, exe: PathBuf, secrets: Arc<dyn notify::SecretStore>) -> Arc<Daemon> {
         // `prioritize` starts on (until the app says otherwise).
         crate::proc_tree::set_daemon_priority(true);
         Arc::new_cyclic(|me: &std::sync::Weak<Daemon>| {
+            let weak = me.clone();
             let me = me.clone();
             let emit: checkpoints::Emit = Arc::new(move |event, params| {
                 if let Some(d) = me.upgrade() {
@@ -181,6 +195,9 @@ impl Daemon {
                 agents_control_others: AtomicBool::new(load_policy(&data_dir)),
                 checkpoints: Arc::new(Checkpoints::new(&data_dir, emit)),
                 deliver_review: Mutex::new(HashMap::new()),
+                notifier: Notifier::new(&data_dir, secrets),
+                scheduled: ScheduledInputs::open(&data_dir),
+                me: weak,
                 data_dir,
                 exe,
                 meta_dirty: AtomicBool::new(false),
@@ -256,6 +273,135 @@ impl Daemon {
         }
     }
 
+    // ---------- notifications (see notify.rs) ----------
+
+    /// An event the user should hear about. The app gets it for its inbox and desktop notification
+    /// (`tell_app`), and the channels carry it off the computer. What a focused window already
+    /// shows is not raised at all, so the desktop and the phone always agree.
+    fn raise(&self, ev: Raised, tell_app: bool) {
+        use notify::Kind;
+        let seen = ev.session.as_deref().is_some_and(|s| self.notifier.looking_at(s));
+        if seen && matches!(ev.kind, Kind::Waiting | Kind::Finished | Kind::Error) {
+            return;
+        }
+        if tell_app {
+            self.broadcast("notify.event", ev.to_json());
+        }
+        if seen && ev.kind == Kind::Cost {
+            return;
+        }
+        if self.notifier.wants_push(&ev, Instant::now()) {
+            let ctx = self.push_context(&ev);
+            self.notifier.send(&ev, &ctx);
+        }
+    }
+
+    /// What a message needs to know around an event; read only for one that is being sent.
+    fn push_context(&self, ev: &Raised) -> notify::Context {
+        let mut ctx = notify::Context { phone_url: self.notifier.config().phone_link.then(|| self.mobile.running_url()).flatten(), ..Default::default() };
+        ctx.project = ev.project_id.as_deref().and_then(|p| self.mobile.project_name(p));
+        let Some(entry) = ev.session.as_deref().and_then(|s| self.by_id(s)) else { return ctx };
+        let info = entry.info();
+        let spec = &info.spec;
+        let kind_label = agents::preset_for(&spec.kind).map_or(spec.kind.as_str(), |p| p.label);
+        ctx.title = Some(notify::session_label(spec.name.as_deref(), info.title.as_deref(), &spec.kind, kind_label, spec.remote.as_ref().map(|r| r.dest.as_str())));
+        if self.notifier.config().include_screen {
+            if let Entry::Term(s) = &entry {
+                let tail = s.text_tail(40);
+                let lines: Vec<&str> = tail.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+                ctx.screen = Some(lines[lines.len().saturating_sub(14)..].join("\n"));
+            }
+        }
+        ctx
+    }
+
+    /// One status change of a session, from the ticker or a spec update.
+    fn observe(&self, info: &SessionInfo, now: Instant) {
+        if let Some(ev) = self.notifier.observe(info, now) {
+            self.raise(ev, true);
+        }
+    }
+
+    /// A run's tasks that just began waiting for the user's approval.
+    fn announce_approvals(&self, run: &runs::Run) {
+        let tasks: Vec<(String, String, bool)> = run.tasks.iter().map(|t| (t.id.clone(), t.title.clone(), t.status == TaskStatus::WaitingApproval)).collect();
+        for ev in self.notifier.new_approvals(&run.id, &run.name, run.project_id.as_deref(), &tasks) {
+            self.raise(ev, true);
+        }
+    }
+
+    // ---------- continue at reset (see scheduled_input.rs) ----------
+
+    /// A timer is due: type `continue` if the session is still stopped by the limit it was set
+    /// for and nobody typed since; otherwise drop it and say why.
+    fn fire_scheduled(&self, item: crate::scheduled_input::Scheduled) {
+        let result = match self.by_id(&item.session) {
+            Some(Entry::Term(s)) => s
+                .continue_if_limited(item.generation, item.agent_session_id.as_deref(), item.turn, crate::session::typed_text(CONTINUE_TEXT).into_bytes())
+                .map(|written| (s, written)),
+            _ => Err(crate::session::Refused::Exited),
+        };
+        match result {
+            Ok((s, written)) => {
+                // Enter is a separate write (a TUI takes one in the same write as text), and only
+                // if nothing was typed in between; the app is told what happened.
+                let (me, session) = (self.me.clone(), item.session.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(120));
+                    let sent = s.input_if_last_typed_at(written, b"\r".to_vec());
+                    if let Some(d) = me.upgrade() {
+                        let event = if sent { json!({"session": session, "at": null, "result": "sent"}) } else { json!({"session": session, "at": null, "result": "cancelled", "reason": "input"}) };
+                        d.broadcast("scheduled.updated", event);
+                    }
+                });
+            }
+            Err(why) => self.broadcast("scheduled.updated", json!({"session": item.session, "at": null, "result": "cancelled", "reason": why.code()})),
+        }
+    }
+
+    /// The session's timer goes (it was closed or is starting again): the app is told why.
+    fn drop_timer(&self, session: &str, reason: &str) {
+        if self.scheduled.cancel(session) {
+            self.broadcast("scheduled.updated", json!({"session": session, "at": null, "result": "cancelled", "reason": reason}));
+        }
+    }
+
+    /// `session.set_env_restart`: gives a stopped Claude Code / Codex session another account's
+    /// config home and starts it again on the same conversation.
+    fn set_env_restart(&self, handle: u32, env: &Value) -> Result<SessionInfo> {
+        let Entry::Term(session) = self.entry(handle)? else { bail!("only terminal sessions can change account") };
+        anyhow::ensure!(!session.is_alive(), "stop the session first");
+        let (var, remote) = {
+            let spec = session.spec.lock();
+            (match spec.kind.as_str() {
+                "claude" => "CLAUDE_CONFIG_DIR",
+                "codex" => "CODEX_HOME",
+                other => bail!("{other} sessions have no account to switch"),
+            }, spec.remote.is_some())
+        };
+        anyhow::ensure!(!remote, "a session on another machine keeps its account");
+        let map = env.as_object().ok_or_else(|| anyhow!("env must be an object"))?;
+        anyhow::ensure!(map.keys().all(|k| k == var), "only {var} can change");
+        let value = match map.get(var) {
+            None | Some(Value::Null) => None,
+            Some(Value::String(dir)) if std::path::Path::new(dir).is_absolute() && std::path::Path::new(dir).is_dir() => Some(dir.clone()),
+            Some(_) => bail!("{var} must be an existing folder"),
+        };
+        let set = |dir: Option<String>| {
+            let mut spec = session.spec.lock();
+            match dir {
+                Some(dir) => spec.env.insert(var.into(), dir),
+                None => spec.env.remove(var),
+            }
+        };
+        let old = set(value);
+        self.meta_dirty.store(true, Ordering::Relaxed);
+        // A restart that fails leaves the session as it was.
+        self.restart(handle).inspect_err(|_| {
+            set(old);
+        })
+    }
+
     /// Starts the automation's agent with its prompt and records the run.
     pub fn run_automation(&self, id: &str) -> Result<SessionInfo> {
         let a = self.automations.lock().list.iter().find(|a| a.id == id).cloned().ok_or_else(|| anyhow!("no automation {id}"))?;
@@ -277,6 +423,7 @@ impl Daemon {
         }
         self.automations.lock().record(id, now_millis(), session.clone(), error.clone());
         self.broadcast("automation.ran", json!({"id": id, "name": a.name, "session_id": session, "error": error}));
+        self.raise(Raised { project_id: a.project_id.clone(), ..Raised::automation(&a.name, session, error) }, true);
         result
     }
 
@@ -325,6 +472,7 @@ impl Daemon {
         for id in ids {
             if let Some(r) = runs.get(id) {
                 self.broadcast("run.updated", json!(r));
+                self.announce_approvals(r);
             }
         }
     }
@@ -495,6 +643,7 @@ impl Daemon {
                 let rid = runs.get(&id()).map(|r| r.id.clone()).ok_or_else(|| anyhow!("no run {}", id()))?;
                 anyhow::ensure!(runs.get(&rid).is_some_and(|r| r.status != runs::RunStatus::Running), "cancel the run before deleting it");
                 runs.list.retain(|r| r.id != rid);
+                self.notifier.forget_run(&rid);
                 runs.save()?;
                 self.broadcast("run.deleted", json!({"id": rid}));
                 return Ok(json!(true));
@@ -535,6 +684,7 @@ impl Daemon {
 
     pub fn unregister_client(&self, id: u64) {
         self.clients.lock().remove(&id);
+        self.notifier.drop_client(id);
         for entry in self.sessions.read().values() {
             entry.detach(id);
         }
@@ -591,6 +741,7 @@ impl Daemon {
                 if saved.alive {
                     chat.mark_interrupted(saved.last_activity);
                 }
+                self.notifier.seed(&chat.info());
                 self.sessions.write().insert(handle, Entry::Chat(chat));
                 continue;
             }
@@ -605,6 +756,7 @@ impl Daemon {
             if saved.alive {
                 session.mark_interrupted(saved.last_activity);
             }
+            self.notifier.seed(&session.info());
             self.sessions.write().insert(handle, Entry::Term(session));
         }
     }
@@ -650,6 +802,7 @@ impl Daemon {
         let info = entry.info();
         self.sessions.write().insert(handle, entry);
         self.meta_dirty.store(true, Ordering::Relaxed);
+        self.notifier.seed(&info);
         self.broadcast("session.updated", serde_json::to_value(&info)?);
         self.checkpoint_baseline(&info.spec, "spawn");
         Ok(info)
@@ -669,6 +822,7 @@ impl Daemon {
             spec.clone()
         };
         let launch = Self::launch_for(&spec, Self::resume_for(&spec), None, &self.exe, &self.data_dir)?;
+        self.drop_timer(&spec.id, "restarted");
         // The program starts below the old output, which stays readable above it. A resumed agent
         // redraws only the latest part of its conversation (Claude Code shows about a screenful),
         // so clearing the scrollback here would lose everything said before the restart.
@@ -684,6 +838,8 @@ impl Daemon {
 
     pub fn close(&self, handle: u32) -> Result<()> {
         let entry = self.sessions.write().remove(&handle).ok_or_else(|| anyhow!("no session {handle}"))?;
+        self.notifier.forget(handle);
+        self.drop_timer(&entry.spec().id, "exited");
         entry.kill();
         self.store.remove_snapshot(&entry.spec().id);
         // Waits for a snapshot of its repository that is running: not on this request's worker.
@@ -725,6 +881,9 @@ impl Daemon {
             Entry::Term(s) => s.tick(Instant::now()),
             Entry::Chat(c) => c.tick(Instant::now()),
         };
+        if let Some(info) = &ticked {
+            self.observe(info, Instant::now());
+        }
         if let Some(v) = ticked.and_then(|i| serde_json::to_value(&i).ok()) {
             self.broadcast("session.updated", v);
         }
@@ -737,6 +896,13 @@ impl Daemon {
         let agent = params.get("agent").and_then(Value::as_str).unwrap_or("");
         let payload = params.get("payload").cloned().unwrap_or(Value::Null);
         let Some(Entry::Term(session)) = self.by_id(session_id) else { return Ok(()) };
+        // `auth` adds `verified`: true when the caller proved it is this session (its token), false for a
+        // claimed id. Only a proof makes the session strict; a caller with the user's token proves nothing
+        // about the agent. Once strict, unproven reports change nothing, not even the conversation id.
+        let (proven, claimed) = (params.get("verified") == Some(&Value::Bool(true)), params.get("verified") == Some(&Value::Bool(false)));
+        if !session.accepts_report(!claimed, proven) {
+            return Ok(());
+        }
         let event = payload
             .get("hook_event_name")
             .or_else(|| payload.get("type"))
@@ -769,6 +935,9 @@ impl Daemon {
         }
         if let Some(status) = hook_event_status(agent, event, &payload) {
             session.set_hook_status(status, hook_event_failed(event));
+            if hook_event_limited(event, &payload) {
+                session.set_limited();
+            }
         }
         // The app reads the conversation's usage when a turn moves on (it debounces).
         if !event.is_empty() {
@@ -993,6 +1162,9 @@ impl Daemon {
                 last_run_tick = now;
                 self.run_tick();
             }
+            for item in self.scheduled.take_due(now_millis()) {
+                self.fire_scheduled(item);
+            }
             if now.duration_since(last_schedule) >= Duration::from_secs(10) {
                 last_schedule = now;
                 self.update_awake();
@@ -1038,6 +1210,7 @@ impl Daemon {
                     if let Ok(v) = serde_json::to_value(&info) {
                         self.broadcast("session.updated", v);
                     }
+                    self.observe(&info, now);
                     // A turn ended (also for agents without hooks): the app reads the usage.
                     let prev = if info.alive { last_status.insert(info.handle, info.status) } else { last_status.remove(&info.handle) };
                     if info.status == Status::Working && prev != Some(Status::Working) {
@@ -1132,6 +1305,75 @@ impl Daemon {
                 self.update_awake();
                 json!({"held": self.awake.held()})
             }
+            // The window tells which sessions it shows (API 12): what a focused window shows is not
+            // raised as an event, for the desktop and the phone alike.
+            "ui.focus" => {
+                let focused = params.get("focused").and_then(Value::as_bool).unwrap_or(false);
+                let visible = params.get("visible").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                self.notifier.set_ui(client, focused, visible, params.get("active_at").and_then(Value::as_u64));
+                json!(true)
+            }
+            "notify.get" => self.notifier.describe(params.get("reveal_topic").and_then(Value::as_bool) == Some(true)),
+            "notify.set" => {
+                let config = match params.get("config") {
+                    Some(c) if !c.is_null() => Some(serde_json::from_value(c.clone()).context("notify config")?),
+                    _ => None,
+                };
+                self.notifier.update(config, params.get("secrets").unwrap_or(&Value::Null))?;
+                self.notifier.describe(false)
+            }
+            "notify.rotate_topic" => json!({"topic": self.notifier.rotate_topic()?}),
+            "notify.clear" => {
+                self.notifier.clear()?;
+                self.notifier.describe(false)
+            }
+            // Sends on a thread of its own: a slow server holds no other request.
+            "notify.test" => {
+                let channel = notify::Channel::parse(param(&params, "channel")?.as_str().unwrap_or_default()).ok_or_else(|| anyhow!("unknown channel"))?;
+                let (me, tx, id) = (self.clone(), tx.clone(), id.clone());
+                std::thread::Builder::new().name("kelpie-notify-test".into()).spawn(move || {
+                    let reply = match me.notifier.test(channel) {
+                        Ok(()) => json!({"id": id, "result": true}),
+                        Err(e) => json!({"id": id, "error": {"message": e}}),
+                    };
+                    let _ = tx.send(json_out(&reply));
+                })?;
+                return Ok(None);
+            }
+            // Only the app reads usage, so only it knows a session passed its cost cap: the
+            // channels carry that on (the app shows it itself).
+            "notify.report" => {
+                anyhow::ensure!(param(&params, "kind")?.as_str() == Some("cost"), "unknown report");
+                let sid = param(&params, "session")?.as_str().unwrap_or_default();
+                let project = self.by_id(sid).and_then(|e| e.spec().project_id);
+                let detail = params.get("detail").and_then(Value::as_str).map(|s| s.chars().take(200).collect());
+                self.raise(Raised::cost(sid, project, detail), false);
+                json!(true)
+            }
+            "session.schedule_continue" => {
+                let Entry::Term(s) = self.entry(handle_of(&params)?)? else { bail!("only terminal sessions can continue at reset") };
+                anyhow::ensure!(s.info().limited, "the session is not stopped by a usage limit");
+                let at = param(&params, "at")?.as_u64().ok_or_else(|| anyhow!("bad reset time"))?;
+                let source = param(&params, "source")?.as_str().unwrap_or_default();
+                let (sid, conversation) = {
+                    let spec = s.spec.lock();
+                    (spec.id.clone(), spec.agent_session_id.clone())
+                };
+                let item = self.scheduled.schedule(&sid, s.generation(), conversation, s.turn_seq(), at, source, now_millis())?;
+                self.broadcast("scheduled.updated", json!({"session": sid, "at": item.fire_at, "source": item.source}));
+                json!(item)
+            }
+            "session.cancel_scheduled" => {
+                let sid = self.session_id_of(handle_of(&params)?).ok_or_else(|| anyhow!("no such session"))?;
+                let cancelled = self.scheduled.cancel(&sid);
+                if cancelled {
+                    self.broadcast("scheduled.updated", json!({"session": sid, "at": null, "result": "cancelled", "reason": "user"}));
+                }
+                json!(cancelled)
+            }
+            // The timers now, and the ones a daemon that stopped left behind (reported once).
+            "session.scheduled" => json!({"timers": self.scheduled.list(), "lost": self.scheduled.take_lost()}),
+            "session.set_env_restart" => serde_json::to_value(self.set_env_restart(handle_of(&params)?, params.get("env").unwrap_or(&Value::Null))?)?,
             "agent.presets" => {
                 let installed = agents::installed_presets();
                 json!(agents::all_presets()
@@ -1414,12 +1656,102 @@ fn create_task_worktree(run: &runs::Run, task: &runs::Task) -> Result<(String, S
 mod tests {
     use super::*;
 
+    fn test_daemon(name: &str) -> (Arc<Daemon>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("kelpie-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (Daemon::with_secrets(dir.clone(), PathBuf::from("kelpied"), notify::Memory::new()), dir)
+    }
+
+    fn events(rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::session::Outgoing>) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(o) = rx.try_recv() {
+            out.push(serde_json::from_slice(&o.data[5..]).unwrap());
+        }
+        out
+    }
+
+    #[test]
+    fn what_the_user_looks_at_is_raised_neither_to_the_app_nor_to_the_phone() {
+        use notify::Kind;
+        let (daemon, dir) = test_daemon("raise");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.register_client(1, tx);
+        let mut c = notify::Config { min_turn_s: 0, ..Default::default() };
+        c.ntfy = notify::Ntfy { enabled: true, server: "http://127.0.0.1:1".into() };
+        daemon.notifier.update(Some(c), &Value::Null).unwrap();
+        daemon.notifier.set_ui(1, true, vec!["s1".into()], None);
+        let of = |kind: Kind, session: &str| Raised { session: Some(session.into()), ..Raised::bare(kind) };
+
+        // A focused window showing s1: its status events go nowhere, whether it needs you, ended or failed.
+        for kind in [Kind::Waiting, Kind::Finished, Kind::Error] {
+            daemon.raise(of(kind, "s1"), true);
+        }
+        assert!(events(&mut rx).is_empty(), "the app is not told");
+        assert!(!daemon.notifier.started(), "and nothing is sent to the phone");
+
+        // The same events for a session it does not show reach both.
+        daemon.raise(of(Kind::Waiting, "s2"), true);
+        let got = events(&mut rx);
+        assert_eq!((got.len(), got[0]["event"].as_str(), got[0]["params"]["kind"].as_str(), got[0]["params"]["session"].as_str()), (1, Some("notify.event"), Some("waiting"), Some("s2")));
+        assert!(daemon.notifier.started(), "the phone gets it");
+
+        // Automations and approvals are not about a session on screen: always told.
+        daemon.raise(Raised { session: Some("s1".into()), ..Raised::automation("nightly", None, None) }, true);
+        assert_eq!(events(&mut rx).len(), 1);
+
+        // A cost cap crossing is shown by the app itself; the daemon only carries it on.
+        daemon.raise(of(Kind::Cost, "s2"), false);
+        assert!(events(&mut rx).is_empty(), "reported by the app: not echoed back");
+        daemon.unregister_client(1);
+        daemon.raise(of(Kind::Finished, "s1"), true);
+        assert!(events(&mut rx).is_empty(), "no window: nobody to tell");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_closed_window_stops_counting_as_looking() {
+        let (daemon, dir) = test_daemon("looking");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.register_client(7, tx);
+        daemon.notifier.set_ui(7, true, vec!["s1".into()], None);
+        assert!(daemon.notifier.looking_at("s1"));
+        daemon.unregister_client(7);
+        assert!(!daemon.notifier.looking_at("s1"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_account_switch_changes_only_the_accounts_variable_of_a_stopped_session() {
+        let (daemon, dir) = test_daemon("account");
+        let session = |kind: &str, remote: bool| {
+            let spec = SessionSpec { id: format!("a-{kind}"), kind: kind.into(), cwd: dir.to_string_lossy().into_owned(), remote: remote.then(|| crate::session::RemoteSpec { dest: "h".into(), ..Default::default() }), ..Default::default() };
+            let handle = daemon.next_handle.fetch_add(1, Ordering::Relaxed);
+            daemon.sessions.write().insert(handle, Entry::Term(Session::new(handle, spec, 80, 24)));
+            handle
+        };
+        let home = dir.to_string_lossy().into_owned();
+        let claude = session("claude", false);
+        // Only the variable of that agent, only a real folder, never a relative path.
+        for bad in [json!({"PATH": home}), json!({"CODEX_HOME": home}), json!({"CLAUDE_CONFIG_DIR": "relative/dir"}), json!({"CLAUDE_CONFIG_DIR": dir.join("missing").to_string_lossy()}), json!({"CLAUDE_CONFIG_DIR": 5}), json!("x")] {
+            assert!(daemon.set_env_restart(claude, &bad).is_err(), "{bad}");
+        }
+        assert!(daemon.set_env_restart(session("shell", false), &json!({})).unwrap_err().to_string().contains("no account"));
+        assert!(daemon.set_env_restart(session("claude", true), &json!({})).unwrap_err().to_string().contains("another machine"));
+        let spec = match daemon.entry(claude).unwrap() {
+            Entry::Term(s) => s.spec.lock().clone(),
+            Entry::Chat(_) => unreachable!(),
+        };
+        assert!(spec.env.is_empty(), "a refused switch changes nothing");
+        assert!(daemon.set_env_restart(9999, &json!({})).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn an_automation_run_delivers_its_folder_to_review_once() {
         let dir = std::env::temp_dir().join(format!("kelpie-deliver-{}", uuid::Uuid::new_v4()));
         let work = dir.join("worktree");
         std::fs::create_dir_all(&work).unwrap();
-        let daemon = Daemon::new(dir.clone(), PathBuf::from("kelpied"));
+        let daemon = Daemon::with_secrets(dir.clone(), PathBuf::from("kelpied"), notify::Memory::new());
         let cwd = work.to_string_lossy().into_owned();
         daemon.set_meta(&cwd, Some("refactor"), Some("progress")).unwrap();
         daemon.deliver_review.lock().insert("s1".into(), cwd.clone());

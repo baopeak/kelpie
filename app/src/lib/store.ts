@@ -7,6 +7,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as ipc from "./ipc";
 import { olderVersion } from "./version";
 import { ANSWER_API, nextWaiting, setAnswering } from "./attention";
+import { NOTIFY_API, describeNotify, type NotifyEvent } from "./notify-events";
 import { t } from "./i18n";
 import { allPanes, autoGrid, buildGrid, cellCount, equalize, findPane, fromTemplate, insertBeside, leaf, migrateLayout, moveGutter, movePane, removePane, replacePane, splitPane, swapPanes, templateLeaves, toTemplate, type GridSpec, type Side } from "./layout";
 import { basename, isMac, normPath, uid } from "./platform";
@@ -239,7 +240,8 @@ function createAppStore() {
     olderDaemon = false;
     setDaemonNeedsSwitch(false);
     const [info, app] = await Promise.all([ipc.daemon<{ api?: number; version?: string; security?: number }>("daemon.info", {}), ipc.platformInfo()]).catch(() => [null, null]);
-    setDaemonApi(info?.api ?? 0);
+    // A daemon that predates API levels says none: level 1.
+    setDaemonApi(info ? info.api ?? 1 : 0);
     // Only an older daemon: a dev app and an installed Kelpie may share one, and must not keep
     // offering to restart each other's.
     if (!info || !app || ((info.api ?? 1) >= app.api && !(info.version && olderVersion(info.version, app.version)))) return;
@@ -334,6 +336,10 @@ function createAppStore() {
     }
   }
 
+  /** A daemon from before API 12 does not classify status changes: this window does. Newer ones
+   *  send `notify.event`, also while no window is open. */
+  const legacyNotify = () => daemonApi() > 0 && daemonApi() < NOTIFY_API;
+
   async function maybeNotify(prev: SessionInfo | undefined, next: SessionInfo) {
     if (!prev) return;
     // A turn that ended (or a process that died) in an error, reported once when it happens.
@@ -354,13 +360,24 @@ function createAppStore() {
     await desktopNotify(title, body);
   }
 
+  /** An event from the daemon's single source: the inbox entry and the desktop notification.
+   *  What a focused window already shows never arrives (the daemon knows through `ui.focus`). */
+  function onNotifyEvent(ev: NotifyEvent) {
+    const s = ev.session ? sessions[ev.session] : undefined;
+    const projectId = ev.project_id ?? s?.project_id ?? undefined;
+    const project = state.projects.find((p) => p.id === projectId);
+    const d = describeNotify(ev, { label: s ? sessionLabel(s) : undefined, host: s?.remote?.dest, projectName: project?.name });
+    addInbox({ kind: d.kind, title: d.title, body: d.body, sessionId: ev.session ?? undefined, projectId });
+    void desktopNotify(d.title, d.body);
+  }
+
   function onDaemonEvent(msg: { event: string; params: any }) {
     const p = msg.params;
     switch (msg.event) {
       case "session.updated": {
         const prev = sessions[p.id];
         setSessions(p.id, reconcile(p as SessionInfo));
-        void maybeNotify(prev, p);
+        if (legacyNotify()) void maybeNotify(prev, p);
         // Background projects are not watched: an agent finishing a turn may have committed
         // or switched branch, so refresh that project's subtitle.
         if (prev?.status === "working" && p.status !== "working" && p.project_id) refreshProjectInfo(p.project_id, 1000);
@@ -401,13 +418,22 @@ function createAppStore() {
         break;
       }
       case "automation.ran": {
-        const title = t("Automation · {name}", { name: p.name });
-        const body = p.error ? t("Failed: {error}", { error: p.error }) : t("Started");
-        addInbox({ kind: p.error ? "error" : "automation", title, body, sessionId: p.session_id ?? undefined, projectId: (p.session_id && sessions[p.session_id]?.project_id) || undefined });
-        void desktopNotify(title, body);
+        if (legacyNotify()) {
+          const title = t("Automation · {name}", { name: p.name });
+          const body = p.error ? t("Failed: {error}", { error: p.error }) : t("Started");
+          addInbox({ kind: p.error ? "error" : "automation", title, body, sessionId: p.session_id ?? undefined, projectId: (p.session_id && sessions[p.session_id]?.project_id) || undefined });
+          void desktopNotify(title, body);
+        }
         window.dispatchEvent(new CustomEvent("kelpie:automations"));
         break;
       }
+      case "notify.event":
+        onNotifyEvent(p as NotifyEvent);
+        break;
+      case "scheduled.updated":
+        // Read by lib/limits.ts (the store must not import it: it imports the store).
+        window.dispatchEvent(new CustomEvent("kelpie:scheduled", { detail: p }));
+        break;
       case "automation.changed":
         window.dispatchEvent(new CustomEvent("kelpie:automations"));
         break;
@@ -1492,7 +1518,7 @@ function createAppStore() {
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
     settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
-    daemonNeedsSwitch, switchDaemon, daemonApi, openAnswer, revealNextWaiting,
+    daemonNeedsSwitch, switchDaemon, daemonApi, legacyNotify, openAnswer, revealNextWaiting,
     notesFor, addNote, removeNotes, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
     newFloating, toggleFloating, selectFloating, closeFloating,
   };

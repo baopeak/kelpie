@@ -21,10 +21,12 @@ import { kindInfo } from "../lib/agents";
 import type { Pane, Project, Tab } from "../lib/types";
 import { t } from "../lib/i18n";
 import { confirmDialog } from "../lib/confirm-dialog";
+import { isLimited } from "../lib/limits";
 
 // Loaded when a diff or a turn's file is first opened.
 const DiffView = lazy(() => import("./diff-view").then((m) => ({ default: m.DiffView })));
 const TurnFileView = lazy(() => import("./turn-file-view"));
+const LimitBanner = lazy(() => import("./limit-banner"));
 
 export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
   const focused = () => props.tab.focus === props.pane.id;
@@ -101,6 +103,10 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
           </Show>
           {tools()}
         </div>
+      </Show>
+      {/* The usage limit stopped this agent (the daemon says so for Claude Code). */}
+      <Show when={props.pane.kind === "terminal" ? session() : undefined} keyed>
+        {(s) => <Show when={isLimited(s)}><LimitBanner s={s} /></Show>}
       </Show>
       <div class="pane-body">
         <Switch fallback={<EmptyPane project={props.project} tab={props.tab} pane={props.pane} focused={focused()} />}>

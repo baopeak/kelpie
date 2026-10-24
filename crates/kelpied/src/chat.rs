@@ -346,6 +346,7 @@ impl ChatSession {
             unread: g.unread,
             alive: g.alive,
             exit_code: g.exit_code,
+            limited: false,
             failed: match g.exit_code {
                 Some(code) => !g.stopped && exit_failed(code),
                 None => g.activity.failed,

@@ -2680,6 +2680,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "ureq 3.4.2",
  "uuid",
  "windows-sys 0.61.2",
 ]

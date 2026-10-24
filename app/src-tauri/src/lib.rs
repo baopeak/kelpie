@@ -263,6 +263,7 @@ pub fn run() {
             accounts::account_create,
             accounts::account_remove,
             accounts::account_status,
+            accounts::account_transcript,
             integrations::integration_secret_set,
             integrations::integration_secret_clear,
             integrations::integration_secret_has,

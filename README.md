@@ -126,6 +126,8 @@ Agents live in a background session daemon, so switching projects, closing the w
 ### Activity and automations
 
 - **Activity inbox** behind the bell in the status bar: agents that finished or need you, automation runs and new worktrees across every project, newest first; jump to any of them, mark read, filter. An optional sound plays with desktop notifications.
+- **Notifications on your phone, with the window closed**: the daemon sends needs-you, done, failed, automation, run-approval and cost-cap events to ntfy (random topic), Telegram or a webhook, with credentials masked, per-event switches and a turn-length filter. Secrets stay in the OS credential store.
+- **Usage-limit actions**: a Claude Code session stopped by its usage limit offers *Continue at reset* (typed by the daemon, only if the session is still limited and untouched), *Switch account* (the conversation moves to the other account's folder) and *Hand off*.
 - **Scheduled automations**: an agent prompt (or shell command) in a folder every hour, day, weekday or week. The daemon runs them, also while the window is closed; *Run now*, enable / disable, and every run lands in the inbox.
 
 | | |
@@ -292,7 +294,7 @@ The full list is in the [user guide](docs/user-guide.md#keyboard-shortcuts).
 
 ## Privacy and data
 
-- Everything stays on your machine: sessions, layouts, settings, worktree comments, automations, runs, plugins and speech models live in `%LOCALAPPDATA%\Kelpie` (Windows) or `~/Library/Application Support/Kelpie` (macOS). There is no telemetry. No network port is opened unless you turn on **phone access** (one address and port you choose, paired devices only, optional HTTPS).
+- Everything stays on your machine: sessions, layouts, settings, worktree comments, automations, runs, plugins and speech models live in `%LOCALAPPDATA%\Kelpie` (Windows) or `~/Library/Application Support/Kelpie` (macOS). There is no telemetry, and notifications leave the computer only through a channel you switch on (ntfy, Telegram, webhook). No network port is opened unless you turn on **phone access** (one address and port you choose, paired devices only, optional HTTPS).
 - **Upgrading from Erka** (the project's former name). Quit Erka, then start Kelpie. On its first start Kelpie:
   - stops Erka's background daemon if it still runs; its sessions come back in Kelpie as exited, resumable from their conversation;
   - moves your sessions, layouts, settings, accounts, saved hosts, plugins and speech models from the `Erka` folder, and points the paths stored in them at the new folder;
@@ -337,6 +339,7 @@ End-to-end tests drive the real app through WebDriver (`tauri-driver` + a matchi
 | `scripts/e2e/browser.py`, `remote.py`, `mobile.py` | browser panes and design mode (trusted page input via DevTools); SSH projects (local test host); phone pairing and replies |
 | `scripts/e2e/ssh_hosts.py` | SSH hosts page against a local test host: password login through askpass, fingerprint check, terminal and Claude Code on the host, files, port forwards, keys installed and used, known hosts, config import (set `KELPIE_SSH_DIR`) |
 | `scripts/e2e/ssh_panes.py` | SSH panes in a local project against a local test host: "Run on" in the launcher, splits that keep the host, a local and a remote pane in one tab, host links per project, "Open in" the current project, saved layouts on a host, quick connect, OS badge, host theme (set `KELPIE_SSH_DIR`) |
+| `scripts/e2e/notify.py` | ntfy / Telegram / webhook channels against a local server (secrets in the credential store under the run's own endpoint), desktop and phone agreeing on what is in front of the user, needs-you with the window closed, filters and rate limit, redaction, the usage-limit strip, "continue at reset" typing only into a still-limited untouched session, switching account |
 | `scripts/e2e/attention.py` | prompts on screen (PowerShell `Read-Host (y/n)`, a numbered menu) turn sessions *needs you* with `waiting_since` and keys; `session.answer` refuses a stale prompt and types the current answer; ordinary output is not a prompt; sessions may not answer (daemon only) |
 | `scripts/e2e/updater.py` | updates keep sessions running: installer script stops only programs directly in the install folder; a daemon running from its copy keeps its pid and sessions through an install; uninstall stops it; `latest.json` (daemon only) |
 | `scripts/e2e/daemon_auth.py` | who may call the daemon: anonymous and forged callers refused, session tokens get scripting but no admin methods, hook reports bound to the caller's session, the "agents can control other sessions" policy and restricted sessions (daemon only) |

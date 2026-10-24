@@ -30,11 +30,14 @@ regex = "1"
 # SSH passwords / key passphrases saved by the app, read when ssh asks (askpass.rs).
 keyring = { version = "3.6", default-features = false, features = ["windows-native", "apple-native"] }
 if-addrs = "0.15"
+# Off-machine notifications (notify.rs): ntfy, Telegram and webhook posts. The same client and TLS
+# provider (ring) as the app's usage meters.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Power"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Power", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

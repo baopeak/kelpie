@@ -103,6 +103,8 @@ function announce(prev: Run | undefined, next: Run) {
     if (before === task.status) continue;
     const title = t("Run · {name} · {task}", { name: next.name, task: task.title });
     if (task.status === "waiting_approval") {
+      // From API 12 the daemon says it (`notify.event`), also for the phone channels.
+      if (!store.legacyNotify()) continue;
       const body = t("Waiting for your approval to start");
       store.addInbox({ kind: "waiting", title, body, projectId: project });
       void store.desktopNotify(title, body);

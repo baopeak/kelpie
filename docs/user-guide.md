@@ -355,7 +355,38 @@ the bottom. Settings → Terminal → *Scrollback* sets how many lines each term
 The bell in the status bar lists what happened while you looked elsewhere: agents that
 finished or need you, automation runs, new worktrees — with the agents working right now on
 top. Click an entry to jump there; right-click toggles read. Settings → Notifications can add
-a short chime to desktop notifications.
+a short chime to desktop notifications. A session you are looking at (the window has focus and
+shows it) raises nothing.
+
+#### On your phone, with the window closed
+
+Settings → Notifications → *Off this computer* sends the same events from the session daemon,
+which keeps running when you close the window. Nothing is sent until you switch a channel on.
+
+- **ntfy**: switch it on, install the ntfy app and subscribe to the topic Kelpie shows (*Show topic*).
+  The topic is 128 random bits only you know; use *New topic* if you shared it by accident. An
+  access token is optional, and the server can be your own.
+- **Telegram**: make a bot with @BotFather, paste its token and your chat id, press *Send a test*.
+- **Webhook**: a JSON `POST` to an address you choose.
+
+Choose which events go out (needs you, finished, failed, automation, run approval, cost cap), skip
+turns shorter than a number of seconds (30 by default), and optionally send only while Kelpie's
+window is not in focus or the computer has been idle for 5 minutes (the system's own clock on Windows; elsewhere, no key or pointer use in Kelpie's window). A session sends at most one message per
+30 seconds. Messages carry the project, the session's name, what happened and how long the turn took,
+with credentials masked; the end of the terminal screen is added only if you switch that on (it leaves
+the computer, through the server you chose). With phone access on, the message links to the session in
+the phone app; the link holds no pairing code, so it opens only on a phone that is already paired. Tokens
+and the topic are kept in the system credential store, never in a file, and are never shown again.
+
+#### When an agent hits the usage limit
+
+A Claude Code session stopped by its subscription's usage limit shows a strip above its pane:
+**Continue at reset** (the time comes from the usage meter; when the meter cannot say, type the time
+and confirm it), **Switch account…** and **Hand off to…**. The daemon keeps the timer, so it works with
+the window closed. When the time comes it types `continue` only if the session is still stopped by
+that limit, in the same conversation and the same run, and nothing was typed since its last prompt was sent (a half-written message would otherwise be submitted); otherwise it
+cancels and leaves a note in the inbox saying why. Other agents do not report their limits, so they
+have no strip.
 
 ### Source control and review
 
@@ -447,6 +478,12 @@ Sessions panel lists the conversations of every account and resumes each with it
 an agent, the tasks it waits for, optionally an **approval** before it starts and its own
 **worktree** (a new branch, so parallel tasks never edit the same checkout). *Plan tasks with
 AI* drafts the tasks from an objective for you to review. The session daemon runs them —
+A running Claude Code or Codex session can move to another account (*Switch account…* in the
+usage-limit strip): Kelpie copies the conversation into that account's folder, stops the agent and
+starts it again there on the same conversation. It refuses, with the reason and before stopping
+anything, when the target is not signed in, already holds a different or newer conversation with the same id (an older copy from an earlier switch is replaced, so you can switch back and forth),
+or the conversation is over 1 GB; sessions in chat view or on another machine do not switch.
+
 also with the window closed — starting each task when its dependencies are done. A task ends
 when its agent reports (`kelpied run report done "summary"` / `failed "why"`, which Kelpie adds to
 the prompt), exits, or worked and then stayed idle for 5 minutes. Failed tasks can be retried,
@@ -704,8 +741,9 @@ a setting.
   default shell, colour theme, floating terminal.
 - **Appearance**: language, dark or light theme, compact density, interface text size, editor
   word wrap.
-- **Notifications**: desktop notifications and their sound, notes about shortcuts kept from
-  the terminal, first-run tips.
+- **Notifications**: desktop notifications and their sound, ntfy / Telegram / webhook messages
+  with the window closed (events, turn length, away-only, screen text), notes about shortcuts kept
+  from the terminal, first-run tips.
 - **Usage & Resources**: usage and memory meters, the per-session cost cap, the Usage & cost page.
 - **Session Daemon**: status, data folder and log, *Stop daemon & all sessions*.
 

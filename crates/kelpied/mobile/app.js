@@ -70,8 +70,12 @@
   let readTimer = 0;
 
   // ---------- pairing ----------
-  const pairCode = new URLSearchParams(location.hash.slice(1)).get("p");
-  if (pairCode) history.replaceState(null, "", location.pathname);
+  const hashParams = new URLSearchParams(location.hash.slice(1));
+  const pairCode = hashParams.get("p");
+  // A link from a notification (#s=<session id>): opens that session once connected. It carries no
+  // code or token, so it works only on a device that is already paired.
+  let wantSession = hashParams.get("s");
+  if (pairCode || wantSession) history.replaceState(null, "", location.pathname);
 
   function showPair(code, error) {
     title.textContent = t("Pair with Kelpie");
@@ -133,6 +137,9 @@
       sessions = m.sessions;
       projects = m.projects || {};
       render();
+      const wanted = wantSession && sessions.find((s) => s.id === wantSession);
+      wantSession = null;
+      if (wanted) openSession(wanted.handle);
     } else if (m.type === "sessions") {
       const before = new Map(sessions.map((s) => [s.handle, s.status]));
       sessions = m.sessions;
@@ -234,7 +241,15 @@
 
   // A pairing link opened in a tab that already has the app changes only the fragment.
   window.addEventListener("hashchange", () => {
-    const code = new URLSearchParams(location.hash.slice(1)).get("p");
+    const params = new URLSearchParams(location.hash.slice(1));
+    const want = params.get("s");
+    if (want) {
+      history.replaceState(null, "", location.pathname);
+      const s = sessions.find((x) => x.id === want);
+      if (s) openSession(s.handle);
+      return;
+    }
+    const code = params.get("p");
     if (!code) return;
     history.replaceState(null, "", location.pathname);
     if (ws) {

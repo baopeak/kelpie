@@ -1,0 +1,6 @@
+/* Settings → Notifications → Off this computer */
+.settings-subhead { font-size: 14px; margin: 18px 0 4px; font-weight: 600; }
+.push-block { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: 100%; }
+.push-block .text-input { min-width: 220px; }
+.push-events { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px 16px; width: 100%; }
+.push-block .btn { white-space: nowrap; }

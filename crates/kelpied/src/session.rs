@@ -97,6 +97,9 @@ pub struct SessionInfo {
     pub exit_code: Option<i32>,
     /// The last agent turn errored, or the process exited with a failure code on its own.
     pub failed: bool,
+    /// The last turn ended on the subscription's usage limit (Claude Code reports it).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub limited: bool,
     pub pid: Option<u32>,
     pub cols: u16,
     pub rows: u16,
@@ -110,6 +113,28 @@ pub struct SessionInfo {
     /// Wall-clock ms since it has been waiting on the user (`status == waiting`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_since: Option<u64>,
+}
+
+/// Why a guarded write was not made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    Exited,
+    Restarted,
+    Conversation,
+    NotLimited,
+    InputSince,
+}
+
+impl Refused {
+    pub fn code(self) -> &'static str {
+        match self {
+            Refused::Exited => "exited",
+            Refused::Restarted => "restarted",
+            Refused::Conversation => "conversation",
+            Refused::NotLimited => "not_limited",
+            Refused::InputSince => "input",
+        }
+    }
 }
 
 /// One queued write to a client socket. `credit` is decremented once written.
@@ -496,8 +521,17 @@ impl Session {
     }
 
     fn write_input(g: &mut Inner, bytes: Vec<u8>) {
-        // Focus reports (`ESC [ I` / `ESC [ O`, sent by the terminal view when focus moves) are
-        // not the user answering anything: a prompt keeps waiting while they look elsewhere.
+        // Focus reports (`ESC [ I` / `ESC [ O`) are not the user answering anything: a prompt keeps
+        // waiting while they look elsewhere. Mouse reports and query replies are not typing either,
+        // for the usage-limit timer; a click can still answer a prompt.
+        if !is_terminal_report(&bytes) {
+            let now = Instant::now();
+            g.activity.last_typed = Some(now);
+            // Keys that answer a permission prompt or a question go to that dialog, not to the prompt line.
+            if !matches!(g.activity.hook, Some((Status::Waiting, _))) {
+                g.activity.last_draft = Some(now);
+            }
+        }
         if !is_focus_report(&bytes) {
             if g.screen_prompt.is_some() {
                 g.answered_prompt = g.prompt_fingerprint.clone();
@@ -521,6 +555,71 @@ impl Session {
         }
         Self::write_input(&mut g, bytes);
         true
+    }
+
+    /// Types `bytes` for a timer that waits out the usage limit: only into the same run of the
+    /// process (`generation`) and conversation that the limit stopped, and only while that is
+    /// still so with nothing typed since. Checked and written under one lock, like [`Self::answer`].
+    pub fn continue_if_limited(&self, generation: u64, agent_session_id: Option<&str>, turn_seq: u64, bytes: Vec<u8>) -> Result<Instant, Refused> {
+        let mut g = self.inner.lock();
+        if g.pty.is_none() {
+            return Err(Refused::Exited);
+        }
+        if g.generation != generation {
+            return Err(Refused::Restarted);
+        }
+        if self.spec.lock().agent_session_id.as_deref() != agent_session_id {
+            return Err(Refused::Conversation);
+        }
+        // Another turn has begun since the timer was set: the limit it was for is over.
+        if !(g.activity.failed && g.activity.limited) || g.activity.turn_seq != turn_seq {
+            return Err(Refused::NotLimited);
+        }
+        if !g.activity.limit_untouched() {
+            // Whoever typed has taken over; a later report of a limit cannot hand the session back.
+            g.activity.limit_dead = true;
+            return Err(Refused::InputSince);
+        }
+        if g.activity.status(Instant::now()) != Status::Idle {
+            return Err(Refused::NotLimited);
+        }
+        Self::write_input(&mut g, bytes);
+        Ok(g.activity.last_typed.unwrap_or_else(Instant::now))
+    }
+
+    /// Sends `bytes` only if the write at `written` is still the last thing typed (the Enter that
+    /// follows a timer's text must not follow anything the user typed in between).
+    pub fn input_if_last_typed_at(&self, written: Instant, bytes: Vec<u8>) -> bool {
+        let mut g = self.inner.lock();
+        if g.pty.is_none() || g.activity.last_typed != Some(written) {
+            return false;
+        }
+        Self::write_input(&mut g, bytes);
+        true
+    }
+
+    /// Whether a report of the agent's state may be applied. `proven`: it came with the session's token;
+    /// once one has, reports that are only claimed (a program in the session posing as the agent) are not.
+    /// `allowed` is false for a claimed report.
+    pub fn accepts_report(&self, allowed: bool, proven: bool) -> bool {
+        let mut g = self.inner.lock();
+        g.activity.verified_hooks |= proven;
+        allowed || !g.activity.verified_hooks
+    }
+
+    /// Turns begun by this run of the agent (see `Activity::turn_seq`).
+    pub fn turn_seq(&self) -> u64 {
+        self.inner.lock().activity.turn_seq
+    }
+
+    /// The turn that just failed ended on the usage limit.
+    pub fn set_limited(&self) {
+        self.inner.lock().activity.on_limit();
+    }
+
+    /// Which run of the process this is: it grows with every spawn.
+    pub fn generation(&self) -> u64 {
+        self.inner.lock().generation
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
@@ -713,6 +812,7 @@ impl Session {
                 Some(code) => !g.stopped && exit_failed(code),
                 None => g.activity.failed,
             },
+            limited: g.exit_code.is_none() && g.activity.failed && g.activity.limited,
             pid: g.pty.as_ref().and_then(|p| p.pid),
             cols,
             rows,
@@ -781,15 +881,69 @@ pub fn next_client_id() -> u64 {
     NEXT_CLIENT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Text to type or paste as a prompt: line breaks become `\n`, tabs stay, every other control
-/// character goes (ESC above all). Prompts quote files, diffs and other sessions' output; an ESC
-/// left in would let a `\x1b[201~` inside them end the bracketed paste early, and the rest would
-/// arrive as keystrokes (commands run, prompts answered).
 /// Only focus reports (`ESC [ I`, `ESC [ O`): the terminal view saying it gained or lost focus.
 fn is_focus_report(bytes: &[u8]) -> bool {
     !bytes.is_empty() && bytes.chunks(3).all(|c| c == b"\x1b[I" || c == b"\x1b[O")
 }
 
+/// Only what the terminal view sends on its own: focus reports, mouse reports (SGR and X10),
+/// and replies to the program's queries (device attributes, cursor position, status, mode and
+/// colour reports). Anything else, a key or a paste, is the user.
+fn is_terminal_report(bytes: &[u8]) -> bool {
+    let mut at = 0;
+    while at < bytes.len() {
+        match report_len(&bytes[at..]) {
+            Some(n) => at += n,
+            None => return false,
+        }
+    }
+    !bytes.is_empty()
+}
+
+/// Length of the report at the start of `b`, if it is one.
+fn report_len(b: &[u8]) -> Option<usize> {
+    if b.len() < 3 || b[0] != 0x1b {
+        return None;
+    }
+    let fields = |p: &[u8]| p.split(|c| *c == b';').filter(|f| !f.is_empty() && f.iter().all(u8::is_ascii_digit)).count();
+    match b[1] {
+        b'[' => {
+            if b[2] == b'M' {
+                // X10 mouse: three bytes follow.
+                return (b.len() >= 6).then_some(6);
+            }
+            let mut j = 2;
+            let marker = matches!(b[j], b'<' | b'?' | b'>').then(|| b[j]);
+            j += usize::from(marker.is_some());
+            let params_at = j;
+            while j < b.len() && (b[j].is_ascii_digit() || b[j] == b';') {
+                j += 1;
+            }
+            let params = &b[params_at..j];
+            let dollar = b.get(j) == Some(&b'$');
+            j += usize::from(dollar);
+            let last = *b.get(j)?;
+            let is_report = match (marker, last, dollar) {
+                (None, b'I' | b'O', false) => params.is_empty(),
+                (Some(b'<'), b'M' | b'm', false) => fields(params) == 3,
+                (Some(b'?' | b'>'), b'c', false) => true,
+                (None, b'R', false) => fields(params) == 2,
+                (None | Some(b'?'), b'n', false) => matches!(fields(params), 1 | 2),
+                (None | Some(b'?'), b'y', true) => true,
+                _ => false,
+            };
+            is_report.then_some(j + 1)
+        }
+        // A colour or title reply: up to BEL or ST.
+        b']' => b.iter().position(|c| *c == 7).map(|p| p + 1).or_else(|| b.windows(2).position(|w| w == b"\x1b\\").map(|p| p + 2)),
+        _ => None,
+    }
+}
+
+/// Text to type or paste as a prompt: line breaks become `\n`, tabs stay, every other control
+/// character goes (ESC above all). Prompts quote files, diffs and other sessions' output; an ESC
+/// left in would let a `\x1b[201~` inside them end the bracketed paste early, and the rest would
+/// arrive as keystrokes (commands run, prompts answered).
 pub fn typed_text(text: &str) -> String {
     text.replace("\r\n", "\n")
         .chars()
@@ -807,6 +961,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_session_that_proved_itself_ignores_reports_without_the_token() {
+        let (s, _rx) = limited_session(1);
+        assert!(s.accepts_report(false, false), "nobody has proved anything yet");
+        assert!(s.accepts_report(true, false), "a caller with the user's token proves nothing about the agent");
+        assert!(s.accepts_report(false, false));
+        assert!(s.accepts_report(true, true));
+        assert!(!s.accepts_report(false, false), "now a claimed report is a program posing as the agent");
+        assert!(s.accepts_report(true, false) && s.accepts_report(true, true));
+    }
+
+    #[test]
+    fn a_mouse_report_is_not_typing_for_the_timer_but_still_answers_a_prompt() {
+        let (s, rx) = limited_session(1);
+        s.input(b"\x1b[<0;5;5M\x1b[I".to_vec());
+        assert!(s.inner.lock().activity.last_input.is_some(), "a click is input as far as prompts go");
+        assert!(s.inner.lock().activity.last_typed.is_none());
+        assert!(s.continue_if_limited(1, Some("conv-1"), 1, b"continue".to_vec()).is_ok());
+        assert_eq!(typed(&rx).len(), 2);
+    }
+
+    #[test]
     fn focus_reports_are_not_input() {
         assert!(is_focus_report(b"\x1b[I"));
         assert!(is_focus_report(b"\x1b[O\x1b[I"));
@@ -816,10 +991,173 @@ mod tests {
     }
 
     #[test]
+    fn what_the_terminal_view_sends_by_itself_is_not_typing() {
+        for report in [
+            &b"\x1b[I"[..], b"\x1b[O\x1b[I", b"\x1b[<0;41;12M", b"\x1b[<35;100;7m", b"\x1b[M #!", b"\x1b[?1;2c", b"\x1b[>0;276;0c", b"\x1b[12;40R",
+            b"\x1b[0n", b"\x1b[?997;1n", b"\x1b[?2004;2$y", b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07", b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\", b"\x1b[<64;5;5M\x1b[<64;5;5M\x1b[I",
+        ] {
+            assert!(is_terminal_report(report), "{:?}", String::from_utf8_lossy(report));
+        }
+        for typed in [&b"y"[..], b"", b"\x1b[A", b"\x1b[1;5C", b"\x1b", b"\x1b[<0;41M", b"hello\x1b[I", b"\x1b[I\r", b"\x1b[200~x\x1b[201~", b"\x1b[?1;2", b"\x1bOP"] {
+            assert!(!is_terminal_report(typed), "{:?}", String::from_utf8_lossy(typed));
+        }
+    }
+
+    #[test]
     fn typed_text_drops_escapes_that_could_end_a_paste() {
         assert_eq!(typed_text("a\x1b[201~\rrm -rf ~\r"), "a[201~\nrm -rf ~\n");
         assert_eq!(typed_text("x\u{9b}31m\u{7}y\tz\r\nw"), "x31my\tz\nw");
         assert_eq!(typed_text("héllo — 日本"), "héllo — 日本");
+    }
+
+    #[derive(Debug, Clone)]
+    struct NoKill;
+
+    impl ChildKiller for NoKill {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(NoKill)
+        }
+    }
+
+    /// A claude session that looks running (no process behind it) and was stopped by the usage
+    /// limit; what it is sent shows up on the returned channel.
+    fn limited_session(generation: u64) -> (Arc<Session>, std::sync::mpsc::Receiver<Ctl>) {
+        let spec = SessionSpec { id: "s1".into(), kind: "claude".into(), cwd: ".".into(), agent_session_id: Some("conv-1".into()), ..Default::default() };
+        let session = Session::new(1, spec, 80, 24);
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let mut g = session.inner.lock();
+            g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None });
+            g.generation = generation;
+            g.activity = Activity { alive: true, ..Default::default() };
+            g.activity.on_hook(Status::Working, false, Instant::now());
+            g.activity.on_hook(Status::Idle, true, Instant::now());
+        }
+        session.set_limited();
+        (session, rx)
+    }
+
+    fn typed(rx: &std::sync::mpsc::Receiver<Ctl>) -> Vec<Vec<u8>> {
+        rx.try_iter().filter_map(|c| if let Ctl::Input(b) = c { Some(b) } else { None }).collect()
+    }
+
+    #[test]
+    fn the_continue_timer_types_only_into_the_run_and_conversation_it_was_set_for() {
+        let (s, rx) = limited_session(3);
+        assert!(s.info().limited && s.info().failed);
+        assert!(s.continue_if_limited(3, Some("conv-1"), 1, b"continue".to_vec()).is_ok());
+        assert_eq!(typed(&rx), vec![b"continue".to_vec()]);
+        // Typing counts as input: a second timer for the same stop would be refused.
+        assert_eq!(s.continue_if_limited(3, Some("conv-1"), 1, b"continue".to_vec()), Err(Refused::InputSince));
+        assert!(typed(&rx).is_empty());
+
+        // The process was restarted since: a different generation.
+        let (s, rx) = limited_session(4);
+        assert_eq!(s.continue_if_limited(3, Some("conv-1"), 1, b"continue".to_vec()), Err(Refused::Restarted));
+        // /clear or /resume moved the session to another conversation.
+        s.spec.lock().agent_session_id = Some("conv-2".into());
+        assert_eq!(s.continue_if_limited(4, Some("conv-1"), 1, b"continue".to_vec()), Err(Refused::Conversation));
+        s.spec.lock().agent_session_id = None;
+        assert_eq!(s.continue_if_limited(4, Some("conv-1"), 1, b"continue".to_vec()), Err(Refused::Conversation));
+        assert!(typed(&rx).is_empty(), "nothing was typed in any refused case");
+    }
+
+    #[test]
+    fn a_draft_typed_while_the_turn_ran_blocks_the_timer_and_a_forged_limit_cannot_bring_it_back() {
+        let spec = SessionSpec { id: "s1".into(), kind: "claude".into(), cwd: ".".into(), agent_session_id: Some("conv-1".into()), ..Default::default() };
+        let session = Session::new(1, spec, 80, 24);
+        let (tx, rx) = std::sync::mpsc::channel();
+        session.inner.lock().pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None });
+        session.inner.lock().generation = 1;
+        let hook = |status, failed| session.inner.lock().activity.on_hook(status, failed, Instant::now());
+        // The prompt is sent, the turn starts, the user starts typing the next message, the turn fails.
+        session.input(b"first prompt\r".to_vec());
+        std::thread::sleep(Duration::from_millis(5));
+        hook(Status::Working, false);
+        std::thread::sleep(Duration::from_millis(5));
+        session.input(b"half a mess".to_vec());
+        std::thread::sleep(Duration::from_millis(5));
+        hook(Status::Idle, true);
+        session.set_limited();
+        assert!(session.info().limited);
+        assert_eq!(session.continue_if_limited(1, Some("conv-1"), session.turn_seq(), b"continue".to_vec()), Err(Refused::InputSince));
+        let sent: Vec<Vec<u8>> = rx.try_iter().filter_map(|c| if let Ctl::Input(b) = c { Some(b) } else { None }).collect();
+        assert!(!sent.iter().any(|b| b == b"continue"), "the draft was not submitted");
+        // A program reporting the limit again does not bring the timer or the banner back.
+        hook(Status::Idle, true);
+        session.set_limited();
+        assert!(!session.info().limited);
+    }
+
+    #[test]
+    fn a_timer_is_void_once_another_turn_has_begun() {
+        let (s, rx) = limited_session(1);
+        let old = s.turn_seq();
+        // A forged "prompt submitted" followed by a forged limit report is another turn.
+        s.inner.lock().activity.on_hook(Status::Working, false, Instant::now());
+        s.inner.lock().activity.on_hook(Status::Idle, true, Instant::now());
+        s.set_limited();
+        assert_eq!(s.continue_if_limited(1, Some("conv-1"), old, b"continue".to_vec()), Err(Refused::NotLimited));
+        assert!(typed(&rx).is_empty());
+    }
+
+    #[test]
+    fn enter_follows_the_timers_text_only_if_nothing_was_typed_between() {
+        let (s, rx) = limited_session(1);
+        let at = s.continue_if_limited(1, Some("conv-1"), s.turn_seq(), b"continue".to_vec()).unwrap();
+        assert!(s.input_if_last_typed_at(at, b"\r".to_vec()));
+        let (s, rx2) = limited_session(1);
+        let at = s.continue_if_limited(1, Some("conv-1"), s.turn_seq(), b"continue".to_vec()).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        s.input(b"x".to_vec());
+        assert!(!s.input_if_last_typed_at(at, b"\r".to_vec()), "the user typed meanwhile");
+        assert_eq!(typed(&rx), vec![b"continue".to_vec(), b"\r".to_vec()]);
+        assert_eq!(typed(&rx2), vec![b"continue".to_vec(), b"x".to_vec()]);
+    }
+
+    #[test]
+    fn the_continue_timer_gives_way_to_the_user_and_to_a_session_that_moved_on() {
+        // The user typed since the limit was reported.
+        let (s, rx) = limited_session(1);
+        s.input(b"hello".to_vec());
+        assert_eq!(s.continue_if_limited(1, Some("conv-1"), 1, b"continue".to_vec()), Err(Refused::InputSince));
+        assert_eq!(typed(&rx), vec![b"hello".to_vec()], "only the user's own input reached the process");
+
+        // A focus report is not typing.
+        let (s, rx) = limited_session(1);
+        s.input(b"\x1b[I".to_vec());
+        assert!(s.continue_if_limited(1, Some("conv-1"), 1, b"continue".to_vec()).is_ok());
+        assert_eq!(typed(&rx).last(), Some(&b"continue".to_vec()));
+
+        // The agent works again (the user continued by other means): no longer limited.
+        let (s, rx) = limited_session(1);
+        s.inner.lock().activity.on_hook(Status::Working, false, Instant::now());
+        assert!(!s.info().limited);
+        assert_eq!(s.continue_if_limited(1, Some("conv-1"), 1, b"continue".to_vec()), Err(Refused::NotLimited));
+
+        // Failed for another reason than the limit.
+        let (s, rx2) = limited_session(1);
+        s.inner.lock().activity.on_hook(Status::Idle, true, Instant::now());
+        assert!(!s.info().limited);
+        assert_eq!(s.continue_if_limited(1, Some("conv-1"), 1, b"continue".to_vec()), Err(Refused::NotLimited));
+
+        // Output on the screen: the agent is busy, whatever the failure flag says.
+        let (s, rx3) = limited_session(1);
+        {
+            let mut g = s.inner.lock();
+            g.activity.hook = None;
+            g.activity.on_output(Instant::now());
+        }
+        assert_eq!(s.continue_if_limited(1, Some("conv-1"), 1, b"continue".to_vec()), Err(Refused::NotLimited));
+
+        // The process is gone.
+        let (s, _rx4) = limited_session(1);
+        s.inner.lock().pty = None;
+        assert_eq!(s.continue_if_limited(1, Some("conv-1"), 1, b"continue".to_vec()), Err(Refused::Exited));
+        assert!(typed(&rx).is_empty() && typed(&rx2).is_empty() && typed(&rx3).is_empty());
     }
 
     #[test]

@@ -1,7 +1,8 @@
 // Reactions to a session's usage that most sessions never need: the ring's menu, the one-time hint
 // at 85 % and the cost cap's inbox entry and Esc. Loaded on first use, not at startup.
 import { store, sessionLabel } from "./store";
-import { sendInput } from "./ipc";
+import { daemon, sendInput } from "./ipc";
+import { NOTIFY_API } from "./notify-events";
 import { conversationCommands, handOffSession, runConversationCommand } from "./agent-actions";
 import { isAgentKind, kindInfo, launchableAgents } from "./agents";
 import { openContextMenu, type MenuItem } from "../components/context-menu";
@@ -78,6 +79,11 @@ function reportOverCap(s: SessionInfo, cost: number, exact: boolean) {
   const body = t("{cost} of {cap}", { cost: formatCost(cost, exact), cap: formatCost(cap, true) });
   store.addInbox({ kind: "cost", title, body, sessionId: s.id, projectId: s.project_id ?? undefined });
   void store.desktopNotify(title, body);
+  // Only this window reads usage, so it tells the daemon, which carries it to the phone channels.
+  if (store.daemonApi() >= NOTIFY_API) {
+    const detail = `Passed the cost cap: ${formatCost(cost, exact)} of ${formatCost(cap, true)}`; // i18n-ignore: goes to the phone channels
+    void daemon("notify.report", { kind: "cost", session: s.id, detail }).catch(() => {});
+  }
 }
 
 /** Hints and cap reactions for every session that is due one. Safe to call again at any change. */

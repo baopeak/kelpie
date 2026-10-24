@@ -86,10 +86,10 @@ Frames (`crates/kelpie-proto`): `u32 LE length | u8 kind | payload`
 | 2 Output | daemon → app | `u32 handle \| u64 seq \| bytes` (`seq` = stream offset after the bytes) |
 | 3 Input | app → daemon | `u32 handle \| bytes` |
 
-RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|save|delete|run`, `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`.
+RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|save|delete|run`, `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them).
 `daemon.info` reports an `api` feature level (`kelpie_proto::API_LEVEL`); an app built for a
 higher level offers to restart an older daemon still running from a previous version.
-Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `automation.ran`, `run.updated`, `mobile.pair_request`.
+Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `automation.ran`, `run.updated`, `mobile.pair_request`, and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
 
 ## Session threading (daemon)
 
@@ -165,8 +165,89 @@ Priority: agent hooks → bell → prompt on screen → output activity.
   answers on daemons below API 7.
 
 States: `working`, `waiting` (needs you), `idle` (+ `unread` after ≥ 3 s of work while not
-visible), `exited`. Desktop notifications fire on working → idle/waiting when the session is
-not visible.
+visible), `exited`. What a status change turns into (inbox entry, desktop notification, phone
+message) is decided by the daemon: see "Notifications and limit actions".
+
+## Notifications and limit actions
+
+One source decides "this is worth telling the user" (`notify.rs`, API 12). The ticker hands every
+changed session to `Notifier::observe`, which compares it with the previous state of that session
+(seeded when a session is created or restored, so a first sighting is not an event):
+
+| Event (`notify.event.kind`) | When | Inbox kind |
+|---|---|---|
+| `waiting` | working → waiting | waiting |
+| `finished` | working → idle | finished |
+| `error` | a turn or process newly failed, whatever it was doing (once) | error |
+| `automation` | an automation run started or failed to start | automation / error |
+| `approval` | a run task began waiting for approval | waiting |
+| `cost` | the app reports a session over its cost cap (`notify.report`; only the app reads usage) | cost (the app adds it itself) |
+
+The app no longer classifies anything from API 12 on: it shows `notify.event` in its inbox and as a
+desktop notification, worded in the interface language (`lib/notify-events.ts`). Against an older
+daemon it keeps the old window-side rule (`store.legacyNotify()`), so notifications still work.
+
+**What is in front of the user is not an event.** The app reports its window with `ui.focus
+{focused, visible: [session ids]}` (per connection; dropped when the connection ends, so a closed
+window shows nothing). A status event for a session that a focused window shows is neither broadcast
+nor sent to the phone; automation and approval events are never suppressed. A computer idle for 5 minutes
+is not being looked at, whatever the window shows. The desktop and the phone therefore agree by
+construction.
+
+**Channels** (Settings → Notifications → *Off this computer*, all through the app's connection,
+user-only): ntfy (server, a random 128-bit topic made when ntfy is first switched on, optional access
+token; the message goes as JSON to the server's root, so the topic is never in an address), Telegram
+(bot token, chat id; `sendMessage`) and a webhook (JSON `{source, title, text, event}`). Their secrets
+(topic, tokens, webhook address) are kept with `kelpie_proto::secret_*` under the service
+`Kelpie (<endpoint>)` — a daemon with its own `KELPIE_ENDPOINT` (every dev and test daemon) has its own
+service and never reads or writes the installed app's entries; `notify.json` holds only what is safe to
+read, and `notify.get` says whether each secret is set, never its value (the topic only with
+`reveal_topic`). Nothing runs until a channel is switched on: no thread, socket or timer (the sending
+thread starts with the first message). Send errors say what failed (`HTTP 500`, `timed out`…), never
+where; request addresses are not logged (the daemon's log filter keeps the HTTP client at `warn`, whatever
+`KELPIE_LOG` says: its trace output contains the request path, a Telegram bot token among it). The sending
+queue holds 32 messages and drops one that waited over 5 minutes; dropped ones are counted and shown in the
+settings. A cost-cap report has its own 30 s allowance (it arrives seconds after the turn's message). An ntfy
+access token is refused for an `http://` server on another computer. Filters: per-event switches (needs-you, done, failed,
+automation, approval, cost cap), a finished turn must last N s (default 30), *only while the window is
+not focused or the computer is idle* (idle: no keyboard or mouse for 5 min: the system's clock on Windows, elsewhere the window's own report of its last key or pointer use in `ui.focus`), and one
+message per session per 30 s. The Telegram address can be pointed at a loopback fake only when
+`KELPIE_E2E` is set.
+
+**Payload.** Project, session label, status, turn length; every text passes `redact`. The end of the
+screen is included only when switched on (a warning is shown), last 14 lines, 1000 characters, redacted.
+The phone link is `<phone address>/#s=<session id>` while phone access is on and *Include a link to the
+phone page* is (default on; the link holds this computer's LAN address and goes to the chosen server): no pairing code and no
+token, so it opens only on a device that is already paired (the phone page strips the fragment).
+
+**Continue at reset.** Claude Code's `StopFailure` hook with error `rate_limit` marks the session
+`limited` (a `limited` field of `session.list`, cleared when the agent works again); other agents report
+no structured limit, so they never show the banner. The pane shows a banner with *Continue at reset*,
+*Switch account…* and *Hand off to…*. The reset time comes only from the usage meter (a full window's
+`resets_at`, read for the session's own account) or is typed in and confirmed by the user;
+`session.schedule_continue {handle, at, source: meter|confirmed}` stores `{session, generation,
+agent_session_id, turn}` (`scheduled_input.rs`, written to `scheduled.json`). When it fires (30 s after the
+reset, shortened for tests) `Session::continue_if_limited` checks under the session's lock — same run of
+the process (generation), same conversation, same turn, still failed by the limit, idle, and **nothing typed
+since the failed turn began** (a draft typed while the agent worked would be submitted with the text; the
+Enter that sent the turn's prompt is the last keystroke allowed; answers to a permission prompt or question move the mark up, since they went to the dialog) — and only then types `continue` and, as a
+separate write, Enter, which is dropped if anything was typed in between. Focus, mouse and query-reply
+sequences from the terminal view are not typing. A refused timer marks the limit dead until the next genuine turn begins, so a bare report of it from a
+program cannot re-arm it; once the agent has sent a report with the session token, reports without one are
+ignored (until then the hook path stays open to agents that strip the token). Otherwise the timer is dropped and
+`scheduled.updated {result: cancelled, reason}` gives the app an inbox note; closing or restarting the
+session cancels its timer at once. No process outlives its daemon, so timers found in `scheduled.json` at
+start can never fire: `session.scheduled` returns `{timers, lost}` and reports each lost one once, which
+the app turns into an inbox note; the app replaces its timer list with `timers` on every load. A timer set for a session that is not limited, or for a time that has passed, is refused.
+
+**Switch account.** `account_transcript` (Rust core) copies the conversation into the target account's
+home (Claude `projects/<folder>/<id>.jsonl` and its sub-agents; Codex the dated `rollout-…-<id>.jsonl`),
+an older copy of the same conversation in the target (the start of the file, left by an earlier switch) is
+replaced, a newer or different one never; it refuses (with the reason, before anything is stopped) for other agents, the same
+account, a home Kelpie did not create, an account that is not signed in, a different conversation under
+that id in the target, more than 1 GB, or more than 2000 files. The app then stops the agent and calls
+`session.set_env_restart {handle, env: {CLAUDE_CONFIG_DIR|CODEX_HOME}}`, which sets only that variable on
+a stopped terminal session and restarts it on the same conversation (undone if the restart fails).
 
 ## CPU priority (Windows)
 
@@ -570,7 +651,7 @@ and sequence.
 | Area | Where | How |
 |---|---|---|
 | Layouts | `app/src/lib/layout.ts` | A tab is a tree of n-ary splits (`children`, `sizes`) with pane leaves; grids are built from `{mode: rows\|cols, counts}`; saved layouts are templates (tree shape + session kind per leaf). Version-2 binary trees migrate on load. |
-| Accounts | `app/src-tauri/src/accounts.rs`, `lib/accounts.ts` | One config home per account under `<data>/accounts/<agent>/<id>`, passed as `CLAUDE_CONFIG_DIR` / `CODEX_HOME` to every launch (terminal, chat, automations, runs, one-shot AI actions); history and usage read each home. |
+| Accounts | `app/src-tauri/src/accounts.rs`, `lib/accounts.ts` | One config home per account under `<data>/accounts/<agent>/<id>`, passed as `CLAUDE_CONFIG_DIR` / `CODEX_HOME` to every launch (terminal, chat, automations, runs, one-shot AI actions); history and usage read each home. A stopped terminal session can move to another account (`account_transcript` copies the conversation, `session.set_env_restart` restarts it there; see "Notifications and limit actions"). |
 | Orchestration | `crates/kelpied/src/runs.rs` | A run is a task DAG (cycle-checked) persisted in `runs.json`. `Runs::step` starts ready tasks (deps done, approval given) as ordinary sessions, optionally in a new worktree; tasks end on `kelpied run report`, session exit, or idle after working (default 300 s). |
 | Integrations | `app/src-tauri/src/integrations.rs` | Linear GraphQL, Jira REST (Cloud v3 `search/jql`, Server v2), GitLab REST v4. Tokens live in the OS keyring (`keyring`, service `Kelpie (<endpoint>)`) and never reach the webview. |
 | Browser panes | `app/src-tauri/src/browser.rs`, `browser_picker.js` | Tauri child webviews positioned over the pane (hidden while an overlay covers them). Design mode injects a picker; picks travel through a cancelled navigation to a sentinel URL, are redacted and size-capped, and the element screenshot uses the WebView2 DevTools protocol (end-to-end tests also send trusted page input through it, `browser_test_input`, dev / e2e builds only). |
@@ -588,3 +669,6 @@ and sequence.
 - Project switch (3 projects with terminals): release p50 ≈ 30 ms, p95 40–52 ms; dev build p95 35–105 ms.
 - Session history, 421 transcripts / 1.2 GB (release build): first scan 0.5 s, later launches
   (disk cache) 34 ms; the first full prompt count runs in the background (~15–30 s).
+- Event classification (`Notifier::observe`, 20 sessions cycling working → waiting → idle,
+  `cargo test -p kelpied classification_costs -- --nocapture`): 1.2 µs per status change in a debug
+  build (budget 100 µs). With no channel switched on nothing else runs for a status change.

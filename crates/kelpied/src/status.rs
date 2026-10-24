@@ -40,10 +40,32 @@ pub struct Activity {
     /// Start of the current continuous output burst.
     pub burst_start: Option<Instant>,
     pub last_input: Option<Instant>,
+    /// The last keystroke of the user: what `last_input` is without the terminal's own reports
+    /// (mouse, query replies). A usage-limit timer only cares about this.
+    pub last_typed: Option<Instant>,
+    /// The last keystroke that went to the prompt line (not to a permission dialog or question): what
+    /// a typed "continue" would be appended to.
+    pub last_draft: Option<Instant>,
+    /// When the failure was reported.
+    pub failed_at: Option<Instant>,
+    /// A report of this agent came with the session's token: reports without one are then ignored
+    /// (a program in the session cannot speak for the agent once the agent has proved itself).
+    pub verified_hooks: bool,
     pub bell: Option<Instant>,
     pub hook: Option<(Status, Instant)>,
     /// The last agent turn ended in an error (API failure, rate limit); cleared once it works again.
     pub failed: bool,
+    /// The failed turn ended on the subscription's usage limit (Claude Code's `StopFailure` with
+    /// error `rate_limit`); only meaningful while `failed`.
+    pub limited: bool,
+    /// When the turn that ended in the failure began (its first working report): anything typed
+    /// after that may be a draft still sitting in the agent's prompt, which a typed "continue" would send.
+    pub turn_started: Option<Instant>,
+    /// Counts the turns this run of the agent has begun; a timer set for one turn is void in another.
+    pub turn_seq: u64,
+    /// A timer for this limit was cancelled because the user typed: reports of a limit no longer
+    /// count (a program in the session could otherwise re-arm it by forging one).
+    pub limit_dead: bool,
     /// The agent's hooks report when a turn starts too (Claude Code), not only when it ends
     /// (Codex): once it says it is idle, it says so again when it works.
     pub hooks_report_start: bool,
@@ -54,7 +76,7 @@ pub struct Activity {
 
 impl Default for Activity {
     fn default() -> Self {
-        Activity { alive: true, last_output: None, burst_start: None, last_input: None, bell: None, hook: None, failed: false, hooks_report_start: false, screen_prompt: None }
+        Activity { alive: true, last_output: None, burst_start: None, last_input: None, last_typed: None, last_draft: None, failed_at: None, verified_hooks: false, bell: None, hook: None, failed: false, limited: false, turn_started: None, turn_seq: 0, limit_dead: false, hooks_report_start: false, screen_prompt: None }
     }
 }
 
@@ -76,13 +98,34 @@ impl Activity {
     /// Records an agent-reported state. A failed turn stays failed through later idle reports
     /// and clears as soon as the agent works or asks for something again.
     pub fn on_hook(&mut self, status: Status, failed: bool, now: Instant) {
+        // Work after idle (or the very first report) begins a turn; work after a question goes on with it.
+        if status == Status::Working && !matches!(self.hook, Some((Status::Working | Status::Waiting, _))) {
+            self.turn_started = Some(now);
+            self.turn_seq += 1;
+            // A genuine new turn: a later limit is a new limit.
+            self.limit_dead = false;
+        }
         self.hook = Some((status, now));
         self.hooks_report_start |= status == Status::Working;
         if failed {
             self.failed = true;
+            self.failed_at = Some(now);
+            self.limited = false;
         } else if status != Status::Idle {
             self.failed = false;
+            self.limited = false;
         }
+    }
+
+    /// The failure just reported was the usage limit.
+    pub fn on_limit(&mut self) {
+        self.limited = self.failed && !self.limit_dead;
+    }
+
+    /// Still stopped by the usage limit, and nothing was typed since the failed turn began (the
+    /// Enter that sent its prompt is the last keystroke allowed): no draft waits in the prompt.
+    pub fn limit_untouched(&self) -> bool {
+        self.failed && self.limited && self.turn_started.is_some_and(|t| self.last_draft.is_none_or(|i| i <= t)) && self.failed_at.is_some_and(|f| self.last_typed.is_none_or(|i| i <= f))
     }
 
     pub fn status(&self, now: Instant) -> Status {
@@ -167,6 +210,12 @@ pub fn turn_event(session: &str, event: &str, payload: &serde_json::Value, agent
 /// Whether a hook event means the agent's turn ended in an error.
 pub fn hook_event_failed(event: &str) -> bool {
     event == "StopFailure"
+}
+
+/// Whether a hook event means the agent's turn ended on the subscription's usage limit
+/// (`StopFailure` carries the error type; only Claude Code reports one).
+pub fn hook_event_limited(event: &str, payload: &serde_json::Value) -> bool {
+    event == "StopFailure" && payload.get("error").and_then(|v| v.as_str()) == Some("rate_limit")
 }
 
 /// Whether a process exit code is a failure rather than a normal or Ctrl+C exit.
@@ -291,6 +340,123 @@ mod tests {
         assert!(a.failed);
         a.on_hook(Status::Working, false, t0);
         assert!(!a.failed);
+    }
+
+    #[test]
+    fn only_the_rate_limit_error_is_the_usage_limit() {
+        let rate = serde_json::json!({"error": "rate_limit"});
+        assert!(hook_event_limited("StopFailure", &rate));
+        assert!(!hook_event_limited("StopFailure", &serde_json::json!({"error": "server_error"})));
+        assert!(!hook_event_limited("StopFailure", &serde_json::Value::Null));
+        assert!(!hook_event_limited("Stop", &rate));
+    }
+
+    #[test]
+    fn a_limit_stays_until_the_agent_works_and_typing_ends_it_for_the_timer() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut a = Activity::default();
+        a.on_hook(Status::Working, false, at(0));
+        a.on_hook(Status::Idle, true, at(1));
+        a.on_limit();
+        assert!(a.limit_untouched());
+        // The user types something after the failure.
+        a.last_typed = Some(at(5));
+        assert!(!a.limit_untouched());
+        assert!(a.limited, "the session is still limited, only the timer's guard is gone");
+        // A later idle report keeps the failure; working clears the limit.
+        a.on_hook(Status::Idle, false, at(6));
+        assert!(a.limited);
+        a.on_hook(Status::Working, false, at(7));
+        assert!(!a.limited && !a.failed);
+        // A failure that is not the limit never counts.
+        a.on_hook(Status::Idle, true, at(8));
+        assert!(!a.limit_untouched());
+    }
+
+    #[test]
+    fn a_draft_typed_while_the_turn_ran_is_not_a_clean_stop() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut a = Activity { last_typed: Some(at(0)), ..Default::default() };
+        // The prompt was sent at 0 (its Enter is the last keystroke before the turn began).
+        a.on_hook(Status::Working, false, at(1));
+        a.on_hook(Status::Working, false, at(2));
+        a.on_hook(Status::Waiting, false, at(3));
+        a.on_hook(Status::Working, false, at(4));
+        assert_eq!(a.turn_seq, 1, "a question and its answer stay in one turn");
+        a.on_hook(Status::Idle, true, at(10));
+        a.on_limit();
+        assert!(a.limit_untouched());
+        // A draft typed during the turn would be submitted together with "continue".
+        a.last_typed = Some(at(6));
+        a.last_draft = Some(at(6));
+        assert!(!a.limit_untouched());
+    }
+
+    #[test]
+    fn a_draft_blocks_the_timer_wherever_it_was_typed_but_an_answer_to_a_dialog_does_not() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        // A turn that asks a question: working 1-3, dialog 3-6, working 6-10, fails at 10. `typed` says
+        // when the user pressed a key, `draft` whether it went to the prompt line (not to the dialog).
+        let run = |typed: Option<(u64, bool)>| {
+            let mut a = Activity { last_typed: Some(at(0)), last_draft: Some(at(0)), ..Default::default() };
+            a.on_hook(Status::Working, false, at(1));
+            a.on_hook(Status::Waiting, false, at(3));
+            a.on_hook(Status::Working, false, at(6));
+            a.on_hook(Status::Idle, true, at(10));
+            a.on_limit();
+            if let Some((when, draft)) = typed {
+                a.last_typed = Some(at(when));
+                if draft {
+                    a.last_draft = Some(at(when));
+                }
+            }
+            assert_eq!(a.turn_seq, 1, "a question and its answer stay in one turn");
+            a.limit_untouched()
+        };
+        assert!(run(None), "nothing typed during the turn: clean");
+        assert!(!run(Some((2, true))), "a draft typed before the dialog came up is still in the prompt");
+        assert!(run(Some((4, false))), "the answer went to the dialog");
+        assert!(!run(Some((7, true))), "a draft typed after work resumed");
+        assert!(!run(Some((11, false))), "anything typed after the failure");
+    }
+
+    #[test]
+    fn a_later_genuine_limit_gets_its_banner_again_but_a_bare_report_does_not() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut a = Activity::default();
+        a.on_hook(Status::Working, false, at(1));
+        a.on_hook(Status::Idle, true, at(2));
+        a.limit_dead = true; // a timer for it was refused: the user typed
+        a.on_limit();
+        assert!(!a.limited);
+        // A bare report of the limit again (no new turn): still refused.
+        a.on_hook(Status::Idle, true, at(3));
+        a.on_limit();
+        assert!(!a.limited && a.limit_dead);
+        // The user continued by hand: a new turn begins, and it ends on the limit again.
+        a.on_hook(Status::Working, false, at(100));
+        assert!(!a.limit_dead);
+        a.on_hook(Status::Idle, true, at(200));
+        a.on_limit();
+        assert!(a.limited && a.limit_untouched(), "the new limit has its banner and its timer");
+    }
+
+    #[test]
+    fn a_cancelled_limit_cannot_be_reported_again_and_no_report_of_a_turn_means_no_timer() {
+        let t0 = Instant::now();
+        let mut a = Activity::default();
+        a.on_hook(Status::Idle, true, t0);
+        a.on_limit();
+        assert!(a.limited && !a.limit_untouched(), "no turn was seen to begin: nothing proves the prompt is empty");
+        a.on_hook(Status::Working, false, t0 + Duration::from_secs(1));
+        a.on_hook(Status::Idle, true, t0 + Duration::from_secs(2));
+        a.limit_dead = true;
+        a.on_limit();
+        assert!(!a.limited, "a forged report does not bring the banner or the timer back");
     }
 
     #[test]

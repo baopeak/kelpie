@@ -1,9 +1,12 @@
 // Terminal, Appearance and Notifications sections.
 import { t } from "../../lib/i18n";
-import { For, Show } from "solid-js";
+import { For, Show, Suspense, lazy } from "solid-js";
 import { store } from "../../lib/store";
+import { NOTIFY_API } from "../../lib/notify-events";
 import { terminalThemes } from "../../lib/terminal-themes";
 import { applySettings, Choice, SettingRow, Toggle } from "./setting-row";
+
+const PushSettings = lazy(() => import("./push-settings"));
 
 const s = () => store.state.settings;
 
@@ -97,6 +100,10 @@ export function NotificationSettings() {
           <button class="btn" disabled={!s().tipsSeen.length} onClick={() => store.setSettings({ tips: true, tipsSeen: [] })}>{t("Show tips again")}</button>
         </div>
       </SettingRow>
+      {/* Phone channels live in the session daemon (API 12); the page loads on first use. */}
+      <Show when={store.daemonApi() >= NOTIFY_API}>
+        <Suspense><PushSettings /></Suspense>
+      </Show>
     </>
   );
 }
