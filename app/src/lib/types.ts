@@ -441,6 +441,8 @@ export interface AppState {
   inbox: InboxItem[];
   /** Diff review notes by project id. */
   reviewNotes: Record<string, ReviewNote[]>;
+  /** Prompts sent from the composer, newest first, by project id. */
+  promptHistory?: Record<string, string[]>;
   /** Floating terminal: its sessions (tab order) and the one shown. */
   floating: { sessions: string[]; active: string | null; open: boolean };
 }

@@ -15,7 +15,7 @@
 //   session id and a `result` of no turns;
 // - slash commands are sent as plain user text and run by the CLI (`/context` answers with a
 //   synthetic assistant message).
-import { type Adapter, type AdapterContext, type AskQuestion, type ChatCommand, type ChatItem, putSetting, setSettingValue, slashCommand, summarize, textOf } from "./chat-model";
+import { type Adapter, type AdapterContext, type AskQuestion, type ChatCommand, type ChatItem, putSetting, setSettingValue, slashCommand, summarize, textOf, withImageNames } from "./chat-model";
 import { lineDiff, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 
@@ -349,15 +349,16 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
         }
       }
     },
-    send(text) {
+    send(text, _typed, images) {
       const slash = slashCommand(text);
       if (slash && tuiOnly.has(slash[0])) {
         ctx.upsert({ kind: "system", id: `tui-${Date.now()}`, text: t("/{name} works only in the terminal UI.", { name: slash[0] }), tone: "info", tui: { command: text.trim() } });
         return;
       }
-      ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text, pending: true });
+      ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text: withImageNames(text, images), pending: true });
       ctx.set("busy", true);
-      ctx.write({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
+      const pictures = (images ?? []).map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } }));
+      ctx.write({ type: "user", message: { role: "user", content: [...pictures, ...(text.trim() ? [{ type: "text", text }] : [])] } });
     },
     // The CLI takes a message mid-turn and reads it at its next step.
     steer(text) {

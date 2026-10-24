@@ -188,6 +188,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updater::PendingUpdate::default())
         .setup(|app| {
+            fs_ops::sweep_temp();
             let index = Arc::new(search::FileIndex::default());
             app.manage(DaemonClient::start(app.handle().clone()));
             app.manage(watcher::Watchers::new(app.handle().clone(), index.clone()));
@@ -218,6 +219,8 @@ pub fn run() {
             fs_ops::fs_rename,
             fs_ops::fs_delete,
             fs_ops::fs_reveal,
+            fs_ops::fs_write_temp,
+            fs_ops::fs_read_image,
             search::quick_open,
             search::search_text,
             watcher::fs_watch,

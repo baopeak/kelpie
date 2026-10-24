@@ -13,6 +13,8 @@ import { commandHint as hint } from "../lib/commands";
 import { handOffSession, sessionTranscript } from "../lib/agent-actions";
 import { hostOf } from "../lib/ssh-hosts";
 import { findTerminalTheme } from "../lib/terminal-themes";
+import { selectionSource } from "../lib/composer-state";
+import { sendSelectionToAgent } from "../lib/send-to-agent";
 
 export function TerminalPane(props: { sessionId: string; focused: boolean }) {
   let host!: HTMLDivElement;
@@ -41,7 +43,12 @@ export function TerminalPane(props: { sessionId: string; focused: boolean }) {
       findInput?.select();
     };
     window.addEventListener("kelpie:find", onFind);
+    // What is selected here is what `@selection` in a composer stands for.
+    const selection = selectionSource(() => (view.term.hasSelection() ? { text: view.term.getSelection(), source: "terminal" as const } : null));
+    const selecting = view.term.onSelectionChange(selection.changed);
     onCleanup(() => {
+      selecting.dispose();
+      selection.dispose();
       window.removeEventListener("kelpie:find", onFind);
       parkView(props.sessionId);
     });
@@ -79,10 +86,14 @@ export function TerminalPane(props: { sessionId: string; focused: boolean }) {
 
   const menu = (e: MouseEvent) => {
     const s = session();
+    const picked = view.term.hasSelection() ? view.term.getSelection() : "";
     const items: MenuItem[] = [
       { label: t("Copy"), hint: isMac ? "⌘C" : "Ctrl+C", run: () => view.term.hasSelection() && void writeText(view.term.getSelection()) },
       { label: t("Paste"), hint: isMac ? "⌘V" : "Ctrl+V", run: () => void view.pasteFromClipboard() },
       { label: t("Select All"), run: () => view.term.selectAll() },
+      ...(picked && s?.project_id
+        ? [{ label: t("Send Selection to Agent…"), run: () => sendSelectionToAgent(new MouseEvent("contextmenu", { clientX: e.clientX, clientY: e.clientY }), s.project_id!, { text: picked, source: "terminal" }) }]
+        : []),
       { label: t("Copy Context"), run: () => void transcript().then(redact).then((text) => writeText(text)).then(() => store.notify(t("Copied the last 400 lines"))) },
       { label: t("Find…"), run: () => { setFinding(true); queueMicrotask(() => findInput?.focus()); } },
       { label: t("Clear"), run: () => view.term.clear() },

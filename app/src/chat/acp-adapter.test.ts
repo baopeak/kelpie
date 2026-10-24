@@ -36,6 +36,44 @@ function openSession(a: ReturnType<typeof createAcpAdapter>) {
   a.onMessage({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hello" } } } }, "");
 }
 
+describe("pictures", () => {
+  const PIC = { mime: "image/png", data: "iVBORw0KGgo=", path: "C:\\Temp\\kelpie-composer\\image-1.png" };
+  const open = (image: boolean) => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    a.start();
+    a.onMessage({ jsonrpc: "2.0", id: "kelpie-init", result: { agentCapabilities: { promptCapabilities: { image } } } }, "");
+    a.onMessage({ jsonrpc: "2.0", id: "kelpie-session", result: { sessionId: "s-1" } }, "");
+    return { h, a };
+  };
+
+  it("sends an image block when the agent takes pictures", () => {
+    const { h, a } = open(true);
+    a.send("what is this?", true, [PIC]);
+    const prompt = h.written.find((w) => w.method === "session/prompt");
+    expect(prompt.params.prompt).toEqual([{ type: "image", mimeType: "image/png", data: PIC.data }, { type: "text", text: "what is this?" }]);
+  });
+
+  it("tells an agent that cannot take pictures where the file is", () => {
+    const { h, a } = open(false);
+    a.send("what is this?", true, [PIC]);
+    const prompt = h.written.find((w) => w.method === "session/prompt");
+    expect(prompt.params.prompt).toEqual([{ type: "text", text: `what is this?\n${PIC.path}` }]);
+  });
+
+  it("keeps the pictures of a prompt typed before the session opened", () => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    a.start();
+    a.onMessage({ jsonrpc: "2.0", id: "kelpie-init", result: { agentCapabilities: { promptCapabilities: { image: true } } } }, "");
+    a.send("early", true, [PIC]);
+    expect(h.written.some((w) => w.method === "session/prompt")).toBe(false);
+    a.onMessage({ jsonrpc: "2.0", id: "kelpie-session", result: { sessionId: "s-1" } }, "");
+    const prompt = h.written.find((w) => w.method === "session/prompt");
+    expect(prompt.params.prompt[0]).toMatchObject({ type: "image", data: PIC.data });
+  });
+});
+
 describe("createAcpAdapter", () => {
   it("offers /new and /clear ahead of the agent's own commands, without the agent's own clear", () => {
     const h = harness();

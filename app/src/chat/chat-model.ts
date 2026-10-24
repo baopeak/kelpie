@@ -46,11 +46,26 @@ export interface PermissionReply {
   answers?: Record<string, string>;
 }
 
+/** A picture sent with a message: the agent takes `data` (base64) or reads `path`. */
+export interface ChatImage {
+  mime: string;
+  data: string;
+  path: string;
+}
+
+/** What a message shows in the transcript: its text, and the names of the pictures under it. */
+export function withImageNames(text: string, images?: ChatImage[]): string {
+  if (!images?.length) return text;
+  const names = images.map((i) => `[${i.path.split(/[\\/]/).pop()}]`).join(" ");
+  return text ? `${text}\n${names}` : names;
+}
+
 /** A message sent while the agent was busy, sent when its turn ends. */
 export interface QueuedMessage {
   id: string;
   text: string;
   typed: boolean;
+  images?: ChatImage[];
 }
 
 /** Work the agent runs alongside its turn (a background shell, a subagent), from its task events;
@@ -114,7 +129,7 @@ export interface Adapter {
   /** One stdout line from the agent (already JSON-parsed when possible). */
   onMessage(msg: any, raw: string): void;
   /** `typed`: the user wrote it in the composer (not text Kelpie sends for them). */
-  send(text: string, typed?: boolean): void;
+  send(text: string, typed?: boolean, images?: ChatImage[]): void;
   /** Delivers `text` into the running turn; false when the agent cannot take it mid-turn. */
   steer?(text: string): boolean;
   /** Text that starts no turn (a picker command, a terminal-only one): never queued. */
@@ -339,15 +354,15 @@ export class ChatController {
   }
 
   /** Sends now, or queues while the agent works (or while earlier queued messages wait). */
-  send(text: string, typed = false) {
-    if (!text.trim() || this.state.exited) return;
+  send(text: string, typed = false, images?: ChatImage[]) {
+    if ((!text.trim() && !images?.length) || this.state.exited) return;
     // Not attached yet: a re-attach replays the log and would wipe what is sent now.
     if ((this.state.busy || this.state.queue.length || !this.state.ready) && !this.adapter.immediate?.(text, typed)) {
-      this.set("queue", (q) => [...q, { id: `q-${++this.queued}`, text, typed }]);
+      this.set("queue", (q) => [...q, { id: `q-${++this.queued}`, text, typed, images }]);
       this.set("queuePaused", false);
       return;
     }
-    this.adapter.send(text, typed);
+    this.adapter.send(text, typed, images);
   }
 
   /** Sends the next queued message once the agent is idle — a microtask later, as this runs
@@ -361,7 +376,7 @@ export class ChatController {
       if (s.busy || !s.ready || s.exited || s.queuePaused || this.isReplaying || !s.queue.length) return;
       const [next, ...rest] = s.queue;
       this.set("queue", rest);
-      this.adapter.send(next.text, next.typed);
+      this.adapter.send(next.text, next.typed, next.images);
     });
   }
 
@@ -390,8 +405,8 @@ export class ChatController {
     const command = /^[/!]/.test(m.text.trim());
     if (!this.state.busy) {
       this.unqueue(id);
-      this.adapter.send(m.text, m.typed);
-    } else if (!command && this.adapter.steer?.(m.text)) {
+      this.adapter.send(m.text, m.typed, m.images);
+    } else if (!command && !m.images?.length && this.adapter.steer?.(m.text)) {
       this.unqueue(id);
     } else {
       this.set("queue", (q) => [m, ...q.filter((x) => x.id !== id)]);

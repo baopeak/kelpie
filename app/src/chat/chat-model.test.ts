@@ -9,8 +9,8 @@ function setup(opts: { steer?: boolean } = {}) {
     start() {},
     onMessage() {},
     reset() {},
-    send(text) {
-      calls.push(`send ${text}`);
+    send(text, _typed, images) {
+      calls.push(`send ${text}${images?.length ? ` +${images.length}` : ""}`);
       ctx.set("busy", true);
     },
     interrupt() {
@@ -42,6 +42,19 @@ describe("ChatController queue", () => {
     await idle();
     expect(calls).toEqual(["send one", "send two", "send three"]);
     expect(ctrl.state.queue).toEqual([]);
+  });
+
+  it("keeps the pictures of a queued message, and sends a picture without text", async () => {
+    const { ctrl, calls, idle } = setup();
+    const pic = { mime: "image/png", data: "AA==", path: "/tmp/a.png" };
+    ctrl.send("one");
+    ctrl.send("two", true, [pic]);
+    ctrl.send("", true, [pic, pic]);
+    ctrl.send("  ");
+    expect(ctrl.state.queue.map((q) => q.images?.length ?? 0)).toEqual([1, 2]);
+    await idle();
+    await idle();
+    expect(calls).toEqual(["send one", "send two +1", "send  +2"]);
   });
 
   it("never queues a picker command", () => {

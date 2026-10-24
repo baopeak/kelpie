@@ -6,7 +6,11 @@ import { gitFileVersions, onEvent } from "../lib/ipc";
 import { turnBlob } from "../lib/checkpoints";
 import { baseExtensions, languageFor } from "../lib/codemirror";
 import { store } from "../lib/store";
-import { chooseAgentAndSend } from "../lib/send-to-agent";
+import { chooseAgentAndSend, sendSelectionToAgent } from "../lib/send-to-agent";
+import { selectionSource } from "../lib/composer-state";
+import { openContextMenu } from "./context-menu";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { isMac } from "../lib/platform";
 import { Icon } from "./icons";
 import type { Project, ReviewNote } from "../lib/types";
 import { t } from "../lib/i18n";
@@ -93,6 +97,25 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
   let destroy: (() => void) | null = null;
   let editors: { view: EditorView; side: "new" | "old" }[] = [];
 
+  /** Text selected in either side (lines would mean the old or the new file: the path alone). */
+  const picked = () => {
+    for (const { view } of editors) {
+      const r = view.state.selection.main;
+      if (!r.empty) return { text: view.state.doc.sliceString(r.from, r.to), path: props.path };
+    }
+    return null;
+  };
+  const selection = selectionSource(picked);
+  const menu = (e: MouseEvent) => {
+    const sel = picked();
+    if (!sel) return;
+    openContextMenu(e, [
+      { label: t("Copy"), hint: isMac ? "⌘C" : "Ctrl+C", run: () => void writeText(sel.text) },
+      null,
+      { label: t("Send Selection to Agent…"), run: () => sendSelectionToAgent(new MouseEvent("contextmenu", { clientX: e.clientX, clientY: e.clientY }), props.project.id, sel) },
+    ]);
+  };
+
   const allNotes = () => store.notesFor(props.project.id);
   const fileNotes = createMemo(() => allNotes().filter((n) => n.path === props.path));
 
@@ -119,7 +142,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
     try {
       const v = props.rev ? await turnVersions(props.rev, props.path) : await gitFileVersions(props.project.path, props.path, props.staged, props.base);
       const lang = await languageFor(props.path);
-      const exts = (side: "new" | "old") => [...baseExtensions({ readOnly: true }), ...(lang ? [lang] : []), EditorView.editable.of(false), EditorState.readOnly.of(true), changeKeys, noteGutter(openDraft(side))];
+      const exts = (side: "new" | "old") => [...baseExtensions({ readOnly: true }), ...(lang ? [lang] : []), EditorView.editable.of(false), EditorState.readOnly.of(true), changeKeys, noteGutter(openDraft(side)), EditorView.updateListener.of((u) => u.selectionSet && !u.state.selection.main.empty && selection.changed())];
       destroy?.();
       host.replaceChildren();
       const a = v.original ?? "";
@@ -158,6 +181,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
     const un = onEvent<{ root: string; git: boolean }>("fs-changed", (e) => !props.rev && e.root === props.project.path && e.git && void render());
     onCleanup(() => {
       void un.then((f) => f());
+      selection.dispose();
       destroy?.();
     });
   });
@@ -202,7 +226,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
           </div>
         </Show>
       </Show>
-      <div class="cm-host" ref={host} style={{ overflow: "auto" }} />
+      <div class="cm-host" ref={host} style={{ overflow: "auto" }} onContextMenu={menu} />
       <Show when={draft()}>
         {(d) => (
           <div class="note-draft" style={{ left: `${Math.max(8, d().x)}px`, top: `${d().y}px` }} onPointerDown={(e) => e.stopPropagation()}>

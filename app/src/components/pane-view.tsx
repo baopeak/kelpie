@@ -22,17 +22,23 @@ import type { Pane, Project, Tab } from "../lib/types";
 import { t } from "../lib/i18n";
 import { confirmDialog } from "../lib/confirm-dialog";
 import { isLimited } from "../lib/limits";
+import { commandHint } from "../lib/commands";
+import { composerRequest, toggleComposer } from "../lib/composer-state";
 
 // Loaded when a diff or a turn's file is first opened.
 const DiffView = lazy(() => import("./diff-view").then((m) => ({ default: m.DiffView })));
 const TurnFileView = lazy(() => import("./turn-file-view"));
 const LimitBanner = lazy(() => import("./limit-banner"));
+// Loaded the first time a composer opens.
+const Composer = lazy(() => import("./composer").then((m) => ({ default: m.Composer })));
 
 export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
   const focused = () => props.tab.focus === props.pane.id;
   const multi = createMemo(() => allPanes(props.tab.root).length > 1);
   const session = () => (props.pane.sessionId ? store.sessions[props.pane.sessionId] : undefined);
   const focus = () => store.focusPane(props.project.id, props.tab.id, props.pane.id);
+  /** This pane's session has its composer open. */
+  const composing = () => !!props.pane.sessionId && composerRequest()?.sessionId === props.pane.sessionId;
   const close = async () => {
     const s = session();
     if (s?.alive && s.kind !== "shell" && !(await confirmDialog(t("Stop {kind} and close this pane?", { kind: s.kind })))) return;
@@ -53,6 +59,9 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
         >
           <button class="icon-btn" title={t("Back to terminal (TUI)")} onClick={() => void switchToTerminal(props.project, props.tab, props.pane)}><Icon name="terminal" size={14} /></button>
         </Show>
+      </Show>
+      <Show when={(props.pane.kind === "terminal" || props.pane.kind === "chat") && session()?.alive}>
+        <button class={`icon-btn${composing() ? " active" : ""}`} title={t("Compose") + commandHint("composer.open")} data-compose onClick={() => toggleComposer(session()!.id)}><Icon name="compose" size={13} /></button>
       </Show>
       <Show when={props.pane.kind === "terminal" && session()?.alive}>
         <MicButton sessionId={props.pane.sessionId} size={13} />
@@ -107,6 +116,9 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
       {/* The usage limit stopped this agent (the daemon says so for Claude Code). */}
       <Show when={props.pane.kind === "terminal" ? session() : undefined} keyed>
         {(s) => <Show when={isLimited(s)}><LimitBanner s={s} /></Show>}
+      </Show>
+      <Show when={composing() && session() ? composerRequest() : null} keyed>
+        {(request) => <Composer session={session()!} project={props.project} request={request} />}
       </Show>
       <div class="pane-body">
         <Switch fallback={<EmptyPane project={props.project} tab={props.tab} pane={props.pane} focused={focused()} />}>

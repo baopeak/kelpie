@@ -343,6 +343,65 @@ flags (Codex: `-s`/`-a` or `--dangerously-bypass-approvals-and-sandbox`, `-m`,
 `-c model_reasoning_effort`), replacing the profile's own. Codex's app-server and OMP restore a
 conversation's own settings themselves.
 
+## Composer
+
+One floating composer (`components/composer.tsx`, loaded the first time it opens; `Ctrl+Shift+I`
+or the pane's Compose button) writes a prompt for any session: a shell, an agent's terminal UI or a
+chat view. `lib/composer-state.ts` (in the main bundle, a few lines) says which session's composer is
+open and holds the registry of selections (editor, diff and terminal register how to read theirs;
+`@selection` is the one made last).
+
+`@` mentions are expanded by the pure `expandMentions(text, ctx, kind)` (`lib/mentions.ts`, all
+app access through the `MentionContext`). Claude, Codex and Gemini read `@path` themselves, so a file
+or folder stays `@path` (`@"a path with spaces"` is quoted). Every other program gets the file
+fenced and labelled with its path, in a fence longer than any backtick run in the content. A
+snippet has at most 200 lines and all snippets together 64 KB (counted in bytes); past that the
+agent gets a path: the file's own, `path:lines` for a selection of a file, or a temporary file
+(`fs_write_temp`) for text without one (a diff, terminal output). `@selection`, `@diff` (`git_context`),
+`@note` (the review notes of the project), `@terminal:<session>` (`session.read`, last 400 lines)
+and `@issue:<key>` (Linear, Jira, GitLab; a bare `@issue` is the issue the session was started on,
+named by its key) always inline, since they have no path; `@terminal` and `@issue` text passes
+`redact` first, and so does what is written to a temporary file. A mention that finds nothing
+(no selection, no changes, unknown session or issue) sends nothing and says so. GitHub issues are
+not offered: `github.rs` only knows pull requests.
+
+Delivery is the existing one: `sendToSession` → `typeInto` → `TerminalHost.paste`, so `typedText`
+drops control characters (an `Esc [201~` in a file cannot end the paste early; xterm adds the paste
+markers only when the program asked for them) and the Enter follows after the delay that keeps
+Codex from reading it as a newline. The daemon's own `typed_text` (`paste: true`) only covers a
+prompt typed at launch; composer text is cleaned by this front-end choke point, which the
+detached-view fallback of `typeInto` also goes through (`pasteInput` keeps the markers there). A
+chat view gets the text through its controller; pictures go along as `ChatImage`s (Claude: `image`
+content blocks; ACP: `image` prompt blocks when the agent reports `promptCapabilities.image`, else
+the file's path in the text; Codex: `localImage` items), at most 5 MB each (the API's limit).
+
+What reaches a terminal is decided by whether the program asked for bracketed paste (`term.modes`):
+without it every line break is an Enter key, so content is never inlined and a multi-line text is
+refused (an agent still starting gets paths until it is ready). A shell or other non-agent program
+(`shell`, `custom`) never gets content at all: only paths, written as one word for its shell
+(`shellQuote`: single quotes, `'` doubled in PowerShell and `'\''` in POSIX shells, refused for
+control or bidi characters and, for cmd, `% ^ ! & | < > ( ) "`), so `$(…)`, `;` or a backtick in a
+file name stay text; and the text is left at the prompt, never submitted, once it holds a mention
+or a picture (a name can be a script). Gemini's `@` form follows Gemini CLI's own escaping. On a
+session on another machine long text goes in as its last lines (no local temp file), pictures are
+refused. A terminal selection is masked like `@terminal`. A picture
+pasted into a terminal's composer is written to the temporary folder (`fs_write_temp`, known
+extensions, 25 MiB, files older than three days are removed) and mentioned by its path; a picture
+dropped on the composer keeps its own path and is read (`fs_read_image`, picture types only) only
+for a chat.
+
+The file index of `search.rs` holds folders too (`dir/`); `quick_open` returns them only with
+`dirs: true` (the composer), so file pickers are unchanged. Ranking (`search/rank.rs`, no app
+access) scores an index of 8 000 paths or more on several workers (half the cores, at most 4, so a
+search does not take the machine from other work; the result does not depend on the number) and gives the filename bonus, a second match per hit, only to the best 400
+path matches: over 51 000 entries (a generated tree, release build, 4-core laptop) the median
+query takes 6 to 8 ms and the 95th percentile 16 to 29 ms when the machine is not busy (one core:
+14 to 18 ms and 36 to 65 ms; scoring every hit twice, one core: 15 to 20 ms and about 90 ms). The
+ignored test `fuzzy_p95_on_fifty_thousand_files` builds such a tree and holds a release build to
+30 ms. Sent prompts are kept per project
+(`AppState.promptHistory`, newest first, 100 at most): Up / Down in the composer walk them and the
+search palette (`!`) finds them.
+
 ## Context, tokens and cost
 
 Per session: context fill (a ring on the sidebar row, pane header and tab: amber from 70 %, red

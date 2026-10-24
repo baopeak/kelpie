@@ -110,6 +110,27 @@ describe("applyClaudeMessage", () => {
   });
 });
 
+describe("pictures", () => {
+  const PIC = { mime: "image/png", data: "iVBORw0KGgo=", path: "C:\\Temp\\kelpie-composer\\image-1.png" };
+
+  it("sends each picture as an image block ahead of the text and names it in the transcript", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.send("what is this?", true, [PIC]);
+    expect(h.written[0]).toEqual({
+      type: "user",
+      message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: PIC.data } }, { type: "text", text: "what is this?" }] },
+    });
+    expect(h.items()[0]).toMatchObject({ kind: "user", text: "what is this?\n[image-1.png]" });
+  });
+
+  it("sends a picture alone without an empty text block", () => {
+    const h = harness();
+    createClaudeAdapter(h.ctx).send("", true, [PIC]);
+    expect(h.written[0].message.content).toEqual([{ type: "image", source: { type: "base64", media_type: "image/png", data: PIC.data } }]);
+  });
+});
+
 describe("/clear", () => {
   it("empties the transcript for the new conversation and shows no result for it", () => {
     const h = harness();

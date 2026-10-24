@@ -34,6 +34,30 @@ function openThread(a: ReturnType<typeof createCodexAdapter>) {
   a.onMessage({ id: "kelpie-thread", result: { thread: { id: "thr-1", turns: [] }, model: "gpt-5", sandbox: { type: "workspaceWrite" } } }, "");
 }
 
+describe("pictures", () => {
+  const PIC = { mime: "image/png", data: "iVBORw0KGgo=", path: "C:\\Temp\\kelpie-composer\\image-1.png" };
+
+  it("starts a turn with the picture as a local image next to the text", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    openThread(a);
+    a.send("what is this?", true, [PIC]);
+    const turn = h.written.at(-1);
+    expect(turn.method).toBe("turn/start");
+    expect(turn.params.input).toEqual([{ type: "text", text: "what is this?", text_elements: [] }, { type: "localImage", path: PIC.path }]);
+  });
+
+  it("keeps the picture of a prompt typed before the thread exists", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    a.start();
+    a.send("early", true, [PIC]);
+    a.onMessage({ id: "kelpie-init", result: {} }, "");
+    a.onMessage({ id: "kelpie-thread", result: { thread: { id: "thr-1", turns: [] } } }, "");
+    expect(h.written.find((w) => w.method === "turn/start").params.input).toContainEqual({ type: "localImage", path: PIC.path });
+  });
+});
+
 describe("codexArgs", () => {
   it("runs app-server and translates the TUI's model flags into -c overrides", () => {
     expect(codexArgs()).toEqual(["codex", "app-server"]);

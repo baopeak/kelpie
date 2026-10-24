@@ -5,7 +5,7 @@ import { t } from "./i18n";
 import { sendInput } from "./ipc";
 import { allPanes } from "./layout";
 import { peekView } from "./terminal-host";
-import { typedText } from "./typed-text";
+import { pasteInput, typedText } from "./typed-text";
 import { getController } from "../chat/mode-switch";
 import { pluginQuickCommands } from "./plugins";
 import type { QuickCommand, SessionInfo } from "./types";
@@ -29,11 +29,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Delivers `text` like a real paste: xterm adds bracketed-paste markers only when the program
  *  asked for them and turns newlines into Enter keys, exactly as when the user pastes. */
 export async function typeInto(s: SessionInfo, raw: string, enter: boolean, enterDelay: number) {
-  const text = typedText(raw);
   const view = peekView(s.id);
-  // A view between attachments (e.g. during a daemon reconnect) would drop the paste.
-  if (view?.handle != null) view.paste(text);
-  else await sendInput(s.handle, text.replace(/\r?\n/g, "\r"));
+  // A view between attachments (e.g. during a daemon reconnect) would drop the paste: it goes
+  // straight to the session, still inside the paste markers the program asked for.
+  if (view?.handle != null) view.paste(typedText(raw));
+  else await sendInput(s.handle, pasteInput(raw, !!view?.term.modes.bracketedPasteMode));
   if (!enter) return;
   // Agent TUIs treat Enter that follows a burst of input as part of the paste (Codex: within
   // 120 ms) and insert a newline instead of submitting.

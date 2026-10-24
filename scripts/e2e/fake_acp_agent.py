@@ -1,14 +1,14 @@
 """A stand-in Agent Client Protocol agent (JSON-RPC 2.0, one message per line on stdio) for the
 chat-view tests: it answers like a real ACP agent without any account or network.
 
-    python scripts/e2e/fake_acp_agent.py [--no-load] [--auth] [--state FILE] [--log FILE]
+    python scripts/e2e/fake_acp_agent.py [--no-load] [--auth] [--image] [--state FILE] [--log FILE]
 
 Each prompt runs one tool-using turn: a thought, a tool call that asks for permission, the
 tool's result, an answer, a title and a usage update, the stop reason — then one more usage
 update after it (agents do that; it must not mark the session working again). A prompt that
 contains "ask me" asks the user a question (elicitation) instead of the permission round.
 `session/load` replays the conversation so far. `--no-load` hides `loadSession`; `--auth`
-requires `authenticate` before a session opens. `--state FILE` keeps the conversations in a file, so
+requires `authenticate` before a session opens; `--image` says prompts may carry pictures. `--state FILE` keeps the conversations in a file, so
 a new process (the agent started again) loads what the last one said; `--log FILE` appends every
 message the client sends to it, one JSON object per line.
 """
@@ -22,6 +22,7 @@ PAUSE = 0.8  # seconds between a turn's steps: the agent is visibly working mean
 
 LOAD = "--no-load" not in sys.argv
 AUTH = "--auth" in sys.argv
+IMAGE = "--image" in sys.argv
 
 
 def option(name):
@@ -131,7 +132,7 @@ for line in sys.stdin:
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": rid, "result": {
             "protocolVersion": 1,
-            "agentCapabilities": {"loadSession": LOAD, "promptCapabilities": {"image": False, "embeddedContext": True}},
+            "agentCapabilities": {"loadSession": LOAD, "promptCapabilities": {"image": IMAGE, "embeddedContext": True}},
             "authMethods": [{"id": "fake-login", "name": "Fake login", "description": "Always succeeds"}] if AUTH else [],
             "agentInfo": {"name": "fake-acp", "version": "1.0.0"}}})
     elif method == "authenticate":

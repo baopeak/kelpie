@@ -63,8 +63,14 @@ export const revealEntry = (root: string, path: string) => invoke<void>("fs_reve
 export const watchRoot = (root: string) => invoke<void>("fs_watch", { root });
 export const unwatchRoot = (root: string) => invoke<void>("fs_unwatch", { root });
 
-export interface QuickOpenHit { path: string; score: number; indices: number[] }
-export const quickOpen = (root: string, query: string, limit = 60) => invoke<QuickOpenHit[]>("quick_open", { root, query, limit });
+export interface QuickOpenHit { path: string; score: number; indices: number[]; is_dir: boolean }
+/** Fuzzy file search; `dirs` also returns folders (their path ends in `/`). */
+export const quickOpen = (root: string, query: string, limit = 60, dirs = false) => invoke<QuickOpenHit[]>("quick_open", { root, query, limit, dirs });
+
+/** Saves bytes (base64) in the temp folder under a known extension; the path of the file. */
+export const writeTempFile = (label: string, ext: string, base64: string) => invoke<string>("fs_write_temp", { label, ext, base64 });
+/** A picture file (dropped on the composer) as base64 with its type. */
+export const readImage = (path: string) => invoke<{ mime: string; base64: string }>("fs_read_image", { path });
 
 export interface TextHit { path: string; line: number; column: number; text: string }
 export const searchText = (root: string, query: string, regex: boolean, caseSensitive: boolean, folder?: string) =>
@@ -145,7 +151,7 @@ export const gitRepoState = (root: string) => invoke<{ operation: "merge" | "reb
 export const gitAbort = (root: string) => invoke<string>("git_abort", { root });
 export const gitBranchDelete = (root: string, branch: string, force = false) => invoke<void>("git_branch_delete", { root, branch, force });
 export const gitRefs = (root: string) => invoke<{ name: string; kind: "local" | "remote" | "tag" }[]>("git_refs", { root });
-export const gitContext = (root: string, kind: "staged" | "branch", base?: string, max?: number) => invoke<string>("git_context", { root, kind, base, max });
+export const gitContext = (root: string, kind: "staged" | "branch" | "worktree", base?: string, max?: number) => invoke<string>("git_context", { root, kind, base, max });
 export interface PullRequest { number: number; title: string; url: string; state: "OPEN" | "CLOSED" | "MERGED"; draft: boolean; base: string; checks: "passing" | "failing" | "pending" | "none"; provider?: "github" | "gitlab" }
 export const ghPrStatus = (root: string) => invoke<PullRequest | null>("gh_pr_status", { root });
 export const ghDefaultBranch = (root: string) => invoke<string | null>("gh_default_branch", { root });

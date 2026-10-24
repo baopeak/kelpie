@@ -53,6 +53,7 @@ Agents live in a background session daemon, so switching projects, closing the w
 - **Hibernation** (opt-in): finished agents idle in background projects are stopped and resume their conversation when you show them again; *Sleep* a project or worktree on demand.
 - **Keep the computer awake**: off, while agents are working, or always — from the coffee cup in the status bar.
 - **Typing stays quick on a busy machine** (Windows): the session on screen runs its agent and console host above normal priority, so a keystroke is not stuck behind other agents' builds and tests or other programs; nothing else is slowed down (Settings → Agents → *Prioritize visible terminals*, on by default).
+- **Composer**: `Ctrl+Shift+I` opens a floating prompt box over any session (shell, agent TUI or chat view) with `@` mentions for files, folders, the selection, the diff, review notes, other terminals and issues, pasted or dropped pictures, and an Up-arrow history per project; Claude, Codex and Gemini get `@path`, other programs get the content fenced and labelled, with caps and secrets masked.
 - **Conversation upkeep**: *Compact conversation*, *Clear conversation* and *Restart, keeping the conversation* (a fresh process, same conversation) from a session's menu or the command palette.
 
 | | |
@@ -294,7 +295,7 @@ The full list is in the [user guide](docs/user-guide.md#keyboard-shortcuts).
 
 ## Privacy and data
 
-- Everything stays on your machine: sessions, layouts, settings, worktree comments, automations, runs, plugins and speech models live in `%LOCALAPPDATA%\Kelpie` (Windows) or `~/Library/Application Support/Kelpie` (macOS). There is no telemetry, and notifications leave the computer only through a channel you switch on (ntfy, Telegram, webhook). No network port is opened unless you turn on **phone access** (one address and port you choose, paired devices only, optional HTTPS).
+- Everything stays on your machine: sessions, layouts, settings, worktree comments, automations, runs, plugins and speech models live in `%LOCALAPPDATA%\Kelpie` (Windows) or `~/Library/Application Support/Kelpie` (macOS). Pictures pasted into the composer and text too long to inline (diffs, selections) wait in the system temp folder (`kelpie-composer`) and are removed after three days. There is no telemetry, and notifications leave the computer only through a channel you switch on (ntfy, Telegram, webhook). No network port is opened unless you turn on **phone access** (one address and port you choose, paired devices only, optional HTTPS).
 - **Upgrading from Erka** (the project's former name). Quit Erka, then start Kelpie. On its first start Kelpie:
   - stops Erka's background daemon if it still runs; its sessions come back in Kelpie as exited, resumable from their conversation;
   - moves your sessions, layouts, settings, accounts, saved hosts, plugins and speech models from the `Erka` folder, and points the paths stored in them at the new folder;
@@ -335,6 +336,7 @@ End-to-end tests drive the real app through WebDriver (`tauri-driver` + a matchi
 | `scripts/e2e/finish.py` | review cards, Review tab, request changes, Finish (WIP commit, approved checks, squash, branch and worktree cleanup), a branch editing `.kelpie.yaml`, conflicts, overlap chips, auto-worktree, automation delivery, queue refresh time |
 | `scripts/e2e/layouts.py` | grids, per-row counts, drag to swap / move, equalize, broadcast, saved layouts, resume after a daemon restart (real Claude, terminal and chat) |
 | `scripts/e2e/tabs_panes.py` | a lone pane has no header; Tile all gathers one-pane tabs into an even grid (4 → 2 × 2, 5th → 3 + 2), Spread into tabs undoes it; split tabs stay |
+| `scripts/e2e/composer.py` | composer: mentions per agent, inert delivery, selection menus, pictures (TUI path, chat image block), prompt history |
 | `scripts/e2e/accounts.py`, `runs.py`, `integrations.py` | several accounts; orchestration runs (real agent reporting, AI planning); Linear / Jira / GitLab (GitLab live) |
 | `scripts/e2e/browser.py`, `remote.py`, `mobile.py` | browser panes and design mode (trusted page input via DevTools); SSH projects (local test host); phone pairing and replies |
 | `scripts/e2e/ssh_hosts.py` | SSH hosts page against a local test host: password login through askpass, fingerprint check, terminal and Claude Code on the host, files, port forwards, keys installed and used, known hosts, config import (set `KELPIE_SSH_DIR`) |

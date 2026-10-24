@@ -1,0 +1,13 @@
+/* Floating composer over a pane (components/composer.tsx). The message box and its completion
+   menu reuse the chat composer's styles (.composer-box, .composer-menu, .composer-item). */
+.composer-float { position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 9; display: flex; flex-direction: column; gap: 6px; max-width: 860px; margin: 0 auto; }
+.composer-float .composer-box { max-width: none; margin: 0; box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+.composer-float.dropping .composer-box { border-color: var(--accent); border-style: dashed; }
+.composer-float textarea { min-height: 56px; width: 100%; box-sizing: border-box; }
+.composer-attached { display: flex; flex-wrap: wrap; gap: 6px; }
+.composer-image { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; padding: 2px 4px 2px 2px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-elev); font-size: 11.5px; color: var(--text-dim); }
+.composer-image img { width: 28px; height: 28px; object-fit: cover; border-radius: 5px; flex: none; }
+.composer-image .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-hint { font-size: 11.5px; color: var(--text-faint); }
+.composer-row .composer-target { color: var(--text-dim); }
+:root[data-theme="light"] .composer-float .composer-box { box-shadow: 0 10px 30px rgba(20,30,50,.18); }

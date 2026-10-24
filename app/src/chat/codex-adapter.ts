@@ -5,7 +5,7 @@
 // `thread/compact/start`, `/review` → `review/start`, `/new` (or `/clear`, `/reset`) → `thread/start`, `!cmd` →
 // `thread/shellCommand`); model, effort and approval mode ride on the next `turn/start`, which
 // Codex keeps for later turns; `$skill` mentions add a `skill` input item.
-import { type Adapter, type AdapterContext, type ChatCommand, type ToolCategory, NEW_CONVERSATION_COMMANDS, putSetting, setSettingValue, slashCommand, textOf } from "./chat-model";
+import { type Adapter, type AdapterContext, type ChatCommand, type ChatImage, type ToolCategory, NEW_CONVERSATION_COMMANDS, putSetting, setSettingValue, slashCommand, textOf, withImageNames } from "./chat-model";
 import { basename, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 
@@ -81,7 +81,7 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
   /** The running turn's changes as one diff (`turn/diff/updated`), shown with its result. */
   let turnDiff: string | null = null;
   /** Prompts typed before the thread was ready; sent once it is. */
-  const queued: { text: string; typed: boolean }[] = [];
+  const queued: { text: string; typed: boolean; images?: ChatImage[] }[] = [];
   let models: CodexModel[] = [];
   /** Models a thread ran with that the catalog does not list (one set in config.toml): they
    *  stay in the picker, or a switch away could not be undone. */
@@ -104,14 +104,18 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
   }
 
   /** `$name` mentions of known skills travel as skill items, as the TUI sends them. */
-  function userInput(text: string) {
+  function userInput(text: string, images: ChatImage[] = []) {
     const skills = ctx.state.skills.filter((s) => s.path && new RegExp(`(^|\\s)\\$${s.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=\\s|$)`).test(text));
-    return [{ type: "text", text, text_elements: [] }, ...skills.map((s) => ({ type: "skill", name: s.name, path: s.path }))];
+    return [
+      ...(text.trim() ? [{ type: "text", text, text_elements: [] }] : []),
+      ...images.map((i) => ({ type: "localImage", path: i.path })),
+      ...skills.map((s) => ({ type: "skill", name: s.name, path: s.path })),
+    ];
   }
 
-  function startTurn(text: string) {
+  function startTurn(text: string, images?: ChatImage[]) {
     ctx.set("busy", true);
-    const input = userInput(text);
+    const input = userInput(text, images);
     // What the user picked travels in the request id: its answer is logged, so a reloaded view
     // restores it. Only picks — never the thread's own settings, which Codex already keeps.
     const picks = encodeURIComponent(JSON.stringify({ model: overrides.model, effort: overrides.effort, mode: modePicked ? mode : undefined }));
@@ -365,8 +369,8 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
             // "Busy" only covered the wait for the thread; whatever starts a turn sets it again.
             if (queued.length) ctx.set("busy", false);
             while (queued.length) {
-              const { text, typed } = queued.shift()!;
-              if (!runCommand(text, typed)) startTurn(text);
+              const { text, typed, images } = queued.shift()!;
+              if (!runCommand(text, typed)) startTurn(text, images);
             }
           }
         } else if (ctx.replaying() && String(m.id).startsWith("kelpie-turn-")) {
@@ -450,16 +454,16 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
           break;
       }
     },
-    send(text, typed = false) {
+    send(text, typed = false, images) {
       if (runCommand(text, typed)) return;
       if (!threadId) {
-        queued.push({ text, typed });
-        ctx.upsert({ kind: "user", id: `queued-${Date.now()}`, text, pending: true });
+        queued.push({ text, typed, images });
+        ctx.upsert({ kind: "user", id: `queued-${Date.now()}`, text: withImageNames(text, images), pending: true });
         ctx.set("busy", true);
         return;
       }
       // No optimistic bubble: Codex echoes the prompt as a `userMessage` item right away.
-      startTurn(text);
+      startTurn(text, images);
     },
     steer(text) {
       if (!threadId || !turnId) return false;

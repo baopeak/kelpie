@@ -231,6 +231,33 @@ folder can run in its own new worktree, with the branch named from the first pro
 (`Fix the login redirect` → `fix-the-login-redirect`). *Ask* shows an unticked box, *Always* ticks it, *Never*
 hides it. The repository's `.kelpie.yaml` setup runs there only if you approved that exact file before.
 
+### Composer
+
+`Ctrl+Shift+I` (`⌘⇧I`), or the pencil in a pane's toolbar, opens a multi-line composer over the
+focused session, whether it is a shell, an agent's terminal UI or a chat view. Enter sends,
+Shift+Enter adds a line, Esc closes it and keeps the draft, and Up / Down bring back the
+project's earlier prompts (the search palette finds them too: type `!` and a word).
+
+Type `@` to mention:
+
+- **files and folders** (`@src/app.ts`, `@"my docs/read me.md"`);
+- **`@selection`**: what is selected in an editor, a diff or a terminal (also *Send Selection to
+  Agent…* in their right-click menus, which opens the composer of the agent you pick);
+- **`@diff`** (uncommitted changes), **`@note`** (your review notes);
+- **`@terminal:<session>`**: the recent output of another session, **`@issue:<key>`**: an issue
+  from Linear, Jira or GitLab (a bare `@issue` is the issue the session was started on). Secrets in
+  both are masked before they are sent.
+
+Claude Code, Codex and Gemini read `@path` themselves, so they get the path. Other programs get
+the content, fenced and labelled with where it came from; a snippet of more than 200 lines, or
+more than 64 KB in all, becomes a path instead. A shell never gets content: it gets paths, quoted for it,
+left at the prompt for you to read and run (a file name can be a script, so nothing that holds a
+mention or a picture is sent with Enter). A terminal that did not ask for bracketed paste (an agent
+that is still starting, an older shell) takes no multi-line text, since every line would run.
+
+Paste or drop a picture: a terminal UI gets its path (the picture is saved to a temporary file), a
+chat view gets the picture itself.
+
 ### Quick commands
 
 Settings → Quick Commands saves commands and prompts. *Terminal* types into the focused shell
@@ -716,6 +743,7 @@ App shortcuts use `Ctrl+Shift` on Windows so plain `Ctrl+letter` keys reach the 
 | Runs (orchestration) | Ctrl+Shift+R | ⌘⇧R |
 | Open browser | Ctrl+Shift+U | ⌘⇧U |
 | Dictate (start / stop) | Ctrl+Shift+Space | ⌘⇧Space |
+| Composer (write a prompt with @ mentions) | Ctrl+Shift+I | ⌘⇧I |
 | Close all editor tabs | Ctrl+Alt+W | ⌘⌥W |
 | Next / previous change (diff) | F7 / Shift+F7 | F7 / ⇧F7 |
 | Previous / next prompt sent (terminal) | Ctrl+Shift+↑ / ↓ | ⌘↑ / ↓ |

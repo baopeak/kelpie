@@ -7,7 +7,7 @@
 // (`available_commands_update`, run by sending `/name args` as prompt text) and its settings
 // (`configOptions`: mode, model, thought level) itself. `/new`, `/clear` and `/reset` start a
 // new session (`session/new`) whatever the agent lists.
-import { type Adapter, type AdapterContext, type ChatCommand, type ChatItem, type ToolCategory, NEW_CONVERSATION_COMMANDS, putSetting, setSettingValue, slashCommand, summarize, textOf } from "./chat-model";
+import { type Adapter, type AdapterContext, type ChatCommand, type ChatImage, type ChatItem, type ToolCategory, NEW_CONVERSATION_COMMANDS, putSetting, setSettingValue, slashCommand, summarize, textOf, withImageNames } from "./chat-model";
 import { lineDiff, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 import { version as appVersion } from "../../package.json";
@@ -38,6 +38,8 @@ const isNewConversation = (text: string) => {
 export function createAcpAdapter(ctx: AdapterContext): Adapter {
   let initialized = false;
   let canLoad = false;
+  /** The agent takes pictures in a prompt (otherwise it is told where the file is). */
+  let canImage = false;
   let sessionId: string | null = null;
   let seq = 0;
   let lastKind: "assistant" | "thinking" | "user" | null = null;
@@ -52,9 +54,9 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
   /** Open elicitations: card id → the request id and the schema properties behind each question. */
   const elicitations = new Map<string, { rid: unknown; fields: { key: string; question: string; type: string }[] }>();
   /** Prompts typed before the session was ready; sent once it is. */
-  const queued: string[] = [];
+  const queued: { text: string; images?: ChatImage[] }[] = [];
 
-  function prompt(text: string) {
+  function prompt(text: string, images: ChatImage[] = []) {
     if (isNewConversation(text)) {
       sessionId = null;
       lastKind = null;
@@ -63,7 +65,9 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
     }
     lastKind = null;
     ctx.set("busy", true);
-    rpc(`kelpie-prompt-${++seq}-${Date.now()}`, "session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+    const pictures = canImage ? images.map((i) => ({ type: "image", mimeType: i.mime, data: i.data })) : [];
+    const words = [text, ...(canImage ? [] : images.map((i) => i.path))].filter(Boolean).join("\n");
+    rpc(`kelpie-prompt-${++seq}-${Date.now()}`, "session/prompt", { sessionId, prompt: [...pictures, ...(words ? [{ type: "text", text: words }] : [])] });
   }
 
   const rpc = (id: string, method: string, params: unknown) => ctx.write({ jsonrpc: "2.0", id, method, params });
@@ -210,6 +214,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
     reset() {
       initialized = false;
       canLoad = false;
+      canImage = false;
       sessionId = null;
       lastKind = null;
       requests.clear();
@@ -259,6 +264,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
           }
           initialized = true;
           canLoad = !!m.result?.agentCapabilities?.loadSession;
+          canImage = !!m.result?.agentCapabilities?.promptCapabilities?.image;
           authMethods = Array.isArray(m.result?.authMethods) ? m.result.authMethods : [];
           if (!ctx.replaying()) openSession();
         } else if (String(m.id).startsWith("kelpie-auth-")) {
@@ -275,7 +281,10 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
           if (!ctx.replaying()) {
             // "Busy" only covered the wait for the session; a prompt sets it again.
             if (queued.length) ctx.set("busy", false);
-            while (queued.length) prompt(queued.shift()!);
+            while (queued.length) {
+              const next = queued.shift()!;
+              prompt(next.text, next.images);
+            }
           }
         } else if (Array.isArray(m.result?.configOptions)) {
           applyConfig(m.result.configOptions);
@@ -334,14 +343,14 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
         if (!ctx.replaying()) ctx.write({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `Kelpie does not implement ${m.method}` } });
       }
     },
-    send(text) {
-      if (!isNewConversation(text)) ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text });
+    send(text, _typed, images) {
+      if (!isNewConversation(text)) ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text: withImageNames(text, images) });
       if (!sessionId) {
-        queued.push(text);
+        queued.push({ text, images });
         ctx.set("busy", true);
         return;
       }
-      prompt(text);
+      prompt(text, images);
     },
     interrupt() {
       if (!sessionId) return;

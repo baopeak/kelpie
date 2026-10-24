@@ -353,9 +353,118 @@ fn fs_reveal_blocking(root: String, path: String) -> CmdResult<()> {
     result.map(|_| ()).map_err(err)
 }
 
+const TEMP_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "txt", "md", "diff", "log"];
+const TEMP_MAX_BYTES: usize = 25 << 20;
+const TEMP_KEEP: std::time::Duration = std::time::Duration::from_secs(3 * 24 * 3600);
+
+/// Writes pasted bytes (an image from the clipboard) or a snippet too long to type into a file
+/// in the system temp folder and returns its path, for an agent to read by path. Only known
+/// extensions are written, and files older than a few days are removed on the way.
+fn write_temp(dir: &Path, label: &str, ext: &str, data: &[u8]) -> CmdResult<PathBuf> {
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    if !TEMP_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!("unsupported extension {ext}"));
+    }
+    if data.len() > TEMP_MAX_BYTES {
+        return Err(format!("{} MiB is too large to attach (limit {} MiB)", data.len() >> 20, TEMP_MAX_BYTES >> 20));
+    }
+    std::fs::create_dir_all(dir).map_err(err)?;
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let label: String = label.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(24).collect();
+    let stamp = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let name = format!("{}-{stamp}-{}.{ext}", if label.is_empty() { "paste" } else { &label }, COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let path = dir.join(name);
+    std::fs::write(&path, data).map_err(err)?;
+    Ok(path)
+}
+
+#[derive(Serialize)]
+pub struct ImageData {
+    mime: &'static str,
+    base64: String,
+}
+
+fn image_mime(ext: &str) -> Option<&'static str> {
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => return None,
+    })
+}
+
+/// A picture the user dropped on the composer (it can live anywhere), for a chat to attach.
+/// Only picture types, and not past the temp-file limit.
+#[tauri::command]
+pub async fn fs_read_image(path: String) -> CmdResult<ImageData> {
+    blocking(move || {
+        use std::io::Read;
+        // A network path would make Windows sign in to whatever host it names.
+        if path.starts_with("\\\\") || path.starts_with("//") {
+            return Err("pictures on a network path are not read".into());
+        }
+        let path = Path::new(&path);
+        let mime = path.extension().and_then(|e| e.to_str()).and_then(image_mime).ok_or("not a picture file")?;
+        if std::fs::symlink_metadata(path).map_err(err)?.file_type().is_symlink() {
+            return Err("a link to a picture is not followed".into());
+        }
+        let mut data = Vec::new();
+        std::fs::File::open(path).map_err(err)?.take(TEMP_MAX_BYTES as u64 + 1).read_to_end(&mut data).map_err(err)?;
+        if data.len() > TEMP_MAX_BYTES {
+            return Err(format!("larger than {} MiB: too large to attach", TEMP_MAX_BYTES >> 20));
+        }
+        Ok(ImageData { mime, base64: base64::engine::general_purpose::STANDARD.encode(data) })
+    })
+    .await
+}
+
+/// Removes what the composer left in the temp folder more than a few days ago (also at start-up:
+/// it holds unmasked selections and diffs).
+pub fn sweep_temp() {
+    let dir = std::env::temp_dir().join("kelpie-composer");
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > TEMP_KEEP) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn fs_write_temp(label: String, ext: String, base64: String) -> CmdResult<String> {
+    blocking(move || {
+        let data = base64::engine::general_purpose::STANDARD.decode(base64.as_bytes()).map_err(err)?;
+        sweep_temp();
+        let path = write_temp(&std::env::temp_dir().join("kelpie-composer"), &label, &ext, &data)?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temp_files_keep_their_bytes_and_extension() {
+        let dir = std::env::temp_dir().join(format!("kelpie-temp-test-{}", std::process::id()));
+        let a = write_temp(&dir, "image", ".PNG", &[1, 2, 3]).unwrap();
+        let b = write_temp(&dir, "image", "png", &[4]).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a.extension().unwrap(), "png");
+        assert_eq!(std::fs::read(&a).unwrap(), [1, 2, 3]);
+        // A label cannot walk out of the folder or smuggle in an extension.
+        let c = write_temp(&dir, "../../evil.exe", "txt", b"x").unwrap();
+        assert_eq!(c.parent().unwrap(), dir);
+        assert!(c.file_name().unwrap().to_string_lossy().starts_with("evilexe-"));
+        assert!(write_temp(&dir, "x", "exe", b"x").is_err());
+        assert!(write_temp(&dir, "x", "", b"x").is_err());
+        assert!(write_temp(&dir, "x", "png", &vec![0; TEMP_MAX_BYTES + 1]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn natural_order() {

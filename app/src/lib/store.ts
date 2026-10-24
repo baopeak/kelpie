@@ -22,6 +22,7 @@ import { agentFolder, agentsAt, hostOf, isHostKeyError, layoutTarget, layoutTarg
 import { confirmRootStart } from "./root-user";
 import type { WorkStatus, AgentProfile, AppState, BranchInfo, InboxItem, LayoutNode, LayoutTemplate, Pane, Project, ProjectHost, RecentItem, ReviewNote, SessionInfo, SessionKind, SessionTarget, Settings, Tab, Workspace, WorkspaceMeta } from "./types";
 import { confirmDialog } from "./confirm-dialog";
+import { remember } from "./prompt-history";
 
 export const defaultSettings: Settings = {
   fontFamily: '"JetBrains Mono", "Cascadia Code", "Cascadia Mono", Menlo, Consolas, "Symbols Nerd Font Mono", monospace',
@@ -512,6 +513,7 @@ function createAppStore() {
       for (const x of ids) {
         delete s.workspaces[x];
         if (s.collapsed) delete s.collapsed[x];
+        if (s.promptHistory) delete s.promptHistory[x];
       }
       s.recent = (s.recent ?? []).filter((r) => !ids.has(r.projectId) && !(r.kind === "project" && ids.has(r.id)));
       if (s.activeProject && ids.has(s.activeProject)) s.activeProject = s.projects.find((p) => !p.parentId)?.id ?? s.projects[0]?.id ?? null;
@@ -566,6 +568,16 @@ function createAppStore() {
       const list = s.reviewNotes?.[projectId];
       if (!list) return;
       s.reviewNotes[projectId] = ids === "all" ? [] : list.filter((n) => !ids.includes(n.id));
+    });
+  }
+
+  // ---------- composer prompt history ----------
+  const promptsFor = (projectId: string): string[] => state.promptHistory?.[projectId] ?? [];
+
+  function rememberPrompt(projectId: string, text: string) {
+    update((s) => {
+      s.promptHistory ??= {};
+      s.promptHistory[projectId] = remember(s.promptHistory[projectId], text);
     });
   }
 
@@ -1519,7 +1531,7 @@ function createAppStore() {
     settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
     daemonNeedsSwitch, switchDaemon, daemonApi, legacyNotify, openAnswer, revealNextWaiting,
-    notesFor, addNote, removeNotes, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
+    notesFor, addNote, removeNotes, promptsFor, rememberPrompt, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
     newFloating, toggleFloating, selectFloating, closeFloating,
   };
 }

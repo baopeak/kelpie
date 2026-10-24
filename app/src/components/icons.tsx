@@ -49,6 +49,7 @@ const paths: Record<string, () => JSX.Element> = {
   push: () => <><path d="M8 11V3M4.5 6.5L8 3l3.5 3.5" /><path d="M3 13h10" /></>,
   pull: () => <><path d="M8 3v8M4.5 7.5L8 11l3.5-3.5" /><path d="M3 13h10" /></>,
   sync: () => <><path d="M12.5 6.5A4.5 4.5 0 0 0 4 5" /><path d="M3.5 9.5A4.5 4.5 0 0 0 12 11" /><path d="M4 2.5V5h2.5M12 13.5V11H9.5" /></>,
+  compose: () => <><path d="M3 13l.8-3.2L10.6 3l2.4 2.4-6.8 6.8z" /><path d="M9.4 4.2l2.4 2.4" /></>,
   note: () => <><path d="M3 3h10v7l-3 3H3z" /><path d="M10 13v-3h3M5.5 6h5M5.5 8.5h3" /></>,
   moon: () => <path d="M12.5 10A5 5 0 0 1 6 3.5 5 5 0 1 0 12.5 10z" />,
   external: () => <><path d="M9 3h4v4M13 3L7.5 8.5" /><path d="M11 9.5V13H3V5h3.5" /></>,
