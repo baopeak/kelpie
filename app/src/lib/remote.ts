@@ -10,9 +10,20 @@ export interface HostCheck {
   /** `/etc/os-release` ID (ubuntu, debian…); empty on macOS and the BSDs. */
   distro: string;
   home: string;
+  /** The account it logs in as; `root` true when that is uid 0. */
+  user: string;
+  root: boolean;
   git: boolean;
   tmux: boolean;
   agents: string[];
+}
+
+export interface AddedUser {
+  home: string;
+  /** It was there already (it only got root's keys). */
+  existed: boolean;
+  /** sshd's AllowUsers / AllowGroups / DenyUsers / DenyGroups lines. */
+  sshd: string[];
 }
 
 /** Package-manager command per `/etc/os-release` ID, for hosts without tmux. */
@@ -34,6 +45,7 @@ export function tmuxInstall(c: Pick<HostCheck, "os" | "distro">): string | null 
 export const remoteConfigure =(config: string | null) => invoke<void>("remote_configure", { config });
 export const remoteHosts = () => invoke<string[]>("remote_hosts");
 export const remoteCheck = (dest: string, agents: string[]) => invoke<HostCheck>("remote_check", { dest, agents });
+export const remoteAddUser = (dest: string, name: string) => invoke<AddedUser>("remote_add_user", { dest, name });
 export const remoteFolders = (dest: string, path: string) => invoke<string[]>("remote_folders", { dest, path });
 
 export const isRemote = (p: Pick<Project, "remote"> | undefined | null) => !!p?.remote;

@@ -21,6 +21,7 @@ import { FloatingTerminal } from "./floating-terminal";
 import { LayoutMenuHost } from "./layout-menu";
 import { RunsPage } from "./runs-page";
 import { RemoteDialog } from "./remote-dialog";
+import { RootUserDialogHost } from "./root-user-dialog";
 import { HostsPage } from "./hosts-page";
 import { initSshHosts, vault } from "../lib/ssh-hosts";
 import { MobileApprovals } from "./settings/mobile-settings";
@@ -170,6 +171,7 @@ export function App() {
       <Show when={store.state.settings.floatingTerminal && store.state.floating?.open}>
         <FloatingTerminal />
       </Show>
+      <RootUserDialogHost />
       <ContextMenuHost />
       <LayoutMenuHost />
       <MobileApprovals />

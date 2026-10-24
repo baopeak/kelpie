@@ -246,6 +246,9 @@ export interface Settings {
   activeAccounts: Partial<Record<"claude" | "codex", string>>;
   /** `ssh -F` file for remote projects (empty: ssh's default, ~/.ssh/config). */
   sshConfig: string;
+  /** Saved hosts logged in as root where starting Claude Code in Yolo mode (it then asks for
+   *  permissions) no longer explains why first. */
+  rootYoloOk?: string[];
   /** Interface language (lib/i18n.ts); "system" follows the OS. */
   language: "system" | "en" | "vi";
   /** Voice dictation (lib/voice.ts): speech model id, Whisper language ("auto" detects), microphone (null: the default). */

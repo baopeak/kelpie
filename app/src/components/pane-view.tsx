@@ -146,7 +146,7 @@ function EmptyPane(props: { project: Project; tab: Tab; pane: Pane; focused: boo
     // anything, and its props stop resolving once it leaves the tree.
     const projectId = props.project.id;
     const place = into();
-    const target = await resolveRunOn(props.project, runOn());
+    const target = await resolveRunOn(props.project, runOn(), kind);
     const open = workspaceHasPane(projectId, place.paneId);
     const s = target === null || !open ? undefined : await store.newSession(projectId, kind, { into: place, target });
     if (!s) starting = false;

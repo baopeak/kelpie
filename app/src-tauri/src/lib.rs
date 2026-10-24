@@ -292,6 +292,7 @@ pub fn run() {
             remote::remote_configure,
             remote::remote_hosts,
             remote::remote_check,
+            remote::remote_add_user,
             remote::remote_folders,
             plugins::plugin_list,
             plugins::plugin_dir,

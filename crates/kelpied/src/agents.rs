@@ -245,6 +245,35 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+const ROOT_BYPASS_NOTE: &str = "[kelpie] Logged in as root: Claude Code refuses to skip permission prompts as root, so it starts asking for them. To skip them, run it as a regular user (Kelpie: SSH hosts → Set up a regular user…).";
+
+/// Claude's argv to start as root: without the flags that skip permission prompts (all refused
+/// as root), and in the default permission mode unless it names another one, since a
+/// `defaultMode: bypassPermissions` in its settings is refused as well.
+fn claude_as_root(argv: &[String]) -> Vec<String> {
+    let mut out = without_claude_bypass(argv);
+    if !out.iter().any(|a| a == "--permission-mode" || a.starts_with("--permission-mode=")) {
+        out.extend(["--permission-mode".to_string(), "default".to_string()]);
+    }
+    out
+}
+
+/// Claude's argv without the flags that skip permission prompts.
+fn without_claude_bypass(argv: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len());
+    let mut it = argv.iter().peekable();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--dangerously-skip-permissions" | "--allow-dangerously-skip-permissions" | "--permission-mode=bypassPermissions" => {}
+            "--permission-mode" if it.peek().is_some_and(|v| *v == "bypassPermissions") => {
+                it.next();
+            }
+            _ => out.push(a.clone()),
+        }
+    }
+    out
+}
+
 /// A session on another machine: `ssh -t` running the program there in the remote folder,
 /// through the user's login shell (so PATH has their tools), inside tmux when asked and
 /// available (`tmux new-session -A` re-attaches when that session still runs). Agents get no
@@ -273,23 +302,36 @@ pub fn build_remote_launch(kind: &str, user_args: &[String], resume: Resume, pro
                     _ => typed_prompt = Some(TypedPrompt { text: text.to_string(), paste: true }),
                 }
             }
-            let with = |r: &Resume| -> Vec<String> {
+            let with = |r: &Resume, as_root: bool| -> Vec<String> {
                 let base = std::iter::once(p.bin).chain(p.launch.iter().copied()).map(str::to_string);
-                base.chain(resume_args(other, r, Some(p))).chain(rest.iter().cloned()).collect()
+                let argv: Vec<String> = base.chain(resume_args(other, r, Some(p))).chain(rest.iter().cloned()).collect();
+                if as_root { claude_as_root(&argv) } else { argv }
             };
             // Claude's id is Kelpie's own (`--session-id`), so it may name a conversation that
             // was never saved (no message sent): resume it when the host has its transcript,
             // else start it under that id.
-            if let Resume::Id(id) = resume {
-                if other == "claude" && !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                    choice = Some(format!(
-                        r#"if ls "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}"/projects/*/{id}.jsonl >/dev/null 2>&1; then exec {}; else exec {}; fi"#,
-                        quote(&with(&Resume::Id(id))),
-                        quote(&with(&Resume::New(id)))
-                    ));
-                }
-            }
-            Some(with(&resume))
+            let exec = |as_root: bool| match resume {
+                Resume::Id(id) if other == "claude" && !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => format!(
+                    r#"if ls "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}"/projects/*/{id}.jsonl >/dev/null 2>&1; then exec {}; else exec {}; fi"#,
+                    quote(&with(&Resume::Id(id), as_root)),
+                    quote(&with(&Resume::New(id), as_root))
+                ),
+                _ => format!("exec {}", quote(&with(&resume, as_root))),
+            };
+            // Claude refuses every bypass flag as root (unless the host sets IS_SANDBOX=1) and
+            // exits at once, so as root it starts asking for permission instead, and says why.
+            let full = with(&resume, false);
+            choice = Some(if other == "claude" && without_claude_bypass(&full) != full {
+                format!(
+                    r#"if [ "$(id -u)" = 0 ] && [ "${{IS_SANDBOX:-}}" != 1 ]; then printf '%s\n' {} >&2; {}; else {}; fi"#,
+                    sh_quote(ROOT_BYPASS_NOTE),
+                    exec(true),
+                    exec(false)
+                )
+            } else {
+                exec(false)
+            });
+            Some(full)
         }
     };
     if matches!(kind, "shell" | "custom") {
@@ -814,6 +856,30 @@ mod remote_tests {
         // Codex resumes the id it reported; no choice needed.
         let j = command_line(&build_remote_launch("codex", &[], Resume::Id(id), None, &remote(false), "/srv/x", "abc").unwrap().argv);
         assert!(j.contains("'\\''resume'\\''") && !j.contains("jsonl"), "{j}");
+    }
+
+    #[test]
+    fn remote_claude_as_root_drops_the_bypass_flags() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(without_claude_bypass(&a(&["claude", "--dangerously-skip-permissions", "--model", "opus"])), a(&["claude", "--model", "opus"]));
+        assert_eq!(without_claude_bypass(&a(&["claude", "--permission-mode", "bypassPermissions", "--allow-dangerously-skip-permissions"])), a(&["claude"]));
+        assert_eq!(without_claude_bypass(&a(&["claude", "--permission-mode=bypassPermissions", "--permission-mode", "plan"])), a(&["claude", "--permission-mode", "plan"]));
+        // Settings may say bypassPermissions too: as root it starts in the default mode.
+        assert_eq!(claude_as_root(&a(&["claude", "--dangerously-skip-permissions"])), a(&["claude", "--permission-mode", "default"]));
+        assert_eq!(claude_as_root(&a(&["claude", "--dangerously-skip-permissions", "--permission-mode", "plan"])), a(&["claude", "--permission-mode", "plan"]));
+        let id = "5a5f996e-bc9d-4b62-95c9-787b89fd1454";
+        for tmux in [false, true] {
+            let j = command_line(&build_remote_launch("claude", &["--dangerously-skip-permissions".into()], Resume::Id(id), None, &remote(tmux), "/srv/x", "abc").unwrap().argv);
+            // The host decides: root without IS_SANDBOX=1 runs it without the flag, saying why.
+            assert!(j.contains(r#"if [ "$(id -u)" = 0 ] && [ "${IS_SANDBOX:-}" != 1 ]; then printf"#), "{j}");
+            assert!(j.contains("Logged in as root"), "{j}");
+            assert!(j.contains(&format!(r"then exec '\''claude'\'' '\''--resume'\'' '\''{id}'\'' '\''--permission-mode'\'' '\''default'\''; else")), "as root, no flag: {j}");
+            assert!(j.contains(r"'\''--dangerously-skip-permissions'\''; fi; fi"), "kept for other users: {j}");
+        }
+        let j = command_line(&build_remote_launch("claude", &["--model".into(), "haiku".into()], Resume::None, None, &remote(false), "/srv/x", "abc").unwrap().argv);
+        assert!(!j.contains("id -u"), "no check without a bypass flag: {j}");
+        let j = command_line(&build_remote_launch("codex", &["--dangerously-skip-permissions".into()], Resume::None, None, &remote(false), "/srv/x", "abc").unwrap().argv);
+        assert!(!j.contains("id -u"), "only Claude refuses root: {j}");
     }
 
     #[test]

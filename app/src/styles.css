@@ -1084,6 +1084,16 @@ input, textarea, select { font: inherit; color: var(--text); }
 .remote-check .ok { color: var(--idle); }
 .remote-check .warn { color: var(--waiting); }
 
+/* Claude Code on a host that logs in as root (root-user-dialog.tsx); above other overlays. */
+.root-user-overlay { z-index: 60; }
+.root-user-guide { width: min(680px, 94vw); }
+.root-user-text { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text); }
+.root-user-step { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); }
+.root-user-step h3 { margin: 0; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.root-user-num { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: var(--bg); font-size: 11px; font-weight: 600; }
+.root-user .inline-fields { flex-wrap: wrap; }
+.root-user .inline-fields .btn { display: inline-flex; align-items: center; gap: 5px; }
+
 /* ---------- SSH hosts page ---------- */
 .hosts-tabs { width: auto; }
 .hosts-tabs button { padding: 3px 12px; }

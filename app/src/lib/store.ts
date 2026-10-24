@@ -17,7 +17,8 @@ import type { SettingsSection } from "./settings-catalog";
 import { accountEnv, accountHomes, sessionHome } from "./accounts";
 import { closeBrowser } from "./browser";
 import { projectTarget, sessionTarget, targetEnv, targetRemote } from "./remote";
-import { agentsAt, hostOf, isHostKeyError, layoutTarget, layoutTargetFor } from "./ssh-hosts";
+import { agentFolder, agentsAt, hostOf, isHostKeyError, layoutTarget, layoutTargetFor } from "./ssh-hosts";
+import { confirmRootStart } from "./root-user";
 import type { WorkStatus, AgentProfile, AppState, BranchInfo, InboxItem, LayoutNode, LayoutTemplate, Pane, Project, ProjectHost, RecentItem, ReviewNote, SessionInfo, SessionKind, SessionTarget, Settings, Tab, Workspace, WorkspaceMeta } from "./types";
 import { confirmDialog } from "./confirm-dialog";
 
@@ -718,6 +719,8 @@ function createAppStore() {
     const remoteEnv = target ? await targetEnv(target.dest) : {};
     const env = opts.env || Object.keys(remoteEnv).length ? { ...(launch.env ?? {}), ...remoteEnv, ...(opts.env ?? {}) } : launch.env;
     const remote = target ? targetRemote(target) : undefined;
+    const args = opts.args ?? (kind === "shell" ? state.settings.shellArgs : launch.args);
+    if (!(await confirmRootStart(kind, args, target, projectId))) return;
     try {
       const info = await ipc.createSession({
         kind,
@@ -727,7 +730,7 @@ function createAppStore() {
         remote,
         project_id: projectId,
         name: opts.name,
-        args: opts.args ?? (kind === "shell" ? state.settings.shellArgs : launch.args),
+        args,
         env,
         agent_session_id: opts.agentSessionId,
         prompt: opts.prompt,
@@ -917,9 +920,16 @@ function createAppStore() {
     const leaves = templateLeaves(template);
     const project = state.projects.find((p) => p.id === projectId);
     // Panes on a host start in this project's folder there; a host that cannot be reached (a new
-    // host key, offline) leaves an empty pane offering it.
+    // host key, offline), or agents on a host without that folder, leave an empty pane offering it.
+    const noFolder = new Set<string>();
     const targets = await Promise.all(leaves.map(async (l) => {
       if (!l.kind || !l.target) return l.target;
+      const host = hostOf(l.target);
+      if (host && isAgentKind(l.kind) && !agentFolder(host, project, l.target.path)) {
+        if (!noFolder.has(host.id)) notify(t("Type the folder of {project} on {host} first: agents do not start in the login folder", { project: project?.name ?? "", host: host.label }));
+        noFolder.add(host.id);
+        return null;
+      }
       try {
         const tg = await layoutTargetFor(project, l.target);
         const busy = agentsAt(tg, projectId);

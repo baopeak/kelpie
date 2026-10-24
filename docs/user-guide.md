@@ -535,7 +535,9 @@ A local project can hold terminals and agents on any saved host, next to its loc
 same tab, split or grid. An empty pane (a split, a grid cell) and *New session…* have a **Run on**
 row: *This computer*, the hosts linked to the project, or *Other host…* for any saved one; `Tab`
 moves between them in an empty pane. Pick a host, then Claude Code or a shell: it starts in the
-host's folder for this project, inside tmux, with the host's saved password or key. Splitting a
+host's folder for this project, inside tmux, with the host's saved password or key. A shell with no
+folder chosen starts in the host's start folder or login folder; an agent never does — type the
+project's folder on the host first (the first one typed is linked to the project). Splitting a
 pane on a host offers that host first, and *Hand off* from an agent on a host starts the next
 agent there too.
 
@@ -550,7 +552,32 @@ agent there too.
   host, the launcher says so before you start a second one.
 - **Saved layouts** remember which panes ran on which host and start them there again — in the
   folder the project you open the layout in uses on that host. A host that cannot be reached (a
-  new host key, offline) leaves an empty pane offering it.
+  new host key, offline), or an agent pane on a host where the project has no folder yet, leaves
+  an empty pane offering it.
+- **Logged in as root**: Claude Code refuses to skip permission prompts as root (it would quit at
+  once), so with *Permissions: Yolo* Kelpie starts it on such a host without its skip-permission
+  flags and in the default permission mode (a `defaultMode: bypassPermissions` in its settings is
+  refused too): it asks for permissions. Before the first such start a dialog explains why
+  (*Don't explain this again* turns it off for that host; *Explain again before Claude starts* on
+  the host's page turns it back on); the host's check on the SSH hosts page shows *logs in as
+  root*. On a host that is only a sandbox, `IS_SANDBOX=1` in its login shell lets Claude skip
+  prompts as root, and Kelpie then treats it as a regular login.
+- **Set up a regular user** (from that dialog, or the host's page) gives Yolo mode on a root host
+  in four steps:
+  1. *Create the user* — Kelpie runs `useradd` as root: no password (it logs in with the SSH keys
+     root has, yours included, added to its `~/.ssh/authorized_keys`) and no sudo. Running it
+     again only adds the keys; an existing system account, one without a login shell, or one
+     whose `~/.ssh` is a symbolic link is refused. It warns when sshd's `AllowUsers` /
+     `AllowGroups` would keep the user out.
+  2. *Add it to Kelpie* — a saved host with the same address and key logging in as the user, then
+     a check that it logs in as that user and has Claude Code (*Install Claude Code* if not).
+  3. *Give it your project* — folders under `/root` are private to root, so the user cannot open
+     them: *Copy in a terminal* copies the project into the user's home in a terminal on the
+     root host, which says when it is done (the original stays; an existing copy is never
+     overwritten). *Use … for* links the copy to the project.
+  4. *Sign in* — each user has its own Claude Code sign-in; its first start asks for it.
+
+  Do not give that user passwordless sudo: agents in Yolo mode could act as root again.
 
 The file tree, search and source control of the project stay those of this computer; use the
 host's *Files* or *Open as project* to work with its files.

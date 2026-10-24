@@ -2,7 +2,7 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid
 import { store, type PaneTarget } from "../lib/store";
 import { KindGlyph } from "./icons";
 import { isAgentKind, kindInfo } from "../lib/agents";
-import { RunOnPicker, initialRunOn, resolveRunOn, runOnAgents, type RunOn } from "./host-target";
+import { RunOnPicker, initialRunOn, lacksFolder, resolveRunOn, runOnAgents, type RunOn } from "./host-target";
 import { vault } from "../lib/ssh-hosts";
 import { sessionTarget } from "../lib/remote";
 import { findPane } from "../lib/layout";
@@ -76,9 +76,10 @@ export function NewSessionMenu() {
     const extra = args().trim();
     const argv = extra ? extra.match(/"[^"]*"|\S+/g)!.map((a) => a.replace(/^"|"$/g, "")) : undefined;
     if (kind() === "custom" && !argv) return store.notify(t("Enter a command to run"));
+    const chat = ui() === "chat" && supportsChat(kind()) && local();
+    if (!chat && lacksFolder(project, runOn(), kind())) return;
     store.setOverlay(null);
     const w = where();
-    const chat = ui() === "chat" && supportsChat(kind()) && local();
     // In a worktree of its own: the session opens there, in a tab of that project.
     let projectId = project.id;
     let place: { where: "tab" | "right" | "down"; into: PaneTarget | undefined };
@@ -89,7 +90,7 @@ export function NewSessionMenu() {
         return store.notify(t("Could not create the worktree: {error}", { error: String(e).replace(/^Error: /, "") }), undefined, 8000);
       }
     }
-    const target = chat ? undefined : await resolveRunOn(project, runOn());
+    const target = chat ? undefined : await resolveRunOn(project, runOn(), kind());
     if (target === null) return;
     if (w === "grid") {
       // The same agent in every cell; the first prompt (if any) goes to each of them.

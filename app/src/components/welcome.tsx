@@ -65,7 +65,7 @@ export function Launcher(props: { project: Project }) {
     if (starting) return;
     starting = true;
     const projectId = props.project.id;
-    const target = await resolveRunOn(props.project, run);
+    const target = await resolveRunOn(props.project, run, kind);
     if (target !== null) await store.newSession(projectId, kind, { target });
     starting = false;
   };

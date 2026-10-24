@@ -335,10 +335,21 @@ pub struct HostCheck {
     /// `ID` of `/etc/os-release` (ubuntu, debian, alpine…); empty where there is none (macOS).
     distro: String,
     home: String,
+    /// The account it logs in as. `root`: uid 0 without `IS_SANDBOX=1` in the login shell, where
+    /// Claude Code refuses to skip permission prompts.
+    user: String,
+    root: bool,
     git: bool,
     tmux: bool,
     /// Agent CLIs found on the host's PATH (login shell).
     agents: Vec<String>,
+}
+
+/// The probe's `uid=` value (`0`, `1000`, `0-sandbox1`): root, without the `IS_SANDBOX=1` that
+/// lets Claude Code skip permission prompts as root (the daemon's launch checks the same).
+fn root_refused(v: &str) -> bool {
+    let (uid, sandbox) = v.trim().split_once("-sandbox").unwrap_or((v.trim(), ""));
+    uid == "0" && sandbox != "1"
 }
 
 /// Connects to `dest` (`user@host[:port]` or an alias) and reports what it has.
@@ -349,15 +360,19 @@ pub async fn remote_check(dest: String, agents: Vec<String>) -> CmdResult<HostCh
     // A login shell, so PATH matches what terminals get. The loop's status is the last tool's;
     // `true` keeps a missing one from failing the whole check.
     let probe = format!(
-        "printf 'os=%s\\nhome=%s\\ndistro=%s\\n' \"$(uname -sr)\" \"$HOME\" \"$( (. /etc/os-release 2>/dev/null && printf %s \"$ID\") )\"; for b in git tmux {}; do command -v \"$b\" >/dev/null 2>&1 && echo \"has=$b\"; done; true",
+        "printf 'os=%s\\nhome=%s\\ndistro=%s\\nuser=%s\\nuid=%s\\n' \"$(uname -sr)\" \"$HOME\" \"$( (. /etc/os-release 2>/dev/null && printf %s \"$ID\") )\" \"$(id -un)\" \"$(id -u)${{IS_SANDBOX:+-sandbox$IS_SANDBOX}}\"; for b in git tmux {}; do command -v \"$b\" >/dev/null 2>&1 && echo \"has=$b\"; done; true",
         bins.join(" ")
     );
     let script = format!("exec \"${{SHELL:-/bin/sh}}\" -lc {}", q(&probe));
     let text = exec_ok(&r, &script).await?;
-    let mut c = HostCheck { os: String::new(), distro: String::new(), home: String::new(), git: false, tmux: false, agents: Vec::new() };
+    let mut c = HostCheck { os: String::new(), distro: String::new(), home: String::new(), user: String::new(), root: false, git: false, tmux: false, agents: Vec::new() };
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("os=") {
             c.os = v.trim().into();
+        } else if let Some(v) = line.strip_prefix("user=") {
+            c.user = v.trim().into();
+        } else if let Some(v) = line.strip_prefix("uid=") {
+            c.root = root_refused(v);
         } else if let Some(v) = line.strip_prefix("distro=") {
             c.distro = v.trim().to_ascii_lowercase();
         } else if let Some(v) = line.strip_prefix("home=") {
@@ -374,6 +389,85 @@ pub async fn remote_check(dest: String, agents: Vec<String>) -> CmdResult<HostCh
         return Err(format!("{dest} did not answer the probe"));
     }
     Ok(c)
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct AddedUser {
+    home: String,
+    /// The user was there already (it only got root's keys).
+    existed: bool,
+    /// sshd's AllowUsers / AllowGroups / DenyUsers / DenyGroups lines: the user may need adding
+    /// there before it can log in.
+    sshd: Vec<String>,
+}
+
+/// A login name `useradd` takes everywhere (and never root).
+fn valid_user_name(n: &str) -> bool {
+    let mut c = n.chars();
+    n.len() <= 32 && n != "root" && c.next().is_some_and(|f| f.is_ascii_lowercase() || f == '_') && c.all(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || x == '_' || x == '-')
+}
+
+/// Run as root: creates the user (no password, so it logs in with keys only), then gives it
+/// root's authorized SSH keys after any it has (in order, without duplicates). An existing user
+/// only gets the keys, and only a regular account (a login uid and shell) whose `.ssh` holds no
+/// symlinks: root writes there, and must not follow a link the user planted.
+const ADD_USER: &str = r#"
+[ "$(id -u)" = 0 ] || { echo "log in as root to add a user" >&2; exit 3; }
+command -v useradd >/dev/null 2>&1 || { echo "useradd is not available on this host" >&2; exit 3; }
+existed=1
+if ! id -u "$n" >/dev/null 2>&1; then
+  existed=0
+  useradd -m -U -s "$(command -v bash || echo /bin/sh)" -p '*' "$n" || exit 4
+fi
+[ "$(id -u "$n")" != 0 ] || { echo "$n is a root account" >&2; exit 3; }
+home=$(getent passwd "$n" | cut -d: -f6)
+g=$(id -gn "$n")
+[ -n "$home" ] && [ -d "$home" ] || { echo "$n has no home folder" >&2; exit 3; }
+k="$home/.ssh/authorized_keys"
+if [ "$existed" = 1 ]; then
+  umin=$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)
+  [ "$(id -u "$n")" -ge "${umin:-1000}" ] || { echo "$n is a system account: choose another name" >&2; exit 3; }
+  case "$(getent passwd "$n" | cut -d: -f7)" in */nologin|*/false|"") echo "$n cannot log in (no shell): choose another name" >&2; exit 3;; esac
+  [ ! -L "$home/.ssh" ] && [ ! -L "$k" ] || { echo "$n's ~/.ssh is a symbolic link: Kelpie does not write through it" >&2; exit 3; }
+fi
+install -d -m 700 -o "$n" -g "$g" "$home/.ssh" || exit 4
+t=$(mktemp) || exit 4
+{ [ -f "$k" ] && cat "$k"; echo; cat "$HOME/.ssh/authorized_keys" 2>/dev/null; echo; } | grep -v '^[[:space:]]*$' | awk '!seen[$0]++' > "$t"
+grep -q . "$HOME/.ssh/authorized_keys" 2>/dev/null || { rm -f "$t"; echo "root has no authorized SSH keys to give $n" >&2; exit 3; }
+install -m 600 -o "$n" -g "$g" "$t" "$k" || { rm -f "$t"; exit 4; }
+rm -f "$t"
+command -v restorecon >/dev/null 2>&1 && restorecon -R "$home/.ssh" >/dev/null 2>&1
+printf 'home=%s\nexisted=%s\n' "$home" "$existed"
+sshd -T 2>/dev/null | grep -Ei '^(allowusers|allowgroups|denyusers|denygroups) ' | sed 's/^/sshd=/'
+true
+"#;
+
+/// Adds a regular user on a host logged in as root, for agents that refuse to run as root
+/// unguarded (Claude Code's Yolo mode).
+#[tauri::command]
+pub async fn remote_add_user(dest: String, name: String) -> CmdResult<AddedUser> {
+    if !valid_user_name(&name) {
+        return Err("invalid user name".into());
+    }
+    let r = parse_root(&format!("ssh://{dest}/")).ok_or("invalid host")?;
+    parse_added_user(&exec_ok(&r, &format!("n={}\n{ADD_USER}", q(&name))).await?)
+}
+
+fn parse_added_user(text: &str) -> CmdResult<AddedUser> {
+    let mut u = AddedUser { home: String::new(), existed: false, sshd: Vec::new() };
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("home=") {
+            u.home = v.trim().into();
+        } else if let Some(v) = line.strip_prefix("existed=") {
+            u.existed = v.trim() == "1";
+        } else if let Some(v) = line.strip_prefix("sshd=") {
+            u.sshd.push(v.trim().into());
+        }
+    }
+    if u.home.is_empty() {
+        return Err("the host did not confirm the new user".into());
+    }
+    Ok(u)
 }
 
 /// Folders of an absolute path on the host (for choosing a project folder).
@@ -402,6 +496,32 @@ mod tests {
         assert!(parse_root("ssh://-oProxyCommand=x/p").is_none());
         assert!(parse_root("C:/x").is_none());
         assert_eq!(parse_root("ssh://me@h:22/p").unwrap().root(), "ssh://me@h:22/p");
+    }
+
+    #[test]
+    fn user_names_useradd_takes() {
+        for ok in ["dev", "_svc", "web-1", "a_b"] {
+            assert!(valid_user_name(ok), "{ok}");
+        }
+        for bad in ["", "root", "Dev", "1dev", "-dev", "de v", "dev;rm", "dev$", &"a".repeat(33)] {
+            assert!(!valid_user_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn root_unless_a_sandbox() {
+        assert!(root_refused("0"));
+        assert!(root_refused("0-sandbox0"));
+        assert!(!root_refused("0-sandbox1"));
+        assert!(!root_refused("1000"));
+        assert!(!root_refused("1000-sandbox1"));
+    }
+
+    #[test]
+    fn reads_the_added_user() {
+        let u = parse_added_user("home=/home/dev\nexisted=0\nsshd=allowusers root\n").unwrap();
+        assert_eq!(u, AddedUser { home: "/home/dev".into(), existed: false, sshd: vec!["allowusers root".into()] });
+        assert!(parse_added_user("existed=1\n").is_err());
     }
 
     #[test]
