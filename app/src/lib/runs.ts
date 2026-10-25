@@ -2,13 +2,41 @@
 // actions on runs and tasks, activity entries for what needs the user, worktree projects for
 // tasks that run in their own worktree, and planning a run's tasks with an AI agent.
 import { createStore, produce, reconcile } from "solid-js/store";
-import { agentRun, daemon, onEvent } from "./ipc";
+import { agentRun, daemon, isDir, onEvent } from "./ipc";
+import { normPath } from "./platform";
 import { store } from "./store";
-import { t } from "./i18n";
+import { msg, t } from "./i18n";
 import type { SessionKind } from "./types";
 
 export type RunStatus = "running" | "done" | "failed" | "cancelled";
 export type TaskStatus = "pending" | "waiting_approval" | "starting" | "running" | "done" | "failed" | "skipped" | "cancelled";
+
+/** What a worktree was given from the repository's ignored files (the daemon's `Materialized`). */
+export interface Brought {
+  linked: string[];
+  copied: string[];
+  skipped: { path: string; reason: string }[];
+}
+
+export const STATUS_LABEL: Record<string, string> = {
+  pending: msg("Waiting"), waiting_approval: msg("Needs approval"), starting: msg("Starting"), running: msg("Running"), done: msg("Done"), failed: msg("Failed"), skipped: msg("Skipped"), cancelled: msg("Cancelled"),
+};
+
+/** The reasons the daemon gives for leaving an entry out, in the user's language. */
+const REASONS: Record<string, string> = {
+  "not a plain relative path": msg("not a plain relative path"),
+  "missing in the repository": msg("missing in the repository"),
+  "already in the worktree": msg("already in the worktree"),
+  "not ignored by git (tracked files are already checked out)": msg("not ignored by git (tracked files are already checked out)"),
+  "only folders can be linked": msg("only folders can be linked"),
+};
+
+/** One line about what a worktree was given (the full text, with the reasons, is the tooltip). */
+export function broughtText(b: Brought): { short: string; full: string } {
+  const parts = [b.linked.length ? t("linked {files}", { files: b.linked.join(", ") }) : "", b.copied.length ? t("copied {files}", { files: b.copied.join(", ") }) : ""].filter(Boolean);
+  const left = b.skipped.map((s) => `${s.path} (${REASONS[s.reason] ? t(REASONS[s.reason]) : s.reason})`);
+  return { short: parts.join(" · ") || t("nothing brought"), full: [...parts, ...(left.length ? [t("not brought: {files}", { files: left.join("; ") })] : [])].join(" · ") };
+}
 
 export interface RunTask {
   id: string;
@@ -25,11 +53,15 @@ export interface RunTask {
   session_id: string | null;
   cwd: string | null;
   branch: string | null;
+  /** The branch the worktree was created from. */
+  base?: string;
   started_at: number;
   finished_at: number;
   summary: string | null;
   error: string | null;
   worked: boolean;
+  /** What its worktree was given from the repository's ignored files (copies, links, what was left out). */
+  brought?: Brought;
 }
 
 export interface Run {
@@ -39,6 +71,8 @@ export interface Run {
   cwd: string;
   project_id: string | null;
   tasks: RunTask[];
+  /** The ignored files and folders each task worktree gets: what the user approved in `.kelpie.yaml`. */
+  materialize?: { copy: string[]; link: string[] };
   status: RunStatus;
   created_at: number;
   finished_at: number;
@@ -87,7 +121,7 @@ export async function loadRuns() {
   setRuns(reconcile(map));
 }
 
-export const createRun = (spec: { name: string; objective: string; cwd: string; project_id: string | null; tasks: (TaskDraft & { env?: Record<string, string>; args?: string[] })[]; idle_done_secs?: number }) =>
+export const createRun = (spec: { name: string; objective: string; cwd: string; project_id: string | null; tasks: (TaskDraft & { env?: Record<string, string>; args?: string[] })[]; idle_done_secs?: number; materialize?: { copy: string[]; link: string[] } }) =>
   daemon<Run>("run.create", spec);
 
 export type RunAction = "approve" | "retry" | "task_done" | "task_skip";
@@ -120,15 +154,22 @@ function announce(prev: Run | undefined, next: Run) {
   }
 }
 
+/** Worktrees removed in this session (a discarded candidate, a finished task): a run's later updates do not bring them back. */
+const removedWorktrees = new Set<string>();
+export const markWorktreeRemoved = (path: string) => void removedWorktrees.add(normPath(path));
+
 /** A task running in its own worktree appears as that worktree's project, with its session. */
-function adoptWorktrees(run: Run) {
+async function adoptWorktrees(run: Run) {
   const parent = store.state.projects.find((p) => p.id === run.project_id);
   if (!parent) return;
   const repo = parent.parentId ?? parent.id;
   for (const t of run.tasks) {
     if (!t.worktree || !t.cwd || !t.session_id || !t.branch) continue;
+    // A worktree that was removed (a discarded candidate, a finished one) does not come back.
+    if (removedWorktrees.has(normPath(t.cwd))) continue;
+    if (!store.state.projects.some((p) => normPath(p.path) === normPath(t.cwd!)) && !(await isDir(t.cwd).catch(() => false))) continue;
     const s = store.sessions[t.session_id];
-    const pid = store.addProject(t.cwd, { parentId: repo, branch: t.branch, open: false });
+    const pid = store.addProject(t.cwd, { parentId: repo, branch: t.branch, baseBranch: t.base, open: false });
     if (s && s.project_id !== pid) void daemon("session.update", { handle: s.handle, project_id: pid }).catch(() => {});
   }
 }
@@ -143,7 +184,7 @@ export function initRuns() {
       const r = msg.params as Run;
       announce(runs[r.id], r);
       setRuns(r.id, reconcile(r));
-      adoptWorktrees(r);
+      void adoptWorktrees(r);
     } else if (msg.event === "run.deleted") {
       setRuns(produce((m) => delete m[msg.params.id]));
     }

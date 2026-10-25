@@ -365,7 +365,7 @@ fn git_raw(dir: &Path, index: Option<&Path>, args: &[&str], input: Option<Vec<u8
     Ok(out.stdout)
 }
 
-fn git(dir: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
+pub(crate) fn git(dir: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&git_raw(dir, index, args, None)?).trim().to_string())
 }
 

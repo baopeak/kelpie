@@ -108,7 +108,50 @@ fn state_backup_blocking(label: String) -> CmdResult<Option<String>> {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let dst = dir.join(format!("app-state.{label}-{secs}.bak.json"));
     std::fs::copy(&src, &dst).map_err(err)?;
+    // A migration that may run at every start (review notes) leaves a few copies, not one per start.
+    if label == "notes" {
+        prune_backups(&dir, "notes", 3);
+    }
     Ok(Some(dst.to_string_lossy().into_owned()))
+}
+
+/// Deletes all but the newest `keep` of `app-state.<label>-<secs>.bak.json` (the time sorts them).
+fn prune_backups(dir: &std::path::Path, label: &str, keep: usize) {
+    let prefix = format!("app-state.{label}-");
+    let mut found: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let secs = name.strip_prefix(&prefix)?.strip_suffix(".bak.json")?.parse::<u64>().ok()?;
+            Some((secs, e.path()))
+        })
+        .collect();
+    found.sort_by_key(|(secs, _)| std::cmp::Reverse(*secs));
+    for (_, path) in found.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::prune_backups;
+
+    #[test]
+    fn only_the_newest_backups_of_a_label_are_kept() {
+        let dir = std::env::temp_dir().join(format!("kelpie-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["app-state.notes-100.bak.json", "app-state.notes-200.bak.json", "app-state.notes-300.bak.json", "app-state.notes-400.bak.json", "app-state.notes-1000.bak.json", "app-state.v2-50.bak.json", "app-state.json", "app-state.notes-x.bak.json"] {
+            std::fs::write(dir.join(name), "{}").unwrap();
+        }
+        prune_backups(&dir, "notes", 3);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["app-state.json", "app-state.notes-1000.bak.json", "app-state.notes-300.bak.json", "app-state.notes-400.bak.json", "app-state.notes-x.bak.json", "app-state.v2-50.bak.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[tauri::command]
@@ -237,6 +280,7 @@ pub fn run() {
             git::git_worktree_prune,
             git::git_show_file,
             git::git_orphan_commits,
+            git::git_head,
             git_finish::review_changes,
             git_finish::finish_inspect,
             git_finish::finish_wip_commit,
@@ -254,6 +298,7 @@ pub fn run() {
             github::gh_default_branch,
             github::gh_pr_create,
             worktree_files::worktree_materialize,
+            worktree_files::worktree_materialize_estimate,
             external_editor::editors_list,
             external_editor::editor_open,
             sys_stats::processes_alive,

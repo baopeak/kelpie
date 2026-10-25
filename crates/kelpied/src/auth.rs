@@ -10,7 +10,7 @@
 //!   started restricted; then only their own session. Hook and run reports always speak for the
 //!   caller's own session. Admin methods (custom agents, automations, phone access, daemon
 //!   settings, closing sessions, turn checkpoints and their undo, notification channels, timers
-//!   that type into a session, changing a session's account…) are the user's only. Other sessions' environments are left
+//!   that type into a session, changing a session's account, resolving review notes…) are the user's only. Other sessions' environments are left
 //!   out of what they read.
 //! - **Claimed** (`KELPIE_SESSION_ID` without its token — some agents strip `*TOKEN*` variables
 //!   from the programs they run, hooks included): hook reports for that session only, which is
@@ -89,10 +89,10 @@ pub fn authenticate(d: &Daemon, params: &Value) -> Result<Role> {
 const SCRIPTING: &[&str] = &[
     "daemon.info", "agent.presets", "session.list", "session.read", "session.input", "session.create",
     "meta.list", "meta.get", "meta.set", "run.list", "run.get", "run.create", "run.retry",
-    "run.task_done", "run.task_skip", "run.cancel", "run.report", "hook.report",
+    "run.task_done", "run.task_skip", "run.cancel", "run.report", "hook.report", "note.add", "note.list",
 ];
 /// Methods a restricted session's programs may call, on their own session only.
-const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report"];
+const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report", "note.add", "note.list"];
 /// Methods of a session whose token went missing.
 const CLAIMED: &[&str] = &["daemon.info", "hook.report"];
 
@@ -134,6 +134,12 @@ pub fn authorize(d: &Daemon, role: &Role, method: &str, params: &mut Value) -> R
         };
         bail!("{method} is not available to programs running in a Kelpie session{why}");
     }
+    // A session's request names its parameters: none at all is an empty object, anything else that is
+    // not an object (an array deserialises into a struct field by field) is refused before any
+    // method looks at it.
+    if matches!(role, Role::Session(_) | Role::Claimed(_)) {
+        object_params(method, params)?;
+    }
     if matches!(method, "hook.report" | "run.report") {
         if let Some(obj) = params.as_object_mut() {
             obj.insert("session_id".into(), Value::String(id.clone()));
@@ -142,6 +148,9 @@ pub fn authorize(d: &Daemon, role: &Role, method: &str, params: &mut Value) -> R
                 obj.insert("verified".into(), Value::Bool(matches!(role, Role::Session(_))));
             }
         }
+    }
+    if matches!(role, Role::Session(_)) {
+        scope_session_params(method, &id, &cwd, params)?;
     }
     if !scripting {
         match method {
@@ -159,6 +168,46 @@ pub fn authorize(d: &Daemon, role: &Role, method: &str, params: &mut Value) -> R
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// `params` as an object: missing (null) becomes `{}`, any other shape is an error.
+fn object_params(method: &str, params: &mut Value) -> Result<()> {
+    match params {
+        Value::Object(_) => Ok(()),
+        Value::Null => {
+            *params = Value::Object(Default::default());
+            Ok(())
+        }
+        _ => bail!("{method}: params must be an object"),
+    }
+}
+
+/// What a session's programs cannot decide for themselves. Review notes go to the worktree the
+/// session is in and carry its name; what the user's app fills in (id, time, side, quoted text) is
+/// worked out by the daemon. A run's `materialize` lists are what the user approved in the app: a
+/// program cannot widen them.
+fn scope_session_params(method: &str, id: &str, cwd: &str, params: &mut Value) -> Result<()> {
+    object_params(method, params)?;
+    let Some(obj) = params.as_object_mut() else { return Ok(()) };
+    match method {
+        "note.add" | "note.list" => {
+            if let Some(path) = obj.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()) {
+                if crate::notes::worktree_key(path) != crate::notes::worktree_key(cwd) {
+                    bail!("{method}: only this session's own worktree");
+                }
+            }
+            obj.insert("path".into(), Value::String(cwd.to_string()));
+            for key in ["id", "at", "side", "text", "by"] {
+                obj.remove(key);
+            }
+            obj.insert("by_session".into(), Value::String(id.to_string()));
+        }
+        "run.create" => {
+            obj.remove("materialize");
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -245,19 +294,85 @@ mod tests {
     }
 
     #[test]
+    fn a_session_writes_notes_only_in_its_own_worktree() {
+        let dir = std::env::temp_dir().join(format!("kelpie-auth-notes-{}", uuid::Uuid::new_v4()));
+        let (mine, other) = (dir.join("mine"), dir.join("other"));
+        for d in [&mine, &other] {
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join(".git"), "gitdir: x").unwrap();
+        }
+        let cwd = mine.join("src").to_string_lossy().into_owned();
+        // No path: its own worktree. The user's fields are not its to set.
+        let mut p = serde_json::json!({"file": "a.rs", "line": 3, "note": "n", "id": "x", "at": 1, "side": "old", "text": "forged", "by": "the user"});
+        scope_session_params("note.add", "s1", &cwd, &mut p).unwrap();
+        assert_eq!(p["path"], cwd.as_str());
+        assert_eq!(p["by_session"], "s1");
+        for k in ["id", "at", "side", "text", "by"] {
+            assert!(p.get(k).is_none(), "{k}");
+        }
+        assert_eq!(p["note"], "n");
+        // Naming the worktree it is in (from a subfolder, or its root) is fine; another one is not.
+        for ok in [mine.to_string_lossy(), mine.join("src").to_string_lossy()] {
+            scope_session_params("note.list", "s1", &cwd, &mut serde_json::json!({"path": ok})).unwrap();
+        }
+        let err = scope_session_params("note.add", "s1", &cwd, &mut serde_json::json!({"path": other.to_string_lossy(), "file": "a.rs", "line": 1, "note": "n"})).unwrap_err();
+        assert!(err.to_string().contains("own worktree"), "{err}");
+        // A program cannot widen what the user approved for a run's worktrees.
+        let mut run = serde_json::json!({"name": "r", "materialize": {"link": ["node_modules"]}, "tasks": []});
+        scope_session_params("run.create", "s1", &cwd, &mut run).unwrap();
+        assert!(run.get("materialize").is_none() && run["name"] == "r");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_cannot_get_around_the_scoping_with_the_shape_of_its_params() {
+        let dir = std::env::temp_dir().join(format!("kelpie-auth-shape-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".git"), "gitdir: x").unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+        for method in ["note.add", "note.list", "run.create"] {
+            // No params: an empty object, scoped like any other (a note.list without a folder is its own worktree's).
+            let mut none = Value::Null;
+            scope_session_params(method, "s1", &cwd, &mut none).unwrap();
+            assert!(none.is_object(), "{method}");
+            if method.starts_with("note.") {
+                assert_eq!(none["path"], cwd.as_str(), "{method}: a session never asks for every worktree");
+                assert_eq!(none["by_session"], "s1");
+            }
+            for bad in [serde_json::json!([]), serde_json::json!(["r", "", cwd, null, [], null, [[".env"], ["node_modules"]]]), serde_json::json!("note.list"), serde_json::json!(7), serde_json::json!(true)] {
+                let mut p = bad.clone();
+                let err = scope_session_params(method, "s1", &cwd, &mut p).unwrap_err();
+                assert!(err.to_string().contains("must be an object"), "{method} {bad}: {err}");
+            }
+        }
+        // The same for every other method a session may call.
+        for method in ["session.list", "meta.set", "hook.report", "run.report", "daemon.info"] {
+            assert!(object_params(method, &mut serde_json::json!([1])).is_err(), "{method}");
+            let mut null = Value::Null;
+            object_params(method, &mut null).unwrap();
+            assert_eq!(null, serde_json::json!({}));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn capability_matrix() {
         let user = Role::User;
         let s = Role::Session("s".into());
         let claimed = Role::Claimed("s".into());
-        let admin = ["agent.set_custom", "automation.save", "automation.run", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart"];
+        let admin = ["agent.set_custom", "automation.save", "automation.run", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys"];
         for m in admin {
             assert!(allowed(&user, false, m), "user: {m}");
             assert!(!allowed(&s, true, m), "scripting session: {m}");
             assert!(!allowed(&s, false, m), "own-only session: {m}");
             assert!(!allowed(&claimed, true, m), "claimed: {m}");
         }
-        for m in ["session.list", "session.read", "session.input", "session.create", "meta.set", "run.create", "run.report", "hook.report"] {
+        for m in ["session.list", "session.read", "session.input", "session.create", "meta.set", "run.create", "run.report", "hook.report", "note.add", "note.list"] {
             assert!(allowed(&s, true, m), "scripting session: {m}");
+        }
+        for m in ["note.add", "note.list"] {
+            assert!(allowed(&s, false, m), "own-only session: {m}");
+            assert!(!allowed(&claimed, true, m), "claimed: {m}");
         }
         assert!(!allowed(&s, false, "session.create"));
         assert!(!allowed(&s, false, "run.create"));

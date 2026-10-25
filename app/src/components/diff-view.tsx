@@ -210,7 +210,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
           <span>{allNotes().length > 1 ? t("{n} review notes", { n: allNotes().length }) : t("{n} review note", { n: allNotes().length })}{fileNotes().length !== allNotes().length ? ` (${t("{n} here", { n: fileNotes().length })})` : ""}</span>
           <span style={{ flex: 1 }} />
           <button class="btn primary" onClick={(e) => chooseAgentAndSend(e, props.project.id, notesPrompt(allNotes()))}>{t("Send to agent")} ▾</button>
-          <button class="btn" title={t("Remove every note (resolve all)")} onClick={() => { store.removeNotes(props.project.id, "all"); queueMicrotask(pushMarks); }}>{t("Resolve all")}</button>
+          <button class="btn" title={t("Remove every note (resolve all)")} onClick={() => { store.removeNotes(props.project.id, allNotes().map((n) => n.id)); queueMicrotask(pushMarks); }}>{t("Resolve all")}</button>
         </div>
         <Show when={fileNotes().length}>
           <div class="notes-list">
@@ -218,7 +218,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
               {(n) => (
                 <div class="note-item">
                   <span class="note-line">{n.side === "old" ? "−" : ""}{n.line}</span>
-                  <span class="note-body">{n.note}</span>
+                  <span class="note-body">{n.note}<Show when={n.by}><span class="muted-inline" title={t("Written by an agent with kelpied review add")}> · {n.by}</span></Show></span>
                   <button class="icon-btn" title={t("Resolve (remove)")} onClick={() => remove(n.id)}><Icon name="check" size={13} /></button>
                 </div>
               )}

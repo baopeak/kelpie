@@ -60,7 +60,8 @@ anything but `daemon.info` answers:
   secret, set in each session's environment with `KELPIE_SESSION_ENDPOINT`): `kelpied` inside a
   session of that daemon (against another endpoint it uses that daemon's user token). The scripting
   surface (`session.list|read|input|create`, `meta.*`, `run.*` except `approve` — approval gates wait
-  for the user — and `delete`, `hook.report`); `hook.report` and `run.report` always speak for the
+  for the user — and `delete`, `hook.report`, and from API 13 `note.add|list`, kept to the session's own
+  worktree even when scripting is off); `hook.report` and `run.report` always speak for the
   caller's own session, and `session.list` leaves other sessions' `env` out. With *Agents can control
   other sessions* off (`daemon.set_policy`, saved in `policy.json`) or a session created `restricted`,
   only its own session (`meta.set` compared on canonical paths, `..` refused). Everything else
@@ -86,10 +87,10 @@ Frames (`crates/kelpie-proto`): `u32 LE length | u8 kind | payload`
 | 2 Output | daemon → app | `u32 handle \| u64 seq \| bytes` (`seq` = stream offset after the bytes) |
 | 3 Input | app → daemon | `u32 handle \| bytes` |
 
-RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|save|delete|run`, `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them).
+RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|save|delete|run`, `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them).
 `daemon.info` reports an `api` feature level (`kelpie_proto::API_LEVEL`); an app built for a
 higher level offers to restart an older daemon still running from a previous version.
-Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `automation.ran`, `run.updated`, `mobile.pair_request`, and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
+Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran`, `run.updated`, `mobile.pair_request`, and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
 
 ## Session threading (daemon)
 
@@ -677,6 +678,78 @@ and sequence.
   above it, like `kelpied worktree set`). An older daemon ignores the field; the app hides the option below
   API 11. The mapping lives in memory, so a daemon restart during a run drops the delivery.
 
+### Cross-review and best-of-N
+
+Review notes, run worktrees that bring ignored files, and the compare view (API 13). An app that
+finds an older daemon keeps everything it did before: notes stay in `app-state.json`, run
+worktrees start as clean checkouts, and the new buttons that need the daemon say so.
+
+- **Review notes in the daemon** (`notes.rs`, `review-notes.json`): `note.add|list|clear`, keyed by the
+  worktree folder (the folder holding `.git` at or above the path given, spelled like `meta.rs` keys
+  folders; a path that does not exist is its own key, never the repository around it), broadcast as
+  `notes.changed {path, notes}` to the user's connections and to the session of that worktree only (the
+  daemon records each connection's role at `auth`; unauthenticated ones are sent nothing). A note is `{id, path, line, side, text, note, at,
+  by?}`; text is stripped of control and bidi characters, 500 notes per worktree, 4000 characters each.
+  One store feeds the diff gutter, the review card's *Request changes*, `@note` of the composer and an
+  agent's `kelpied review add <file>:<line> "<text>" [--old] [--base REF]`. The app gives `side` and
+  `text` (it showed the line); for an agent the daemon works them out: `git diff -U0` of the file
+  against `--base`, else the uncommitted changes, then the default branch's merge base (`--no-ext-diff
+  --no-textconv`, literal pathspecs, the ref checked not to be an option); a line outside every diff is
+  quoted from the file (a regular file whose real path is inside the worktree), a removed line must be in
+  a diff. Capability: `note.add|list` are in the session surface and also in the restricted one, but
+  `auth.rs` rewrites their params for a session — `path` becomes its own worktree (another worktree is
+  refused), `id`, `at`, `side`, `text` and `by` are dropped, `by_session` names the agent — so a program
+  cannot write a note elsewhere or in the user's name, and `note.list` without a folder (every worktree's
+  notes) answers the user only. For every method a session (or claimed id) calls, missing params are `{}`
+  and any other non-object is refused before the method sees it (a struct deserialises from an array).
+  `note.clear` and `note.keys` (which key a folder's notes are filed under) are the user's. `removeWorktree`
+  clears a worktree's notes before it removes the folder.
+- **Migration**: when the app meets a daemon of API 13 or newer it first asks for `note.list`, then — once
+  per run of the app — takes `ipc.stateBackup("notes")` (the existing versioned copy of `app-state.json`),
+  sends every note of `AppState.reviewNotes` with its own id, time, side and text, and drops a project's
+  notes from the state only after the daemon has all of them (a note id the daemon already has is kept
+  once, so a stop in the middle repeats safely). Without a backup nothing moves. `store.notesFor` reads
+  the notes filed under the project's own key (`note.keys`; exact, so a worktree inside another folder
+  never shows or sends that folder's notes) plus whatever is still local. *Request changes* clears the
+  notes it sent, by id.
+- **Run worktrees bring `copy:` / `link:`** (`kelpie-proto/src/materialize.rs`, shared with the app's
+  `worktree_files.rs`; same order of checks as before, each entry looked at again just before it is brought,
+  and an entry inside or around one already brought is skipped, so a copy never writes through a link onto
+  the repository's own file; one `git check-ignore` run per worktree, one per entry if it fails):
+  `create_task_worktree` calls `materialize` after `git worktree add` when the run has a
+  `materialize: {copy, link}`. The daemon cannot see the app's approvals, so the app sends the field only
+  for a repository whose `.kelpie.yaml` the user approved (then `.worktreeinclude` entries are read too,
+  as for any new worktree; nothing approved, nothing sent, nothing brought) — from Try with N agents and
+  from the Runs page's New run editor, which shows the same size line; a session's `run.create` has the
+  field removed whatever shape its params have. A task records `base` (the branch the run folder was on,
+  for Finish) and `brought` (structured: linked, copied, left out with the reason; the app words it). `worktree_materialize_estimate` measures the same selection
+  for the size shown before a run starts. Tasks start on blocking threads, so five worktrees with links are
+  made in parallel: about a second of git work (unit test), ready within 3 s of `run.create` including the
+  engine's one-second tick (end-to-end test).
+- **Review with…** (`lib/review-with.ts`, lazy dialog): a new session in the worktree with the review
+  prompt (the quick command called *Review prompt*, else a built-in text; editable in the dialog), the
+  instruction for `kelpied review add` (when the daemon takes notes) and the diff against the worktree's
+  base — `git_context` branch + worktree parts, 48 KB at most, in fences longer than any backtick run
+  inside — all passed through `redact` and `startWithPrompt`/`store.newSession(prompt)`, i.e. the daemon's
+  first-prompt path (an argument up to 8 kB, else a bracketed paste, sanitised there).
+- **Try with N agents** (`lib/try-agents.ts`, lazy dialog): one prompt, 2–5 agents, creates an ordinary
+  Run of N tasks with `worktree: true`, no dependencies and no new field. The prompt is redacted once
+  and capped at 64 KB.
+- **Compare** (`run-compare.tsx`, lazy; the model is `lib/run-compare.ts`): a tab of the Runs page for a run
+  with two or more worktree tasks. It reads each candidate's worktree once (`review_changes` cache, the
+  base's checks, turns from `checkpoint.list`, cost from the usage readings) and again when a task
+  changes state; only the elapsed time of a candidate still running ticks. *Use this one* confirms,
+  listing what goes, stops the other candidates at once (`run.task_skip`, their sessions closed and waited
+  for) and records each one's commit and uncommitted files, then opens the winner's Finish with a hook
+  (`finishSucceeded`). When Finish has merged the work and removed the worktree, a candidate that still holds
+  exactly what was recorded has its uncommitted files saved in a WIP commit (`finish_wip_commit`, the files
+  that were recorded), its worktree removed the ordinary way (never `--force`) and its branch deleted with
+  `branch -d`, which refuses an unmerged one: the branch stays with the candidate's work and the Activity
+  entry says so. A candidate that changed after the confirmation (a commit, a file), could not be stopped
+  or cannot be removed without force is left as it is, with the reason. *Discard…* does the same for one
+  candidate. The run engine's adoption of worktree tasks as sidebar projects skips folders that no longer
+  exist and worktrees removed in this session.
+
 ## Daemon services beyond sessions
 
 - **Agent presets** (`agents.rs` `PRESETS`): binary, launch args, skip-permission flags,
@@ -702,8 +775,8 @@ and sequence.
   non-shell session is working.
 - **Terminal palette**: `daemon.set_theme` takes an optional palette (16 ANSI + fg/bg/cursor)
   so colour-query answers match the chosen terminal theme.
-- **CLI** (`cli.rs`): `kelpied terminal list|read|send|wait` and `kelpied worktree get|set` over
-  the same RPCs.
+- **CLI** (`cli.rs`): `kelpied terminal list|read|send|wait`, `kelpied worktree get|set` and
+  `kelpied review add|list` over the same RPCs.
 
 ## Features beyond sessions
 
@@ -711,7 +784,7 @@ and sequence.
 |---|---|---|
 | Layouts | `app/src/lib/layout.ts` | A tab is a tree of n-ary splits (`children`, `sizes`) with pane leaves; grids are built from `{mode: rows\|cols, counts}`; saved layouts are templates (tree shape + session kind per leaf). Version-2 binary trees migrate on load. |
 | Accounts | `app/src-tauri/src/accounts.rs`, `lib/accounts.ts` | One config home per account under `<data>/accounts/<agent>/<id>`, passed as `CLAUDE_CONFIG_DIR` / `CODEX_HOME` to every launch (terminal, chat, automations, runs, one-shot AI actions); history and usage read each home. A stopped terminal session can move to another account (`account_transcript` copies the conversation, `session.set_env_restart` restarts it there; see "Notifications and limit actions"). |
-| Orchestration | `crates/kelpied/src/runs.rs` | A run is a task DAG (cycle-checked) persisted in `runs.json`. `Runs::step` starts ready tasks (deps done, approval given) as ordinary sessions, optionally in a new worktree; tasks end on `kelpied run report`, session exit, or idle after working (default 300 s). |
+| Orchestration | `crates/kelpied/src/runs.rs` | A run is a task DAG (cycle-checked) persisted in `runs.json`. `Runs::step` starts ready tasks (deps done, approval given) as ordinary sessions, optionally in a new worktree; tasks end on `kelpied run report`, session exit, or idle after working (default 300 s). A run may carry `materialize` (ignored files its worktrees get) and a task records its `base` branch and what it `brought`; see "Cross-review and best-of-N". |
 | Integrations | `app/src-tauri/src/integrations.rs` | Linear GraphQL, Jira REST (Cloud v3 `search/jql`, Server v2), GitLab REST v4. Tokens live in the OS keyring (`keyring`, service `Kelpie (<endpoint>)`) and never reach the webview. |
 | Browser panes | `app/src-tauri/src/browser.rs`, `browser_picker.js` | Tauri child webviews positioned over the pane (hidden while an overlay covers them). Design mode injects a picker; picks travel through a cancelled navigation to a sentinel URL, are redacted and size-capped, and the element screenshot uses the WebView2 DevTools protocol (end-to-end tests also send trusted page input through it, `browser_test_input`, dev / e2e builds only). |
 | Remote (SSH) | `app/src-tauri/src/remote.rs`, `agents.rs` `build_remote_launch` | The system OpenSSH client (on Windows `System32\OpenSSH`, never a Git Bash one from PATH): sessions run `ssh -t host` with a login shell, inside `tmux new-session -A` when available; files, search and git run as remote commands with quoted arguments. Commands never prompt: secrets come from askpass, anything else fails. |

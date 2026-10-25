@@ -224,6 +224,36 @@ merged offers Review instead.
   (and in the Changes tab) says which other worktree changed the same files (checked every 30 s and
   after a turn ends).
 
+### Review with another agent, and best of several
+
+**Review with…** (the button on a review card, or the palette's *Review Worktree with…*) asks another
+agent — by default one that did not write the changes, so it can be another vendor — to review a worktree.
+You choose the agent and can edit the prompt it starts with; to change the default, save a quick command
+called **Review prompt** (Settings → Quick commands). The session starts in the same worktree with the diff
+against the branch it will be merged into (at most 48 KB, credentials masked). The reviewer can leave
+comments on lines of the diff with `kelpied review add <file>:<line> "<comment>"` (`--old` for a removed
+line, `--base <branch>` to name the base; Kelpie puts the command in the prompt): they appear in the normal
+diff view like your own notes, marked with the agent's name, and **Request changes** sends them on. A
+reviewer can only write notes in its own worktree. (An agent whose launcher strips `*TOKEN*` variables from the
+programs it runs cannot prove which session it is: `kelpied review add` is refused there; paste its comments as notes yourself.)
+
+**Try with several agents…** (the link in the New session dialog, or the palette) sends one prompt to 2 to
+5 agents, each in a worktree of its own, started from where the folder is now. It is an ordinary run, so
+the Runs page follows it. When the repository's `.kelpie.yaml` has been approved (New worktree shows it),
+each worktree also gets its `link:` folders (shared, nothing copied) and `copy:` files, and the dialog shows
+what that is and how large the copies are before you start; without approval they start as clean checkouts.
+The Runs page's *New run* does the same for its tasks that have their own worktree.
+
+**Compare** (the tab of a run in Runs, when two or more of its tasks have a worktree) puts the candidates in
+columns: status, time, cost, files, +/- lines, the base's checks and turns, with a star on the quickest and
+the smallest change among those that finished. Click a file to see two candidates' versions of it side by
+side (pick which two). **Use this one** asks, listing the other candidates, stops their agents and opens Finish
+for the winner. Once it has merged, each other candidate that is still exactly as it was when you confirmed
+is cleaned up: what it had not committed is saved in a commit on its branch, its worktree is removed (never
+forced) and its branch is deleted only if it is merged, otherwise it stays with the candidate's work. A
+candidate that changed meanwhile, or that cannot be removed without force, is left alone and Activity says
+why. **Discard…** does the same for a single candidate after asking.
+
 ### New agent sessions in a worktree
 
 Settings → Agents → *Worktree for new agent sessions*: in the New session dialog an agent started in a git
@@ -437,7 +467,9 @@ checks (also as a chip in the sidebar); *Create pull request…* pushes and open
 **Review notes**: in a diff, click the gutter (`+`) to note a line; notes on all files of
 the project collect in a bar above the diff. **Send to agent ▾** sends them as one prompt to
 a running agent or a new one; resolve notes once addressed. `F7` / `Shift+F7` move between
-changes.
+changes. The session daemon keeps the notes (so another agent can write them too, see *Review with…*
+below); notes you wrote with an older daemon move over by themselves the first time, after a copy of
+the app state is made.
 
 ### Files
 
@@ -527,7 +559,12 @@ kelpied run create run.json          # {"name", "objective", "tasks": [{"id", "t
 kelpied run list                     #   "kind", "deps": [...], "approve", "worktree"}]}
 kelpied run show <run> | approve|retry|done|skip <run> <task> | cancel|delete <run>
 kelpied run wait <run>
+kelpied review add <file>:<line> "<comment>" [--old] [--base <ref>]   # a note on this worktree's diff
+kelpied review list [--json]
 ```
+
+The same prompt to several agents, with a compare view to pick the best, is *Try with several agents…*
+(see Review and Finish).
 
 ### Issue trackers and GitLab
 

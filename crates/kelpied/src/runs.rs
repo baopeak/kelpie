@@ -82,6 +82,9 @@ pub struct Task {
     pub cwd: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
+    /// The branch the worktree was created from (what Finish merges into).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(default)]
     pub started_at: u64,
     #[serde(default)]
@@ -94,6 +97,20 @@ pub struct Task {
     /// The session has been seen working (idle afterwards may mean done).
     #[serde(default)]
     pub worked: bool,
+    /// What its worktree was given from the repository's ignored files (see `Materialize`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brought: Option<kelpie_proto::materialize::Materialized>,
+}
+
+/// Ignored files and folders of the repository a run's worktrees get (`.kelpie.yaml` `copy:` and
+/// `link:`). The app sends the lists the user approved for that repository; none are brought
+/// without them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Materialize {
+    #[serde(default)]
+    pub copy: Vec<String>,
+    #[serde(default)]
+    pub link: Vec<String>,
 }
 
 fn default_kind() -> String {
@@ -113,6 +130,8 @@ pub struct Run {
     #[serde(default)]
     pub project_id: Option<String>,
     pub tasks: Vec<Task>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialize: Option<Materialize>,
     pub status: RunStatus,
     pub created_at: u64,
     #[serde(default)]
@@ -163,6 +182,8 @@ pub struct NewRun {
     pub tasks: Vec<NewTask>,
     #[serde(default)]
     pub idle_done_secs: Option<u64>,
+    #[serde(default)]
+    pub materialize: Option<Materialize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,11 +242,13 @@ pub fn build_run(new: NewRun, id: String, now: u64) -> Result<Run> {
             session_id: None,
             cwd: None,
             branch: None,
+            base: None,
             started_at: 0,
             finished_at: 0,
             summary: None,
             error: None,
             worked: false,
+            brought: None,
         });
     }
     for t in &tasks {
@@ -248,6 +271,7 @@ pub fn build_run(new: NewRun, id: String, now: u64) -> Result<Run> {
         cwd: new.cwd,
         project_id: new.project_id,
         tasks,
+        materialize: new.materialize,
         status: RunStatus::Running,
         created_at: now,
         finished_at: 0,
@@ -460,7 +484,7 @@ mod tests {
     }
 
     fn run_of(tasks: Vec<NewTask>) -> Run {
-        build_run(NewRun { name: "R".into(), objective: "obj".into(), cwd: ".".into(), project_id: None, tasks, idle_done_secs: Some(60) }, "r1".into(), 0).unwrap()
+        build_run(NewRun { name: "R".into(), objective: "obj".into(), cwd: ".".into(), project_id: None, tasks, idle_done_secs: Some(60), materialize: None }, "r1".into(), 0).unwrap()
     }
 
     fn view(alive: bool, working: bool, exit: Option<i32>, last: u64) -> Option<SessionView> {
@@ -469,7 +493,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_graphs() {
-        let bad = |tasks| build_run(NewRun { name: "R".into(), objective: String::new(), cwd: ".".into(), project_id: None, tasks, idle_done_secs: None }, "x".into(), 0).unwrap_err().to_string();
+        let bad = |tasks| build_run(NewRun { name: "R".into(), objective: String::new(), cwd: ".".into(), project_id: None, tasks, idle_done_secs: None, materialize: None }, "x".into(), 0).unwrap_err().to_string();
         assert!(bad(vec![new_task("a", &["b"]), new_task("b", &["a"])]).contains("circle"));
         assert!(bad(vec![new_task("a", &["zzz"])]).contains("unknown"));
         assert!(bad(vec![new_task("a", &[]), new_task("a", &[])]).contains("two tasks"));

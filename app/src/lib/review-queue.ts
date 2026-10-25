@@ -19,6 +19,10 @@ const TURN_DEBOUNCE_MS = 1500;
 const [changes, setChanges] = createStore<Record<string, ipc.ReviewChanges>>({});
 const [overlaps, setOverlaps] = createStore<Record<string, { id: string; name: string; files: string[] }[]>>({});
 const [finishTarget, setFinishTarget] = createSignal<string | null>(null);
+const [reviewTarget, setReviewTarget] = createSignal<string | null>(null);
+const [tryTarget, setTryTarget] = createSignal<{ projectId: string; prompt: string } | null>(null);
+/** What runs when the Finish of a worktree ends with the work merged and the worktree gone. */
+const afterFinish = new Map<string, () => void>();
 
 /** Overlap scans run so far (nothing is scanned while fewer than two worktrees of a repository are active). */
 export let overlapScans = 0;
@@ -26,10 +30,34 @@ export let overlapScans = 0;
 export const changesOf = (projectId: string): ipc.ReviewChanges | undefined => changes[projectId];
 export const overlapsOf = (projectId: string) => overlaps[projectId] ?? [];
 export const finishing = finishTarget;
+/** The project whose "Review with…" dialog is open. */
+export const reviewing = reviewTarget;
+/** The project and prompt of the open "Try with several agents" dialog. */
+export const trying = tryTarget;
 
-export function openFinish(projectId: string) {
+/** `after` runs once if this Finish ends with the work merged and the worktree gone (the other candidates of a comparison go then). */
+export function openFinish(projectId: string, after?: () => void) {
+  if (after) afterFinish.set(projectId, after);
+  else afterFinish.delete(projectId);
   setFinishTarget(projectId);
   store.setOverlay("finish");
+}
+
+/** The Finish of `projectId` ended with the work merged and the worktree gone. */
+export function finishSucceeded(projectId: string) {
+  const after = afterFinish.get(projectId);
+  afterFinish.delete(projectId);
+  after?.();
+}
+
+export function openReviewWith(projectId: string) {
+  setReviewTarget(projectId);
+  store.setOverlay("review");
+}
+
+export function openTryAgents(projectId: string, prompt = "") {
+  setTryTarget({ projectId, prompt });
+  store.setOverlay("try");
 }
 
 const repoOf = (p: Project) => (p.parentId ? store.state.projects.find((x) => x.id === p.parentId) : undefined);

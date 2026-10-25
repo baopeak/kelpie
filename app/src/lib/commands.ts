@@ -10,7 +10,7 @@ import { chordLabel, isMac } from "./platform";
 import { allViews, peekView, setAppShortcutMatcher, setOverlayCheck } from "./terminal-host";
 import { navBack, navForward } from "./nav-history";
 import { addExistingWorktrees } from "./worktrees";
-import { openFinish } from "./review-queue";
+import { openFinish, openReviewWith, openTryAgents } from "./review-queue";
 import { waitingSessions } from "./attention";
 import { openWorktreeDialog } from "../components/worktree-dialog";
 import { openRuns } from "../components/runs-page";
@@ -187,6 +187,8 @@ export const commands: Command[] = [
   },
   { id: "panel.review", label: msg("Review Queue"), run: () => store.showRightPanel("review"), when: () => { const a = store.activeProject(); return !!a && !a.remote && !!store.projectInfo[a.parentId ?? a.id]?.is_repo; } },
   { id: "worktree.finish", label: msg("Finish Worktree…"), when: () => { const a = store.activeProject(); return !!a?.parentId && !a.remote; }, run: () => openFinish(store.activeProject()!.id) },
+  { id: "worktree.review", label: msg("Review Worktree with…"), when: () => { const a = store.activeProject(); return !!a?.parentId && !a.remote; }, run: () => openReviewWith(store.activeProject()!.id) },
+  { id: "runs.try", label: msg("Try with Several Agents…"), when: () => { const a = store.activeProject(); const repo = a?.parentId ?? a?.id; return !!repo && !a?.remote && !!store.projectInfo[repo]?.is_repo; }, run: () => openTryAgents(store.activeProject()!.id) },
   { id: "worktree.new", label: msg("New Worktree…"), when: () => { const a = store.activeProject(); const repo = a?.parentId ?? a?.id; return !!repo && !a?.remote && !!store.projectInfo[repo]?.is_repo; }, run: () => { const a = store.activeProject()!; openWorktreeDialog(a.parentId ?? a.id); } },
   { id: "project.sleep", label: msg("Sleep Project (stop agents, resume on open)"), when: hasProject, run: () => void store.sleepProject(pid()!) },
   { id: "automations", label: msg("Scheduled Automations…"), run: () => store.openSettings("automations") },

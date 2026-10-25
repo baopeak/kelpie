@@ -150,6 +150,7 @@ where
                                 _ => json!({"user": true}),
                             };
                             role = r;
+                            daemon.set_client_role(id, &role);
                             let _ = out_tx.send(json_out(&json!({"id": req_id, "result": who})));
                             continue;
                         }

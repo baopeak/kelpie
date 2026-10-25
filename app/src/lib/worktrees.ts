@@ -6,6 +6,7 @@ import * as ipc from "./ipc";
 import { t } from "./i18n";
 import { basename, normPath } from "./platform";
 import { disposeView } from "./terminal-host";
+import { markWorktreeRemoved } from "./runs";
 import type { Project, SessionKind } from "./types";
 
 /** `.kelpie.yaml` in a repository root. */
@@ -115,11 +116,15 @@ export async function createWorktree(repo: Project, opts: { branch: string; base
   if (!requested || requested === "HEAD") baseBranch = store.projectInfo[repo.id]?.branch ?? undefined;
   else if ((await ipc.gitRefs(repo.path).catch(() => [])).some((r) => r.kind === "local" && r.name === requested)) baseBranch = requested;
   await ipc.gitWorktreeAdd(repo.path, opts.path.trim(), opts.branch, opts.base?.trim() || undefined);
-  // Ignored files a checkout lacks (.env, node_modules): before setup runs, which may need them.
-  const files = await ipc.worktreeMaterialize(repo.path, opts.path.trim(), opts.config?.copy ?? [], opts.config?.link ?? []).catch((e) => {
-    store.notify(t("Copying ignored files failed: {error}", { error: String(e) }), undefined, 8000);
-    return null;
-  });
+  // Ignored files a checkout lacks (.env, node_modules): before setup runs, which may need them. Only
+  // with the repository's `.kelpie.yaml` approved (`.worktreeinclude` too): without it the worktree is a
+  // clean checkout.
+  const files = opts.config
+    ? await ipc.worktreeMaterialize(repo.path, opts.path.trim(), opts.config.copy, opts.config.link).catch((e) => {
+        store.notify(t("Copying ignored files failed: {error}", { error: String(e) }), undefined, 8000);
+        return null;
+      })
+    : null;
   const id = store.addProject(opts.path.trim(), { parentId: repo.id, branch: opts.branch, baseBranch, name: opts.branch });
   const project = store.state.projects.find((p) => p.id === id)!;
   const parts = [files?.copied.length ? t("copied {files}", { files: files.copied.join(", ") }) : "", files?.linked.length ? t("linked {files}", { files: files.linked.join(", ") }) : ""].filter(Boolean);
@@ -239,6 +244,8 @@ export async function removeWorktree(wt: Project, opts: { force: boolean }): Pro
   if (!repo) throw new Error(t("This worktree's repository is not in the sidebar"));
   if (store.state.activeProject === wt.id) store.switchProject(repo.id);
   if (!(await stopSessions(wt))) throw new Error(t("Some processes in this worktree did not stop; close them and try again"));
+  // Where its notes are filed, asked while the folder exists; they are cleared under that exact key once it is gone.
+  const noteKey = await store.noteKeyFor(wt);
   // The file watcher holds the folder open; leaving the project only stops it in the background.
   await ipc.unwatchRoot(wt.path).catch(() => {});
   for (let attempt = 0; ; attempt++) {
@@ -256,6 +263,8 @@ export async function removeWorktree(wt: Project, opts: { force: boolean }): Pro
       await sleep(500);
     }
   }
+  markWorktreeRemoved(wt.path);
+  await store.clearNotesAt(wt.id, noteKey);
   store.removeProject(wt.id);
   // A deleted folder that something still had open lingers until that handle closes.
   for (let i = 0; i < 15; i++) {

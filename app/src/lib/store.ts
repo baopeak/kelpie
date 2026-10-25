@@ -23,6 +23,7 @@ import { confirmRootStart } from "./root-user";
 import type { WorkStatus, AgentProfile, AppState, BranchInfo, InboxItem, LayoutNode, LayoutTemplate, Pane, Project, ProjectHost, RecentItem, ReviewNote, SessionInfo, SessionKind, SessionTarget, Settings, Tab, Workspace, WorkspaceMeta } from "./types";
 import { confirmDialog } from "./confirm-dialog";
 import { remember } from "./prompt-history";
+import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
 
 export const defaultSettings: Settings = {
   fontFamily: '"JetBrains Mono", "Cascadia Code", "Cascadia Mono", Menlo, Consolas, "Symbols Nerd Font Mono", monospace',
@@ -120,7 +121,7 @@ function chime() {
   }
 }
 
-export type Overlay = null | "cost" | "palette" | "quickopen" | "jump" | "dashboard" | "settings" | "newsession" | "board" | "worktree" | "runs" | "remote" | "hosts" | "update" | "answer" | "finish";
+export type Overlay = null | "cost" | "palette" | "quickopen" | "jump" | "dashboard" | "settings" | "newsession" | "board" | "worktree" | "runs" | "remote" | "hosts" | "update" | "answer" | "finish" | "review" | "try";
 
 /** A pane of a tab (an empty pane a new session takes the place of). */
 export type PaneTarget = { tabId: string; paneId: string };
@@ -225,6 +226,12 @@ function createAppStore() {
   const [daemonNeedsSwitch, setDaemonNeedsSwitch] = createSignal(false);
   /** The connected daemon's API level: features needing newer RPCs hide on an older daemon. */
   const [daemonApi, setDaemonApi] = createSignal(0);
+  /** The daemon program: the `kelpied` an agent is told to run (`kelpied review add …`). */
+  const [daemonExe, setDaemonExe] = createSignal<string | null>(null);
+  /** Review notes the daemon keeps (API 13), by `metaKey` of the worktree folder. */
+  const [daemonNotes, setDaemonNotes] = createStore<Record<string, ReviewNote[]>>({});
+  /** The key the daemon files each project's notes under (its worktree's folder), by project id. */
+  const [noteKeys, setNoteKeys] = createStore<Record<string, string>>({});
 
   async function switchDaemon() {
     if (!(await confirmDialog(t("Switch to the new session daemon now? Running sessions stop for a moment; agents that can resume continue their conversation.")))) return;
@@ -240,9 +247,10 @@ function createAppStore() {
   async function checkDaemonApi() {
     olderDaemon = false;
     setDaemonNeedsSwitch(false);
-    const [info, app] = await Promise.all([ipc.daemon<{ api?: number; version?: string; security?: number }>("daemon.info", {}), ipc.platformInfo()]).catch(() => [null, null]);
+    const [info, app] = await Promise.all([ipc.daemon<{ api?: number; version?: string; security?: number; exe?: string }>("daemon.info", {}), ipc.platformInfo()]).catch(() => [null, null]);
     // A daemon that predates API levels says none: level 1.
     setDaemonApi(info ? info.api ?? 1 : 0);
+    setDaemonExe(info?.exe ?? null);
     // Only an older daemon: a dev app and an installed Kelpie may share one, and must not keep
     // offering to restart each other's.
     if (!info || !app || ((info.api ?? 1) >= app.api && !(info.version && olderVersion(info.version, app.version)))) return;
@@ -418,6 +426,9 @@ function createAppStore() {
         if (project && m.status && project.status !== m.status) update((s) => (s.projects.find((x) => x.id === project.id)!.status = m.status!));
         break;
       }
+      case "notes.changed":
+        applyNotes(p.path, p.notes);
+        break;
       case "automation.ran": {
         if (legacyNotify()) {
           const title = t("Automation · {name}", { name: p.name });
@@ -499,6 +510,7 @@ function createAppStore() {
     update((s) => s.projects.push(project));
     ensureWorkspace(project.id);
     resolveCanonKey(project);
+    void resolveNoteKeys([project]);
     refreshProjectInfo(project.id, 0);
     if (opts.open !== false) switchProject(project.id);
     return project.id;
@@ -554,21 +566,104 @@ function createAppStore() {
   }
 
   // ---------- review notes (diff annotations) ----------
-  const notesFor = (projectId: string): ReviewNote[] => state.reviewNotes?.[projectId] ?? [];
+  // The daemon keeps them from API 13 (shared with a reviewing agent's `kelpied review add`); an
+  // older daemon's notes stay in the app's state, and so do the ones the daemon refused to take.
+  const useDaemonNotes = () => daemonApi() >= NOTES_API;
 
-  function addNote(projectId: string, note: Omit<ReviewNote, "id" | "at">) {
+  const notesFor = (projectId: string): ReviewNote[] => {
+    const local = state.reviewNotes?.[projectId] ?? [];
+    const p = state.projects.find((x) => x.id === projectId);
+    return p && useDaemonNotes() ? mergeNotes(notesForKey(daemonNotes, noteKeys[p.id] ?? canonKey(p)), local) : local;
+  };
+
+  /** Asks the daemon which key each project's notes are filed under (a project on a subfolder shares its worktree's). */
+  async function resolveNoteKeys(projects: Project[]) {
+    if (!useDaemonNotes() || !projects.length) return;
+    const keys = await ipc.daemon<Record<string, string>>("note.keys", { paths: projects.map((p) => p.path) }).catch(() => null);
+    if (!keys) return;
+    for (const p of projects) if (typeof keys[p.path] === "string") setNoteKeys(p.id, metaKey(keys[p.path]));
+  }
+
+  function applyNotes(path: string, notes: ReviewNote[]) {
+    setDaemonNotes(metaKey(path), notes.length ? reconcile(notes) : undefined!);
+  }
+
+  async function loadNotes() {
+    await resolveNoteKeys(state.projects.filter((p) => !p.remote));
+    const map = await ipc.daemon<Record<string, ReviewNote[]>>("note.list", {}).catch(() => null);
+    if (!map) return;
+    const next: Record<string, ReviewNote[]> = {};
+    for (const [k, v] of Object.entries(map)) next[metaKey(k)] = v;
+    setDaemonNotes(reconcile(next));
+  }
+
+  async function addNote(projectId: string, note: Omit<ReviewNote, "id" | "at">) {
+    const p = state.projects.find((x) => x.id === projectId);
+    if (p && useDaemonNotes()) {
+      try {
+        const r = await ipc.daemon<{ path: string; notes: ReviewNote[] }>("note.add", { path: p.path, file: note.path, line: note.line, side: note.side, text: note.text, note: note.note });
+        applyNotes(r.path, r.notes);
+      } catch (e) {
+        notify(String(e).replace(/^Error: /, ""));
+      }
+      return;
+    }
     update((s) => {
       s.reviewNotes ??= {};
       (s.reviewNotes[projectId] ??= []).push({ ...note, id: uid(), at: Date.now() });
     });
   }
 
-  function removeNotes(projectId: string, ids: string[] | "all") {
-    update((s) => {
-      const list = s.reviewNotes?.[projectId];
-      if (!list) return;
-      s.reviewNotes[projectId] = ids === "all" ? [] : list.filter((n) => !ids.includes(n.id));
+  /** The key a project's notes are filed under (ask while its folder exists). */
+  async function noteKeyFor(p: Project): Promise<string> {
+    await resolveNoteKeys([p]);
+    return noteKeys[p.id] ?? canonKey(p);
+  }
+
+  /** Clears the notes filed under `key` (a worktree that is gone), and the project's own leftovers. */
+  async function clearNotesAt(projectId: string, key: string) {
+    if (state.reviewNotes?.[projectId]?.length) update((s) => void delete s.reviewNotes[projectId]);
+    if (!useDaemonNotes()) return;
+    try {
+      const r = await ipc.daemon<{ path: string; notes: ReviewNote[] }>("note.clear", { path: key, exact: true });
+      applyNotes(r.path, r.notes);
+    } catch (e) {
+      notify(String(e).replace(/^Error: /, ""));
+    }
+  }
+
+  async function removeNotes(projectId: string, ids: string[] | "all") {
+    if (state.reviewNotes?.[projectId]?.length) {
+      update((s) => {
+        const list = s.reviewNotes[projectId];
+        s.reviewNotes[projectId] = ids === "all" ? [] : list.filter((n) => !ids.includes(n.id));
+      });
+    }
+    const p = state.projects.find((x) => x.id === projectId);
+    if (!p || !useDaemonNotes()) return;
+    try {
+      const r = await ipc.daemon<{ path: string; notes: ReviewNote[] }>("note.clear", { path: p.path, ids: ids === "all" ? undefined : ids });
+      applyNotes(r.path, r.notes);
+    } catch (e) {
+      notify(String(e).replace(/^Error: /, ""));
+    }
+  }
+
+  /** Once per run of the app: the notes an older daemon left in the app's state go to the daemon. */
+  let notesMoved = false;
+  async function moveNotesToDaemon() {
+    if (notesMoved) return;
+    notesMoved = true;
+    const r = await migrateNotes(pendingNotes(state.reviewNotes, state.projects), {
+      backup: () => ipc.stateBackup("notes").catch(() => null),
+      add: async (path, n) => {
+        await ipc.daemon("note.add", { path, file: n.path, line: n.line, side: n.side, text: n.text, note: n.note, id: n.id, at: n.at });
+      },
+      drop: (projectId) => update((s) => void delete s.reviewNotes[projectId]),
     });
+    if (r.noBackup) notify(t("Review notes stay in the app for now: its state could not be backed up first."), undefined, 8000);
+    else if (r.failed.length) notify(t("Some review notes could not be moved to the session daemon; they stay in the app."), undefined, 8000);
+    await loadNotes();
   }
 
   // ---------- composer prompt history ----------
@@ -1434,6 +1529,7 @@ function createAppStore() {
     await checkDaemonApi();
     void loadAgentPresets();
     void loadMeta();
+    if (useDaemonNotes()) void loadNotes().then(moveNotesToDaemon);
     void ipc.daemon("daemon.set_awake", { mode: state.settings.keepAwake ?? "off" }).catch(() => {});
     void ipc.daemon("daemon.set_priority", { enabled: state.settings.prioritizeVisible ?? true }).catch(() => {});
     void ipc.daemon("daemon.set_policy", { agents_control_others: state.settings.agentsScripting ?? true }).catch(() => {});
@@ -1530,8 +1626,8 @@ function createAppStore() {
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
     settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
-    daemonNeedsSwitch, switchDaemon, daemonApi, legacyNotify, openAnswer, revealNextWaiting,
-    notesFor, addNote, removeNotes, promptsFor, rememberPrompt, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
+    daemonNeedsSwitch, switchDaemon, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting,
+    notesFor, addNote, removeNotes, noteKeyFor, clearNotesAt, promptsFor, rememberPrompt, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
     newFloating, toggleFloating, selectFloating, closeFloating,
   };
 }

@@ -17,6 +17,7 @@ use crate::awake::{self, Awake};
 use crate::chat::ChatSession;
 use crate::checkpoints::{self, Checkpoints};
 use crate::meta::MetaStore;
+use crate::notes::{self, Note, NoteStore};
 use crate::notify::{self, Notifier, Raised};
 use crate::status::Status;
 use crate::persist::{write_atomic, SavedSession, Store};
@@ -68,6 +69,8 @@ pub struct Daemon {
     sessions: RwLock<BTreeMap<u32, Entry>>,
     next_handle: AtomicU32,
     clients: Mutex<HashMap<u64, ClientTx>>,
+    /// Who each authenticated connection is (see `set_client_role`).
+    client_roles: Mutex<HashMap<u64, crate::auth::Role>>,
     store: Store,
     pub data_dir: PathBuf,
     /// Path of this executable; agents call it back as `kelpied hook …`.
@@ -75,6 +78,8 @@ pub struct Daemon {
     meta_dirty: AtomicBool,
     pub shutdown: tokio::sync::Notify,
     workspace_meta: Mutex<MetaStore>,
+    /// Review notes on worktrees' diffs (see `notes.rs`).
+    notes: Mutex<NoteStore>,
     automations: Mutex<Automations>,
     runs: Mutex<Runs>,
     pub mobile: crate::mobile::Mobile,
@@ -184,8 +189,10 @@ impl Daemon {
                 sessions: RwLock::new(BTreeMap::new()),
                 next_handle: AtomicU32::new(1),
                 clients: Mutex::new(HashMap::new()),
+                client_roles: Mutex::new(HashMap::new()),
                 store: Store::new(&data_dir),
                 workspace_meta: Mutex::new(MetaStore::load(&data_dir)),
+                notes: Mutex::new(NoteStore::load(&data_dir)),
                 automations: Mutex::new(Automations::load(&data_dir)),
                 runs: Mutex::new(Runs::load(&data_dir)),
                 mobile: crate::mobile::Mobile::load(&data_dir),
@@ -271,6 +278,98 @@ impl Daemon {
         if let Err(e) = self.set_meta(&path, None, Some("review")) {
             tracing::warn!("deliver to review: {e:#}");
         }
+    }
+
+    // ---------- review notes (see notes.rs) ----------
+
+    fn note_rpc(&self, method: &str, params: &Value) -> Result<Value> {
+        let text = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or_default();
+        let path = text("path");
+        if method == "note.list" && path.is_empty() {
+            // Every worktree's notes are the user's: a session's request always names its own.
+            anyhow::ensure!(params.get("by_session").is_none(), "note.list: only this session's own worktree");
+            return Ok(json!(self.notes.lock().all()));
+        }
+        // The key each folder's notes are filed under (the app asks once per project).
+        if method == "note.keys" {
+            let paths = params.get("paths").and_then(Value::as_array).ok_or_else(|| anyhow!("missing param `paths`"))?;
+            let keys: serde_json::Map<String, Value> = paths.iter().filter_map(Value::as_str).take(500).map(|p| (p.to_string(), json!(notes::worktree_key(p)))).collect();
+            return Ok(Value::Object(keys));
+        }
+        anyhow::ensure!(!path.is_empty(), "missing param `path` (the worktree folder)");
+        // `exact`: `path` already is a key (what `note.keys` said); it is not looked up again, so a folder
+        // that is half deleted cannot stand for the repository around it.
+        let key = if method == "note.clear" && params.get("exact").and_then(Value::as_bool) == Some(true) { crate::meta::key(path) } else { notes::worktree_key(path) };
+        match method {
+            "note.list" => Ok(json!(self.notes.lock().list(&key))),
+            "note.add" => {
+                let line = params.get("line").and_then(Value::as_u64).and_then(|l| u32::try_from(l).ok()).ok_or_else(|| anyhow!("missing param `line`"))?;
+                // The app quotes the line it showed; an agent names a line and the diff says the rest.
+                let (side, quoted) = match (text("side"), params.get("text").and_then(Value::as_str)) {
+                    (side @ ("new" | "old"), Some(quoted)) => (side.to_string(), quoted.to_string()),
+                    _ => {
+                        let top = crate::checkpoints::find_top(std::path::Path::new(path)).ok_or_else(|| anyhow!("{path} is not inside a git worktree"))?;
+                        let base = Some(text("base")).filter(|b| !b.is_empty());
+                        notes::locate(&top, text("file"), line, params.get("old").and_then(Value::as_bool) == Some(true), base)?
+                    }
+                };
+                // Named after the agent that wrote it; the user's own notes carry no name.
+                let by = params.get("by_session").and_then(Value::as_str).map(|sid| {
+                    self.by_id(sid).map(|e| e.spec()).map(|s| s.name.filter(|n| !n.is_empty()).unwrap_or(s.kind)).unwrap_or_else(|| "agent".to_string())
+                });
+                let note = Note {
+                    id: Some(text("id")).filter(|i| !i.is_empty()).map(str::to_string).unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    path: text("file").to_string(),
+                    line,
+                    side,
+                    text: quoted,
+                    note: text("note").to_string(),
+                    at: params.get("at").and_then(Value::as_u64).unwrap_or_else(now_millis),
+                    by,
+                };
+                let added = self.notes.lock().add(&key, note)?;
+                self.notes_changed(&key);
+                Ok(json!({"path": key, "note": added, "notes": self.notes.lock().list(&key)}))
+            }
+            "note.clear" => {
+                let ids: Option<Vec<String>> = params.get("ids").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+                let left = self.notes.lock().clear(&key, ids.as_deref())?;
+                self.notes_changed(&key);
+                Ok(json!({"path": key, "notes": left}))
+            }
+            other => bail!("unknown method {other}"),
+        }
+    }
+
+    /// Tells the user's connections (the app) of a worktree's notes, and a session's own connection
+    /// when it is that session's worktree. Nobody else: not a session of another worktree, not a
+    /// connection that has not authenticated.
+    fn notes_changed(&self, key: &str) {
+        let msg = json_out(&json!({"event": "notes.changed", "params": {"path": key, "notes": self.notes.lock().list(key)}}));
+        // Who is told is worked out first (it looks at folders); the clients lock is held only to send.
+        let told: Vec<u64> = self
+            .client_roles
+            .lock()
+            .clone()
+            .into_iter()
+            .filter(|(_, role)| match role {
+                crate::auth::Role::User => true,
+                crate::auth::Role::Session(sid) => self.session_policy(sid).is_some_and(|(_, cwd)| notes::worktree_key(&cwd) == key),
+                _ => false,
+            })
+            .map(|(id, _)| id)
+            .collect();
+        let clients = self.clients.lock();
+        for id in told {
+            if let Some(tx) = clients.get(&id) {
+                let _ = tx.send(crate::session::Outgoing { data: msg.data.clone(), credit: None });
+            }
+        }
+    }
+
+    /// What a connection proved itself to be (`auth`): decides which events it is sent.
+    pub fn set_client_role(&self, id: u64, role: &crate::auth::Role) {
+        self.client_roles.lock().insert(id, role.clone());
     }
 
     // ---------- notifications (see notify.rs) ----------
@@ -500,14 +599,15 @@ impl Daemon {
     /// Creates the task's worktree (when asked) and starts its agent with the task prompt.
     fn start_task(&self, run_id: &str, task_id: &str) {
         let Some((run, task)) = self.runs.lock().get(run_id).and_then(|r| r.tasks.iter().find(|t| t.id == task_id).cloned().map(|t| (r.clone(), t))) else { return };
-        let prepared = if task.worktree { create_task_worktree(&run, &task).map(|(p, b)| (p, Some(b))) } else { Ok((run.cwd.clone(), None)) };
+        let prepared = if task.worktree { create_task_worktree(&run, &task).map(Some) } else { Ok(None) };
         // The session id is the task's before its process starts: an agent that reports at once
         // must find its task.
         let sid = uuid::Uuid::new_v4().to_string();
         if let Ok((t, _)) = self.runs.lock().task_mut(run_id, task_id) {
             t.session_id = Some(sid.clone());
         }
-        let started = prepared.and_then(|(cwd, branch)| {
+        let started = prepared.and_then(|wt| {
+            let cwd = wt.as_ref().map_or_else(|| run.cwd.clone(), |w| w.path.clone());
             let prompt = runs::task_prompt(&run, &task, &self.exe);
             let info = self.create(json!({
                 "id": sid,
@@ -519,20 +619,24 @@ impl Daemon {
                 "env": task.env,
                 "prompt": prompt,
             }))?;
-            Ok((info.spec.id, cwd, branch))
+            Ok((info.spec.id, cwd, wt))
         });
         {
             let mut runs = self.runs.lock();
             let Ok((t, _)) = runs.task_mut(run_id, task_id) else { return };
             match started {
-                Ok((sid, cwd, branch)) => {
+                Ok((sid, cwd, wt)) => {
                     // A report may already have finished it.
                     if t.status == TaskStatus::Starting {
                         t.status = TaskStatus::Running;
                     }
                     t.session_id = Some(sid);
                     t.cwd = Some(cwd);
-                    t.branch = branch;
+                    if let Some(w) = wt {
+                        t.branch = Some(w.branch);
+                        t.base = w.base;
+                        t.brought = w.brought;
+                    }
                     t.started_at = now_millis();
                 }
                 Err(e) => {
@@ -684,6 +788,7 @@ impl Daemon {
 
     pub fn unregister_client(&self, id: u64) {
         self.clients.lock().remove(&id);
+        self.client_roles.lock().remove(&id);
         self.notifier.drop_client(id);
         for entry in self.sessions.read().values() {
             entry.detach(id);
@@ -1464,7 +1569,15 @@ impl Daemon {
                 self.broadcast("automation.changed", json!({}));
                 json!(true)
             }
-            m if m.starts_with("run.") => self.run_rpc(m, &params)?,
+            m if m.starts_with("run.") => {
+                let out = self.run_rpc(m, &params)?;
+                // What lets a task start (a new run, an approval, a retry, a task that ended) does not wait for the next tick.
+                if matches!(m, "run.create" | "run.approve" | "run.retry" | "run.task_done" | "run.task_skip") && tokio::runtime::Handle::try_current().is_ok() {
+                    self.run_tick();
+                }
+                out
+            }
+            m if m.starts_with("note.") => self.note_rpc(m, &params)?,
             // Undo, its preview and drop wait for the repository's snapshots and run git: they
             // answer from their own thread so this client's other requests are not held up.
             m @ ("checkpoint.undo_plan" | "checkpoint.undo" | "checkpoint.drop") => {
@@ -1623,9 +1736,21 @@ fn save_policy(data_dir: &std::path::Path, agents_control_others: bool) {
     }
 }
 
+/// A task's new worktree.
+struct TaskWorktree {
+    path: String,
+    branch: String,
+    /// The branch the run folder was on: the worktree is forked from it.
+    base: Option<String>,
+    /// What it was given from the repository's ignored files (none when the run asked for nothing).
+    brought: Option<kelpie_proto::materialize::Materialized>,
+}
+
 /// A new git worktree for a task: branch `kelpie/<run>-<id>-<task>` from the run folder's HEAD, in
-/// `<repo>-worktrees/` next to the repository (where Kelpie's worktree dialog puts them).
-fn create_task_worktree(run: &runs::Run, task: &runs::Task) -> Result<(String, String)> {
+/// `<repo>-worktrees/` next to the repository (where Kelpie's worktree dialog puts them), with the
+/// ignored files the run was approved to bring (`copy:` / `link:` of `.kelpie.yaml`). Returns the
+/// folder, the branch, the branch it was forked from and what was brought.
+fn create_task_worktree(run: &runs::Run, task: &runs::Task) -> Result<TaskWorktree> {
     let git = |args: &[&str]| -> Result<String> {
         let mut cmd = std::process::Command::new("git");
         cmd.args(args).stdin(std::process::Stdio::null());
@@ -1640,8 +1765,19 @@ fn create_task_worktree(run: &runs::Run, task: &runs::Task) -> Result<(String, S
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    let top = git(&["-C", &run.cwd, "rev-parse", "--show-toplevel"]).map_err(|_| anyhow!("a task worktree needs the run folder to be a git repository"))?;
-    let top = PathBuf::from(top);
+    // The repository's top folder and the branch it is on, from one git run.
+    let head = git(&["-C", &run.cwd, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"]).map_err(|_| {
+        // Which of the two it is: not a repository, or one without a commit to fork from.
+        if git(&["-C", &run.cwd, "rev-parse", "--show-toplevel"]).is_ok() {
+            anyhow!("a task worktree needs the run folder's repository to have a commit")
+        } else {
+            anyhow!("a task worktree needs the run folder to be a git repository")
+        }
+    })?;
+    let mut head = head.lines();
+    let top = PathBuf::from(head.next().unwrap_or_default());
+    // `HEAD` itself: a detached head, no branch to merge back into.
+    let base = head.next().map(str::trim).filter(|b| !b.is_empty() && *b != "HEAD").map(str::to_string);
     let name = top.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
     let short: String = run.id.chars().take(6).collect();
     let leaf = format!("{}-{short}-{}", runs::slug(&run.name), task.id);
@@ -1649,7 +1785,8 @@ fn create_task_worktree(run: &runs::Run, task: &runs::Task) -> Result<(String, S
     let path = top.parent().unwrap_or(&top).join(format!("{name}-worktrees")).join(&leaf);
     let path_s = path.to_string_lossy().into_owned();
     git(&["-C", &top.to_string_lossy(), "worktree", "add", "-b", &branch, &path_s, "HEAD"])?;
-    Ok((path_s, branch))
+    let brought = run.materialize.as_ref().map(|m| kelpie_proto::materialize::materialize(top.clone(), path.clone(), m.copy.clone(), m.link.clone()));
+    Ok(TaskWorktree { path: path_s, branch, base, brought })
 }
 
 #[cfg(test)]
@@ -1743,6 +1880,172 @@ mod tests {
         };
         assert!(spec.env.is_empty(), "a refused switch changes nothing");
         assert!(daemon.set_env_restart(9999, &json!({})).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A repository with an ignored folder and an ignored file next to a tracked one.
+    fn repo_with_ignored(name: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("kelpie-{name}-{}", uuid::Uuid::new_v4()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join("deps/pkg")).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(&repo).status().unwrap().success());
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), "deps/\n.env\n").unwrap();
+        std::fs::write(repo.join(".env"), "KEY=1").unwrap();
+        std::fs::write(repo.join("deps/pkg/a.js"), "1").unwrap();
+        std::fs::write(repo.join("main.txt"), "m").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        (base, repo)
+    }
+
+    fn worktree_run(repo: &std::path::Path, ids: &[&str], materialize: Option<runs::Materialize>) -> runs::Run {
+        let task = |id: &str| runs::NewTask { id: Some(id.into()), title: id.into(), prompt: "p".into(), kind: None, args: vec![], env: BTreeMap::new(), deps: vec![], approve: false, worktree: true };
+        let new = NewRun { name: "Try".into(), objective: String::new(), cwd: repo.to_string_lossy().into_owned(), project_id: None, tasks: ids.iter().map(|i| task(i)).collect(), idle_done_secs: None, materialize };
+        runs::build_run(new, "abcdef012345".into(), 0).unwrap()
+    }
+
+    #[test]
+    fn a_run_worktree_gets_the_approved_links_and_copies_only() {
+        let (base, repo) = repo_with_ignored("run-links");
+        let approved = runs::Materialize { copy: vec![".env".into(), "main.txt".into()], link: vec!["deps".into(), "../outside".into()] };
+        let run = worktree_run(&repo, &["with", "plain"], Some(approved));
+        let made = create_task_worktree(&run, &run.tasks[0]).unwrap();
+        assert_eq!(made.base.as_deref(), Some("main"), "Finish merges back into the branch the run started on");
+        let (wt, brought) = (PathBuf::from(made.path), made.brought);
+        assert!(wt.join("deps/pkg/a.js").is_file(), "the approved link resolves to the repository's folder");
+        assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "KEY=1");
+        let said = brought.unwrap();
+        assert_eq!((said.linked.clone(), said.copied.clone()), (vec!["deps".to_string()], vec![".env".to_string()]));
+        let left_out: Vec<_> = said.skipped.iter().map(|s| (s.path.as_str(), s.reason.as_str())).collect();
+        assert!(left_out.contains(&("main.txt", "already in the worktree")) && left_out.contains(&("../outside", "not a plain relative path")), "tracked files and escapes are left out: {left_out:?}");
+
+        // Nothing approved (a run made by an agent, or a repository whose file was never approved): a clean checkout.
+        let mut plain = worktree_run(&repo, &["plain"], None);
+        plain.id = "fedcba543210".into();
+        let made = create_task_worktree(&plain, &plain.tasks[0]).unwrap();
+        assert!(!PathBuf::from(&made.path).join("deps").exists() && !PathBuf::from(&made.path).join(".env").exists());
+        assert!(made.brought.is_none());
+        let _ = std::process::Command::new("git").args(["worktree", "prune"]).current_dir(&repo).status();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn five_run_worktrees_with_links_are_ready_within_three_seconds() {
+        let (base, repo) = repo_with_ignored("run-five");
+        // A folder the size of a real dependency tree is linked, never copied.
+        for i in 0..300 {
+            std::fs::write(repo.join(format!("deps/pkg/f{i}.js")), "x").unwrap();
+        }
+        let approved = runs::Materialize { copy: vec![".env".into()], link: vec!["deps".into()] };
+        let run = Arc::new(worktree_run(&repo, &["a", "b", "c", "d", "e"], Some(approved)));
+        let started = Instant::now();
+        let jobs: Vec<_> = (0..5)
+            .map(|i| {
+                let run = run.clone();
+                std::thread::spawn(move || create_task_worktree(&run, &run.tasks[i]).unwrap())
+            })
+            .collect();
+        let made: Vec<_> = jobs.into_iter().map(|j| j.join().unwrap()).collect();
+        let took = started.elapsed();
+        eprintln!("5 worktrees with links and a copy: {took:?}");
+        assert!(made.iter().all(|w| PathBuf::from(&w.path).join("deps/pkg/f299.js").is_file()), "every worktree has the link");
+        // The real bound (3 s from the run's creation) is measured end to end; here only that a loaded machine does not hang it.
+        assert!(took < Duration::from_secs(30), "{took:?}");
+        let _ = std::process::Command::new("git").args(["worktree", "prune"]).current_dir(&repo).status();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn notes_are_added_listed_and_cleared_through_the_rpcs() {
+        let (daemon, dir) = test_daemon("notes");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.register_client(1, tx.clone());
+        daemon.set_client_role(1, &crate::auth::Role::User);
+        let (base, repo) = repo_with_ignored("notes-repo");
+        let wt = repo.to_string_lossy().into_owned();
+        let call = |method: &str, params: Value| daemon.dispatch(1, &tx, &json!(1), method, params).map(|v| v.unwrap());
+        // The app quotes the line; an agent names it and the diff says the rest.
+        std::fs::write(repo.join("main.txt"), "m\nsecond\n").unwrap();
+        let by_app = call("note.add", json!({"path": wt, "file": "main.txt", "line": 1, "side": "new", "text": "m", "note": "why", "id": "keep-1", "at": 7})).unwrap();
+        assert_eq!((by_app["note"]["id"].as_str(), by_app["note"]["at"].as_u64()), (Some("keep-1"), Some(7)));
+        let by_agent = call("note.add", json!({"path": wt, "file": "main.txt", "line": 2, "note": "typo?", "by_session": "gone"})).unwrap();
+        assert_eq!((by_agent["note"]["side"].as_str(), by_agent["note"]["text"].as_str(), by_agent["note"]["by"].as_str()), (Some("new"), Some("second"), Some("agent")));
+        // Moving the same note over twice keeps one.
+        call("note.add", json!({"path": wt, "file": "main.txt", "line": 1, "side": "new", "text": "m", "note": "why", "id": "keep-1"})).unwrap();
+        assert_eq!(call("note.list", json!({"path": repo.join("deps").to_string_lossy()})).unwrap().as_array().unwrap().len(), 2, "a subfolder is the same worktree");
+        assert!(events(&mut rx).iter().any(|e| e["event"] == "notes.changed" && e["params"]["notes"].as_array().is_some_and(|n| n.len() == 2)));
+        assert_eq!(call("note.list", json!({})).unwrap().as_object().unwrap().len(), 1, "without a path, every worktree's");
+        assert!(call("note.add", json!({"path": wt, "file": "main.txt", "line": 9, "note": "nowhere"})).is_err(), "no such line");
+        let left = call("note.clear", json!({"path": wt, "ids": ["keep-1"]})).unwrap();
+        assert_eq!(left["notes"].as_array().unwrap().len(), 1);
+        assert!(call("note.clear", json!({"path": wt})).unwrap()["notes"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn notes_changed_reaches_the_user_and_the_session_of_that_worktree_only() {
+        use crate::auth::Role;
+        let (daemon, dir) = test_daemon("notes-audience");
+        let (base, repo) = repo_with_ignored("notes-audience-repo");
+        let (other_base, other_repo) = repo_with_ignored("notes-audience-other");
+        let wt = repo.to_string_lossy().into_owned();
+        let session = |id: &str, cwd: &std::path::Path| {
+            let spec = SessionSpec { id: id.into(), kind: "claude".into(), cwd: cwd.to_string_lossy().into_owned(), ..Default::default() };
+            let handle = daemon.next_handle.fetch_add(1, Ordering::Relaxed);
+            daemon.sessions.write().insert(handle, Entry::Term(Session::new(handle, spec, 80, 24)));
+        };
+        session("mine", &repo);
+        session("elsewhere", &other_repo);
+        let mut rx = Vec::new();
+        for (cid, role) in [(1u64, Some(Role::User)), (2, Some(Role::Session("mine".into()))), (3, Some(Role::Session("elsewhere".into()))), (4, Some(Role::Claimed("mine".into()))), (5, None)] {
+            let (tx, r) = tokio::sync::mpsc::unbounded_channel();
+            daemon.register_client(cid, tx);
+            if let Some(role) = role {
+                daemon.set_client_role(cid, &role);
+            }
+            rx.push(r);
+        }
+        let (tx, _own) = tokio::sync::mpsc::unbounded_channel();
+        daemon.dispatch(1, &tx, &json!(1), "note.add", json!({"path": wt, "file": "main.txt", "line": 1, "side": "new", "text": "m", "note": "n"})).unwrap();
+        let told: Vec<usize> = rx.iter_mut().map(|r| events(r).iter().filter(|e| e["event"] == "notes.changed").count()).collect();
+        assert_eq!(told, [1, 1, 0, 0, 0], "the user, the session in that worktree; not another worktree's session, a claimed id or an unauthenticated connection");
+        // A session's own request for "every worktree" is refused whatever else it sends.
+        assert!(daemon.dispatch(1, &tx, &json!(1), "note.list", json!({"by_session": "mine"})).is_err());
+        // Clearing by an exact key never looks upward: a folder inside the repository clears its own notes only.
+        let inner = repo.join("deps");
+        daemon.dispatch(1, &tx, &json!(1), "note.add", json!({"path": wt, "file": "main.txt", "line": 1, "side": "new", "text": "m", "note": "repo note", "id": "r1"})).unwrap();
+        let left = daemon.dispatch(1, &tx, &json!(1), "note.clear", json!({"path": inner.to_string_lossy(), "exact": true})).unwrap().unwrap();
+        assert!(left["notes"].as_array().unwrap().is_empty(), "the key of the subfolder holds nothing");
+        assert_eq!(daemon.dispatch(1, &tx, &json!(1), "note.list", json!({"path": wt})).unwrap().unwrap().as_array().unwrap().len(), 2, "the repository's notes are still there");
+        // Keys: the app asks where each folder's notes are filed.
+        let keys = daemon.dispatch(1, &tx, &json!(1), "note.keys", json!({"paths": [repo.join("deps").to_string_lossy(), "C:/gone/folder"]})).unwrap().unwrap();
+        assert_eq!(keys[repo.join("deps").to_string_lossy().as_ref()], notes::worktree_key(&wt));
+        assert_eq!(keys["C:/gone/folder"], notes::worktree_key("C:/gone/folder"));
+        let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(other_base);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn notes_moved_over_from_the_app_survive_a_daemon_restart_untouched() {
+        let (daemon, dir) = test_daemon("notes-migrate");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (base, repo) = repo_with_ignored("notes-migrate-repo");
+        let wt = repo.to_string_lossy().into_owned();
+        let moved = [("old-1", "main.txt", 1u64, "new", "m", "from the app", 1_700_000_000_000u64), ("old-2", "README.md", 4u64, "old", "removed line", "second", 1_700_000_001_000)];
+        // The app sends each note with its own id, time, side and quoted text, and may send the lot twice.
+        for _ in 0..2 {
+            for (id, file, line, side, text, note, at) in moved {
+                daemon.dispatch(1, &tx, &json!(1), "note.add", json!({"path": wt, "file": file, "line": line, "side": side, "text": text, "note": note, "id": id, "at": at})).unwrap();
+            }
+        }
+        let restarted = Daemon::with_secrets(dir.clone(), PathBuf::from("kelpied"), notify::Memory::new());
+        let list = restarted.dispatch(1, &tx, &json!(1), "note.list", json!({"path": wt})).unwrap().unwrap();
+        let got: Vec<_> = list.as_array().unwrap().iter().map(|n| (n["id"].as_str().unwrap(), n["path"].as_str().unwrap(), n["line"].as_u64().unwrap(), n["side"].as_str().unwrap(), n["text"].as_str().unwrap(), n["note"].as_str().unwrap(), n["at"].as_u64().unwrap())).collect();
+        assert_eq!(got, moved, "every note, once, exactly as the app had it");
+        let _ = std::fs::remove_dir_all(base);
         let _ = std::fs::remove_dir_all(dir);
     }
 

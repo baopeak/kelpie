@@ -16,6 +16,13 @@
 .review-item-head { display: flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; }
 .review-item-head .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 
+.review-with, .try-dialog { width: min(640px, 94vw); max-height: 88vh; overflow: auto; }
+.review-prompt { width: 100%; min-height: 140px; resize: vertical; }
+.try-prompt { width: 100%; min-height: 96px; resize: vertical; }
+.try-slots { display: flex; flex-direction: column; gap: 6px; }
+.try-slot { display: flex; gap: 6px; align-items: center; }
+.try-slot select { flex: 1; }
+
 .finish-dialog { width: min(680px, 94vw); max-height: 88vh; overflow: auto; }
 .finish-dialog h3 { margin: 12px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); }
 .finish-list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; max-height: 150px; overflow: auto; font-size: 12.5px; }

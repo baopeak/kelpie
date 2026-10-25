@@ -335,6 +335,13 @@ pub async fn git_orphan_commits(root: String) -> CmdResult<u32> {
     out.trim().parse().map_err(|_| "unexpected git output".to_string())
 }
 
+/// The commit a worktree's HEAD is at.
+#[tauri::command]
+pub async fn git_head(root: String) -> CmdResult<String> {
+    let dir = guard(&root, "")?;
+    Ok(git_ok(&dir, &["rev-parse", "HEAD"]).await?.trim().to_string())
+}
+
 /// A symlink / junction found (and removed) inside a worktree.
 pub struct SharedLink {
     path: std::path::PathBuf,

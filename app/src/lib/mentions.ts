@@ -175,7 +175,7 @@ const bytes = (text: string) => new TextEncoder().encode(text).length;
 const lineCount = (text: string) => text.replace(/\r?\n$/, "").split(/\r?\n/).length;
 
 /** A fence longer than any run of backticks inside, so the content cannot close it. */
-function fence(content: string, lang: string): string {
+export function fence(content: string, lang: string): string {
   const longest = Math.max(0, ...[...content.matchAll(/`+/g)].map((m) => m[0].length));
   const ticks = "`".repeat(Math.max(3, longest + 1));
   return `${ticks}${lang}\n${content.replace(/\r?\n$/, "")}\n${ticks}`;

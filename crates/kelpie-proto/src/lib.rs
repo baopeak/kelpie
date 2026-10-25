@@ -13,6 +13,7 @@ use std::io;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+pub mod materialize;
 pub mod redact;
 pub use redact::redact;
 
@@ -21,7 +22,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Feature level of the daemon's RPC surface. Unlike `PROTOCOL_VERSION` (which names the
 /// endpoint, so changing it orphans running daemons) this only lets a newer app notice an
 /// older daemon that is still running and offer to restart it.
-pub const API_LEVEL: u32 = 12;
+pub const API_LEVEL: u32 = 13;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

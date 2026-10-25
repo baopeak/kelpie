@@ -46,6 +46,8 @@ import { initLimits } from "../lib/limits";
 
 const Board = lazy(() => import("./board").then((m) => ({ default: m.Board })));
 const FinishDialog = lazy(() => import("./finish-dialog"));
+const ReviewWithDialog = lazy(() => import("./review-with-dialog"));
+const TryDialog = lazy(() => import("./try-dialog"));
 const UpdateDialog = lazy(() => import("./update-dialog"));
 const QuickAnswer = lazy(() => import("./quick-answer"));
 const CostPage = lazy(() => import("./cost-page"));
@@ -166,6 +168,8 @@ export function App() {
         <Match when={store.overlay() === "worktree"}><WorktreeDialog /></Match>
         <Match when={store.overlay() === "update"}><UpdateDialog /></Match>
         <Match when={store.overlay() === "finish"}><FinishDialog /></Match>
+        <Match when={store.overlay() === "review"}><ReviewWithDialog /></Match>
+        <Match when={store.overlay() === "try"}><TryDialog /></Match>
         <Match when={store.overlay() === "answer"}><QuickAnswer /></Match>
         <Match when={store.overlay() === "cost"}><CostPage /></Match>
         <Match when={["palette", "quickopen", "jump"].includes(store.overlay() ?? "") && store.overlay()} keyed>

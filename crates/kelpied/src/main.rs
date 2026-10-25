@@ -11,6 +11,7 @@
 //!   kelpied bench-echo [opts]  keystroke-to-echo latency, optionally under CPU load
 //!   kelpied terminal list|read|send|wait …   drive sessions from a script or another agent
 //!   kelpied worktree get|set …               this folder's comment / board status
+//!   kelpied review add|list …                review notes on this worktree's diff
 
 mod agents;
 mod askpass;
@@ -27,6 +28,7 @@ mod daemon;
 mod echo_bench;
 mod meta;
 mod mobile;
+mod notes;
 mod notify;
 mod oneshot;
 mod persist;
@@ -95,6 +97,7 @@ fn main() -> Result<()> {
         Some("terminal") => runtime()?.block_on(cli::terminal(&args[1..])),
         Some("worktree") => runtime()?.block_on(cli::worktree(&args[1..])),
         Some("run") => runtime()?.block_on(cli::run(&args[1..])),
+        Some("review") => runtime()?.block_on(cli::review(&args[1..])),
         // ssh runs its SSH_ASKPASS program with the prompt as the only argument.
         Some(prompt) if std::env::var_os("KELPIE_ASKPASS").is_some() => std::process::exit(askpass::run(prompt)),
         Some(other) => anyhow::bail!("unknown command `{other}`"),

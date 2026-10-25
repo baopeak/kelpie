@@ -13,6 +13,7 @@ import { GRID_PRESETS, cellCount, gridLabel, type GridSpec } from "../lib/layout
 import { GridThumb, parseCounts } from "./layout-menu";
 import { accountsOf, activeAccount, isAccountAgent } from "../lib/accounts";
 import { branchFromPrompt, createAgentWorktree } from "../lib/worktrees";
+import { openTryAgents } from "../lib/review-queue";
 import type { SessionKind } from "../lib/types";
 import { t } from "../lib/i18n";
 
@@ -133,6 +134,9 @@ export function NewSessionMenu() {
           <div class="form-row">
             <label>{t("First prompt (optional)")}</label>
             <textarea class="text-input" rows={2} value={prompt()} placeholder={t("What should the agent do? (Ctrl+Enter to start)")} onInput={(e) => setPrompt(e.currentTarget.value)} />
+            <Show when={!project?.remote && !runOn().hostId && store.projectInfo[project?.parentId ?? project?.id ?? ""]?.is_repo === true}>
+              <button class="link-btn" data-try title={t("The same prompt to 2 to 5 agents, each in its own worktree; compare the results in Runs")} onClick={() => { const text = prompt().trim(); store.setOverlay(null); openTryAgents(project!.id, text); }}>{t("Try with several agents…")}</button>
+            </Show>
           </div>
         </Show>
         <Show when={worktreeOffered()}>

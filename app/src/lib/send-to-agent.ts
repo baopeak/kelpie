@@ -25,6 +25,11 @@ export async function sendToSession(s: SessionInfo, text: string, submit = true)
   store.revealSession(s.id);
 }
 
+/** A new session of `kind` in the project that starts with `text` as its first prompt, credentials masked first. */
+export async function startWithPrompt(projectId: string, kind: string, text: string): Promise<SessionInfo | undefined> {
+  return store.newSession(projectId, kind, { prompt: await redact(text) });
+}
+
 /** Menu at the pointer: running agents first, then "New … session" for each launchable agent.
  *  Credentials in `text` (a diff line, an issue body) are masked before it reaches the agent. */
 export function chooseAgentAndSend(e: MouseEvent, projectId: string, text: string, onSent?: () => void) {
@@ -34,7 +39,7 @@ export function chooseAgentAndSend(e: MouseEvent, projectId: string, text: strin
   }));
   const fresh: MenuItem[] = launchableAgents(store.state.settings.hiddenAgents).map((kind) => ({
     label: t("New {agent} session", { agent: kindInfo(kind).label }),
-    run: () => void redact(text).then((safe) => store.newSession(projectId, kind, { prompt: safe })).then((s) => s && onSent?.()),
+    run: () => void startWithPrompt(projectId, kind, text).then((s) => s && onSent?.()),
   }));
   openContextMenu(e, running.length ? [...running, null, ...fresh] : fresh);
 }

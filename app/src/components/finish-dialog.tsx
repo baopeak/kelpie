@@ -3,7 +3,7 @@
 import { For, Show, createEffect, createResource, createSignal, untrack } from "solid-js";
 import { store } from "../lib/store";
 import * as ipc from "../lib/ipc";
-import { baseOf, changesOf, currentBranchOf, finishing, refreshChanges } from "../lib/review-queue";
+import { baseOf, changesOf, currentBranchOf, finishSucceeded, finishing, refreshChanges } from "../lib/review-queue";
 import { configApproved } from "../lib/worktrees";
 import { checkPrompt, conflictPrompt, defaultMessage, diffChecks, loadChecksPlan, needsDecision, runFinish, runnable, type Outcome, type Problem } from "../lib/finish";
 import type { FinishStrategy } from "../lib/ipc";
@@ -125,6 +125,7 @@ export default function FinishDialog() {
     });
     setStep(null);
     setOutcome(result);
+    if (result.kind === "finished") finishSucceeded(w.id);
     if (result.kind === "stopped") {
       // Files may have changed while the sessions stopped: the list is read again and has to be confirmed again.
       if (result.problem.why === "files_changed" || result.problem.why === "not_on_branch") setConfirmed([]);

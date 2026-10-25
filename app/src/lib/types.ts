@@ -377,6 +377,8 @@ export interface ReviewNote {
   text: string;
   note: string;
   at: number;
+  /** The agent that wrote it (`kelpied review add`); none for the user's own. */
+  by?: string;
 }
 
 /** Folder comment / board status shared with agents through the daemon (`meta.*`). */
@@ -439,7 +441,7 @@ export interface AppState {
   /** Sessions Kelpie stopped to save memory (hibernation, sleeping worktrees): resumed when shown. */
   hibernated: string[];
   inbox: InboxItem[];
-  /** Diff review notes by project id. */
+  /** Diff review notes by project id: only those of a daemon older than API 13 (it keeps them from there). */
   reviewNotes: Record<string, ReviewNote[]>;
   /** Prompts sent from the composer, newest first, by project id. */
   promptHistory?: Record<string, string[]>;

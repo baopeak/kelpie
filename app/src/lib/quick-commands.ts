@@ -10,6 +10,18 @@ import { getController } from "../chat/mode-switch";
 import { pluginQuickCommands } from "./plugins";
 import type { QuickCommand, SessionInfo } from "./types";
 
+/** The quick command whose text is the default "Review with…" prompt (edit it in Settings → Quick commands). */
+export const REVIEW_PROMPT_LABEL = "Review prompt";
+
+export const DEFAULT_REVIEW_PROMPT =
+  "You are reviewing changes another agent made in this worktree; you did not write them. Read the diff below like a careful maintainer: look for bugs, missed edge cases, security problems, unrelated edits and missing tests. Do not change any files. Reply with a short verdict and the problems that matter most, each naming a file and line.";
+
+/** The review prompt for a project: the user's quick command labelled "Review prompt", else the built-in text. */
+export function reviewPrompt(projectId: string | null): string {
+  const own = quickCommandsFor(projectId).find((c) => c.label.trim().toLowerCase() === REVIEW_PROMPT_LABEL.toLowerCase() && c.text.trim());
+  return own ? own.text : DEFAULT_REVIEW_PROMPT;
+}
+
 /** Commands for a project: global ones, its own, ones whose project was removed, then plugins' ones. */
 export function quickCommandsFor(projectId: string | null): QuickCommand[] {
   const known = new Set(store.state.projects.map((p) => p.id));

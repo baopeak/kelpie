@@ -2,13 +2,11 @@
 // in the Review column and the Review tab lists. Loaded with the Board / the tab.
 import { For, Show, createMemo, createResource, onMount } from "solid-js";
 import { store } from "../lib/store";
-import { baseOf, changesOf, openFinish, refreshChanges } from "../lib/review-queue";
-import { loadChecksPlan, runnable } from "../lib/finish";
+import { baseOf, changesOf, openFinish, openReviewWith, refreshChanges } from "../lib/review-queue";
+import { loadChecksPlan } from "../lib/finish";
 import { chooseAgentAndSend } from "../lib/send-to-agent";
-import { sessionCost } from "../lib/session-usage";
+import { checksChip, countTurns, sessionsOf, worktreeCost } from "../lib/review-facts";
 import { formatCost } from "../lib/usage-format";
-import { CHECKPOINT_API } from "../lib/checkpoint-api";
-import { listTurns, visibleTurns } from "../lib/checkpoints";
 import type { Project } from "../lib/types";
 import { t } from "../lib/i18n";
 import "./review.css";
@@ -28,8 +26,10 @@ export async function requestChanges(e: MouseEvent, p: Project) {
   const notes = store.notesFor(p.id);
   if (!notes.length) return store.notify(t("Write review notes first: click the + beside a line of the diff, then ask for changes."), undefined, 7000);
   const { notesPrompt } = await import("./diff-view");
-  chooseAgentAndSend(e, p.id, notesPrompt(notes), () => {
-    store.removeNotes(p.id, "all");
+  chooseAgentAndSend(e, p.id, notesPrompt(notes), async () => {
+    // Only the notes that were sent go (a reviewer may have added one since); they are gone before the
+    // card moves, so whoever sees it in progress finds none of them left.
+    await store.removeNotes(p.id, notes.map((n) => n.id));
     store.setProjectStatus(p.id, "progress");
   });
 }
@@ -47,29 +47,10 @@ export function ReviewBody(props: { project: Project; files?: boolean }) {
   };
   const [plan] = createResource(planKey, () => loadChecksPlan(repo()!, baseOf(p())!, !!c()?.config_changed));
 
-  const mine = createMemo(() => Object.values(store.sessions).filter((s) => s.project_id === p().id));
-  const cost = () => mine().reduce((sum, s) => sum + (sessionCost(s) ?? 0), 0);
-  const [turns] = createResource(
-    () => (store.daemonApi() >= CHECKPOINT_API ? mine().map((s) => s.id).join(",") : false),
-    async (ids) => {
-      let n = 0;
-      for (const id of ids.split(",").filter(Boolean)) {
-        const list = await listTurns(id).catch(() => null);
-        if (list) n += visibleTurns(list).filter((r) => r.kind === "turn").length;
-      }
-      return n;
-    },
-  );
-
-  const checksChip = () => {
-    const pl = plan();
-    if (!pl) return null;
-    if (pl.error) return { text: t("checks unreadable"), cls: "warn", title: pl.error };
-    if (!pl.commands.length) return null;
-    if (pl.blocked) return { text: t("checks off: edits .kelpie.yaml"), cls: "warn", title: t("This branch changes .kelpie.yaml, so its checks do not run unless you allow it in Finish.") };
-    if (!pl.approved) return { text: t("checks need approval"), cls: "warn", title: pl.commands.join("\n") };
-    return { text: pl.commands.length === 1 ? t("1 check") : t("{n} checks", { n: pl.commands.length }), cls: runnable(pl, false) ? "ok" : "", title: pl.commands.join("\n") };
-  };
+  const mine = createMemo(() => sessionsOf(p().id));
+  const cost = () => worktreeCost(p().id);
+  const [turns] = createResource(() => mine().map((s) => s.id).join(","), (ids) => countTurns(ids.split(",").filter(Boolean)));
+  const chip = () => checksChip(plan());
 
   const openFile = (path: string) => {
     const base = baseOf(p());
@@ -95,7 +76,7 @@ export function ReviewBody(props: { project: Project; files?: boolean }) {
               <Show when={cc().uncommitted}><span class="muted-inline" title={t("Not committed yet: Finish saves them in a WIP commit")}>{t("{n} uncommitted", { n: cc().uncommitted })}</span></Show>
             </div>
             <div class="review-line">
-              <Show when={checksChip()}>{(k) => <span class={`chip review-chip ${k().cls}`} title={k().title}>{k().text}</span>}</Show>
+              <Show when={chip()}>{(k) => <span class={`chip review-chip ${k().cls}`} title={k().title}>{k().text}</span>}</Show>
               <Show when={cc().config_changed}><span class="chip review-chip warn" title={t("The change edits .kelpie.yaml (setup, links and checks). Read that diff before you finish.")}>{t(".kelpie.yaml changed")}</span></Show>
               <Show when={cost() > 0}><span class="muted-inline" title={t("What this worktree's sessions cost")}>{formatCost(cost(), false)}</span></Show>
               <Show when={(turns() ?? 0) > 0}><span class="muted-inline">{turns() === 1 ? t("1 turn") : t("{n} turns", { n: turns() ?? 0 })}</span></Show>
@@ -112,6 +93,7 @@ export function ReviewBody(props: { project: Project; files?: boolean }) {
       <div class="review-actions">
         <button class="btn mini" onClick={() => openReview(p())}>{t("Open diff")}</button>
         <button class="btn mini" onClick={(e) => void requestChanges(e, p())}>{t("Request changes")}</button>
+        <button class="btn mini" title={t("Ask another agent to review this worktree's changes")} disabled={!c()?.ok} onClick={() => openReviewWith(p().id)}>{t("Review with…")}</button>
         <button class="btn mini primary" disabled={!c()?.ok} onClick={() => { store.setOverlay(null); openFinish(p().id); }}>{t("Approve → Finish")}</button>
       </div>
     </div>

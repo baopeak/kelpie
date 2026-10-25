@@ -81,6 +81,7 @@ export const gitWorktrees = (root: string) => invoke<Worktree[]>("git_worktrees"
 export const gitWorktreeAdd = (root: string, path: string, branch: string, base?: string) => invoke<void>("git_worktree_add", { root, path, branch, base });
 export const gitWorktreePrune = (root: string) => invoke<void>("git_worktree_prune", { root });
 export const gitShowFile = (root: string, rev: string, path: string) => invoke<string | null>("git_show_file", { root, rev, path });
+export const gitHead = (root: string) => invoke<string>("git_head", { root });
 export const gitOrphanCommits = (root: string) => invoke<number>("git_orphan_commits", { root });
 export const processesAlive = (pids: number[]) => invoke<number[]>("processes_alive", { pids });
 export const gitWorktreeRemove = (root: string, path: string, force = false) => invoke<void>("git_worktree_remove", { root, path, force });
@@ -158,6 +159,9 @@ export const ghDefaultBranch = (root: string) => invoke<string | null>("gh_defau
 export const ghPrCreate = (root: string, title: string, body: string, base: string, draft: boolean) => invoke<string>("gh_pr_create", { root, title, body, base, draft });
 export const worktreeMaterialize = (root: string, worktree: string, copy: string[], link: string[]) =>
   invoke<{ copied: string[]; linked: string[]; skipped: { path: string; reason: string }[] }>("worktree_materialize", { root, worktree, copy, link });
+/** What `worktreeMaterialize` would bring into one fresh worktree, and how large the copies are. */
+export interface MaterializeEstimate { copy_bytes: number; copy_entries: number; copied: string[]; linked: string[]; skipped: { path: string; reason: string }[] }
+export const worktreeMaterializeEstimate = (root: string, copy: string[], link: string[]) => invoke<MaterializeEstimate>("worktree_materialize_estimate", { root, copy, link });
 export const editorsList = () => invoke<{ id: string; label: string }[]>("editors_list");
 export const editorOpen = (editor: string, path: string) => invoke<void>("editor_open", { editor, path });
 /** One-shot agent answer (no terminal), e.g. a commit message. */

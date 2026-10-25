@@ -7,6 +7,8 @@
 //!   kelpied terminal wait <session> [--timeout-ms N]      until it stops working
 //!   kelpied worktree get [--path P] [--json]
 //!   kelpied worktree set [--path P] [--comment TEXT] [--status todo|progress|review|done]
+//!   kelpied review add <file>:<line> "<text>" [--old] [--base REF]    a review note on this worktree's diff
+//!   kelpied review list [--json]
 //!   kelpied run create|list|show|approve|retry|done|skip|cancel|delete|report|wait …  (see `run`)
 //!
 //! `<session>` is a handle number, a session id (or its prefix) or a session name.
@@ -185,6 +187,52 @@ pub async fn worktree(args: &[String]) -> Result<()> {
             }
         }
         _ => bail!("usage: kelpied worktree get|set …"),
+    }
+    Ok(())
+}
+
+/// `kelpied review …`: review notes on the diff of the worktree this folder is in. A session's
+/// programs reach their own worktree only; the daemon fills in which side of the diff the line is
+/// on and quotes it (see notes.rs).
+///
+///   kelpied review add <file>:<line> "<text>" [--old] [--base REF]
+///   kelpied review list [--json]
+pub async fn review(args: &[String]) -> Result<()> {
+    let mut args = args.to_vec();
+    let json_out = take_flag(&mut args, "--json");
+    let old = take_flag(&mut args, "--old");
+    let base = take_opt(&mut args, "--base");
+    let sub = if args.is_empty() { String::new() } else { args.remove(0) };
+    let path = std::env::current_dir()?.to_string_lossy().into_owned();
+    let mut c = Client::connect().await?;
+    match sub.as_str() {
+        "add" => {
+            let usage = || anyhow!("usage: kelpied review add <file>:<line> \"<text>\" [--old] [--base REF]");
+            let target = args.first().ok_or_else(usage)?;
+            let (file, line) = target.rsplit_once(':').and_then(|(f, l)| Some((f, l.parse::<u32>().ok()?))).ok_or_else(usage)?;
+            let note = args[1..].join(" ");
+            if note.trim().is_empty() {
+                return Err(usage());
+            }
+            let mut params = json!({"path": path, "file": file, "line": line, "note": note, "old": old});
+            if let Some(b) = base {
+                params["base"] = json!(b);
+            }
+            let r = c.call("note.add", params).await?;
+            let n = &r["note"];
+            println!("noted {}:{} ({} side): {}", str_of(n, "path"), n["line"], if str_of(n, "side") == "old" { "removed" } else { "new" }, str_of(n, "text").trim());
+        }
+        "list" => {
+            let r = c.call("note.list", json!({"path": path})).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                return Ok(());
+            }
+            for n in r.as_array().into_iter().flatten() {
+                println!("{}:{}{}  {}", str_of(n, "path"), if str_of(n, "side") == "old" { "-" } else { "" }, n["line"], str_of(n, "note").replace('\n', " "));
+            }
+        }
+        _ => bail!("usage: kelpied review add|list …"),
     }
     Ok(())
 }
