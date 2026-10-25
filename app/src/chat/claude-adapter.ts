@@ -92,6 +92,37 @@ export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: s
   live.msgId = group;
 }
 
+/** Claude's task events (`system` task_started / task_progress / task_updated /
+ *  task_notification): the background shells and subagents still running. Housekeeping tasks
+ *  (`skip_transcript`, `ambient`) and a subagent's own tasks (internals, as in the transcript)
+ *  are not listed; one the turn waits for (`awaited`) is not background work. */
+export function applyTaskEvent(ctx: AdapterContext, m: any) {
+  const id = typeof m.task_id === "string" ? m.task_id : null;
+  if (!id) return;
+  const tasks = ctx.state.tasks;
+  const i = tasks.findIndex((x) => x.id === id);
+  const drop = () => i >= 0 && ctx.set("tasks", (list) => list.filter((x) => x.id !== id));
+  switch (m.subtype) {
+    case "task_started":
+      if (m.skip_transcript || m.ambient || m.parent_task_id || m.owned_by_subagent || i >= 0) return;
+      ctx.set("tasks", (list) => [...list, { id, description: String(m.description ?? ""), background: m.is_backgrounded !== false && !m.awaited }]);
+      return;
+    case "task_progress":
+      if (i >= 0 && typeof m.summary === "string" && m.summary) ctx.set("tasks", i, "summary", m.summary);
+      return;
+    case "task_updated": {
+      const p = m.patch ?? {};
+      if (p.status && p.status !== "running" && p.status !== "pending" && p.status !== "paused") return drop();
+      if (i < 0) return;
+      if (typeof p.description === "string" && p.description) ctx.set("tasks", i, "description", p.description);
+      if (typeof p.is_backgrounded === "boolean") ctx.set("tasks", i, "background", p.is_backgrounded);
+      return;
+    }
+    case "task_notification":
+      drop();
+  }
+}
+
 function pushUser(ctx: AdapterContext, text: string, uuid?: string) {
   // Ctrl+C used to stop the TUI during a mode switch leaves this marker; it is not a message.
   if (/^\[Request interrupted by user/.test(text.trim())) return;
@@ -198,6 +229,8 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
             }
           } else if (m.subtype === "api_retry") {
             ctx.upsert({ kind: "system", id: `retry-${ctx.state.items.length}`, text: t("API retry…"), tone: "info" });
+          } else if (typeof m.subtype === "string" && m.subtype.startsWith("task_")) {
+            applyTaskEvent(ctx, m);
           }
           return;
         case "conversation_reset":

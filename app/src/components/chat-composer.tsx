@@ -43,6 +43,9 @@ function rank(list: ChatCommand[], query: string): ChatCommand[] {
 
 const MAX_SUGGESTIONS = 50;
 
+/** Permission modes without approvals: Shift+Tab never steps into them, and their chip warns. */
+const UNGUARDED = new Set(["full-access", "bypassPermissions"]);
+
 export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo | undefined; agentLabel: string; focused: boolean; onSent: () => void }) {
   const ctrl = props.ctrl;
   let textarea!: HTMLTextAreaElement;
@@ -107,12 +110,26 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
     textarea.focus();
   }
 
+  /** When the last message went: the send button turns into Stop under the pointer right away,
+   *  and the second click of a double-click must not stop the turn it just started. */
+  let sentAt = 0;
   const send = () => {
     const text = draft();
     if (!text.trim()) return;
     ctrl.send(text, true);
+    sentAt = Date.now();
     setText("");
     props.onSent();
+  };
+  // A click on the round button keeps the caret in the message field: the button it clicked
+  // is replaced (Send ↔ Stop), which would drop the focus.
+  const stopFromButton = () => {
+    if (Date.now() - sentAt > 600) ctrl.interrupt();
+    textarea.focus();
+  };
+  const sendFromButton = () => {
+    send();
+    textarea.focus();
   };
 
   createEffect(() => props.focused && store.overlay() === null && queueMicrotask(() => textarea?.focus()));
@@ -126,8 +143,13 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
 
   /** Shift+Tab steps through the permission modes, as in the agents' terminal UIs — but never
    *  into one without approvals: that takes a deliberate pick. */
-  const UNGUARDED = new Set(["full-access", "bypassPermissions"]);
   const modeSetting = () => ctrl.state.settings.find((s) => s.id === "mode");
+  /** Model and effort share one chip ("Opus 5.5 · high"); other settings get their own. */
+  const modelGroup = () => ["model", "effort"].map((id) => ctrl.state.settings.find((s) => s.id === id)).filter((s): s is ChatSetting => !!s);
+  const otherSettings = () => ctrl.state.settings.filter((s) => !["model", "effort", "mode"].includes(s.id));
+  /** Busy with nothing typed: the send button stops the turn instead, as in Claude Code. */
+  const stops = () => ctrl.state.busy && !draft().trim();
+  const sendKey = isMac ? "↩" : "⏎";
   const cycleMode = () => {
     const mode = modeSetting()!;
     const options = mode.options.filter((o) => !UNGUARDED.has(o.value));
@@ -185,6 +207,7 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
 
   return (
     <div class="chat-composer">
+      <TaskStrip ctrl={ctrl} />
       <PlanPanel ctrl={ctrl} />
       <Show when={ctrl.state.queue.length}>
         <div class="queue">
@@ -236,7 +259,7 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
             ctrl.state.exited ? t("Agent exited — switch to terminal to resume")
             : waiting() ? t("Press 1–{n} to answer, or type a message", { n: waiting()!.options.length })
             : ctrl.state.busy ? t("Queue another message… (it goes when {agent} finishes)", { agent: props.agentLabel })
-            : t("Message {agent}…  (/ commands, @ files, Enter to send, Shift+Enter for newline, Esc to interrupt)", { agent: props.agentLabel })
+            : t("Message {agent}…  / commands, @ files", { agent: props.agentLabel })
           }
           value={draft()}
           disabled={ctrl.state.exited}
@@ -253,27 +276,67 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
           onKeyDown={onKeyDown}
         />
         <div class="composer-row">
-          <span>{props.agentLabel}</span>
-          <Show when={ctrl.state.model && !ctrl.state.settings.some((s) => s.id === "model")}><span>· {ctrl.state.model}</span></Show>
-          <For each={ctrl.state.settings}>{(s) => <SettingPicker setting={s} disabled={ctrl.state.exited} onPick={(v) => ctrl.setSetting(s.id, v)} />}</For>
+          <Show when={modelGroup().length} fallback={<span class="composer-agent">{props.agentLabel}<Show when={ctrl.state.model}> · {ctrl.state.model}</Show></span>}>
+            <SettingPicker settings={modelGroup()} disabled={ctrl.state.exited} onPick={(id, v) => ctrl.setSetting(id, v)} />
+          </Show>
+          <For each={otherSettings()}>{(s) => <SettingPicker settings={[s]} disabled={ctrl.state.exited} onPick={(id, v) => ctrl.setSetting(id, v)} />}</For>
           <Show when={ctrl.state.conversationId && ctrl.state.conversationId !== "latest"}>
-            <span title={t("Agent conversation id")}>· {ctrl.state.conversationId!.slice(0, 8)}</span>
+            <span class="composer-id" title={t("Agent conversation id")}>{ctrl.state.conversationId!.slice(0, 8)}</span>
           </Show>
           <span class="spacer" />
           <ContextMeter ctrl={ctrl} />
+          <Show when={modeSetting()}>
+            {(mode) => <SettingPicker settings={[mode()]} right warn={UNGUARDED.has(mode().value ?? "")} disabled={ctrl.state.exited} onPick={(id, v) => ctrl.setSetting(id, v)} />}
+          </Show>
           <Show when={props.session && !props.session.alive}>
             <button class="btn" style={{ height: "26px" }} title={t("Start the agent again, continuing this conversation")} onClick={() => void store.resumeSession(props.session!.id)}>
               <Icon name="restart" size={12} /> {t("Resume")}
             </button>
           </Show>
-          <Show when={ctrl.state.busy}>
-            <button class="btn" style={{ height: "26px" }} onClick={() => ctrl.interrupt()}><Icon name="stop" size={12} /> {t("Stop")}</button>
-          </Show>
           <Show when={!ctrl.state.exited}><MicButton field={() => textarea} /></Show>
-          <button class="btn primary" style={{ height: "26px" }} disabled={!draft().trim() || ctrl.state.exited} onClick={send}>{ctrl.state.busy ? t("Queue {key}", { key: isMac ? "↩" : "⏎" }) : t("Send {key}", { key: isMac ? "↩" : "⏎" })}</button>
+          <Show
+            when={stops()}
+            fallback={
+              <button class="send-btn" disabled={!draft().trim() || ctrl.state.exited} onClick={sendFromButton}
+                title={ctrl.state.busy ? t("Queue {key}", { key: sendKey }) : t("Send {key}", { key: sendKey })} aria-label={ctrl.state.busy ? t("Queue {key}", { key: sendKey }) : t("Send {key}", { key: sendKey })}>
+                <Icon name="up" size={15} />
+              </button>
+            }
+          >
+            <button class="send-btn stop" onClick={stopFromButton} title={`${t("Stop")} (Esc)`} aria-label={t("Stop")}><Icon name="stop" size={13} /></button>
+          </Show>
         </div>
       </div>
     </div>
+  );
+}
+
+/** Work left running in the background (shells, subagents): the first one's status, the rest on click. */
+function TaskStrip(props: { ctrl: ChatController }) {
+  const tasks = () => props.ctrl.state.tasks.filter((x) => x.background);
+  const [open, setOpen] = createSignal(false);
+  return (
+    <Show when={tasks().length}>
+      <div class="plan tasks">
+        <div class="plan-head" onClick={() => setOpen(!open())}>
+          <span class="tdot running" />
+          <span class="plan-title">{t("In the background")}</span>
+          <Show when={tasks().length > 1}><span class="plan-count">{tasks().length}</span></Show>
+          <Show when={!open()}><span class="plan-current">{tasks()[0].summary || tasks()[0].description}</span></Show>
+          <span class="spacer" />
+          <Icon name={open() ? "chevronDown" : "chevronRight"} size={12} />
+        </div>
+        <Show when={open()}>
+          <For each={tasks()}>
+            {(x) => (
+              <div class="plan-entry">
+                <span class="task-text">{x.description}<Show when={x.summary}><span class="task-summary">{x.summary}</span></Show></span>
+              </div>
+            )}
+          </For>
+        </Show>
+      </div>
+    </Show>
   );
 }
 
@@ -348,14 +411,21 @@ function ContextMeter(props: { ctrl: ChatController }) {
 /** Long lists (OMP offers hundreds of models) get a filter field. */
 const FILTER_FROM = 12;
 
-function SettingPicker(props: { setting: ChatSetting; disabled: boolean; onPick: (value: string) => void }) {
+const currentLabel = (s: ChatSetting) => s.options.find((o) => o.value === s.value)?.label ?? s.value ?? t("Default");
+
+/** A chip for one or more settings (model and effort share one), opening a list per setting.
+ *  `right`: the list opens towards the left (a chip at the right end); `warn`: a risky value. */
+function SettingPicker(props: { settings: ChatSetting[]; disabled: boolean; right?: boolean; warn?: boolean; onPick: (id: string, value: string) => void }) {
   const [open, setOpen] = createSignal(false);
   const [filter, setFilter] = createSignal("");
-  const current = () => props.setting.options.find((o) => o.value === props.setting.value);
-  const shown = createMemo(() => {
+  const filterable = () => props.settings.some((s) => s.options.length > FILTER_FROM);
+  /** A model or a mode names itself; a lone level ("high") needs its setting's name. */
+  const label = () => props.settings.map((s) => (s.id === "model" || s.id === "mode" || props.settings.length > 1 ? currentLabel(s) : `${s.label}: ${currentLabel(s)}`)).join(" · ");
+  /** The filter narrows only the long lists (models), never a short one shown beside them. */
+  const shown = (s: ChatSetting) => {
     const q = filter().toLowerCase();
-    return q ? props.setting.options.filter((o) => o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q)) : props.setting.options;
-  });
+    return q && s.options.length > FILTER_FROM ? s.options.filter((o) => o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q)) : s.options;
+  };
   let root!: HTMLSpanElement;
   const close = (e: PointerEvent) => !root.contains(e.target as Node) && setOpen(false);
   createEffect(() => {
@@ -366,27 +436,31 @@ function SettingPicker(props: { setting: ChatSetting; disabled: boolean; onPick:
   });
   return (
     <span class="setting-picker" ref={root}>
-      <button class="setting-btn" disabled={props.disabled} title={props.setting.label} onClick={() => setOpen(!open())}>
-        {/* A model or a mode names itself; a level ("high") needs its setting's name. */}
-        · {props.setting.id === "model" || props.setting.id === "mode" ? "" : `${props.setting.label}: `}
-        {current()?.label ?? props.setting.value ?? t("Default")} <Icon name="chevronDown" size={10} />
+      <button class={`setting-btn${props.warn ? " warn" : ""}`} disabled={props.disabled} title={props.settings.map((s) => s.label).join(" · ")} onClick={() => setOpen(!open())}>
+        <span class="setting-label">{label()}</span><Icon name="chevronDown" size={10} />
       </button>
       <Show when={open()}>
-        <div class="setting-pop" onKeyDown={(e) => e.key === "Escape" && (e.stopPropagation(), setOpen(false))}>
-          <div class="setting-title">{props.setting.label}</div>
-          <Show when={props.setting.options.length > FILTER_FROM}>
+        <div class={`setting-pop${props.right ? " right" : ""}`} onKeyDown={(e) => e.key === "Escape" && (e.stopPropagation(), setOpen(false))}>
+          <Show when={filterable()}>
             <input class="text-input" ref={(el) => queueMicrotask(() => el.focus())} placeholder={t("Filter…")} value={filter()} onInput={(e) => setFilter(e.currentTarget.value)} />
           </Show>
-          <div class="setting-list">
-            <For each={shown()}>
-              {(o) => (
-                <div class={`setting-opt${o.value === props.setting.value ? " sel" : ""}`} title={o.description} onClick={() => { props.onPick(o.value); setOpen(false); }}>
-                  {o.label}
-                  <Show when={o.description && o.description !== o.label}><span class="detail">{o.description}</span></Show>
+          <For each={props.settings}>
+            {(s) => (
+              <>
+                <div class="setting-title">{s.label}</div>
+                <div class="setting-list">
+                  <For each={shown(s)}>
+                    {(o) => (
+                      <div class={`setting-opt${o.value === s.value ? " sel" : ""}`} title={o.description} onClick={() => { props.onPick(s.id, o.value); setOpen(false); }}>
+                        {o.label}
+                        <Show when={o.description && o.description !== o.label}><span class="detail">{o.description}</span></Show>
+                      </div>
+                    )}
+                  </For>
                 </div>
-              )}
-            </For>
-          </div>
+              </>
+            )}
+          </For>
         </div>
       </Show>
     </span>

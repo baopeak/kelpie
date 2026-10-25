@@ -1,8 +1,12 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, lazy, on, onCleanup, onMount } from "solid-js";
+import { Portal } from "solid-js/web";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { store } from "../lib/store";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { sessionLabel, store } from "../lib/store";
+import { CHECKPOINT_API } from "../lib/checkpoint-api";
+import { listTurns, turnsByMessage } from "../lib/checkpoints";
 import { findPane } from "../lib/layout";
 import { getController, switchToTerminal } from "../chat/mode-switch";
 import type { ChatItem } from "../chat/chat-model";
@@ -11,15 +15,64 @@ import type { Project } from "../lib/types";
 import { Icon } from "./icons";
 import { ChatComposer } from "./chat-composer";
 import { type FileChange, PermissionCard, ThinkingRow, ToolRow, ToolRun, TurnFiles } from "./chat-rows";
-import { kindInfo } from "../lib/agents";
+import { isAgentKind, kindInfo } from "../lib/agents";
 import { t } from "../lib/i18n";
 
 const RENDER_WINDOW = 300;
 
+/** The turn panel's undo preview, loaded the first time a chat offers an undo. */
+const UndoDialog = lazy(() => import("./turn-timeline").then((m) => ({ default: m.UndoDialog })));
+
+// The code block copy button's icons (our own constant markup); `.copied` shows the tick.
+const COPY_ICONS =
+  '<svg class="i-copy" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3.5 10.5h-1v-8h8v1"/></svg>' +
+  '<svg class="i-done" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>';
+
 const toHtml = (text: string) => DOMPurify.sanitize(marked.parse(text, { gfm: true, async: false }) as string);
 
-function openLink(e: MouseEvent) {
-  const a = (e.target as HTMLElement).closest("a");
+/** Sanitized markdown whose code blocks get a copy button. The buttons are added to the DOM
+ *  afterwards, never spliced into the sanitized markup: some WebKit builds serialize `<` and `>`
+ *  unescaped in attribute values, so a string edit could turn an attribute into live markup. */
+function MarkdownHtml(props: { text: string; class?: string; onClick?: (e: MouseEvent) => void }) {
+  let el!: HTMLDivElement;
+  createEffect(() => {
+    el.innerHTML = toHtml(props.text);
+    for (const pre of el.querySelectorAll("pre")) {
+      const block = document.createElement("div");
+      block.className = "code-block";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "code-copy";
+      button.title = t("Copy");
+      button.setAttribute("aria-label", t("Copy"));
+      button.innerHTML = COPY_ICONS;
+      pre.replaceWith(block);
+      block.append(button, pre);
+    }
+  });
+  return <div ref={el} class={props.class} onClick={props.onClick} />;
+}
+
+/** Copies `text`, ticking the button that asked for a moment. */
+function copyText(text: string, button: HTMLElement) {
+  void writeText(text).then(
+    () => {
+      button.classList.add("copied");
+      setTimeout(() => button.classList.remove("copied"), 1200);
+    },
+    () => store.notify(t("Could not copy")),
+  );
+}
+
+/** Links open in the browser; a code block's button copies its code. */
+function onMarkdownClick(e: MouseEvent) {
+  const target = e.target as HTMLElement;
+  const copy = target.closest<HTMLElement>(".code-copy");
+  if (copy) {
+    copyText(copy.parentElement?.querySelector("pre")?.textContent ?? "", copy);
+    return;
+  }
+  const a = target.closest("a");
   if (!a) return;
   e.preventDefault();
   const href = a.getAttribute("href") ?? "";
@@ -27,8 +80,15 @@ function openLink(e: MouseEvent) {
 }
 
 function Markdown(props: { text: string }) {
-  const html = createMemo(() => toHtml(props.text));
-  return <div class="msg-assistant" innerHTML={html()} onClick={openLink} />;
+  return <MarkdownHtml class="msg-assistant" text={props.text} onClick={onMarkdownClick} />;
+}
+
+function CopyButton(props: { text: string }) {
+  return (
+    <button class="msg-action" title={t("Copy")} aria-label={t("Copy")} onClick={(e) => copyText(props.text, e.currentTarget)}>
+      <span class="i-copy"><Icon name="copy" size={12} /></span><span class="i-done"><Icon name="check" size={12} /></span>
+    </button>
+  );
 }
 
 /** Where streamed text can be cut: after the last blank line outside a code fence. Blocks
@@ -50,10 +110,9 @@ export function stableEnd(text: string): number {
 function StreamingMarkdown(props: { text: string }) {
   const cut = createMemo(() => stableEnd(props.text));
   const done = createMemo(() => props.text.slice(0, cut()));
-  const html = createMemo(() => toHtml(done()));
   return (
-    <div class="msg-assistant" onClick={openLink}>
-      <div innerHTML={html()} />
+    <div class="msg-assistant" onClick={onMarkdownClick}>
+      <MarkdownHtml text={done()} />
       <div style={{ "white-space": "pre-wrap" }}>{props.text.slice(cut())}</div>
     </div>
   );
@@ -183,6 +242,25 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
 
   const meta = () => kindInfo(session()?.kind ?? "custom");
 
+  // The turns each message led to, for its undo button. Read again when this session takes a
+  // snapshot or an undo finishes.
+  const [turnsVersion, setTurnsVersion] = createSignal(0);
+  const recorded = () => {
+    const s = session();
+    return !!s && !s.remote && isAgentKind(s.kind) && store.daemonApi() >= CHECKPOINT_API;
+  };
+  const [turns] = createResource(() => recorded() && { id: props.sessionId, v: turnsVersion() }, ({ id }) => listTurns(id).catch(() => null));
+  onMount(() => {
+    const onCheckpoint = (e: Event) => (e as CustomEvent).detail?.session === props.sessionId && setTurnsVersion((v) => v + 1);
+    window.addEventListener("kelpie:checkpoint", onCheckpoint);
+    onCleanup(() => window.removeEventListener("kelpie:checkpoint", onCheckpoint));
+  });
+  const undoable = createMemo(() => {
+    const list = turns();
+    return list?.records.length ? turnsByMessage(list, ctrl.state.items.filter((i) => i.kind === "user")) : new Map();
+  });
+  const [undoing, setUndoing] = createSignal<number | null>(null);
+
   return (
     <div class="chat">
       <div class="chat-scroll" ref={scroller} onScroll={(e) => {
@@ -207,7 +285,17 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                     return (
                       <Show when={u.text}>
                         <div class="msg-user-wrap">
-                          <Stamp at={u.at} />
+                          <div class="msg-meta">
+                            <For each={undoable().get(u.id) ?? []}>
+                              {(rec) => (
+                                <button class="msg-action" title={t("Undo turn #{n}…", { n: rec.n })} aria-label={t("Undo turn #{n}…", { n: rec.n })} onClick={() => setUndoing(rec.n)}>
+                                  <Icon name="undo" size={12} />
+                                  <Show when={(undoable().get(u.id)?.length ?? 0) > 1}><span>#{rec.n}</span></Show>
+                                </button>
+                              )}
+                            </For>
+                            <Stamp at={u.at} />
+                          </div>
                           <div class="msg-user" style={{ opacity: u.pending ? 0.7 : 1 }}>{u.text}</div>
                         </div>
                       </Show>
@@ -217,7 +305,10 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                 <Match when={item.kind === "assistant" && item}>
                   {(it) => (
                     <div class="msg-reply">
-                      <Stamp at={it().at} />
+                      <div class="msg-meta">
+                        <Show when={!(it() as any).streaming && (it() as any).text}><CopyButton text={(it() as any).text} /></Show>
+                        <Stamp at={it().at} />
+                      </div>
                       <Show when={(it() as any).streaming} fallback={<Markdown text={(it() as any).text} />}><StreamingMarkdown text={(it() as any).text} /></Show>
                     </div>
                   )}
@@ -278,6 +369,22 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
         </Show>
       </div>
       <ChatComposer ctrl={ctrl} session={session()} agentLabel={meta().label} focused={props.focused} onSent={() => (stick = true)} />
+      {/* In the body: the work area contains layout, which would hold a fixed overlay inside it. */}
+      <Show when={undoing()}>
+        {(n) => (
+          <Portal>
+            <UndoDialog
+              sessionId={props.sessionId}
+              sessionName={session() ? sessionLabel(session()!) : ""}
+              n={n()}
+              onClose={(changed) => {
+                setUndoing(null);
+                if (changed) setTurnsVersion((v) => v + 1);
+              }}
+            />
+          </Portal>
+        )}
+      </Show>
     </div>
   );
 }

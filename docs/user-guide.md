@@ -66,8 +66,10 @@ features earlier (running sessions stop for a moment; agents that can resume con
    terminal icon switches back to the TUI. Kelpie stops one front-end before starting the other,
    so a conversation never has two writers. In the message field `/` lists the agent's own
    commands (skills and custom commands included), `@` the folder's files and, for Codex, `$` its
-   skills (`↑`/`↓`, `Tab` or `Enter` to pick, `Esc` to close); the pickers next to the agent's
-   name switch model, effort and permission mode (`Shift+Tab` steps through the modes). A command
+   skills (`↑`/`↓`, `Tab` or `Enter` to pick, `Esc` to close); the chips under the message field
+   switch model and effort (one chip, left) and permission mode (right, amber when nothing asks
+   for approval; `Shift+Tab` steps through the guarded modes). While the agent works with nothing
+   typed, the round send button stops it. A command
    that only works in the terminal UI shows *Run it in the terminal*, which switches back and runs
    it there.
    - The transcript reads like the terminal UI: each tool call is one line (*Read app.ts · lines
@@ -75,7 +77,11 @@ features earlier (running sessions stop for a moment; agents that can resume con
      fold into *Explored 4 files, 2 searches*, and thinking folds into *Thought for 6s*. After a
      turn, *N files changed* lists each file with its line counts; click one to open its changes.
    - Every prompt and reply shows its date and time in the top right corner (hover for the full
-     date), also after a restart or when you come back to the chat later.
+     date), also after a restart or when you come back to the chat later. Hover a reply to copy
+     it, or a code block to copy its code. Hover a prompt whose turn changed files for
+     *Undo this turn…*: the same previewed undo as the Turns panel.
+   - Background work Claude left running (background commands, subagents) is listed above the
+     message field as *In the background*; click it for each task's status.
    - Messages sent while the agent works wait above the message field and go when its turn ends.
      *Send now* gives one to the agent during its turn (Codex and Claude; for other agents it stops
      the turn first); stopping the agent holds the queue until you send again.

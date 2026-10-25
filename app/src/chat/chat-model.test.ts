@@ -132,4 +132,12 @@ describe("ChatController queue", () => {
     const it = ctrl.state.items[0] as any;
     expect(it.doneAt).toBeGreaterThanOrEqual(it.at);
   });
+
+  it("forgets running tasks when the agent exits: nothing will report them done", () => {
+    const { ctrl } = setup();
+    ctrl.set("tasks", [{ id: "b1", description: "npm run dev", background: true }]);
+    (ctrl as any).feed(new TextEncoder().encode(JSON.stringify({ type: "kelpie_exit", code: 0 }) + "\n"));
+    expect(ctrl.state.exited).toBe(true);
+    expect(ctrl.state.tasks).toEqual([]);
+  });
 });

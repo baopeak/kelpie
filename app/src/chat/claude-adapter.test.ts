@@ -266,3 +266,46 @@ describe("createClaudeAdapter", () => {
     expect(h.written[2].request_id).toMatch(/^kelpie-effort:high:\d+$/);
   });
 });
+
+describe("task events", () => {
+  // Shapes from the claude 2.1.310 SDK message schema (system task_started … task_notification).
+  const started = (id: string, extra: object = {}) => ({ type: "system", subtype: "task_started", task_id: id, tool_use_id: `toolu_${id}`, description: `Run ${id}`, task_type: "local_bash", is_backgrounded: true, ...extra });
+
+  it("lists a task from start to its notification, with its progress summary", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage(started("b1"), "");
+    a.onMessage({ type: "system", subtype: "task_progress", task_id: "b1", description: "Run b1", usage: { total_tokens: 0, tool_uses: 1, duration_ms: 10 }, summary: "Compiling" }, "");
+    expect(JSON.parse(JSON.stringify(h.state.tasks))).toEqual([{ id: "b1", description: "Run b1", background: true, summary: "Compiling" }]);
+    a.onMessage({ type: "system", subtype: "task_notification", task_id: "b1", status: "completed", output_file: "", summary: "done" }, "");
+    expect(h.state.tasks).toEqual([]);
+  });
+
+  it("follows a move to the background and drops a task that ended through task_updated", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage(started("f1", { is_backgrounded: false, task_type: "local_agent" }), "");
+    expect(h.state.tasks[0].background).toBe(false);
+    a.onMessage({ type: "system", subtype: "task_updated", task_id: "f1", patch: { is_backgrounded: true, description: "Review" } }, "");
+    expect(h.state.tasks[0]).toMatchObject({ background: true, description: "Review" });
+    a.onMessage({ type: "system", subtype: "task_updated", task_id: "f1", patch: { status: "killed" } }, "");
+    expect(h.state.tasks).toEqual([]);
+  });
+
+  it("skips housekeeping tasks and a subagent's own tasks", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage(started("h1", { skip_transcript: true }), "");
+    a.onMessage(started("h2", { ambient: true }), "");
+    a.onMessage(started("n1", { parent_task_id: "x" }), "");
+    a.onMessage(started("n2", { owned_by_subagent: true }), "");
+    expect(h.state.tasks).toEqual([]);
+  });
+
+  it("does not count a subagent the turn waits for as background work", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage(started("w1", { task_type: "local_agent", awaited: true }), "");
+    expect(h.state.tasks[0].background).toBe(false);
+  });
+});

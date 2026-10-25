@@ -33,7 +33,7 @@
 .turn-chip.static { cursor: default; }
 .turn-chip.static:hover { color: var(--text-dim); border-color: var(--border-strong); }
 
-.turn-undo { width: min(760px, 94vw); }
+.turn-undo { width: min(760px, 94vw); outline: none; }
 .turn-undo-list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; max-height: 44vh; overflow: auto; }
 .turn-undo-row { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 12.5px; border-bottom: 1px solid var(--border); cursor: pointer; }
 .turn-undo-row:last-child { border-bottom: 0; }

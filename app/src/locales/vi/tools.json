@@ -311,7 +311,7 @@
   "Create": "Tạo",
   "Create worktree": "Tạo worktree",
   "terminal UI only": "chỉ có trong giao diện terminal",
-  "Message {agent}…  (/ commands, @ files, Enter to send, Shift+Enter for newline, Esc to interrupt)": "Nhắn cho {agent}…  (/ lệnh, @ tệp, Enter để gửi, Shift+Enter xuống dòng, Esc để ngắt)",
+  "Message {agent}…  / commands, @ files": "Nhắn cho {agent}…  / lệnh, @ tệp",
   "Filter…": "Lọc…",
   "Run it in the terminal": "Chạy trong terminal",
   "Ask before edits": "Hỏi trước khi sửa",
@@ -386,5 +386,8 @@
   "1 file changed": "1 file thay đổi",
   "{n} files changed": "{n} file thay đổi",
   "Not sent:\n{messages}": "Chưa gửi:\n{messages}",
-  "No longer needed": "Không còn cần"
+  "No longer needed": "Không còn cần",
+  "In the background": "Đang chạy nền",
+  "Could not copy": "Không sao chép được",
+  "Undo turn #{n}…": "Hoàn tác lượt #{n}…"
 }

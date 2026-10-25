@@ -53,6 +53,16 @@ export interface QueuedMessage {
   typed: boolean;
 }
 
+/** Work the agent runs alongside its turn (a background shell, a subagent), from its task events;
+ *  listed while it runs. `background`: the turn does not wait for it. */
+export interface AgentTask {
+  id: string;
+  description: string;
+  background: boolean;
+  /** The agent's one-line status for it, when it gives one. */
+  summary?: string;
+}
+
 /** A command offered by the composer: `/name` (or `$name`, a Codex skill). */
 export interface ChatCommand {
   name: string;
@@ -94,6 +104,8 @@ export interface ChatState {
   plan: { entries: PlanEntry[]; explanation?: string } | null;
   /** Context in use, the model's window (null when the agent does not say) and the cost. */
   usage: { used: number; size: number | null; cost?: number } | null;
+  /** Tasks still running (Claude's task events); emptied when the agent exits. */
+  tasks: AgentTask[];
 }
 
 export interface Adapter {
@@ -141,7 +153,7 @@ export interface AdapterContext {
 export function emptyChatState(conversationId: string | null = null): ChatState {
   return {
     items: [], commands: [], skills: [], settings: [], busy: false, model: null, conversationId, ready: false, exited: false, status: null,
-    busySince: null, queue: [], queuePaused: false, plan: null, usage: null,
+    busySince: null, queue: [], queuePaused: false, plan: null, usage: null, tasks: [],
   };
 }
 
@@ -243,7 +255,7 @@ export class ChatController {
   private resetState() {
     this.index.clear();
     this.buffer = "";
-    this.set({ items: [], busy: false, ready: false, status: null, plan: null, usage: null });
+    this.set({ items: [], busy: false, ready: false, status: null, plan: null, usage: null, tasks: [] });
     this.adapter.reset();
   }
 
@@ -265,7 +277,7 @@ export class ChatController {
         continue;
       }
       if (msg?.type === "kelpie_exit") {
-        this.set({ exited: true, busy: false });
+        this.set({ exited: true, busy: false, tasks: [] });
         this.upsert({ kind: "system", id: `exit-${Date.now()}`, text: t("Agent process exited (code {code}).", { code: String(msg.code) }), tone: "info" });
         // Nothing can take them now: show what was not sent rather than keep dead chips.
         if (this.state.queue.length) {

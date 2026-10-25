@@ -418,11 +418,12 @@ input, textarea, select { font: inherit; color: var(--text); }
 .markdown pre, .markdown code { font-family: var(--font-mono); font-size: 12.5px; }
 .markdown pre { background: var(--bg-elev); padding: 12px 14px; border-radius: 8px; overflow: auto; border: 1px solid var(--border); }
 .markdown :not(pre) > code { background: var(--bg-elev-2); padding: 1px 5px; border-radius: 4px; }
-.markdown a { color: var(--accent); }
-.markdown table { border-collapse: collapse; }
-.markdown th, .markdown td { border: 1px solid var(--border-strong); padding: 5px 10px; }
-.markdown blockquote { border-left: 3px solid var(--border-strong); margin: 0; padding-left: 14px; color: var(--text-dim); }
-.markdown img { max-width: 100%; }
+/* Shared with chat replies (.msg-assistant), which render the same markdown. */
+.markdown a, .msg-assistant a { color: var(--accent); }
+.markdown table, .msg-assistant table { border-collapse: collapse; }
+.markdown th, .markdown td, .msg-assistant th, .msg-assistant td { border: 1px solid var(--border-strong); padding: 5px 10px; }
+.markdown blockquote, .msg-assistant blockquote { border-left: 3px solid var(--border-strong); margin: 0; padding-left: 14px; color: var(--text-dim); }
+.markdown img, .msg-assistant img { max-width: 100%; }
 
 /* ---------- overlays ---------- */
 .overlay { position: fixed; inset: 0; background: rgba(5,7,10,.55); z-index: 50; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; }
@@ -526,29 +527,56 @@ input, textarea, select { font: inherit; color: var(--text); }
 .toast { position: fixed; bottom: 36px; left: 50%; transform: translateX(-50%); background: var(--bg-elev-2); border: 1px solid var(--border-strong); padding: 8px 10px 8px 14px; border-radius: 9px; z-index: 120; box-shadow: 0 12px 30px rgba(0,0,0,.5); max-width: 70vw; display: flex; align-items: center; }
 
 /* ---------- chat ---------- */
-.chat { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--term-bg); }
-.chat-scroll { flex: 1; overflow-y: auto; padding: 18px 0 8px; user-select: text; }
-.chat-inner { max-width: 860px; margin: 0 auto; padding: 0 22px; display: flex; flex-direction: column; gap: 12px; }
+/* Transcript and composer share one column: wide, with slim side gutters so more fits. */
+.chat { --chat-max: 1200px; --chat-gutter: 12px; --rail: 18px; position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--term-bg); }
+.chat-scroll { flex: 1; overflow-y: auto; padding: 14px 0 8px; user-select: text; }
+.chat-inner { max-width: var(--chat-max); margin: 0 auto; padding: 0 var(--chat-gutter); display: flex; flex-direction: column; gap: 12px; }
 .msg-user { align-self: flex-end; max-width: 85%; background: var(--bg-active); border: 1px solid var(--user-msg-border); padding: 9px 13px; border-radius: 12px 12px 3px 12px; white-space: pre-wrap; }
 .msg-assistant { line-height: 1.6; }
 .msg-assistant p { margin: .35em 0; }
 .msg-assistant pre { background: var(--bg-elev); padding: 10px 12px; border-radius: 8px; overflow: auto; border: 1px solid var(--border); font: 12.5px var(--font-mono); }
 .msg-assistant :not(pre) > code { background: var(--bg-elev-2); padding: 1px 5px; border-radius: 4px; font: 12.5px var(--font-mono); }
+.msg-assistant > :first-child, .msg-assistant > div > :first-child { margin-top: 0; }
+.msg-assistant h1, .msg-assistant h2, .msg-assistant h3, .msg-assistant h4 { margin: .9em 0 .35em; line-height: 1.3; font-weight: 600; }
+.msg-assistant h1 { font-size: 1.3em; }
+.msg-assistant h2 { font-size: 1.18em; }
+.msg-assistant h3 { font-size: 1.06em; }
+.msg-assistant h4 { font-size: 1em; color: var(--text-dim); }
+.msg-assistant ul, .msg-assistant ol { margin: .35em 0; padding-left: 1.5em; }
+.msg-assistant li { margin: .15em 0; }
+.msg-assistant li > p { margin: .15em 0; }
+.msg-assistant blockquote { margin: .5em 0; }
+.msg-assistant hr { border: 0; border-top: 1px solid var(--border-strong); margin: .9em 0; }
+/* Wide tables scroll sideways instead of stretching the transcript. */
+.msg-assistant table { display: block; width: max-content; max-width: 100%; overflow-x: auto; margin: .5em 0; }
+.msg-assistant th { background: var(--bg-elev-2); font-weight: 600; text-align: left; }
 .msg-thinking { color: var(--text-faint); font-style: italic; font-size: 12.5px; white-space: pre-wrap; border-left: 2px solid var(--border-strong); padding-left: 10px; }
-.tool { border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); overflow: hidden; }
 .tool-head { display: flex; align-items: center; gap: 8px; padding: 7px 11px; cursor: pointer; font-size: 12.5px; }
-.tool-head .tname { font-weight: 600; color: var(--accent); }
+.tool-head .tname { font-weight: 600; color: var(--text); }
 .tool-head .tsum { flex: 1; min-width: 0; color: var(--text-dim); font-family: var(--font-mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tool-body { border-top: 1px solid var(--border); padding: 8px 11px; font: 12px/1.5 var(--font-mono); color: var(--text-dim); white-space: pre-wrap; max-height: 320px; overflow: auto; }
-.tool.error .tool-head .tname { color: var(--danger); }
+.tool-body { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); margin: 4px 0 2px; padding: 8px 11px; font: 12px/1.5 var(--font-mono); color: var(--text-dim); white-space: pre-wrap; max-height: 320px; overflow: auto; }
+.tool.error > .tool-head .tname { color: var(--danger); }
+/* Left rail: every transcript block hangs off a dot in a gutter, as in Claude Code. Dots sit
+   inside their block's padding: blocks are paint-contained (see .chat-inner > * below). */
+.msg-reply, .trow, .typing { position: relative; padding-left: var(--rail); }
+.perm, .turn-files { margin-left: var(--rail); }
+.msg-reply::before, .trow.thinking.running::before { content: ""; position: absolute; left: 3px; top: 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); }
+/* A reply's dot sits on its first line, below the meta line (16px, pulled up 4px). */
+.msg-reply::before { top: 19px; }
+.trow.thinking.running::before { background: var(--text-faint); animation: pulse 1.2s ease-in-out infinite; }
+.trow > .tool-head > .tdot { margin-left: calc(3px - var(--rail)); }
+.typing > .dot { margin-left: calc(2px - var(--rail)); }
+/* A tool call is a line (dot, name, target); its content opens in a box below. */
+.trow > .tool-head { padding: 2px 0; }
+.trow > .tool-head:hover .tsum { color: var(--text); }
 .diff-line.add { background: rgba(139,213,139,.10); color: var(--diff-add-text); }
 .diff-line.del { background: rgba(255,107,122,.10); color: var(--diff-del-text); }
 .perm { border: 1px solid var(--waiting); background: rgba(242,201,109,.06); border-radius: 10px; padding: 11px 13px; display: flex; flex-direction: column; gap: 8px; }
 .perm .q { font-weight: 500; }
 .perm .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .result-line { font-size: 11.5px; color: var(--text-faint); text-align: center; }
-.chat-composer { flex: none; padding: 10px 22px 14px; }
-.composer-box { max-width: 860px; margin: 0 auto; background: var(--bg-elev-2); border: 1px solid var(--border-strong); border-radius: 12px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.chat-composer { flex: none; padding: 8px var(--chat-gutter) 10px; }
+.composer-box { max-width: var(--chat-max); margin: 0 auto; background: var(--bg-elev-2); border: 1px solid var(--border-strong); border-radius: 12px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .composer-box:focus-within { border-color: var(--accent); }
 .composer-box textarea { border: 0; outline: 0; background: transparent; resize: none; min-height: 44px; max-height: 240px; padding: 4px 6px; line-height: 1.5; }
 .composer-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-faint); }
@@ -564,8 +592,19 @@ input, textarea, select { font: inherit; color: var(--text); }
 .composer-item .name { font-family: var(--font-mono); color: var(--text); flex: none; }
 .composer-item .hint { font-family: var(--font-mono); color: var(--text-faint); flex: none; }
 .composer-item .detail { color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.setting-picker { position: relative; }
-.setting-btn { display: inline-flex; align-items: center; gap: 3px; background: transparent; border: 0; padding: 2px 4px; border-radius: 5px; color: var(--text-faint); font: inherit; cursor: pointer; }
+.setting-picker { position: relative; min-width: 0; }
+/* Settings are chips: the model (with its effort) on the left, the permission mode on the right. */
+.setting-btn { display: inline-flex; align-items: center; gap: 3px; height: 22px; background: transparent; border: 1px solid var(--border); padding: 0 8px; border-radius: 999px; color: var(--text-dim); font: inherit; cursor: pointer; white-space: nowrap; max-width: 100%; }
+.setting-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.setting-btn.warn { border-color: color-mix(in srgb, var(--waiting) 45%, transparent); color: var(--waiting); }
+.setting-pop.right { left: auto; right: 0; }
+.composer-agent, .composer-id { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.composer-id { font-family: var(--font-mono); font-size: 10.5px; }
+.send-btn { flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 50%; background: var(--accent); color: var(--on-accent); cursor: pointer; }
+.send-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.send-btn:disabled { background: var(--bg-active); color: var(--text-faint); cursor: default; }
+.send-btn svg { stroke-width: 2; }
+.send-btn.stop { background: var(--text); color: var(--bg); }
 .setting-btn:hover:not(:disabled) { background: var(--bg-active); color: var(--text); }
 .setting-pop { position: absolute; left: 0; bottom: calc(100% + 6px); width: 280px; background: var(--bg-elev-2); border: 1px solid var(--border-strong); border-radius: 10px; padding: 6px; box-shadow: 0 12px 32px rgba(0,0,0,.45); z-index: 20; display: flex; flex-direction: column; gap: 4px; }
 .setting-title { font-size: 11px; color: var(--text-faint); padding: 2px 6px; }
@@ -579,15 +618,13 @@ input, textarea, select { font: inherit; color: var(--text); }
 .trow.running > .tool-head > .tdot { background: var(--working); animation: pulse 1.2s ease-in-out infinite; }
 .trow.error > .tool-head > .tdot { background: var(--danger); }
 .trow.thinking .tdot { background: var(--text-faint); }
-.trow.nested { border: 0; border-radius: 0; border-top: 1px solid var(--border); }
 @keyframes pulse { 50% { opacity: .35; } }
 .tool-head .tdetail { color: var(--text-faint); font-size: 11.5px; white-space: nowrap; }
-.tool-head.plain { padding: 4px 0; color: var(--text-faint); }
+.trow > .tool-head.plain { color: var(--text-faint); }
 .tool-head .thought { font-style: italic; }
 .tstats { display: inline-flex; gap: 6px; font: 11.5px var(--font-mono); }
 .tstats .add { color: var(--diff-add-text); }
 .tstats .del { color: var(--diff-del-text); }
-.trow.thinking { border: 0; background: none; }
 .msg-thinking.live { max-height: 9.5em; overflow: hidden; }
 .diff-file { color: var(--text); margin: 2px 0 4px; }
 .diff-file .link-btn { padding: 0; font: inherit; }
@@ -598,12 +635,24 @@ input, textarea, select { font: inherit; color: var(--text); }
 .io-text { flex: 1; min-width: 0; }
 .clamp-text { white-space: pre-wrap; word-break: break-word; }
 .tool-body .link-btn { display: block; padding: 2px 0; font-size: 11.5px; }
-.run-items { border-top: 1px solid var(--border); }
+.run-items { margin-top: 2px; }
 .msg-user-wrap { align-self: flex-end; max-width: 85%; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .msg-user-wrap .msg-user { max-width: 100%; }
 .msg-time { font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
-.msg-reply { display: flex; flex-direction: column; }
-.msg-reply > .msg-time { align-self: flex-end; margin-bottom: -4px; }
+/* A message's time and actions, on a line of their own above it (always there, so a reply's dot
+   keeps its place). Actions show on hover or keyboard focus. */
+.msg-meta { display: flex; align-items: center; justify-content: flex-end; gap: 4px; min-height: 16px; }
+.msg-reply > .msg-meta { margin-bottom: -4px; }
+.msg-action { display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 4px; border: 0; border-radius: 4px; background: transparent; color: var(--text-faint); font: 10.5px var(--font-mono); cursor: pointer; opacity: 0; }
+.msg-user-wrap:hover .msg-action, .msg-reply:hover .msg-action, .msg-action:focus-visible, .msg-action.copied { opacity: 1; }
+.msg-action:hover { background: var(--bg-active); color: var(--text); }
+.msg-action .i-done, .code-copy .i-done { display: none; }
+.msg-action.copied .i-copy, .code-copy.copied .i-copy { display: none; }
+.msg-action.copied .i-done, .code-copy.copied .i-done { display: inline-flex; color: var(--idle); }
+.code-block { position: relative; }
+.code-copy { position: absolute; top: 5px; right: 5px; display: inline-grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elev-2); color: var(--text-faint); cursor: pointer; opacity: 0; }
+.code-block:hover .code-copy, .code-copy:focus-visible, .code-copy.copied { opacity: 1; }
+.code-copy:hover { color: var(--text); }
 .perm-detail { font-size: 12.5px; color: var(--text-dim); white-space: pre-wrap; }
 .perm-command { margin: 0; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: 12px/1.5 var(--font-mono); white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto; }
 .perm-diff { border: 1px solid var(--border); border-radius: 8px; }
@@ -626,7 +675,7 @@ input, textarea, select { font: inherit; color: var(--text); }
 .chat-pill-dock { position: sticky; bottom: 8px; display: flex; justify-content: center; pointer-events: none; z-index: 5; }
 .chat-pill { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--bg-elev-2); color: var(--text); font: 12px var(--font-ui); cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.35); }
 .chat-pill.warn { border-color: var(--waiting); color: var(--waiting); }
-.plan { max-width: 860px; margin: 0 auto 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); font-size: 12.5px; max-height: 40vh; overflow: auto; }
+.plan { max-width: var(--chat-max); margin: 0 auto 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); font-size: 12.5px; max-height: 40vh; overflow: auto; }
 .plan-head { display: flex; align-items: center; gap: 7px; padding: 6px 11px; cursor: pointer; color: var(--text-dim); min-width: 0; }
 .plan-title { font-weight: 600; color: var(--text); }
 .plan-count { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint); }
@@ -638,7 +687,11 @@ input, textarea, select { font: inherit; color: var(--text); }
 .plan-entry.active { color: var(--text); font-weight: 500; }
 .plan-entry.done { color: var(--text-faint); text-decoration: line-through; }
 .plan-box { flex: none; width: 14px; text-align: center; color: var(--accent); }
-.queue { max-width: 860px; margin: 0 auto 6px; display: flex; flex-direction: column; gap: 4px; }
+.tasks .plan-head > .tdot { background: var(--working); animation: pulse 1.2s ease-in-out infinite; }
+.tasks .plan-entry { padding-left: 25px; }
+.task-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-summary { margin-left: 8px; color: var(--text-faint); }
+.queue { max-width: var(--chat-max); margin: 0 auto 6px; display: flex; flex-direction: column; gap: 4px; }
 .queue-note { font-size: 11.5px; color: var(--text-faint); display: flex; gap: 6px; align-items: center; }
 .queue-chip { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; border: 1px dashed var(--border-strong); border-radius: 8px; font-size: 12.5px; color: var(--text-dim); min-width: 0; }
 .queue-text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

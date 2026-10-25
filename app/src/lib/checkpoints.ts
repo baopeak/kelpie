@@ -157,6 +157,28 @@ export function markdownBlocks(source: string): { line: number; raw: string }[] 
   return out;
 }
 
+/** How long after a message the daemon may note its turn as started: a replayed message carries
+ *  the log's clock, written at most once a second. */
+const TURN_START_SLACK_MS = 1000;
+
+/** The undoable turns each chat message led to: the turns with changed files, not undone yet,
+ *  that have their base (the Turns panel's rows). A turn belongs to the last message sent before
+ *  it started — not before it ended: the record's time is when its snapshot finished, which a
+ *  queued or quick next message can precede. Messages without a time, and turns that started
+ *  before the first of them (an earlier conversation), match nothing. */
+export function turnsByMessage(list: TurnList, messages: { id: string; at?: number }[]): Map<string, TurnRecord[]> {
+  const timed = messages.filter((m) => m.at != null).sort((a, b) => a.at! - b.at!);
+  const undone = new Set(list.records.filter((r) => r.kind === "undo").map((r) => r.undo_of));
+  const out = new Map<string, TurnRecord[]>();
+  for (const rec of list.first_is_base ? list.records.slice(1) : list.records) {
+    if (rec.kind !== "turn" || rec.files === 0 || undone.has(rec.n)) continue;
+    const start = rec.started ? rec.started + TURN_START_SLACK_MS : rec.at;
+    const owner = timed.findLast((m) => m.at! <= start);
+    if (owner) out.set(owner.id, [...(out.get(owner.id) ?? []), rec]);
+  }
+  return out;
+}
+
 /** "3 files" with the lines added and removed after it, when there are any. */
 export function turnStats(rec: Pick<TurnRecord, "added" | "removed">, filesText: string): string {
   return rec.added || rec.removed ? `${filesText} +${rec.added} −${rec.removed}` : filesText;

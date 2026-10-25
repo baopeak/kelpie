@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { artifactKind, markdownBlocks, sourceNote, turnStats, visibleTurns, type TurnList, type TurnRecord } from "./checkpoints";
+import { artifactKind, markdownBlocks, sourceNote, turnStats, turnsByMessage, visibleTurns, type TurnList, type TurnRecord } from "./checkpoints";
 
 const rec = (n: number, extra: Partial<TurnRecord> = {}): TurnRecord => ({
   n, kind: n === 0 ? "baseline" : "turn", at: n * 10, started: n * 10 - 5, source: "hook", approximate: false,
@@ -52,5 +52,32 @@ describe("turn text", () => {
     expect(sourceNote(rec(1), "codex")).toMatch(/turn-complete/);
     expect(sourceNote(rec(1), "claude")).toBe("");
     expect(sourceNote(rec(0, { source: "restart" }), "claude")).toMatch(/resumed/);
+  });
+});
+
+describe("turnsByMessage", () => {
+  const list = (records: TurnRecord[], first_is_base = false): TurnList => ({ repo: "/r", enabled: true, repo_off: false, why: null, records, first_is_base });
+  const turn = (n: number, started: number, files = 1, at = started + 3000) => rec(n, { started, at, files });
+  const owners = (map: Map<string, TurnRecord[]>) => [...map.entries()].map(([id, recs]) => [id, recs.map((r) => r.n)]);
+  it("gives each turn with changes to the last message sent before it started", () => {
+    const msgs = [{ id: "u1", at: 100 }, { id: "u2", at: 5000 }, { id: "old" }];
+    const map = turnsByMessage(list([rec(0, { at: 50 }), turn(1, 150), turn(2, 160, 0), turn(3, 5100), turn(4, 5200)]), msgs);
+    expect(owners(map)).toEqual([["u1", [1]], ["u2", [3, 4]]]);
+  });
+  it("keeps a turn on its own message when the next one went out before its snapshot finished", () => {
+    // A queued message is sent as the turn ends; the record's time is the later snapshot end.
+    const map = turnsByMessage(list([turn(1, 150, 1, 2600)]), [{ id: "u1", at: 100 }, { id: "queued", at: 2400 }]);
+    expect(owners(map)).toEqual([["u1", [1]]]);
+  });
+  it("allows a replayed message stamped up to a second after its turn started", () => {
+    expect(owners(turnsByMessage(list([turn(1, 1000)]), [{ id: "u1", at: 1800 }]))).toEqual([["u1", [1]]]);
+  });
+  it("falls back to the record's time when the start is unknown", () => {
+    expect(owners(turnsByMessage(list([rec(1, { started: 0, at: 900, files: 1 })]), [{ id: "u1", at: 100 }]))).toEqual([["u1", [1]]]);
+  });
+  it("matches nothing for earlier turns, undos, undone turns or the base of a full history", () => {
+    const records = [turn(1, 3000), turn(2, 5200), turn(3, 5300), rec(4, { kind: "undo", at: 9000, files: 2, undo_of: 3 })];
+    expect(turnsByMessage(list(records), [{ id: "u1", at: 5000 }]).get("u1")!.map((r) => r.n)).toEqual([2]);
+    expect(turnsByMessage(list([turn(5, 200), turn(6, 300)], true), [{ id: "u1", at: 100 }]).get("u1")!.map((r) => r.n)).toEqual([6]);
   });
 });

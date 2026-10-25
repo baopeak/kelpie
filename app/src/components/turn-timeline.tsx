@@ -268,7 +268,7 @@ function OwnersList(props: { project: Project; session: SessionInfo; version: nu
 
 /** Every file an undo would restore or delete, with what makes it risky; nothing happens until
  *  the user confirms, and files another session touched or that changed since need their own tick. */
-function UndoDialog(props: { sessionId: string; sessionName: string; n: number; onClose: (changed: boolean) => void }) {
+export function UndoDialog(props: { sessionId: string; sessionName: string; n: number; onClose: (changed: boolean) => void }) {
   const [plan, setPlan] = createSignal<UndoPlan | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [picked, setPicked] = createSignal<Set<string>>(new Set());
@@ -335,7 +335,8 @@ function UndoDialog(props: { sessionId: string; sessionName: string; n: number; 
 
   return (
     <div class="overlay" onPointerDown={(e) => e.target === e.currentTarget && !busy() && props.onClose(false)}>
-      <div class="modal turn-undo" onKeyDown={(e) => e.key === "Escape" && !busy() && props.onClose(false)}>
+      {/* Focused on open, so keys reach the dialog and not the composer or pane behind it. */}
+      <div class="modal turn-undo" tabIndex={-1} ref={(el) => queueMicrotask(() => el.focus())} onKeyDown={(e) => e.key === "Escape" && !busy() && props.onClose(false)}>
         <h2>{t("Undo turn #{n} of {name}?", { n: props.n, name: props.sessionName })}</h2>
         <span class="muted-inline">{t("These files go back to how they were before the turn. Your index, branch and other files are not touched.")}</span>
         <span class="muted-inline">{t("Files come back with the line endings your git settings give them, which can differ from before.")}</span>
