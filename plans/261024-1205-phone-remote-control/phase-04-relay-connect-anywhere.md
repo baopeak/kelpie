@@ -44,6 +44,19 @@ and on open-source `workerd` (self-host). The client side (connect race, migrati
 - Host overload: relay pairing admission follows the phase-1 load level; overloaded desktop answers new screen/takeover requests with `host_busy` (retry-after 10 s).
 - Tests with the TCP fault proxy (phase 1 harness): blackhole 10/30/90 s, half-open, RST storm, NAT rebinding (proxy restart on a new port), relay deploy.
 
+## Deployment & operations
+<!-- Updated: 2026-10-25 - user approved hosted + self-host deployment design -->
+- **One codebase, two targets**: `relay/` (TypeScript Worker + Durable Object). Hosted on Cloudflare via `wrangler`; self-host via `workerd` in a Docker image (`ghcr.io/baopeak/kelpie-relay`, persistent volume for DO storage, TLS by Caddy/Let's Encrypt in front). Same protocol version, same tests.
+- **Environments**: `staging` and `production` Workers on separate routes (`relay-staging.<domain>`, `relay.<domain>`); the desktop default points at production; dev builds and e2e use a local `workerd`.
+- **Secrets**: APNs `.p8` + key id + team id, FCM service account, TURN key — only via `wrangler secret put` per environment (and env vars for self-host); never in the repo or CI logs.
+- **CI/CD** (`.github/workflows/relay.yml`): on PR — typecheck + vitest (`@cloudflare/vitest-pool-workers`) + `workerd` smoke; on tag `relay-v*` — deploy staging → automated smoke (pair a test client through the relay, send 100 frames, revoke) → deploy production. Docker image built and pushed on the same tag.
+- **Deploys drop every socket** (DO restart): clients reconnect with 0–10 s jitter (restart close code); protocol `v` field keeps old and new clients compatible across a deploy; deploys scheduled off-peak; rollback = `wrangler rollback` to the previous version.
+- **Monitoring**: Workers Analytics + `/v1/health`; counters only (rooms, sockets, frames, bytes, error codes) — no IPs, no payloads; alerts on error-rate and bandwidth spikes (abuse) and on push-gateway failures.
+- **Abuse limits**: room creation per IP, idle rooms expire after 90 days, per-room 4 MB/s and 20 GB/month, frames ≤ 64 KiB, ≤ 8 phones/room, budget counters persisted.
+- **Cost model** (verify against current Cloudflare pricing at go-live): Workers Paid ≈ 5 USD/month covers hundreds of users (≈ 13 k billed requests/user/month, mostly heartbeats; WebSocket messages billed 20:1); no egress fees on Workers; TURN 1 000 GB/month free then 0.05 USD/GB; APNs/FCM free; domain ≈ 10 USD/year.
+- **Self-host limits** documented in `docs/relay-self-host.md`: store-app push must still use the hosted gateway (APNs/FCM keys belong to the Kelpie app) or be turned off; TURN via own `coturn` optional.
+- **Maintainer go-live checklist** (manual, blocks production only — staging and local work proceed without it): domain, Cloudflare account + Workers Paid, Apple Developer (APNs key), Firebase project (FCM), secrets set, DNS routes.
+
 ## Architecture
 ```
 relay/
@@ -55,7 +68,7 @@ relay/
 - PWA stays LAN/Tailscale (no service worker on `http://`, origin unreachable away from home); the relay never serves code.
 
 ## Related Code Files
-- Create: `relay/**`, `crates/kelpied/src/relay.rs`, `crates/kelpie-link/src/client.rs`, `docs/relay-self-host.md`
+- Create: `relay/**`, `.github/workflows/relay.yml`, `relay/Dockerfile`, `crates/kelpied/src/relay.rs`, `crates/kelpie-link/src/client.rs`, `docs/relay-self-host.md`
 - Modify: `crates/kelpied/Cargo.toml`, `crates/kelpie-link/Cargo.toml` (feature `client`), `crates/kelpied/src/mobile.rs`, `crates/kelpied/src/daemon.rs` (`mobile.set_relay`, `API_LEVEL`), `app/src/components/settings/mobile-settings.tsx`, locales, `README.md`, `docs/architecture.md`, `.github/workflows/ci.yml`
 
 ## Implementation Steps
