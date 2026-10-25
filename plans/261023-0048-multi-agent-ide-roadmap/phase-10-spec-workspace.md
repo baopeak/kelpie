@@ -1,7 +1,7 @@
 ---
 phase: 10
 title: "Spec workspace"
-status: pending
+status: completed
 priority: P2
 effort: "3d"
 dependencies: [8, 9]
@@ -37,7 +37,7 @@ Parse in TS with `marked.lexer` (already shipped; task-list items) [RT-15], trig
 - Parse ≥ 20 plan files ≤ 20 ms; panel lazy; no work when tab closed.
 
 ## Success Criteria
-- [ ] Plan by agent A, tasks done by B and C, progress in one panel.
+- [x] Plan by agent A, tasks done by B and C, progress in one panel.
 
 ## Risk Assessment
 - Unknown formats show as plain markdown lists, never hidden.

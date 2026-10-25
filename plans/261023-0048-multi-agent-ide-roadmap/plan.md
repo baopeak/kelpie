@@ -44,7 +44,7 @@ tests and a performance budget. Supersedes [261023-0036-vibe-coder-gaps](../2610
 | 7 | [Review queue, Finish, overlap, auto-worktree](phase-07-review-queue-finish.md) | P1 | 5d | 6 | completed |
 | 8 | [Cross-review & best-of-N](phase-08-cross-review-best-of-n.md) | P2 | 4d | 5, 7 | completed |
 | 9 | [Composer & context attach](phase-09-composer-context.md) | P1 | 3d | 1 | completed |
-| 10 | [Spec workspace](phase-10-spec-workspace.md) | P2 | 3d | 8, 9 | pending |
+| 10 | [Spec workspace](phase-10-spec-workspace.md) | P2 | 3d | 8, 9 | completed |
 | 11 | [Event-triggered automations](phase-11-event-automations.md) | P2 | 3d | 1, 7 | pending |
 | 12 | [Off-machine notify & limit actions](phase-12-notify-limits-redaction.md) | P1 | 3d | 1, 3, 5 | completed |
 | 13 | [Processes, ports & preview](phase-13-processes-ports.md) | P2 | 3d | 1 | pending |
@@ -134,6 +134,7 @@ feature on an older daemon; never assume app and daemon are the same release.
 - `attention.py` flaked once (11/12) under heavy parallel load, then 12/12 three times (incl. at 100 % CPU): watch it.
 - Phase 12: manual checks pending (real Telegram bot, ntfy.sh, a real Claude usage limit, Codex resume after switch account, phone link); no limit signal for Codex/chat; non-Windows idle unit-tested only.
 - Phase 9: fuzzy p95 > 30 ms under full CPU load (17–21 ms quiet); remote Windows hosts get POSIX quoting; `chat_ui.py` (real Claude/Codex) not run.
+- Phase 10: `session.create` lets a program inside a session open ssh to any saved host (pre-existing; product decision needed); host tasks verified under Git Bash only.
 - Perf gate `bench` measures unfocused sessions, which the CPU-priority work (separate change) deliberately slows under load: compare bench with `daemon.set_priority {enabled:false}` or budget it separately.
 
 ## Unresolved questions

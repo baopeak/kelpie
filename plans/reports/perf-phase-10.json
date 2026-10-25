@@ -1,0 +1,30 @@
+{
+  "label": "phase10",
+  "created": "2026-10-25T17:43:13+07:00",
+  "machine": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "cpu": "Intel(R) Core(TM) i5-6440HQ CPU @ 2.60GHz",
+    "python": "3.14.6",
+    "cores": "4 physical / 4 logical",
+    "ram_gb": 7.9,
+    "commit": "2eebe80"
+  },
+  "runs": 1,
+  "metrics": {
+    "entry_gz_kb": 320.75
+  },
+  "spread_pct": {},
+  "range": {},
+  "bundle": {
+    "entry_file": "index-B1uR9q9I.js",
+    "lazy_chunks": 250,
+    "lazy_gz_kb": 1757.49,
+    "largest_lazy": {
+      "chunk-FOHPRMQF-DD4dKubD.js": 143.15,
+      "cytoscape.esm-BegBNzOV.js": 137.75,
+      "terminal-host-DhAbSd3E.js": 137.05,
+      "katex-DJhrJSbw.js": 77.43,
+      "i18n-DWYm-RXC.js": 59.07
+    }
+  }
+}
