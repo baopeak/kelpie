@@ -24,6 +24,12 @@ is the Kelpie-window target with the pane rect as crop hint — no separate prov
   - Same safety model and grant lifetime as phase 8 (hotkey Ctrl+Option+Shift+K).
 - Non-functional: phase-8 latency/CPU targets on Apple Silicon; Intel best effort.
 
+## Resilience requirements — unstable networks and host overload
+<!-- Updated: 2026-10-25 - resilience research -->
+- Same network ladder, freeze detection, keyframe and degradation rules as phase 8.
+- Load inputs for `load.rs` on macOS: `ProcessInfo.thermalState` (+ change notification), `isLowPowerModeEnabled`, `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE`; helper capture/encode threads at QoS `USER_INTERACTIVE`, daemon link/sync at `USER_INITIATED`; App Nap held off (`beginActivity`) while a viewer is connected.
+- SCK frame pacing via `minimumFrameInterval`; VideoToolbox `kVTCompressionPropertyKey_RealTime` + overuse detector from phase 8; same `host_busy` admission and gates.
+
 ## Architecture
 - `crates/kelpie-screen/src/{capture_sck.rs,encode_vt.rs,input_mac.rs}` behind phase-8 traits; `str0m` with `apple-crypto` or `rust-crypto`.
 

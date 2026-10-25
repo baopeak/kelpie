@@ -3,7 +3,7 @@ title: "Phone remote control: sessions anywhere, screen when needed"
 description: "Control every Kelpie session from a phone with zero networking setup and end-to-end encryption — LAN or anywhere, no account — plus browser-pane and desktop/IDE screen takeover."
 status: pending
 priority: P1
-effort: "~47d"
+effort: "~59d"
 tags: [mobile, remote, e2e, noise, relay, webrtc, screen, security]
 created: 2026-10-24
 blockedBy: [261023-0048-multi-agent-ide-roadmap]
@@ -60,8 +60,10 @@ relay, user-presence-gated approvals, one inbox across 23 agents, browser-pane a
 | D6 | **One phone client** (`app/phone`, own Vite config), chat adapters reused in **observer mode** over a narrow transport | No three UIs; phone never initializes or reconfigures an agent |
 | D7 | **Native shell = Tauri 2 mobile**, keys + biometric gate enforced in Rust | Shares Rust crates; Capacitor documented fallback |
 | D8 | **Sessions travel as state**: line-diff frames by session id with per-device resume; first-wins answers for terminal and chat prompts | 4G bandwidth, Telex-safe input, no double answers |
-| D9 | **Push**: native app via content-free relay push (own gateway credential); PWA users via existing ntfy deep links; no Web Push | No content to Apple/Google/relay; no HTTPS requirement; no duplicate channel |
+| D9 | **Push**: native app via relay push (own gateway credential; generic text + details sealed to the device, decrypted on the phone; lost-contact via relay lease + alarm); PWA users via existing ntfy deep links; no Web Push | No content to Apple/Google/relay; no HTTPS requirement; no duplicate channel |
 | D10 | **Screen, two tiers**: browser pane via WebView2 CDP screencast (Windows); desktop/window via app-spawned `kelpie-screen` (WGC/DXGI + MF H.264 + `str0m` WebRTC + `SendInput`; macOS SCK + VideoToolbox + `CGEventPost`). Desktop video never goes through the relay; browser-takeover frames may, at ≤ 2 fps within their own budget | P2P UDP for video; cheap takeover for logins |
+| D12 | **Built for flaky networks**: encrypted heartbeat 20 s / pong 8 s / dead 45 s (lag-aware), ack window with latest-state-only, `peer_reset` + IK re-handshake on any pipe drop, address advertisement after IP changes, no hidden offline queue (input disabled offline, answers retried once with first-wins), durable push outbox, WebRTC restart ladder | Carrier NAT idle timeouts 30–120 s; half-open sockets take minutes to fail; Noise transport desyncs on lost frames ([research](../reports/researcher-261025-1744-unstable-network-resilience.md)) |
+| D13 | **Built for a busy computer**: one `load.rs` level machine (L0–L3, hysteresis) fed by the daemon's own event-loop lag, sink queue age and encoder time; every phase sheds rate/size by level; input, answers, revoke, stop and heartbeats are never shed; new screen sessions refused at L2+; EcoQoS opt-out, MMCSS for capture/encode, never HIGH/REALTIME | 5–20 agents with builds peg the CPU; a windowless daemon gets throttled ([research](../reports/researcher-261025-1744-cpu-overload-resilience.md)) |
 | D11 | **Trust boundary**: sensitive settings (approve, upgrade to write/control, always-allow, relay on, reset) need the verified Kelpie app process (`Role::App`) + OS user verification; per-device `read` < `write` < `control`; grants keyed to device + connection + provider and stopped on revoke | Same-user programs can read the user token (`docs/architecture.md:72`) |
 
 ```
@@ -80,15 +82,15 @@ Phone (PWA on LAN | native app anywhere) ── one SolidJS client (app/phone)
 ## Phases
 | # | Phase | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|
-| 1 | [Phone protocol v2: state-sync, prompts, safe answers](phase-01-phone-protocol-v2.md) | P1 | 4d | roadmap phase 12 | pending |
-| 2 | [Phone client app (SolidJS, PWA)](phase-02-phone-client-app.md) | P1 | 6d | 1 | pending |
-| 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) | P1 | 6d | 2 | pending |
-| 4 | [Relay: connect from anywhere](phase-04-relay-connect-anywhere.md) | P1 | 4d | 3 | pending |
-| 5 | [Native mobile shell (Tauri 2 iOS/Android)](phase-05-native-mobile-shell.md) | P1 | 6d | 3, 4 | pending |
-| 6 | [Push notifications](phase-06-push-notifications.md) | P1 | 4d | 3, 5, roadmap phase 12 | pending |
-| 7 | [Browser pane takeover + app provider channel](phase-07-browser-pane-takeover.md) | P2 | 4d | 3 (4 for relay mode) | pending |
-| 8 | [Desktop / window screen control — Windows](phase-08-desktop-screen-windows.md) | P2 | 8d | 3, 4, 5, 7 | pending |
-| 9 | [Desktop / window screen control — macOS](phase-09-desktop-screen-macos.md) | P2 | 5d | 7, 8 | pending |
+| 1 | [Phone protocol v2: state-sync, prompts, safe answers](phase-01-phone-protocol-v2.md) (+ resilience addendum, second commit) | P1 | 4d + 3d | roadmap phase 12 | in progress |
+| 2 | [Phone client app (SolidJS, PWA)](phase-02-phone-client-app.md) | P1 | 7d | 1 | pending |
+| 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) | P1 | 7d | 2 | pending |
+| 4 | [Relay: connect from anywhere](phase-04-relay-connect-anywhere.md) | P1 | 5d | 3 | pending |
+| 5 | [Native mobile shell (Tauri 2 iOS/Android)](phase-05-native-mobile-shell.md) | P1 | 7d | 3, 4 | pending |
+| 6 | [Push notifications](phase-06-push-notifications.md) | P1 | 5d | 3, 5, roadmap phase 12 | pending |
+| 7 | [Browser pane takeover + app provider channel](phase-07-browser-pane-takeover.md) | P2 | 5d | 3 (4 for relay mode) | pending |
+| 8 | [Desktop / window screen control — Windows](phase-08-desktop-screen-windows.md) | P2 | 10d | 3, 4, 5, 7 | pending |
+| 9 | [Desktop / window screen control — macOS](phase-09-desktop-screen-macos.md) | P2 | 6d | 7, 8 | pending |
 
 Order: daily value (1–2), security foundation (3) before reach (4–6), screen last with spike gates (7–9). Phase 7 may run beside 4–6 but
 phases 4, 6, 7 and 8 all touch `crates/kelpied/src/mobile.rs` and `daemon.rs`: work them sequentially or with one owner of those files.
@@ -109,12 +111,20 @@ phases 4, 6, 7 and 8 all touch `crates/kelpied/src/mobile.rs` and `daemon.rs`: w
 - [ ] Same on LAN via PWA (browser pairing); direct path preferred automatically when both exist.
 - [ ] Terminal prompt and chat permission answered with one tap; first answer wins across devices; Telex/VNI never sends mid-composition.
 - [ ] A program holding only the user token cannot add a device, raise permissions or enable the relay.
-- [ ] Locked phone (native app) notified ≤ 10 s; payload has no session text; PWA users notified via ntfy deep link.
+- [ ] Needs-you push accepted by the gateway ≤ 2 s p95 (device delivery measured on real phones); payload has no session text; no push lost or duplicated across a desktop outage; PWA users notified via ntfy deep link.
+- [ ] Flaky network: Wi-Fi ↔ 4G handover ⇒ sessions back ≤ 3 s p95 and screen stream ≤ 5 s p95 without user action; 90 s blackhole ⇒ clean reconnect, cached view stays readable, no stale input executed, no duplicate answer (fault-proxy + netem matrix).
+- [ ] Busy computer: 30 min all-core stress, 20 sessions, 8 phones ⇒ 0 false disconnects, input echo p95 ≤ 300 ms, revoke < 1 s, quality reduced visibly (never a silent freeze).
 - [ ] Relay operator (logs + storage) cannot read any session content (test harness inspects relay traffic).
 - [ ] Browser-pane OAuth/2FA login (popups included) completed from the phone on Windows.
 - [ ] Desktop/IDE window viewed and controlled: ≤ 150 ms p95 LAN, ≤ 250 ms direct P2P, ≤ 400 ms TURN on 4G; secure-desktop/elevated states reported.
 - [ ] Feature off: no sockets, no helper, no measurable CPU (perf gate).
 - [ ] EN + VI; user guide, architecture, README privacy updated; e2e green on Windows and macOS CI.
+
+## Resilience update — 2026-10-25
+Trigger: user asked to research and add unstable-network and CPU-overload cases. Research: [unstable networks](../reports/researcher-261025-1744-unstable-network-resilience.md) · [host overload](../reports/researcher-261025-1744-cpu-overload-resilience.md); code scout of existing mechanisms (no phone heartbeat, unbounded per-connection event channel, no network-change detection, no load sampler; reusable: visible-terminal priority, `SUB_BUDGET`/resync, `7a28b74` busy-probe pattern).
+Added D12, D13, a "Resilience" section to every phase, the phase-1 resilience addendum (second commit), success criteria for handover/blackhole/stress, and effort +12 d.
+User decisions (2026-10-25): (1) never lower hidden agents' priority under load — only stream quality/rates are shed; (2) no new keep-awake behaviour — Settings suggests the existing "while agents are working" mode; (3) lost-contact push via a relay lease + Durable Object alarm (90 s), sealed per-device details decrypted on the phone (iOS Notification Service Extension), sleep vs network loss distinguished, default off, opt-in per device.
+Superseded figures: phase 7 relay "≤ 2 fps q50" → byte budget 55 KB/s; phase 4 keepalive "≤ 1 / 30 s" → "≤ 1 / 20 s"; phase 4 "1.5 s LAN timeout / probe every 30 s" → 250 ms stagger + interface-change triggers; push "≤ 10 s p95" → gateway ≤ 2 s p95 + measured delivery; answer dedupe 60 s → 10 min.
 
 ## Red Team Review
 

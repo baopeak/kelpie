@@ -25,7 +25,16 @@ and would duplicate ntfy. [RT-14] Includes the `notify.rs` delivery refactor thi
   - Tap → app opens the attention queue and the session's prompt card; lock-screen actions limited to "Open".
   - Per-device toggle; desktop "Send test notification".
   - Privacy doc: the gateway sees device push tokens and the timing of attention events; self-hosted relays still use the hosted gateway for the store app (its APNs/FCM keys are Kelpie's) or turn native push off. [RT-14]
-- Non-functional: needs-you → phone ≤ 10 s p95 even with another channel failing; nothing runs with no destination enabled.
+- Non-functional: needs-you → gateway accepted ≤ 2 s p95 even with another channel failing (device delivery measured, see below); nothing runs with no destination enabled.
+
+## Resilience requirements — unstable networks and host overload
+<!-- Updated: 2026-10-25 - resilience research -->
+- **Durable outbox** per destination (on disk, ≤ 50 entries) replacing the single 3 s retry: state-based send (re-check "still waiting" right before every attempt, drop if resolved); retry 1, 2, 4, 8, 16, 32, 60 s with full jitter on network errors / 5xx / 429 (honour `Retry-After`), none on other 4xx; max age 10 min; after an outage, **one** summary ("N sessions need you") instead of a burst of stale pushes. Tests: sink 503×3 then 200 ⇒ exactly one delivery ≤ 1 min late; sink down 12 min while the session got answered ⇒ none.
+- Gateway: `apns-expiration = now + 600 s`, FCM `ttl = 600s`, collapse key = session id + wait id (a late delivery replaces, never stacks), high priority for needs-you; the app dedupes by nonce/wait id and always resolves a tap against synced state ("already handled" if the wait is gone).
+- **Lost-contact push** (opt-in per device, default off): when the phase-4 lease alarm fires (desktop gone 90 s while agents were running), the gateway sends **one** push per opted-in device — `computer_asleep` if a `going_to_sleep` frame preceded the loss, else `lost_contact` — collapse id per room, at most 1 per room per hour until the desktop returns; no "back online" push by default.
+- **Sealed push details** (all push kinds): the desktop attaches a blob sealed to each device's key (e.g. "3 agents running in api-server, last seen 14:02"; needs-you: project + redacted session title). iOS Notification Service Extension (`mutable-content: 1`) and the Android app decrypt it locally and show the details; on any failure the generic localized text stays. Apple, Google and the relay see only ciphertext. Payload ≤ 2 KiB after sealing (APNs limit 4 KiB).
+- Host overload: attention events are never delayed > 1 s at any load level; other events coalesce 1 s at L1, digest 5 s at L2; delivery work never runs on the classifier thread.
+- Success criterion rewritten: the gateway accepts the push ≤ 2 s p95 after the event (controllable); device delivery p50/p95 is **measured** on real iOS + Android over 100 events and reported (APNs/FCM give no latency SLA).
 
 ## Architecture
 - `crates/kelpied/src/notify/` gains `destinations.rs` (queue per destination) and `relay_push.rs`.
@@ -33,7 +42,7 @@ and would duplicate ntfy. [RT-14] Includes the `notify.rs` delivery refactor thi
 - `apps/phone/plugins/push/` — Swift (`UNUserNotificationCenter`, APNs token) + Kotlin (FCM); tap → deep link.
 
 ## Related Code Files
-- Create: `crates/kelpied/src/notify/destinations.rs`, `crates/kelpied/src/notify/relay_push.rs`, `relay/src/push.ts`, `apps/phone/plugins/push/**`
+- Create: `crates/kelpied/src/notify/destinations.rs`, `crates/kelpied/src/notify/relay_push.rs`, `crates/kelpied/src/notify/outbox.rs`, `relay/src/push.ts`, `relay/src/lease.ts`, `apps/phone/plugins/push/**`, `apps/phone/ios-notification-service/` (NSE target)
 - Modify: `crates/kelpied/src/notify.rs`, `crates/kelpied/src/mobile.rs` (token messages), `crates/kelpie-proto/src/lib.rs` (`API_LEVEL`), `relay/src/worker.ts`, `apps/phone/src-tauri/**`, `app/phone/src/*` (permission ask after first pairing), `app/src/components/settings/push-settings.tsx` (destination list, per-device push), locales, `README.md`, `docs/user-guide.md`
 
 ## Implementation Steps
@@ -51,7 +60,8 @@ and would duplicate ntfy. [RT-14] Includes the `notify.rs` delivery refactor thi
 - Event → enqueue ≤ 1 ms; zero threads/sockets with no destination.
 
 ## Success Criteria
-- [ ] Locked native-app phone notified ≤ 10 s; PWA users notified through ntfy with a working deep link.
+- [ ] Gateway accepts ≤ 2 s p95; locked-phone delivery measured and reported (p50/p95 over 100 events, iOS + Android); PWA users notified through ntfy with a working deep link.
+- [ ] Offline desktop: no push lost or duplicated across a 12-min outage; one summary after recovery; lost-contact push at 90–100 s while a lease is held; none without one.
 - [ ] Apple/Google/gateway receive no session content (asserted in tests).
 
 ## Risk Assessment

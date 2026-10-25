@@ -25,6 +25,14 @@ After this phase the default desktop QR becomes the app form (`kelpie://pair#p=�
   - Version negotiation: a 404 on `/link` or an old `v` ⇒ "update Kelpie on the computer"; newer daemon ⇒ "update the app". [RT-9]
 - Non-functional: cold start ≤ 1.5 s mid Android; ≤ 15 MB; no analytics SDKs; store privacy labels "no data collected".
 
+## Resilience requirements — unstable networks and host overload
+<!-- Updated: 2026-10-25 - resilience research -->
+- Native network events forwarded to the client: `NWPathMonitor` (iOS), `ConnectivityManager.registerDefaultNetworkCallback` (Android); path change ⇒ kill the socket proactively and reconnect (do not wait for a socket error — half-open sockets take 60 s–3 min to fail); first state frame ≤ 3 s p95 after Wi-Fi → 4G on a good 4G profile.
+- Captive portal (iOS captive assist / Android `NET_CAPABILITY_VALIDATED` absent) ⇒ `sign-in needed`, backoff paused; constrained / expensive network (`NWPath.isConstrained`/`isExpensive`, Android `getRestrictBackgroundStatus`) ⇒ visible-session-only, 500 ms min frame interval, screen streams start at the lowest rung and need an explicit tap.
+- Background: no socket, no timer; foreground resume sequence = paint cache → 3 s probe → reconnect → resubscribe the visible session first.
+- mDNS `_kelpie._tcp` browsing for the phase-3 hostname fallback (iOS `NSLocalNetworkUsageDescription` + `NSBonjourServices`; Android `NsdManager`).
+- Phone hints to the desktop every 2 s and on change: thermal state (`ProcessInfo.thermalState`, `PowerManager.getCurrentThermalStatus`), low-power mode, battery %, decode time, dropped frames; the desktop uses `min(host caps, phone caps)`.
+
 ## Architecture
 ```
 apps/phone/

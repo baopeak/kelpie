@@ -26,10 +26,23 @@ and on open-source `workerd` (self-host). The client side (connect race, migrati
   - **Revoke while offline**: pending allow-list removals persisted on the desktop and applied first on relay reconnect. [RT-12]
   - **Logging**: counters and error codes only; no payloads; no persisted IPs (Cloudflare edge logs documented).
   - **Daemon**: outbound WSS only when "Connect from anywhere" is on (user presence required, phase 3); jittered backoff 1 s → 60 s; each slot feeds the same link handler as `/link`.
-  - **Client** (`kelpie-link::client`): LAN addresses (QR + last known, 1.5 s timeout) in parallel with the relay; first completed IK handshake wins; on relay, probe LAN every 30 s and migrate
+  - **Client** (`kelpie-link::client`): LAN addresses (QR + last known + `addrs` updates) first, relay after a 250 ms stagger (details in Resilience requirements); first completed IK handshake wins; on relay, re-probe LAN on interface change and migrate
     (new handshake on direct, rebind subscriptions with per-device resume, then close relay socket). Control grants re-bind to the new connection only after the same device's handshake succeeds. [RT-12]
   - Settings → Mobile: toggle, relay URL (default / custom), "What the relay can see" (ciphertext, IPs, timing, sizes, room id), status.
 - Non-functional: ≤ 30 ms median added in-region; zero cost when off; Worker CPU ≤ 1 ms per frame.
+
+## Resilience requirements — unstable networks and host overload
+<!-- Updated: 2026-10-25 - resilience research -->
+- **Relay signals**: `desktop_offline` / `desktop_online`, `peer_reset` to the surviving side when either socket drops, a distinct **restart** close code (code deploys drop every DO socket) on which clients add 0–10 s jitter; desktop sockets carry a generation counter — a new desktop socket replaces the old one (last wins) even before the old one is noticed dead.
+- **Keepalive**: relay↔desktop and relay↔phone edge ping/pong every 20 s via DO `setWebSocketAutoResponse` (no wake, no duration billing); end-to-end liveness of the desktop comes from the phase-1 `hb` inside Noise plus `desktop_offline`. Desktop declares the relay dead after 45 s (90 s at L2+, lag-aware). Perf gate changes from "≤ 1 keepalive / 30 s" to **≤ 1 per 20 s per socket**.
+- **Backoff and triggers** (desktop → relay): full-jitter 1 s → 60 s, reset to attempt 0 on a network-change event (debounced 2 s) and after 30 s stable. Test: kill/restart `workerd` 20× with 8 phones ⇒ all reconnect ≤ 15 s, ≤ 3 attempts per client per 10 s.
+- **Connect race refined**: LAN candidates first, relay after 250 ms (happy-eyeballs stagger) instead of a flat 1.5 s LAN timeout; skip RFC1918 candidates that are not on-link when the phone is on cellular (Tailscale 100.64/10 always eligible); "probe LAN every 30 s" replaced by interface-change triggers (+30 s only on Wi-Fi with an unknown subnet); direct → relay fallback immediate, relay → direct only after direct has been stable 10 s (no flapping).
+- **Budgets survive eviction**: rate and byte counters (20 GB/month, takeover budget) persisted to DO storage, batched every 5 s or 1 MB.
+- `relay unreachable` reported distinctly from `computer offline`; direct retried every 30 s while the relay is down; room created with `locationHint` from the desktop; "≤ 30 ms added in-region" stated as in-region only.
+- **Lost-contact lease** for phase 6 (user decision 2026-10-25): instead of an on/off bit, the desktop holds a lease on its room only while ≥ 1 session is Working/Waiting **and** ≥ 1 device opted in; the lease is renewed by the existing 20 s heartbeat (no extra traffic) and carries one sealed blob per opted-in device (encrypted to that device's key — the relay forwards it unread). On desktop socket loss the room's Durable Object sets `storage.setAlarm(now + 90 s)` (works on `workerd`); desktop back before it fires ⇒ alarm cancelled. A `going_to_sleep` frame sent on OS suspend (`PBT_APMSUSPEND` / `NSWorkspaceWillSleepNotification`) marks the loss as sleep. Relay learns only *when* a lease exists (documented); default off.
+- Settings → Mobile suggests the existing keep-awake mode "while agents are working" when phone access is turned on (no new keep-awake behaviour — user decision 2026-10-25).
+- Host overload: relay pairing admission follows the phase-1 load level; overloaded desktop answers new screen/takeover requests with `host_busy` (retry-after 10 s).
+- Tests with the TCP fault proxy (phase 1 harness): blackhole 10/30/90 s, half-open, RST storm, NAT rebinding (proxy restart on a new port), relay deploy.
 
 ## Architecture
 ```
@@ -58,7 +71,7 @@ relay/
 - e2e with local `workerd`: Rust test client pairs over relay only (LAN bind failing), sessions work, revoke while relay socket down is enforced on reconnect, LAN appears ⇒ migration; relay capture has no plaintext.
 
 ## Perf gate
-- Off: zero outbound connections. On, idle: ≤ 1 keepalive / 30 s.
+- Off: zero outbound connections. On, idle: ≤ 1 keepalive per 20 s per socket (carrier NAT idle timeouts can be 30 s).
 
 ## Success Criteria
 - [ ] Test client on a different network reaches a desktop behind NAT with only the QR (native app UX lands in phase 5).

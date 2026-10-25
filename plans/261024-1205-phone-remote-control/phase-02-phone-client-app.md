@@ -29,6 +29,16 @@ PWA and the native shell bundles in phase 5. Chat reuses the desktop adapters in
   - Service worker for the app shell only on secure origins (HTTPS/Tailscale); plain `http://` works without it.
 - Non-functional: ≤ 250 KB gzip; iOS Safari 16.4+, Android Chrome 120+.
 
+## Resilience requirements — unstable networks and host overload
+<!-- Updated: 2026-10-25 - resilience research -->
+- **One connection-state enum + always-visible indicator**: `live`, `degraded` (RTT > 800 ms or heartbeat late), `reconnecting (attempt n, next in s)`, `no network`, `sign-in needed` (captive portal), `computer offline (since hh:mm)`, `relay unreachable`, `computer restarted` (epoch change), `computer busy` (load level). Distinct wording for "your connection is slow" vs "the computer is busy".
+- **Never block reading**: last state cached (IndexedDB on the PWA, native secure store in phase 5) and painted first (0 ms), dimmed with "as of 14:03:22 (2 min ago)"; data-age chip from `server_ts` (amber > 2 s "updating slowly", red > 5 s "computer not responding").
+- **Offline interaction policy** (no hidden queue): `input`/`key` disabled while not `live` (drafts kept locally); `answer`/`chat_answer` only while `live`, a drop in flight ⇒ `unknown`, one automatic retry within 60 s (safe: first-wins + dedupe), later ask the user; takeover/screen input refused offline.
+- **Conflict messages** from phase-1 answer results (`stale {answered_by, at}`): "Already answered on the desktop 2 min ago".
+- **Triggers**: `visibilitychange`, `online`/`offline`, failed heartbeat ⇒ immediate 3 s probe then reconnect, bypassing backoff once per 2 s; backoff full-jitter: first attempt 0–200 ms, then 1 s ×2 up to 30 s; nothing runs in the background.
+- **Load-aware**: shows `load.status` reason banners (busy / low memory / hot or battery saver) in EN + VI; sends `focus` (session on screen) and `visibility`; hidden page ⇒ unsubscribe everything except the attention list; rendering rAF-batched, ≤ 10 Hz when hidden or Save-Data (`navigator.connection.saveData`) is on; Save-Data ⇒ subscribe only the visible session.
+- Tests: fake-link Playwright/WebDriver: drop link ⇒ "reconnecting" ≤ 1 s after detection, cached cards stay visible, composer disabled; reconnect resumes without reload; answer during drop ⇒ `unknown` then exactly one retry.
+
 ## Architecture
 - **Separate build** `app/vite.phone.config.ts` (`root: app/phone`, `outDir: app/dist-phone`), script `pnpm build:phone`; `pnpm build` stays desktop-only (Tauri `frontendDist ../dist`, `tauri.conf.json:9-10`); `tsconfig` includes `phone`. [RT-10]
 - Transport `app/src/chat/transport.ts` = only `attach(observer)`, `send(line)`, `answer(request_id, line)`, events; desktop wraps `lib/ipc.ts`, phone wraps the phone socket. No generic `daemon()` on the phone. [RT-6]
