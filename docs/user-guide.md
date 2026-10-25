@@ -478,18 +478,18 @@ chat view, automations and AI actions; running sessions keep theirs. Right-click
 to switch; each account has its own meter. The new-session dialog can pick an account, and the
 Sessions panel lists the conversations of every account and resumes each with its own.
 
-### Orchestration runs
-
-**Runs** (`Ctrl+Shift+R` / `⌘⇧R`) split a larger job into agent tasks: each task has a prompt,
-an agent, the tasks it waits for, optionally an **approval** before it starts and its own
-**worktree** (a new branch, so parallel tasks never edit the same checkout). *Plan tasks with
-AI* drafts the tasks from an objective for you to review. The session daemon runs them —
 A running Claude Code or Codex session can move to another account (*Switch account…* in the
 usage-limit strip): Kelpie copies the conversation into that account's folder, stops the agent and
 starts it again there on the same conversation. It refuses, with the reason and before stopping
 anything, when the target is not signed in, already holds a different or newer conversation with the same id (an older copy from an earlier switch is replaced, so you can switch back and forth),
 or the conversation is over 1 GB; sessions in chat view or on another machine do not switch.
 
+### Orchestration runs
+
+**Runs** (`Ctrl+Shift+R` / `⌘⇧R`) split a larger job into agent tasks: each task has a prompt,
+an agent, the tasks it waits for, optionally an **approval** before it starts and its own
+**worktree** (a new branch, so parallel tasks never edit the same checkout). *Plan tasks with
+AI* drafts the tasks from an objective for you to review. The session daemon runs them —
 also with the window closed — starting each task when its dependencies are done. A task ends
 when its agent reports (`kelpied run report done "summary"` / `failed "why"`, which Kelpie adds to
 the prompt), exits, or worked and then stayed idle for 5 minutes. Failed tasks can be retried,
