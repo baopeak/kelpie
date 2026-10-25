@@ -1,7 +1,7 @@
 ---
 phase: 11
 title: "Event-triggered automations"
-status: pending
+status: completed
 priority: P2
 effort: "3d"
 dependencies: [1, 7]
@@ -38,7 +38,7 @@ Automations run on a clock today. Add event triggers that work for any agent, sa
 - No new watcher roots; match ≤ 1 ms for 100 triggers; ticker latency unchanged with 10 due automations.
 
 ## Success Criteria
-- [ ] "When a spec changes, ask Gemini to update tasks" works without loops or injection.
+- [x] "When a spec changes, ask Gemini to update tasks" works without loops or injection.
 
 ## Risk Assessment
 - Runaway cost → caps + inbox summary + global switch.
