@@ -48,7 +48,7 @@ tests and a performance budget. Supersedes [261023-0036-vibe-coder-gaps](../2610
 | 11 | [Event-triggered automations](phase-11-event-automations.md) | P2 | 3d | 1, 7 | pending |
 | 12 | [Off-machine notify & limit actions](phase-12-notify-limits-redaction.md) | P1 | 3d | 1, 3, 5 | completed |
 | 13 | [Processes, ports & preview](phase-13-processes-ports.md) | P2 | 3d | 1 | pending |
-| 14 | [Agent setup: MCP, instructions, skills](phase-14-agent-setup.md) | P2 | 3d | 1 | pending |
+| 14 | [Agent setup: MCP, instructions, skills](phase-14-agent-setup.md) | P2 | 3d | 1 | completed |
 | 15 | [Platform & hygiene](phase-15-platform-hygiene.md) | P3 | 3d | 1, 2 | pending |
 
 Order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 9 → 12 → 8 → 10 → 11 → 13 → 14 → 15.

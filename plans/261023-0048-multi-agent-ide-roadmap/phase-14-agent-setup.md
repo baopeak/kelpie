@@ -1,7 +1,7 @@
 ---
 phase: 14
 title: "Agent setup: MCP, instructions, skills"
-status: pending
+status: completed
 priority: P2
 effort: "3d"
 dependencies: [1]
@@ -43,7 +43,7 @@ JSON keeps unknown keys/order (serde_json `preserve_order`).
 - Reads only on open (≤ 50 ms); zero background work.
 
 ## Success Criteria
-- [ ] Add an MCP server once, usable in Claude, Codex and Gemini; no untrusted server promoted silently.
+- [x] Add an MCP server once, usable in Claude, Codex and Gemini; no untrusted server promoted silently.
 
 ## Risk Assessment
 - Config corruption → preview + backup + auto-restore.
