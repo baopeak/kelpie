@@ -1,7 +1,7 @@
 ---
 phase: 9
 title: "Composer & context attach"
-status: pending
+status: completed
 priority: P1
 effort: "3d"
 dependencies: [1]
@@ -40,7 +40,7 @@ Fuzzy search in Rust core (`search.rs`, nucleo) incl. directories. Pure TS `expa
 - Fuzzy ≤ 30 ms p95 on 50k files; composer lazy; echo unchanged when closed.
 
 ## Success Criteria
-- [ ] Same composer works for Claude, Codex, Gemini, a shell and an ACP chat; no break-out from any fixture.
+- [x] Same composer works for Claude, Codex, Gemini, a shell and an ACP chat; no break-out from any fixture.
 
 ## Risk Assessment
 - Large pastes slow TUIs → caps + path references.
