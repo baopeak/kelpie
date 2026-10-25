@@ -793,6 +793,11 @@ impl Session {
         g.last_activity = last_activity;
     }
 
+    /// Not to be resumed after all (see `Action::Release`).
+    pub fn clear_interrupted(&self) {
+        self.inner.lock().interrupted = false;
+    }
+
     pub fn info(&self) -> SessionInfo {
         let g = self.inner.lock();
         self.info_locked(&g, g.last_status)

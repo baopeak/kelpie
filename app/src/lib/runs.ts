@@ -6,7 +6,11 @@ import { agentRun, daemon, isDir, onEvent } from "./ipc";
 import { normPath } from "./platform";
 import { store } from "./store";
 import { msg, t } from "./i18n";
-import type { SessionKind } from "./types";
+import { targetEnv, targetRemote } from "./remote";
+import type { Project, SessionKind, SessionTarget } from "./types";
+
+/** From this daemon API level a run's task can run on an SSH host (`host`); an older daemon would ignore the field and run it here. */
+export const RUN_HOST_API = 14;
 
 export type RunStatus = "running" | "done" | "failed" | "cancelled";
 export type TaskStatus = "pending" | "waiting_approval" | "starting" | "running" | "done" | "failed" | "skipped" | "cancelled";
@@ -48,6 +52,8 @@ export interface RunTask {
   deps: string[];
   approve: boolean;
   worktree: boolean;
+  /** Runs on an SSH host, in this folder there, instead of on this computer. Never in tmux: the task ends with the ssh session. */
+  host?: { dest: string; port?: number; config?: string; path: string };
   status: TaskStatus;
   approved: boolean;
   session_id: string | null;
@@ -121,13 +127,50 @@ export async function loadRuns() {
   setRuns(reconcile(map));
 }
 
-export const createRun = (spec: { name: string; objective: string; cwd: string; project_id: string | null; tasks: (TaskDraft & { env?: Record<string, string>; args?: string[] })[]; idle_done_secs?: number; materialize?: { copy: string[]; link: string[] } }) =>
+export const createRun = (spec: { name: string; objective: string; cwd: string; project_id: string | null; tasks: (TaskDraft & { env?: Record<string, string>; args?: string[]; host?: RunTask["host"] })[]; idle_done_secs?: number; materialize?: { copy: string[]; link: string[] } }) =>
   daemon<Run>("run.create", spec);
 
 export type RunAction = "approve" | "retry" | "task_done" | "task_skip";
 export const taskAction = (action: RunAction, run: string, task: string) => daemon<Run>(`run.${action}`, { id: run, task }).catch((e) => store.notify(String(e)));
 export const cancelRun = (id: string) => daemon("run.cancel", { id }).catch((e) => store.notify(String(e)));
 export const deleteRun = (id: string) => daemon("run.delete", { id }).catch((e) => store.notify(String(e)));
+
+/** The latest run started for each task id of this project, for the Plan tab's rows to show its status. A spec task's
+ *  run has that one task, whose id comes from the task's file and text, so a task whose words change loses its row link
+ *  (the run stays on the Runs page). Built in one pass over the runs, for the panel to keep until they change. */
+export function specTaskRuns(projectId: string): Map<string, { run: Run; task: RunTask }> {
+  const found = new Map<string, { run: Run; task: RunTask }>();
+  for (const run of Object.values(runs)) {
+    if (run.project_id !== projectId) continue;
+    for (const task of run.tasks) {
+      const old = found.get(task.id);
+      if (!old || run.created_at > old.run.created_at) found.set(task.id, { run, task });
+    }
+  }
+  return found;
+}
+
+/** One spec task as a run of its own: the agent starts in the project's folder, in a worktree of its own (with what
+ *  `.kelpie.yaml` is approved to bring), or on `host` (an SSH host, in the folder `host.path` there; no worktree). */
+export async function createSpecRun(project: Project, task: { id: string; title: string; prompt: string }, kind: SessionKind, worktree: boolean, materialize?: { copy: string[]; link: string[] }, host?: SessionTarget) {
+  const launch = store.profileLaunch(kind);
+  if (host) {
+    if (store.daemonApi() < RUN_HOST_API) throw new Error(t("This daemon is too old to start a task on a host; restart it to update it"));
+    if (worktree) throw new Error(t("A worktree is made on this computer: a task on a host cannot have one"));
+    // The saved password / passphrase of the host is looked up by the host's own address, as for any remote session.
+    const env = { ...(launch.env ?? {}), ...(await targetEnv(host.dest)) };
+    const remote = targetRemote(host);
+    return createRun({
+      name: task.title, objective: "", cwd: project.remote ? project.remote.path : project.path, project_id: project.id,
+      tasks: [{ id: task.id, title: task.title, prompt: task.prompt, kind, deps: [], approve: false, worktree: false, ...launch, env, host: { dest: remote.dest, port: remote.port, config: remote.config, path: host.path } }],
+    });
+  }
+  return createRun({
+    name: task.title, objective: "", cwd: project.path, project_id: project.id,
+    tasks: [{ id: task.id, title: task.title, prompt: task.prompt, kind, deps: [], approve: false, worktree, ...launch }],
+    ...(worktree && materialize ? { materialize } : {}),
+  });
+}
 
 /** Activity entries and notifications for what changed in a run. */
 function announce(prev: Run | undefined, next: Run) {

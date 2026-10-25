@@ -242,11 +242,12 @@ pub struct WriteResult {
 }
 
 #[tauri::command]
-pub async fn fs_write_file(root: String, path: String, content: String, expected_mtime: Option<u64>, force: Option<bool>) -> CmdResult<WriteResult> {
+pub async fn fs_write_file(root: String, path: String, content: String, expected_mtime: Option<u64>, force: Option<bool>, expected_cksum: Option<String>, confine: Option<bool>) -> CmdResult<WriteResult> {
     if crate::remote::is_remote(&root) {
         // Remote mtimes are whole seconds (the viewer keeps milliseconds).
         let expected = if force.unwrap_or(false) { None } else { expected_mtime.map(|m| m / 1000) };
-        let (ok, mtime_s) = crate::remote::write_file(&root, &path, content.into_bytes(), expected).await?;
+        let cksum = if force.unwrap_or(false) { None } else { expected_cksum.as_deref() };
+        let (ok, mtime_s) = crate::remote::write_file(&root, &path, content.into_bytes(), expected, cksum, confine.unwrap_or(false)).await?;
         return Ok(WriteResult { ok, conflict: !ok, mtime: mtime_s * 1000 });
     }
     crate::fs_ops::blocking(move || fs_write_file_blocking(root, path, content, expected_mtime, force)).await
@@ -287,7 +288,8 @@ pub async fn fs_create(root: String, path: String, dir: bool) -> CmdResult<()> {
 
 fn fs_create_blocking(root: String, path: String, dir: bool) -> CmdResult<()> {
     let full = guard(&root, &path)?;
-    if full.exists() {
+    // A link whose target is missing does not "exist", yet creating the file would create its target.
+    if full.exists() || std::fs::symlink_metadata(&full).is_ok() {
         return Err(format!("{path} already exists"));
     }
     if dir {

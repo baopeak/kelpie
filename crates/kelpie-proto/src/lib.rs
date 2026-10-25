@@ -21,8 +21,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Feature level of the daemon's RPC surface. Unlike `PROTOCOL_VERSION` (which names the
 /// endpoint, so changing it orphans running daemons) this only lets a newer app notice an
-/// older daemon that is still running and offer to restart it.
-pub const API_LEVEL: u32 = 13;
+/// older daemon that is still running and offer to restart it. 14: a run's task may run on an SSH
+/// host (`runs::TaskHost`); an older daemon would ignore the field and run it here, so the app asks for it only at 14.
+pub const API_LEVEL: u32 = 14;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

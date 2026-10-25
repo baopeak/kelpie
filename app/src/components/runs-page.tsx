@@ -38,6 +38,12 @@ function TaskCard(props: { run: Run; task: RunTask }) {
   const tk = () => props.task;
   const session = () => (tk().session_id ? store.sessions[tk().session_id!] : undefined);
   const act = (a: Parameters<typeof taskAction>[0]) => void taskAction(a, props.run.id, tk().id);
+  // The agent of a task on a host may outlive its connection by a few minutes: another one needs the user's word.
+  const retry = async () => {
+    const host = tk().host;
+    if (host && !(await confirmDialog(t("The previous agent on {host} may still be running there for a few minutes after its connection was lost. Start another anyway?", { host: host.dest })))) return;
+    act("retry");
+  };
   return (
     <div class={`run-task st-${tk().status}`} data-task={tk().id}>
       <div class="run-task-head">
@@ -50,6 +56,7 @@ function TaskCard(props: { run: Run; task: RunTask }) {
         <Show when={tk().deps.length}><span>{t("after {deps}", { deps: tk().deps.join(", ") })}</span></Show>
         <Show when={tk().branch}><span class="mono" title={tk().cwd ?? ""}><Icon name="branch" size={11} /> {tk().branch}</span></Show>
         <Show when={tk().approve}><span>{t("approval")}</span></Show>
+        <Show when={tk().host}><span class="mono" title={`${tk().host!.dest}:${tk().host!.path}`}>{t("on {host}", { host: tk().host!.dest })}</span></Show>
         <Show when={tk().brought}><span title={broughtText(tk().brought!).full}>{broughtText(tk().brought!).short}</span></Show>
       </div>
       <Show when={tk().error}><div class="run-task-summary error">{tk().error}</div></Show>
@@ -72,7 +79,7 @@ function TaskCard(props: { run: Run; task: RunTask }) {
           <button class="btn" title={t("Do not run this task (tasks after it are skipped too)")} onClick={() => act("task_skip")}>{t("Skip")}</button>
         </Show>
         <Show when={tk().status === "failed" || tk().status === "skipped" || tk().status === "cancelled"}>
-          <button class="btn" onClick={() => act("retry")}><Icon name="restart" size={12} /> {t("Retry")}</button>
+          <button class="btn" onClick={() => void retry()}><Icon name="restart" size={12} /> {t("Retry")}</button>
         </Show>
         <Show when={!tk().session_id && !finishedTask(tk().status)}>
           <button class="icon-btn" title={t("Show the prompt")} onClick={() => setOpen(!open())}><Icon name="note" size={13} /></button>

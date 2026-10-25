@@ -750,6 +750,73 @@ worktrees start as clean checkouts, and the new buttons that need the daemon say
   candidate. The run engine's adoption of worktree tasks as sidebar projects skips folders that no longer
   exist and worktrees removed in this session.
 
+### Spec workspace
+
+The Plan tab (`plan-panel.tsx`, lazy; the model is `lib/spec-index.ts`) reads the repository's markdown plans
+as phases and tasks. It has no daemon part and no store of its own: checkbox state is the file's, and a
+task's run status is the Runs engine's.
+
+- **Detection**: `plans/*/plan.md` + `phase-*.md` (one folder level), `specs/**`, `.kiro/specs/**` and
+  `docs/plans/**` (to six levels, 300 files, 256 KB each). Only paths found by walking the project are used,
+  never a path named inside a file; symlinks and junctions are not entered (a root that is one is skipped),
+  and names with control, bidirectional or quote characters are not listed. A remote project has the tab too: the same
+  calls go through `fs_list_dir` / `fs_read_file` / `fs_write_file` / `fs_create`, which speak ssh for an `ssh://` root
+  (the link check uses the listing's symlink flag; times are whole seconds, content is compared by digest). There
+  is no watcher on a host: the panel reads again on demand.
+- **Parsing**: marked's block lexer over the whole file, inline tokens only for headings and the first block
+  of a task (most of the cost); line numbers come from the raw text of the tokens, which is checked against
+  the checkbox pattern on that line (a task whose line cannot be confirmed is shown but not tickable).
+  `parseSpec` never throws. A task's id is `spec-` plus a hash of the file path, its text and its occurrence.
+- **Live**: the index listens to the existing `fs-changed` events only while the tab is open. Events for
+  folders outside the four roots are ignored; the rest are debounced for 300 ms and reconcile only the
+  folders named (a new folder is found through its parent's listing, which also tells whether it is a link).
+  A root created later (`specs/`, `docs/plans/`, `.kiro/specs/`, found from the project root's, `docs`' or `.kiro`'s own event and the new root's) is
+  looked for in its parent's listing, only while one of the four is unknown; no deeper watcher root is added. `stats` counts scans, reads
+  and parses (the e2e checks they stay still while the tab is closed). A file is always parsed whole (any cut changes what is a task: html
+  comments and blocks, nested fences and reference definitions reach across lines). Files over 8 KB are parsed in a worker
+  (`spec-worker.ts` runs `parseSpec`; `spec-parse-client.ts` is the page's side, with a parse in place when there is no worker or it
+  fails), because marked's list tokenizer slows with every item of one list (a 256 KB list takes a few hundred milliseconds): the
+  page only posts the text and receives the plain result. Rows are keyed by position, so an edit does not rebuild them. `docs` and
+  `.kiro` are checked as plain folders too, not only the root inside them.
+- **Tick**: `index.tick` re-reads the file, requires its time and content digest to be the ones parsed and
+  the task's line to be unchanged, checks that the file and every folder above it are still plain entries,
+  then writes through `fs_write_file` with the time it just read as `expectedMtime` and the POSIX `cksum` of the bytes it read as
+  `expectedCksum` (on a host both are checked right before the write, and the content goes to a temporary file made by `mktemp "<target>.kelpie-tmp.XXXXXX"` in the target's own folder (exclusive, mode 0600,
+  removed by a trap on every failure; no `mktemp` on the host means no write), whose size and checksum are checked before it replaces the
+  file; the values reach the script as positional parameters (`set -- <quoted values>` in front of a constant script), never pasted into
+  its text, so a file name cannot reach it, and a project at `/` confines nothing out of itself; a link is followed to its target (confined to the project for the index, not for the editor's save), the mode is copied with
+  `chmod`, never `cp -p`, the owner is not touched, and a folder that cannot be written to gets an in-place write after the content
+  is verified in a temporary file; a conditional write never recreates a file that is gone); it changes the one
+  character and nothing else. A mismatch writes nothing and reads the file again. Text is decoded strictly as
+  UTF-8 (a byte order mark is kept), so what is written back is exactly what was read.
+- **Run with…** (`createSpecRun` in `lib/runs.ts`): a run with one task (`worktree` as chosen, the profile's
+  flags, `materialize` only from an approved `.kelpie.yaml`). The prompt is the scrubbed instruction text
+  followed by the file's mention expanded by `expandMentions` for the agent's kind; the heading and task text
+  are added after the expansion so they cannot become mentions. `runOfSpecTask` finds a row's latest run by
+  its task id, so there is no `task_ref` store.
+- **Tasks on a host** (API level 14): `runs::Task.host` (`TaskHost`: ssh destination, port, `-F` config, absolute
+  folder there) next to `worktree`. `build_run` validates it (destination of letters, digits and `._@:%[]-` that does not
+  start with `-`; port other than 0; an absolute folder without control characters) and refuses a worktree on a host.
+  `start_task` hands it to the ordinary session path as `remote` and `cwd`, so the launch is `agents::build_remote_launch`
+  (ssh -t, the host's login shell) with `tmux: false` always: the task's end is the ssh session's exit (0 = done; any other code, including
+  ssh's 255 for a dropped connection, = failed with "the agent on <host> stopped with the connection"), which tmux would make
+  meaningless (a detach and a crash both exit 0, a dropped connection leaves the agent running). `Runs::step` also skips idle completion for
+  such a task, and a task whose session came back `interrupted` after a daemon restart is failed and released (`Action::Release`
+  clears the flag) so the app does not resume it as an agent no task follows. The same rule runs once at the end of `restore()` (`settle_host_tasks`),
+  before any client is served, so an app set to resume sessions at once cannot restart the agent first; `release_session` marks the session
+  data dirty, so a second stop does not bring the session back as interrupted. A worker that does not answer in 15 s is stopped: the file
+  is parsed in place when it is at most 64 KB, and shown as too slow to read otherwise. The prompt of such a task leaves out the report command: it is a program of
+  this computer. `auth::scope_session_params` refuses a `run.create` whose tasks name a host when the caller is a session
+  (it does not drop it, which would run the task here), and refuses any `tasks` that is not a list of objects (a task sent as an array is
+  deserialised field by field, and its tenth element is the host); claimed sessions cannot create runs at all. This does not stop a
+  session from starting an ssh session through `session.create` with a `remote` (a separate, older door, noted as a follow-up). The app asks for a host
+  only when `daemonApi() >= RUN_HOST_API` (an older daemon ignores the field and would run the task here), takes the folder from
+  the remote project or from the folder linked to the project on a saved host, and adds that host's askpass environment
+  (`ssh_session_env`) like any remote session.
+- **New spec**: `createSpec` slugifies the name (ASCII, at most 48 characters, no Windows device names),
+  refuses when `specs/` or the spec's folder is a link or any of the three files exists, and creates each
+  file with `fs_create` (which refuses an existing one) before writing it.
+
 ## Daemon services beyond sessions
 
 - **Agent presets** (`agents.rs` `PRESETS`): binary, launch args, skip-permission flags,

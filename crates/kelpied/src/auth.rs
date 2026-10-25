@@ -206,6 +206,22 @@ fn scope_session_params(method: &str, id: &str, cwd: &str, params: &mut Value) -
         }
         "run.create" => {
             obj.remove("materialize");
+            // A task on an SSH host starts a program on another machine with the user's ssh setup: only the
+            // user's own app asks for that. Refused outright, not dropped (the task would run here instead).
+            // Only a list of objects: a task sent as an array would be read field by field, and its tenth
+            // element is the host.
+            match obj.get("tasks") {
+                None | Some(Value::Null) => {}
+                Some(Value::Array(tasks)) => {
+                    if tasks.iter().any(|x| !x.is_object()) {
+                        bail!("each task must be an object");
+                    }
+                    if tasks.iter().any(|x| x.get("host").is_some_and(|h| !h.is_null())) {
+                        bail!("a program cannot start a task on an SSH host");
+                    }
+                }
+                Some(_) => bail!("tasks must be a list"),
+            }
         }
         _ => {}
     }
@@ -382,5 +398,53 @@ mod tests {
         assert!(allowed(&Role::Anonymous, false, "daemon.info"));
         assert!(!allowed(&Role::Anonymous, false, "session.list"));
         assert!(OWN.iter().all(|m| SCRIPTING.contains(m)));
+    }
+
+    #[test]
+    fn programs_cannot_point_a_run_at_a_host() {
+        let task = |host: Value| serde_json::json!({"title": "t", "prompt": "p", "host": host});
+        let create = |tasks: Value| serde_json::json!({"name": "R", "cwd": "/p", "tasks": tasks});
+        let mut hosted = create(serde_json::json!([task(serde_json::json!({"dest": "evil", "path": "/"}))]));
+        let err = scope_session_params("run.create", "s1", "/p", &mut hosted).unwrap_err().to_string();
+        assert!(err.contains("SSH host"), "{err}");
+        // The second task of several, and as a string or an array: still a host.
+        let mut later = create(serde_json::json!([serde_json::json!({"title": "t", "prompt": "p"}), task(serde_json::json!("evil"))]));
+        assert!(scope_session_params("run.create", "s1", "/p", &mut later).is_err());
+        // Local tasks, and a null host, pass; materialize is still dropped.
+        let mut plain = create(serde_json::json!([task(Value::Null), {"title": "u", "prompt": "q"}]));
+        plain["materialize"] = serde_json::json!({"copy": [".env"], "link": []});
+        scope_session_params("run.create", "s1", "/p", &mut plain).unwrap();
+        assert!(plain.get("materialize").is_none());
+        // Other methods are not affected, and a claimed session cannot create a run at all.
+        let mut other = serde_json::json!({"tasks": [task(serde_json::json!({"dest": "x"}))]});
+        assert!(scope_session_params("run.list", "s1", "/p", &mut other).is_ok());
+        assert!(!allowed(&Role::Claimed("s1".into()), true, "run.create"));
+        assert!(allowed(&Role::Session("s1".into()), true, "run.create"));
+        assert!(allowed(&Role::User, false, "run.create"));
+    }
+
+    #[test]
+    fn no_shape_of_task_gets_a_host_past_the_scoping() {
+        let host = serde_json::json!({"dest": "127.0.0.1", "port": 1, "path": "/tmp"});
+        let check = |tasks: Value| {
+            let mut p = serde_json::json!({"name": "R", "cwd": "/p", "tasks": tasks});
+            scope_session_params("run.create", "s1", "/p", &mut p).map(|_| p)
+        };
+        // A task as an array deserialises field by field: the tenth element is `host`.
+        let array = serde_json::json!([[null, "t", "p", "shell", [], {}, [], true, false, host]]);
+        assert!(check(array).unwrap_err().to_string().contains("must be an object"));
+        assert!(check(serde_json::json!([null])).is_err());
+        assert!(check(serde_json::json!(["a task"])).is_err());
+        assert!(check(serde_json::json!([1, {"title": "t", "prompt": "p"}])).is_err());
+        assert!(check(serde_json::json!("tasks")).is_err());
+        assert!(check(serde_json::json!({"0": {"title": "t", "prompt": "p"}})).is_err());
+        assert!(check(serde_json::json!(7)).is_err());
+        // The host as an array is a host too.
+        assert!(check(serde_json::json!([{"title": "t", "prompt": "p", "host": ["h", null, null, "/x"]}])).is_err());
+        // A missing or null `tasks` is left for `build_run` to refuse; plain object tasks pass.
+        assert!(check(Value::Null).is_ok());
+        assert!(check(serde_json::json!([{"title": "t", "prompt": "p"}])).is_ok());
+        let msg = check(serde_json::json!([{"host": host}])).unwrap_err().to_string();
+        assert_eq!(msg, "a program cannot start a task on an SSH host");
     }
 }

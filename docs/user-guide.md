@@ -566,6 +566,56 @@ kelpied review list [--json]
 The same prompt to several agents, with a compare view to pick the best, is *Try with several agents…*
 (see Review and Finish).
 
+### Specs and tasks (the Plan tab)
+
+The **Plan** tab of the right panel (palette: *Plan (specs and tasks)*) shows the plans and specs your
+repository already has, written by any agent or by you: `plans/<name>/plan.md` with its `phase-*.md`,
+`specs/**`, `.kiro/specs/**` (Kiro's requirements, design and tasks) and `docs/plans/**`. There is no
+format of Kelpie's own, only markdown with `- [ ]` / `- [x]` task lists. Each plan or spec is a group with
+its progress; a file is a phase; unfinished groups are open and listed first. A file with no checkboxes
+shows its list items as they are, so nothing is hidden. Links (symlinks, junctions) are not followed, and
+nothing outside the project is read or written.
+
+- **Live**: when a file under those folders changes (an agent ticked a box, you edited it, or an agent wrote
+  the first `specs/`, `docs/plans/` or `.kiro/specs/` of the repository) the panel follows after a third of a second. With the tab closed nothing is read or parsed.
+- **Tick a box** in the panel and the file changes by that one character; line endings and everything
+  else stay byte for byte. If the file changed after the panel read it, nothing is written: it is read
+  again and you tick once more. Files that are not UTF-8 text, or larger than 256 KB, are listed but
+  cannot be ticked from here.
+- **Run with…** (the bolt at the end of a task row) starts an agent on that task: choose the agent, and
+  whether it works *here* (the folder as it is), in a *worktree of its own* (started from the last commit,
+  with the repository's approved `link:` / `copy:` files like any run worktree; a spec file with uncommitted
+  changes is flagged because the agent would not see them) or *on a host*: any saved SSH host linked to the
+  project is offered, and the agent starts in the project's folder there, the way a pane on that host does
+  (for a remote project, *here* is its own host). A task on a host has no worktree, and its agent works on
+  the host's own copy of the file, so its tick is made there. It does **not** run in tmux and cannot run Kelpie's
+  report command: the task is *done* when the agent exits with code 0, and *failed* when the agent stops with another
+  code or the connection drops (the task says so). The agent ends with its connection once the host notices that
+  it is gone, which can take a few minutes, so a failed task may still have its agent running there for a while: *Retry*
+  and a new *Run with…* ask for your confirmation first. If Kelpie itself restarts while such an agent runs, the task
+  is marked failed as the daemon starts, before any window can resume sessions, and its session is not resumed (a resumed agent would be one no task follows). There is no idle
+  timeout for such a task; *Mark done* ends it by hand. Needs a daemon of API level 14. It is an ordinary run with one task, so the Runs
+  page follows it; the row shows the run's status (click it to open the run). The prompt names the file
+  and the section, points the agent at the file the way its own kind reads it (`@path`, or the file's
+  content for other agents) and asks it to tick the box when done; agents can also report with
+  `kelpied run report`. Headings and task text, and the text of the file when it is included in the prompt, are cleaned
+  of escape sequences and of control, bidirectional and invisible characters first. A row follows its run by the
+  task's words: if you change them (or add an identical task above), the row loses its chip and the run stays on
+  the Runs page.
+- **Remote projects** have the Plan tab too: their files are listed, read, ticked and created over ssh. A
+  host is not watched, so use the refresh button to read it again (a refused tick reads the file again by itself). A
+  tick on a host is checked against the file's content (not only its time, which is whole seconds there) and written
+  through a temporary file in the file's folder (made with the host's `mktemp`, so exclusively and private; a host without
+  it is not written to) that replaces the old one, after its size and checksum are checked: a
+  dropped connection leaves the old file, never a truncated one, and a link stays a link (the target is written; the
+  plan refuses a target outside the project). The folder must be writable for that; where it is not, the file is
+  written in place, but only after the whole content has arrived. A file deleted meanwhile is not recreated. Saving
+  a file from the editor on a host uses the same write and keeps the file's mode; a file that belongs to someone else is
+  written in place too, so that its owner does not change.
+- **New spec** (the button, or the palette) asks for a name and writes `specs/<name>/requirements.md`,
+  `design.md` and `tasks.md` (what is wanted, how it will be built, then the tasks). The name becomes
+  letters, digits and dashes. It never overwrites: if any of the three files exists nothing is written.
+
 ### Issue trackers and GitLab
 
 Settings → Integrations connects **Linear** (personal API key), **Jira** (Cloud: site, e-mail

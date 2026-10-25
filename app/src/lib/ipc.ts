@@ -54,8 +54,10 @@ export const isDir = (path: string) => invoke<boolean>("fs_is_dir", { path });
 export const listDir = (root: string, path: string) => invoke<DirEntry[]>("fs_list_dir", { root, path });
 export const readFile = (root: string, path: string, maxBytes?: number, asBase64 = false) =>
   invoke<FileContent>("fs_read_file", { root, path, maxBytes, asBase64 });
-export const writeFile = (root: string, path: string, content: string, expectedMtime?: number, force = false) =>
-  invoke<{ ok: boolean; conflict: boolean; mtime: number }>("fs_write_file", { root, path, content, expectedMtime, force });
+/** `expectedCksum` (POSIX `cksum` of what was read) is checked on a host, where times are whole seconds. `confine`: on a host,
+ *  the file after links must be inside the project (the editor's save does not ask for it). */
+export const writeFile = (root: string, path: string, content: string, expectedMtime?: number, force = false, expectedCksum?: string, confine?: boolean) =>
+  invoke<{ ok: boolean; conflict: boolean; mtime: number }>("fs_write_file", { root, path, content, expectedMtime, force, expectedCksum, confine });
 export const createEntry = (root: string, path: string, dir: boolean) => invoke<void>("fs_create", { root, path, dir });
 export const renameEntry = (root: string, from: string, to: string) => invoke<void>("fs_rename", { root, from, to });
 export const deleteEntry = (root: string, path: string) => invoke<void>("fs_delete", { root, path });

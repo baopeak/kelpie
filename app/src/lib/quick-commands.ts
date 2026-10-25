@@ -1,5 +1,6 @@
 // Saved commands/prompts: typed into the focused shell (or a new one), or sent as a prompt to
 // the focused agent session.
+import { createSignal } from "solid-js";
 import { store } from "./store";
 import { t } from "./i18n";
 import { sendInput } from "./ipc";
@@ -51,6 +52,18 @@ export async function typeInto(s: SessionInfo, raw: string, enter: boolean, ente
   // 120 ms) and insert a newline instead of submitting.
   await sleep(enterDelay);
   await sendInput(s.handle, "\r");
+}
+
+const [newSpecAsked, setNewSpecAsked] = createSignal(false);
+/** The Plan tab was opened by "New spec": it shows its name field. Cleared by the tab once it has. */
+export { newSpecAsked, setNewSpecAsked };
+
+/** The "New spec" quick command: opens the Plan tab at the name of a spec to write into `specs/<name>/`
+ *  (requirements, design, tasks); the tab asks for the name and does the writing. */
+export function newSpec() {
+  if (!store.activeProject()) return store.notify(t("Open a project first"));
+  setNewSpecAsked(true);
+  store.showRightPanel("plan");
 }
 
 export async function runQuickCommand(c: QuickCommand) {

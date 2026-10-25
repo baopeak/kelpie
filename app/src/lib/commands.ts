@@ -20,7 +20,7 @@ import { toggleDictation } from "./voice";
 import type { SessionKind } from "./types";
 import { msg, t } from "./i18n";
 import { confirmDialog } from "./confirm-dialog";
-import { focusedSession } from "./quick-commands";
+import { focusedSession, newSpec } from "./quick-commands";
 import { CHECKPOINT_API } from "./checkpoint-api";
 import { toggleComposer } from "./composer-state";
 import { conversationCommands, restartKeepingConversation, runConversationCommand } from "./agent-actions";
@@ -185,6 +185,8 @@ export const commands: Command[] = [
       }
     },
   },
+  { id: "panel.plan", label: msg("Plan (specs and tasks)"), run: () => store.showRightPanel("plan"), when: hasProject },
+  { id: "spec.new", label: msg("New Spec…"), run: newSpec, when: hasProject },
   { id: "panel.review", label: msg("Review Queue"), run: () => store.showRightPanel("review"), when: () => { const a = store.activeProject(); return !!a && !a.remote && !!store.projectInfo[a.parentId ?? a.id]?.is_repo; } },
   { id: "worktree.finish", label: msg("Finish Worktree…"), when: () => { const a = store.activeProject(); return !!a?.parentId && !a.remote; }, run: () => openFinish(store.activeProject()!.id) },
   { id: "worktree.review", label: msg("Review Worktree with…"), when: () => { const a = store.activeProject(); return !!a?.parentId && !a.remote; }, run: () => openReviewWith(store.activeProject()!.id) },

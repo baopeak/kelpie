@@ -581,7 +581,7 @@ impl Daemon {
         let view = |sid: &str| {
             self.by_id(sid).map(|e| {
                 let i = e.info();
-                SessionView { alive: i.alive, working: i.status == Status::Working, idle: i.status == Status::Idle, exit_code: i.exit_code, last_activity: i.last_activity }
+                SessionView { alive: i.alive, working: i.status == Status::Working, idle: i.status == Status::Idle, exit_code: i.exit_code, last_activity: i.last_activity, interrupted: i.interrupted }
             })
         };
         let (actions, changed) = self.runs.lock().step(now_millis(), view);
@@ -592,6 +592,7 @@ impl Daemon {
             tokio::task::spawn_blocking(move || match a {
                 Action::Start { run, task } => me.start_task(&run, &task),
                 Action::Capture { run, task, session } => me.capture_task(&run, &task, &session),
+                Action::Release { session } => me.release_session(&session),
             });
         }
     }
@@ -607,7 +608,11 @@ impl Daemon {
             t.session_id = Some(sid.clone());
         }
         let started = prepared.and_then(|wt| {
-            let cwd = wt.as_ref().map_or_else(|| run.cwd.clone(), |w| w.path.clone());
+            // On a host the folder is the one there; the session starts like any remote one.
+            let cwd = match &task.host {
+                Some(h) => h.path.clone(),
+                None => wt.as_ref().map_or_else(|| run.cwd.clone(), |w| w.path.clone()),
+            };
             let prompt = runs::task_prompt(&run, &task, &self.exe);
             let info = self.create(json!({
                 "id": sid,
@@ -617,6 +622,7 @@ impl Daemon {
                 "name": format!("{} · {}", run.name, task.title),
                 "args": task.args,
                 "env": task.env,
+                "remote": task.host.as_ref().map(runs::TaskHost::remote),
                 "prompt": prompt,
             }))?;
             Ok((info.spec.id, cwd, wt))
@@ -647,6 +653,32 @@ impl Daemon {
             }
         }
         self.runs_changed(&[run_id.to_string()]);
+    }
+
+    /// Called at the end of `restore`, before any client is served: the tasks on a host that were running when the daemon stopped
+    /// fail and their sessions are released, so no app can resume them first.
+    fn settle_host_tasks(&self) {
+        let view = |sid: &str| {
+            self.by_id(sid).map(|e| {
+                let i = e.info();
+                SessionView { alive: i.alive, working: i.status == Status::Working, idle: i.status == Status::Idle, exit_code: i.exit_code, last_activity: i.last_activity, interrupted: i.interrupted }
+            })
+        };
+        let (sessions, changed) = self.runs.lock().settle_interrupted_hosts(now_millis(), view);
+        for s in &sessions {
+            self.release_session(s);
+        }
+        self.runs_changed(&changed);
+    }
+
+    /// A session of a failed task on a host is not resumed by the app after a restart: tells the clients.
+    fn release_session(&self, session: &str) {
+        if let Some(Entry::Term(s)) = self.by_id(session) {
+            s.clear_interrupted();
+            // Saved as it is now: a second stop must not bring it back as an interrupted session.
+            self.meta_dirty.store(true, Ordering::Relaxed);
+            self.broadcast("session.updated", json!(s.info()));
+        }
     }
 
     /// Keeps the end of a finished task's output when its agent reported no summary.
@@ -864,6 +896,7 @@ impl Daemon {
             self.notifier.seed(&session.info());
             self.sessions.write().insert(handle, Entry::Term(session));
         }
+        self.settle_host_tasks();
     }
 
     pub fn create(&self, params: Value) -> Result<SessionInfo> {
@@ -1900,7 +1933,7 @@ mod tests {
     }
 
     fn worktree_run(repo: &std::path::Path, ids: &[&str], materialize: Option<runs::Materialize>) -> runs::Run {
-        let task = |id: &str| runs::NewTask { id: Some(id.into()), title: id.into(), prompt: "p".into(), kind: None, args: vec![], env: BTreeMap::new(), deps: vec![], approve: false, worktree: true };
+        let task = |id: &str| runs::NewTask { id: Some(id.into()), title: id.into(), prompt: "p".into(), kind: None, args: vec![], env: BTreeMap::new(), deps: vec![], approve: false, worktree: true, host: None };
         let new = NewRun { name: "Try".into(), objective: String::new(), cwd: repo.to_string_lossy().into_owned(), project_id: None, tasks: ids.iter().map(|i| task(i)).collect(), idle_done_secs: None, materialize };
         runs::build_run(new, "abcdef012345".into(), 0).unwrap()
     }
@@ -2067,6 +2100,36 @@ mod tests {
         daemon.set_meta(&cwd, None, Some("progress")).unwrap();
         daemon.deliver_to_review("s1");
         assert_eq!(daemon.workspace_meta.lock().find(&cwd).unwrap().1.status.as_deref(), Some("progress"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_host_task_whose_session_came_back_interrupted_is_failed_and_released_before_anyone_can_resume_it() {
+        let (daemon, dir) = test_daemon("settle-host");
+        let spec = SessionSpec { id: "s1".into(), kind: "claude".into(), cwd: "/srv/app".into(), remote: Some(crate::session::RemoteSpec { dest: "devbox".into(), ..Default::default() }), ..Default::default() };
+        let session = Session::new(7, spec, 80, 24);
+        session.mark_interrupted(5);
+        daemon.sessions.write().insert(7, Entry::Term(session));
+        let host = runs::TaskHost { dest: "devbox".into(), port: None, config: None, path: "/srv/app".into() };
+        let task = |id: &str| runs::NewTask { id: Some(id.into()), title: id.into(), prompt: "p".into(), kind: None, args: vec![], env: BTreeMap::new(), deps: vec![], approve: false, worktree: false, host: Some(host.clone()) };
+        let new = NewRun { name: "Hosted".into(), objective: String::new(), cwd: "/srv/app".into(), project_id: None, tasks: vec![task("a")], idle_done_secs: None, materialize: None };
+        {
+            let mut runs = daemon.runs.lock();
+            runs.list.push(runs::build_run(new, "r1".into(), 0).unwrap());
+            let _ = runs.step(0, |_| None);
+            let (t, _) = runs.task_mut("r1", "a").unwrap();
+            t.status = TaskStatus::Running;
+            t.session_id = Some("s1".into());
+        }
+        assert!(daemon.by_id("s1").unwrap().info().interrupted);
+        daemon.meta_dirty.store(false, Ordering::Relaxed);
+        daemon.settle_host_tasks();
+        let info = daemon.by_id("s1").unwrap().info();
+        assert!(!info.interrupted, "the app has nothing to resume");
+        assert!(daemon.meta_dirty.load(Ordering::Relaxed), "saved as it is now: a second stop does not bring it back");
+        assert_eq!(daemon.runs.lock().get("r1").unwrap().tasks[0].status, TaskStatus::Failed);
+        // Persisted as not alive: the next daemon would not flag it as interrupted either.
+        assert!(!daemon.saved_sessions().iter().any(|s| s.spec.id == "s1" && s.alive));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
