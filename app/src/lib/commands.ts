@@ -195,6 +195,7 @@ export const commands: Command[] = [
   { id: "project.sleep", label: msg("Sleep Project (stop agents, resume on open)"), when: hasProject, run: () => void store.sleepProject(pid()!) },
   { id: "automations", label: msg("Scheduled Automations…"), run: () => store.openSettings("automations") },
   { id: "accounts", label: msg("Claude / Codex Accounts…"), run: () => store.openSettings("accounts") },
+  { id: "agent-setup", label: msg("Agent Setup (MCP, instructions, skills)…"), run: () => store.openSettings("agent-setup") },
   { id: "usage.cost", label: msg("Usage & Cost…"), run: () => store.setOverlay("cost") },
   { id: "runs", label: msg("Toggle Runs (Orchestration)"), win: "mod+shift+r", mac: "mod+shift+r", run: () => store.setOverlay(store.overlay() === "runs" ? null : "runs") },
   { id: "runs.new", label: msg("New Run…"), run: () => openRuns(true) },

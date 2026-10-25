@@ -3,6 +3,7 @@
 //! commands for the workbench.
 
 mod accounts;
+mod agent_config;
 mod agent_history;
 mod browser;
 mod daemon_client;
@@ -312,6 +313,12 @@ pub fn run() {
             accounts::account_remove,
             accounts::account_status,
             accounts::account_transcript,
+            agent_config::agent_setup_overview,
+            agent_config::agent_setup_preview,
+            agent_config::agent_setup_apply,
+            agent_config::agent_setup_backups,
+            agent_config::agent_setup_reveal,
+            agent_config::agent_registry_fetch,
             integrations::integration_secret_set,
             integrations::integration_secret_clear,
             integrations::integration_secret_has,

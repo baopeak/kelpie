@@ -77,7 +77,8 @@ export function NewSessionMenu() {
     const extra = args().trim();
     const argv = extra ? extra.match(/"[^"]*"|\S+/g)!.map((a) => a.replace(/^"|"$/g, "")) : undefined;
     if (kind() === "custom" && !argv) return store.notify(t("Enter a command to run"));
-    const chat = ui() === "chat" && supportsChat(kind()) && local();
+    // A registry agent has no terminal interface: it always starts as a chat.
+    const chat = (ui() === "chat" || !!store.registryAgent(kind())) && supportsChat(kind()) && local();
     if (!chat && lacksFolder(project, runOn(), kind())) return;
     store.setOverlay(null);
     const w = where();

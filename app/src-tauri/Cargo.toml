@@ -21,7 +21,7 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-updater = "2"
 anyhow.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 tokio.workspace = true
 interprocess.workspace = true
 parking_lot.workspace = true
@@ -37,6 +37,8 @@ ureq = { version = "3", features = ["json"] }
 keyring = { version = "3.6", default-features = false, features = ["windows-native", "apple-native"] }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 zstd = "0.14.3"
+toml_edit = "0.25"
+jsonc-parser = { version = "0.34", default-features = false, features = ["cst", "serde_json"] }
 
 
 [target.'cfg(windows)'.dependencies]

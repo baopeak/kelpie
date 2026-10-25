@@ -1,3 +1,4 @@
+import type { SavedRegistryAgent } from "./agent-setup";
 /** Mirrors `SessionInfo` from kelpied (crates/kelpied/src/session.rs). */
 export type SessionStatus = "idle" | "working" | "waiting" | "exited";
 /** shell | custom | claude | codex | omp, or a preset agent id from `agent.presets` (gemini, cursor…). */
@@ -202,6 +203,8 @@ export interface Settings {
   agentPermissions: "manual" | "yolo";
   /** Agent kinds left out of launchers. */
   hiddenAgents: string[];
+  /** Agents saved from the ACP registry (Settings → Agent setup → Find more agents); sent to the daemon with the plugin agents. */
+  registryAgents?: SavedRegistryAgent[];
   /** Stop finished background agents after `hibernateMinutes` idle; resume when shown again. */
   hibernate: boolean;
   hibernateMinutes: number;

@@ -14,6 +14,7 @@ import { RunOnPicker, resolveRunOn, runOnAgents, type RunOn } from "./host-targe
 import type { Project, SessionKind } from "../lib/types";
 import { t, msg } from "../lib/i18n";
 import { openHosts } from "./hosts-page";
+import { newChat } from "../chat/mode-switch";
 import { BrandWordmark, Kip, kipShown } from "./brand";
 
 const kbd = (id: string) => {
@@ -53,7 +54,9 @@ const SUBTITLES: Record<string, string> = {
  *  chosen host, the agents that host has. */
 const choices = (project: Project, run: RunOn): { kind: SessionKind; sub: string }[] => {
   const host = run.hostId ? hostById(run.hostId)?.label : project.remote ? hostLabel(project) : undefined;
-  return [...runOnAgents(project, run, store.state.settings.hiddenAgents), "shell"].map((kind) => ({ kind, sub: host ? t("on {host}", { host }) : SUBTITLES[kind] ? t(SUBTITLES[kind]) : t("{bin} CLI", { bin: presetFor(kind)?.bin ?? kind }) }));
+  // A registry agent shows the command it really starts, not just the program (`npx`).
+  const command = (kind: SessionKind) => { const a = store.registryAgent(kind); return a ? [a.bin, ...a.acp].join(" ") : undefined; };
+  return [...runOnAgents(project, run, store.state.settings.hiddenAgents), "shell"].map((kind) => ({ kind, sub: host ? t("on {host}", { host }) : SUBTITLES[kind] ? t(SUBTITLES[kind]) : command(kind) ?? t("{bin} CLI", { bin: presetFor(kind)?.bin ?? kind }) }));
 };
 
 /** Shown in a project with no tabs: pick the machine ("Run on"), then one click starts an agent. */
@@ -65,6 +68,12 @@ export function Launcher(props: { project: Project }) {
     if (starting) return;
     starting = true;
     const projectId = props.project.id;
+    // Registry agents have no terminal interface: they open as a chat.
+    if (store.registryAgent(kind)) {
+      await newChat(projectId, kind);
+      starting = false;
+      return;
+    }
     const target = await resolveRunOn(props.project, run, kind);
     if (target !== null) await store.newSession(projectId, kind, { target });
     starting = false;
@@ -88,6 +97,7 @@ export function Launcher(props: { project: Project }) {
         <h1>{props.project.name}</h1>
         <div style={{ color: "var(--text-faint)", "font-family": "var(--font-mono)", "font-size": "12px" }}>{props.project.path}</div>
         <RunOnPicker project={props.project} value={runOn()} onChange={setRunOn} />
+        <button class="link-btn" data-launch="agent-setup" onClick={() => store.openSettings("agent-setup")}>{t("Set up this project's agents: MCP servers, instructions, skills")}</button>
         <div class="launcher">
           <For each={choices(props.project, runOn())}>
             {(c) => (

@@ -2,10 +2,11 @@
 // navigation, its search box, and "/" results in the global search.
 import { msg, translated } from "./i18n";
 
-export type SettingsSection = "agents" | "accounts" | "integrations" | "automations" | "terminal" | "layouts" | "remote" | "mobile" | "appearance" | "notifications" | "usage" | "commands" | "shortcuts" | "daemon" | "plugins" | "voice" | "about";
+export type SettingsSection = "agents" | "agent-setup" | "accounts" | "integrations" | "automations" | "terminal" | "layouts" | "remote" | "mobile" | "appearance" | "notifications" | "usage" | "commands" | "shortcuts" | "daemon" | "plugins" | "voice" | "about";
 
 export const settingsSections: { id: SettingsSection; label: string; group: string }[] = [
   { id: "agents", label: msg("Agents"), group: msg("Workflow") },
+  { id: "agent-setup", label: msg("Agent setup"), group: msg("Workflow") },
   { id: "accounts", label: msg("Accounts"), group: msg("Workflow") },
   { id: "integrations", label: msg("Integrations"), group: msg("Workflow") },
   { id: "remote", label: msg("Remote (SSH)"), group: msg("Workflow") },
@@ -39,6 +40,7 @@ export const settingsCatalog: SettingEntry[] = [
   { id: "auto-worktree", section: "agents", label: msg("Worktree for new agent sessions"), description: msg("In a git folder, new agent sessions in the New session dialog can start in their own worktree, named from the first prompt. Ask: a box you tick per session. Always: ticked unless you untick it. Never: not offered."), keywords: "worktree isolate branch new session agent automatic auto parallel" },
   { id: "hibernate", section: "agents", label: msg("Hibernate idle agents"), description: msg("Stop agents that finished and sat unseen in a background project; they resume their conversation when you open it again."), keywords: "sleep memory idle pause resume hibernation" },
   { id: "resume-sessions", section: "agents", label: msg("Resume after a restart"), description: msg("When the session daemon stops while sessions run (computer restart, update, crash), bring them back: when you open them, all at once, or only with their Resume button. Agents continue the same conversation."), keywords: "restore reopen reboot continue session resume startup" },
+  { id: "agent-setup", section: "agent-setup", label: msg("MCP servers, instructions and skills"), description: msg("One page for what your agents are told and can use: their MCP servers (switch on and off, copy between agents), instruction files such as AGENTS.md, and their skills, commands and subagents. Every change shows a preview and keeps a backup."), keywords: "mcp server tools claude.md agents.md gemini.md steering copilot instructions skills commands subagents registry acp find agents context" },
   { id: "accounts", section: "accounts", label: msg("Claude Code and Codex accounts"), description: msg("Sign in with several accounts. New sessions use the active account; running ones keep theirs. Each account has its own sign-in, settings and history."), keywords: "account login sign in profile switch subscription team personal work CLAUDE_CONFIG_DIR CODEX_HOME" },
   { id: "integration-linear", section: "integrations", label: msg("Linear"), description: msg("A personal API key: your assigned issues in the Issues panel, start agents or worktrees from them, move them between states."), keywords: "linear issues tracker api key ticket" },
   { id: "integration-jira", section: "integrations", label: msg("Jira"), description: msg("Jira Cloud (site, e-mail and API token) or Server / Data Center (personal access token): your open issues, transitions."), keywords: "jira atlassian issues tracker ticket jql" },

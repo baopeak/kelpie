@@ -843,9 +843,17 @@ function createAppStore() {
   type StartOpts = { args?: string[]; name?: string; agentSessionId?: string; cwd?: string; prompt?: string; account?: string; env?: Record<string, string>; target?: SessionTarget };
 
   /** Starts a session for a project without placing it in a layout. */
+  /** An agent saved from the ACP registry: it speaks the protocol over stdio and has no terminal
+   *  interface, so it only starts as a chat. */
+  const registryAgent = (kind: SessionKind) => (state.settings.registryAgents ?? []).find((a) => a.id === kind);
+
   async function startSession(projectId: string, kind: SessionKind, opts: StartOpts = {}): Promise<SessionInfo | undefined> {
     const project = state.projects.find((p) => p.id === projectId);
     if (!project) return;
+    if (registryAgent(kind)) {
+      notify(t("“{agent}” has no terminal interface: start it as a chat.", { agent: presetFor(kind)?.label ?? kind }));
+      return;
+    }
     const launch = profileLaunch(kind, { account: opts.account });
     const target = opts.target ?? projectTarget(project);
     // Saved passwords / passphrases are looked up by the session's own host, not the project's.
@@ -1624,7 +1632,7 @@ function createAppStore() {
     replacePaneIn, updatePane, resizeSplit, setRightPanel, showRightPanel, setSettings, zoomed, toggleZoom,
     topProjects, childrenOf, setProjectStatus, togglePin, approveSetup, approveChecks, linkHost, unlinkHost,
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
-    settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
+    registryAgent, settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
     daemonNeedsSwitch, switchDaemon, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting,
     notesFor, addNote, removeNotes, noteKeyFor, clearNotesAt, promptsFor, rememberPrompt, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,

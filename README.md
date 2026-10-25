@@ -167,6 +167,7 @@ Agents live in a background session daemon, so switching projects, closing the w
 - **Phone access** (opt-in): pair a phone with a QR code to see every session, read its screen and answer agents that need you.
 - **Voice dictation** on this computer: Vietnamese or ~100 languages with Whisper, into any text field or terminal.
 - **Plugins**: declarative manifests that add agents, commands, quick commands, themes, layouts and status-bar items, enabled only after you review what they run.
+- **Agent setup** (Settings → Agent setup): one page for the MCP servers of Claude Code, Codex, Gemini, OpenCode and Cursor (user and project files, switch on and off, copy between agents with a warning before a repository's server reaches your own settings, secrets never written into project files), instruction files (**one file for all agents**: AGENTS.md as the source), a read-only list of skills, commands and subagents, and **Find more agents** from the ACP registry (one request, on click). Every change shows a diff, keeps a backup and is undone at once if the file stops parsing.
 - **English and Vietnamese** interface.
 
 Screenshots are taken from the running app by [`scripts/e2e/readme_shots.py`](scripts/e2e/readme_shots.py).
@@ -353,6 +354,7 @@ End-to-end tests drive the real app through WebDriver (`tauri-driver` + a matchi
 | `scripts/perf/perf_gate.py` | the performance gate above (release build, `pip install psutil`) |
 | `scripts/e2e/typing_latency.py` | keystroke → rendered frame through the whole app (shell, Claude Code), idle and with busy background sessions, *Prioritize visible terminals* off and on |
 | `scripts/e2e/chat_parity.py` | chat view: each agent's `/` commands, `@` files, Codex `$` skills, model / effort / mode pickers, `/context` answered in chat, terminal-only commands handed to the TUI |
+| `scripts/e2e/agent_setup.py` | Agent setup page on fixture config homes: list and provenance, toggle, project → user copy confirmation, secrets masked and never in project files, diff / backup / restore, auto-restore of a bad write, one file for all agents, skills, ACP registry (fake server: one request per click, confirm, nothing run) |
 | `scripts/e2e/plugins.py`, `voice.py` | plugin install / review / every contribution; speech-model download, dictation into terminals and fields |
 | `scripts/e2e/i18n.py` | Vietnamese interface: no untranslated text on 30 surfaces, dates, switching languages without a reload |
 | `scripts/e2e/ui_tour.py` | screenshots of every surface in dark, light, compact and small-window layouts |

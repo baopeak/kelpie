@@ -161,6 +161,10 @@ export async function syncPluginAgents(force = false) {
     prompt: item.prompt ?? "typed",
     acp: item.acp ?? [],
   }));
+  // Agents saved from the ACP registry travel in the same list: `agent.set_custom` replaces it whole.
+  for (const a of store.state.settings.registryAgents ?? []) {
+    if (!agents.some((x) => x.id === a.id)) agents.push({ id: a.id, label: a.label, bin: a.bin, launch: [], yolo: [], resume_latest: [], prompt: "typed", acp: a.acp });
+  }
   const key = JSON.stringify(agents);
   if (key === agentsSent && !force) return;
   try {

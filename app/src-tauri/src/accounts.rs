@@ -15,7 +15,7 @@ use crate::fs_ops::{err, CmdResult};
 /// Marks a folder Kelpie created, so removal never touches anything else.
 const MARKER: &str = ".kelpie-account";
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default()
 }
 
@@ -46,44 +46,15 @@ fn default_home(agent: &str) -> PathBuf {
 }
 
 /// Makes `CODEX_HOME/config.toml` keep the login in `auth.json` (not the OS keyring), so the
-/// usage meter and the status check can read it, keeping every other setting.
-fn codex_file_store(config: &str) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut set = false;
-    let mut in_table = false;
-    for line in config.lines() {
-        let t = line.trim_start();
-        if t.starts_with('[') {
-            if !set {
-                out.push("cli_auth_credentials_store = \"file\"".into());
-                set = true;
-            }
-            in_table = true;
-        }
-        if !in_table && t.starts_with("cli_auth_credentials_store") {
-            if !set {
-                out.push("cli_auth_credentials_store = \"file\"".into());
-                set = true;
-            }
-            continue;
-        }
-        out.push(line.to_string());
-    }
-    if !set {
-        out.push("cli_auth_credentials_store = \"file\"".into());
-    }
-    out.join("\n") + "\n"
+/// usage meter and the status check can read it, keeping every other setting, comment and table
+/// (the same writer that edits the file's MCP servers).
+fn codex_file_store(config: &str) -> CmdResult<String> {
+    crate::agent_config::toml_set_top_level(config, "cli_auth_credentials_store", "file").map_err(|e| format!("Codex config.toml: {e}"))
 }
 
-/// Creates (or re-seeds) an account home. Settings come from the default account so the
-/// agent behaves the same; logins and history do not.
-fn create_blocking(agent: &str, id: &str) -> CmdResult<String> {
-    valid_agent(agent)?;
-    valid_id(id)?;
-    let dir = account_dir(agent, id);
-    std::fs::create_dir_all(&dir).map_err(err)?;
-    std::fs::write(dir.join(MARKER), format!("{agent}\n")).map_err(err)?;
-    let src = default_home(agent);
+/// Fills an account home from the agent's default home `src`: settings, instructions and (Codex)
+/// config.toml with its MCP servers; never logins or history.
+pub(crate) fn seed_account(agent: &str, dir: &Path, src: &Path) -> CmdResult<()> {
     match agent {
         "claude" => {
             for name in ["settings.json", "CLAUDE.md"] {
@@ -96,9 +67,21 @@ fn create_blocking(agent: &str, id: &str) -> CmdResult<String> {
         _ => {
             let to = dir.join("config.toml");
             let base = std::fs::read_to_string(if to.exists() { to.clone() } else { src.join("config.toml") }).unwrap_or_default();
-            std::fs::write(&to, codex_file_store(&base)).map_err(err)?;
+            std::fs::write(&to, codex_file_store(&base)?).map_err(err)?;
         }
     }
+    Ok(())
+}
+
+/// Creates (or re-seeds) an account home. Settings come from the default account so the
+/// agent behaves the same; logins and history do not.
+fn create_blocking(agent: &str, id: &str) -> CmdResult<String> {
+    valid_agent(agent)?;
+    valid_id(id)?;
+    let dir = account_dir(agent, id);
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    std::fs::write(dir.join(MARKER), format!("{agent}\n")).map_err(err)?;
+    seed_account(agent, &dir, &default_home(agent))?;
     Ok(dir.to_string_lossy().into_owned())
 }
 
@@ -364,12 +347,12 @@ mod tests {
 
     #[test]
     fn codex_config_keeps_settings_and_stores_login_in_a_file() {
-        assert_eq!(codex_file_store(""), "cli_auth_credentials_store = \"file\"\n");
+        assert_eq!(codex_file_store("").unwrap(), "cli_auth_credentials_store = \"file\"\n");
         let cfg = "model = \"gpt-5\"\ncli_auth_credentials_store = \"keyring\"\n[mcp_servers.x]\ncommand = \"y\"\n";
-        let out = codex_file_store(cfg);
+        let out = codex_file_store(cfg).unwrap();
         assert_eq!(out, "model = \"gpt-5\"\ncli_auth_credentials_store = \"file\"\n[mcp_servers.x]\ncommand = \"y\"\n");
         // A key of the same name inside a table is not the top-level one.
-        let out = codex_file_store("[profiles.a]\ncli_auth_credentials_store = \"x\"\n");
+        let out = codex_file_store("[profiles.a]\ncli_auth_credentials_store = \"x\"\n").unwrap();
         assert!(out.starts_with("cli_auth_credentials_store = \"file\"\n[profiles.a]\ncli_auth_credentials_store = \"x\""));
     }
 

@@ -784,6 +784,59 @@ were typing — at the cursor of a text field, or pasted into the focused termin
 pressing Enter. `Esc` cancels. Speech is recognised on this computer by a separate helper
 process (`kelpie-stt`) that exits after ten idle minutes; nothing is sent anywhere.
 
+### Agent setup
+
+Settings → Agent setup (or the link on a project's start page, or the palette) is one page for
+what your agents are told and can use. It reads their files once when you open it (*Refresh*
+reads again); nothing is watched in the background.
+
+- **MCP servers**: Claude Code (`~/.claude.json`, the project's `.mcp.json`), Codex
+  (`config.toml`), Gemini (`settings.json`), OpenCode (`opencode.json`) and Cursor
+  (`.cursor/mcp.json`), each with the user's file and the project's. Every server is tagged
+  **user** or **project · untrusted** (a project's file comes with the repository). Switches turn a
+  server off the way each agent does it (Codex and OpenCode `enabled`, Gemini `mcp.excluded`, Claude
+  for a project in `.claude/settings.local.json`); Claude's user file and Cursor have no switch.
+  **Copy to…** converts a server to another agent's format and writes it to the files you tick; *Add an MCP
+  server* does the same for a new one, so one entry serves Claude, Codex and Gemini. Environment
+  and header values are shown by name only and are never written into a project file (they become
+  references to a variable of the same name); writing the values to your own user-level file is an
+  opt-in. Copying a **project** server to a user-level file skips the agent's own "trust this
+  server?" prompt, so the preview lists everything it would run (the program and each argument,
+  the working folder, every environment and header entry as the repository wrote it, a reference
+  to one of your own variables named, never expanded) and the button stays off until you confirm.
+  A path relative to the project (`./scripts/mcp.sh`) is made absolute, so it keeps running that
+  project's file, and the preview says so. None of the project's environment is copied unless you
+  tick the box, and Kelpie never invents references to your own variables for it. Codex gets
+  variables through its own `env_vars`, `env_http_headers` and `bearer_token_env_var`; `Bearer ${TOKEN}`
+  and other references inside a value are rewritten into each agent's syntax.
+- **Files of a project that lead elsewhere** (a link or junction out of the repository, on
+  `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `.cursor/`, `.gemini/`…) are neither read nor written; the
+  page names where the link goes. `CLAUDE.md` linked to `AGENTS.md` counts as already one file.
+- **While Claude Code runs**: `~/.claude.json` is changed under Claude's own lock
+  (`.claude.json.lock`) and only if it still matches the preview; if another program saves it
+  right after Kelpie's write, Kelpie leaves that save alone and says so instead of reporting a
+  success.
+- **Instructions**: the CLAUDE.md, AGENTS.md, GEMINI.md, `.kiro/steering` and
+  `.github/copilot-instructions.md` of the project and the user-level ones. **One file for all
+  agents** makes AGENTS.md the source: CLAUDE.md imports it with `@AGENTS.md`, Gemini lists it in
+  its settings (`context.fileName`) or gets a copy. Nothing is deleted.
+- **Skills & commands**: a read-only list of the skills, commands and subagents the agents find
+  (`~/.claude/skills`, `.claude/commands`, Codex prompts, Gemini commands, OpenCode agents…), with
+  a button to show the file.
+- **Find more agents**: *Search the registry* makes one request to the Agent Client Protocol
+  registry, only when pressed. Each entry shows the full command with its version pinned;
+  *Save as custom agent…* asks for confirmation and then adds it to the agents Kelpie can start
+  (`npx` and `uvx` entries; downloaded programs are not supported). The package is pinned to an
+  exact version (a tag such as `latest` or `beta`, a range, or a URL / git spec is replaced by the
+  registry's own version or refused) and the page shows it. Such an agent has no terminal
+  interface: it starts as a chat, and its launcher card shows the real command. Saving never runs it.
+
+Every change goes through the same steps: a **preview** (a diff, secrets masked), a **backup** of
+each file (in Kelpie's data folder, `agent-config-backups`, newest 20 per file; *Backups* at the
+bottom restores one, again with a preview), the write, and a check that the file still parses; if
+it does not, the files go back as they were at once. Comments, key order and keys Kelpie does not
+know stay as you wrote them.
+
 ### Plugins
 
 A plugin is a folder with an `kelpie-plugin.json` manifest that adds agents, palette commands,
@@ -856,6 +909,7 @@ a setting.
   permission mode (Claude) or approval policy (Codex) and environment variables (stored in
   plain text) — used by terminal and chat sessions; which agent CLIs launchers show; the agent
   for AI actions; hibernation; turn snapshots; prioritize visible terminals; keep computer awake.
+- **Agent setup**: MCP servers, instruction files, skills and the ACP registry (see above).
 - **Accounts**, **Integrations**, **Remote (SSH)**, **Mobile**, **Voice**, **Plugins**,
   **Layouts**, **Quick Commands**, **Automations**, **Shortcuts**: see above.
 - **Terminal**: font, size, line height, scrollback, renderer (WebGL / DOM), cursor blink,
