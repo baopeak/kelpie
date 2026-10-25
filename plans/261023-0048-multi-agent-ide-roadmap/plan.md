@@ -42,7 +42,7 @@ tests and a performance budget. Supersedes [261023-0036-vibe-coder-gaps](../2610
 | 5 | [Context, tokens & cost](phase-05-context-cost.md) | P1 | 3d | 4 | completed |
 | 6 | [Turn checkpoints & artifacts](phase-06-turn-checkpoints.md) | P1 | 5d | 1, 5 | completed |
 | 7 | [Review queue, Finish, overlap, auto-worktree](phase-07-review-queue-finish.md) | P1 | 5d | 6 | completed |
-| 8 | [Cross-review & best-of-N](phase-08-cross-review-best-of-n.md) | P2 | 4d | 5, 7 | pending |
+| 8 | [Cross-review & best-of-N](phase-08-cross-review-best-of-n.md) | P2 | 4d | 5, 7 | completed |
 | 9 | [Composer & context attach](phase-09-composer-context.md) | P1 | 3d | 1 | completed |
 | 10 | [Spec workspace](phase-10-spec-workspace.md) | P2 | 3d | 8, 9 | pending |
 | 11 | [Event-triggered automations](phase-11-event-automations.md) | P2 | 3d | 1, 7 | pending |

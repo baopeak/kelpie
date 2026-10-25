@@ -1,7 +1,7 @@
 ---
 phase: 8
 title: "Cross-review & best-of-N"
-status: pending
+status: completed
 priority: P2
 effort: "4d"
 dependencies: [5, 7]
@@ -39,7 +39,7 @@ Compare and review across different agent CLIs — the thing single-vendor IDEs 
 - 5 worktrees created in parallel ≤ 3 s (with links); compare view lazy; no idle cost after the run.
 
 ## Success Criteria
-- [ ] One prompt → 3 vendors → pick best → merged, in one flow; cross-review notes land in the normal diff view.
+- [x] One prompt → 3 vendors → pick best → merged, in one flow; cross-review notes land in the normal diff view.
 
 ## Risk Assessment
 - Notes migration loss → back up app-state before migration (existing versioned backup).
