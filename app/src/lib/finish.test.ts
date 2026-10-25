@@ -13,6 +13,7 @@ const ipc = {
 const stopSessions = vi.fn();
 const removeWorktree = vi.fn();
 const setProjectStatus = vi.fn();
+const reportEvent = vi.fn();
 const store = {
   state: { approvedSetups: {} as Record<string, string>, approvedChecks: {} as Record<string, string[]> },
   sessions: {},
@@ -22,6 +23,7 @@ const store = {
 };
 vi.mock("./store", () => ({ store }));
 vi.mock("./ipc", () => ipc);
+vi.mock("./automation-events", () => ({ automationEvents: { report: reportEvent } }));
 vi.mock("./terminal-host", () => ({ disposeView: vi.fn() }));
 vi.mock("./worktrees", async () => ({ ...(await vi.importActual<typeof import("./worktrees")>("./worktrees")), stopSessions, removeWorktree }));
 
@@ -162,6 +164,8 @@ describe("runFinish", () => {
     expect(ipc.finishWipCommit).toHaveBeenCalledWith(wt.path, "fix-login", expect.stringMatching(/^WIP from /), ["a.txt", "b.txt"]);
     expect(ipc.daemon).toHaveBeenCalledWith("checkpoint.drop", { worktree: wt.path, root: repo.path });
     expect(removeWorktree).toHaveBeenCalledWith(wt, { force: false });
+    // Automations hear that the worktree is finished, in the project it came from.
+    expect(reportEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "finished", root: repo.path, branch: "fix-login" }));
   });
 
   it("makes no WIP commit when nothing is uncommitted", async () => {

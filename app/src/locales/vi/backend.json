@@ -117,5 +117,13 @@
   "Writes are off in this run.": "Lần chạy này tắt chức năng ghi.",
   "This run has no fixture config folder (set KELPIE_AGENT_CONFIG_HOME): writes are off.": "Lần chạy này không có thư mục cấu hình thử nghiệm: chức năng ghi đang tắt.",
   "reads your variables": "đọc các biến của bạn",
-  "in its command or URL. Tick the box to copy the project's environment too, or leave it in the project.": "trong lệnh hoặc URL của nó. Hãy đánh dấu ô để chép cả biến môi trường của dự án, hoặc để nó lại trong dự án."
+  "in its command or URL. Tick the box to copy the project's environment too, or leave it in the project.": "trong lệnh hoặc URL của nó. Hãy đánh dấu ô để chép cả biến môi trường của dự án, hoặc để nó lại trong dự án.",
+  "its command has not been approved in Kelpie": "lệnh của nó chưa được duyệt trong Kelpie",
+  "the command changed since it was shown; check it again": "lệnh đã thay đổi kể từ lúc hiển thị; hãy kiểm tra lại",
+  "The automations file is damaged": "Tệp tự động hóa bị hỏng",
+  "it was kept as": "đã được giữ lại thành",
+  "Automations are off and changes are not saved until Kelpie's background service restarts.": "Tự động hóa đang tắt và thay đổi không được lưu cho đến khi dịch vụ nền của Kelpie khởi động lại.",
+  "reached its limit of": "đã đạt giới hạn",
+  "runs today; it runs again tomorrow": "lượt chạy hôm nay; ngày mai sẽ chạy lại",
+  "is only available to the Kelpie app": "chỉ dùng được từ ứng dụng Kelpie"
 }

@@ -157,7 +157,7 @@ struct Sub {
     stalled: bool,
 }
 
-enum Ctl {
+pub(crate) enum Ctl {
     Input(Vec<u8>),
     Resize(u16, u16),
     Close,
@@ -587,6 +587,20 @@ impl Session {
         Ok(g.activity.last_typed.unwrap_or_else(Instant::now))
     }
 
+    /// Types `text` as one message, but only while the agent sits idle at its prompt (checked and
+    /// written under one lock, like [`Self::answer`]). Returns when it was typed, for the Enter that follows.
+    /// Not when something was typed within `quiet` (it may be somebody's half-written message).
+    pub fn type_when_idle(&self, text: &str, quiet: Duration) -> Option<Instant> {
+        let mut g = self.inner.lock();
+        if g.pty.is_none() || g.activity.status(Instant::now()) != Status::Idle || g.activity.last_typed.is_some_and(|t| t.elapsed() < quiet) {
+            return None;
+        }
+        let body = typed_text(text);
+        let bytes = if g.vt.bracketed_paste() { format!("\x1b[200~{body}\x1b[201~") } else { body.replace('\n', " ") };
+        Self::write_input(&mut g, bytes.into_bytes());
+        Some(g.activity.last_typed.unwrap_or_else(Instant::now))
+    }
+
     /// Sends `bytes` only if the write at `written` is still the last thing typed (the Enter that
     /// follows a timer's text must not follow anything the user typed in between).
     pub fn input_if_last_typed_at(&self, written: Instant, bytes: Vec<u8>) -> bool {
@@ -961,6 +975,37 @@ pub fn typed_text(text: &str) -> String {
         .collect()
 }
 
+/// A process that cannot be killed, for sessions that only look running.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct NoKill;
+
+#[cfg(test)]
+impl ChildKiller for NoKill {
+    fn kill(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+        Box::new(NoKill)
+    }
+}
+
+#[cfg(test)]
+impl Session {
+    /// Makes the session look like a running agent in `status`; what is typed into it shows up on the channel.
+    pub(crate) fn fake_running(&self, status: Status) -> std::sync::mpsc::Receiver<Ctl> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let mut g = self.inner.lock();
+            g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None });
+            g.activity = Activity { alive: true, ..Default::default() };
+            g.activity.on_hook(status, false, Instant::now());
+        }
+        self.tick(Instant::now());
+        rx
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1013,18 +1058,6 @@ mod tests {
         assert_eq!(typed_text("a\x1b[201~\rrm -rf ~\r"), "a[201~\nrm -rf ~\n");
         assert_eq!(typed_text("x\u{9b}31m\u{7}y\tz\r\nw"), "x31my\tz\nw");
         assert_eq!(typed_text("héllo — 日本"), "héllo — 日本");
-    }
-
-    #[derive(Debug, Clone)]
-    struct NoKill;
-
-    impl ChildKiller for NoKill {
-        fn kill(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-            Box::new(NoKill)
-        }
     }
 
     /// A claude session that looks running (no process behind it) and was stopped by the usage

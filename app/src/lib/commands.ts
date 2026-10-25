@@ -193,7 +193,7 @@ export const commands: Command[] = [
   { id: "runs.try", label: msg("Try with Several Agents…"), when: () => { const a = store.activeProject(); const repo = a?.parentId ?? a?.id; return !!repo && !a?.remote && !!store.projectInfo[repo]?.is_repo; }, run: () => openTryAgents(store.activeProject()!.id) },
   { id: "worktree.new", label: msg("New Worktree…"), when: () => { const a = store.activeProject(); const repo = a?.parentId ?? a?.id; return !!repo && !a?.remote && !!store.projectInfo[repo]?.is_repo; }, run: () => { const a = store.activeProject()!; openWorktreeDialog(a.parentId ?? a.id); } },
   { id: "project.sleep", label: msg("Sleep Project (stop agents, resume on open)"), when: hasProject, run: () => void store.sleepProject(pid()!) },
-  { id: "automations", label: msg("Scheduled Automations…"), run: () => store.openSettings("automations") },
+  { id: "automations", label: msg("Automations…"), run: () => store.openSettings("automations") },
   { id: "accounts", label: msg("Claude / Codex Accounts…"), run: () => store.openSettings("accounts") },
   { id: "agent-setup", label: msg("Agent Setup (MCP, instructions, skills)…"), run: () => store.openSettings("agent-setup") },
   { id: "usage.cost", label: msg("Usage & Cost…"), run: () => store.setOverlay("cost") },

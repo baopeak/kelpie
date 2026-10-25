@@ -2,6 +2,9 @@
 name = "kelpied"
 version.workspace = true
 edition.workspace = true
+# What the code already needs (`is_none_or`, `LazyLock`). Starting a batch file with arguments is only safe from
+# 1.77.2 on (the std library quotes them for cmd.exe), which this satisfies.
+rust-version = "1.82"
 
 [dependencies]
 kelpie-proto = { path = "../kelpie-proto" }

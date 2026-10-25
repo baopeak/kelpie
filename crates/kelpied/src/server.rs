@@ -151,6 +151,9 @@ where
                             };
                             role = r;
                             daemon.set_client_role(id, &role);
+                            // The Kelpie app says so; scripts using the user's token do not, and a connection that
+                            // authenticates again as anything else is no longer the app.
+                            daemon.mark_app(id, role == Role::User && req.pointer("/params/client").and_then(Value::as_str) == Some("app"));
                             let _ = out_tx.send(json_out(&json!({"id": req_id, "result": who})));
                             continue;
                         }

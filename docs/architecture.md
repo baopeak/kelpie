@@ -87,10 +87,10 @@ Frames (`crates/kelpie-proto`): `u32 LE length | u8 kind | payload`
 | 2 Output | daemon → app | `u32 handle \| u64 seq \| bytes` (`seq` = stream offset after the bytes) |
 | 3 Input | app → daemon | `u32 handle \| bytes` |
 
-RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|save|delete|run`, `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them).
+RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them).
 `daemon.info` reports an `api` feature level (`kelpie_proto::API_LEVEL`); an app built for a
 higher level offers to restart an older daemon still running from a previous version.
-Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran`, `run.updated`, `mobile.pair_request`, and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
+Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request`, and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
 
 ## Session threading (daemon)
 
@@ -677,6 +677,12 @@ and sequence.
   session exits) the daemon does `meta.set status=review` on the automation's folder (the existing record
   above it, like `kelpied worktree set`). An older daemon ignores the field; the app hides the option below
   API 11. The mapping lives in memory, so a daemon restart during a run drops the delivery.
+- **Event-triggered automations** (API 15) are described under "Automations" in the daemon list above. The
+  window reports what only it can see: `app/src-tauri/src/watcher.rs` sends each batch's changed files
+  (at most 200) to the daemon, `lib/pull-requests.ts` reports a failing pull request once, `lib/finish.ts`
+  reports a finished worktree, and `lib/automation-events.ts` holds the global switch and the five-minute
+  pull request look. File, pull request and finish triggers therefore fire only while the window runs; the
+  settings page says so next to each.
 
 ### Cross-review and best-of-N
 
@@ -834,9 +840,86 @@ task's run status is the Runs engine's.
   per canonical folder path; `meta.updated` is broadcast. `kelpied worktree get|set` defaults to
   the git top level of the current folder.
 - **Automations** (`automations.rs`, `automation.*`, `automations.json`): hourly / daily /
-  weekdays / weekly in local time (chrono). The ticker checks every 10 s; a run creates an
-  ordinary session with the prompt and is broadcast as `automation.ran`. Runs missed by more
-  than 30 min are skipped.
+  weekdays / weekly in local time (chrono). The ticker checks every 10 s and starts each due run on its own
+  thread (never awaited: ten due runs cost the ticker about 2 ms); a run creates an ordinary session with
+  the prompt and is broadcast as `automation.ran`. Runs missed by more than 30 min are skipped.
+  Since API 15 an automation can instead carry a `trigger` (`file`, `turn`, `commit`, `pr_checks_failed`,
+  `finished`) and an `action` (`agent`, `quick`, `shell`); the runtime is `daemon/automation.rs`:
+  - **Events.** `turn` is raised by the ticker when a non-shell session leaves working; `commit` by comparing
+    `git rev-parse HEAD --abbrev-ref HEAD` of the folder with the last look (at turn start and end, and every
+    10 s for folders of commit automations): only HEAD moving on the same branch counts, so checkpoint refs
+    under `refs/kelpie` and checkouts never fire it. `file`, `pr_checks_failed` and `finished` arrive as
+    `automation.event` from the app connection only (the file watcher sends the changed files of each 150 ms
+    batch of the roots it already watches; no new roots). An automation reacts to events whose folder is its
+    folder or inside it.
+  - **Guards** (`Automations::on_event`, pure and unit-tested): enabled and not paused, not busy (a session it
+    started is working, its command is running, or either stopped less than 5 s ago), at most one run per 60 s
+    (`KELPIE_AUTOMATION_GAP_MS` shortens it for end-to-end tests), a per-trigger daily cap (counted per local
+    day, saved), and a command only when its hash is approved. Matching 100 triggers takes well under a
+    millisecond.
+  - **Commands** are spawned without a shell (`std::process::Command` with the program and argument list),
+    `stdin` closed, `KELPIE_*` event variables added, a 5-minute limit, the end of the output redacted into
+    the run's note. Whole-argument placeholders only (`{file}`, `{files}`, `{commit}`, `{branch}`); a file
+    name starting with `-`, `@` or `+` is given as `./name`. The program is resolved the way a user expects
+    (`resolve_program`): a path with a separator against the automation's folder, never the daemon's; a bare
+    name through `PATH` and, on Windows, `PATHEXT` (`npm` is `npm.cmd`, which `std` starts with safe
+    quoting, which needs Rust 1.77.2; the crate pins 1.82). The approval is the SHA-256 of the event, folder, the **resolved file** and
+    the arguments **and the contents of the files it runs from the project** (the program when it is inside
+    the folder, the script an interpreter runs, every argument naming a file); `automation.approve` stores it
+    (an editor's copy is ignored). An agent that edits an approved script makes the automation "changed since
+    approved": it does not run and the inbox says so until the user approves again.
+    Event data is allowed by an **allowlist** (`check_command`, at save and again at run). The program, resolved
+    (`PATH`, `PATHEXT`, the file's real name, versions such as `python3.12` or `pwsh-preview` included), is
+    classified. A *remote or elevated runner* (cmd, ssh, plink, wsl, su, sudo, doas, runas, schtasks, at, start,
+    conhost, wt, watch, script, forfiles, xargs, env, nohup, time, timeout, nice, npx…), a *package manager*
+    (npm, pnpm, yarn: `npm run` expands `%VAR%` in a name through cmd.exe, probed) and a *build tool or task
+    runner* (make, cmake, gradle, mvn, msbuild, ninja, bazel, just, rake, task, tox…), or an environment, version, secret or sandbox
+    *wrapper* (uv, poetry, pdm, hatch, rye, pipenv, pixi, bundle, mise, asdf, volta, fnm, nvm, pyenv, rbenv, direnv,
+    nix, nix-shell, guix, dotenv(x), devbox, flox, earthly, act, doppler, op, aws-vault, infisical, chamber,
+    firejail, bwrap, proot, docker, podman, kubectl…) never get event data:
+    a `{placeholder}` or `KELPIE_*` anywhere in its arguments refuses the command. A *command interpreter*
+    gets it only as `interpreter [safe flags] script args` with a script file that exists inside the project
+    (or in a `PATH` folder): `powershell`/`pwsh` need `-File x.ps1` after only -NoProfile, -NonInteractive,
+    -NoLogo, -ExecutionPolicy <value>; `bash`/`sh`/`zsh`/`fish`… the script as first non-flag argument after
+    only -e, -u, -o <name> (never -c in any form); `python`/`node`/`ruby`/`perl`/`php`/`deno`/… the script as
+    first argument, no flags. A batch file called directly gets arguments quoted by `std`, but `%` and `!`
+    written into its arguments are refused. Anything else (git, a real executable) gets whole-argument
+    placeholders. The program is classified by its given name and by its real file name (canonical path: an 8.3
+    short name or a link does not hide it), with trailing dots and spaces ignored as Windows does. Only
+    `.com/.exe/.bat/.cmd` ever resolve as programs (never `.js`, `.vbs`, `.wsf`, `.hta`, `.lnk`, `.url`). A program with no rule gets whole-argument placeholders, and `shown()` flags it (`command_unvetted`) so the
+    approval dialog warns that agent-chosen names will be its arguments; the safe forms (a script run by its
+    interpreter, a batch file called directly) carry no warning. The refusal message points to the safe form. A command is started in a job object (a process group on Unix): after 5 minutes everything it started is
+    stopped, so its output pipes close and "running" clears; at a normal end what it launched (an editor it
+    opened) is left alone and its output is not waited for beyond 3 s. An "agent" of
+    kind `shell` or `custom` types what it is given into a shell, so it counts as a command: app-only save,
+    approval, and the prompt carries no event data. Only agents Kelpie knows can be agents.
+  - **Quick** actions type the saved prompt, as one bracketed paste with ESC and other control characters
+    dropped (`typed_text`), only into a session **this automation started** (never one the user opened), only
+    while it is idle and nothing was typed into it in the last 30 s (checked and written under one lock), then
+    Enter as a separate write if nothing else was typed. With no session of its own alive it starts one.
+  - **Loops.** An automation set off while another one is busy, or fired in the last two minutes, in the same folder is one step further
+    down a chain; at 3 it is not run and the inbox says so. Daily caps and the per-automation busy guard
+    (sessions `Working` or `Waiting`, running commands, 5 s after) bound the rest.
+  - **Storage.** `{"version": 2, "paused": bool, "automations": [...]}`. A bare list (version 1) is copied to
+    `automations.json.bak` (never over an earlier one) and rewritten. A file that does not parse is renamed
+    `automations.json.corrupt-<time>`; a file with a newer version is left alone; in both cases every write is
+    refused, the app is told through `notify.event` (inbox, only once an app connection is there to read it)
+    and `automation.state.error`, and nothing replaces the file. A set-aside file stays a problem across
+    restarts until the user dismisses it (`automation.resolve dismiss` renames it `.seen`). Every save also
+    writes the same bytes to `automations.json.v2`, a name older Kelpies never read: an older Kelpie reads the
+    object as damaged, starts empty and replaces the file with its own list. Downgrading is not supported, but
+    nothing is lost: at the next start of this version the list found beside an existing `.v2` raises a notice
+    and `state.fix = "restore"`; `automation.resolve restore` merges the `.v2` list with what the older one
+    added, `keep` sets the `.v2` aside (`.v2.kept-<time>`). Until then nothing is written. The app offers the
+    new options only from API 15.
+  - **RPCs.** `automation.list|state|save|delete|run|approve|set_paused|resolve|event` are the user's: no
+    session token reaches them (none is in the session or claimed method lists). `save` of a command,
+    `approve`, `resolve` and `event` also need the connection to say it is the app (`auth` with
+    `client: "app"`, which the window's connection sends and `kelpied` does not). That is a convention, not a
+    boundary: whoever holds the user token can send it, and the user token already allows everything these do
+    (it can create sessions). The boundary against agents is the session token, which these methods refuse.
+    `event` takes only `file`, `pr_checks_failed` and `finished`.
+    `automation.list` adds `command_hash` to commands.
 - **Keep awake** (`awake.rs`, `daemon.set_awake`): Windows `SetThreadExecutionState` from one
   dedicated thread, macOS a `caffeinate -i -w <pid>` child; mode *agents* holds it while any
   non-shell session is working.

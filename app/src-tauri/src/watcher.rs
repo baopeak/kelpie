@@ -2,7 +2,8 @@
 //!
 //! Raw notify events are filtered (dependency/build dirs, `.git` internals except the files
 //! that change git status) and coalesced for 150 ms, then emitted as one `fs-changed` event
-//! per root with the set of affected directories, so the explorer reloads only those.
+//! per root with the set of affected directories, so the explorer reloads only those. The changed
+//! files (a bounded list) also go to the daemon, which matches them against automations' file triggers.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -13,17 +14,22 @@ use std::time::Duration;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use serde_json::json;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
+use crate::daemon_client::DaemonClient;
 use crate::fs_ops::{err, CmdResult};
 use crate::search::FileIndex;
 
 const IGNORED_DIRS: &[&str] = &["node_modules", "target", "dist", "build", ".next", ".venv", "__pycache__", ".cache", ".turbo"];
 const DEBOUNCE: Duration = Duration::from_millis(150);
+/// Most changed files kept per batch (a build or a checkout can touch thousands).
+const MAX_FILES: usize = 200;
 
 #[derive(Default)]
 struct Pending {
     dirs: BTreeSet<String>,
+    /// Changed files, relative to the root.
+    files: BTreeSet<String>,
     git: bool,
     structural: bool,
 }
@@ -68,8 +74,22 @@ impl Watchers {
                     self.index.invalidate(&root);
                 }
                 let _ = self.app.emit("fs-changed", json!({"root": root, "dirs": p.dirs, "git": p.git}));
+                self.report_files(root, p.files);
             }
         }
+    }
+
+    /// Tells the daemon which files changed, for file-triggered automations. Fire and forget: a daemon
+    /// that predates them answers with an error, and without one there is nobody to tell.
+    fn report_files(&self, root: String, files: BTreeSet<String>) {
+        if files.is_empty() {
+            return;
+        }
+        let Some(client) = self.app.try_state::<Arc<DaemonClient>>() else { return };
+        let client = client.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = client.call("automation.event", json!({"kind": "file", "root": root, "files": files})).await;
+        });
     }
 
     pub fn watch(&self, root: &str) -> CmdResult<()> {
@@ -119,8 +139,11 @@ impl Watchers {
                         entry.git = true;
                         changed = true;
                     }
-                    Change::Dir(dir) => {
+                    Change::File { dir, path } => {
                         entry.dirs.insert(dir);
+                        if entry.files.len() < MAX_FILES {
+                            entry.files.insert(path);
+                        }
                         entry.structural |= structural;
                         // Working-tree edits change `git status` too.
                         entry.git = true;
@@ -148,8 +171,8 @@ impl Watchers {
 enum Change {
     Ignored,
     Git,
-    /// Parent directory (relative, `/`-separated, "" for root) of the changed entry.
-    Dir(String),
+    /// The changed entry (relative, `/`-separated) and its parent directory ("" for root).
+    File { dir: String, path: String },
 }
 
 fn classify(root: &Path, path: &Path) -> Change {
@@ -166,7 +189,7 @@ fn classify(root: &Path, path: &Path) -> Change {
     if parts.iter().any(|p| IGNORED_DIRS.contains(&p.as_str())) {
         return Change::Ignored;
     }
-    Change::Dir(parts[..parts.len().saturating_sub(1)].join("/"))
+    Change::File { dir: parts[..parts.len().saturating_sub(1)].join("/"), path: parts.join("/") }
 }
 
 // Creating or dropping a recursive watcher on a large tree can take a long time on Windows;
@@ -198,8 +221,8 @@ mod tests {
     #[test]
     fn classifies_paths() {
         let root = Path::new("/p");
-        assert!(matches!(classify(root, Path::new("/p/src/a.rs")), Change::Dir(d) if d == "src"));
-        assert!(matches!(classify(root, Path::new("/p/a.rs")), Change::Dir(d) if d.is_empty()));
+        assert!(matches!(classify(root, Path::new("/p/src/a.rs")), Change::File { dir, path } if dir == "src" && path == "src/a.rs"));
+        assert!(matches!(classify(root, Path::new("/p/a.rs")), Change::File { dir, path } if dir.is_empty() && path == "a.rs"));
         assert!(matches!(classify(root, Path::new("/p/.git/index")), Change::Git));
         assert!(matches!(classify(root, Path::new("/p/.git/objects/ab/cd")), Change::Ignored));
         assert!(matches!(classify(root, Path::new("/p/.git/refs/heads/main")), Change::Git));

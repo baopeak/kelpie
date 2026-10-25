@@ -189,6 +189,11 @@ impl Vt {
         (self.term.columns() as u16, self.term.screen_lines() as u16)
     }
 
+    /// Whether the program asked to get pastes between markers (agent TUIs do).
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
     }

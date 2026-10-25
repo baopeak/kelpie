@@ -129,11 +129,11 @@ Agents live in a background session daemon, so switching projects, closing the w
 - **Activity inbox** behind the bell in the status bar: agents that finished or need you, automation runs and new worktrees across every project, newest first; jump to any of them, mark read, filter. An optional sound plays with desktop notifications.
 - **Notifications on your phone, with the window closed**: the daemon sends needs-you, done, failed, automation, run-approval and cost-cap events to ntfy (random topic), Telegram or a webhook, with credentials masked, per-event switches and a turn-length filter. Secrets stay in the OS credential store.
 - **Usage-limit actions**: a Claude Code session stopped by its usage limit offers *Continue at reset* (typed by the daemon, only if the session is still limited and untouched), *Switch account* (the conversation moves to the other account's folder) and *Hand off*.
-- **Scheduled automations**: an agent prompt (or shell command) in a folder every hour, day, weekday or week. The daemon runs them, also while the window is closed; *Run now*, enable / disable, and every run lands in the inbox.
+- **Automations**: an agent prompt, a saved prompt typed into an idle agent, or an approved command (no shell: file names are never interpreted) in a folder every hour, day, weekday or week, or when a file matching a pattern changes, an agent finishes a turn, a commit is made, pull request checks fail or a worktree is finished. At most one run a minute, a daily cap, never while the agent it started is still working, a pause switch in the status bar and a dry run. The daemon runs them, also while the window is closed (file, pull request and finish triggers need the window); *Run now*, enable / disable, and every run lands in the inbox.
 
 | | |
 |---|---|
-| ![Activity inbox](docs/screenshots/inbox.png) **Activity** — what finished, what needs you, what ran. | ![Scheduled automations](docs/screenshots/automations.png) **Automations** — agent prompts on a schedule, run by the daemon. |
+| ![Activity inbox](docs/screenshots/inbox.png) **Activity** — what finished, what needs you, what ran. | ![Scheduled automations](docs/screenshots/automations.png) **Automations** — agent prompts on a schedule or on an event, run by the daemon. |
 
 ### Usage, settings and shortcuts
 
@@ -336,6 +336,7 @@ End-to-end tests drive the real app through WebDriver (`tauri-driver` + a matchi
 | `scripts/e2e/chat.py` | Claude / Codex / OMP: TUI ↔ chat with the same conversation (real model calls) |
 | `scripts/e2e/phase1.py` … `phase5.py` | key hints, explorer, sidebar, search, history, usage, quick commands, settings, shortcuts, navigation, themes, worktrees, board, state migration |
 | `scripts/e2e/parity.py` | agent presets and Yolo, startup prompts, `kelpied terminal` / `worktree` CLI, push / pull / sync / abort, worktree copy / link, review notes, inbox, floating terminal, hibernation, keep-awake, themes, viewers, automations (`--ai`: one real one-shot call) |
+| `scripts/e2e/event_automations.py` | event-triggered automations: file / turn / commit / pull request / finish triggers, approved commands with literal event data, no re-trigger by the session an automation started, caps, dry run, the status-bar switch, who may call what, a damaged or old automations file |
 | `scripts/e2e/finish.py` | review cards, Review tab, request changes, Finish (WIP commit, approved checks, squash, branch and worktree cleanup), a branch editing `.kelpie.yaml`, conflicts, overlap chips, auto-worktree, automation delivery, queue refresh time |
 | `scripts/e2e/layouts.py` | grids, per-row counts, drag to swap / move, equalize, broadcast, saved layouts, resume after a daemon restart (real Claude, terminal and chat) |
 | `scripts/e2e/tabs_panes.py` | a lone pane has no header; Tile all gathers one-pane tabs into an even grid (4 → 2 × 2, 5th → 3 + 2), Spread into tabs undoes it; split tabs stay |

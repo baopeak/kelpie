@@ -82,7 +82,7 @@ impl DaemonClient {
                     // session, even when started from a Kelpie terminal). A daemon older than
                     // tokens answers with an error the read loop ignores.
                     if let Some(token) = kelpie_proto::read_user_token(&endpoint) {
-                        let _ = out_tx.send(Frame::json(&json!({"id": "auth", "method": "auth", "params": {"token": token}})).encode());
+                        let _ = out_tx.send(Frame::json(&json!({"id": "auth", "method": "auth", "params": {"token": token, "client": "app"}})).encode());
                     }
                     *self.out.lock() = Some(out_tx);
                     self.connected.store(true, Ordering::SeqCst);

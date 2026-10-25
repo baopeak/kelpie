@@ -233,6 +233,7 @@ fn serve() -> Result<()> {
     let daemon = daemon::Daemon::new(data_dir, exe);
     daemon.restore();
     daemon.collect_checkpoints();
+    daemon.poll_commits(true);
     tracing::info!(pid = std::process::id(), "kelpied {} starting", env!("CARGO_PKG_VERSION"));
     let rt = runtime()?;
     let result = rt.block_on(async {

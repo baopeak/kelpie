@@ -487,6 +487,60 @@ the window is closed; *Run now* tries one immediately. Runs missed by more than 
 (computer asleep) are skipped, not caught up. *When it finishes* can move the project's card to
 the board's Review column once the run's first turn ends (a daemon restart in the middle forgets it).
 
+**When something happens.** *Starts → When something happens* runs an automation on an event instead of the clock:
+
+| Event | Seen by | Also with the window closed |
+|---|---|---|
+| A file changes (a pattern such as `**/*.md`; a pattern without `/` matches the file name anywhere) | the window's file watcher | no |
+| An agent finishes a turn in the project | the daemon | yes |
+| A commit is made (HEAD moves on its branch: by hand, by an agent, a rebase or an amend; not a checkout) | the daemon, which asks git every ten seconds and when an agent's turn ends | yes |
+| Pull request checks fail (`gh`, looked at when the Git panel refreshes and every five minutes for projects that have such an automation) | the window | no |
+| A worktree is finished (Finish merged it) | the window | no |
+
+What it does: start an agent session with the prompt, **type a saved prompt** (a Quick command for agents) into an
+session that automation started earlier (a new session the first time, and never one you opened yourself, nor one
+you typed into in the last 30 seconds), or **run a command**. The prompt gets a short note of what happened (the
+changed files, the commit, listed as names, not instructions). A command is a program and its arguments, started
+**without a shell**: nothing is parsed, expanded or interpolated, so a file named `$(rm -rf ~)` is just a name. The
+program is looked up in the automation's folder (a path such as `scripts\lint.cmd`) or on `PATH`, with the usual
+Windows extensions (`npm` finds `npm.cmd`), and the approval covers the file that was found. An
+argument that is only `{file}`, `{files}`, `{commit}` or `{branch}` is replaced by that value; the same data is in
+`KELPIE_EVENT`, `KELPIE_ROOT`, `KELPIE_FILE`, `KELPIE_FILES` (one per line), `KELPIE_COMMIT`, `KELPIE_BRANCH` and
+`KELPIE_PR_NUMBER`. After saving a command, the list shows its hash and **Approve command**; changing the program,
+its arguments or the folder takes the approval away. Commands can only be created, edited and approved from the
+Kelpie window; programs running in a session cannot touch automations at all.
+
+Kelpie gives event data only to commands that cannot turn it into code. A program that is not a command interpreter
+(`git`, a real `.exe`, a `.cmd` file called directly) gets it as whole arguments. A **command interpreter**
+(PowerShell, bash and other shells, python, node, ruby, perl, php, deno…) gets it only when it runs a **script file
+inside the project**: `powershell -File scripts\lint.ps1 {file}`, `bash lint.sh {file}`, `python lint.py {file}`; the
+script reads the name from its arguments or from `KELPIE_FILE` (in a batch file, quote it). Anything that hands one
+line to another shell or machine (`cmd`, `ssh`, `wsl`, `sudo`, `env`, `start`, `xargs`…), and every package manager and build tool (`npm`, `pnpm`, `yarn`, `make`, `cmake`, `gradle`, `mvn`, `msbuild`, `just`, `rake`, and wrappers that run another program such as `uv run`, `poetry run`, `bundle exec`, `direnv exec`, `mise exec`, `nix-shell`, `docker run`, `doppler run`…: they run targets and scripts through a shell, and `npm run` expands `%VAR%` in a name), is not given event data at all,
+and neither is `powershell` without `-File`, `bash -c`, `python -c`, `node -e` and the like. Kelpie refuses such a
+command when you save it and says what to write instead. The approval covers the **contents** of the script (and of the
+program, when it lives in the project): if an agent edits the script, the automation stops with a note in the inbox
+until you approve it again. A program Kelpie has no rule for (`git`, a plain `.exe`) is given the names as arguments, and the approval dialog says so in a warning: approve it only if it never runs them as commands. An agent kind of `shell` or `custom` counts as a command too (approval, and no event data
+typed into it).
+
+Guards: an event automation runs **at most once a minute**, **at most N times a day** (default 10; you are told
+once when the limit is reached), **not while a session or command it started is working** (or in the five seconds
+after), and never while automations are **paused** (the bolt in the status bar, shown once any automation exists).
+The agent an automation starts therefore does not set the same automation off again with its own edits, but it can
+set off a different automation. *Dry run* (a checkbox, and a button on every automation) matches events and notes
+what would happen without starting anything. *Run now* and a manual dry run use an example event. Automations that
+one automation's work sets off in turn are cut off after three links (the inbox says so). Patterns match
+case-insensitively on Windows only, and `[abc]` classes are taken literally; a file watched through a folder inside
+the automation's folder is matched by its path from the watched folder.
+
+Automations are kept in `automations.json` with a version. An older file is upgraded after a copy to
+`automations.json.bak`. A file that cannot be read is renamed `automations.json.corrupt-<time>`, you are told in the
+activity inbox, and nothing is written until you press **Dismiss** in Settings → Automations, also after a restart.
+Every save keeps a copy as `automations.json.v2`. Downgrading Kelpie is not supported (an older version shows an
+empty list and replaces the file with its own); if it happens, the next start of this version tells you and offers
+**Restore the newer list** (which also keeps what the older version added) or **Keep the current list**. The daemon
+must be restarted once after an update (Settings → Session Daemon) before these options appear; an older daemon would
+treat an event automation as a daily one, so the editor does not offer them.
+
 ### Layouts
 
 **Tabs and panes.** A tab is one piece of work; panes are what you look at side by side inside

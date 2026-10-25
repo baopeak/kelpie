@@ -5,6 +5,7 @@
 // this decides what may run and sequences it. Loaded with the Finish dialog and the review cards.
 import * as ipc from "./ipc";
 import { store } from "./store";
+import { automationEvents } from "./automation-events";
 import { t } from "./i18n";
 import { kindInfo, isAgentKind } from "./agents";
 import { configAtRef, checksApproved, removeWorktree, stopSessions, type KelpieConfig } from "./worktrees";
@@ -190,6 +191,7 @@ export async function runFinish(input: FinishInput, onStep: (text: string, pastM
 
     // The merge is done and recorded: the card is Done whatever happens to the folder.
     store.setProjectStatus(wt.id, "done");
+    automationEvents.report({ kind: "finished", root: repo.path, branch, commit: commit ?? undefined });
     if (cancelled()) {
       // Past the point where Cancel can mean "nothing changed": leave a normal worktree and say what is merged.
       if (r.branch_deleted) await ipc.finishRestoreBranch(repo.path, branch, r.tip, wt.path).catch(() => {});

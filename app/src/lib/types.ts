@@ -414,6 +414,44 @@ export interface Automation {
   next_run: number;
   /** When the run finishes: "review" moves the folder's card to the Review column. */
   deliver?: "review" | null;
+  /** Runs on an event instead of the clock (`every` / `time` / `weekday` are then unused). */
+  trigger?: AutomationTrigger | null;
+  /** agent: a new session; quick: a saved prompt typed into an idle session of the agent; shell: a program, no shell. */
+  action?: "agent" | "quick" | "shell";
+  shell?: { program: string; argv: string[]; approved_hash?: string | null } | null;
+  quick_label?: string | null;
+  /** Records what it would do and does nothing. */
+  dry_run?: boolean;
+  last_note?: string | null;
+  cap_day?: string;
+  cap_count?: number;
+}
+
+export type AutomationEventKind = "file" | "turn" | "commit" | "pr_checks_failed" | "finished";
+
+export interface AutomationTrigger {
+  event: AutomationEventKind;
+  /** file: comma-separated patterns relative to the folder. */
+  glob: string;
+  daily_cap: number;
+}
+
+/** What the window tells the daemon (`automation.event`). */
+export interface AutomationEvent {
+  kind: "file" | "pr_checks_failed" | "finished";
+  root: string;
+  files?: string[];
+  branch?: string;
+  commit?: string;
+  number?: number;
+}
+
+export interface AutomationState {
+  paused: boolean;
+  /** Why saving is refused (a damaged automations file, or a newer list found beside an older one). */
+  error: string | null;
+  /** What the user can do about it: dismiss the notice, or restore / keep the newer list. */
+  fix?: "dismiss" | "restore" | null;
 }
 
 export interface RecentItem {

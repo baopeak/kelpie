@@ -112,6 +112,15 @@ mod imp {
             }
         }
 
+        /// Lets go of the processes still in the job: closing it no longer kills them (a command that opened
+        /// an application keeps it).
+        pub fn release(&self) {
+            unsafe {
+                let info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                SetInformationJobObject(self.job, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32);
+            }
+        }
+
         /// The flag `set_current_thread_quiet` follows in the session's output reader.
         pub fn quiet_flag(&self) -> Arc<AtomicBool> {
             self.quiet.clone()
@@ -235,11 +244,12 @@ mod imp {
 
     pub struct ProcTree {
         pgid: i32,
+        released: std::sync::atomic::AtomicBool,
     }
 
     impl ProcTree {
         pub fn adopt(pid: u32, _console: Option<u32>, _agent: Option<&str>) -> io::Result<ProcTree> {
-            Ok(ProcTree { pgid: pid as i32 })
+            Ok(ProcTree { pgid: pid as i32, released: std::sync::atomic::AtomicBool::new(false) })
         }
 
         /// SIGHUP+SIGTERM now, SIGKILL after a grace period for anything still alive.
@@ -255,6 +265,11 @@ mod imp {
                     libc::killpg(pgid, libc::SIGKILL);
                 }
             });
+        }
+
+        /// Lets go of the group: dropping this no longer hangs it up.
+        pub fn release(&self) {
+            self.released.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         pub fn quiet_flag(&self) -> Arc<AtomicBool> {
@@ -276,14 +291,18 @@ mod imp {
     /// Like the Windows job's kill-on-close: whatever the session left running goes too.
     impl Drop for ProcTree {
         fn drop(&mut self) {
-            unsafe {
-                libc::killpg(self.pgid, libc::SIGHUP);
+            if !self.released.load(std::sync::atomic::Ordering::Relaxed) {
+                unsafe {
+                    libc::killpg(self.pgid, libc::SIGHUP);
+                }
             }
         }
     }
 }
 
 pub use imp::{console_hosts, set_current_thread_quiet, set_daemon_priority, ProcTree};
+#[cfg(all(test, windows))]
+pub use imp::children_for_test;
 
 #[cfg(all(test, windows))]
 mod tests {

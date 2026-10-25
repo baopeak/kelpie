@@ -8,6 +8,7 @@ import { activeRuns } from "../lib/runs";
 import { available, whenIdle } from "../lib/updater";
 import { pluginStatus, pluginStatusItems, type PluginInfo, type PluginStatusItem } from "../lib/plugins";
 import { t, msg } from "../lib/i18n";
+import { automationEvents } from "../lib/automation-events";
 
 const waitingApproval = () => activeRuns().reduce((n, r) => n + r.tasks.filter((t) => t.status === "waiting_approval").length, 0);
 
@@ -90,6 +91,13 @@ export function StatusBar() {
         <span class="item clickable" title={t("Orchestration runs in progress")} onClick={() => store.setOverlay("runs")}>
           <Icon name="board" size={13} /> {activeRuns().length === 1 ? t("{n} run", { n: 1 }) : t("{n} runs", { n: activeRuns().length })}
           <Show when={waitingApproval()}><span class="badge waiting" title={t("Tasks waiting for approval")}>{waitingApproval()}</span></Show>
+        </span>
+      </Show>
+      {/* The global switch: nothing starts by itself while it is off. Shown when there is something to switch. */}
+      <Show when={automationEvents.active() || automationEvents.state().paused}>
+        <span class={`item clickable${automationEvents.state().paused ? "" : " on"}`} title={automationEvents.state().paused ? t("Automations are paused: nothing starts by itself. Click to resume.") : t("Automations are on. Click to pause every automatic run.")} onClick={() => void automationEvents.setPaused(!automationEvents.state().paused)}>
+          <Icon name="bolt" size={13} />
+          <Show when={automationEvents.state().paused}>{t("paused")}</Show>
         </span>
       </Show>
       <span class={`item clickable${awake() !== "off" ? " on" : ""}`} title={t(AWAKE_TITLE[awake()])} onClick={cycleAwake}>

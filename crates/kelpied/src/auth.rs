@@ -262,15 +262,21 @@ fn own_folder(path: &str, cwd: &str) -> bool {
     within(&crate::meta::key(path), &crate::meta::key(cwd))
 }
 
+/// A path the way folders are compared: `/` separators, no trailing one, lowercase on Windows.
+pub(crate) fn norm(p: &str) -> String {
+    let p = p.replace('\\', "/");
+    let p = p.trim_end_matches('/').to_string();
+    if cfg!(windows) { p.to_lowercase() } else { p }
+}
+
 /// `path` is `root` or inside it (case-insensitive and separator-agnostic on Windows).
-fn within(path: &str, root: &str) -> bool {
-    let norm = |p: &str| {
-        let p = p.replace('\\', "/");
-        let p = p.trim_end_matches('/').to_string();
-        if cfg!(windows) { p.to_lowercase() } else { p }
-    };
-    let (p, r) = (norm(path), norm(root));
-    !r.is_empty() && (p == r || p.starts_with(&format!("{r}/")))
+pub(crate) fn within(path: &str, root: &str) -> bool {
+    within_norm(&norm(path), &norm(root))
+}
+
+/// [`within`] for paths already through [`norm`].
+pub(crate) fn within_norm(path: &str, root: &str) -> bool {
+    !root.is_empty() && path.starts_with(root) && (path.len() == root.len() || path.as_bytes()[root.len()] == b'/')
 }
 
 #[cfg(test)]
@@ -376,7 +382,7 @@ mod tests {
         let user = Role::User;
         let s = Role::Session("s".into());
         let claimed = Role::Claimed("s".into());
-        let admin = ["agent.set_custom", "automation.save", "automation.run", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys"];
+        let admin = ["agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys"];
         for m in admin {
             assert!(allowed(&user, false, m), "user: {m}");
             assert!(!allowed(&s, true, m), "scripting session: {m}");

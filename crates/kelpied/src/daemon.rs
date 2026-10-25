@@ -26,6 +26,8 @@ use crate::scheduled_input::{ScheduledInputs, CONTINUE_TEXT};
 use crate::session::{json_out, now_millis, ClientTx, Session, SessionInfo, SessionSpec};
 use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, turn_event};
 
+mod automation;
+
 #[derive(Clone)]
 pub enum Entry {
     Term(Arc<Session>),
@@ -81,6 +83,8 @@ pub struct Daemon {
     /// Review notes on worktrees' diffs (see `notes.rs`).
     notes: Mutex<NoteStore>,
     automations: Mutex<Automations>,
+    /// What the automations that events set off need to remember (see `daemon/automation.rs`).
+    auto_rt: automation::Runtime,
     runs: Mutex<Runs>,
     pub mobile: crate::mobile::Mobile,
     awake: Awake,
@@ -194,6 +198,7 @@ impl Daemon {
                 workspace_meta: Mutex::new(MetaStore::load(&data_dir)),
                 notes: Mutex::new(NoteStore::load(&data_dir)),
                 automations: Mutex::new(Automations::load(&data_dir)),
+                auto_rt: automation::Runtime::new(),
                 runs: Mutex::new(Runs::load(&data_dir)),
                 mobile: crate::mobile::Mobile::load(&data_dir),
                 awake: Awake::new(),
@@ -501,31 +506,6 @@ impl Daemon {
         })
     }
 
-    /// Starts the automation's agent with its prompt and records the run.
-    pub fn run_automation(&self, id: &str) -> Result<SessionInfo> {
-        let a = self.automations.lock().list.iter().find(|a| a.id == id).cloned().ok_or_else(|| anyhow!("no automation {id}"))?;
-        let result = self.create(json!({
-            "kind": a.kind,
-            "cwd": a.cwd,
-            "project_id": a.project_id,
-            "name": a.name,
-            "args": a.args,
-            "env": a.env,
-            "prompt": a.prompt,
-        }));
-        let (session, error) = match &result {
-            Ok(info) => (Some(info.spec.id.clone()), None),
-            Err(e) => (None, Some(format!("{e:#}"))),
-        };
-        if let (Some(id), Some(DELIVER_REVIEW)) = (&session, a.deliver.as_deref()) {
-            self.deliver_review.lock().insert(id.clone(), a.cwd.clone());
-        }
-        self.automations.lock().record(id, now_millis(), session.clone(), error.clone());
-        self.broadcast("automation.ran", json!({"id": id, "name": a.name, "session_id": session, "error": error}));
-        self.raise(Raised { project_id: a.project_id.clone(), ..Raised::automation(&a.name, session, error) }, true);
-        result
-    }
-
     /// Answers on `tx` once the one-shot run finishes (see `oneshot.rs`).
     fn agent_run(&self, tx: &ClientTx, id: &Value, params: &Value) -> Result<()> {
         let kind = params.get("kind").and_then(Value::as_str).unwrap_or("claude").to_string();
@@ -821,6 +801,7 @@ impl Daemon {
     pub fn unregister_client(&self, id: u64) {
         self.clients.lock().remove(&id);
         self.client_roles.lock().remove(&id);
+        self.auto_rt.drop_client(id);
         self.notifier.drop_client(id);
         for entry in self.sessions.read().values() {
             entry.detach(id);
@@ -1306,16 +1287,10 @@ impl Daemon {
             if now.duration_since(last_schedule) >= Duration::from_secs(10) {
                 last_schedule = now;
                 self.update_awake();
-                let due = self.automations.lock().due(now_millis());
-                for id in due {
-                    let me = self.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        if let Err(e) = me.run_automation(&id) {
-                            tracing::warn!("automation {id}: {e:#}");
-                        }
-                    })
-                    .await;
-                }
+                // Each on its own thread: a run that takes a while never holds up the ticker.
+                self.run_due_automations();
+                self.poll_commits(false);
+                self.announce_automation_problem();
             }
             let entries: Vec<Entry> = self.sessions.read().values().cloned().collect();
             let prioritize = self.prioritize.load(Ordering::Relaxed);
@@ -1372,6 +1347,12 @@ impl Daemon {
                         let started = self.checkpoints.take_work_start(&info.spec.id, now_millis());
                         // Looking for the repository touches the disk: not on the ticker.
                         let (me, info) = (self.clone(), info.clone());
+                        // Automations see the turn end first, in case it was their own session's.
+                        {
+                            let me = me.clone();
+                            let info = info.clone();
+                            tokio::task::spawn_blocking(move || me.automation_turn_ended(&info));
+                        }
                         tokio::task::spawn_blocking(move || me.checkpoint_turn_end(&info, hooks, typed, started));
                     }
                     if (matches!(prev, Some(Status::Working | Status::Waiting)) && matches!(info.status, Status::Idle | Status::Exited)) || !info.alive {
@@ -1590,18 +1571,7 @@ impl Daemon {
                 let opt = |k: &str| params.get(k).map(|v| v.as_str().unwrap_or(""));
                 self.set_meta(path, opt("comment"), opt("status"))?
             }
-            "automation.list" => serde_json::to_value(&self.automations.lock().list)?,
-            "automation.save" => {
-                let a: Automation = serde_json::from_value(params).context("automation")?;
-                let saved = self.automations.lock().upsert(a)?;
-                self.broadcast("automation.changed", json!({}));
-                serde_json::to_value(saved)?
-            }
-            "automation.delete" => {
-                self.automations.lock().remove(param(&params, "id")?.as_str().unwrap_or_default())?;
-                self.broadcast("automation.changed", json!({}));
-                json!(true)
-            }
+            m if m.starts_with("automation.") => self.automation_rpc(client, m, params)?,
             m if m.starts_with("run.") => {
                 let out = self.run_rpc(m, &params)?;
                 // What lets a task start (a new run, an approval, a retry, a task that ended) does not wait for the next tick.
@@ -1625,7 +1595,6 @@ impl Daemon {
                 return Ok(None);
             }
             m if m.starts_with("checkpoint.") => self.checkpoint_rpc(m, &params)?,
-            "automation.run" => serde_json::to_value(self.run_automation(param(&params, "id")?.as_str().unwrap_or_default())?)?,
             "daemon.shutdown" => {
                 // A hand-over to a newer daemon: only when nothing runs any more (checked here,
                 // not from a session list the app read a moment ago).
