@@ -698,6 +698,8 @@ saves them as running before the process exits, and `restore()` marks them inter
 sidecars `build-release.sh` joins with `lipo` when `KELPIE_TARGET` says so), and
 `scripts/release/latest_json.py` writes the manifest (`darwin-aarch64` and `darwin-x86_64` both point
 at the universal bundle) into a **draft** release; apps see it once the draft is published.
+Each runner checks only its own platform's app binary before uploading artifacts. A missing
+binary or a compiled updater test override stops the build before a draft can be published.
 
 ## Worktrees
 
