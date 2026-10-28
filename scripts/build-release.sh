@@ -50,6 +50,10 @@ if [ "${KELPIE_TARGET:-}" = "universal-apple-darwin" ]; then
   # One macOS build for Apple Silicon and Intel: each sidecar for both, joined with lipo.
   for t in aarch64-apple-darwin x86_64-apple-darwin; do
     cargo build --release -p kelpied -p kelpie-stt --target "$t"
+    # Tauri's per-architecture Rust builds need these before final universal bundling.
+    for bin in kelpied kelpie-stt; do
+      cp "$out_dir/$t/release/$bin" "app/src-tauri/binaries/$bin-$t"
+    done
   done
   for bin in kelpied kelpie-stt; do
     lipo -create -output "app/src-tauri/binaries/$bin-universal-apple-darwin" \
