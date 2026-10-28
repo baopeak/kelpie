@@ -1,0 +1,117 @@
+{
+  "metrics": {
+    "cold_start_ms": 2985.37,
+    "switch_median_ms": 24.8,
+    "echo_median_ms": 16.6,
+    "idle_cpu_pct": 1.3,
+    "rss_mb": 508.65,
+    "entry_gz_kb": 323.6,
+    "long_tasks": 0,
+    "bench_wall_s": 3.72,
+    "echo_p95_ms": 21.7,
+    "switch_p95_ms": 36
+  },
+  "history": [
+    {
+      "date": "2026-10-23T09:20:18+07:00",
+      "label": "baseline",
+      "reason": "initial baseline",
+      "metrics": [
+        "bench_wall_s",
+        "cold_start_ms",
+        "echo_median_ms",
+        "echo_missed",
+        "echo_p95_ms",
+        "echo_samples",
+        "entry_gz_kb",
+        "idle_cpu_pct",
+        "idle_seconds",
+        "long_tasks",
+        "pty_idle_cpu_pct",
+        "pty_rss_mb",
+        "rss_mb",
+        "sessions",
+        "switch_median_ms",
+        "switch_p95_ms",
+        "switch_samples"
+      ]
+    }
+  ],
+  "label": "baseline",
+  "created": "2026-10-23T09:20:18+07:00",
+  "machine": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "cpu": "Intel(R) Core(TM) i5-6440HQ CPU @ 2.60GHz",
+    "python": "3.14.6",
+    "cores": "4 physical / 4 logical",
+    "ram_gb": 7.9,
+    "commit": "bca2899"
+  },
+  "runs": 3,
+  "spread_pct": {
+    "cold_start_ms": 37.4,
+    "echo_median_ms": 0.0,
+    "echo_p95_ms": 2.3,
+    "idle_cpu_pct": 122.3,
+    "rss_mb": 2.3,
+    "switch_median_ms": 1.0,
+    "switch_p95_ms": 0.6
+  },
+  "range": {
+    "cold_start_ms": [
+      2620.41,
+      3735.67
+    ],
+    "echo_median_ms": [
+      16.6,
+      16.6
+    ],
+    "echo_p95_ms": [
+      21.4,
+      21.9
+    ],
+    "idle_cpu_pct": [
+      1.12,
+      2.71
+    ],
+    "long_tasks": [
+      0,
+      0
+    ],
+    "rss_mb": [
+      500.61,
+      512.53
+    ],
+    "switch_median_ms": [
+      24.65,
+      24.9
+    ],
+    "switch_p95_ms": [
+      35.9,
+      36.1
+    ]
+  },
+  "details": {
+    "bundle": {
+      "entry_file": "index-CsYkw8D5.js",
+      "lazy_chunks": 219,
+      "lazy_gz_kb": 1627.35,
+      "largest_lazy": {
+        "chunk-FOHPRMQF-DD4dKubD.js": 143.15,
+        "cytoscape.esm-BegBNzOV.js": 137.75,
+        "terminal-host-DX578UMD.js": 136.76,
+        "katex-DJhrJSbw.js": 77.43,
+        "architectureDiagram-5GKGNRK7-DnpfkwMF.js": 41.08
+      }
+    },
+    "bench": {
+      "bench_runs_s": [
+        3.72,
+        4.0,
+        3.71
+      ],
+      "bench_mib_s": 14.6
+    }
+  },
+  "notes": "Medians of 3 launches of the release build on a 4-core i5-6440HQ / 8 GB laptop shared with other builds: cold start (2.6-3.7 s) and idle CPU (1.1-2.7 % of a core) varied more than the 10 % target, the page-timed metrics (switch, echo) and RSS stayed within 2 %. Re-baseline on a quiet machine with --update-baseline --reason before relying on cold start or idle CPU verdicts."
+}

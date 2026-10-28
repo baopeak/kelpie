@@ -16,6 +16,25 @@ export function allPanes(node: LayoutNode): Pane[] {
   return node.type === "leaf" ? [node.pane] : node.children.flatMap(allPanes);
 }
 
+/** Panes as the eye reads them: top to bottom, then left to right on the same line — whatever
+ *  way the tree nests (a grid can be rows of columns or columns of rows). */
+export function readingOrder(node: LayoutNode): Pane[] {
+  const placed: { pane: Pane; x: number; y: number }[] = [];
+  const walk = (n: LayoutNode, x: number, y: number, w: number, h: number) => {
+    if (n.type === "leaf") return void placed.push({ pane: n.pane, x, y });
+    let at = 0;
+    n.children.forEach((child, i) => {
+      const share = n.sizes[i] ?? 1 / n.children.length;
+      if (n.dir === "row") walk(child, x + at * w, y, share * w, h);
+      else walk(child, x, y + at * h, w, share * h);
+      at += share;
+    });
+  };
+  walk(node, 0, 0, 1, 1);
+  // Tops within a hair of each other are one line (sizes are fractions that rarely add up exactly).
+  return placed.sort((a, b) => (Math.abs(a.y - b.y) > 1e-6 ? a.y - b.y : a.x - b.x)).map((p) => p.pane);
+}
+
 export function findPane(node: LayoutNode, paneId: string): Pane | undefined {
   return allPanes(node).find((p) => p.id === paneId);
 }
@@ -225,6 +244,17 @@ export const GRID_PRESETS: GridSpec[] = [
 
 export function validGrid(spec: GridSpec): boolean {
   return spec.counts.length >= 1 && spec.counts.length <= MAX_GRID && spec.counts.every((n) => Number.isInteger(n) && n >= 1 && n <= MAX_GRID);
+}
+
+/** The most even grid for `n` panes: about as many columns as rows, longer rows first
+ *  (4 → 2 + 2, 5 → 3 + 2, 7 → 3 + 2 + 2). Never more than MAX_GRID per line. */
+export function autoGrid(n: number): GridSpec {
+  const count = Math.max(1, Math.min(n, MAX_GRID * MAX_GRID));
+  const cols = Math.min(MAX_GRID, Math.ceil(Math.sqrt(count)));
+  const rows = Math.ceil(count / cols);
+  const base = Math.floor(count / rows);
+  const extra = count % rows;
+  return { mode: "rows", counts: Array.from({ length: rows }, (_, i) => base + (i < extra ? 1 : 0)) };
 }
 
 /** Lays `panes` out in the grid, in reading order. Missing cells get `filler()`. */

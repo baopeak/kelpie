@@ -3,12 +3,15 @@
 //! commands for the workbench.
 
 mod accounts;
+mod agent_config;
 mod agent_history;
 mod browser;
 mod daemon_client;
+mod daemon_runtime;
 mod external_editor;
 mod fs_ops;
 mod git;
+mod git_finish;
 mod git_sync;
 mod github;
 mod integrations;
@@ -16,9 +19,12 @@ mod plugins;
 mod voice;
 mod remote;
 mod search;
+mod session_usage;
 mod ssh_hosts;
 mod sys_stats;
+mod updater;
 mod usage;
+mod usage_report;
 mod watcher;
 mod worktree_files;
 
@@ -56,7 +62,7 @@ fn term_input(client: State<'_, Arc<DaemonClient>>, handle: u32, data: String, b
 /// App UI state (projects, layouts, settings) — a single JSON document owned by the UI.
 #[tauri::command]
 async fn state_load() -> CmdResult<Value> {
-    crate::fs_ops::blocking(move || state_load_blocking()).await
+    crate::fs_ops::blocking(state_load_blocking).await
 }
 
 fn state_load_blocking() -> CmdResult<Value> {
@@ -103,7 +109,50 @@ fn state_backup_blocking(label: String) -> CmdResult<Option<String>> {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let dst = dir.join(format!("app-state.{label}-{secs}.bak.json"));
     std::fs::copy(&src, &dst).map_err(err)?;
+    // A migration that may run at every start (review notes) leaves a few copies, not one per start.
+    if label == "notes" {
+        prune_backups(&dir, "notes", 3);
+    }
     Ok(Some(dst.to_string_lossy().into_owned()))
+}
+
+/// Deletes all but the newest `keep` of `app-state.<label>-<secs>.bak.json` (the time sorts them).
+fn prune_backups(dir: &std::path::Path, label: &str, keep: usize) {
+    let prefix = format!("app-state.{label}-");
+    let mut found: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let secs = name.strip_prefix(&prefix)?.strip_suffix(".bak.json")?.parse::<u64>().ok()?;
+            Some((secs, e.path()))
+        })
+        .collect();
+    found.sort_by_key(|(secs, _)| std::cmp::Reverse(*secs));
+    for (_, path) in found.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::prune_backups;
+
+    #[test]
+    fn only_the_newest_backups_of_a_label_are_kept() {
+        let dir = std::env::temp_dir().join(format!("kelpie-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["app-state.notes-100.bak.json", "app-state.notes-200.bak.json", "app-state.notes-300.bak.json", "app-state.notes-400.bak.json", "app-state.notes-1000.bak.json", "app-state.v2-50.bak.json", "app-state.json", "app-state.notes-x.bak.json"] {
+            std::fs::write(dir.join(name), "{}").unwrap();
+        }
+        prune_backups(&dir, "notes", 3);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["app-state.json", "app-state.notes-1000.bak.json", "app-state.notes-300.bak.json", "app-state.notes-400.bak.json", "app-state.notes-x.bak.json", "app-state.v2-50.bak.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[tauri::command]
@@ -112,11 +161,20 @@ fn platform_info() -> Value {
         "os": std::env::consts::OS,
         "home": std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default(),
         "data_dir": kelpie_proto::data_dir(),
-        // The daemon feature level this app was built against.
+        // The daemon feature level this app was built against, and the release both come from.
         "api": kelpie_proto::API_LEVEL,
+        "version": env!("CARGO_PKG_VERSION"),
+        "security": kelpie_proto::DAEMON_SECURITY_LEVEL,
         // Set by the end-to-end test runner: lets it drive a release build too.
         "e2e": std::env::var_os("KELPIE_E2E").is_some(),
     })
+}
+
+/// Text about to leave a session (a hand-off, Copy Context, notes or an issue sent to an agent)
+/// with recognisable credentials masked.
+#[tauri::command]
+fn redact_batch(texts: Vec<String>) -> Vec<String> {
+    texts.iter().map(|t| kelpie_proto::redact(t)).collect()
 }
 
 /// End-to-end tests only (dev builds or KELPIE_E2E): resizes the window itself. WebDriver's
@@ -171,7 +229,10 @@ pub fn run() {
         // the app opens links itself.
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updater::PendingUpdate::default())
         .setup(|app| {
+            fs_ops::sweep_temp();
             let index = Arc::new(search::FileIndex::default());
             app.manage(DaemonClient::start(app.handle().clone()));
             app.manage(watcher::Watchers::new(app.handle().clone(), index.clone()));
@@ -190,6 +251,9 @@ pub fn run() {
             state_save,
             state_backup,
             platform_info,
+            redact_batch,
+            updater::update_check,
+            updater::update_install,
             fs_ops::fs_list_dir,
             fs_ops::fs_is_dir,
             fs_ops::fs_canonical,
@@ -199,6 +263,8 @@ pub fn run() {
             fs_ops::fs_rename,
             fs_ops::fs_delete,
             fs_ops::fs_reveal,
+            fs_ops::fs_write_temp,
+            fs_ops::fs_read_image,
             search::quick_open,
             search::search_text,
             watcher::fs_watch,
@@ -215,6 +281,14 @@ pub fn run() {
             git::git_worktree_prune,
             git::git_show_file,
             git::git_orphan_commits,
+            git::git_head,
+            git_finish::review_changes,
+            git_finish::finish_inspect,
+            git_finish::finish_wip_commit,
+            git_finish::finish_integrate,
+            git_finish::finish_restore_branch,
+            git_finish::finish_cancel,
+            git_finish::finish_reset,
             git_sync::git_remote,
             git_sync::git_repo_state,
             git_sync::git_abort,
@@ -225,6 +299,7 @@ pub fn run() {
             github::gh_default_branch,
             github::gh_pr_create,
             worktree_files::worktree_materialize,
+            worktree_files::worktree_materialize_estimate,
             external_editor::editors_list,
             external_editor::editor_open,
             sys_stats::processes_alive,
@@ -232,9 +307,18 @@ pub fn run() {
             agent_history::agent_claude_transcript,
             agent_history::agent_history_list,
             usage::usage_fetch,
+            session_usage::session_usage,
+            usage_report::usage_report,
             accounts::account_create,
             accounts::account_remove,
             accounts::account_status,
+            accounts::account_transcript,
+            agent_config::agent_setup_overview,
+            agent_config::agent_setup_preview,
+            agent_config::agent_setup_apply,
+            agent_config::agent_setup_backups,
+            agent_config::agent_setup_reveal,
+            agent_config::agent_registry_fetch,
             integrations::integration_secret_set,
             integrations::integration_secret_clear,
             integrations::integration_secret_has,
@@ -264,6 +348,7 @@ pub fn run() {
             remote::remote_configure,
             remote::remote_hosts,
             remote::remote_check,
+            remote::remote_add_user,
             remote::remote_folders,
             plugins::plugin_list,
             plugins::plugin_dir,

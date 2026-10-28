@@ -7,6 +7,7 @@ import { CORE_AGENTS, agentPresets, kindInfo, loadAgentPresets } from "../../lib
 import { KindGlyph } from "../icons";
 import { Choice, SettingRow, Toggle } from "./setting-row";
 import type { AgentProfile } from "../../lib/types";
+import { confirmDialog } from "../../lib/confirm-dialog";
 
 /** Permission flags each agent understands; "" keeps the agent's own default. */
 const PERMISSIONS: Record<string, [string, string][]> = {
@@ -96,8 +97,8 @@ export function AgentSettings() {
   return (
     <>
       <SettingRow id="agent-permissions">
-        <Choice value={s().agentPermissions ?? "manual"} options={[["manual", t("Manual")], ["yolo", t("Yolo")]]} onChange={(v) => {
-          if (v === "yolo" && !confirm(t("Start agents with their skip-permission flags? They can then run commands and edit files without asking. A worktree is not a sandbox: the agent can still reach anything your account can."))) return;
+        <Choice value={s().agentPermissions ?? "manual"} options={[["manual", t("Manual")], ["yolo", t("Yolo")]]} onChange={async (v) => {
+          if (v === "yolo" && !(await confirmDialog(t("Start agents with their skip-permission flags? They can then run commands and edit files without asking. A worktree is not a sandbox: the agent can still reach anything your account can.")))) return;
           store.setSettings({ agentPermissions: v });
         }} />
       </SettingRow>
@@ -114,6 +115,9 @@ export function AgentSettings() {
       <SettingRow id="ai-agent">
         <Choice value={s().aiAgent ?? "claude"} options={[["claude", "Claude Code"], ["codex", "Codex"]]} onChange={(v) => store.setSettings({ aiAgent: v })} />
       </SettingRow>
+      <SettingRow id="auto-worktree">
+        <Choice value={s().autoWorktree ?? "ask"} options={[["ask", t("Ask")], ["always", t("Always")], ["never", t("Never")]]} onChange={(v) => store.setSettings({ autoWorktree: v })} />
+      </SettingRow>
       <SettingRow id="hibernate">
         <div class="inline-fields">
           <Toggle on={s().hibernate} onChange={(on) => store.setSettings({ hibernate: on })} />
@@ -124,6 +128,15 @@ export function AgentSettings() {
       </SettingRow>
       <SettingRow id="resume-sessions">
         <Choice value={s().resumeSessions ?? "shown"} options={[["shown", t("When shown")], ["all", t("All at once")], ["off", t("Off")]]} onChange={(v) => store.setSettings({ resumeSessions: v })} />
+      </SettingRow>
+      <SettingRow id="prioritize-visible">
+        <Toggle on={s().prioritizeVisible ?? true} onChange={(on) => store.setSettings({ prioritizeVisible: on })} />
+      </SettingRow>
+      <SettingRow id="turn-checkpoints">
+        <Toggle on={s().checkpoints ?? false} onChange={(on) => store.setSettings({ checkpoints: on })} />
+      </SettingRow>
+      <SettingRow id="agents-scripting">
+        <Toggle on={s().agentsScripting ?? true} onChange={(on) => store.setSettings({ agentsScripting: on })} />
       </SettingRow>
       <SettingRow id="keep-awake">
         <Choice value={s().keepAwake ?? "off"} options={[["off", t("Off")], ["agents", t("While agents work")], ["always", t("Always")]]} onChange={(v) => store.setSettings({ keepAwake: v })} />

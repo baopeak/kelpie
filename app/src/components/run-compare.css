@@ -1,0 +1,22 @@
+/* The Compare tab of the Runs page: candidates in columns, then two of them in a split diff. */
+.run-compare { display: flex; flex-direction: column; gap: 10px; min-height: 0; flex: 1; overflow: auto; padding-bottom: 12px; }
+.compare-bar { display: flex; align-items: center; gap: 8px; }
+.compare-grid { display: grid; grid-template-columns: 78px repeat(var(--cols), minmax(150px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-size: 12.5px; }
+.compare-grid > * { background: var(--bg-elev-2); padding: 6px 9px; min-width: 0; }
+.compare-label { color: var(--text-dim); font-size: 11.5px; display: flex; align-items: center; }
+.compare-head { display: flex; align-items: center; gap: 7px; font-weight: 600; flex-wrap: wrap; }
+.compare-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.compare-cell { font-family: var(--font-mono); display: flex; align-items: center; }
+.compare-cell.best { color: var(--added); font-weight: 600; }
+.compare-summary { font-family: var(--font-ui); color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.compare-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.compare-pick { display: flex; gap: 10px; }
+.compare-pick .field { flex: 1; }
+.compare-files { display: flex; flex-direction: column; max-height: 150px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; flex: none; }
+.compare-file { display: flex; gap: 10px; justify-content: space-between; text-align: left; padding: 3px 9px; border: 0; background: transparent; color: var(--text); font: 12px var(--font-ui); cursor: pointer; }
+.compare-file:hover { background: var(--bg-hover); }
+.compare-file.on { background: var(--bg-active, var(--bg-hover)); box-shadow: inset 3px 0 0 var(--accent); }
+.compare-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.compare-diff { display: flex; flex-direction: column; gap: 6px; min-height: 260px; flex: 1; }
+.compare-diff .cm-host { flex: 1; min-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+.compare-empty { padding: 8px 2px; }

@@ -1,11 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="10 8 180 184" role="img" aria-label="Kip cười tít mắt vì agent đã xong việc">
 <title>Kip xong việc</title>
-<path d="M160 44 L162 50 L168 52 L162 54 L160 60 L158 54 L152 52 L158 50 Z" fill="#F5B53F"/>
-<path d="M40 50 L42 56 L48 58 L42 60 L40 66 L38 60 L32 58 L38 56 Z" fill="#F5B53F"/>
-<path d="M64 70 L58 22 Q58 16 64 20 L92 52 Z" fill="#E8743B"/>
-<path d="M68 62 L64 32 L86 52 Z" fill="#FFC9A8"/>
-<path d="M136 70 L142 22 Q142 16 136 20 L108 52 Z" fill="#E8743B"/>
-<path d="M132 62 L136 32 L114 52 Z" fill="#FFC9A8"/>
+<path class="kip-fx" d="M160 44 L162 50 L168 52 L162 54 L160 60 L158 54 L152 52 L158 50 Z" fill="#F5B53F"/>
+<path class="kip-fx" d="M40 50 L42 56 L48 58 L42 60 L40 66 L38 60 L32 58 L38 56 Z" fill="#F5B53F"/>
+<g class="kip-ear kip-ear-l"><path d="M64 70 L58 22 Q58 16 64 20 L92 52 Z" fill="#E8743B"/><path d="M68 62 L64 32 L86 52 Z" fill="#FFC9A8"/></g>
+<g class="kip-ear kip-ear-r"><path d="M136 70 L142 22 Q142 16 136 20 L108 52 Z" fill="#E8743B"/><path d="M132 62 L136 32 L114 52 Z" fill="#FFC9A8"/></g>
 <ellipse cx="100" cy="90" rx="42" ry="36" fill="#E8743B"/>
 <ellipse cx="84" cy="74" rx="6" ry="3.5" fill="#F6A971"/>
 <ellipse cx="116" cy="74" rx="6" ry="3.5" fill="#F6A971"/>
@@ -16,7 +14,7 @@
 <path d="M94 99 Q100 95 106 99 Q103 105 100 105 Q97 105 94 99 Z" fill="#141823"/>
 <path d="M91 108 Q100 121 109 108 Z" fill="#141823"/>
 <path d="M95 111 Q100 118 105 111 Z" fill="#FF7A93"/>
-<rect x="22" y="118" width="156" height="68" rx="14" fill="#141823"/>
+<rect x="22" y="118" width="156" height="68" rx="14" fill="#141823" stroke="#3A4258" stroke-width="2.5"/>
 <circle cx="38" cy="134" r="3.5" fill="#FF6B6B"/><circle cx="50" cy="134" r="3.5" fill="#F5B53F"/><circle cx="62" cy="134" r="3.5" fill="#3FAE6A"/>
 <path d="M38 162 L45 169 L58 155" fill="none" stroke="#3FAE6A" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
 <ellipse cx="72" cy="120" rx="13" ry="8" fill="#F6A971"/>

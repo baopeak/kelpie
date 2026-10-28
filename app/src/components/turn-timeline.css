@@ -1,0 +1,55 @@
+/* Turns panel, undo preview and the files of a turn. */
+.turns { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.turns .explorer-tools { display: flex; gap: 6px; align-items: center; }
+.turns .explorer-tools select { flex: 1; min-width: 0; }
+.turns-list { flex: 1; overflow: auto; }
+.turns-notice { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin: 8px 12px; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-elev); font-size: 12px; color: var(--text-dim); }
+.turns-foot { font-size: 11px; line-height: 1.4; }
+.turn-row { border-bottom: 1px solid var(--border); }
+.turn-head { display: flex; align-items: flex-start; gap: 8px; padding: 6px 12px; cursor: default; }
+.turn-row.turn .turn-head, .turn-row.undo .turn-head { cursor: pointer; }
+.turn-head:hover { background: var(--bg-hover); }
+.turn-head .row-actions { display: none; gap: 2px; flex: none; }
+.turn-head:hover .row-actions { display: flex; }
+.turn-n { flex: none; min-width: 26px; font: 11px var(--font-mono, monospace); color: var(--text-faint); padding-top: 2px; }
+.turn-row.baseline .history-title { color: var(--text-faint); }
+.turn-approx { margin-left: 6px; padding: 0 5px; border: 1px dashed var(--border-strong); border-radius: 8px; font-size: 10px; color: var(--text-faint); }
+.turn-files { padding: 0 0 6px 46px; }
+.turn-file { display: flex; align-items: center; gap: 8px; padding: 2px 12px 2px 0; font-size: 12px; cursor: pointer; }
+.turn-file:hover { background: var(--bg-hover); }
+.turn-file.owner { padding-left: 12px; justify-content: space-between; }
+.turn-file.owner .turn-path { flex: 1; }
+.turn-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.turn-delta { flex: none; font-size: 11px; color: var(--text-faint); }
+.turn-status { flex: none; width: 14px; text-align: center; font: 600 11px var(--font-mono, monospace); }
+.turn-status.s-A { color: var(--idle); }
+.turn-status.s-M { color: var(--waiting); }
+.turn-status.s-D { color: var(--danger); }
+.turn-owners { display: flex; gap: 4px; align-items: center; flex: none; max-width: 55%; flex-wrap: wrap; justify-content: flex-end; }
+.turn-shared { font-size: 10px; color: var(--waiting); border: 1px solid var(--waiting); border-radius: 8px; padding: 0 5px; }
+.turn-artifacts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 12px 2px 0; }
+.turn-chip { padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text-dim); font-size: 11px; cursor: pointer; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-chip:hover { color: var(--text); border-color: var(--accent); }
+.turn-chip.static { cursor: default; }
+.turn-chip.static:hover { color: var(--text-dim); border-color: var(--border-strong); }
+
+.turn-undo { width: min(760px, 94vw); outline: none; }
+.turn-undo-list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; max-height: 44vh; overflow: auto; }
+.turn-undo-row { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 12.5px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.turn-undo-row:last-child { border-bottom: 0; }
+.turn-undo-row.risky { background: color-mix(in srgb, var(--waiting) 10%, transparent); }
+.turn-undo-row.skip { opacity: .6; cursor: default; }
+.turn-verb { flex: none; min-width: 52px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; color: var(--text-dim); }
+.turn-verb.delete { color: var(--danger); }
+.turn-why { flex: none; max-width: 45%; font-size: 11px; color: var(--waiting); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* A file as it was at the end of a turn (rendered artifacts). */
+.turn-file-view { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; }
+.turn-file-view .md-block { position: relative; padding-right: 30px; }
+.turn-file-view .md-block:hover { background: var(--bg-hover); }
+.turn-file-view .md-comment { position: absolute; right: 4px; top: 2px; opacity: 0; }
+.turn-file-view .md-block:hover .md-comment { opacity: 1; }
+.turn-file-view .md-note { margin: 0 0 6px; padding: 4px 8px; border-left: 2px solid var(--accent); background: var(--bg-elev); font-size: 12px; color: var(--text-dim); }
+.turn-file-view .md-note-input { display: flex; gap: 6px; margin: 4px 0 8px; }
+.turn-file-view .md-note-input textarea { flex: 1; }
+.turn-file-view .turn-file-body { flex: 1; min-height: 0; overflow: auto; }

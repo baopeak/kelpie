@@ -3,9 +3,14 @@ import { EditorView, GutterMarker, gutter, keymap } from "@codemirror/view";
 import { EditorState, StateEffect, StateField } from "@codemirror/state";
 import { MergeView, goToNextChunk, goToPreviousChunk, unifiedMergeView } from "@codemirror/merge";
 import { gitFileVersions, onEvent } from "../lib/ipc";
+import { turnBlob } from "../lib/checkpoints";
 import { baseExtensions, languageFor } from "../lib/codemirror";
 import { store } from "../lib/store";
-import { chooseAgentAndSend } from "../lib/send-to-agent";
+import { chooseAgentAndSend, sendSelectionToAgent } from "../lib/send-to-agent";
+import { selectionSource } from "../lib/composer-state";
+import { openContextMenu } from "./context-menu";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { isMac } from "../lib/platform";
 import { Icon } from "./icons";
 import type { Project, ReviewNote } from "../lib/types";
 import { t } from "../lib/i18n";
@@ -70,8 +75,19 @@ export function notesPrompt(notes: ReviewNote[]): string {
   return `Please address these review notes on the current changes. Each names a file and a line of the diff.\n\n${parts.join("\n\n")}`;
 }
 
-/** HEAD ↔ working tree (or index when `staged`) diff, side by side or unified, with notes. */
-export function DiffView(props: { project: Project; path: string; staged: boolean }) {
+/** One file before and after an agent turn: the snapshot ends of the turn and of the one before. */
+async function turnVersions(rev: { session: string; n: number; prefix?: string }, path: string): Promise<{ original: string | null; modified: string | null }> {
+  const side = async (before: boolean) => {
+    const b = await turnBlob(rev.session, rev.n, (rev.prefix ?? "") + path, false, before);
+    return b.exists ? (b.binary ? t("(binary file)") : b.too_large ? t("(too large to show)") : b.text ?? "") : null;
+  };
+  const [original, modified] = await Promise.all([side(true), side(false)]);
+  return { original, modified };
+}
+
+/** HEAD ↔ working tree (or index when `staged`) diff, side by side or unified, with notes. With
+ *  `rev`: the same file before and after that agent turn (read only, never changes). */
+export function DiffView(props: { project: Project; path: string; staged: boolean; rev?: { session: string; n: number; prefix?: string }; base?: string }) {
   let host!: HTMLDivElement;
   let box!: HTMLDivElement;
   const [unified, setUnified] = createSignal(host?.clientWidth < 900);
@@ -80,6 +96,25 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
   const [noteText, setNoteText] = createSignal("");
   let destroy: (() => void) | null = null;
   let editors: { view: EditorView; side: "new" | "old" }[] = [];
+
+  /** Text selected in either side (lines would mean the old or the new file: the path alone). */
+  const picked = () => {
+    for (const { view } of editors) {
+      const r = view.state.selection.main;
+      if (!r.empty) return { text: view.state.doc.sliceString(r.from, r.to), path: props.path };
+    }
+    return null;
+  };
+  const selection = selectionSource(picked);
+  const menu = (e: MouseEvent) => {
+    const sel = picked();
+    if (!sel) return;
+    openContextMenu(e, [
+      { label: t("Copy"), hint: isMac ? "⌘C" : "Ctrl+C", run: () => void writeText(sel.text) },
+      null,
+      { label: t("Send Selection to Agent…"), run: () => sendSelectionToAgent(new MouseEvent("contextmenu", { clientX: e.clientX, clientY: e.clientY }), props.project.id, sel) },
+    ]);
+  };
 
   const allNotes = () => store.notesFor(props.project.id);
   const fileNotes = createMemo(() => allNotes().filter((n) => n.path === props.path));
@@ -105,9 +140,9 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
 
   async function render() {
     try {
-      const v = await gitFileVersions(props.project.path, props.path, props.staged);
+      const v = props.rev ? await turnVersions(props.rev, props.path) : await gitFileVersions(props.project.path, props.path, props.staged, props.base);
       const lang = await languageFor(props.path);
-      const exts = (side: "new" | "old") => [...baseExtensions({ readOnly: true }), ...(lang ? [lang] : []), EditorView.editable.of(false), EditorState.readOnly.of(true), changeKeys, noteGutter(openDraft(side))];
+      const exts = (side: "new" | "old") => [...baseExtensions({ readOnly: true }), ...(lang ? [lang] : []), EditorView.editable.of(false), EditorState.readOnly.of(true), changeKeys, noteGutter(openDraft(side)), EditorView.updateListener.of((u) => u.selectionSet && !u.state.selection.main.empty && selection.changed())];
       destroy?.();
       host.replaceChildren();
       const a = v.original ?? "";
@@ -142,9 +177,11 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
   onMount(() => {
     if (host.clientWidth && host.clientWidth < 900) setUnified(true);
     void render();
-    const un = onEvent<{ root: string; git: boolean }>("fs-changed", (e) => e.root === props.project.path && e.git && void render());
+    // A turn's snapshots never change: only the working-tree diff follows the folder.
+    const un = onEvent<{ root: string; git: boolean }>("fs-changed", (e) => !props.rev && e.root === props.project.path && e.git && void render());
     onCleanup(() => {
       void un.then((f) => f());
+      selection.dispose();
       destroy?.();
     });
   });
@@ -158,7 +195,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
     <div class="viewer" ref={box}>
       <div class="viewer-bar">
         <span class="path">&lrm;{props.path}</span>
-        <span style={{ color: "var(--text-faint)" }}>{props.staged ? t("HEAD ↔ index") : t("HEAD ↔ working tree")}{info() ? ` · ${info() === "new" ? t("new file") : t("deleted")}` : ""}</span>
+        <span style={{ color: "var(--text-faint)" }}>{props.rev ? t("Before ↔ after turn #{n}", { n: props.rev.n }) : props.base ? t("{base} ↔ working tree", { base: props.base }) : props.staged ? t("HEAD ↔ index") : t("HEAD ↔ working tree")}{info() ? ` · ${info() === "new" ? t("new file") : t("deleted")}` : ""}</span>
         <div class="toggles">
           <button class="icon-btn" title={t("Previous change (Shift+F7)")} onClick={() => jump(false)}><Icon name="up" size={14} /></button>
           <button class="icon-btn" title={t("Next change (F7)")} onClick={() => jump(true)}><Icon name="down" size={14} /></button>
@@ -173,7 +210,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
           <span>{allNotes().length > 1 ? t("{n} review notes", { n: allNotes().length }) : t("{n} review note", { n: allNotes().length })}{fileNotes().length !== allNotes().length ? ` (${t("{n} here", { n: fileNotes().length })})` : ""}</span>
           <span style={{ flex: 1 }} />
           <button class="btn primary" onClick={(e) => chooseAgentAndSend(e, props.project.id, notesPrompt(allNotes()))}>{t("Send to agent")} ▾</button>
-          <button class="btn" title={t("Remove every note (resolve all)")} onClick={() => { store.removeNotes(props.project.id, "all"); queueMicrotask(pushMarks); }}>{t("Resolve all")}</button>
+          <button class="btn" title={t("Remove every note (resolve all)")} onClick={() => { store.removeNotes(props.project.id, allNotes().map((n) => n.id)); queueMicrotask(pushMarks); }}>{t("Resolve all")}</button>
         </div>
         <Show when={fileNotes().length}>
           <div class="notes-list">
@@ -181,7 +218,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
               {(n) => (
                 <div class="note-item">
                   <span class="note-line">{n.side === "old" ? "−" : ""}{n.line}</span>
-                  <span class="note-body">{n.note}</span>
+                  <span class="note-body">{n.note}<Show when={n.by}><span class="muted-inline" title={t("Written by an agent with kelpied review add")}> · {n.by}</span></Show></span>
                   <button class="icon-btn" title={t("Resolve (remove)")} onClick={() => remove(n.id)}><Icon name="check" size={13} /></button>
                 </div>
               )}
@@ -189,7 +226,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
           </div>
         </Show>
       </Show>
-      <div class="cm-host" ref={host} style={{ overflow: "auto" }} />
+      <div class="cm-host" ref={host} style={{ overflow: "auto" }} onContextMenu={menu} />
       <Show when={draft()}>
         {(d) => (
           <div class="note-draft" style={{ left: `${Math.max(8, d().x)}px`, top: `${d().y}px` }} onPointerDown={(e) => e.stopPropagation()}>

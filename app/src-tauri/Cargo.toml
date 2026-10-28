@@ -18,9 +18,10 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
+tauri-plugin-updater = "2"
 anyhow.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 tokio.workspace = true
 interprocess.workspace = true
 parking_lot.workspace = true
@@ -36,9 +37,16 @@ ureq = { version = "3", features = ["json"] }
 keyring = { version = "3.6", default-features = false, features = ["windows-native", "apple-native"] }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 zstd = "0.14.3"
+toml_edit = "0.25"
+jsonc-parser = { version = "0.34", default-features = false, features = ["cst", "serde_json"] }
 
 
 [target.'cfg(windows)'.dependencies]
 # Same versions as Tauri's own (browser pane screenshots through the WebView2 DevTools protocol).
 webview2-com = "0.39"
-windows = { version = "0.62", features = ["Win32_Foundation"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[features]
+# Test-only: lets the end-to-end tests point the updater at a local server and skip the
+# installer. Release builds never enable it (the release workflow checks).
+e2e-updater = []

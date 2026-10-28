@@ -1,0 +1,7 @@
+/* The strip above a pane whose agent hit the usage limit. Amber, with an icon: not colour alone. */
+.limit-banner { flex: none; display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 12px; color: var(--text); background: color-mix(in srgb, var(--waiting) 16%, var(--bg-elev)); border-bottom: 1px solid color-mix(in srgb, var(--waiting) 50%, var(--border)); }
+.limit-banner svg { flex: none; color: var(--waiting); }
+.limit-banner .limit-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.limit-banner .limit-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.limit-banner .limit-time { width: 92px; height: 24px; padding: 0 6px; }
+.limit-banner .btn { white-space: nowrap; }

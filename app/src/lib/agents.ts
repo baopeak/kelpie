@@ -12,7 +12,32 @@ export interface AgentPreset {
   yolo: string[];
   /** Restart continues the folder's latest conversation. */
   resume_latest: boolean;
+  /** Arguments that start it as an ACP agent (plugin agents; daemon API 8+). */
+  acp?: string[];
   installed: boolean;
+}
+
+/** Built-in agents that speak the Agent Client Protocol over stdio, and how to start them so
+ *  (each CLI's documentation; see docs/architecture.md "Chat mode"). Kept here, not in the
+ *  daemon: an updated app may run against an older daemon. */
+export const ACP_ARGS: Record<string, string[]> = {
+  omp: ["acp"],
+  gemini: ["--acp"],
+  opencode: ["acp"],
+  copilot: ["--acp"],
+  goose: ["acp"],
+  qwen: ["--acp"],
+  kimi: ["acp"],
+  auggie: ["--acp"],
+  cursor: ["acp"],
+};
+
+/** The argv that starts `kind` as an ACP agent, or null when it has no ACP mode. */
+export function acpArgv(kind: string): string[] | null {
+  const p = presetFor(kind);
+  const args = ACP_ARGS[kind] ?? (p?.acp?.length ? p.acp : null);
+  if (!args) return null;
+  return [p?.bin ?? kind, ...args];
 }
 
 /** Always offered: Kelpie integrates them deeply (hooks, chat view, history). */

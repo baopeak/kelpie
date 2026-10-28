@@ -1,9 +1,12 @@
+import type { SavedRegistryAgent } from "./agent-setup";
 /** Mirrors `SessionInfo` from kelpied (crates/kelpied/src/session.rs). */
 export type SessionStatus = "idle" | "working" | "waiting" | "exited";
 /** shell | custom | claude | codex | omp, or a preset agent id from `agent.presets` (gemini, cursor…). */
 export type SessionKind = string;
 
 export interface SessionInfo {
+  /** Wall-clock ms since it has been waiting on the user (daemon API 7+). */
+  waiting_since?: number;
   handle: number;
   id: string;
   project_id: string | null;
@@ -20,6 +23,10 @@ export interface SessionInfo {
   unread: boolean;
   alive: boolean;
   exit_code: number | null;
+  /** The last agent turn errored, or the process exited with a failure code on its own (absent from older daemons). */
+  failed?: boolean;
+  /** The last turn ended on the subscription's usage limit (Claude Code reports it; daemon API 12+). */
+  limited?: boolean;
   pid: number | null;
   cols: number;
   rows: number;
@@ -43,6 +50,8 @@ export interface Project {
   /** Set for a git worktree shown under its repository's project. */
   parentId?: string;
   branch?: string;
+  /** The branch this worktree was created from: what Finish merges into (unknown for worktrees added later). */
+  baseBranch?: string;
   /** Workspace board column (default todo) and pin. */
   status?: WorkStatus;
   pinned?: boolean;
@@ -87,6 +96,11 @@ export interface Pane {
   /** Project-relative path for file/diff panes. */
   path?: string;
   staged?: boolean;
+  /** A file or diff pane showing a turn of an agent session instead of the folder: the snapshot
+   *  at the end of turn `n` (a diff compares it with the one before). */
+  rev?: { session: string; n: number; prefix?: string };
+  /** A diff pane comparing the folder with a branch (a review): the one it forked from. */
+  base?: string;
   line?: number;
   /** Browser panes: the page shown. */
   url?: string;
@@ -135,7 +149,7 @@ export interface Tab {
   name?: string;
 }
 
-export type RightPanel = "files" | "git" | "search" | "history" | "issues" | null;
+export type RightPanel = "files" | "git" | "search" | "history" | "issues" | "turns" | "review" | "plan" | null;
 
 export interface Workspace {
   tabs: Tab[];
@@ -173,6 +187,10 @@ export interface Settings {
   /** Claude / Codex subscription usage in the status bar (reads the agents' own sign-in). */
   usageMeters: boolean;
   memoryMeter: boolean;
+  /** Per-session cost cap in USD (0 = off): a session over it gets a red chip and an inbox entry. */
+  costCap: number;
+  /** Also press Esc in a session when it first passes the cap (only with an exact transcript match). */
+  costCapEsc: boolean;
   quickCommands: QuickCommand[];
   theme: "dark" | "light";
   density: "comfortable" | "compact";
@@ -185,21 +203,43 @@ export interface Settings {
   agentPermissions: "manual" | "yolo";
   /** Agent kinds left out of launchers. */
   hiddenAgents: string[];
+  /** Agents saved from the ACP registry (Settings → Agent setup → Find more agents); sent to the daemon with the plugin agents. */
+  registryAgents?: SavedRegistryAgent[];
   /** Stop finished background agents after `hibernateMinutes` idle; resume when shown again. */
   hibernate: boolean;
   hibernateMinutes: number;
   /** Prevent idle sleep: never, while an agent works, or always. */
   keepAwake: "off" | "agents" | "always";
+  /** Sessions not on screen run below normal CPU priority, so typing stays quick when the
+   *  machine is busy (Windows). */
+  prioritizeVisible: boolean;
+  /** Snapshot an agent's working folder when each turn ends (git folders on this computer), for
+   *  the Turns panel and undo. */
+  checkpoints: boolean;
+  /** Programs in a session (agents, scripts) may drive other sessions through `kelpied`
+   *  (`terminal send`, `call session.create`…). Off: only their own session. */
+  agentsScripting: boolean;
   /** A short chime with desktop notifications. */
   notificationSound: boolean;
+  /** Look for a newer Kelpie on GitHub Releases (30 s after start, then every 6 hours). */
+  updateChecks: boolean;
+  /** A release the user chose to skip; newer ones are offered again. */
+  skippedUpdate?: string;
   /** Terminal colour theme id (lib/terminal-themes.ts); "default" follows the app theme. */
   terminalTheme: string;
   /** Editor soft wrap. */
   wordWrap: boolean;
   /** Agent for AI actions (commit message, pull request text). */
   aiAgent: "claude" | "codex";
+  /** New agent sessions in a git folder: offer an isolated worktree (ask, off unless ticked),
+   *  start in one (always, ticked unless unticked) or never offer it. Branch named from the first prompt. */
+  autoWorktree?: "ask" | "always" | "never";
   /** Global floating terminal (not tied to a project). */
   floatingTerminal: boolean;
+  /** Kip, the mascot: in the sidebar footer (agent status) and on empty screens. */
+  mascot: boolean;
+  /** Kip's animations: always, as the OS's animation setting says, or never. */
+  mascotMotion: "on" | "system" | "off";
   /** Layouts saved from a tab, offered in the layout menu and the launcher. */
   layouts: SavedLayout[];
   /** After the session daemon restarts (reboot, update, crash): resume sessions when they are
@@ -211,6 +251,9 @@ export interface Settings {
   activeAccounts: Partial<Record<"claude" | "codex", string>>;
   /** `ssh -F` file for remote projects (empty: ssh's default, ~/.ssh/config). */
   sshConfig: string;
+  /** Saved hosts logged in as root where starting Claude Code in Yolo mode (it then asks for
+   *  permissions) no longer explains why first. */
+  rootYoloOk?: string[];
   /** Interface language (lib/i18n.ts); "system" follows the OS. */
   language: "system" | "en" | "vi";
   /** Voice dictation (lib/voice.ts): speech model id, Whisper language ("auto" detects), microphone (null: the default). */
@@ -273,6 +316,40 @@ export interface UsageReport {
   codex: ProviderUsage;
 }
 
+/** A conversation's numbers from its transcript (app core `session_usage`). */
+export interface SessionUsage {
+  context_used: number;
+  /** Absent when the agent does not say (OMP) or the model has no known window. */
+  context_window: number | null;
+  tokens_in: number;
+  tokens_out: number;
+  /** Whole conversation; null when any of it has no price (unknown model, Codex). */
+  cost: number | null;
+  /** The agent's own number (OMP) instead of an estimate at API prices (Claude). */
+  cost_exact: boolean;
+  model: string | null;
+  /** The totals cover the whole transcript (false while a background count runs). */
+  totals: boolean;
+}
+
+/** One cell of the usage report: a local day of one agent, project and model. */
+export interface UsageRow {
+  day: number;
+  agent: string;
+  project: string;
+  model: string;
+  tokens_in: number;
+  tokens_out: number;
+  cost: number;
+  unpriced: number;
+}
+
+export interface UsageTotals {
+  rows: UsageRow[];
+  files: number;
+  pending: number;
+}
+
 export interface MemoryStats {
   app: number;
   daemon: number;
@@ -284,7 +361,7 @@ export interface MemoryStats {
 export interface InboxItem {
   id: string;
   at: number;
-  kind: "finished" | "waiting" | "automation" | "worktree" | "error";
+  kind: "finished" | "waiting" | "automation" | "worktree" | "error" | "cost";
   title: string;
   body: string;
   sessionId?: string;
@@ -303,6 +380,8 @@ export interface ReviewNote {
   text: string;
   note: string;
   at: number;
+  /** The agent that wrote it (`kelpied review add`); none for the user's own. */
+  by?: string;
 }
 
 /** Folder comment / board status shared with agents through the daemon (`meta.*`). */
@@ -333,6 +412,46 @@ export interface Automation {
   last_session: string | null;
   last_error: string | null;
   next_run: number;
+  /** When the run finishes: "review" moves the folder's card to the Review column. */
+  deliver?: "review" | null;
+  /** Runs on an event instead of the clock (`every` / `time` / `weekday` are then unused). */
+  trigger?: AutomationTrigger | null;
+  /** agent: a new session; quick: a saved prompt typed into an idle session of the agent; shell: a program, no shell. */
+  action?: "agent" | "quick" | "shell";
+  shell?: { program: string; argv: string[]; approved_hash?: string | null } | null;
+  quick_label?: string | null;
+  /** Records what it would do and does nothing. */
+  dry_run?: boolean;
+  last_note?: string | null;
+  cap_day?: string;
+  cap_count?: number;
+}
+
+export type AutomationEventKind = "file" | "turn" | "commit" | "pr_checks_failed" | "finished";
+
+export interface AutomationTrigger {
+  event: AutomationEventKind;
+  /** file: comma-separated patterns relative to the folder. */
+  glob: string;
+  daily_cap: number;
+}
+
+/** What the window tells the daemon (`automation.event`). */
+export interface AutomationEvent {
+  kind: "file" | "pr_checks_failed" | "finished";
+  root: string;
+  files?: string[];
+  branch?: string;
+  commit?: string;
+  number?: number;
+}
+
+export interface AutomationState {
+  paused: boolean;
+  /** Why saving is refused (a damaged automations file, or a newer list found beside an older one). */
+  error: string | null;
+  /** What the user can do about it: dismiss the notice, or restore / keep the newer list. */
+  fix?: "dismiss" | "restore" | null;
 }
 
 export interface RecentItem {
@@ -356,13 +475,17 @@ export interface AppState {
   collapsed: Record<string, boolean>;
   /** Shortcut overrides by command id: a chord like "mod+alt+p", or "" for none. */
   keymap: Record<string, string>;
-  /** `.kelpie.yaml` contents (hash) the user agreed to run, by repository path. */
+  /** The setup, tabs, copy and link of `.kelpie.yaml` (canonical text) the user agreed to run, by repository path. */
   approvedSetups: Record<string, string>;
+  /** The `check:` commands the user agreed to run, by repository path (a different list needs approval again). */
+  approvedChecks?: Record<string, string[]>;
   /** Sessions Kelpie stopped to save memory (hibernation, sleeping worktrees): resumed when shown. */
   hibernated: string[];
   inbox: InboxItem[];
-  /** Diff review notes by project id. */
+  /** Diff review notes by project id: only those of a daemon older than API 13 (it keeps them from there). */
   reviewNotes: Record<string, ReviewNote[]>;
+  /** Prompts sent from the composer, newest first, by project id. */
+  promptHistory?: Record<string, string[]>;
   /** Floating terminal: its sessions (tab order) and the one shown. */
   floating: { sessions: string[]; active: string | null; open: boolean };
 }

@@ -1,28 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="10 8 180 184" role="img" aria-label="Kip đang chăm chú nhìn agent làm việc">
 <title>Kip đang làm việc</title>
-<path d="M162 34 L164 40 L170 42 L164 44 L162 50 L160 44 L154 42 L160 40 Z" fill="#F5B53F"/>
-<path d="M64 70 L58 22 Q58 16 64 20 L92 52 Z" fill="#E8743B"/>
-<path d="M68 62 L64 32 L86 52 Z" fill="#FFC9A8"/>
-<path d="M136 70 L142 22 Q142 16 136 20 L108 52 Z" fill="#E8743B"/>
-<path d="M132 62 L136 32 L114 52 Z" fill="#FFC9A8"/>
+<path class="kip-fx" d="M162 34 L164 40 L170 42 L164 44 L162 50 L160 44 L154 42 L160 40 Z" fill="#F5B53F"/>
+<g class="kip-ear kip-ear-l"><path d="M64 70 L58 22 Q58 16 64 20 L92 52 Z" fill="#E8743B"/><path d="M68 62 L64 32 L86 52 Z" fill="#FFC9A8"/></g>
+<g class="kip-ear kip-ear-r"><path d="M136 70 L142 22 Q142 16 136 20 L108 52 Z" fill="#E8743B"/><path d="M132 62 L136 32 L114 52 Z" fill="#FFC9A8"/></g>
 <ellipse cx="100" cy="90" rx="42" ry="36" fill="#E8743B"/>
 <ellipse cx="84" cy="76" rx="6" ry="3.5" fill="#F6A971"/>
 <ellipse cx="116" cy="76" rx="6" ry="3.5" fill="#F6A971"/>
 <ellipse cx="100" cy="106" rx="22" ry="14" fill="#FFF1E2"/>
 <ellipse cx="74" cy="100" rx="7" ry="4" fill="#FF6F8E" opacity="0.4"/>
 <ellipse cx="126" cy="100" rx="7" ry="4" fill="#FF6F8E" opacity="0.4"/>
+<g class="kip-eyes">
 <ellipse cx="84" cy="91" rx="6" ry="6" fill="#141823"/>
 <ellipse cx="116" cy="91" rx="6" ry="6" fill="#141823"/>
 <circle cx="85.5" cy="89" r="1.8" fill="#FFFFFF"/>
 <circle cx="117.5" cy="89" r="1.8" fill="#FFFFFF"/>
+</g>
 <path d="M94 99 Q100 95 106 99 Q103 105 100 105 Q97 105 94 99 Z" fill="#141823"/>
 <path d="M95 110 Q100 113 105 110" fill="none" stroke="#141823" stroke-width="2.5" stroke-linecap="round"/>
-<rect x="22" y="118" width="156" height="68" rx="14" fill="#141823"/>
+<rect x="22" y="118" width="156" height="68" rx="14" fill="#141823" stroke="#3A4258" stroke-width="2.5"/>
 <circle cx="38" cy="134" r="3.5" fill="#FF6B6B"/><circle cx="50" cy="134" r="3.5" fill="#F5B53F"/><circle cx="62" cy="134" r="3.5" fill="#3FAE6A"/>
 <rect x="36" y="148" width="72" height="6" rx="3" fill="#FFF1E2" opacity="0.75"/>
 <rect x="36" y="160" width="48" height="6" rx="3" fill="#FFF1E2" opacity="0.45"/>
 <rect x="36" y="172" width="104" height="5" rx="2.5" fill="#2A3142"/>
-<rect x="36" y="172" width="64" height="5" rx="2.5" fill="#18A999"/>
+<rect class="kip-bar" x="36" y="172" width="64" height="5" rx="2.5" fill="#18A999"/>
 <ellipse cx="72" cy="120" rx="13" ry="8" fill="#F6A971"/>
 <ellipse cx="128" cy="120" rx="13" ry="8" fill="#F6A971"/>
 <path d="M67 116 V121 M72 115 V121 M77 116 V121 M123 116 V121 M128 115 V121 M133 116 V121" fill="none" stroke="#C9824F" stroke-width="2" stroke-linecap="round"/>

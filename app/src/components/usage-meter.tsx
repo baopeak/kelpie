@@ -31,6 +31,21 @@ function resetText(at: number | null): string {
   return t("resets in {rel} ({when})", { rel: formatDuration(at - Date.now()), when: formatDateTime(at, { weekday: "short", hour: "2-digit", minute: "2-digit" }) });
 }
 
+/** Ticks once a minute so the inline countdowns stay current between usage refreshes. */
+const [now, setNow] = createSignal(Date.now());
+
+/** Compact time left until a window resets, for the status bar: "45m", "2h 13m", "4d 5h". */
+function remainText(at: number | null): string {
+  if (!at) return "";
+  const m = Math.ceil((at - now()) / 60_000);
+  if (m <= 0) return "";
+  if (m < 60) return t("{n}m", { n: m });
+  const h = Math.floor(m / 60);
+  if (h < 24) return m % 60 ? `${t("{n}h", { n: h })} ${t("{n}m", { n: m % 60 })}` : t("{n}h", { n: h });
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${t("{n}d", { n: d })} ${t("{n}h", { n: h % 24 })}` : t("{n}d", { n: d });
+}
+
 /** One toast per window and reset period when a limit is reached. */
 const warned = new Set<string>();
 
@@ -78,6 +93,7 @@ function accountMenu(e: MouseEvent, agent: AccountAgent) {
     { label: `${current === null ? "● " : ""}${t("Default")}`, run: () => setActiveAccount(agent, null) },
     ...accountsOf(agent).map((a): MenuItem => ({ label: `${current === a.id ? "● " : ""}${a.label}`, run: () => setActiveAccount(agent, a.id) })),
     null,
+    { label: t("Usage & cost…"), run: () => store.setOverlay("cost") },
     { label: t("Manage accounts…"), run: () => store.openSettings("accounts") },
   ];
   openContextMenu(e, items);
@@ -104,6 +120,7 @@ function Provider(props: { kind: ProviderId; name: string; usage: Shown | null }
                 <span class="meter-label">{windowLabel(w.label)}</span>
                 <span class="meter-bar"><span style={{ width: `${Math.min(100, w.used_percent)}%` }} /></span>
                 {Math.round(w.used_percent)}%
+                <Show when={remainText(w.resets_at)}>{(r) => <span class="meter-reset">{r()}</span>}</Show>
               </span>
             )}
           </For>
@@ -148,6 +165,7 @@ export function UsageMeters() {
       })
       .catch(() => {});
   poll(refresh, USAGE_EVERY);
+  poll(() => setNow(Date.now()), 60_000);
   // Another active account: fetch its own numbers at once.
   createEffect(on(() => `${accountKey("claude")}|${accountKey("codex")}`, () => {
     setReport(null);
@@ -159,6 +177,7 @@ export function UsageMeters() {
       <span class="meters clickable" onClick={refresh} title={t("Click to refresh")}>
         <Provider kind="claude" name="Claude" usage={view("claude")} />
         <Provider kind="codex" name="Codex" usage={view("codex")} />
+        <span class="item clickable" title={t("Usage & cost")} onClick={(e) => { e.stopPropagation(); store.setOverlay("cost"); }}>{t("Cost")}</span>
       </span>
     </Show>
   );

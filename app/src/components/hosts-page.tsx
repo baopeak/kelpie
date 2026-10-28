@@ -9,7 +9,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { store } from "../lib/store";
 import * as ipc from "../lib/ipc";
 import { kindInfo } from "../lib/agents";
-import type { HostCheck } from "../lib/remote";
+import { tmuxInstall, type HostCheck } from "../lib/remote";
+import { openRootUserGuide } from "../lib/root-user";
 import {
   CLAUDE_INSTALL, agentAdd, agentList, checkHost, connectHost, deleteKey, forwardStart, forwardStatus, forwardStop, generateKey, hasSecret, hostAddress, hostById, hostKeys,
   hostProject, importKey, importSshConfig, installKey, isHostKeyError, knownHosts, listKeys, loadVault, newForward, newHost, parseDestination, removeForward, removeHost, removeKnownHosts, runOnHosts,
@@ -19,6 +20,7 @@ import { Icon } from "./icons";
 import { t, errorText } from "../lib/i18n";
 import { relTimeShort } from "../lib/platform";
 import type { DirEntry } from "../lib/types";
+import { confirmDialog } from "../lib/confirm-dialog";
 
 type Tab = "hosts" | "keys" | "known" | "forwards";
 const [tab, setTab] = createSignal<Tab>("hosts");
@@ -264,8 +266,9 @@ function HostDetail(props: { host: SshHost; onEdit: () => void }) {
     guarded(kind, async () => {
       const c = check() ?? (await checkHost(h()));
       setCheck(c);
-      store.setOverlay(null);
+      // Closed once started: an error (an agent without a folder there) shows on this page.
       await connectHost(h(), kind, { check: c, prompt, projectId: inHere() ? here()?.id : undefined });
+      store.setOverlay(null);
     });
   const asProject = () => guarded("project", async () => {
     const id = await hostProject(h(), check() ?? undefined);
@@ -273,7 +276,7 @@ function HostDetail(props: { host: SshHost; onEdit: () => void }) {
     store.switchProject(id);
   });
   const remove = async () => {
-    if (!confirm(t("Remove the host {name}? Its saved password and port forwards are removed too.", { name: h().label }))) return;
+    if (!(await confirmDialog(t("Remove the host {name}? Its saved password and port forwards are removed too.", { name: h().label })))) return;
     await removeHost(h().id).catch((e) => setError(errText(e)));
     setSelected(null);
   };
@@ -324,16 +327,29 @@ function HostDetail(props: { host: SshHost; onEdit: () => void }) {
         {(c) => (
           <div class="remote-check" data-host-check>
             <span><Icon name="check" size={12} /> {c().os}</span>
+            <Show when={c().root}>
+              <span class="warn" data-host-root title={t("Claude Code refuses Yolo mode as root: on this host it asks for permissions.")}>{t("logs in as root")}</span>
+            </Show>
             <span class={c().git ? "ok" : "warn"}>{c().git ? t("git ✓") : t("git missing")}</span>
-            <span class={c().tmux ? "ok" : "muted-inline"}>{c().tmux ? t("tmux ✓") : t("tmux not installed")}</span>
+            <span class={c().tmux ? "ok" : "muted-inline"} title={c().tmux ? "" : t("Without tmux a session ends when its connection drops; with it, sessions keep running on the host.")}>{c().tmux ? t("tmux ✓") : t("tmux not installed")}</span>
             <span>{agents().length ? t("agents: {list}", { list: agents().map((k) => kindInfo(k).label).join(", ") }) : t("no agent CLIs found on its PATH")}</span>
             <Show when={!hasClaude()}>
               <button class="btn" title={CLAUDE_INSTALL} onClick={() => void open("shell", CLAUDE_INSTALL)}>{t("Install Claude Code")}</button>
             </Show>
+            <Show when={!c().tmux && tmuxInstall(c())}>
+              {(cmd) => <button class="btn" title={cmd()} onClick={() => void open("shell", cmd())}>{t("Install tmux")}</button>}
+            </Show>
+            <Show when={c().root}>
+              <button class="btn" data-action="root-user-guide" onClick={() => { store.setOverlay(null); openRootUserGuide(h().id, here()?.id); }}>{t("Set up a regular user…")}</button>
+              <Show when={store.state.settings.rootYoloOk?.includes(h().id)}>
+                <button class="btn" data-action="root-yolo-explain" title={t("Claude Code in Yolo mode on this host starts asking for permissions without saying why first.")}
+                  onClick={() => store.setSettings({ rootYoloOk: (store.state.settings.rootYoloOk ?? []).filter((id) => id !== h().id) })}>{t("Explain again before Claude starts")}</button>
+              </Show>
+            </Show>
           </div>
         )}
       </Show>
-      <Show when={!check() && !error() && !trust()}><div class="form-note">{t("Terminals and agents start in {folder}, inside tmux when the host has it.", { folder: h().folder || t("the login folder") })}</div></Show>
+      <Show when={!check() && !error() && !trust()}><div class="form-note">{h().folder ? t("Terminals and agents start in {folder}, inside tmux when the host has it.", { folder: h().folder }) : t("Terminals start in the login folder, inside tmux when the host has it. Agents need a start folder, or a project linked to its folder here.")}</div></Show>
       <Show when={files()}><FileBrowser host={h()} onHostKey={() => setTrust(true)} /></Show>
       <HostProjects host={h()} />
       <HostForwards host={h()} />
@@ -624,8 +640,8 @@ function FileBrowser(props: { host: SshHost; onHostKey: () => void }) {
     const from = picked()[0];
     if (from) setAsk({ label: t("Rename {name} to", { name: from }), value: from, ok: (v) => v.trim() && v.trim() !== from && void run("rename", () => ipc.renameEntry(root(), rel(join(from)), rel(join(v.trim())))) });
   };
-  const remove = () => {
-    if (!picked().length || !confirm(t("Delete {n} item(s) on {host}? There is no trash on the host.", { n: picked().length, host: props.host.label }))) return;
+  const remove = async () => {
+    if (!picked().length || !(await confirmDialog(t("Delete {n} item(s) on {host}? There is no trash on the host.", { n: picked().length, host: props.host.label })))) return;
     void run("delete", async () => { for (const n of picked()) await ipc.deleteEntry(root(), rel(join(n))); });
   };
   // Files dropped from Explorer / Finder onto the list upload into the current folder.
@@ -887,7 +903,7 @@ function KeysTab() {
             <button class="btn" disabled={!vault().hosts.length} onClick={() => setInstallFor(installFor() === k.path ? null : k.path)}>{t("Install on host…")}</button>
             <Show when={k.encrypted}><button class="btn" onClick={() => savePassphrase(k.path)}>{t("Passphrase…")}</button></Show>
             <button class="btn" onClick={() => void act(() => agentAdd(k.path), t("Added to the SSH agent"))}>{t("Add to agent")}</button>
-            <button class="btn" onClick={() => confirm(t("Move {name} and {name}.pub to the trash?", { name: k.name })) && void act(() => deleteKey(k.path))}>{t("Delete")}</button>
+            <button class="btn" onClick={async () => (await confirmDialog(t("Move {name} and {name}.pub to the trash?", { name: k.name }))) && void act(() => deleteKey(k.path))}>{t("Delete")}</button>
             <Show when={installFor() === k.path}>
               <div class="key-install">
                 <For each={vault().hosts}>{(h) => <button class="btn" onClick={() => void act(() => installKey(h.alias, k.path), t("Key installed on {host}", { host: h.label }))}>{h.label}</button>}</For>
@@ -909,7 +925,7 @@ function KnownHostsTab() {
   const [error, setError] = createSignal<string | null>(null);
   const shown = () => (list() ?? []).filter((k) => !query().trim() || k.hosts.toLowerCase().includes(query().trim().toLowerCase()) || k.fingerprint.includes(query().trim()));
   const remove = async (line: number, name: string) => {
-    if (!confirm(t("Forget the key of {name}? ssh asks to trust it again on the next connection.", { name }))) return;
+    if (!(await confirmDialog(t("Forget the key of {name}? ssh asks to trust it again on the next connection.", { name })))) return;
     try {
       await removeKnownHosts([line]);
       void refetch();

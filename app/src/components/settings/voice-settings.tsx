@@ -9,6 +9,7 @@ import {
 } from "../../lib/voice";
 import { MicButton } from "../voice";
 import { SettingRow } from "./setting-row";
+import { confirmDialog } from "../../lib/confirm-dialog";
 
 const mb = (n: number) => `${Math.round(n / 1e6)} MB`;
 const setVoice = (patch: Partial<ReturnType<typeof voiceSettings>>) => store.setSettings({ voice: { ...voiceSettings(), ...patch } });
@@ -34,7 +35,7 @@ export function VoiceSettings() {
     }
   };
   const remove = async (m: SpeechModel) => {
-    if (!confirm(t("Delete the {name} model ({size})?", { name: m.label, size: mb(m.size) }))) return;
+    if (!(await confirmDialog(t("Delete the {name} model ({size})?", { name: m.label, size: mb(m.size) })))) return;
     await deleteModel(m.id).catch((e) => setError(String(e)));
     if (voiceSettings().model === m.id) setVoice({ model: models()?.find((x) => x.installed && x.id !== m.id)?.id ?? null });
     await refetch();

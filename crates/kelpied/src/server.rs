@@ -8,6 +8,7 @@ use kelpie_proto::{read_frame, transport, Endpoint, Frame};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
+use crate::auth::{self, Role};
 use crate::daemon::Daemon;
 use crate::session::{json_out, next_client_id, Outgoing};
 
@@ -82,12 +83,12 @@ where
 
     // Requests from one client run strictly in order (detach-then-attach, restart twice…)
     // on a single worker, off the read loop so input frames keep flowing meanwhile.
-    let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<(Value, Role)>();
     let worker = {
         let daemon = daemon.clone();
         let out_tx = out_tx.clone();
         tokio::spawn(async move {
-            while let Some(req) = req_rx.recv().await {
+            while let Some((req, role)) = req_rx.recv().await {
                 let daemon = daemon.clone();
                 let out_tx = out_tx.clone();
                 let _ = tokio::task::spawn_blocking(move || {
@@ -95,7 +96,10 @@ where
                     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
                     let params = req.get("params").cloned().unwrap_or(Value::Null);
                     let reply = match daemon.dispatch(id, &out_tx, &req_id, method, params) {
-                        Ok(Some(result)) => json!({"id": req_id, "result": result}),
+                        Ok(Some(mut result)) => {
+                            auth::filter_reply(&daemon, &role, method, &mut result);
+                            json!({"id": req_id, "result": result})
+                        }
                         Ok(None) => return,
                         Err(e) => json!({"id": req_id, "error": {"message": format!("{e:#}")}}),
                     };
@@ -108,6 +112,9 @@ where
         })
     };
 
+    // Set by `auth`, handled here rather than on the worker so frames that follow it already
+    // see the new role.
+    let mut role = Role::Anonymous;
     loop {
         let frame = match read_frame(&mut rx).await {
             Ok(Some(f)) => f,
@@ -118,20 +125,59 @@ where
             }
         };
         match frame {
-            Frame::Input { handle, data } => {
+            // Raw keystrokes come from the app's terminal views only.
+            Frame::Input { handle, data } if role == Role::User => {
                 if let Ok(entry) = daemon.entry(handle) {
                     entry.input(data);
                 }
             }
+            Frame::Input { .. } => {}
             Frame::Json(body) => {
-                let req: Value = match serde_json::from_slice(&body) {
+                let mut req: Value = match serde_json::from_slice(&body) {
                     Ok(v) => v,
                     Err(e) => {
                         let _ = out_tx.send(json_out(&json!({"id": null, "error": {"message": format!("bad json: {e}")}})));
                         continue;
                     }
                 };
-                let _ = req_tx.send(req);
+                let req_id = req.get("id").cloned().unwrap_or(Value::Null);
+                let method = req.get("method").and_then(Value::as_str).unwrap_or("").to_string();
+                let denied = if method == "auth" {
+                    match auth::authenticate(&daemon, req.get("params").unwrap_or(&Value::Null)) {
+                        Ok(r) => {
+                            let who = match &r {
+                                Role::Session(id) | Role::Claimed(id) => json!({"session_id": id}),
+                                _ => json!({"user": true}),
+                            };
+                            role = r;
+                            daemon.set_client_role(id, &role);
+                            // The Kelpie app says so; scripts using the user's token do not, and a connection that
+                            // authenticates again as anything else is no longer the app.
+                            daemon.mark_app(id, role == Role::User && req.pointer("/params/client").and_then(Value::as_str) == Some("app"));
+                            let _ = out_tx.send(json_out(&json!({"id": req_id, "result": who})));
+                            continue;
+                        }
+                        Err(e) => Some(e),
+                    }
+                } else if role == Role::User {
+                    // The app's requests: no lookup, no copy.
+                    None
+                } else {
+                    let mut params = req.get_mut("params").map(std::mem::take).unwrap_or(Value::Null);
+                    let checked = auth::authorize(&daemon, &role, &method, &mut params);
+                    if let Some(obj) = req.as_object_mut() {
+                        obj.insert("params".into(), params);
+                    }
+                    checked.err()
+                };
+                if let Some(e) = denied {
+                    if req_id.is_null() {
+                        continue;
+                    }
+                    let _ = out_tx.send(json_out(&json!({"id": req_id, "error": {"message": format!("{e:#}")}})));
+                    continue;
+                }
+                let _ = req_tx.send((req, role.clone()));
             }
             Frame::Output { .. } => {}
         }

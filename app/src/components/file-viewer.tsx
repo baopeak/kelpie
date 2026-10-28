@@ -11,6 +11,11 @@ import { isMac } from "../lib/platform";
 import { CsvView, MermaidView, NotebookView, PdfView, renderMermaidBlocks } from "./rich-viewers";
 import type { FileContent, Project } from "../lib/types";
 import { msg, t } from "../lib/i18n";
+import { confirmDialog } from "../lib/confirm-dialog";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { openContextMenu } from "./context-menu";
+import { selectionSource } from "../lib/composer-state";
+import { sendSelectionToAgent } from "../lib/send-to-agent";
 
 const EDIT_LIMIT = 5 << 20; // larger files open read-only (first 5 MiB)
 const IMAGE_EXT: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", ico: "image/x-icon", bmp: "image/bmp", avif: "image/avif" };
@@ -126,13 +131,24 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
 
   const readOnly = () => !!file() && (file()!.truncated || file()!.binary);
 
+  /** The selected text with the lines it covers: `@selection` in a composer, Send selection. */
+  const picked = () => {
+    if (!view || view.state.selection.main.empty) return null;
+    const { from, to } = view.state.selection.main;
+    const doc = view.state.doc;
+    // A selection that ends with a line break does not cover the next line.
+    const last = to > from && doc.lineAt(to).from === to ? to - 1 : to;
+    return { text: doc.sliceString(from, to), path: props.path, startLine: doc.lineAt(from).number, endLine: doc.lineAt(last).number };
+  };
+  const selection = selectionSource(picked);
+
   async function save(force = false) {
     if (!view || readOnly()) return;
     const text = view.state.doc.toString();
     try {
       const r = await writeFile(props.project.path, props.path, text, mtime, force);
       if (r.conflict) {
-        if (confirm(t("{path} changed on disk since it was opened. Overwrite it?", { path: props.path }))) return save(true);
+        if (await confirmDialog(t("{path} changed on disk since it was opened. Overwrite it?", { path: props.path }))) return save(true);
         return;
       }
       mtime = r.mtime;
@@ -161,7 +177,10 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
             baseExtensions({ readOnly: f.truncated, onSave: () => void save() }),
             language.of([]),
             wrap.of(wrapExt()),
-            EditorView.updateListener.of((u) => u.docChanged && setDirty(u.state.doc.toString() !== loadedText)),
+            EditorView.updateListener.of((u) => {
+              if (u.docChanged) setDirty(u.state.doc.toString() !== loadedText);
+              if (u.selectionSet && !u.state.selection.main.empty) selection.changed();
+            }),
           ],
         });
         void languageFor(props.path).then((lang) => lang && view?.dispatch({ effects: language.reconfigure(lang) }));
@@ -192,9 +211,27 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
     });
     onCleanup(() => {
       void un.then((f) => f());
+      selection.dispose();
       view?.destroy();
     });
   });
+
+  /** With a selection the menu offers it to an agent; without one the native menu stays. */
+  const menu = (e: MouseEvent) => {
+    const sel = picked();
+    if (!sel || !view) return;
+    const at = () => new MouseEvent("contextmenu", { clientX: e.clientX, clientY: e.clientY });
+    const editor = view;
+    openContextMenu(e, [
+      { label: t("Copy"), hint: isMac ? "⌘C" : "Ctrl+C", run: () => void writeText(sel.text) },
+      ...(readOnly() ? [] : [
+        { label: t("Cut"), hint: isMac ? "⌘X" : "Ctrl+X", run: () => { void writeText(sel.text); editor.dispatch(editor.state.replaceSelection("")); } },
+        { label: t("Paste"), hint: isMac ? "⌘V" : "Ctrl+V", run: () => void readText().then((text) => text && editor.dispatch(editor.state.replaceSelection(text))) },
+      ]),
+      null,
+      { label: t("Send Selection to Agent…"), run: () => sendSelectionToAgent(at(), props.project.id, sel) },
+    ]);
+  };
 
   createEffect(on(() => props.line, (line) => line && goToLine(line), { defer: true }));
   createEffect(on(() => store.state.settings.wordWrap, () => view?.dispatch({ effects: wrap.reconfigure(wrapExt()) }), { defer: true }));
@@ -213,7 +250,7 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
         </div>
       </Show>
       <Show when={error()}><div class="muted">{error()}</div></Show>
-      <div class="cm-host" ref={host} />
+      <div class="cm-host" ref={host} onContextMenu={menu} />
     </>
   );
 }

@@ -220,27 +220,117 @@ pub async fn read_file(root: &str, rel: &str, max: u64) -> CmdResult<(Vec<u8>, u
     Ok((out.stdout[nl + 1..].to_vec(), size, mtime))
 }
 
-/// Writes a remote file; with `expected_mtime`, refuses when it changed meanwhile (seconds).
-pub async fn write_file(root: &str, rel: &str, content: Vec<u8>, expected_mtime: Option<u64>) -> CmdResult<(bool, u64)> {
-    let f = parse_root(&guard(root, rel)?.to_string_lossy()).ok_or("invalid path")?;
-    let check = match expected_mtime {
-        Some(m) => format!("if [ -f \"$f\" ]; then m=$(stat -c %Y \"$f\" 2>/dev/null || stat -f %m \"$f\"); [ \"$m\" = {m} ] || {{ echo conflict; exit 4; }}; fi; "),
-        None => String::new(),
-    };
-    let script = format!("f={}; {check}cat > \"$f\" && (stat -c %Y \"$f\" 2>/dev/null || stat -f %m \"$f\")", q(&f.path));
-    let out = exec(&f, &script, Some(content), Duration::from_secs(60)).await?;
-    if out.code == Some(4) {
-        return Ok((false, 0));
+/// POSIX `cksum` of `bytes` as the command prints it ("<crc> <bytes>"): CRC-32 (polynomial 0x04C11DB7, most significant bit
+/// first) of the bytes and then of their count, complemented.
+pub fn cksum(bytes: &[u8]) -> String {
+    fn step(crc: u32, b: u8) -> u32 {
+        let mut c = crc ^ ((b as u32) << 24);
+        for _ in 0..8 {
+            c = if c & 0x8000_0000 != 0 { (c << 1) ^ 0x04C1_1DB7 } else { c << 1 };
+        }
+        c
+    }
+    let mut crc = bytes.iter().fold(0u32, |c, b| step(c, *b));
+    let mut n = bytes.len();
+    while n > 0 {
+        crc = step(crc, (n & 0xff) as u8);
+        n >>= 8;
+    }
+    format!("{} {}", !crc, bytes.len())
+}
+
+/// The shell part of `write_file`. Its values arrive as positional parameters (`set -- …` in front, every value quoted), never
+/// pasted into the text, so nothing in a file name can reach the script: `$1` the path, `$2` the project's folder, `$3` the
+/// cksum of what is written, `$4` the cksum the file must still have ("" for none), `$5` the time (seconds) it must still have
+/// ("" for none), `$6` 1 to keep the target inside the project.
+const WRITE_SCRIPT: &str = r#"f=$1; root=$2; new=$3; sum=$4; mtime=$5; confine=$6
+t=
+trap 'rm -f "$t"' EXIT
+command -v mktemp >/dev/null 2>&1 || exit 8
+resolve() { p=$1; n=0; while [ -L "$p" ] && [ "$n" -lt 40 ]; do l=$(readlink -- "$p") || return 1; case "$l" in /*) p=$l;; *) p=$(dirname -- "$p")/$l;; esac; n=$((n+1)); done; [ -L "$p" ] && return 1; printf '%s' "$p"; }
+if [ -L "$f" ]; then f=$(resolve "$f") || exit 6; fi
+if [ "$confine" = 1 ]; then
+  R=$(cd "$root" && pwd -P) || exit 7
+  D=$(cd "$(dirname -- "$f")" && pwd -P) || exit 7
+  case "$R" in /) ;; *) case "$D/" in "$R"/*) ;; *) exit 7;; esac;; esac
+fi
+if [ -n "$mtime" ] && [ -f "$f" ]; then m=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f"); [ "$m" = "$mtime" ] || { echo conflict; exit 4; }; fi
+if [ -n "$sum" ]; then
+  [ -f "$f" ] || { echo conflict; exit 4; }
+  c=$(cksum < "$f" | tr -s ' ' ' '); [ "$c" = "$sum" ] || { echo conflict; exit 4; }
+fi
+atomic=0
+# A file made by mktemp is made exclusively (a name that is already there, a link included, is never opened) with mode 0600.
+if [ ! -e "$f" ] || [ -O "$f" ]; then
+  if t=$(mktemp "$f.kelpie-tmp.XXXXXX" 2>/dev/null); then atomic=1; else t=; fi
+fi
+[ "$atomic" = 1 ] || t=$(mktemp) || exit 1
+cat > "$t" || exit 1
+[ "$(cksum < "$t" | tr -s ' ' ' ')" = "$new" ] || exit 5
+if [ "$atomic" = 1 ]; then
+  if [ -f "$f" ]; then m=$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f" 2>/dev/null); else m=$(printf '%o' $((0666 & ~$(umask)))); fi
+  [ -z "$m" ] || chmod "$m" "$t"
+  mv -f "$t" "$f" || exit 1
+else
+  cat "$t" > "$f" || exit 1
+fi
+stat -c %Y "$f" 2>/dev/null || stat -f %m "$f"
+"#;
+
+/// The script `write_file` runs on the host for `content` (see there), with its values in front as parameters.
+fn write_script(path: &str, project: &str, content: &[u8], expected_mtime: Option<u64>, expected_cksum: Option<&str>, confine: bool) -> CmdResult<String> {
+    if let Some(sum) = expected_cksum {
+        if sum.is_empty() || !sum.chars().all(|c| c.is_ascii_digit() || c == ' ') {
+            return Err("invalid checksum".into());
+        }
+    }
+    let mtime = expected_mtime.map(|m| m.to_string()).unwrap_or_default();
+    Ok(format!(
+        "set -- {} {} {} {} {} {}\n{WRITE_SCRIPT}",
+        q(path),
+        q(project),
+        q(&cksum(content)),
+        q(expected_cksum.unwrap_or("")),
+        q(&mtime),
+        if confine { "1" } else { "0" }
+    ))
+}
+
+/// What the script's exit says: written (with the file's new time), refused because the file changed, or an error.
+fn write_outcome(out: &Output) -> CmdResult<(bool, u64)> {
+    match out.code {
+        Some(4) => return Ok((false, 0)),
+        Some(5) => return Err("the file did not arrive complete: nothing was changed".into()),
+        Some(6) => return Err("could not follow the link to the file".into()),
+        Some(7) => return Err("the file is a link that leads out of the project: nothing was written".into()),
+        Some(8) => return Err("this host has no mktemp: the file was not written".into()),
+        _ => {}
     }
     if !out.ok {
-        return Err(out.stderr);
+        return Err(out.stderr.clone());
     }
     Ok((true, String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)))
 }
 
+/// Writes a remote file. A link is written through to its target, whose own folder gets the temporary file: the content goes
+/// there first and replaces the file in one step, so a connection that drops half way leaves the old file, never a truncated
+/// one; what arrived is checked (size and `cksum`) before anything is replaced. A folder that cannot be written to falls back to
+/// writing the file in place, but only once the whole content is known to have arrived; so does a file that belongs to someone else, because a new file would be the ssh user's. The mode of the file stays.
+///
+/// With `expected_mtime` (seconds) and / or `expected_cksum` (the POSIX `cksum` of the content the caller read, "<crc> <bytes>")
+/// it refuses when the file changed meanwhile: seconds alone cannot tell two edits of one second apart. With a checksum the file
+/// must still be there (a conditional write never recreates it). `confine`: the target, after links, must be inside the project's
+/// folder (the spec index asks for it; the editor's save keeps writing wherever its links lead).
+pub async fn write_file(root: &str, rel: &str, content: Vec<u8>, expected_mtime: Option<u64>, expected_cksum: Option<&str>, confine: bool) -> CmdResult<(bool, u64)> {
+    let f = parse_root(&guard(root, rel)?.to_string_lossy()).ok_or("invalid path")?;
+    let top = parse_root(root).ok_or("invalid remote root")?;
+    let script = write_script(&f.path, &top.path, &content, expected_mtime, expected_cksum, confine)?;
+    write_outcome(&exec(&f, &script, Some(content), Duration::from_secs(60)).await?)
+}
+
 pub async fn create(root: &str, rel: &str, dir: bool) -> CmdResult<()> {
     let f = parse_root(&guard(root, rel)?.to_string_lossy()).ok_or("invalid path")?;
-    let script = if dir { format!("mkdir -p -- {}", q(&f.path)) } else { format!("f={}; [ -e \"$f\" ] && {{ echo 'already exists' >&2; exit 1; }}; mkdir -p -- \"$(dirname -- \"$f\")\" && : > \"$f\"", q(&f.path)) };
+    let script = if dir { format!("mkdir -p -- {}", q(&f.path)) } else { format!("f={}; {{ [ -e \"$f\" ] || [ -L \"$f\" ]; }} && {{ echo 'already exists' >&2; exit 1; }}; mkdir -p -- \"$(dirname -- \"$f\")\" && : > \"$f\"", q(&f.path)) };
     exec_ok(&f, &script).await.map(|_| ())
 }
 
@@ -335,10 +425,21 @@ pub struct HostCheck {
     /// `ID` of `/etc/os-release` (ubuntu, debian, alpine…); empty where there is none (macOS).
     distro: String,
     home: String,
+    /// The account it logs in as. `root`: uid 0 without `IS_SANDBOX=1` in the login shell, where
+    /// Claude Code refuses to skip permission prompts.
+    user: String,
+    root: bool,
     git: bool,
     tmux: bool,
     /// Agent CLIs found on the host's PATH (login shell).
     agents: Vec<String>,
+}
+
+/// The probe's `uid=` value (`0`, `1000`, `0-sandbox1`): root, without the `IS_SANDBOX=1` that
+/// lets Claude Code skip permission prompts as root (the daemon's launch checks the same).
+fn root_refused(v: &str) -> bool {
+    let (uid, sandbox) = v.trim().split_once("-sandbox").unwrap_or((v.trim(), ""));
+    uid == "0" && sandbox != "1"
 }
 
 /// Connects to `dest` (`user@host[:port]` or an alias) and reports what it has.
@@ -349,15 +450,19 @@ pub async fn remote_check(dest: String, agents: Vec<String>) -> CmdResult<HostCh
     // A login shell, so PATH matches what terminals get. The loop's status is the last tool's;
     // `true` keeps a missing one from failing the whole check.
     let probe = format!(
-        "printf 'os=%s\\nhome=%s\\ndistro=%s\\n' \"$(uname -sr)\" \"$HOME\" \"$( (. /etc/os-release 2>/dev/null && printf %s \"$ID\") )\"; for b in git tmux {}; do command -v \"$b\" >/dev/null 2>&1 && echo \"has=$b\"; done; true",
+        "printf 'os=%s\\nhome=%s\\ndistro=%s\\nuser=%s\\nuid=%s\\n' \"$(uname -sr)\" \"$HOME\" \"$( (. /etc/os-release 2>/dev/null && printf %s \"$ID\") )\" \"$(id -un)\" \"$(id -u)${{IS_SANDBOX:+-sandbox$IS_SANDBOX}}\"; for b in git tmux {}; do command -v \"$b\" >/dev/null 2>&1 && echo \"has=$b\"; done; true",
         bins.join(" ")
     );
     let script = format!("exec \"${{SHELL:-/bin/sh}}\" -lc {}", q(&probe));
     let text = exec_ok(&r, &script).await?;
-    let mut c = HostCheck { os: String::new(), distro: String::new(), home: String::new(), git: false, tmux: false, agents: Vec::new() };
+    let mut c = HostCheck { os: String::new(), distro: String::new(), home: String::new(), user: String::new(), root: false, git: false, tmux: false, agents: Vec::new() };
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("os=") {
             c.os = v.trim().into();
+        } else if let Some(v) = line.strip_prefix("user=") {
+            c.user = v.trim().into();
+        } else if let Some(v) = line.strip_prefix("uid=") {
+            c.root = root_refused(v);
         } else if let Some(v) = line.strip_prefix("distro=") {
             c.distro = v.trim().to_ascii_lowercase();
         } else if let Some(v) = line.strip_prefix("home=") {
@@ -374,6 +479,85 @@ pub async fn remote_check(dest: String, agents: Vec<String>) -> CmdResult<HostCh
         return Err(format!("{dest} did not answer the probe"));
     }
     Ok(c)
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct AddedUser {
+    home: String,
+    /// The user was there already (it only got root's keys).
+    existed: bool,
+    /// sshd's AllowUsers / AllowGroups / DenyUsers / DenyGroups lines: the user may need adding
+    /// there before it can log in.
+    sshd: Vec<String>,
+}
+
+/// A login name `useradd` takes everywhere (and never root).
+fn valid_user_name(n: &str) -> bool {
+    let mut c = n.chars();
+    n.len() <= 32 && n != "root" && c.next().is_some_and(|f| f.is_ascii_lowercase() || f == '_') && c.all(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || x == '_' || x == '-')
+}
+
+/// Run as root: creates the user (no password, so it logs in with keys only), then gives it
+/// root's authorized SSH keys after any it has (in order, without duplicates). An existing user
+/// only gets the keys, and only a regular account (a login uid and shell) whose `.ssh` holds no
+/// symlinks: root writes there, and must not follow a link the user planted.
+const ADD_USER: &str = r#"
+[ "$(id -u)" = 0 ] || { echo "log in as root to add a user" >&2; exit 3; }
+command -v useradd >/dev/null 2>&1 || { echo "useradd is not available on this host" >&2; exit 3; }
+existed=1
+if ! id -u "$n" >/dev/null 2>&1; then
+  existed=0
+  useradd -m -U -s "$(command -v bash || echo /bin/sh)" -p '*' "$n" || exit 4
+fi
+[ "$(id -u "$n")" != 0 ] || { echo "$n is a root account" >&2; exit 3; }
+home=$(getent passwd "$n" | cut -d: -f6)
+g=$(id -gn "$n")
+[ -n "$home" ] && [ -d "$home" ] || { echo "$n has no home folder" >&2; exit 3; }
+k="$home/.ssh/authorized_keys"
+if [ "$existed" = 1 ]; then
+  umin=$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)
+  [ "$(id -u "$n")" -ge "${umin:-1000}" ] || { echo "$n is a system account: choose another name" >&2; exit 3; }
+  case "$(getent passwd "$n" | cut -d: -f7)" in */nologin|*/false|"") echo "$n cannot log in (no shell): choose another name" >&2; exit 3;; esac
+  [ ! -L "$home/.ssh" ] && [ ! -L "$k" ] || { echo "$n's ~/.ssh is a symbolic link: Kelpie does not write through it" >&2; exit 3; }
+fi
+install -d -m 700 -o "$n" -g "$g" "$home/.ssh" || exit 4
+t=$(mktemp) || exit 4
+{ [ -f "$k" ] && cat "$k"; echo; cat "$HOME/.ssh/authorized_keys" 2>/dev/null; echo; } | grep -v '^[[:space:]]*$' | awk '!seen[$0]++' > "$t"
+grep -q . "$HOME/.ssh/authorized_keys" 2>/dev/null || { rm -f "$t"; echo "root has no authorized SSH keys to give $n" >&2; exit 3; }
+install -m 600 -o "$n" -g "$g" "$t" "$k" || { rm -f "$t"; exit 4; }
+rm -f "$t"
+command -v restorecon >/dev/null 2>&1 && restorecon -R "$home/.ssh" >/dev/null 2>&1
+printf 'home=%s\nexisted=%s\n' "$home" "$existed"
+sshd -T 2>/dev/null | grep -Ei '^(allowusers|allowgroups|denyusers|denygroups) ' | sed 's/^/sshd=/'
+true
+"#;
+
+/// Adds a regular user on a host logged in as root, for agents that refuse to run as root
+/// unguarded (Claude Code's Yolo mode).
+#[tauri::command]
+pub async fn remote_add_user(dest: String, name: String) -> CmdResult<AddedUser> {
+    if !valid_user_name(&name) {
+        return Err("invalid user name".into());
+    }
+    let r = parse_root(&format!("ssh://{dest}/")).ok_or("invalid host")?;
+    parse_added_user(&exec_ok(&r, &format!("n={}\n{ADD_USER}", q(&name))).await?)
+}
+
+fn parse_added_user(text: &str) -> CmdResult<AddedUser> {
+    let mut u = AddedUser { home: String::new(), existed: false, sshd: Vec::new() };
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("home=") {
+            u.home = v.trim().into();
+        } else if let Some(v) = line.strip_prefix("existed=") {
+            u.existed = v.trim() == "1";
+        } else if let Some(v) = line.strip_prefix("sshd=") {
+            u.sshd.push(v.trim().into());
+        }
+    }
+    if u.home.is_empty() {
+        return Err("the host did not confirm the new user".into());
+    }
+    Ok(u)
 }
 
 /// Folders of an absolute path on the host (for choosing a project folder).
@@ -405,6 +589,32 @@ mod tests {
     }
 
     #[test]
+    fn user_names_useradd_takes() {
+        for ok in ["dev", "_svc", "web-1", "a_b"] {
+            assert!(valid_user_name(ok), "{ok}");
+        }
+        for bad in ["", "root", "Dev", "1dev", "-dev", "de v", "dev;rm", "dev$", &"a".repeat(33)] {
+            assert!(!valid_user_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn root_unless_a_sandbox() {
+        assert!(root_refused("0"));
+        assert!(root_refused("0-sandbox0"));
+        assert!(!root_refused("0-sandbox1"));
+        assert!(!root_refused("1000"));
+        assert!(!root_refused("1000-sandbox1"));
+    }
+
+    #[test]
+    fn reads_the_added_user() {
+        let u = parse_added_user("home=/home/dev\nexisted=0\nsshd=allowusers root\n").unwrap();
+        assert_eq!(u, AddedUser { home: "/home/dev".into(), existed: false, sshd: vec!["allowusers root".into()] });
+        assert!(parse_added_user("existed=1\n").is_err());
+    }
+
+    #[test]
     fn guards_remote_paths() {
         assert_eq!(guard("ssh://box/home/me/app", "src/a.rs").unwrap().to_string_lossy(), "ssh://box/home/me/app/src/a.rs");
         assert_eq!(guard("ssh://box/home/me/app", "").unwrap().to_string_lossy(), "ssh://box/home/me/app");
@@ -416,5 +626,146 @@ mod tests {
     fn quotes_for_sh() {
         assert_eq!(q("it's"), r"'it'\''s'");
         assert_eq!(q("$(rm -rf /)"), "'$(rm -rf /)'");
+    }
+
+    #[test]
+    fn cksum_is_the_posix_one() {
+        assert_eq!(cksum(b"123456789"), "930766865 9");
+        assert_eq!(cksum(b""), "4294967295 0");
+        assert_eq!(cksum(b"a\r\nb"), "893934516 4");
+        assert!(cksum(&vec![7u8; 70_000]).ends_with(" 70000"));
+    }
+
+    // The write script, run by a local shell (Git Bash on Windows, with its link emulation on; none: the tests do nothing).
+    fn shell() -> Option<std::path::PathBuf> {
+        let candidates = [std::env::var("KELPIE_TEST_BASH").unwrap_or_default(), r"C:\Program Files\Git\bin\bash.exe".into(), "/bin/sh".into()];
+        candidates.into_iter().filter(|c| !c.is_empty()).map(std::path::PathBuf::from).find(|p| p.exists())
+    }
+
+    fn sh(shell: &std::path::Path, script: &str, stdin: &[u8]) -> Output {
+        use std::io::Write;
+        let mut child = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(script)
+            .env("MSYS", "winsymlinks:lnk")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin).ok();
+        let o = child.wait_with_output().unwrap();
+        Output { ok: o.status.success(), code: o.status.code(), stdout: o.stdout, stderr: String::from_utf8_lossy(&o.stderr).trim().to_string() }
+    }
+
+    fn scratch(name: &str) -> String {
+        let d = std::env::temp_dir().join(format!("kelpie-write-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.to_string_lossy().replace('\\', "/")
+    }
+
+    #[test]
+    fn a_remote_write_keeps_links_and_never_commits_a_short_file() {
+        let Some(shell) = shell() else { return };
+        let dir = scratch("w");
+        let (project, outside) = (format!("{dir}/project"), format!("{dir}/outside"));
+        let run = |script: &str| sh(&shell, script, b"");
+        run(&format!("mkdir -p {p} {o} && printf 'old\\n' > {p}/real.md && printf 'elsewhere\\n' > {o}/target.md && ln -s real.md {p}/link.md && ln -s {o}/target.md {p}/out.md && ln -s missing.md {p}/dangling.md", p = q(&project), o = q(&outside)));
+        let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+        let write = |rel: &str, body: &[u8], mtime: Option<u64>, sum: Option<&str>, confine: bool| {
+            let script = write_script(&format!("{project}/{rel}"), &project, body, mtime, sum, confine).unwrap();
+            write_outcome(&sh(&shell, &script, body))
+        };
+
+        // A plain file: replaced whole, no temporary file left.
+        assert!(write("real.md", b"new\n", None, None, true).unwrap().0);
+        assert_eq!(read(&format!("{project}/real.md")), "new\n");
+        assert!(!std::fs::read_dir(&project).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains("kelpie-tmp")));
+
+        // A link inside the project is written through: the link stays and its target changes.
+        assert!(write("link.md", b"through\n", None, Some(&cksum(b"new\n")), true).unwrap().0);
+        assert_eq!(read(&format!("{project}/real.md")), "through\n");
+        assert!(sh(&shell, &format!("[ -L {}/link.md ]", q(&project)), b"").ok, "the link is still a link");
+
+        // The editor's save (no confine) writes through a link that leads out; the spec index (confine) refuses and changes nothing.
+        let err = write("out.md", b"nope\n", None, Some(&cksum(b"elsewhere\n")), true).unwrap_err();
+        assert!(err.contains("leads out of the project"), "{err}");
+        assert_eq!(read(&format!("{outside}/target.md")), "elsewhere\n");
+        assert!(write("out.md", b"saved\n", None, None, false).unwrap().0);
+        assert_eq!(read(&format!("{outside}/target.md")), "saved\n");
+        assert!(sh(&shell, &format!("[ -L {}/out.md ]", q(&project)), b"").ok);
+
+        // A short input (the connection dropped part way) is refused and the file is untouched.
+        let whole = b"a whole new content of some length\n";
+        let script = write_script(&format!("{project}/real.md"), &project, whole, None, None, false).unwrap();
+        let err = write_outcome(&sh(&shell, &script, &whole[..10])).unwrap_err();
+        assert!(err.contains("did not arrive complete"), "{err}");
+        assert_eq!(read(&format!("{project}/real.md")), "through\n");
+        assert!(!std::fs::read_dir(&project).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains("kelpie-tmp")));
+
+        // A conditional write refuses a changed file, and a file that is gone (it never recreates it); the editor's save recreates.
+        assert!(!write("real.md", b"x\n", None, Some(&cksum(b"something else\n")), true).unwrap().0);
+        std::fs::remove_file(format!("{project}/real.md")).unwrap();
+        assert!(!write("real.md", b"x\n", None, Some(&cksum(b"through\n")), true).unwrap().0);
+        assert!(!std::path::Path::new(&format!("{project}/real.md")).exists());
+        assert!(write("real.md", b"again\n", None, None, false).unwrap().0);
+        assert_eq!(read(&format!("{project}/real.md")), "again\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_remote_write_makes_its_temp_file_exclusively_and_reads_names_as_names() {
+        let Some(shell) = shell() else { return };
+        let dir = scratch("x");
+        let project = format!("{dir}/project");
+        let log = format!("{dir}/mktemp.log");
+        std::fs::create_dir_all(&project).unwrap();
+        let run = |script: &str, stdin: &[u8]| {
+            use std::io::Write;
+            // `mktemp` is a function that notes how it is asked, and then does the real thing.
+            let script = format!("mktemp() {{ echo \"$@\" >> {}; command mktemp \"$@\"; }}
+{script}", q(&log));
+            let mut c = std::process::Command::new(&shell).arg("-c").arg(&script).env("MSYS", "winsymlinks:lnk").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+            c.stdin.take().unwrap().write_all(stdin).ok();
+            let o = c.wait_with_output().unwrap();
+            Output { ok: o.status.success(), code: o.status.code(), stdout: o.stdout, stderr: String::from_utf8_lossy(&o.stderr).trim().to_string() }
+        };
+        let put = |name: &str, body: &[u8]| {
+            let script = write_script(&format!("{project}/{name}"), &project, body, None, None, true).unwrap();
+            write_outcome(&run(&script, body))
+        };
+
+        // Names that an attacker plants where a temporary file would go: a file, the template itself, a link to a file elsewhere.
+        std::fs::write(format!("{dir}/victim.md"), "victim\n").unwrap();
+        for n in ["real.md.kelpie-tmp.XXXXXX", "real.md.kelpie-tmp.1", "real.md.kelpie-tmp.4242"] {
+            std::fs::write(format!("{project}/{n}"), "planted\n").unwrap();
+        }
+        assert!(run(&format!("ln -s ../victim.md {}/real.md.kelpie-tmp.7", q(&project)), b"").ok);
+        assert!(put("real.md", b"written\n").unwrap().0);
+        assert_eq!(std::fs::read_to_string(format!("{project}/real.md")).unwrap(), "written\n");
+        for n in ["real.md.kelpie-tmp.XXXXXX", "real.md.kelpie-tmp.1", "real.md.kelpie-tmp.4242"] {
+            assert_eq!(std::fs::read_to_string(format!("{project}/{n}")).unwrap(), "planted\n", "{n} was not touched");
+        }
+        assert_eq!(std::fs::read_to_string(format!("{dir}/victim.md")).unwrap(), "victim\n", "a planted link was not followed");
+        let asked = std::fs::read_to_string(&log).unwrap();
+        assert!(asked.contains(&format!("{project}/real.md.kelpie-tmp.XXXXXX")), "the temporary file is made by mktemp, in the target's folder: {asked}");
+
+        // File names that look like the script's own placeholders, or like shell.
+        for name in ["a__NEW__b.md", "a__CHECKS__b.md", "a__CONFINE__b.md", "a__F__b.md", "a__ROOT__b.md", "x'y z $(echo hi) ;.md", "$1.md", "-n.md", "`tick`.md"] {
+            let body = format!("body of {name}\n");
+            assert!(put(name, body.as_bytes()).unwrap().0, "{name}");
+            assert_eq!(std::fs::read_to_string(format!("{project}/{name}")).unwrap(), body, "{name}");
+            // And a conditional write of such a file names the file's own checksum.
+            let again = write_script(&format!("{project}/{name}"), &project, b"again\n", None, Some(&cksum(body.as_bytes())), true).unwrap();
+            assert!(write_outcome(&run(&again, b"again\n")).unwrap().0, "{name}");
+        }
+        // Nothing but what was planted, what was written and the two helper files is in the folder.
+        let names: Vec<String> = std::fs::read_dir(&project).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert!(!names.iter().any(|n| n.contains("kelpie-tmp") && !n.starts_with("real.md.kelpie-tmp.")), "{names:?}");
+        // A project folder that is the root of the host: every target is inside it.
+        let script = write_script(&format!("{project}/real.md"), "/", b"root\n", None, None, true).unwrap();
+        assert!(write_outcome(&run(&script, b"root\n")).unwrap().0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

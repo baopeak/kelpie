@@ -8,6 +8,7 @@ import { kindInfo } from "../../lib/agents";
 import type { AgentAccount } from "../../lib/types";
 import { Icon, KindGlyph } from "../icons";
 import { SettingRow } from "./setting-row";
+import { confirmDialog } from "../../lib/confirm-dialog";
 
 /** Re-reads sign-in state every few seconds while the page is open (a sign-in may be running
  *  in the floating terminal). */
@@ -43,8 +44,8 @@ function AccountRow(props: { agent: AccountAgent; account: AgentAccount | null }
       <Show when={props.account}>
         {(a) => (
           <button class="icon-btn" title={t("Remove account (its sign-in and history go to the trash)")}
-            onClick={() => {
-              if (!confirm(t("Remove the {agent} account “{name}”? Its sign-in, settings and conversation history move to the trash.", { agent: kindInfo(props.agent).label, name: a().label }))) return;
+            onClick={async () => {
+              if (!(await confirmDialog(t("Remove the {agent} account “{name}”? Its sign-in, settings and conversation history move to the trash.", { agent: kindInfo(props.agent).label, name: a().label })))) return;
               void removeAccount(a()).catch((e) => store.notify(t("Could not remove the account: {error}", { error: String(e) })));
             }}>
             <Icon name="close" size={13} />

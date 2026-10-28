@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Kelpie",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "identifier": "dev.kelpie.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -49,6 +49,7 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
+        "installerHooks": "./installer/hooks.nsh",
         "installerIcon": "icons/icon.ico",
         "headerImage": "installer/nsis-header.bmp",
         "sidebarImage": "installer/nsis-sidebar.bmp"
@@ -61,6 +62,17 @@
         "windowSize": { "width": 660, "height": 400 },
         "appPosition": { "x": 180, "y": 220 },
         "applicationFolderPosition": { "x": 480, "y": 220 }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIxN0M2MzZGMzM4MDlBQjcKUldTM21vQXpiMk44c2NpUW5ZSUdhamU1Y0ZpTUIzU09NVXF2YXJUYUVYY1RsMW00Q3FGTldIWmQK",
+      "endpoints": [
+        "https://github.com/baopeak/kelpie/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

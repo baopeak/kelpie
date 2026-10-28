@@ -108,7 +108,7 @@ try:
         b: {{ type: 'split', id: 's2', dir: 'row', ratio: 0.5, a: {{ type: 'leaf', id: 'l2', pane: P('b') }}, b: {{ type: 'leaf', id: 'l3', pane: P('c') }} }} }};
       const m = L.migrateLayout(legacy);
       out.migrate = [m.children.length, m.sizes.map(x => +x.toFixed(3))];
-      const tpl = L.toTemplate(g, (p) => p.id === 'a' ? 'shell' : null);
+      const tpl = L.toTemplate(g, (p) => ({{ kind: p.id === 'a' ? 'shell' : null }}));
       out.tpl = L.templateKinds(tpl);
       const back = L.fromTemplate(tpl, (k) => ({{ id: 'n' + Math.random(), kind: k ? 'terminal' : 'empty' }}));
       out.tplShape = [back.children.length, back.children.map(c => c.children.length)];

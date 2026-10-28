@@ -6,6 +6,7 @@ import * as ipc from "./ipc";
 import { t } from "./i18n";
 import { basename, normPath } from "./platform";
 import { disposeView } from "./terminal-host";
+import { markWorktreeRemoved } from "./runs";
 import type { Project, SessionKind } from "./types";
 
 /** `.kelpie.yaml` in a repository root. */
@@ -18,8 +19,13 @@ export interface KelpieConfig {
   copy: string[];
   /** Ignored folders shared with the repository through a link (e.g. node_modules). */
   link: string[];
-  /** Hash of the file's text: what the user approved to run. */
-  hash: string;
+  /** Commands Finish runs on the merged result before the base branch moves. One program and its
+   *  arguments each; no shell (no `&&`, pipes or variables). */
+  check: string[];
+  /** The commands that run when a worktree starts (setup, tabs, copy, link) as canonical text: what the user
+   *  approved is stored as this text and compared for equality (no hash to forge). `check:` is approved on its
+   *  own (see `checksApproved`). */
+  setupKey: string;
   /** The file it came from: `.kelpie.yaml`, or `.erka.yaml` from before the rename. */
   file?: string;
 }
@@ -27,12 +33,6 @@ export interface KelpieConfig {
 /** shell, a core agent or any preset agent id (checked when the tab starts). */
 const KIND_RE = /^[a-z][a-z0-9-]*$/;
 const MAX_CONFIG = 64 * 1024;
-
-function hashText(text: string): string {
-  let h = 0x811c9dc5; // FNV-1a
-  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
-  return (h >>> 0).toString(16) + ":" + text.length;
-}
 
 /** Parses `.kelpie.yaml` text. Throws a readable message when it is invalid. */
 export function parseKelpieConfig(text: string): KelpieConfig {
@@ -52,7 +52,9 @@ export function parseKelpieConfig(text: string): KelpieConfig {
     else throw new Error(t(".kelpie.yaml: unknown tab {tab} (use an agent such as claude, shell, or { command: … })", { tab: JSON.stringify(tab) }));
   }
   const paths = (v: unknown) => list(v).map(String).map((x) => x.trim()).filter(Boolean);
-  return { setup, tabs, copy: paths(raw.copy), link: paths(raw.link), hash: hashText(text) };
+  const copy = paths(raw.copy);
+  const link = paths(raw.link);
+  return { setup, tabs, copy, link, check: list(raw.check).map(String).map((c) => c.trim()).filter(Boolean), setupKey: JSON.stringify([setup, tabs, copy, link]) };
 }
 
 /**
@@ -68,8 +70,14 @@ export async function configAtRef(repo: Project, base: string): Promise<KelpieCo
   return null;
 }
 
-/** Whether this exact config was approved for the repository before. */
-export const configApproved = (repo: Project, config: KelpieConfig) => store.state.approvedSetups?.[normPath(repo.path)] === config.hash;
+/** Whether these exact worktree-start commands (setup, tabs, copy, link) were approved for the repository before. */
+export const configApproved = (repo: Project, config: KelpieConfig) => store.state.approvedSetups?.[normPath(repo.path)] === config.setupKey;
+
+/** Whether exactly this `check:` list was approved for the repository before. */
+export const checksApproved = (repo: Project, config: KelpieConfig) => {
+  const approved = store.state.approvedChecks?.[normPath(repo.path)];
+  return !!approved && approved.length === config.check.length && approved.every((c, i) => c === config.check[i]);
+};
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -102,22 +110,70 @@ export function worktreeFolder(repo: Project, branch: string): string {
  */
 export async function createWorktree(repo: Project, opts: { branch: string; base?: string; path: string; config: KelpieConfig | null }) {
   if (!validBranch(opts.branch)) throw new Error(t("\"{name}\" is not a valid branch name", { name: opts.branch }));
+  // The branch this one forks from is what Finish merges into later (the main checkout may be on another branch by then).
+  const requested = opts.base?.trim();
+  let baseBranch: string | undefined;
+  if (!requested || requested === "HEAD") baseBranch = store.projectInfo[repo.id]?.branch ?? undefined;
+  else if ((await ipc.gitRefs(repo.path).catch(() => [])).some((r) => r.kind === "local" && r.name === requested)) baseBranch = requested;
   await ipc.gitWorktreeAdd(repo.path, opts.path.trim(), opts.branch, opts.base?.trim() || undefined);
-  // Ignored files a checkout lacks (.env, node_modules): before setup runs, which may need them.
-  const files = await ipc.worktreeMaterialize(repo.path, opts.path.trim(), opts.config?.copy ?? [], opts.config?.link ?? []).catch((e) => {
-    store.notify(t("Copying ignored files failed: {error}", { error: String(e) }), undefined, 8000);
-    return null;
-  });
-  const id = store.addProject(opts.path.trim(), { parentId: repo.id, branch: opts.branch, name: opts.branch });
+  // Ignored files a checkout lacks (.env, node_modules): before setup runs, which may need them. Only
+  // with the repository's `.kelpie.yaml` approved (`.worktreeinclude` too): without it the worktree is a
+  // clean checkout.
+  const files = opts.config
+    ? await ipc.worktreeMaterialize(repo.path, opts.path.trim(), opts.config.copy, opts.config.link).catch((e) => {
+        store.notify(t("Copying ignored files failed: {error}", { error: String(e) }), undefined, 8000);
+        return null;
+      })
+    : null;
+  const id = store.addProject(opts.path.trim(), { parentId: repo.id, branch: opts.branch, baseBranch, name: opts.branch });
   const project = store.state.projects.find((p) => p.id === id)!;
   const parts = [files?.copied.length ? t("copied {files}", { files: files.copied.join(", ") }) : "", files?.linked.length ? t("linked {files}", { files: files.linked.join(", ") }) : ""].filter(Boolean);
   store.addInbox({ kind: "worktree", title: t("Worktree {name}", { name: opts.branch }), body: parts.length ? t("Created in {repo} · {details}", { repo: repo.name, details: parts.join(" · ") }) : t("Created in {repo}", { repo: repo.name }), projectId: id });
   if (files?.skipped.length) store.notify(t("Not brought into the worktree: {files}", { files: files.skipped.map((x) => `${x.path} (${x.reason})`).join("; ") }), undefined, 12000);
   if (opts.config) {
-    store.approveSetup(repo.path, opts.config.hash);
     void applyKelpieConfig(project, opts.config).catch((e) => store.notify(t(".kelpie.yaml: {error}", { error: String(e) })));
   }
   return project;
+}
+
+/** A branch name from the first words of a prompt: `fix-the-login-redirect`. */
+export function branchFromPrompt(prompt: string, fallback: string): string {
+  const words = prompt.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").match(/[a-z0-9]+/g) ?? [];
+  let slug = "";
+  for (const w of words.slice(0, 6)) {
+    if ((slug + "-" + w).length > 40 && slug) break;
+    slug = slug ? `${slug}-${w}` : w.slice(0, 40);
+  }
+  return slug || fallback;
+}
+
+/** `name`, or `name-2`, `name-3`… when taken (case does not count: refs collide on Windows and macOS). */
+export function uniqueName(name: string, taken: Iterable<string>, folderTaken: (name: string) => boolean = () => false): string {
+  const all = new Set([...taken].map((n) => n.toLowerCase()));
+  const free = (n: string) => !all.has(n.toLowerCase()) && !folderTaken(n);
+  if (free(name)) return name;
+  for (let i = 2; ; i++) if (free(`${name}-${i}`)) return `${name}-${i}`;
+}
+
+/**
+ * A fresh worktree for an agent session, named from its first prompt. The repository's
+ * `.kelpie.yaml` runs only when this exact file was approved before (nothing is asked here).
+ */
+export async function createAgentWorktree(repo: Project, prompt: string, kind: string): Promise<Project> {
+  const stamp = new Date().toISOString().slice(5, 16).replace(/\D/g, "");
+  const branches = await ipc.gitRefs(repo.path).then((r) => r.filter((x) => x.kind === "local").map((x) => x.name)).catch(() => []);
+  const folders = new Set<string>();
+  const wanted = branchFromPrompt(prompt, `${kind}-${stamp}`);
+  // A folder left over from an earlier worktree would make `git worktree add` fail.
+  for (let i = 1; i <= 20; i++) {
+    const name = i === 1 ? wanted : `${wanted}-${i}`;
+    if (await ipc.isDir(worktreeFolder(repo, name)).catch(() => false)) folders.add(name);
+  }
+  const branch = uniqueName(wanted, branches, (n) => folders.has(n));
+  const config = await configAtRef(repo, "").catch(() => null);
+  const approved = config && configApproved(repo, config) ? config : null;
+  if (config && !approved) store.notify(t("This repository's .kelpie.yaml has not been approved: the worktree starts without its setup. Approve it from New worktree."), undefined, 8000);
+  return createWorktree(repo, { branch, path: worktreeFolder(repo, branch), config: approved });
 }
 
 /** Adds the repository's other worktrees that are not in the sidebar yet; returns how many. */
@@ -159,7 +215,7 @@ export async function checkRemoval(wt: Project): Promise<RemovalCheck> {
  * Stops every session belonging to the worktree or running inside its folder, and waits for
  * their processes to exit (Windows refuses to delete a folder a process still uses).
  */
-async function stopSessions(wt: Project, timeoutMs = 10_000) {
+export async function stopSessions(wt: Project, timeoutMs = 10_000) {
   const root = normPath(wt.path);
   const inside = (cwd: string) => normPath(cwd) === root || normPath(cwd).startsWith(root + "/");
   const mine = () => Object.values(store.sessions).filter((s) => s.project_id === wt.id || inside(s.cwd));
@@ -188,6 +244,10 @@ export async function removeWorktree(wt: Project, opts: { force: boolean }): Pro
   if (!repo) throw new Error(t("This worktree's repository is not in the sidebar"));
   if (store.state.activeProject === wt.id) store.switchProject(repo.id);
   if (!(await stopSessions(wt))) throw new Error(t("Some processes in this worktree did not stop; close them and try again"));
+  // Where its notes are filed, asked while the folder exists; they are cleared under that exact key once it is gone.
+  const noteKey = await store.noteKeyFor(wt);
+  // The file watcher holds the folder open; leaving the project only stops it in the background.
+  await ipc.unwatchRoot(wt.path).catch(() => {});
   for (let attempt = 0; ; attempt++) {
     try {
       await ipc.gitWorktreeRemove(repo.path, wt.path, opts.force);
@@ -203,6 +263,13 @@ export async function removeWorktree(wt: Project, opts: { force: boolean }): Pro
       await sleep(500);
     }
   }
+  markWorktreeRemoved(wt.path);
+  await store.clearNotesAt(wt.id, noteKey);
   store.removeProject(wt.id);
-  return { leftover: await ipc.isDir(wt.path).catch(() => false) };
+  // A deleted folder that something still had open lingers until that handle closes.
+  for (let i = 0; i < 15; i++) {
+    if (!(await ipc.isDir(wt.path).catch(() => false))) return { leftover: false };
+    await sleep(200);
+  }
+  return { leftover: true };
 }

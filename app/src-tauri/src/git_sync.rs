@@ -185,8 +185,8 @@ pub async fn git_refs(root: String) -> CmdResult<Vec<GitRef>> {
         .collect())
 }
 
-/// Text an AI action works from, capped at `max` bytes: `staged` (stat + staged patch) or
-/// `branch` (commits and stat since `base`).
+/// Text an AI action works from, capped at `max` bytes: `staged` (stat + staged patch), `worktree`
+/// (every uncommitted change) or `branch` (commits and stat since `base`).
 #[tauri::command]
 pub async fn git_context(root: String, kind: String, base: Option<String>, max: Option<usize>) -> CmdResult<String> {
     let dir = guard(&root, "")?;
@@ -212,6 +212,16 @@ pub async fn git_context(root: String, kind: String, base: Option<String>, max: 
             let stat = output(&dir, &["diff", "--stat", &range]).await?;
             let patch = output(&dir, &["diff", "--no-ext-diff", &range]).await.unwrap_or_default();
             format!("Commits:\n{log}\nFiles:\n{stat}\n{patch}")
+        }
+        // Everything uncommitted, staged or not, and the files git does not know yet; empty when there is none.
+        "worktree" => {
+            let patch = output(&dir, &["diff", "HEAD", "--no-ext-diff"]).await.unwrap_or_default();
+            let untracked = output(&dir, &["ls-files", "--others", "--exclude-standard"]).await.unwrap_or_default();
+            if untracked.trim().is_empty() {
+                patch
+            } else {
+                format!("{patch}\nNew files:\n{untracked}")
+            }
         }
         other => return Err(format!("unknown context {other}")),
     };

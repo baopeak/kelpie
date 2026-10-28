@@ -43,13 +43,14 @@ export function parseDelimited(text: string, sep: string): string[][] {
   return rows;
 }
 
-export function CsvView(props: { project: Project; path: string }) {
+/** `text`: the content when it is not the file on disk (a file as it was at a turn). */
+export function CsvView(props: { project: Project; path: string; text?: string }) {
   const [rows, setRows] = createSignal<string[][]>([]);
   const [query, setQuery] = createSignal("");
   const [sort, setSort] = createSignal<{ col: number; desc: boolean } | null>(null);
   onMount(async () => {
-    const f = await readFile(props.project.path, props.path, 20 << 20).catch((e) => (store.notify(String(e)), null));
-    setRows(parseDelimited(f?.text ?? "", props.path.toLowerCase().endsWith(".tsv") ? "\t" : ","));
+    const text = props.text ?? (await readFile(props.project.path, props.path, 20 << 20).catch((e) => (store.notify(String(e)), null)))?.text;
+    setRows(parseDelimited(text ?? "", props.path.toLowerCase().endsWith(".tsv") ? "\t" : ","));
   });
   const header = () => rows()[0] ?? [];
   const body = createMemo(() => {
@@ -143,14 +144,13 @@ export async function renderMermaidBlocks(root: HTMLElement) {
   }
 }
 
-export function MermaidView(props: { project: Project; path: string }) {
+export function MermaidView(props: { project: Project; path: string; text?: string }) {
   const [svg, setSvg] = createSignal("");
   const [error, setError] = createSignal("");
   const [zoom, setZoom] = createSignal(1);
   onMount(async () => {
     try {
-      const f = await readFile(props.project.path, props.path, 1 << 20);
-      setSvg(await renderMermaid(f.text ?? ""));
+      setSvg(await renderMermaid(props.text ?? (await readFile(props.project.path, props.path, 1 << 20)).text ?? ""));
     } catch (e) {
       setError(String(e));
     }

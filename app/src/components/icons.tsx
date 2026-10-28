@@ -1,5 +1,6 @@
 // Small inline SVG icon set (stroke icons, 16px grid) — no icon font, no network.
-import type { JSX } from "solid-js";
+import { createUniqueId, For, Show, type JSX } from "solid-js";
+import { AGENT_LOGOS, GEMINI_WASHES } from "../lib/agent-logos";
 import { kindInfo } from "../lib/agents";
 
 // Factories, not elements: a Solid JSX element is a real DOM node and can live in one place only.
@@ -22,6 +23,7 @@ const paths: Record<string, () => JSX.Element> = {
   refresh: () => <><path d="M13 8a5 5 0 1 1-1.5-3.6" /><path d="M13 2.5v3h-3" /></>,
   chat: () => <path d="M3 3.5h10v7H7l-3 2.5v-2.5H3z" />,
   check: () => <path d="M3.5 8.5l3 3 6-7" />,
+  alert: () => <path d="M8 3.5v5.2M8 12.3v.2" />,
   minus: () => <path d="M4 8h8" />,
   undo: () => <><path d="M5 6.5H10a3 3 0 0 1 0 6H6" /><path d="M7 4L4.5 6.5 7 9" /></>,
   restart: () => <><path d="M3 8a5 5 0 1 0 1.5-3.6" /><path d="M3 2.5v3h3" /></>,
@@ -47,6 +49,7 @@ const paths: Record<string, () => JSX.Element> = {
   push: () => <><path d="M8 11V3M4.5 6.5L8 3l3.5 3.5" /><path d="M3 13h10" /></>,
   pull: () => <><path d="M8 3v8M4.5 7.5L8 11l3.5-3.5" /><path d="M3 13h10" /></>,
   sync: () => <><path d="M12.5 6.5A4.5 4.5 0 0 0 4 5" /><path d="M3.5 9.5A4.5 4.5 0 0 0 12 11" /><path d="M4 2.5V5h2.5M12 13.5V11H9.5" /></>,
+  compose: () => <><path d="M3 13l.8-3.2L10.6 3l2.4 2.4-6.8 6.8z" /><path d="M9.4 4.2l2.4 2.4" /></>,
   note: () => <><path d="M3 3h10v7l-3 3H3z" /><path d="M10 13v-3h3M5.5 6h5M5.5 8.5h3" /></>,
   moon: () => <path d="M12.5 10A5 5 0 0 1 6 3.5 5 5 0 1 0 12.5 10z" />,
   external: () => <><path d="M9 3h4v4M13 3L7.5 8.5" /><path d="M11 9.5V13H3V5h3.5" /></>,
@@ -69,15 +72,55 @@ export function Icon(props: { name: keyof typeof paths | string; size?: number }
   );
 }
 
+/** An agent's official mark, unaltered, on a neutral tile; kinds without one get a lettered colour tile. */
 export function KindGlyph(props: { kind: string; size?: number }) {
   const meta = () => kindInfo(props.kind);
+  const logo = () => AGENT_LOGOS[props.kind];
   const size = () => props.size ?? 18;
   return (
-    <span
-      style={{ width: `${size()}px`, height: `${size()}px`, "border-radius": "5px", background: meta().color, color: "#141823", display: "inline-grid", "place-items": "center", "font-size": `${Math.round(size() * 0.5)}px`, "font-weight": 700, flex: "none" }}
+    <Show
+      when={logo()}
+      fallback={
+        <span
+          class="kind-glyph"
+          style={{ "--kc": meta().color, width: `${size()}px`, height: `${size()}px`, "font-size": `${Math.round(size() * 0.5)}px` }}
+        >
+          {meta().glyph}
+        </span>
+      }
     >
-      {meta().glyph}
-    </span>
+      {(l) => (
+        <span class="kind-glyph logo" role="img" aria-label={l().title} style={{ width: `${size()}px`, height: `${size()}px` }}>
+          <svg viewBox="0 0 24 24" width="66%" height="66%" fill={l().fill ?? "currentColor"} fill-rule="evenodd" aria-hidden="true">
+            <Show when={l().gemini} fallback={<path d={l().path} />}>
+              <GeminiMark path={l().path} />
+            </Show>
+          </svg>
+        </span>
+      )}
+    </Show>
+  );
+}
+
+// The washes need gradient ids unique to this instance: duplicate ids resolve to the first in the
+// document, which renders nothing once that copy sits in a hidden subtree.
+function GeminiMark(props: { path: string }) {
+  const id = createUniqueId();
+  return (
+    <>
+      <defs>
+        <For each={GEMINI_WASHES}>
+          {([color, x1, y1, x2, y2, end], i) => (
+            <linearGradient id={`gw${id}-${i()}`} gradientUnits="userSpaceOnUse" x1={x1} y1={y1} x2={x2} y2={y2}>
+              <stop stop-color={color} />
+              <stop offset={end} stop-color={color} stop-opacity="0" />
+            </linearGradient>
+          )}
+        </For>
+      </defs>
+      <path d={props.path} fill="#3186FF" />
+      <For each={GEMINI_WASHES}>{(_, i) => <path d={props.path} fill={`url(#gw${id}-${i()})`} />}</For>
+    </>
   );
 }
 

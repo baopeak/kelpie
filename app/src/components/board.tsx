@@ -6,6 +6,8 @@ import { store } from "../lib/store";
 import { Icon, KindGlyph } from "./icons";
 import { openContextMenu, type MenuItem } from "./context-menu";
 import { StatusDot } from "./sidebar";
+import { ReviewBody } from "./review-card";
+import { moveToStatus } from "../lib/review-queue";
 import type { Project, WorkStatus } from "../lib/types";
 import { t, msg } from "../lib/i18n";
 
@@ -31,7 +33,7 @@ function cardMenu(p: Project, open: () => void): MenuItem[] {
     { label: t("Open"), run: open },
     { label: p.pinned ? t("Unpin") : t("Pin to top"), run: () => store.togglePin(p.id) },
     null,
-    ...COLUMNS.filter((c) => c.id !== (p.status ?? "todo")).map((c) => ({ label: t("Move to {column}", { column: t(c.label) }), run: () => store.setProjectStatus(p.id, c.id) })),
+    ...COLUMNS.filter((c) => c.id !== (p.status ?? "todo")).map((c) => ({ label: t("Move to {column}", { column: t(c.label) }), run: () => void moveToStatus(p, c.id) })),
   ];
 }
 
@@ -82,6 +84,9 @@ function Card(props: { project: Project; ghost?: boolean; onPointerDown?: (e: Po
           <Show when={attention()}><span class="badge waiting">{attention()}</span></Show>
         </div>
       </Show>
+      <Show when={!props.ghost && props.project.parentId && (props.project.status ?? "todo") === "review"}>
+        <ReviewBody project={props.project} />
+      </Show>
     </div>
   );
 }
@@ -128,7 +133,10 @@ export function Board() {
       const target = moved ? columnAt(ev.clientX, ev.clientY) : undefined;
       setDrag(null);
       if (!moved) open(id);
-      else if (target) store.setProjectStatus(id, target);
+      else if (target) {
+        const p = store.state.projects.find((x) => x.id === id);
+        if (p) void moveToStatus(p, target);
+      }
     };
     detach?.();
     detach = () => {

@@ -2,9 +2,9 @@
 // empty-pane launcher and the new session dialog), and the chips that mark panes on a host.
 import { For, Show, createEffect, createSignal, on } from "solid-js";
 import { store } from "../lib/store";
-import { agentsAt, cachedCheck, checkHost, hostAgents, hostById, hostOf, hostTarget, isHostKeyError, osBadge, projectHosts, vault, type SshHost } from "../lib/ssh-hosts";
+import { agentFolder, agentsAt, cachedCheck, checkHost, hostAgents, hostById, hostOf, hostTarget, isHostKeyError, osBadge, projectHosts, vault, type SshHost } from "../lib/ssh-hosts";
 import { hostLabel, projectTarget } from "../lib/remote";
-import { projectAgents, kindInfo } from "../lib/agents";
+import { isAgentKind, projectAgents, kindInfo } from "../lib/agents";
 import { openContextMenu, type MenuItem } from "./context-menu";
 import { openHosts } from "./hosts-page";
 import { t, errorText } from "../lib/i18n";
@@ -21,12 +21,17 @@ export function initialRunOn(project: Project, target: SessionTarget | undefined
 }
 
 /** The target for a choice (undefined: the project's own). A host is checked first; a new host
- *  key opens its fingerprint check on the Hosts page instead of starting anything. */
-export async function resolveRunOn(project: Project, run: RunOn): Promise<SessionTarget | undefined | null> {
+ *  key opens its fingerprint check on the Hosts page instead of starting anything. An agent needs
+ *  the project's folder on the host; the first one typed is linked to the project. */
+export async function resolveRunOn(project: Project, run: RunOn, kind: string): Promise<SessionTarget | undefined | null> {
   const host = run.hostId ? hostById(run.hostId) : undefined;
   if (!host) return undefined;
+  if (lacksFolder(project, run, kind)) return null;
+  const agent = isAgentKind(kind);
   try {
-    return await hostTarget(host, project, run.path);
+    const target = await hostTarget(host, project, run.path);
+    if (agent && !agentFolder(host, project)) store.linkHost(project.id, { hostId: host.id, path: target.path });
+    return target;
   } catch (e) {
     if (isHostKeyError(e)) {
       store.notify(t("Check the fingerprint of {name} first", { name: host.label }));
@@ -34,6 +39,14 @@ export async function resolveRunOn(project: Project, run: RunOn): Promise<Sessio
     } else store.notify(t("Could not connect to {list}", { list: host.label }) + ": " + errorText(String(e)));
     return null;
   }
+}
+
+/** True (and says so) when an agent would start on a host without the project's folder there. */
+export function lacksFolder(project: Project, run: RunOn, kind: string): boolean {
+  const host = run.hostId ? hostById(run.hostId) : undefined;
+  if (!host || !isAgentKind(kind) || agentFolder(host, project, run.path)) return false;
+  store.notify(t("Type the folder of {project} on {host} first: agents do not start in the login folder", { project: project.name, host: host.label }));
+  return true;
 }
 
 /** Checks a host once in the background when it gets chosen, so the launcher offers the agents it
@@ -69,7 +82,7 @@ export function OsBadge(props: { os: string; size?: number }) {
 export function HostChip(props: { target: SessionTarget; path?: boolean }) {
   const host = () => hostOf(props.target);
   return (
-    <span class="host-chip" title={t("Runs on {host} over SSH", { host: host()?.label ?? props.target.dest })} style={{ "--host-color": host()?.color || "var(--accent)" }}>
+    <span class="host-chip" title={`${t("Runs on {host} over SSH", { host: host()?.label ?? props.target.dest })}${props.target.path ? ` · ${props.target.path}` : ""}`} style={{ "--host-color": host()?.color || "var(--accent)" }}>
       <span class="host-dot" />
       <span class="host-chip-name">{host()?.label ?? props.target.dest}</span>
       <Show when={props.path}><span class="host-chip-path">{props.target.path}</span></Show>
@@ -122,9 +135,7 @@ export function RunOnPicker(props: { project: Project; value: RunOn; onChange: (
             </button>
           )}
         </For>
-        <Show when={vault().hosts.length}>
-          <button class="toggle" data-action="other-host" onClick={others}>{t("Other host…")}</button>
-        </Show>
+        <button class="toggle" data-action="other-host" onClick={others}>{t("Other host…")}</button>
       </div>
       <Show when={host()}>
         {(h) => (
@@ -142,6 +153,9 @@ export function RunOnPicker(props: { project: Project; value: RunOn; onChange: (
             </Show>
           </div>
         )}
+      </Show>
+      <Show when={host() && !agentFolder(host()!, props.project, props.value.path)}>
+        <div class="form-note" data-run-on-no-folder>{t("Agents need this project's folder on the host; terminals start in {folder}.", { folder: host()!.folder || t("the login folder") })}</div>
       </Show>
       <Show when={busy().length}>
         <div class="form-note warn" data-run-on-busy>

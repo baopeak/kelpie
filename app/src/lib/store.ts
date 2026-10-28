@@ -5,8 +5,11 @@ import { createStore, produce, reconcile } from "solid-js/store";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as ipc from "./ipc";
+import { olderVersion } from "./version";
+import { ANSWER_API, nextWaiting, setAnswering } from "./attention";
+import { NOTIFY_API, describeNotify, type NotifyEvent } from "./notify-events";
 import { t } from "./i18n";
-import { allPanes, buildGrid, cellCount, equalize, findPane, fromTemplate, insertBeside, leaf, migrateLayout, moveGutter, movePane, removePane, replacePane, splitPane, swapPanes, templateLeaves, toTemplate, type GridSpec, type Side } from "./layout";
+import { allPanes, autoGrid, buildGrid, cellCount, equalize, findPane, fromTemplate, insertBeside, leaf, migrateLayout, moveGutter, movePane, removePane, replacePane, splitPane, swapPanes, templateLeaves, toTemplate, type GridSpec, type Side } from "./layout";
 import { basename, isMac, normPath, uid } from "./platform";
 import { projectColors } from "./theme";
 import { disposeView, peekView, resetStreams, setInputFanout } from "./terminal-host";
@@ -15,8 +18,12 @@ import type { SettingsSection } from "./settings-catalog";
 import { accountEnv, accountHomes, sessionHome } from "./accounts";
 import { closeBrowser } from "./browser";
 import { projectTarget, sessionTarget, targetEnv, targetRemote } from "./remote";
-import { agentsAt, hostOf, isHostKeyError, layoutTarget, layoutTargetFor } from "./ssh-hosts";
+import { agentFolder, agentsAt, hostOf, isHostKeyError, layoutTarget, layoutTargetFor } from "./ssh-hosts";
+import { confirmRootStart } from "./root-user";
 import type { WorkStatus, AgentProfile, AppState, BranchInfo, InboxItem, LayoutNode, LayoutTemplate, Pane, Project, ProjectHost, RecentItem, ReviewNote, SessionInfo, SessionKind, SessionTarget, Settings, Tab, Workspace, WorkspaceMeta } from "./types";
+import { confirmDialog } from "./confirm-dialog";
+import { remember } from "./prompt-history";
+import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
 
 export const defaultSettings: Settings = {
   fontFamily: '"JetBrains Mono", "Cascadia Code", "Cascadia Mono", Menlo, Consolas, "Symbols Nerd Font Mono", monospace',
@@ -35,6 +42,8 @@ export const defaultSettings: Settings = {
   projectSort: "manual",
   usageMeters: true,
   memoryMeter: true,
+  costCap: 0,
+  costCapEsc: false,
   quickCommands: [],
   theme: "dark",
   density: "comfortable",
@@ -46,11 +55,18 @@ export const defaultSettings: Settings = {
   hibernate: false,
   hibernateMinutes: 30,
   keepAwake: "off",
+  prioritizeVisible: true,
+  checkpoints: false,
+  agentsScripting: true,
   notificationSound: false,
+  updateChecks: true,
   terminalTheme: "default",
   wordWrap: false,
   aiAgent: "claude",
+  autoWorktree: "ask",
   floatingTerminal: true,
+  mascot: true,
+  mascotMotion: "system",
   layouts: [],
   resumeSessions: "shown",
   accounts: [],
@@ -105,7 +121,7 @@ function chime() {
   }
 }
 
-export type Overlay = null | "palette" | "quickopen" | "jump" | "dashboard" | "settings" | "newsession" | "board" | "worktree" | "runs" | "remote" | "hosts";
+export type Overlay = null | "cost" | "palette" | "quickopen" | "jump" | "dashboard" | "settings" | "newsession" | "board" | "worktree" | "runs" | "remote" | "hosts" | "update" | "answer" | "finish" | "review" | "try";
 
 /** A pane of a tab (an empty pane a new session takes the place of). */
 export type PaneTarget = { tabId: string; paneId: string };
@@ -203,18 +219,88 @@ function createAppStore() {
     }
   }
 
-  /** An older daemon left running across an app upgrade lacks newer RPCs: offer a restart. */
+  /** The connected daemon is from an older release: it keeps serving the sessions it runs (an
+   *  update never stops them) and hands over to this release's daemon once none is running. */
+  let olderDaemon = false;
+  /** The older daemon lacks a security fix this release made: ask until the user switches. */
+  const [daemonNeedsSwitch, setDaemonNeedsSwitch] = createSignal(false);
+  /** The connected daemon's API level: features needing newer RPCs hide on an older daemon. */
+  const [daemonApi, setDaemonApi] = createSignal(0);
+  /** The daemon program: the `kelpied` an agent is told to run (`kelpied review add …`). */
+  const [daemonExe, setDaemonExe] = createSignal<string | null>(null);
+  /** Review notes the daemon keeps (API 13), by `metaKey` of the worktree folder. */
+  const [daemonNotes, setDaemonNotes] = createStore<Record<string, ReviewNote[]>>({});
+  /** The key the daemon files each project's notes under (its worktree's folder), by project id. */
+  const [noteKeys, setNoteKeys] = createStore<Record<string, string>>({});
+
+  async function switchDaemon() {
+    if (!(await confirmDialog(t("Switch to the new session daemon now? Running sessions stop for a moment; agents that can resume continue their conversation.")))) return;
+    olderDaemon = false;
+    setDaemonNeedsSwitch(false);
+    void ipc.daemon("daemon.shutdown", { kill_sessions: false }).catch(() => {});
+  }
+
+  /** Updates keep the daemon — and every session — running; the updated app connects to it.
+   *  An older daemon is replaced as soon as no session runs on it, or now if the user asks (it
+   *  stops gracefully: sessions come back interrupted and agents resume their conversation; the
+   *  app starts the new daemon on its own). */
   async function checkDaemonApi() {
-    const [info, app] = await Promise.all([ipc.daemon<{ api?: number }>("daemon.info", {}), ipc.platformInfo()]).catch(() => [null, null]);
-    if (!info || !app || (info.api ?? 1) >= app.api) return;
-    notify(t("The session daemon is older than this app; some features are unavailable until it restarts."), {
-      label: t("Restart daemon"),
-      run: () => {
-        if (confirm(t("Restart the session daemon? Running sessions stop; their screens are kept and they can be restarted."))) {
-          void ipc.daemon("daemon.shutdown", { kill_sessions: true }).catch(() => {});
-        }
-      },
-    }, 15000);
+    olderDaemon = false;
+    setDaemonNeedsSwitch(false);
+    const [info, app] = await Promise.all([ipc.daemon<{ api?: number; version?: string; security?: number; exe?: string }>("daemon.info", {}), ipc.platformInfo()]).catch(() => [null, null]);
+    // A daemon that predates API levels says none: level 1.
+    setDaemonApi(info ? info.api ?? 1 : 0);
+    setDaemonExe(info?.exe ?? null);
+    // Only an older daemon: a dev app and an installed Kelpie may share one, and must not keep
+    // offering to restart each other's.
+    if (!info || !app || ((info.api ?? 1) >= app.api && !(info.version && olderVersion(info.version, app.version)))) return;
+    olderDaemon = true;
+    handOverIfIdle();
+    const fix = (info.security ?? 1) < app.security;
+    setDaemonNeedsSwitch(fix);
+    notify(
+      fix
+        ? t("The session daemon from Kelpie {version} lacks a security fix in this release. Switch when you can: running sessions stop for a moment and agents resume.", { version: info.version ?? "?" })
+        : t("Your sessions keep running on the session daemon from Kelpie {version}; the new one takes over once they have all stopped.", { version: info.version ?? "?" }),
+      { label: t("Switch now"), run: () => void switchDaemon() },
+      15000,
+    );
+  }
+
+  /** The quick-answer popover for session `id` (daemons that can answer safely); otherwise the
+   *  session itself. */
+  function openAnswer(id: string) {
+    const s = sessions[id];
+    if (s && !s.chat && daemonApi() >= ANSWER_API && s.waiting_since) {
+      setAnswering(id);
+      setOverlay("answer");
+    } else revealSession(id);
+  }
+
+  /** Shows the session that has waited longest on the user, then the next one on each call. */
+  function revealNextWaiting() {
+    const next = nextWaiting(Object.values(sessions), lastWaitingShown);
+    if (!next) return notify(t("No session is waiting for you"));
+    lastWaitingShown = next.id;
+    revealSession(next.id);
+  }
+  let lastWaitingShown: string | null = null;
+
+  /** Replaces an older daemon once nothing runs on it. A session can be down for a moment
+   *  (restarted to keep its conversation, switched between terminal and chat, resumed at start),
+   *  so it waits for things to settle and asks the daemon itself rather than trusting this
+   *  window's list; `if_idle` lets newer daemons refuse when something started meanwhile. */
+  let handOverTimer: ReturnType<typeof setTimeout> | undefined;
+  function handOverIfIdle() {
+    if (!olderDaemon) return;
+    clearTimeout(handOverTimer);
+    handOverTimer = setTimeout(async () => {
+      if (!olderDaemon) return;
+      const list = await ipc.listSessions().catch(() => null);
+      if (!list || list.some((s) => s.alive)) return;
+      olderDaemon = false;
+      void ipc.daemon("daemon.shutdown", { kill_sessions: false, if_idle: true }).catch(() => {});
+    }, 10_000);
   }
 
   // ---------- sessions ----------
@@ -259,16 +345,39 @@ function createAppStore() {
     }
   }
 
+  /** A daemon from before API 12 does not classify status changes: this window does. Newer ones
+   *  send `notify.event`, also while no window is open. */
+  const legacyNotify = () => daemonApi() > 0 && daemonApi() < NOTIFY_API;
+
   async function maybeNotify(prev: SessionInfo | undefined, next: SessionInfo) {
-    if (!prev || prev.status !== "working") return;
-    if (next.status !== "idle" && next.status !== "waiting") return;
+    if (!prev) return;
+    // A turn that ended (or a process that died) in an error, reported once when it happens.
+    const failed = !!next.failed && !prev.failed;
+    if (!failed) {
+      if (prev.status !== "working") return;
+      if (next.status !== "idle" && next.status !== "waiting") return;
+    }
     const visible = document.hasFocus() && isSessionVisible(next.id);
     if (visible) return;
     const project = state.projects.find((p) => p.id === next.project_id);
     const title = `${sessionLabel(next)}${next.remote ? " @" + next.remote.dest : ""}${project ? " · " + project.name : ""}`;
-    const body = next.status === "waiting" ? t("Needs your input") : t("Finished");
-    addInbox({ kind: next.status === "waiting" ? "waiting" : "finished", title, body, sessionId: next.id, projectId: next.project_id ?? undefined });
+    const kind = failed ? "error" : next.status === "waiting" ? "waiting" : "finished";
+    const body = failed
+      ? next.alive ? t("Stopped with an error") : t("Exited with code {code}", { code: next.exit_code ?? "" })
+      : kind === "waiting" ? t("Needs your input") : t("Finished");
+    addInbox({ kind, title, body, sessionId: next.id, projectId: next.project_id ?? undefined });
     await desktopNotify(title, body);
+  }
+
+  /** An event from the daemon's single source: the inbox entry and the desktop notification.
+   *  What a focused window already shows never arrives (the daemon knows through `ui.focus`). */
+  function onNotifyEvent(ev: NotifyEvent) {
+    const s = ev.session ? sessions[ev.session] : undefined;
+    const projectId = ev.project_id ?? s?.project_id ?? undefined;
+    const project = state.projects.find((p) => p.id === projectId);
+    const d = describeNotify(ev, { label: s ? sessionLabel(s) : undefined, host: s?.remote?.dest, projectName: project?.name });
+    addInbox({ kind: d.kind, title: d.title, body: d.body, sessionId: ev.session ?? undefined, projectId });
+    void desktopNotify(d.title, d.body);
   }
 
   function onDaemonEvent(msg: { event: string; params: any }) {
@@ -277,10 +386,11 @@ function createAppStore() {
       case "session.updated": {
         const prev = sessions[p.id];
         setSessions(p.id, reconcile(p as SessionInfo));
-        void maybeNotify(prev, p);
+        if (legacyNotify()) void maybeNotify(prev, p);
         // Background projects are not watched: an agent finishing a turn may have committed
         // or switched branch, so refresh that project's subtitle.
         if (prev?.status === "working" && p.status !== "working" && p.project_id) refreshProjectInfo(p.project_id, 1000);
+        if (prev?.alive && !p.alive) handOverIfIdle();
         break;
       }
       case "session.closed": {
@@ -295,6 +405,7 @@ function createAppStore() {
           }
           if (state.recent?.some((r) => r.kind === "session" && r.id === s.id)) update((st) => (st.recent = st.recent.filter((r) => !(r.kind === "session" && r.id === s.id))));
         }
+        handOverIfIdle();
         break;
       }
       case "session.resync": {
@@ -307,6 +418,10 @@ function createAppStore() {
         if (v && v.handle === p.handle) void v.attach(p.handle);
         break;
       }
+      case "chat.resolved":
+        // A phone (or the other window) answered the agent's request first.
+        window.dispatchEvent(new CustomEvent("kelpie:chat-resolved", { detail: p }));
+        break;
       case "meta.updated": {
         const m = p as WorkspaceMeta;
         setMeta(metaKey(m.path), m.comment || m.status ? reconcile(m) : undefined!);
@@ -315,16 +430,39 @@ function createAppStore() {
         if (project && m.status && project.status !== m.status) update((s) => (s.projects.find((x) => x.id === project.id)!.status = m.status!));
         break;
       }
+      case "notes.changed":
+        applyNotes(p.path, p.notes);
+        break;
       case "automation.ran": {
-        const title = t("Automation · {name}", { name: p.name });
-        const body = p.error ? t("Failed: {error}", { error: p.error }) : t("Started");
-        addInbox({ kind: p.error ? "error" : "automation", title, body, sessionId: p.session_id ?? undefined, projectId: (p.session_id && sessions[p.session_id]?.project_id) || undefined });
-        void desktopNotify(title, body);
+        if (legacyNotify()) {
+          const title = t("Automation · {name}", { name: p.name });
+          const body = p.error ? t("Failed: {error}", { error: p.error }) : t("Started");
+          addInbox({ kind: p.error ? "error" : "automation", title, body, sessionId: p.session_id ?? undefined, projectId: (p.session_id && sessions[p.session_id]?.project_id) || undefined });
+          void desktopNotify(title, body);
+        }
         window.dispatchEvent(new CustomEvent("kelpie:automations"));
         break;
       }
+      case "notify.event":
+        onNotifyEvent(p as NotifyEvent);
+        break;
+      case "scheduled.updated":
+        // Read by lib/limits.ts (the store must not import it: it imports the store).
+        window.dispatchEvent(new CustomEvent("kelpie:scheduled", { detail: p }));
+        break;
       case "automation.changed":
         window.dispatchEvent(new CustomEvent("kelpie:automations"));
+        break;
+      case "session.turn":
+        // Read by lib/session-usage.ts (the store must not import it: it imports the store).
+        window.dispatchEvent(new CustomEvent("kelpie:session-turn", { detail: p }));
+        break;
+      case "checkpoint.updated":
+        window.dispatchEvent(new CustomEvent("kelpie:checkpoint", { detail: p }));
+        break;
+      case "checkpoint.disabled":
+        // Said once per repository (the daemon remembers it).
+        notify(t("Turn snapshots are off for {repo}: they took over a second, twice in a row. Turn them on again in the Turns panel.", { repo: p.repo }));
         break;
       case "session.clipboard": {
         // OSC 52: only the terminal the user is looking at may set the clipboard, and we say so.
@@ -349,9 +487,17 @@ function createAppStore() {
   const samePath = (a: string, b: string) => normPath(a) === normPath(b);
 
   /** Adds a folder (or, with `parentId`, a worktree of that project) and returns its id. */
-  function addProject(path: string, opts: { parentId?: string; branch?: string; name?: string; open?: boolean; remote?: Project["remote"] } = {}): string {
+  function addProject(path: string, opts: { parentId?: string; branch?: string; baseBranch?: string; name?: string; open?: boolean; remote?: Project["remote"] } = {}): string {
     const existing = state.projects.find((p) => samePath(p.path, path));
     if (existing) {
+      // Adding a remote project again takes what its host has now (tmux installed since, agents).
+      const remote = opts.remote;
+      if (remote && existing.remote) {
+        update((s) => {
+          const p = s.projects.find((x) => x.id === existing.id)!;
+          p.remote = { ...p.remote!, tmux: remote.tmux, agents: remote.agents ?? p.remote!.agents };
+        });
+      }
       if (opts.open !== false) switchProject(existing.id);
       return existing.id;
     }
@@ -362,12 +508,13 @@ function createAppStore() {
       path,
       // Worktrees share their repository's colour.
       color: parent?.color ?? projectColors[topProjects().length % projectColors.length],
-      ...(parent ? { parentId: parent.id, branch: opts.branch } : {}),
+      ...(parent ? { parentId: parent.id, branch: opts.branch, ...(opts.baseBranch ? { baseBranch: opts.baseBranch } : {}) } : {}),
       ...(opts.remote ? { remote: opts.remote } : {}),
     };
     update((s) => s.projects.push(project));
     ensureWorkspace(project.id);
     resolveCanonKey(project);
+    void resolveNoteKeys([project]);
     refreshProjectInfo(project.id, 0);
     if (opts.open !== false) switchProject(project.id);
     return project.id;
@@ -382,6 +529,7 @@ function createAppStore() {
       for (const x of ids) {
         delete s.workspaces[x];
         if (s.collapsed) delete s.collapsed[x];
+        if (s.promptHistory) delete s.promptHistory[x];
       }
       s.recent = (s.recent ?? []).filter((r) => !ids.has(r.projectId) && !(r.kind === "project" && ids.has(r.id)));
       if (s.activeProject && ids.has(s.activeProject)) s.activeProject = s.projects.find((p) => !p.parentId)?.id ?? s.projects[0]?.id ?? null;
@@ -422,28 +570,129 @@ function createAppStore() {
   }
 
   // ---------- review notes (diff annotations) ----------
-  const notesFor = (projectId: string): ReviewNote[] => state.reviewNotes?.[projectId] ?? [];
+  // The daemon keeps them from API 13 (shared with a reviewing agent's `kelpied review add`); an
+  // older daemon's notes stay in the app's state, and so do the ones the daemon refused to take.
+  const useDaemonNotes = () => daemonApi() >= NOTES_API;
 
-  function addNote(projectId: string, note: Omit<ReviewNote, "id" | "at">) {
+  const notesFor = (projectId: string): ReviewNote[] => {
+    const local = state.reviewNotes?.[projectId] ?? [];
+    const p = state.projects.find((x) => x.id === projectId);
+    return p && useDaemonNotes() ? mergeNotes(notesForKey(daemonNotes, noteKeys[p.id] ?? canonKey(p)), local) : local;
+  };
+
+  /** Asks the daemon which key each project's notes are filed under (a project on a subfolder shares its worktree's). */
+  async function resolveNoteKeys(projects: Project[]) {
+    if (!useDaemonNotes() || !projects.length) return;
+    const keys = await ipc.daemon<Record<string, string>>("note.keys", { paths: projects.map((p) => p.path) }).catch(() => null);
+    if (!keys) return;
+    for (const p of projects) if (typeof keys[p.path] === "string") setNoteKeys(p.id, metaKey(keys[p.path]));
+  }
+
+  function applyNotes(path: string, notes: ReviewNote[]) {
+    setDaemonNotes(metaKey(path), notes.length ? reconcile(notes) : undefined!);
+  }
+
+  async function loadNotes() {
+    await resolveNoteKeys(state.projects.filter((p) => !p.remote));
+    const map = await ipc.daemon<Record<string, ReviewNote[]>>("note.list", {}).catch(() => null);
+    if (!map) return;
+    const next: Record<string, ReviewNote[]> = {};
+    for (const [k, v] of Object.entries(map)) next[metaKey(k)] = v;
+    setDaemonNotes(reconcile(next));
+  }
+
+  async function addNote(projectId: string, note: Omit<ReviewNote, "id" | "at">) {
+    const p = state.projects.find((x) => x.id === projectId);
+    if (p && useDaemonNotes()) {
+      try {
+        const r = await ipc.daemon<{ path: string; notes: ReviewNote[] }>("note.add", { path: p.path, file: note.path, line: note.line, side: note.side, text: note.text, note: note.note });
+        applyNotes(r.path, r.notes);
+      } catch (e) {
+        notify(String(e).replace(/^Error: /, ""));
+      }
+      return;
+    }
     update((s) => {
       s.reviewNotes ??= {};
       (s.reviewNotes[projectId] ??= []).push({ ...note, id: uid(), at: Date.now() });
     });
   }
 
-  function removeNotes(projectId: string, ids: string[] | "all") {
+  /** The key a project's notes are filed under (ask while its folder exists). */
+  async function noteKeyFor(p: Project): Promise<string> {
+    await resolveNoteKeys([p]);
+    return noteKeys[p.id] ?? canonKey(p);
+  }
+
+  /** Clears the notes filed under `key` (a worktree that is gone), and the project's own leftovers. */
+  async function clearNotesAt(projectId: string, key: string) {
+    if (state.reviewNotes?.[projectId]?.length) update((s) => void delete s.reviewNotes[projectId]);
+    if (!useDaemonNotes()) return;
+    try {
+      const r = await ipc.daemon<{ path: string; notes: ReviewNote[] }>("note.clear", { path: key, exact: true });
+      applyNotes(r.path, r.notes);
+    } catch (e) {
+      notify(String(e).replace(/^Error: /, ""));
+    }
+  }
+
+  async function removeNotes(projectId: string, ids: string[] | "all") {
+    if (state.reviewNotes?.[projectId]?.length) {
+      update((s) => {
+        const list = s.reviewNotes[projectId];
+        s.reviewNotes[projectId] = ids === "all" ? [] : list.filter((n) => !ids.includes(n.id));
+      });
+    }
+    const p = state.projects.find((x) => x.id === projectId);
+    if (!p || !useDaemonNotes()) return;
+    try {
+      const r = await ipc.daemon<{ path: string; notes: ReviewNote[] }>("note.clear", { path: p.path, ids: ids === "all" ? undefined : ids });
+      applyNotes(r.path, r.notes);
+    } catch (e) {
+      notify(String(e).replace(/^Error: /, ""));
+    }
+  }
+
+  /** Once per run of the app: the notes an older daemon left in the app's state go to the daemon. */
+  let notesMoved = false;
+  async function moveNotesToDaemon() {
+    if (notesMoved) return;
+    notesMoved = true;
+    const r = await migrateNotes(pendingNotes(state.reviewNotes, state.projects), {
+      backup: () => ipc.stateBackup("notes").catch(() => null),
+      add: async (path, n) => {
+        await ipc.daemon("note.add", { path, file: n.path, line: n.line, side: n.side, text: n.text, note: n.note, id: n.id, at: n.at });
+      },
+      drop: (projectId) => update((s) => void delete s.reviewNotes[projectId]),
+    });
+    if (r.noBackup) notify(t("Review notes stay in the app for now: its state could not be backed up first."), undefined, 8000);
+    else if (r.failed.length) notify(t("Some review notes could not be moved to the session daemon; they stay in the app."), undefined, 8000);
+    await loadNotes();
+  }
+
+  // ---------- composer prompt history ----------
+  const promptsFor = (projectId: string): string[] => state.promptHistory?.[projectId] ?? [];
+
+  function rememberPrompt(projectId: string, text: string) {
     update((s) => {
-      const list = s.reviewNotes?.[projectId];
-      if (!list) return;
-      s.reviewNotes[projectId] = ids === "all" ? [] : list.filter((n) => !ids.includes(n.id));
+      s.promptHistory ??= {};
+      s.promptHistory[projectId] = remember(s.promptHistory[projectId], text);
     });
   }
 
-  /** Remembers a `.kelpie.yaml` (by hash) the user agreed to run for this repository. */
-  function approveSetup(repoPath: string, hash: string) {
+  /** Remembers the `setup:` / `tabs:` / `copy:` / `link:` of a `.kelpie.yaml` (their canonical text) the user agreed to run for this repository. */
+  function approveSetup(repoPath: string, key: string) {
     update((s) => {
       s.approvedSetups ??= {};
-      s.approvedSetups[normPath(repoPath)] = hash;
+      s.approvedSetups[normPath(repoPath)] = key;
+    });
+  }
+
+  /** Remembers the `check:` commands the user agreed to run for this repository (separately: approving checks never approves setup). */
+  function approveChecks(repoPath: string, check: string[]) {
+    update((s) => {
+      s.approvedChecks ??= {};
+      s.approvedChecks[normPath(repoPath)] = [...check];
     });
   }
 
@@ -598,15 +847,25 @@ function createAppStore() {
   type StartOpts = { args?: string[]; name?: string; agentSessionId?: string; cwd?: string; prompt?: string; account?: string; env?: Record<string, string>; target?: SessionTarget };
 
   /** Starts a session for a project without placing it in a layout. */
+  /** An agent saved from the ACP registry: it speaks the protocol over stdio and has no terminal
+   *  interface, so it only starts as a chat. */
+  const registryAgent = (kind: SessionKind) => (state.settings.registryAgents ?? []).find((a) => a.id === kind);
+
   async function startSession(projectId: string, kind: SessionKind, opts: StartOpts = {}): Promise<SessionInfo | undefined> {
     const project = state.projects.find((p) => p.id === projectId);
     if (!project) return;
+    if (registryAgent(kind)) {
+      notify(t("“{agent}” has no terminal interface: start it as a chat.", { agent: presetFor(kind)?.label ?? kind }));
+      return;
+    }
     const launch = profileLaunch(kind, { account: opts.account });
     const target = opts.target ?? projectTarget(project);
     // Saved passwords / passphrases are looked up by the session's own host, not the project's.
     const remoteEnv = target ? await targetEnv(target.dest) : {};
     const env = opts.env || Object.keys(remoteEnv).length ? { ...(launch.env ?? {}), ...remoteEnv, ...(opts.env ?? {}) } : launch.env;
     const remote = target ? targetRemote(target) : undefined;
+    const args = opts.args ?? (kind === "shell" ? state.settings.shellArgs : launch.args);
+    if (!(await confirmRootStart(kind, args, target, projectId))) return;
     try {
       const info = await ipc.createSession({
         kind,
@@ -616,7 +875,7 @@ function createAppStore() {
         remote,
         project_id: projectId,
         name: opts.name,
-        args: opts.args ?? (kind === "shell" ? state.settings.shellArgs : launch.args),
+        args,
         env,
         agent_session_id: opts.agentSessionId,
         prompt: opts.prompt,
@@ -677,6 +936,85 @@ function createAppStore() {
     }
   }
 
+  /** Panes that hold something (empty launcher cells do not count). */
+  const realPanes = (tab: Tab) => allPanes(tab.root).filter((p) => p.kind !== "empty");
+
+  /** The tabs (other than `tabId`) that "Tile all" would pull into that tab: tabs holding one CLI
+   *  (terminal or chat). Tabs with a split are deliberate layouts; file, diff and browser tabs are
+   *  not CLIs. */
+  function tileCandidates(projectId: string, tabId: string): Tab[] {
+    return workspace(projectId).tabs.filter((t) => {
+      if (t.id === tabId) return false;
+      const panes = allPanes(t.root);
+      return panes.length === 1 && !!panes[0].sessionId;
+    });
+  }
+
+  /** Tile all would change something: gather another tab, or re-even this tab's own panes. */
+  function canTile(projectId: string, tabId: string) {
+    const tab = workspace(projectId).tabs.find((t) => t.id === tabId);
+    return !!tab && (realPanes(tab).length > 1 || (realPanes(tab).length === 1 && tileCandidates(projectId, tabId).length > 0));
+  }
+
+  function canSpread(projectId: string, tabId: string) {
+    const tab = workspace(projectId).tabs.find((t) => t.id === tabId);
+    return !!tab && realPanes(tab).length > 1;
+  }
+
+  /** Tile all: this tab's panes, then every one-CLI tab in tab-bar order, in the most even grid.
+   *  Tabs whose pane joined close; their sessions keep running. Broadcast goes off when other
+   *  tabs join, so keystrokes never start reaching agents the user did not pick. */
+  function tileTab(projectId: string, tabId: string) {
+    const tab = workspace(projectId).tabs.find((t) => t.id === tabId);
+    if (!tab || !canTile(projectId, tabId)) return;
+    if (zoomed()[tab.id]) toggleZoom(tab.id, zoomed()[tab.id]);
+    const cap = cellCount(autoGrid(Infinity));
+    const own = realPanes(tab);
+    // More panes than the biggest grid: the arrange path spills the rest into new tabs.
+    if (own.length >= cap) return arrangeTab(projectId, tabId, autoGrid(cap));
+    const others = tileCandidates(projectId, tabId);
+    const joining = others.slice(0, cap - own.length);
+    const panes = [...own, ...joining.map((t) => allPanes(t.root)[0])];
+    const joined = new Set(joining.map((t) => t.id));
+    const taken = new Set(panes.map((p) => p.id));
+    const root = buildGrid(autoGrid(panes.length), panes, emptyPane);
+    update((s) => {
+      const w = s.workspaces[projectId];
+      w.tabs = w.tabs.filter((t) => !joined.has(t.id));
+      const t = w.tabs.find((x) => x.id === tabId)!;
+      t.root = root;
+      if (!taken.has(t.focus)) t.focus = panes[0].id;
+      if (joined.size) t.broadcast = false;
+      w.activeTab = tabId;
+    });
+    if (joined.size) notify(joined.size === 1 ? t("{n} tab joined this grid", { n: joined.size }) : t("{n} tabs joined this grid", { n: joined.size }));
+    const left = others.length - joining.length;
+    if (left) notify(left === 1 ? t("{n} tab did not fit and stays as it is", { n: left }) : t("{n} tabs did not fit and stay as they are", { n: left }));
+  }
+
+  /** Spread into tabs: every pane of this tab gets a tab of its own, right after it; the focused
+   *  pane stays here. Empty panes (launchers) are dropped; the tab's name and broadcast described
+   *  the group, so they go with it. */
+  function spreadTab(projectId: string, tabId: string) {
+    const tab = workspace(projectId).tabs.find((t) => t.id === tabId);
+    if (!tab || !canSpread(projectId, tabId)) return;
+    const panes = realPanes(tab);
+    if (zoomed()[tab.id]) toggleZoom(tab.id, zoomed()[tab.id]);
+    const keep = panes.find((p) => p.id === tab.focus) ?? panes[0];
+    const rest: Tab[] = panes.filter((p) => p.id !== keep.id).map((p) => ({ id: uid(), root: leaf(p), focus: p.id }));
+    update((s) => {
+      const w = s.workspaces[projectId];
+      const i = w.tabs.findIndex((x) => x.id === tabId);
+      if (i < 0) return;
+      w.tabs[i].root = leaf(keep);
+      w.tabs[i].focus = keep.id;
+      w.tabs[i].broadcast = false;
+      delete w.tabs[i].name;
+      w.tabs.splice(i + 1, 0, ...rest);
+      w.activeTab = tabId;
+    });
+  }
+
   /** Opens a new tab with a grid; cell i runs `kinds[i]` (null = an empty pane with a
    *  launcher). `prompt` goes to every agent started. */
   async function launchGrid(projectId: string, spec: GridSpec, kinds: (SessionKind | null)[], opts: { prompt?: string; args?: string[]; account?: string; target?: SessionTarget } = {}) {
@@ -727,9 +1065,16 @@ function createAppStore() {
     const leaves = templateLeaves(template);
     const project = state.projects.find((p) => p.id === projectId);
     // Panes on a host start in this project's folder there; a host that cannot be reached (a new
-    // host key, offline) leaves an empty pane offering it.
+    // host key, offline), or agents on a host without that folder, leave an empty pane offering it.
+    const noFolder = new Set<string>();
     const targets = await Promise.all(leaves.map(async (l) => {
       if (!l.kind || !l.target) return l.target;
+      const host = hostOf(l.target);
+      if (host && isAgentKind(l.kind) && !agentFolder(host, project, l.target.path)) {
+        if (!noFolder.has(host.id)) notify(t("Type the folder of {project} on {host} first: agents do not start in the login folder", { project: project?.name ?? "", host: host.label }));
+        noFolder.add(host.id);
+        return null;
+      }
       try {
         const tg = await layoutTargetFor(project, l.target);
         const busy = agentsAt(tg, projectId);
@@ -879,19 +1224,19 @@ function createAppStore() {
     addTab(projectId, { id: uid(), kind: s?.chat ? "chat" : "terminal", sessionId });
   }
 
-  function openFile(projectId: string, path: string, opts: { line?: number; diff?: boolean; staged?: boolean } = {}) {
+  function openFile(projectId: string, path: string, opts: { line?: number; diff?: boolean; staged?: boolean; rev?: Pane["rev"]; base?: string } = {}) {
     const kind = opts.diff ? "diff" : "file";
     if (!opts.diff) recordRecent("file", path, projectId);
     const ws = workspace(projectId);
     for (const tab of ws.tabs) {
-      const pane = allPanes(tab.root).find((p) => p.kind === kind && p.path === path && !!p.staged === !!opts.staged);
+      const pane = allPanes(tab.root).find((p) => p.kind === kind && p.path === path && !!p.staged === !!opts.staged && p.rev?.session === opts.rev?.session && p.rev?.n === opts.rev?.n && p.base === opts.base);
       if (pane) {
         if (opts.line) setTabRoot(projectId, tab.id, replacePane(tab.root, pane.id, { ...pane, line: opts.line }));
         focusPane(projectId, tab.id, pane.id);
         return;
       }
     }
-    addTab(projectId, { id: uid(), kind, path, line: opts.line, staged: opts.staged });
+    addTab(projectId, { id: uid(), kind, path, line: opts.line, staged: opts.staged, rev: opts.rev, base: opts.base });
   }
 
   /** Closes a pane. Terminal sessions are killed only when `kill` (default for exited ones). */
@@ -1192,10 +1537,14 @@ function createAppStore() {
 
   /** Per-connection setup: feature check, agent table, folder notes, keep-awake mode. */
   async function onConnected() {
-    void checkDaemonApi();
+    // Before resuming interrupted agents: a hand-over decision must see them start.
+    await checkDaemonApi();
     void loadAgentPresets();
     void loadMeta();
+    if (useDaemonNotes()) void loadNotes().then(moveNotesToDaemon);
     void ipc.daemon("daemon.set_awake", { mode: state.settings.keepAwake ?? "off" }).catch(() => {});
+    void ipc.daemon("daemon.set_priority", { enabled: state.settings.prioritizeVisible ?? true }).catch(() => {});
+    void ipc.daemon("daemon.set_policy", { agents_control_others: state.settings.agentsScripting ?? true }).catch(() => {});
     resumeInterrupted();
   }
 
@@ -1281,22 +1630,24 @@ function createAppStore() {
     state, sessions, connected, overlay, setOverlay, loaded, toast, notify, lastSwitchMs,
     init, activeProject, workspace, activeTab, addProject, removeProject, renameProject, moveProject, switchProject,
     addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, openFile, closePane,
-    arrangeTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
+    arrangeTab, tileCandidates, canTile, canSpread, tileTab, spreadTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
     splitPicker, moveTab, movePaneToTab, mergeTab,
     resumeSession, resumeInterrupted, setChatResumer,
     replacePaneIn, updatePane, resizeSplit, setRightPanel, showRightPanel, setSettings, zoomed, toggleZoom,
-    topProjects, childrenOf, setProjectStatus, togglePin, approveSetup, linkHost, unlinkHost,
+    topProjects, childrenOf, setProjectStatus, togglePin, approveSetup, approveChecks, linkHost, unlinkHost,
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
-    settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
+    registryAgent, settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
-    notesFor, addNote, removeNotes, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
+    daemonNeedsSwitch, switchDaemon, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting,
+    notesFor, addNote, removeNotes, noteKeyFor, clearNotesAt, promptsFor, rememberPrompt, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
     newFloating, toggleFloating, selectFloating, closeFloating,
   };
 }
 
 export interface Toast {
   text: string;
-  action?: { label: string; run: () => void };
+  /** `run` gets the click, for actions that open a menu at the button. */
+  action?: { label: string; run: (e?: MouseEvent) => void };
 }
 
 export const store = createRoot(createAppStore);

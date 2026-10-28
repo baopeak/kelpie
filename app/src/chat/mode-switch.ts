@@ -9,7 +9,9 @@
 import { ChatController, type Adapter, type AdapterContext } from "./chat-model";
 import { applyClaudeMessage, claudeArgs, createClaudeAdapter } from "./claude-adapter";
 import { codexArgs, createCodexAdapter } from "./codex-adapter";
-import { createAcpAdapter, ompAcpArgs } from "./acp-adapter";
+import { createAcpAdapter } from "./acp-adapter";
+import { CORE_AGENTS, acpArgv } from "../lib/agents";
+import { type AgentSettings, claudeSettingsFrom, withSettings } from "./agent-settings";
 import { agentLatestSession, claudeTranscript, createSession, daemon, sendInput } from "../lib/ipc";
 import { store, type PaneTarget } from "../lib/store";
 import { disposeView } from "../lib/terminal-host";
@@ -17,8 +19,11 @@ import { uid } from "../lib/platform";
 import { HOME_VAR, isAccountAgent, sessionHome } from "../lib/accounts";
 import { t } from "../lib/i18n";
 import type { Pane, Project, SessionInfo, SessionKind, Tab } from "../lib/types";
+import { confirmDialog } from "../lib/confirm-dialog";
 
-export const supportsChat = (kind: string) => kind === "claude" || kind === "codex" || kind === "omp";
+/** Claude Code and Codex have native chat protocols; every other agent with an ACP mode chats
+ *  through the generic ACP adapter. */
+export const supportsChat = (kind: string) => kind === "claude" || kind === "codex" || acpArgv(kind) !== null;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -59,11 +64,27 @@ function chatEnv(kind: SessionKind, opts: { account?: string; home?: string | nu
   return Object.keys(env).length ? env : undefined;
 }
 
-function chatArgv(kind: SessionKind, resumeId: string | null): string[] {
+/** `settings`: what the conversation ran with so far (Claude only: Codex's app-server and OMP
+ *  restore the conversation's own settings themselves). */
+function chatArgv(kind: SessionKind, resumeId: string | null, settings: AgentSettings = {}): string[] {
   const profile = store.profileLaunch(kind, { yolo: false }).args;
-  if (kind === "claude") return claudeArgs(resumeId, profile);
+  if (kind === "claude") return claudeArgs(resumeId, withSettings(kind, profile, settings));
   if (kind === "codex") return codexArgs(profile);
-  return ompAcpArgs();
+  const acp = acpArgv(kind);
+  if (!acp) throw new Error(`${kind} has no chat mode`);
+  return acp;
+}
+
+/** Claude's mode, model and effort as its transcript last recorded them, else its own flags. */
+async function claudeSettings(s: SessionInfo, conv: string | null): Promise<AgentSettings> {
+  const lines = conv ? await claudeTranscript(conv, s.cwd, sessionHome(s)).catch(() => [] as string[]) : [];
+  return claudeSettingsFrom(lines, s.args ?? []);
+}
+
+/** What chat view's pickers are set to. */
+function chatSettings(ctrl: ChatController | undefined): AgentSettings {
+  const value = (id: string) => ctrl?.state.settings.find((x) => x.id === id)?.value ?? null;
+  return { model: value("model"), effort: value("effort"), mode: value("mode") };
 }
 
 const controllers = new Map<string, ChatController>();
@@ -82,6 +103,7 @@ export function getController(s: SessionInfo): ChatController {
     // mode are replayed from the daemon log, so only take lines older than this process.
     c.loadHistory = async (ctx) => {
       const lines = await claudeTranscript(resumeId, s.cwd, sessionHome(s)).catch(() => []);
+      c!.seed(claudeSettingsFrom(lines));
       const live = { msgId: null as string | null };
       for (const line of lines) {
         let m: any;
@@ -135,7 +157,7 @@ export async function switchToChat(project: Project, tab: Tab, pane: Pane) {
 async function doSwitchToChat(project: Project, tab: Tab, pane: Pane) {
   const s = pane.sessionId ? store.sessions[pane.sessionId] : undefined;
   if (!s || !supportsChat(s.kind)) return;
-  if (s.alive && s.status === "working" && !confirm(t("The agent is working. Interrupt it and continue in chat view?"))) return;
+  if (s.alive && s.status === "working" && !(await confirmDialog(t("The agent is working. Interrupt it and continue in chat view?")))) return;
   let conv = s.agent_session_id;
   if (!conv && ambiguous(s)) {
     store.notify(t("This {agent} session has not reported its conversation id yet and other {agent} sessions run in this folder — finish one turn first, then switch.", { agent: s.kind }));
@@ -156,11 +178,13 @@ async function doSwitchToChat(project: Project, tab: Tab, pane: Pane) {
     return;
   }
   try {
+    // Read after the TUI stopped: a mode switched just before is in the transcript by now.
+    const settings = s.kind === "claude" ? await claudeSettings(s, conv) : {};
     const info = await createSession({
       kind: s.kind, cwd: s.cwd, project_id: s.project_id ?? project.id, name: s.name ?? undefined,
       // Codex without a known thread id resumes the newest thread of this folder.
       agent_session_id: conv ?? (s.kind === "codex" ? "latest" : undefined),
-      chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null),
+      chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null, settings),
       env: ownEnv(s),
     });
     store.setSessions(info.id, info);
@@ -172,21 +196,22 @@ async function doSwitchToChat(project: Project, tab: Tab, pane: Pane) {
   }
 }
 
-export async function switchToTerminal(project: Project, tab: Tab, pane: Pane) {
+/** `command`: typed into the terminal UI once it is ready (a command chat view cannot run). */
+export async function switchToTerminal(project: Project, tab: Tab, pane: Pane, command?: string) {
   if (switching.has(pane.id)) return;
   switching.add(pane.id);
   try {
-    await doSwitchToTerminal(project, tab, pane);
+    await doSwitchToTerminal(project, tab, pane, command);
   } finally {
     switching.delete(pane.id);
   }
 }
 
-async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane) {
+async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane, command?: string) {
   const c = pane.sessionId ? store.sessions[pane.sessionId] : undefined;
   if (!c) return;
   const ctrl = controllers.get(c.id);
-  if (ctrl?.state.busy && !confirm(t("The agent is working. Interrupt it and continue in the terminal?"))) return;
+  if (ctrl?.state.busy && !(await confirmDialog(t("The agent is working. Interrupt it and continue in the terminal?")))) return;
   let conv = ctrl?.state.conversationId ?? c.agent_session_id;
   if (conv === "latest") conv = null;
   const stopped = await stopProcess(c, async () => {
@@ -199,9 +224,15 @@ async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane) {
     return;
   }
   try {
-    // The terminal front-end gets the profile's flags back (chat argv used its own form).
-    const launch = store.profileLaunch(c.kind);
-    const info = await createSession({ kind: c.kind, cwd: c.cwd, project_id: c.project_id ?? project.id, name: c.name ?? undefined, agent_session_id: conv ?? undefined, args: launch.args, env: ownEnv(c) ?? launch.env, cols: 120, rows: 32 });
+    // The terminal front-end gets the profile's flags back (chat argv used its own form), with
+    // what chat view's pickers are set to in place of the profile's own model / effort / mode.
+    const picks = chatSettings(ctrl);
+    const launch = store.profileLaunch(c.kind, picks.mode ? { yolo: false } : {});
+    const args = withSettings(c.kind, launch.args, picks);
+    // Only agents whose terminal UI is known to resume an ACP / chat conversation by its id get
+    // it; for the others the id may mean nothing to the CLI, so their terminal starts fresh.
+    const resumes = CORE_AGENTS.includes(c.kind);
+    const info = await createSession({ kind: c.kind, cwd: c.cwd, project_id: c.project_id ?? project.id, name: c.name ?? undefined, agent_session_id: resumes ? conv ?? undefined : undefined, args, env: ownEnv(c) ?? launch.env, cols: 120, rows: 32, prompt: command });
     store.setSessions(info.id, info);
     store.replacePaneIn(project.id, tab.id, pane.id, { id: pane.id, kind: "terminal", sessionId: info.id });
     disposeController(c.id);
@@ -216,10 +247,11 @@ async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane) {
 async function resumeChat(s: SessionInfo) {
   const conv = s.agent_session_id && s.agent_session_id !== "latest" ? s.agent_session_id : null;
   try {
+    const settings = s.kind === "claude" ? await claudeSettings(s, conv) : {};
     const info = await createSession({
       kind: s.kind, cwd: s.cwd, project_id: s.project_id ?? undefined, name: s.name ?? undefined,
       agent_session_id: conv ?? (s.kind === "codex" ? "latest" : undefined),
-      chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null),
+      chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null, settings),
       env: ownEnv(s) ?? store.profileLaunch(s.kind).env,
     });
     store.setSessions(info.id, info);

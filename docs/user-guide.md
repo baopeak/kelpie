@@ -14,6 +14,18 @@ Architecture and protocol: [architecture.md](architecture.md).
 Agents are not bundled: install the CLIs you use (`claude`, `codex`, `omp`) as usual. Kelpie
 finds them on your PATH (Windows) or through your login shell (macOS).
 
+**Updates.** Kelpie looks for a newer release on GitHub 30 s after it starts and every 6 hours
+(Settings → About → **Check for updates**, or **Check now**). A newer release shows as
+*Update x.y.z* in the status bar; its dialog shows the release notes, with **Install now**,
+**Install when idle** (as soon as no session is working) and **Skip this version**. Updates are
+signed; Kelpie installs nothing else. Installing restarts only the app: every session keeps
+running and is there when Kelpie reopens (running an installer by hand over a running Kelpie works
+the same way). The one exception is the first update from Kelpie 0.1.x, whose session daemon
+runs from the install folder: that update stops sessions once (the dialog says so) and agents
+resume. The sessions stay on the previous session daemon until they have all stopped; then
+the new one takes over on its own. A notice offers **Switch now** if you want the new daemon's
+features earlier (running sessions stop for a moment; agents that can resume continue).
+
 ## Everyday use
 
 1. **Add a project**: sidebar `+` (or search → *Add Project Folder…*). Any folder works; for a
@@ -21,7 +33,9 @@ finds them on your PATH (Windows) or through your login shell (macOS).
 2. **Start a session**: click Claude / Codex / OMP / Terminal on the empty project screen, or
    `+` in the tab bar for options (extra args, name, split, *Chat view*) and your quick commands.
 3. **Sidebar**: every project with its branch (`*` = uncommitted changes, ↑↓ ahead/behind) and
-   its sessions: status dot, task title, model and time since the last activity. Badges show
+   its sessions — in the order their panes sit on screen (tab by tab, each read left to right,
+   top to bottom; sessions in no pane last): status dot, task title, model and time since the
+   last activity. Badges show
    sessions that need you (amber), are working (blue) or finished unread (green). The chevron
    folds a project; the toolbar filters (all / running / needs you) and sorts (manual /
    recent). Right-click a session to rename it inline, mark it unread, restart or resume it,
@@ -32,7 +46,14 @@ finds them on your PATH (Windows) or through your login shell (macOS).
    sessions, projects, files, commands and settings in one box. Prefix `@` sessions, `#` files,
    `>` commands, `/` settings, or press `Tab` to change scope.
 5. **Dashboard** (`Ctrl+Shift+M` / `⌘⇧M`): every session of every project grouped by
-   *Needs you / Working / Done / Idle* — click a card to jump there.
+   *Needs you / Failed / Working / Done / Idle* — click a card to jump there. *Needs you* lists
+   the longest wait first ("waiting 3 min"); **Answer** opens a quick answer: the bottom of that
+   session's screen, a button for each key its prompt offers (1 2 3, y n), Enter / Esc and a
+   line of text — sent only if the session still waits on that prompt. `Ctrl+Shift+.` / `⌘⇧.`
+   jumps to the session that has waited longest, then the next. Agents without hooks (Codex,
+   Gemini, Aider, OpenCode…) count as *needs you* when their screen shows a menu or a yes/no
+   question; the bell in the status bar gets a dot while any session needs you, and its
+   *Needs you* list answers right there.
 6. **Files**: the right panel has Files (filter by name, or search contents), Changes (git) and
    Sessions. Click a file to open it in the editor (`Ctrl+S` saves; external changes are
    detected); click a change to see its diff. Ignored files are dimmed.
@@ -43,7 +64,34 @@ finds them on your PATH (Windows) or through your login shell (macOS).
 8. **Chat view**: in an agent pane header click the chat icon to continue the *same
    conversation* in a chat UI (messages, tool cards with diffs, Allow/Deny prompts); the
    terminal icon switches back to the TUI. Kelpie stops one front-end before starting the other,
-   so a conversation never has two writers.
+   so a conversation never has two writers. In the message field `/` lists the agent's own
+   commands (skills and custom commands included), `@` the folder's files and, for Codex, `$` its
+   skills (`↑`/`↓`, `Tab` or `Enter` to pick, `Esc` to close); the chips under the message field
+   switch model and effort (one chip, left) and permission mode (right, amber when nothing asks
+   for approval; `Shift+Tab` steps through the guarded modes). While the agent works with nothing
+   typed, the round send button stops it. A command
+   that only works in the terminal UI shows *Run it in the terminal*, which switches back and runs
+   it there.
+   - The transcript reads like the terminal UI: each tool call is one line (*Read app.ts · lines
+     75-80*, *Edit main.rs +3 −1*, *Bash* with its command and output), runs of reads and searches
+     fold into *Explored 4 files, 2 searches*, and thinking folds into *Thought for 6s*. After a
+     turn, *N files changed* lists each file with its line counts; click one to open its changes.
+   - Every prompt and reply shows its date and time in the top right corner (hover for the full
+     date), also after a restart or when you come back to the chat later. Hover a reply to copy
+     it, or a code block to copy its code. Hover a prompt whose turn changed files for
+     *Undo this turn…*: the same previewed undo as the Turns panel.
+   - Background work Claude left running (background commands, subagents) is listed above the
+     message field as *In the background*; click it for each task's status.
+   - Messages sent while the agent works wait above the message field and go when its turn ends.
+     *Send now* gives one to the agent during its turn (Codex and Claude; for other agents it stops
+     the turn first); stopping the agent holds the queue until you send again.
+   - The agent's task list (Claude's todos, Codex and OMP plans) stays pinned above the message
+     field. The ring next to the pickers shows how full the context is (hover for tokens and cost;
+     click to compact).
+   - Approvals show the command or the edit they are about; press `1`–`9` (with an empty message
+     field) to pick an option, or type what the agent should do instead and *Deny*. Questions the
+     agent asks (Claude's multiple-choice questions) and plans it wants approved are answered in
+     their card. *Waiting for your approval* appears when the card is scrolled out of view.
 
 ### Past conversations
 
@@ -63,6 +111,182 @@ the agents' own sign-in (`~/.claude/.credentials.json` or the macOS keychain, an
 endpoint, identifying as Kelpie. When a refresh fails (e.g. the endpoint's rate limit) the last
 values stay shown, dimmed, with the reason in the tooltip. Both meters can be turned off in
 Settings → Usage & Resources.
+
+### Context, tokens and cost
+
+Each Claude Code, Codex and OMP session shows a small **context ring** on its sidebar row, pane
+header and tab: how much of the model's context window the conversation uses (grey, amber from
+70 %, red from 85 %). Hover for the numbers: context, tokens in and out, cost and model. At 85 %
+Kelpie says so once per session; click the ring (or the toast's button) for **Compact** (the agent's
+own `/compact`), **Hand Off to another agent**, or the usage page. The numbers come from the agent's
+own transcript and only for a session Kelpie can match to its conversation exactly; a session without
+one shows nothing. Claude costs are **estimates at API prices** ("≈ $": a subscription is not billed
+per token); OMP's and ACP agents' are their own numbers; Codex shows tokens only. OMP has no known
+window, so it shows a cost chip instead of a ring.
+
+**Usage & cost** (palette, right-click a usage meter, or the "Cost" item next to the meters) lists
+cost and tokens by day, week, project, agent or model for the last 7 / 30 / 90 days or all time, from
+every transcript on this computer, Claude's sub-agents included. The first count can take a
+while; it continues in the background.
+
+Settings → Usage & Resources has an optional **cost cap per session** (US dollars, off at 0): a
+session over it (all its conversations together) gets a red cost chip and an Activity entry, and can
+optionally be interrupted with Esc.
+
+### Turns and undo
+
+Settings -> Agents -> **Turn snapshots** (off by default; it costs a few hundred milliseconds per turn on a
+large repository) keeps a snapshot of an agent's folder when each of its turns ends, for agents running on
+this computer in a git folder. The **Turns** tab of the right panel (or "Agent Turns and Undo" in the palette)
+lists them for a session: when, how many files and lines, and what changed; click a file for a before / after
+diff. A turn marked *approx.* belongs to an agent that reports no turns: Kelpie guesses the end from the
+output going quiet, so two turns may be merged. The **Files** view shows who touched which files in the
+folder; a file changed by more than one session is marked shared. A turn's *Produced* row opens markdown,
+images, Mermaid and CSV it wrote, rendered; a comment on a markdown block becomes a review note you can send
+to an agent from any diff.
+
+**Undo** (the arrow on a turn) previews every file it will restore or delete and changes nothing until you
+confirm. It is available once the session is idle. Files another session also worked on in the same period,
+files changed since the turn or between turns (by your editor or a terminal, even if the agent edited them too; Kelpie looks at the folder as each turn starts), start unticked and say why; tick one to allow overwriting it. Your index,
+branch and commits are never touched. Snapshots live in the repository under `refs/kelpie` (the last 50 turns
+per session) and are removed when the session is closed or its worktree removed. A repository where a
+snapshot takes over a second twice in a row (on an otherwise idle machine) is switched off until Kelpie's
+session daemon restarts, with a notice; turn it on again in the panel. Other git tools can see the
+`refs/kelpie` refs (`git log --all`, graph tools), and a `git push --mirror` would send them. Line endings of
+a restored file follow your git settings and can differ from before; Kelpie says so in the dialog.
+
+### Review and Finish
+
+The board's **Review** column is the review queue (so is `kelpied worktree set --status review`, which an
+agent can run itself, and an automation set to *Move the folder's card to Review* when it finishes). A
+worktree card in that column shows its files, +/- lines, commits, uncommitted files, the checks, what its
+sessions cost and how many turns they took. The **Review** tab of the right panel lists the same cards
+for the current repository with their files; a file opens a diff against the branch the worktree will be
+merged into, committed changes included. Marking a worktree **Done** while it still has changes nobody
+merged offers Review instead.
+
+- **Open diff** shows that. **Request changes** sends the review notes you wrote on the diff (click the +
+  beside a line) to an agent in the worktree and moves the card back to *In progress*.
+- **Approve → Finish** (also the sidebar menu's *Finish…* and the palette's *Finish Worktree…*) opens the
+  Finish dialog: the uncommitted files it will save as a "WIP from <agent>" commit (with their sizes; you tick
+  to confirm exactly that list), how to merge (squash, merge commit or rebase) and the message, and the
+  checks. Then Kelpie stops the worktree's sessions and reads the files again: if any appeared after you
+  confirmed (the agent was still writing) nothing is committed and you confirm the new list. Only the
+  confirmed files are committed; a folder with a git repository of its own inside the worktree is refused
+  rather than committed as a pointer to nothing. Then it merges, runs the checks, moves the branch it merges
+  into only if that branch has not changed meanwhile, updates the main checkout, deletes the branch only
+  when its work is in the target, and removes the worktree last. It never forces anything. The branch is the
+  one the worktree is really on: a worktree on a detached HEAD, whose commits would be lost with it, cannot be
+  finished until you give them a branch (`git switch -c <name>`).
+  - It merges into the branch the worktree was created from; if that is not the main checkout's current
+    branch, or is unknown (worktrees added later), the dialog says so and asks you to confirm.
+  - A conflict is announced in the dialog (*Resolve with agent* starts an agent in the worktree) and nothing
+    is stopped for it; a failing check (*Fix with agent*), a target that moved (try again) and a main checkout
+    with changes to tracked files (commit or stash them first) stop it before anything moves. Untracked notes
+    or logs in the main checkout do not matter, except a file the merge would overwrite (including an ignored
+    one such as `.env`): Finish names it and stops.
+  - **Cancel Finish** works at every step: before the target branch moves it ends whatever runs (a merge, a
+    signature that waits, a check) and changes nothing; once the work is merged it only skips the cleanup and
+    says what is merged. A check that outlives its time (20 minutes) is stopped with everything it started.
+    A Cancel never carries over to the next Finish.
+  - If the worktree cannot be removed (a program still has a file open) the work is already merged; the branch
+    is put back and the worktree stays, with the reason. If git deleted part of the folder before failing, the
+    leftover folder is reported; it holds no links into your shared folders.
+  - **Signing and hooks.** If the repository signs commits (`commit.gpgSign`, any config level), the commits
+    Finish makes (squash, merge commit, every rebased commit, the WIP commit) are signed with git's own
+    settings (`user.signingKey`, `gpg.format` openpgp / ssh / x509); a passphrase or security-key prompt that
+    nobody answers within two minutes, or a failing signer, stops Finish before anything moves. Rebased commits
+    are re-signed by you. **Commit hooks do not run** for Finish's commits (pre-commit, commit-msg,
+    prepare-commit-msg, reference-transaction…): they are Kelpie's own bookkeeping, and with husky-style hooks
+    the scripts would come from the branch being merged. So a Gerrit Change-Id or DCO sign-off added by a
+    commit-msg hook is not added; add it to the message in the dialog. `merge.verifySignatures` is not
+    applied either; the checks are the gate.
+- **Checks**: add `check:` to the repository's `.kelpie.yaml`, one command per line (a program and its
+  arguments; no `&&`, pipes or variables):
+
+  ```yaml
+  check:
+    - pnpm test
+    - cargo clippy -- -D warnings
+  ```
+
+  They are read from the file committed on the branch you merge into, never from the branch being merged,
+  and run only after you approved that exact list (the Finish dialog shows them and asks; if the list changes
+  it shows what was added or removed and asks again). The approval covers the checks only: it is kept apart
+  from the approval of `setup:`, `tabs:`, `copy:` and `link:` that the New worktree dialog asks for (which now
+  lists the `check:` commands too), so approving a check never approves a changed setup command. They run
+  without a shell in a temporary worktree of the merged result, where the `copy:` and `link:` entries are
+  available. **They run the branch's own code**: `pnpm test` or `cargo test` execute the branch's scripts and
+  build files, so a check is only as safe as the branch. If the branch itself edits `.kelpie.yaml`, its card
+  says so, its checks are off, and Finish makes you choose between finishing without them and running the
+  target branch's list; the same holds when the file cannot be read. Finish waits until the checks have been read before it can start.
+- **Also changed in …**: when two or more worktrees of a repository have an agent running, a chip on each row
+  (and in the Changes tab) says which other worktree changed the same files (checked every 30 s and
+  after a turn ends).
+
+### Review with another agent, and best of several
+
+**Review with…** (the button on a review card, or the palette's *Review Worktree with…*) asks another
+agent — by default one that did not write the changes, so it can be another vendor — to review a worktree.
+You choose the agent and can edit the prompt it starts with; to change the default, save a quick command
+called **Review prompt** (Settings → Quick commands). The session starts in the same worktree with the diff
+against the branch it will be merged into (at most 48 KB, credentials masked). The reviewer can leave
+comments on lines of the diff with `kelpied review add <file>:<line> "<comment>"` (`--old` for a removed
+line, `--base <branch>` to name the base; Kelpie puts the command in the prompt): they appear in the normal
+diff view like your own notes, marked with the agent's name, and **Request changes** sends them on. A
+reviewer can only write notes in its own worktree. (An agent whose launcher strips `*TOKEN*` variables from the
+programs it runs cannot prove which session it is: `kelpied review add` is refused there; paste its comments as notes yourself.)
+
+**Try with several agents…** (the link in the New session dialog, or the palette) sends one prompt to 2 to
+5 agents, each in a worktree of its own, started from where the folder is now. It is an ordinary run, so
+the Runs page follows it. When the repository's `.kelpie.yaml` has been approved (New worktree shows it),
+each worktree also gets its `link:` folders (shared, nothing copied) and `copy:` files, and the dialog shows
+what that is and how large the copies are before you start; without approval they start as clean checkouts.
+The Runs page's *New run* does the same for its tasks that have their own worktree.
+
+**Compare** (the tab of a run in Runs, when two or more of its tasks have a worktree) puts the candidates in
+columns: status, time, cost, files, +/- lines, the base's checks and turns, with a star on the quickest and
+the smallest change among those that finished. Click a file to see two candidates' versions of it side by
+side (pick which two). **Use this one** asks, listing the other candidates, stops their agents and opens Finish
+for the winner. Once it has merged, each other candidate that is still exactly as it was when you confirmed
+is cleaned up: what it had not committed is saved in a commit on its branch, its worktree is removed (never
+forced) and its branch is deleted only if it is merged, otherwise it stays with the candidate's work. A
+candidate that changed meanwhile, or that cannot be removed without force, is left alone and Activity says
+why. **Discard…** does the same for a single candidate after asking.
+
+### New agent sessions in a worktree
+
+Settings → Agents → *Worktree for new agent sessions*: in the New session dialog an agent started in a git
+folder can run in its own new worktree, with the branch named from the first prompt
+(`Fix the login redirect` → `fix-the-login-redirect`). *Ask* shows an unticked box, *Always* ticks it, *Never*
+hides it. The repository's `.kelpie.yaml` setup runs there only if you approved that exact file before.
+
+### Composer
+
+`Ctrl+Shift+I` (`⌘⇧I`), or the pencil in a pane's toolbar, opens a multi-line composer over the
+focused session, whether it is a shell, an agent's terminal UI or a chat view. Enter sends,
+Shift+Enter adds a line, Esc closes it and keeps the draft, and Up / Down bring back the
+project's earlier prompts (the search palette finds them too: type `!` and a word).
+
+Type `@` to mention:
+
+- **files and folders** (`@src/app.ts`, `@"my docs/read me.md"`);
+- **`@selection`**: what is selected in an editor, a diff or a terminal (also *Send Selection to
+  Agent…* in their right-click menus, which opens the composer of the agent you pick);
+- **`@diff`** (uncommitted changes), **`@note`** (your review notes);
+- **`@terminal:<session>`**: the recent output of another session, **`@issue:<key>`**: an issue
+  from Linear, Jira or GitLab (a bare `@issue` is the issue the session was started on). Secrets in
+  both are masked before they are sent.
+
+Claude Code, Codex and Gemini read `@path` themselves, so they get the path. Other programs get
+the content, fenced and labelled with where it came from; a snippet of more than 200 lines, or
+more than 64 KB in all, becomes a path instead. A shell never gets content: it gets paths, quoted for it,
+left at the prompt for you to read and run (a file name can be a script, so nothing that holds a
+mention or a picture is sent with Enter). A terminal that did not ask for bracketed paste (an agent
+that is still starting, an older shell) takes no multi-line text, since every line would run.
+
+Paste or drop a picture: a terminal UI gets its path (the picture is saved to a temporary file), a
+chat view gets the picture itself.
 
 ### Quick commands
 
@@ -110,6 +334,8 @@ capped at 2 GiB / 50,000 files per worktree. The *From* field suggests local and
 branches and tags (a commit id works too). After **Remove worktree…** a notice offers to
 delete its branch (`git branch -d`; when it has unmerged commits Kelpie asks before `-D`).
 In search, typing a name that matches nothing offers **Create worktree "…"**.
+Folder names remain literal when linked, including spaces, Unicode, `&` and `%`; creating a
+Windows junction does not run the name through a shell.
 
 A worktree (or any folder) can carry a **comment** — what it is doing right now — and a board
 status. Set them from the sidebar menu (*Add comment…*) or let an agent set them:
@@ -141,6 +367,12 @@ prompt**; for a terminal it is a startup command.
   project for N minutes are stopped; they resume their conversation when you open them
   again. *Sleep* in a project's menu does the same at once.
 - **Keep computer awake**: off, while an agent works, or always (status bar coffee icon).
+- **Prioritize visible terminals** (Settings → Agents, on by default, Windows): the terminal on
+  screen gets the CPU first, so typing stays quick while other agents build and test or other
+  programs keep the machine busy. Nothing else is slowed down.
+- **Compact / Clear / Restart, keeping the conversation**: in a session's menu (and the command
+  palette, *Agent: …*). Compact and Clear send the agent's own commands; Restart starts a fresh
+  process on the same conversation, which helps when a long-running TUI has become sluggish.
 
 ### Terminals
 
@@ -148,6 +380,12 @@ Right-click a terminal for copy / paste / select all / clear, **Copy Context** (
 lines as text), splits, your quick commands and hand-offs. Settings → Terminal → *Colour
 theme* offers Dracula, Nord, One Dark, Tokyo Night, Catppuccin, Gruvbox, Solarized and GitHub
 Light (agents are told the same colours when they ask).
+
+Programs that take over the mouse — Claude Code with `"tui": "fullscreen"` (`/tui fullscreen`),
+OMP — scroll their own view with the wheel and copy what you select in them to the clipboard
+(OSC 52; only from the terminal you are in). Hold `Shift` while dragging to select terminal text
+instead. They draw on the alternate screen, so the terminal itself keeps no scrollback for
+them: `/tui classic` brings Claude Code's plain scrollback back.
 
 The **floating terminal** (`Ctrl+Shift+\`` / `⌘⌥A`, or the status bar) is a shell in your home
 folder, above any project; hide it and it keeps running.
@@ -163,6 +401,14 @@ kelpied terminal wait <session>          # until it stops working
 
 `<session>` is a handle, a session id (prefix) or a session name.
 
+Inside a Kelpie session `kelpied` speaks for that session: it can drive other sessions while
+Settings → Agents → **Agents can control other sessions** is on (the default) and only its own
+session when it is off. Kelpie's settings, automations, custom agents and phone access are never
+reachable from inside a session; run `kelpied` from a terminal outside Kelpie for those.
+Prompts Kelpie types for you (quick commands, review notes, hand-offs) drop control characters,
+and hand-offs, Copy Context and notes or issues sent to an agent have recognisable credentials
+(API keys, tokens, private keys, `PASSWORD=` values) replaced by `[redacted]`.
+
 **Long output.** Scrolled up in a long conversation, a pill in the corner counts the lines that
 arrived meanwhile and takes you back to the bottom. Every line you submit (Enter) is a mark:
 `Ctrl+Shift+↑ / ↓` (`⌘↑ / ↓`) jumps to the previous / next prompt you sent, so a Claude Code
@@ -174,7 +420,38 @@ the bottom. Settings → Terminal → *Scrollback* sets how many lines each term
 The bell in the status bar lists what happened while you looked elsewhere: agents that
 finished or need you, automation runs, new worktrees — with the agents working right now on
 top. Click an entry to jump there; right-click toggles read. Settings → Notifications can add
-a short chime to desktop notifications.
+a short chime to desktop notifications. A session you are looking at (the window has focus and
+shows it) raises nothing.
+
+#### On your phone, with the window closed
+
+Settings → Notifications → *Off this computer* sends the same events from the session daemon,
+which keeps running when you close the window. Nothing is sent until you switch a channel on.
+
+- **ntfy**: switch it on, install the ntfy app and subscribe to the topic Kelpie shows (*Show topic*).
+  The topic is 128 random bits only you know; use *New topic* if you shared it by accident. An
+  access token is optional, and the server can be your own.
+- **Telegram**: make a bot with @BotFather, paste its token and your chat id, press *Send a test*.
+- **Webhook**: a JSON `POST` to an address you choose.
+
+Choose which events go out (needs you, finished, failed, automation, run approval, cost cap), skip
+turns shorter than a number of seconds (30 by default), and optionally send only while Kelpie's
+window is not in focus or the computer has been idle for 5 minutes (the system's own clock on Windows; elsewhere, no key or pointer use in Kelpie's window). A session sends at most one message per
+30 seconds. Messages carry the project, the session's name, what happened and how long the turn took,
+with credentials masked; the end of the terminal screen is added only if you switch that on (it leaves
+the computer, through the server you chose). With phone access on, the message links to the session in
+the phone app; the link holds no pairing code, so it opens only on a phone that is already paired. Tokens
+and the topic are kept in the system credential store, never in a file, and are never shown again.
+
+#### When an agent hits the usage limit
+
+A Claude Code session stopped by its subscription's usage limit shows a strip above its pane:
+**Continue at reset** (the time comes from the usage meter; when the meter cannot say, type the time
+and confirm it), **Switch account…** and **Hand off to…**. The daemon keeps the timer, so it works with
+the window closed. When the time comes it types `continue` only if the session is still stopped by
+that limit, in the same conversation and the same run, and nothing was typed since its last prompt was sent (a half-written message would otherwise be submitted); otherwise it
+cancels and leaves a note in the inbox saying why. Other agents do not report their limits, so they
+have no strip.
 
 ### Source control and review
 
@@ -192,7 +469,9 @@ checks (also as a chip in the sidebar); *Create pull request…* pushes and open
 **Review notes**: in a diff, click the gutter (`+`) to note a line; notes on all files of
 the project collect in a bar above the diff. **Send to agent ▾** sends them as one prompt to
 a running agent or a new one; resolve notes once addressed. `F7` / `Shift+F7` move between
-changes.
+changes. The session daemon keeps the notes (so another agent can write them too, see *Review with…*
+below); notes you wrote with an older daemon move over by themselves the first time, after a copy of
+the app state is made.
 
 ### Files
 
@@ -207,9 +486,81 @@ Cursor, Windsurf, Zed, Sublime Text or IntelliJ IDEA when installed.
 Settings → Automations runs an agent with a prompt every hour, day, weekday or week (local
 time), in a project. They are stored and started by the session daemon, so they run while
 the window is closed; *Run now* tries one immediately. Runs missed by more than 30 minutes
-(computer asleep) are skipped, not caught up.
+(computer asleep) are skipped, not caught up. *When it finishes* can move the project's card to
+the board's Review column once the run's first turn ends (a daemon restart in the middle forgets it).
+
+**When something happens.** *Starts → When something happens* runs an automation on an event instead of the clock:
+
+| Event | Seen by | Also with the window closed |
+|---|---|---|
+| A file changes (a pattern such as `**/*.md`; a pattern without `/` matches the file name anywhere) | the window's file watcher | no |
+| An agent finishes a turn in the project | the daemon | yes |
+| A commit is made (HEAD moves on its branch: by hand, by an agent, a rebase or an amend; not a checkout) | the daemon, which asks git every ten seconds and when an agent's turn ends | yes |
+| Pull request checks fail (`gh`, looked at when the Git panel refreshes and every five minutes for projects that have such an automation) | the window | no |
+| A worktree is finished (Finish merged it) | the window | no |
+
+What it does: start an agent session with the prompt, **type a saved prompt** (a Quick command for agents) into an
+session that automation started earlier (a new session the first time, and never one you opened yourself, nor one
+you typed into in the last 30 seconds), or **run a command**. The prompt gets a short note of what happened (the
+changed files, the commit, listed as names, not instructions). A command is a program and its arguments, started
+**without a shell**: nothing is parsed, expanded or interpolated, so a file named `$(rm -rf ~)` is just a name. The
+program is looked up in the automation's folder (a path such as `scripts\lint.cmd`) or on `PATH`, with the usual
+Windows extensions (`npm` finds `npm.cmd`), and the approval covers the file that was found. An
+argument that is only `{file}`, `{files}`, `{commit}` or `{branch}` is replaced by that value; the same data is in
+`KELPIE_EVENT`, `KELPIE_ROOT`, `KELPIE_FILE`, `KELPIE_FILES` (one per line), `KELPIE_COMMIT`, `KELPIE_BRANCH` and
+`KELPIE_PR_NUMBER`. After saving a command, the list shows its hash and **Approve command**; changing the program,
+its arguments or the folder takes the approval away. Commands can only be created, edited and approved from the
+Kelpie window; programs running in a session cannot touch automations at all.
+
+Kelpie gives event data only to commands that cannot turn it into code. A program that is not a command interpreter
+(`git`, a real `.exe`, a `.cmd` file called directly) gets it as whole arguments. A **command interpreter**
+(PowerShell, bash and other shells, python, node, ruby, perl, php, deno…) gets it only when it runs a **script file
+inside the project**: `powershell -File scripts\lint.ps1 {file}`, `bash lint.sh {file}`, `python lint.py {file}`; the
+script reads the name from its arguments or from `KELPIE_FILE` (in a batch file, quote it). Anything that hands one
+line to another shell or machine (`cmd`, `ssh`, `wsl`, `sudo`, `env`, `start`, `xargs`…), and every package manager and build tool (`npm`, `pnpm`, `yarn`, `make`, `cmake`, `gradle`, `mvn`, `msbuild`, `just`, `rake`, and wrappers that run another program such as `uv run`, `poetry run`, `bundle exec`, `direnv exec`, `mise exec`, `nix-shell`, `docker run`, `doppler run`…: they run targets and scripts through a shell, and `npm run` expands `%VAR%` in a name), is not given event data at all,
+and neither is `powershell` without `-File`, `bash -c`, `python -c`, `node -e` and the like. Kelpie refuses such a
+command when you save it and says what to write instead. The approval covers the **contents** of the script (and of the
+program, when it lives in the project): if an agent edits the script, the automation stops with a note in the inbox
+until you approve it again. A program Kelpie has no rule for (`git`, a plain `.exe`) is given the names as arguments, and the approval dialog says so in a warning: approve it only if it never runs them as commands. An agent kind of `shell` or `custom` counts as a command too (approval, and no event data
+typed into it).
+
+Approval checks read each covered file in full, not just its size or a prefix. If a covered
+file cannot be read, the command cannot be approved or run; restore read access first.
+
+Guards: an event automation runs **at most once a minute**, **at most N times a day** (default 10; you are told
+once when the limit is reached), **not while a session or command it started is working** (or in the five seconds
+after), and never while automations are **paused** (the bolt in the status bar, shown once any automation exists).
+The agent an automation starts therefore does not set the same automation off again with its own edits, but it can
+set off a different automation. *Dry run* (a checkbox, and a button on every automation) matches events and notes
+what would happen without starting anything. *Run now* and a manual dry run use an example event. Automations that
+one automation's work sets off in turn are cut off after three links (the inbox says so). Patterns match
+case-insensitively on Windows only, and `[abc]` classes are taken literally; a file watched through a folder inside
+the automation's folder is matched by its path from the watched folder.
+
+Automations are kept in `automations.json` with a version. An older file is upgraded after a copy to
+`automations.json.bak`. A file that cannot be read is renamed `automations.json.corrupt-<time>`, you are told in the
+activity inbox, and nothing is written until you press **Dismiss** in Settings → Automations, also after a restart.
+Every save keeps a copy as `automations.json.v2`. Downgrading Kelpie is not supported (an older version shows an
+empty list and replaces the file with its own); if it happens, the next start of this version tells you and offers
+**Restore the newer list** (which also keeps what the older version added) or **Keep the current list**. The daemon
+must be restarted once after an update (Settings → Session Daemon) before these options appear; an older daemon would
+treat an event automation as a daily one, so the editor does not offer them.
 
 ### Layouts
+
+**Tabs and panes.** A tab is one piece of work; panes are what you look at side by side inside
+it. A new terminal or session opens in a new tab; *Split right / down* halves the focused pane
+and asks what to run there. A tab with one pane has no pane header — the tab shows its agent,
+title and host, and the pane's buttons (chat view, dictation, split, close) appear when you hover
+its top-right corner. As soon as a tab holds two or more panes, each gets a header and the tab
+shows one coloured dot per pane.
+
+**Tile all** (layout menu, or the palette) puts the tab's panes and every tab that holds a
+single CLI (terminal or chat) into one even grid: 4 CLIs become 2 × 2, a 5th makes it 3 + 2,
+7 make 3 + 2 + 2. It also evens out a grid that splitting made lopsided. Tabs that already hold
+a split, and file, diff or browser tabs, are left alone; *Broadcast input* turns off when other
+tabs join. **Spread into tabs** does the opposite: each pane of the tab gets its own tab.
+Sessions keep running through both.
 
 The grid button in the tab bar (or `Ctrl+Shift+L` / `⌘⇧L`) arranges the tab: presets from
 2 columns to 3×3, any number of rows or columns, or per-row counts such as `3,2` (three panes
@@ -233,7 +584,8 @@ sessions come back *interrupted* with their last screen. Settings → Agents →
 restart* decides what happens next: resume each one when you open it (default), all at once,
 or only with its **Resume** button. Agents continue the same conversation (Claude Code
 `--resume <id>`, Codex `resume <id>`, others with their "continue latest" flag); shells start
-again below their old output.
+again below their old output. Kelpie names each new Claude Code conversation itself, so even two
+Claude sessions in one folder — or on an SSH host — each come back to their own conversation.
 
 ### Several Claude Code / Codex accounts
 
@@ -243,6 +595,12 @@ once in a terminal Kelpie opens there. The *active* account per agent is used by
 chat view, automations and AI actions; running sessions keep theirs. Right-click a usage meter
 to switch; each account has its own meter. The new-session dialog can pick an account, and the
 Sessions panel lists the conversations of every account and resumes each with its own.
+
+A running Claude Code or Codex session can move to another account (*Switch account…* in the
+usage-limit strip): Kelpie copies the conversation into that account's folder, stops the agent and
+starts it again there on the same conversation. It refuses, with the reason and before stopping
+anything, when the target is not signed in, already holds a different or newer conversation with the same id (an older copy from an earlier switch is replaced, so you can switch back and forth),
+or the conversation is over 1 GB; sessions in chat view or on another machine do not switch.
 
 ### Orchestration runs
 
@@ -260,7 +618,62 @@ kelpied run create run.json          # {"name", "objective", "tasks": [{"id", "t
 kelpied run list                     #   "kind", "deps": [...], "approve", "worktree"}]}
 kelpied run show <run> | approve|retry|done|skip <run> <task> | cancel|delete <run>
 kelpied run wait <run>
+kelpied review add <file>:<line> "<comment>" [--old] [--base <ref>]   # a note on this worktree's diff
+kelpied review list [--json]
 ```
+
+The same prompt to several agents, with a compare view to pick the best, is *Try with several agents…*
+(see Review and Finish).
+
+### Specs and tasks (the Plan tab)
+
+The **Plan** tab of the right panel (palette: *Plan (specs and tasks)*) shows the plans and specs your
+repository already has, written by any agent or by you: `plans/<name>/plan.md` with its `phase-*.md`,
+`specs/**`, `.kiro/specs/**` (Kiro's requirements, design and tasks) and `docs/plans/**`. There is no
+format of Kelpie's own, only markdown with `- [ ]` / `- [x]` task lists. Each plan or spec is a group with
+its progress; a file is a phase; unfinished groups are open and listed first. A file with no checkboxes
+shows its list items as they are, so nothing is hidden. Links (symlinks, junctions) are not followed, and
+nothing outside the project is read or written.
+
+- **Live**: when a file under those folders changes (an agent ticked a box, you edited it, or an agent wrote
+  the first `specs/`, `docs/plans/` or `.kiro/specs/` of the repository) the panel follows after a third of a second. With the tab closed nothing is read or parsed.
+- **Tick a box** in the panel and the file changes by that one character; line endings and everything
+  else stay byte for byte. If the file changed after the panel read it, nothing is written: it is read
+  again and you tick once more. Files that are not UTF-8 text, or larger than 256 KB, are listed but
+  cannot be ticked from here.
+- **Run with…** (the bolt at the end of a task row) starts an agent on that task: choose the agent, and
+  whether it works *here* (the folder as it is), in a *worktree of its own* (started from the last commit,
+  with the repository's approved `link:` / `copy:` files like any run worktree; a spec file with uncommitted
+  changes is flagged because the agent would not see them) or *on a host*: any saved SSH host linked to the
+  project is offered, and the agent starts in the project's folder there, the way a pane on that host does
+  (for a remote project, *here* is its own host). A task on a host has no worktree, and its agent works on
+  the host's own copy of the file, so its tick is made there. It does **not** run in tmux and cannot run Kelpie's
+  report command: the task is *done* when the agent exits with code 0, and *failed* when the agent stops with another
+  code or the connection drops (the task says so). The agent ends with its connection once the host notices that
+  it is gone, which can take a few minutes, so a failed task may still have its agent running there for a while: *Retry*
+  and a new *Run with…* ask for your confirmation first. If Kelpie itself restarts while such an agent runs, the task
+  is marked failed as the daemon starts, before any window can resume sessions, and its session is not resumed (a resumed agent would be one no task follows). There is no idle
+  timeout for such a task; *Mark done* ends it by hand. Needs a daemon of API level 14. It is an ordinary run with one task, so the Runs
+  page follows it; the row shows the run's status (click it to open the run). The prompt names the file
+  and the section, points the agent at the file the way its own kind reads it (`@path`, or the file's
+  content for other agents) and asks it to tick the box when done; agents can also report with
+  `kelpied run report`. Headings and task text, and the text of the file when it is included in the prompt, are cleaned
+  of escape sequences and of control, bidirectional and invisible characters first. A row follows its run by the
+  task's words: if you change them (or add an identical task above), the row loses its chip and the run stays on
+  the Runs page.
+- **Remote projects** have the Plan tab too: their files are listed, read, ticked and created over ssh. A
+  host is not watched, so use the refresh button to read it again (a refused tick reads the file again by itself). A
+  tick on a host is checked against the file's content (not only its time, which is whole seconds there) and written
+  through a temporary file in the file's folder (made with the host's `mktemp`, so exclusively and private; a host without
+  it is not written to) that replaces the old one, after its size and checksum are checked: a
+  dropped connection leaves the old file, never a truncated one, and a link stays a link (the target is written; the
+  plan refuses a target outside the project). The folder must be writable for that; where it is not, the file is
+  written in place, but only after the whole content has arrived. A file deleted meanwhile is not recreated. Saving
+  a file from the editor on a host uses the same write and keeps the file's mode; a file that belongs to someone else is
+  written in place too, so that its owner does not change.
+- **New spec** (the button, or the palette) asks for a name and writes `specs/<name>/requirements.md`,
+  `design.md` and `tasks.md` (what is wanted, how it will be built, then the tasks). The name becomes
+  letters, digits and dashes. It never overwrites: if any of the three files exists nothing is written.
 
 ### Issue trackers and GitLab
 
@@ -338,7 +751,9 @@ A local project can hold terminals and agents on any saved host, next to its loc
 same tab, split or grid. An empty pane (a split, a grid cell) and *New session…* have a **Run on**
 row: *This computer*, the hosts linked to the project, or *Other host…* for any saved one; `Tab`
 moves between them in an empty pane. Pick a host, then Claude Code or a shell: it starts in the
-host's folder for this project, inside tmux, with the host's saved password or key. Splitting a
+host's folder for this project, inside tmux, with the host's saved password or key. A shell with no
+folder chosen starts in the host's start folder or login folder; an agent never does — type the
+project's folder on the host first (the first one typed is linked to the project). Splitting a
 pane on a host offers that host first, and *Hand off* from an agent on a host starts the next
 agent there too.
 
@@ -353,10 +768,60 @@ agent there too.
   host, the launcher says so before you start a second one.
 - **Saved layouts** remember which panes ran on which host and start them there again — in the
   folder the project you open the layout in uses on that host. A host that cannot be reached (a
-  new host key, offline) leaves an empty pane offering it.
+  new host key, offline), or an agent pane on a host where the project has no folder yet, leaves
+  an empty pane offering it.
+- **Logged in as root**: Claude Code refuses to skip permission prompts as root (it would quit at
+  once), so with *Permissions: Yolo* Kelpie starts it on such a host without its skip-permission
+  flags and in the default permission mode (a `defaultMode: bypassPermissions` in its settings is
+  refused too): it asks for permissions. Before the first such start a dialog explains why
+  (*Don't explain this again* turns it off for that host; *Explain again before Claude starts* on
+  the host's page turns it back on); the host's check on the SSH hosts page shows *logs in as
+  root*. On a host that is only a sandbox, `IS_SANDBOX=1` in its login shell lets Claude skip
+  prompts as root, and Kelpie then treats it as a regular login.
+- **Set up a regular user** (from that dialog, or the host's page) gives Yolo mode on a root host
+  in four steps:
+  1. *Create the user* — Kelpie runs `useradd` as root: no password (it logs in with the SSH keys
+     root has, yours included, added to its `~/.ssh/authorized_keys`) and no sudo. Running it
+     again only adds the keys; an existing system account, one without a login shell, or one
+     whose `~/.ssh` is a symbolic link is refused. It warns when sshd's `AllowUsers` /
+     `AllowGroups` would keep the user out.
+  2. *Add it to Kelpie* — a saved host with the same address and key logging in as the user, then
+     a check that it logs in as that user and has Claude Code (*Install Claude Code* if not).
+  3. *Give it your project* — folders under `/root` are private to root, so the user cannot open
+     them: *Copy in a terminal* copies the project into the user's home in a terminal on the
+     root host, which says when it is done (the original stays; an existing copy is never
+     overwritten). *Use … for* links the copy to the project.
+  4. *Sign in* — each user has its own Claude Code sign-in; its first start asks for it.
+
+  Do not give that user passwordless sudo: agents in Yolo mode could act as root again.
 
 The file tree, search and source control of the project stay those of this computer; use the
 host's *Files* or *Open as project* to work with its files.
+
+### Keeping sessions running on a server
+
+Install **tmux** on the server, and Kelpie runs every terminal and agent there inside it. A session
+then keeps running on the server when the connection drops, when you close Kelpie or when your
+computer sleeps or restarts; opening it again (or *Resume*) attaches to it as it was — an agent in
+the middle of a task carries on meanwhile. Without tmux, a session ends with its connection.
+
+The host's check (SSH hosts page, *Check connection*, or *Add Remote Project*) shows `tmux ✓` or
+*tmux not installed*; on a known system, **Install tmux** types the command into a terminal there:
+
+| Server | Command |
+|---|---|
+| Ubuntu, Debian | `sudo apt-get update && sudo apt-get install -y tmux` |
+| Fedora, RHEL, CentOS, Rocky, Alma, Amazon Linux | `sudo dnf install -y tmux` (older: `sudo yum install -y tmux`) |
+| Arch, Manjaro | `sudo pacman -S tmux` |
+| openSUSE | `sudo zypper install -y tmux` |
+| Alpine | `sudo apk add tmux` |
+| macOS | `brew install tmux` |
+
+Logged in as root, leave out `sudo`; without admin rights, ask the server's administrator. Then
+check the host again — *Check connection* on its page, or add a remote project of it again — and
+terminals and agents opened from then on run in tmux. *Keep sessions in tmux* on a host (on by
+default) turns it off for that host. Kelpie's sessions are named `kelpie-…` on the server
+(`tmux ls` lists them, `tmux attach -t <name>` opens one from any SSH client).
 
 ### Phone access
 
@@ -366,7 +831,13 @@ certificate, e.g. from `tailscale cert`). **Pair a phone** shows a QR code valid
 minutes; scan it, name the phone and approve it on the computer. The phone lists every session
 grouped by *Needs you / Working / Idle / Stopped*, buzzes when one starts needing you, shows a
 session's screen and — if you allow that device to type — sends replies and keys (Enter, Esc,
-Ctrl+C, arrows, y / n, 1–3). Unpairing a device disconnects it at once.
+Ctrl+C, arrows, y / n, 1–3). The list and the screen update as soon as something changes. A reply typed
+while a menu or permission prompt is waiting is refused (answer with the keys instead). Unpairing a
+device disconnects it at once.
+
+Turning Mobile off also closes existing phone connections, not just the listening port.
+Paired devices stay saved, but must reconnect after access is enabled again; an old connection
+cannot keep reading or answering prompts across that switch.
 
 ### Voice dictation
 
@@ -377,6 +848,59 @@ Settings) starts listening; press it again (or **Done**) and the words are inser
 were typing — at the cursor of a text field, or pasted into the focused terminal without
 pressing Enter. `Esc` cancels. Speech is recognised on this computer by a separate helper
 process (`kelpie-stt`) that exits after ten idle minutes; nothing is sent anywhere.
+
+### Agent setup
+
+Settings → Agent setup (or the link on a project's start page, or the palette) is one page for
+what your agents are told and can use. It reads their files once when you open it (*Refresh*
+reads again); nothing is watched in the background.
+
+- **MCP servers**: Claude Code (`~/.claude.json`, the project's `.mcp.json`), Codex
+  (`config.toml`), Gemini (`settings.json`), OpenCode (`opencode.json`) and Cursor
+  (`.cursor/mcp.json`), each with the user's file and the project's. Every server is tagged
+  **user** or **project · untrusted** (a project's file comes with the repository). Switches turn a
+  server off the way each agent does it (Codex and OpenCode `enabled`, Gemini `mcp.excluded`, Claude
+  for a project in `.claude/settings.local.json`); Claude's user file and Cursor have no switch.
+  **Copy to…** converts a server to another agent's format and writes it to the files you tick; *Add an MCP
+  server* does the same for a new one, so one entry serves Claude, Codex and Gemini. Environment
+  and header values are shown by name only and are never written into a project file (they become
+  references to a variable of the same name); writing the values to your own user-level file is an
+  opt-in. Copying a **project** server to a user-level file skips the agent's own "trust this
+  server?" prompt, so the preview lists everything it would run (the program and each argument,
+  the working folder, every environment and header entry as the repository wrote it, a reference
+  to one of your own variables named, never expanded) and the button stays off until you confirm.
+  A path relative to the project (`./scripts/mcp.sh`) is made absolute, so it keeps running that
+  project's file, and the preview says so. None of the project's environment is copied unless you
+  tick the box, and Kelpie never invents references to your own variables for it. Codex gets
+  variables through its own `env_vars`, `env_http_headers` and `bearer_token_env_var`; `Bearer ${TOKEN}`
+  and other references inside a value are rewritten into each agent's syntax.
+- **Files of a project that lead elsewhere** (a link or junction out of the repository, on
+  `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, `.cursor/`, `.gemini/`…) are neither read nor written; the
+  page names where the link goes. `CLAUDE.md` linked to `AGENTS.md` counts as already one file.
+- **While Claude Code runs**: `~/.claude.json` is changed under Claude's own lock
+  (`.claude.json.lock`) and only if it still matches the preview; if another program saves it
+  right after Kelpie's write, Kelpie leaves that save alone and says so instead of reporting a
+  success.
+- **Instructions**: the CLAUDE.md, AGENTS.md, GEMINI.md, `.kiro/steering` and
+  `.github/copilot-instructions.md` of the project and the user-level ones. **One file for all
+  agents** makes AGENTS.md the source: CLAUDE.md imports it with `@AGENTS.md`, Gemini lists it in
+  its settings (`context.fileName`) or gets a copy. Nothing is deleted.
+- **Skills & commands**: a read-only list of the skills, commands and subagents the agents find
+  (`~/.claude/skills`, `.claude/commands`, Codex prompts, Gemini commands, OpenCode agents…), with
+  a button to show the file.
+- **Find more agents**: *Search the registry* makes one request to the Agent Client Protocol
+  registry, only when pressed. Each entry shows the full command with its version pinned;
+  *Save as custom agent…* asks for confirmation and then adds it to the agents Kelpie can start
+  (`npx` and `uvx` entries; downloaded programs are not supported). The package is pinned to an
+  exact version (a tag such as `latest` or `beta`, a range, or a URL / git spec is replaced by the
+  registry's own version or refused) and the page shows it. Such an agent has no terminal
+  interface: it starts as a chat, and its launcher card shows the real command. Saving never runs it.
+
+Every change goes through the same steps: a **preview** (a diff, secrets masked), a **backup** of
+each file (in Kelpie's data folder, `agent-config-backups`, newest 20 per file; *Backups* at the
+bottom restores one, again with a preview), the write, and a check that the file still parses; if
+it does not, the files go back as they were at once. Comments, key order and keys Kelpie does not
+know stay as you wrote them.
 
 ### Plugins
 
@@ -401,6 +925,7 @@ App shortcuts use `Ctrl+Shift` on Windows so plain `Ctrl+letter` keys reach the 
 | Go to file | Ctrl+Shift+O | ⌘P |
 | Jump to session / project | Ctrl+Shift+K | ⌘K |
 | Agent dashboard | Ctrl+Shift+M | ⌘⇧M |
+| Next session waiting for you | Ctrl+Shift+. | ⌘⇧. |
 | Workspace board | Ctrl+Shift+J | ⌘⇧J |
 | Back / forward | Alt+Shift+← / → | ⌘⌥← / → |
 | New terminal | Ctrl+Shift+T | ⌘T |
@@ -423,6 +948,7 @@ App shortcuts use `Ctrl+Shift` on Windows so plain `Ctrl+letter` keys reach the 
 | Runs (orchestration) | Ctrl+Shift+R | ⌘⇧R |
 | Open browser | Ctrl+Shift+U | ⌘⇧U |
 | Dictate (start / stop) | Ctrl+Shift+Space | ⌘⇧Space |
+| Composer (write a prompt with @ mentions) | Ctrl+Shift+I | ⌘⇧I |
 | Close all editor tabs | Ctrl+Alt+W | ⌘⌥W |
 | Next / previous change (diff) | F7 / Shift+F7 | F7 / ⇧F7 |
 | Previous / next prompt sent (terminal) | Ctrl+Shift+↑ / ↓ | ⌘↑ / ↓ |
@@ -447,16 +973,18 @@ a setting.
 - **Agents**: permissions (Manual / Yolo); per agent extra arguments (e.g. `--model opus`),
   permission mode (Claude) or approval policy (Codex) and environment variables (stored in
   plain text) — used by terminal and chat sessions; which agent CLIs launchers show; the agent
-  for AI actions; hibernation; keep computer awake.
+  for AI actions; hibernation; turn snapshots; prioritize visible terminals; keep computer awake.
+- **Agent setup**: MCP servers, instruction files, skills and the ACP registry (see above).
 - **Accounts**, **Integrations**, **Remote (SSH)**, **Mobile**, **Voice**, **Plugins**,
   **Layouts**, **Quick Commands**, **Automations**, **Shortcuts**: see above.
 - **Terminal**: font, size, line height, scrollback, renderer (WebGL / DOM), cursor blink,
   default shell, colour theme, floating terminal.
 - **Appearance**: language, dark or light theme, compact density, interface text size, editor
   word wrap.
-- **Notifications**: desktop notifications and their sound, notes about shortcuts kept from
-  the terminal, first-run tips.
-- **Usage & Resources**: usage and memory meters.
+- **Notifications**: desktop notifications and their sound, ntfy / Telegram / webhook messages
+  with the window closed (events, turn length, away-only, screen text), notes about shortcuts kept
+  from the terminal, first-run tips.
+- **Usage & Resources**: usage and memory meters, the per-session cost cap, the Usage & cost page.
 - **Session Daemon**: status, data folder and log, *Stop daemon & all sessions*.
 
 Settings and layouts live in `app-state.json` in the data folder; when its format changes the
@@ -484,6 +1012,9 @@ scripts/build-release.sh --bundles nsis      # Windows installer
 scripts/build-release.sh --bundles app,dmg   # macOS
 ```
 
+Each run bumps the patch version (in `Cargo.toml`, `app/package.json` and
+`app/src-tauri/tauri.conf.json`) before building, so every installer has its own number.
+
 Voice dictation needs the speech helper: `cargo build --release -p kelpie-stt` (the build script
 does it; it downloads the speech engine's prebuilt library, ~120 MB, at build time). A
 development build finds it in `target/release`.
@@ -491,5 +1022,6 @@ development build finds it in `target/release`.
 Development: `scripts/dev-daemon.sh run` (isolated endpoint/data dir), then in `app/`
 `KELPIE_ENDPOINT=kelpie-dev pnpm tauri dev`. Tests: `cargo test`, `pnpm typecheck`,
 `pnpm i18n:check` (every interface text has a Vietnamese translation), `kelpied bench --sessions
-20 --mb 2`, and the WebDriver end-to-end scripts in `scripts/e2e/`
+20 --mb 2`, `kelpied bench-echo` (keystroke latency; `--cmd claude --ready ❯`, `--load N` busy
+sessions, `--external N` busy processes), and the WebDriver end-to-end scripts in `scripts/e2e/`
 (require `tauri-driver` + a matching `msedgedriver`).

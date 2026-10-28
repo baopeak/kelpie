@@ -173,7 +173,7 @@ try:
     out = wait(lambda: (lambda t: t if "remote-42" in t else None)(daemon(d, "session.read", {"handle": sess(sid)["handle"], "lines": 50})["text"]), 30)
     run.check("commands run on the host, in the project folder", bool(out) and posix in out.replace("\\", "/"), (out or "")[-300:])
     run.shot("03-remote-terminal")
-    run.check("chat view is not offered for remote sessions", not d.js("return !!document.querySelector('.pane-header .icon-btn[title=\"Open in chat view\"]')"))
+    run.check("chat view is not offered for remote sessions", not d.js("return !!document.querySelector('.pane .icon-btn[title=\"Open in chat view\"]')"))
     d.js(f"{S}.setOverlay('newsession')")
     d.wait("return !!document.querySelector('.modal')", 5)
     kinds = d.js("return [...document.querySelectorAll('.modal .launch-card')].map(c => c.textContent.trim())")

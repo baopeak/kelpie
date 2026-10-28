@@ -1,20 +1,25 @@
 //! Quick open (fuzzy file paths) and search-in-files.
 //!
-//! The file index is built once per project with a parallel, `.gitignore`-aware walk and
-//! cached; the watcher invalidates it. Fuzzy ranking uses nucleo (the matcher behind Helix),
-//! with a filename bonus so `main` finds `src/main.rs` before `domain/x.rs`.
+//! The index is built once per project with a parallel, `.gitignore`-aware walk and cached; the
+//! watcher invalidates it. It holds files and folders (a folder ends in `/`); callers that only
+//! want files leave `dirs` off. Fuzzy ranking uses nucleo (the matcher behind Helix), with a
+//! filename bonus so `main` finds `src/main.rs` before `domain/x.rs`.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use ignore::{WalkBuilder, WalkState};
-use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher, Utf32Str};
 use parking_lot::Mutex;
 use serde::Serialize;
 
 use crate::fs_ops::{err, guard, CmdResult};
+
+mod rank;
+#[cfg(test)]
+mod tests;
+
+use rank::{rank, QuickOpenHit};
 
 const MAX_INDEX: usize = 300_000;
 
@@ -37,7 +42,7 @@ impl FileIndex {
         if let Some(files) = self.by_root.lock().get(root) {
             return files.clone();
         }
-        let files = Arc::new(walk_files(Path::new(root)));
+        let files = Arc::new(walk_index(Path::new(root)));
         self.by_root.lock().insert(root.to_string(), files.clone());
         files
     }
@@ -54,19 +59,25 @@ fn walker(root: &Path) -> WalkBuilder {
     b
 }
 
-fn walk_files(root: &Path) -> Vec<String> {
+/// Every file of the project, and every folder as `dir/`.
+fn walk_index(root: &Path) -> Vec<String> {
     let out = Mutex::new(Vec::with_capacity(4096));
     walker(root).build_parallel().run(|| {
         let out = &out;
         Box::new(move |entry| {
             let Ok(entry) = entry else { return WalkState::Continue };
-            if entry.file_type().is_some_and(|t| t.is_file()) {
+            let Some(kind) = entry.file_type() else { return WalkState::Continue };
+            if kind.is_file() || (kind.is_dir() && entry.depth() > 0) {
                 if let Ok(rel) = entry.path().strip_prefix(root) {
                     let mut out = out.lock();
                     if out.len() >= MAX_INDEX {
                         return WalkState::Quit;
                     }
-                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                    let mut path = rel.to_string_lossy().replace('\\', "/");
+                    if kind.is_dir() {
+                        path.push('/');
+                    }
+                    out.push(path);
                 }
             }
             WalkState::Continue
@@ -75,55 +86,33 @@ fn walk_files(root: &Path) -> Vec<String> {
     out.into_inner()
 }
 
-#[derive(Serialize)]
-pub struct QuickOpenHit {
-    path: String,
-    score: u32,
-    /// Matched character indices in `path` (for highlighting).
-    indices: Vec<u32>,
+/// A remote project lists files only: its folders are the parents of those.
+fn with_parent_dirs(mut files: Vec<String>) -> Vec<String> {
+    let mut dirs = std::collections::BTreeSet::new();
+    for f in &files {
+        let mut end = f.len();
+        while let Some(i) = f[..end].rfind('/') {
+            if !dirs.insert(f[..=i].to_string()) {
+                break;
+            }
+            end = i;
+        }
+    }
+    files.extend(dirs);
+    files
 }
 
 #[tauri::command]
-pub async fn quick_open(index: tauri::State<'_, Arc<FileIndex>>, root: String, query: String, limit: Option<usize>) -> CmdResult<Vec<QuickOpenHit>> {
+pub async fn quick_open(index: tauri::State<'_, Arc<FileIndex>>, root: String, query: String, limit: Option<usize>, dirs: Option<bool>) -> CmdResult<Vec<QuickOpenHit>> {
     let index = index.inner().clone();
     if crate::remote::is_remote(&root) && !index.remote_at.lock().get(&root).is_some_and(|t| t.elapsed() < REMOTE_INDEX_TTL) {
         let files = crate::remote::list_files(&root).await?;
-        index.by_root.lock().insert(root.clone(), Arc::new(files));
+        index.by_root.lock().insert(root.clone(), Arc::new(with_parent_dirs(files)));
         index.remote_at.lock().insert(root.clone(), std::time::Instant::now());
     }
     tauri::async_runtime::spawn_blocking(move || {
         let files = index.get(&root);
-        let limit = limit.unwrap_or(50);
-        let query = query.trim();
-        if query.is_empty() {
-            return files.iter().take(limit).map(|p| QuickOpenHit { path: p.clone(), score: 0, indices: vec![] }).collect();
-        }
-        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-        let pattern = Pattern::new(query, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
-        let mut buf = Vec::new();
-        let mut hits: Vec<(u32, &String)> = Vec::new();
-        for path in files.iter() {
-            let hay = Utf32Str::new(path, &mut buf);
-            if let Some(score) = pattern.score(hay, &mut matcher) {
-                let name = path.rsplit('/').next().unwrap_or(path);
-                let mut name_buf = Vec::new();
-                let bonus = pattern.score(Utf32Str::new(name, &mut name_buf), &mut matcher).map(|s| s / 2).unwrap_or(0);
-                // Prefer shorter paths among equals.
-                let score = (score + bonus).saturating_sub((path.len() / 16) as u32);
-                hits.push((score, path));
-            }
-        }
-        hits.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.len().cmp(&b.1.len())));
-        hits.truncate(limit);
-        hits.into_iter()
-            .map(|(score, path)| {
-                let mut indices = Vec::new();
-                pattern.indices(Utf32Str::new(path, &mut buf), &mut matcher, &mut indices);
-                indices.sort_unstable();
-                indices.dedup();
-                QuickOpenHit { path: path.clone(), score, indices }
-            })
-            .collect()
+        rank(&files, &query, limit.unwrap_or(50), dirs.unwrap_or(false))
     })
     .await
     .map_err(err)

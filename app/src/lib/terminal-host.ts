@@ -21,6 +21,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { attachTerminal, b64ToBytes, daemon, detachTerminal, sendInput } from "./ipc";
 import { isMac } from "./platform";
 import { terminalThemeFor } from "./theme";
+import { typedText } from "./typed-text";
+import { osc52Text } from "./osc52";
 import type { Settings } from "./types";
 
 /** A session's own terminal theme id (its host's), over the app's; set by lib/ssh-hosts.ts. */
@@ -109,6 +111,13 @@ export class TermView {
     }));
     this.term.onData((d) => this.input(d));
     this.term.onBinary((d) => this.input(d, true));
+    // A program's copy (OSC 52; Claude Code's fullscreen mode copies its mouse selection so):
+    // taken only from the terminal the user is in, and never from replayed output.
+    this.term.parser.registerOscHandler(52, (data) => {
+      const text = osc52Text(data);
+      if (text != null && this.suppressReplies === 0 && this.term.element?.contains(document.activeElement)) void writeText(text);
+      return true;
+    });
     this.term.attachCustomKeyEventHandler((e) => this.onKey(e));
     this.term.textarea?.addEventListener("focus", () => (this.focused = true));
     this.term.onScroll(() => this.updateScroll());
@@ -218,11 +227,13 @@ export class TermView {
 
   async pasteFromClipboard() {
     const text = await readText().catch(() => "");
-    if (text) this.term.paste(text);
+    if (text) this.paste(text);
   }
 
+  /** Every paste into a terminal (clipboard, drops, inserted paths, quick commands, prompts
+   *  Kelpie types) goes through here, cleaned by `typedText`. */
   paste(text: string) {
-    this.term.paste(text);
+    this.term.paste(typedText(text));
   }
 
   mount(parent: HTMLElement) {

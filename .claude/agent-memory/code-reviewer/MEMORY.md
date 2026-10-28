@@ -1,2 +1,11 @@
-- [Shell hook blocked words](shell-hook-blocked-words.md) — Bash blocked for target/build/dist/vendor/node_modules; use Read/Grep, skip cargo
+- [Shell hook blocked words](shell-hook-blocked-words.md) — target/, .git, node_modules blocked; script-file workaround; node .mts / scratch-crate probes; load sampling
 - [E2E overlay selector collisions](e2e-overlay-selector-collisions.md) — workspace stays mounted under fixed overlays; e2e clicks first match
+- [Agent CLI protocol verification](agent-cli-protocol-verification.md) — codex schema dump, claude.exe mmap grep, live probes (stream-json dispatches by type only, lone CR no split, bad line exits 1), @path quoting, task events
+- [Git plumbing facts](git-plumbing-facts.md) — commit-tree ignores gpgsign; worktree remove w/ locked file unregisters; read-tree overwrites ignored; hooksPath hooks
+- [Agent transcript formats](agent-transcript-formats.md) — Claude subagents/ files, streaming output_tokens dedupe, no [1m] tag; Codex rollout facts
+- [kelpied logging and store traps](kelpied-logging-and-store-traps.md) — KELPIE_LOG not RUST_LOG, logs in data/logs; ureq trace leaks URL path; Solid root setStore merges
+- [Auth param scoping traps](auth-param-scoping-traps.md) — Null/array params skip auth rewrites; nested array tasks bypass key checks; session.create remote unscoped
+- [Vault host identity](vault-host-identity.md) — checkHost/saveVault replace all SshHost objects; keyed Show on them remounts UI
+- [Windows command spawn facts](windows-command-spawn-facts.md) — .cmd args safe in std 1.97; no PATHEXT; relative program uses parent cwd; powershell (even w/o -Command) and cmd %VAR% inject; npm = runner; canonicalize for 8.3; stale-binary check
+- [GUI e2e isolation wrapper](gui-e2e-isolation-wrapper.md) — runpy wrapper for ssh_hosts/ssh_panes/remote; mkdtemp KELPIE_SSH_DIR breaks Windows OpenSSH
+- [Markdown slicing and remote write traps](markdown-slicing-and-remote-write-traps.md) — sliced lexing diverges; ssh tmp+mv truncation/symlinks; chained template replace + $$ temp files

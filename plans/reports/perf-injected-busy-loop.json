@@ -1,0 +1,113 @@
+{
+  "label": "injected-busy-loop",
+  "created": "2026-10-23T09:21:39+07:00",
+  "machine": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "cpu": "Intel(R) Core(TM) i5-6440HQ CPU @ 2.60GHz",
+    "python": "3.14.6",
+    "cores": "4 physical / 4 logical",
+    "ram_gb": 7.9,
+    "commit": "bca2899"
+  },
+  "runs": 1,
+  "metrics": {
+    "cold_start_ms": 2467.08,
+    "echo_median_ms": 16.6,
+    "echo_missed": 0,
+    "echo_p95_ms": 21.9,
+    "echo_samples": 205,
+    "idle_cpu_pct": 0.62,
+    "idle_seconds": 5.0,
+    "long_tasks": 1,
+    "pty_idle_cpu_pct": 0.0,
+    "pty_rss_mb": 264.18,
+    "rss_mb": 477.47,
+    "sessions": 3,
+    "switch_median_ms": 22.05,
+    "switch_p95_ms": 35.9,
+    "switch_samples": 210
+  },
+  "spread_pct": {},
+  "range": {},
+  "gui_runs": [
+    {
+      "cold_start_ms": 2467.08,
+      "switch_median_ms": 22.05,
+      "switch_p95_ms": 35.9,
+      "switch_samples": 210,
+      "echo_median_ms": 16.6,
+      "echo_p95_ms": 21.9,
+      "echo_samples": 205,
+      "echo_missed": 0,
+      "long_tasks": 1,
+      "long_task_ms": [
+        100
+      ],
+      "idle_cpu_pct": 0.62,
+      "rss_mb": 477.47,
+      "pty_idle_cpu_pct": 0.0,
+      "pty_rss_mb": 264.18,
+      "sessions": 3,
+      "idle_seconds": 5.0
+    }
+  ],
+  "injected_busy_loop_ms": 100,
+  "comparison": [
+    {
+      "metric": "cold_start_ms",
+      "current": 2467.08,
+      "baseline": 2985.37,
+      "limit": "<= 3134.64 ms",
+      "verdict": "ok"
+    },
+    {
+      "metric": "switch_median_ms",
+      "current": 22.05,
+      "baseline": 24.8,
+      "limit": "<= 27.28 ms",
+      "verdict": "ok"
+    },
+    {
+      "metric": "echo_median_ms",
+      "current": 16.6,
+      "baseline": 16.6,
+      "limit": "<= 18.26 ms",
+      "verdict": "ok"
+    },
+    {
+      "metric": "idle_cpu_pct",
+      "current": 0.62,
+      "baseline": 1.3,
+      "limit": "<= 2.30 % of one core",
+      "verdict": "ok"
+    },
+    {
+      "metric": "rss_mb",
+      "current": 477.47,
+      "baseline": 508.65,
+      "limit": "<= 538.65 MB",
+      "verdict": "ok"
+    },
+    {
+      "metric": "long_tasks",
+      "current": 1,
+      "baseline": 0,
+      "limit": "<= 0.00 count",
+      "verdict": "FAIL"
+    },
+    {
+      "metric": "switch_p95_ms",
+      "current": 35.9,
+      "baseline": 36,
+      "limit": "warn only",
+      "verdict": "ok"
+    },
+    {
+      "metric": "echo_p95_ms",
+      "current": 21.9,
+      "baseline": 21.7,
+      "limit": "warn only",
+      "verdict": "ok"
+    }
+  ]
+}

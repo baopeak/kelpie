@@ -47,6 +47,7 @@ class Server(paramiko.ServerInterface):
     def __init__(self, transport):
         self.transport = transport
         self.commands = {}  # chanid -> command (None: shell)
+        self.ptys = set()  # chanids that asked for a terminal
         self.ready = {}  # chanid -> Event
         self.tcpip = {}  # chanid -> (host, port) for direct-tcpip
         self.listeners = {}  # (addr, port) -> socket for remote forwards
@@ -74,7 +75,8 @@ class Server(paramiko.ServerInterface):
         self.tcpip[chanid] = destination
         return paramiko.OPEN_SUCCEEDED
 
-    def check_channel_pty_request(self, *args):
+    def check_channel_pty_request(self, channel, *args):
+        self.ptys.add(channel.get_id())
         return True
 
     def check_channel_env_request(self, channel, name, value):
@@ -273,7 +275,8 @@ def run_session(server, chan):
                 data = chan.recv(65536)
                 if not data:
                     break
-                p.stdin.write(data.replace(b"\r", b"\n"))
+                # A terminal turns Enter (CR) into a line feed; a command run without one gets its input as it is.
+                p.stdin.write(data.replace(b"\r", b"\n") if chan.get_id() in server.ptys else data)
                 p.stdin.flush()
         except Exception:
             pass

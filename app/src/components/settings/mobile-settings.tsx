@@ -6,6 +6,7 @@ import { daemon, onEvent } from "../../lib/ipc";
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import { Icon } from "../icons";
 import { SettingRow, Toggle } from "./setting-row";
+import { confirmDialog } from "../../lib/confirm-dialog";
 
 export interface MobileStatus {
   enabled: boolean;
@@ -113,7 +114,7 @@ export function MobileSettings() {
                     <div class="muted-inline" style={{ "font-size": "11.5px" }}>{t("paired {when} · last seen {seen}", { when: formatRelative(d.created_at), seen: formatRelative(d.last_seen) })}</div>
                   </div>
                   <label class="check-label"><input type="checkbox" checked={d.can_write} onChange={(e) => void run(() => daemon("mobile.set_write", { id: d.id, can_write: e.currentTarget.checked }))} /> {t("May type")}</label>
-                  <button class="btn" onClick={() => confirm(t("Unpair “{name}”? It is disconnected at once.", { name: d.name })) && void run(() => daemon("mobile.revoke", { id: d.id }))}>{t("Unpair")}</button>
+                  <button class="btn" onClick={async () => (await confirmDialog(t("Unpair “{name}”? It is disconnected at once.", { name: d.name }))) && void run(() => daemon("mobile.revoke", { id: d.id }))}>{t("Unpair")}</button>
                 </div>
               )}
             </For>

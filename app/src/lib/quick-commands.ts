@@ -1,13 +1,27 @@
 // Saved commands/prompts: typed into the focused shell (or a new one), or sent as a prompt to
 // the focused agent session.
+import { createSignal } from "solid-js";
 import { store } from "./store";
 import { t } from "./i18n";
 import { sendInput } from "./ipc";
 import { allPanes } from "./layout";
 import { peekView } from "./terminal-host";
+import { pasteInput, typedText } from "./typed-text";
 import { getController } from "../chat/mode-switch";
 import { pluginQuickCommands } from "./plugins";
 import type { QuickCommand, SessionInfo } from "./types";
+
+/** The quick command whose text is the default "Review with…" prompt (edit it in Settings → Quick commands). */
+export const REVIEW_PROMPT_LABEL = "Review prompt";
+
+export const DEFAULT_REVIEW_PROMPT =
+  "You are reviewing changes another agent made in this worktree; you did not write them. Read the diff below like a careful maintainer: look for bugs, missed edge cases, security problems, unrelated edits and missing tests. Do not change any files. Reply with a short verdict and the problems that matter most, each naming a file and line.";
+
+/** The review prompt for a project: the user's quick command labelled "Review prompt", else the built-in text. */
+export function reviewPrompt(projectId: string | null): string {
+  const own = quickCommandsFor(projectId).find((c) => c.label.trim().toLowerCase() === REVIEW_PROMPT_LABEL.toLowerCase() && c.text.trim());
+  return own ? own.text : DEFAULT_REVIEW_PROMPT;
+}
 
 /** Commands for a project: global ones, its own, ones whose project was removed, then plugins' ones. */
 export function quickCommandsFor(projectId: string | null): QuickCommand[] {
@@ -16,7 +30,7 @@ export function quickCommandsFor(projectId: string | null): QuickCommand[] {
   return [...own, ...pluginQuickCommands()];
 }
 
-function focusedSession(): SessionInfo | undefined {
+export function focusedSession(): SessionInfo | undefined {
   const p = store.state.activeProject;
   const tab = p ? store.activeTab(p) : undefined;
   const pane = tab && allPanes(tab.root).find((x) => x.id === tab.focus);
@@ -27,16 +41,29 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Delivers `text` like a real paste: xterm adds bracketed-paste markers only when the program
  *  asked for them and turns newlines into Enter keys, exactly as when the user pastes. */
-export async function typeInto(s: SessionInfo, text: string, enter: boolean, enterDelay: number) {
+export async function typeInto(s: SessionInfo, raw: string, enter: boolean, enterDelay: number) {
   const view = peekView(s.id);
-  // A view between attachments (e.g. during a daemon reconnect) would drop the paste.
-  if (view?.handle != null) view.paste(text);
-  else await sendInput(s.handle, text.replace(/\r?\n/g, "\r"));
+  // A view between attachments (e.g. during a daemon reconnect) would drop the paste: it goes
+  // straight to the session, still inside the paste markers the program asked for.
+  if (view?.handle != null) view.paste(typedText(raw));
+  else await sendInput(s.handle, pasteInput(raw, !!view?.term.modes.bracketedPasteMode));
   if (!enter) return;
   // Agent TUIs treat Enter that follows a burst of input as part of the paste (Codex: within
   // 120 ms) and insert a newline instead of submitting.
   await sleep(enterDelay);
   await sendInput(s.handle, "\r");
+}
+
+const [newSpecAsked, setNewSpecAsked] = createSignal(false);
+/** The Plan tab was opened by "New spec": it shows its name field. Cleared by the tab once it has. */
+export { newSpecAsked, setNewSpecAsked };
+
+/** The "New spec" quick command: opens the Plan tab at the name of a spec to write into `specs/<name>/`
+ *  (requirements, design, tasks); the tab asks for the name and does the writing. */
+export function newSpec() {
+  if (!store.activeProject()) return store.notify(t("Open a project first"));
+  setNewSpecAsked(true);
+  store.showRightPanel("plan");
 }
 
 export async function runQuickCommand(c: QuickCommand) {

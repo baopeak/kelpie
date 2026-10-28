@@ -4,8 +4,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { store } from "../../lib/store";
 import { t } from "../../lib/i18n";
 import { daemon, platformInfo, revealEntry } from "../../lib/ipc";
-import { SettingRow } from "./setting-row";
+import { SettingRow, Toggle } from "./setting-row";
 import { BrandMark, BrandWordmark, Kip } from "../brand";
+import { confirmDialog } from "../../lib/confirm-dialog";
+import { checkForUpdate } from "../../lib/updater";
 
 interface DaemonInfo {
   version: string;
@@ -22,7 +24,7 @@ const [platform] = createResource(() => platformInfo().catch(() => null));
 export function DaemonSettings() {
   const [info, { refetch }] = createResource(() => store.connected(), () => daemon<DaemonInfo>("daemon.info").catch(() => null));
   const stopAll = async () => {
-    if (!confirm(t("Stop the session daemon and every running session?"))) return;
+    if (!(await confirmDialog(t("Stop the session daemon and every running session?")))) return;
     await daemon("daemon.shutdown", { kill_sessions: true }).catch(() => {});
     setTimeout(() => void refetch(), 1500);
   };
@@ -57,7 +59,23 @@ export function DaemonSettings() {
 
 export function AboutSettings() {
   const [version] = createResource(() => getVersion().catch(() => "?"));
+  const checkNow = async () => {
+    try {
+      const found = await checkForUpdate(true);
+      if (found) store.setOverlay("update");
+      else store.notify(t("Kelpie is up to date"));
+    } catch (e) {
+      store.notify(t("Could not check for updates: {error}", { error: String(e) }));
+    }
+  };
   return (
+    <>
+    <SettingRow id="update-checks">
+      <div style={{ display: "flex", "align-items": "center", gap: "10px" }}>
+        <Toggle on={store.state.settings.updateChecks ?? true} onChange={(on) => store.setSettings({ updateChecks: on })} />
+        <button class="btn" onClick={() => void checkNow()}>{t("Check now")}</button>
+      </div>
+    </SettingRow>
     <SettingRow id="version">
       <div style={{ display: "flex", "align-items": "center", gap: "12px", "margin-bottom": "12px" }}>
         <Kip mood="peek" size={72} />
@@ -71,6 +89,10 @@ export function AboutSettings() {
         <span>{t("Platform")}</span><span>{platform()?.os ?? ""}</span>
         <span>{t("Stack")}</span><span>Tauri 2 · SolidJS · xterm.js · Rust session daemon</span> {/* i18n-ignore: product names */}
       </div>
+      <div class="muted-inline" style={{ "font-size": "11.5px", "margin-top": "10px" }}>
+        {t("Agent names and logos are trademarks of their owners, shown only to identify the tools Kelpie launches. Kelpie is not affiliated with or endorsed by them.")}
+      </div>
     </SettingRow>
+    </>
   );
 }

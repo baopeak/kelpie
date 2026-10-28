@@ -7,6 +7,7 @@ import { kindInfo } from "../../lib/agents";
 import { TemplateThumb } from "../layout-menu";
 import { Icon } from "../icons";
 import { SettingRow } from "./setting-row";
+import { confirmDialog } from "../../lib/confirm-dialog";
 
 export function LayoutSettings() {
   const layouts = () => store.state.settings.layouts ?? [];
@@ -24,7 +25,7 @@ export function LayoutSettings() {
                 </div>
                 <button class="btn" disabled={!store.activeProject()} title={t("Open in a new tab of the current project")}
                   onClick={() => { const p = store.activeProject(); if (p) { store.setOverlay(null); void store.applyLayout(p.id, l.template); } }}>{t("Open")}</button>
-                <button class="icon-btn" title={t("Delete layout")} onClick={() => confirm(t("Delete layout “{name}”?", { name: l.name })) && store.deleteLayout(l.id)}><Icon name="close" size={13} /></button>
+                <button class="icon-btn" title={t("Delete layout")} onClick={async () => (await confirmDialog(t("Delete layout “{name}”?", { name: l.name }))) && store.deleteLayout(l.id)}><Icon name="close" size={13} /></button>
               </div>
             )}
           </For>

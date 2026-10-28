@@ -3,7 +3,7 @@
 import { allLayouts } from "../lib/plugins";
 import { For, Index, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../lib/store";
-import { GRID_PRESETS, MAX_GRID, allPanes, cellCount, gridLabel, templateKinds, validGrid, type GridSpec } from "../lib/layout";
+import { GRID_PRESETS, MAX_GRID, allPanes, autoGrid, cellCount, gridLabel, templateKinds, validGrid, type GridSpec } from "../lib/layout";
 import { kindInfo } from "../lib/agents";
 import type { LayoutTemplate, Project, Tab } from "../lib/types";
 import { Icon, KindGlyph } from "./icons";
@@ -20,6 +20,9 @@ export function openLayoutMenu(e: MouseEvent, project: Project, tab: Tab | undef
 }
 
 export const closeLayoutMenu = () => setOpenFor(null);
+
+/** Panes that hold something (empty launcher cells do not count). */
+const realPanes = (tab: Tab) => allPanes(tab.root).filter((p) => p.kind !== "empty").length;
 
 /** A small picture of a grid. */
 export function GridThumb(props: { spec: GridSpec; size?: number }) {
@@ -135,8 +138,25 @@ export function LayoutMenuHost() {
         <div ref={el} class="layout-menu" style={{ left: `${Math.max(8, Math.min(c().x - 300, window.innerWidth - 316))}px`, top: `${c().y}px` }}>
           <div class="layout-menu-head">
             {t("Arrange this tab")}{" "}
-            <span class="muted-inline">({((n) => (n === 1 ? t("{n} pane", { n }) : t("{n} panes", { n })))(allPanes(c().tab.root).filter((p) => p.kind !== "empty").length)})</span>
+            <span class="muted-inline">({((n) => (n === 1 ? t("{n} pane", { n }) : t("{n} panes", { n })))(realPanes(c().tab))})</span>
           </div>
+          <div class="layout-flows">
+            <button class="layout-menu-item" data-action="tile" disabled={!store.canTile(c().projectId, c().tabId)}
+              title={t("This tab's panes and every one-CLI tab, in an even grid")}
+              onClick={() => { store.tileTab(c().projectId, c().tabId); setOpenFor(null); }}>
+              <GridThumb spec={autoGrid(Math.max(2, realPanes(c().tab) + store.tileCandidates(c().projectId, c().tabId).length))} size={22} />
+              <span style={{ flex: 1, "text-align": "left" }}>{t("Tile all")}</span>
+              <Show when={store.tileCandidates(c().projectId, c().tabId).length}>
+                {(n) => <span class="muted-inline">{n() === 1 ? t("+{n} tab", { n: n() }) : t("+{n} tabs", { n: n() })}</span>}
+              </Show>
+            </button>
+            <button class="layout-menu-item" data-action="spread" disabled={!store.canSpread(c().projectId, c().tabId)}
+              title={t("Every pane of this tab gets its own tab")}
+              onClick={() => { store.spreadTab(c().projectId, c().tabId); setOpenFor(null); }}>
+              <Icon name="files" size={14} /> <span style={{ flex: 1, "text-align": "left" }}>{t("Spread into tabs")}</span>
+            </button>
+          </div>
+          <div class="layout-menu-sep" />
           <div class="layout-presets">
             <For each={GRID_PRESETS}>
               {(spec) => (

@@ -3,8 +3,9 @@
 // approved that exact file for this repository before.
 import { For, Show, createEffect, createResource, createSignal, on, onMount } from "solid-js";
 import { store } from "../lib/store";
-import { configAtRef, configApproved, createWorktree, validBranch, worktreeFolder, type KelpieConfig } from "../lib/worktrees";
+import { configAtRef, configApproved, checksApproved, createWorktree, validBranch, worktreeFolder, type KelpieConfig } from "../lib/worktrees";
 import { gitRefs } from "../lib/ipc";
+import { normPath } from "../lib/platform";
 import { KeyHints } from "./key-hints";
 import { t, errorText } from "../lib/i18n";
 
@@ -62,7 +63,10 @@ export function WorktreeDialog() {
     return c && "config" in c ? c.config : null;
   };
   // Approved before (same file, same repository) → ticked; otherwise the user opts in.
-  createEffect(on(loaded, (c) => setRunConfig(!!c && !!repo() && configApproved(repo()!, c))));
+  createEffect(on(loaded, (c) => setRunConfig(!!c && !!repo() && configApproved(repo()!, c) && checksApproved(repo()!, c))));
+
+  /** The check list approved before (for marking what changed). */
+  const approvedChecks = () => (repo() ? store.state.approvedChecks?.[normPath(repo()!.path)] : undefined);
 
   let input!: HTMLInputElement;
   onMount(() => (input.focus(), input.select()));
@@ -74,7 +78,13 @@ export function WorktreeDialog() {
     setBusy(true);
     setError(null);
     try {
-      const project = await createWorktree(r, { branch: branch(), base: base(), path: folder(), config: runConfig() ? loaded() : null });
+      const cfg = runConfig() ? loaded() : null;
+      // What was shown above is what is approved: the commands that start a worktree, and the checks Finish runs.
+      if (cfg) {
+        store.approveSetup(r.path, cfg.setupKey);
+        store.approveChecks(r.path, cfg.check);
+      }
+      const project = await createWorktree(r, { branch: branch(), base: base(), path: folder(), config: cfg });
       if (store.overlay() === "worktree") store.setOverlay(null);
       const then = afterCreate;
       afterCreate = null;
@@ -123,6 +133,7 @@ export function WorktreeDialog() {
                       <For each={cfg().tabs}>{(tab) => <div class="mono">+ tab: {"kind" in tab ? tab.kind : tab.command}</div>}</For>
                       <For each={cfg().copy}>{(f) => <div class="mono">copy: {f}</div>}</For>
                       <For each={cfg().link}>{(f) => <div class="mono">link: {f}</div>}</For>
+                      <For each={cfg().check}>{(c) => <div class="mono" classList={{ "check-changed": !!approvedChecks() && !approvedChecks()!.includes(c) }} title={t("Run by Finish before a worktree is merged, in a temporary worktree of the result")}>check: {c}{approvedChecks() && !approvedChecks()!.includes(c) ? "  " + t("(new since you approved the checks)") : ""}</div>}</For>
                     </div>
                   </div>
                 )}

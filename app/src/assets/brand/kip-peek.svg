@@ -1,25 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="10 8 180 184" role="img" aria-label="Kip, chú chó kelpie ló đầu khỏi cửa sổ terminal">
 <title>Kip</title>
-<path d="M64 70 L58 22 Q58 16 64 20 L92 52 Z" fill="#E8743B"/>
-<path d="M68 62 L64 32 L86 52 Z" fill="#FFC9A8"/>
-<path d="M136 70 L142 22 Q142 16 136 20 L108 52 Z" fill="#E8743B"/>
-<path d="M132 62 L136 32 L114 52 Z" fill="#FFC9A8"/>
+<g class="kip-ear kip-ear-l"><path d="M64 70 L58 22 Q58 16 64 20 L92 52 Z" fill="#E8743B"/><path d="M68 62 L64 32 L86 52 Z" fill="#FFC9A8"/></g>
+<g class="kip-ear kip-ear-r"><path d="M136 70 L142 22 Q142 16 136 20 L108 52 Z" fill="#E8743B"/><path d="M132 62 L136 32 L114 52 Z" fill="#FFC9A8"/></g>
 <ellipse cx="100" cy="90" rx="42" ry="36" fill="#E8743B"/>
 <ellipse cx="84" cy="74" rx="6" ry="3.5" fill="#F6A971"/>
 <ellipse cx="116" cy="74" rx="6" ry="3.5" fill="#F6A971"/>
 <ellipse cx="100" cy="106" rx="22" ry="14" fill="#FFF1E2"/>
 <ellipse cx="74" cy="100" rx="7" ry="4" fill="#FF6F8E" opacity="0.4"/>
 <ellipse cx="126" cy="100" rx="7" ry="4" fill="#FF6F8E" opacity="0.4"/>
+<g class="kip-eyes">
 <ellipse cx="84" cy="88" rx="6" ry="7" fill="#141823"/>
 <ellipse cx="116" cy="88" rx="6" ry="7" fill="#141823"/>
 <circle cx="86" cy="85.5" r="2.2" fill="#FFFFFF"/>
 <circle cx="118" cy="85.5" r="2.2" fill="#FFFFFF"/>
+</g>
 <path d="M94 99 Q100 95 106 99 Q103 105 100 105 Q97 105 94 99 Z" fill="#141823"/>
 <path d="M100 105 V109 M100 109 Q95 114 90 111 M100 109 Q105 114 110 111" fill="none" stroke="#141823" stroke-width="2.5" stroke-linecap="round"/>
-<rect x="22" y="118" width="156" height="68" rx="14" fill="#141823"/>
+<rect x="22" y="118" width="156" height="68" rx="14" fill="#141823" stroke="#3A4258" stroke-width="2.5"/>
 <circle cx="38" cy="134" r="3.5" fill="#FF6B6B"/><circle cx="50" cy="134" r="3.5" fill="#F5B53F"/><circle cx="62" cy="134" r="3.5" fill="#3FAE6A"/>
 <path d="M38 154 L48 161 L38 168" fill="none" stroke="#E8743B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-<rect x="54" y="164" width="16" height="4" rx="2" fill="#18A999"/>
+<rect class="kip-cursor" x="54" y="164" width="16" height="4" rx="2" fill="#18A999"/>
 <ellipse cx="72" cy="120" rx="13" ry="8" fill="#F6A971"/>
 <ellipse cx="128" cy="120" rx="13" ry="8" fill="#F6A971"/>
 <path d="M67 116 V121 M72 115 V121 M77 116 V121 M123 116 V121 M128 115 V121 M133 116 V121" fill="none" stroke="#C9824F" stroke-width="2" stroke-linecap="round"/>

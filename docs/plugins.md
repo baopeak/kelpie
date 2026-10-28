@@ -27,7 +27,7 @@ Git installs accept `https://`, `ssh://` and `git@` URLs (plain `http://` only f
   "contributes": {
     "agents": [
       { "id": "bot", "label": "Acme Bot", "bin": "acme", "launch": ["chat"],
-        "yolo": ["--yes"], "resumeLatest": ["--continue"], "prompt": "flag:--ask" }
+        "yolo": ["--yes"], "resumeLatest": ["--continue"], "prompt": "flag:--ask", "acp": ["acp"] }
     ],
     "commands": [
       { "id": "test", "label": "Run tests", "run": "pnpm test -- ${file}", "in": "split" }
@@ -59,7 +59,8 @@ Git installs accept `https://`, `ssh://` and `git@` URLs (plain `http://` only f
   Settings → Agents → Permissions: Yolo; `resumeLatest`: arguments that continue the folder's
   latest conversation (used to resume after a restart); `prompt`: how a first prompt is given —
   `"argv"` (last argument), `"flag:<flag>"` (`<flag> <prompt>`) or `"typed"` (default: typed
-  once the program is ready). The daemon keeps plugin agents in `custom-agents.json` so their
+  once the program is ready); `acp`: arguments that start it as an Agent Client Protocol agent
+  over stdio — it then opens in chat view too (daemon API 8 and later). The daemon keeps plugin agents in `custom-agents.json` so their
   sessions resume after a restart.
 - **commands** — `id`, `label`, `run` required; shown in search as `<plugin name>: <label>` and
   bindable in Settings → Shortcuts. `in`: `"terminal"` (default: the focused shell, or a new

@@ -68,7 +68,7 @@ pub fn emit(args: &[String]) {
     let _ = out.flush();
 }
 
-fn pct(sorted: &[Duration], p: f64) -> f64 {
+pub fn pct(sorted: &[Duration], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
@@ -79,7 +79,7 @@ fn pct(sorted: &[Duration], p: f64) -> f64 {
 pub async fn run(args: &[String]) -> Result<()> {
     let o = parse(args);
     let exe = std::env::current_exe()?.to_string_lossy().into_owned();
-    let mut c = Client::connect().await?;
+    let mut c = Client::connect_user().await?;
     let cwd = std::env::temp_dir().to_string_lossy().into_owned();
     let bytes = (o.mb << 20).to_string();
 

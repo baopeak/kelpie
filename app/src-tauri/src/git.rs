@@ -13,6 +13,9 @@ use crate::fs_ops::{err, guard, CmdResult};
 
 const GIT_CONCURRENCY: usize = 3;
 static GIT_SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(GIT_CONCURRENCY));
+/// Review summaries and overlap scans (a refresh of 20 worktrees is dozens of processes) wait here, so
+/// they never queue the sidebar, the Changes panel or a diff behind them.
+static REVIEW_SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(2));
 
 pub struct GitOutput {
     pub ok: bool,
@@ -21,7 +24,22 @@ pub struct GitOutput {
 }
 
 pub async fn git(cwd: &Path, args: &[&str]) -> CmdResult<GitOutput> {
-    let _slot = GIT_SLOTS.acquire().await.map_err(err)?;
+    git_env(cwd, args, &[]).await
+}
+
+/// `git` with extra environment variables (the finish sequence runs with English messages and
+/// without prompts).
+pub async fn git_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> CmdResult<GitOutput> {
+    run_git(&GIT_SLOTS, cwd, args, env).await
+}
+
+/// `git` on the review pool (see `REVIEW_SLOTS`).
+pub async fn git_review(cwd: &Path, args: &[&str]) -> CmdResult<GitOutput> {
+    run_git(&REVIEW_SLOTS, cwd, args, &[]).await
+}
+
+async fn run_git(slots: &Semaphore, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> CmdResult<GitOutput> {
+    let _slot = slots.acquire().await.map_err(err)?;
     // A remote project's folder (`ssh://…`): the same git command, on the host.
     if let Some(dir) = cwd.to_str().filter(|d| crate::remote::is_remote(d)) {
         return crate::remote::git(dir, args).await;
@@ -31,9 +49,11 @@ pub async fn git(cwd: &Path, args: &[&str]) -> CmdResult<GitOutput> {
         .args(args)
         .current_dir(cwd)
         .env("GIT_OPTIONAL_LOCKS", "0") // never fight the user's own git for index.lock
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true); // a call given up on (a timeout, Cancel) does not linger
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flash from a GUI app
     let out = cmd.output().await.map_err(|e| format!("git: {e}"))?;
@@ -50,23 +70,23 @@ async fn git_ok(cwd: &Path, args: &[&str]) -> CmdResult<String> {
 
 #[derive(Serialize, Default)]
 pub struct GitStatus {
-    is_repo: bool,
-    branch: Option<String>,
-    upstream: Option<String>,
-    ahead: i64,
-    behind: i64,
-    files: Vec<GitFile>,
-    truncated: bool,
+    pub(crate) is_repo: bool,
+    pub(crate) branch: Option<String>,
+    pub(crate) upstream: Option<String>,
+    pub(crate) ahead: i64,
+    pub(crate) behind: i64,
+    pub(crate) files: Vec<GitFile>,
+    pub(crate) truncated: bool,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
 pub struct GitFile {
-    path: String,
-    orig_path: Option<String>,
+    pub(crate) path: String,
+    pub(crate) orig_path: Option<String>,
     /// Index (staged) status letter, '.' when unchanged; '?' untracked; 'U' conflict.
-    index: char,
+    pub(crate) index: char,
     /// Working tree status letter.
-    worktree: char,
+    pub(crate) worktree: char,
 }
 
 const MAX_STATUS_FILES: usize = 5000;
@@ -155,17 +175,23 @@ pub async fn git_branch_info(root: String) -> CmdResult<BranchInfo> {
 
 #[derive(Serialize)]
 pub struct FileVersions {
-    /// Content at HEAD (None when the file is new).
+    /// Content at HEAD, or at the fork point from `base` (None when the file is new).
     original: Option<String>,
     /// Working tree (or index when `staged`) content (None when deleted).
     modified: Option<String>,
 }
 
 #[tauri::command]
-pub async fn git_file_versions(root: String, path: String, staged: bool) -> CmdResult<FileVersions> {
+pub async fn git_file_versions(root: String, path: String, staged: bool, base: Option<String>) -> CmdResult<FileVersions> {
     let dir = guard(&root, "")?;
     let full = guard(&root, &path)?;
-    let head = git(&dir, &["show", &format!("HEAD:{path}")]).await?;
+    // Against a branch (a review): the file where this one forked from it, not at HEAD.
+    let from = match base.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        Some(b) if b.starts_with('-') => return Err("invalid base".into()),
+        Some(b) => git_ok(&dir, &["merge-base", &format!("refs/heads/{b}"), "HEAD"]).await?.trim().to_string(),
+        None => "HEAD".to_string(),
+    };
+    let head = git(&dir, &["show", &format!("{from}:{path}")]).await?;
     let original = head.ok.then(|| String::from_utf8_lossy(&head.stdout).into_owned());
     let modified = if staged {
         let idx = git(&dir, &["show", &format!(":{path}")]).await?;
@@ -224,13 +250,13 @@ pub async fn git_commit(root: String, message: String, amend: bool) -> CmdResult
 
 #[derive(Serialize)]
 pub struct Worktree {
-    path: String,
+    pub(crate) path: String,
     head: Option<String>,
-    branch: Option<String>,
-    bare: bool,
+    pub(crate) branch: Option<String>,
+    pub(crate) bare: bool,
     detached: bool,
     /// Registered but its folder is gone (`git worktree prune` would drop it).
-    prunable: bool,
+    pub(crate) prunable: bool,
 }
 
 #[tauri::command]
@@ -309,9 +335,24 @@ pub async fn git_orphan_commits(root: String) -> CmdResult<u32> {
     out.trim().parse().map_err(|_| "unexpected git output".to_string())
 }
 
+/// The commit a worktree's HEAD is at.
+#[tauri::command]
+pub async fn git_head(root: String) -> CmdResult<String> {
+    let dir = guard(&root, "")?;
+    Ok(git_ok(&dir, &["rev-parse", "HEAD"]).await?.trim().to_string())
+}
+
+/// A symlink / junction found (and removed) inside a worktree.
+pub struct SharedLink {
+    path: std::path::PathBuf,
+    target: std::path::PathBuf,
+}
+
 /// Removes the symlinks / junctions inside a worktree (the links only, never what they point
 /// at): shared folders such as a linked `node_modules` must survive the worktree's deletion.
-fn unlink_shared(dir: &Path) {
+/// Returns what it removed so a failed deletion can put the links back (`relink_shared`).
+pub(crate) fn unlink_shared(dir: &Path) -> Vec<SharedLink> {
+    let mut removed = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     let mut seen = 0usize;
     while let Some(d) = stack.pop() {
@@ -319,7 +360,7 @@ fn unlink_shared(dir: &Path) {
         for e in rd.flatten() {
             seen += 1;
             if seen > 200_000 {
-                return;
+                return removed;
             }
             let p = e.path();
             let Ok(meta) = std::fs::symlink_metadata(&p) else { continue };
@@ -331,32 +372,92 @@ fn unlink_shared(dir: &Path) {
             #[cfg(not(windows))]
             let is_link = meta.file_type().is_symlink();
             if is_link {
+                let target = std::fs::read_link(&p).ok();
                 // A directory link is removed with remove_dir (Windows), a file link with remove_file.
-                let _ = std::fs::remove_dir(&p).or_else(|_| std::fs::remove_file(&p));
+                if std::fs::remove_dir(&p).or_else(|_| std::fs::remove_file(&p)).is_ok() {
+                    if let Some(target) = target {
+                        removed.push(SharedLink { path: p, target });
+                    }
+                }
             } else if meta.is_dir() && e.file_name() != ".git" {
                 stack.push(p);
             }
         }
     }
+    removed
 }
 
-#[tauri::command]
-pub async fn git_worktree_remove(root: String, path: String, force: bool) -> CmdResult<()> {
-    let dir = guard(&root, "")?;
+/// Puts back the links `unlink_shared` removed; returns the ones that could not be restored.
+pub(crate) fn relink_shared(links: &[SharedLink]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for l in links {
+        if std::fs::symlink_metadata(&l.path).is_ok() {
+            continue;
+        }
+        // A junction's target can come back with the verbatim `\\?\` prefix.
+        let raw = l.target.to_string_lossy();
+        let target = std::path::PathBuf::from(raw.strip_prefix(r"\\?\").unwrap_or(&raw));
+        if !target.is_dir() || crate::worktree_files::link_dir(&target, &l.path).is_err() {
+            failed.push(l.path.to_string_lossy().into_owned());
+        }
+    }
+    failed
+}
+
+fn same_folder(a: &str, b: &str) -> bool {
+    let norm = |p: &str| std::fs::canonicalize(p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| p.to_string()).replace('\\', "/").trim_end_matches('/').to_lowercase();
+    norm(a) == norm(b)
+}
+
+/// `git worktree remove` for a linked worktree. Its shared links go first (so a linked folder is
+/// never traversed) and come back when git cannot delete the folder.
+pub(crate) async fn remove_linked_worktree(root: &str, path: &str, force: bool) -> CmdResult<()> {
+    let dir = guard(root, "")?;
     // Only ever inside a linked worktree git knows about (never the main checkout).
     let canon = |p: &str| std::fs::canonicalize(p).ok();
-    let registered = git_worktrees(root.clone()).await.unwrap_or_default();
-    let linked = canon(&path).is_some_and(|c| registered.iter().skip(1).any(|w| canon(&w.path).as_ref() == Some(&c)));
+    let registered = git_worktrees(root.to_string()).await.unwrap_or_default();
+    let linked = canon(path).is_some_and(|c| registered.iter().skip(1).any(|w| canon(&w.path).as_ref() == Some(&c)));
+    let mut unlinked = Vec::new();
     if linked {
-        let wt = std::path::PathBuf::from(&path);
-        tokio::task::spawn_blocking(move || unlink_shared(&wt)).await.map_err(err)?;
+        let wt = std::path::PathBuf::from(path);
+        unlinked = tokio::task::spawn_blocking(move || unlink_shared(&wt)).await.map_err(err)?;
     }
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");
     }
-    args.push(path.as_str());
-    git_ok(&dir, &args).await.map(|_| ())
+    args.push(path);
+    let mut removed = git_ok(&dir, &args).await.map(|_| ());
+    if let Err(e) = &mut removed {
+        // Git refusing cleanly leaves the worktree in use: its shared folders must stay reachable. But on
+        // Windows a locked file makes it delete most of the folder and its own records first; links put
+        // back into that leftover would make deleting it by hand reach into the shared folders.
+        let still_registered = git_worktrees(root.to_string()).await.is_ok_and(|l| l.iter().skip(1).any(|w| same_folder(&w.path, path)));
+        if still_registered {
+            if unlinked.is_empty() {
+                return removed;
+            }
+            let failed = relink_shared(&unlinked);
+            if !failed.is_empty() {
+                *e = format!("{e}\nCould not restore the links: {}", failed.join(", "));
+            }
+        } else {
+            *e = format!("{e}\nThe worktree was partly deleted and git no longer lists it; the leftover folder {path} can be deleted by hand (its shared folders were not linked back).");
+        }
+    }
+    removed
+}
+
+#[tauri::command]
+pub async fn git_worktree_remove(client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>, root: String, path: String, force: bool) -> CmdResult<()> {
+    let removed = remove_linked_worktree(&root, &path, force).await;
+    // Once it is gone: the daemon deletes the snapshots of the sessions that worked in it (their refs
+    // live in the main repository). An older daemon or none running is fine; they are collected
+    // when their sessions close. A removal that failed keeps them.
+    if removed.is_ok() {
+        let _ = client.call("checkpoint.drop", serde_json::json!({"worktree": path, "root": root})).await;
+    }
+    removed
 }
 
 #[cfg(test)]

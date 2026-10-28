@@ -1,0 +1,17 @@
+/* Usage & cost page (lazy: loaded with cost-page.tsx). */
+.cost-page { position: fixed; inset: 0; z-index: 40; background: var(--dashboard-bg); display: flex; flex-direction: column; outline: none; overflow: auto; }
+.cost-controls { display: flex; align-items: center; gap: 16px; padding: 0 22px 10px; }
+.cost-error { margin: 0 22px; }
+.cost-summary { display: flex; gap: 28px; padding: 6px 22px 14px; }
+.cost-summary div { display: flex; flex-direction: column; gap: 2px; }
+.cost-summary b { font-size: 22px; font-variant-numeric: tabular-nums; }
+.cost-summary span { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; }
+.cost-table { margin: 0 22px 22px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); overflow: hidden; }
+.cost-row { display: grid; grid-template-columns: minmax(160px, 1fr) 100px 100px 120px minmax(80px, 160px); align-items: center; gap: 12px; padding: 7px 14px; border-top: 1px solid var(--border); font-size: 13px; }
+.cost-row:first-child { border-top: 0; }
+.cost-row.head { color: var(--text-faint); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; background: var(--bg); }
+.cost-row .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cost-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+.cost-row .bar { height: 6px; border-radius: 3px; background: var(--bg-hover); overflow: hidden; }
+.cost-row .bar span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.cost-empty { padding: 18px 14px; }

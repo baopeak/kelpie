@@ -5,6 +5,7 @@ import { chordOf, commands } from "../lib/commands";
 import { chordLabel } from "../lib/platform";
 import { TerminalPane } from "./terminal-pane";
 import { Icon } from "./icons";
+import { StatusDot } from "./sidebar";
 import { t } from "../lib/i18n";
 
 export function FloatingTerminal() {
@@ -21,7 +22,7 @@ export function FloatingTerminal() {
           <For each={f().sessions.filter((id) => store.sessions[id])}>
             {(id) => (
               <div class={`floating-tab${f().active === id ? " active" : ""}`} onClick={() => store.selectFloating(id)}>
-                <span class={`dot ${store.sessions[id]?.alive ? store.sessions[id]?.status : "exited"}`} />
+                <StatusDot s={store.sessions[id]} />
                 <span>{sessionLabel(store.sessions[id])}</span>
                 <button class="icon-btn mini" title={t("Close")} onClick={(e) => { e.stopPropagation(); void store.closeFloating(id); }}><Icon name="close" size={10} /></button>
               </div>

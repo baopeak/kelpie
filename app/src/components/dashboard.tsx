@@ -5,12 +5,17 @@ import { Icon, KindGlyph } from "./icons";
 import { StatusDot, STATUS_WORDS } from "./sidebar";
 import type { SessionInfo } from "../lib/types";
 import { t, msg } from "../lib/i18n";
+import { ANSWER_API, waitedFor, waitingSessions } from "../lib/attention";
+
+/** A failed turn or a failed exit that nothing has followed yet. */
+const failedNow = (s: SessionInfo) => !!s.failed && !(s.alive && (s.status === "waiting" || s.status === "working"));
 
 const columns: { id: string; title: string; color: string; test: (s: SessionInfo) => boolean }[] = [
   { id: "waiting", title: msg("Needs you"), color: "var(--waiting)", test: (s) => s.alive && s.status === "waiting" },
+  { id: "failed", title: msg("Failed"), color: "var(--danger)", test: failedNow },
   { id: "working", title: msg("Working"), color: "var(--working)", test: (s) => s.alive && s.status === "working" },
-  { id: "done", title: msg("Done · unread"), color: "var(--idle)", test: (s) => s.alive && s.status === "idle" && s.unread },
-  { id: "idle", title: msg("Idle / exited"), color: "var(--text-faint)", test: (s) => !s.alive || (s.status === "idle" && !s.unread) },
+  { id: "done", title: msg("Done · unread"), color: "var(--idle)", test: (s) => s.alive && s.status === "idle" && s.unread && !failedNow(s) },
+  { id: "idle", title: msg("Idle / exited"), color: "var(--text-faint)", test: (s) => (!s.alive || (s.status === "idle" && !s.unread)) && !failedNow(s) },
 ];
 
 /** Every session in every project, grouped by what it needs — without rendering a single terminal. */
@@ -36,7 +41,8 @@ export function Dashboard() {
       <div class="dash-cols">
         <For each={columns}>
           {(col) => {
-            const items = createMemo(() => all().filter(col.test));
+            // Needs you: the longest wait first.
+            const items = createMemo(() => (col.id === "waiting" ? waitingSessions(all()) : all().filter(col.test)));
             return (
               <div class="dash-col">
                 <h3><span class="dot" style={{ background: col.color }} />{t(col.title)}<span class="count">{items().length}</span></h3>
@@ -56,7 +62,12 @@ export function Dashboard() {
                               {(p) => <span class="chip" style={{ "border-color": p().color, color: p().color }}>{p().name}</span>}
                             </Show>
                             <span>{s.alive ? t(STATUS_WORDS[s.status]) : t("exited {code}", { code: s.exit_code ?? "" })}</span>
-                            <span>· {relTime(s.created_at)}</span>
+                            <Show when={col.id === "waiting" && s.waiting_since} fallback={<span>· {relTime(s.created_at)}</span>}>
+                              <span>· {t("waiting {time}", { time: waitedFor(s.waiting_since!) })}</span>
+                            </Show>
+                            <Show when={col.id === "waiting" && !s.chat && store.daemonApi() >= ANSWER_API}>
+                              <button class="btn dash-answer" onClick={(e) => { e.stopPropagation(); store.openAnswer(s.id); }}>{t("Answer")}</button>
+                            </Show>
                           </div>
                         </div>
                       );

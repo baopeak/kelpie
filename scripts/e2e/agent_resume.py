@@ -2,7 +2,7 @@
 
     python scripts/e2e/agent_resume.py <kelpied.exe> <project-dir> [agent ...]   # default: claude codex omp
 
-Runs an isolated daemon (own endpoint and data folder), tells each agent a secret number,
+Runs an isolated daemon (own endpoint and data folder), tells each agent a number,
 kills the daemon hard, starts it again, resumes every interrupted session and asks for a value
 only the original conversation can produce (secret x 3). Uses the agents' real sign-in.
 """
@@ -48,7 +48,9 @@ def find(c, sid):
 
 
 def wait_idle(c, sid, timeout=240, min_wait=4):
-    """Idle (or waiting) after the agent worked, with a screen that stopped changing."""
+    """Idle (or waiting) after the agent worked, with a drawn screen that stopped changing. A
+    blank screen is never "ready": a resumed agent can take many seconds to draw (8 s for Claude
+    Code on an idle machine, longer on a busy one), and text typed before that is lost."""
     end, last, stable = time.time() + timeout, None, 0
     time.sleep(min_wait)
     while time.time() < end:
@@ -56,7 +58,8 @@ def wait_idle(c, sid, timeout=240, min_wait=4):
         screen = c.call("session.read", {"handle": s["handle"]})["text"]
         stable = stable + 1 if screen == last else 0
         last = screen
-        if s["status"] in ("idle", "waiting") and stable >= 6:
+        drawn = sum(1 for line in screen.splitlines() if line.strip()) >= 3
+        if s["status"] in ("idle", "waiting") and drawn and stable >= 6:
             return s
         time.sleep(0.5)
     return find(c, sid)
@@ -94,6 +97,21 @@ def type_line(c, handle, text):
     c.call("session.input", {"handle": handle, "data": "\r"})
 
 
+def submit(c, sid, text, answer, tries=3):
+    """Types `text` and makes sure the agent took it: it starts working or answers. An agent
+    still starting up can keep the text but drop the Enter (Enter again), or drop it all (type
+    again). Returns how many attempts it took, 0 if none worked."""
+    for attempt in range(1, tries + 1):
+        if attempt == 1 or text[:30] not in "\n".join(screen(c, sid).splitlines()[-8:]):
+            type_line(c, find(c, sid)["handle"], text)
+        else:
+            c.call("session.input", {"handle": find(c, sid)["handle"], "data": "\r"})
+        took = wait_for(lambda: find(c, sid)["status"] == "working" or answer in screen(c, sid, 400).split(text[:30])[-1], 20)
+        if took:
+            return attempt
+    return 0
+
+
 daemon, c = start_daemon()
 secrets, sids = {}, {}
 try:
@@ -102,7 +120,7 @@ try:
         secrets[kind] = secret
         info = c.call("session.create", {
             "kind": kind, "cwd": project, "cols": 120, "rows": 36,
-            "prompt": f"Remember this secret number for later: {secret}. Do not use any tools. Reply with only the word OK.",
+            "prompt": f"Remember this number for later: {secret}. Do not use any tools. Reply with only the word OK.",
         })
         sids[kind] = info["id"]
     for kind in agents:
@@ -131,15 +149,22 @@ try:
         check(f"{kind}: restored as interrupted", s is not None and s["interrupted"] and not s["alive"])
         check(f"{kind}: kept its conversation id", s is not None and s.get("agent_session_id") == before[kind], f"{s and s.get('agent_session_id')} != {before[kind]}")
         c.call("session.restart", {"handle": s["handle"]})
+    # Not a "secret": GPT models refuse to repeat one ("I can't provide that").
+    question = "Multiply the number I gave you earlier by 3. Do not use any tools. Reply with only the result."
     for kind in agents:
         s = wait_idle(c, sids[kind], min_wait=8)
         check(f"{kind}: resumed and running", s["alive"], screen(c, sids[kind])[-800:])
-        type_line(c, s["handle"], "Multiply the secret number I gave you earlier by 3. Do not use any tools. Reply with only the result.")
+        attempts = submit(c, sids[kind], question, str(secrets[kind] * 3))
+        check(f"{kind}: took the question", attempts > 0, screen(c, sids[kind])[-800:])
+        if attempts > 1:
+            print(f"  {kind} needed {attempts} attempts to take the question")
     for kind in agents:
+        want = str(secrets[kind] * 3)
+        # The screen can sit still while the agent works (Codex runs the user's hooks silently).
+        wait_for(lambda: want in screen(c, sids[kind], 400).split("Multiply the number")[-1], 180)
         s = wait_idle(c, sids[kind])
         text = c.call("session.read", {"handle": s["handle"], "lines": 400})["text"]
-        want = str(secrets[kind] * 3)
-        check(f"{kind}: remembers the conversation ({secrets[kind]} x 3 = {want})", want in text.split("Multiply the secret")[-1], text[-600:])
+        check(f"{kind}: remembers the conversation ({secrets[kind]} x 3 = {want})", want in text.split("Multiply the number")[-1], text[-600:])
     for kind in agents:
         s = find(c, sids[kind])
         c.call("session.kill", {"handle": s["handle"]})

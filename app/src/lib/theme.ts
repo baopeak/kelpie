@@ -28,9 +28,9 @@ export const terminalTheme: ITheme = {
   brightMagenta: "#d7b0ff",
   brightCyan: "#87e8e8",
   brightWhite: "#f4f6fa",
-  scrollbarSliderBackground: "rgba(255,255,255,0.08)",
-  scrollbarSliderHoverBackground: "rgba(255,255,255,0.16)",
-  scrollbarSliderActiveBackground: "rgba(255,255,255,0.22)",
+  scrollbarSliderBackground: "rgba(255,255,255,0.18)",
+  scrollbarSliderHoverBackground: "rgba(255,255,255,0.28)",
+  scrollbarSliderActiveBackground: "rgba(255,255,255,0.36)",
 };
 
 /** Light terminal palette (Settings → Appearance → Light). */
@@ -57,9 +57,9 @@ export const terminalThemeLight: ITheme = {
   brightMagenta: "#9b67e0",
   brightCyan: "#1597a3",
   brightWhite: "#eef0f4",
-  scrollbarSliderBackground: "rgba(0,0,0,0.10)",
-  scrollbarSliderHoverBackground: "rgba(0,0,0,0.18)",
-  scrollbarSliderActiveBackground: "rgba(0,0,0,0.25)",
+  scrollbarSliderBackground: "rgba(0,0,0,0.20)",
+  scrollbarSliderHoverBackground: "rgba(0,0,0,0.30)",
+  scrollbarSliderActiveBackground: "rgba(0,0,0,0.40)",
 };
 
 /** The terminal palette for the app theme and the chosen terminal colour theme. */

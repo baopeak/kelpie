@@ -16,21 +16,21 @@ use tauri::{AppHandle, Emitter};
 
 use crate::fs_ops::{err, CmdResult};
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default()
 }
 
-fn claude_dir() -> PathBuf {
+pub(crate) fn claude_dir() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".claude"))
 }
 
 /// An account's config home (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`), else the default one.
-fn home_or(dir: Option<&str>, default: fn() -> PathBuf) -> PathBuf {
+pub(crate) fn home_or(dir: Option<&str>, default: fn() -> PathBuf) -> PathBuf {
     dir.filter(|d| !d.is_empty()).map(PathBuf::from).unwrap_or_else(default)
 }
 
 /// Claude Code names project dirs after the cwd with every non-alphanumeric char → '-'.
-fn claude_project_dir(root: &Path, cwd: &str) -> PathBuf {
+pub(crate) fn claude_project_dir(root: &Path, cwd: &str) -> PathBuf {
     let escaped: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     root.join("projects").join(escaped)
 }
@@ -42,7 +42,7 @@ fn newest(files: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
         .map(|(_, p)| p)
 }
 
-fn jsonl_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
+pub(crate) fn jsonl_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -77,7 +77,7 @@ fn agent_latest_session_blocking(kind: String, cwd: String, account: Option<Stri
                 .flat_map(|d| jsonl_in(&d.path()).collect::<Vec<_>>())
                 .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
                 .collect();
-            files.sort_by(|a, b| b.0.cmp(&a.0));
+            files.sort_by_key(|f| std::cmp::Reverse(f.0));
             let want = normalize_cwd(&cwd);
             for (_, path) in files.into_iter().take(300) {
                 let Ok(file) = std::fs::File::open(&path) else { continue };
@@ -164,8 +164,8 @@ pub struct HistoryItem {
     home: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Agent {
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Agent {
     Claude,
     Codex,
     Omp,
@@ -237,11 +237,11 @@ fn save_cache() {
     }
 }
 
-fn dirs_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
+pub(crate) fn dirs_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
     std::fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok()).filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path())
 }
 
-fn codex_dir() -> PathBuf {
+pub(crate) fn codex_dir() -> PathBuf {
     std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".codex"))
 }
 
@@ -260,7 +260,7 @@ pub struct AccountHomes {
 
 /// Every transcript file of every agent, with the account home it belongs to (`None` = the
 /// default). Codex nests rollouts under `sessions/YYYY/MM/DD/`.
-fn transcript_files(homes: &AccountHomes) -> Vec<(Agent, PathBuf, Option<String>)> {
+pub(crate) fn transcript_files(homes: &AccountHomes) -> Vec<(Agent, PathBuf, Option<String>)> {
     let mut out = Vec::new();
     let claude_roots = std::iter::once((claude_dir(), None)).chain(homes.claude.iter().map(|h| (PathBuf::from(h), Some(h.clone()))));
     for (root, home) in claude_roots {
@@ -288,7 +288,7 @@ fn transcript_files(homes: &AccountHomes) -> Vec<(Agent, PathBuf, Option<String>
     out
 }
 
-fn millis(t: SystemTime) -> u64 {
+pub(crate) fn millis(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -325,13 +325,14 @@ fn content_text(content: &Value) -> Option<&str> {
 /// Complete lines of a (possibly zstd-compressed) transcript, from byte `offset` of a plain file,
 /// reading at most `limit` bytes. A last line without its newline (cut by the limit or still
 /// being written) is not returned, so `consumed` always ends on a line boundary.
-struct Lines {
+pub(crate) struct Lines {
     reader: BufReader<std::io::Take<Box<dyn Read>>>,
     buf: Vec<u8>,
-    consumed: u64,
+    /// Bytes of the complete lines returned so far.
+    pub(crate) consumed: u64,
 }
 
-fn open_lines(path: &Path, offset: u64, limit: u64) -> Option<Lines> {
+pub(crate) fn open_lines(path: &Path, offset: u64, limit: u64) -> Option<Lines> {
     let mut file = std::fs::File::open(path).ok()?;
     let inner: Box<dyn Read> = if is_zst(path) {
         Box::new(zstd::stream::read::Decoder::new(file).ok()?)
@@ -363,14 +364,14 @@ fn is_claude_command(text: &str) -> bool {
 
 /// Ids are passed to the agent's `--resume`; anything else (a leading `-`, spaces, quotes) is
 /// not a real conversation id.
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     static ID: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$").unwrap());
     ID.is_match(id)
 }
 
 /// Folder for matching sidebar projects: on Windows, long names instead of 8.3 short names
 /// (`PROGRA~1`) and no `\\?\` prefix. A folder that no longer exists keeps its recorded form.
-fn canonical_folder(cwd: &str) -> String {
+pub(crate) fn canonical_folder(cwd: &str) -> String {
     #[cfg(windows)]
     if !cwd.is_empty() {
         if let Ok(p) = std::fs::canonicalize(cwd) {
@@ -539,7 +540,7 @@ fn codex_titles(homes: &AccountHomes) -> HashMap<String, String> {
 
 /// Whether byte `offset - 1` is a newline: a file rewritten (not appended) since the last count
 /// would otherwise be counted from the middle of a line.
-fn line_ends_at(path: &Path, offset: u64) -> bool {
+pub(crate) fn line_ends_at(path: &Path, offset: u64) -> bool {
     if offset == 0 {
         return true;
     }
@@ -567,7 +568,7 @@ fn count_turns(agent: Agent, path: &Path, prev: Option<TurnCount>, mtime_ms: u64
 
 /// Counts prompts of `files` on a background thread (smallest first, so most rows fill in
 /// quickly), then persists the counts and tells the UI.
-fn spawn_counting(app: AppHandle, mut files: Vec<(Agent, PathBuf, u64, u64)>) {
+fn spawn_counting(app: AppHandle, mut files: Vec<StaleFile>) {
     if files.is_empty() || COUNTING.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -613,8 +614,11 @@ fn spawn_counting(app: AppHandle, mut files: Vec<(Agent, PathBuf, u64, u64)>) {
     });
 }
 
+/// A transcript whose prompt count is out of date: agent, path, modified (ms), size.
+type StaleFile = (Agent, PathBuf, u64, u64);
+
 /// The list (newest first) and the files whose prompt counts are out of date.
-fn scan_history(homes: &AccountHomes) -> (Vec<HistoryItem>, Vec<(Agent, PathBuf, u64, u64)>) {
+fn scan_history(homes: &AccountHomes) -> (Vec<HistoryItem>, Vec<StaleFile>) {
     let mut account_of: HashMap<PathBuf, String> = HashMap::new();
     let files: Vec<(Agent, PathBuf, SystemTime, u64)> = transcript_files(homes)
         .into_iter()
@@ -696,7 +700,7 @@ fn scan_history(homes: &AccountHomes) -> (Vec<HistoryItem>, Vec<(Agent, PathBuf,
     if changed {
         save_cache();
     }
-    items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    items.sort_by_key(|i| std::cmp::Reverse(i.updated_at));
     items.truncate(MAX_ITEMS);
     (items, to_count)
 }

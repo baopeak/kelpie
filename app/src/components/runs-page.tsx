@@ -1,24 +1,25 @@
 // Orchestration runs page: the runs on the left; the selected run's tasks in columns by
 // dependency depth, with what each needs; and an editor for new runs (tasks written by hand or
 // planned by an AI agent, then reviewed).
-import { For, Index, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Index, Show, createMemo, createResource, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { store } from "../lib/store";
 import { kindInfo, launchableAgents } from "../lib/agents";
 import { relTimeShort } from "../lib/platform";
-import { formatRelative, msg, t } from "../lib/i18n";
-import { cancelRun, createRun, deleteRun, finishedTask, lanes, planTasks, runList, runsById, taskAction, type Run, type RunTask, type TaskDraft } from "../lib/runs";
+import { formatRelative, t } from "../lib/i18n";
+import { STATUS_LABEL, broughtText, cancelRun, createRun, deleteRun, finishedTask, lanes, planTasks, runList, runsById, taskAction, type Run, type RunTask, type TaskDraft } from "../lib/runs";
 import { Icon, KindGlyph } from "./icons";
+import { confirmDialog } from "../lib/confirm-dialog";
 
-const STATUS_LABEL: Record<string, string> = {
-  pending: msg("Waiting"), waiting_approval: msg("Needs approval"), starting: msg("Starting"), running: msg("Running"), done: msg("Done"), failed: msg("Failed"), skipped: msg("Skipped"), cancelled: msg("Cancelled"),
-};
+// Loaded when a run's candidates are compared.
+const RunCompare = lazy(() => import("./run-compare"));
 
 const [selected, setSelected] = createSignal<string | null>(null);
 const runStatusText = (s: string) => (s === "running" ? t("running") : s === "done" ? t("done") : s === "failed" ? t("failed") : s === "cancelled" ? t("cancelled") : s);
 const [editing, setEditing] = createSignal(false);
 
-export function openRuns(newRun = false) {
+export function openRuns(newRun = false, runId?: string) {
   setEditing(newRun);
+  if (runId) setSelected(runId);
   store.setOverlay("runs");
 }
 
@@ -37,6 +38,12 @@ function TaskCard(props: { run: Run; task: RunTask }) {
   const tk = () => props.task;
   const session = () => (tk().session_id ? store.sessions[tk().session_id!] : undefined);
   const act = (a: Parameters<typeof taskAction>[0]) => void taskAction(a, props.run.id, tk().id);
+  // The agent of a task on a host may outlive its connection by a few minutes: another one needs the user's word.
+  const retry = async () => {
+    const host = tk().host;
+    if (host && !(await confirmDialog(t("The previous agent on {host} may still be running there for a few minutes after its connection was lost. Start another anyway?", { host: host.dest })))) return;
+    act("retry");
+  };
   return (
     <div class={`run-task st-${tk().status}`} data-task={tk().id}>
       <div class="run-task-head">
@@ -49,6 +56,8 @@ function TaskCard(props: { run: Run; task: RunTask }) {
         <Show when={tk().deps.length}><span>{t("after {deps}", { deps: tk().deps.join(", ") })}</span></Show>
         <Show when={tk().branch}><span class="mono" title={tk().cwd ?? ""}><Icon name="branch" size={11} /> {tk().branch}</span></Show>
         <Show when={tk().approve}><span>{t("approval")}</span></Show>
+        <Show when={tk().host}><span class="mono" title={`${tk().host!.dest}:${tk().host!.path}`}>{t("on {host}", { host: tk().host!.dest })}</span></Show>
+        <Show when={tk().brought}><span title={broughtText(tk().brought!).full}>{broughtText(tk().brought!).short}</span></Show>
       </div>
       <Show when={tk().error}><div class="run-task-summary error">{tk().error}</div></Show>
       <Show when={tk().summary}>
@@ -70,7 +79,7 @@ function TaskCard(props: { run: Run; task: RunTask }) {
           <button class="btn" title={t("Do not run this task (tasks after it are skipped too)")} onClick={() => act("task_skip")}>{t("Skip")}</button>
         </Show>
         <Show when={tk().status === "failed" || tk().status === "skipped" || tk().status === "cancelled"}>
-          <button class="btn" onClick={() => act("retry")}><Icon name="restart" size={12} /> {t("Retry")}</button>
+          <button class="btn" onClick={() => void retry()}><Icon name="restart" size={12} /> {t("Retry")}</button>
         </Show>
         <Show when={!tk().session_id && !finishedTask(tk().status)}>
           <button class="icon-btn" title={t("Show the prompt")} onClick={() => setOpen(!open())}><Icon name="note" size={13} /></button>
@@ -83,6 +92,9 @@ function TaskCard(props: { run: Run; task: RunTask }) {
 
 function RunDetail(props: { run: Run }) {
   const project = () => store.state.projects.find((p) => p.id === props.run.project_id);
+  const [comparing, setComparing] = createSignal(false);
+  // Two or more tasks in worktrees of their own are candidates for the same work.
+  const candidates = () => props.run.tasks.filter((x) => x.worktree && x.cwd).length >= 2;
   return (
     <div class="run-detail">
       <div class="run-detail-head">
@@ -91,20 +103,25 @@ function RunDetail(props: { run: Run }) {
           <Show when={props.run.objective}><div class="run-objective">{props.run.objective}</div></Show>
           <div class="run-task-meta"><span>{project()?.name ?? props.run.cwd}</span><span>{t("started {when}", { when: formatRelative(props.run.created_at) })}</span><Progress run={props.run} /></div>
         </div>
-        <Show when={props.run.status === "running"} fallback={<button class="btn" onClick={() => confirm(t("Delete the run “{name}”? Its sessions stay open.", { name: props.run.name })) && void deleteRun(props.run.id).then(() => setSelected(null))}>{t("Delete")}</button>}>
-          <button class="btn danger" onClick={() => confirm(t("Cancel “{name}”? Running agents are stopped.", { name: props.run.name })) && void cancelRun(props.run.id)}>{t("Cancel run")}</button>
+        <Show when={candidates()}>
+          <button class={`toggle${comparing() ? " on" : ""}`} data-compare onClick={() => setComparing(!comparing())}>{t("Compare")}</button>
+        </Show>
+        <Show when={props.run.status === "running"} fallback={<button class="btn" onClick={async () => (await confirmDialog(t("Delete the run “{name}”? Its sessions stay open.", { name: props.run.name }))) && void deleteRun(props.run.id).then(() => setSelected(null))}>{t("Delete")}</button>}>
+          <button class="btn danger" onClick={async () => (await confirmDialog(t("Cancel “{name}”? Running agents are stopped.", { name: props.run.name }))) && void cancelRun(props.run.id)}>{t("Cancel run")}</button>
         </Show>
       </div>
-      <div class="run-lanes">
-        <For each={lanes(props.run)}>
-          {(lane, i) => (
-            <div class="run-lane">
-              <div class="run-lane-head">{i() === 0 ? t("Start") : t("Step {n}", { n: i() + 1 })}</div>
-              <For each={lane}>{(t) => <TaskCard run={props.run} task={t} />}</For>
-            </div>
-          )}
-        </For>
-      </div>
+      <Show when={!(comparing() && candidates())} fallback={<RunCompare run={props.run} />}>
+        <div class="run-lanes">
+          <For each={lanes(props.run)}>
+            {(lane, i) => (
+              <div class="run-lane">
+                <div class="run-lane-head">{i() === 0 ? t("Start") : t("Step {n}", { n: i() + 1 })}</div>
+                <For each={lane}>{(t) => <TaskCard run={props.run} task={t} />}</For>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
     </div>
   );
 }
@@ -121,6 +138,16 @@ function RunEditor(props: { onDone: (id?: string) => void }) {
   const [planning, setPlanning] = createSignal(false);
   const [idle, setIdle] = createSignal(300);
   const project = () => store.state.projects.find((p) => p.id === projectId());
+  // Tasks with a worktree of their own get the repository's approved `copy:` / `link:` files: what that
+  // is, and how large, is read (and shown) while the tasks are written.
+  const worktreeTasks = () => tasks().filter((t) => t.worktree).length;
+  const [bringing] = createResource(
+    () => (worktreeTasks() && project() ? project()! : false),
+    async (p) => {
+      const m = await import("../lib/try-agents");
+      return { plan: await m.planBringing(p), text: m.bringingText };
+    },
+  );
   const update = (i: number, patch: Partial<TaskDraft>) => setTasks(tasks().map((t, j) => (j === i ? { ...t, ...patch } : t)));
   const remove = (i: number) => {
     const gone = tasks()[i].id;
@@ -153,6 +180,8 @@ function RunEditor(props: { onDone: (id?: string) => void }) {
         name: name().trim(), objective: objective().trim(), cwd: project()!.path, project_id: project()!.id, idle_done_secs: idle(),
         // Each task runs with its agent profile's flags and the active account.
         tasks: tasks().map((t) => ({ ...t, ...store.profileLaunch(t.kind) })),
+        // Only what the user approved in `.kelpie.yaml`; nothing for a repository whose file was not.
+        ...(worktreeTasks() && bringing()?.plan.approved ? { materialize: { copy: bringing()!.plan.copy, link: bringing()!.plan.link } } : {}),
       });
       props.onDone(run.id);
     } catch (e) {
@@ -220,6 +249,9 @@ function RunEditor(props: { onDone: (id?: string) => void }) {
         </Index>
         <button class="btn" style={{ "align-self": "flex-start" }} onClick={add}><Icon name="plus" size={13} /> {t("Add task")}</button>
       </div>
+      <Show when={worktreeTasks() > 0 ? bringing() : undefined}>
+        {(b) => <p class="muted-inline" data-bringing>{b().text(b().plan, worktreeTasks())}</p>}
+      </Show>
       <div class="inline-fields" style={{ "justify-content": "flex-end" }}>
         <button class="btn" onClick={() => props.onDone()}>{t("Cancel")}</button>
         <button class="btn primary" disabled={!valid()} onClick={() => void start()}>{t("Start run")}</button>

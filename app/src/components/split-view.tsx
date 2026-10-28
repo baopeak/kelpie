@@ -206,7 +206,7 @@ function SplitNodeView(props: { node: SplitNode; project: Project; tab: Tab }) {
       <For each={ids()}>
         {(id, i) => (
           <>
-            <div class="child" style={{ "flex-basis": `calc(${size(id) * 100}% - ${gutters() / props.node.children.length}px)`, "flex-grow": 0, "flex-shrink": 0 }}>
+            <div class="child" style={{ "flex-basis": `calc(${size(id) * 100}% - var(--gutter) * ${gutters() / props.node.children.length})`, "flex-grow": 0, "flex-shrink": 0 }}>
               <NodeView node={child(id)} project={props.project} tab={props.tab} />
             </div>
             <Show when={i() < gutters()}>

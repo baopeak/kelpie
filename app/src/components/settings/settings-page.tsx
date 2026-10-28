@@ -1,6 +1,6 @@
 // Settings as a full page: grouped navigation on the left, one section at a time on the right,
 // and a search box (Ctrl/Cmd+F) that shows every matching row across sections.
-import { For, createMemo, onCleanup, onMount, type JSX } from "solid-js";
+import { For, Suspense, createMemo, lazy, onCleanup, onMount, type JSX } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { store } from "../../lib/store";
 import { t } from "../../lib/i18n";
@@ -22,8 +22,18 @@ import { MobileSettings } from "./mobile-settings";
 import { PluginSettings } from "./plugin-settings";
 import { VoiceSettings } from "./voice-settings";
 
+// The setup page (diffs, registry, skills) loads when it is opened, not with the app.
+const AgentSetup = lazy(() => import("../agent-setup"));
+
 const SECTIONS: Record<SettingsSection, () => JSX.Element> = {
   agents: AgentSettings,
+  "agent-setup": () => (
+    <SettingRow id="agent-setup" wide>
+      <Suspense fallback={<div class="muted-inline">{t("Loading…")}</div>}>
+        <AgentSetup />
+      </Suspense>
+    </SettingRow>
+  ),
   accounts: AccountSettings,
   integrations: IntegrationSettings,
   remote: RemoteSettings,

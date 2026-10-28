@@ -1,4 +1,4 @@
-//! Minimal async client used by `kelpied hook`, `kelpied ping`, the benchmark and tests.
+//! Minimal async client used by `kelpied hook`, the `kelpied` commands, the benchmark and tests.
 
 use std::collections::VecDeque;
 
@@ -17,10 +17,27 @@ pub struct Client {
 }
 
 impl Client {
+    /// Connects and authenticates: inside a session of this daemon as that session, otherwise
+    /// with the user token. Without either only `daemon.info` answers.
     pub async fn connect() -> Result<Client> {
-        let stream = transport::connect(&kelpie_proto::endpoint()).await?;
+        Self::connect_with(kelpie_proto::cli_auth_params).await
+    }
+
+    /// Connects with the user token even inside a session: the benchmarks create, attach and
+    /// close sessions of their own.
+    pub async fn connect_user() -> Result<Client> {
+        Self::connect_with(kelpie_proto::user_auth_params).await
+    }
+
+    async fn connect_with(auth: fn(&kelpie_proto::Endpoint) -> Option<Value>) -> Result<Client> {
+        let endpoint = kelpie_proto::endpoint();
+        let stream = transport::connect(&endpoint).await?;
         let (rx, tx) = stream.split();
-        Ok(Client { rx: tokio::io::BufReader::with_capacity(256 * 1024, rx), tx, next_id: 1, backlog: VecDeque::new() })
+        let mut c = Client { rx: tokio::io::BufReader::with_capacity(256 * 1024, rx), tx, next_id: 1, backlog: VecDeque::new() };
+        if let Some(params) = auth(&endpoint) {
+            c.call("auth", params).await?;
+        }
+        Ok(c)
     }
 
     pub async fn send(&mut self, frame: &Frame) -> Result<()> {

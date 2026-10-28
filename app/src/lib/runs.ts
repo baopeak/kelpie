@@ -2,13 +2,45 @@
 // actions on runs and tasks, activity entries for what needs the user, worktree projects for
 // tasks that run in their own worktree, and planning a run's tasks with an AI agent.
 import { createStore, produce, reconcile } from "solid-js/store";
-import { agentRun, daemon, onEvent } from "./ipc";
+import { agentRun, daemon, isDir, onEvent } from "./ipc";
+import { normPath } from "./platform";
 import { store } from "./store";
-import { t } from "./i18n";
-import type { SessionKind } from "./types";
+import { msg, t } from "./i18n";
+import { targetEnv, targetRemote } from "./remote";
+import type { Project, SessionKind, SessionTarget } from "./types";
+
+/** From this daemon API level a run's task can run on an SSH host (`host`); an older daemon would ignore the field and run it here. */
+export const RUN_HOST_API = 14;
 
 export type RunStatus = "running" | "done" | "failed" | "cancelled";
 export type TaskStatus = "pending" | "waiting_approval" | "starting" | "running" | "done" | "failed" | "skipped" | "cancelled";
+
+/** What a worktree was given from the repository's ignored files (the daemon's `Materialized`). */
+export interface Brought {
+  linked: string[];
+  copied: string[];
+  skipped: { path: string; reason: string }[];
+}
+
+export const STATUS_LABEL: Record<string, string> = {
+  pending: msg("Waiting"), waiting_approval: msg("Needs approval"), starting: msg("Starting"), running: msg("Running"), done: msg("Done"), failed: msg("Failed"), skipped: msg("Skipped"), cancelled: msg("Cancelled"),
+};
+
+/** The reasons the daemon gives for leaving an entry out, in the user's language. */
+const REASONS: Record<string, string> = {
+  "not a plain relative path": msg("not a plain relative path"),
+  "missing in the repository": msg("missing in the repository"),
+  "already in the worktree": msg("already in the worktree"),
+  "not ignored by git (tracked files are already checked out)": msg("not ignored by git (tracked files are already checked out)"),
+  "only folders can be linked": msg("only folders can be linked"),
+};
+
+/** One line about what a worktree was given (the full text, with the reasons, is the tooltip). */
+export function broughtText(b: Brought): { short: string; full: string } {
+  const parts = [b.linked.length ? t("linked {files}", { files: b.linked.join(", ") }) : "", b.copied.length ? t("copied {files}", { files: b.copied.join(", ") }) : ""].filter(Boolean);
+  const left = b.skipped.map((s) => `${s.path} (${REASONS[s.reason] ? t(REASONS[s.reason]) : s.reason})`);
+  return { short: parts.join(" · ") || t("nothing brought"), full: [...parts, ...(left.length ? [t("not brought: {files}", { files: left.join("; ") })] : [])].join(" · ") };
+}
 
 export interface RunTask {
   id: string;
@@ -20,16 +52,22 @@ export interface RunTask {
   deps: string[];
   approve: boolean;
   worktree: boolean;
+  /** Runs on an SSH host, in this folder there, instead of on this computer. Never in tmux: the task ends with the ssh session. */
+  host?: { dest: string; port?: number; config?: string; path: string };
   status: TaskStatus;
   approved: boolean;
   session_id: string | null;
   cwd: string | null;
   branch: string | null;
+  /** The branch the worktree was created from. */
+  base?: string;
   started_at: number;
   finished_at: number;
   summary: string | null;
   error: string | null;
   worked: boolean;
+  /** What its worktree was given from the repository's ignored files (copies, links, what was left out). */
+  brought?: Brought;
 }
 
 export interface Run {
@@ -39,6 +77,8 @@ export interface Run {
   cwd: string;
   project_id: string | null;
   tasks: RunTask[];
+  /** The ignored files and folders each task worktree gets: what the user approved in `.kelpie.yaml`. */
+  materialize?: { copy: string[]; link: string[] };
   status: RunStatus;
   created_at: number;
   finished_at: number;
@@ -87,13 +127,50 @@ export async function loadRuns() {
   setRuns(reconcile(map));
 }
 
-export const createRun = (spec: { name: string; objective: string; cwd: string; project_id: string | null; tasks: (TaskDraft & { env?: Record<string, string>; args?: string[] })[]; idle_done_secs?: number }) =>
+export const createRun = (spec: { name: string; objective: string; cwd: string; project_id: string | null; tasks: (TaskDraft & { env?: Record<string, string>; args?: string[]; host?: RunTask["host"] })[]; idle_done_secs?: number; materialize?: { copy: string[]; link: string[] } }) =>
   daemon<Run>("run.create", spec);
 
 export type RunAction = "approve" | "retry" | "task_done" | "task_skip";
 export const taskAction = (action: RunAction, run: string, task: string) => daemon<Run>(`run.${action}`, { id: run, task }).catch((e) => store.notify(String(e)));
 export const cancelRun = (id: string) => daemon("run.cancel", { id }).catch((e) => store.notify(String(e)));
 export const deleteRun = (id: string) => daemon("run.delete", { id }).catch((e) => store.notify(String(e)));
+
+/** The latest run started for each task id of this project, for the Plan tab's rows to show its status. A spec task's
+ *  run has that one task, whose id comes from the task's file and text, so a task whose words change loses its row link
+ *  (the run stays on the Runs page). Built in one pass over the runs, for the panel to keep until they change. */
+export function specTaskRuns(projectId: string): Map<string, { run: Run; task: RunTask }> {
+  const found = new Map<string, { run: Run; task: RunTask }>();
+  for (const run of Object.values(runs)) {
+    if (run.project_id !== projectId) continue;
+    for (const task of run.tasks) {
+      const old = found.get(task.id);
+      if (!old || run.created_at > old.run.created_at) found.set(task.id, { run, task });
+    }
+  }
+  return found;
+}
+
+/** One spec task as a run of its own: the agent starts in the project's folder, in a worktree of its own (with what
+ *  `.kelpie.yaml` is approved to bring), or on `host` (an SSH host, in the folder `host.path` there; no worktree). */
+export async function createSpecRun(project: Project, task: { id: string; title: string; prompt: string }, kind: SessionKind, worktree: boolean, materialize?: { copy: string[]; link: string[] }, host?: SessionTarget) {
+  const launch = store.profileLaunch(kind);
+  if (host) {
+    if (store.daemonApi() < RUN_HOST_API) throw new Error(t("This daemon is too old to start a task on a host; restart it to update it"));
+    if (worktree) throw new Error(t("A worktree is made on this computer: a task on a host cannot have one"));
+    // The saved password / passphrase of the host is looked up by the host's own address, as for any remote session.
+    const env = { ...(launch.env ?? {}), ...(await targetEnv(host.dest)) };
+    const remote = targetRemote(host);
+    return createRun({
+      name: task.title, objective: "", cwd: project.remote ? project.remote.path : project.path, project_id: project.id,
+      tasks: [{ id: task.id, title: task.title, prompt: task.prompt, kind, deps: [], approve: false, worktree: false, ...launch, env, host: { dest: remote.dest, port: remote.port, config: remote.config, path: host.path } }],
+    });
+  }
+  return createRun({
+    name: task.title, objective: "", cwd: project.path, project_id: project.id,
+    tasks: [{ id: task.id, title: task.title, prompt: task.prompt, kind, deps: [], approve: false, worktree, ...launch }],
+    ...(worktree && materialize ? { materialize } : {}),
+  });
+}
 
 /** Activity entries and notifications for what changed in a run. */
 function announce(prev: Run | undefined, next: Run) {
@@ -103,6 +180,8 @@ function announce(prev: Run | undefined, next: Run) {
     if (before === task.status) continue;
     const title = t("Run · {name} · {task}", { name: next.name, task: task.title });
     if (task.status === "waiting_approval") {
+      // From API 12 the daemon says it (`notify.event`), also for the phone channels.
+      if (!store.legacyNotify()) continue;
       const body = t("Waiting for your approval to start");
       store.addInbox({ kind: "waiting", title, body, projectId: project });
       void store.desktopNotify(title, body);
@@ -118,15 +197,22 @@ function announce(prev: Run | undefined, next: Run) {
   }
 }
 
+/** Worktrees removed in this session (a discarded candidate, a finished task): a run's later updates do not bring them back. */
+const removedWorktrees = new Set<string>();
+export const markWorktreeRemoved = (path: string) => void removedWorktrees.add(normPath(path));
+
 /** A task running in its own worktree appears as that worktree's project, with its session. */
-function adoptWorktrees(run: Run) {
+async function adoptWorktrees(run: Run) {
   const parent = store.state.projects.find((p) => p.id === run.project_id);
   if (!parent) return;
   const repo = parent.parentId ?? parent.id;
   for (const t of run.tasks) {
     if (!t.worktree || !t.cwd || !t.session_id || !t.branch) continue;
+    // A worktree that was removed (a discarded candidate, a finished one) does not come back.
+    if (removedWorktrees.has(normPath(t.cwd))) continue;
+    if (!store.state.projects.some((p) => normPath(p.path) === normPath(t.cwd!)) && !(await isDir(t.cwd).catch(() => false))) continue;
     const s = store.sessions[t.session_id];
-    const pid = store.addProject(t.cwd, { parentId: repo, branch: t.branch, open: false });
+    const pid = store.addProject(t.cwd, { parentId: repo, branch: t.branch, baseBranch: t.base, open: false });
     if (s && s.project_id !== pid) void daemon("session.update", { handle: s.handle, project_id: pid }).catch(() => {});
   }
 }
@@ -141,7 +227,7 @@ export function initRuns() {
       const r = msg.params as Run;
       announce(runs[r.id], r);
       setRuns(r.id, reconcile(r));
-      adoptWorktrees(r);
+      void adoptWorktrees(r);
     } else if (msg.event === "run.deleted") {
       setRuns(produce((m) => delete m[msg.params.id]));
     }

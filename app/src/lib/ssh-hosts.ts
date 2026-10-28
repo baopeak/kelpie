@@ -8,6 +8,7 @@ import { store } from "./store";
 import { CORE_AGENTS, agentPresets, isAgentKind } from "./agents";
 import { remoteCheck, remoteRoot, type HostCheck } from "./remote";
 import { setSessionThemeResolver } from "./terminal-host";
+import { t } from "./i18n";
 import type { Project, SessionInfo, SessionKind, SessionTarget } from "./types";
 
 export interface SshHost {
@@ -126,6 +127,8 @@ export async function saveHost(edited: SshHost) {
   const host = cur ? { ...edited, os: cur.os || edited.os, lastConnected: cur.lastConnected } : edited;
   const hosts = host.id ? vault().hosts.map((h) => (h.id === host.id ? host : h)) : [...vault().hosts, host];
   const saved = await saveVault({ ...vault(), hosts });
+  // An edit can change who it logs in as: the last check no longer says.
+  if (cur) forgetCheck(cur.id);
   // A new host is the one whose id was empty: the last one.
   return host.id ? saved.hosts.find((h) => h.id === host.id)! : saved.hosts[saved.hosts.length - 1];
 }
@@ -158,6 +161,10 @@ export const isHostKeyError = (e: unknown) => /host key verification failed|remo
 /** The last check of each host since the app started, by host id (launchers read its agents). */
 const [checks, setChecks] = createSignal<Record<string, HostCheck>>({});
 export const cachedCheck = (hostId: string): HostCheck | undefined => checks()[hostId];
+function forgetCheck(hostId: string) {
+  const { [hostId]: _, ...rest } = checks();
+  setChecks(rest);
+}
 
 /** What the host has (git, tmux, agent CLIs); records the connection time and its OS. */
 export async function checkHost(host: SshHost): Promise<HostCheck> {
@@ -205,6 +212,14 @@ export async function hostTarget(host: SshHost, project?: Project | null, path?:
   return { dest: host.alias, path: (path ?? "").trim() || (linked ?? "").trim() || host.folder.trim() || c.home || "/", tmux: host.tmux && c.tmux };
 }
 
+/** The folder an agent of `project` starts in on `host`: `path`, else the project's own folder
+ *  there. Empty: none chosen yet. Agents never fall back to the host's start or login folder:
+ *  that folder is not this project's (as root it is /root). */
+export function agentFolder(host: SshHost, project: Project | null | undefined, path?: string): string {
+  const own = project?.remote?.dest === host.alias ? project.remote.path : "";
+  return (path ?? "").trim() || (project?.hosts?.find((l) => l.hostId === host.id)?.path ?? "").trim() || own;
+}
+
 /** The saved host a session or target runs on (undefined: this computer or an unsaved host). */
 export const hostOf = (t: { dest: string } | null | undefined) => (t ? hostByAlias(t.dest) : undefined);
 
@@ -235,10 +250,12 @@ export async function connectHost(host: SshHost, kind: SessionKind = "shell", op
   const prompt = opts.prompt ?? (kind === "shell" && host.startup.trim() ? host.startup : undefined);
   const project = opts.projectId ? store.state.projects.find((p) => p.id === opts.projectId) : undefined;
   if (project && !project.remote) {
+    if (isAgentKind(kind) && !agentFolder(host, project)) throw new Error(t("Link {project} to its folder on {host} first: agents do not start in the login folder", { project: project.name, host: host.label }));
     const target = await hostTarget(host, project);
     store.switchProject(project.id);
     return store.newSession(project.id, kind, { prompt, target });
   }
+  if (isAgentKind(kind) && !host.folder.trim()) throw new Error(t("Set a start folder for {host}, or open it in a project linked to its folder there: agents do not start in the login folder", { host: host.label }));
   const projectId = await hostProject(host, opts.check);
   store.switchProject(projectId);
   return store.newSession(projectId, kind, { prompt });

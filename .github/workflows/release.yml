@@ -1,0 +1,115 @@
+name: release
+
+# Push a tag `v<version>` (the version in Cargo.toml, app/package.json and tauri.conf.json) to
+# build signed installers and the updater manifest into a DRAFT release: check its files, then
+# publish it on GitHub — only then does `releases/latest/download/latest.json` offer it to apps.
+# Secrets: TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD (empty when the key
+# has none).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            bundles: nsis
+            target: ""
+          # One universal macOS build for Apple Silicon and Intel.
+          - os: macos-latest
+            bundles: app,dmg
+            target: universal-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: The tag names the version every manifest declares
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          pkg=$(python3 -c "import json;print(json.load(open('app/package.json'))['version'])")
+          conf=$(python3 -c "import json;print(json.load(open('app/src-tauri/tauri.conf.json'))['version'])")
+          for v in "$cargo" "$pkg" "$conf"; do
+            [ "$v" = "$tag" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $cargo, package.json $pkg, tauri.conf.json $conf"; exit 1; }
+          done
+      # Dependencies install without the signing key in the environment.
+      - name: Install frontend dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Build signed bundles
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          KELPIE_KEEP_VERSION: "1"
+          KELPIE_TARGET: ${{ matrix.target }}
+        run: scripts/build-release.sh --bundles ${{ matrix.bundles }} --config src-tauri/tauri.updater.json
+      - name: The release build carries no updater test hooks
+        shell: bash
+        run: |
+          bin=$(ls target/release/kelpie.exe target/universal-apple-darwin/release/kelpie 2>/dev/null | head -1)
+          [ -n "$bin" ] || { echo "app binary not found"; exit 1; }
+          if grep -a -q KELPIE_UPDATE_ENDPOINT "$bin"; then echo "$bin was built with e2e-updater"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.os }}
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/nsis/*-setup.exe.sig
+            target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+          merge-multiple: true
+      - name: Release files, notes and updater manifest
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          # Artifacts keep their bundle/nsis, macos, dmg folders: release assets are flat.
+          mkdir -p dist
+          find downloaded -type f -exec cp {} dist/ \;
+          ls -l dist
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          [ -s notes.md ] || echo "Kelpie $v" > notes.md
+          exe=$(ls dist/*-setup.exe | head -1)
+          mac=$(ls dist/*.app.tar.gz | head -1)
+          python3 scripts/release/latest_json.py --version "$v" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            --artifact "windows-x86_64=$exe" \
+            --artifact "darwin-aarch64=$mac" \
+            --artifact "darwin-x86_64=$mac" > dist/latest.json
+          cat dist/latest.json
+      - name: Create the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --draft --title "Kelpie ${GITHUB_REF_NAME#v}" --notes-file notes.md

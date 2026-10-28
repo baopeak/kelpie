@@ -27,7 +27,14 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm typecheck
+          pnpm test
           pnpm i18n:check
+      - name: Performance gate (bundle size, daemon throughput; the GUI metrics need a desktop, see scripts/perf/README.md)
+        shell: bash
+        run: |
+          python scripts/perf/perf_gate.py --label ci-bundle --metrics bundle --runs 1 --compare scripts/perf/baseline.json
+          cargo build --release -p kelpied
+          python scripts/perf/perf_gate.py --label ci-bench --metrics bench --runs 1
       - name: Bundle
         shell: bash
         run: scripts/build-release.sh --bundles ${{ matrix.os == 'windows-latest' && 'nsis' || 'app,dmg' }}

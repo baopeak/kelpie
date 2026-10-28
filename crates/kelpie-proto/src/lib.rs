@@ -13,12 +13,22 @@ use std::io;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+pub mod materialize;
+pub mod redact;
+pub use redact::redact;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Feature level of the daemon's RPC surface. Unlike `PROTOCOL_VERSION` (which names the
 /// endpoint, so changing it orphans running daemons) this only lets a newer app notice an
-/// older daemon that is still running and offer to restart it.
-pub const API_LEVEL: u32 = 4;
+/// older daemon that is still running and offer to restart it. 14: a run's task may run on an SSH
+/// host (`runs::TaskHost`); an older daemon would ignore the field and run it here, so the app asks for it only at 14. 15: automations can have event
+/// triggers and approved commands; an older daemon would ignore those fields, so the app offers them only at 15.
+pub const API_LEVEL: u32 = 15;
+/// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
+/// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
+/// (it never stops sessions by itself). Daemons that predate it report none: level 1.
+pub const DAEMON_SECURITY_LEVEL: u32 = 1;
 pub const KIND_JSON: u8 = 1;
 pub const KIND_OUTPUT: u8 = 2;
 pub const KIND_INPUT: u8 = 3;
@@ -165,6 +175,80 @@ impl Endpoint {
             Endpoint::Path(p) => p.display().to_string(),
         }
     }
+}
+
+// ---------- who is calling ----------
+//
+// The endpoint only keeps other OS users out. A connection then names itself with `auth`:
+// the user token (the app, `kelpied` outside a session, the user's scripts) gives full access;
+// a session token (set in each session's environment) gives that session's programs the
+// scripting surface and binds hook / run reports to that session.
+
+/// Environment variable carrying a session's token, next to `KELPIE_SESSION_ID`.
+pub const SESSION_TOKEN_ENV: &str = "KELPIE_SESSION_TOKEN";
+/// The daemon a session belongs to ([`endpoint_key`]): its token means nothing to another one
+/// (a dev daemon driven from a Kelpie terminal).
+pub const SESSION_ENDPOINT_ENV: &str = "KELPIE_SESSION_ENDPOINT";
+
+/// `endpoint` as a file-name-safe key.
+pub fn endpoint_key(endpoint: &Endpoint) -> String {
+    let raw = match endpoint {
+        Endpoint::Namespaced(n) => n.clone(),
+        Endpoint::Path(p) => p.display().to_string(),
+    };
+    raw.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+/// File holding the daemon's user token for `endpoint`. Keyed by the endpoint rather than the
+/// data folder: a dev app and a dev daemon agree on the endpoint even when only one of them
+/// sets `KELPIE_DATA_DIR`.
+pub fn auth_token_path(endpoint: &Endpoint) -> std::path::PathBuf {
+    data_base().join("Kelpie").join("auth").join(format!("{}.token", endpoint_key(endpoint)))
+}
+
+/// The user token the running daemon wrote for `endpoint`, if readable.
+pub fn read_user_token(endpoint: &Endpoint) -> Option<String> {
+    let t = std::fs::read_to_string(auth_token_path(endpoint)).ok()?;
+    let t = t.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+/// Writes the user token readable by this OS user only.
+pub fn write_user_token(endpoint: &Endpoint, token: &str) -> io::Result<()> {
+    let path = auth_token_path(endpoint);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    use std::io::Write as _;
+    opts.open(&path)?.write_all(token.as_bytes())
+}
+
+/// `auth` params for a command-line client. Inside a session of this daemon it speaks for that
+/// session: with its token, or — when the token was stripped (some agents drop variables named
+/// `*TOKEN*` from the programs they run) — as an unverified claim the daemon accepts for hook
+/// reports only. Never falls back to the user token there. Elsewhere: the user token.
+pub fn cli_auth_params(endpoint: &Endpoint) -> Option<serde_json::Value> {
+    let id = std::env::var("KELPIE_SESSION_ID").ok().filter(|s| !s.is_empty());
+    let this_daemon = std::env::var(SESSION_ENDPOINT_ENV).map_or(true, |e| e == endpoint_key(endpoint));
+    if let (Some(id), true) = (id, this_daemon) {
+        return Some(match std::env::var(SESSION_TOKEN_ENV).ok().filter(|t| !t.is_empty()) {
+            Some(token) => serde_json::json!({"session_id": id, "token": token}),
+            None => serde_json::json!({"session_id": id}),
+        });
+    }
+    user_auth_params(endpoint)
+}
+
+/// `auth` params with the user token, wherever the caller runs.
+pub fn user_auth_params(endpoint: &Endpoint) -> Option<serde_json::Value> {
+    read_user_token(endpoint).map(|token| serde_json::json!({"token": token}))
 }
 
 /// The project's name before it was renamed to Kelpie: the data folder and credential-store

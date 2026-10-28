@@ -1,4 +1,4 @@
-import { Match, Show, Switch, createEffect, createMemo, on, onMount } from "solid-js";
+import { Match, Show, Switch, createEffect, createMemo, lazy, on, onMount } from "solid-js";
 import { errorText } from "../lib/i18n";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { store } from "../lib/store";
@@ -13,7 +13,6 @@ import { Dashboard } from "./dashboard";
 import { SettingsPage } from "./settings/settings-page";
 import { Tips } from "./tips";
 import { setEditorTheme } from "../lib/codemirror";
-import { Board } from "./board";
 import { WorktreeDialog } from "./worktree-dialog";
 import { NewSessionMenu } from "./new-session-menu";
 import { Welcome } from "./welcome";
@@ -22,12 +21,15 @@ import { FloatingTerminal } from "./floating-terminal";
 import { LayoutMenuHost } from "./layout-menu";
 import { RunsPage } from "./runs-page";
 import { RemoteDialog } from "./remote-dialog";
+import { RootUserDialogHost } from "./root-user-dialog";
 import { HostsPage } from "./hosts-page";
 import { initSshHosts, vault } from "../lib/ssh-hosts";
 import { MobileApprovals } from "./settings/mobile-settings";
 import { daemon as daemonCall } from "../lib/ipc";
 import { loadSshConfigPath, remoteConfigure } from "../lib/remote";
 import { initRuns } from "../lib/runs";
+import { initSessionUsage } from "../lib/session-usage";
+import { initReviewWatch } from "../lib/review-queue";
 import { setCovering } from "../lib/overlays";
 import { allViews, setLinkOpener } from "../lib/terminal-host";
 import { isLocalUrl, openBrowser } from "../lib/browser";
@@ -37,6 +39,18 @@ import { loadPlugins, syncPluginAgents } from "../lib/plugins";
 import { initVoice } from "../lib/voice";
 import { applyLocale } from "../lib/i18n";
 import { VoicePill } from "./voice";
+import { startUpdater } from "../lib/updater";
+import { CHECKPOINT_API } from "../lib/checkpoint-api";
+import { initNotifySync } from "../lib/notify-sync";
+import { initLimits } from "../lib/limits";
+
+const Board = lazy(() => import("./board").then((m) => ({ default: m.Board })));
+const FinishDialog = lazy(() => import("./finish-dialog"));
+const ReviewWithDialog = lazy(() => import("./review-with-dialog"));
+const TryDialog = lazy(() => import("./try-dialog"));
+const UpdateDialog = lazy(() => import("./update-dialog"));
+const QuickAnswer = lazy(() => import("./quick-answer"));
+const CostPage = lazy(() => import("./cost-page"));
 
 /** Tells the daemon which palette to answer terminal colour queries with. */
 function syncDaemonTheme() {
@@ -48,6 +62,9 @@ function syncDaemonTheme() {
 
 export function App() {
   createEffect(syncDaemonTheme);
+  startUpdater();
+  initNotifySync();
+  initLimits();
   createEffect(() => applyLocale(store.state.settings.language));
   // Plugin agents go to the daemon on every connection (it may have restarted without them).
   createEffect(() => store.connected() && void syncPluginAgents(true));
@@ -62,6 +79,18 @@ export function App() {
   createEffect(() => {
     const mode = store.state.settings.keepAwake ?? "off";
     if (store.connected()) void daemon("daemon.set_awake", { mode }).catch(() => {});
+  });
+  createEffect(() => {
+    const enabled = store.state.settings.prioritizeVisible ?? true;
+    if (store.connected()) void daemon("daemon.set_priority", { enabled }).catch(() => {});
+  });
+  createEffect(() => {
+    const on = store.state.settings.checkpoints ?? false;
+    if (store.connected() && store.daemonApi() >= CHECKPOINT_API) void daemon("checkpoint.set_enabled", { enabled: on }).catch(() => {});
+  });
+  createEffect(() => {
+    const on = store.state.settings.agentsScripting ?? true;
+    if (store.connected()) void daemon("daemon.set_policy", { agents_control_others: on }).catch(() => {});
   });
   // A host's terminal theme changed: repaint the terminals (those on that host pick it up).
   const hostThemes = createMemo(() => vault().hosts.map((h) => `${h.alias}=${h.terminalTheme}`).join("|"));
@@ -89,6 +118,8 @@ export function App() {
   });
   onMount(() => {
     initRuns();
+    initSessionUsage();
+    initReviewWatch();
     void loadSshConfigPath().catch(() => {});
     void initSshHosts();
     void loadPlugins();
@@ -135,6 +166,12 @@ export function App() {
         <Match when={store.overlay() === "remote"}><RemoteDialog /></Match>
         <Match when={store.overlay() === "hosts"}><HostsPage /></Match>
         <Match when={store.overlay() === "worktree"}><WorktreeDialog /></Match>
+        <Match when={store.overlay() === "update"}><UpdateDialog /></Match>
+        <Match when={store.overlay() === "finish"}><FinishDialog /></Match>
+        <Match when={store.overlay() === "review"}><ReviewWithDialog /></Match>
+        <Match when={store.overlay() === "try"}><TryDialog /></Match>
+        <Match when={store.overlay() === "answer"}><QuickAnswer /></Match>
+        <Match when={store.overlay() === "cost"}><CostPage /></Match>
         <Match when={["palette", "quickopen", "jump"].includes(store.overlay() ?? "") && store.overlay()} keyed>
           {(o) => <Palette scope={o === "quickopen" ? "files" : o === "jump" ? "sessions" : "all"} />}
         </Match>
@@ -142,6 +179,7 @@ export function App() {
       <Show when={store.state.settings.floatingTerminal && store.state.floating?.open}>
         <FloatingTerminal />
       </Show>
+      <RootUserDialogHost />
       <ContextMenuHost />
       <LayoutMenuHost />
       <MobileApprovals />
@@ -151,7 +189,7 @@ export function App() {
           <div class="toast">
             <span>{errorText(t().text)}</span>
             <Show when={t().action}>
-              {(a) => <button class="btn" style={{ height: "24px", "margin-left": "10px" }} onClick={() => a().run()}>{a().label}</button>}
+              {(a) => <button class="btn" style={{ height: "24px", "margin-left": "10px" }} onClick={(e) => a().run(e)}>{a().label}</button>}
             </Show>
           </div>
         )}

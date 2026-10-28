@@ -1,0 +1,35 @@
+{
+  "application": "Kelpie",
+  "app_version": "0.1.5",
+  "platform": "Windows 10",
+  "native": true,
+  "viewport": [1600, 1000],
+  "browser_window_capture": [1616, 1039],
+  "projects": ["atlas-commerce", "beacon-api", "orbit-mobile", "prism-design", "harbor-infra", "pulse-analytics", "relay-workers", "field-notes"],
+  "worktrees": ["feature/coupon-validation", "fix/shipping-threshold"],
+  "screenshots": ["workspace", "omp", "codex", "claude", "powershell", "new-session", "dashboard", "layouts", "terminal-menu", "floating", "chat", "composer", "board", "worktree-dialog", "review-notes", "changes", "editor", "markdown", "csv", "plan", "search", "inbox", "automations", "settings", "terminal-settings", "agents", "shortcuts", "light", "vietnamese", "chatgpt"],
+  "chat_agent": "omp",
+  "agent_views": {
+    "omp": "Real read-only checkout review in the terminal; real model response in chat.",
+    "codex": "Real sign-in interface with a clean CODEX_HOME; no completed Codex task claimed.",
+    "claude": "Real Claude Code terminal; no model turn requested.",
+    "powershell": "PowerShell 7.6.9, real smoke assertions and checkout quote output.",
+    "chatgpt": "Real signed-out chatgpt.com website beside OMP in a native child webview. Cookie rejection was performed manually before capture."
+  },
+  "scenario_data": "Synthetic local repositories and CSV values; seeded board stages, worktree comments, release checklists, review note, inbox samples and disabled automations. No fake agent responses or private conversation history.",
+  "capture_process": "Base shell/chat walkthrough and agent gallery were exercised in separate isolated native app sessions. Images were selected after visual review. WebDriver captures app views; PrintWindow captures the browser split including the native child webview. No UI pixels were fabricated or composited.",
+  "checks": [
+    ["eight project smoke scripts passed", true, ""],
+    ["both worktree smoke scripts passed", true, ""],
+    ["generator refused an existing nonempty root without overwriting its manifest", true, ""],
+    ["real checkout output reached the daemon terminal", true, ""],
+    ["Plan checkbox changed the actual spec and toggling back restored it", true, ""],
+    ["real shell approval prompt appeared and was answered", true, ""],
+    ["OMP read tools and a completed answer appeared in the terminal", true, ""],
+    ["OMP produced a completed answer in chat", true, ""],
+    ["Codex sign-in, Claude Code and PowerShell interfaces were observed", true, ""],
+    ["ChatGPT page title and native rendered content were observed", true, ""],
+    ["30 unique README screenshots have valid dimensions and local paths", true, ""],
+    ["rendered README galleries opened with no broken images or horizontal overflow", true, ""]
+  ]
+}

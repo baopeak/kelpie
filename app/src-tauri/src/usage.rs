@@ -59,7 +59,7 @@ fn window_label(minutes: u64) -> String {
 }
 
 /// RFC 3339 / ISO-8601 UTC timestamp → ms (enough of the format for these APIs).
-fn parse_iso_ms(s: &str) -> Option<u64> {
+pub(crate) fn parse_iso_ms(s: &str) -> Option<u64> {
     let (date, rest) = s.split_once('T')?;
     let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
     let (y, mo, da) = (d.next()??, d.next()??, d.next()??);

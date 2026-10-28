@@ -8,6 +8,8 @@ import { basename, chordLabel, relTime } from "../lib/platform";
 import { quickOpen, type QuickOpenHit } from "../lib/ipc";
 import { settingsCatalog } from "../lib/settings-catalog";
 import { quickCommandsFor, runQuickCommand } from "../lib/quick-commands";
+import { searchHistory } from "../lib/prompt-history";
+import { composeWith } from "../lib/send-to-agent";
 import { Icon, KindGlyph } from "./icons";
 import { KeyHints } from "./key-hints";
 import { StatusDot, STATUS_WORDS } from "./sidebar";
@@ -15,13 +17,14 @@ import { openWorktreeDialog } from "./worktree-dialog";
 import type { Project, SessionInfo } from "../lib/types";
 import { t, msg } from "../lib/i18n";
 
-export type SearchScope = "all" | "commands" | "sessions" | "files" | "settings";
+export type SearchScope = "all" | "commands" | "sessions" | "files" | "settings" | "history";
 const SCOPES: { id: SearchScope; label: string; prefix: string }[] = [
   { id: "all", label: msg("All"), prefix: "" },
   { id: "sessions", label: msg("Sessions"), prefix: "@" },
   { id: "files", label: msg("Files"), prefix: "#" },
   { id: "commands", label: msg("Commands"), prefix: ">" },
   { id: "settings", label: msg("Settings"), prefix: "/" },
+  { id: "history", label: msg("Prompts"), prefix: "!" },
 ];
 
 interface Item {
@@ -212,6 +215,18 @@ export function Palette(props: { scope: SearchScope }) {
       const items = commandItems(q);
       if (items.length) out.push({ title: t("Commands"), items: sc === "all" ? items.slice(0, 6) : items });
     }
+    // Earlier composer prompts of this project: choosing one reopens it in the focused session.
+    if (((sc === "all" && q) || sc === "history") && project()) {
+      const p = project()!;
+      const items = searchHistory(store.promptsFor(p.id), q, sc === "all" ? 3 : 50).map((text, i): Item => ({
+        key: `h${i}${text}`,
+        label: text.split("\n")[0].slice(0, 90),
+        hint: t("Earlier prompt"),
+        icon: () => <Icon name="history" size={14} />,
+        run: () => composeWith(p.id, text),
+      }));
+      if (items.length) out.push({ title: t("Prompt history"), items });
+    }
     if (sc === "all" || sc === "settings") {
       const items = settingsCatalog
         .map((c) => ({ c, shown: t(c.label) }))
@@ -289,6 +304,7 @@ export function Palette(props: { scope: SearchScope }) {
       files: project() ? t("Go to file in {project}…", { project: project()!.name }) : t("Go to file in project…"),
       commands: t("Run a command…"),
       settings: t("Find a setting…"),
+      history: t("Search earlier prompts…"),
     })[scope()];
 
   return (

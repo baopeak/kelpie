@@ -1,13 +1,14 @@
 {
   "name": "kelpie-app",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "i18n:check": "node scripts/i18n-check.mjs",
+    "test": "vitest run",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -42,6 +43,7 @@
     "@tauri-apps/cli": "^2.12.3",
     "typescript": "^5.9.3",
     "vite": "^8.3.4",
-    "vite-plugin-solid": "^2.11.14"
+    "vite-plugin-solid": "^2.11.14",
+    "vitest": "^5.0.5"
   }
 }

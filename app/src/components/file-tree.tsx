@@ -13,6 +13,7 @@ import { peekView } from "../lib/terminal-host";
 import type { DirEntry, Project } from "../lib/types";
 import { openContextMenu, type MenuItem } from "./context-menu";
 import { t } from "../lib/i18n";
+import { confirmDialog } from "../lib/confirm-dialog";
 
 const ROW_H = 24;
 
@@ -162,7 +163,7 @@ export function FileTree(props: { project: Project; api?: (api: FileTreeApi) => 
         {
           label: t("Move to Trash"), danger: true,
           run: async () => {
-            if (!confirm(t("Move \"{name}\" to the trash?", { name: entry.name }))) return;
+            if (!(await confirmDialog(t("Move \"{name}\" to the trash?", { name: entry.name })))) return;
             try { await deleteEntry(root(), entry.path); await load(parentOf(entry.path)); } catch (e) { store.notify(String(e)); }
           },
         },

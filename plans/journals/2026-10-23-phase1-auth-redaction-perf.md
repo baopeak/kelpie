@@ -1,0 +1,8 @@
+# 2026-10-23 — Phase 1: daemon caller auth, paste sanitiser, redaction, perf gate
+
+- Built the foundation of the multi-agent roadmap: per-endpoint user token + per-session tokens with a tiered capability table (README scripting kept, admin and `run.approve` user-only), control-character sanitising on every terminal paste, `kelpie_proto::redact` on everything sent out of a session, and a perf gate + vitest.
+- Reviewer caught real gaps the first cut missed: the CLI used a session token against a different daemon (dev scripts from a Kelpie terminal), clipboard paste bypassed the sanitiser, and the `NAME=value` redaction mangled ordinary code (`pub password: String`). Rewrote redaction around "looks like configuration" (upper-case env names, quoted values, YAML lines with a digit) and covered the reviewer's false positives in tests.
+- Codex-style env filtering strips `*TOKEN*` variables: instead of silently falling back to the user token, the daemon grants a "claimed" role limited to hook reports, so status keeps working without widening rights.
+- Perf: auth costs ~0.2 ms per new connection; redaction 1.37 ms / 63 KiB. The perf gate flagged bench +17 % — an interleaved A/B (HEAD vs working tree) showed it only with the separate CPU-priority change active (unfocused sessions yield by design); with it off the difference was noise.
+- Environment pain: C: and D: both hit 0 bytes mid-session (old scratch cargo targets, builds); moved builds to a C: target dir and cleaned up after. Several sessions edited the same tree concurrently — commit must be hunk-limited.
+- Lesson: on a shared, loaded machine only interleaved A/B comparisons say anything about regressions; absolute gate numbers did not.

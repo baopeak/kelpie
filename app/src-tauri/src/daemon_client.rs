@@ -78,6 +78,12 @@ impl DaemonClient {
                     spawned_at = None;
                     let (rx, mut tx) = stream.split();
                     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                    // First frame on the connection: the app speaks as the user (never as a
+                    // session, even when started from a Kelpie terminal). A daemon older than
+                    // tokens answers with an error the read loop ignores.
+                    if let Some(token) = kelpie_proto::read_user_token(&endpoint) {
+                        let _ = out_tx.send(Frame::json(&json!({"id": "auth", "method": "auth", "params": {"token": token, "client": "app"}})).encode());
+                    }
                     *self.out.lock() = Some(out_tx);
                     self.connected.store(true, Ordering::SeqCst);
                     self.connected_notify.notify_waiters();
@@ -272,10 +278,11 @@ pub fn daemon_exe() -> std::path::PathBuf {
     })
 }
 
-/// Starts `kelpied` next to our executable, fully detached so closing the app (or its console
-/// job on Windows) never takes the daemon — and every agent — down with it.
+/// Starts `kelpied`, fully detached so closing the app (or its console job on Windows) never
+/// takes the daemon — and every agent — down with it; on Windows from a copy outside the install
+/// folder, so updating Kelpie never has to stop it (`daemon_runtime`).
 fn spawn_daemon() -> Result<()> {
-    let exe = daemon_exe();
+    let exe = crate::daemon_runtime::runnable(&daemon_exe());
     if !exe.exists() {
         return Err(anyhow!("daemon binary not found at {}", exe.display()));
     }

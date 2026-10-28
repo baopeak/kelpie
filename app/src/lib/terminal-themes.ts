@@ -49,9 +49,9 @@ export function toXtermTheme(theme: TerminalTheme): ITheme {
     ...out,
     selectionBackground: sel,
     selectionInactiveBackground: theme.dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.08)",
-    scrollbarSliderBackground: theme.dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.10)",
-    scrollbarSliderHoverBackground: theme.dark ? "rgba(255,255,255,0.16)" : "rgba(0,0,0,0.18)",
-    scrollbarSliderActiveBackground: theme.dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
+    scrollbarSliderBackground: theme.dark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.20)",
+    scrollbarSliderHoverBackground: theme.dark ? "rgba(255,255,255,0.28)" : "rgba(0,0,0,0.30)",
+    scrollbarSliderActiveBackground: theme.dark ? "rgba(255,255,255,0.36)" : "rgba(0,0,0,0.40)",
   };
 }
 

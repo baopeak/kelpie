@@ -1,0 +1,41 @@
+/* Review cards, the Review tab and the Finish dialog. */
+.review-body { display: flex; flex-direction: column; gap: 5px; cursor: default; }
+.review-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-dim); }
+.review-add { color: var(--added); font-family: var(--font-mono); }
+.review-del { color: var(--danger); font-family: var(--font-mono); }
+.review-chip.ok { color: var(--added); border-color: var(--added); }
+.review-chip.warn { color: var(--waiting); border-color: var(--waiting); }
+.review-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.review-files { display: flex; flex-direction: column; max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+.review-file { text-align: left; padding: 2px 8px; border: 0; background: transparent; color: var(--text); font: 12px var(--font-ui); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; }
+.review-file:hover { background: var(--bg-hover); }
+
+.review-panel { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; overflow: auto; min-height: 0; flex: 1; }
+.review-item { display: flex; flex-direction: column; gap: 6px; padding: 9px 10px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-elev-2); }
+.review-item.current { box-shadow: inset 3px 0 0 var(--accent); }
+.review-item-head { display: flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; }
+.review-item-head .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+
+.review-with, .try-dialog { width: min(640px, 94vw); max-height: 88vh; overflow: auto; }
+.review-prompt { width: 100%; min-height: 140px; resize: vertical; }
+.try-prompt { width: 100%; min-height: 96px; resize: vertical; }
+.try-slots { display: flex; flex-direction: column; gap: 6px; }
+.try-slot { display: flex; gap: 6px; align-items: center; }
+.try-slot select { flex: 1; }
+
+.finish-dialog { width: min(680px, 94vw); max-height: 88vh; overflow: auto; }
+.finish-dialog h3 { margin: 12px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); }
+.finish-list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; max-height: 150px; overflow: auto; font-size: 12.5px; }
+.finish-list > div { display: flex; gap: 8px; padding: 3px 10px; border-bottom: 1px solid var(--border); }
+.finish-list > div:last-child { border-bottom: 0; }
+.finish-list .code { flex: none; width: 16px; font: 600 11px var(--font-mono); color: var(--text-dim); }
+.finish-list .added { color: var(--added); }
+.finish-list .removed { color: var(--danger); text-decoration: line-through; }
+.finish-checks { font-family: var(--font-mono); }
+.finish-note { font-size: 12.5px; line-height: 1.45; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg); color: var(--text-dim); }
+.finish-note.warn { border-color: var(--waiting); }
+.finish-note.bad { border-color: var(--danger); }
+.finish-output { font: 11px var(--font-mono); white-space: pre-wrap; max-height: 200px; overflow: auto; margin: 6px 0 0; padding: 6px 8px; background: var(--bg); border-radius: 6px; }
+.finish-steps { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--text-dim); }
+.finish-strategies { display: flex; flex-direction: column; gap: 4px; }
+.finish-strategies label { display: flex; gap: 8px; align-items: baseline; font-size: 13px; }

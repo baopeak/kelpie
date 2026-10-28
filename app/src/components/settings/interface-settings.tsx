@@ -1,9 +1,12 @@
 // Terminal, Appearance and Notifications sections.
 import { t } from "../../lib/i18n";
-import { For } from "solid-js";
+import { For, Show, Suspense, lazy } from "solid-js";
 import { store } from "../../lib/store";
+import { NOTIFY_API } from "../../lib/notify-events";
 import { terminalThemes } from "../../lib/terminal-themes";
 import { applySettings, Choice, SettingRow, Toggle } from "./setting-row";
+
+const PushSettings = lazy(() => import("./push-settings"));
 
 const s = () => store.state.settings;
 
@@ -67,6 +70,14 @@ export function AppearanceSettings() {
       <SettingRow id="word-wrap">
         <Toggle on={s().wordWrap} onChange={(on) => store.setSettings({ wordWrap: on })} />
       </SettingRow>
+      <SettingRow id="mascot">
+        <Toggle on={s().mascot !== false} onChange={(on) => store.setSettings({ mascot: on })} />
+      </SettingRow>
+      <Show when={s().mascot !== false}>
+        <SettingRow id="mascot-motion">
+          <Choice value={s().mascotMotion ?? "system"} options={[["on", t("Always")], ["system", t("Follow system")], ["off", t("Off")]]} onChange={(v) => store.setSettings({ mascotMotion: v })} />
+        </SettingRow>
+      </Show>
     </>
   );
 }
@@ -89,6 +100,10 @@ export function NotificationSettings() {
           <button class="btn" disabled={!s().tipsSeen.length} onClick={() => store.setSettings({ tips: true, tipsSeen: [] })}>{t("Show tips again")}</button>
         </div>
       </SettingRow>
+      {/* Phone channels live in the session daemon (API 12); the page loads on first use. */}
+      <Show when={store.daemonApi() >= NOTIFY_API}>
+        <Suspense><PushSettings /></Suspense>
+      </Show>
     </>
   );
 }
@@ -98,6 +113,16 @@ export function UsageSettings() {
     <>
       <SettingRow id="usage-meters">
         <Toggle on={s().usageMeters} onChange={(on) => store.setSettings({ usageMeters: on })} />
+      </SettingRow>
+      <SettingRow id="cost-cap">
+        <div class="inline-fields">
+          <input class="text-input" type="number" min="0" step="1" style={{ width: "90px" }} value={s().costCap ?? 0} title={t("US dollars (0 = off)")}
+            onChange={(e) => store.setSettings({ costCap: Math.max(0, +e.currentTarget.value || 0) })} />
+          <span class="muted-inline">{t("US dollars (0 = off)")}</span>
+        </div>
+      </SettingRow>
+      <SettingRow id="cost-cap-esc">
+        <Toggle on={s().costCapEsc ?? false} onChange={(on) => store.setSettings({ costCapEsc: on })} />
       </SettingRow>
       <SettingRow id="memory-meter">
         <Toggle on={s().memoryMeter} onChange={(on) => store.setSettings({ memoryMeter: on })} />

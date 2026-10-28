@@ -1,7 +1,7 @@
 // Typed wrappers around the Tauri commands in app/src-tauri/src.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AttachReply, BranchInfo, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, SessionInfo, UsageReport } from "./types";
+import type { AttachReply, BranchInfo, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, SessionInfo, SessionUsage, UsageReport, UsageTotals } from "./types";
 
 export const daemon = <T = unknown>(method: string, params: object = {}) =>
   invoke<T>("daemon_call", { method, params });
@@ -44,15 +44,20 @@ export const sendInput = (handle: number, data: string, binary = false) =>
 export const loadState = () => invoke<unknown>("state_load");
 export const saveState = (state: unknown) => invoke<void>("state_save", { state });
 export const stateBackup = (label: string) => invoke<string | null>("state_backup", { label });
-export const platformInfo = () => invoke<{ os: string; home: string; data_dir: string; api: number; e2e: boolean }>("platform_info");
+/** `text` with recognisable credentials masked (`kelpie_proto::redact`): for anything Kelpie
+ *  sends out of a session. */
+export const redact = (text: string) => invoke<string[]>("redact_batch", { texts: [text] }).then((r) => r[0] ?? "");
+export const platformInfo = () => invoke<{ os: string; home: string; data_dir: string; api: number; version: string; security: number; e2e: boolean }>("platform_info");
 
 export const canonicalPath = (path: string) => invoke<string>("fs_canonical", { path });
 export const isDir = (path: string) => invoke<boolean>("fs_is_dir", { path });
 export const listDir = (root: string, path: string) => invoke<DirEntry[]>("fs_list_dir", { root, path });
 export const readFile = (root: string, path: string, maxBytes?: number, asBase64 = false) =>
   invoke<FileContent>("fs_read_file", { root, path, maxBytes, asBase64 });
-export const writeFile = (root: string, path: string, content: string, expectedMtime?: number, force = false) =>
-  invoke<{ ok: boolean; conflict: boolean; mtime: number }>("fs_write_file", { root, path, content, expectedMtime, force });
+/** `expectedCksum` (POSIX `cksum` of what was read) is checked on a host, where times are whole seconds. `confine`: on a host,
+ *  the file after links must be inside the project (the editor's save does not ask for it). */
+export const writeFile = (root: string, path: string, content: string, expectedMtime?: number, force = false, expectedCksum?: string, confine?: boolean) =>
+  invoke<{ ok: boolean; conflict: boolean; mtime: number }>("fs_write_file", { root, path, content, expectedMtime, force, expectedCksum, confine });
 export const createEntry = (root: string, path: string, dir: boolean) => invoke<void>("fs_create", { root, path, dir });
 export const renameEntry = (root: string, from: string, to: string) => invoke<void>("fs_rename", { root, from, to });
 export const deleteEntry = (root: string, path: string) => invoke<void>("fs_delete", { root, path });
@@ -60,8 +65,14 @@ export const revealEntry = (root: string, path: string) => invoke<void>("fs_reve
 export const watchRoot = (root: string) => invoke<void>("fs_watch", { root });
 export const unwatchRoot = (root: string) => invoke<void>("fs_unwatch", { root });
 
-export interface QuickOpenHit { path: string; score: number; indices: number[] }
-export const quickOpen = (root: string, query: string, limit = 60) => invoke<QuickOpenHit[]>("quick_open", { root, query, limit });
+export interface QuickOpenHit { path: string; score: number; indices: number[]; is_dir: boolean }
+/** Fuzzy file search; `dirs` also returns folders (their path ends in `/`). */
+export const quickOpen = (root: string, query: string, limit = 60, dirs = false) => invoke<QuickOpenHit[]>("quick_open", { root, query, limit, dirs });
+
+/** Saves bytes (base64) in the temp folder under a known extension; the path of the file. */
+export const writeTempFile = (label: string, ext: string, base64: string) => invoke<string>("fs_write_temp", { label, ext, base64 });
+/** A picture file (dropped on the composer) as base64 with its type. */
+export const readImage = (path: string) => invoke<{ mime: string; base64: string }>("fs_read_image", { path });
 
 export interface TextHit { path: string; line: number; column: number; text: string }
 export const searchText = (root: string, query: string, regex: boolean, caseSensitive: boolean, folder?: string) =>
@@ -72,12 +83,67 @@ export const gitWorktrees = (root: string) => invoke<Worktree[]>("git_worktrees"
 export const gitWorktreeAdd = (root: string, path: string, branch: string, base?: string) => invoke<void>("git_worktree_add", { root, path, branch, base });
 export const gitWorktreePrune = (root: string) => invoke<void>("git_worktree_prune", { root });
 export const gitShowFile = (root: string, rev: string, path: string) => invoke<string | null>("git_show_file", { root, rev, path });
+export const gitHead = (root: string) => invoke<string>("git_head", { root });
 export const gitOrphanCommits = (root: string) => invoke<number>("git_orphan_commits", { root });
 export const processesAlive = (pids: number[]) => invoke<number[]>("processes_alive", { pids });
 export const gitWorktreeRemove = (root: string, path: string, force = false) => invoke<void>("git_worktree_remove", { root, path, force });
 export const gitBranchInfo = (root: string) => invoke<BranchInfo>("git_branch_info", { root });
-export const gitFileVersions = (root: string, path: string, staged: boolean) =>
-  invoke<{ original: string | null; modified: string | null }>("git_file_versions", { root, path, staged });
+export const gitFileVersions = (root: string, path: string, staged: boolean, base?: string) =>
+  invoke<{ original: string | null; modified: string | null }>("git_file_versions", { root, path, staged, base });
+
+/** What one worktree changed against the branch it will be merged into (git_finish.rs). */
+export interface ReviewChanges {
+  path: string;
+  ok: boolean;
+  error: string | null;
+  branch: string | null;
+  files: string[];
+  truncated: boolean;
+  commits: number;
+  uncommitted: number;
+  added: number;
+  deleted: number;
+  /** The change touches `.kelpie.yaml`. */
+  config_changed: boolean;
+}
+/** `names_only`: just which files changed (the overlap watch), no line or commit counts. */
+export const reviewChanges = (targets: { path: string; base: string; names_only?: boolean }[], force = false) => invoke<ReviewChanges[]>("review_changes", { targets, force });
+
+export interface FinishInspect {
+  /** The branch the worktree's HEAD is on, read by the backend; null on a detached HEAD. */
+  branch: string | null;
+  uncommitted: { path: string; status: string; size: number }[];
+  /** Folders holding a git repository of their own. */
+  embedded: string[];
+  conflicts: string[];
+  operation: string | null;
+  /** The branch's commits would conflict with the base in these files. */
+  merge_conflicts: string[];
+  base_checkout: string | null;
+  base_checkout_dirty: boolean;
+}
+export const finishInspect = (root: string, worktree: string, base: string) => invoke<FinishInspect>("finish_inspect", { root, worktree, base });
+/** Commits exactly `paths`; `extra` lists changed files that were not among them (then nothing is committed). */
+export const finishWipCommit = (worktree: string, branch: string, message: string, paths: string[]) => invoke<{ commit: string | null; extra: string[] }>("finish_wip_commit", { worktree, branch, message, paths });
+/** Cancel belongs to one worktree's Finish; `finishReset` forgets it when a Finish begins or ends. */
+export const finishCancel = (worktree: string) => invoke<void>("finish_cancel", { worktree });
+export const finishReset = (worktree: string) => invoke<void>("finish_reset", { worktree });
+export const finishRestoreBranch = (root: string, branch: string, tip: string, worktree?: string) => invoke<void>("finish_restore_branch", { root, branch, tip, worktree });
+
+export type FinishStrategy = "squash" | "merge" | "rebase";
+export interface CheckResult { command: string; ok: boolean; code: number | null; output: string }
+export type Integrated =
+  | { state: "merged"; commit: string; tip: string; checkout_updated: string | null; branch_deleted: boolean; branch_note: string | null; checks: CheckResult[] }
+  | { state: "nothing"; tip: string; branch_deleted: boolean; branch_note: string | null }
+  | { state: "conflict"; files: string[] }
+  | { state: "check_failed"; checks: CheckResult[]; cleanup_error: string | null }
+  | { state: "base_moved" }
+  | { state: "checkout_dirty"; path: string; files: string[] }
+  | { state: "worktree_changed"; files: string[] }
+  | { state: "config_blocked"; files: string[] }
+  | { state: "cancelled" };
+export const finishIntegrate = (args: { root: string; worktree: string; branch: string; base: string; strategy: FinishStrategy; message: string; checks: string[]; copy: string[]; link: string[]; allow_config_change: boolean; delete_branch: boolean }) =>
+  invoke<Integrated>("finish_integrate", { args });
 export const gitStage = (root: string, paths: string[], stage: boolean) => invoke<void>("git_stage", { root, paths, stage });
 export const gitDiscard = (root: string, paths: string[], untracked: string[]) => invoke<void>("git_discard", { root, paths, untracked });
 export const gitCommit = (root: string, message: string, amend = false) => invoke<string>("git_commit", { root, message, amend });
@@ -88,13 +154,16 @@ export const gitRepoState = (root: string) => invoke<{ operation: "merge" | "reb
 export const gitAbort = (root: string) => invoke<string>("git_abort", { root });
 export const gitBranchDelete = (root: string, branch: string, force = false) => invoke<void>("git_branch_delete", { root, branch, force });
 export const gitRefs = (root: string) => invoke<{ name: string; kind: "local" | "remote" | "tag" }[]>("git_refs", { root });
-export const gitContext = (root: string, kind: "staged" | "branch", base?: string, max?: number) => invoke<string>("git_context", { root, kind, base, max });
+export const gitContext = (root: string, kind: "staged" | "branch" | "worktree", base?: string, max?: number) => invoke<string>("git_context", { root, kind, base, max });
 export interface PullRequest { number: number; title: string; url: string; state: "OPEN" | "CLOSED" | "MERGED"; draft: boolean; base: string; checks: "passing" | "failing" | "pending" | "none"; provider?: "github" | "gitlab" }
 export const ghPrStatus = (root: string) => invoke<PullRequest | null>("gh_pr_status", { root });
 export const ghDefaultBranch = (root: string) => invoke<string | null>("gh_default_branch", { root });
 export const ghPrCreate = (root: string, title: string, body: string, base: string, draft: boolean) => invoke<string>("gh_pr_create", { root, title, body, base, draft });
 export const worktreeMaterialize = (root: string, worktree: string, copy: string[], link: string[]) =>
   invoke<{ copied: string[]; linked: string[]; skipped: { path: string; reason: string }[] }>("worktree_materialize", { root, worktree, copy, link });
+/** What `worktreeMaterialize` would bring into one fresh worktree, and how large the copies are. */
+export interface MaterializeEstimate { copy_bytes: number; copy_entries: number; copied: string[]; linked: string[]; skipped: { path: string; reason: string }[] }
+export const worktreeMaterializeEstimate = (root: string, copy: string[], link: string[]) => invoke<MaterializeEstimate>("worktree_materialize_estimate", { root, copy, link });
 export const editorsList = () => invoke<{ id: string; label: string }[]>("editors_list");
 export const editorOpen = (editor: string, path: string) => invoke<void>("editor_open", { editor, path });
 /** One-shot agent answer (no terminal), e.g. a commit message. */
@@ -110,6 +179,12 @@ export const agentLatestSession = (kind: string, cwd: string, home?: string) =>
   invoke<{ id: string; path: string } | null>("agent_latest_session", { kind, cwd, home });
 export const claudeTranscript = (sessionId: string, cwd?: string, home?: string) =>
   invoke<string[]>("agent_claude_transcript", { sessionId, cwd, home });
+/** Context, tokens and cost of one conversation, from its transcript. Null without an exact match. */
+export const sessionUsage = (a: { kind: string; agentSessionId: string; transcriptPath?: string; cwd?: string; home?: string }) =>
+  invoke<SessionUsage | null>("session_usage", a);
+/** Cost and tokens of every transcript, by local day/agent/project/model (`usage-scanned` follows a pass). */
+export const usageReport = (tzOffsetMin: number, homes?: { claude: string[]; codex: string[] }) =>
+  invoke<UsageTotals>("usage_report", { tzOffsetMin, homes });
 
 export function onEvent<T>(name: string, cb: (payload: T) => void): Promise<UnlistenFn> {
   return listen<T>(name, (e) => cb(e.payload));

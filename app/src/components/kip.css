@@ -1,0 +1,38 @@
+/* Kip, the mascot (components/brand.tsx). Nothing loops: a mood plays its entry once, then a
+   timer adds one short gesture class every few seconds. None of this runs while the window is
+   hidden or when Settings → Appearance turns motion off (by default it follows the OS's
+   animation setting). */
+.kip { display: inline-block; flex: none; line-height: 0; }
+.kip-body, .kip-act { display: block; width: 100%; transform-origin: 50% 100%; }
+.kip-act svg { display: block; width: 100%; height: auto; overflow: visible; }
+.kip-act svg .kip-ear, .kip-act svg .kip-eyes { transform-box: fill-box; transition: transform .2s ease; }
+.kip-act svg .kip-ear-l { transform-origin: 75% 95%; }
+.kip-act svg .kip-ear-r { transform-origin: 25% 95%; }
+.kip-act svg .kip-eyes { transform-origin: 50% 50%; }
+
+/* Entering a mood (once). */
+.kip.moving .kip-body { animation: kip-pop .4s cubic-bezier(.3, 1.6, .5, 1); }
+.kip.moving.kip-done .kip-body { animation: kip-hop .5s ease-out 2; }
+/* Gestures (durations match GESTURE_MS in brand.tsx). */
+.kip.moving.blink .kip-act svg .kip-eyes { animation: kip-blink .2s ease-in-out; }
+.kip.moving.twitch .kip-act svg .kip-ear-r { animation: kip-twitch .5s ease-in-out; }
+.kip.moving.bob .kip-act { animation: kip-bob .5s ease-in-out 2; }
+.kip.moving.nudge .kip-act { animation: kip-nudge .9s ease-in-out; }
+.kip.moving.hop .kip-act { animation: kip-hop .5s ease-out 2; }
+.kip.moving.breathe .kip-act { animation: kip-breathe 2.4s ease-in-out; }
+/* Pointing at Kip: ears up. */
+.kip.moving.interactive:hover .kip-act svg .kip-ear-l { transform: rotate(-9deg); }
+.kip.moving.interactive:hover .kip-act svg .kip-ear-r { transform: rotate(9deg); }
+
+@keyframes kip-pop { 0% { transform: translateY(6px) scale(.92); } 100% { transform: none; } }
+@keyframes kip-hop { 0%, 100% { transform: none; } 40% { transform: translateY(-14%); } }
+@keyframes kip-bob { 0%, 100% { transform: none; } 50% { transform: translateY(4%); } }
+@keyframes kip-nudge { 0%, 100% { transform: none; } 25% { transform: rotate(-7deg); } 55% { transform: rotate(5deg); } 80% { transform: rotate(-2deg); } }
+@keyframes kip-breathe { 0%, 100% { transform: none; } 50% { transform: scale(1.03, 1.05); } }
+@keyframes kip-blink { 50% { transform: scaleY(.1); } }
+@keyframes kip-twitch { 0%, 100% { transform: none; } 30% { transform: rotate(12deg); } 60% { transform: rotate(-4deg); } }
+
+/* In the sidebar footer, peeking over its top edge. */
+.kip-companion { flex: none; align-self: flex-end; margin: -18px 2px 0 0; padding: 0; border: 0; border-radius: 8px; background: none; cursor: pointer; }
+.kip-companion:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sidebar.collapsed .kip-companion { display: none; }

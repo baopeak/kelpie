@@ -3,7 +3,7 @@
 import { For, Show, createResource, createSignal, onMount } from "solid-js";
 import { store } from "../lib/store";
 import { CORE_AGENTS, agentPresets, kindInfo } from "../lib/agents";
-import { remoteCheck, remoteFolders, remoteHosts, remoteRoot, splitHost, type HostCheck } from "../lib/remote";
+import { remoteCheck, remoteFolders, remoteHosts, remoteRoot, splitHost, tmuxInstall, type HostCheck } from "../lib/remote";
 import { Icon } from "./icons";
 import { KeyHints } from "./key-hints";
 import { openHosts } from "./hosts-page";
@@ -118,6 +118,12 @@ export function RemoteDialog() {
             <input type="checkbox" checked={tmux()} disabled={!check()?.tmux} onChange={(e) => setTmux(e.currentTarget.checked)} />
             {t("Keep sessions running on the host with tmux (they survive dropped connections and restarts)")}
           </label>
+          <Show when={check() && !check()!.tmux}>
+            <div class="form-note">
+              {t("To keep sessions running, install tmux on the host, then connect again.")}{" "}
+              <Show when={tmuxInstall(check()!)}>{(cmd) => <code>{cmd()}</code>}</Show>
+            </div>
+          </Show>
         </Show>
         <Show when={error()}><div class="form-note error">{errorText(error())}</div></Show>
         <div class="footer">
