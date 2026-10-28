@@ -2,7 +2,8 @@
 #   pwsh scripts/capture-window.ps1 -Process kelpie -Out shot.png
 param(
   [string]$Process = "kelpie",
-  [Parameter(Mandatory = $true)][string]$Out
+  [Parameter(Mandatory = $true)][string]$Out,
+  [int]$ProcessId = 0
 )
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -17,7 +18,11 @@ public static class Win {
 }
 "@
 [Win]::SetProcessDPIAware() | Out-Null
-$p = Get-Process -Name $Process -ErrorAction Stop | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+$p = if ($ProcessId) {
+  Get-Process -Id $ProcessId -ErrorAction Stop | Where-Object { $_.MainWindowHandle -ne 0 }
+} else {
+  Get-Process -Name $Process -ErrorAction Stop | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+}
 if (-not $p) { throw "no window for process $Process" }
 $h = $p.MainWindowHandle
 $r = New-Object Win+RECT
