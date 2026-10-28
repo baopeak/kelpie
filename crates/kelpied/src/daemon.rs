@@ -1824,7 +1824,11 @@ fn create_task_worktree(run: &runs::Run, task: &runs::Task) -> Result<TaskWorktr
     let branch = format!("kelpie/{leaf}");
     let path = top.parent().unwrap_or(&top).join(format!("{name}-worktrees")).join(&leaf);
     let path_s = path.to_string_lossy().into_owned();
+    // Git can observe another add's incomplete worktree metadata while checking branches.
+    // Coordinate with other daemon runs and the desktop; copies and links stay parallel.
+    let worktree_lock = kelpie_proto::worktree_lock::acquire(&top)?;
     git(&["-C", &top.to_string_lossy(), "worktree", "add", "-b", &branch, &path_s, "HEAD"])?;
+    drop(worktree_lock);
     let brought = run.materialize.as_ref().map(|m| kelpie_proto::materialize::materialize(top.clone(), path.clone(), m.copy.clone(), m.link.clone()));
     Ok(TaskWorktree { path: path_s, branch, base, brought })
 }
@@ -2129,10 +2133,15 @@ mod tests {
         let approved = runs::Materialize { copy: vec![".env".into()], link: vec!["deps".into()] };
         let run = Arc::new(worktree_run(&repo, &["a", "b", "c", "d", "e"], Some(approved)));
         let started = Instant::now();
+        let ready = Arc::new(std::sync::Barrier::new(5));
         let jobs: Vec<_> = (0..5)
             .map(|i| {
                 let run = run.clone();
-                std::thread::spawn(move || create_task_worktree(&run, &run.tasks[i]).unwrap())
+                let ready = ready.clone();
+                std::thread::spawn(move || {
+                    ready.wait();
+                    create_task_worktree(&run, &run.tasks[i]).unwrap()
+                })
             })
             .collect();
         let made: Vec<_> = jobs.into_iter().map(|j| j.join().unwrap()).collect();

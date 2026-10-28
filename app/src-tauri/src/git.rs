@@ -33,6 +33,18 @@ pub async fn git_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> CmdResu
     run_git(&GIT_SLOTS, cwd, args, env).await
 }
 
+/// Worktree metadata is shared with daemon runs. Wait for the repository's cross-process
+/// lock off the async executor; release it before materialization or long-running checks.
+pub(crate) async fn git_worktree_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> CmdResult<GitOutput> {
+    if cwd.to_str().is_some_and(crate::remote::is_remote) {
+        return git_env(cwd, args, env).await;
+    }
+    let repo = cwd.to_path_buf();
+    let _held = tokio::task::spawn_blocking(move || kelpie_proto::worktree_lock::acquire(&repo))
+        .await.map_err(err)?.map_err(err)?;
+    git_env(cwd, args, env).await
+}
+
 /// `git` on the review pool (see `REVIEW_SLOTS`).
 pub async fn git_review(cwd: &Path, args: &[&str]) -> CmdResult<GitOutput> {
     run_git(&REVIEW_SLOTS, cwd, args, &[]).await
@@ -62,6 +74,14 @@ async fn run_git(slots: &Semaphore, cwd: &Path, args: &[&str], env: &[(&str, &st
 
 async fn git_ok(cwd: &Path, args: &[&str]) -> CmdResult<String> {
     let out = git(cwd, args).await?;
+    if !out.ok {
+        return Err(out.stderr.trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+async fn worktree_ok(cwd: &Path, args: &[&str]) -> CmdResult<String> {
+    let out = git_worktree_env(cwd, args, &[]).await?;
     if !out.ok {
         return Err(out.stderr.trim().to_string());
     }
@@ -262,7 +282,7 @@ pub struct Worktree {
 #[tauri::command]
 pub async fn git_worktrees(root: String) -> CmdResult<Vec<Worktree>> {
     let dir = guard(&root, "")?;
-    let out = git_ok(&dir, &["worktree", "list", "--porcelain"]).await?;
+    let out = worktree_ok(&dir, &["worktree", "list", "--porcelain"]).await?;
     let mut list = Vec::new();
     for block in out.split("\n\n") {
         let mut wt = Worktree { path: String::new(), head: None, branch: None, bare: false, detached: false, prunable: false };
@@ -304,14 +324,14 @@ pub async fn git_worktree_add(root: String, path: String, branch: String, base: 
     if let Some(b) = base.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         args.push(b);
     }
-    git_ok(&dir, &args).await.map(|_| ())
+    worktree_ok(&dir, &args).await.map(|_| ())
 }
 
 /// Drops worktree records whose folder is gone (after an interrupted removal).
 #[tauri::command]
 pub async fn git_worktree_prune(root: String) -> CmdResult<()> {
     let dir = guard(&root, "")?;
-    git_ok(&dir, &["worktree", "prune"]).await.map(|_| ())
+    worktree_ok(&dir, &["worktree", "prune"]).await.map(|_| ())
 }
 
 /// A file as committed at `rev` (e.g. the base of a new worktree); `None` when absent.
@@ -427,7 +447,7 @@ pub(crate) async fn remove_linked_worktree(root: &str, path: &str, force: bool) 
         args.push("--force");
     }
     args.push(path);
-    let mut removed = git_ok(&dir, &args).await.map(|_| ());
+    let mut removed = worktree_ok(&dir, &args).await.map(|_| ());
     if let Err(e) = &mut removed {
         // Git refusing cleanly leaves the worktree in use: its shared folders must stay reachable. But on
         // Windows a locked file makes it delete most of the folder and its own records first; links put

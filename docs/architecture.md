@@ -699,6 +699,9 @@ sidecars `build-release.sh` stages for each architecture before joining them wit
 when `KELPIE_TARGET` says so), and
 `scripts/release/latest_json.py` writes the manifest (`darwin-aarch64` and `darwin-x86_64` both point
 at the universal bundle) into a **draft** release; apps see it once the draft is published.
+The release job fetches the remote tag object into a separate ref before reading its
+description; a checkout-local lightweight ref must not turn annotated release notes into
+the merge commit message.
 Each runner checks only its own platform's app binary before uploading artifacts. A missing
 binary or a compiled updater test override stops the build before a draft can be published.
 
@@ -713,6 +716,15 @@ worktree remove` — never deleting the branch; a deleted folder that something 
 lingers until the handle closes, so the leftover check waits up to 3 s. `.kelpie.yaml` (setup commands, default tabs) is read from the base
 commit, shown in full, and runs only when the user opts in; approval is remembered per
 repository by the file's hash.
+
+Kelpie's local worktree commands share an OS file lock in the common Git directory
+(`kelpie-proto/src/worktree_lock.rs`). Daemon run creation, desktop add/list/remove/prune,
+and Finish scratch-worktree commands use the same lock across processes and linked
+worktrees. This prevents Git from scanning another creation's incomplete administrative
+files. The desktop waits on a blocking thread; copying/linking ignored files and running
+checks happen after the lock is released. The lock file is kept permanently so all openers
+lock the same inode. Remote Git and independently invoked external Git commands do not
+participate in this local coordination.
 
 Folder links use filesystem APIs, not a command interpreter: Unix symlinks and Windows
 mount-point reparse points (junctions). Windows targets are canonicalized and encoded as
@@ -846,9 +858,10 @@ worktrees start as clean checkouts, and the new buttons that need the daemon say
   from the Runs page's New run editor, which shows the same size line; a session's `run.create` has the
   field removed whatever shape its params have. A task records `base` (the branch the run folder was on,
   for Finish) and `brought` (structured: linked, copied, left out with the reason; the app words it). `worktree_materialize_estimate` measures the same selection
-  for the size shown before a run starts. Tasks start on blocking threads, so five worktrees with links are
-  made in parallel: about a second of git work (unit test), ready within 3 s of `run.create` including the
-  engine's one-second tick (end-to-end test).
+  for the size shown before a run starts. Tasks start on blocking threads; worktree Git metadata
+  operations are serialized per repository, while materialization and independent repositories
+  remain parallel. The five-worktree regression starts all creators together and checks that
+  each receives its approved dependency link.
 - **Review with…** (`lib/review-with.ts`, lazy dialog): a new session in the worktree with the review
   prompt (the quick command called *Review prompt*, else a built-in text; editable in the dialog), the
   instruction for `kelpied review add` (when the daemon takes notes) and the diff against the worktree's

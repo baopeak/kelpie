@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub mod materialize;
 pub mod redact;
+pub mod worktree_lock;
 pub use redact::redact;
 
 pub const PROTOCOL_VERSION: u32 = 1;

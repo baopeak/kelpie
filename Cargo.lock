@@ -1483,6 +1483,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "fsevent-sys"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2598,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2634,9 +2644,10 @@ dependencies = [
 
 [[package]]
 name = "kelpie-proto"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
+ "fs2",
  "interprocess",
  "keyring",
  "regex",
@@ -2649,7 +2660,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie-stt"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "bzip2 0.5.2",
@@ -2664,7 +2675,7 @@ dependencies = [
 
 [[package]]
 name = "kelpied"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "alacritty_terminal",
  "anyhow",

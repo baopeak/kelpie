@@ -101,7 +101,10 @@ jobs:
           mkdir -p dist
           find downloaded -type f -exec cp {} dist/ \;
           ls -l dist
-          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          # Checkout may materialize the event tag as a lightweight commit ref.
+          # Fetch its actual object into a separate ref to preserve annotated notes.
+          git fetch --no-tags origin "refs/tags/$GITHUB_REF_NAME:refs/kelpie-release/tag"
+          git for-each-ref --format='%(contents)' refs/kelpie-release/tag > notes.md
           [ -s notes.md ] || echo "Kelpie $v" > notes.md
           exe=$(ls dist/*-setup.exe | head -1)
           mac=$(ls dist/*.app.tar.gz | head -1)
