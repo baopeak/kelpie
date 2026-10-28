@@ -62,8 +62,12 @@ jobs:
       - name: The release build carries no updater test hooks
         shell: bash
         run: |
-          bin=$(ls target/release/kelpie.exe target/universal-apple-darwin/release/kelpie 2>/dev/null | head -1)
-          [ -n "$bin" ] || { echo "app binary not found"; exit 1; }
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            bin=target/release/kelpie.exe
+          else
+            bin=target/universal-apple-darwin/release/kelpie
+          fi
+          [ -f "$bin" ] || { echo "app binary not found: $bin"; exit 1; }
           if grep -a -q KELPIE_UPDATE_ENDPOINT "$bin"; then echo "$bin was built with e2e-updater"; exit 1; fi
       - uses: actions/upload-artifact@v4
         with:
