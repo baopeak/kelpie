@@ -275,6 +275,8 @@ pnpm test
 pnpm i18n:check
 ```
 
+CI exercises the Rust suite on both Windows and macOS. A local pass on one platform does not replace the other platform's checks.
+
 `cargo test --workspace` also includes the optional native speech helper. Real-app scenarios live in [scripts/e2e](scripts/e2e); inspect their prerequisites first, because some use signed-in agents, remote fixtures or paid model calls. Keep test daemons isolated from personal sessions. Performance verification is documented in [scripts/perf/README.md](scripts/perf/README.md).
 
 ### Scripting the workbench

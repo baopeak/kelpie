@@ -464,14 +464,11 @@ fn an_automation_set_off_by_another_ones_work_is_one_step_further_down_a_chain()
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(windows)]
 #[test]
 fn a_command_that_runs_too_long_is_stopped_with_what_it_started() {
     let (daemon, dir) = test_daemon("timeout");
     drop(daemon);
-    if !cfg!(windows) {
-        let _ = std::fs::remove_dir_all(dir);
-        return;
-    }
     // cmd starts ping (a grandchild) that would run for 40 s and keeps cmd's output open.
     let mut cmd = std::process::Command::new("cmd");
     cmd.args(["/d", "/c", "ping -n 40 127.0.0.1 > nul"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
