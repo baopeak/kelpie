@@ -88,7 +88,31 @@ struct Config {
 
 struct Running {
     url: String,
-    stop: Arc<Notify>,
+    stop: Arc<Generation>,
+}
+
+/// Sticky shutdown: late subscribers (including HTTP upgrades) also see cancellation.
+struct Generation {
+    stopped: tokio::sync::watch::Sender<bool>,
+}
+
+impl Generation {
+    fn new() -> Self {
+        Self { stopped: tokio::sync::watch::channel(false).0 }
+    }
+
+    fn cancel(&self) {
+        self.stopped.send_replace(true);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        *self.stopped.borrow()
+    }
+
+    async fn cancelled(&self) {
+        let mut stopped = self.stopped.subscribe();
+        let _ = stopped.wait_for(|stopped| *stopped).await;
+    }
 }
 
 struct Pending {
@@ -196,9 +220,13 @@ impl Mobile {
         })
     }
 
-    /// What the device may do now, from its record as it stands (None once revoked).
+    /// What the device may do now (None while disabled or once revoked).
     fn permission(&self, id: &str) -> Option<Permission> {
-        self.config.lock().devices.iter().find(|d| d.id == id).map(|d| if d.can_write { Permission::Write } else { Permission::Read })
+        let c = self.config.lock();
+        if !c.enabled {
+            return None;
+        }
+        c.devices.iter().find(|d| d.id == id).map(|d| if d.can_write { Permission::Write } else { Permission::Read })
     }
 
     /// Whether `ip` has failed to pair too often lately.
@@ -231,6 +259,9 @@ impl Mobile {
     fn device_for(&self, token: &str) -> Option<Device> {
         let hash = sha256_hex(token);
         let mut c = self.config.lock();
+        if !c.enabled {
+            return None;
+        }
         // Every entry is compared, whatever matches, in constant time.
         let mut found = None;
         for d in c.devices.iter_mut() {
@@ -316,10 +347,10 @@ impl Mobile {
     }
 
     pub fn disable(&self) {
-        if let Some(r) = self.running.lock().take() {
-            r.stop.notify_waiters();
-        }
         self.config.lock().enabled = false;
+        if let Some(r) = self.running.lock().take() {
+            r.stop.cancel();
+        }
         *self.code.lock() = None;
         self.save();
     }
@@ -344,12 +375,12 @@ pub async fn enable(daemon: Arc<Daemon>, params: Value) -> Result<Value> {
         if let Some(v) = path("key") {
             c.key = v;
         }
+        if let Some(r) = m.running.lock().take() {
+            r.stop.cancel();
+        }
         c.enabled = true;
     }
     m.save();
-    if let Some(r) = m.running.lock().take() {
-        r.stop.notify_waiters();
-    }
     match start(daemon.clone()).await {
         Ok(_) => *m.last_error.lock() = None,
         Err(e) => {
@@ -388,7 +419,7 @@ async fn start(daemon: Arc<Daemon>) -> Result<String> {
         _ => None,
     };
     let url = format!("{}://{ip}:{port}/", if tls.is_some() { "https" } else { "http" });
-    let stop = Arc::new(Notify::new());
+    let stop = Arc::new(Generation::new());
     let app = Router::new()
         .route("/", get(page))
         .route("/app.js", get(page))
@@ -397,32 +428,49 @@ async fn start(daemon: Arc<Daemon>) -> Result<String> {
         .route("/icon.svg", get(page))
         .route("/pair", post(pair))
         .route("/ws", get(socket))
-        .with_state(daemon.clone());
+        .with_state(daemon.clone())
+        .layer(axum::Extension(stop.clone()));
     let stop2 = stop.clone();
+    {
+        let c = daemon.mobile.config.lock();
+        if !c.enabled {
+            bail!("mobile access was disabled while starting");
+        }
+        if let Some(old) = daemon.mobile.running.lock().replace(Running { url: url.clone(), stop: stop.clone() }) {
+            old.stop.cancel();
+        }
+    }
     tokio::spawn(async move {
         loop {
             let accepted = tokio::select! {
-                _ = stop2.notified() => break,
+                biased;
+                _ = stop2.cancelled() => break,
                 a = listener.accept() => a,
             };
             let Ok((tcp, peer)) = accepted else { continue };
             // Who is calling, for the pairing limiter.
             let app = app.clone().layer(axum::Extension(ConnectInfo(peer)));
             let tls = tls.clone();
+            let connection_stop = stop2.clone();
             tokio::spawn(async move {
-                let svc = hyper_util::service::TowerToHyperService::new(app);
-                let builder = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
-                let _ = match tls {
-                    Some(acceptor) => match acceptor.accept(tcp).await {
-                        Ok(s) => builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(s), svc).await,
-                        Err(_) => return,
-                    },
-                    None => builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(tcp), svc).await,
-                };
+                tokio::select! {
+                    biased;
+                    _ = connection_stop.cancelled() => {}
+                    _ = async move {
+                        let svc = hyper_util::service::TowerToHyperService::new(app);
+                        let builder = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+                        let _ = match tls {
+                            Some(acceptor) => match acceptor.accept(tcp).await {
+                                Ok(s) => builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(s), svc).await,
+                                Err(_) => return,
+                            },
+                            None => builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(tcp), svc).await,
+                        };
+                    } => {}
+                }
             });
         }
     });
-    *daemon.mobile.running.lock() = Some(Running { url: url.clone(), stop });
     tracing::info!("mobile access on {url}");
     Ok(url)
 }
@@ -513,11 +561,14 @@ fn same_origin(headers: &HeaderMap) -> bool {
     }
 }
 
-async fn socket(State(daemon): State<Arc<Daemon>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+async fn socket(State(daemon): State<Arc<Daemon>>, axum::Extension(generation): axum::Extension<Arc<Generation>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    if generation.is_cancelled() || !daemon.mobile.config.lock().enabled {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     if !same_origin(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    ws.max_message_size(256 * 1024).on_upgrade(move |s| client(daemon, s))
+    ws.max_message_size(256 * 1024).on_upgrade(move |s| client(daemon, s, generation))
 }
 
 fn sessions(daemon: &Daemon) -> Value {
@@ -791,12 +842,19 @@ impl Conn {
     }
 }
 
-async fn client(daemon: Arc<Daemon>, mut ws: WebSocket) {
-    // First message: the device token.
-    let token = match tokio::time::timeout(Duration::from_secs(10), ws.recv()).await {
-        Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<Value>(&t).ok().and_then(|v| v["token"].as_str().map(str::to_string)),
-        _ => None,
+async fn client(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Generation>) {
+    // Cancellation covers authentication too, including an upgrade completed before disable.
+    let token = tokio::select! {
+        biased;
+        _ = generation.cancelled() => return,
+        token = tokio::time::timeout(Duration::from_secs(10), ws.recv()) => match token {
+            Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<Value>(&t).ok().and_then(|v| v["token"].as_str().map(str::to_string)),
+            _ => None,
+        },
     };
+    if generation.is_cancelled() {
+        return;
+    }
     let Some(device) = token.and_then(|t| daemon.mobile.device_for(&t)) else {
         close(&mut ws, NOT_PAIRED, "not paired").await;
         return;
@@ -805,6 +863,7 @@ async fn client(daemon: Arc<Daemon>, mut ws: WebSocket) {
     let id = next_client_id();
     let (tx, rx) = mpsc::unbounded_channel();
     daemon.register_client(id, tx.clone());
+    daemon.set_client_role(id, &crate::auth::Role::User);
     let (out, mut out_rx) = mpsc::channel(16);
     let dirty = Arc::new(Notify::new());
     let mut adapter = tokio::spawn(adapt(daemon.clone(), rx, out.clone(), dirty.clone()));
@@ -814,7 +873,12 @@ async fn client(daemon: Arc<Daemon>, mut ws: WebSocket) {
     if let Some((_, older)) = daemon.mobile.connections.lock().insert(device.id.clone(), (id, replaced.clone())) {
         older.notify_one();
     }
-    serve(&mut conn, &mut ws, &device, &mut out_rx, &dirty, &mut adapter, &replaced).await;
+    // Dropping serve cancels an in-flight request/send, then the common cleanup still runs.
+    tokio::select! {
+        biased;
+        _ = generation.cancelled() => {}
+        _ = serve(&mut conn, &mut ws, &device, &mut out_rx, &dirty, &mut adapter, &replaced, &generation) => {}
+    }
     adapter.abort();
     {
         let mut open = daemon.mobile.connections.lock();
@@ -825,7 +889,10 @@ async fn client(daemon: Arc<Daemon>, mut ws: WebSocket) {
     conn.end();
 }
 
-async fn serve(conn: &mut Conn, ws: &mut WebSocket, device: &Device, out_rx: &mut mpsc::Receiver<String>, dirty: &Notify, adapter: &mut tokio::task::JoinHandle<()>, replaced: &Notify) {
+async fn serve(conn: &mut Conn, ws: &mut WebSocket, device: &Device, out_rx: &mut mpsc::Receiver<String>, dirty: &Notify, adapter: &mut tokio::task::JoinHandle<()>, replaced: &Notify, generation: &Generation) {
+    if generation.is_cancelled() {
+        return;
+    }
     let mut revoked = conn.daemon.mobile.revoked.subscribe();
     let first = conn.publish(true).expect("forced");
     let hello = json!({
@@ -836,6 +903,10 @@ async fn serve(conn: &mut Conn, ws: &mut WebSocket, device: &Device, out_rx: &mu
         return;
     }
     loop {
+        // Also check synchronously: a busy socket can keep this future ready without yielding.
+        if generation.is_cancelled() {
+            return;
+        }
         tokio::select! {
             r = revoked.recv() => {
                 if let Some((code, reason)) = closing(r, &device.id) {
@@ -864,6 +935,9 @@ async fn serve(conn: &mut Conn, ws: &mut WebSocket, device: &Device, out_rx: &mu
                 let Some(Ok(msg)) = msg else { return };
                 let Message::Text(text) = msg else { continue };
                 let Ok(req) = serde_json::from_str::<Value>(&text) else { continue };
+                if generation.is_cancelled() {
+                    return;
+                }
                 // Every request is checked against the device's record as it is now.
                 let Some(granted) = conn.daemon.mobile.permission(&device.id) else {
                     close(ws, NOT_PAIRED, "revoked").await;
@@ -1067,6 +1141,7 @@ mod tests {
         daemon.insert_for_test(Entry::Chat(chat.clone()));
         let device = Device { id: "phone".into(), name: "Phone".into(), token_sha256: String::new(), can_write: true, created_at: 0, last_seen: 0 };
         daemon.mobile.config.lock().devices.push(device);
+        daemon.mobile.config.lock().enabled = true;
         let (tx, _rx) = mpsc::unbounded_channel();
         let (out_tx, out) = mpsc::channel(16);
         let conn = Conn { daemon: daemon.clone(), device: "phone".into(), id: 1, tx, out: out_tx, followed: HashMap::new(), watched: HashSet::new(), chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), list: None, rev: 0 };
@@ -1083,6 +1158,163 @@ mod tests {
         async fn ask_write(&mut self, req: Value) -> Value {
             self.ask(Permission::Write, req).await
         }
+    }
+
+    /// Real loopback transports, isolated from the user's daemon and mobile settings.
+    struct NetworkRig {
+        rig: Rig,
+        dir: PathBuf,
+        addr: SocketAddr,
+    }
+
+    impl NetworkRig {
+        async fn new() -> Self {
+            let rig = rig();
+            let dir = rig.daemon.mobile.path.parent().unwrap().to_path_buf();
+            rig.daemon.mobile.config.lock().devices[0].token_sha256 = sha256_hex("test-phone-token");
+            let mut network = Self { rig, dir, addr: "127.0.0.1:0".parse().unwrap() };
+            network.restart().await;
+            network
+        }
+
+        async fn restart(&mut self) {
+            // Reserve an OS-selected port, never the daemon's default port.
+            let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            self.addr = reservation.local_addr().unwrap();
+            drop(reservation);
+            enable(self.rig.daemon.clone(), json!({"ip": "127.0.0.1", "port": self.addr.port()})).await.unwrap();
+        }
+
+        async fn http(&self) -> tokio::net::TcpStream {
+            tokio::net::TcpStream::connect(self.addr).await.unwrap()
+        }
+
+        async fn websocket(&self) -> tokio::net::TcpStream {
+            use tokio::io::AsyncWriteExt;
+            let mut tcp = self.http().await;
+            tcp.write_all(format!(
+                "GET /ws HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+                self.addr
+            ).as_bytes()).await.unwrap();
+            assert!(http_head(&mut tcp).await.starts_with("HTTP/1.1 101"));
+            tcp
+        }
+    }
+
+    impl Drop for NetworkRig {
+        fn drop(&mut self) {
+            self.rig.daemon.mobile.disable();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    async fn http_head(tcp: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut bytes = Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") {
+                bytes.push(tcp.read_u8().await.unwrap());
+                assert!(bytes.len() < 16 * 1024);
+            }
+            String::from_utf8(bytes).unwrap()
+        }).await.expect("HTTP response")
+    }
+
+    async fn phone_send(tcp: &mut tokio::net::TcpStream, value: Value) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let text = value.to_string();
+        assert!(text.len() < 126);
+        let mask = [17, 29, 43, 59];
+        let mut frame = vec![0x81, 0x80 | text.len() as u8];
+        frame.extend(mask);
+        frame.extend(text.bytes().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        tcp.write_all(&frame).await
+    }
+
+    /// None means the transport ended or the server sent a WebSocket close, not a timeout.
+    async fn phone_recv(tcp: &mut tokio::net::TcpStream) -> Option<Value> {
+        use tokio::io::AsyncReadExt;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let opcode = match tcp.read_u8().await {
+                Ok(byte) => byte & 0x0f,
+                Err(_) => return None,
+            };
+            let size = tcp.read_u8().await.ok()? & 0x7f;
+            let size = match size {
+                126 => tcp.read_u16().await.ok()? as usize,
+                127 => usize::try_from(tcp.read_u64().await.ok()?).unwrap(),
+                n => n as usize,
+            };
+            assert!(size < 1024 * 1024);
+            let mut body = vec![0; size];
+            tcp.read_exact(&mut body).await.ok()?;
+            if opcode == 8 {
+                return None;
+            }
+            assert_eq!(opcode, 1, "expected a JSON text frame");
+            Some(serde_json::from_slice(&body).unwrap())
+        }).await.expect("mobile transport must respond or close promptly")
+    }
+
+    async fn authenticate(tcp: &mut tokio::net::TcpStream) {
+        phone_send(tcp, json!({"token": "test-phone-token"})).await.unwrap();
+        assert_eq!(phone_recv(tcp).await.unwrap()["type"], "hello");
+    }
+
+    #[tokio::test]
+    async fn security_regression_mobile_disable_ends_authenticated_socket_and_output() {
+        let mut network = NetworkRig::new().await;
+        let mut phone = network.websocket().await;
+        authenticate(&mut phone).await;
+        phone_send(&mut phone, json!({"type": "input", "id": "t1", "text": "before", "req": 1})).await.unwrap();
+        assert_eq!(phone_recv(&mut phone).await.unwrap()["type"], "ack");
+        assert_eq!(network.rig.typed.writes(), vec![b"before".to_vec()]);
+
+        network.rig.daemon.mobile.disable();
+        // A queued event must not leak through an already authenticated connection.
+        network.rig.daemon.broadcast("session.updated", json!({"id": "t1"}));
+        let _ = phone_send(&mut phone, json!({"type": "input", "id": "t1", "text": "after", "req": 2})).await;
+        assert!(phone_recv(&mut phone).await.is_none(), "disabled sockets must not reply or publish events");
+        assert!(network.rig.typed.writes().is_empty(), "disable removes write authority");
+        assert!(network.rig.daemon.mobile.device_for("test-phone-token").is_none());
+        assert_eq!(network.rig.daemon.mobile.permission("phone"), None);
+
+        network.restart().await;
+        let mut fresh = network.websocket().await;
+        authenticate(&mut fresh).await;
+        phone_send(&mut fresh, json!({"type": "list", "req": 3})).await.unwrap();
+        assert!(phone_recv(&mut fresh).await.is_some(), "paired device reconnects on the new server");
+        assert!(phone_recv(&mut phone).await.is_none(), "old socket cannot revive");
+    }
+
+    #[tokio::test]
+    async fn security_regression_mobile_shutdown_is_sticky_before_websocket_authentication() {
+        let mut network = NetworkRig::new().await;
+        // The upgrade has finished, but its token has not arrived when shutdown wins.
+        let mut old = network.websocket().await;
+        network.rig.daemon.mobile.disable();
+        network.restart().await;
+        let _ = phone_send(&mut old, json!({"token": "test-phone-token"})).await;
+        assert!(phone_recv(&mut old).await.is_none(), "old generation cannot authenticate after re-enable");
+        let mut fresh = network.websocket().await;
+        authenticate(&mut fresh).await;
+    }
+
+    #[tokio::test]
+    async fn security_regression_mobile_disable_closes_accepted_http_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let network = NetworkRig::new().await;
+        let mut http = network.http().await;
+        // HEAD has no body: consuming the headers leaves an idle, established keep-alive connection.
+        let request = format!("HEAD / HTTP/1.1\r\nHost: {}\r\n\r\n", network.addr);
+        http.write_all(request.as_bytes()).await.unwrap();
+        assert!(http_head(&mut http).await.starts_with("HTTP/1.1 200"));
+        network.rig.daemon.mobile.disable();
+        let _ = http.write_all(request.as_bytes()).await;
+        let mut byte = [0];
+        let ended = tokio::time::timeout(Duration::from_secs(2), http.read(&mut byte)).await
+            .expect("disabled accepted HTTP connection must close");
+        assert!(matches!(ended, Ok(0) | Err(_)), "old HTTP connection still serves requests");
     }
 
     fn code(reply: &Value) -> Option<&str> {

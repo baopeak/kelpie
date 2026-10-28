@@ -809,9 +809,39 @@ impl Daemon {
     }
 
     pub fn broadcast(&self, event: &str, params: Value) {
-        let msg = json_out(&json!({"event": event, "params": params}));
+        self.broadcast_event(event, params, None);
+    }
+
+    fn broadcast_event(&self, event: &str, params: Value, closed_session: Option<&str>) {
+        use crate::auth::EventVisibility;
+        // Resolve session policy before locking clients, just as notes_changed does.
+        // Callers must release session-map guards before publishing an event.
+        let told: Vec<_> = self
+            .client_roles
+            .lock()
+            .clone()
+            .into_iter()
+            .filter_map(|(id, role)| {
+                let visibility = crate::auth::event_visibility(self, &role, event, &params, closed_session);
+                (!matches!(visibility, EventVisibility::Hidden)).then_some((id, visibility))
+            })
+            .collect();
+        let mut full = None;
+        let mut redacted = None;
         let clients = self.clients.lock();
-        for tx in clients.values() {
+        for (id, visibility) in told {
+            let Some(tx) = clients.get(&id) else { continue };
+            let msg = match visibility {
+                EventVisibility::Full => full.get_or_insert_with(|| json_out(&json!({"event": event, "params": &params}))),
+                EventVisibility::WithoutEnv => redacted.get_or_insert_with(|| {
+                    let mut safe = params.clone();
+                    if let Some(object) = safe.as_object_mut() {
+                        object.remove("env");
+                    }
+                    json_out(&json!({"event": event, "params": safe}))
+                }),
+                EventVisibility::Hidden => unreachable!(),
+            };
             let _ = tx.send(crate::session::Outgoing { data: msg.data.clone(), credit: None });
         }
     }
@@ -981,7 +1011,7 @@ impl Daemon {
         let (checkpoints, id, now) = (self.checkpoints.clone(), entry.spec().id, now_millis());
         let _ = std::thread::Builder::new().name("kelpie-checkpoint-drop".into()).spawn(move || checkpoints.close_session(&id, now));
         self.meta_dirty.store(true, Ordering::Relaxed);
-        self.broadcast("session.closed", json!({"handle": handle}));
+        self.broadcast_event("session.closed", json!({"handle": handle}), Some(&entry.spec().id));
         Ok(())
     }
 
@@ -1817,12 +1847,161 @@ mod tests {
         out
     }
 
+    fn event_session(daemon: &Daemon, dir: &std::path::Path, handle: u32, id: &str, restricted: bool) -> Arc<Session> {
+        let spec = SessionSpec {
+            id: id.into(),
+            cwd: dir.to_string_lossy().into_owned(),
+            restricted,
+            env: BTreeMap::from([("PRIVATE_KEY".into(), format!("{id}-secret"))]),
+            ..Default::default()
+        };
+        let session = Session::new(handle, spec, 80, 24);
+        daemon.insert_for_test(Entry::Term(session.clone()));
+        session
+    }
+
+    #[test]
+    fn security_regression_unauthenticated_and_claimed_clients_receive_no_events() {
+        use crate::auth::Role;
+        let (daemon, dir) = test_daemon("event-unauthenticated");
+        event_session(&daemon, &dir, 1, "mine", false);
+        let mut receivers = Vec::new();
+        for (id, role) in [(1, None), (2, Some(Role::Anonymous)), (3, Some(Role::Claimed("mine".into())))] {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            daemon.register_client(id, tx);
+            if let Some(role) = role {
+                daemon.set_client_role(id, &role);
+            }
+            receivers.push(rx);
+        }
+        for event in ["session.updated", "session.closed", "session.turn", "scheduled.updated", "notify.event", "meta.updated", "run.updated", "run.deleted", "automation.changed", "automation.ran", "mobile.updated", "mobile.pair_request", "checkpoint.updated"] {
+            daemon.broadcast(event, json!({"id": "mine", "handle": 1, "session": "mine", "env": {"PRIVATE_KEY": "mine-secret"}}));
+        }
+        for (index, rx) in receivers.iter_mut().enumerate() {
+            assert!(events(rx).is_empty(), "untrusted client {index} received daemon events");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn security_regression_restricted_event_stream_is_own_session_only() {
+        use crate::auth::Role;
+        let (daemon, dir) = test_daemon("event-restricted");
+        let own = event_session(&daemon, &dir, 1, "mine", true);
+        let other = event_session(&daemon, &dir, 2, "other", false);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.register_client(1, tx);
+        daemon.set_client_role(1, &Role::Session("mine".into()));
+        for session in [&own, &other] {
+            daemon.broadcast("session.updated", json!(session.info()));
+            daemon.broadcast("session.turn", turn_event(&session.info().spec.id, "turn_end", &Value::Null, None));
+        }
+        let got = events(&mut rx);
+        assert_eq!(got.len(), 2, "only the owner's update and turn may be delivered: {got:?}");
+        assert_eq!(got[0]["params"]["id"], "mine");
+        assert_eq!(got[0]["params"]["env"]["PRIVATE_KEY"], "mine-secret", "the owner's environment remains available");
+        assert_eq!(got[1]["params"]["session"], "mine");
+        daemon.broadcast("session.closed", json!({"handle": 2}));
+        assert!(events(&mut rx).is_empty(), "another session's close is not visible");
+        for event in ["notify.event", "scheduled.updated", "run.updated", "run.deleted", "automation.ran", "mobile.pair_request", "checkpoint.updated", "future.private_event"] {
+            daemon.broadcast(event, json!({"id": "mine", "session": "mine"}));
+        }
+        assert!(events(&mut rx).is_empty(), "administrative and unknown events are not a session's scripting surface");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn security_regression_scripting_events_redact_other_session_environment() {
+        use crate::auth::Role;
+        let (daemon, dir) = test_daemon("event-scripting");
+        daemon.agents_control_others.store(true, Ordering::Relaxed);
+        let own = event_session(&daemon, &dir, 1, "mine", false);
+        let other = event_session(&daemon, &dir, 2, "other", false);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.register_client(1, tx);
+        daemon.set_client_role(1, &Role::Session("mine".into()));
+        daemon.broadcast("session.updated", json!(own.info()));
+        daemon.broadcast("session.updated", json!(other.info()));
+        let got = events(&mut rx);
+        assert_eq!(got.len(), 2, "scripting clients still see both session updates");
+        assert_eq!(got[0]["params"]["env"]["PRIVATE_KEY"], "mine-secret");
+        assert_eq!(got[1]["params"]["id"], "other");
+        assert!(got[1]["params"].get("env").is_none(), "another session's environment must not enter the outgoing channel: {got:?}");
+        daemon.agents_control_others.store(false, Ordering::Relaxed);
+        daemon.broadcast("session.updated", json!(other.info()));
+        assert!(events(&mut rx).is_empty(), "turning scripting off immediately narrows an existing connection");
+        daemon.broadcast("session.updated", json!(own.info()));
+        assert_eq!(events(&mut rx).len(), 1, "its own events remain visible");
+        daemon.remove_for_test(1);
+        daemon.broadcast("session.updated", json!(other.info()));
+        assert!(events(&mut rx).is_empty(), "a vanished caller no longer has scripting reach");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn security_regression_trusted_app_keeps_full_event_payloads() {
+        use crate::auth::Role;
+        let (daemon, dir) = test_daemon("event-user");
+        let session = event_session(&daemon, &dir, 1, "mine", false);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.register_client(1, tx);
+        daemon.set_client_role(1, &Role::User);
+        let payloads = [
+            ("session.updated", json!(session.info())),
+            ("session.turn", turn_event("mine", "turn_end", &Value::Null, None)),
+            ("session.closed", json!({"handle": 1})),
+            ("notify.event", json!({"session": "mine", "kind": "waiting"})),
+            ("mobile.pair_request", json!({"id": "phone", "name": "test phone"})),
+            ("automation.changed", json!({})),
+        ];
+        for (event, params) in &payloads {
+            daemon.broadcast(event, params.clone());
+        }
+        let got = events(&mut rx);
+        assert_eq!(got.len(), payloads.len());
+        for (got, (event, params)) in got.iter().zip(&payloads) {
+            assert_eq!(got, &json!({"event": event, "params": params}));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn security_regression_session_update_and_close_preserve_owner_delivery() {
+        use crate::auth::Role;
+        let (daemon, dir) = test_daemon("event-lifecycle");
+        event_session(&daemon, &dir, 1, "mine", true);
+        event_session(&daemon, &dir, 2, "other", true);
+        let mut receivers = Vec::new();
+        for (id, role) in [(1, Role::Session("mine".into())), (2, Role::Session("other".into())), (3, Role::User)] {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            daemon.register_client(id, tx);
+            daemon.set_client_role(id, &role);
+            receivers.push(rx);
+        }
+        daemon.update_spec(1, &json!({"name": "renamed"})).unwrap();
+        for index in [0, 2] {
+            let got = events(&mut receivers[index]);
+            let updated = got.iter().find(|event| event["event"] == "session.updated").expect("owner and app receive the real spec update");
+            assert_eq!(updated["params"]["name"], "renamed");
+            assert_eq!(updated["params"]["env"]["PRIVATE_KEY"], "mine-secret");
+        }
+        assert!(events(&mut receivers[1]).is_empty(), "another restricted owner sees no update");
+        daemon.close(1).unwrap();
+        assert!(daemon.session_id_of(1).is_none());
+        for index in [0, 2] {
+            assert_eq!(events(&mut receivers[index]), vec![json!({"event": "session.closed", "params": {"handle": 1}})], "the final event keeps its existing handle-only wire shape after removal");
+        }
+        assert!(events(&mut receivers[1]).is_empty(), "another restricted owner sees no close");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn what_the_user_looks_at_is_raised_neither_to_the_app_nor_to_the_phone() {
         use notify::Kind;
         let (daemon, dir) = test_daemon("raise");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         daemon.register_client(1, tx);
+        daemon.set_client_role(1, &crate::auth::Role::User);
         let mut c = notify::Config { min_turn_s: 0, ..Default::default() };
         c.ntfy = notify::Ntfy { enabled: true, server: "http://127.0.0.1:1".into() };
         daemon.notifier.update(Some(c), &Value::Null).unwrap();

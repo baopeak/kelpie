@@ -253,6 +253,53 @@ pub fn filter_reply(d: &Daemon, role: &Role, method: &str, result: &mut Value) {
     }
 }
 
+/// Event access follows the same reach as replies; unknown/admin events are user-only.
+#[derive(Clone, Copy)]
+pub(crate) enum EventVisibility {
+    Hidden,
+    Full,
+    WithoutEnv,
+}
+
+pub(crate) fn event_visibility(d: &Daemon, role: &Role, event: &str, params: &Value, closed_session: Option<&str>) -> EventVisibility {
+    use EventVisibility::{Full, Hidden, WithoutEnv};
+    let id = match role {
+        Role::User => return Full,
+        Role::Session(id) => id,
+        Role::Anonymous | Role::Claimed(_) => return Hidden,
+    };
+    // Closing removes the session before publishing. Its authenticated owner must still
+    // receive that last event, without adding an identity field to the wire payload.
+    if event == "session.closed" && closed_session == Some(id.as_str()) {
+        return Full;
+    }
+    let Ok(Some((_, scripting, cwd))) = reach(d, role) else { return Hidden };
+    match event {
+        "session.updated" => match params.get("id").and_then(Value::as_str) {
+            Some(subject) if subject == id => Full,
+            Some(_) if scripting => WithoutEnv,
+            _ => Hidden,
+        },
+        "session.turn" => {
+            if params.get("session").and_then(Value::as_str).is_some_and(|subject| subject == id || scripting) { Full } else { Hidden }
+        }
+        "session.closed" => {
+            if scripting {
+                return Full;
+            }
+            let own = closed_session.map(|subject| subject == id).unwrap_or_else(|| {
+                params.get("handle").and_then(Value::as_u64).and_then(|h| u32::try_from(h).ok()).and_then(|h| d.session_id_of(h)).as_deref() == Some(id.as_str())
+            });
+            if own { Full } else { Hidden }
+        }
+        "meta.updated" => {
+            if params.get("path").and_then(Value::as_str).is_some_and(|path| scripting || own_folder(path, &cwd)) { Full } else { Hidden }
+        }
+        "run.updated" | "run.deleted" if scripting => Full,
+        _ => Hidden,
+    }
+}
+
 /// `path` is the session's folder or inside it, compared the way the metadata store keys
 /// folders (canonical where they exist); `..` never passes.
 fn own_folder(path: &str, cwd: &str) -> bool {

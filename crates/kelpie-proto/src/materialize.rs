@@ -143,26 +143,83 @@ pub fn link_dir(src: &Path, dst: &Path) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        // A junction needs no Developer Mode / admin rights, unlike a directory symlink.
-        // mklink rejects forward slashes ("syntax of the command is incorrect").
-        let native = |p: &Path| p.to_string_lossy().replace('/', "\\");
-        let out = std::process::Command::new("cmd")
-            .args(["/d", "/c", "mklink", "/J"])
-            .arg(native(dst))
-            .arg(native(src))
-            .creation_flags(0x0800_0000)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-        }
-        Ok(())
+        create_junction(src, dst).map_err(|e| e.to_string())
     }
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(src, dst).map_err(|e| e.to_string())
     }
+}
+
+#[cfg(windows)]
+fn create_junction(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::{
+        Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT},
+        System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_REPARSE_POINT},
+    };
+
+    // Canonicalization supplies an absolute, verbatim Unicode path, including
+    // long paths. Reparse targets use the NT prefix instead of Win32's \\?\.
+    let target = std::fs::canonicalize(src)?;
+    let wide: Vec<u16> = target.as_os_str().encode_wide().collect();
+    let target = wide.strip_prefix(&[92, 92, 63, 92]).unwrap_or(&wide);
+    let substitute_units = 4 + target.len(); // \??\ + target (UNC\... for shares)
+    let print_units = target.len();
+    let data_bytes = 8 + (substitute_units + 1 + print_units + 1) * 2;
+    // MAXIMUM_REPARSE_DATA_BUFFER_SIZE includes the eight-byte common header.
+    if data_bytes + 8 > 16 * 1024 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "junction target is too long"));
+    }
+    // REPARSE_DATA_BUFFER, with the mount-point variant. Offsets/lengths are
+    // bytes relative to PathBuffer; lengths exclude the two NUL terminators.
+    // u16 storage keeps both the header and UTF-16 names suitably aligned.
+    let mut data = Vec::<u16>::with_capacity((data_bytes + 8) / 2);
+    data.extend_from_slice(&[
+        0x0003, 0xa000, // IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003
+        data_bytes as u16, 0, // ReparseDataLength, Reserved
+        0, (substitute_units * 2) as u16,
+        ((substitute_units + 1) * 2) as u16, (print_units * 2) as u16,
+        92, 63, 63, 92, // \??\
+    ]);
+    data.extend_from_slice(target);
+    data.push(0);
+    data.extend_from_slice(target);
+    data.push(0);
+
+    // create_dir, unlike create_dir_all, atomically refuses an existing
+    // destination. Rollback below therefore owns only this newly-created dir.
+    std::fs::create_dir(dst)?;
+    let result = (|| {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(dst)?;
+        let mut returned = 0;
+        // SAFETY: file owns a live directory handle; data is an aligned,
+        // length-checked mount-point buffer and remains alive for the call.
+        // This is synchronous I/O, with no output buffer or OVERLAPPED.
+        let ok = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_SET_REPARSE_POINT,
+                data.as_ptr().cast(),
+                (data.len() * 2) as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+        // file closes before rollback, including when DeviceIoControl fails.
+    })();
+    if result.is_err() {
+        // Never recurse: remove_dir removes only the empty destination or the
+        // junction itself, not anything in the target. Preserve the I/O error.
+        let _ = std::fs::remove_dir(dst);
+    }
+    result
 }
 
 /// The entries that qualify (`(path, linked)`, links first) and the ones that do not. With a
@@ -293,6 +350,104 @@ mod tests {
         std::fs::write(repo.join("deps/pkg/a.js"), "1").unwrap();
         std::fs::write(repo.join("tracked.txt"), "t").unwrap();
         (base, repo, wt)
+    }
+
+    #[test]
+    fn security_regression_materialize_links_literal_metacharacters() {
+        let (base, repo, wt) = fixture("literal-links");
+        let names = ["deps&literal", "deps-%COMSPEC%-雪"];
+        std::fs::write(repo.join(".gitignore"), format!("deps/\n.env\n{}\n", names.join("\n"))).unwrap();
+        for name in names {
+            std::fs::create_dir(repo.join(name)).unwrap();
+            std::fs::write(repo.join(name).join("original.txt"), "unchanged").unwrap();
+        }
+        let out = materialize(repo.clone(), wt.clone(), vec![], names.iter().map(|name| (*name).into()).collect());
+        // Remove links before asserting, so failures do not leave junctions behind.
+        let contents: Vec<_> = names.iter().map(|name| std::fs::read_to_string(wt.join(name).join("original.txt"))).collect();
+        let originals: Vec<_> = names.iter().map(|name| std::fs::read_to_string(repo.join(name).join("original.txt")).unwrap()).collect();
+        for name in names {
+            let dst = wt.join(name);
+            #[cfg(windows)]
+            let _ = std::fs::remove_dir(dst);
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(dst);
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(out.linked, names, "{out:?}");
+        for content in contents {
+            assert_eq!(content.unwrap(), "unchanged", "literal destination must resolve to its source");
+        }
+        assert!(originals.iter().all(|content| content == "unchanged"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn security_regression_link_dir_never_executes_path_commands() {
+        // No environment mutation: cmd would expand the inherited TEMP variable.
+        // The only injected command is a batch file that writes a sentinel inside
+        // this isolated fixture; it has no external effects.
+        let temp = PathBuf::from(std::env::var_os("TEMP").expect("Windows TEMP"));
+        let base_name = format!("kelpie-materialize-shell-sentinel-{}", std::process::id());
+        let base = temp.join(&base_name);
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let sentinel = base.join("sentinel-executed");
+        std::fs::write(base.join("sentinel.cmd"), "@echo off\r\n@echo sentinel>\"%~dp0sentinel-executed\"\r\n").unwrap();
+        let src = base.join("source&%TEMP%").join(&base_name).join("sentinel.cmd&rem");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("original.txt"), "unchanged").unwrap();
+        let dst = base.join("literal-destination");
+        let result = link_dir(&src, &dst);
+        let executed = sentinel.exists();
+        let contents = std::fs::read_to_string(dst.join("original.txt"));
+        let original = std::fs::read_to_string(src.join("original.txt")).unwrap();
+        let _ = std::fs::remove_dir(&dst);
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(!executed, "a path must never execute the sentinel batch command");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(contents.unwrap(), "unchanged");
+        assert_eq!(original, "unchanged");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn security_regression_link_dir_supports_long_unicode_paths() {
+        let (base, repo, wt) = fixture("long-junction");
+        let mut src = repo.join("雪&%COMSPEC%");
+        let mut dst = wt.join("雪&%COMSPEC%");
+        for _ in 0..8 {
+            src.push("long-directory-component-1234567890");
+            dst.push("long-directory-component-1234567890");
+        }
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("original.txt"), "unchanged").unwrap();
+        let result = link_dir(&src, &dst);
+        let contents = std::fs::read_to_string(dst.join("original.txt"));
+        let write_result = std::fs::write(dst.join("through-link.txt"), "shared");
+        let shared = std::fs::read_to_string(src.join("through-link.txt"));
+        let original = std::fs::read_to_string(src.join("original.txt")).unwrap();
+        let _ = std::fs::remove_dir(&dst);
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(contents.unwrap(), "unchanged");
+        write_result.unwrap();
+        assert_eq!(shared.unwrap(), "shared", "destination must be a junction, not a copy");
+        assert_eq!(original, "unchanged");
+    }
+
+    #[test]
+    fn security_regression_link_dir_preserves_existing_destination() {
+        let (base, repo, wt) = fixture("existing-link-destination");
+        let dst = wt.join("existing");
+        std::fs::create_dir(&dst).unwrap();
+        std::fs::write(dst.join("keep.txt"), "destination unchanged").unwrap();
+        let result = link_dir(&repo.join("deps"), &dst);
+        let kept = std::fs::read_to_string(dst.join("keep.txt")).unwrap();
+        let original = std::fs::read_to_string(repo.join("deps/pkg/a.js")).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(result.is_err(), "an existing directory must not be replaced");
+        assert_eq!(kept, "destination unchanged");
+        assert_eq!(original, "1");
     }
 
     #[test]

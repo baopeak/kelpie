@@ -8,6 +8,7 @@
 //! daemon refuses to write a new one over it, so a damaged list is never silently replaced by an empty one.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
@@ -256,7 +257,7 @@ impl Automation {
 
     /// The hash the user approves for a command: the event that starts it, where it runs, the file that will
     /// run (the program resolved the way the daemon will start it) and every argument; for a typed shell, the
-    /// text it types. `None` for an automation that runs no command.
+    /// text it types. `None` if it runs no command or a covered file cannot be read.
     pub fn command_hash(&self) -> Option<String> {
         let mut h = Sha256::new();
         h.update(b"kelpie-command\0");
@@ -276,7 +277,7 @@ impl Automation {
                 h.update(b"\0file\0");
                 h.update(file.to_string_lossy().as_bytes());
                 h.update([0u8]);
-                h.update(file_digest(&file).as_bytes());
+                h.update(file_digest(&file)?);
             }
         } else if self.is_typed_shell() {
             h.update(b"typed\0");
@@ -310,7 +311,7 @@ impl Automation {
     pub fn approved(&self) -> bool {
         match self.command_hash() {
             Some(hash) => self.stored_approval() == Some(hash.as_str()),
-            None => true,
+            None => !self.runs_commands(),
         }
     }
 
@@ -861,15 +862,27 @@ pub fn check_command(cwd: &str, program: &str, argv: &[String]) -> Result<Analys
     }
 }
 
-/// Reads at most this much of a file into an approval hash.
-const MAX_HASHED_FILE: u64 = 4 * 1024 * 1024;
-
-fn file_digest(p: &Path) -> String {
-    match std::fs::metadata(p) {
-        Ok(m) if m.len() <= MAX_HASHED_FILE => std::fs::read(p).map_or_else(|_| "unreadable".to_string(), |b| Sha256::digest(&b).iter().map(|x| format!("{x:02x}")).collect()),
-        Ok(m) => format!("large:{}", m.len()),
-        Err(_) => "missing".to_string(),
+/// Hashes the complete file with bounded memory; an unreadable file cannot be approved.
+fn file_digest(p: &Path) -> Option<[u8; 64]> {
+    let mut file = std::fs::File::open(p).ok()?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => hash.update(&buffer[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
     }
+    // Preserve existing approvals for readable files that were already hashed in full.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = [0u8; 64];
+    for (pair, byte) in encoded.chunks_exact_mut(2).zip(hash.finalize()) {
+        pair[0] = HEX[usize::from(byte >> 4)];
+        pair[1] = HEX[usize::from(byte & 15)];
+    }
+    Some(encoded)
 }
 
 /// Files a command runs that the approval covers by content: the program when it sits in the project, the
@@ -1280,7 +1293,8 @@ impl Automations {
     pub fn approve(&mut self, id: &str, hash: &str) -> Result<Automation> {
         self.check_writable()?;
         let a = self.list.iter_mut().find(|a| a.id == id).ok_or_else(|| anyhow!("no automation {id}"))?;
-        let current = a.command_hash().ok_or_else(|| anyhow!("this automation runs no command"))?;
+        anyhow::ensure!(a.runs_commands(), "this automation runs no command");
+        let current = a.command_hash().ok_or_else(|| anyhow!("cannot read every command file; restore read access before approving"))?;
         anyhow::ensure!(current == hash, "the command changed since it was shown; check it again");
         if a.action == ActionKind::Shell {
             if let Some(sh) = &mut a.shell {

@@ -802,6 +802,69 @@ fn editing_an_approved_script_needs_approval_again() {
 }
 
 #[test]
+fn security_regression_editing_the_end_of_a_large_script_needs_approval_again() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let (dir, cwd) = project_with_scripts("large-script-edit");
+    let script = Path::new(&cwd).join("lint.py");
+    {
+        let mut file = std::fs::File::create(&script).unwrap();
+        std::io::copy(&mut std::io::repeat(b'#').take(4 * 1024 * 1024 + 1), &mut file).unwrap();
+        file.write_all(b"\nprint('before')\n").unwrap();
+    }
+    let size = std::fs::metadata(&script).unwrap().len();
+    let mut store = Automations::load(&dir);
+    let saved = store.upsert(runs_command("large", &cwd, EventKind::File, "*.md", "python", &["lint.py", "{file}"])).unwrap();
+    let approved_hash = saved.command_hash().unwrap();
+    store.approve("large", &approved_hash).unwrap();
+    let event = file_event(&cwd, &["a.md"]);
+    assert_eq!(store.on_event(&event, 1_000_000, "d", 0, NOT_BUSY).fire.len(), 1);
+    {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&script).unwrap();
+        file.seek(SeekFrom::End(-16)).unwrap();
+        file.write_all(b"print('after!')\n").unwrap();
+    }
+    assert_eq!(std::fs::metadata(&script).unwrap().len(), size);
+    assert!(!store.list[0].approved(), "same-size edits beyond 4 MiB invalidate approval");
+    let blocked = store.on_event(&event, 2_000_000, "d", 0, NOT_BUSY);
+    assert!(blocked.fire.is_empty());
+    assert_eq!(blocked.notices[0].1, CHANGED);
+    assert!(store.approve("large", &approved_hash).is_err());
+    store.approve("large", &store.list[0].command_hash().unwrap()).unwrap();
+    assert_eq!(store.on_event(&event, 3_000_000, "d", 0, NOT_BUSY).fire.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn security_regression_an_unreadable_script_cannot_be_approved() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, cwd) = project_with_scripts("unreadable-script");
+    let script = Path::new(&cwd).join("lint.py");
+    let mut store = Automations::load(&dir);
+    let saved = store.upsert(runs_command("unreadable", &cwd, EventKind::File, "*.md", "python", &["lint.py", "{file}"])).unwrap();
+    let hash = saved.command_hash().unwrap();
+    store.approve("unreadable", &hash).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&script).is_ok() {
+        // A privileged test process can bypass mode bits, so it cannot exercise EACCES.
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    let current_hash = store.list[0].command_hash();
+    let approved = store.list[0].approved();
+    let result = store.approve("unreadable", &hash);
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(current_hash.is_none());
+    assert!(!approved);
+    assert!(result.is_err());
+    assert!(store.list[0].approved(), "restoring access to unchanged bytes preserves approval");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn a_typed_shells_environment_is_part_of_its_approval() {
     let mut a = typed("shell");
     let plain = a.command_hash();

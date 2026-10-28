@@ -73,6 +73,13 @@ anything but `daemon.info` answers:
 Programs run as the same OS user and could read the user token if not sandboxed: this scopes
 what agents do through Kelpie by default; it is not a boundary against deliberate same-user code.
 
+Broadcast events are scoped before they enter a client's outgoing queue. Anonymous and
+claimed connections receive none; restricted sessions receive their own session lifecycle
+events and scoped metadata. Scripting sessions can observe other sessions only while policy
+allows it, with their `env` omitted. Administrative and unknown broadcast events are user-only.
+The close event keeps its handle-only wire shape; its removed session's identity is passed
+privately to the authorization check so the owner can still receive it.
+
 Text Kelpie types into a session as a prompt, and every paste into a terminal view (clipboard,
 drops, inserted paths, quick commands), drops control characters first (`session::typed_text`,
 `typedText` in `typed-text.ts`, applied in `TerminalHost.paste`), so quoted content cannot end a
@@ -256,6 +263,13 @@ The phone page is a client of the daemon's phone server (`mobile.rs`), not of th
 (`/ws`, JSON text messages, first message `{token}`) is registered as a daemon client through an adapter
 and may use only the verbs below. `session.update`, `session.attach`, closing, phone settings and the
 other admin methods are not verbs, so naming them reaches nothing.
+
+The internal adapter is explicitly registered as a trusted user client; the phone itself
+still has only the closed verb table below. Each server generation owns a sticky shutdown
+signal shared by the listener, accepted HTTP/TLS connections and upgraded WebSockets,
+including authentication. Disabling access revokes current permissions and cancels that
+generation's connections; enabling it again cannot revive an old socket. Paired device
+records remain available for a new connection.
 
 - **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `sub`, `unsub`, `chat_sub` need
   *read*; `input`, `key`, `answer`, `chat_answer` need *write*; anything else is `unknown_verb`. The
@@ -686,6 +700,11 @@ worktree remove` — never deleting the branch; a deleted folder that something 
 lingers until the handle closes, so the leftover check waits up to 3 s. `.kelpie.yaml` (setup commands, default tabs) is read from the base
 commit, shown in full, and runs only when the user opts in; approval is remembered per
 repository by the file's hash.
+
+Folder links use filesystem APIs, not a command interpreter: Unix symlinks and Windows
+mount-point reparse points (junctions). Windows targets are canonicalized and encoded as
+UTF-16; shell metacharacters in a directory name remain literal. A failed junction creation
+removes only its newly-created empty destination, never source contents or an existing target.
 
 ### Review queue and Finish
 

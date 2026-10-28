@@ -334,6 +334,8 @@ capped at 2 GiB / 50,000 files per worktree. The *From* field suggests local and
 branches and tags (a commit id works too). After **Remove worktree…** a notice offers to
 delete its branch (`git branch -d`; when it has unmerged commits Kelpie asks before `-D`).
 In search, typing a name that matches nothing offers **Create worktree "…"**.
+Folder names remain literal when linked, including spaces, Unicode, `&` and `%`; creating a
+Windows junction does not run the name through a shell.
 
 A worktree (or any folder) can carry a **comment** — what it is doing right now — and a board
 status. Set them from the sidebar menu (*Add comment…*) or let an agent set them:
@@ -521,6 +523,9 @@ command when you save it and says what to write instead. The approval covers the
 program, when it lives in the project): if an agent edits the script, the automation stops with a note in the inbox
 until you approve it again. A program Kelpie has no rule for (`git`, a plain `.exe`) is given the names as arguments, and the approval dialog says so in a warning: approve it only if it never runs them as commands. An agent kind of `shell` or `custom` counts as a command too (approval, and no event data
 typed into it).
+
+Approval checks read each covered file in full, not just its size or a prefix. If a covered
+file cannot be read, the command cannot be approved or run; restore read access first.
 
 Guards: an event automation runs **at most once a minute**, **at most N times a day** (default 10; you are told
 once when the limit is reached), **not while a session or command it started is working** (or in the five seconds
@@ -829,6 +834,10 @@ session's screen and — if you allow that device to type — sends replies and 
 Ctrl+C, arrows, y / n, 1–3). The list and the screen update as soon as something changes. A reply typed
 while a menu or permission prompt is waiting is refused (answer with the keys instead). Unpairing a
 device disconnects it at once.
+
+Turning Mobile off also closes existing phone connections, not just the listening port.
+Paired devices stay saved, but must reconnect after access is enabled again; an old connection
+cannot keep reading or answering prompts across that switch.
 
 ### Voice dictation
 
