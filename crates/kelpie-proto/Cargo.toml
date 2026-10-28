@@ -10,6 +10,7 @@ anyhow.workspace = true
 tokio.workspace = true
 interprocess.workspace = true
 regex = "1"
+fs2 = "0.4"
 keyring = { version = "3.6", default-features = false, features = ["windows-native", "apple-native"] }
 
 [target.'cfg(windows)'.dependencies]

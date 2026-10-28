@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::fs_ops::{err, guard, CmdResult};
-use crate::git::{git, git_env, git_review, git_worktrees, parse_status, GitOutput};
+use crate::git::{git, git_env, git_review, git_worktree_env, git_worktrees, parse_status, GitOutput};
 
 const SCAN_TTL: Duration = Duration::from_secs(30);
 const MAX_FILES: usize = 2000;
@@ -40,7 +40,11 @@ async fn plumb_env(cwd: &Path, args: &[&str], extra: &[(&str, &str)]) -> CmdResu
     full.extend_from_slice(args);
     let mut env = ENV.to_vec();
     env.extend_from_slice(extra);
-    git_env(cwd, &full, &env).await
+    if args.first() == Some(&"worktree") {
+        git_worktree_env(cwd, &full, &env).await
+    } else {
+        git_env(cwd, &full, &env).await
+    }
 }
 
 async fn plumb(cwd: &Path, args: &[&str]) -> CmdResult<GitOutput> {
