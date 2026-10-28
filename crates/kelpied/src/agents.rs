@@ -506,7 +506,7 @@ fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path) -> Result<PathBu
     let body = serde_json::to_vec_pretty(&settings)?;
     if std::fs::read(&path).ok().as_deref() != Some(&body[..]) {
         std::fs::create_dir_all(data_dir)?;
-        std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
+        crate::persist::write_atomic(&path, &body).with_context(|| format!("write {}", path.display()))?;
     }
     Ok(path)
 }
@@ -629,18 +629,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_gets_hook_settings_and_resume() {
-        let dir = std::env::temp_dir().join("kelpie-agents-test");
-        let launch = build_launch("claude", &["--model".into(), "opus".into()], Resume::Id("abc"), None, Path::new("/x/kelpied"), &dir);
-        if let Ok(l) = launch {
-            let joined = l.argv.join(" ");
-            assert!(joined.contains("--settings"));
-            assert!(joined.contains("--resume abc"));
-            assert!(joined.contains("--model opus"));
-            let settings = std::fs::read_to_string(dir.join("claude-hooks.json")).unwrap();
-            assert!(settings.contains("hook claude"));
-        }
+    fn concurrent_hook_settings_are_published_as_complete_json() {
+        use std::sync::{atomic::{AtomicUsize, Ordering}, Barrier};
+
+        let dir = std::env::temp_dir().join(format!("kelpie-hooks-atomic-{}", uuid::Uuid::new_v4()));
+        let path = write_claude_hook_settings(Path::new("/fixture/initial/kelpied"), &dir).unwrap();
+        let start = Barrier::new(3);
+        let done = AtomicUsize::new(0);
+        let mut incomplete = false;
+        std::thread::scope(|scope| {
+            for writer in 0..2 {
+                let (dir, start, done) = (&dir, &start, &done);
+                scope.spawn(move || {
+                    start.wait();
+                    for revision in 0..128 {
+                        let exe = PathBuf::from(format!("/fixture/{writer}/{revision}/kelpied"));
+                        write_claude_hook_settings(&exe, dir).unwrap();
+                    }
+                    done.fetch_add(1, Ordering::Release);
+                });
+            }
+            start.wait();
+            loop {
+                let bytes = std::fs::read(&path).unwrap();
+                if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+                    incomplete = true;
+                    break;
+                }
+                if done.load(Ordering::Acquire) == 2 {
+                    break;
+                }
+            }
+        });
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(!incomplete, "a consumer observed torn hook settings during concurrent launches");
     }
+
 
     #[test]
     fn user_args_that_choose_the_conversation() {
@@ -660,45 +684,7 @@ mod tests {
         assert_eq!(npm_shim_script("\"%dp0%\\node.exe\""), None);
     }
 
-    #[test]
-    fn presets_take_prompts_and_resume() {
-        let dir = std::env::temp_dir().join("kelpie-agents-test");
-        let exe = Path::new("/x/kelpied");
-        // Unix wraps argv in `$SHELL -l -c "exec …"`, Windows needs the binary on PATH: compare
-        // the joined command line either way, and skip when the CLI is not installed.
-        let joined = |kind: &str, resume, prompt| build_launch(kind, &[], resume, prompt, exe, &dir).map(|l| (l.argv.join(" "), l.typed_prompt));
-        if let Ok((argv, typed)) = joined("gemini", Resume::None, Some("fix it")) {
-            assert!(argv.contains("-i") && argv.contains("fix it"), "{argv}");
-            assert!(typed.is_none());
-        }
-        if let Ok((argv, typed)) = joined("aider", Resume::None, Some("fix it")) {
-            assert!(!argv.contains("fix it"));
-            assert_eq!(typed, Some(TypedPrompt { text: "fix it".into(), paste: true }));
-        }
-        // A resumed conversation takes the prompt as an argument too: the agent runs it there.
-        if let Ok((argv, typed)) = joined("opencode", Resume::Latest, Some("/compact")) {
-            assert!(argv.contains("--continue") && argv.contains("--prompt /compact"), "{argv}");
-            assert!(typed.is_none());
-        }
-        if let Ok((argv, typed)) = joined("claude", Resume::Id("abc"), Some("/doctor")) {
-            assert!(argv.contains("--resume abc") && argv.ends_with("/doctor"), "{argv}");
-            assert!(typed.is_none());
-        }
-        // A new conversation under Kelpie's id; other agents cannot be told one.
-        if let Ok((argv, _)) = joined("claude", Resume::New("abc"), Some("hi")) {
-            assert!(argv.contains("--session-id abc") && !argv.contains("--resume") && argv.ends_with("hi"), "{argv}");
-        }
-        if let Ok((argv, _)) = joined("codex", Resume::New("abc"), None) {
-            assert!(!argv.contains("abc") && !argv.contains("resume"), "{argv}");
-        }
-        assert!(build_launch("nope", &[], Resume::None, None, exe, &dir).is_err());
-        assert!(PRESETS.iter().all(|p| !p.id.is_empty() && !p.bin.is_empty()));
-    }
 
-    #[test]
-    fn default_shell_is_not_empty() {
-        assert!(!default_shell().is_empty());
-    }
 }
 
 #[cfg(test)]

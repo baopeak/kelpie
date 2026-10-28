@@ -156,6 +156,8 @@ Priority: agent hooks → bell → prompt on screen → output activity.
 - Claude Code: launched with `--settings <kelpie hooks file>` (and `--session-id`, see above);
   every hook runs `kelpied hook claude`, which reports the event (and the Claude session id,
   which changes on `/clear`) over the socket.
+  Its generated settings use compare-before-write and atomic replacement, so concurrent
+  launches never expose truncated JSON to a newly-starting agent.
 - Codex: `-c notify=[kelpied, hook, codex]` (turn completion + thread id). Codex also runs
   unsaved background threads of its own that notify too; `kelpied hook` keeps a thread id only
   when Codex saved that thread (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-…-<id>.jsonl`, the day
