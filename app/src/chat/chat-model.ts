@@ -438,6 +438,25 @@ export class ChatController {
     return this.adapter.mention?.(path) ?? `@${path}`;
   }
 
+  /** The agent's request `requestId` was answered by someone else (a phone, the first to answer wins):
+   *  its card stops asking. Each adapter names a request's card after the agent's id its own way.
+   *  `lost`: the daemon dropped an answer given here because another one had already counted, so a card
+   *  that shows what was clicked here shows what happened instead. */
+  resolvedElsewhere(requestId: string | number, lost = false) {
+    const id = String(requestId);
+    for (const key of [id, `approval-${id}`, `perm-${id}`, `elicit-${id}`]) {
+      const i = this.index.get(key);
+      const item = i == null ? undefined : this.state.items[i];
+      if (item?.kind !== "permission") continue;
+      const label = t("Answered on another device");
+      if (item.resolved && !(lost && item.resolved !== label)) continue;
+      this.resolved.set(key, label);
+      this.patch(key, (it) => {
+        if (it.kind === "permission") it.resolved = label;
+      });
+    }
+  }
+
   respond(permissionId: string, optionId: string, label: string, reply?: PermissionReply) {
     if (this.resolved.has(permissionId)) return;
     this.resolved.set(permissionId, label);

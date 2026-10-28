@@ -154,6 +154,16 @@ impl Dimensions for Size {
     }
 }
 
+/// The end of a terminal's text: logical lines, and the cursor as (line, column) among them when
+/// it is shown inside them.
+pub struct Tail {
+    pub lines: Vec<String>,
+    pub cursor: Option<(usize, usize)>,
+    /// The last line is cut off where the screen ends: it wraps onto a row that is blank, so no
+    /// line break follows it.
+    pub open_end: bool,
+}
+
 pub struct Vt {
     term: Term<Collector>,
     parser: Processor<StdSyncHandler>,
@@ -221,6 +231,20 @@ impl Vt {
     /// Plain text of the last `lines` lines (scrollback included), wrapped rows joined: what a
     /// person would copy. Used by `session.read`, *Copy context* and hand-offs.
     pub fn text_tail(&self, lines: usize) -> String {
+        let tail = self.tail_lines(lines);
+        let last = tail.lines.len().saturating_sub(1);
+        tail.lines.iter().enumerate().fold(String::new(), |mut out, (i, l)| {
+            out.push_str(l);
+            if !(tail.open_end && i == last) {
+                out.push('\n');
+            }
+            out
+        })
+    }
+
+    /// The last `lines` logical lines (wrapped rows joined, trailing blanks trimmed) and where the
+    /// cursor sits among them.
+    pub fn tail_lines(&self, lines: usize) -> Tail {
         let grid = self.term.grid();
         let cols = grid.columns();
         let screen = grid.screen_lines() as i32;
@@ -243,20 +267,34 @@ impl Vt {
             }
             first -= 1;
         }
-        let mut out = String::new();
+        let at = grid.cursor.point;
+        let cursor_shown = self.term.mode().contains(TermMode::SHOW_CURSOR);
+        let mut out = Tail { lines: Vec::new(), cursor: None, open_end: false };
+        let mut text = String::new();
+        let mut row_in_line = 0;
         for line in first..=last {
             let row = &grid[Line(line)];
+            if cursor_shown && at.line.0 == line {
+                out.cursor = Some((out.lines.len(), row_in_line * cols + at.column.0));
+            }
             for col in 0..visible_len(row, cols) {
                 let cell = &row[Column(col)];
                 if !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                    out.push(if cell.c == '\0' { ' ' } else { cell.c });
+                    text.push(if cell.c == '\0' { ' ' } else { cell.c });
                 }
             }
-            if !row[Column(cols - 1)].flags.contains(Flags::WRAPLINE) {
-                let trimmed = out.trim_end_matches(' ').len();
-                out.truncate(trimmed);
-                out.push('\n');
+            if row[Column(cols - 1)].flags.contains(Flags::WRAPLINE) {
+                row_in_line += 1;
+            } else {
+                text.truncate(text.trim_end_matches(' ').len());
+                out.lines.push(std::mem::take(&mut text));
+                row_in_line = 0;
             }
+        }
+        // A line that wraps onto a blank row ends the screen without a break.
+        if row_in_line > 0 {
+            out.lines.push(text);
+            out.open_end = true;
         }
         out
     }
@@ -558,6 +596,32 @@ mod tests {
         vt.feed(b"abcdefghijKLM");
         assert_eq!(vt.text_tail(3), "line4\nline5\nabcdefghijKLM\n");
         assert!(vt.text_tail(100).starts_with("line0\n"));
+    }
+
+    #[test]
+    fn a_last_line_that_wraps_onto_a_blank_row_is_kept() {
+        // Ten cells of text and a space that wraps: the continuation row looks blank.
+        let mut vt = Vt::new(10, 3, 100);
+        vt.feed(b"abcdefghij ");
+        assert_eq!(vt.text_tail(3), "abcdefghij");
+        assert_eq!(vt.tail_lines(3).lines, ["abcdefghij"]);
+        vt.feed(b"\r\nnext");
+        assert_eq!(vt.text_tail(3), "abcdefghij\nnext\n");
+    }
+
+    #[test]
+    fn tail_lines_place_the_cursor_among_the_lines() {
+        let mut vt = Vt::new(10, 4, 100);
+        vt.feed(b"one\r\nabcdefghijKLM");
+        let tail = vt.tail_lines(5);
+        assert_eq!(tail.lines, ["one", "abcdefghijKLM"]);
+        // The second line wrapped: the cursor is 13 cells in.
+        assert_eq!(tail.cursor, Some((1, 13)));
+        vt.feed(b"\x1b[?25l");
+        assert_eq!(vt.tail_lines(5).cursor, None, "a hidden cursor is not reported");
+        assert!(!vt.bracketed_paste());
+        vt.feed(b"\x1b[?25h\x1b[?2004h");
+        assert!(vt.bracketed_paste());
     }
 
     #[test]

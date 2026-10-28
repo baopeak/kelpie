@@ -115,6 +115,34 @@ describe("ChatController queue", () => {
     });
   });
 
+  it("an approval a phone answered first stops asking, under each adapter's card id", () => {
+    const { ctrl } = setup();
+    const card = (id: string) => ({ kind: "permission" as const, id, title: "Allow?", options: [{ id: "allow", label: "Allow" }] });
+    // Claude names the card by the request id, Codex and ACP prefix the JSON-RPC id.
+    for (const id of ["req-1", "approval-7", "perm-8", "elicit-9"]) ctrl.upsert(card(id));
+    ctrl.resolvedElsewhere("req-1");
+    ctrl.resolvedElsewhere(7);
+    ctrl.resolvedElsewhere(8);
+    ctrl.resolvedElsewhere("9");
+    for (const id of ["req-1", "approval-7", "perm-8", "elicit-9"]) expect(ctrl.state.items.find((i) => i.id === id)).toMatchObject({ resolved: "Answered on another device" });
+    // A request that was already answered here keeps its answer; one that is not on this screen is ignored.
+    ctrl.upsert(card("req-2"));
+    ctrl.respond("req-2", "allow", "Allowed");
+    ctrl.resolvedElsewhere("req-2");
+    ctrl.resolvedElsewhere("unknown");
+    expect(ctrl.state.items.find((i) => i.id === "req-2")).toMatchObject({ resolved: "Allowed" });
+    // An answer clicked here that the daemon dropped (a phone's counted) is corrected, once.
+    ctrl.upsert(card("req-3"));
+    ctrl.respond("req-3", "allow", "Allowed");
+    ctrl.resolvedElsewhere("req-3");
+    expect(ctrl.state.items.find((i) => i.id === "req-3")).toMatchObject({ resolved: "Allowed" });
+    ctrl.resolvedElsewhere("req-3", true);
+    expect(ctrl.state.items.find((i) => i.id === "req-3")).toMatchObject({ resolved: "Answered on another device" });
+    // The agent repeating the card (a replay) does not bring the question back.
+    ctrl.upsert(card("req-1"));
+    expect(ctrl.state.items.find((i) => i.id === "req-1")).toMatchObject({ resolved: "Answered on another device" });
+  });
+
   it("waits for the view to attach before sending", async () => {
     const { ctrl, calls } = setup();
     ctrl.set("ready", false);

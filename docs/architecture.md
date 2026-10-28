@@ -90,7 +90,7 @@ Frames (`crates/kelpie-proto`): `u32 LE length | u8 kind | payload`
 RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them).
 `daemon.info` reports an `api` feature level (`kelpie_proto::API_LEVEL`); an app built for a
 higher level offers to restart an older daemon still running from a previous version.
-Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request`, and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
+Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request`, `chat.resolved` (API 14: `{handle, id, request_id, by, dropped}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
 
 ## Session threading (daemon)
 
@@ -249,6 +249,91 @@ account, a home Kelpie did not create, an account that is not signed in, a diffe
 that id in the target, more than 1 GB, or more than 2000 files. The app then stops the agent and calls
 `session.set_env_restart {handle, env: {CLAUDE_CONFIG_DIR|CODEX_HOME}}`, which sets only that variable on
 a stopped terminal session and restarts it on the same conversation (undone if the restart fails).
+
+## Phone protocol (v2)
+
+The phone page is a client of the daemon's phone server (`mobile.rs`), not of the RPC pipe: a connection
+(`/ws`, JSON text messages, first message `{token}`) is registered as a daemon client through an adapter
+and may use only the verbs below. `session.update`, `session.attach`, closing, phone settings and the
+other admin methods are not verbs, so naming them reaches nothing.
+
+- **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `sub`, `unsub`, `chat_sub` need
+  *read*; `input`, `key`, `answer`, `chat_answer` need *write*; anything else is `unknown_verb`. The
+  permission is read from the device's record on every message, so a revoked or downgraded device is
+  cut off at once. A request may carry `req` (echoed in its `ack` or `error {code, reason?, message}`)
+  and, for write verbs, the `epoch` it was made under (refused as `epoch` after a daemon restart).
+- **Addressing and epoch**: sessions are addressed by `spec.id`. Handles restart at 1 and are reassigned
+  by a restart, so a write by handle could land in another session. `hello {v: 2, api, daemon_epoch, rev,
+  device, sessions, projects}`; `daemon_epoch` is random per daemon start, and a phone that sees it
+  change drops every position and frame number it holds and re-resolves its ids.
+- **The list is pushed**: the connection's adapter turns `session.updated|closed` events into a wake-up;
+  it then rebuilds the list and sends `sessions {rev, sessions, projects}` only if it changed. Nothing
+  polls. The adapter never blocks on the socket for events (only for chat lines, below) and a socket
+  that takes 30 s to accept a message is cut.
+- **Screens are state, not a stream** (`mobile/sync.rs`): `sub {id, height?, rev?}` follows a terminal
+  session. One task per followed session, shared by all its phones, waits on the session's `watch` (bumped
+  by `ingest`, a resize, and a tick that changes the prompt or the wait) and, at most once per 100 ms,
+  takes `Session::screen_view` (the last 200 logical lines, cursor, prompt, `waiting_since`, title) under
+  the session lock and hashes its rows; it ends with its last follower, and a session nobody follows costs
+  nothing. A task per phone and session diffs the latest render against the rows it last sent that device,
+  outside the lock. Frames: `screen {id, rev, base, shift, rows: [[index, text]], height, cursor, prompt,
+  waiting_since, title}`: scroll the phone's lines up by `shift`, resize to `height` (the phone's own, the
+  last rows of the render), replace the rows named. `base` is the frame it follows (`null`: the whole
+  view). A frame is reserved a place in the connection's queue (16) before the state is read, so a slow
+  socket gets the latest state, never a queue of old ones. A session whose frames average over 8 KiB
+  (a full-screen redraw, a flood of output) is followed at five frames a second. Rows are cut to 300
+  characters and, together, to 56 KiB, so a frame stays under 64 KiB.
+- **Resume**: what was last sent is kept per (device, session) for 5 minutes after the connection
+  ends. `sub` with the `rev` the phone holds carries on from it (the new connection takes the slot over,
+  the old one's task ends), anything else gets a whole first frame; this is what makes a relay↔direct
+  migration or a flaky connection cheap. A device has one connection: a newer one closes the older with
+  4409 (the page then waits until it is looked at again). Close codes: 4401 the device was removed (the
+  page forgets its token); 4408 connect again, the device stays paired (its permission changed, or the
+  connection fell behind the daemon's events and may have missed a removal, which the next connect finds
+  out); 4409 replaced. A close frame that cannot leave within 5 s is given up on. Rows are compared by text.
+- **Typing and answering** share one path with the desktop's quick answer (`Session::answer`,
+  `Session::type_message`): text goes through `typed_text` (control characters and with them a
+  `\x1b[201~` paste break-out are dropped), several lines are one bracketed paste when the program asked
+  for those, and Enter is a separate write 250 ms later (`ENTER_DELAY`: Codex takes an Enter within
+  120 ms of input as a newline). The Enter is sent only if nothing was typed meanwhile and no new
+  prompt came up (`Session::enter_if`); a phone's `input` reply waits for it, so that its next message
+  starts after this Enter instead of merging with it. `input` is refused with `prompt` while a prompt is
+  shown unless `force`; when the Enter was skipped the ack says `entered: false` (the text is on the
+  prompt line, unsent).
+  `answer {id, waiting_since, key | text, enter?}` is typed only while the session still waits on that
+  prompt, checked and written under one lock. A wait is answered once: `answered_wait` is set by `answer`
+  and by any typing (the desktop's keys included: a hook's `waiting` outlives the key press), and cleared
+  when the session stops waiting or a hook reports anything but `waiting` (a second prompt within one
+  tick is a new wait). Refusals are `stale` with `reason` `not_waiting`, `moved` or `answered`.
+- **Chat**: `chat_sub {id, since_seq?}` attaches as an observer (`ChatSession::observe`): it neither focuses
+  the chat nor marks it read, and a chat may be asked for once a second per connection. The reply is
+  small and the log follows as one output frame (nothing is encoded under the chat's lock). A
+  connection has one budget for all the chat output it has not yet taken (4 MiB); while 256 KiB of it
+  is waiting, a new `chat_sub` is refused as `busy`, so a client that does not read cannot make the
+  daemon queue logs. The log after
+  `since_seq` arrives as a delta when that is a line boundary still in the log; otherwise the last 2 000
+  lines (2 MiB) behind the handshake answers the adapters need (`PINNED_IDS`, also those still in the
+  log). Messages: `chat {id, mode: reset|delta|more|live, seq, lines}` (chunks of about 64 KiB, each
+  saying where it ends; a longer line goes alone), `chat_resolved {id, request_id, by, dropped}`,
+  `chat_resync {id}` (the daemon stopped feeding a phone that fell behind: ask again).
+  `chat_answer {id, request_id, line}` answers a question the agent put to the person and nobody has
+  answered: the daemon tracks only those from its output (Claude `control_request` `can_use_tool` and
+  `elicitation`; JSON-RPC approvals, `requestUserInput`, `session/request_permission`, elicitation) and
+  never the requests the client answers (hook callbacks, MCP messages, `fs/*`, `terminal/*`, tool calls). It
+  accepts `line` only if it is exactly that request's answer in that dialect (a `control_response` with
+  keys `type` and `response` only; a JSON-RPC response with `jsonrpc`, `id` and `result` or `error` only).
+  What reaches the agent is the parsed line written again, so a phone cannot send another kind of
+  message through this verb. Ids are compared as numbers (`7` and `7.0` are one id), the two dialects'
+  never meet. Every line written to a chat agent, the desktop's too, is checked for being an answer: the
+  first answer to a request wins, a second is dropped (`stale` for a phone), and every attached client
+  gets `chat.resolved {handle, id, request_id, by, dropped}` (API 14): `by` is who answered first
+  (`phone` or `desktop`); `dropped` means this event is about an answer that lost, so a chat view whose
+  user clicked it shows what the agent got instead. The sets of answered and pending requests are per
+  process run and forget the oldest first.
+- **Pairing** (`POST /pair`): failed attempts are counted per source address (10 a minute).
+
+Checks: `cargo test -p kelpied` (verbs, diff, sync, answers, chat) and, against a real daemon,
+`scripts/e2e/mobile_protocol.py`; the cost of eight phones is measured by `scripts/e2e/mobile_perf.py`.
 
 ## CPU priority (Windows)
 
@@ -939,7 +1024,7 @@ task's run status is the Runs engine's.
 | Browser panes | `app/src-tauri/src/browser.rs`, `browser_picker.js` | Tauri child webviews positioned over the pane (hidden while an overlay covers them). Design mode injects a picker; picks travel through a cancelled navigation to a sentinel URL, are redacted and size-capped, and the element screenshot uses the WebView2 DevTools protocol (end-to-end tests also send trusted page input through it, `browser_test_input`, dev / e2e builds only). |
 | Remote (SSH) | `app/src-tauri/src/remote.rs`, `agents.rs` `build_remote_launch` | The system OpenSSH client (on Windows `System32\OpenSSH`, never a Git Bash one from PATH): sessions run `ssh -t host` with a login shell, inside `tmux new-session -A` when available; files, search and git run as remote commands with quoted arguments. Commands never prompt: secrets come from askpass, anything else fails. |
 | SSH hosts | `app/src-tauri/src/ssh_hosts.rs`, `crates/kelpied/src/askpass.rs`, `app/src/components/hosts-page.tsx` | Saved hosts and forward rules in `<data>/ssh/hosts.json`, rendered into `<data>/ssh/config` (one `Host` per saved host, then `Match all` + `Include` of the user's config) that every Kelpie `ssh` / `scp` reads with `-F`. Passwords and key passphrases live in the OS keyring (service `Kelpie (<endpoint>)`); ssh gets them through `SSH_ASKPASS=kelpied` + `SSH_ASKPASS_REQUIRE=force` + `KELPIE_ASKPASS=<host id>` — `kelpied` answers password / passphrase prompts and declines host-key questions, which the page settles with `ssh-keyscan` fingerprints first. Connecting to a host opens a remote project on it. Port forwards are `ssh -N` children of the app (stopped with it; auto-start rules restart on launch); transfers are `scp -r -p` (SFTP). Keys, agent and known hosts go through `ssh-keygen` / `ssh-add` and the known_hosts file. `KELPIE_SSH_DIR` replaces `~/.ssh` for the tests. |
-| Phone server | `crates/kelpied/src/mobile.rs`, `crates/kelpied/mobile/` | axum on a chosen address (default port 4817), optional rustls (ring). Pairing: a one-time code shown as a QR (2 min) and approved in the app; device tokens are stored as SHA-256 and compared in constant time; Origin checks, CSP, rate limits; revoking closes the device's sockets. |
+| Phone server | `crates/kelpied/src/mobile.rs`, `crates/kelpied/mobile/` | axum on a chosen address (default port 4817), optional rustls (ring). Pairing: a one-time code shown as a QR (2 min) and approved in the app; device tokens are stored as SHA-256 and compared in constant time; Origin checks, CSP, pairing attempts limited per source address; revoking closes the device's sockets. Protocol v2 (verbs, state sync, answers, chat): `mobile/verbs.rs`, `mobile/sync.rs` and "Phone protocol (v2)". |
 | Plugins | `app/src-tauri/src/plugins.rs`, `lib/plugins.ts` | Declarative manifests (see [plugins.md](plugins.md)); approval bound to the manifest SHA-256; agents are sent to the daemon (`agent.set_custom`, kept in `custom-agents.json`). |
 | Agent setup | `app/src-tauri/src/agent_config.rs` (+ `agent_config/`), `lib/agent-setup.ts`, `components/agent-setup.tsx` | MCP servers, instruction files and skills of the agents, from their own files: Claude `~/.claude.json` / `.mcp.json`, Codex `config.toml`, Gemini `settings.json`, OpenCode `opencode.json(c)`, Cursor `.cursor/mcp.json`. One neutral `McpServer` with a codec per agent; reads happen only when the page opens. **One writer per file**: JSON and JSONC through a syntax tree (`jsonc-parser`: comments, order, indentation and unknown keys survive), TOML through `toml_edit` — the same writer `accounts.rs` uses to keep a Codex login in a file, so an MCP server copied into `config.toml` survives an account re-seed. **Trust**: a server found in a repository is `project` scope (untrusted); copying it to a user-level file needs an explicit confirmation, enforced by the app on apply, of everything it would run (argv per element, working folder, every env / header entry as the repository wrote it; relative paths are made absolute inside the project); none of its environment is carried unless opted in, and no reference to the user's variables is invented for it. A user's own environment and header values never reach the webview (names only), never a project file (they become `${VAR}`-style references in the destination's syntax, rewritten inside values too; Codex uses `env_vars`, `env_http_headers`, `bearer_token_env_var`), and are masked in every diff by position in the parsed tree. Project-scope paths (and `AGENTS.md` / `CLAUDE.md` / `GEMINI.md`, `.gemini/settings.json`, `.claude/settings.local.json`) are refused when a link or junction leads out of the project. **Writes** (one apply at a time): preview (a token over the files as read and as they would become, refused when stale) → per file, with Claude's own lock (`~/.claude.json.lock`, `mkdir`, stale after 10 s) held for `~/.claude.json`: compare with the previewed text → backup (`<data>/agent-config-backups`, private, newest 20 per file) → unique private temp file in the same folder (owner-only on unix, fsync) renamed over the target, retried and then refused, never rewritten in place → read back and parse. A write that is Kelpie's own and broken is put back (with the earlier files of the edit), but only while the file still holds what Kelpie wrote; a file another program saved since is left as it is and reported. The ACP registry (`agent_registry_fetch`) is one https GET per click (size- and time-capped); an entry becomes a custom agent (`npx` / `uvx`, an exact version; tags, ranges and URL or git specs are replaced by the registry's version or refused) that is stored in the settings and sent to the daemon with the plugin agents (`agent.set_custom`, the user's capability); it has no terminal interface, so the app starts it as a chat only. For tests only (`KELPIE_E2E`): `KELPIE_AGENT_CONFIG_HOME` replaces the user's home for every lookup (without it an end-to-end run cannot write), `KELPIE_ACP_REGISTRY_URL` moves the registry (plain http to 127.0.0.1 / localhost only), and a marker file `agent-setup-corrupt-next` corrupts the next write. |
 | Voice | `crates/kelpie-stt`, `app/src-tauri/src/voice.rs`, `lib/voice.ts` | A separate helper process: sherpa-onnx (static, offline) with a Vietnamese zipformer or Whisper; `cpal` microphone capture mixed to mono; JSON lines over stdin/stdout; models downloaded on request and verified by pinned SHA-256. Kept out of the app and daemon so the native engine can never take them down. |

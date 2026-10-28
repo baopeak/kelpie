@@ -826,7 +826,9 @@ certificate, e.g. from `tailscale cert`). **Pair a phone** shows a QR code valid
 minutes; scan it, name the phone and approve it on the computer. The phone lists every session
 grouped by *Needs you / Working / Idle / Stopped*, buzzes when one starts needing you, shows a
 session's screen and — if you allow that device to type — sends replies and keys (Enter, Esc,
-Ctrl+C, arrows, y / n, 1–3). Unpairing a device disconnects it at once.
+Ctrl+C, arrows, y / n, 1–3). The list and the screen update as soon as something changes. A reply typed
+while a menu or permission prompt is waiting is refused (answer with the keys instead). Unpairing a
+device disconnects it at once.
 
 ### Voice dictation
 

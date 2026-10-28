@@ -418,6 +418,10 @@ function createAppStore() {
         if (v && v.handle === p.handle) void v.attach(p.handle);
         break;
       }
+      case "chat.resolved":
+        // A phone (or the other window) answered the agent's request first.
+        window.dispatchEvent(new CustomEvent("kelpie:chat-resolved", { detail: p }));
+        break;
       case "meta.updated": {
         const m = p as WorkspaceMeta;
         setMeta(metaKey(m.path), m.comment || m.status ? reconcile(m) : undefined!);

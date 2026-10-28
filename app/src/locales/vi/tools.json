@@ -387,6 +387,7 @@
   "{n} files changed": "{n} file thay đổi",
   "Not sent:\n{messages}": "Chưa gửi:\n{messages}",
   "No longer needed": "Không còn cần",
+  "Answered on another device": "Đã trả lời trên thiết bị khác",
   "In the background": "Đang chạy nền",
   "Could not copy": "Không sao chép được",
   "Undo turn #{n}…": "Hoàn tác lượt #{n}…"

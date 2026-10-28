@@ -340,8 +340,10 @@ mod tests {
         };
         let pid = child.id();
         assert!(!wait_for_exit(pid, std::time::Duration::from_millis(100)), "still running after 100 ms");
+        // Reap it meanwhile: on unix an unreaped child stays a zombie that `kill(pid, 0)` still finds.
+        let reaper = std::thread::spawn(move || child.wait());
         assert!(wait_for_exit(pid, std::time::Duration::from_secs(10)), "gone within 10 s");
-        let _ = child.wait();
+        let _ = reaper.join();
     }
 
     #[test]

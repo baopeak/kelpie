@@ -484,6 +484,7 @@ input, textarea, select { font: inherit; color: var(--text); }
 .meter { gap: 8px; }
 .meter-win { display: inline-flex; align-items: center; gap: 4px; }
 .meter-label { color: var(--text-faint); }
+.meter-reset { color: var(--text-faint); }
 .meter-bar { width: 28px; height: 4px; border-radius: 2px; background: var(--border-strong); overflow: hidden; display: inline-block; }
 .meter-bar > span { display: block; height: 100%; background: var(--text-dim); }
 .meter-win.high { color: var(--waiting); }

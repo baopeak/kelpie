@@ -23,7 +23,7 @@ use crate::status::Status;
 use crate::persist::{write_atomic, SavedSession, Store};
 use crate::runs::{self, Action, NewRun, Runs, SessionView, TaskStatus};
 use crate::scheduled_input::{ScheduledInputs, CONTINUE_TEXT};
-use crate::session::{json_out, now_millis, ClientTx, Session, SessionInfo, SessionSpec};
+use crate::session::{json_out, now_millis, Answer, AnswerError, ClientTx, Session, SessionInfo, SessionSpec};
 use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, turn_event};
 
 mod automation;
@@ -816,11 +816,27 @@ impl Daemon {
         }
     }
 
+    /// Adds a session that has no process, for tests of what talks to sessions.
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(&self, entry: Entry) {
+        let handle = match &entry {
+            Entry::Term(s) => s.handle,
+            Entry::Chat(c) => c.handle,
+        };
+        self.sessions.write().insert(handle, entry);
+    }
+
+    /// Takes a session away, as closing it does.
+    #[cfg(test)]
+    pub(crate) fn remove_for_test(&self, handle: u32) {
+        self.sessions.write().remove(&handle);
+    }
+
     pub fn entry(&self, handle: u32) -> Result<Entry> {
         self.sessions.read().get(&handle).cloned().ok_or_else(|| anyhow!("no session {handle}"))
     }
 
-    fn by_id(&self, id: &str) -> Option<Entry> {
+    pub fn by_id(&self, id: &str) -> Option<Entry> {
         self.sessions.read().values().find(|e| e.spec().id == id).cloned()
     }
 
@@ -1641,24 +1657,16 @@ impl Daemon {
                 let Entry::Term(s) = self.entry(handle_of(&params)?)? else { bail!("session.answer is for terminal sessions") };
                 let since = params.get("waiting_since").and_then(Value::as_u64);
                 // `key`: Esc or Enter alone (text goes through `typed_text`, which drops controls).
-                let bytes = match params.get("key").and_then(Value::as_str) {
-                    Some("esc") => b"\x1b".to_vec(),
-                    Some("enter") => b"\r".to_vec(),
-                    Some(other) => bail!("unknown key {other}"),
-                    None => crate::session::typed_text(param(&params, "data")?.as_str().unwrap_or_default()).into_bytes(),
+                let answer = match params.get("key").and_then(Value::as_str) {
+                    Some(key) => Answer::Key(key),
+                    None => Answer::Text(param(&params, "data")?.as_str().unwrap_or_default()),
                 };
-                if !s.answer(since, bytes) {
-                    bail!("the session no longer waits on that prompt");
+                let enter = params.get("enter").and_then(Value::as_bool) == Some(true);
+                match s.answer(since, answer, enter) {
+                    Ok(()) => json!(true),
+                    Err(AnswerError::UnknownKey) => bail!("unknown key"),
+                    Err(_) => bail!("the session no longer waits on that prompt"),
                 }
-                if params.get("enter").and_then(Value::as_bool) == Some(true) {
-                    // A separate write (TUIs take an Enter in the same write as text as part of
-                    // it), off this client's request worker.
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(120));
-                        s.input(b"\r".to_vec());
-                    });
-                }
-                json!(true)
             }
             "session.resize" => {
                 let cols = param(&params, "cols")?.as_u64().unwrap_or(80) as u16;

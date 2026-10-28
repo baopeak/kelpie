@@ -188,8 +188,16 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
     // The daemon dropped us for falling behind: re-attach (full replay).
     const onResync = (e: Event) => (e as CustomEvent).detail === props.sessionId && target() != null && void ctrl.attach(target()!);
     window.addEventListener("kelpie:chat-resync", onResync);
+    // A phone answered one of the agent's requests first.
+    const onResolved = (e: Event) => {
+      const d = (e as CustomEvent).detail;
+      // `dropped`: an answer sent from here lost to `by`'s, which is what the agent got.
+      if (d?.id === props.sessionId && !(d.dropped && d.by === "desktop")) ctrl.resolvedElsewhere(d.request_id, !!d.dropped);
+    };
+    window.addEventListener("kelpie:chat-resolved", onResolved);
     onCleanup(() => {
       window.removeEventListener("kelpie:chat-resync", onResync);
+      window.removeEventListener("kelpie:chat-resolved", onResolved);
       ctrl.detach();
     });
   });

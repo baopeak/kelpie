@@ -590,12 +590,22 @@ async fn a_repository_inside_the_worktree_is_not_committed_as_a_file() {
     assert!(inner.join("x.txt").is_file());
 }
 
+/// Writes a script git can run as `gpg.program`: on unix it must be executable.
+fn write_script(path: &Path, body: &str) {
+    std::fs::write(path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 /// A stand-in for gpg that records its calls (and signs, or fails).
 fn fake_signer(f: &Fixture, works: bool) -> PathBuf {
     let log = f.base.join("signer-calls.txt");
     let script = f.base.join("fake-gpg.sh");
     let signature = if works { "echo '[GNUPG:] SIG_CREATED ' >&2\ncat >/dev/null\nprintf -- '-----BEGIN PGP SIGNATURE-----\\n\\nZmFrZQ==\\n-----END PGP SIGNATURE-----\\n'\n" } else { "cat >/dev/null\nexit 1\n" };
-    std::fs::write(&script, format!("#!/bin/sh\necho called >> '{}'\n{signature}", log.to_string_lossy().replace('\\', "/"))).unwrap();
+    write_script(&script, &format!("#!/bin/sh\necho called >> '{}'\n{signature}", log.to_string_lossy().replace('\\', "/")));
     sh(&f.repo, &["config", "gpg.program", &script.to_string_lossy().replace('\\', "/")]);
     log
 }
@@ -774,7 +784,7 @@ async fn a_cancel_pressed_while_signing_waits_changes_nothing() {
     commit_file(&f.wt, "new.txt", "n\n", "work");
     // A signer that never answers.
     let script = f.base.join("slow-gpg.sh");
-    std::fs::write(&script, "#!/bin/sh\nsleep 60\n").unwrap();
+    write_script(&script, "#!/bin/sh\nsleep 60\n");
     sh(&f.repo, &["config", "gpg.program", &script.to_string_lossy().replace('\\', "/")]);
     sh(&f.repo, &["config", "commit.gpgsign", "true"]);
     let (main_tip, feature_tip) = (sh(&f.repo, &["rev-parse", "main"]), sh(&f.repo, &["rev-parse", "feature"]));

@@ -21,6 +21,7 @@ use parking_lot::Mutex;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::sync::watch;
 
 use crate::agents::{Launch, TypedPrompt};
 use crate::proc_tree::{console_hosts, Priority, ProcTree};
@@ -115,6 +116,33 @@ pub struct SessionInfo {
     pub waiting_since: Option<u64>,
 }
 
+/// How long after typed text its Enter follows (the desktop waits the same: `typeInto`).
+pub const ENTER_DELAY: Duration = Duration::from_millis(250);
+
+/// Text typed into a session, to decide later whether an Enter still belongs to it.
+#[derive(Debug, Clone, Copy)]
+pub struct Typed {
+    written: Option<Instant>,
+    wait: Option<u64>,
+}
+
+/// What answers a prompt: a named key (`esc`, `enter`) or text, which `typed_text` cleans.
+#[derive(Debug, Clone, Copy)]
+pub enum Answer<'a> {
+    Key(&'a str),
+    Text(&'a str),
+}
+
+/// Why a typed answer or message was not written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerError {
+    UnknownKey,
+    /// The prompt is gone, another one, or already answered (`not_waiting`, `moved`, `answered`).
+    Stale(&'static str),
+    /// A prompt is shown and the text was not forced.
+    Prompt,
+}
+
 /// Why a guarded write was not made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
@@ -141,6 +169,15 @@ impl Refused {
 pub struct Outgoing {
     pub data: Arc<[u8]>,
     pub credit: Option<Arc<AtomicUsize>>,
+}
+
+/// The end of a session's screen as a remote view shows it (see `Session::screen_view`).
+pub struct ScreenView {
+    pub lines: Vec<String>,
+    pub cursor: Option<(usize, usize)>,
+    pub prompt: Option<crate::choices::Prompt>,
+    pub waiting_since: Option<u64>,
+    pub title: Option<String>,
 }
 
 pub type ClientTx = tokio::sync::mpsc::UnboundedSender<Outgoing>;
@@ -233,6 +270,9 @@ struct Inner {
     pending_prompt: Option<PendingPrompt>,
     last_output: Option<Instant>,
     interrupted: bool,
+    /// The wait on the user that `waiting_since` names has been answered (typed into): a hook
+    /// keeps saying `waiting` until its next report, and nothing may answer the same wait twice.
+    answered_wait: bool,
 }
 
 struct PendingPrompt {
@@ -258,6 +298,9 @@ pub struct Session {
     pub handle: u32,
     pub spec: Mutex<SessionSpec>,
     inner: Mutex<Inner>,
+    /// Sent (the output position) whenever what a remote view shows may have changed; the
+    /// phone's sync waits on it instead of polling.
+    wake: watch::Sender<u64>,
 }
 
 /// How stale a broadcast `last_activity` may get while a session keeps printing.
@@ -272,6 +315,7 @@ impl Session {
         Arc::new(Session {
             handle,
             spec: Mutex::new(spec),
+            wake: watch::channel(0).0,
             inner: Mutex::new(Inner {
                 vt: Vt::new(cols, rows, SCROLLBACK),
                 ring: Ring { buf: VecDeque::with_capacity(64 * 1024) },
@@ -299,6 +343,7 @@ impl Session {
                 pending_prompt: None,
                 last_output: None,
                 interrupted: false,
+                answered_wait: false,
             }),
         })
     }
@@ -435,6 +480,7 @@ impl Session {
         let events = g.vt.feed(bytes);
         g.seq += bytes.len() as u64;
         g.ring.push(bytes);
+        self.wake.send_replace(g.seq);
         g.activity.on_output(now);
         g.last_output = Some(now);
         g.last_activity = now_millis();
@@ -536,6 +582,11 @@ impl Session {
             if g.screen_prompt.is_some() {
                 g.answered_prompt = g.prompt_fingerprint.clone();
             }
+            // Typing answers a wait the agent reported (a hook outlives the answer); the
+            // terminal's own mouse and query reports do not.
+            if !is_terminal_report(&bytes) && g.activity.status(Instant::now()) == Status::Waiting {
+                g.answered_wait = true;
+            }
             g.activity.last_input = Some(Instant::now());
             g.last_activity = now_millis();
             g.activity.bell = None;
@@ -545,16 +596,90 @@ impl Session {
         }
     }
 
+    /// What was last typed and the wait it was typed into, for an Enter that follows.
+    fn typed_marker(g: &Inner) -> Typed {
+        Typed { written: g.activity.last_typed, wait: g.waiting_since }
+    }
+
     /// Types `bytes` only while the session still waits on the prompt that began at
-    /// `waiting_since` — checked and written under one lock, so nothing can answer it in between.
-    pub fn answer(&self, waiting_since: Option<u64>, bytes: Vec<u8>) -> bool {
+    /// `waiting_since` and nobody has answered that wait — checked and written under one lock, so
+    /// nothing can answer it in between. Refused with why: not waiting any more, a different
+    /// prompt, or already answered.
+    fn answer_bytes(&self, waiting_since: Option<u64>, bytes: Vec<u8>) -> Result<Typed, AnswerError> {
         let mut g = self.inner.lock();
-        let waiting = g.activity.status(Instant::now()) == Status::Waiting;
-        if !waiting || g.waiting_since.is_none() || g.waiting_since != waiting_since {
-            return false;
+        if g.activity.status(Instant::now()) != Status::Waiting || g.waiting_since.is_none() {
+            return Err(AnswerError::Stale("not_waiting"));
+        }
+        if g.waiting_since != waiting_since {
+            return Err(AnswerError::Stale("moved"));
+        }
+        if g.answered_wait {
+            return Err(AnswerError::Stale("answered"));
         }
         Self::write_input(&mut g, bytes);
+        Ok(Self::typed_marker(&g))
+    }
+
+    /// The one way a person answers the prompt a session waits on from a surface that is not its
+    /// terminal (the desktop's quick answer, the phone): `answer` is typed only while the session
+    /// still waits on the prompt named by `waiting_since`, then `enter` follows after the agent's
+    /// Enter delay (see [`Self::enter_if`]).
+    pub fn answer(self: &Arc<Self>, waiting_since: Option<u64>, answer: Answer<'_>, enter: bool) -> Result<(), AnswerError> {
+        let bytes = match answer {
+            Answer::Key("esc") => b"\x1b".to_vec(),
+            Answer::Key("enter") => b"\r".to_vec(),
+            Answer::Key(_) => return Err(AnswerError::UnknownKey),
+            Answer::Text(text) => typed_text(text).into_bytes(),
+        };
+        let typed = self.answer_bytes(waiting_since, bytes)?;
+        if enter {
+            self.enter_later(typed);
+        }
+        Ok(())
+    }
+
+    /// Types a message on the prompt line. Refused while a prompt is shown (the text would go to
+    /// its dialog) unless `force`. The caller sends Enter with [`Self::enter_if`] after
+    /// `ENTER_DELAY`, waiting itself so that the next message does not run into this one's Enter.
+    pub fn type_message(&self, text: &str, force: bool) -> Result<Typed, AnswerError> {
+        let mut g = self.inner.lock();
+        if !force && g.screen_prompt.is_some() {
+            return Err(AnswerError::Prompt);
+        }
+        let body = typed_text(text);
+        // Lines of a message are one paste: Enter keys inside it would submit each.
+        let bytes = if !body.contains('\n') {
+            body.into_bytes()
+        } else if g.vt.bracketed_paste() {
+            format!("\x1b[200~{}\x1b[201~", body.replace('\n', "\r")).into_bytes()
+        } else {
+            body.replace('\n', "\r").into_bytes()
+        };
+        Self::write_input(&mut g, bytes);
+        Ok(Self::typed_marker(&g))
+    }
+
+    /// Enter as its own write, `ENTER_DELAY` after the text: agent TUIs take an Enter that follows
+    /// a burst of input as part of it (Codex: within 120 ms) and insert a newline instead of
+    /// submitting. It is sent only if nothing else was typed meanwhile and no new prompt came up,
+    /// else it would answer or submit something it was not meant for.
+    pub fn enter_if(&self, typed: Typed) -> bool {
+        let mut g = self.inner.lock();
+        let same_wait = g.waiting_since.is_none() || g.waiting_since == typed.wait;
+        if g.pty.is_none() || g.activity.last_typed != typed.written || !same_wait {
+            return false;
+        }
+        Self::write_input(&mut g, b"\r".to_vec());
         true
+    }
+
+    /// [`Self::enter_if`] after the delay, off the caller.
+    fn enter_later(self: &Arc<Self>, typed: Typed) {
+        let me = Arc::clone(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(ENTER_DELAY);
+            me.enter_if(typed);
+        });
     }
 
     /// Types `bytes` for a timer that waits out the usage limit: only into the same run of the
@@ -643,6 +768,7 @@ impl Session {
         }
         g.vt.resize(cols, rows);
         g.replay_floor = g.seq;
+        self.wake.send_replace(g.seq);
         if let Some(pty) = &g.pty {
             let _ = pty.ctl.send(Ctl::Resize(cols, rows));
         }
@@ -720,7 +846,32 @@ impl Session {
     }
 
     pub fn set_hook_status(&self, status: Status, failed: bool) {
-        self.inner.lock().activity.on_hook(status, failed, Instant::now());
+        let mut g = self.inner.lock();
+        g.activity.on_hook(status, failed, Instant::now());
+        // The agent moved on: whatever it asks next is a new wait, even within one tick. A repeated
+        // `waiting` (a second notice of the same request) is not.
+        if status != Status::Waiting {
+            g.answered_wait = false;
+            g.waiting_since = None;
+        }
+    }
+
+    /// A receiver that fires when the screen, the prompt or the wait may have changed.
+    pub fn watch(&self) -> watch::Receiver<u64> {
+        self.wake.subscribe()
+    }
+
+    /// What a remote view shows right now, taken in one go under the lock.
+    pub fn screen_view(&self, height: usize) -> ScreenView {
+        let g = self.inner.lock();
+        let tail = g.vt.tail_lines(height);
+        ScreenView {
+            lines: tail.lines,
+            cursor: tail.cursor,
+            prompt: g.screen_prompt.clone(),
+            waiting_since: g.waiting_since,
+            title: g.vt.title().map(str::to_string),
+        }
     }
 
     pub fn screen_text(&self) -> String {
@@ -849,6 +1000,8 @@ impl Session {
         if g.pending_prompt.is_some() {
             Self::deliver_prompt(&mut g, now);
         }
+        let watched = self.wake.receiver_count() > 0;
+        let before = watched.then(|| (g.waiting_since, g.screen_prompt.clone()));
         Self::look_for_prompt(&mut g, now);
         let status = g.activity.status(now);
         g.waiting_since = match (status, g.waiting_since) {
@@ -856,6 +1009,13 @@ impl Session {
             (Status::Waiting, None) => Some(now_millis()),
             _ => None,
         };
+        if status != Status::Waiting {
+            g.answered_wait = false;
+        }
+        // A remote view shows the prompt and the wait too, which change without any output.
+        if before.is_some_and(|b| b != (g.waiting_since, g.screen_prompt.clone())) {
+            self.wake.send_replace(g.seq);
+        }
         if status == Status::Working && g.last_status != Status::Working {
             g.working_since = Some(now);
         }
@@ -973,6 +1133,73 @@ pub fn typed_text(text: &str) -> String {
             c => Some(c),
         })
         .collect()
+}
+
+/// Sessions without a process, for tests of what is written into them.
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct NoKill;
+
+    impl ChildKiller for NoKill {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(NoKill)
+        }
+    }
+
+    /// A terminal session that looks running; what is typed into it arrives on the receiver.
+    pub fn running(handle: u32, id: &str, kind: &str) -> (Arc<Session>, Typed) {
+        let spec = SessionSpec { id: id.into(), kind: kind.into(), cwd: ".".into(), ..Default::default() };
+        let session = Session::new(handle, spec, 80, 24);
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let mut g = session.inner.lock();
+            g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None });
+            g.generation = 1;
+            g.activity = Activity { alive: true, ..Default::default() };
+        }
+        (session, Typed(rx))
+    }
+
+    pub struct Typed(std::sync::mpsc::Receiver<Ctl>);
+
+    impl Typed {
+        /// Everything written so far, one entry per write.
+        pub fn writes(&self) -> Vec<Vec<u8>> {
+            self.0.try_iter().filter_map(|c| if let Ctl::Input(b) = c { Some(b) } else { None }).collect()
+        }
+
+        /// The next write, waiting up to `ms` for it.
+        pub fn next_within(&self, ms: u64) -> Option<Vec<u8>> {
+            match self.0.recv_timeout(Duration::from_millis(ms)) {
+                Ok(Ctl::Input(b)) => Some(b),
+                _ => None,
+            }
+        }
+    }
+
+    /// The process ends.
+    pub fn stop(session: &Session) {
+        session.inner.lock().pty = None;
+    }
+
+    /// A menu is on screen, waiting for a key.
+    pub fn show_prompt(session: &Session) {
+        session.inner.lock().screen_prompt = Some(crate::choices::Prompt { keys: vec!["1".into(), "2".into()], question: None, line: false });
+    }
+
+    /// The agent reports a permission request; returns the wait's `waiting_since`.
+    pub fn wait_on_user(session: &Session) -> u64 {
+        let now = Instant::now();
+        session.inner.lock().activity.on_hook(Status::Waiting, false, now);
+        session.tick(now);
+        session.info().waiting_since.expect("waiting")
+    }
 }
 
 /// A process that cannot be killed, for sessions that only look running.
@@ -1211,5 +1438,158 @@ mod tests {
         let seq = 11 + big.len() as u64;
         assert!(r.since(0, seq).is_none());
         assert_eq!(r.since(seq - 3, seq).unwrap(), b"xxx");
+    }
+
+    #[test]
+    fn a_wait_is_answered_once() {
+        let (s, rx) = fake::running(1, "s1", "claude");
+        let since = fake::wait_on_user(&s);
+        assert_eq!(s.answer(Some(since), Answer::Text("1"), false), Ok(()));
+        // A second tap, from this device or another: the wait was answered.
+        assert_eq!(s.answer(Some(since), Answer::Text("1"), false), Err(AnswerError::Stale("answered")));
+        assert_eq!(rx.writes(), vec![b"1".to_vec()], "only the first answer was typed");
+    }
+
+    #[test]
+    fn typing_at_the_terminal_answers_a_hooks_wait_for_everyone_else() {
+        // The hook keeps saying `waiting` after the key press, until the agent's next report.
+        let (s, rx) = fake::running(1, "s1", "claude");
+        let since = fake::wait_on_user(&s);
+        s.input(b"1".to_vec());
+        assert_eq!(s.info().status, Status::Waiting, "the hook still says so");
+        assert_eq!(s.answer(Some(since), Answer::Text("1"), false), Err(AnswerError::Stale("answered")));
+        assert_eq!(rx.writes(), vec![b"1".to_vec()]);
+
+        // What the terminal view reports on its own is not an answer.
+        let (s, rx) = fake::running(2, "s2", "claude");
+        let since = fake::wait_on_user(&s);
+        s.input(b"\x1b[I\x1b[?1;2c".to_vec());
+        assert_eq!(s.answer(Some(since), Answer::Text("1"), false), Ok(()));
+        assert_eq!(rx.writes().len(), 2);
+    }
+
+    #[test]
+    fn the_next_wait_can_be_answered_again() {
+        let (s, rx) = fake::running(1, "s1", "claude");
+        let first = fake::wait_on_user(&s);
+        assert_eq!(s.answer(Some(first), Answer::Text("1"), false), Ok(()));
+        // The agent works on, then asks again.
+        s.inner.lock().activity.on_hook(Status::Working, false, Instant::now());
+        s.tick(Instant::now());
+        assert_eq!(s.answer(Some(first), Answer::Text("1"), false), Err(AnswerError::Stale("not_waiting")));
+        std::thread::sleep(Duration::from_millis(3));
+        let second = fake::wait_on_user(&s);
+        assert_ne!(first, second);
+        assert_eq!(s.answer(Some(first), Answer::Text("1"), false), Err(AnswerError::Stale("moved")), "an answer to the old prompt");
+        assert_eq!(s.answer(Some(second), Answer::Text("2"), false), Ok(()));
+        assert_eq!(rx.writes(), vec![b"1".to_vec(), b"2".to_vec()]);
+        assert_eq!(s.answer(Some(second), Answer::Text("2"), false), Err(AnswerError::Stale("answered")));
+    }
+
+    #[test]
+    fn an_answer_is_a_key_or_cleaned_text_and_enter_follows_after_the_agents_delay() {
+        let (s, rx) = fake::running(1, "s1", "codex");
+        let since = fake::wait_on_user(&s);
+        assert_eq!(s.answer(Some(since), Answer::Key("tab"), false), Err(AnswerError::UnknownKey));
+        assert!(rx.writes().is_empty());
+        let at = Instant::now();
+        assert_eq!(s.answer(Some(since), Answer::Text("y\x1b[201~"), true), Ok(()));
+        assert_eq!(rx.next_within(50), Some(b"y[201~".to_vec()), "text first, cleaned of escapes");
+        assert_eq!(rx.next_within(1000), Some(b"\r".to_vec()));
+        assert!(at.elapsed() >= ENTER_DELAY, "Enter came after {:?}", at.elapsed());
+    }
+
+    #[test]
+    fn a_message_is_refused_while_a_prompt_is_shown_unless_forced() {
+        let (s, rx) = fake::running(1, "s1", "claude");
+        fake::show_prompt(&s);
+        assert_eq!(s.type_message("hello", false).map(|_| ()), Err(AnswerError::Prompt));
+        assert!(rx.writes().is_empty());
+        assert_eq!(s.type_message("hello", true).map(|_| ()), Ok(()));
+        assert_eq!(rx.writes(), vec![b"hello".to_vec()]);
+    }
+
+    #[test]
+    fn a_message_cannot_break_out_of_its_paste() {
+        let (s, rx) = fake::running(1, "s1", "claude");
+        assert_eq!(s.type_message("a\x1b[201~\rrm -rf ~", false).map(|_| ()), Ok(()));
+        // The escape is gone; no paste markers were asked for, so a line break is an Enter key.
+        assert_eq!(rx.writes(), vec![b"a[201~\rrm -rf ~".to_vec()]);
+        s.ingest(b"\x1b[?2004h");
+        assert_eq!(s.type_message("one\ntwo\x1b[201~", false).map(|_| ()), Ok(()));
+        assert_eq!(rx.writes(), vec![b"\x1b[200~one\rtwo[201~\x1b[201~".to_vec()], "the program asked for bracketed paste: the lines are one paste");
+    }
+
+    #[test]
+    fn watchers_wake_for_output_and_for_a_new_prompt() {
+        let (s, _rx) = fake::running(1, "s1", "claude");
+        let mut wake = s.watch();
+        assert!(!wake.has_changed().unwrap());
+        s.ingest(b"hello\r\n");
+        assert!(wake.has_changed().unwrap(), "output wakes the sync");
+        wake.borrow_and_update();
+        fake::wait_on_user(&s);
+        assert!(wake.has_changed().unwrap(), "so does a wait that came with no output");
+        wake.borrow_and_update();
+        s.tick(Instant::now());
+        assert!(!wake.has_changed().unwrap(), "a tick that changes nothing does not");
+        s.resize(100, 30);
+        assert!(wake.has_changed().unwrap());
+        let view = s.screen_view(10);
+        assert_eq!((view.lines, view.waiting_since.is_some()), (vec!["hello".to_string()], true));
+    }
+
+    #[test]
+    fn a_quick_second_prompt_is_a_new_wait_that_can_be_answered() {
+        let (s, rx) = fake::running(1, "s1", "claude");
+        let first = fake::wait_on_user(&s);
+        assert_eq!(s.answer(Some(first), Answer::Text("1"), false), Ok(()));
+        // Working and asking again between two ticks: the tick never sees the agent working.
+        std::thread::sleep(Duration::from_millis(3));
+        s.set_hook_status(Status::Working, false);
+        s.set_hook_status(Status::Waiting, false);
+        s.tick(Instant::now());
+        let second = s.info().waiting_since.expect("waiting again");
+        assert_ne!(first, second);
+        assert_eq!(s.answer(Some(first), Answer::Text("1"), false), Err(AnswerError::Stale("moved")));
+        assert_eq!(s.answer(Some(second), Answer::Text("2"), false), Ok(()));
+        assert_eq!(rx.writes(), vec![b"1".to_vec(), b"2".to_vec()]);
+        // A second notice of the same request is the same wait, and stays answered.
+        s.set_hook_status(Status::Waiting, false);
+        assert_eq!(s.answer(Some(second), Answer::Text("2"), false), Err(AnswerError::Stale("answered")));
+    }
+
+    #[test]
+    fn an_enter_that_would_land_on_something_else_is_not_sent() {
+        // Nothing happened meanwhile: it goes.
+        let (s, rx) = fake::running(1, "s1", "codex");
+        let typed = s.type_message("hello", false).unwrap();
+        assert!(s.enter_if(typed));
+        assert_eq!(rx.writes(), vec![b"hello".to_vec(), b"\r".to_vec()]);
+
+        // The user typed in between.
+        let typed = s.type_message("again", false).unwrap();
+        std::thread::sleep(Duration::from_millis(3));
+        s.input(b"x".to_vec());
+        assert!(!s.enter_if(typed));
+        assert_eq!(rx.writes(), vec![b"again".to_vec(), b"x".to_vec()]);
+
+        // A prompt came up within the delay: the Enter would answer it.
+        let (s, rx) = fake::running(2, "s2", "codex");
+        let typed = s.type_message("hello", false).unwrap();
+        fake::wait_on_user(&s);
+        assert!(!s.enter_if(typed));
+        assert_eq!(rx.writes(), vec![b"hello".to_vec()]);
+
+        // The same through an answer given with Enter.
+        let (s, rx) = fake::running(3, "s3", "codex");
+        let since = fake::wait_on_user(&s);
+        assert_eq!(s.answer(Some(since), Answer::Text("y"), true), Ok(()));
+        std::thread::sleep(Duration::from_millis(3));
+        s.set_hook_status(Status::Working, false);
+        s.set_hook_status(Status::Waiting, false);
+        s.tick(Instant::now());
+        assert_eq!(rx.next_within(50), Some(b"y".to_vec()));
+        assert_eq!(rx.next_within(600), None, "the delayed Enter found another prompt and stayed away");
     }
 }

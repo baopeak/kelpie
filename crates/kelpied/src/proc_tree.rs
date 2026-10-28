@@ -331,17 +331,20 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1800));
         let kids = super::imp::children_for_test(root, "ping.exe");
         assert!(!kids.is_empty(), "ping runs under cmd");
+        // On some CI machines the test runs below normal and its children inherit that,
+        // so "left alone" means keeping the class they started with.
+        let started: Vec<u32> = kids.iter().map(|&k| class_of(k)).collect();
         tree.set_priority(Priority::Foreground);
         assert_eq!(class_of(root), ABOVE_NORMAL_PRIORITY_CLASS);
         // The agent's children (builds, tests) are never raised…
-        for &k in &kids {
-            assert_eq!(class_of(k), NORMAL_PRIORITY_CLASS);
+        for (&k, &class) in kids.iter().zip(&started) {
+            assert_eq!(class_of(k), class);
         }
         // …and out of sight nothing goes below normal.
         tree.set_priority(Priority::Background);
         assert_eq!(class_of(root), NORMAL_PRIORITY_CLASS);
-        for &k in &kids {
-            assert_eq!(class_of(k), NORMAL_PRIORITY_CLASS);
+        for (&k, &class) in kids.iter().zip(&started) {
+            assert_eq!(class_of(k), class);
         }
         tree.set_priority(Priority::Normal);
         assert_eq!(class_of(root), NORMAL_PRIORITY_CLASS);

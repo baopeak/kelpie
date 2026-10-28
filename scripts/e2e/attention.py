@@ -153,6 +153,32 @@ try:
     steady = bool(first) and all(st == "waiting" and ws == first["waiting_since"] for st, ws in samples)
     check("a repainting prompt stays one wait (no flicker)", steady, samples)
 
+    # 3c. an agent that reports through hooks keeps saying `waiting` after a key at the keyboard:
+    # that wait is answered, and nothing may answer it a second time
+    s5 = ready_shell(c, cwd, "hook-wait")
+    hook = lambda event: c.call("hook.report", {"session_id": s5["id"], "agent": "claude", "payload": {"hook_event_name": event}})  # noqa: E731
+    hook("PermissionRequest")
+    w5 = wait_for(lambda: info(c, s5["id"]).get("status") == "waiting" and info(c, s5["id"]), 10) or {}
+    c.call("session.input", {"handle": s5["handle"], "data": "1"})
+    check("a hook's wait still shows as waiting after a key at the keyboard", info(c, s5["id"]).get("status") == "waiting")
+    try:
+        c.call("session.answer", {"handle": s5["handle"], "waiting_since": w5.get("waiting_since"), "data": "1"})
+        answered_twice = True
+    except SystemExit:
+        answered_twice = False
+    check("…and that wait can no longer be answered", not answered_twice)
+    # The agent works on and asks again at once: no tick sees it working in between.
+    hook("PostToolUse")
+    hook("PermissionRequest")
+    w5b = wait_for(lambda: info(c, s5["id"]).get("waiting_since") not in (None, w5.get("waiting_since")) and info(c, s5["id"]), 10) or {}
+    try:
+        c.call("session.answer", {"handle": s5["handle"], "waiting_since": w5b.get("waiting_since"), "data": "1"})
+        next_answered = True
+    except SystemExit:
+        next_answered = False
+    check("the next wait can be answered", next_answered)
+    c.call("session.close", {"handle": s5["handle"]})
+
     for s in (s1, s2, s3, s4):
         c.call("session.close", {"handle": s["handle"]})
 finally:
