@@ -695,7 +695,8 @@ to stop sessions (a daemon from the install folder: the one-time move from 0.1.x
 (exit 3) rather than end that session. A graceful stop keeps sessions resumable: `persist(true)`
 saves them as running before the process exits, and `restore()` marks them interrupted. Releases: tag `v<version>` → `.github/workflows/release.yml` builds and signs
 (`tauri.updater.json` turns on updater artifacts; macOS as one `universal-apple-darwin` build whose
-sidecars `build-release.sh` joins with `lipo` when `KELPIE_TARGET` says so), and
+sidecars `build-release.sh` stages for each architecture before joining them with `lipo`
+when `KELPIE_TARGET` says so), and
 `scripts/release/latest_json.py` writes the manifest (`darwin-aarch64` and `darwin-x86_64` both point
 at the universal bundle) into a **draft** release; apps see it once the draft is published.
 Each runner checks only its own platform's app binary before uploading artifacts. A missing
