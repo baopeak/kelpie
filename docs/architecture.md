@@ -45,6 +45,14 @@ on an SSH host the remote shell checks for the transcript and runs `--resume` or
 Data: `%LOCALAPPDATA%\Kelpie` (Windows), `~/Library/Application Support/Kelpie` (macOS).
 `KELPIE_DATA_DIR` and `KELPIE_ENDPOINT` override both (used by the dev scripts and tests).
 
+Daemon state is published through unique same-directory temporary files. Windows uses
+`FileRenameInfoEx` with POSIX replacement semantics: existing readers keep their old file
+while a newly opened reader sees the replacement
+([Windows contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)).
+Unix keeps atomic rename. A publication error is returned without deleting the destination;
+only the failed write's own temporary is cleaned. Alternate filesystems and redirected or
+network data directories require separate validation of the native operation.
+
 ## Transport
 
 Local socket only — no TCP port. Windows: named pipe `\\.\pipe\kelpie-<user>-v1` with a
