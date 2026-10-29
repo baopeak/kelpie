@@ -99,7 +99,7 @@ fn ssh_dir() -> PathBuf {
     std::env::var_os("KELPIE_SSH_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".ssh"))
 }
 
-fn vault_path() -> PathBuf {
+pub(crate) fn vault_path() -> PathBuf {
     kelpie_proto::data_dir().join("ssh").join("hosts.json")
 }
 
@@ -122,6 +122,30 @@ pub fn set_user_config(config: Option<String>) {
 
 pub fn load() -> Vault {
     std::fs::read(vault_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// The saved hosts, or an error when the file exists but cannot be read or understood: a caller that
+/// writes the vault back must never take a damaged file for an empty one.
+pub fn load_strict() -> CmdResult<Vault> {
+    match std::fs::read(vault_path()) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("the saved SSH hosts could not be read: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vault::default()),
+        Err(e) => Err(format!("the saved SSH hosts could not be read: {e}")),
+    }
+}
+
+/// Replaces the vault only while it is still `expected` (what the caller looked at); returns what was saved.
+pub fn save_checked(expected: &Vault, next: Vault) -> CmdResult<Vault> {
+    let v = normalize(next)?;
+    let _guard = WRITE.lock().unwrap();
+    if &load_strict()? != expected {
+        return Err("the saved SSH hosts changed since the preview; import again".into());
+    }
+    let path = vault_path();
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(err)?;
+    write_atomic(&path, &serde_json::to_vec_pretty(&v).map_err(err)?).map_err(err)?;
+    write_config(&v)?;
+    Ok(v)
 }
 
 /// `kelpied`, which answers ssh's password / passphrase prompts (`SSH_ASKPASS`).

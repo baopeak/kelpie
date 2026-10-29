@@ -23,65 +23,10 @@ import { confirmRootStart } from "./root-user";
 import type { WorkStatus, AgentProfile, AppState, BranchInfo, InboxItem, LayoutNode, LayoutTemplate, Pane, Project, ProjectHost, RecentItem, ReviewNote, SessionInfo, SessionKind, SessionTarget, Settings, Tab, Workspace, WorkspaceMeta } from "./types";
 import { confirmDialog } from "./confirm-dialog";
 import { remember } from "./prompt-history";
+import { defaultSettings } from "./default-settings";
 import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
 
-export const defaultSettings: Settings = {
-  fontFamily: '"JetBrains Mono", "Cascadia Code", "Cascadia Mono", Menlo, Consolas, "Symbols Nerd Font Mono", monospace',
-  fontSize: 13,
-  lineHeight: 1.2,
-  scrollback: 5000,
-  cursorBlink: true,
-  webgl: true,
-  shellArgs: [],
-  rightPanelWidth: 300,
-  sidebarWidth: 232,
-  sidebarCollapsed: false,
-  notifications: true,
-  shortcutHints: true,
-  projectFilter: "all",
-  projectSort: "manual",
-  usageMeters: true,
-  memoryMeter: true,
-  costCap: 0,
-  costCapEsc: false,
-  quickCommands: [],
-  theme: "dark",
-  density: "comfortable",
-  uiScale: 1,
-  tips: true,
-  tipsSeen: [],
-  agentPermissions: "manual",
-  hiddenAgents: [],
-  hibernate: false,
-  hibernateMinutes: 30,
-  keepAwake: "off",
-  prioritizeVisible: true,
-  checkpoints: false,
-  agentsScripting: true,
-  notificationSound: false,
-  updateChecks: true,
-  terminalTheme: "default",
-  wordWrap: false,
-  aiAgent: "claude",
-  autoWorktree: "ask",
-  floatingTerminal: true,
-  mascot: true,
-  mascotMotion: "system",
-  layouts: [],
-  resumeSessions: "shown",
-  accounts: [],
-  activeAccounts: {},
-  integrations: { linear: false, jira: null, gitlabHosts: [] },
-  localhostInBrowser: true,
-  sshConfig: "",
-  voice: { model: null, language: "auto", device: null },
-  language: "system",
-  profiles: [
-    { kind: "claude", label: "Claude Code", args: [] },
-    { kind: "codex", label: "Codex", args: [] },
-    { kind: "omp", label: "OMP", args: [] },
-  ],
-};
+export { defaultSettings };
 
 /** app-state.json format; older files are migrated (after a backup) on load. */
 const STATE_VERSION = 3;
@@ -164,6 +109,13 @@ function createAppStore() {
     setState(produce(fn));
     persist();
   };
+  /** Saves now instead of after the debounce, and reports a failure (a settings import must know). */
+  async function saveNow() {
+    if (!loaded() || persistBlocked) throw new Error(t("App state cannot be saved in this session."));
+    clearTimeout(saveTimer);
+    await ipc.saveState(JSON.parse(JSON.stringify(state)));
+  }
+  const canPersist = () => loaded() && !persistBlocked;
 
   function notify(text: string, action?: Toast["action"], ms = 3500) {
     const t: Toast = { text, action };
@@ -1329,6 +1281,11 @@ function createAppStore() {
     update((s) => Object.assign(s.settings, patch));
   }
 
+  /** Swaps in a whole settings object (an import, or undoing one); the caller saves with `saveNow`. */
+  function replaceSettings(next: Settings) {
+    setState("settings", reconcile(JSON.parse(JSON.stringify(next))));
+  }
+
   /** Launch arguments and environment of an agent profile, permission mode included. */
   /** `yolo: false`: without the Yolo flags (chat view asks Allow / Deny itself). */
   function profileLaunch(kind: SessionKind, opts: { yolo?: boolean; account?: string | null } = {}): { args: string[]; env?: Record<string, string> } {
@@ -1633,7 +1590,7 @@ function createAppStore() {
     arrangeTab, tileCandidates, canTile, canSpread, tileTab, spreadTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
     splitPicker, moveTab, movePaneToTab, mergeTab,
     resumeSession, resumeInterrupted, setChatResumer,
-    replacePaneIn, updatePane, resizeSplit, setRightPanel, showRightPanel, setSettings, zoomed, toggleZoom,
+    replacePaneIn, updatePane, resizeSplit, setRightPanel, showRightPanel, setSettings, replaceSettings, saveNow, canPersist, zoomed, toggleZoom,
     topProjects, childrenOf, setProjectStatus, togglePin, approveSetup, approveChecks, linkHost, unlinkHost,
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
     registryAgent, settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,

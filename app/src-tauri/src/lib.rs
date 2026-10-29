@@ -6,6 +6,7 @@ mod accounts;
 mod agent_config;
 mod agent_history;
 mod browser;
+mod config_transfer;
 mod daemon_client;
 mod daemon_runtime;
 mod external_editor;
@@ -253,6 +254,11 @@ pub fn run() {
             state_backup,
             platform_info,
             redact_batch,
+            config_transfer::config_export,
+            config_transfer::config_import_read,
+            config_transfer::config_backup,
+            config_transfer::config_hosts_current,
+            config_transfer::config_hosts_write,
             updater::update_check,
             updater::update_install,
             fs_ops::fs_list_dir,

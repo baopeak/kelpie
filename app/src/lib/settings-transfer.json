@@ -1,0 +1,13 @@
+{
+  "exported": [
+    "fontFamily", "fontSize", "lineHeight", "scrollback", "cursorBlink", "webgl", "shellArgs", "rightPanelWidth", "sidebarWidth",
+    "sidebarCollapsed", "notifications", "shortcutHints", "projectFilter", "projectSort", "usageMeters", "memoryMeter", "costCap",
+    "costCapEsc", "theme", "density", "uiScale", "tips", "tipsSeen", "agentPermissions", "hiddenAgents", "hibernate",
+    "hibernateMinutes", "keepAwake", "prioritizeVisible", "checkpoints", "agentsScripting", "notificationSound", "updateChecks",
+    "terminalTheme", "wordWrap", "aiAgent", "autoWorktree", "floatingTerminal", "mascot", "mascotMotion", "resumeSessions",
+    "integrations", "localhostInBrowser", "voice", "language"
+  ],
+  "excluded": [
+    "profiles", "quickCommands", "layouts", "accounts", "activeAccounts", "sshConfig", "rootYoloOk", "skippedUpdate", "registryAgents"
+  ]
+}
