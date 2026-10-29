@@ -533,3 +533,163 @@ Minor: a long unbroken token (a path) still widens the span up to the toast's 70
 Status: DONE_WITH_CONCERNS
 Summary: Round 3 correctly fixes container-prefixed HTML openers, JSON-lines and numeric redaction, the OMP broken-chain fallback, the late-failure temp cleanup and the toast height, and the focused tests pass. But `contain` treats list-item code fences as top-level, so an unclosed one gets a column-0 closer that opens a new fence and swallows the following heading and tool block (confirmed with the real function and `marked`).
 Concerns/Blockers: R3-M1 is blocking (a small fix). R3-M2 is recommended in the same change. R3-L1 to R3-L3 can follow. The scratch probe is in `D:\kelpie-review-scratch`; deleting it was blocked earlier, so remove it by hand.
+
+---
+
+# Round 4: `git diff b19efa5 5bce172`
+
+Commit 5bce172, "fix(history): keep list-item code fences and inline HTML from breaking exports".
+
+## Verdict
+
+**One blocking finding (R4-M1).**
+- The rewritten `contain` now recognises a fence *closer* at any quote depth and any indentation. It also ends a top-level fence that is indented 1 to 3 spaces at the first less-indented line, as if it were in a list.
+- Both lose sync with the renderer on ordinary Markdown-in-Markdown content. Either an open fence is left unclosed, or the appended closer opens a new fence, which swallows the next heading and tool block.
+- Round 3's `contain` handled all three probe inputs correctly, so these are regressions of this rewrite. Confirmed with the real `contain` and `marked`.
+
+**Fixed:**
+- R3-M1: the list-item fence probes pass.
+- R3-M2: inline tags are escaped outside code, and the code-span rules are sound.
+- R3-L1: the range union is correct and UTF-8 safe.
+- R3-L2: secret keys are masked at any depth.
+- R3-L3: the OMP root rule is fixed.
+- The toast now has `overflow-wrap: anywhere`.
+
+**Non-blocking:** R4-M2. A new raw-HTML path appears when two same-role messages follow each other and the first ends in a list.
+
+## Checks run (round 4)
+
+| Check | Result |
+|---|---|
+| `cargo test -p kelpie-proto -j 2` | 26 passed, 2 ignored |
+| `cargo test -p kelpie -j 2 --lib session_export` | 22 passed, 1 ignored |
+| `cargo test -p kelpie -j 2 --lib config_transfer` | 26 passed |
+| `cargo test -p kelpie -j 2 --lib session_usage` | 18 passed |
+| `cargo test -p kelpie -j 2 --lib agent_history` | 6 passed, 1 ignored |
+| Scratch probe | Ran a verbatim copy of the new `contain` and its helpers (`after_quotes`, `lead`, `after_containers`, `code_spans`, `flush`, `escape_tags`) from 5bce172 on 12 adversarial inputs. Each output was rendered with `marked` as `## User` + output + the usual `## Assistant` / `<details>` / `## User` tail. Pass means all three survive and no raw tag appears outside `<code>`. |
+| Scratch probe | Ran a verbatim copy of `redact_escaped` against the real `kelpie_proto` with `redact_ranges`/`mask_ranges`, on 10 overlap, UTF-8 and escape cases. |
+
+All test runs used target `D:\kelpie-p9-target`, `CARGO_INCREMENTAL=0` and TMP on D:. The worktree was clean at 5bce172. 5bce172 also committed the round-3 section of this report; this Round 4 section is uncommitted. No e2e, no daemon, no real transcripts.
+
+## 1. R3-M1: fence tracking
+
+| Probe (through the real `contain`, then `marked`) | Result |
+|---|---|
+| `1. Install:\n   ```bash\n   npm i` (R3-M1) | OK. The closer is appended at indent 3. |
+| `- step\n  ```\n  code\n<!-- hidden` (R3-M1) | OK. The item ends and `\<!--` is escaped. |
+| `> ~~~\n> <b>\nlazy <script>`, `> > ```\n> > <b>\n> <script>` | OK. A line with fewer `>` ends the fence. |
+| `para\n        ```\n         <script>` | OK in `marked` and in CommonMark: the fence characters and the appended closer pair as an inline code span. |
+| `` ```md\n> ```\nstill code `` | **FAIL** (R4-M1a) |
+| `` ```\n    ```\n<details>\n``` `` | **FAIL** (R4-M1a) |
+| `` ␣␣```\ncode\n␣␣``` `` (a well-formed, closed fence) | **FAIL** (R4-M1b) |
+
+### R4-M1 (Medium, BLOCKING): the fence state loses sync with the renderer
+
+**Where.** `contain`, `session_export.rs:612-628`.
+
+**(a) Closers at the wrong depth or indentation.** While a fence is open, a line is taken as its closer if `inner.trim_start()` starts with enough fence characters. `inner` has every `>` stripped, and `trim_start` drops any indentation. CommonMark only accepts a closer:
+- at the opener's quote depth;
+- indented at most 3 columns from its container.
+
+So inside a top-level fence, `> ```` and `    ```` are content, not closers. `contain` closes the fence on them:
+- `` ```md\n> ```\nstill code `` (left open): `contain` believes the fence closed at line 2 and appends nothing. The renderer keeps it open, and `## Assistant`, `<details>` and the next tool block render as code.
+- `` ```\n    ```\n<details>\n``` `` (closed): `contain` closes at line 2. It then takes the real closer on line 4 as an *opener* and appends `` ``` ``. The renderer closes at line 4, so the appended line opens a new fence that swallows the rest.
+
+**Scenario.** Documentation or README work. An assistant shows Markdown inside a ```` ```md ```` fence, and that Markdown contains a quoted code block (`> ````) or a code block in a list item (`    ````). This is ordinary content.
+
+**(b) The "item ended" rule applies outside lists.** `ended = … || (!blank && f.col > 0 && lead(inner) < f.col)` ends *any* fence whose opener was indented. For a top-level fence indented 1 to 3 spaces, CommonMark keeps the fence open through less-indented lines.
+
+So the well-formed `` ␣␣```\ncode\n␣␣``` `` gets `` ␣␣``` `` appended. The renderer closes the fence at line 3, the appended line opens a new one, and the rest of the document is swallowed.
+
+**Why blocking.** Round 3's `contain` passed all three inputs: it only treated a line as a fence when it started with up to 3 spaces then fence characters. These are regressions of the rewrite, they break the whole remainder of the file, and (a) comes from ordinary documentation sessions.
+
+**Fix.**
+- Record the opener's quote depth, and its container's content column `base`: 0 at top level, or the list item's content column when the opener is the item's first line or inside an open item.
+- A closer must have `depth == f.depth` and `base <= lead(inner) <= base + 3`, then the fence characters, then only whitespace.
+- Apply the "less-indented line ends it" rule only when `base > 0` (the fence is inside a list item), comparing against `base`.
+- Add the three FAIL samples above as tests.
+
+### R4-M2 (Medium, non-blocking): a message after a list can start with raw HTML
+
+`contain` begins each message with `list_open = false` and `prev_blank = true`. A first line indented 4 or more spaces is therefore taken as indented code and left unescaped.
+
+`Doc::message` only adds a heading when the role changes. So two consecutive same-role messages are separated only by a blank line, for example two assistant text blocks, or a user text then another user text. A list in the first message continues across that blank line. If the second message starts with `    <!-- hidden`, CommonMark makes it the list item's text, so it is an HTML block inside the `<li>`.
+
+Confirmed with `marked`: `- item\n\n    <!-- hidden\n\n<details>…` renders as `<li><p>item</p>\n  <!-- hidden</li>…`. In a browser the comment then hides everything after it.
+
+Round 3 escaped this line, because it applied the `<` test at any indentation, so this is a regression too.
+
+**Fix (one line).** Start each message with `list_open = true` (unknown means possibly in a list, so the text side wins). Alternatively, have `Doc::message` separate same-role messages with a construct that ends a list.
+
+### Remaining fence notes
+- After the R4-M1 fix, the visible `\` side effect stays as before. It appears in fences inside quotes or lists and in indented code within list items, and is cosmetic.
+- The visible `\` inside a code span on a table row (`| `\<b>` |`) is the accepted conservative cost.
+
+## 2. R3-M2: inline escaping (sound)
+
+`escape_tags` escapes every `<` followed by a letter, `/`, `!` or `?` outside the kept spans. `\<` and `\\\<` stay as they are; `\\<` gets one more backslash. These are checked against the count of preceding backslashes: `\<` stays, and `\\<i>` becomes `\\\<i>`.
+
+**Code-span certainty.** `contain` only skips escaping inside spans it is sure of, and every case where it is unsure falls on the text side:
+- A span is kept only when every line of the paragraph chunk closes its own spans, and the line has no `|`.
+- A backslash-escaped backtick opens nothing outside a span, and is literal inside one, matching CommonMark.
+- The only inline constructs that take precedence over code spans are raw HTML tags and autolinks. Both start with `<` plus a letter outside any earlier span, so `contain` escapes them first, and the renderer's pairing then matches `contain`'s.
+- Spans across lines are never trusted, so everything in that chunk is escaped (the cost is a visible `\` in code).
+- In GFM tables the cells split before code spans, so any row containing `|` keeps no spans.
+
+**Probes.** The inline-`<textarea>` probe, `` a `x\` <script> `y` ``, a table row with `` `x|<script>` `` and `\<b> and \\<i>` all pass: no raw tag outside code, and the structure survives.
+
+**Residual.** Lines that `contain` misjudges as fenced or indented code are left raw. Those are exactly R4-M1 and R4-M2.
+
+## 3. R3-L1: `redact_ranges` / `mask_ranges` (correct)
+
+- **Union.**
+  - `redact_ranges` runs every pattern on the original text, independently, and merges overlapping and adjacent ranges (`start <= last.end`).
+  - `redact_escaped` maps the unescaped text's ranges back through a per-byte origin table. Each escape maps to its 2-byte source; each character maps to its own source range, including for multi-byte characters.
+  - It unions both readings, merges again, masks, then runs `redact` once more. That last pass can only add masks.
+- **Probes** (real `kelpie_proto`):
+  - The R3-L1 tie case now masks both `s3cret1` and `abcdef123`.
+  - `TOKEN=abc123\nSECRET=xyz789` (escaped) masks both. The swallowed-name problem is gone because ranges are computed on unmasked text.
+  - Bearer plus `DB_PASSWORD` across `\n` masks both.
+- **UTF-8.**
+  - `é\n…GITHUB_TOKEN=…ü`, `日本\n-----BEGIN RSA PRIVATE KEY-----\nMIIE…日本`, `😀\nAKIA…😀`, a trailing lone `\` and escape-only strings all ran without a panic.
+  - Masks start and end on character boundaries. A mapped range starts at the first byte's source and ends at the last byte's source end, and every byte of a multi-byte character shares one source range.
+  - Empty ranges are dropped before `r.end - 1` is used.
+- **Existing callers.** `redact` itself is unchanged in the diff: two functions were added. So the daemon, notification and phone callers behave exactly as before. The new `ranges_mask_what_redact_masks` test checks equivalence on 9 samples. The kelpie-proto suite passes.
+- **Out of scope (pre-existing in `redact`).**
+  - The token patterns use Unicode `\b`, so a token directly followed by a letter like `é` (`ghp_…345é`) is not matched, by `redact` either.
+  - A literal backslash-n in content (`\\nGITHUB_TOKEN=…` in JSON) correctly stays a backslash-n, so the token after it is not at a line start.
+  - Neither affects this review.
+
+## 4. R3-L2: secret keys at any depth (correct)
+
+- **Depth.** `redact_under` passes a `secret` flag down the tree once a key matches `secret_name`. Under it, every non-empty string and every number is masked, in nested objects and arrays alike. It is tested, with `ports`/`name` left alone.
+- **The pre-check list** is `secret`, `token`, `pass`, `pwd`, `key`, `credential`, matched case-insensitively. It is a superset of the `SECRET_NAME` alternatives:
+  - `PASSW(OR)?D` contains `pass`;
+  - every `…_?KEY` contains `key`;
+  - `CREDENTIALS?` contains `credential`.
+
+  So no key that the full rule would accept is skipped. The full rule still decides.
+- **No over-masking of usage data.** Usage keys like `tokens`, `input_tokens`, `max_tokens`, `token_count` and `keyboard` fail the full rule, because the name must *end* in the secret word. Strings under a genuine secret key (`{"token": {"type": "bearer"}}`) are masked whole. That is safe over-masking.
+- **Performance.** One lowercase copy and six `contains` checks per object key. The `redact` probe only runs for candidate keys. Recursion depth is bounded by serde's 128-level parse limit. The cost of large JSON is still dominated by the pre-existing per-leaf `redact`, which is bounded by `MAX_LINE`. Acceptable.
+
+## 5. OMP root rule (correct)
+
+`active_branch` records the `session` header's id and treats a parent equal to it as the root (`session_export.rs:885-886`). It still accepts `parentId: null` and falls back to file order on any other unknown parent. It is tested with a header-rooted session that has a branch which was left (the branch is excluded).
+
+## 6. Toast CSS
+
+`overflow-wrap: anywhere` was added, so long unbroken paths now wrap. Fine.
+
+## Round 4 findings
+
+| ID | Severity | Blocking | Summary |
+|---|---|---|---|
+| R4-M1 | Medium | **Yes** | `contain`'s fence state loses sync. (a) It accepts closers at any quote depth or indentation, so `> ```` or `    ```` inside a top-level fence "closes" it. (b) It ends top-level 1–3-space-indented fences at a less-indented line. Result: an open fence left unclosed, or an appended closer that opens a new fence and swallows the rest. Three probes fail with `marked`; all pass with round-3 `contain`. Fix: require same depth and container-relative indentation of at most 3 for closers, and apply the item-end rule only inside list items. |
+| R4-M2 | Medium | No | A same-role message that follows a list and starts with 4+-space `<tag` is treated as indented code and left raw; CommonMark makes it list-item HTML (`<!--` confirmed with `marked`). A regression from round 3. One-line fix: start `contain` with `list_open = true`. |
+| R4-I1 | Info | No | Pre-existing in `kelpie_proto::redact`: Unicode `\b` means a token immediately followed by a non-ASCII letter is not masked. Out of scope for 15d. |
+
+---
+
+Status: DONE_WITH_CONCERNS
+Summary: Round 4 correctly delivers the range-union redaction (UTF-8 safe, `redact` unchanged), secret-key masking at any depth, inline tag escaping with sound code-span rules, the OMP header-root rule and the R3-M1 list-item cases; all focused tests and kelpie-proto pass. But the rewritten fence tracking accepts closers at the wrong quote depth or indentation and ends indented top-level fences early, so three ordinary Markdown-in-Markdown inputs again swallow the rest of the document (confirmed with `marked`).
+Concerns/Blockers: R4-M1 is blocking. R4-M2 is non-blocking but a one-line fix, recommended in the same change.

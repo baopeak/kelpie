@@ -11,8 +11,9 @@
 //!   and JSON tool output have each string redacted before they are serialised (JSON escapes would
 //!   hide line starts and quotes from the patterns), and the text again after. A tool text is
 //!   redacted over what its block keeps plus [`REDACT_MARGIN`], never the whole output.
-//! - **Content.** User and assistant messages in full, kept from breaking the document (an open code
-//!   fence is closed, a line-start HTML opener escaped); tool calls and results as folded `<details>`
+//! - **Content.** User and assistant messages in full, each under its own heading and kept from
+//!   breaking the document (see [`contain`]: a CommonMark parser finds the code, tag-like `<` outside
+//!   it are escaped, a message left inside an open fence is written as plain text); tool calls and results as folded `<details>`
 //!   blocks, each cut to [`CUT_LINES`] lines / [`CUT_CHARS`] characters with a "… N lines omitted"
 //!   marker; thinking left out; images and attachments named (`[image: image/png]`), never embedded.
 //!   Line endings are LF, whatever the transcript used. OMP sessions are trees: only the active branch
@@ -23,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use kelpie_proto::redact;
+use pulldown_cmark::{CodeBlockKind, Event as Md, Options, Parser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -472,211 +474,122 @@ fn tool_text(text: &str) -> String {
     cut(&redact_escaped(head), after)
 }
 
-/// `line` past its blockquote markers (each: up to 3 spaces, `>`, an optional space) and how many.
-fn after_quotes(line: &str) -> (usize, &str) {
-    let (mut depth, mut rest) = (0, line);
-    loop {
-        let s = rest.trim_start_matches(' ');
-        match s.strip_prefix('>') {
-            Some(after) if rest.len() - s.len() <= 3 => {
-                depth += 1;
-                rest = after.strip_prefix(' ').unwrap_or(after);
-            }
-            _ => return (depth, rest),
-        }
-    }
+/// The Markdown dialect a viewer renders an export with (the app's `marked`: GitHub tables, task
+/// lists, strikethrough).
+fn markdown() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH
 }
 
-/// Columns of leading whitespace (a tab reaches the next multiple of 4).
-fn lead(s: &str) -> usize {
-    let mut col = 0;
-    for c in s.chars() {
-        match c {
-            ' ' => col += 1,
-            '\t' => col += 4 - col % 4,
-            _ => break,
-        }
-    }
-    col
+/// What a CommonMark parser makes of a message: the byte ranges of its code (fenced and indented
+/// blocks, inline spans), whether any raw HTML is left, and whether a fenced block is still open at
+/// the end (it would run on into whatever follows the message).
+struct Shape {
+    code: Vec<std::ops::Range<usize>>,
+    raw_html: bool,
+    open_at_end: bool,
 }
 
-/// `line` past its indentation, blockquote markers (`>`) and list markers (`-`, `*`, `+`, `1.`, `1)`),
-/// however deeply nested.
-fn after_containers(line: &str) -> &str {
-    let mut rest = line;
-    loop {
-        let s = rest.trim_start_matches([' ', '\t']);
-        if let Some(after) = s.strip_prefix('>') {
-            rest = after;
-            continue;
-        }
-        let digits = s.bytes().take_while(u8::is_ascii_digit).count();
-        let marker = match s.as_bytes().first() {
-            Some(b'-' | b'*' | b'+') => 1,
-            Some(_) if (1..=9).contains(&digits) && matches!(s.as_bytes().get(digits), Some(b'.' | b')')) => digits + 1,
-            _ => 0,
-        };
-        // A marker is one only when a space, a tab or the line's end follows it.
-        if marker > 0 && matches!(s.as_bytes().get(marker), None | Some(b' ' | b'\t')) {
-            rest = &s[marker..];
-            continue;
-        }
-        return s;
-    }
-}
-
-/// The inline code spans of `line` (byte ranges, backticks included), or `None` when a backtick run
-/// has no closing run of the same length in the line.
-fn code_spans(line: &str) -> Option<Vec<std::ops::Range<usize>>> {
-    let b = line.as_bytes();
-    let run = |at: usize| b[at..].iter().take_while(|&&c| c == b'`').count();
-    let (mut spans, mut i) = (Vec::new(), 0);
-    while i < b.len() {
-        match b[i] {
-            // A backslash-escaped backtick opens nothing.
-            b'\\' => i += if b.get(i + 1).is_some_and(u8::is_ascii_punctuation) { 2 } else { 1 },
-            b'`' => {
-                let n = run(i);
-                let mut j = i + n;
-                let close = loop {
-                    if j >= b.len() {
-                        break None;
-                    }
-                    if b[j] == b'`' {
-                        let m = run(j);
-                        if m == n {
-                            break Some(j + m);
-                        }
-                        j += m;
-                    } else {
-                        j += 1;
-                    }
-                };
-                let end = close?;
-                spans.push(i..end);
-                i = end;
-            }
-            _ => i += 1,
-        }
-    }
-    Some(spans)
-}
-
-/// A code fence `contain` is inside: its character and length, the blockquote depth and the column
-/// (after the quote markers) where it starts, and what a closing line has to start with.
-struct OpenFence {
-    ch: char,
-    len: usize,
-    depth: usize,
-    col: usize,
-    prefix: String,
-}
-
-/// User or assistant text made safe to embed, so one message cannot fold, hide or swallow the rest
-/// of the file (a Markdown viewer passes raw HTML through):
-/// - every `<` that starts a tag-like sequence (`<` then a letter, `/`, `!` or `?`) outside code is
-///   escaped, at a line's start, behind quote or list markers or within a line;
-/// - code is left as written: fenced code, indented code (only where it cannot be a list item's
-///   text) and inline code spans (only where their pairing is certain: in a paragraph whose every
-///   line closes its own spans, and on a line without `|`, which splits table cells first);
-/// - a fence the message leaves open is closed at the opener's own indentation and quote depth, so
-///   the closer cannot open a new fence; a fence inside a list item or blockquote ends where the item
-///   or quote does (a less-indented line, fewer `>`), as CommonMark ends it.
-///
-/// Where the code / text call is uncertain the text side wins: the worst case is a visible `\` in
-/// code, never raw HTML in the file.
-fn contain(text: &str) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut chunk: Vec<&str> = Vec::new();
-    let mut fence: Option<OpenFence> = None;
-    let (mut list_open, mut prev_blank, mut prev_code) = (false, true, false);
-    for line in text.split('\n') {
-        let (depth, inner) = after_quotes(line);
-        let blank = inner.trim().is_empty();
-        if let Some(f) = &fence {
-            let ended = depth < f.depth || (!blank && f.col > 0 && lead(inner) < f.col);
-            if !ended {
-                let t = inner.trim_start();
-                let run = t.chars().take_while(|c| *c == f.ch).count();
-                if run >= f.len && t[run..].trim().is_empty() {
-                    fence = None;
+fn shape(text: &str) -> Shape {
+    let mut s = Shape { code: Vec::new(), raw_html: false, open_at_end: false };
+    // The open fenced block: its character, and where its content (its last text) ends.
+    let mut fence: Option<(char, usize)> = None;
+    for (event, r) in Parser::new_ext(text, markdown()).into_offset_iter() {
+        match event {
+            Md::Start(Tag::CodeBlock(kind)) => {
+                if let CodeBlockKind::Fenced(_) = kind {
+                    let ch = text[r.clone()].chars().find(|c| *c == '`' || *c == '~').unwrap_or('`');
+                    let opener_end = text[r.clone()].find('\n').map_or(r.end, |i| r.start + i + 1);
+                    fence = Some((ch, opener_end));
                 }
-                out.push(line.to_string());
-                prev_blank = blank;
-                continue;
+                s.code.push(r);
             }
-            fence = None;
-        }
-        if blank {
-            flush(&mut chunk, &mut out);
-            out.push(line.to_string());
-            prev_blank = true;
-            continue;
-        }
-        let indent = lead(inner);
-        // Indented code: 4+ columns, not in a list, after a blank line or more indented code.
-        if depth == 0 && indent >= 4 && !list_open && (prev_blank || prev_code) {
-            flush(&mut chunk, &mut out);
-            out.push(line.to_string());
-            (prev_blank, prev_code) = (false, true);
-            continue;
-        }
-        prev_code = false;
-        let rest = after_containers(inner);
-        if let Some(ch) = rest.chars().next().filter(|c| *c == '`' || *c == '~') {
-            let n = rest.chars().take_while(|c| *c == ch).count();
-            // A backtick fence's info string has no backticks (else it is inline code).
-            if n >= 3 && !(ch == '`' && rest[n..].contains('`')) {
-                flush(&mut chunk, &mut out);
-                let col = inner.len() - rest.len();
-                fence = Some(OpenFence { ch, len: n, depth, col, prefix: "> ".repeat(depth) + &" ".repeat(col) });
-                out.push(line.to_string());
-                prev_blank = false;
-                continue;
+            Md::Text(_) => {
+                if let Some((_, end)) = &mut fence {
+                    *end = (*end).max(r.end);
+                }
             }
+            Md::End(TagEnd::CodeBlock) => {
+                // Closed: a run of the fence character follows the content within the block.
+                if let Some((ch, content_end)) = fence.take() {
+                    let closed = text[content_end.min(r.end)..r.end].contains(&ch.to_string().repeat(3));
+                    s.open_at_end |= !closed && text[r.end..].trim().is_empty();
+                }
+            }
+            Md::Code(_) => s.code.push(r),
+            Md::Html(_) | Md::InlineHtml(_) => s.raw_html = true,
+            _ => {}
         }
-        let starts_item = rest.len() < inner.trim_start().len();
-        if starts_item {
-            list_open = true;
-        } else if depth == 0 && indent == 0 && prev_blank {
-            list_open = false;
-        }
-        chunk.push(line);
-        prev_blank = false;
     }
-    flush(&mut chunk, &mut out);
-    if let Some(f) = fence {
-        out.push(format!("{}{}", f.prefix, f.ch.to_string().repeat(f.len)));
-    }
-    out.join("\n")
+    s
 }
 
-/// Writes a paragraph's lines with their tag-like `<` escaped (see [`contain`]).
-fn flush(chunk: &mut Vec<&str>, out: &mut Vec<String>) {
-    let spans: Vec<Option<Vec<std::ops::Range<usize>>>> = chunk.iter().map(|l| code_spans(l)).collect();
-    let certain = spans.iter().all(Option::is_some);
-    for (line, spans) in chunk.drain(..).zip(spans) {
-        let keep = if certain && !line.contains('|') { spans.unwrap_or_default() } else { Vec::new() };
-        out.push(escape_tags(line, &keep));
-    }
-}
-
-/// `line` with a `\` before each `<` that starts a tag-like sequence outside `keep`, unless a
-/// backslash already escapes it.
-fn escape_tags(line: &str, keep: &[std::ops::Range<usize>]) -> String {
-    let b = line.as_bytes();
-    let mut out = String::with_capacity(line.len() + 4);
-    for (i, c) in line.char_indices() {
+/// `text` with a `\` before each `<` that starts a tag-like sequence (`<` then a letter, `/`, `!` or
+/// `?`) outside `code`, unless a backslash already escapes it.
+fn escape_tags(text: &str, code: &[std::ops::Range<usize>]) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len() + 8);
+    for (i, c) in text.char_indices() {
         if c == '<'
             && b.get(i + 1).is_some_and(|x| x.is_ascii_alphabetic() || matches!(x, b'/' | b'!' | b'?'))
-            && !keep.iter().any(|r| r.contains(&i))
-            && b[..i].iter().rev().take_while(|&&x| x == b'\\').count() .is_multiple_of(2)
+            && !code.iter().any(|r| r.contains(&i))
+            && b[..i].iter().rev().take_while(|&&x| x == b'\\').count().is_multiple_of(2)
         {
             out.push('\\');
         }
         out.push(c);
     }
     out
+}
+
+/// Whether `text`, followed by the next message's heading, leaves that heading a heading and has
+/// no raw HTML: what the export needs of every message.
+fn contained(text: &str) -> bool {
+    let doc = format!("{text}\n\n## kelpie-next\n");
+    let next = text.len() + 2;
+    let mut heading = false;
+    for (event, r) in Parser::new_ext(&doc, markdown()).into_offset_iter() {
+        match event {
+            Md::Html(_) | Md::InlineHtml(_) => return false,
+            Md::Start(Tag::Heading { .. }) if r.start == next => heading = true,
+            _ => {}
+        }
+    }
+    heading
+}
+
+/// `text` as plain text in a fence longer than any backtick or tilde run in it (nothing inside can
+/// close it).
+fn as_plain(text: &str) -> String {
+    let run = |ch: char| text.split(|c| c != ch).map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(run('`').max(run('~')).max(2) + 1);
+    format!("{fence}text\n{text}\n{fence}")
+}
+
+/// User or assistant text made safe to embed, so one message cannot fold, hide or swallow the rest
+/// of the file (a Markdown viewer passes raw HTML through). A CommonMark parser (`pulldown-cmark`,
+/// with the viewer's GitHub extensions) says where the code is; every tag-like `<` outside it is
+/// escaped. The result is parsed again and must have no raw HTML and leave the next message's
+/// heading a heading. A message that ends inside an open code fence (an interrupted reply), or whose
+/// result does not pass, is written whole as plain text in an outer fence instead: containment over
+/// looks in those rare cases.
+fn contain(text: &str) -> String {
+    let first = shape(text);
+    if !first.open_at_end {
+        let mut out = escape_tags(text, &first.code);
+        // Escaping can change what parses as code (an HTML block becomes a paragraph): check the
+        // result, and escape again by what it now holds.
+        for _ in 0..3 {
+            let now = shape(&out);
+            if now.open_at_end {
+                break;
+            }
+            if !now.raw_html && contained(&out) {
+                return out;
+            }
+            out = escape_tags(&out, &now.code);
+        }
+    }
+    as_plain(text)
 }
 
 /// At most [`CUT_LINES`] lines and [`CUT_CHARS`] characters of `text`, then "… N lines omitted"
@@ -739,6 +652,8 @@ struct Doc {
     role: Option<Role>,
     /// Tool names by call id (results in Claude and Codex name only the call).
     names: HashMap<String, String>,
+    /// Text of the transcript entry being read, joined until something else comes: one message.
+    pending: Option<(Role, String)>,
 }
 
 impl Doc {
@@ -750,9 +665,36 @@ impl Doc {
     }
 
     fn push(&mut self, e: Event) {
+        let (role, text) = match e {
+            Event::User(t) => (Role::User, t),
+            Event::Assistant(t) => (Role::Assistant, t),
+            other => {
+                self.end_message();
+                return self.tool(other);
+            }
+        };
+        match &mut self.pending {
+            Some((r, buf)) if *r == role => {
+                buf.push_str("\n\n");
+                buf.push_str(&text);
+            }
+            _ => {
+                self.end_message();
+                self.pending = Some((role, text));
+            }
+        }
+    }
+
+    /// Writes the message being gathered, if any (at the end of each transcript entry).
+    fn end_message(&mut self) {
+        if let Some((role, text)) = self.pending.take() {
+            self.message(role, &text);
+        }
+    }
+
+    fn tool(&mut self, e: Event) {
         match e {
-            Event::User(t) => self.message(Role::User, &t),
-            Event::Assistant(t) => self.message(Role::Assistant, &t),
+            Event::User(_) | Event::Assistant(_) => {}
             Event::Call { id, name, input } => {
                 if !id.is_empty() {
                     self.names.insert(id, name.clone());
@@ -783,7 +725,10 @@ impl Doc {
         if text.trim().is_empty() {
             return;
         }
-        self.heading(role);
+        // Every message under a heading of its own: a list or code block cannot run on from the one
+        // before.
+        self.role = Some(role);
+        self.body.push_str(if role == Role::User { "## User\n\n" } else { "## Assistant\n\n" });
         self.body.push_str(&contain(text));
         self.body.push_str("\n\n");
     }
@@ -930,7 +875,9 @@ fn render_lines(agent: Agent, mut next: impl FnMut() -> Option<Result<String, u6
         for e in events.drain(..) {
             doc.push(e);
         }
+        doc.end_message();
     }
+    doc.end_message();
     let mut text = header(agent, req, &meta);
     let body = doc.body.trim_end();
     text.push_str(if body.is_empty() { "*No messages.*" } else { body });

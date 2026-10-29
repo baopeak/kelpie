@@ -92,6 +92,8 @@ Applied 1 edit to .env.example
 
 </details>
 
+## Assistant
+
 The logger now masks headers. The connection string mysql://root:[redacted]@localhost/app in `src/db.ts` should move to `.env` as well.
 
 ---

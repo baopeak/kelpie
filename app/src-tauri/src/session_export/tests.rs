@@ -295,60 +295,6 @@ fn only_the_start_of_a_long_tool_output_is_redacted_and_never_half_a_secret() {
 }
 
 #[test]
-fn messages_cannot_break_the_document() {
-    let opened = contain("see:\n<details>\n<summary>x</summary>\n  <!-- hidden\n</details>\n```yaml\nport: 1\n<details>");
-    assert_eq!(opened, "see:\n\\<details>\n\\<summary>x\\</summary>\n  \\<!-- hidden\n\\</details>\n```yaml\nport: 1\n<details>\n```");
-    // Fenced code, a `<` that starts no tag, and markers without a space are left alone.
-    assert_eq!(contain("~~~~\n<x>\n~~~~\nif a < b {}\n-<x> "), "~~~~\n<x>\n~~~~\nif a < b {}\n-\\<x> ");
-    // Behind blockquote and list markers, nested, or in a list item's indented continuation.
-    let nested = "> quoted mail\n> <!-- tracking pixel\n- item\n  <textarea>\n- outer\n  - inner\n    <script>x</script>\n>> <details>\n1. > <style>\n2) <pre>\n- x\n\n    <!-- deep";
-    let want = "> quoted mail\n> \\<!-- tracking pixel\n- item\n  \\<textarea>\n- outer\n  - inner\n    \\<script>x\\</script>\n>> \\<details>\n1. > \\<style>\n2) \\<pre>\n- x\n\n    \\<!-- deep";
-    assert_eq!(contain(nested), want);
-    assert_eq!(after_containers(" > - 12. >\t<x>"), "<x>");
-    assert_eq!(after_containers("1234567890. <x>"), "1234567890. <x>", "ten digits are not a list marker");
-    assert_eq!(contain("````md\n```\nstill code"), "````md\n```\nstill code\n````");
-    // Each message is contained on its own: headings after an unclosed fence stay headings.
-    let lines = json_lines_of(&[
-        json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "fix:\n```diff\n- a"}]}}),
-        json!({"type": "user", "message": {"content": "thanks"}}),
-    ]);
-    let out = render_vec(Agent::Claude, lines, MAX_BODY).text;
-    assert!(out.contains("- a\n```\n\n## User\n\nthanks"), "{out}");
-}
-
-#[test]
-fn a_fence_in_a_list_item_is_closed_where_the_item_is() {
-    // Left open inside the item: the closer keeps the opener's indentation (a column-0 one would open a fence).
-    assert_eq!(contain("1. Install:\n   ```bash\n   npm i"), "1. Install:\n   ```bash\n   npm i\n   ```");
-    // The item (and its fence) ends at a less-indented line: escaping resumes, nothing is added.
-    assert_eq!(contain("- step\n  ```\n  code\n<!-- hidden"), "- step\n  ```\n  code\n\\<!-- hidden");
-    // In a blockquote: closed at the same depth; a line with fewer `>` ends it.
-    assert_eq!(contain("> ```\n> <x>"), "> ```\n> <x>\n> ```");
-    assert_eq!(contain("> ```\n> <x>\n\n<y>"), "> ```\n> <x>\n\n\\<y>");
-    assert_eq!(contain("1. ```js\n   let a = '<b>';\n   ```\n<c>"), "1. ```js\n   let a = '<b>';\n   ```\n\\<c>");
-}
-
-#[test]
-fn inline_tags_are_escaped_outside_code() {
-    assert_eq!(contain("Why does the <textarea> lose focus?"), "Why does the \\<textarea> lose focus?");
-    assert_eq!(contain("a <details> b </details> <!-- c --> <?x?> <x/>"), "a \\<details> b \\</details> \\<!-- c --> \\<?x?> \\<x/>");
-    // Inline code keeps its text; an escape already there is not doubled.
-    assert_eq!(contain("use `<script>` or ``a ` <b>`` and \\<i>"), "use `<script>` or ``a ` <b>`` and \\<i>");
-    // Indented code after a blank line keeps its text; in a list it is the item's text.
-    assert_eq!(contain("text\n\n    <div>\n    </div>"), "text\n\n    <div>\n    </div>");
-    assert_eq!(contain("- a\n\n    <div>"), "- a\n\n    \\<div>");
-    // Pairing that is not certain keeps nothing: a run without its closer on the same line (the
-    // renderer may pair it across lines), or a table row (cells are split before code spans).
-    assert_eq!(contain("x `\na ` <b> ` c"), "x `\na ` \\<b> ` c");
-    assert_eq!(contain("| `a | <b> ` |"), "| `a | \\<b> ` |");
-    assert_eq!(contain("| `<b>` | ok |"), "| `\\<b>` | ok |");
-    // A blank line separates paragraphs: the next one's spans are certain again.
-    assert_eq!(contain("x `\n\nsee `<b>`"), "x `\n\nsee `<b>`");
-    let spans = code_spans("a \\` b `c`").map(|v| v.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>());
-    assert_eq!(spans, Some(vec![(7, 10)]), "an escaped backtick opens nothing");
-}
-
-#[test]
 fn an_omp_export_follows_the_active_branch() {
     let (name, agent, id, title) = CASES[2];
     let raw = std::fs::read_to_string(fixtures().join(format!("{name}.jsonl"))).unwrap();
@@ -489,4 +435,116 @@ fn an_omp_root_may_point_at_the_session_header() {
     let mut it = lines.into_iter();
     let out = render_lines(Agent::Omp, || it.next(), &Request { id: "s1", cwd: None, title: None }, MAX_BODY, Some(&keep)).text;
     assert!(out.contains("first") && out.contains("kept") && !out.contains("left behind"), "{out}");
+}
+
+/// `contain(input)` placed as in an export (a heading before, and after it the next heading, a tool
+/// block and another message), parsed: the message leaves no raw HTML, and the three headings and
+/// the tool block after it survive.
+fn assert_contained(input: &str) -> String {
+    let out = contain(input);
+    let head = "## User\n\n";
+    let doc = format!("{head}{out}\n\n## Assistant\n\n<details>\n<summary>Result</summary>\n\n```text\nx\n```\n\n</details>\n\n## User\n\nend\n");
+    let tail = head.len() + out.len();
+    let (mut headings, mut details) = (0, 0);
+    for (event, r) in Parser::new_ext(&doc, markdown()).into_offset_iter() {
+        match event {
+            Md::Html(h) | Md::InlineHtml(h) => {
+                assert!(r.start >= tail, "raw HTML {h:?} from {input:?}:\n{out}");
+                details += usize::from(h.starts_with("<details>"));
+            }
+            Md::Start(Tag::Heading { .. }) => headings += 1,
+            _ => {}
+        }
+    }
+    assert_eq!((headings, details), (3, 1), "what follows {input:?} survives:\n{out}");
+    out
+}
+
+/// Every adversarial message from the reviews (fences in quotes and lists, Markdown inside Markdown,
+/// HTML blocks and inline tags, code spans, tables, escapes): contained, whatever the output looks like.
+const ADVERSARIAL: &[&str] = &[
+    "My notes:\n<details>\n<summary>env</summary>\n<!-- private\n</details>\n```yaml\nport: 8080",
+    "Here is the change:\n```diff\n- retries: 0\n+ retries: 2",
+    "> quoted mail\n> <!-- tracking pixel\n>> <details>\n- item\n  <textarea>\n- outer\n  - inner\n    <script>alert(1)</script>",
+    "1. > <style>\n2) <pre>\n- x\n\n    <!-- deep",
+    "1. Install:\n   ```bash\n   npm i",
+    "- step\n  ```\n  code\n<!-- hidden",
+    "Why does the <textarea> lose focus?",
+    "a <details> b </details> <!-- c --> <?x?> <x/>",
+    "x `\na ` <b> ` c",
+    "| `a | <b> ` |",
+    "> ~~~\n> <b>\nlazy <script>",
+    "> > ```\n> > <b>\n> <script>",
+    "para\n        ```\n         <script>",
+    "```md\n> ```\nstill code",
+    "```\n    ```\n<details>\n```",
+    "  ```\ncode\n  ```",
+    "a `x\\` <script> `y`",
+    "| `x|<script>` |",
+    "\\<b> and \\\\<i>",
+    "use `<script>` or ``a ` <b>`` and \\<i>",
+    "| a | b |\n|---|---|\n| `<b>` | <i>ok</i> |",
+    "<div>\n`x`\n</div>\n<script>\nlet a = 1;\n</script>",
+    "~~~~\n<x>\n~~~~\nif a < b {}\n-<x> ",
+    "````md\n```\nstill code",
+    "text\n\n    <div>\n    </div>",
+];
+
+#[test]
+fn adversarial_messages_are_contained() {
+    for input in ADVERSARIAL {
+        assert_contained(input);
+    }
+}
+
+#[test]
+fn code_keeps_its_text_and_tags_elsewhere_are_escaped() {
+    assert_eq!(assert_contained("Why does the <textarea> lose focus?"), "Why does the \\<textarea> lose focus?");
+    assert_eq!(assert_contained("a <details> b </details> <!-- c --> <?x?> <x/>"), "a \\<details> b \\</details> \\<!-- c --> \\<?x?> \\<x/>");
+    // Inline code, fenced and indented code keep their text; an escape already there is not doubled.
+    for kept in ["use `<script>` or ``a ` <b>`` and \\<i>", "  ```\ncode <b>\n  ```", "```\n    ```\n<details>\n```", "text\n\n    <div>\n    </div>", "~~~~\n<x>\n~~~~"] {
+        assert_eq!(assert_contained(kept), kept);
+    }
+    assert_eq!(assert_contained("\\<b> and \\\\<i>"), "\\<b> and \\\\\\<i>");
+    // A table cell's code keeps its text (the parser knows the cells); a tag beside it is escaped.
+    assert_eq!(assert_contained("| a | b |\n|---|---|\n| `<b>` | <i>ok</i> |"), "| a | b |\n|---|---|\n| `<b>` | \\<i>ok\\</i> |");
+    // A list item's fence that the item ends: escaping resumes after it.
+    assert_eq!(assert_contained("- step\n  ```\n  code\n<!-- hidden"), "- step\n  ```\n  code\n\\<!-- hidden");
+}
+
+#[test]
+fn a_message_ending_in_an_open_fence_is_written_as_plain_text() {
+    for open in ["1. Install:\n   ```bash\n   npm i", "```md\n> ```\nstill code", "fix:\n```diff\n- a\n``"] {
+        let out = assert_contained(open);
+        let fence = "`".repeat(4);
+        assert_eq!(out, format!("{fence}text\n{open}\n{fence}"), "{open:?}");
+    }
+    // Longer than any backtick or tilde run inside.
+    assert!(as_plain("~~~~~~\n```").starts_with("```````text\n"));
+    // In a whole export: the next message keeps its heading.
+    let lines = json_lines_of(&[
+        json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "fix:\n```diff\n- a"}]}}),
+        json!({"type": "user", "message": {"content": "thanks"}}),
+    ]);
+    let out = render_vec(Agent::Claude, lines, MAX_BODY).text;
+    assert!(out.contains("- a\n````\n\n## User\n\nthanks"), "{out}");
+}
+
+#[test]
+fn every_message_has_its_own_heading() {
+    // Two user messages in a row: a list in the first cannot take in the second's indented first line.
+    // (OMP: Claude Code's own user lines that start with `<` are left out as its markup.)
+    let lines = json_lines_of(&[
+        json!({"type": "message", "message": {"role": "user", "content": "- item"}}),
+        json!({"type": "message", "message": {"role": "user", "content": "    <!-- hidden"}}),
+        json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "one"}, {"type": "text", "text": "same entry"}]}}),
+    ]);
+    let out = render_vec(Agent::Omp, lines, MAX_BODY).text;
+    assert!(out.contains("## User\n\n- item\n\n## User\n\n    <!-- hidden\n\n## Assistant\n\none\n\nsame entry"), "{out}");
+    let mut indented_code = false;
+    for (event, _) in Parser::new_ext(&out, markdown()).into_offset_iter() {
+        assert!(!matches!(event, Md::Html(_) | Md::InlineHtml(_)), "{out}");
+        indented_code |= matches!(event, Md::Start(Tag::CodeBlock(CodeBlockKind::Indented)));
+    }
+    assert!(indented_code, "the indented line is code, not the list's text");
 }

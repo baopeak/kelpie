@@ -265,3 +265,75 @@ I tracked fences with their indentation, quote depth and an end rule, rather tha
   - `pnpm i18n:check`: 0 missing, 0 problems.
   - `pnpm build`: ok.
 - Bundle gate: entry 326.29 kB gz, limit 338.60: ok.
+
+## Review fixes, round 4
+
+Review: "Round 4" in `plans/reports/code-reviewer-261030-phase15d-session-export.md`. Approach as decided by the controller: a real CommonMark parser replaces the hand-rolled fence and code tracking.
+
+### Parser
+
+- **Dependency.** `pulldown-cmark = { version = "=0.13.5", default-features = false }`, in `app/src-tauri` only. It is used for parsing only: no HTML writer and no getopts. `Cargo.lock` gains two packages, pulldown-cmark and unicase; bitflags 2 and memchr were already present.
+- **`contain`** parses each message with `Parser::new_ext` and the options the app's `marked` renders (GitHub tables, task lists, strikethrough), using `into_offset_iter`.
+  - The byte ranges of fenced and indented code blocks and inline `Code` become the "code" set.
+  - Every tag-like `<` (followed by a letter, `/`, `!` or `?`) outside that set is escaped, unless backslashes already escape it.
+  - Raw `Html` / `InlineHtml` always starts with such a `<`, so those ranges are escaped by the same rule.
+- **Second check.** The result is parsed again. It must have no raw HTML, and it must leave a following `## ` heading a heading.
+  - Escaping can change the parse (an HTML block becomes a paragraph), so escaping is redone from the new code ranges at most three times.
+  - If the result still doesn't pass, the plain-text form is used.
+- **Message left inside an open fence.** This applies when the last fenced block runs to the end of the message and no fence run follows its content inside the block (the parser's own block range shows this). The whole message is then written as plain text in an outer backtick fence longer than any backtick or tilde run in it, with no attempt to make up a closer.
+- **Removed:** the old tracking code (`after_quotes`, `lead`, `after_containers`, `code_spans`, `OpenFence`, `flush` and the old `contain`/`escape_tags`) and its tests. The `|` heuristic is gone: the parser knows table cells, and a code span in a cell keeps its text.
+
+### Message boundaries
+
+- Every message now gets its own `## User` / `## Assistant` heading, not only on a role change, so a list or code block can't continue into the next message.
+- A message is the text of one transcript entry: consecutive text pieces of one role in one entry are joined. Tool blocks stay under the current heading, getting a new one only after a user message, as before.
+- **Tests:**
+  - two consecutive user messages (`- item`, then `    <!-- hidden`) parse with no raw HTML, and the second one's indented line is an indented code block, not the list's text;
+  - two text pieces of one entry share one heading.
+
+### Regression tests
+
+- **`ADVERSARIAL`** holds 25 messages: every sample from rounds 1 to 4.
+  - All 12 round-4 probes: the R3-M1 list fences, the lazy quote and nested quote fences, `para` with an 8-space fence, the two R4-M1a fences, the 2-space top-level fence, `` a `x\` <script> `y` ``, the `|<script>` table cell, and the backslash cases.
+  - The R2 container cases, the R3 inline-tag, pairing and table cases, an HTML block containing a code span, and the earlier golden cases.
+- **`assert_contained`** places each output as in an export: a heading before it, then the next heading, a tool block and another message. It parses the result and asserts two things:
+  1. no raw HTML starts inside the message;
+  2. all 3 headings and the `<details>` block after it survive.
+- **Expected outputs** are pinned for:
+  - escaped prose tags;
+  - kept inline, fenced and indented code (including the closed 2-space fence and the nested-fence sample);
+  - a table cell's code;
+  - a list fence ended by its item;
+  - backslash escapes;
+  - the plain-text fallback for three open-fence messages;
+  - an outer fence longer than a 6-tilde run.
+- **Golden.** `claude.md` now also holds:
+  - the README sample left inside a fence (`` ```md `` / `> ```` `), written as plain text;
+  - the nested and indented fences, kept as written;
+  - a list followed by a message starting `    <!-- …`, which is indented code under its own heading;
+  - a table with code and a tag.
+  - The earlier open-fence messages ("My notes…", "Here is the change…", "Two steps…") are now written as plain text, as specified.
+
+### Render check with `marked` (scripted)
+
+- `app/src/lib/session-export-goldens.test.ts` is part of `pnpm test`. To run it alone: `cd app && pnpm exec vitest run src/lib/session-export-goldens.test.ts`.
+- It renders every golden `.md` with the app's `marked` and asserts:
+  - every `## User` / `## Assistant` heading line is an `<h2>`;
+  - every tool block (`<details>` followed by its `Tool call` / `Result` summary) is a `<details>` element, opened and closed;
+  - outside `<pre><code>` and `<code>` there is no `<!--` and no tag outside an allow-list (the export's own and Markdown's);
+  - the document ends with a paragraph.
+- The goldens load through Vite's `?raw` import, so the test needs no Node typings.
+- The documentation is in the test file's header and in `docs/architecture.md`.
+
+### Numbers after round 4
+
+- `cargo test -p kelpie -j 2`: 233 passed, 0 failed, 6 ignored. `session_export` has 23 tests and 1 ignored bless helper.
+- clippy `-p kelpie -p kelpie-proto --all-targets`: clean.
+- The first combined clippy + test run ran out of memory while `pnpm build` ran beside it. The tests were re-run alone and passed.
+- Frontend:
+  - `pnpm typecheck`: ok.
+  - `pnpm test`: 514 passed, including the 4 new golden render checks.
+  - `pnpm i18n:check`: 0 missing, 0 problems.
+  - `pnpm build`: ok.
+- Bundle gate: entry 326.29 kB gz, limit 338.60: ok. pulldown-cmark is Rust-side only.
+- `scripts/e2e/session_export.py`: 28/28 in two consecutive runs on the rebuilt debug app. Test daemon, driver and scratch data were removed; only the user's own installed Kelpie stayed running, untouched.

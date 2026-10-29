@@ -175,14 +175,17 @@ File created successfully at: D:\work\demo\.env
 
 ## User
 
+````text
 My notes, pasted as they are:
-\<details>
-\<summary>env\</summary>
-\<!-- private
-\</details>
+<details>
+<summary>env</summary>
+<!-- private
+</details>
 ```yaml
 port: 8080
-```
+````
+
+## User
 
 Forwarded mail:
 > quoted mail
@@ -196,11 +199,12 @@ Forwarded mail:
 
 ## Assistant
 
+````text
 Here is the change I was about to make:
 ```diff
 - retries: 0
 + retries: 2
-```
+````
 
 ## User
 
@@ -212,11 +216,50 @@ Why does the \<textarea> lose focus? Keep `<script>` tags out.
 
 ## Assistant
 
+````text
 Two steps:
 1. Install:
    ```bash
    npm i
-   ```
+````
+
+## Assistant
+
+````text
+A README sample:
+```md
+> ```
+> quoted code
+````
+
+## Assistant
+
+Nested sample:
+```
+    ```
+<details>
+```
+and an indented fence:
+  ```
+  <b>code</b>
+  ```
+
+## Assistant
+
+Checklist:
+- item
+
+## Assistant
+
+    <!-- right after a list
+
+## Assistant
+
+| tag | note |
+|---|---|
+| `<b>` | \<i>bold\</i> |
+
+## Assistant
 
 Done: `ci.yml` now retries twice and the build is green.
 
