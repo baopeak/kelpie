@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::proc_tree::{Priority, ProcTree};
-use crate::session::{json_out, ClientTx, Outgoing, SessionInfo, SessionSpec, SUB_BUDGET};
+use crate::session::{json_out, By, ClientTx, Outgoing, Resolution, SessionInfo, SessionSpec, SUB_BUDGET};
 use crate::status::{exit_failed, Activity, Status, MIN_WORK_FOR_UNREAD};
 
 const LOG_MAX_LINES: usize = 20_000;
@@ -89,7 +89,7 @@ struct Inner {
     /// Wall-clock ms the current wait on the user began.
     waiting_since: Option<u64>,
     /// The agent's requests that have been answered, and by whom, this run of the process.
-    answered: Recent<Who>,
+    answered: Recent<Resolution>,
     /// The requests the agent has made (this run) and nobody has answered yet: the only ones a
     /// phone may answer.
     pending: Recent<()>,
@@ -136,19 +136,12 @@ fn pinned_kind(line: &[u8]) -> Option<usize> {
     PINNED_IDS.iter().position(|id| head.contains(id)).filter(|_| line.len() < 1 << 20)
 }
 
-/// Who gave the answer that counted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Who {
-    Desktop,
-    Phone,
-}
-
-impl Who {
-    fn name(self) -> &'static str {
-        match self {
-            Who::Desktop => "desktop",
-            Who::Phone => "phone",
-        }
+/// What `chat.resolved` calls who gave the answer that counted.
+fn kind(by: &By) -> &'static str {
+    if by.is_desktop() {
+        "desktop"
+    } else {
+        "phone"
     }
 }
 
@@ -158,13 +151,13 @@ struct Recent<V> {
     order: VecDeque<String>,
 }
 
-impl<V: Copy> Recent<V> {
+impl<V: Clone> Recent<V> {
     fn new() -> Self {
         Recent { items: HashMap::new(), order: VecDeque::new() }
     }
 
     fn get(&self, key: &str) -> Option<V> {
-        self.items.get(key).copied()
+        self.items.get(key).cloned()
     }
 
     fn insert(&mut self, key: String, value: V) {
@@ -189,25 +182,17 @@ impl<V: Copy> Recent<V> {
 }
 
 /// Why a phone's answer to an agent request was not written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotAnswered {
     /// The line is not exactly the answer to a request the agent is waiting on.
     NotAnAnswer,
-    AlreadyAnswered,
+    /// The request was answered, by this one.
+    AlreadyAnswered(Resolution),
 }
 
 /// A chat log is already on its way to this connection: ask again once it has been read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Busy;
-
-impl NotAnswered {
-    pub fn code(self) -> &'static str {
-        match self {
-            NotAnswered::NotAnAnswer => "bad_answer",
-            NotAnswered::AlreadyAnswered => "stale",
-        }
-    }
-}
 
 /// A JSON-RPC id as one key: numbers by value (`7` and `7.0` are the same id), strings as they are.
 fn id_key(id: &Value) -> Option<String> {
@@ -557,16 +542,16 @@ impl ChatSession {
     /// A phone's answer to the agent's request `request_id`: `line` must be exactly that request's
     /// answer in the agent's dialect (see `exact_answer`) and the request one the agent made and
     /// nobody has answered. What reaches the agent is the line parsed and written again.
-    pub fn answer(&self, request_id: &Value, line: &str) -> Result<(), NotAnswered> {
+    pub fn answer(&self, request_id: &Value, line: &str, by: By) -> Result<(), NotAnswered> {
         let Some((key, clean)) = exact_answer(line.trim(), request_id) else { return Err(NotAnswered::NotAnAnswer) };
         let mut g = self.inner.lock();
-        if g.answered.get(&key).is_some() {
-            return Err(NotAnswered::AlreadyAnswered);
+        if let Some(resolution) = g.answered.get(&key) {
+            return Err(NotAnswered::AlreadyAnswered(resolution));
         }
         if g.pending.get(&key).is_none() {
             return Err(NotAnswered::NotAnAnswer);
         }
-        Self::resolve(&mut g, self.handle, &self.spec.lock().id, key, request_id.clone(), Who::Phone);
+        Self::resolve(&mut g, self.handle, &self.spec.lock().id, key, request_id.clone(), by);
         g.activity.last_input = Some(Instant::now());
         g.last_activity = crate::session::now_millis();
         if let Some(stdin) = &g.stdin {
@@ -579,14 +564,17 @@ impl ChatSession {
     /// who answered). If it was answered before, nothing changes except that they are told whose
     /// answer stood (`dropped`), so a view that showed this one's click can correct itself.
     /// Returns whether this answer is the one that counts.
-    fn resolve(g: &mut Inner, handle: u32, session: &str, key: String, id: Value, who: Who) -> bool {
+    fn resolve(g: &mut Inner, handle: u32, session: &str, key: String, id: Value, by: By) -> bool {
         let winner = g.answered.get(&key);
+        let first = winner.clone().unwrap_or_else(|| Resolution { by, at: crate::session::now_millis() });
         if winner.is_none() {
-            g.answered.insert(key.clone(), who);
+            g.answered.insert(key.clone(), first.clone());
             g.pending.remove(&key);
         }
-        let by = winner.unwrap_or(who).name();
-        let event = json_out(&json!({"event": "chat.resolved", "params": {"handle": handle, "id": session, "request_id": id, "by": by, "dropped": winner.is_some()}}));
+        let event = json_out(&json!({"event": "chat.resolved", "params": {
+            "handle": handle, "id": session, "request_id": id, "by": kind(&first.by), "dropped": winner.is_some(),
+            "answered_by": first.by.name, "at": first.at,
+        }}));
         g.subs.retain(|s| s.tx.send(Outgoing { data: event.data.clone(), credit: None }).is_ok());
         winner.is_none()
     }
@@ -596,7 +584,7 @@ impl ChatSession {
         let mut kept = Vec::with_capacity(bytes.len());
         for line in bytes.split_inclusive(|b| *b == b'\n') {
             if let Some((key, id)) = answered_key(line) {
-                if !Self::resolve(g, handle, session, key, id, Who::Desktop) {
+                if !Self::resolve(g, handle, session, key, id, By::desktop()) {
                     continue;
                 }
             }
@@ -791,6 +779,11 @@ fn turn_failed(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A phone's answer, as the connection of the device "Phone" makes it.
+    fn answer(c: &ChatSession, request_id: &Value, line: &str) -> Result<(), NotAnswered> {
+        c.answer(request_id, line, By { id: "phone".into(), name: "Phone".into() })
+    }
+
     use super::*;
 
     #[test]
@@ -852,7 +845,7 @@ mod tests {
     }
 
     fn client() -> (ClientTx, Feed) {
-        tokio::sync::mpsc::unbounded_channel()
+        crate::session::client_channel()
     }
 
     /// What the daemon sent a client: JSON frames decoded, output frames as their text.
@@ -958,11 +951,11 @@ mod tests {
             (json!(2), json!({"jsonrpc": "2.0", "id": 2, "result": {"content": "made up"}})),
             (json!(3), json!({"jsonrpc": "2.0", "id": 3, "result": {"terminalId": "t"}})),
         ] {
-            assert_eq!(c.answer(&id, &line.to_string()), Err(NotAnswered::NotAnAnswer), "{line}");
+            assert_eq!(answer(&c, &id, &line.to_string()), Err(NotAnswered::NotAnAnswer), "{line}");
         }
         assert!(stdin.try_recv().is_err(), "nothing reached the agent");
         // The question to the person next to them is answerable.
-        assert_eq!(c.answer(&json!(1), &json!({"jsonrpc": "2.0", "id": 1, "result": {}}).to_string()), Ok(()));
+        assert_eq!(answer(&c, &json!(1), &json!({"jsonrpc": "2.0", "id": 1, "result": {}}).to_string()), Ok(()));
         // The desktop's own answers to any request still count for first-wins.
         c.input(format!("{}\n", json!({"jsonrpc": "2.0", "id": 2, "result": {"content": "x"}})).into_bytes());
         assert!(stdin.try_recv().is_ok(), "the phone's answer");
@@ -1040,21 +1033,21 @@ mod tests {
             (json!("unasked"), allow("unasked")),
         ];
         for (id, line) in &exploits {
-            assert_eq!(c.answer(id, &line.to_string()), Err(NotAnswered::NotAnAnswer), "{line}");
+            assert_eq!(answer(&c, id, &line.to_string()), Err(NotAnswered::NotAnAnswer), "{line}");
         }
         for (id, line) in [(json!("r1"), format!("{}\n{}", allow("r1"), allow("r1"))), (json!("r1"), "not json".to_string()), (json!(["r1"]), allow("r1").to_string()), (json!("r1"), allow("other").to_string())] {
-            assert_eq!(c.answer(&id, &line), Err(NotAnswered::NotAnAnswer), "{line}");
+            assert_eq!(answer(&c, &id, &line), Err(NotAnswered::NotAnAnswer), "{line}");
         }
         assert!(stdin.try_recv().is_err(), "nothing reached the agent");
 
         // The real answers go through, re-serialized from what was parsed (no stray whitespace or newline survives).
-        assert_eq!(c.answer(&json!("r1"), &format!("  {}\n\n", serde_json::to_string_pretty(&allow("r1")).unwrap())), Ok(()));
+        assert_eq!(answer(&c, &json!("r1"), &format!("  {}\n\n", serde_json::to_string_pretty(&allow("r1")).unwrap())), Ok(()));
         assert_eq!(String::from_utf8(stdin.try_recv().unwrap()).unwrap(), format!("{}\n", allow("r1")));
-        assert_eq!(c.answer(&json!(7), r#"{"jsonrpc":"2.0","id":7.0,"result":{"outcome":{"outcome":"cancelled"}}}"#), Ok(()));
+        assert_eq!(answer(&c, &json!(7), r#"{"jsonrpc":"2.0","id":7.0,"result":{"outcome":{"outcome":"cancelled"}}}"#), Ok(()));
         let sent = String::from_utf8(stdin.try_recv().unwrap()).unwrap();
         assert!(sent.ends_with('\n') && sent.matches('\n').count() == 1 && sent.contains(r#""result""#), "{sent}");
         // Once answered, a request is not pending, and not answerable again (7 and 7.0 are one id).
-        assert_eq!(c.answer(&json!(7.0), r#"{"id":7,"result":{}}"#), Err(NotAnswered::AlreadyAnswered));
+        assert!(matches!(answer(&c, &json!(7.0), r#"{"id":7,"result":{}}"#), Err(NotAnswered::AlreadyAnswered(_))));
         assert!(stdin.try_recv().is_err());
     }
 
@@ -1069,8 +1062,8 @@ mod tests {
         received(&mut rx);
 
         // A phone answers; the desktop's answer a moment later is dropped.
-        assert_eq!(c.answer(&json!("r1"), &allow("r1").to_string()), Ok(()));
-        assert_eq!(c.answer(&json!("r1"), &allow("r1").to_string()), Err(NotAnswered::AlreadyAnswered));
+        assert_eq!(answer(&c, &json!("r1"), &allow("r1").to_string()), Ok(()));
+        assert!(matches!(answer(&c, &json!("r1"), &allow("r1").to_string()), Err(NotAnswered::AlreadyAnswered(_))));
         c.input(format!("{}\n", allow("r1")).into_bytes());
         assert_eq!(stdin.try_recv().unwrap(), format!("{}\n", allow("r1")).into_bytes());
         assert!(stdin.try_recv().is_err(), "the agent got one answer");
@@ -1084,7 +1077,7 @@ mod tests {
         // The other way round: the desktop first.
         c.input(format!("{}\n", json!({"id": 3, "result": {"decision": "accept"}})).into_bytes());
         assert!(stdin.try_recv().is_ok());
-        assert_eq!(c.answer(&json!(3), &json!({"id": 3, "result": {"decision": "decline"}}).to_string()), Err(NotAnswered::AlreadyAnswered));
+        assert!(matches!(answer(&c, &json!(3), &json!({"id": 3, "result": {"decision": "decline"}}).to_string()), Err(NotAnswered::AlreadyAnswered(_))));
         assert!(stdin.try_recv().is_err());
         let told: Vec<_> = received(&mut rx).into_iter().filter(|e| e["event"] == "chat.resolved").collect();
         assert_eq!(told[0]["params"]["by"], "desktop");

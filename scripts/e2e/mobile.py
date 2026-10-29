@@ -35,11 +35,13 @@ class Phone:
     def __init__(self):
         self.proc = subprocess.Popen([edgedriver, "--port=9515"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)
-        caps = {"capabilities": {"alwaysMatch": {"browserName": "MicrosoftEdge", "ms:edgeOptions": {
+        # The performance log carries the page's WebSocket frames (what it sends and what it is sent).
+        caps = {"capabilities": {"alwaysMatch": {"browserName": "MicrosoftEdge", "ms:loggingPrefs": {"performance": "ALL"}, "ms:perfLoggingPrefs": {"enableNetwork": True}, "ms:edgeOptions": {
             "args": ["--headless=new", "--window-size=412,900", "--no-first-run", f"--user-data-dir={os.path.join(scratch, 'phone-profile')}"],
             "mobileEmulation": {"deviceMetrics": {"width": 412, "height": 900, "pixelRatio": 2.0}, "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"},
         }}}}
         self.sid = self.req("POST", "/session", caps)["sessionId"]
+        self.frames = {}  # the performance log is read once: what was read is kept here
 
     def req(self, method, path, body=None):
         data = json.dumps(body).encode() if body is not None else None
@@ -52,6 +54,18 @@ class Phone:
 
     def go(self, url):
         self.req("POST", f"/session/{self.sid}/url", {"url": url})
+
+    def socket_frames(self, method):
+        """The page's WebSocket frames of `method` (`Network.webSocketFrameSent` or `...Received`) read so far, as JSON."""
+        for entry in self.req("POST", f"/session/{self.sid}/log", {"type": "performance"}):
+            message = json.loads(entry["message"])["message"]
+            kind = message.get("method", "")
+            if kind.startswith("Network.webSocketFrame"):  # every frame read is kept, whichever method is asked for
+                try:
+                    self.frames.setdefault(kind, []).append(json.loads(message["params"]["response"]["payloadData"]))
+                except (KeyError, ValueError):
+                    pass  # binary or not JSON: not a control message
+        return self.frames.get(method, [])
 
     def js(self, script, *args):
         return self.req("POST", f"/session/{self.sid}/execute/sync", {"script": script, "args": list(args)})
@@ -156,6 +170,13 @@ try:
     run.shot("03-approve")
     d.js("[...document.querySelectorAll('.mobile-approve .btn.primary')].find(b => b.textContent.includes('typing')).click()")
     run.check("approved phone connects and lists sessions", bool(phone.wait("return document.getElementById('conn').className.includes('on')", 20)))
+    # The served page itself: it sends caps [ack, hb] with its auth (token not printed), and the daemon's
+    # hello does not put it in the legacy mode.
+    sent, got = phone.socket_frames("Network.webSocketFrameSent"), phone.socket_frames("Network.webSocketFrameReceived")
+    auth = [m for m in sent if m.get("type") == "auth"]
+    run.check("the page's auth says it acknowledges frames and answers heartbeats (caps ack, hb)", any(sorted(m.get("caps") or []) == ["ack", "hb"] for m in auth), f"{len(sent)} frames sent, auth caps {[m.get('caps') for m in auth]}")
+    hello = [m for m in got if m.get("type") == "hello"]
+    run.check("the daemon's hello is not legacy (hello.hb.legacy false)", any((m.get("hb") or {}).get("legacy") is False for m in hello), f"{len(got)} frames received, hello {len(hello)}")
     devs = daemon(d, "mobile.status")["devices"]
     run.check("the device is listed with typing allowed", len(devs) == 1 and devs[0]["name"] == "Test phone" and devs[0]["can_write"], str(devs))
     run.check("the used pairing code is refused afterwards", post_pair(base, link.split("#p=")[1]) == 403)

@@ -82,7 +82,7 @@ Phone (PWA on LAN | native app anywhere) ── one SolidJS client (app/phone)
 ## Phases
 | # | Phase | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|
-| 1 | [Phone protocol v2: state-sync, prompts, safe answers](phase-01-phone-protocol-v2.md) (+ resilience addendum, second commit) | P1 | 4d + 3d | roadmap phase 12 | in progress |
+| 1 | [Phone protocol v2: state-sync, prompts, safe answers](phase-01-phone-protocol-v2.md) (+ resilience addendum, second commit) | P1 | 4d + 3d | roadmap phase 12 | done |
 | 2 | [Phone client app (SolidJS, PWA)](phase-02-phone-client-app.md) | P1 | 7d | 1 | pending |
 | 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) | P1 | 7d | 2 | pending |
 | 4 | [Relay: connect from anywhere](phase-04-relay-connect-anywhere.md) | P1 | 5d | 3 | pending |

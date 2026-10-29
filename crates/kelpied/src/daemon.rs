@@ -1566,6 +1566,12 @@ impl Daemon {
                 json!(true)
             }
             "mobile.status" => self.mobile.status(),
+            "mobile.load" => {
+                if params.get("reset").and_then(Value::as_bool) == Some(true) {
+                    self.mobile.load.reset_lags();
+                }
+                self.mobile.load.report()
+            }
             "mobile.enable" => {
                 // Binding the listener is async: answer when it is up (or failed).
                 let (me, tx, id) = (self.clone(), tx.clone(), id.clone());
@@ -1871,7 +1877,7 @@ mod tests {
         event_session(&daemon, &dir, 1, "mine", false);
         let mut receivers = Vec::new();
         for (id, role) in [(1, None), (2, Some(Role::Anonymous)), (3, Some(Role::Claimed("mine".into())))] {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, rx) = crate::session::client_channel();
             daemon.register_client(id, tx);
             if let Some(role) = role {
                 daemon.set_client_role(id, &role);
@@ -1893,7 +1899,7 @@ mod tests {
         let (daemon, dir) = test_daemon("event-restricted");
         let own = event_session(&daemon, &dir, 1, "mine", true);
         let other = event_session(&daemon, &dir, 2, "other", false);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::session::client_channel();
         daemon.register_client(1, tx);
         daemon.set_client_role(1, &Role::Session("mine".into()));
         for session in [&own, &other] {
@@ -1921,7 +1927,7 @@ mod tests {
         daemon.agents_control_others.store(true, Ordering::Relaxed);
         let own = event_session(&daemon, &dir, 1, "mine", false);
         let other = event_session(&daemon, &dir, 2, "other", false);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::session::client_channel();
         daemon.register_client(1, tx);
         daemon.set_client_role(1, &Role::Session("mine".into()));
         daemon.broadcast("session.updated", json!(own.info()));
@@ -1947,7 +1953,7 @@ mod tests {
         use crate::auth::Role;
         let (daemon, dir) = test_daemon("event-user");
         let session = event_session(&daemon, &dir, 1, "mine", false);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::session::client_channel();
         daemon.register_client(1, tx);
         daemon.set_client_role(1, &Role::User);
         let payloads = [
@@ -1977,7 +1983,7 @@ mod tests {
         event_session(&daemon, &dir, 2, "other", true);
         let mut receivers = Vec::new();
         for (id, role) in [(1, Role::Session("mine".into())), (2, Role::Session("other".into())), (3, Role::User)] {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, rx) = crate::session::client_channel();
             daemon.register_client(id, tx);
             daemon.set_client_role(id, &role);
             receivers.push(rx);
@@ -2003,7 +2009,7 @@ mod tests {
     fn what_the_user_looks_at_is_raised_neither_to_the_app_nor_to_the_phone() {
         use notify::Kind;
         let (daemon, dir) = test_daemon("raise");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::session::client_channel();
         daemon.register_client(1, tx);
         daemon.set_client_role(1, &crate::auth::Role::User);
         let mut c = notify::Config { min_turn_s: 0, ..Default::default() };
@@ -2041,7 +2047,7 @@ mod tests {
     #[test]
     fn a_closed_window_stops_counting_as_looking() {
         let (daemon, dir) = test_daemon("looking");
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = crate::session::client_channel();
         daemon.register_client(7, tx);
         daemon.notifier.set_ui(7, true, vec!["s1".into()], None);
         assert!(daemon.notifier.looking_at("s1"));
@@ -2157,7 +2163,7 @@ mod tests {
     #[test]
     fn notes_are_added_listed_and_cleared_through_the_rpcs() {
         let (daemon, dir) = test_daemon("notes");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::session::client_channel();
         daemon.register_client(1, tx.clone());
         daemon.set_client_role(1, &crate::auth::Role::User);
         let (base, repo) = repo_with_ignored("notes-repo");
@@ -2198,14 +2204,14 @@ mod tests {
         session("elsewhere", &other_repo);
         let mut rx = Vec::new();
         for (cid, role) in [(1u64, Some(Role::User)), (2, Some(Role::Session("mine".into()))), (3, Some(Role::Session("elsewhere".into()))), (4, Some(Role::Claimed("mine".into()))), (5, None)] {
-            let (tx, r) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, r) = crate::session::client_channel();
             daemon.register_client(cid, tx);
             if let Some(role) = role {
                 daemon.set_client_role(cid, &role);
             }
             rx.push(r);
         }
-        let (tx, _own) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _own) = crate::session::client_channel();
         daemon.dispatch(1, &tx, &json!(1), "note.add", json!({"path": wt, "file": "main.txt", "line": 1, "side": "new", "text": "m", "note": "n"})).unwrap();
         let told: Vec<usize> = rx.iter_mut().map(|r| events(r).iter().filter(|e| e["event"] == "notes.changed").count()).collect();
         assert_eq!(told, [1, 1, 0, 0, 0], "the user, the session in that worktree; not another worktree's session, a claimed id or an unauthenticated connection");
@@ -2229,7 +2235,7 @@ mod tests {
     #[test]
     fn notes_moved_over_from_the_app_survive_a_daemon_restart_untouched() {
         let (daemon, dir) = test_daemon("notes-migrate");
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = crate::session::client_channel();
         let (base, repo) = repo_with_ignored("notes-migrate-repo");
         let wt = repo.to_string_lossy().into_owned();
         let moved = [("old-1", "main.txt", 1u64, "new", "m", "from the app", 1_700_000_000_000u64), ("old-2", "README.md", 4u64, "old", "removed line", "second", 1_700_000_001_000)];
