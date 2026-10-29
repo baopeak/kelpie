@@ -977,17 +977,20 @@ task's run status is the Runs engine's.
   tree. A scan reads the process table once: on Windows one `NtQuerySystemInformation(SystemProcessInformation)`
   call (parents, start times, names, working set and CPU time of every process, ~2 ms; a Toolhelp snapshot or
   sysinfo cost ~6 ms each for the same), with the executable path read from the handle of each process listed;
-  on Unix sysinfo without threads (`without_tasks`; Linux would list each thread as a process), the executable
+  on Unix sysinfo without threads (`without_tasks`; Linux would list each thread as a process), through one
+  long-lived `System` for every reading (one boot time, so start times agree after a clock step), the executable
   path read fresh for each process listed and again before each stop. Every process is keyed by its identity
   (pid, start time, exe path); one remembered in a tree that still runs as the same process outside it is listed
   as an orphan, one whose identity changed is dropped. The session's own process is the one the session reports
-  now (it holds it until it records the exit), so after a restart under the same session id the new process is
-  the root, never a child, and is always in the keep set; what the previous run left is remembered as orphans.
-  Ports: Windows `GetExtendedTcpTable` (listeners, both families), Linux `/proc/net/tcp*` with socket inodes,
-  macOS one `lsof` for all the PIDs of a look. Nothing scans by itself: `process.ports` (the chips) is asked by
-  the app for the visible sessions, once when they appear, ~0.8 s after their terminal prints (at most every 2
-  s), and every 3 s only while the last look found children; it asks for ports only when some session has
-  children or orphans. `process.list` while the Processes panel is open (every 2 s). `daemon.info.process_scans`
+  now, checked against the start time the session recorded when it started it (a PID reused before the session
+  learnt its process ended is not the root, and nothing is walked from it). So after a restart under the same
+  session id the new process is the root, never a child, and the reported PID is always in the keep set; what
+  the previous run left is remembered as orphans. Ports: Windows `GetExtendedTcpTable` (listeners, both
+  families), Linux `/proc/net/tcp*` with socket inodes, macOS one `lsof` for all the PIDs of a look. Nothing
+  scans by itself: `process.ports` (the chips) is asked by the app for the visible sessions, once when they
+  appear, ~0.8 s after their terminal prints (at most every 2 s), and every 3 s only while the last look found
+  children; on macOS it runs `lsof` only when some session has children or orphans or is a custom session (whose
+  own process is often the server), elsewhere whenever a session has a process. `process.list` while the Processes panel is open (every 2 s). `daemon.info.process_scans`
   counts scans. `process.kill {session, pid, start_time, exe?}` refuses unless the process is in the session's
   tree (or its orphans) with that identity, never the session's own process or the daemon; it stops the process
   and its descendants deepest first. Each victim is re-checked against its identity through the handle that

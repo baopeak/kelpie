@@ -19,7 +19,8 @@ script started itself (servers it typed into its own sessions, a stranger it spa
 5. "Kill children" on an agent session stops the server its tool shell started and keeps the agent process
    and what it runs directly (a helper, as an MCP server is). After the session is killed and restarted (same
    session id, a new process in a new job), the new process is the session's own: listed as the root, never a
-   child, refused by Kill, and kept by Kill children, which still frees the new server's port.
+   child, refused by Kill, and kept by Kill children, which still frees the new server's port. A custom session
+   whose own process is the server (`python -m http.server`, nothing under it) gets its chip too.
 6. Guards: a stale identity (wrong start time, wrong program, a PID that is not in the tree, the session's
    own process) never stops anything; programs running in a session (token, no token, any shape of
    parameters) cannot list or stop processes.
@@ -353,6 +354,17 @@ def scenario(run, c):
     run.check("…frees the port", bool(until(lambda: not listening(agent_port2), 15)))
     time.sleep(1)
     run.check("…and keeps the new process, its helper and the session", alive(new_root) and bool(helper2) and alive(helper2) and info(c, ag["id"]).get("alive") is True, f"root {new_root}, helper {helper2}")
+
+    # 5c. a session that is itself the server (a custom command, nothing under it): its port has a chip too
+    srv_port = free_port()
+    srv = js_await(d, f"{S}.newSession(arguments[0], 'custom', {{args: arguments[1], name: 'server'}})", pid, [PY, "-m", "http.server", str(srv_port), "--bind", "127.0.0.1"])
+    up = until(lambda: listening(srv_port), 30)
+    srv_list = processes(c, srv["id"])
+    srv_root = srv_list["root"] or {}
+    run.check("a custom session runs the server as its own process", bool(up) and srv_root.get("name", "").lower().startswith("python") and srv_root.get("ports"), json.dumps(srv_root)[:200])
+    t0 = time.time()
+    chip = until(lambda: d.js("return !!document.querySelector('.tab.active .port-chip[data-port=\"%d\"]')" % srv_port), 12, 0.1)
+    run.check("…and its :port chip is on its tab", bool(chip), f"{time.time() - t0:.2f} s after it listened")
 
     # 6. guards on the daemon
     list_ = processes(c, sid2)

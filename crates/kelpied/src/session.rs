@@ -205,6 +205,8 @@ struct Pty {
     killer: Box<dyn ChildKiller + Send + Sync>,
     tree: Option<Arc<ProcTree>>,
     pid: Option<u32>,
+    /// When that process started (`procs::start_time_of`), read right after it was started.
+    start: Option<u64>,
 }
 
 struct Ring {
@@ -381,6 +383,8 @@ impl Session {
         let mut writer = pair.master.take_writer()?;
         let master = pair.master;
         let pid = child.process_id();
+        // Read while the child is ours and unreaped: this is the start the session's process is known by.
+        let start = pid.and_then(crate::procs::start_time_of);
         let agent = crate::agents::preset_for(&spec.kind).map(|p| p.bin);
         let tree = pid.and_then(|p| ProcTree::adopt(p, console, agent).map(Arc::new).map_err(|e| tracing::warn!("job object: {e}")).ok());
         let quiet = tree.as_ref().map(|t| t.quiet_flag());
@@ -401,7 +405,7 @@ impl Session {
             g.interrupted = false;
             g.activity = Activity { alive: true, ..Default::default() };
             g.last_status = Status::Idle;
-            g.pty = Some(Pty { ctl: ctl_tx.clone(), killer, tree, pid });
+            g.pty = Some(Pty { ctl: ctl_tx.clone(), killer, tree, pid, start });
             g.generation
         };
 
@@ -812,11 +816,11 @@ impl Session {
         }))
     }
 
-    /// The process the session runs, and its job when there is one; `None` once it has ended.
-    pub fn proc_root(&self) -> Option<(u32, Option<Arc<ProcTree>>)> {
+    /// The process the session runs, when it started, and its job when there is one; `None` once it has ended.
+    pub fn proc_root(&self) -> Option<crate::procs::Root> {
         let g = self.inner.lock();
         let pty = g.pty.as_ref()?;
-        Some((pty.pid?, pty.tree.clone()))
+        Some(crate::procs::Root { pid: pty.pid?, start: pty.start, tree: pty.tree.clone() })
     }
 
     pub fn kill(&self) {
@@ -1166,7 +1170,7 @@ pub(crate) mod fake {
         let (tx, rx) = std::sync::mpsc::channel();
         {
             let mut g = session.inner.lock();
-            g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None });
+            g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None, start: None });
             g.generation = 1;
             g.activity = Activity { alive: true, ..Default::default() };
         }
@@ -1230,7 +1234,7 @@ impl Session {
     pub(crate) fn fake_process(&self, pid: u32, tree: Option<Arc<ProcTree>>) {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut g = self.inner.lock();
-        g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree, pid: Some(pid) });
+        g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree, pid: Some(pid), start: crate::procs::start_time_of(pid) });
     }
 
     /// Makes the session look like a running agent in `status`; what is typed into it shows up on the channel.
@@ -1238,7 +1242,7 @@ impl Session {
         let (tx, rx) = std::sync::mpsc::channel();
         {
             let mut g = self.inner.lock();
-            g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None });
+            g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None, start: None });
             g.activity = Activity { alive: true, ..Default::default() };
             g.activity.on_hook(status, false, Instant::now());
         }
@@ -1309,7 +1313,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         {
             let mut g = session.inner.lock();
-            g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None });
+            g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None, start: None });
             g.generation = generation;
             g.activity = Activity { alive: true, ..Default::default() };
             g.activity.on_hook(Status::Working, false, Instant::now());
@@ -1349,7 +1353,7 @@ mod tests {
         let spec = SessionSpec { id: "s1".into(), kind: "claude".into(), cwd: ".".into(), agent_session_id: Some("conv-1".into()), ..Default::default() };
         let session = Session::new(1, spec, 80, 24);
         let (tx, rx) = std::sync::mpsc::channel();
-        session.inner.lock().pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None });
+        session.inner.lock().pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree: None, pid: None, start: None });
         session.inner.lock().generation = 1;
         let hook = |status, failed| session.inner.lock().activity.on_hook(status, failed, Instant::now());
         // The prompt is sent, the turn starts, the user starts typing the next message, the turn fails.

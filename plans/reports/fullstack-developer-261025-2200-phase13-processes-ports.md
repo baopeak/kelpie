@@ -151,3 +151,49 @@ helper and the session.
 - `processes.py`: two consecutive green runs, **53/53** and **53/53**. Chip 0.96 s / 0.86 s; idle 0 scans in 10 s; debug
   daemon scan with 5 servers median 5.36 / 5.06 ms (release budget, reported only). No test process left afterwards.
 - Regressions: `attention.py` **15/15**, `finish.py` **72/72**.
+
+## Review fixes round 2 (code review, "Round 2" section)
+
+### Blocking
+- **Chips for a session that is itself the server**: the "ask for ports only when something runs under a session" gate
+  now applies on macOS only (`wants_ports` in `daemon/process.rs`, called with `cfg!(target_os = "macos")`). Windows and
+  Linux ask whenever a visible session has a process, as before round 1. On macOS the roots of custom sessions (not a
+  shell, not an agent: `Target.custom`) are included, so a custom session running `python -m http.server` gets its chip
+  there too; a shell or agent with nothing under it still costs no `lsof`. Tests: unit test of the decision on both
+  settings (`a_session_whose_own_process_is_the_server_has_its_ports_looked_up`), daemon test with a custom session whose
+  own process listens (`a_session_whose_own_process_listens_has_its_port_in_the_chips`), and e2e step 5c: a custom session
+  runs `python -m http.server` as its own process (nothing under it) and its tab shows the chip (1.52 s / 1.35 s after it
+  listened). The round-1 trade-off noted under M1 is gone.
+
+### Low
+- **Root start time**: `Session::spawn` and the chat spawn record `procs::start_time_of(pid)` right after starting the
+  process (child still unreaped); `proc_root` returns it (`procs::Root`), `Target.root_start` carries it, and the scan
+  takes the reported PID as the root only when its start matches. A different start (session ended, PID reused before
+  the session recorded the exit) gives no root, so nothing is walked from it; the reported PID is still never a child,
+  always kept and refused by Kill. The comment that claimed the session holds its process until it records the exit was
+  rewritten (true on Windows, not on Unix). Test `a_process_under_the_session_s_pid_with_another_start_is_not_its_root`.
+- **One `System` on Unix (also the clock-step disagreement)**: every Unix reading goes through one static
+  `parking_lot::Mutex<System>`: the table, a listed process's identity, the checks before each signal and the start
+  recorded at spawn. No `System::new()` per PID per scan any more, and every start time uses the same boot time, so a
+  wall-clock step cannot make listing and identity disagree. The lock is taken per reading (never across the grace wait).
+  Scans still run on `spawn_blocking`/kill threads; the PTY reader/writer/waiter threads never touch it (spawn reads the
+  start on the caller's thread). Compiled only on Unix: the module was copied verbatim (`libc::kill` stubbed) into a
+  throwaway crate and run against sysinfo 0.39.6 on Windows (table, identity and recorded start agree; a wrong start is
+  refused), then removed.
+- **Agent one level deeper (Gemini relaunch, Volta shim)**: not changed. No small rule is clearly correct: descending into
+  a sole same-named child would also descend into a lone `node` MCP server or dev server the agent started, and keep what
+  those start, which breaks "what a tool started is stopped". Follow-up: recognise these launchers by command line (e.g.
+  Gemini's relaunch flag, Volta's shim path) when Linux/macOS agent launch is reworked. The agent itself always survives;
+  only its helpers may be stopped in these setups.
+
+### Verification (numbers)
+- `cargo test -j 2 -p kelpie-proto -p kelpied`: kelpied **351 passed / 3 ignored**, kelpie-proto 25 / 2 ignored.
+  `cargo test -j 1 -p kelpie` (crate unchanged this round): **169 passed / 5 ignored** on the rerun. The first run, under
+  heavy machine load (other sessions building, 1.4 GB free), timed out two timing-sensitive tests
+  (`reading_everything_on_open_is_fast`, `a_cancel_pressed_while_signing_waits_changes_nothing`); both also pass alone.
+- `cargo clippy -j 2 -p kelpied -p kelpie-proto --all-targets -- -D warnings`: only master's `too_many_arguments` at
+  `mobile.rs:892`; clean with it allowed.
+- `pnpm typecheck` clean; `pnpm test` 460 passed; `pnpm i18n:check` 0 missing (no frontend change this round).
+- Debug `kelpied` rebuilt (app unchanged). `processes.py`: two consecutive green runs, **55/55** and **55/55** (chip
+  0.87 / 0.89 s; debug scan with 5 servers median 6.32 / 5.43 ms under load). `attention.py` **15/15**, `finish.py`
+  **72/72**. No test process left afterwards.

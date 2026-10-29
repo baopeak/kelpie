@@ -67,7 +67,7 @@ impl Entry {
         }
     }
     /// The process the session runs and its job (see `procs`); `None` once it has ended.
-    fn proc_root(&self) -> Option<(u32, Option<Arc<crate::proc_tree::ProcTree>>)> {
+    fn proc_root(&self) -> Option<crate::procs::Root> {
         match self {
             Entry::Term(s) => s.proc_root(),
             Entry::Chat(c) => c.proc_root(),
@@ -2400,6 +2400,28 @@ mod tests {
         assert!(daemon.dispatch(1, &tx, &json!(4), "process.list", json!({"session": "gone"})).is_err());
         reap(stranger);
         reap(root);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A custom session whose own process is the server (`python -m http.server` run as the session) has a chip.
+    #[test]
+    fn a_session_whose_own_process_listens_has_its_port_in_the_chips() {
+        let (daemon, dir) = test_daemon("process-root-port");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.register_client(1, tx.clone());
+        daemon.set_client_role(1, &crate::auth::Role::User);
+        // The test run itself stands for the server: it is the session's process and it listens.
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let spec = SessionSpec { id: "srv".into(), kind: "custom".into(), cwd: std::env::temp_dir().to_string_lossy().into_owned(), ..Default::default() };
+        let handle = daemon.next_handle.fetch_add(1, Ordering::Relaxed);
+        let session = Session::new(handle, spec, 80, 24);
+        session.fake_process(std::process::id(), None);
+        daemon.sessions.write().insert(handle, Entry::Term(session));
+        let chips = daemon.dispatch(1, &tx, &json!(1), "process.ports", json!({"sessions": ["srv"]})).unwrap().unwrap();
+        let ports = chips["sessions"]["srv"]["ports"].as_array().unwrap();
+        assert!(ports.iter().any(|p| p["port"] == port && p["pid"] == std::process::id()), "{chips}");
+        drop(socket);
         let _ = std::fs::remove_dir_all(dir);
     }
 

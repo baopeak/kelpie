@@ -68,6 +68,8 @@ struct Inner {
     stdin: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
     tree: Option<Arc<ProcTree>>,
     pid: Option<u32>,
+    /// When that process started (`procs::start_time_of`), read right after it was started.
+    pid_start: Option<u64>,
     alive: bool,
     exit_code: Option<i32>,
     /// Kelpie stopped the process, so its exit code says nothing about failure.
@@ -309,6 +311,7 @@ impl ChatSession {
                 stdin: None,
                 tree: None,
                 pid: None,
+                pid_start: None,
                 alive: false,
                 exit_code: None,
                 activity: Activity { alive: false, ..Default::default() },
@@ -359,6 +362,7 @@ impl ChatSession {
         cmd.process_group(0);
         let mut child = cmd.spawn().with_context(|| format!("spawn {argv:?}"))?;
         let pid = child.id();
+        let pid_start = pid.and_then(crate::procs::start_time_of);
         let tree = pid.and_then(|p| ProcTree::adopt(p, None, None).ok()).map(Arc::new);
         let mut stdin = child.stdin.take().context("stdin")?;
         let stdout = child.stdout.take().context("stdout")?;
@@ -369,6 +373,7 @@ impl ChatSession {
             g.stdin = Some(in_tx);
             g.tree = tree;
             g.pid = pid;
+            g.pid_start = pid_start;
             g.alive = true;
             g.exit_code = None;
             g.stopped = false;
@@ -633,12 +638,12 @@ impl ChatSession {
     }
 
     /// See `Session::proc_root`.
-    pub fn proc_root(&self) -> Option<(u32, Option<Arc<ProcTree>>)> {
+    pub fn proc_root(&self) -> Option<crate::procs::Root> {
         let g = self.inner.lock();
         if !g.alive {
             return None;
         }
-        Some((g.pid?, g.tree.clone()))
+        Some(crate::procs::Root { pid: g.pid?, start: g.pid_start, tree: g.tree.clone() })
     }
 
     pub fn set_focus(&self, focused: bool) {

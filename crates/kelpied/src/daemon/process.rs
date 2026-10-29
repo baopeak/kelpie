@@ -55,16 +55,27 @@ fn pids_of(scans: &[TreeScan]) -> Vec<u32> {
     pids
 }
 
+/// Whether a look at `targets` (scanned as `scans`) asks the system for its listening sockets. Windows and Linux
+/// read a socket table in about a millisecond: always, when a session has a process. On macOS (`lsof_costs`) that
+/// is an `lsof` run, so only when something runs under a session or a session runs a command of its own (a custom
+/// session is often the server itself): a shell or agent with nothing under it, looked at after each burst of
+/// output, costs no `lsof`.
+fn wants_ports(targets: &[Target], scans: &[TreeScan], lsof_costs: bool) -> bool {
+    targets.iter().zip(scans).any(|(t, s)| !s.children.is_empty() || !s.orphans.is_empty() || (s.root.is_some() && (!lsof_costs || t.custom)))
+}
+
 impl Daemon {
     /// The session's process as the scanner needs it.
     fn process_target(&self, id: &str) -> Result<Target> {
         let entry = self.by_id(id).ok_or_else(|| anyhow!("no session {id}"))?;
-        let (root, tree) = match entry.proc_root() {
-            Some((pid, tree)) => (Some(pid), tree),
-            None => (None, None),
+        let (root, root_start, tree) = match entry.proc_root() {
+            Some(r) => (Some(r.pid), r.start, r.tree),
+            None => (None, None, None),
         };
-        let agent = crate::agents::preset_for(&entry.spec().kind).map(|p| p.bin.to_string());
-        Ok(Target { id: id.to_string(), root, tree, agent })
+        let kind = entry.spec().kind;
+        let agent = crate::agents::preset_for(&kind).map(|p| p.bin.to_string());
+        let custom = agent.is_none() && kind != "shell";
+        Ok(Target { id: id.to_string(), root, root_start, tree, agent, custom })
     }
 
     fn forget_closed_sessions(&self) {
@@ -101,9 +112,7 @@ impl Daemon {
                 let targets: Vec<Target> = ids.iter().filter_map(Value::as_str).filter_map(|sid| self.process_target(sid).ok()).collect();
                 self.forget_closed_sessions();
                 let scans = if targets.is_empty() { Vec::new() } else { self.procs.scan(&targets) };
-                // The ports are asked for only when something runs under a session: a shell or agent with nothing
-                // under it (asked about after each burst of output) costs no socket lookup (on macOS, an `lsof`).
-                let listeners = if scans.iter().all(|s| s.children.is_empty() && s.orphans.is_empty()) { Vec::new() } else { ports::listeners(Some(&pids_of(&scans))) };
+                let listeners = if wants_ports(&targets, &scans, cfg!(target_os = "macos")) { ports::listeners(Some(&pids_of(&scans))) } else { Vec::new() };
                 let ports = by_owner(&listeners);
                 let mut sessions = serde_json::Map::new();
                 for s in &scans {
@@ -152,5 +161,41 @@ impl Daemon {
             Some(req) => self.procs.kill(target, req, GRACE),
             None => Ok(self.procs.kill_children(target, GRACE)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proc_(pid: u32) -> Proc {
+        Proc { pid, ppid: None, name: "p".into(), start_time: 1, exe: None, mem: 0, cpu: 0.0 }
+    }
+
+    fn look(custom: bool, root: bool, children: usize) -> (Target, TreeScan) {
+        let t = Target { id: "s".into(), root: root.then_some(1), root_start: None, tree: None, agent: None, custom };
+        let s = TreeScan { id: "s".into(), root: root.then(|| proc_(1)), children: (0..children as u32).map(|i| proc_(10 + i)).collect(), orphans: Vec::new(), dropped: 0, keep: HashSet::new() };
+        (t, s)
+    }
+
+    fn wants(looks: Vec<(Target, TreeScan)>, lsof_costs: bool) -> bool {
+        let (targets, scans): (Vec<Target>, Vec<TreeScan>) = looks.into_iter().unzip();
+        wants_ports(&targets, &scans, lsof_costs)
+    }
+
+    #[test]
+    fn a_session_whose_own_process_is_the_server_has_its_ports_looked_up() {
+        // Windows and Linux: any session with a process, the server being that process itself included.
+        assert!(wants(vec![look(true, true, 0)], false));
+        assert!(wants(vec![look(false, true, 0)], false));
+        // macOS: a custom session's own process (often the server), or something running under a session…
+        assert!(wants(vec![look(true, true, 0)], true));
+        assert!(wants(vec![look(false, true, 2)], true));
+        assert!(wants(vec![look(false, true, 0), look(true, true, 0)], true));
+        // …but no `lsof` for a shell or agent with nothing under it.
+        assert!(!wants(vec![look(false, true, 0)], true));
+        // Nothing running at all: nothing to ask about.
+        assert!(!wants(vec![look(true, false, 0)], false));
+        assert!(!wants(vec![], false));
     }
 }

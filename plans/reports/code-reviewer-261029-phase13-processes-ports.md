@@ -125,3 +125,139 @@ The panel shows the "Kill children" button, because `kids()` = children not in `
 1. Is a Linux `kelpied` in scope (for example, for SSH hosts later)? This decides whether H2 blocks.
 2. Should "Kill children" keep the agent's MCP and stdio helpers (M3)?
 3. Should Windows implement console Ctrl+Break for the grace period, or should the docs and dialog say console programs are stopped at once (M2)?
+
+---
+
+# Round 2: fixes in 0e327b5 (diff `5fcd65b..0e327b5`)
+
+Review only; no source edited. The controller's decisions (M2 docs-only, M3 keeps the agent's direct children, Linux in scope) are taken as given.
+
+## Verdict
+
+**One blocking item left: R2-M1.** The new "look up ports only when something runs under a session" gate applies on every platform, not only macOS. A session whose own process is the server, for example a custom session running `python -m http.server`, no longer gets a chip. The fix is one line. Everything else from round 1 is fixed correctly, and the safety properties hold: every stop is identity-checked, and the session's root can never be stopped. The remaining new findings are Low.
+
+## Round-1 findings re-checked
+
+| Finding | Status | Evidence |
+|---|---|---|
+| H1 restart/root | **Fixed** | `procs.rs:229` uses whatever root the session reports now. `:238` removes `t.root` from members, including the job list. `:256` always keeps `t.root`, even when its identity is unreadable. `:277` makes `kill` refuse `t.root` by PID. Regression test `a_restarted_session_s_new_process_is_its_own_and_is_never_stopped` passes; it uses a real new job under the same id. See R2-L1 for the guard that was dropped. |
+| H2 Linux threads | **Fixed** | `refresh_kind()` uses `.without_tasks()` (`:546`). `read` and `now` both filter `thread_kind().is_none()` (`:558`, `:584`). |
+| L2 stale exe | **Fixed** | The table no longer reads exe paths. `now()` (`:555-560`) reads with `UpdateKind::Always` both when listing and before each signal. |
+| L3 case | **Fixed** | `:166-169` lowercases before stripping `.exe`, with a test for `Codex.Exe`. |
+| L5 chips | **Fixed** | Off-screen chips are marked `stale`, dimmed and dashed, with a tooltip. They become fresh on the next look and are deleted when the session dies (`processes.ts:126-129`). There is a Vitest for it. |
+| L6 buffer bounds | **Fixed** | `:435-440`: `wrapping_sub` rejects a buffer below base. The parity check is valid because base is 8-aligned. `name_at > end \|\| name_len > end - name_at` cannot overflow. |
+| M2 / M3 / M4 / L7 / L8 / L9 | Fixed as decided | The Windows dialog text is OS-specific. `keep_set` keeps the agent's direct children. There is a direct `os::terminate` refusal test. The panel uses `allSettled` plus pruning. `forget_closed_sessions` is now also called on `process.ports`. `uniquePorts` is shared. |
+| M1 macOS lsof | Partly addressed | It was already one `lsof` per look. The new gate causes R2-M1. |
+| L1 | Skipped, accepted | — |
+
+## Safety questions asked for this round
+
+**Can anything untrusted choose the root PID?** No.
+- `Target.root` comes only from the daemon's own spawn bookkeeping: `Session::proc_root` → `pty.pid` from `child.process_id()` (`session.rs:383,404,816-820`), and `ChatSession::proc_root` → `g.pid` (`chat.rs:371,636-642`).
+- A session program cannot reach `process.*` (the auth allow-list and its test still pass), and it cannot change these fields.
+- The agent name comes from the user's own preset or custom agent config.
+- The only remaining way to get a wrong root is a stale snapshot; see R2-L1.
+
+**Is every stop still identity-checked? Can a stop reach a non-descendant?** Yes, every stop is checked. A non-descendant can be reached only through R2-L1.
+- `kill` refuses `t.root` and the scanned root (`:277`).
+- It requires the PID to be one of this scan's children or orphans, compares `start_time`, and compares `exe` when one is given (`:280-287`).
+- Victims below it come only from this scan's `children`.
+- `kill_children` stops only `children` that are not in `keep`.
+- `os::terminate` re-checks every victim:
+  - On Windows, through the handle it holds until `TerminateProcess` (`:494-512`).
+  - On Unix, by a fresh read before `SIGTERM` and again before `SIGKILL` (`:603-635`).
+- Job members are kernel-assigned, so on Windows they are descendants. The `child_map` start-time rule still rejects reused parent PIDs.
+
+**Is the "launcher with nothing agent-like under it is the agent" rule sound?** It is sound for safety:
+- The rule only adds to `keep`, so it can only cause something to be kept that should have been stopped. It can never cause something extra to be stopped.
+- The root is never a victim either way.
+- In the configurations that actually ship, it is what makes M3 work:
+  - Windows npm shims are unwrapped to `node cli.js` (`agents.rs:552-555`), so for npm-installed agents the root is `node`.
+  - On Unix, `$SHELL -l -c "exec claude"` (`agents.rs:527-531`) leaves `node` as the root.
+
+  In both cases no child is named like the agent, so the root is correctly taken as the agent.
+- Two kinds of mistake are possible, both Low:
+  - A wrong keep: a launcher's direct child that is not an agent helper is kept and can still be stopped with Kill. No shipped agent session keeps a shell around after the agent exits (Windows runs the agent as the root; Unix `exec`s it), so I found no realistic case.
+  - A wrong kill when the real agent sits one level deeper; see R2-L3.
+
+## New findings
+
+### R2-M1 (Medium, **blocking**): the port-lookup gate removed chips for sessions whose own process is the server, on every platform
+
+- **Where:** `crates/kelpied/src/daemon/process.rs:106`. The condition `scans.iter().all(|s| s.children.is_empty() && s.orphans.is_empty())` has no `cfg`. At 5fcd65b it also checked `s.root.is_none()`, so the root's ports were looked up.
+- **Scenario (Windows):**
+  1. Create a custom session (New session → Custom, `python -m http.server 8000`; worktree tab commands start the same way, `worktrees.ts:93`). `resolve` runs `python.exe` as the PTY root (`agents.rs:559`).
+  2. It has no children, so `listeners` is empty and `session_ports` returns nothing. No chip appears.
+  3. On Unix, `wrap_for_platform` `exec`s, so the root is again the server and the result is the same.
+  4. Many single-process servers are affected: `python -m http.server`, `uvicorn`, `deno run`, `php -S`, Go or Rust binaries.
+- **Inconsistency:** because `process.ports` batches every visible session, the same root-only server *does* get a chip whenever some other visible session happens to have children.
+- **Spec and docs:** "Port chips `:5173` on tab/sidebar → browser pane" with success criterion "Ports visible". The spec's own example server is `python -m http.server`. The e2e still passes only because it types the command into a shell, which makes the server a child. `docs/user-guide.md` still says "When a program in a session listens on a port (… `python -m http.server 8000`…), a `:8000` chip appears", which is now false for custom sessions.
+- **Why blocking:** the gate saves nothing on Windows, the primary platform (`GetExtendedTcpTable` is about 1 ms). It regresses the spec's main preview path there, and the fix is trivial.
+- **Fix (either):**
+  - (a) Apply the gate only on macOS: `cfg!(target_os = "macos") && …`.
+  - (b) Also look up ports when a non-agent, non-shell (custom) session has a root, because a custom root is often the server itself. This needs the kind on `Target`; `agent` alone cannot tell shell from custom.
+
+  Either way, add a daemon test: a target whose root itself listens appears in `process.ports`.
+
+### R2-L1 (Low): the root's identity is no longer checked, so a stale `Target` with a reused PID would expose a stranger's descendants to Kill children
+
+- **Where:** `procs.rs:229` uses `proc_of(&table, pid)` with no comparison against the process the session started. `process.rs:128-138` snapshots the `Target` before the kill thread scans.
+- **Comment accuracy:** the comment at `:225-228` says "the session holds its process until it records the exit". That is true on Windows: the `Child` and the killer's duplicated handle live until after `g.pty = None` (`session.rs:449-453`, `:467`). On Unix it is not true: `child.wait()` reaps before `on_exit` takes the lock (`session.rs:450`, `chat.rs:411-414`).
+- **Scenario:**
+  1. The `Target` is built while the session is alive.
+  2. The session's process exits, is reaped, and its PID is reused by an unrelated process before the scan reads the table.
+  3. `root` is now the stranger, and `member_pids` are the stranger's descendants that started after it.
+  4. `kill_children` stops them. The identity checks pass because those identities come from the same scan.
+
+  `process.kill` is not exposed, because the request identity must match a process that was listed earlier.
+- **Likelihood:** exit, PID reuse and new descendants must all happen within the milliseconds between snapshot and table read. On Windows the snapshot must also outlive the ≥50 ms handle hold. That is practically nil, which is why this is Low.
+- **Fix:** record the root's start time at spawn (in `Pty` or the chat `Inner`), carry it in `Target`, and require `root.start_time == target.root_start` in `scan`. If it differs, treat `root` as `None`, but still keep `t.root` in `keep`. This restores the invariant the old `tr.root` pin gave, without the H1 bug. Also correct the comment.
+
+### R2-L2 (Low, Linux only): after a wall-clock step, every process fails `proc_of` until the daemon restarts
+
+- **Cause:** On Linux, sysinfo's `start_time` is boot-relative ticks plus `SystemInfo.boot_time`, where `boot_time` is `/proc/stat` `btime`. sysinfo reads it once per `System` (sysinfo `unix/linux/system.rs:116-158`; `process.rs:581-587`).
+  - The long-lived `Reader` keeps the `btime` from daemon start.
+  - `now()` builds a fresh `System` per call (`procs.rs:562-563`) and gets the current `btime`.
+  - `btime` moves when the wall clock is stepped: an NTP step after start, or WSL2 or a VM after resume.
+  - After that, `proc_of` (`:141-145`) compares `table.start_time` with the fresh `start_time` and they never match. Every Linux tree and chip goes empty. This fails safe; nothing is killed.
+- **Regression:** before 0e327b5, Unix `identity()` came from the table, so listing kept working.
+- **Fix:** use one clock source for both reads. Either reuse the `Reader`'s `System` in `now()`, or key Linux identity on `/proc/<pid>/stat` starttime ticks, which also removes L1's 1 s granularity. This can go with the Linux phase.
+- **macOS is unaffected:** `pbi_start_tvsec` is absolute (`apple/macos/process.rs:421`).
+
+### R2-L3 (Low): the agent's helpers are still stopped when the real agent is one level below the process taken as the agent
+
+- **Where:** `keep_set` (`procs.rs:173-184`).
+- **Examples:**
+  - Gemini CLI relaunches itself as a child `node` (outer `node` → inner `node`).
+  - A Volta shim named `claude` is the root and spawns `node cli.js`.
+- **What happens:** the outer process is taken as the agent. Its direct child, the real agent, is kept, but the real agent's MCP servers and tool shells are grandchildren of the root, so they are stopped. This happens despite the dialog promising "the programs the agent runs directly (such as MCP servers) keep running" (`processes-panel.tsx:163-165`). The agent itself always survives.
+- **Optional fix:** when the chosen agent has exactly one direct child with the same name or exe (`node` → `node`), descend to that child. Otherwise, soften the dialog wording.
+
+### R2-L4 (Low, Unix performance): one `System::new()` per PID per scan
+
+- **Where:** `procs.rs:562-563`. `identity()` is called for the root, every member and every remembered PID on each scan: every 2 s while the panel is open, and on chip polls.
+- **macOS cost:** `System::new()` calls `mach_host_self()` and `host_processor_info` (`SystemTimeInfo::new`) each time (sysinfo `apple/system.rs:133-152`, `apple/macos/system.rs:69-96`). sysinfo never deallocates the host-port send right it takes.
+- **Fix:** keep one `System` (for example in `Reader`, or one per scan) and refresh only `Some(&[pid])` with exe `Always`. This also fixes R2-L2.
+
+## Linux test: compile check by inspection against sysinfo 0.39.6
+
+- **APIs exist:**
+  - `ProcessRefreshKind::without_tasks` and `with_exe` (`common/system.rs:2532-2533`, `impl_get_set!`).
+  - `UpdateKind::Always` (`:2324`).
+  - `Process::thread_kind() -> Option<ThreadKind>` (`:2144`; it returns `None` off Linux, so the Windows and macOS filters are no-ops).
+- **The assertions will hold on Linux:**
+  - `get_proc_and_tasks` checks `Tgid` from `/proc/<pid>/status` in every mode, including `ProcessesToUpdate::Some` (`unix/linux/process.rs:940-953`), and marks a TID `ThreadKind::Userland` (`:594-595`, `:650-651`).
+  - So `now(tid)` is filtered out, and `os::identity(&table, tids[0]).is_none()` holds.
+  - `without_tasks` skips `get_proc_tasks`, so `read(None)` does not contain TIDs.
+- **The test code compiles by inspection:** `os::Reader::default()`, `read(None)` and `os::identity(&Table, u32)` are all `pub` in the `cfg(unix)` `os` module, and `std::sync::mpsc` is used correctly.
+
+## Verification run (this round)
+
+- `cargo test -p kelpied -j 2 -- procs:: ports:: proc_tree:: processes_ programs_in_a_session` (target `D:\kelpie-p9-target`, `CARGO_INCREMENTAL=0`): **24 passed**, including the two new tests and the auth test.
+- `pnpm exec vitest run src/lib/processes.test.ts`: **8 passed**.
+- `pnpm i18n:check`: 0 missing, 0 problems.
+- Not run: e2e, macOS, Linux.
+
+## Round 2 unresolved questions
+
+1. R2-M1: should the gate be macOS-only (simplest), or should custom sessions' roots always be included?

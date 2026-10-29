@@ -74,15 +74,27 @@ impl Proc {
 /// the processes themselves, for the ones a scan looks at (see [`proc_of`]).
 type Table = HashMap<u32, Proc>;
 
+/// The process a session runs, as the session recorded it when it started it.
+pub struct Root {
+    pub pid: u32,
+    pub start: Option<u64>,
+    pub tree: Option<Arc<ProcTree>>,
+}
+
 /// A session's process, as the scanner needs to see it.
 #[derive(Clone)]
 pub struct Target {
     pub id: String,
     /// The process the session started, while it runs.
     pub root: Option<u32>,
+    /// When that process started, as recorded when the session started it: a process found under that PID with
+    /// another start is not the session's (the session's ended and the number was reused).
+    pub root_start: Option<u64>,
     pub tree: Option<Arc<ProcTree>>,
     /// The agent's binary name, when the session runs one (its launcher may be the root).
     pub agent: Option<String>,
+    /// The session runs a command of its own (not a shell, not an agent): its own process is often a server.
+    pub custom: bool,
 }
 
 /// One session's processes at one moment.
@@ -224,9 +236,10 @@ impl Procs {
                 let tr = tracked.entry(t.id.clone()).or_default();
                 // The session's process is the one the session says it runs now: a restart (same session, a new
                 // process in a new job) brings a new one, and what the previous run left behind stays remembered
-                // (an orphan while it runs). The session holds its process (a handle on Windows, an unreaped child
-                // on Unix) until it records the exit, so that PID is not another program's while it is reported.
-                let root = t.root.and_then(|pid| proc_of(&table, pid));
+                // (an orphan while it runs). It is that process only if it started when the session recorded it
+                // starting: on Unix the process is reaped before the session learns it ended, and the session may
+                // have been asked about before that, so its number can belong to another process by now.
+                let root = t.root.and_then(|pid| proc_of(&table, pid)).filter(|r| t.root_start.is_none_or(|s| s == r.start_time));
                 // Who is in the tree: the descendants of the session's process, and the members of its job. The
                 // session's own process is never one of them, even when its identity could not be read.
                 let mut member_pids = root.as_ref().map(|r| kelpie_proto::procs::descendants(&children_of, r.pid)).unwrap_or_default();
@@ -305,6 +318,11 @@ impl Procs {
     }
 }
 
+/// When `pid` started, as the scans read it (to record a session's process when the session starts it).
+pub fn start_time_of(pid: u32) -> Option<u64> {
+    os::start_time_of(pid)
+}
+
 /// Stops `victims` (each re-checked against the identity it was listed with, right before it is acted on):
 /// asks them to end, forces the ones still running after `grace`.
 fn terminate(victims: &[Proc], grace: Duration) -> KillReport {
@@ -381,6 +399,10 @@ mod os {
 
     pub fn identity_of_pid(pid: u32) -> Option<Identity> {
         identity_of(&open(pid, PROCESS_QUERY_LIMITED_INFORMATION).ok()?, pid)
+    }
+
+    pub fn start_time_of(pid: u32) -> Option<u64> {
+        identity_of_pid(pid).map(|id| id.start_time)
     }
 
     /// The identity of `pid` now, from the process itself (the table has no executable paths).
@@ -550,36 +572,45 @@ mod os {
         !matches!(p.status(), ProcessStatus::Zombie | ProcessStatus::Dead)
     }
 
+    /// Every reading of the processes goes through this one `System`: the table, the identity of a listed
+    /// process, the check before each signal and the start of a session's process recorded at spawn. One reader
+    /// means one clock: on Linux a start time is the boot time (read once per `System`) plus ticks, so two
+    /// readers would disagree for good after the wall clock is stepped.
+    static SYS: std::sync::LazyLock<parking_lot::Mutex<System>> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(System::new()));
+
     /// `pid` as it is now. Listing and stopping both read it this way, so a process that changed its program
     /// since it was first seen (a launcher that `exec`s) is listed as what it runs now and can be stopped.
-    fn now(sys: &mut System, pid: u32) -> Option<Identity> {
+    fn now(pid: u32) -> Option<Identity> {
         let kind = ProcessRefreshKind::nothing().without_tasks().with_exe(UpdateKind::Always);
+        let mut sys = SYS.lock();
         sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true, kind);
         let p = sys.process(Pid::from_u32(pid)).filter(|p| live(p) && p.thread_kind().is_none())?;
         Some(Identity { pid, start_time: p.start_time(), exe: p.exe().map(|e| e.to_string_lossy().into_owned()) })
     }
 
     pub fn identity(_table: &Table, pid: u32) -> Option<Identity> {
-        now(&mut System::new(), pid)
+        now(pid)
+    }
+
+    pub fn start_time_of(pid: u32) -> Option<u64> {
+        now(pid).map(|id| id.start_time)
     }
 
     /// Reads the table of processes: all of them, or the ones asked for.
     #[derive(Default)]
-    pub struct Reader {
-        sys: System,
-    }
+    pub struct Reader;
 
     impl Reader {
         pub fn read(&mut self, wanted: Option<&[u32]>) -> Table {
+            let mut sys = SYS.lock();
             match wanted {
-                None => self.sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind()),
+                None => sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind()),
                 Some(w) => {
                     let pids: Vec<Pid> = w.iter().copied().map(Pid::from_u32).collect();
-                    self.sys.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), true, refresh_kind())
+                    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), true, refresh_kind())
                 }
             };
-            self.sys
-                .processes()
+            sys.processes()
                 .iter()
                 .filter(|(pid, p)| live(p) && p.thread_kind().is_none() && wanted.is_none_or(|w| w.contains(&pid.as_u32())))
                 .map(|(pid, p)| {
@@ -592,16 +623,15 @@ mod os {
 
     /// Whether `v` is still running as the same process: `Some(true)`, `Some(false)` when its PID
     /// is another process's now, `None` when it has ended.
-    fn check(sys: &mut System, v: &Identity) -> Option<bool> {
-        Some(now(sys, v.pid)?.same(v))
+    fn check(v: &Identity) -> Option<bool> {
+        Some(now(v.pid)?.same(v))
     }
 
     pub fn terminate(victims: &[Identity], grace: Duration) -> KillReport {
         let mut report = KillReport::default();
-        let mut sys = System::new();
         let mut asked: Vec<&Identity> = Vec::new();
         for v in victims {
-            match check(&mut sys, v) {
+            match check(v) {
                 None => report.gone.push(v.pid),
                 Some(false) => report.refused.push(Refused { pid: v.pid, reason: "the process changed: it is not the one that was listed".into() }),
                 Some(true) => {
@@ -616,18 +646,18 @@ mod os {
         let mut waiting: Vec<&Identity> = asked.clone();
         while !waiting.is_empty() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
-            waiting.retain(|v| check(&mut sys, v) == Some(true));
+            waiting.retain(|v| check(v) == Some(true));
         }
         for v in asked {
             // Judged again: the grace period is long enough for the number to have been reused.
-            match check(&mut sys, v) {
+            match check(v) {
                 Some(true) => {
                     unsafe {
                         libc::kill(v.pid as i32, libc::SIGKILL);
                     }
                     report.forced.push(v.pid);
                     let end = Instant::now() + Duration::from_secs(2);
-                    while Instant::now() < end && check(&mut sys, v) == Some(true) {
+                    while Instant::now() < end && check(v) == Some(true) {
                         std::thread::sleep(Duration::from_millis(25));
                     }
                 }
@@ -692,7 +722,7 @@ pub(crate) mod tests {
     pub(crate) fn session(id: &str) -> (Child, Target) {
         let mut root = launcher();
         let tree = ProcTree::adopt(root.id(), None, None).ok().map(Arc::new);
-        let target = Target { id: id.into(), root: Some(root.id()), tree, agent: None };
+        let target = Target { id: id.into(), root: Some(root.id()), root_start: start_time_of(root.id()), tree, agent: None, custom: false };
         root.stdin.take().expect("piped").write_all(b"\n").expect("tell the launcher to go on");
         (root, target)
     }
@@ -892,6 +922,28 @@ pub(crate) mod tests {
         reap(second);
     }
 
+    /// A process under the session's PID that did not start when the session started its process (the session's
+    /// ended and the number was reused before the session knew) is not its root: nothing is walked from it, and
+    /// that PID is still never a child and always kept.
+    #[test]
+    fn a_process_under_the_session_s_pid_with_another_start_is_not_its_root() {
+        let procs = Procs::default();
+        let (root, t) = session("s");
+        let real = wait_for_children(&procs, &t);
+        assert!(real.root.is_some());
+        let reused = Target { id: "r".into(), root_start: t.root_start.map(|s| s + 1), tree: None, ..t.clone() };
+        let scan = procs.scan(std::slice::from_ref(&reused)).pop().unwrap();
+        assert!(scan.root.is_none(), "not the session's process");
+        assert!(scan.children.is_empty(), "nothing is walked from a process that is not the session's");
+        assert!(scan.keep.contains(&root.id()));
+        let report = procs.kill_children(&reused, Duration::from_millis(200));
+        assert!(report.closed.is_empty() && report.forced.is_empty(), "{report:?}");
+        let start = real.root.as_ref().unwrap().start_time;
+        assert!(procs.kill(&reused, &KillRequest { pid: root.id(), start_time: start, exe: None }, Duration::from_millis(200)).is_err());
+        assert!(alive(root.id()) && real.children.iter().all(|c| alive(c.pid)));
+        reap(root);
+    }
+
     /// The last check before a stop, on its own: a live process whose start time or program is not the one
     /// listed is refused and keeps running.
     #[test]
@@ -949,7 +1001,7 @@ pub(crate) mod tests {
         assert!(!kids.is_empty(), "ping runs under cmd");
         let tree = ProcTree::adopt(root.id(), None, None).ok().map(Arc::new);
         assert!(!tree.as_ref().unwrap().pids().unwrap().contains(&kids[0]), "the job holds only cmd");
-        let t = Target { id: "s".into(), root: Some(root.id()), tree, agent: None };
+        let t = Target { id: "s".into(), root: Some(root.id()), root_start: start_time_of(root.id()), tree, agent: None, custom: false };
         let procs = Procs::default();
         let scan = procs.scan(std::slice::from_ref(&t)).pop().unwrap();
         let member = scan.children.iter().find(|c| c.pid == kids[0]).expect("ping is in the tree by its parent").clone();
@@ -1033,7 +1085,7 @@ pub(crate) mod tests {
     fn a_process_that_outlives_its_parent_is_listed_as_an_orphan() {
         let procs = Procs::default();
         let mut root = Command::new("sh").args(["-c", "sleep 60 & echo $!; wait"]).stdout(Stdio::piped()).spawn().unwrap();
-        let t = Target { id: "s".into(), root: Some(root.id()), tree: None, agent: None };
+        let t = Target { id: "s".into(), root: Some(root.id()), root_start: start_time_of(root.id()), tree: None, agent: None, custom: false };
         let scan = wait_for_children(&procs, &t);
         let child = scan.children.iter().find(|c| c.name.contains("sleep")).expect("the background program").clone();
         let _ = root.kill();
