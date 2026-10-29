@@ -480,39 +480,74 @@ fn markdown() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH
 }
 
+/// Deepest nesting of blockquotes and lists a message may have: much deeper nesting makes `marked`
+/// overflow its stack (it renders nothing of the file).
+const MAX_NESTING: usize = 100;
+
 /// What a CommonMark parser makes of a message: the byte ranges of its code (fenced and indented
-/// blocks, inline spans), whether any raw HTML is left, and whether a fenced block is still open at
-/// the end (it would run on into whatever follows the message).
+/// blocks, inline spans, in order), whether any raw HTML is left, and whether only plain text is
+/// safe: a fenced block still open at the end (it would run on into whatever follows the message),
+/// a fence that `marked` would end where CommonMark does not, or nesting deeper than [`MAX_NESTING`].
 struct Shape {
     code: Vec<std::ops::Range<usize>>,
     raw_html: bool,
-    open_at_end: bool,
+    plain: bool,
+}
+
+/// An open fenced block while [`shape`] reads it: its character, its run's length and column, and
+/// where its opening line and its content (its last text) end.
+struct Fenced {
+    ch: char,
+    len: usize,
+    col: usize,
+    opener_end: usize,
+    content_end: usize,
+}
+
+/// Whether a content line would close the fence for `marked`, which ends a fence at up to 3 columns
+/// of indentation, the opener's run, then any mix of `` ` ``, `~` and spaces (CommonMark: the
+/// opener's character only). Quote markers and spaces before it count as indentation, so this errs
+/// towards "yes", which only costs plain text.
+fn marked_closer(line: &str, f: &Fenced) -> bool {
+    let rest = line.trim_start_matches([' ', '\t', '>']);
+    let indent = line.len() - rest.len();
+    let run = rest.chars().take_while(|c| *c == f.ch).count();
+    indent <= f.col + 3 && run >= f.len && rest[run..].chars().all(|c| matches!(c, '`' | '~' | ' ' | '\t' | '\r'))
 }
 
 fn shape(text: &str) -> Shape {
-    let mut s = Shape { code: Vec::new(), raw_html: false, open_at_end: false };
-    // The open fenced block: its character, and where its content (its last text) ends.
-    let mut fence: Option<(char, usize)> = None;
+    let mut s = Shape { code: Vec::new(), raw_html: false, plain: false };
+    let (mut fence, mut depth): (Option<Fenced>, usize) = (None, 0);
     for (event, r) in Parser::new_ext(text, markdown()).into_offset_iter() {
         match event {
+            Md::Start(Tag::BlockQuote(..) | Tag::List(..)) => {
+                depth += 1;
+                s.plain |= depth > MAX_NESTING;
+            }
+            Md::End(TagEnd::BlockQuote(..) | TagEnd::List(..)) => depth = depth.saturating_sub(1),
             Md::Start(Tag::CodeBlock(kind)) => {
                 if let CodeBlockKind::Fenced(_) = kind {
-                    let ch = text[r.clone()].chars().find(|c| *c == '`' || *c == '~').unwrap_or('`');
-                    let opener_end = text[r.clone()].find('\n').map_or(r.end, |i| r.start + i + 1);
-                    fence = Some((ch, opener_end));
+                    let block = &text[r.clone()];
+                    let at = block.find(['`', '~']).unwrap_or(0);
+                    let ch = block[at..].chars().next().unwrap_or('`');
+                    let line_start = text[..r.start].rfind('\n').map_or(0, |i| i + 1);
+                    let opener_end = block.find('\n').map_or(r.end, |i| r.start + i + 1);
+                    let len = block[at..].chars().take_while(|c| *c == ch).count();
+                    fence = Some(Fenced { ch, len, col: r.start + at - line_start, opener_end, content_end: opener_end });
                 }
                 s.code.push(r);
             }
             Md::Text(_) => {
-                if let Some((_, end)) = &mut fence {
-                    *end = (*end).max(r.end);
+                if let Some(f) = &mut fence {
+                    f.content_end = f.content_end.max(r.end);
                 }
             }
             Md::End(TagEnd::CodeBlock) => {
-                // Closed: a run of the fence character follows the content within the block.
-                if let Some((ch, content_end)) = fence.take() {
-                    let closed = text[content_end.min(r.end)..r.end].contains(&ch.to_string().repeat(3));
-                    s.open_at_end |= !closed && text[r.end..].trim().is_empty();
+                if let Some(f) = fence.take() {
+                    // Closed: a run of the fence character follows the content within the block.
+                    let closed = text[f.content_end.min(r.end)..r.end].contains(&f.ch.to_string().repeat(3));
+                    s.plain |= !closed && text[r.end..].trim().is_empty();
+                    s.plain |= text[f.opener_end.min(f.content_end)..f.content_end].split('\n').any(|line| marked_closer(line, &f));
                 }
             }
             Md::Code(_) => s.code.push(r),
@@ -520,6 +555,7 @@ fn shape(text: &str) -> Shape {
             _ => {}
         }
     }
+    s.code.sort_by_key(|r| r.start);
     s
 }
 
@@ -528,10 +564,16 @@ fn shape(text: &str) -> Shape {
 fn escape_tags(text: &str, code: &[std::ops::Range<usize>]) -> String {
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len() + 8);
+    // The code ranges come in document order and do not overlap: one pass with a cursor.
+    let mut next = 0;
     for (i, c) in text.char_indices() {
+        while code.get(next).is_some_and(|r| r.end <= i) {
+            next += 1;
+        }
+        let in_code = code.get(next).is_some_and(|r| r.start <= i);
         if c == '<'
+            && !in_code
             && b.get(i + 1).is_some_and(|x| x.is_ascii_alphabetic() || matches!(x, b'/' | b'!' | b'?'))
-            && !code.iter().any(|r| r.contains(&i))
             && b[..i].iter().rev().take_while(|&&x| x == b'\\').count().is_multiple_of(2)
         {
             out.push('\\');
@@ -569,18 +611,19 @@ fn as_plain(text: &str) -> String {
 /// of the file (a Markdown viewer passes raw HTML through). A CommonMark parser (`pulldown-cmark`,
 /// with the viewer's GitHub extensions) says where the code is; every tag-like `<` outside it is
 /// escaped. The result is parsed again and must have no raw HTML and leave the next message's
-/// heading a heading. A message that ends inside an open code fence (an interrupted reply), or whose
-/// result does not pass, is written whole as plain text in an outer fence instead: containment over
-/// looks in those rare cases.
+/// heading a heading. A message that ends inside an open code fence (an interrupted reply), that holds
+/// a fence `marked` would close early, that nests deeper than [`MAX_NESTING`], or whose result does not
+/// pass, is written whole as plain text in an outer fence instead: containment over looks in those
+/// rare cases.
 fn contain(text: &str) -> String {
     let first = shape(text);
-    if !first.open_at_end {
+    if !first.plain {
         let mut out = escape_tags(text, &first.code);
         // Escaping can change what parses as code (an HTML block becomes a paragraph): check the
         // result, and escape again by what it now holds.
         for _ in 0..3 {
             let now = shape(&out);
-            if now.open_at_end {
+            if now.plain {
                 break;
             }
             if !now.raw_html && contained(&out) {

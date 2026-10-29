@@ -337,3 +337,55 @@ Review: "Round 4" in `plans/reports/code-reviewer-261030-phase15d-session-export
   - `pnpm build`: ok.
 - Bundle gate: entry 326.29 kB gz, limit 338.60: ok. pulldown-cmark is Rust-side only.
 - `scripts/e2e/session_export.py`: 28/28 in two consecutive runs on the rebuilt debug app. Test daemon, driver and scratch data were removed; only the user's own installed Kelpie stayed running, untouched.
+
+## Review fixes, round 5
+
+Review: "Round 5" in `plans/reports/code-reviewer-261030-phase15d-session-export.md`. It had no blocking findings.
+
+### `marked`'s lenient fence closer
+
+- **The difference.** `marked` ends a fence at the opener's run followed by any mix of `` ` ``, `~` and spaces, for example ```` ```~ ```` or `` ~~~` ``. CommonMark and pulldown-cmark do not.
+- **The fix.** `shape` now checks every content line of a fenced block against that rule (`marked_closer`):
+  - indentation (spaces, tabs and quote markers) of at most the opener's column plus 3;
+  - at least the opener's run of its own character;
+  - then only backticks, tildes and whitespace.
+
+  A match sends the message to plain text. The check errs towards "yes", which only costs plain text, never a leak. A run indented 4 or more columns closes nothing in either renderer and is kept as code.
+- `as_plain` stays immune: its fence is longer than any backtick or tilde run in the text, and `marked`'s closer must start with the opener's whole run.
+- **Tests:** the review's three probes plus a quoted variant. Each must come out exactly as `as_plain`, and pass `assert_contained`. The 4-column case is kept as code.
+
+### Linear escaping
+
+- `escape_tags` walks the code ranges with a cursor. `shape` sorts them; they come from one forward parse and do not overlap.
+- **Test** (debug build):
+  - 1.6 MB of `` `x` <b> `` with 200k code spans and 200k tags is escaped in under 2 s. It is measured at milliseconds, against 64 s for the quadratic version in a release build.
+  - The whole of `contain` on that message is checked against a loose 60 s bound.
+  - The whole session_export suite runs in about 1.8 s.
+
+### Deep nesting
+
+`shape` counts how deep blockquotes and lists are nested. A message nested more than 100 levels deep (`MAX_NESTING`) is written as plain text. Tests: 3,000 `>` and 1,500 nested `- ` go to plain text, and 20 levels stay as Markdown.
+
+### Adversarial corpus rendered by `marked`
+
+- **Corpus.** `ADVERSARIAL` now holds 93 messages (`adversarial.md` has 93 probe blocks): the 25 from round 4, the 3 closer probes plus a quoted variant, and every small input from the reviewer's probe set (`D:\kelpie-review-scratch\run.js`, copied in as string literals).
+  - The probe set covers HTML block types 1–7, links and autolinks, entities, setext and lazy lines, tabs, nesting, wide markers, code spans, tables, GFM extensions, spoofed headings and `<details>`, and closer variants.
+  - The large inputs (300k tags, 100k `[`, 160 KB of spans, deep nesting) are not copied. They are covered by the timing and nesting tests above.
+- **`adversarial.md` fixture.** It is built by `adversarial_doc()`: each message as an export writes it, under `## User`, followed by a `Result: probe N` tool block, then a closing `## User` / `end`.
+  - `the_adversarial_fixture_is_current` compares it byte for byte with the file, and the ignored `bless` test rewrites it with the other golden files.
+  - `session-export-goldens.test.ts` renders it with `marked` like the other goldens, so a problem only `marked` has now fails `pnpm test` and CI.
+  - That test now requires all four files to be present, allows `h3`–`h6`, and also rejects `<?`, `<![` and `<!D` outside code.
+- **Rust-side check.** `assert_contained` counts only the headings after the message, since a message may have headings of its own (`## <b>x</b>`, setext headings, spoofed `## Assistant`).
+
+### Numbers after round 5
+
+- `cargo test -p kelpie -j 2`, run alone: 237 passed, 0 failed, 6 ignored. `session_export` has 27 tests and 1 ignored bless helper.
+- clippy `-p kelpie -p kelpie-proto --all-targets`: clean.
+- Frontend:
+  - `pnpm typecheck`: ok.
+  - `pnpm test`: 515 passed, including 5 golden render checks with `adversarial.md`.
+  - `pnpm i18n:check`: 0 missing, 0 problems.
+  - `pnpm build`: ok.
+- Bundle gate: entry 326.29 kB gz, limit 338.60: ok.
+- `scripts/e2e/session_export.py`: 28/28 in two consecutive runs on the rebuilt debug app. Test daemon, driver and scratch data were removed.
+  - Still running, not touched: the user's installed Kelpie, and a `kelpied` from `D:\Works\Kelpie\target\debug`. That one belongs to another session; this run used `D:\kelpie-p9-target`.

@@ -693,3 +693,152 @@ Round 3 escaped this line, because it applied the `<` test at any indentation, s
 Status: DONE_WITH_CONCERNS
 Summary: Round 4 correctly delivers the range-union redaction (UTF-8 safe, `redact` unchanged), secret-key masking at any depth, inline tag escaping with sound code-span rules, the OMP header-root rule and the R3-M1 list-item cases; all focused tests and kelpie-proto pass. But the rewritten fence tracking accepts closers at the wrong quote depth or indentation and ends indented top-level fences early, so three ordinary Markdown-in-Markdown inputs again swallow the rest of the document (confirmed with `marked`).
 Concerns/Blockers: R4-M1 is blocking. R4-M2 is non-blocking but a one-line fix, recommended in the same change.
+
+---
+
+# Round 5: `git diff 5bce172 f4f8269`
+
+Commit f4f8269, "fix(history): contain exported messages with a CommonMark parser".
+
+## Verdict
+
+**No blocking findings.**
+
+The parser-based `contain` passes every probe from rounds 1–4 and 60 new ones. Details:
+- Every heading and `<details>` block survives.
+- No raw tag appears outside code in the app's `marked`.
+- Each message now has its own heading, so R4-M2 (a list running into the next message) cannot happen.
+- The dependency is pinned and featureless.
+- The golden render test does fail on broken exports.
+
+Three residual issues remain, all non-blocking:
+- **R5-M1:** a `marked`-only fence-closer leniency lets crafted content become raw HTML in `marked`.
+- **R5-M2:** `escape_tags` is quadratic, so a 1.6 MB message took 64 s.
+- **R5-L1:** very deep nesting crashes `marked` (a stack overflow).
+
+## Checks run (round 5)
+
+| Check | Result |
+|---|---|
+| `cargo test -p kelpie -j 2 --lib session_export` | 23 passed, 1 ignored |
+| `pnpm exec vitest run src/lib/session-export-goldens.test.ts` | 4 passed |
+| `cargo tree -p kelpie -i pulldown-cmark -e features` | `pulldown-cmark v0.13.5`, no features enabled |
+| Release-build probe (`D:\kelpie-review-scratch\cmark-probe`, `run.js`) | Ran a verbatim copy of `markdown`, `shape`, `escape_tags`, `contained`, `as_plain` and `contain` from f4f8269, with `pulldown-cmark =0.13.5` and default features off, on 85 inputs. Each output was rendered with the app's `marked` as `## User` + output + `## Assistant` / `<details>` tool block / `## User` / `later`. Pass means every heading and the `<details>` survive and no tag outside an allow-list (and no `<!--`, `<?` or `<!`) appears outside `<code>`/`<pre>`. |
+| Replica of the golden test's assertions | Run on known-broken documents (see section 5). |
+
+All Rust runs used target `D:\kelpie-p9-target`, `CARGO_INCREMENTAL=0` and TMP on D:. The worktree was clean at f4f8269. f4f8269 also committed the round-4 section of this report; this Round 5 section is uncommitted. No e2e, no daemon, no real transcripts.
+
+## 1. Probes
+
+**All earlier probes pass.** That covers every round 1–4 input. Some now go out as plain text, which is acceptable:
+- unclosed list-item fences;
+- ```` ```md\n> ```\nstill code ````;
+- `~~~~/~~~~~/~~~`;
+- the `<details>`/unclosed `yaml` sample;
+- `fix:\n```diff\n- a`.
+
+The rest are contained in place, including:
+- the R4-M1 indented-closer case and the indented top-level fence;
+- the tilde fence in a quote with a lazy line;
+- the escaped backtick in a code span, and a code span in a table row;
+- already-escaped `\<`;
+- `> <!--` and `- <textarea>`.
+
+**New probes that pass:**
+- **HTML blocks, types 1–7:** `<script>`, `<pre>`, `<style>`, `<!--`, `<?php`, `<!DOCTYPE`, `<![CDATA[`, `<div>`, a custom element, a closing tag, HTML in a list item, HTML in a heading.
+- **Links and inline constructs:** link reference definitions with `<…>` destinations; `[a](<b>)` and `[a](<b c>)`; URL and email autolinks; numeric and named entities.
+- **Setext and lazy lines:** setext headings over HTML, and lazy continuation after a quote or a quoted fence.
+- **Tabs:** after a marker, as indentation, in a list's code, after `>`, and before a fence in an ordered list.
+- **Nesting:** quote/list/quote nests, and list items with code indented 6 to 10 spaces.
+- **Wide markers:** wide list markers, and indented code after a heading or in a quote.
+- **Code spans:** multi-line and blank-line spans, and table pipes inside spans (escaped and unescaped, with and without a leading `|`).
+- **GFM extensions:** task lists and strikethrough.
+- **Edge cases:** a hard break before a tag; an HTML attribute holding a backtick; a fence whose info string contains a backtick or a tab.
+- **Fence closers:** longer closers; closers followed by a tab, or by spaces and a tab.
+- **Spoofing:** messages that try to spoof `## Assistant` / `<details>` / `</details>`.
+- **Size:** 300k tags, 100k `[`.
+
+### R5-M1 (Medium, non-blocking): `marked`'s lenient fence closer leaks code as raw HTML
+
+**The divergence.** `marked`'s fenced-code rule ends a fence at ` {0,3}\1[~`]* *$`: the opener's run, then *any mix* of `~` and `` ` ``. CommonMark and `pulldown-cmark` need a run of the opener's character only. So a content line like ```` ```~ ````, `` ~~~` `` or ```` `````~~ ```` closes the fence in `marked` but is content to `pulldown-cmark`.
+
+**What goes wrong.** `contain` takes its code ranges from `pulldown-cmark` and leaves the following lines unescaped. All three probes fail in `marked`:
+- ```` ```\ncode\n```~\n<script>\n``` ```` → raw `<script>`. The trailing ```` ``` ```` then opens a fence in `marked`, which swallows `## Assistant` and the tool block.
+- `~~~\nx\n~~~`\n<b>\n~~~` → raw `<b>`.
+- ```` ````\nx\n`````~~\n<b>\n```` ```` → raw `<b>`.
+
+**Impact.**
+- GitHub's cmark-gfm agrees with `pulldown-cmark`, so it is unaffected.
+- Kelpie's own Markdown views (file viewer, chat, notebooks) render with `marked` but pass the result through `DOMPurify`, so this is a display and structure problem, not script execution.
+- It needs an unusual line, so it is effectively crafted-only. Hence non-blocking.
+- The golden test does not cover it, because no golden contains such a line.
+
+**Fix.** In `shape`, for each fenced block, check its content lines against `marked`'s closer rule: up to 3 spaces, at least the opener's length of the opener's character, then only `` ` ``/`~`/spaces. If any matches, mark the message uncontainable, so it goes out through `as_plain`. `as_plain` is immune, because its fence run is longer than any run in the text, and `marked`'s closer starts with the exact opener run.
+
+## 2. Re-parse loop and plain-text fallback
+
+- **The loop is bounded.** It parses the result (`shape`), and accepts it when there is no raw HTML and a following `## heading` survives (`contained`). Otherwise it escapes by the new code ranges, up to 3 times. After that, or when a fence is open at the end, it falls back to `as_plain(text)`, which wraps the *original* (redacted) text.
+- **Why the heading check suffices.** Every way a message could run on (an open fence, a list, a quote, indented code, a paragraph) is ended by the blank line and column-0 `## ` heading the export writes next. A following `<details>` would be ended the same way.
+- **`as_plain` cannot be closed from inside.**
+  - Its fence is backticks, longer than the longest backtick *and* tilde run in the text (minimum 3).
+  - Tildes cannot close a backtick fence in CommonMark or in `marked`.
+  - No content line can begin with a backtick run as long as the fence.
+  - `marked`'s lenient closer still has to start with the exact opener run.
+  - Every `[plain]` probe rendered correctly in `marked`.
+- **`open_at_end`** compares the fence's last content offset with the block's end, and only counts a block that reaches the end of the message. A fence closed by its container (a list item or quote ending earlier) is left to the container, and `marked` agrees on the probes. A fence open at the end of a quote or list item goes to plain text, even though the following blank line and heading would end it. That is cosmetic.
+
+## 3. Dependency
+
+- `pulldown-cmark = { version = "=0.13.5", default-features = false }` in `app/src-tauri/Cargo.toml`. `cargo tree … -e features` shows no features enabled: no `html`, `simd` or `getopts`.
+- It adds two crates to `Cargo.lock`: `pulldown-cmark` 0.13.5 and `unicase` 2.10.0. Its other dependencies, `bitflags` 2.x and `memchr`, were already there. All are under permissive MIT/Apache-2.0-style licences (`memchr` is Unlicense/MIT).
+- The repository has no Rust licence or audit tooling (no `deny.toml`, `about.toml` or third-party list for crates), so nothing else needs updating.
+- It is Rust-only, so the webview bundle is unaffected. `perf-phase-15d.json` was regenerated.
+- The exact `=` pin blocks automatic patch updates. That is intended here, and worth noting for future dependency bumps.
+
+## 4. Performance
+
+- **Parsing is cheap.** A normal message is parsed 3 times: `shape`, `shape` on the escaped result, and `contained`. The 1 MB, 300k-tag probe took 176–184 ms for the whole of `contain` (release).
+- **R5-M2 (Medium, non-blocking): `escape_tags` is quadratic.** For every tag-like `<`, it scans *all* code ranges (`code.iter().any(|r| r.contains(&i))`, `session_export.rs:528-540`), so the cost is tags × code spans, and it runs up to 4 times. Measured (release build):
+  - 160 KB with 20k inline spans and 20k tags: 0.33 s.
+  - 1.6 MB with 200k spans and 200k tags: **64 s**.
+  - 5 MB of prose with one span and one tag per line (100k each): **12 s**.
+
+  A debug or dev build is slower. The export blocks on this without feedback.
+
+  **Fix:** the ranges come from one forward parse and are sorted and disjoint. Walk them with a cursor alongside `char_indices`, or binary-search, to make it linear.
+- **R5-L1 (Low, non-blocking): deep nesting crashes `marked`.** 3,000 levels of `>`, or 1,500 nested `- `, make `marked` throw `RangeError: Maximum call stack size exceeded`. A `marked`-based viewer then renders nothing of the export. `pulldown-cmark` handles it.
+
+  **Fix:** track container depth in `shape`, and send a message nested more than about 64 deep to `as_plain`. This is adversarial-only.
+
+## 5. Golden-file render test
+
+`session-export-goldens.test.ts` renders each golden with `marked` and checks:
+- the number of `<h2>User/Assistant</h2>` equals the number of `## User|Assistant` lines;
+- `<details>`/`</details>` counts equal the number of exported tool blocks;
+- no `<!--`, and no tag outside an allow-list, appears outside code;
+- the HTML ends in `</p>`.
+
+**It does fail on breakage.** I ran a replica of its assertions:
+- the R5-M1 leak document fails on headings, the `script` tag and the ending;
+- the round-4 swallow document fails on headings and `details`;
+- an unescaped inline `<textarea>` fails on the `textarea` tag;
+- a clean document passes.
+
+**Limitation (Low).** It only sees the three goldens, so `marked`-only divergences in other inputs, such as R5-M1, are not covered by CI.
+
+**Suggestion.** Add a corpus fixture: the adversarial inputs from this review, written through `contain` by a blessed Rust test and rendered by the same vitest. CI would then check both parsers on the hard cases.
+
+## Round 5 findings
+
+| ID | Severity | Blocking | Summary |
+|---|---|---|---|
+| R5-M1 | Medium | No | `marked` ends a fence at the opener run plus any `` ` ``/`~` mix (```` ```~ ````, `` ~~~` ````); `pulldown-cmark` does not. Lines after it, left unescaped as code, become raw HTML and can swallow the next heading in `marked` (3 probes). GitHub is unaffected; Kelpie's viewers sanitise. Fix: route fences whose content matches `marked`'s closer rule to `as_plain`. |
+| R5-M2 | Medium | No | `escape_tags` is O(tags × code ranges): 64 s for a 1.6 MB message with 200k spans and tags, 12 s for 5 MB of prose. Use a cursor or binary search over the sorted ranges. |
+| R5-L1 | Low | No | Nesting deeper than about 1,500–3,000 levels makes `marked` overflow its stack, so the export does not render in `marked`. Send very deep nesting to `as_plain`. |
+| R5-L2 | Low | No | The golden render test is meaningful but covers only the three goldens. Add the adversarial corpus as a fixture so `marked` checks it in CI. |
+
+---
+
+Status: DONE_WITH_CONCERNS
+Summary: The pulldown-cmark rewrite contains every probe from rounds 1–4 and 60 new ones in `marked`; the fallback fence cannot be closed from inside; the dependency is pinned, featureless and licence-neutral; and the golden render test does fail on broken exports. Remaining: a `marked`-only fence-closer leniency (```` ```~ ````) still lets crafted content render as raw HTML, and `escape_tags` is quadratic (64 s for a 1.6 MB span-heavy message).
+Concerns/Blockers: No blocking findings. R5-M1 and R5-M2 are recommended before release (both small). R5-L1 and R5-L2 can follow.

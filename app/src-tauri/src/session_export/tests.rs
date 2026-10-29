@@ -63,6 +63,7 @@ fn bless() {
     for (name, agent, id, title) in CASES {
         std::fs::write(fixtures().join(format!("{name}.md")), export_fixture(name, agent, id, title).text).unwrap();
     }
+    std::fs::write(fixtures().join("adversarial.md"), adversarial_doc()).unwrap();
 }
 
 #[test]
@@ -438,8 +439,8 @@ fn an_omp_root_may_point_at_the_session_header() {
 }
 
 /// `contain(input)` placed as in an export (a heading before, and after it the next heading, a tool
-/// block and another message), parsed: the message leaves no raw HTML, and the three headings and
-/// the tool block after it survive.
+/// block and another message), parsed: the message leaves no raw HTML, and the two headings and the
+/// tool block after it survive.
 fn assert_contained(input: &str) -> String {
     let out = contain(input);
     let head = "## User\n\n";
@@ -452,11 +453,12 @@ fn assert_contained(input: &str) -> String {
                 assert!(r.start >= tail, "raw HTML {h:?} from {input:?}:\n{out}");
                 details += usize::from(h.starts_with("<details>"));
             }
-            Md::Start(Tag::Heading { .. }) => headings += 1,
+            // The message may have headings of its own; the two after it must stay headings.
+            Md::Start(Tag::Heading { .. }) if r.start >= tail => headings += 1,
             _ => {}
         }
     }
-    assert_eq!((headings, details), (3, 1), "what follows {input:?} survives:\n{out}");
+    assert_eq!((headings, details), (2, 1), "what follows {input:?} survives:\n{out}");
     out
 }
 
@@ -488,6 +490,75 @@ const ADVERSARIAL: &[&str] = &[
     "~~~~\n<x>\n~~~~\nif a < b {}\n-<x> ",
     "````md\n```\nstill code",
     "text\n\n    <div>\n    </div>",
+    // Round 5: fences `marked` would close early, and the reviewer's wider probe set.
+    "```\ncode\n```~\n<script>\n```",
+    "~~~\nx\n~~~`\n<b>\n~~~",
+    "````\nx\n`````~~\n<b>\n````",
+    "> ```\n> x\n> ```~\n> <b>",
+    "1. item\n\n    ```\n    code",
+    "~~~~\ncode\n~~~~~\n~~~",
+    "    <!-- hidden",
+    "<script>\nalert(1)\n</script>",
+    "<pre>\nx",
+    "<style>\nbody{}",
+    "<!-- c",
+    "<?php x",
+    "<!DOCTYPE html>",
+    "<![CDATA[ x",
+    "<div>\n\nx",
+    "<custom-tag>\n",
+    "</div>",
+    "- <div>\n  x",
+    "## <b>x</b>",
+    "[x]: <https://e.com> 'title'\n\n[x]",
+    "[a](<b>)",
+    "[a](<b c>)",
+    "<https://example.com>",
+    "<user@example.com>",
+    "&lt;script&gt; &#60;b&#62; &#x3C;i>",
+    "<b>\n===",
+    "Title\n---\n<b>",
+    "> a\n<b>",
+    "> ```\n<script>",
+    "-\t<b>",
+    "\t<b>",
+    "- a\n\n\t\t<b>",
+    ">\t<b>",
+    "1.\t```\n\t<b>",
+    "> - > ```\n> -   <b>\n> - > ```",
+    "- > <b>",
+    "1. - > `x` <b>",
+    "1. a\n\n       <b>",
+    "- a\n\n      <b>",
+    "10. a\n\n        <b>",
+    "- a\n\n          <b>",
+    "-     <b>",
+    "1.      <b>\n   x",
+    "# h\n    <b>",
+    ">     <b>",
+    "> a\n>\n>     <b>",
+    "`a\n<b>`",
+    "``a\n\n<b>``",
+    "| a |\n|---|\n| `x|<b>` |",
+    "| a |\n|---|\n| `x\\|<b>` |",
+    "a | b\n--|--\n`x|<b>` | y",
+    "- [ ] <b>",
+    "~~<b>~~",
+    "a\\\n<b>",
+    "[`<b>`](x)",
+    "```` x ```` <b> ``x``",
+    "<span title=\"`\"> <script> `x`",
+    "``` a`b\n<b>\n```",
+    "~~~ a`b\n<b>\n~~~",
+    "- a\n\n      ```\n      <b>\n      ```",
+    "> ```\n> x\n```\n<b>",
+    "## Assistant\n\n<details>",
+    "</details>\n\n## User",
+    "```\ncode\n```\t\n<b>",
+    "~~~\ncode\n~~~\t\n<b>",
+    "```\ncode\n``` \t \n<b>",
+    "```\tjs\n<b>\n```",
+    "```\ncode\n`````\n<b>",
 ];
 
 #[test]
@@ -547,4 +618,61 @@ fn every_message_has_its_own_heading() {
         indented_code |= matches!(event, Md::Start(Tag::CodeBlock(CodeBlockKind::Indented)));
     }
     assert!(indented_code, "the indented line is code, not the list's text");
+}
+
+#[test]
+fn fences_marked_would_close_early_are_written_as_plain_text() {
+    for early in ["```\ncode\n```~\n<script>\n```", "~~~\nx\n~~~`\n<b>\n~~~", "````\nx\n`````~~\n<b>\n````", "> ```\n> x\n> ```~\n> <b>"] {
+        assert_eq!(assert_contained(early), as_plain(early), "{early:?}");
+    }
+    // A run indented 4 or more columns closes nothing in either renderer: kept as code.
+    let kept = "```\n    ```~\n<b>\n```";
+    assert_eq!(assert_contained(kept), kept);
+}
+
+#[test]
+fn very_deep_nesting_is_written_as_plain_text() {
+    for deep in [format!("{} <b>", ">".repeat(3000)), format!("{}<b>", "- ".repeat(1500))] {
+        assert_eq!(contain(&deep), as_plain(&deep));
+    }
+    // Ordinary nesting is kept as Markdown.
+    let nested = format!("{} quoted", ">".repeat(20));
+    assert_eq!(contain(&nested), nested);
+}
+
+#[test]
+fn escaping_is_linear_in_the_message() {
+    // 1.6 MB: 200k inline code spans and 200k tags (quadratic, this took a minute in a release build).
+    let text = "`x` <b> ".repeat(200_000);
+    let spans: Vec<std::ops::Range<usize>> = (0..200_000).map(|k| k * 8..k * 8 + 3).collect();
+    let t = std::time::Instant::now();
+    let out = escape_tags(&text, &spans);
+    assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    assert_eq!(out.len(), text.len() + 200_000);
+    assert!(out.starts_with("`x` \\<b> `x` \\<b> "));
+    // The whole of `contain` on it stays well within an export's time.
+    let t = std::time::Instant::now();
+    assert!(contain(&text).starts_with("`x` \\<b> "));
+    assert!(t.elapsed() < std::time::Duration::from_secs(60), "{:?}", t.elapsed());
+}
+
+/// Every adversarial message as an export writes it (contained, under its heading, then a tool
+/// block), for the `marked` render check in the app's tests (`session-export-goldens.test.ts`).
+fn adversarial_doc() -> String {
+    let mut doc = Doc::default();
+    for (i, input) in ADVERSARIAL.iter().enumerate() {
+        doc.push(Event::User((*input).to_string()));
+        doc.end_message();
+        doc.push(Event::Result { id: String::new(), name: Some(format!("probe {}", i + 1)), output: "ok".into(), error: false });
+    }
+    doc.push(Event::User("end".into()));
+    doc.end_message();
+    format!("# Adversarial messages\n\n{}\n", doc.body.trim_end())
+}
+
+#[test]
+fn the_adversarial_fixture_is_current() {
+    let want = std::fs::read_to_string(fixtures().join("adversarial.md")).unwrap();
+    assert!(!want.contains('\r'));
+    assert_eq!(adversarial_doc(), want, "rewrite it with the ignored `bless` test");
 }

@@ -1,5 +1,6 @@
 // The session export's golden files (app/src-tauri/tests/fixtures/session-export/*.md, written by
-// session_export.rs and compared byte for byte by its Rust tests) rendered with the app's own
+// session_export.rs and compared byte for byte by its Rust tests; adversarial.md holds every hostile
+// message from the reviews as an export writes it) rendered with the app's own
 // Markdown renderer: every message heading and tool block survives, and nothing a transcript said
 // reaches a viewer as raw HTML. Run with `pnpm test` (or `pnpm exec vitest run src/lib/session-export-goldens.test.ts`).
 import { describe, expect, it } from "vitest";
@@ -10,10 +11,10 @@ const goldens = Object.keys(files).map((path) => path.split("/").pop() as string
 const read = (name: string) => files[Object.keys(files).find((p) => p.endsWith("/" + name)) as string];
 
 /** Tags the export itself writes, or Markdown renders to. */
-const ALLOWED = new Set(["h1", "h2", "p", "ul", "ol", "li", "blockquote", "details", "summary", "pre", "code", "hr", "strong", "em", "del", "a", "br", "table", "thead", "tbody", "tr", "th", "td", "input"]);
+const ALLOWED = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "blockquote", "details", "summary", "pre", "code", "hr", "strong", "em", "del", "a", "br", "table", "thead", "tbody", "tr", "th", "td", "input"]);
 
 describe("session export golden files", () => {
-  it("are present", () => expect(goldens.length).toBeGreaterThanOrEqual(3));
+  it("are present", () => expect(goldens).toEqual(expect.arrayContaining(["claude.md", "codex.md", "omp.md", "adversarial.md"])));
 
   for (const name of goldens) {
     it(`${name} keeps its structure when rendered`, () => {
@@ -29,7 +30,7 @@ describe("session export golden files", () => {
       expect((html.match(/<\/details>/g) ?? []).length).toBe(wantDetails);
       // Outside code, only the tags above: no comment, script, textarea… from a message.
       const outside = html.replace(/<pre><code[^>]*>[\s\S]*?<\/code><\/pre>/g, "").replace(/<code>[\s\S]*?<\/code>/g, "");
-      expect(outside).not.toMatch(/<!--/);
+      expect(outside).not.toMatch(/<!--|<\?|<!\[|<!D/i);
       const tags = [...outside.matchAll(/<\/?([a-zA-Z][\w-]*)/g)].map((m) => m[1].toLowerCase());
       expect(tags.filter((t) => !ALLOWED.has(t))).toEqual([]);
       // The document ends with what the export wrote last, not inside a code block.
