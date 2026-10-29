@@ -27,6 +27,7 @@ use crate::session::{json_out, now_millis, Answer, AnswerError, ClientTx, Sessio
 use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, turn_event};
 
 mod automation;
+mod process;
 
 #[derive(Clone)]
 pub enum Entry {
@@ -63,6 +64,13 @@ impl Entry {
         match self {
             Entry::Term(s) => s.kill(),
             Entry::Chat(c) => c.kill(),
+        }
+    }
+    /// The process the session runs and its job (see `procs`); `None` once it has ended.
+    fn proc_root(&self) -> Option<crate::procs::Root> {
+        match self {
+            Entry::Term(s) => s.proc_root(),
+            Entry::Chat(c) => c.proc_root(),
         }
     }
 }
@@ -102,6 +110,8 @@ pub struct Daemon {
     pub notifier: Notifier,
     /// "Continue at reset" timers.
     scheduled: ScheduledInputs,
+    /// What the sessions run, looked at when the app asks (`process.*`).
+    procs: crate::procs::Procs,
     /// This daemon, for threads that outlive a call.
     me: std::sync::Weak<Daemon>,
 }
@@ -209,6 +219,7 @@ impl Daemon {
                 deliver_review: Mutex::new(HashMap::new()),
                 notifier: Notifier::new(&data_dir, secrets),
                 scheduled: ScheduledInputs::open(&data_dir),
+                procs: crate::procs::Procs::default(),
                 me: weak,
                 data_dir,
                 exe,
@@ -1442,6 +1453,8 @@ impl Daemon {
                 "data_dir": self.data_dir,
                 "endpoint": kelpie_proto::endpoint().display(),
                 "sessions": self.sessions.read().len(),
+                // Looks at running processes made so far: only the app's requests make one.
+                "process_scans": self.procs.scans(),
             }),
             "daemon.policy" => json!({"agents_control_others": self.agents_control_others()}),
             "daemon.set_policy" => {
@@ -1627,6 +1640,7 @@ impl Daemon {
                 out
             }
             m if m.starts_with("note.") => self.note_rpc(m, &params)?,
+            m if m.starts_with("process.") => return self.process_rpc(tx, id, m, params),
             // Undo, its preview and drop wait for the repository's snapshots and run git: they
             // answer from their own thread so this client's other requests are not held up.
             m @ ("checkpoint.undo_plan" | "checkpoint.undo" | "checkpoint.drop") => {
@@ -2295,6 +2309,159 @@ mod tests {
         assert_eq!(daemon.runs.lock().get("r1").unwrap().tasks[0].status, TaskStatus::Failed);
         // Persisted as not alive: the next daemon would not flag it as interrupted either.
         assert!(!daemon.saved_sessions().iter().any(|s| s.spec.id == "s1" && s.alive));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A session that runs `root` (in a job of its own on Windows).
+    fn session_running(daemon: &Arc<Daemon>, id: &str, root: &std::process::Child, job: Option<Arc<crate::proc_tree::ProcTree>>) {
+        let spec = SessionSpec { id: id.into(), kind: "shell".into(), cwd: std::env::temp_dir().to_string_lossy().into_owned(), ..Default::default() };
+        let handle = daemon.next_handle.fetch_add(1, Ordering::Relaxed);
+        let session = Session::new(handle, spec, 80, 24);
+        session.fake_process(root.id(), job);
+        daemon.sessions.write().insert(handle, Entry::Term(session));
+    }
+
+    /// The reply to request `id` (stopping answers from a thread of its own).
+    fn reply_to(rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::session::Outgoing>, id: u64) -> Value {
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(r) = events(rx).into_iter().find(|e| e["id"] == id) {
+                return r;
+            }
+            assert!(Instant::now() < end, "no reply to {id}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn processes_are_listed_and_stopped_only_when_they_are_the_sessions_and_the_same_process() {
+        use crate::procs::tests::{alive, reap, session};
+        let (daemon, dir) = test_daemon("process-rpc");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.register_client(1, tx.clone());
+        daemon.set_client_role(1, &crate::auth::Role::User);
+        let (root, target) = session("s1");
+        session_running(&daemon, "s1", &root, target.tree.clone());
+        let stranger = crate::procs::tests::sleeper();
+        let call = |id: u64, method: &str, params: Value| {
+            daemon.dispatch(1, &tx, &json!(id), method, params).unwrap();
+        };
+        // The tree: the launcher and, once it has started it, a program, each with its identity.
+        let end = Instant::now() + Duration::from_secs(15);
+        let listed = loop {
+            let a = daemon.dispatch(1, &tx, &json!(1), "process.list", json!({"session": "s1"})).unwrap().unwrap();
+            if !a["children"].as_array().unwrap().is_empty() || Instant::now() > end {
+                break a;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert_eq!(listed["root"]["pid"], root.id());
+        let child = listed["children"][0].clone();
+        assert!(child["start_time"].as_u64().unwrap() > 0 && child["exe"].is_string(), "{child}");
+        assert!(listed["keep"].as_array().unwrap().iter().any(|p| *p == root.id()));
+        // The chips' call names the session and counts what it started.
+        let chips = daemon.dispatch(1, &tx, &json!(2), "process.ports", json!({"sessions": ["s1", "nope"]})).unwrap().unwrap();
+        assert!(chips["sessions"]["s1"]["children"].as_u64().unwrap() >= 1 && chips["sessions"].get("nope").is_none());
+        assert!(daemon.dispatch(1, &tx, &json!(3), "daemon.info", json!({})).unwrap().unwrap()["process_scans"].as_u64().unwrap() >= 2);
+        // A wrong start time, another program, a stranger's PID, the session's own process: all refused, nothing ends.
+        let kill = |pid: u64, start: u64, exe: Value| json!({"session": "s1", "pid": pid, "start_time": start, "exe": exe});
+        let (cpid, cstart) = (child["pid"].as_u64().unwrap(), child["start_time"].as_u64().unwrap());
+        let (sid, sstart) = {
+            let id = crate::procs::Procs::default().describe(stranger.id()).expect("the stranger runs").0;
+            (id.pid as u64, id.start_time)
+        };
+        for (n, params) in [
+            kill(cpid, cstart + 1, Value::Null),
+            kill(cpid, cstart, json!("C:/elsewhere/other.exe")),
+            kill(sid, sstart, Value::Null),
+            kill(root.id() as u64, cstart, Value::Null),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            call(100 + n as u64, "process.kill", params);
+            let r = reply_to(&mut rx, 100 + n as u64);
+            assert!(r["error"]["message"].is_string(), "{n}: {r}");
+        }
+        assert!(alive(cpid as u32) && alive(stranger.id()) && alive(root.id()), "nothing was stopped");
+        // The listed process, with its identity, is.
+        call(200, "process.kill", kill(cpid, cstart, child["exe"].clone()));
+        let done = reply_to(&mut rx, 200);
+        assert!(done["error"].is_null() && done["result"]["refused"].as_array().unwrap().is_empty(), "{done}");
+        let end = Instant::now() + Duration::from_secs(5);
+        while alive(cpid as u32) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(cpid as u32));
+        assert!(alive(stranger.id()), "an unrelated process is never stopped");
+        // Stopping the children asks for nothing but the session.
+        call(300, "process.kill_children", json!({"session": "s1"}));
+        assert!(reply_to(&mut rx, 300)["error"].is_null());
+        assert!(daemon.dispatch(1, &tx, &json!(4), "process.list", json!({"session": "gone"})).is_err());
+        reap(stranger);
+        reap(root);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A custom session whose own process is the server (`python -m http.server` run as the session) has a chip.
+    #[test]
+    fn a_session_whose_own_process_listens_has_its_port_in_the_chips() {
+        let (daemon, dir) = test_daemon("process-root-port");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.register_client(1, tx.clone());
+        daemon.set_client_role(1, &crate::auth::Role::User);
+        // The test run itself stands for the server: it is the session's process and it listens.
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let spec = SessionSpec { id: "srv".into(), kind: "custom".into(), cwd: std::env::temp_dir().to_string_lossy().into_owned(), ..Default::default() };
+        let handle = daemon.next_handle.fetch_add(1, Ordering::Relaxed);
+        let session = Session::new(handle, spec, 80, 24);
+        session.fake_process(std::process::id(), None);
+        daemon.sessions.write().insert(handle, Entry::Term(session));
+        let chips = daemon.dispatch(1, &tx, &json!(1), "process.ports", json!({"sessions": ["srv"]})).unwrap().unwrap();
+        let ports = chips["sessions"]["srv"]["ports"].as_array().unwrap();
+        assert!(ports.iter().any(|p| p["port"] == port && p["pid"] == std::process::id()), "{chips}");
+        drop(socket);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn programs_in_a_session_cannot_list_or_stop_processes_whatever_they_send() {
+        use crate::auth::{authorize, Role};
+        let (daemon, dir) = test_daemon("process-auth");
+        let spec = SessionSpec { id: "s1".into(), kind: "shell".into(), cwd: dir.to_string_lossy().into_owned(), ..Default::default() };
+        let handle = daemon.next_handle.fetch_add(1, Ordering::Relaxed);
+        daemon.sessions.write().insert(handle, Entry::Term(Session::new(handle, spec, 80, 24)));
+        let shapes = [
+            Value::Null,
+            json!({}),
+            json!([]),
+            json!(["s1", 1, 1, null]),
+            json!("process.kill"),
+            json!(7),
+            json!(true),
+            json!({"session": "s1", "pid": 1, "start_time": 1}),
+            json!({"session": "other", "pid": 1, "start_time": 1, "exe": "x"}),
+            json!({"sessions": ["s1"]}),
+            json!({"port": 80}),
+        ];
+        let methods = ["process.list", "process.ports", "process.port_owner", "process.kill", "process.kill_children", "process.anything_else"];
+        for scripting in [true, false] {
+            daemon.agents_control_others.store(scripting, Ordering::Relaxed);
+            for role in [Role::Session("s1".into()), Role::Claimed("s1".into()), Role::Anonymous] {
+                for method in methods {
+                    for shape in &shapes {
+                        let mut params = shape.clone();
+                        let err = authorize(&daemon, &role, method, &mut params).expect_err(&format!("{role:?} {method} {shape}"));
+                        assert!(!err.to_string().is_empty());
+                    }
+                }
+            }
+        }
+        // The user's own connection may.
+        for method in methods.iter().take(5) {
+            authorize(&daemon, &Role::User, method, &mut json!({})).unwrap();
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -1,7 +1,7 @@
 //! Memory meter: resident memory of the app (incl. its WebView processes), the session daemon,
 //! and everything the daemon runs (shells, agents and their children).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use parking_lot::Mutex;
@@ -22,38 +22,18 @@ pub struct MemoryStats {
     session_processes: u32,
 }
 
-/// Sum of memory of `root`'s descendants (not `root` itself), and their count. The graph can
-/// contain cycles (Windows reuses the PIDs of dead parents), so each process counts once.
+/// Sum of memory of `root`'s descendants (not `root` itself), and their count.
 fn descendants(children: &HashMap<Pid, Vec<Pid>>, mem: &HashMap<Pid, u64>, root: Pid) -> (u64, u32) {
-    let (mut total, mut count) = (0, 0);
-    let mut seen = HashSet::from([root]);
-    let mut stack = children.get(&root).cloned().unwrap_or_default();
-    while let Some(pid) = stack.pop() {
-        if !seen.insert(pid) {
-            continue;
-        }
-        total += mem.get(&pid).copied().unwrap_or(0);
-        count += 1;
-        if let Some(c) = children.get(&pid) {
-            stack.extend(c);
-        }
-    }
-    (total, count)
+    let all = kelpie_proto::procs::descendants(children, root);
+    (all.iter().map(|p| mem.get(p).copied().unwrap_or(0)).sum(), all.len() as u32)
 }
 
 fn collect(daemon_pid: Option<u32>) -> MemoryStats {
     let mut sys = SYS.lock();
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_memory());
-    let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
-    let mut mem: HashMap<Pid, u64> = HashMap::new();
-    for (pid, p) in sys.processes() {
-        mem.insert(*pid, p.memory());
-        // A "parent" that started after its child is a newer process that reused a dead
-        // parent's PID, not the real parent.
-        if let Some(parent) = p.parent().filter(|pp| sys.process(*pp).is_some_and(|pp| pp.start_time() <= p.start_time())) {
-            children.entry(parent).or_default().push(*pid);
-        }
-    }
+    let mem: HashMap<Pid, u64> = sys.processes().iter().map(|(pid, p)| (*pid, p.memory())).collect();
+    let rows: Vec<(Pid, Option<Pid>, u64)> = sys.processes().iter().map(|(pid, p)| (*pid, p.parent(), p.start_time())).collect();
+    let children = kelpie_proto::procs::child_map(&rows);
     let me = Pid::from_u32(std::process::id());
     let daemon = daemon_pid.map(Pid::from_u32);
     let (app_children, _) = descendants(&children, &mem, me);

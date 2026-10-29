@@ -125,5 +125,13 @@
   "Automations are off and changes are not saved until Kelpie's background service restarts.": "Tự động hóa đang tắt và thay đổi không được lưu cho đến khi dịch vụ nền của Kelpie khởi động lại.",
   "reached its limit of": "đã đạt giới hạn",
   "runs today; it runs again tomorrow": "lượt chạy hôm nay; ngày mai sẽ chạy lại",
-  "is only available to the Kelpie app": "chỉ dùng được từ ứng dụng Kelpie"
+  "is only available to the Kelpie app": "chỉ dùng được từ ứng dụng Kelpie",
+  "that is the session's own process: stop the session instead": "đó là tiến trình của chính phiên: hãy dừng phiên thay vì dừng tiến trình",
+  "not a process of this session (it may have ended)": "không phải tiến trình của phiên này (có thể đã kết thúc)",
+  "the process with that id started at another time: it is not the one that was listed": "tiến trình mang id đó khởi chạy vào lúc khác: đó không phải tiến trình đã được liệt kê",
+  "the process with that id runs another program: it is not the one that was listed": "tiến trình mang id đó chạy chương trình khác: đó không phải tiến trình đã được liệt kê",
+  "the process changed: it is not the one that was listed": "tiến trình đã đổi: đó không phải tiến trình đã được liệt kê",
+  "the process is not in the session's job": "tiến trình không nằm trong job của phiên",
+  "that is the Kelpie daemon": "đó là dịch vụ nền của Kelpie",
+  "cannot open the process": "không mở được tiến trình"
 }

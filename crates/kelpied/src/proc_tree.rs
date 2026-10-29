@@ -39,8 +39,9 @@ mod imp {
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-        TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation,
+        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, OpenProcess, SetPriorityClass, SetThreadPriority,
@@ -109,6 +110,34 @@ mod imp {
         pub fn kill(&self) {
             unsafe {
                 TerminateJobObject(self.job, 1);
+            }
+        }
+
+        /// Every process in the session's job right now. `None` when the job cannot be asked.
+        pub fn pids(&self) -> Option<Vec<u32>> {
+            self.pids_from(256)
+        }
+
+        /// [`Self::pids`] starting with room for `capacity` ids (a job with more is asked again).
+        pub(super) fn pids_from(&self, mut capacity: usize) -> Option<Vec<u32>> {
+            let header = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
+            let word = std::mem::size_of::<usize>();
+            loop {
+                // Whole words: two counters, then the ids as an array of pointer-sized integers.
+                let mut buf = vec![0usize; header / word + capacity];
+                let ok = unsafe { QueryInformationJobObject(self.job, JobObjectBasicProcessIdList, buf.as_mut_ptr().cast(), (buf.len() * word) as u32, std::ptr::null_mut()) };
+                let list = buf.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+                let (assigned, listed) = unsafe { ((*list).NumberOfAssignedProcesses as usize, (*list).NumberOfProcessIdsInList as usize) };
+                // A buffer too small fails with ERROR_MORE_DATA after filling itself: ask again with room for all.
+                if ok == 0 && assigned > capacity {
+                    capacity = assigned + 16;
+                    continue;
+                }
+                if ok == 0 {
+                    return None;
+                }
+                let first = header / word;
+                return Some(buf[first..first + listed.min(capacity)].iter().map(|&p| p as u32).collect());
             }
         }
 
@@ -272,6 +301,11 @@ mod imp {
             self.released.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
+        /// There is no list to ask for: the processes are found by walking parents from `root`.
+        pub fn pids(&self) -> Option<Vec<u32>> {
+            None
+        }
+
         pub fn quiet_flag(&self) -> Arc<AtomicBool> {
             Arc::default()
         }
@@ -350,6 +384,31 @@ mod tests {
         assert_eq!(class_of(root), NORMAL_PRIORITY_CLASS);
         tree.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn the_job_lists_the_processes_in_it() {
+        // cmd (the root) starts a long ping after a second, by then inside the job.
+        let mut child = std::process::Command::new("cmd.exe").args(["/c", "ping -n 2 127.0.0.1 >nul & ping -n 30 127.0.0.1 >nul"]).spawn().unwrap();
+        let root = child.id();
+        let tree = ProcTree::adopt(root, None, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1800));
+        let kids = super::imp::children_for_test(root, "ping.exe");
+        assert!(!kids.is_empty(), "ping runs under cmd");
+        let pids = tree.pids().expect("the job can be asked");
+        assert!(pids.contains(&root) && kids.iter().all(|k| pids.contains(k)), "{pids:?} vs {root} {kids:?}");
+        // The test run itself is not in the job.
+        assert!(!pids.contains(&std::process::id()));
+        // A list that does not fit the first buffer is asked for again.
+        let mut again = tree.pids_from(1).expect("asked again with room for all");
+        let mut all = pids.clone();
+        again.sort_unstable();
+        all.sort_unstable();
+        assert_eq!(again, all);
+        tree.kill();
+        let _ = child.wait();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(tree.pids().expect("an empty job can be asked").is_empty());
     }
 
     #[test]

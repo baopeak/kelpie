@@ -12,6 +12,7 @@ import { conversationCommands, restartKeepingConversation, runConversationComman
 import { daemon } from "../lib/ipc";
 import { Icon, KindGlyph } from "./icons";
 import { ContextRing } from "./context-ring";
+import { PortChips } from "./port-chips";
 import { BrandMark, BrandWordmark, KipCompanion, kipShown } from "./brand";
 import { findPane, readingOrder } from "../lib/layout";
 import { sessionAccount } from "../lib/accounts";
@@ -270,6 +271,7 @@ function SessionRow(props: { s: SessionInfo }) {
           <span class="model">{[props.s.model && shortModel(props.s.model), sessionAccount(props.s)?.label].filter(Boolean).join(" · ")}</span>
         </Show>
       </span>
+      <PortChips id={props.s.id} max={2} />
       <ContextRing s={props.s} />
       <Show when={LABEL[state()]} fallback={<span class="age">{relTimeShort(props.s.last_activity || props.s.created_at, now())}</span>}>
         {(label) => <span class={`age state-label ${state()}`}>{t(label())}</span>}

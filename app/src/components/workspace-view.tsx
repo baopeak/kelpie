@@ -12,6 +12,7 @@ import { Launcher } from "./welcome";
 import { openLayoutMenu } from "./layout-menu";
 import { browserState, openBrowser } from "../lib/browser";
 import { HostChip } from "./host-target";
+import { PortChips } from "./port-chips";
 import { projectTarget, sessionTarget } from "../lib/remote";
 import { kindInfo } from "../lib/agents";
 import type { Pane, Project, Tab } from "../lib/types";
@@ -60,6 +61,7 @@ function TabTitle(props: { tab: Tab; project: Project }) {
       <Show when={host()}>{(tg) => <HostChip target={tg()} />}</Show>
       <Show when={props.tab.broadcast}><span class="badge broadcast-badge" title={t("Broadcast input is on")}>⇶</span></Show>
       <span class="title">{props.tab.name ?? paneTitle(focus())}</span>
+      <Show when={session() && !session()!.remote}><PortChips id={session()!.id} max={2} /></Show>
       <Show when={session()}>{(s) => <ContextRing s={s()} size={12} />}</Show>
       <Show when={panes().length > 1}>
         <span class="tab-panes">

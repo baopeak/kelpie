@@ -102,7 +102,7 @@ Frames (`crates/kelpie-proto`): `u32 LE length | u8 kind | payload`
 | 2 Output | daemon → app | `u32 handle \| u64 seq \| bytes` (`seq` = stream offset after the bytes) |
 | 3 Input | app → daemon | `u32 handle \| bytes` |
 
-RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them).
+RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
 `daemon.info` reports an `api` feature level (`kelpie_proto::API_LEVEL`); an app built for a
 higher level offers to restart an older daemon still running from a previous version.
 Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request`, `chat.resolved` (API 14: `{handle, id, request_id, by, dropped}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
@@ -969,6 +969,40 @@ task's run status is the Runs engine's.
 - **Workspace notes** (`meta.rs`, `meta.*`, `workspace-meta.json`): comment + board status
   per canonical folder path; `meta.updated` is broadcast. `kelpied worktree get|set` defaults to
   the git top level of the current folder.
+- **Processes and ports** (`procs.rs`, `ports.rs`, `daemon/process.rs`, API 16): a session's tree is the
+  descendants of its process by parent PID (a parent that started after its child is a reused PID, not a parent;
+  shared `kelpie_proto::procs::child_map`/`descendants`, also used by the app's memory meter) plus, on Windows,
+  the members of its Job Object (`QueryInformationJobObject(JobObjectBasicProcessIdList)`): a program a shell
+  starts is not always in the job (the children of a packaged PowerShell are not), so the job alone is not the
+  tree. A scan reads the process table once: on Windows one `NtQuerySystemInformation(SystemProcessInformation)`
+  call (parents, start times, names, working set and CPU time of every process, ~2 ms; a Toolhelp snapshot or
+  sysinfo cost ~6 ms each for the same), with the executable path read from the handle of each process listed;
+  on Unix sysinfo without threads (`without_tasks`; Linux would list each thread as a process), through one
+  long-lived `System` for every reading (one boot time, so start times agree after a clock step), the executable
+  path read fresh for each process listed and again before each stop. Every process is keyed by its identity
+  (pid, start time, exe path); one remembered in a tree that still runs as the same process outside it is listed
+  as an orphan, one whose identity changed is dropped. The session's own process is the one the session reports
+  now, checked against the start time the session recorded when it started it (a PID reused before the session
+  learnt its process ended is not the root, and nothing is walked from it). So after a restart under the same
+  session id the new process is the root, never a child, and the reported PID is always in the keep set; what
+  the previous run left is remembered as orphans. Ports: Windows `GetExtendedTcpTable` (listeners, both
+  families), Linux `/proc/net/tcp*` with socket inodes, macOS one `lsof` for all the PIDs of a look. Nothing
+  scans by itself: `process.ports` (the chips) is asked by the app for the visible sessions, once when they
+  appear, ~0.8 s after their terminal prints (at most every 2 s), and every 3 s only while the last look found
+  children; on macOS it runs `lsof` only when some session has children or orphans or is a custom session (whose
+  own process is often the server), elsewhere whenever a session has a process. `process.list` while the Processes panel is open (every 2 s). `daemon.info.process_scans`
+  counts scans. `process.kill {session, pid, start_time, exe?}` refuses unless the process is in the session's
+  tree (or its orphans) with that identity, never the session's own process or the daemon; it stops the process
+  and its descendants deepest first. Each victim is re-checked against its identity through the handle that
+  stops it (Windows: an open process handle, so the PID cannot be reused in between; Unix: re-read before
+  `SIGTERM` and again before `SIGKILL`). Graceful first (Windows: `WM_CLOSE` to its top-level windows, then
+  forced after 3 s; a console program has none and is not asked — no console control event is sent — but
+  terminated at once, or after the grace when a program with windows in the same stop was asked;
+  Unix: `SIGTERM`, forced after 3 s). `process.kill_children` keeps the session's process and, in an agent
+  session, the agent's process (the root when named like the agent; under a launcher the child named like the
+  agent, or whatever a batch file run by `cmd` starts directly; a launcher with neither is the agent) and the
+  agent's direct children (MCP servers, tool shells); their descendants are stopped. Kills answer from their own
+  thread.
 - **Automations** (`automations.rs`, `automation.*`, `automations.json`): hourly / daily /
   weekdays / weekly in local time (chrono). The ticker checks every 10 s and starts each due run on its own
   thread (never awaited: ten due runs cost the ticker about 2 ms); a run creates an ordinary session with

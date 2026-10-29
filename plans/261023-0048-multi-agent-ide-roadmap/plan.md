@@ -47,7 +47,7 @@ tests and a performance budget. Supersedes [261023-0036-vibe-coder-gaps](../2610
 | 10 | [Spec workspace](phase-10-spec-workspace.md) | P2 | 3d | 8, 9 | completed |
 | 11 | [Event-triggered automations](phase-11-event-automations.md) | P2 | 3d | 1, 7 | completed |
 | 12 | [Off-machine notify & limit actions](phase-12-notify-limits-redaction.md) | P1 | 3d | 1, 3, 5 | completed |
-| 13 | [Processes, ports & preview](phase-13-processes-ports.md) | P2 | 3d | 1 | pending |
+| 13 | [Processes, ports & preview](phase-13-processes-ports.md) | P2 | 3d | 1 | completed |
 | 14 | [Agent setup: MCP, instructions, skills](phase-14-agent-setup.md) | P2 | 3d | 1 | completed |
 | 15 | [Platform & hygiene](phase-15-platform-hygiene.md) | P3 | 3d | 1, 2 | pending |
 
@@ -135,6 +135,7 @@ feature on an older daemon; never assume app and daemon are the same release.
 - Phase 12: manual checks pending (real Telegram bot, ntfy.sh, a real Claude usage limit, Codex resume after switch account, phone link); no limit signal for Codex/chat; non-Windows idle unit-tested only.
 - Phase 9: fuzzy p95 > 30 ms under full CPU load (17–21 ms quiet); remote Windows hosts get POSIX quoting; `chat_ui.py` (real Claude/Codex) not run.
 - Phase 10: `session.create` lets a program inside a session open ssh to any saved host (pre-existing; product decision needed); host tasks verified under Git Bash only.
+- Phase 13: Unix-only process code first compiles in CI (Linux untested); Gemini/Volta shims may lose agent helpers on Kill children; programs escaping the Job survive session close; macOS `lsof` → libproc and a Mac scan measurement.
 - Perf gate `bench` measures unfocused sessions, which the CPU-priority work (separate change) deliberately slows under load: compare bench with `daemon.set_priority {enabled:false}` or budget it separately.
 
 ## Unresolved questions

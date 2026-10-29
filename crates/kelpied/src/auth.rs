@@ -10,7 +10,7 @@
 //!   started restricted; then only their own session. Hook and run reports always speak for the
 //!   caller's own session. Admin methods (custom agents, automations, phone access, daemon
 //!   settings, closing sessions, turn checkpoints and their undo, notification channels, timers
-//!   that type into a session, changing a session's account, resolving review notes…) are the user's only. Other sessions' environments are left
+//!   that type into a session, changing a session's account, resolving review notes, listing and stopping a session's processes…) are the user's only. Other sessions' environments are left
 //!   out of what they read.
 //! - **Claimed** (`KELPIE_SESSION_ID` without its token — some agents strip `*TOKEN*` variables
 //!   from the programs they run, hooks included): hook reports for that session only, which is
@@ -429,7 +429,7 @@ mod tests {
         let user = Role::User;
         let s = Role::Session("s".into());
         let claimed = Role::Claimed("s".into());
-        let admin = ["agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys"];
+        let admin = ["agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys", "process.list", "process.ports", "process.port_owner", "process.kill", "process.kill_children"];
         for m in admin {
             assert!(allowed(&user, false, m), "user: {m}");
             assert!(!allowed(&s, true, m), "scripting session: {m}");

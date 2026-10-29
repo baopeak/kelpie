@@ -22,6 +22,7 @@ import { msg, t } from "./i18n";
 import { confirmDialog } from "./confirm-dialog";
 import { focusedSession, newSpec } from "./quick-commands";
 import { CHECKPOINT_API } from "./checkpoint-api";
+import { PROCESS_API } from "./process-api";
 import { toggleComposer } from "./composer-state";
 import { conversationCommands, restartKeepingConversation, runConversationCommand } from "./agent-actions";
 
@@ -186,6 +187,7 @@ export const commands: Command[] = [
     },
   },
   { id: "panel.plan", label: msg("Plan (specs and tasks)"), run: () => store.showRightPanel("plan"), when: hasProject },
+  { id: "panel.processes", label: msg("Processes and Ports"), run: () => store.showRightPanel("processes"), when: () => hasProject() && store.daemonApi() >= PROCESS_API },
   { id: "spec.new", label: msg("New Spec…"), run: newSpec, when: hasProject },
   { id: "panel.review", label: msg("Review Queue"), run: () => store.showRightPanel("review"), when: () => { const a = store.activeProject(); return !!a && !a.remote && !!store.projectInfo[a.parentId ?? a.id]?.is_repo; } },
   { id: "worktree.finish", label: msg("Finish Worktree…"), when: () => { const a = store.activeProject(); return !!a?.parentId && !a.remote; }, run: () => openFinish(store.activeProject()!.id) },

@@ -695,6 +695,29 @@ token-like values removed) and size, with a screenshot of the element; add a not
 to an agent** as one prompt. With Settings → Terminal → *Open localhost links in a browser
 pane*, `Ctrl/⌘+click` on a dev-server address in a terminal opens it next to the terminal.
 
+### Processes, ports and preview
+
+When a program in a session listens on a port (a dev server, `python -m http.server 8000`…), a
+`:8000` chip appears on the session's tab and its sidebar row. Click it to open the address in a
+browser pane; right-click for *Open preview beside* (split next to the focused pane), *Open in a
+browser tab* or *Copy address*. Chips of a session that is not on screen are dimmed: they show the
+ports as of when it was last on screen. The **Processes** tab of the right panel (palette:
+*Processes and Ports*) lists what each running session of the project runs, as a tree with PID,
+memory, CPU and ports. **Kill** stops a program and what it started. **Kill children** stops what a
+session started while the session itself keeps running; in an agent session the agent also keeps
+the programs it runs directly (its MCP servers, the shell it runs a tool in), and what those started
+(a dev server a tool ran) is stopped. Any of them can still be stopped on its own with **Kill**. Both
+ask first and name what would end and which ports it frees. On macOS and Linux a program is asked to
+end and forced after 3 seconds; on Windows a program with a window is asked to close it and forced
+after 3 seconds, while a console program (most dev servers) is ended at once. Kelpie only stops a
+process that is still the one it listed (same PID, start time and program): a program that already
+ended, or a number now used by another program, is never touched. After a session is restarted, its
+new process is the session's own and is never stopped by either button. A program that left its
+session but still runs is listed under *Left the session*. If a port is still in use after a stop,
+Kelpie says which program holds it. Kelpie looks at processes only while this tab is open, or for a
+visible session: when it appears, shortly after its terminal prints something (at most every 2
+seconds), and every 3 seconds while programs run under it. Needs a daemon of API level 16.
+
 ### Remote projects (SSH)
 
 *Add Remote Project (SSH)…* (search, or the server icon in the sidebar's project toolbar) picks a host
