@@ -1,6 +1,8 @@
 /* Settings → Notifications → Off this computer */
-.settings-subhead { font-size: 14px; margin: 18px 0 4px; font-weight: 600; }
+.settings-subhead { font-size: 14px; margin: 28px 0 4px; padding-top: 16px; border-top: 1px solid var(--border-strong); font-weight: 600; }
 .push-block { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: 100%; }
 .push-block .text-input { min-width: 220px; }
+.push-block .text-input.num { min-width: 0; width: 80px; }
+.push-summary { display: inline-flex; margin-top: 12px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; color: var(--text-dim); }
 .push-events { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px 16px; width: 100%; }
 .push-block .btn { white-space: nowrap; }

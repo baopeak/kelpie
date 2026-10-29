@@ -14,12 +14,14 @@ export function TerminalSettings() {
   return (
     <>
       <SettingRow id="font-family">
-        <input class="text-input" value={s().fontFamily} onChange={(e) => applySettings({ fontFamily: e.currentTarget.value })} />
+        <input class="text-input" value={s().fontFamily} title={s().fontFamily} onChange={(e) => applySettings({ fontFamily: e.currentTarget.value })} />
       </SettingRow>
       <SettingRow id="font-size">
         <div class="inline-fields">
-          <input class="text-input" type="number" min="8" max="28" value={s().fontSize} title={t("Font size")} onChange={(e) => applySettings({ fontSize: +e.currentTarget.value || 13 })} />
-          <input class="text-input" type="number" step="0.05" min="1" max="2" value={s().lineHeight} title={t("Line height")} onChange={(e) => applySettings({ lineHeight: +e.currentTarget.value || 1.2 })} />
+          <span class="muted-inline">{t("Font size")}</span>
+          <input class="text-input num" type="number" min="8" max="28" value={s().fontSize} title={t("Font size")} onChange={(e) => applySettings({ fontSize: +e.currentTarget.value || 13 })} />
+          <span class="muted-inline">{t("Line height")}</span>
+          <input class="text-input num" type="number" step="0.05" min="1" max="2" value={s().lineHeight} title={t("Line height")} onChange={(e) => applySettings({ lineHeight: +e.currentTarget.value || 1.2 })} />
         </div>
       </SettingRow>
       <SettingRow id="scrollback">

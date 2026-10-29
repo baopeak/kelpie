@@ -1,4 +1,4 @@
-import { Match, Show, Switch, createEffect, lazy, onCleanup } from "solid-js";
+import { Match, Show, Switch, createEffect, lazy, onCleanup, onMount } from "solid-js";
 import { store } from "../lib/store";
 import { unwatchRoot, watchRoot } from "../lib/ipc";
 import { gitState } from "../lib/git-state";
@@ -18,10 +18,25 @@ const PlanPanel = lazy(() => import("./plan-panel"));
 export function RightPanel(props: { project: Project }) {
   const panel = () => store.workspace(props.project.id).rightPanel;
   let tabs!: HTMLDivElement;
+  // No scrollbar over the tabs: the side with tabs out of sight fades out instead (styles.css `.panel-tabs.more-*`).
+  const fadeEdges = () => {
+    tabs.classList.toggle("more-left", tabs.scrollLeft > 1);
+    tabs.classList.toggle("more-right", tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1);
+  };
+  onMount(() => {
+    const ro = new ResizeObserver(fadeEdges);
+    ro.observe(tabs);
+    const mo = new MutationObserver(fadeEdges);
+    mo.observe(tabs, { childList: true, subtree: true, characterData: true });
+    onCleanup(() => (ro.disconnect(), mo.disconnect()));
+  });
   // The tabs are wider than the default panel: the shown one is scrolled into view, and the wheel scrolls the bar.
   createEffect(() => {
     panel();
-    queueMicrotask(() => tabs.querySelector(".ptab.active")?.scrollIntoView({ inline: "nearest", block: "nearest" }));
+    queueMicrotask(() => {
+      tabs.querySelector(".ptab.active")?.scrollIntoView({ inline: "nearest", block: "nearest" });
+      fadeEdges();
+    });
   });
 
   // Watch only the project being looked at; background projects cost nothing.
@@ -66,7 +81,7 @@ export function RightPanel(props: { project: Project }) {
   return (
     <aside class="rightpanel">
       <div class="panel-resizer" onPointerDown={startResize} />
-      <div class="panel-tabs" ref={tabs} onWheel={(e) => { if (e.deltaY) tabs.scrollLeft += e.deltaY; }}>
+      <div class="panel-tabs" ref={tabs} onScroll={fadeEdges} onWheel={(e) => { if (e.deltaY) tabs.scrollLeft += e.deltaY; }}>
         {tab("files", t("Files"))}
         {tab("git", t("Changes"))}
         {tab("history", t("Sessions"))}

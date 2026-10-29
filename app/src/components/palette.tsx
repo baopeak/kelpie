@@ -116,7 +116,7 @@ function projectItem(p: Project, marks?: number[]): Item {
     marks: parent && marks ? marks.map((m) => m + parent.name.length + 3) : marks,
     hint: `${info?.branch ? info.branch + (info.dirty ? "*" : "") + " · " : ""}${p.path}`,
     chord: projectChord(i),
-    icon: () => <span class="project-swatch" style={{ background: p.color, width: "16px", height: "16px", "font-size": "9px" }}>{p.name[0]?.toUpperCase()}</span>,
+    icon: () => <span class="project-swatch" style={{ "--kc": p.color, width: "16px", height: "16px", "font-size": "9px" }}>{p.name[0]?.toUpperCase()}</span>,
     run: () => store.switchProject(p.id),
   };
 }

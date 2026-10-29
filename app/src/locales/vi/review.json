@@ -16,7 +16,7 @@
   "A check failed. {base} was not changed.": "Một bước kiểm tra thất bại. {base} không bị thay đổi.",
   "{base} moved while Finish was working, so it was not changed. Try again.": "{base} đã đổi trong lúc Hoàn tất đang chạy nên không bị thay đổi. Hãy thử lại.",
   "{path} has uncommitted changes, so {base} was not changed. Commit or stash them, then try again.": "{path} có thay đổi chưa commit nên {base} không bị thay đổi. Hãy commit hoặc stash rồi thử lại.",
-  "This worktree is not available.": "Worktree này không còn.",
+  "This worktree is not available.": "Worktree này không còn khả dụng.",
   "Finish {name}": "Hoàn tất {name}",
   "{branch} → {base}": "{branch} → {base}",
   "The repository has no current branch to merge into; switch it to a branch first.": "Kho chưa ở nhánh nào để hợp nhất vào; hãy chuyển sang một nhánh trước.",

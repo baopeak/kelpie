@@ -319,7 +319,7 @@ function ProjectRow(props: { project: Project }) {
           </button>
         </Show>
         <Show when={worktree()} fallback={<span class="project-swatch" style={{ "--kc": props.project.color }}>{props.project.name.slice(0, 1).toUpperCase()}</span>}>
-          <span class="wt-glyph" style={{ color: props.project.color }}><Icon name="branch" size={13} /></span>
+          <span class="wt-glyph" style={{ "--kc": props.project.color }}><Icon name="branch" size={13} /></span>
         </Show>
         <Show when={!collapsedSidebar()}>
           <span class="project-text">
@@ -336,8 +336,8 @@ function ProjectRow(props: { project: Project }) {
             </Show>
             <Show when={info()?.is_repo}>
               <span class="project-sub">
-                <Show when={!worktree()}><Icon name="branch" size={10} /> {info()!.branch ?? t("detached")}</Show>
-                <Show when={worktree() && info()!.branch !== props.project.name}>{info()!.branch ?? t("detached")}</Show>
+                <Show when={!worktree()}><Icon name="branch" size={10} /> <span class="branch-text">{info()!.branch ?? t("detached")}</span></Show>
+                <Show when={worktree() && info()!.branch !== props.project.name}><span class="branch-text">{info()!.branch ?? t("detached")}</span></Show>
                 {info()!.dirty ? "*" : ""}
                 <Show when={info()!.ahead || info()!.behind}> ↑{info()!.ahead}↓{info()!.behind}</Show>
                 <Show when={children().length}><span class="primary-tag">{t("primary")}</span></Show>

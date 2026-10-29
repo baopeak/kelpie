@@ -102,7 +102,7 @@ export function WorktreeDialog() {
         if (e.key === "Escape" && !busy()) store.setOverlay(null);
         if (e.key === "Enter" && !(e.target as HTMLElement).matches("textarea, input[type=checkbox]")) void create();
       }}>
-        <h2>{t("New worktree of {name}", { name: repo()?.name ?? "" })}</h2>
+        <h2>{repo()?.name ? t("New worktree of {name}", { name: repo()!.name }) : t("New worktree")}</h2>
         <div class="form-row">
           <label>{t("Branch")}</label>
           <input ref={input} class="text-input" value={branch()} onInput={(e) => setBranch(e.currentTarget.value.trim())} />

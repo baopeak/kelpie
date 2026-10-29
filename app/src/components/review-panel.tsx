@@ -27,7 +27,7 @@ export default function ReviewPanel(props: { project: Project }) {
           {(p) => (
             <div class={`review-item${store.state.activeProject === p.id ? " current" : ""}`}>
               <div class="review-item-head">
-                <span class="wt-glyph" style={{ color: p.color }}><Icon name="branch" size={13} /></span>
+                <span class="wt-glyph" style={{ "--kc": p.color }}><Icon name="branch" size={13} /></span>
                 <span class="name" title={p.path} onClick={() => store.switchProject(p.id)}>{p.name}</span>
               </div>
               <ReviewBody project={p} files />
