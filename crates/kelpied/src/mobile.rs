@@ -457,13 +457,9 @@ async fn start(daemon: Arc<Daemon>) -> Result<String> {
     let url = format!("{}://{ip}:{port}/", if tls.is_some() { "https" } else { "http" });
     let stop = Arc::new(Generation::new());
     let app = Router::new()
-        .route("/", get(page))
-        .route("/app.js", get(page))
-        .route("/app.css", get(page))
-        .route("/manifest.webmanifest", get(page))
-        .route("/icon.svg", get(page))
         .route("/pair", post(pair))
         .route("/ws", get(socket))
+        .fallback(page)
         .with_state(daemon.clone())
         .layer(axum::Extension(stop.clone()));
     let stop2 = stop.clone();
@@ -545,11 +541,14 @@ fn tls_acceptor(cert: &str, key: &str) -> Result<tokio_rustls::TlsAcceptor> {
 
 // ---------- HTTP ----------
 
-const INDEX: &str = include_str!("../mobile/index.html");
-const APP_JS: &str = include_str!("../mobile/app.js");
-const APP_CSS: &str = include_str!("../mobile/app.css");
-const MANIFEST: &str = include_str!("../mobile/manifest.webmanifest");
-const ICON: &str = include_str!("../mobile/icon.svg");
+// The phone client (app/phone, built by `pnpm build:phone`), embedded by build.rs as `PHONE_ASSETS`.
+include!(concat!(env!("OUT_DIR"), "/phone_assets.rs"));
+
+/// The embedded file for a request path: `/` is the page; anything else must be a file of the bundle.
+fn phone_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
+    let path = if path == "/" { "/index.html" } else { path };
+    PHONE_ASSETS.iter().find(|(p, _, _)| *p == path).map(|(_, ty, body)| (*ty, *body))
+}
 
 fn secure_headers(mut r: Response) -> Response {
     let h = r.headers_mut();
@@ -561,15 +560,20 @@ fn secure_headers(mut r: Response) -> Response {
     r
 }
 
-async fn page(uri: axum::http::Uri) -> Response {
-    let (body, ty) = match uri.path() {
-        "/app.js" => (APP_JS, "text/javascript; charset=utf-8"),
-        "/app.css" => (APP_CSS, "text/css; charset=utf-8"),
-        "/manifest.webmanifest" => (MANIFEST, "application/manifest+json"),
-        "/icon.svg" => (ICON, "image/svg+xml"),
-        _ => (INDEX, "text/html; charset=utf-8"),
+async fn page(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+        return secure_headers(StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+    let Some((ty, body)) = phone_asset(uri.path()) else {
+        return secure_headers(StatusCode::NOT_FOUND.into_response());
     };
-    secure_headers(([(header::CONTENT_TYPE, ty)], body).into_response())
+    let mut r = secure_headers(([(header::CONTENT_TYPE, ty)], body).into_response());
+    // Files under /assets/ carry a hash of their content in their name: the browser may keep them. The page,
+    // the service worker and the manifest are asked for again every time.
+    if uri.path().starts_with("/assets/") {
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
+    }
+    r
 }
 
 #[derive(Deserialize)]
@@ -1591,6 +1595,60 @@ mod tests {
         assert!(matches!(ended, Ok(0) | Err(_)), "old HTTP connection still serves requests");
     }
 
+    /// Whether this daemon carries the phone client (`pnpm build:phone` ran before it was built) or the placeholder page.
+    fn has_phone_client() -> bool {
+        !phone_asset("/").is_some_and(|(_, body)| String::from_utf8_lossy(body).contains("KELPIE_PHONE_BUNDLE_MISSING"))
+    }
+
+    #[test]
+    fn the_phone_client_is_found_by_path_and_nothing_else_is() {
+        let (ty, body) = phone_asset("/").expect("the page");
+        assert!(ty.starts_with("text/html") && body.starts_with(b"<!doctype html"), "{ty}");
+        assert_eq!(phone_asset("/index.html").map(|(_, b)| b.len()), Some(body.len()));
+        for path in ["/nope.js", "/../Cargo.toml", "/assets/../index.html", "/app.js", "//", ""] {
+            assert!(phone_asset(path).is_none(), "{path}");
+        }
+        if has_phone_client() {
+            for path in ["/sw.js", "/manifest.webmanifest", "/icon.svg"] {
+                assert!(phone_asset(path).is_some(), "{path}");
+            }
+            assert!(PHONE_ASSETS.iter().all(|(p, _, _)| !p.ends_with(".map")), "source maps are not served");
+            assert!(PHONE_ASSETS.iter().any(|(p, ty, _)| p.starts_with("/assets/") && ty.starts_with("text/javascript")));
+        } else {
+            assert_eq!(PHONE_ASSETS.len(), 1, "the placeholder is one page");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_phone_client_is_served_with_its_headers() {
+        use tokio::io::AsyncWriteExt;
+        let network = NetworkRig::new().await;
+        let head = |path: String| {
+            let network = &network;
+            async move {
+                let mut http = network.http().await;
+                http.write_all(format!("HEAD {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", network.addr).as_bytes()).await.unwrap();
+                http_head(&mut http).await.to_ascii_lowercase()
+            }
+        };
+        let page = head("/".into()).await;
+        assert!(page.starts_with("http/1.1 200") && page.contains("text/html") && page.contains("script-src 'self'") && page.contains("no-store"), "{page}");
+        assert!(head("/nothing-here".into()).await.starts_with("http/1.1 404"));
+        assert!(head("/app.js".into()).await.starts_with("http/1.1 404"), "the old page's script is gone");
+        if has_phone_client() {
+            let worker = head("/sw.js".into()).await;
+            assert!(worker.starts_with("http/1.1 200") && worker.contains("text/javascript") && worker.contains("no-store"), "{worker}");
+            let (path, _, _) = PHONE_ASSETS.iter().find(|(p, ty, _)| p.starts_with("/assets/") && ty.starts_with("text/javascript")).unwrap();
+            let asset = head(path.to_string()).await;
+            assert!(asset.starts_with("http/1.1 200") && asset.contains("immutable"), "{asset}");
+        }
+        // Only reading: a POST to the page, and a GET of the pairing endpoint, are refused.
+        let mut http = network.http().await;
+        http.write_all(format!("POST / HTTP/1.1\r\nHost: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", network.addr).as_bytes()).await.unwrap();
+        assert!(http_head(&mut http).await.starts_with("HTTP/1.1 405"));
+        assert!(head("/pair".into()).await.starts_with("http/1.1 405"));
+    }
+
     fn code(reply: &Value) -> Option<&str> {
         reply["code"].as_str()
     }
@@ -2196,6 +2254,24 @@ mod tests {
         m.load.set_for_test(Level::L3);
         *m.paired_at.lock() = Some(Instant::now() - Duration::from_millis(1100));
         assert!(m.pairing_paced(), "five seconds at L3");
+    }
+
+    /// An attempt turned away because the machine is busy is turned away before the code is looked at: it
+    /// cannot be used to test a guess, spends nothing and counts as no failure.
+    #[tokio::test]
+    async fn a_pairing_attempt_turned_away_for_load_never_looks_at_the_code() {
+        let r = rig();
+        let m = &r.daemon.mobile;
+        *m.code.lock() = Some(("the-right-code".into(), Instant::now()));
+        m.load.set_for_test(Level::L3);
+        *m.paired_at.lock() = Some(Instant::now());
+        let peer: SocketAddr = "10.0.0.7:5000".parse().unwrap();
+        for guess in ["the-right-code", "a-wrong-one", "a-wrong-one"] {
+            let reply = pair(State(r.daemon.clone()), ConnectInfo(peer), Json(PairRequest { code: guess.into(), name: "x".into() })).await;
+            assert_eq!(reply.status(), StatusCode::SERVICE_UNAVAILABLE, "{guess}");
+        }
+        assert!(m.code.lock().is_some(), "the code is not spent");
+        assert!(m.failures.lock().is_empty(), "nothing is counted as a failed guess");
     }
 
     /// A chat log that finds the bulk lane full waits for room; a phone that makes none for `SLOW_AFTER`

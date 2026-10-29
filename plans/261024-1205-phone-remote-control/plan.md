@@ -3,7 +3,7 @@ title: "Phone remote control: sessions anywhere, screen when needed"
 description: "Control every Kelpie session from a phone with zero networking setup and end-to-end encryption — LAN or anywhere, no account — plus browser-pane and desktop/IDE screen takeover."
 status: pending
 priority: P1
-effort: "~59d"
+effort: "~65d"
 tags: [mobile, remote, e2e, noise, relay, webrtc, screen, security]
 created: 2026-10-24
 blockedBy: [261023-0048-multi-agent-ide-roadmap]
@@ -65,6 +65,7 @@ relay, user-presence-gated approvals, one inbox across 23 agents, browser-pane a
 | D12 | **Built for flaky networks**: encrypted heartbeat 20 s / pong 8 s / dead 45 s (lag-aware), ack window with latest-state-only, `peer_reset` + IK re-handshake on any pipe drop, address advertisement after IP changes, no hidden offline queue (input disabled offline, answers retried once with first-wins), durable push outbox, WebRTC restart ladder | Carrier NAT idle timeouts 30–120 s; half-open sockets take minutes to fail; Noise transport desyncs on lost frames ([research](../reports/researcher-261025-1744-unstable-network-resilience.md)) |
 | D13 | **Built for a busy computer**: one `load.rs` level machine (L0–L3, hysteresis) fed by the daemon's own event-loop lag, sink queue age and encoder time; every phase sheds rate/size by level; input, answers, revoke, stop and heartbeats are never shed; new screen sessions refused at L2+; EcoQoS opt-out, MMCSS for capture/encode, never HIGH/REALTIME | 5–20 agents with builds peg the CPU; a windowless daemon gets throttled ([research](../reports/researcher-261025-1744-cpu-overload-resilience.md)) |
 | D11 | **Trust boundary**: sensitive settings (approve, upgrade to write/control, always-allow, relay on, reset) need the verified Kelpie app process (`Role::App`) + OS user verification; per-device `read` < `write` < `control`; grants keyed to device + connection + provider and stopped on revoke | Same-user programs can read the user token (`docs/architecture.md:72`) |
+| D14 | **Daemon-owned chat turn queue (single writer)**: one bounded FIFO per chat in `kelpied`, written only when the agent is idle; phone `chat_send` (write) is text the daemon builds per dialect at write time; desktop entries are built by its adapter at dequeue (`chat.turn_ready` → `chat.write_turn`), plain text falls back to the daemon when the window is gone; every turn logged as `kelpie_sent`; `chat_send/cancel/stop/resume` never shed, `cid` dedupe 10 min | One writer per conversation, phone works with the window closed, phone stays an observer, rich desktop features stay in TS ([phase 2b](phase-02b-phone-chat-send.md), review W5) |
 
 ```
 Phone (PWA on LAN | native app anywhere) ── one SolidJS client (app/phone)
@@ -83,8 +84,9 @@ Phone (PWA on LAN | native app anywhere) ── one SolidJS client (app/phone)
 | # | Phase | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|
 | 1 | [Phone protocol v2: state-sync, prompts, safe answers](phase-01-phone-protocol-v2.md) (+ resilience addendum, second commit) | P1 | 4d + 3d | roadmap phase 12 | done |
-| 2 | [Phone client app (SolidJS, PWA)](phase-02-phone-client-app.md) | P1 | 7d | 1 | pending |
-| 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) | P1 | 7d | 2 | pending |
+| 2 | [Phone client app (SolidJS, PWA)](phase-02-phone-client-app.md) | P1 | 7d | 1 | done |
+| 2b | [Send chat messages from the phone (single writer)](phase-02b-phone-chat-send.md) | P1 | 6d | 2 | pending |
+| 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) | P1 | 7d | 2; 2b for chat-write verbs | pending |
 | 4 | [Relay: connect from anywhere](phase-04-relay-connect-anywhere.md) | P1 | 5d | 3 | pending |
 | 5 | [Native mobile shell (Tauri 2 iOS/Android)](phase-05-native-mobile-shell.md) | P1 | 7d | 3, 4 | pending |
 | 6 | [Push notifications](phase-06-push-notifications.md) | P1 | 5d | 3, 5, roadmap phase 12 | pending |
@@ -92,7 +94,7 @@ Phone (PWA on LAN | native app anywhere) ── one SolidJS client (app/phone)
 | 8 | [Desktop / window screen control — Windows](phase-08-desktop-screen-windows.md) | P2 | 10d | 3, 4, 5, 7 | pending |
 | 9 | [Desktop / window screen control — macOS](phase-09-desktop-screen-macos.md) | P2 | 6d | 7, 8 | pending |
 
-Order: daily value (1–2), security foundation (3) before reach (4–6), screen last with spike gates (7–9). Phase 7 may run beside 4–6 but
+Order: daily value (1–2, 2b), security foundation (3) before reach (4–6), screen last with spike gates (7–9). 2b follows 2 (same chat/phone files) and precedes 3 (both edit `mobile.rs`, `mobile/verbs.rs`). Phase 7 may run beside 4–6 but
 phases 4, 6, 7 and 8 all touch `crates/kelpied/src/mobile.rs` and `daemon.rs`: work them sequentially or with one owner of those files.
 
 ## Security model (applies to every phase)

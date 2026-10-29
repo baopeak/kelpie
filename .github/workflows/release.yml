@@ -57,6 +57,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           KELPIE_KEEP_VERSION: "1"
+          KELPIE_REQUIRE_PHONE: "1"
           KELPIE_TARGET: ${{ matrix.target }}
         run: scripts/build-release.sh --bundles ${{ matrix.bundles }} --config src-tauri/tauri.updater.json
       - name: The release build carries no updater test hooks
@@ -69,6 +70,18 @@ jobs:
           fi
           [ -f "$bin" ] || { echo "app binary not found: $bin"; exit 1; }
           if grep -a -q KELPIE_UPDATE_ENDPOINT "$bin"; then echo "$bin was built with e2e-updater"; exit 1; fi
+      - name: The release daemon carries the phone client, not its placeholder page
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            bins="target/release/kelpied.exe"
+          else
+            bins="target/aarch64-apple-darwin/release/kelpied target/x86_64-apple-darwin/release/kelpied"
+          fi
+          for bin in $bins; do
+            [ -f "$bin" ] || { echo "daemon binary not found: $bin"; exit 1; }
+            if grep -a -q KELPIE_PHONE_BUNDLE_MISSING "$bin"; then echo "$bin was built without the phone client"; exit 1; fi
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: bundle-${{ matrix.os }}

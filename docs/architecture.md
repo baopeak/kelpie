@@ -416,6 +416,40 @@ Checks: `cargo test -p kelpied` (verbs, diff, sync, answers, chat, load, lanes) 
 `scripts/e2e/mobile_protocol.py`; the cost of eight phones is measured by `scripts/e2e/mobile_perf.py`; bad networks
 by `scripts/e2e/mobile_resilience.py` (through `net_fault_proxy.py`); a busy machine by `scripts/e2e/stress.py`.
 
+### Phone client
+
+The page the daemon serves to phones is a SolidJS app of its own, `app/phone` (installable as a PWA), not the
+desktop frontend. It has its own build, `pnpm build:phone` (`app/vite.phone.config.ts` → `app/dist-phone/`); `pnpm build`
+stays the desktop's. `crates/kelpied/build.rs` embeds `dist-phone` as `PHONE_ASSETS` and `mobile.rs` serves it by path
+(hashed `/assets/*` are cacheable, the page, `sw.js` and the manifest are not). A development build without the bundle embeds
+a placeholder page; with `KELPIE_REQUIRE_PHONE=1` (`scripts/build-release.sh`, `ci.yml`, `release.yml`) the build script
+fails instead, and the release workflow greps the daemon for the placeholder's marker. `pnpm build:phone` must run before any
+`cargo build/test -p kelpied`. `scripts/check-phone-guard.sh` proves the guard. The bundle may not import `@tauri-apps/*`
+or `lib/ipc` (the build fails), is about 45 KB gzip, and carries only the Vietnamese strings its code uses
+(`app/phone/vite-dictionary.ts`, from `app/src/locales/vi/*.json`; the phone's own are in `phone.json`).
+
+- **One boundary**: `app/phone/src/link.ts` is the only file that knows the wire (today the JSON WebSocket above). It declares
+  `caps: ["ack","hb"]` in its first message, answers and sends heartbeats (it asks after 15 s of silence and drops the socket if
+  3 s pass without a word), reconnects with full-jitter backoff (first retry within 200 ms, then 1 s doubling to 30 s) and at once
+  on `visibilitychange`, `online` and a failed probe (at most every 2 s), resumes with `sub {have_rev}` / `chat_sub {since_seq}`,
+  and refuses writes while not connected: nothing is queued. An `answer` or `chat_answer` whose reply was lost with the
+  connection is sent once more after the next hello within a minute (same daemon run only); typing and keys are never retried.
+- **Connection state** (`conn-state.ts`): one enum shown by an always-visible indicator: live, degraded (round trip over
+  800 ms, a late heartbeat or frames 2 s behind), reconnecting (attempt, seconds to the next), no network, sign-in needed (a
+  same-origin probe got another page), computer offline since, relay unreachable (reserved for the relay), computer restarted
+  (epoch change), computer busy (`load.status`, worded by reason) and replaced. The last list and last screen are kept in
+  IndexedDB and painted first, dimmed, with "as of hh:mm:ss"; a data-age chip goes amber at 2 s and red at 5 s.
+- **Chat** reuses the desktop adapters through `chat/transport.ts` in observer mode (`ChatController`): no `start()`, no queue,
+  no `session.update`, no write the adapter makes by itself; only the person's answer to a card goes out, as `chat_answer`, and
+  the card settles on the daemon's verdict (ok / dup, "already answered on … " for stale, "not sure" for a lost reply).
+  `chat_sub` replies are applied with `applyLog` (`reset` replaces, `delta` / `more` carry on, `live` appends).
+- The phone has no `focus` or `visibility` verb (the table is closed): focus is `sub {focus}`, and a hidden page unsubscribes
+  everything and re-subscribes, resuming, when it is shown.
+- A service worker keeps the app shell, only on secure origins; plain `http://` works without it.
+
+Checks: `cd app && pnpm test` (link, sync, state, inbox, composer, observer), `scripts/e2e/mobile.py` on the real page (inbox
+order, prompt tap, chat answer, `#s=` link, reconnect).
+
 ## CPU priority (Windows)
 
 A keystroke crosses daemon → console host → agent → console host → daemon → webview, and

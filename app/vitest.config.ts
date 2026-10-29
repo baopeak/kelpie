@@ -5,5 +5,5 @@ import { defineConfig } from "vitest/config";
 // solid-js resolve to its client build, as in the app.
 export default defineConfig({
   resolve: { conditions: ["browser"] },
-  test: { include: ["src/**/*.test.ts"], environment: "node" },
+  test: { include: ["src/**/*.test.ts", "phone/src/**/*.test.ts"], environment: "node" },
 });

@@ -38,6 +38,11 @@ EOF
 fi
 echo "Version: $version"
 
+# The daemon embeds the phone client (app/dist-phone): build it before any cargo build, and refuse to build
+# a daemon without it (build.rs fails when KELPIE_REQUIRE_PHONE=1 and the bundle is missing).
+export KELPIE_REQUIRE_PHONE=1
+(cd app && pnpm install --frozen-lockfile && pnpm build:phone)
+
 triple=$(rustc -vV | sed -n 's/^host: //p')
 ext=""
 case "$triple" in *windows*) ext=".exe" ;; esac

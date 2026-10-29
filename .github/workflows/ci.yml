@@ -20,20 +20,28 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Rust tests (protocol, daemon, app backend, speech helper)
-        run: cargo test -p kelpie-proto -p kelpied -p kelpie -p kelpie-stt
-      - name: Frontend typecheck
+      # The daemon embeds the phone client (app/dist-phone), so it is built before any cargo build or test.
+      - name: Frontend typecheck, tests and phone client
         working-directory: app
         run: |
           pnpm install --frozen-lockfile
           pnpm typecheck
           pnpm test
           pnpm i18n:check
+          pnpm build:phone
+      - name: Rust tests (protocol, daemon, app backend, speech helper)
+        shell: bash
+        env:
+          KELPIE_REQUIRE_PHONE: "1"
+        run: cargo test -p kelpie-proto -p kelpied -p kelpie -p kelpie-stt
+      - name: A daemon cannot be built without the phone client when it is required
+        shell: bash
+        run: scripts/check-phone-guard.sh
       - name: Performance gate (bundle size, daemon throughput; the GUI metrics need a desktop, see scripts/perf/README.md)
         shell: bash
         run: |
           python scripts/perf/perf_gate.py --label ci-bundle --metrics bundle --runs 1 --compare scripts/perf/baseline.json
-          cargo build --release -p kelpied
+          KELPIE_REQUIRE_PHONE=1 cargo build --release -p kelpied
           python scripts/perf/perf_gate.py --label ci-bench --metrics bench --runs 1
       - name: Bundle
         shell: bash

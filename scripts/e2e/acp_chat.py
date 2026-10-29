@@ -81,6 +81,9 @@ def free_port():
 
 
 DRIVER_PORT = free_port()
+# tauri-driver starts msedgedriver on --native-port, 4445 unless told: two runs at once would share it, and one would
+# drive the other's app (its data folder, its plugins). Each run has its own.
+NATIVE_PORT = free_port()
 os.environ["KELPIE_E2E_DRIVER"] = f"http://127.0.0.1:{DRIVER_PORT}"  # read by wd.Driver
 NATIVE = os.environ.get("MSEDGEDRIVER") or shutil.which("msedgedriver")
 TAURI_DRIVER = shutil.which("tauri-driver")
@@ -366,7 +369,7 @@ def main():
             time.sleep(0.1)
     if c is None:
         raise SystemExit("the daemon did not start")
-    spawn("driver", [TAURI_DRIVER, "--port", str(DRIVER_PORT), "--native-driver", NATIVE])
+    spawn("driver", [TAURI_DRIVER, "--port", str(DRIVER_PORT), "--native-port", str(NATIVE_PORT), "--native-driver", NATIVE])
     if not until(port_open, 30):
         raise SystemExit("tauri-driver did not open its port")
 
