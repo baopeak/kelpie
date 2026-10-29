@@ -39,19 +39,42 @@ const EVENTS: &[&str] = &["file", "turn", "commit", "pr_checks_failed", "finishe
 const ACTIONS: &[&str] = &["agent", "quick", "shell"];
 const MASK: &str = kelpie_proto::redact::MASK;
 
-/// Words that make a variable or flag name hold a secret, whole or at the end of a part of the name
-/// (trailing digits aside): `SMTP_PASS`, `OPENAI_KEY`, `apiKey`, `--api-key`, `GH_AUTH`, `DB_PASS2`.
-const SECRET_WORDS: &[&str] = &["PASS", "PASSWD", "PASSWORD", "PWD", "SECRET", "TOKEN", "KEY", "AUTH", "CREDENTIAL", "CREDENTIALS", "COOKIE", "SESSION"];
+/// Name parts that mark a secret only as a whole part: `SMTP_PASS`, `--pass`, `OPENAI_KEY`, `apiKey`,
+/// `GH_AUTH` — but not `BYPASS`, `MONKEY` or `AUTHOR`.
+const SECRET_PARTS: &[&str] = &["PASS", "PWD", "KEY", "AUTH", "OAUTH", "COOKIE", "APIKEY"];
+/// Words unambiguous enough to count at the end of a part too: `DBPASSWORD`, `GHTOKEN`, `clientSecret`.
+const SECRET_SUFFIXES: &[&str] = &["PASSWORD", "PASSWD", "SECRET", "TOKEN", "CREDENTIAL", "CREDENTIALS"];
 
-/// Whether a variable, key or flag name says its value is a secret (case-insensitive; parts split at
-/// `_`, `-`, `.`). Errs on the side of leaving a value out.
+/// A name's parts, upper case: split at anything but letters and digits and at lower → upper case
+/// (`apiKey` → `API`, `KEY`), trailing digits dropped (`DB_PASS2` → `DB`, `PASS`).
+fn name_parts(name: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if (!c.is_ascii_alphanumeric() || (prev_lower && c.is_ascii_uppercase())) && !cur.is_empty() {
+            parts.push(std::mem::take(&mut cur));
+        }
+        if c.is_ascii_alphanumeric() {
+            cur.push(c.to_ascii_uppercase());
+        }
+        prev_lower = c.is_ascii_lowercase();
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    parts.into_iter().map(|p| p.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()).filter(|p| !p.is_empty()).collect()
+}
+
+/// Whether a variable, key or flag name says its value is a secret (case-insensitive). `SESSION` alone is
+/// not one (`--session-id`, `XDG_SESSION_TYPE`); a session token or cookie is, by its other word. A name
+/// ending in `env_key` holds the name of a variable (Codex `env_key=OPENAI_API_KEY`), not a secret.
 pub fn secret_name(name: &str) -> bool {
-    name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|p| !p.is_empty()).any(|part| {
-        // `DB_PASS2`, `TOKEN_V1`: a number after the word does not change what it holds.
-        let part = part.to_ascii_uppercase();
-        let part = part.trim_end_matches(|c: char| c.is_ascii_digit());
-        SECRET_WORDS.iter().any(|w| part.ends_with(w))
-    })
+    let parts = name_parts(name);
+    if parts.len() >= 2 && parts[parts.len() - 2] == "ENV" && parts[parts.len() - 1] == "KEY" {
+        return false;
+    }
+    parts.iter().any(|p| SECRET_PARTS.contains(&p.as_str()) || SECRET_SUFFIXES.iter().any(|w| p.ends_with(w)))
 }
 
 /// Credentials in free text beyond the redaction helper's formats: a secret-named flag's value
@@ -199,6 +222,13 @@ fn env_entries(v: Option<&Value>, with_values: bool) -> Value {
 
 // ---------- sections ----------
 
+/// A network path (`\\server\share`, `//server/share`): opening one on Windows sends the user's
+/// credentials to that server, so a file never brings one in for a key, a folder or a program.
+pub fn is_unc(path: &str) -> bool {
+    let p = path.trim();
+    p.starts_with("\\\\") || p.starts_with("//") || p.starts_with("\\/") || p.starts_with("/\\")
+}
+
 /// Only the settings classified as portable; the window checks each value's shape and range.
 fn settings(v: &Value) -> CmdResult<Value> {
     let o = v.as_object().ok_or("the settings section is not an object")?;
@@ -206,8 +236,15 @@ fn settings(v: &Value) -> CmdResult<Value> {
     for (k, val) in o {
         if SETTINGS_EXPORTED.contains(k) && out.len() < MAX_SETTINGS {
             let val = match (k.as_str(), val.as_array()) {
-                // The terminal's program and arguments: same masking as an agent's arguments.
-                ("shellArgs", Some(a)) => json!(mask_args(&a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())),
+                // The terminal's program and arguments: same masking as an agent's arguments; never a
+                // program on a network share.
+                ("shellArgs", Some(a)) => {
+                    let args: Vec<String> = a.iter().filter_map(Value::as_str).map(str::to_string).collect();
+                    if args.first().is_some_and(|p| is_unc(p)) {
+                        continue;
+                    }
+                    json!(mask_args(&args))
+                }
                 _ => val.clone(),
             };
             out.insert(k.clone(), val);
@@ -270,11 +307,11 @@ fn layout(o: &Map<String, Value>) -> Option<Value> {
 /// An automation without anything the daemon owns: no approval, no run history, and switched off.
 fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
     let name = filled(o, "name")?;
-    let cwd = filled(o, "cwd")?;
+    let cwd = filled(o, "cwd").filter(|c| !is_unc(c))?;
     let action = one_of(o, "action", ACTIONS, "agent");
     let shell = if action == "shell" {
         let sh = o.get("shell")?.as_object()?;
-        json!({ "program": filled(sh, "program")?, "argv": mask_args(&texts(sh, "argv")) })
+        json!({ "program": filled(sh, "program").filter(|p| !is_unc(p))?, "argv": mask_args(&texts(sh, "argv")) })
     } else {
         Value::Null
     };
@@ -310,6 +347,9 @@ fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
 /// computer recorded about it, checked like the Hosts page checks it.
 fn ssh_host(v: &Value) -> Option<Value> {
     let mut h: Host = serde_json::from_value(v.clone()).ok()?;
+    if is_unc(&h.identity_file) {
+        return None;
+    }
     h.os.clear();
     h.last_connected = 0;
     h.env.retain(|k, val| !secret_name(k) && !is_secret(k, val));
@@ -450,10 +490,16 @@ pub fn read_doc(bytes: &[u8]) -> CmdResult<Value> {
     }))
 }
 
+/// Windows device and raw paths (`\\.\pipe\…`, `\\?\…`): even reading their metadata opens them.
+fn device_path(path: &Path) -> bool {
+    let p = path.to_string_lossy();
+    ["\\\\.\\", "\\\\?\\", "//./", "//?/"].iter().any(|prefix| p.starts_with(prefix))
+}
+
 /// At most [`MAX_FILE`] bytes of a regular file; a larger one is refused unread.
 fn read_capped(path: &Path) -> CmdResult<Vec<u8>> {
     // Checked before opening: opening a FIFO blocks, and a pipe path connects to a server.
-    if !std::fs::metadata(path).map_err(err)?.is_file() {
+    if device_path(path) || !std::fs::metadata(path).map_err(err)?.is_file() {
         return Err("not a file".into());
     }
     let f = std::fs::File::open(path).map_err(err)?;
@@ -474,6 +520,9 @@ fn read_capped(path: &Path) -> CmdResult<Vec<u8>> {
 
 /// Beside the target, then renamed over it: a crash never leaves half a file.
 fn write_file_atomic(path: &Path, bytes: &[u8]) -> CmdResult<()> {
+    if device_path(path) {
+        return Err("not a file".into());
+    }
     if path.is_dir() {
         return Err("choose a file, not a folder".into());
     }

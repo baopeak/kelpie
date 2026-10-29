@@ -202,7 +202,7 @@ describe("planImport", () => {
 });
 
 /** A computer in memory: app settings, the hosts file, saved passwords and the daemon's automations. */
-function machine(opts: { refuse?: string; daemonGone?: boolean; failHosts?: boolean; failSettingsSave?: boolean; canSave?: boolean; onBackup?: () => void } = {}) {
+function machine(opts: { refuse?: string; daemonGone?: boolean; keepRefused?: boolean; failHosts?: boolean; failSettingsSave?: boolean; failForget?: string; canSave?: boolean; onBackup?: () => void } = {}) {
   const cur = current();
   const m = {
     settings: cur.settings,
@@ -243,6 +243,8 @@ function machine(opts: { refuse?: string; daemonGone?: boolean; failHosts?: bool
       if (method === "automation.save") {
         if (opts.refuse && params.name === opts.refuse) {
           if (opts.daemonGone) m.down = true;
+          // A daemon that changed its list in memory and then failed to write it.
+          if (opts.keepRefused) m.automations.set(params.id, { ...params, command_approved: false });
           throw new Error("unknown agent kind");
         }
         const a = { ...params, command_approved: false } as ListedAutomation;
@@ -282,12 +284,14 @@ function machine(opts: { refuse?: string; daemonGone?: boolean; failHosts?: bool
     },
     forgetPassword: async (hostId) => {
       m.calls.push("forgetPassword");
+      if (hostId === opts.failForget) throw new Error("credential store locked");
       m.passwords.delete(hostId);
     },
     newId,
   };
-  const snapshot = () => JSON.stringify({ settings: m.settings, saved: m.saved, vault: m.vault, passwords: [...m.passwords], automations: list().map(({ command_approved, ...a }) => ({ ...a, command_approved })) });
-  return { m, ctx, snapshot };
+  const rest = () => JSON.stringify({ settings: m.settings, saved: m.saved, vault: m.vault, automations: list().map(({ command_approved, ...a }) => ({ ...a, command_approved })) });
+  const snapshot = () => JSON.stringify({ rest: rest(), passwords: [...m.passwords] });
+  return { m, ctx, snapshot, rest };
 }
 
 async function previewOn(ctx: TransferContext, chosen = ALL) {
@@ -302,7 +306,9 @@ describe("applyImport", () => {
     expect(r.backup).toBe("C:/data/backups/config-1");
     const firstWrite = m.calls.findIndex((c) => ["config_hosts_write", "saveNow", "automation.save"].includes(c));
     expect(m.calls.indexOf("config_backup")).toBeLessThan(firstWrite);
-    expect(m.calls.at(-1)).toBe("forgetPassword");
+    // Forgotten after the backup and before anything is saved.
+    expect(m.calls.indexOf("config_backup")).toBeLessThan(m.calls.indexOf("forgetPassword"));
+    expect(m.calls.indexOf("forgetPassword")).toBeLessThan(firstWrite);
     expect([...m.passwords]).toEqual(["h1"]);
     expect(m.vault.hosts.map((h) => h.id)).toEqual(["h1", "h2", "h-new"]);
     expect(m.vault.forwards.map((f) => f.id)).toEqual(["f2"]);
@@ -338,23 +344,56 @@ describe("applyImport", () => {
   });
 
   it("undoes everything when the daemon goes away, and restores the user's approval", async () => {
-    const { m, ctx, snapshot } = machine({ refuse: "Report", daemonGone: true });
-    const before = snapshot();
+    const { m, ctx, rest } = machine({ refuse: "Report", daemonGone: true });
+    const before = rest();
     const err = await applyImport(fileRead(), ALL, await previewOn(ctx), ctx, checked).catch((e) => e);
     expect(err).toBeInstanceOf(ImportFailed);
     expect(err.reason).toContain("unknown agent kind");
     expect(err.undoFailures).toEqual([]);
-    expect(err.message).toContain("nothing was changed");
     expect(m.approvals).toEqual(["local-a:h"]);
-    expect(m.calls).not.toContain("forgetPassword");
-    expect(snapshot()).toEqual(before);
+    expect(rest()).toEqual(before);
+    // The moved host's password stays cleared, and the error says so instead of "nothing was changed".
+    expect([...m.passwords]).toEqual(["h1"]);
+    expect(err.forgotten).toEqual(["prod"]);
+    expect(err.message).not.toContain("nothing was changed");
+    expect(err.message).toContain("passwords of moved hosts were cleared: prod");
   });
 
-  it("undoes the hosts when the settings cannot be saved, and keeps the password", async () => {
-    const { ctx, snapshot } = machine({ failSettingsSave: true });
-    const before = snapshot();
-    await expect(applyImport(fileRead(), ["sshHosts", "settings"], await previewOn(ctx, ["sshHosts", "settings"]), ctx, checked)).rejects.toBeInstanceOf(ImportFailed);
-    expect(snapshot()).toEqual(before);
+  it("undoes the hosts when the settings cannot be saved; the moved host's password stays cleared", async () => {
+    const { m, ctx, rest } = machine({ failSettingsSave: true });
+    const before = rest();
+    const err = await applyImport(fileRead(), ["sshHosts", "settings"], await previewOn(ctx, ["sshHosts", "settings"]), ctx, checked).catch((e) => e);
+    expect(err).toBeInstanceOf(ImportFailed);
+    expect(JSON.parse(rest()).vault).toEqual(JSON.parse(before).vault);
+    expect([...m.passwords]).toEqual(["h1"]);
+    expect(err.message).toContain("cleared: prod");
+  });
+
+  it("a password that cannot be forgotten stops the import before anything is saved", async () => {
+    const read = fileRead();
+    // Both hosts now connect elsewhere; the second forget fails.
+    read.doc.sections.sshHosts![0] = { ...read.doc.sections.sshHosts![0], hostname: "10.9.9.9" };
+    const { m, ctx, rest } = machine({ failForget: "h2" });
+    const before = rest();
+    const preview = planImport(read, ALL, await loadCurrent(ALL, ctx), { defaults, newId });
+    expect(preview.hostTargets.map((h) => h.id)).toEqual(["h1", "h2"]);
+    const err = await applyImport(read, ALL, preview, ctx, checked).catch((e) => e);
+    expect(err).toBeInstanceOf(ImportFailed);
+    expect(err.forgotten).toEqual(["box"]);
+    expect(err.message).toContain("credential store locked");
+    expect(err.message).toContain("nothing else was changed");
+    expect(err.message).toContain("cleared: box");
+    expect(m.calls.filter((c) => /config_hosts_write|saveNow|automation\.save/.test(c))).toEqual([]);
+    expect(rest()).toEqual(before);
+    expect([...m.passwords]).toEqual(["h2"]);
+  });
+
+  it("an automation the daemon kept although it reported a failure fails the import and is undone", async () => {
+    const { m, ctx } = machine({ refuse: "Report", keepRefused: true });
+    const err = await applyImport(fileRead(), ALL, await previewOn(ctx), ctx, checked).catch((e) => e);
+    expect(err).toBeInstanceOf(ImportFailed);
+    expect(m.automations.has("zz")).toBe(false);
+    expect(m.automations.get("local-a")!.shell!.argv).toEqual(["old.py"]);
   });
 
   it("keeps a setting changed while the backup was written", async () => {
@@ -393,6 +432,87 @@ describe("applyImport", () => {
     await expect(readImportFile("C:/bad.json", ctx)).rejects.toThrow("not a Kelpie settings file");
     expect(m.calls).toEqual(["config_import_read"]);
     expect(snapshot()).toEqual(before);
+  });
+});
+
+describe("masked values", () => {
+  const M = "[redacted]";
+  const masked = () => {
+    const read = fileRead();
+    const s = read.doc.sections;
+    s.settings = { ...s.settings, integrations: { linear: true, jira: { url: `https://me:${M}@jira.example.com`, email: "e" }, gitlabHosts: [] }, shellArgs: ["pwsh", "--token", M] };
+    s.agents = [
+      { kind: "claude", label: "Claude Code", args: ["--model", "opus", "--api-key", M, "--token=" + M], env: [{ name: "PUBLIC", value: `Bearer ${M}` }] },
+      { kind: "codex", label: "Codex", args: ["--api-key", M, "--search", "-c", `api_key=${M}`], env: [] },
+    ];
+    s.quickCommands = [
+      { id: "q1", label: "Test", text: `curl -u admin:${M} x`, action: "terminal", enter: true, projectId: null },
+      { id: "qx", label: "Deploy", text: `deploy --token ${M}`, action: "terminal", enter: true, projectId: null },
+    ];
+    s.sshHosts = [strip(host({ id: "h-remote", alias: "box", hostname: "10.0.0.5", notes: `key ${M}` })), strip(host({ id: "h-new", alias: "new", hostname: "n.example", notes: `pw ${M}`, env: { LANG: "C", SECRETISH: `x ${M}` } }))];
+    s.automations = [
+      { ...automation({ id: "a1", name: "Nightly", action: "shell", kind: "", shell: { program: "python", argv: ["x.py", "--token", M] } }), enabled: false, env: [] },
+      { ...automation({ id: "zz", name: "Report", prompt: `use ${M}` }), enabled: false, env: [] },
+    ].map(({ last_run: _a, last_session: _b, last_error: _c, next_run: _d, ...a }) => a);
+    return read;
+  };
+  const cur = () => {
+    const c = current();
+    c.settings = { ...c.settings, shellArgs: ["pwsh", "--token", "localtok"], integrations: { linear: false, jira: { url: "https://jira.local", email: "me" }, gitlabHosts: [] } } as Settings;
+    c.settings.profiles = [{ kind: "claude", label: "Claude Code", args: ["--api-key", "realkey", "--token=tok1", "--model", "sonnet"] }];
+    c.vault!.hosts[0] = { ...c.vault!.hosts[0], notes: "local notes" };
+    c.automations![0] = { ...c.automations![0], shell: { program: "python", argv: ["old.py", "--token", "localtok"] } };
+    return c;
+  };
+
+  it("take this computer's value, so a round trip of your own export keeps the arguments working", () => {
+    const p = planImport(masked(), ALL, cur(), { defaults, newId });
+    const claude = p.settings!.profiles.find((x) => x.kind === "claude")!;
+    expect(claude.args).toEqual(["--model", "opus", "--api-key", "realkey", "--token=tok1"]);
+    expect(p.settings!.shellArgs).toEqual(["pwsh", "--token", "localtok"]);
+    expect(p.settings!.integrations.jira).toEqual({ url: "https://jira.local", email: "me" });
+    expect(p.settings!.quickCommands.find((q) => q.id === "q1")!.text).toBe("npm test");
+    expect(p.vault!.hosts.find((h) => h.id === "h1")!.notes).toBe("local notes");
+    expect(p.automations.find((a) => a.next.name === "Nightly")!.next.shell!.argv).toEqual(["x.py", "--token", "localtok"]);
+  });
+
+  it("without a value here: arguments lose the masked part, an item that needs it is left out, both are listed", () => {
+    const p = planImport(masked(), ALL, cur(), { defaults, newId });
+    const codex = p.settings!.profiles.find((x) => x.kind === "codex")!;
+    expect(codex.args).toEqual(["--search"]);
+    expect(p.settings!.quickCommands.some((q) => q.label === "Deploy")).toBe(false);
+    expect(p.automations.some((a) => a.next.name === "Report")).toBe(false);
+    const added = p.vault!.hosts.find((h) => h.id === "h-new")!;
+    expect(added.notes).toBe("");
+    expect(added.env).toEqual({ LANG: "C" });
+    expect(p.fillIn).toEqual([
+      { section: "quickCommands", item: "Deploy", fields: ["content"], leftOut: true },
+      { section: "agents", item: "Codex", fields: ["args:--api-key", "args:api_key"], leftOut: false },
+      { section: "sshHosts", item: "new", fields: ["notes", "env:SECRETISH"], leftOut: false },
+      { section: "automations", item: "Report", fields: ["prompt"], leftOut: true },
+    ]);
+    expect(p.envNeeded).toEqual([{ kind: "claude", names: ["PUBLIC"] }]);
+    expect(p.sections.quickCommands!.skipped).toBe(2);
+    expect(p.sections.automations!.skipped).toBe(1);
+    // The marker is never written into this computer's configuration.
+    expect(JSON.stringify([p.settings, p.vault, p.automations.map((a) => a.next)])).not.toContain(M);
+  });
+});
+
+describe("what runs, round 2", () => {
+  it("lists a host's key file and target, and an automation's trigger, schedule, action and delivery", () => {
+    const read = fileRead();
+    read.doc.sections.sshHosts![2] = { ...read.doc.sections.sshHosts![2], identityFile: "~/keys/deploy", user: "ops", port: 2222, jump: "bastion" };
+    read.doc.sections.automations![0] = { ...read.doc.sections.automations![0], trigger: { event: "file", glob: "**/*", daily_cap: 50 } };
+    read.doc.sections.automations![1] = { ...read.doc.sections.automations![1], every: "weekly", time: "03:00", weekday: 0, deliver: "review" };
+    const runs = planImport(read, ALL, current(), { defaults, newId }).runs;
+    const find = (item: string, field: string) => runs.find((r) => r.item === item && r.field === field);
+    expect(find("new", "target")).toMatchObject({ before: null, after: "ops@new.example:2222 via bastion" });
+    expect(find("new", "identityFile")).toMatchObject({ before: null, after: "~/keys/deploy" });
+    expect(find("Nightly", "when")).toMatchObject({ before: "daily 09:00", after: "file **/* ≤50/day" });
+    expect(find("Report", "when")).toMatchObject({ before: null, after: "weekly 03:00 (0)" });
+    expect(find("Report", "deliver")).toMatchObject({ before: null, after: "review" });
+    expect(find("Report", "action")).toMatchObject({ before: null, after: "agent" });
   });
 });
 

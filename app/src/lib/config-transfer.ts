@@ -209,18 +209,25 @@ interface Merged<T> {
 }
 
 /** Incoming items replace local ones with the same id, else the same name (keeping the local id);
- *  the rest are added (an empty id gets a new one). */
-function mergeList<T>(local: T[], incoming: T[], key: { id: (x: T) => string; name: (x: T) => string; adopt: (inc: T, loc: T | null, id: string) => T }, newId: () => string): Merged<T> {
+ *  the rest are added (an empty id gets a new one). `clean` resolves masked values against the matched
+ *  local item; `null` leaves the incoming item out (counted in `leftOut`). */
+function mergeList<T>(local: T[], incoming: T[], key: { id: (x: T) => string; name: (x: T) => string; adopt: (inc: T, loc: T | null, id: string) => T; clean?: (inc: T, loc: T | null) => T | null }, newId: () => string): Merged<T> & { leftOut: number } {
   const list = local.slice();
   const used = new Set<number>();
   const pairs: Merged<T>["pairs"] = [];
   let add = 0;
   let replace = 0;
-  for (const inc of incoming) {
-    const id = key.id(inc);
-    const name = key.name(inc).trim();
+  let leftOut = 0;
+  for (const raw of incoming) {
+    const id = key.id(raw);
+    const name = key.name(raw).trim();
     let at = id ? list.findIndex((l, i) => !used.has(i) && key.id(l) === id) : -1;
     if (at < 0 && name) at = list.findIndex((l, i) => !used.has(i) && key.name(l).trim() === name);
+    const inc = key.clean ? key.clean(raw, at >= 0 ? list[at] : null) : raw;
+    if (inc === null) {
+      leftOut++;
+      continue;
+    }
     if (at >= 0) {
       const next = key.adopt(inc, list[at], key.id(list[at]));
       pairs.push({ next, replaces: list[at] });
@@ -235,17 +242,72 @@ function mergeList<T>(local: T[], incoming: T[], key: { id: (x: T) => string; na
       add++;
     }
   }
-  return { list, add, replace, pairs };
+  return { list, add, replace, pairs, leftOut };
 }
 
-/** Environment from a file over a local one: values replace; a name without a value keeps the local
- *  value, or is reported as needing one on this computer. */
+/** What the export filter puts in place of a credential. Never written into this computer's config. */
+export const MASK = "[redacted]";
+const masked = (v: unknown) => (typeof v === "string" ? v.includes(MASK) : JSON.stringify(v ?? null).includes(MASK));
+
+/** A text field: the file's value, or this computer's when the file's is masked; without a local value
+ *  it is empty and `field` is named in `missing`. */
+function unmaskText(v: string, local: string | undefined | null, field: string, missing: string[]): string {
+  if (!masked(v)) return v;
+  if (local !== undefined && local !== null && !masked(local)) return local;
+  missing.push(field);
+  return "";
+}
+
+/** An argument list: a masked value takes this computer's value for the same flag (`--api-key X`) or
+ *  name (`--token=X`, `api_key=X`); without one it is left out with its flag, and named in `missing`
+ *  (`args:--api-key`), so the arguments that remain still work. */
+function unmaskArgs(inc: readonly string[], loc: readonly string[] | undefined, missing: string[], field = "args"): string[] {
+  const out: string[] = [];
+  const valueAfter = (flag: string) => {
+    const j = loc?.indexOf(flag) ?? -1;
+    return j >= 0 ? loc![j + 1] : undefined;
+  };
+  for (let i = 0; i < inc.length; i++) {
+    const a = inc[i];
+    if (!masked(a)) {
+      out.push(a);
+      continue;
+    }
+    const eq = a.indexOf("=");
+    const prev = i > 0 ? inc[i - 1] : "";
+    let local: string | undefined;
+    let name: string;
+    if (eq > 0 && !masked(a.slice(0, eq))) {
+      name = a.slice(0, eq);
+      local = loc?.find((x) => x.startsWith(`${name}=`));
+    } else if (prev.startsWith("-") && out[out.length - 1] === prev) {
+      name = prev;
+      local = valueAfter(prev);
+      if (local === undefined || masked(local)) out.pop();
+    } else {
+      name = a;
+    }
+    if (local !== undefined && !masked(local)) out.push(local);
+    else {
+      missing.push(`${field}:${name}`);
+      // `-c api_key=X`: the flag the value belonged to goes too (`--token=X` stands alone).
+      if (!a.startsWith("-") && prev.startsWith("-") && !prev.includes("=") && out[out.length - 1] === prev) out.pop();
+    }
+  }
+  return out;
+}
+
+/** Environment from a file over a local one: values replace; a name without a value (or with a masked
+ *  one) keeps the local value, or is reported as needing one on this computer. */
 function mergeEnv(local: Record<string, string> | undefined, entries: EnvEntry[]): { env: Record<string, string>; needed: string[] } {
   const env: Record<string, string> = { ...(local ?? {}) };
   const needed: string[] = [];
   for (const e of entries) {
-    if (e.value !== undefined) env[e.name] = e.value;
-    else if (!(e.name in env)) needed.push(e.name);
+    if (e.value !== undefined && !masked(e.value)) env[e.name] = e.value;
+    else if (!(e.name in env) || masked(env[e.name])) {
+      delete env[e.name];
+      needed.push(e.name);
+    }
   }
   return { env, needed };
 }
@@ -318,26 +380,39 @@ export interface ImportPlan {
   missingPlugins: PluginEntry[];
   /** Agent variables the file names without a value and this computer does not have. */
   envNeeded: { kind: string; names: string[] }[];
+  /** Values masked in the file that this computer has no value for: left empty (`fields`, e.g. `notes`,
+   *  `args:--api-key`), or the whole item left out when it cannot do without them. */
+  fillIn: { section: ConfigSection; item: string; fields: string[]; leftOut: boolean }[];
   runs: RunChange[];
   hostTargets: HostTargetChange[];
 }
 
 /** What the user agreed to in the preview; an apply that would do anything else is refused. */
-export const planShown = (p: Pick<ImportPlan, "sections" | "runs" | "hostTargets">) => ({ sections: p.sections, runs: p.runs, hostTargets: p.hostTargets });
+export const planShown = (p: Pick<ImportPlan, "sections" | "runs" | "hostTargets" | "fillIn">) => ({ sections: p.sections, runs: p.runs, hostTargets: p.hostTargets, fillIn: p.fillIn });
 
 const show = (v: unknown): string | null => {
   const s = v === undefined || v === null ? "" : Array.isArray(v) ? argvText(v as string[]) : String(v);
   return s === "" ? null : s;
 };
 
+/** When an automation starts: `event glob ≤cap/day` or `every time [weekday]` (codes, as the file has them). */
+const whenOf = (a: Automation | null) =>
+  !a ? null : a.trigger ? `${a.trigger.event}${a.trigger.glob ? ` ${a.trigger.glob}` : ""} ≤${a.trigger.daily_cap}/day` : `${a.every} ${a.time}${a.every === "weekly" ? ` (${a.weekday})` : ""}`;
+
+const HOST_TEXT: (keyof SshHost)[] = ["label", "group", "user", "identityFile", "jump", "startup", "folder", "notes", "color", "terminalTheme"];
+
 export function planImport(read: ImportRead, chosen: readonly ConfigSection[], cur: Current, opts: { defaults: Settings; newId: () => string }): ImportPlan {
   const s = read.doc.sections;
   const want = (k: ConfigSection) => chosen.includes(k) && s[k] !== undefined;
   const skippedIn = (k: ConfigSection) => read.skipped[k] ?? 0;
-  const plan: ImportPlan = { sections: {}, settings: null, vault: null, automations: [], missingPlugins: [], envNeeded: [], runs: [], hostTargets: [] };
+  const plan: ImportPlan = { sections: {}, settings: null, vault: null, automations: [], missingPlugins: [], envNeeded: [], fillIn: [], runs: [], hostTargets: [] };
   const run = (section: ConfigSection, item: string, field: string, before: unknown, after: unknown) => {
     const [b, a] = [show(before), show(after)];
     if (b !== a) plan.runs.push({ section, item, field, before: b, after: a });
+  };
+  /** Records masked values this computer has no value for; `leftOut`: the item is not imported. */
+  const fill = (section: ConfigSection, item: string, fields: string[], leftOut = false) => {
+    if (fields.length) plan.fillIn.push({ section, item, fields, leftOut });
   };
   const projectFor = (id: string | null | undefined, cwd?: string) =>
     (id && cur.projects.some((p) => p.id === id) ? id : null) ?? (cwd ? cur.projects.find((p) => samePath(p.path, cwd))?.id ?? null : null);
@@ -345,6 +420,17 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
   let next: Settings = JSON.parse(JSON.stringify(cur.settings));
   if (want("settings")) {
     const { values, unknown, invalid } = importableSettings(s.settings!, opts.defaults);
+    // A masked setting keeps this computer's value (there always is one); masked arguments are resolved
+    // one by one.
+    for (const k of Object.keys(values)) {
+      const v = fieldOf(values, k);
+      if (!masked(v)) continue;
+      if (k === "shellArgs") {
+        const missing: string[] = [];
+        (values as Record<string, unknown>)[k] = unmaskArgs(v as string[], cur.settings.shellArgs, missing);
+        fill("settings", k, missing);
+      } else delete (values as Record<string, unknown>)[k];
+    }
     const changed = Object.keys(values).filter((k) => !same(fieldOf(cur.settings, k), fieldOf(values, k)));
     next = { ...next, ...values };
     plan.sections.settings = { total: Object.keys(s.settings!).length, add: 0, replace: changed.length, skipped: unknown.length + invalid.length, changed, unknown, invalid };
@@ -353,18 +439,34 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
   if (want("quickCommands")) {
     const m = mergeList<QuickCommand>(next.quickCommands ?? [], s.quickCommands!, {
       id: (x) => x.id, name: (x) => x.label,
+      clean: (inc, loc) => {
+        const missing: string[] = [];
+        const q = { ...inc, label: unmaskText(inc.label, loc?.label, "label", missing), text: unmaskText(inc.text, loc?.text, "content", missing) };
+        fill("quickCommands", inc.label, missing, missing.length > 0);
+        return missing.length ? null : q;
+      },
       adopt: (inc, _loc, id) => ({ id, label: inc.label, text: inc.text, action: inc.action, enter: inc.enter, projectId: projectFor(inc.projectId) }),
     }, opts.newId);
     next.quickCommands = m.list;
-    plan.sections.quickCommands = { total: s.quickCommands!.length, add: m.add, replace: m.replace, skipped: skippedIn("quickCommands") };
+    plan.sections.quickCommands = { total: s.quickCommands!.length, add: m.add, replace: m.replace, skipped: skippedIn("quickCommands") + m.leftOut };
     // What a click types and where ("$" a terminal, ">" the agent), and whether Enter follows.
     const typed = (q: QuickCommand) => `${q.action === "agent" ? ">" : "$"} ${q.text}${q.enter ? " ⏎" : ""}`;
     for (const { next: q, replaces } of m.pairs) run("quickCommands", q.label, "text", replaces && typed(replaces), typed(q));
   }
   if (want("layouts")) {
-    const m = mergeList<SavedLayout>(next.layouts ?? [], s.layouts!, { id: (x) => x.id, name: (x) => x.name, adopt: (inc, _loc, id) => ({ id, name: inc.name, template: inc.template }) }, opts.newId);
+    const m = mergeList<SavedLayout>(next.layouts ?? [], s.layouts!, {
+      id: (x) => x.id, name: (x) => x.name,
+      clean: (inc, loc) => {
+        const missing: string[] = [];
+        const name = unmaskText(inc.name, loc?.name, "name", missing);
+        const template = masked(inc.template) ? (loc && !masked(loc.template) ? loc.template : (missing.push("template"), null)) : inc.template;
+        fill("layouts", inc.name, missing, missing.length > 0);
+        return missing.length || !template ? null : { ...inc, name, template };
+      },
+      adopt: (inc, _loc, id) => ({ id, name: inc.name, template: inc.template }),
+    }, opts.newId);
     next.layouts = m.list;
-    plan.sections.layouts = { total: s.layouts!.length, add: m.add, replace: m.replace, skipped: skippedIn("layouts") };
+    plan.sections.layouts = { total: s.layouts!.length, add: m.add, replace: m.replace, skipped: skippedIn("layouts") + m.leftOut };
     // Opening a layout starts its panes; one on another machine connects where the file says.
     const remote = (l: SavedLayout | null) => (l ? remotePanes(l.template).join(", ") : null);
     for (const { next: l, replaces } of m.pairs) run("layouts", l.name, "remote", replaces && remote(replaces), remote(l));
@@ -376,8 +478,12 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
     for (const a of s.agents!) {
       const at = profiles.findIndex((p) => p.kind === a.kind);
       const old = at >= 0 ? profiles[at] : undefined;
+      const missing: string[] = [];
+      const label = unmaskText(a.label, old?.label, "label", []) || a.kind;
+      const args = unmaskArgs(a.args, old?.args, missing);
+      const permission = a.permission ? unmaskText(a.permission, old?.permission, "permission", missing) : "";
       const { env, needed } = mergeEnv(old?.env, a.env);
-      const profile: AgentProfile = { kind: a.kind, label: a.label, args: a.args, ...(a.permission ? { permission: a.permission } : {}), ...(Object.keys(env).length ? { env } : {}) };
+      const profile: AgentProfile = { kind: a.kind, label, args, ...(permission ? { permission } : {}), ...(Object.keys(env).length ? { env } : {}) };
       if (old) {
         profiles[at] = profile;
         replace++;
@@ -386,9 +492,10 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
         add++;
       }
       if (needed.length) plan.envNeeded.push({ kind: a.kind, names: needed });
-      run("agents", a.label || a.kind, "args", old?.args, profile.args);
-      run("agents", a.label || a.kind, "permission", old?.permission, profile.permission);
-      for (const name of Object.keys(env).sort()) run("agents", a.label || a.kind, `env:${name}`, old?.env?.[name], env[name]);
+      fill("agents", label, missing);
+      run("agents", label, "args", old?.args, profile.args);
+      run("agents", label, "permission", old?.permission, profile.permission);
+      for (const name of Object.keys(env).sort()) run("agents", label, `env:${name}`, old?.env?.[name], env[name]);
     }
     next.profiles = profiles;
     plan.sections.agents = { total: s.agents!.length, add, replace, skipped: skippedIn("agents") };
@@ -399,6 +506,22 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
     const moved = (inc: SshHost, loc: SshHost | null) => !!loc && hostTarget(inc) !== hostTarget(loc);
     const m = mergeList<SshHost>(cur.vault.hosts, s.sshHosts!.map((h) => ({ ...h, os: "", lastConnected: 0 })), {
       id: (x) => x.id, name: (x) => x.alias,
+      clean: (inc, loc) => {
+        if (masked(inc.hostname) || masked(inc.alias)) {
+          fill("sshHosts", inc.alias, ["hostname"], true);
+          return null;
+        }
+        const missing: string[] = [];
+        const h: SshHost = { ...inc, env: {}, tags: inc.tags.filter((x) => !masked(x)) };
+        for (const f of HOST_TEXT) (h as unknown as Record<string, unknown>)[f] = unmaskText(inc[f] as string, loc?.[f] as string | undefined, f, missing);
+        for (const [k, v] of Object.entries(inc.env)) {
+          const value = masked(v) ? loc?.env[k] : v;
+          if (value !== undefined && !masked(value)) h.env[k] = value;
+          else missing.push(`env:${k}`);
+        }
+        fill("sshHosts", inc.alias, missing);
+        return h;
+      },
       // A replaced host keeps what this computer recorded about it while it still connects to the same place.
       // Agent forwarding never comes from a file: off for a new host, or one that now connects elsewhere.
       adopt: (inc, loc, id) => {
@@ -412,44 +535,68 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
         changedIds.add(h.id);
         plan.hostTargets.push({ id: h.id, alias: h.alias, before: hostTarget(replaces), after: hostTarget(h), forwards: cur.vault.forwards.filter((f) => f.hostId === h.id).length });
       }
+      if (!replaces) run("sshHosts", h.alias, "target", null, hostTarget(h));
+      run("sshHosts", h.alias, "identityFile", replaces?.identityFile, h.identityFile);
       run("sshHosts", h.alias, "startup", replaces?.startup, h.startup);
     }
     // Port forwards of a host that now connects elsewhere would tunnel through the new destination.
     plan.vault = { ...cur.vault, hosts: m.list, forwards: cur.vault.forwards.filter((f) => !changedIds.has(f.hostId)) };
-    plan.sections.sshHosts = { total: s.sshHosts!.length, add: m.add, replace: m.replace, skipped: skippedIn("sshHosts") };
+    plan.sections.sshHosts = { total: s.sshHosts!.length, add: m.add, replace: m.replace, skipped: skippedIn("sshHosts") + m.leftOut };
   }
 
   if (want("automations") && cur.automations) {
-    const m = mergeList<ListedAutomation>(cur.automations, s.automations!.map((a) => ({ ...a, env: {} }) as unknown as ListedAutomation), {
-      id: (x) => x.id, name: (x) => x.name, adopt: (inc, _loc, id) => ({ ...inc, id }),
+    // Each incoming automation with its variables resolved against the one it replaces.
+    const m = mergeList<ListedAutomation>(cur.automations, s.automations!.map((a) => ({ ...a, env: a.env }) as unknown as ListedAutomation), {
+      id: (x) => x.id, name: (x) => x.name,
+      clean: (raw, loc) => {
+        const inc = raw as unknown as AutomationEntry;
+        const missing: string[] = [];
+        const shell = inc.shell ? { program: unmaskText(inc.shell.program, loc?.shell?.program, "command", missing), argv: unmaskArgs(inc.shell.argv, loc?.shell?.argv, missing, "command") } : inc.shell;
+        const out = {
+          ...inc,
+          name: unmaskText(inc.name, loc?.name, "name", missing),
+          cwd: unmaskText(inc.cwd, loc?.cwd, "cwd", missing),
+          prompt: unmaskText(inc.prompt, loc?.prompt, "prompt", missing),
+          quick_label: inc.quick_label ? unmaskText(inc.quick_label, loc?.quick_label, "quick_label", []) : inc.quick_label,
+          args: unmaskArgs(inc.args, loc?.args, missing),
+          shell,
+          trigger: inc.trigger ? { ...inc.trigger, glob: unmaskText(inc.trigger.glob, loc?.trigger?.glob, "trigger", missing) } : inc.trigger,
+        };
+        // The file's variables; one without a usable value keeps the replaced automation's value, if it had one.
+        const env: Record<string, string> = {};
+        for (const e of inc.env) {
+          const v = e.value !== undefined && !masked(e.value) ? e.value : loc?.env?.[e.name];
+          if (v !== undefined && !masked(v)) env[e.name] = v;
+        }
+        // It cannot run without these; the rest (arguments, variables) only lose the masked parts.
+        const essential = missing.filter((f) => ["name", "cwd", "trigger", "command"].includes(f) || (f === "prompt" && inc.action !== "shell"));
+        fill("automations", inc.name, missing, essential.length > 0);
+        return essential.length ? null : ({ ...out, env } as unknown as ListedAutomation);
+      },
+      adopt: (inc, _loc, id) => ({ ...inc, id }),
     }, opts.newId);
-    s.automations!.forEach((entry, i) => {
-      const { next: merged, replaces } = m.pairs[i];
-      // The file's variables; one without a value keeps the replaced automation's value, if it had one.
-      const env: Record<string, string> = {};
-      for (const e of entry.env) {
-        const v = e.value ?? replaces?.env?.[e.name];
-        if (v !== undefined) env[e.name] = v;
-      }
+    for (const { next: merged, replaces } of m.pairs) {
       const automation: Automation = {
-        ...(entry as unknown as Automation),
-        id: merged.id,
-        env,
+        ...merged,
         enabled: false,
-        project_id: projectFor(entry.project_id, entry.cwd),
+        project_id: projectFor(merged.project_id, merged.cwd),
         last_run: 0, last_session: null, last_error: null, next_run: 0,
       };
       plan.automations.push({ next: automation, replaces });
       const command = (a: Automation | null) => (a?.action === "shell" && a.shell ? argvText([a.shell.program, ...a.shell.argv]) : null);
       const agent = (a: Automation | null) => (a && a.action !== "shell" ? a.kind : null);
-      run("automations", automation.name, "kind", agent(replaces), agent(automation));
-      run("automations", automation.name, "command", command(replaces), command(automation));
-      run("automations", automation.name, "args", replaces?.args, automation.args);
-      run("automations", automation.name, "prompt", replaces?.prompt, automation.prompt);
-      run("automations", automation.name, "cwd", replaces?.cwd, automation.cwd);
-      for (const name of Object.keys(env).sort()) run("automations", automation.name, `env:${name}`, replaces?.env?.[name], env[name]);
-    });
-    plan.sections.automations = { total: s.automations!.length, add: m.add, replace: m.replace, skipped: skippedIn("automations") };
+      const name = automation.name;
+      run("automations", name, "action", replaces?.action ?? (replaces ? "agent" : null), automation.action ?? "agent");
+      run("automations", name, "kind", agent(replaces), agent(automation));
+      run("automations", name, "command", command(replaces), command(automation));
+      run("automations", name, "args", replaces?.args, automation.args);
+      run("automations", name, "prompt", replaces?.prompt, automation.prompt);
+      run("automations", name, "cwd", replaces?.cwd, automation.cwd);
+      run("automations", name, "when", whenOf(replaces), whenOf(automation));
+      run("automations", name, "deliver", replaces?.deliver, automation.deliver);
+      for (const k of Object.keys(automation.env ?? {}).sort()) run("automations", name, `env:${k}`, replaces?.env?.[k], automation.env![k]);
+    }
+    plan.sections.automations = { total: s.automations!.length, add: m.add, replace: m.replace, skipped: skippedIn("automations") + m.leftOut };
   }
 
   if (want("plugins") && cur.plugins) {
@@ -512,8 +659,16 @@ export async function exportConfig(path: string, wanted: readonly ConfigSection[
 }
 
 export class ImportFailed extends Error {
-  constructor(public reason: string, public backup: string, public undoFailures: string[]) {
-    super(undoFailures.length ? t("The import failed ({error}) and not every change could be undone; the previous configuration is in {path}.", { error: reason, path: backup }) : t("The import failed and nothing was changed: {error}", { error: reason }));
+  /** `forgotten`: aliases of moved hosts whose saved password was cleared before the failure (that is never undone). */
+  constructor(public reason: string, public backup: string, public undoFailures: string[], public forgotten: string[] = [], undone = 0) {
+    const cleared = forgotten.length ? t("The saved passwords of moved hosts were cleared: {hosts}. Enter them again on the Hosts page.", { hosts: forgotten.join(", ") }) : "";
+    super(
+      undoFailures.length
+        ? `${t("The import failed ({error}) and not every change could be undone; the previous configuration is in {path}.", { error: reason, path: backup })}${cleared ? ` ${cleared}` : ""}`
+        : cleared
+          ? `${undone ? t("The import failed ({error}); everything else was put back.", { error: reason }) : t("The import failed ({error}); nothing else was changed.", { error: reason })} ${cleared}`
+          : t("The import failed and nothing was changed: {error}", { error: reason }),
+    );
   }
 }
 
@@ -524,10 +679,15 @@ export interface ImportResult {
   refused: { name: string; error: string }[];
 }
 
+/** The parts of an automation an import sets (what a daemon that kept a refused one would hold). */
+const automationContent = (a: Automation) => JSON.stringify([a.name, a.kind, a.prompt, a.cwd, a.args, a.action ?? "agent", a.shell?.program ?? null, a.shell?.argv ?? null, a.trigger ?? null]);
+
 /** Applies the chosen sections of `read` if they still plan as `previewed`, and only with `runsChecked`
- *  when that changes what programs run. Every change made before a failure is undone; a backup of the
- *  previous configuration is kept either way. */
-export async function applyImport(read: ImportRead, chosen: readonly ConfigSection[], previewed: Pick<ImportPlan, "sections" | "runs" | "hostTargets">, ctx: TransferContext, opts: { runsChecked: boolean }): Promise<ImportResult> {
+ *  when that changes what programs run. Moved hosts lose their saved password first, before anything is
+ *  saved, so no failure or crash can leave a password bound to a new address (that step is never undone,
+ *  and a failure says so). Every other change made before a failure is undone; a backup of the previous
+ *  configuration is kept either way. */
+export async function applyImport(read: ImportRead, chosen: readonly ConfigSection[], previewed: Pick<ImportPlan, "sections" | "runs" | "hostTargets" | "fillIn">, ctx: TransferContext, opts: { runsChecked: boolean }): Promise<ImportResult> {
   const planOpts = { defaults: ctx.defaults, newId: ctx.newId };
   const cur = await loadCurrent(chosen, ctx);
   const plan = planImport(read, chosen, cur, planOpts);
@@ -538,7 +698,12 @@ export async function applyImport(read: ImportRead, chosen: readonly ConfigSecti
   const backup = await ctx.invoke<string>("config_backup", { appState: ctx.appState(), automations: cur.automations ?? [] });
   const undo: (() => Promise<unknown>)[] = [];
   const refused: ImportResult["refused"] = [];
+  const forgotten: string[] = [];
   try {
+    for (const h of plan.hostTargets) {
+      await ctx.forgetPassword(h.id);
+      forgotten.push(h.alias);
+    }
     if (plan.vault && cur.vault) {
       const before = cur.vault;
       const written = await ctx.invoke<Vault>("config_hosts_write", { expected: before, vault: plan.vault });
@@ -558,34 +723,39 @@ export async function applyImport(read: ImportRead, chosen: readonly ConfigSecti
     }
     for (const op of plan.automations) {
       const old = op.replaces;
-      let saved: Automation;
+      const putBack = old
+        ? async () => {
+            await ctx.daemon("automation.save", old);
+            // The user's own approval of exactly that command, given on this computer.
+            if (old.command_approved && old.command_hash) await ctx.daemon("automation.approve", { id: old.id, hash: old.command_hash });
+          }
+        : () => ctx.daemon("automation.delete", { id: op.next.id });
       try {
-        saved = await ctx.daemon<Automation>("automation.save", op.next);
+        await ctx.daemon<Automation>("automation.save", op.next);
       } catch (e) {
         // Refused by the daemon (an agent or script not on this computer…): skipped and reported. A daemon
-        // that no longer answers fails the import instead.
+        // that no longer answers, or one that kept the automation although it could not save it, fails the
+        // import instead.
         await ctx.daemon("automation.state").catch(() => {
           throw e;
         });
+        const now = await ctx.daemon<ListedAutomation[]>("automation.list").catch(() => {
+          throw e;
+        });
+        const held = now.find((a) => a.id === op.next.id);
+        if (held && automationContent(held) === automationContent(op.next) && !(old && automationContent(old) === automationContent(op.next))) {
+          undo.push(putBack);
+          throw e;
+        }
         refused.push({ name: op.next.name, error: String(e).replace(/^Error:\s*/, "") });
         continue;
       }
-      if (old) {
-        undo.push(async () => {
-          await ctx.daemon("automation.save", old);
-          // The user's own approval of exactly that command, given on this computer.
-          if (old.command_approved && old.command_hash) await ctx.daemon("automation.approve", { id: old.id, hash: old.command_hash });
-        });
-      } else {
-        undo.push(() => ctx.daemon("automation.delete", { id: saved.id }));
-      }
+      undo.push(putBack);
     }
-    // Last, once nothing else can fail: a host that now connects elsewhere loses this computer's password.
-    for (const h of plan.hostTargets) await ctx.forgetPassword(h.id);
   } catch (e) {
     const failures: string[] = [];
     for (const u of undo.reverse()) await u().catch((x) => failures.push(String(x)));
-    throw new ImportFailed(String(e).replace(/^Error:\s*/, ""), backup, failures);
+    throw new ImportFailed(String(e).replace(/^Error:\s*/, ""), backup, failures, forgotten, undo.length);
   }
   return { backup, plan, refused };
 }

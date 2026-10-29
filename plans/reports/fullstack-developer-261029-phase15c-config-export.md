@@ -275,3 +275,73 @@ All findings in `plans/reports/code-reviewer-261029-phase15c-config-export.md` w
 
 Status: DONE_WITH_CONCERNS
 Summary: All blocking, medium and low review findings are fixed and tested. During development, one e2e run reached the OS credential store under the test endpoint's isolated service name; nothing real was affected, and the final runs use a recorder.
+
+## Review fixes, round 2
+
+All round-2 findings in the reviewer report were addressed, plus the optional Lows. No daemon change was made; `API_LEVEL` stays 16.
+
+**Filter false positives, and masked values on import**
+
+Narrower name matching (`secret_name`):
+- Names are split at punctuation and at lower→upper case.
+- `PASS`, `PWD`, `KEY`, `AUTH`, `OAUTH`, `COOKIE` and `APIKEY` count only as a whole part.
+- `PASSWORD`, `PASSWD`, `SECRET`, `TOKEN` and `CREDENTIAL(S)` also count at the end of a part.
+- `SESSION` on its own no longer counts, so `--session-id`, `--no-session-persistence` and `XDG_SESSION_TYPE` keep their values. `SESSION_TOKEN` and `--session-token` are still caught by `TOKEN`.
+- `BYPASS`, `MONKEY` and `AUTHOR` no longer match.
+- A name ending in `env_key` (Codex `env_key=OPENAI_API_KEY`) holds a variable name and is left alone.
+
+The redaction marker is never written into this computer's configuration:
+- A masked value takes this computer's value for that field.
+- A masked argument (`unmaskArgs`) takes this computer's value for the same flag (`--api-key X`) or name (`--token=X`, `api_key=X`).
+- When this computer has no value:
+  - the masked argument is dropped together with the flag it belongs to (`-c api_key=X` drops the `-c`), so the remaining arguments still work;
+  - other fields are left empty;
+  - an item that cannot work without the field is left out (counted as skipped): quick-command text or label, layout name or template, host name, and an automation's name, folder, command, trigger, or prompt for agent actions.
+- Every case is listed in a new `ImportPlan.fillIn`, shown in the preview and in the result.
+- Masked environment values behave like name-only entries.
+
+Tests:
+- Rust: the three report cases plus ordinary names.
+- Vitest: a round trip of your own export (local `--api-key realkey` and `--token=tok1` are kept, the file's `--model opus` is taken), arguments with no local value, left-out items, the fill-in list, and that `[redacted]` appears nowhere in the planned settings, hosts or automations.
+- E2E: A's Claude has `--api-key <A's key>`. B already has its own `--api-key`, which is kept. B's export equals A's. `[redacted]` is nowhere in B's configuration. The masked quick command and automation are left out and named.
+
+**Forget order**
+- Moved hosts' passwords are now forgotten right after the backup, before anything is saved. A crash or a failed hosts undo can therefore never leave a password bound to a new address.
+- A forgotten password is never restored. `ImportFailed` carries `forgotten` and says so:
+  - "…; everything else was put back. The saved passwords of moved hosts were cleared: … Enter them again on the Hosts page."
+  - or "…; nothing else was changed. …" when nothing else had been applied.
+  - It never says "nothing was changed".
+- If a forget fails part way, the import stops before any save and names the passwords already cleared.
+- Tests: forget order; the "daemon gone" undo keeps the password cleared and the message says so; a partial forget failure leaves no write; settings save failure.
+
+**Lows**
+- `identityFile` is in the run list for every host, and a new host's connection target (user@host:port via jump) is listed too.
+- Network paths (`\\server\…`, `//server/…`) are refused on import (`is_unc`; the item is skipped, or the setting dropped) for:
+  - a host key file;
+  - an automation folder or program;
+  - the terminal program (`shellArgs[0]`).
+- Automations now list `action`, `when` (`file *.md ≤10/day` or `weekly 03:00 (0)`) and `deliver`.
+- The user guide lists layouts with remote panes and the other new run-list entries, and describes masked-value handling, UNC refusal and the forget order.
+- E2E: the recorder is checked again right before the Import click, and the script refuses to import without it.
+- Optional (daemon write failure wording): after a refusal the list is read again. If the daemon kept the imported automation in memory although it reported a failure, the import fails and is undone instead of being reported as "refused". Unit-tested.
+- Optional (Windows device paths): `\\.\` and `\\?\` (and `//./`, `//?/`) are refused before any open or metadata read, for both import and export.
+
+**Follow-ups**
+- Pre-existing, separate ticket: `askpass::answer` falls back to any saved host whose hostname matches the prompt (`crates/kelpied/src/askpass.rs:38`).
+  - On an OpenSSH that does not prefix keyboard-interactive prompts with "(user@host)" (check the Windows 10 built-in 8.1), a server could word a prompt to receive another saved host's password.
+  - Not changed here.
+- Still open from round 1: port forwards and `registryAgents` could become sections of their own.
+
+**Numbers after round 2**
+- Rust `config_transfer`: 21 tests.
+- `cargo test -p kelpie -j 2`: 205 passed, 5 ignored (pre-existing).
+- Clippy on `kelpie`: it first flagged a collapsible `if` in `name_parts`. I collapsed it (the logic is unchanged) and re-ran: clippy is clean and the 21 `config_transfer` tests still pass.
+- Vitest: 497 passed; `config-transfer.test.ts` has 29 tests.
+- `pnpm typecheck` clean; `i18n:check` 0 missing.
+- `pnpm build` passes. Entry 326.07 kB gz against the 338.60 limit; lazy chunk 10.00 kB JS + 0.46 kB CSS.
+- E2E: 59/59 twice in a row, with the recorder in place.
+  - The run before those failed one check, the quick-command count, which had to be updated for the masked item now left out.
+  - Afterwards only the user's own `kelpie.exe` and `kelpied.exe` were running.
+
+Status: DONE
+Summary: All round-2 findings and the optional Lows are fixed and tested. Rust, Vitest, typecheck, i18n, build and the bundle gate are green, and the GUI round trip passed 59/59 twice using only the recorder.

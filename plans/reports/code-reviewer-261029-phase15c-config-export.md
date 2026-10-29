@@ -241,3 +241,186 @@ Missing:
 Status: DONE_WITH_CONCERNS
 Summary: The export filtering, file checks, backup, undo and the e2e hook gating are sound, and the focused Rust (12) and Vitest (17) tests plus i18n pass. Two blocking import-safety problems remain: the preview hides values that make programs run (H1), and a replaced SSH host keeps this machine's saved password bound to the host name from the file (H2).
 Concerns/Blockers: H1 and H2 block merge. M1–M4 are recommended: secret-filter gaps (one contradicts a UI promise), settings allowlist by default membership, no range/enum validation, and all-or-nothing failure when one automation is refused.
+
+(The status block above is round 1's. Round 2 follows.)
+
+---
+
+# Round 2: `git diff b7145a3 71e9f7c`
+
+Checks run (HEAD 71e9f7c, worktree clean):
+- `cargo test -p kelpie -j 2 config_transfer` (CARGO_TARGET_DIR=D:\kelpie-p9-target, CARGO_INCREMENTAL=0): 18/18 pass.
+- `pnpm exec vitest run src/lib/config-transfer.test.ts src/lib/layout.test.ts`: 56/56 pass.
+- `pnpm typecheck`: clean.
+- `pnpm i18n:check`: 0 missing.
+
+No e2e was run, no daemon was started, and the keyring was not touched.
+
+## Verdict
+
+H1 and H2 are fixed; neither blocks merge any more. Every round-1 Medium and Low is addressed.
+
+Round 2 adds two Medium findings and some Lows. None of them blocks merge:
+- **R2-M1:** while an import is in progress, a moved host can still keep its password if the window closes or the hosts undo fails.
+- **R2-M2:** the stricter secret filter has false positives, and a masked value overwrites this computer's working value on import.
+
+## 1. H1: fixed
+
+The preview now lists these values old → new, as full strings:
+- **Settings:** `shellArgs`, `agentPermissions`, `agentsScripting`.
+- **Agent profiles:** `args`, `permission` and each `env:<NAME>`.
+- **Quick commands:** their text, with where it goes and whether Enter follows.
+- **Saved layouts:** panes that start on another machine.
+- **Automations:** kind, command (program and argv), args, prompt, cwd, env.
+- **SSH hosts:** `startup`.
+
+The details:
+- **Display** (`config-transfer.css:14`): `<code>` with `pre-wrap` and `break-all`, so nothing is cut off and newlines show. `argvText` quotes any element with whitespace, quotes or no characters, so `["a b"]` and `["a","b"]` cannot look the same.
+- **The tick gate cannot be bypassed:**
+  - It is reset when a new preview opens and whenever a section is ticked or unticked (`config-transfer.tsx:116,225`).
+  - The runs list can only change through those two actions, because `chosenPlan` is derived from the preview's snapshot.
+  - `applyImport` enforces it again (`config-transfer.ts:534`). It also refuses unless `planShown(plan)`, which covers sections, runs and host-target changes, equals what was shown. That check runs at the start and again for settings just before `replaceSettings` (`:551`).
+  - A stale preview is refused.
+  - The keyboard only reaches the native checkbox and the disabled button.
+- **Tests:** "needs the run check…" and "refuses when what runs differs…", plus e2e.
+
+Fields still not listed (Low, non-blocking):
+- **R2-L1. SSH `identityFile`:** for a new host, or a replaced host whose target is unchanged.
+  - On Windows a UNC path (`//attacker/share/k` passes `bad()`) makes ssh open it over SMB, which can leak the user's NTLM hash once they connect.
+  - Add `identityFile` (and `jump` for new hosts) to the runs list, or refuse UNC paths in `normalize`.
+- **R2-L2. Automation trigger, schedule and `deliver`:**
+  - `trigger` (event/glob/daily cap), `every`/`time`, `action` (agent ↔ quick) and `deliver` are not listed.
+  - The automation arrives off, and the event is part of the approval hash. But a kept approval can come with a wider glob, as round-1 L1 noted.
+  - Listing `trigger` would close this.
+- **R2-L3. User guide:** the run-list paragraph in `docs/user-guide.md` omits "saved layouts with panes on another machine", which the UI does show.
+
+## 2. H2: fixed, with a remaining window (R2-M1)
+
+What is now correct:
+- **What counts as moved:** user, hostname, port or jump changing (`hostTarget`).
+- **What a move does:**
+  - `forwardAgent` is false for new or moved hosts; a file never turns it on.
+  - `os` and `lastConnected` are reset.
+  - The host's forwards are dropped from the written vault, and the preview counts them.
+  - `forgetPassword(id)` → `ssh_secret_set(password, id, "")` → `secret_delete("ssh-password:<id>")`.
+- **Host ids:** ids with characters other than letters and digits are cleared on read (`config_transfer.rs` `ssh_host`), so the forget can always build its key.
+- **Tests:** unit tests and e2e (same id, new hostname, `forwardAgent` false, forwards empty, exactly one forget recorded).
+
+**Undo path:**
+- If a step fails before the forget, the vault undo restores the old target and the password still matches it. That is correct.
+- The "keeps the password" test covers this.
+
+**R2-M1 (Medium, non-blocking). A moved host can still keep this computer's password.**
+
+The forget runs last (`config-transfer.ts:582`), after the moved vault is written (`:545`). Askpass reads `hosts.json` at every prompt, so from that write until the forget the old password is bound to the new target. It stays bound for good in three cases:
+1. **The window closes or crashes mid-import:** for example during the `automation.save` loop, which can be many RPCs.
+2. **Apply fails and the hosts undo fails too:** `config_hosts_write` compares first, so a concurrent connection that runs `ssh_host_touch` (`lastConnected`) makes it refuse. The catch block never forgets anything.
+3. **A forget fails part way (keyring error):** passwords already forgotten are lost while the hosts are reverted. The message then says "nothing was changed", which is wrong.
+
+Exposure still needs the user to trust the new host key: askpass declines unknown keys.
+
+Fix:
+- Forget the moved hosts' passwords before writing the vault. A failed import then costs a password the user re-enters, never a bound one. Or at least forget in the `catch` when the hosts undo failed.
+- Report forgets that already ran in `ImportFailed`.
+
+**Out of scope, pre-existing, to verify separately:**
+- `askpass::answer` falls back to any saved host whose hostname matches the prompt (`askpass.rs:38`).
+- Keyboard-interactive prompts are text from the server. On an OpenSSH that does not prefix "(user@host)" (check the Windows 10 built-in 8.1), a server could ask "dev@<other saved host>'s password:" and receive that host's password.
+- An import makes adding such a host easy (still behind host-key trust). Worth a separate ticket.
+
+## 3. The e2e hook `configTransfer.replacePasswordStore`: acceptable
+
+**Who can reach it:**
+- It is a module export reached only through `window.__kelpie.configTransfer`, which is set when `import.meta.env.DEV` or `platform_info().e2e` (the `KELPIE_E2E` environment variable at app start) is true (`main.tsx:22`, `lib.rs:171`).
+- The production lazy chunk contains the function but nothing calls it.
+- Plugins are declarative, with no JS.
+- Page script that could reach it could equally call `config_hosts_write` or skip the forget through IPC, so it adds no capability.
+- A production user cannot skip the forget: the UI always uses the default `ssh_secret_set`.
+
+**The earlier incident:** from the code, a forget in an e2e app can only target that endpoint's own entries:
+- `ssh_secret_set` → `secret_key("password", id)`, which takes letters and digits only, giving the key `ssh-password:<id>`.
+- `kelpie_proto::secret_delete` deletes under `[keyring_service(), keyring_service_named("Erka")]` (`kelpie-proto/src/lib.rs:263-272,297-304`). Both read `KELPIE_ENDPOINT` from the app's process at call time and become `"Kelpie (<endpoint>)"` / `"Erka (<endpoint>)"`.
+- The bare `"Kelpie"` service is used only when the variable is unset or empty. No code calls `set_var` or `remove_var` on it.
+- The e2e sets a non-empty `kelpie-config-export-<pid>-{a,b}` in its own process before starting tauri-driver, and asserts it. The disclosed incident hitting `Kelpie (kelpie-config-export-<pid>-b)` shows it was inherited.
+- That same variable routes the app to the test daemon. An app without it would talk to the real daemon, which the script already guards against.
+- The key used the id of phase B's freshly created host (random hex), so even under the real service it would not match a real entry.
+- So the user's real "Kelpie" entries cannot be reached.
+
+**R2-L4 (Low):**
+- The recorder is installed once, at phase start.
+- A page reload before the Import click would bring back the real forget. It would still be isolated by the service name, but a guard would be nice.
+- Re-check `Array.isArray(window.__secretCalls)` just before `apply-import`.
+- Optionally assert that the app's keyring service is not the bare "Kelpie".
+
+## 4. M1–M4 and the Lows
+
+**M1: fixed**
+- `secret_name` drops values of secret-named variables (`DB_PASSWORD=p@ss:w0rd!` included), on export and on import.
+- `mask_args` masks the value after a secret flag and `--flag=value`.
+- `mask_text` covers flags in text, `mysql -p`, `curl -u`, and upper-case `NAME=value`.
+- SSH `SetEnv` secret names are dropped.
+- The copy is softened. Each case has a Rust test.
+
+**R2-M2 (Medium, non-blocking). False positives, and masked values overwrite working local values.**
+
+`secret_name` matches a name part that ends with a secret word. This catches ordinary names:
+- `--dangerously-bypass-approvals-and-sandbox` (part `BYPASS` ends with `PASS`) masks the next argument when it is not a flag.
+- `--session-id <uuid>` and `--no-session-persistence` (SESSION) do the same.
+- `-c model_providers.x.env_key=OPENAI_API_KEY` becomes `env_key=[redacted]`.
+- `XDG_SESSION_TYPE=x11` is masked in text.
+
+The read path cleans the file the same way. So importing your own export onto a computer that has `["--api-key","realkey"]` writes `["--api-key","[redacted]"]` over it, and the agent breaks. The run list shows the change, so it is visible.
+
+Fix:
+- When an incoming value contains `[redacted]`, keep this computer's value (as name-only env entries already do), or leave that item out and name it.
+- Match `PASS` and `KEY` only as a whole name part, or exempt `BYPASS`.
+
+**M2: fixed**
+- `settings-transfer.json` (`exported`/`excluded`) is the one source:
+  - Rust reads it with `include_str!("../../src/lib/settings-transfer.json")`, and the path resolves to `app/src/lib`;
+  - TS imports it.
+- The Vitest "every default setting in exactly one list" test and the Rust "only classified keys" test pass.
+- `default-settings.ts` imports only types. `store.ts` imports it and re-exports it, with the same object, so there is no import cycle and no behaviour change.
+- The old duplicate exclusion list is gone.
+
+**M3: fixed**
+- `RULES` covers the numeric ranges and every enum. `uiScale` is limited to the four page choices. `integrations` is reduced to `{url, email}`.
+- Lists are capped at 500 strings.
+- Invalid and unknown keys are named in the preview.
+- The ranges match the UI where checked (right panel 200–700, as in `right-panel.tsx:51`).
+
+**M4: fixed, with one case misreported (R2-L5)**
+- When the daemon refuses an automation, `automation.state` is called. If that answers, the automation is skipped and reported; if not, the error is rethrown and everything is undone.
+- **Daemon down:** undo also fails for daemon steps. Those are reported together with the backup path, and hosts and settings are undone. Acceptable.
+- **R2-L5 (Low):** `AutomationStore::upsert` (`automations.rs:1267-1282`, pre-existing) changes the in-memory list before `save()`.
+  - A write error (disk full, ACL) leaves the daemon's state not "broken", yet holding the imported version in memory: it replaces the user's automation, or adds a new one.
+  - The import reports it as "Not imported, refused here" and registers no undo, and a later daemon save persists it.
+  - Fix: after a refusal, re-list. If the id is present with the imported content, treat it as a failure and undo; for a replaced item, register the undo anyway. Or fix `upsert` to roll back when `save()` fails.
+
+**Round-1 Lows**
+- **L1:** the copy is corrected.
+- **L2:** settings are re-read and re-planned before `replaceSettings`; tested.
+- **L3:** `loadForPreview` reads each section on its own and shows unreadable ones as unavailable; tested.
+- **L4:** `metadata` is checked before opening.
+  - **R2-L6 (residual):** on Windows, `std::fs::metadata` itself opens the path (`CreateFileW`, no access rights), so a `\\.\pipe\…` path still connects to the pipe for a moment and then fails `is_file`. Harmless. Refuse paths that start with `\\.\` or `\\?\pipe` to close it fully.
+- **L5:** one shared list.
+- **L6:** non-alphanumeric ids are reset.
+
+## Round 2 summary
+
+| ID | Severity | Blocking | Item |
+|---|---|---|---|
+| H1 | — | no (fixed) | Run-deciding values shown old → new behind a tick, enforced at apply |
+| H2 | — | no (fixed) | Moved host: password forgotten, agent forwarding off, forwards removed |
+| R2-M1 | Medium | no | A moved host can still keep its password (window closed or crash mid-import, hosts undo refused, partial forget) |
+| R2-M2 | Medium | no | Filter false positives (`BYPASS`, `SESSION`, `env_key`); `[redacted]` overwrites working local args |
+| R2-L1 | Low | no | `identityFile` (UNC → NTLM on Windows) not in the run list |
+| R2-L2 | Low | no | Automation trigger, schedule and deliver not in the run list |
+| R2-L3 | Low | no | User guide omits remote layout panes from the run list |
+| R2-L4 | Low | no | E2E recorder not re-checked right before Import |
+| R2-L5 | Low | no | A daemon write failure is reported as "refused" while memory holds the imported automation (pre-existing `upsert`) |
+| R2-L6 | Low | no | Windows `metadata` still opens pipe paths for a moment |
+
+Status: DONE_WITH_CONCERNS
+Summary: Round 2 fixes H1 and H2 and every round-1 Medium and Low. Focused tests pass (Rust 18, Vitest 56, typecheck, i18n), and the test hook cannot reach the real credential store. Nothing blocks merge.
+Concerns/Blockers: No blockers. Recommended before release: R2-M1 (forget the passwords before writing the vault, or in the failure path) and R2-M2 (keep the local value when the incoming one is masked, and narrow `PASS`/`SESSION`). Pre-existing, separate ticket: askpass answering with another saved host's password when the server writes the prompt.

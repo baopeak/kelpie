@@ -247,10 +247,10 @@ fn backups_hold_everything_and_only_the_newest_are_kept() {
 
 #[test]
 fn secret_sounding_names_never_carry_a_value() {
-    for name in ["DB_PASSWORD", "SMTP_PASS", "OPENAI_KEY", "API_KEY", "apiKey", "GH_AUTH", "oauth", "MY_SECRET", "GITHUB_TOKEN", "AWS_CREDENTIALS", "SESSION_COOKIE", "MY_SESSION", "--api-key", "MYSQL_PWD"] {
+    for name in ["DB_PASSWORD", "SMTP_PASS", "OPENAI_KEY", "API_KEY", "apiKey", "GH_AUTH", "oauth", "MY_SECRET", "GITHUB_TOKEN", "AWS_CREDENTIALS", "SESSION_COOKIE", "--session-token", "--api-key", "MYSQL_PWD", "--pass", "DB_PASS2", "clientSecret", "DBPASSWORD"] {
         assert!(secret_name(name), "{name}");
     }
-    for name in ["PUBLIC_FLAG", "LANG", "PATH", "NODE_OPTIONS", "--model", "--permission-mode", "AUTHOR_NAME", "fontSize", "resumeSessions"] {
+    for name in ["PUBLIC_FLAG", "LANG", "PATH", "NODE_OPTIONS", "--model", "--permission-mode", "AUTHOR_NAME", "fontSize", "resumeSessions", "BYPASS", "--dangerously-bypass-approvals-and-sandbox", "--session-id", "--no-session-persistence", "XDG_SESSION_TYPE", "MONKEY", "env_key", "model_providers.x.env_key", "ENV_KEY", "envKey"] {
         assert!(!secret_name(name), "{name}");
     }
     let env = json!({ "DB_PASSWORD": "p@ss:w0rd!", "DB_PASS2": "ab;cdefgh", "GITHUB_TOKEN": "my token value", "SMTP_PASS": "plain", "OPENAI_KEY": "k", "GH_AUTH": "a", "SESSION_COOKIE": "c", "PUBLIC_FLAG": "1" });
@@ -319,6 +319,48 @@ fn settings_carry_only_classified_keys() {
     let kept: Vec<&String> = kept.as_object().unwrap().keys().collect();
     assert_eq!(kept.len(), SETTINGS_EXPORTED.len());
     assert!(excluded.iter().all(|k| !SETTINGS_EXPORTED.iter().any(|e| e == k)));
+}
+
+#[test]
+fn ordinary_flags_and_variable_names_keep_their_values() {
+    let args = |a: &[&str]| mask_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let keep: &[&[&str]] = &[
+        &["--dangerously-bypass-approvals-and-sandbox", "exec", "fix it"],
+        &["--session-id", "0b5c7a7e-1f4b-4a43-9d1e-6a1d2b3c4d5e", "--no-session-persistence", "-p"],
+        &["-c", "model_providers.x.env_key=OPENAI_API_KEY", "-c", "model=o3"],
+    ];
+    for a in keep {
+        assert_eq!(args(a), a.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "{a:?}");
+    }
+    assert_eq!(mask_text("XDG_SESSION_TYPE=x11 startx"), "XDG_SESSION_TYPE=x11 startx");
+    assert_eq!(mask_text("SESSION_TOKEN=abc123 run"), format!("SESSION_TOKEN={MASK} run"));
+}
+
+#[test]
+fn network_paths_are_not_brought_in() {
+    for p in ["\\\\attacker\\share\\key", "//attacker/share/key", "\\/x/y"] {
+        assert!(is_unc(p), "{p}");
+    }
+    assert!(!is_unc("~/keys/deploy") && !is_unc("C:\\Users\\me\\keys\\deploy") && !is_unc("/home/me/keys/deploy"));
+    let file = json!({ "kind": KIND, "version": 1, "sections": {
+        "sshHosts": [{ "id": "h1", "hostname": "h.example", "identityFile": "\\\\attacker\\share\\k" }, { "id": "h2", "hostname": "h.example", "identityFile": "//attacker/s/k" }, { "id": "h3", "hostname": "ok.example", "identityFile": "~/keys/deploy" }],
+        "automations": [{ "name": "a", "cwd": "\\\\attacker\\share" }, { "name": "b", "cwd": "C:/p", "action": "shell", "shell": { "program": "//attacker/share/x.exe" } }, { "name": "c", "cwd": "C:/p" }],
+        "settings": { "shellArgs": ["\\\\attacker\\share\\sh.exe"], "fontSize": 14 },
+    } });
+    let read = read_doc(&serde_json::to_vec(&file).unwrap()).unwrap();
+    let s = &read["doc"]["sections"];
+    assert_eq!(s["sshHosts"].as_array().unwrap().len(), 1);
+    assert_eq!(s["automations"].as_array().unwrap().len(), 1);
+    assert!(s["settings"].get("shellArgs").is_none());
+    assert_eq!(read["skipped"], json!({ "sshHosts": 2, "automations": 2 }));
+}
+
+#[test]
+fn windows_device_paths_are_never_opened() {
+    for p in ["\\\\.\\pipe\\kelpie-test", "\\\\?\\C:\\x.json", "//./pipe/x"] {
+        assert_eq!(read_capped(Path::new(p)).unwrap_err(), "not a file", "{p}");
+        assert!(write_file_atomic(Path::new(p), b"x").is_err(), "{p}");
+    }
 }
 
 #[test]

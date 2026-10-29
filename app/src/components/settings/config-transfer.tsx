@@ -38,8 +38,26 @@ const FIELDS: Record<string, string> = {
   command: msg("command"),
   startup: msg("startup command"),
   remote: msg("panes on another machine"),
+  target: msg("connects to"),
+  identityFile: msg("key file"),
+  when: msg("when it runs"),
+  deliver: msg("when it finishes"),
+  action: msg("does"),
+  name: msg("name"),
+  label: msg("name"),
+  notes: msg("notes"),
+  template: msg("panes"),
+  trigger: msg("trigger"),
+  hostname: msg("host name"),
+  content: msg("text"),
 };
-const fieldLabel = (f: string) => (f.startsWith("env:") ? t("variable {name}", { name: f.slice(4) }) : FIELDS[f] ? t(FIELDS[f]) : f);
+/** `env:NAME` → "variable NAME", `args:--flag` → "arguments --flag", known fields translated, the rest as they are. */
+const fieldLabel = (f: string) => {
+  if (f.startsWith("env:")) return t("variable {name}", { name: f.slice(4) });
+  const [base, detail] = f.includes(":") ? [f.slice(0, f.indexOf(":")), f.slice(f.indexOf(":") + 1)] : [f, ""];
+  const label = FIELDS[base] ? t(FIELDS[base]) : base;
+  return detail ? `${label} ${detail}` : label;
+};
 
 const automationsSupported = () => store.connected() && store.daemonApi() >= AUTOMATION_API;
 
@@ -136,6 +154,7 @@ export async function importPending() {
   for (const r of result.refused) lines.push(t("Not imported, refused here: {name} ({error})", { name: r.name, error: errorText(r.error) }));
   if (p.chosen.includes("sshHosts")) lines.push(t("Saved passwords and key passphrases are not in the file: enter them again on the Hosts page."));
   for (const h of result.plan.hostTargets) lines.push(t("{alias} now connects to {target}: its saved password was forgotten.", { alias: h.alias, target: h.after }));
+  for (const k of CONFIG_SECTIONS) lines.push(...fillNotes(k, result.plan));
   for (const e of result.plan.envNeeded) lines.push(t("{agent} needs values for: {names}", { agent: kindInfo(e.kind).label, names: e.names.join(", ") }));
   if (result.plan.missingPlugins.length) lines.push(t("Plugins to install from their source: {names}", { names: result.plan.missingPlugins.map((x) => x.name).join(", ") }));
   setPending(null);
@@ -157,7 +176,21 @@ function summary(k: ConfigSection, plan: ImportPlan): string {
   return parts.join(" · ");
 }
 
+/** Masked values the file had and this computer has no value for. */
+const fillNotes = (k: ConfigSection, plan: ImportPlan) =>
+  plan.fillIn
+    .filter((f) => f.section === k)
+    .map((f) =>
+      f.leftOut
+        ? t("Left out, masked in the file and not set here: {item} ({fields})", { item: f.item, fields: f.fields.map(fieldLabel).join(", ") })
+        : t("Masked in the file and not set here, left empty: {item} ({fields}). Fill it in after the import.", { item: f.item, fields: f.fields.map(fieldLabel).join(", ") }),
+    );
+
 function notes(k: ConfigSection, plan: ImportPlan): string[] {
+  return [...sectionNotes(k, plan), ...fillNotes(k, plan)];
+}
+
+function sectionNotes(k: ConfigSection, plan: ImportPlan): string[] {
   const s = plan.sections.settings;
   switch (k) {
     case "settings":

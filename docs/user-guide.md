@@ -1044,34 +1044,44 @@ What stays on this computer: SSH passwords, key passphrases and key files (a key
 kept), integration, notification, phone-pairing, daemon and updater tokens, anything in the OS
 credential store, your Claude Code / Codex sign-ins, and settings that only make sense here (the
 SSH config file, accounts). Text that looks like a credential is masked as `[redacted]`: known token
-formats, `NAME=value` and `--flag value` where the name contains PASS, PASSWORD, SECRET, TOKEN, KEY,
-AUTH, CREDENTIAL, COOKIE or SESSION, `mysql -p…` and `curl -u user:…`. Agent environment variables
-are listed by name; their values come along only when you tick *Include values of agent environment
-variables* (off by default: values are plain text in the file), and never for a variable with such a
-name. This is a filter, not a guarantee: open the file and check it before you share it.
+formats, `NAME=value` and `--flag value` where a part of the name is PASS, PWD, KEY, AUTH or COOKIE
+or ends in PASSWORD, SECRET, TOKEN or CREDENTIAL (so `--api-key`, `SMTP_PASS` and `SESSION_TOKEN`,
+but not `--dangerously-bypass-…`, `--session-id` or Codex's `env_key=NAME`), `mysql -p…` and
+`curl -u user:…`. Agent environment variables are listed by name; their values come along only when
+you tick *Include values of agent environment variables* (off by default: values are plain text in
+the file), and never for a variable with such a name. This is a filter, not a guarantee: open the
+file and check it before you share it.
 
 **Import…** opens a file (at most 2 MB) and shows, per part, how many items are new and how many
 replace one with the same id or name; untick what you do not want. Settings with a value the
-settings page does not allow (a font size of 0, an unknown theme) are left out and named. Everything
-that decides what programs run on this computer is listed with its current and new value: the
-terminal's program and arguments, agent permissions, whether agents may control other sessions,
-each agent's arguments, permission mode and variables, the text of new and replaced quick commands,
-automation agents, commands, prompts and folders, and SSH startup commands. When the list is not
-empty, **Import** stays off until you tick *I've checked these commands*. Before anything changes,
-the current configuration is copied to `backups/config-<time>` in the data folder; if a step fails,
-what was already changed is put back. An automation this computer cannot take (an agent that is not
-installed here, a script that is not there) is skipped and named; the rest is imported.
+settings page does not allow (a font size of 0, an unknown theme) are left out and named. A value
+masked in the file is never written here: it keeps this computer's value (for an argument, the value
+of the same flag), and when this computer has none it is left empty and listed for you to fill in;
+an item that cannot work without it (a quick command's text, an automation's prompt) is left out and
+named. Network paths (`\\server\share`, `//server/…`) for a key file, an automation's folder or
+program, or the terminal's program are refused. Everything that decides what programs run on this
+computer is listed with its current and new value: the terminal's program and arguments, agent
+permissions, whether agents may control other sessions, each agent's arguments, permission mode and
+variables, the text of new and replaced quick commands, saved layouts with panes on another machine,
+automation agents, commands, arguments, prompts, folders, triggers, schedules and what happens when
+they finish, and SSH hosts' targets (new hosts), key files and startup commands. When the list is
+not empty, **Import** stays off until you tick *I've checked these commands*. Before anything
+changes, the current configuration is copied to `backups/config-<time>` in the data folder; if a
+step fails, what was already changed is put back. An automation this computer cannot take (an agent
+that is not installed here, a script that is not there) is skipped and named; the rest is imported.
 
 Imported automations come in switched off. Their commands need approving on this computer, unless
 this computer had already approved exactly the same command for the automation it replaces.
 Imported SSH hosts carry no passwords: enter them again on the Hosts page. When an imported host
 replaces one here but connects somewhere else (another host name, user, port or jump host), the
-saved password of the old one is forgotten, agent forwarding is turned off and its port forwards
-are removed (they are in the backup); the preview says so. Agent forwarding is never switched on by
-a file. Agent variables the file names without a value keep this computer's value, or are listed
-for you to fill in. The plugin list only tells you which plugins to install; nothing is installed.
-Automations need a session daemon of the same release (after an update, restart the daemon to
-export or import them); a part that cannot be read here is shown as unavailable, with the reason.
+saved password of the old one is forgotten first, before anything is saved, agent forwarding is
+turned off and its port forwards are removed (they are in the backup); the preview says so. That
+password stays forgotten even if the import then fails, and the error says so. Agent forwarding is
+never switched on by a file. Agent variables the file names without a value keep this computer's
+value, or are listed for you to fill in. The plugin list only tells you which plugins to install;
+nothing is installed. Automations need a session daemon of the same release (after an update,
+restart the daemon to export or import them); a part that cannot be read here is shown as
+unavailable, with the reason.
 
 ## Automation
 
