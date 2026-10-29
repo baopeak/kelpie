@@ -66,7 +66,30 @@ jobs:
         continue-on-error: true
         timeout-minutes: 25
         shell: bash
-        run: s=0; cargo test -p kelpie || s=$?; df -h / | tail -1; du -sh target; exit $s
+        run: |
+          # Watchdog: memory, disk and process count every 20 s, with the biggest processes.
+          ( while sleep 20; do
+              echo "== $(date +%T) mem $(free -m | awk 'NR==2{print $3"/"$2" MB"}') disk $(df -h / | awk 'NR==2{print $4" free"}') procs $(ps -e --no-headers | wc -l)"
+              ps -eo pid,ppid,rss,etime,comm --sort=-rss | head -5
+            done ) &
+          watchdog=$!
+          s=0
+          timeout -k 20 15m cargo test -p kelpie --no-run || s=$?
+          echo "build exit $s"
+          if [ "$s" = 0 ]; then
+            ulimit -u 3000
+            ulimit -v 12000000
+            timeout -k 20 8m cargo test -p kelpie -- --test-threads=2 2>&1 | tee app-tests.log || s=$?
+          fi
+          kill $watchdog || true
+          df -h / | tail -1; du -sh target
+          exit $s
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Linux'
+        with:
+          name: linux-app-tests-log
+          path: app-tests.log
+          if-no-files-found: ignore
       - name: Rust tests on Linux (speech helper)
         if: runner.os == 'Linux'
         continue-on-error: true
