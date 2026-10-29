@@ -192,6 +192,10 @@ export const agentLatestSession = (kind: string, cwd: string, home?: string) =>
   invoke<{ id: string; path: string } | null>("agent_latest_session", { kind, cwd, home });
 export const claudeTranscript = (sessionId: string, cwd?: string, home?: string) =>
   invoke<string[]>("agent_claude_transcript", { sessionId, cwd, home });
+/** Writes one past conversation (a Sessions panel row) to `path` as redacted Markdown. `skipped`:
+ *  transcript lines that could not be read; `truncated`: the file stops at the size cap. */
+export const agentSessionExport = (a: { agent: string; id: string; cwd?: string; home?: string | null; title?: string | null; path: string }) =>
+  invoke<{ path: string; skipped: number; truncated: boolean }>("agent_session_export", a);
 /** Context, tokens and cost of one conversation, from its transcript. Null without an exact match. */
 export const sessionUsage = (a: { kind: string; agentSessionId: string; transcriptPath?: string; cwd?: string; home?: string }) =>
   invoke<SessionUsage | null>("session_usage", a);

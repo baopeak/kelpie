@@ -700,7 +700,7 @@ fn read_capped(path: &Path) -> CmdResult<Vec<u8>> {
 }
 
 /// Beside the target, then renamed over it: a crash never leaves half a file.
-fn write_file_atomic(path: &Path, bytes: &[u8]) -> CmdResult<()> {
+pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> CmdResult<()> {
     if device_path(path) {
         return Err("not a file".into());
     }

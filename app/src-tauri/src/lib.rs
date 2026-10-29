@@ -21,6 +21,7 @@ mod plugins;
 mod voice;
 mod remote;
 mod search;
+mod session_export;
 mod session_usage;
 mod ssh_hosts;
 mod sys_stats;
@@ -318,6 +319,7 @@ pub fn run() {
             agent_history::agent_latest_session,
             agent_history::agent_claude_transcript,
             agent_history::agent_history_list,
+            session_export::agent_session_export,
             usage::usage_fetch,
             session_usage::session_usage,
             usage_report::usage_report,

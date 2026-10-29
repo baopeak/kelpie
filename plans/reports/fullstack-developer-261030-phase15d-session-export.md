@@ -1,0 +1,83 @@
+# Session export (Markdown): Sessions panel → Export as Markdown…
+
+Branch `phase15/session-export` (stacked on `phase15/config-export`). No daemon or API_LEVEL change.
+
+## What was built
+
+- **Rust core** `app/src-tauri/src/session_export.rs`: command `agent_session_export {agent, id, cwd?, home?, title?, path}`
+  returns `{path, skipped, truncated}`. It runs on a blocking thread (`fs_ops::blocking`).
+  - Agents: `claude`, `codex` and `omp`. Any other agent is refused.
+  - **Locating the transcript.** It finds the file by conversation id under the agent's own folder, using `session_usage::resolve_in`, the resolver the usage readers already use. It also finds Codex `.jsonl.zst` rollouts. Ids are checked with `valid_id`. No path inside a transcript is ever opened.
+  - **Bounded reading.** It streams the file with `agent_history::open_lines`, which handles zstd, through a new `Lines::next_capped`.
+    - A line over 32 MiB is passed over without being kept, and counted as skipped.
+    - The Markdown stops at 16 MiB and ends with a note.
+  - **Redaction.** Every text piece goes through `kelpie_proto::redact` on its own, before it is cut or formatted. That covers header values, user and assistant text, tool names, the hint shown in each tool summary, tool input and tool output. Each piece is redacted separately so that a key block cut off in one tool output cannot mask the rest of the document.
+  - **Format.**
+    - Header: title, agent, project folder, session id, started / ended (first and last transcript timestamps), model(s).
+    - Then `## User` / `## Assistant` sections.
+    - Tool calls and results are `<details>` blocks. Inputs are pretty JSON, or raw text for Codex `apply_patch`. Results are labelled with the tool name and `(error)`.
+    - Each tool block is cut to 40 lines or 4,000 characters, with a `… N lines omitted` marker.
+    - Code fences are longer than any run of backticks in the content.
+    - Images and attachments appear as `[image: image/png]` / `[attachment: …]`.
+    - Line endings are LF, and CR in transcripts is normalised.
+    - Skipped lines are counted in a closing note.
+  - **Writing.** `config_transfer::write_file_atomic` (now `pub(crate)`) writes a temporary file beside the target and renames it over. A relative path, or the transcript itself as the target, is refused.
+- **Reuse instead of a new parser.**
+  - From `agent_history`: `open_lines`, `codex_injected` (the injected-context list factored out of `codex_prompt`, the same filter the history list uses), `is_claude_command`, `valid_id`, and the folder helpers.
+  - From `session_usage`: `resolve_in`, `find_rollout*` and `agent_of`.
+  - Claude filtering mirrors `applyClaudeMessage`: meta lines, compaction summaries, sidechains, `<…>` markup and interruption markers are left out. `<synthetic>` notices are dropped too.
+- **UI.**
+  - `history-panel.tsx` gets a download-icon button "Export as Markdown…" on claude/codex/omp rows, plus `data-agent` / `data-id` on rows.
+  - On click it dynamically imports `lib/session-export.ts`, a lazy chunk of 0.71 kB gz. That module opens the save dialog, calls the typed IPC wrapper `ipc.agentSessionExport` and shows a toast.
+  - The suggested file name is `<agent>-<id8>-<day>.md`. The title is kept out of the name because the name is not redacted.
+  - Test hook: `window.__kelpie.sessionExport.replacePicker`, available in dev / KELPIE_E2E only.
+- **Test isolation for OMP.** New `agent_history::omp_sessions_dir()`. With `KELPIE_E2E` and `KELPIE_AGENT_CONFIG_HOME` set, it reads OMP sessions under that fixture home. This follows the agent-setup pattern. The history list, usage and export all use it, so an e2e run never scans the real `~/.omp`.
+- **i18n.** Six interface strings were added to `vi/tools.json`, and four backend error messages to `vi/backend.json`. `Exported to {path}` was reused.
+
+## Decisions
+
+- **Export runs in Rust, not TS.**
+  - The only existing transcript normaliser in TS is Claude's `applyClaudeMessage`. It builds UI state, and its input (`agent_claude_transcript`) is capped to the last 6,000 lines. Using it would drop the start of long conversations and send whole transcripts over IPC into the webview.
+  - Codex and OMP have no on-disk normaliser in TS: their adapters translate the live app-server / ACP protocol.
+  - The Rust readers (resolver, streaming, zstd) and the redaction helper already lived in the core. The new code is only a line → event mapping per format.
+- **Thinking is left out**, with no option. OMP "narration" blocks, which are prose to the user, are kept.
+- **Header labels are English** in the file, so the golden files stay deterministic. The interface strings are translated.
+- **Format details.** OMP sessions are trees; entries are exported in file order. Claude sub-agent transcripts are not included; they are the sub-agent's internals.
+
+## Agents not covered
+
+- Other ACP agents (Gemini, OpenCode, Copilot, Goose, Qwen, Kimi, Auggie, Cursor) have no transcript Kelpie can read today. They are not listed in the Sessions panel, so there is no export action for them.
+- OMP is the ACP agent that is covered.
+
+## Numbers
+
+- **`cargo test -p kelpie -j 2`**: 220 passed, 0 failed, 6 ignored. The new `session_export` module has 10 tests and 1 ignored bless helper:
+  - golden files;
+  - fixture secrets;
+  - secrets in user text, assistant text, tool input and tool output for all 3 formats;
+  - truncation;
+  - fences;
+  - malformed and partial lines;
+  - the capped reader;
+  - the size cap;
+  - thinking;
+  - writing (atomic overwrite, no `.tmp` left, refusals, Codex `.zst`).
+- **clippy** `-p kelpie --all-targets`: clean. kelpie-proto and kelpied were not changed.
+- **Frontend**: `pnpm typecheck` ok; `pnpm test` 510 passed; `pnpm i18n:check` 2201 keys used, 0 missing, 0 problems; `pnpm build` ok.
+- **Bundle gate**: `perf_gate.py --metrics bundle`. The entry is 326.26 kB gz against a baseline of 323.6 kB and a limit of 338.60 kB: ok. It was about 326.1 kB before this change. The report is `plans/reports/perf-phase-15d.json`.
+- **GUI e2e** `scripts/e2e/session_export.py`: 25/25 checks passed in two consecutive runs. Test daemon, driver and scratch data were stopped and removed afterwards. Only the user's own installed Kelpie stayed running, untouched.
+  - The first two runs failed on test bugs, both fixed in the script:
+    - removing toast DOM nodes by hand confused Solid's toast list;
+    - polling the target file kept a read handle open, which made the rename over it fail.
+
+## Files
+
+- New: `app/src-tauri/src/session_export.rs` and `session_export/tests.rs`; `app/src-tauri/tests/fixtures/session-export/{claude,codex,omp}.{jsonl,md}` (synthetic); `app/src/lib/session-export.ts`; `scripts/e2e/session_export.py`.
+- Changed: `agent_history.rs`, `session_usage.rs`, `config_transfer.rs` (visibility only), `lib.rs`, `ipc.ts`, `history-panel.tsx`, `main.tsx`, `locales/vi/{tools,backend}.json`, `docs/user-guide.md`, `docs/architecture.md`.
+
+## Follow-ups
+
+- **Over-masking.** `redact` sometimes masks harmless values (`API_KEY = process.env.API_KEY`, `API_KEY=test-key`). This is the shared helper's trade-off, visible in `codex.md`.
+- **Locked target file.** If the chosen file is open in a program that blocks deletes, the rename fails and the user sees an error toast. Retrying could be added.
+- **Size limits.** A transcript line over 32 MiB is skipped whole, for example one carrying a large pasted PDF, so that message's text is lost too.
+- **Possible additions.** A "include thinking" option, OMP branch selection, and sub-agent transcripts could be added if wanted.

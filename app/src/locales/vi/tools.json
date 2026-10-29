@@ -390,5 +390,11 @@
   "Answered on another device": "Đã trả lời trên thiết bị khác",
   "In the background": "Đang chạy nền",
   "Could not copy": "Không sao chép được",
-  "Undo turn #{n}…": "Hoàn tác lượt #{n}…"
+  "Undo turn #{n}…": "Hoàn tác lượt #{n}…",
+  "Export as Markdown…": "Xuất ra Markdown…",
+  "Export conversation as Markdown": "Xuất cuộc trò chuyện ra Markdown",
+  "The conversation is too long: the file stops at the size limit and says so.": "Cuộc trò chuyện quá dài: tệp dừng ở giới hạn kích thước và có ghi chú về điều đó.",
+  "{n} unreadable transcript line was left out.": "Đã bỏ qua {n} dòng bản ghi không đọc được.",
+  "{n} unreadable transcript lines were left out.": "Đã bỏ qua {n} dòng bản ghi không đọc được.",
+  "Could not export the conversation: {error}": "Không xuất được cuộc trò chuyện: {error}"
 }
