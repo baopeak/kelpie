@@ -479,12 +479,13 @@ describe("masked values", () => {
     expect(p.automations.find((a) => a.next.name === "Nightly")!.next.shell!.argv).toEqual(["x.py", "--token", "localtok"]);
   });
 
-  it("without a value here: arguments lose the masked part, an item that needs it is left out, both are listed", () => {
+  it("without a value here: a profile's arguments are not imported, an item that needs it is left out, both are listed", () => {
     const p = planImport(masked(), ALL, cur(), { defaults, newId });
     const codex = p.settings!.profiles.find((x) => x.kind === "codex")!;
-    // The marker after --api-key was that flag's value: both go. `api_key=[redacted]` goes alone; the
-    // standalone -c before it is never dropped.
-    expect(codex.args).toEqual(["--search", "-c"]);
+    // Codex is new here and `-c api_key=[redacted]` has no value: no arguments rather than a `-c` with
+    // nothing after it.
+    expect(codex.args).toEqual([]);
+    expect(p.argsNotImported).toEqual(["Codex"]);
     expect(p.settings!.quickCommands.some((q) => q.label === "Deploy")).toBe(false);
     expect(p.automations.some((a) => a.next.name === "Report")).toBe(false);
     const added = p.vault!.hosts.find((h) => h.id === "h-new")!;
@@ -492,7 +493,6 @@ describe("masked values", () => {
     expect(added.env).toEqual({ LANG: "C" });
     expect(p.fillIn).toEqual([
       { section: "quickCommands", item: "Deploy", fields: ["content"], leftOut: true },
-      { section: "agents", item: "Codex", fields: ["args:--api-key", "args:api_key"], leftOut: false },
       { section: "sshHosts", item: "new", fields: ["notes", "env:SECRETISH"], leftOut: false },
       { section: "automations", item: "Report", fields: ["prompt"], leftOut: true },
     ]);
@@ -513,33 +513,60 @@ describe("masked arguments are matched by position, never by guess", () => {
     const cur = current();
     cur.settings.profiles = local ? [{ kind: "claude", label: "Claude Code", args: local }] : [];
     const p = planImport(read, ["agents"], cur, { defaults, newId });
-    return { args: p.settings!.profiles.find((x) => x.kind === "claude")!.args, fill: p.fillIn, kept: p.keptLocal };
+    return { args: p.settings!.profiles.find((x) => x.kind === "claude")!.args, fill: p.fillIn, kept: p.keptLocal, notImported: p.argsNotImported };
+  };
+  /** The file's arguments were not used: this computer's stay, the profile is named and nothing is left to fill in. */
+  const notImported = (args: string[], local?: string[]) => {
+    const r = agentArgs(args, local);
+    expect(r.args).toEqual(local ?? []);
+    expect(r.notImported).toEqual(["Claude Code"]);
+    expect(r.fill).toEqual([]);
+    expect(r.kept).toEqual([]);
   };
 
-  it("never drops a standalone flag in front of a masked positional", () => {
-    expect(agentArgs(["--read-only", `https://u:${M}@db/x`]).args).toEqual(["--read-only"]);
-    expect(agentArgs(["--safe", `TOKEN=${M}`]).args).toEqual(["--safe"]);
-    expect(agentArgs(["--read-only", `https://u:${M}@db/x`]).fill).toEqual([{ section: "agents", item: "Claude Code", fields: ["args:#2"], leftOut: false }]);
+  it("does not import a profile's arguments when a masked one has no value here", () => {
+    // Codex's `-c api_key=…`: never a `-c` with nothing after it.
+    notImported(["--search", "-c", `api_key=${M}`]);
+    notImported(["--search", "-c", `api_key=${M}`], ["--model", "o3"]);
+    // A safety flag in front of a masked positional is not dropped either: the whole list stays as it was here.
+    notImported(["--read-only", `https://u:${M}@db/x`]);
+    notImported(["--read-only", `https://u:${M}@db/x`], ["--read-only", "--model", "opus"]);
+    // Even when another masked argument could be filled in.
+    notImported(["--api-key", M, "-c", `api_key=${M}`], ["--api-key", "realkey"]);
+  });
+
+  it("imports the arguments when every masked one is filled in from here", () => {
+    const r = agentArgs(["--search", "-c", `api_key=${M}`], ["-c", "api_key=real"]);
+    expect(r.args).toEqual(["--search", "-c", "api_key=real"]);
+    expect(r.notImported).toEqual([]);
+    expect(r.kept).toEqual([{ section: "agents", item: "Claude Code", fields: ["args:api_key"] }]);
   });
 
   it("pairs a flag only with an exact marker, and takes the same occurrence of that flag here", () => {
-    expect(agentArgs(["--token", M, "--model", "opus"]).args).toEqual(["--model", "opus"]);
+    notImported(["--token", M, "--model", "opus"]);
     expect(agentArgs(["--token", M, "--token", M], ["--token", "first", "--token", "second"]).args).toEqual(["--token", "first", "--token", "second"]);
     // A local flag followed by another flag has no value to take.
-    expect(agentArgs(["--token", M], ["--token", "--verbose"]).args).toEqual([]);
+    notImported(["--token", M], ["--token", "--verbose"]);
   });
 
   it("takes a repeated header only from the same occurrence with the same header name", () => {
     const local = ["-H", "Accept: x", "-H", "Authorization: Bearer real"];
-    // Same position, other header: no value here, only the masked element goes.
-    expect(agentArgs(["-H", `Authorization: Bearer ${M}`], local).args).toEqual(["-H"]);
+    // Same position, other header: no value here.
+    notImported(["-H", `Authorization: Bearer ${M}`], local);
     expect(agentArgs(["-H", "Accept: x", "-H", `Authorization: Bearer ${M}`], local).args).toEqual(local);
   });
 
   it("takes a masked positional from the same index only when both lists have the same shape", () => {
     expect(agentArgs(["run", `https://u:${M}@h`], ["run", "https://u:pw@h"]).args).toEqual(["run", "https://u:pw@h"]);
-    expect(agentArgs(["run", `https://u:${M}@h`], ["run", "--other", "https://u:pw@h"]).args).toEqual(["run"]);
+    notImported(["run", `https://u:${M}@h`], ["run", "--other", "https://u:pw@h"]);
     expect(agentArgs([`api_key=${M}`, `api_key=${M}`], ["api_key=one", "x", "api_key=two"]).args).toEqual(["api_key=one", "api_key=two"]);
+  });
+
+  it("terminal arguments still lose only the masked part, a flag on its own is never dropped", () => {
+    const read = fileRead();
+    read.doc.sections.settings = { ...read.doc.sections.settings, shellArgs: ["pwsh", "-NoLogo", `https://u:${M}@h`] };
+    const p = planImport(read, ["settings"], current(), { defaults, newId });
+    expect(p.settings!.shellArgs).toEqual(["pwsh", "-NoLogo"]);
   });
 
   it("says when this computer's value was kept", () => {

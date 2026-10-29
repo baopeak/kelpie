@@ -417,7 +417,7 @@ All round-3 findings in the reviewer report were addressed. No daemon change was
   - Free space on C: is still low (about 1 GB); builds and e2e scratch stay on D:.
 
 **Numbers after round 3**
-- Rust `config_transfer`: 26 tests.
+- Rust `config_transfer`: 24 tests (`cargo test -p kelpie config_transfer`; an earlier draft of this line said 26).
 - `cargo test -p kelpie -j 2`: 208 passed, 5 ignored (pre-existing). `cargo clippy -p kelpie --all-targets` is clean.
 - Vitest: 504 passed; `config-transfer.test.ts` has 36 tests.
 - `pnpm typecheck` clean; `i18n:check` 0 missing.
@@ -428,3 +428,30 @@ All round-3 findings in the reviewer report were addressed. No daemon change was
 
 Status: DONE
 Summary: All round-3 findings are fixed and tested: one shared path classifier keeps network and device paths (shell arguments included) away from the daemon, masked arguments are matched by position only, and the name matcher covers compound and acronym names. Every check is green, and the GUI round trip passed 63/63 twice using only the recorder.
+## Follow-up: agent arguments with a hidden value that cannot be filled in
+
+The coordinator first asked for the flag before a masked flag value to be dropped as well. They withdrew this before it was implemented: it cannot tell `-c api_key=…` from `--read-only <masked url>`, and silently dropping a safety flag is worse than leaving a dangling `-c`. The rule implemented instead:
+
+- When an agent profile's arguments have a masked element that cannot be restored from this computer, none of the file's arguments are imported for that profile. This computer's arguments for it stay unchanged, or there are none for a new profile.
+- The profile's other fields (label, permission, variables) import as before.
+- A new `ImportPlan.argsNotImported` lists the profile labels. It is part of `planShown`, so the apply must match the preview.
+- The preview (agents row) and the result show "{profile}: arguments not imported, a hidden value couldn't be filled in here (re-enter it in Agent settings)". A Vietnamese translation was added.
+- Restored elements of such a profile are not reported as "kept", since the file's list is not used.
+- When every masked element is restored, the arguments import as before.
+- Shell automations already followed this rule (left out whole when their command would change).
+- Not changed (outside the request): terminal arguments (`shellArgs`) and an agent automation's `args` still lose only the masked element. `unmaskArgs` itself is unchanged. The docs say which rule applies where.
+
+Tests (`config-transfer.test.ts`):
+- Codex `--search -c api_key=[redacted]` with no local value, for a new profile and over existing local arguments;
+- `--read-only https://u:[redacted]@db/x`, with and without local arguments;
+- a list where one masked element could be filled in and another could not;
+- successful restoration (`-c api_key=` from here) still imports and is reported as kept;
+- the earlier position-matching cases, now asserting the whole-list fallback;
+- terminal arguments still lose only the masked part.
+
+The e2e did not depend on dropping: its agent case is a successful restore (B has its own `--api-key`).
+
+Numbers:
+- `cargo test -p kelpie -j 2 config_transfer`: 24 passed. `cargo clippy -p kelpie --all-targets` is clean. No Rust change was made.
+- Vitest: 506 passed; `config-transfer.test.ts` has 38 tests. `pnpm typecheck` is clean; `i18n:check` reports 0 missing.
+- `config_export.py`: 63/63 on a fresh debug build. Afterwards none of this script's processes were left; the `tauri-driver`, `msedgedriver` and `D:\Works\Kelpie` daemon belong to another workstream.

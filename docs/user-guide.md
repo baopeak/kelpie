@@ -1060,9 +1060,12 @@ settings page does not allow (a font size of 0, an unknown theme) are left out a
 masked in the file is never written here: it keeps this computer's value, and the preview says so (for
 an argument, the value after the same occurrence of the same flag, or of the same header after it, or
 at the same place when both argument lists have the same shape). When this computer has none, it is
-left empty and listed for you to fill in, and only the masked argument goes (with its flag only when
-the masked part was that whole flag's value); an item that cannot work without it (a quick command's
-text, an automation's prompt, a command that would then run differently) is left out and named.
+left empty and listed for you to fill in. An agent's arguments are then not imported at all: this
+computer's arguments for that agent stay as they are (none for a new one), and the preview names the
+agent so you can enter the hidden value in Agent settings. For the terminal's arguments and an
+agent automation's arguments only the masked one goes (with its flag only when the masked part was
+that whole flag's value). An item that cannot work without it (a quick command's text, an
+automation's prompt, a command that would then run differently) is left out and named.
 Network and device paths (`\\server\share`, `//server/…`, `\\?\UNC\…`, `\??\…`) for a key file, an
 automation's folder, program or arguments, or the terminal's program and arguments are refused and the
 items named, on export and on import; the session daemon never sees them. Everything that decides what programs run on this

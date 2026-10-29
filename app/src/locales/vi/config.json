@@ -45,6 +45,7 @@
   "host name": "tên máy",
   "Not exported, they use a network or device path: {names}": "Không xuất, vì dùng đường dẫn mạng hoặc thiết bị: {names}",
   "Masked in the file, this computer's value is kept: {item} ({fields})": "Bị che trong tệp, giữ giá trị của máy này: {item} ({fields})",
+  "{item}: arguments not imported, a hidden value couldn't be filled in here (re-enter it in Agent settings)": "{item}: không nhập các đối số, một giá trị bị ẩn không điền được ở máy này (hãy nhập lại trong cài đặt Agent)",
   "Left out, a network or device path: {names}": "Bỏ qua, đường dẫn mạng hoặc thiết bị: {names}",
   "text": "nội dung",
   "Left out, masked in the file and not set here: {item} ({fields})": "Bỏ qua, bị che trong tệp và máy này chưa có: {item} ({fields})",

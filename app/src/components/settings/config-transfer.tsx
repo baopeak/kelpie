@@ -191,6 +191,9 @@ const fillNotes = (k: ConfigSection, plan: ImportPlan) => [
         ? t("Left out, masked in the file and not set here: {item} ({fields})", { item: f.item, fields: f.fields.map(fieldLabel).join(", ") })
         : t("Masked in the file and not set here, left empty: {item} ({fields}). Fill it in after the import.", { item: f.item, fields: f.fields.map(fieldLabel).join(", ") }),
     ),
+  ...(k === "agents" ? plan.argsNotImported : []).map((item) =>
+    t("{item}: arguments not imported, a hidden value couldn't be filled in here (re-enter it in Agent settings)", { item }),
+  ),
 ];
 
 /** Items the file had that use a network or device path (never brought in). */

@@ -429,12 +429,16 @@ export interface ImportPlan {
   fillIn: { section: ConfigSection; item: string; fields: string[]; leftOut: boolean }[];
   /** Values masked in the file that took this computer's value instead (the file's version is not used). */
   keptLocal: { section: ConfigSection; item: string; fields: string[] }[];
+  /** Agent profiles (by label) whose arguments were not imported: a masked argument had no value here, and
+   *  the list without it could mean something else (`-c` with nothing after it, a flag losing its value). */
+  argsNotImported: string[];
   runs: RunChange[];
   hostTargets: HostTargetChange[];
 }
 
 /** What the user agreed to in the preview; an apply that would do anything else is refused. */
-export const planShown = (p: Pick<ImportPlan, "sections" | "runs" | "hostTargets" | "fillIn" | "keptLocal">) => ({ sections: p.sections, runs: p.runs, hostTargets: p.hostTargets, fillIn: p.fillIn, keptLocal: p.keptLocal });
+type Shown = Pick<ImportPlan, "sections" | "runs" | "hostTargets" | "fillIn" | "keptLocal" | "argsNotImported">;
+export const planShown = (p: Shown) => ({ sections: p.sections, runs: p.runs, hostTargets: p.hostTargets, fillIn: p.fillIn, keptLocal: p.keptLocal, argsNotImported: p.argsNotImported });
 
 const show = (v: unknown): string | null => {
   const s = v === undefined || v === null ? "" : Array.isArray(v) ? argvText(v as string[]) : String(v);
@@ -451,7 +455,7 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
   const s = read.doc.sections;
   const want = (k: ConfigSection) => chosen.includes(k) && s[k] !== undefined;
   const skippedIn = (k: ConfigSection) => read.skipped[k] ?? 0;
-  const plan: ImportPlan = { sections: {}, settings: null, vault: null, automations: [], missingPlugins: [], envNeeded: [], fillIn: [], keptLocal: [], runs: [], hostTargets: [] };
+  const plan: ImportPlan = { sections: {}, settings: null, vault: null, automations: [], missingPlugins: [], envNeeded: [], fillIn: [], keptLocal: [], argsNotImported: [], runs: [], hostTargets: [] };
   const run = (section: ConfigSection, item: string, field: string, before: unknown, after: unknown) => {
     const [b, a] = [show(before), show(after)];
     if (b !== a) plan.runs.push({ section, item, field, before: b, after: a });
@@ -530,7 +534,16 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
       const old = at >= 0 ? profiles[at] : undefined;
       const tr = track();
       const label = unmaskText(a.label, old?.label, "label", track()) || a.kind;
-      const args = unmaskArgs(a.args, old?.args, tr);
+      let args = unmaskArgs(a.args, old?.args, tr);
+      if (tr.missing.some((f) => f.startsWith("args:"))) {
+        // A masked argument has no value here. Without it the list could mean something else (a `-c` left
+        // with nothing after it, a safety flag that seems to take the next argument), so the file's arguments
+        // are not used at all: this computer's stay as they are (none for a new profile).
+        args = old ? old.args.slice() : [];
+        tr.missing = tr.missing.filter((f) => !f.startsWith("args:"));
+        tr.kept = tr.kept.filter((f) => !f.startsWith("args:"));
+        plan.argsNotImported.push(label);
+      }
       const permission = a.permission ? unmaskText(a.permission, old?.permission, "permission", tr) : "";
       const { env, needed } = mergeEnv(old?.env, a.env);
       const profile: AgentProfile = { kind: a.kind, label, args, ...(permission ? { permission } : {}), ...(Object.keys(env).length ? { env } : {}) };
@@ -747,7 +760,7 @@ const automationContent = (a: Automation) => {
  *  saved, so no failure or crash can leave a password bound to a new address (that step is never undone,
  *  and a failure says so). Every other change made before a failure is undone; a backup of the previous
  *  configuration is kept either way. */
-export async function applyImport(read: ImportRead, chosen: readonly ConfigSection[], previewed: Pick<ImportPlan, "sections" | "runs" | "hostTargets" | "fillIn" | "keptLocal">, ctx: TransferContext, opts: { runsChecked: boolean }): Promise<ImportResult> {
+export async function applyImport(read: ImportRead, chosen: readonly ConfigSection[], previewed: Shown, ctx: TransferContext, opts: { runsChecked: boolean }): Promise<ImportResult> {
   const planOpts = { defaults: ctx.defaults, newId: ctx.newId };
   const cur = await loadCurrent(chosen, ctx);
   const plan = planImport(read, chosen, cur, planOpts);
