@@ -189,6 +189,7 @@ def scenario(run):
     run.check("Enter with an empty filter switches nothing", head() == "feature" and d.js("return !!document.querySelector('.branch-switcher')"), head())
     d.keys("down")
     run.check("↓ moves from the filter to the first branch", d.js("return document.activeElement?.classList.contains('branch-row') && document.activeElement.dataset.branch === 'feature'"))
+    run.check("the branch list is one Tab stop", d.js("return [...document.querySelectorAll('.branch-row')].filter(r => r.tabIndex === 0).length") == 1)
     run.check("the switcher lists local branches, current first, the held one marked",
               d.js("const r = [...document.querySelectorAll('.branch-row')]; return r[0].dataset.branch === 'feature' && r[0].classList.contains('current') && !!document.querySelector('.branch-row[data-branch=\"held\"] .chip')"))
     run.shot("01-switcher")

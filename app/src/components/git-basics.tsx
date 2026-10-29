@@ -23,6 +23,9 @@ export function BranchSwitcher(props: { project: Project; onClose: () => void; o
   const [busy, setBusy] = createSignal<string | null>(null);
   const [refusal, setRefusal] = createSignal<Refusal | null>(null);
   const shown = createMemo(() => filterBranches(branches() ?? [], query()));
+  // One Tab stop for the list (the row last focused, else the first); ↑ / ↓ move inside it.
+  const [active, setActive] = createSignal<string | null>(null);
+  const tabStop = () => (shown().some((b) => b.name === active()) ? active() : shown()[0]?.name);
   const projectAt = (path: string) => store.state.projects.find((p) => normPath(p.path) === normPath(path));
 
   let input!: HTMLInputElement;
@@ -96,7 +99,7 @@ export function BranchSwitcher(props: { project: Project; onClose: () => void; o
           <For each={shown()} fallback={<div class="muted">{branches.loading ? t("Loading…") : t("No branches")}</div>}>
             {(b) => (
               <div class="list-row branch-row" classList={{ current: b.current }} data-branch={b.name} title={b.worktree ? t("Checked out in {path}", { path: b.worktree }) : b.name}
-                role="option" aria-selected={b.current} tabIndex={0}
+                role="option" aria-selected={b.current} tabIndex={b.name === tabStop() ? 0 : -1} onFocus={() => setActive(b.name)}
                 onClick={() => !b.current && void pick(b.name)}
                 onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && !b.current) { e.preventDefault(); void pick(b.name); } }}>
                 <span class="branch-mark">{b.current ? <Icon name="check" size={12} /> : null}</span>

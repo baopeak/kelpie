@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::fs_ops::{guard, CmdResult};
-use crate::git::{git, git_env, git_ok, git_worktree_env, parse_status, Worktree};
+use crate::git::{git, git_ok, git_worktree_env, parse_status, Worktree};
 
 /// The compact log shows this many commits.
 pub const LOG_LIMIT: usize = 100;
@@ -244,29 +244,46 @@ pub async fn git_stashes(root: String) -> CmdResult<Vec<Stash>> {
 
 const STASH_MOVED: &str = "the stash list changed (another worktree may have stashed or dropped): refresh it and try again";
 
-/// The commit id in git's `Dropped stash@{N} (<oid>)` line.
-fn dropped_oid(output: &str) -> Option<&str> {
-    let start = output.rfind('(')? + 1;
-    let oid = &output[start..start + output[start..].find(')')?];
-    valid_oid(oid).then_some(oid)
+/// The commit ids of the stash list, newest first.
+async fn stash_oids(dir: &Path) -> CmdResult<Vec<String>> {
+    let out = git_ok(dir, &["stash", "list", "--format=%H"]).await?;
+    Ok(out.lines().map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty()).collect())
 }
 
-/// After `stash drop`: when git dropped another stash than `expected` (the list moved between the
-/// check and the drop), stores that one back and reports the conflict.
-async fn verify_drop(dir: &Path, expected: &str, output: &str) -> CmdResult<()> {
-    let Some(dropped) = dropped_oid(output) else { return Ok(()) };
-    if dropped.eq_ignore_ascii_case(expected) {
-        return Ok(());
-    }
+/// Puts a dropped stash commit back on the list, with its own subject as the message.
+async fn restore_stash(dir: &Path, oid: &str) -> CmdResult<()> {
     // A stash commit's own subject is the message it was listed with ("On main: …").
-    let subject = git_ok(dir, &["log", "-1", "--encoding=UTF-8", "--format=%s", dropped]).await.unwrap_or_default();
+    let subject = git_ok(dir, &["log", "-1", "--encoding=UTF-8", "--format=%s", oid]).await.unwrap_or_default();
     let message = if subject.trim().is_empty() { "restored by Kelpie" } else { subject.trim() };
-    match git_ok(dir, &["stash", "store", "-m", message, dropped]).await {
-        Ok(_) => Err(format!("{STASH_MOVED} (nothing was dropped)")),
-        Err(e) => Err(format!("{STASH_MOVED}; another stash was dropped and could not be put back ({e}): recover it with git stash store {dropped}")),
-    }
+    git_ok(dir, &["stash", "store", "-m", message, oid]).await.map(|_| ())
 }
 
+/// After `stash drop stash@{N}`: compares the list with `before` (taken just before the drop), not git's
+/// message (a remote host may print it in any language). Any other stash that went missing (the list
+/// moved between the check and the drop) is stored back. Fails closed: whatever cannot be confirmed is
+/// reported with the commit ids involved.
+async fn verify_drop(dir: &Path, expected: &str, before: &[String]) -> CmdResult<()> {
+    let expected = expected.to_ascii_lowercase();
+    let after = stash_oids(dir).await.map_err(|e| format!("the drop could not be checked ({e}): look at git stash list; the stash meant was {expected}"))?;
+    let missing: Vec<&String> = before.iter().filter(|o| !after.contains(o)).collect();
+    let dropped_expected = missing.iter().any(|o| **o == expected);
+    let others: Vec<&String> = missing.into_iter().filter(|o| **o != expected).collect();
+    let mut failed = Vec::new();
+    for oid in &others {
+        if let Err(e) = restore_stash(dir, oid).await {
+            failed.push(format!("{oid} ({e})"));
+        }
+    }
+    if !failed.is_empty() {
+        return Err(format!("{STASH_MOVED}; a stash dropped by mistake could not be put back, recover it with git stash store <id>: {}", failed.join(", ")));
+    }
+    match (dropped_expected, others.is_empty()) {
+        (true, true) => Ok(()),
+        (false, false) => Err(format!("{STASH_MOVED} (nothing was dropped)")),
+        (true, false) => Err(format!("{STASH_MOVED} (the stash was dropped; another one dropped with it was put back)")),
+        (false, true) => Err(format!("the stash {expected} is still in the list: refresh it and try again")),
+    }
+}
 /// `apply` or `drop` the stash `stash` (`stash@{N}`), only while it is still the commit `oid` the
 /// list showed. Apply uses the commit itself; drop needs `stash@{N}`, so what git dropped is checked
 /// afterwards (and put back when it was another stash). Returns git's last line of output.
@@ -285,15 +302,16 @@ pub async fn git_stash_action(root: String, stash: String, oid: String, action: 
     if !current.ok || !String::from_utf8_lossy(&current.stdout).trim().eq_ignore_ascii_case(&oid) {
         return Err(STASH_MOVED.into());
     }
-    // English output: the drop line is parsed.
+    // Drop is checked against the list as it was just before (`verify_drop`).
+    let before = if action == "drop" { stash_oids(&dir).await? } else { Vec::new() };
     let target = if action == "apply" { oid.as_str() } else { stash.as_str() };
-    let out = git_env(&dir, &["stash", action, target], &[("LC_ALL", "C"), ("LANGUAGE", "C")]).await?;
+    let out = git(&dir, &["stash", action, target]).await?;
     let text = format!("{}\n{}", String::from_utf8_lossy(&out.stdout).trim(), out.stderr.trim());
     if !out.ok {
         return Err(text.trim().to_string());
     }
     if action == "drop" {
-        verify_drop(&dir, &oid, &text).await?;
+        verify_drop(&dir, &oid, &before).await?;
     }
     Ok(text.lines().map(str::trim).rev().find(|l| !l.is_empty()).unwrap_or("").to_string())
 }
@@ -464,11 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_dropped_stash_and_old_git() {
-        let oid = "d".repeat(40);
-        assert_eq!(dropped_oid(&format!("Dropped stash@{{0}} ({oid})")), Some(oid.as_str()));
-        assert_eq!(dropped_oid("Dropped stash@{0} (not-an-id)"), None);
-        assert_eq!(dropped_oid("nothing"), None);
+    fn explains_an_old_git() {
         assert!(old_git("git: 'switch' is not a git command. See 'git --help'.", "2.23").starts_with("this needs git 2.23 or newer"));
         assert_eq!(old_git("fatal: invalid reference: x\n", "2.23"), "fatal: invalid reference: x");
     }
@@ -482,16 +496,22 @@ mod tests {
         sh(&r.dir, &["stash", "push", "-q", "-m", "newer"]);
         let list = git_stashes(root(&r)).await.unwrap();
         let (newer, older) = (&list[0], &list[1]);
-        // The list moved under us: stash@{0} was dropped while the user meant `older`.
-        let out = sh(&r.dir, &["stash", "drop", "stash@{0}"]);
-        let err = verify_drop(&r.dir, &older.oid, &out).await.unwrap_err();
+        // The list moved under us: stash@{0} was dropped while the user meant `older`. Only the lists
+        // are compared, never git's message (which a remote host may print in any language).
+        let before = stash_oids(&r.dir).await.unwrap();
+        sh(&r.dir, &["stash", "drop", "stash@{0}"]);
+        let err = verify_drop(&r.dir, &older.oid, &before).await.unwrap_err();
         assert!(err.contains("nothing was dropped"), "{err}");
         let after = git_stashes(root(&r)).await.unwrap();
         assert_eq!(after.len(), 2);
         assert!(after.iter().any(|s| s.oid == newer.oid && s.subject == "On main: newer"), "{after:?}");
+        // Nothing went missing at all: not confirmed, so not reported as success.
+        let before = stash_oids(&r.dir).await.unwrap();
+        let err = verify_drop(&r.dir, &older.oid, &before).await.unwrap_err();
+        assert!(err.contains("still in the list"), "{err}");
         // The expected one dropped: fine.
-        let out = sh(&r.dir, &["stash", "drop", &after.iter().find(|s| s.oid == older.oid).unwrap().name]);
-        verify_drop(&r.dir, &older.oid, &out).await.unwrap();
+        sh(&r.dir, &["stash", "drop", &after.iter().find(|s| s.oid == older.oid).unwrap().name]);
+        verify_drop(&r.dir, &older.oid, &before).await.unwrap();
         assert_eq!(git_stashes(root(&r)).await.unwrap().len(), 1);
     }
 

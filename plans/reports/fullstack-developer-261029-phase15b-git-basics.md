@@ -210,5 +210,33 @@ Review: `plans/reports/code-reviewer-261029-phase15b-git-basics.md`.
 | `pnpm build`, bundle gate | ok; entry 325.75 kB gz (limit 338.60; it was 325.05 before this work) |
 | `scripts/e2e/git_basics.py` | 36/36 on three consecutive runs (isolated daemon and data folder; only the user's own Kelpie processes remained afterwards) |
 
+## Review fixes, round 2
+
+**R2-1: the drop check no longer depends on git's message and fails closed.** On SSH the `LC_ALL=C`
+setting never reached the host, so a translated "Dropped …" line could make the check skip silently. Now:
+- the stash list (commit ids) is read just before the drop and again just after;
+- dropping the expected stash and nothing else is the only success;
+- any other stash that went missing is stored back with `git stash store -m <its subject> <oid>`, and the
+  action reports a conflict;
+- when the expected stash is still listed, or the list cannot be read afterwards, the action returns an
+  error that names the commit, not success;
+- a stash that cannot be put back is reported with its id for `git stash store`.
+
+The forced English locale is gone, so apply errors stay in the user's git language (R2-2).
+
+The Rust test now builds a moved list and checks three outcomes: the wrong stash is put back with its
+message; nothing missing is an error ("still in the list"); the expected drop passes. No message is parsed
+any more, so the old unparseable-output path no longer exists.
+
+**R2-3 (optional nit): done.** The branch list is one Tab stop (roving `tabindex`: the row last focused,
+else the first) with `↑`/`↓` inside it. The e2e asserts exactly one row has `tabIndex` 0.
+
+**Verification:**
+- `cargo test -p kelpie -j 2 git_basics`: 15 passed.
+- `cargo clippy -p kelpie --all-targets`: clean.
+- `pnpm typecheck`: ok. `pnpm test`: 42 files, 468 tests. i18n check: 0 missing (4 new backend fragments).
+- `git_basics.py` once on the rebuilt debug app: 37/37, isolated daemon and data folder; afterwards only
+  the user's own Kelpie processes were running.
+
 Status: DONE
-Summary: Branch switcher, 100-commit log and stash apply/drop are in the Changes panel, with the review fixes applied: detached-HEAD orphan refusal, race-safe stash actions, held-before-dirty order, keyboard access, a History that follows a switch, and UTF-8 log output. Unit, vitest and isolated GUI e2e (36/36 three times) are green.
+Summary: The git basics work is complete with both review rounds applied. The stash drop is now verified by comparing the list before and after, which fails closed with no output parsing, and the branch list has a roving tabindex. Unit, vitest and GUI e2e (37/37) are green.
