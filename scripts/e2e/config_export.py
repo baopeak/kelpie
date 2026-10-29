@@ -71,6 +71,9 @@ GH = "ghp_0123456789abcdefghijABCDEFGHIJ012345"
 # An agent argument's value on each computer: masked in the file, B keeps its own.
 API_KEY_A = "a-local-api-key-1234"
 API_KEY_B = "b-local-api-key-5678"
+# A network path on this computer's own loopback address with a share that does not exist: what an
+# import must refuse, harmless if it were ever opened.
+SHARE_PATH = "\\\\127.0.0.1\\kelpie-e2e-no-such-share"
 ANT = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123"
 DB_PW = "hunter2hunter2"
 HOST_TOKEN = "tok_abcdef123456"
@@ -284,6 +287,10 @@ def phase_a(run):
         "label": "Build box", "hostname": "10.0.0.5", "user": "dev", "auth": "password", "identityFile": "~/.ssh/id_ed25519", "forwardAgent": True,
         "env": {"API_TOKEN": HOST_TOKEN, "LANG": "C.UTF-8"}, "notes": f"deploy key {GH}",
     }))
+    # A key file on a network share (this computer's own address, nothing listens): never exported.
+    ok(call(d, "window.__kelpie.sshHosts.saveHost(window.__kelpie.sshHosts.newHost(arguments[0]))", {
+        "label": "Share key", "alias": "share-key", "hostname": "10.0.0.6", "identityFile": SHARE_PATH + "\\key",
+    }))
     for pid in ("acme-tools", "beta-tools"):
         ok(call(d, "window.__kelpie.plugins.pluginInstallFolder(arguments[0])", os.path.join(PLUGINS_SRC, pid)))
     daemon = "window.__kelpie.ipc.daemon"
@@ -311,6 +318,7 @@ def phase_a(run):
     run.check("A: export reports every section written", sorted(r["counts"]) == sorted(["settings", "quickCommands", "layouts", "automations", "sshHosts", "plugins", "agents"]), json.dumps(r["counts"]))
     msg = d.wait("return document.querySelector('[data-setting=\"config-transfer\"] [data-part=\"message\"]')?.textContent || null", 10)
     run.check("A: the row says where the file went", EXPORT in (msg or ""), msg)
+    run.check("A: …and names the host left out for its network key path", "Not exported, they use a network or device path: share-key (SSH hosts)" in (msg or "") and r.get("foreign") == [{"section": "sshHosts", "name": "share-key"}], msg)
     ok(call(d, f"{CT}.exportTo(arguments[0], undefined, false)", EXPORT_PLAIN))
 
     text = open(EXPORT, encoding="utf-8").read()
@@ -325,6 +333,7 @@ def phase_a(run):
     run.check("file without values: names only", plain_claude["env"] == [{"name": "DB_PASSWORD"}, {"name": "GITHUB_TOKEN"}, {"name": "PUBLIC_FLAG"}], json.dumps(plain_claude["env"]))
     run.check("file: the quick command keeps its text around the masked token", sec["quickCommands"][0]["text"] == "export GITHUB_TOKEN=[redacted] && npm publish", sec["quickCommands"][0]["text"])
     run.check("file: automations are written switched off", [a["enabled"] for a in sec["automations"]] == [False, False])
+    run.check("file: the host with a network key path is not in it", [h["alias"] for h in sec["sshHosts"]] == ["build-box"] and "kelpie-e2e-no-such-share" not in text and "share-key" not in text)
     host = sec["sshHosts"][0]
     run.check("file: the host keeps its key path and loses secret variables", host["identityFile"] == "~/.ssh/id_ed25519" and host["env"] == {"LANG": "C.UTF-8"} and "os" not in host, json.dumps(host))
     run.check("file: plugins listed with name and version", sec["plugins"] == [{"id": "acme-tools", "name": "Acme Tools", "version": "1.2.0"}, {"id": "beta-tools", "name": "Beta Tools", "version": "1.2.0"}], json.dumps(sec["plugins"]))
@@ -359,6 +368,18 @@ def phase_b(run, exported):
         run.check(f"B: {os.path.basename(path)} is refused ({why})", isinstance(r, dict) and why in r.get("err", ""), json.dumps(r)[:200])
     run.check("B: …and nothing changed, no backup made", configuration(d) == before and not os.path.exists(backups))
     run.check("B: …and no preview is shown", not d.js("return !!document.querySelector('[data-part=\"import-preview\"]')"))
+
+    # A shell automation whose script is on a network share never reaches the daemon (it would read it at once).
+    unc = os.path.join(WORK, "unc.json")
+    write(unc, json.dumps({"kind": "kelpie-config", "version": 1, "sections": {"automations": [
+        {"name": "Share script", "cwd": AUTO_DIR, "action": "shell", "shell": {"program": "powershell", "argv": ["-File", SHARE_PATH + "\\x.ps1"]}},
+    ]}}))
+    ok(call(d, f"{CT}.previewImportFile(arguments[0])", unc))
+    d.wait("return !!document.querySelector('[data-part=\"import-preview\"]') || null", 10)
+    note = d.js("return document.querySelector('[data-part=\"import-preview\"] [data-section=\"automations\"]')?.textContent || ''")
+    run.check("B: a script on a network share is left out and named", "Left out, a network or device path: Share script" in note and "0 in the file" in note, note)
+    d.click('[data-part="import-preview"] .btn:not(.primary)')
+    run.check("B: …and never reached the daemon", not any(a.get("name") == "Share script" for a in configuration(d)["automations"]))
 
     ok(call(d, f"{CT}.previewImportFile(arguments[0])", EXPORT))
     d.wait("return !!document.querySelector('[data-part=\"import-preview\"]') || null", 10)

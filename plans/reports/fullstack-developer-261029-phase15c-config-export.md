@@ -345,3 +345,86 @@ Tests:
 
 Status: DONE
 Summary: All round-2 findings and the optional Lows are fixed and tested. Rust, Vitest, typecheck, i18n, build and the bundle gate are green, and the GUI round trip passed 59/59 twice using only the recorder.
+## Review fixes, round 3
+
+All round-3 findings in the reviewer report were addressed. No daemon change was made; `API_LEVEL` stays 16.
+
+**R3-M2: network and device paths (security)**
+- One classifier, `path_kind(path) -> Local | Network | Device`, handles every form.
+  - It first treats `/` and `\` alike (`\/server`, `/\?\…` and `//./pipe` all count).
+  - Network: `\\server\…`, `//server/…`, `\\?\UNC\…`, `\\.\UNC\…`, `\??\UNC\…`.
+  - Device: `\\.\…`, `\\?\…`, `\??\…`.
+  - `foreign_arg` applies it to a whole argument and to the part after `=`, or after `:` in a flag (`-File:\\srv\x.ps1`).
+- On export and on import, these are left out before anything reaches the daemon:
+  - a host key file;
+  - an automation folder, program or any shell argument (the daemon reads scripts given to an interpreter when it saves the automation);
+  - the terminal's program or any of its arguments.
+- What was left out is named (`foreign_items`, `{section, name}`):
+  - in the export result: "Not exported, they use a network or device path: share-key (SSH hosts)";
+  - in the import preview: "Left out, a network or device path: …".
+- `device_path` for the file itself now uses the same classifier. `\??\` and mixed separators are refused before any open. A network share chosen in the dialog is still allowed: the user picked it.
+- Tests:
+  - every path form;
+  - argument forms;
+  - an import with each kind of foreign item, including the names reported;
+  - device paths never opened, mixed separators included.
+- E2E checks:
+  - A's host with a `\\127.0.0.1\…` key is named and absent from the file;
+  - a file whose shell automation runs a script on `\\127.0.0.1\…` is previewed with that automation named and left out, and the daemon never sees it.
+  - Both use the loopback address and a share that does not exist, so nothing leaves the machine.
+
+**R3-M1: argument repair**
+
+`unmaskArgs` now matches by position only:
+- An element that is exactly the marker, after a flag, takes the value after the same occurrence of that flag on this computer. A repeated `--token` takes the 1st and 2nd values in order, and a local flag followed by another flag has no value.
+- Without a local value, the marker and that flag are dropped together. This is the only case where a flag goes.
+- `name=[redacted]` takes the same occurrence of `name=…` here.
+- A header (`-H "Authorization: Bearer [redacted]"`) takes a local value only from the same occurrence of that flag, and only when it carries the same header name; otherwise there is no local value. A header needs a space after its colon, so `https://…` is not one.
+- Any other masked element takes the element at the same index, only when both lists have the same shape (same length, same flags in the same places).
+- Otherwise only the masked element is dropped. A standalone flag is never dropped, and a non-marker argument is never used up.
+- For example, `--read-only https://u:[redacted]@db` with no local value becomes `--read-only`. `-c api_key=[redacted]` keeps the `-c`. That is the rule as given; the preview lists the dropped argument.
+- A shell automation whose command would change (any `command:` entry it could not restore) is left out and named.
+- Tests cover every example in the review, plus repeated flags and repeated `name=`.
+
+**R3-M3: name matching**
+- Whole-part words: PASS, PWD, KEY, AUTH, OAUTH, COOKIE, PAT.
+- Whole-part or suffix compounds: PASSWORD, PASSWD, SECRET, TOKEN, CREDENTIAL(S), SSHPASS, DBPASS, PASSPHRASE, PRIVATEKEY, SECRETKEY, ACCESSKEY, APIKEY, AUTHORIZATION, WEBHOOK.
+- An explicit list of known false positives: BYPASS, COMPASS, PASSTHROUGH, PASSIVE, PASSPORT, MONKEY, TURNKEY, HOTKEY, AUTHOR, COMPAT, PATH, PATCH.
+- Acronym camel-case is split: `HTTPAuth` → `HTTP`, `AUTH`; `OPENAIKey` → `OPENAI`, `KEY`.
+- New text masks:
+  - `x-…key/token/secret/auth/password:` and `api-key:` / `private-token:` / `(proxy-)authorization:` headers, including the `Basic`/`Bearer`/`Token`/`Digest` scheme;
+  - `Bearer` tokens of 8 or more characters;
+  - `sshpass -p X`.
+  - `SSHPASS=…` is caught again through the name rule.
+- In argument lists (`mask_args` now takes the program):
+  - `-u user:pass` (not a drive path such as `C:\x.py`);
+  - `-pPASS` for mysql, mariadb and sshpass;
+  - `-p PASS` for sshpass.
+- Tests cover every name and text case in the review, plus non-secrets that must stay unmasked (`cargo -p kelpie`, `python -u C:\x.py`, `Bearer of good news`).
+
+**Lows**
+- **R3-L1:** a new `ImportPlan.keptLocal` (part of `planShown`) says when a masked value took this computer's value. It shows in the preview and the result, e.g. "Masked in the file, this computer's value is kept: Claude Code (arguments --api-key)".
+- **R3-L2:** after a refused save, the check compares every field the import saves: id, name, enabled, kind, prompt, cwd, project, args, env, schedule, deliver, trigger, action, command, quick label and dry run. A test covers a replaced automation that differs only in those fields; it is put back with its approval.
+- **R3-L3:** covered by the shared classifier (mixed separators, `\??\`).
+- **R3-L4:** hosts and automations dropped for a network or device path are named on export (see R3-M2).
+- **R3-L5:** acronym splitting (see R3-M3).
+
+**Notes**
+- The test daemon in the unit tests now refuses a save only once, so an undo can put a refused automation back as a real daemon would after a one-off failure.
+- During this round, drive C: (Claude Code's temp folder) ran out of space once, filled by other sessions' temp files and other workstreams' test folders.
+  - One background test output was cut short, and that run was simply repeated.
+  - Nothing outside this session's own files was deleted.
+  - Free space on C: is still low (about 1 GB); builds and e2e scratch stay on D:.
+
+**Numbers after round 3**
+- Rust `config_transfer`: 26 tests.
+- `cargo test -p kelpie -j 2`: 208 passed, 5 ignored (pre-existing). `cargo clippy -p kelpie --all-targets` is clean.
+- Vitest: 504 passed; `config-transfer.test.ts` has 36 tests.
+- `pnpm typecheck` clean; `i18n:check` 0 missing.
+- `pnpm build` passes. Entry 326.09 kB gz against the 338.60 limit; lazy chunk 10.59 kB JS + 0.46 kB CSS.
+- E2E: 63/63, twice in a row, with the password-store recorder.
+  - An invocation before those printed nothing (its output was lost), so it is not counted.
+  - Afterwards none of this script's processes were running. The `tauri-driver`, `msedgedriver` and `kelpied` running at that time belong to another workstream (other ports, another worktree) and were left alone.
+
+Status: DONE
+Summary: All round-3 findings are fixed and tested: one shared path classifier keeps network and device paths (shell arguments included) away from the daemon, masked arguments are matched by position only, and the name matcher covers compound and acronym names. Every check is green, and the GUI round trip passed 63/63 twice using only the recorder.

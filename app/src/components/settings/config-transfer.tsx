@@ -123,7 +123,9 @@ const chosenPlan = createMemo(() => {
 /** Writes the export: the ticked sections and the values switch, unless given. */
 export async function exportTo(path: string, wanted = exportSections().filter(available), withValues = includeValues()) {
   const r = await exportConfig(path, wanted, withValues, appContext());
-  setMessage({ text: t("Exported to {path}", { path: r.path }) });
+  const lines = [t("Exported to {path}", { path: r.path })];
+  if (r.foreign?.length) lines.push(t("Not exported, they use a network or device path: {names}", { names: r.foreign.map((f) => `${f.name} (${t(LABELS[f.section])})`).join(", ") }));
+  setMessage({ text: lines.join("\n") });
   return r;
 }
 
@@ -176,18 +178,29 @@ function summary(k: ConfigSection, plan: ImportPlan): string {
   return parts.join(" · ");
 }
 
-/** Masked values the file had and this computer has no value for. */
-const fillNotes = (k: ConfigSection, plan: ImportPlan) =>
-  plan.fillIn
+/** Masked values the file had: taken from this computer, or (without a value here) left empty or the
+ *  item left out. */
+const fillNotes = (k: ConfigSection, plan: ImportPlan) => [
+  ...plan.keptLocal
+    .filter((f) => f.section === k)
+    .map((f) => t("Masked in the file, this computer's value is kept: {item} ({fields})", { item: f.item, fields: f.fields.map(fieldLabel).join(", ") })),
+  ...plan.fillIn
     .filter((f) => f.section === k)
     .map((f) =>
       f.leftOut
         ? t("Left out, masked in the file and not set here: {item} ({fields})", { item: f.item, fields: f.fields.map(fieldLabel).join(", ") })
         : t("Masked in the file and not set here, left empty: {item} ({fields}). Fill it in after the import.", { item: f.item, fields: f.fields.map(fieldLabel).join(", ") }),
-    );
+    ),
+];
 
-function notes(k: ConfigSection, plan: ImportPlan): string[] {
-  return [...sectionNotes(k, plan), ...fillNotes(k, plan)];
+/** Items the file had that use a network or device path (never brought in). */
+const foreignNotes = (k: ConfigSection, read: ImportRead) => {
+  const names = (read.foreign ?? []).filter((f) => f.section === k).map((f) => f.name);
+  return names.length ? [t("Left out, a network or device path: {names}", { names: names.join(", ") })] : [];
+};
+
+function notes(k: ConfigSection, plan: ImportPlan, read: ImportRead): string[] {
+  return [...sectionNotes(k, plan), ...foreignNotes(k, read), ...fillNotes(k, plan)];
 }
 
 function sectionNotes(k: ConfigSection, plan: ImportPlan): string[] {
@@ -296,7 +309,7 @@ export default function ConfigTransfer() {
                   <Show when={p().unavailable[k]} fallback={<span class="muted-inline" data-part="counts">{summary(k, fullPlan()!)}</span>}>
                     {(why) => <span class="config-error" data-part="unavailable">{t("Cannot be imported now: {reason}", { reason: why() })}</span>}
                   </Show>
-                  <For each={p().unavailable[k] ? [] : notes(k, fullPlan()!).filter(Boolean)}>{(n) => <span class="muted-inline" data-part="note">{n}</span>}</For>
+                  <For each={p().unavailable[k] ? [] : notes(k, fullPlan()!, p().read).filter(Boolean)}>{(n) => <span class="muted-inline" data-part="note">{n}</span>}</For>
                 </div>
               )}
             </For>

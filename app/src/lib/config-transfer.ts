@@ -73,6 +73,8 @@ export interface ImportRead {
   doc: ConfigDoc;
   skipped: Partial<Record<ConfigSection, number>>;
   ignored: string[];
+  /** Items left out because they point at a network or device path, by name. */
+  foreign?: { section: ConfigSection; name: string }[];
 }
 
 /** An automation as the daemon lists it. */
@@ -249,54 +251,96 @@ function mergeList<T>(local: T[], incoming: T[], key: { id: (x: T) => string; na
 export const MASK = "[redacted]";
 const masked = (v: unknown) => (typeof v === "string" ? v.includes(MASK) : JSON.stringify(v ?? null).includes(MASK));
 
-/** A text field: the file's value, or this computer's when the file's is masked; without a local value
- *  it is empty and `field` is named in `missing`. */
-function unmaskText(v: string, local: string | undefined | null, field: string, missing: string[]): string {
+/** What resolving masked values did to one item: fields left empty (or, for arguments, `args:<flag>`
+ *  dropped) for want of a local value, and fields that took this computer's value instead of the file's. */
+interface Track {
+  missing: string[];
+  kept: string[];
+}
+const track = (): Track => ({ missing: [], kept: [] });
+
+/** A text field: the file's value, or this computer's when the file's is masked (noted in `kept`);
+ *  without a local value it is empty and named in `missing`. */
+function unmaskText(v: string, local: string | undefined | null, field: string, tr: Track): string {
   if (!masked(v)) return v;
-  if (local !== undefined && local !== null && !masked(local)) return local;
-  missing.push(field);
+  if (local !== undefined && local !== null && !masked(local)) {
+    tr.kept.push(field);
+    return local;
+  }
+  tr.missing.push(field);
   return "";
 }
 
-/** An argument list: a masked value takes this computer's value for the same flag (`--api-key X`) or
- *  name (`--token=X`, `api_key=X`); without one it is left out with its flag, and named in `missing`
- *  (`args:--api-key`), so the arguments that remain still work. */
-function unmaskArgs(inc: readonly string[], loc: readonly string[] | undefined, missing: string[], field = "args"): string[] {
+const isFlag = (x: string | undefined) => !!x && /^--?[A-Za-z]/.test(x) && !x.includes("=");
+/** Index in `list` of the `k`-th element (0-based) that `pred` accepts, or -1. */
+function nth(list: readonly string[], pred: (x: string) => boolean, k: number): number {
+  let seen = -1;
+  for (let i = 0; i < list.length; i++) if (pred(list[i]) && ++seen === k) return i;
+  return -1;
+}
+/** How many elements before index `i` `pred` accepts. */
+const before = (list: readonly string[], i: number, pred: (x: string) => boolean) => list.slice(0, i).filter(pred).length;
+/** `Authorization: Bearer …` → `authorization` (a colon with a space after it: not `https://…`). */
+const headerName = (x: string | undefined) => (x ? /^\s*([A-Za-z][A-Za-z0-9-]*)\s*:\s/.exec(x)?.[1]?.toLowerCase() : undefined);
+
+/** An argument list whose masked elements are filled in from this computer's arguments, matched by
+ *  position, never by guess:
+ *  - an element that is exactly the marker after a flag (`--api-key [redacted]`, what the export writes
+ *    for a secret flag) takes the value after the same occurrence of that flag here; without one, the
+ *    marker and that flag are left out together;
+ *  - `name=[redacted]` takes the same occurrence of `name=…` here;
+ *  - a header (`Authorization: Bearer [redacted]` after `-H`) takes the value after the same occurrence of
+ *    that flag here only when it is the same header;
+ *  - anything else takes the element at the same index when both lists have the same shape (same length,
+ *    same flags in the same places).
+ *  Otherwise only the masked element is left out (a flag on its own is never dropped), named in
+ *  `missing` (`args:--api-key`). Elements filled from here are named in `kept`. */
+function unmaskArgs(inc: readonly string[], loc: readonly string[] | undefined, tr: Track, field = "args"): string[] {
+  const here = loc ?? [];
   const out: string[] = [];
-  const valueAfter = (flag: string) => {
-    const j = loc?.indexOf(flag) ?? -1;
-    return j >= 0 ? loc![j + 1] : undefined;
-  };
+  const usable = (x: string | undefined): x is string => x !== undefined && !masked(x);
+  const sameShape = here.length === inc.length && inc.every((x, n) => !isFlag(x) || here[n] === x);
   for (let i = 0; i < inc.length; i++) {
     const a = inc[i];
     if (!masked(a)) {
       out.push(a);
       continue;
     }
+    const prev = i > 0 ? inc[i - 1] : undefined;
     const eq = a.indexOf("=");
-    const prev = i > 0 ? inc[i - 1] : "";
     let local: string | undefined;
     let name: string;
-    if (eq > 0 && !masked(a.slice(0, eq))) {
+    if (a === MASK && isFlag(prev)) {
+      name = prev!;
+      const j = nth(here, (x) => x === prev, before(inc, i - 1, (x) => x === prev));
+      local = j >= 0 && !isFlag(here[j + 1]) ? here[j + 1] : undefined;
+      if (!usable(local)) {
+        // The marker is that flag's value: both go, so the flag cannot take the next argument instead.
+        if (out[out.length - 1] === prev) out.pop();
+        tr.missing.push(`${field}:${name}`);
+        continue;
+      }
+    } else if (eq > 0 && !masked(a.slice(0, eq))) {
       name = a.slice(0, eq);
-      local = loc?.find((x) => x.startsWith(`${name}=`));
-    } else if (prev.startsWith("-") && out[out.length - 1] === prev) {
-      name = prev;
-      local = valueAfter(prev);
-      if (local === undefined || masked(local)) out.pop();
+      const has = (x: string) => x.startsWith(`${name}=`);
+      const j = nth(here, has, before(inc, i, has));
+      local = j >= 0 ? here[j] : undefined;
+    } else if (headerName(a) && isFlag(prev)) {
+      name = `${prev} ${headerName(a)}`;
+      const j = nth(here, (x) => x === prev, before(inc, i - 1, (x) => x === prev));
+      const candidate = j >= 0 ? here[j + 1] : undefined;
+      local = headerName(candidate) === headerName(a) ? candidate : undefined;
     } else {
-      name = a;
+      name = `#${i + 1}`;
+      local = sameShape ? here[i] : undefined;
     }
-    if (local !== undefined && !masked(local)) out.push(local);
-    else {
-      missing.push(`${field}:${name}`);
-      // `-c api_key=X`: the flag the value belonged to goes too (`--token=X` stands alone).
-      if (!a.startsWith("-") && prev.startsWith("-") && !prev.includes("=") && out[out.length - 1] === prev) out.pop();
-    }
+    if (usable(local)) {
+      out.push(local);
+      tr.kept.push(`${field}:${name}`);
+    } else tr.missing.push(`${field}:${name}`);
   }
   return out;
 }
-
 /** Environment from a file over a local one: values replace; a name without a value (or with a masked
  *  one) keeps the local value, or is reported as needing one on this computer. */
 function mergeEnv(local: Record<string, string> | undefined, entries: EnvEntry[]): { env: Record<string, string>; needed: string[] } {
@@ -383,12 +427,14 @@ export interface ImportPlan {
   /** Values masked in the file that this computer has no value for: left empty (`fields`, e.g. `notes`,
    *  `args:--api-key`), or the whole item left out when it cannot do without them. */
   fillIn: { section: ConfigSection; item: string; fields: string[]; leftOut: boolean }[];
+  /** Values masked in the file that took this computer's value instead (the file's version is not used). */
+  keptLocal: { section: ConfigSection; item: string; fields: string[] }[];
   runs: RunChange[];
   hostTargets: HostTargetChange[];
 }
 
 /** What the user agreed to in the preview; an apply that would do anything else is refused. */
-export const planShown = (p: Pick<ImportPlan, "sections" | "runs" | "hostTargets" | "fillIn">) => ({ sections: p.sections, runs: p.runs, hostTargets: p.hostTargets, fillIn: p.fillIn });
+export const planShown = (p: Pick<ImportPlan, "sections" | "runs" | "hostTargets" | "fillIn" | "keptLocal">) => ({ sections: p.sections, runs: p.runs, hostTargets: p.hostTargets, fillIn: p.fillIn, keptLocal: p.keptLocal });
 
 const show = (v: unknown): string | null => {
   const s = v === undefined || v === null ? "" : Array.isArray(v) ? argvText(v as string[]) : String(v);
@@ -405,14 +451,15 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
   const s = read.doc.sections;
   const want = (k: ConfigSection) => chosen.includes(k) && s[k] !== undefined;
   const skippedIn = (k: ConfigSection) => read.skipped[k] ?? 0;
-  const plan: ImportPlan = { sections: {}, settings: null, vault: null, automations: [], missingPlugins: [], envNeeded: [], fillIn: [], runs: [], hostTargets: [] };
+  const plan: ImportPlan = { sections: {}, settings: null, vault: null, automations: [], missingPlugins: [], envNeeded: [], fillIn: [], keptLocal: [], runs: [], hostTargets: [] };
   const run = (section: ConfigSection, item: string, field: string, before: unknown, after: unknown) => {
     const [b, a] = [show(before), show(after)];
     if (b !== a) plan.runs.push({ section, item, field, before: b, after: a });
   };
   /** Records masked values this computer has no value for; `leftOut`: the item is not imported. */
-  const fill = (section: ConfigSection, item: string, fields: string[], leftOut = false) => {
-    if (fields.length) plan.fillIn.push({ section, item, fields, leftOut });
+  const fill = (section: ConfigSection, item: string, tr: Track, leftOut = false) => {
+    if (tr.missing.length) plan.fillIn.push({ section, item, fields: tr.missing, leftOut });
+    if (tr.kept.length && !leftOut) plan.keptLocal.push({ section, item, fields: tr.kept });
   };
   const projectFor = (id: string | null | undefined, cwd?: string) =>
     (id && cur.projects.some((p) => p.id === id) ? id : null) ?? (cwd ? cur.projects.find((p) => samePath(p.path, cwd))?.id ?? null : null);
@@ -426,10 +473,13 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
       const v = fieldOf(values, k);
       if (!masked(v)) continue;
       if (k === "shellArgs") {
-        const missing: string[] = [];
-        (values as Record<string, unknown>)[k] = unmaskArgs(v as string[], cur.settings.shellArgs, missing);
-        fill("settings", k, missing);
-      } else delete (values as Record<string, unknown>)[k];
+        const tr = track();
+        (values as Record<string, unknown>)[k] = unmaskArgs(v as string[], cur.settings.shellArgs, tr);
+        fill("settings", k, tr);
+      } else {
+        delete (values as Record<string, unknown>)[k];
+        fill("settings", k, { missing: [], kept: [k] });
+      }
     }
     const changed = Object.keys(values).filter((k) => !same(fieldOf(cur.settings, k), fieldOf(values, k)));
     next = { ...next, ...values };
@@ -440,10 +490,10 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
     const m = mergeList<QuickCommand>(next.quickCommands ?? [], s.quickCommands!, {
       id: (x) => x.id, name: (x) => x.label,
       clean: (inc, loc) => {
-        const missing: string[] = [];
-        const q = { ...inc, label: unmaskText(inc.label, loc?.label, "label", missing), text: unmaskText(inc.text, loc?.text, "content", missing) };
-        fill("quickCommands", inc.label, missing, missing.length > 0);
-        return missing.length ? null : q;
+        const tr = track();
+        const q = { ...inc, label: unmaskText(inc.label, loc?.label, "label", tr), text: unmaskText(inc.text, loc?.text, "content", tr) };
+        fill("quickCommands", inc.label, tr, tr.missing.length > 0);
+        return tr.missing.length ? null : q;
       },
       adopt: (inc, _loc, id) => ({ id, label: inc.label, text: inc.text, action: inc.action, enter: inc.enter, projectId: projectFor(inc.projectId) }),
     }, opts.newId);
@@ -457,11 +507,11 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
     const m = mergeList<SavedLayout>(next.layouts ?? [], s.layouts!, {
       id: (x) => x.id, name: (x) => x.name,
       clean: (inc, loc) => {
-        const missing: string[] = [];
-        const name = unmaskText(inc.name, loc?.name, "name", missing);
-        const template = masked(inc.template) ? (loc && !masked(loc.template) ? loc.template : (missing.push("template"), null)) : inc.template;
-        fill("layouts", inc.name, missing, missing.length > 0);
-        return missing.length || !template ? null : { ...inc, name, template };
+        const tr = track();
+        const name = unmaskText(inc.name, loc?.name, "name", tr);
+        const template = masked(inc.template) ? (loc && !masked(loc.template) ? (tr.kept.push("template"), loc.template) : (tr.missing.push("template"), null)) : inc.template;
+        fill("layouts", inc.name, tr, tr.missing.length > 0);
+        return tr.missing.length || !template ? null : { ...inc, name, template };
       },
       adopt: (inc, _loc, id) => ({ id, name: inc.name, template: inc.template }),
     }, opts.newId);
@@ -478,10 +528,10 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
     for (const a of s.agents!) {
       const at = profiles.findIndex((p) => p.kind === a.kind);
       const old = at >= 0 ? profiles[at] : undefined;
-      const missing: string[] = [];
-      const label = unmaskText(a.label, old?.label, "label", []) || a.kind;
-      const args = unmaskArgs(a.args, old?.args, missing);
-      const permission = a.permission ? unmaskText(a.permission, old?.permission, "permission", missing) : "";
+      const tr = track();
+      const label = unmaskText(a.label, old?.label, "label", track()) || a.kind;
+      const args = unmaskArgs(a.args, old?.args, tr);
+      const permission = a.permission ? unmaskText(a.permission, old?.permission, "permission", tr) : "";
       const { env, needed } = mergeEnv(old?.env, a.env);
       const profile: AgentProfile = { kind: a.kind, label, args, ...(permission ? { permission } : {}), ...(Object.keys(env).length ? { env } : {}) };
       if (old) {
@@ -492,7 +542,7 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
         add++;
       }
       if (needed.length) plan.envNeeded.push({ kind: a.kind, names: needed });
-      fill("agents", label, missing);
+      fill("agents", label, tr);
       run("agents", label, "args", old?.args, profile.args);
       run("agents", label, "permission", old?.permission, profile.permission);
       for (const name of Object.keys(env).sort()) run("agents", label, `env:${name}`, old?.env?.[name], env[name]);
@@ -508,18 +558,20 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
       id: (x) => x.id, name: (x) => x.alias,
       clean: (inc, loc) => {
         if (masked(inc.hostname) || masked(inc.alias)) {
-          fill("sshHosts", inc.alias, ["hostname"], true);
+          fill("sshHosts", inc.alias, { missing: ["hostname"], kept: [] }, true);
           return null;
         }
-        const missing: string[] = [];
+        const tr = track();
         const h: SshHost = { ...inc, env: {}, tags: inc.tags.filter((x) => !masked(x)) };
-        for (const f of HOST_TEXT) (h as unknown as Record<string, unknown>)[f] = unmaskText(inc[f] as string, loc?.[f] as string | undefined, f, missing);
+        for (const f of HOST_TEXT) (h as unknown as Record<string, unknown>)[f] = unmaskText(inc[f] as string, loc?.[f] as string | undefined, f, tr);
         for (const [k, v] of Object.entries(inc.env)) {
           const value = masked(v) ? loc?.env[k] : v;
-          if (value !== undefined && !masked(value)) h.env[k] = value;
-          else missing.push(`env:${k}`);
+          if (value !== undefined && !masked(value)) {
+            h.env[k] = value;
+            if (masked(v)) tr.kept.push(`env:${k}`);
+          } else tr.missing.push(`env:${k}`);
         }
-        fill("sshHosts", inc.alias, missing);
+        fill("sshHosts", inc.alias, tr);
         return h;
       },
       // A replaced host keeps what this computer recorded about it while it still connects to the same place.
@@ -550,17 +602,17 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
       id: (x) => x.id, name: (x) => x.name,
       clean: (raw, loc) => {
         const inc = raw as unknown as AutomationEntry;
-        const missing: string[] = [];
-        const shell = inc.shell ? { program: unmaskText(inc.shell.program, loc?.shell?.program, "command", missing), argv: unmaskArgs(inc.shell.argv, loc?.shell?.argv, missing, "command") } : inc.shell;
+        const tr = track();
+        const shell = inc.shell ? { program: unmaskText(inc.shell.program, loc?.shell?.program, "command", tr), argv: unmaskArgs(inc.shell.argv, loc?.shell?.argv, tr, "command") } : inc.shell;
         const out = {
           ...inc,
-          name: unmaskText(inc.name, loc?.name, "name", missing),
-          cwd: unmaskText(inc.cwd, loc?.cwd, "cwd", missing),
-          prompt: unmaskText(inc.prompt, loc?.prompt, "prompt", missing),
-          quick_label: inc.quick_label ? unmaskText(inc.quick_label, loc?.quick_label, "quick_label", []) : inc.quick_label,
-          args: unmaskArgs(inc.args, loc?.args, missing),
+          name: unmaskText(inc.name, loc?.name, "name", tr),
+          cwd: unmaskText(inc.cwd, loc?.cwd, "cwd", tr),
+          prompt: unmaskText(inc.prompt, loc?.prompt, "prompt", tr),
+          quick_label: inc.quick_label ? unmaskText(inc.quick_label, loc?.quick_label, "quick_label", track()) : inc.quick_label,
+          args: unmaskArgs(inc.args, loc?.args, tr),
           shell,
-          trigger: inc.trigger ? { ...inc.trigger, glob: unmaskText(inc.trigger.glob, loc?.trigger?.glob, "trigger", missing) } : inc.trigger,
+          trigger: inc.trigger ? { ...inc.trigger, glob: unmaskText(inc.trigger.glob, loc?.trigger?.glob, "trigger", tr) } : inc.trigger,
         };
         // The file's variables; one without a usable value keeps the replaced automation's value, if it had one.
         const env: Record<string, string> = {};
@@ -568,9 +620,10 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
           const v = e.value !== undefined && !masked(e.value) ? e.value : loc?.env?.[e.name];
           if (v !== undefined && !masked(v)) env[e.name] = v;
         }
-        // It cannot run without these; the rest (arguments, variables) only lose the masked parts.
-        const essential = missing.filter((f) => ["name", "cwd", "trigger", "command"].includes(f) || (f === "prompt" && inc.action !== "shell"));
-        fill("automations", inc.name, missing, essential.length > 0);
+        // It cannot run without these; agent arguments only lose the masked parts. A command that would run
+        // differently from the file's (an argument it could not restore) is left out whole.
+        const essential = tr.missing.filter((f) => ["name", "cwd", "trigger", "command"].includes(f) || f.startsWith("command:") || (f === "prompt" && inc.action !== "shell"));
+        fill("automations", inc.name, tr, essential.length > 0);
         return essential.length ? null : ({ ...out, env } as unknown as ListedAutomation);
       },
       adopt: (inc, _loc, id) => ({ ...inc, id }),
@@ -655,7 +708,7 @@ export async function exportConfig(path: string, wanted: readonly ConfigSection[
     if (!ctx.automationsSupported()) throw new Error(t("Automations need a connected session daemon of this version."));
     sections.automations = await ctx.daemon<Automation[]>("automation.list");
   }
-  return ctx.invoke<{ path: string; counts: Partial<Record<ConfigSection, number>> }>("config_export", { path, sections, wanted, includeEnvValues, exportedAt: new Date().toISOString() });
+  return ctx.invoke<{ path: string; counts: Partial<Record<ConfigSection, number>>; foreign?: { section: ConfigSection; name: string }[] }>("config_export", { path, sections, wanted, includeEnvValues, exportedAt: new Date().toISOString() });
 }
 
 export class ImportFailed extends Error {
@@ -680,14 +733,21 @@ export interface ImportResult {
 }
 
 /** The parts of an automation an import sets (what a daemon that kept a refused one would hold). */
-const automationContent = (a: Automation) => JSON.stringify([a.name, a.kind, a.prompt, a.cwd, a.args, a.action ?? "agent", a.shell?.program ?? null, a.shell?.argv ?? null, a.trigger ?? null]);
+const automationContent = (a: Automation) => {
+  const env = Object.fromEntries(Object.entries(a.env ?? {}).sort(([x], [y]) => x.localeCompare(y)));
+  const trigger = a.trigger ? { event: a.trigger.event, glob: a.trigger.glob, daily_cap: a.trigger.daily_cap } : null;
+  return JSON.stringify([
+    a.id, a.name, a.enabled, a.kind, a.prompt, a.cwd, a.project_id ?? null, a.args, env, a.every, a.time, a.weekday, a.deliver ?? null, trigger,
+    a.action ?? "agent", a.shell ? [a.shell.program, a.shell.argv] : null, a.quick_label ?? null, !!a.dry_run,
+  ]);
+};
 
 /** Applies the chosen sections of `read` if they still plan as `previewed`, and only with `runsChecked`
  *  when that changes what programs run. Moved hosts lose their saved password first, before anything is
  *  saved, so no failure or crash can leave a password bound to a new address (that step is never undone,
  *  and a failure says so). Every other change made before a failure is undone; a backup of the previous
  *  configuration is kept either way. */
-export async function applyImport(read: ImportRead, chosen: readonly ConfigSection[], previewed: Pick<ImportPlan, "sections" | "runs" | "hostTargets" | "fillIn">, ctx: TransferContext, opts: { runsChecked: boolean }): Promise<ImportResult> {
+export async function applyImport(read: ImportRead, chosen: readonly ConfigSection[], previewed: Pick<ImportPlan, "sections" | "runs" | "hostTargets" | "fillIn" | "keptLocal">, ctx: TransferContext, opts: { runsChecked: boolean }): Promise<ImportResult> {
   const planOpts = { defaults: ctx.defaults, newId: ctx.newId };
   const cur = await loadCurrent(chosen, ctx);
   const plan = planImport(read, chosen, cur, planOpts);

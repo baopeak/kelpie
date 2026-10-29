@@ -40,25 +40,37 @@ const ACTIONS: &[&str] = &["agent", "quick", "shell"];
 const MASK: &str = kelpie_proto::redact::MASK;
 
 /// Name parts that mark a secret only as a whole part: `SMTP_PASS`, `--pass`, `OPENAI_KEY`, `apiKey`,
-/// `GH_AUTH` — but not `BYPASS`, `MONKEY` or `AUTHOR`.
-const SECRET_PARTS: &[&str] = &["PASS", "PWD", "KEY", "AUTH", "OAUTH", "COOKIE", "APIKEY"];
-/// Words unambiguous enough to count at the end of a part too: `DBPASSWORD`, `GHTOKEN`, `clientSecret`.
-const SECRET_SUFFIXES: &[&str] = &["PASSWORD", "PASSWD", "SECRET", "TOKEN", "CREDENTIAL", "CREDENTIALS"];
+/// `GH_AUTH`, `GITHUB_PAT` — not as the end of a longer word (`BYPASS`, `MONKEY`, `AUTHOR`, `COMPAT`).
+const SECRET_PARTS: &[&str] = &["PASS", "PWD", "KEY", "AUTH", "OAUTH", "COOKIE", "PAT"];
+/// Words that mark a secret as a whole part or at the end of one: `DBPASSWORD`, `GHTOKEN`, `clientSecret`,
+/// and compounds a secret word is commonly glued into: `SSHPASS`, `DBPASS`, `GPG_PASSPHRASE`,
+/// `PRIVATEKEY`, `AWS_SECRETKEY`, `ACCESSKEY`, `MYAPIKEY`, `AUTHORIZATION`, `SLACK_WEBHOOK_URL`.
+const SECRET_SUFFIXES: &[&str] = &[
+    "PASSWORD", "PASSWD", "SECRET", "TOKEN", "CREDENTIAL", "CREDENTIALS", "SSHPASS", "DBPASS", "PASSPHRASE", "PRIVATEKEY", "SECRETKEY", "ACCESSKEY",
+    "APIKEY", "AUTHORIZATION", "WEBHOOK",
+];
+/// Parts that look like a secret word but are not: never a reason to leave a value out.
+const NOT_SECRET_PARTS: &[&str] = &["BYPASS", "COMPASS", "PASSTHROUGH", "PASSIVE", "PASSPORT", "MONKEY", "TURNKEY", "HOTKEY", "AUTHOR", "COMPAT", "PATH", "PATCH"];
 
-/// A name's parts, upper case: split at anything but letters and digits and at lower → upper case
-/// (`apiKey` → `API`, `KEY`), trailing digits dropped (`DB_PASS2` → `DB`, `PASS`).
+/// A name's parts, upper case: split at anything but letters and digits, at lower → upper case
+/// (`apiKey` → `API`, `KEY`) and at the end of an acronym (`HTTPAuth` → `HTTP`, `AUTH`; `OPENAIKey` →
+/// `OPENAI`, `KEY`), trailing digits dropped (`DB_PASS2` → `DB`, `PASS`).
 fn name_parts(name: &str) -> Vec<String> {
+    let chars: Vec<char> = name.chars().collect();
     let mut parts = Vec::new();
     let mut cur = String::new();
-    let mut prev_lower = false;
-    for c in name.chars() {
-        if (!c.is_ascii_alphanumeric() || (prev_lower && c.is_ascii_uppercase())) && !cur.is_empty() {
+    for (i, &c) in chars.iter().enumerate() {
+        let prev = i.checked_sub(1).map(|j| chars[j]);
+        let next = chars.get(i + 1).copied();
+        let boundary = !c.is_ascii_alphanumeric()
+            || (c.is_ascii_uppercase() && prev.is_some_and(|p| p.is_ascii_lowercase()))
+            || (c.is_ascii_uppercase() && prev.is_some_and(|p| p.is_ascii_uppercase()) && next.is_some_and(|n| n.is_ascii_lowercase()));
+        if boundary && !cur.is_empty() {
             parts.push(std::mem::take(&mut cur));
         }
         if c.is_ascii_alphanumeric() {
             cur.push(c.to_ascii_uppercase());
         }
-        prev_lower = c.is_ascii_lowercase();
     }
     if !cur.is_empty() {
         parts.push(cur);
@@ -66,23 +78,27 @@ fn name_parts(name: &str) -> Vec<String> {
     parts.into_iter().map(|p| p.trim_end_matches(|c: char| c.is_ascii_digit()).to_string()).filter(|p| !p.is_empty()).collect()
 }
 
-/// Whether a variable, key or flag name says its value is a secret (case-insensitive). `SESSION` alone is
-/// not one (`--session-id`, `XDG_SESSION_TYPE`); a session token or cookie is, by its other word. A name
-/// ending in `env_key` holds the name of a variable (Codex `env_key=OPENAI_API_KEY`), not a secret.
+/// Whether a variable, key, header or flag name says its value is a secret (case-insensitive). `SESSION`
+/// alone is not one (`--session-id`, `XDG_SESSION_TYPE`); a session token or cookie is, by its other
+/// word. A name ending in `env_key` holds the name of a variable (Codex `env_key=OPENAI_API_KEY`).
 pub fn secret_name(name: &str) -> bool {
     let parts = name_parts(name);
     if parts.len() >= 2 && parts[parts.len() - 2] == "ENV" && parts[parts.len() - 1] == "KEY" {
         return false;
     }
-    parts.iter().any(|p| SECRET_PARTS.contains(&p.as_str()) || SECRET_SUFFIXES.iter().any(|w| p.ends_with(w)))
+    parts.iter().filter(|p| !NOT_SECRET_PARTS.contains(&p.as_str())).any(|p| SECRET_PARTS.contains(&p.as_str()) || SECRET_SUFFIXES.iter().any(|w| p.ends_with(w)))
 }
 
 /// Credentials in free text beyond the redaction helper's formats: a secret-named flag's value
-/// (`--api-key X`, `--password=x`), `mysql -pXXX`, `curl -u user:pass`, and `NAME=value` with a
-/// secret-sounding upper-case name whatever the value looks like.
+/// (`--api-key X`, `--password=x`), `mysql -pXXX`, `sshpass -p X`, `curl -u user:pass`, secret headers
+/// (`x-api-key: …`, `Authorization: Basic …`), any `Bearer` token of 8+ characters, and `NAME=value`
+/// with a secret-sounding upper-case name whatever the value looks like.
 static FLAG_VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s"'(])(--?[A-Za-z][\w.-]*)(=|[ \t]+)("[^"]*"|'[^']*'|[^\s"']+)"#).expect("flag pattern"));
-static MYSQL_PASSWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(\bmysql(?:dump|admin|sh)?\b[^\n|;&]*?\s-p)([^\s-]\S*)").expect("mysql pattern"));
+static MYSQL_PASSWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(\b(?:mysql(?:dump|admin|sh)?|mariadb)\b[^\n|;&]*?\s-p)([^\s-]\S*)").expect("mysql pattern"));
+static SSHPASS_PASSWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(\bsshpass\b[^\n|;&]*?\s-p[ \t]*)([^\s-]\S*)").expect("sshpass pattern"));
 static USER_PASSWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"((?:^|\s)(?:-u|--user)[ \t]+[^\s:]+:)(\S+)").expect("user pattern"));
+static HEADER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)(\b(?:x-[\w-]*(?:key|token|secret|auth|password)[\w-]*|api-key|private-token|(?:proxy-)?authorization)[ \t]*:[ \t]*(?:(?:basic|bearer|token|digest)[ \t]+)?)([^\s"']+)"#).expect("header pattern"));
+static BEARER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(\bbearer[ \t]+)([A-Za-z0-9._~+/=-]{8,})").expect("bearer pattern"));
 static ENV_ASSIGN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\b([A-Z][A-Z0-9_]*)=("[^"]*"|'[^']*'|\S+)"#).expect("env pattern"));
 
 fn masked_value(v: &str) -> String {
@@ -98,22 +114,56 @@ pub fn mask_text(text: &str) -> String {
         if secret_name(&c[2]) { format!("{}{}{}{}", &c[1], &c[2], &c[3], masked_value(&c[4])) } else { c[0].to_string() }
     });
     let out = MYSQL_PASSWORD.replace_all(&out, format!("${{1}}{MASK}"));
+    let out = SSHPASS_PASSWORD.replace_all(&out, format!("${{1}}{MASK}"));
     let out = USER_PASSWORD.replace_all(&out, format!("${{1}}{MASK}"));
+    let out = HEADER.replace_all(&out, format!("${{1}}{MASK}"));
+    let out = BEARER.replace_all(&out, format!("${{1}}{MASK}"));
     let out = ENV_ASSIGN.replace_all(&out, |c: &regex::Captures| {
         if secret_name(&c[1]) { format!("{}={}", &c[1], masked_value(&c[2])) } else { c[0].to_string() }
     });
     kelpie_proto::redact(&out)
 }
 
-/// An argument list with the value after a secret-named flag masked (`--api-key X`, `--token=X`),
-/// `name=value` arguments with a secret name masked (`-c api_key=X`), and every argument through
-/// the text filter.
-pub fn mask_args(args: &[String]) -> Vec<String> {
+/// The program's name without folder or extension, lower case (`C:\bin\MySQL.exe` → `mysql`).
+fn tool_name(program: &str) -> String {
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    base.strip_suffix(".exe").unwrap_or(&base).to_string()
+}
+
+/// An argument list (of `program`, when known) with the value after a secret-named flag masked
+/// (`--api-key X`, `--token=X`), `name=value` arguments with a secret name masked (`-c api_key=X`),
+/// `-u user:pass` (curl and others), `-pPASS` (mysql, mariadb, sshpass) and `-p PASS` (sshpass), and
+/// every argument through the text filter.
+pub fn mask_args(args: &[String], program: &str) -> Vec<String> {
+    let tool = tool_name(program);
+    let mysql = tool.starts_with("mysql") || tool.starts_with("mariadb");
+    let sshpass = tool == "sshpass";
     let mut out = Vec::with_capacity(args.len());
     let mut hide_next = false;
+    let mut user_next = false;
     for a in args {
         if std::mem::take(&mut hide_next) && !a.starts_with('-') {
             out.push(MASK.to_string());
+            continue;
+        }
+        if std::mem::take(&mut user_next) {
+            if let Some((user, _)) = a.split_once(':').filter(|(u, _)| !a.starts_with('-') && u.len() > 1) {
+                out.push(format!("{user}:{MASK}"));
+                continue;
+            }
+        }
+        if (mysql || sshpass) && a.len() > 2 && a.starts_with("-p") && !a.starts_with("--") {
+            out.push(format!("-p{MASK}"));
+            continue;
+        }
+        if sshpass && a == "-p" {
+            hide_next = true;
+            out.push(a.clone());
+            continue;
+        }
+        if a == "-u" || a == "--user" {
+            user_next = true;
+            out.push(a.clone());
             continue;
         }
         let (name, value) = match a.split_once('=') {
@@ -222,11 +272,38 @@ fn env_entries(v: Option<&Value>, with_values: bool) -> Value {
 
 // ---------- sections ----------
 
-/// A network path (`\\server\share`, `//server/share`): opening one on Windows sends the user's
-/// credentials to that server, so a file never brings one in for a key, a folder or a program.
-pub fn is_unc(path: &str) -> bool {
-    let p = path.trim();
-    p.starts_with("\\\\") || p.starts_with("//") || p.starts_with("\\/") || p.starts_with("/\\")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    Local,
+    /// `\\server\share`, `//server/share`, `\\?\UNC\server\…`, `\??\UNC\server\…`: opening one on Windows
+    /// sends the user's credentials (NTLM) to that server.
+    Network,
+    /// Windows device and raw paths (`\\.\pipe\…`, `\\?\C:\…`, `\??\C:\…`): even reading their metadata
+    /// opens them.
+    Device,
+}
+
+/// What kind of path `path` is on Windows, whatever its separators (`/` and `\` are the same to Windows,
+/// so `\/server`, `/\?\…` and `//./pipe` count too).
+pub fn path_kind(path: &str) -> PathKind {
+    let p = path.trim().replace('/', "\\");
+    let upper = p.to_ascii_uppercase();
+    for prefix in ["\\\\?\\", "\\\\.\\", "\\??\\"] {
+        if let Some(rest) = upper.strip_prefix(prefix) {
+            return if rest.starts_with("UNC\\") { PathKind::Network } else { PathKind::Device };
+        }
+    }
+    if p.starts_with("\\\\") { PathKind::Network } else { PathKind::Local }
+}
+
+/// A path a file must never bring in for something Kelpie or the daemon opens: a network or device path.
+pub fn foreign_path(path: &str) -> bool {
+    path_kind(path) != PathKind::Local
+}
+
+/// A program argument that is, or ends in (`--file=…`, `-File:…`), a network or device path.
+pub fn foreign_arg(arg: &str) -> bool {
+    foreign_path(arg) || arg.split_once('=').is_some_and(|(_, v)| foreign_path(v)) || (arg.starts_with('-') && arg.split_once(':').is_some_and(|(_, v)| foreign_path(v)))
 }
 
 /// Only the settings classified as portable; the window checks each value's shape and range.
@@ -237,13 +314,13 @@ fn settings(v: &Value) -> CmdResult<Value> {
         if SETTINGS_EXPORTED.contains(k) && out.len() < MAX_SETTINGS {
             let val = match (k.as_str(), val.as_array()) {
                 // The terminal's program and arguments: same masking as an agent's arguments; never a
-                // program on a network share.
+                // network or device path.
                 ("shellArgs", Some(a)) => {
                     let args: Vec<String> = a.iter().filter_map(Value::as_str).map(str::to_string).collect();
-                    if args.first().is_some_and(|p| is_unc(p)) {
+                    if args.iter().any(|x| foreign_arg(x)) {
                         continue;
                     }
-                    json!(mask_args(&args))
+                    json!(mask_args(&args, args.first().map_or("", String::as_str)))
                 }
                 _ => val.clone(),
             };
@@ -307,11 +384,19 @@ fn layout(o: &Map<String, Value>) -> Option<Value> {
 /// An automation without anything the daemon owns: no approval, no run history, and switched off.
 fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
     let name = filled(o, "name")?;
-    let cwd = filled(o, "cwd").filter(|c| !is_unc(c))?;
+    let cwd = filled(o, "cwd").filter(|c| !foreign_path(c))?;
     let action = one_of(o, "action", ACTIONS, "agent");
     let shell = if action == "shell" {
+        // The daemon reads the program and the scripts it is given when it saves the automation: a network
+        // or device path anywhere in it leaves the whole automation out.
         let sh = o.get("shell")?.as_object()?;
-        json!({ "program": filled(sh, "program").filter(|p| !is_unc(p))?, "argv": mask_args(&texts(sh, "argv")) })
+        let program = filled(sh, "program").filter(|p| !foreign_path(p))?;
+        let argv = texts(sh, "argv");
+        if argv.iter().any(|a| foreign_arg(a)) {
+            return None;
+        }
+        let argv = mask_args(&argv, &program);
+        json!({ "program": program, "argv": argv })
     } else {
         Value::Null
     };
@@ -329,7 +414,7 @@ fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
         "prompt": text(o, "prompt").unwrap_or_default(),
         "cwd": cwd,
         "project_id": text(o, "project_id").filter(|s| s.len() <= 128),
-        "args": mask_args(&texts(o, "args")),
+        "args": mask_args(&texts(o, "args"), ""),
         "env": env_entries(o.get("env"), with_values),
         "every": one_of(o, "every", EVERY, "daily"),
         "time": time,
@@ -347,7 +432,7 @@ fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
 /// computer recorded about it, checked like the Hosts page checks it.
 fn ssh_host(v: &Value) -> Option<Value> {
     let mut h: Host = serde_json::from_value(v.clone()).ok()?;
-    if is_unc(&h.identity_file) {
+    if foreign_path(&h.identity_file) {
         return None;
     }
     h.os.clear();
@@ -379,7 +464,7 @@ fn agent(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
     let mut a = json!({
         "kind": kind,
         "label": filled(o, "label").unwrap_or_else(|| kind.clone()),
-        "args": mask_args(&texts(o, "args")),
+        "args": mask_args(&texts(o, "args"), ""),
         "env": env_entries(o.get("env"), with_values),
     });
     if let Some(p) = filled(o, "permission").filter(|p| p.len() <= 64) {
@@ -438,6 +523,30 @@ fn clean_sections(input: &Map<String, Value>, with_values: bool) -> CmdResult<Cl
     Ok(Clean { sections, skipped, ignored })
 }
 
+/// Items a file leaves out because they point at a network or device path, by name: hosts with such a key
+/// file, automations with such a folder, program or argument, and the terminal's program and arguments.
+pub fn foreign_items(sections: &Map<String, Value>) -> Vec<Value> {
+    let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let mut out = Vec::new();
+    for h in sections.get("sshHosts").and_then(Value::as_array).into_iter().flatten() {
+        if foreign_path(&s(h, "identityFile")) {
+            out.push(json!({ "section": "sshHosts", "name": s(h, "alias").trim().to_string().chars().take(64).collect::<String>() }));
+        }
+    }
+    for a in sections.get("automations").and_then(Value::as_array).into_iter().flatten() {
+        let shell = a.get("shell").filter(|_| s(a, "action") == "shell");
+        let argv = shell.and_then(|sh| sh.get("argv")).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+        if foreign_path(&s(a, "cwd")) || shell.is_some_and(|sh| foreign_path(&s(sh, "program"))) || argv.into_iter().any(foreign_arg) {
+            out.push(json!({ "section": "automations", "name": s(a, "name").chars().take(64).collect::<String>() }));
+        }
+    }
+    let shell_args = sections.get("settings").and_then(|v| v.get("shellArgs")).and_then(Value::as_array);
+    if shell_args.into_iter().flatten().filter_map(Value::as_str).any(foreign_arg) {
+        out.push(json!({ "section": "settings", "name": "shellArgs" }));
+    }
+    out
+}
+
 /// The export document: the window's sections plus the hosts and plugins read here, cleaned.
 pub fn export_doc(raw: &Map<String, Value>, wanted: &[String], with_values: bool, hosts: Option<&Vault>, plugins: Option<Vec<Value>>, exported_at: &str) -> CmdResult<Value> {
     let mut input = Map::new();
@@ -487,13 +596,14 @@ pub fn read_doc(bytes: &[u8]) -> CmdResult<Value> {
         "doc": { "kind": KIND, "version": VERSION, "exportedAt": stamp("exportedAt"), "appVersion": stamp("appVersion"), "sections": clean.sections },
         "skipped": clean.skipped,
         "ignored": ignored,
+        "foreign": foreign_items(sections),
     }))
 }
 
-/// Windows device and raw paths (`\\.\pipe\…`, `\\?\…`): even reading their metadata opens them.
+/// A device or raw path (see [`PathKind::Device`]): never opened for an import or an export. (A network
+/// share chosen in the dialog is fine: the user picked it.)
 fn device_path(path: &Path) -> bool {
-    let p = path.to_string_lossy();
-    ["\\\\.\\", "\\\\?\\", "//./", "//?/"].iter().any(|prefix| p.starts_with(prefix))
+    path_kind(&path.to_string_lossy()) == PathKind::Device
 }
 
 /// At most [`MAX_FILE`] bytes of a regular file; a larger one is refused unread.
@@ -586,7 +696,8 @@ fn prune_backups(root: &Path) {
 // ---------- commands ----------
 
 /// Writes the export to `path` (from the save dialog). `sections` holds the window's own sections;
-/// `wanted` names every section to include. Returns the item count of each section written.
+/// `wanted` names every section to include. Returns the item count of each section written, and by name
+/// the items left out for a network or device path.
 #[tauri::command]
 pub async fn config_export(path: String, sections: Value, wanted: Vec<String>, include_env_values: bool, exported_at: String) -> CmdResult<Value> {
     blocking(move || {
@@ -600,7 +711,21 @@ pub async fn config_export(path: String, sections: Value, wanted: Vec<String>, i
         }
         write_file_atomic(Path::new(&path), &bytes)?;
         let counts: Map<String, Value> = doc["sections"].as_object().map(|s| s.iter().map(|(k, v)| (k.clone(), json!(v.as_array().map_or(1, Vec::len)))).collect()).unwrap_or_default();
-        Ok(json!({ "path": path, "counts": counts }))
+        let mut considered = Map::new();
+        for w in &wanted {
+            match w.as_str() {
+                "sshHosts" => {
+                    considered.insert(w.clone(), serde_json::to_value(hosts.as_ref().map(|h| &h.hosts)).map_err(err)?);
+                }
+                "automations" | "settings" => {
+                    if let Some(v) = raw.get(w) {
+                        considered.insert(w.clone(), v.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(json!({ "path": path, "counts": counts, "foreign": foreign_items(&considered) }))
     })
     .await
 }

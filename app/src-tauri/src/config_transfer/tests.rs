@@ -262,7 +262,7 @@ fn secret_sounding_names_never_carry_a_value() {
 
 #[test]
 fn arguments_lose_the_value_of_a_secret_flag() {
-    let args = |a: &[&str]| mask_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let args = |a: &[&str]| mask_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "");
     assert_eq!(args(&["--api-key", "c0ffee1234", "--model", "opus"]), ["--api-key", MASK, "--model", "opus"]);
     assert_eq!(args(&["--token", "abc"]), ["--token", MASK]);
     assert_eq!(args(&["--api-key=myrealkey123"]), [format!("--api-key={MASK}")]);
@@ -323,7 +323,7 @@ fn settings_carry_only_classified_keys() {
 
 #[test]
 fn ordinary_flags_and_variable_names_keep_their_values() {
-    let args = |a: &[&str]| mask_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let args = |a: &[&str]| mask_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "");
     let keep: &[&[&str]] = &[
         &["--dangerously-bypass-approvals-and-sandbox", "exec", "fix it"],
         &["--session-id", "0b5c7a7e-1f4b-4a43-9d1e-6a1d2b3c4d5e", "--no-session-persistence", "-p"],
@@ -337,30 +337,117 @@ fn ordinary_flags_and_variable_names_keep_their_values() {
 }
 
 #[test]
-fn network_paths_are_not_brought_in() {
-    for p in ["\\\\attacker\\share\\key", "//attacker/share/key", "\\/x/y"] {
-        assert!(is_unc(p), "{p}");
+fn every_path_form_is_classified() {
+    use PathKind::*;
+    let cases = [
+        // Network shares, whatever the separators and prefixes.
+        ("\\\\attacker\\share\\key", Network),
+        ("//attacker/share/key", Network),
+        ("\\/attacker/share", Network),
+        ("/\\attacker\\share", Network),
+        ("\\\\?\\UNC\\attacker\\share\\k", Network),
+        ("//?/UNC/attacker/share", Network),
+        ("\\\\.\\UNC\\attacker\\share", Network),
+        ("\\??\\UNC\\attacker\\share\\k", Network),
+        ("/??/unc/attacker/share", Network),
+        ("  \\\\attacker\\s  ", Network),
+        // Device and raw paths.
+        ("\\\\.\\pipe\\kelpie-test", Device),
+        ("//./pipe/x", Device),
+        ("\\/.\\pipe\\x", Device),
+        ("\\\\?\\C:\\x.json", Device),
+        ("/\\?\\C:\\x", Device),
+        ("\\??\\C:\\x", Device),
+        ("\\??\\pipe\\x", Device),
+        // Ordinary paths.
+        ("C:\\Users\\me\\keys\\deploy", Local),
+        ("C:/work/p", Local),
+        ("~/keys/deploy", Local),
+        ("/home/me/keys/deploy", Local),
+        ("\\root-relative\\x", Local),
+        ("scripts/x.py", Local),
+        ("", Local),
+    ];
+    for (p, kind) in cases {
+        assert_eq!(path_kind(p), kind, "{p:?}");
     }
-    assert!(!is_unc("~/keys/deploy") && !is_unc("C:\\Users\\me\\keys\\deploy") && !is_unc("/home/me/keys/deploy"));
+    for a in ["\\\\srv\\s\\x.ps1", "--file=\\\\srv\\s\\x", "-File:\\\\srv\\s\\x.ps1", "-File://srv/s/x.ps1", "\\??\\UNC\\srv\\s"] {
+        assert!(foreign_arg(a), "{a}");
+    }
+    for a in ["-File", "x.ps1", "C:\\x.ps1", "--out=C:\\x", "-Command:Get-Date", "https://example.com/x"] {
+        assert!(!foreign_arg(a), "{a}");
+    }
+}
+
+#[test]
+fn network_and_device_paths_are_not_brought_in() {
     let file = json!({ "kind": KIND, "version": 1, "sections": {
-        "sshHosts": [{ "id": "h1", "hostname": "h.example", "identityFile": "\\\\attacker\\share\\k" }, { "id": "h2", "hostname": "h.example", "identityFile": "//attacker/s/k" }, { "id": "h3", "hostname": "ok.example", "identityFile": "~/keys/deploy" }],
-        "automations": [{ "name": "a", "cwd": "\\\\attacker\\share" }, { "name": "b", "cwd": "C:/p", "action": "shell", "shell": { "program": "//attacker/share/x.exe" } }, { "name": "c", "cwd": "C:/p" }],
-        "settings": { "shellArgs": ["\\\\attacker\\share\\sh.exe"], "fontSize": 14 },
+        "sshHosts": [
+            { "id": "h1", "alias": "share-key", "hostname": "h.example", "identityFile": "\\\\attacker\\share\\k" },
+            { "id": "h2", "alias": "nt-key", "hostname": "h.example", "identityFile": "\\??\\UNC\\attacker\\s\\k" },
+            { "id": "h3", "hostname": "ok.example", "identityFile": "~/keys/deploy" },
+        ],
+        "automations": [
+            { "name": "cwd", "cwd": "\\\\attacker\\share" },
+            { "name": "program", "cwd": "C:/p", "action": "shell", "shell": { "program": "//attacker/share/x.exe" } },
+            { "name": "script", "cwd": "C:/p", "action": "shell", "shell": { "program": "powershell", "argv": ["-File", "\\\\attacker\\s\\x.ps1"] } },
+            { "name": "colon", "cwd": "C:/p", "action": "shell", "shell": { "program": "powershell", "argv": ["-File:\\\\attacker\\s\\x.ps1"] } },
+            { "name": "fine", "cwd": "C:/p", "action": "shell", "shell": { "program": "powershell", "argv": ["-File", "scripts\\x.ps1"] } },
+        ],
+        "settings": { "shellArgs": ["pwsh", "-File", "//attacker/s/profile.ps1"], "fontSize": 14 },
     } });
     let read = read_doc(&serde_json::to_vec(&file).unwrap()).unwrap();
     let s = &read["doc"]["sections"];
     assert_eq!(s["sshHosts"].as_array().unwrap().len(), 1);
-    assert_eq!(s["automations"].as_array().unwrap().len(), 1);
+    assert_eq!(s["automations"].as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap()).collect::<Vec<_>>(), ["fine"]);
     assert!(s["settings"].get("shellArgs").is_none());
-    assert_eq!(read["skipped"], json!({ "sshHosts": 2, "automations": 2 }));
+    assert_eq!(read["skipped"], json!({ "sshHosts": 2, "automations": 4 }));
+    // Named, so the user knows what was left out and why.
+    assert_eq!(read["foreign"], json!([
+        { "section": "sshHosts", "name": "share-key" }, { "section": "sshHosts", "name": "nt-key" },
+        { "section": "automations", "name": "cwd" }, { "section": "automations", "name": "program" }, { "section": "automations", "name": "script" }, { "section": "automations", "name": "colon" },
+        { "section": "settings", "name": "shellArgs" },
+    ]));
 }
 
 #[test]
 fn windows_device_paths_are_never_opened() {
-    for p in ["\\\\.\\pipe\\kelpie-test", "\\\\?\\C:\\x.json", "//./pipe/x"] {
+    for p in ["\\\\.\\pipe\\kelpie-test", "\\\\?\\C:\\x.json", "//./pipe/x", "\\/.\\pipe\\x", "/\\?\\C:\\x.json", "\\??\\C:\\x.json", "\\??\\pipe\\kelpie-test"] {
         assert_eq!(read_capped(Path::new(p)).unwrap_err(), "not a file", "{p}");
         assert!(write_file_atomic(Path::new(p), b"x").is_err(), "{p}");
     }
+}
+
+#[test]
+fn compound_and_acronym_names_are_secret() {
+    for name in ["SSHPASS", "DBPASS", "MYSQL_DBPASS", "PASSPHRASE", "GPG_PASSPHRASE", "PRIVATEKEY", "privatekey", "SECRETKEY", "AWS_SECRETKEY", "ACCESSKEY", "MYAPIKEY", "OPENAIKey", "HTTPAuth", "GITHUB_PAT", "AUTHORIZATION", "Proxy-Authorization", "SLACK_WEBHOOK_URL", "x-api-key", "X-Api-Key", "APIKey"] {
+        assert!(secret_name(name), "{name}");
+    }
+    for name in ["BYPASS", "COMPASS", "PASSTHROUGH", "PASSIVE", "COMPAT", "PATH", "AUTHOR", "MONKEY", "HTTPServer", "OPENAIModel", "--dangerously-bypass-approvals-and-sandbox"] {
+        assert!(!secret_name(name), "{name}");
+    }
+    assert_eq!(name_parts("HTTPAuth"), ["HTTP", "AUTH"]);
+    assert_eq!(name_parts("OPENAIKey"), ["OPENAI", "KEY"]);
+    assert_eq!(name_parts("OPENAIApiKey"), ["OPENAI", "API", "KEY"]);
+    assert_eq!(mask_text("SSHPASS=hunter2 sshpass -e ssh host"), format!("SSHPASS={MASK} sshpass -e ssh host"));
+}
+
+#[test]
+fn headers_bearer_and_tool_passwords_are_masked() {
+    assert_eq!(mask_text("curl -H \"x-api-key: abc123def\" https://x"), format!("curl -H \"x-api-key: {MASK}\" https://x"));
+    assert_eq!(mask_text("Authorization: Basic dXNlcjpwYXNz"), format!("Authorization: Basic {MASK}"));
+    assert_eq!(mask_text("-H 'Authorization: Bearer shorttok'"), format!("-H 'Authorization: Bearer {MASK}'"));
+    assert_eq!(mask_text("token is Bearer abcd1234 here"), format!("token is Bearer {MASK} here"));
+    assert_eq!(mask_text("sshpass -p hunter2 ssh host"), format!("sshpass -p {MASK} ssh host"));
+    assert_eq!(mask_text("Bearer of good news"), "Bearer of good news", "a short ordinary word after Bearer");
+    let args = |a: &[&str], program: &str| mask_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>(), program);
+    assert_eq!(args(&["-u", "admin:hunter2", "https://x"], "curl"), ["-u", &format!("admin:{MASK}"), "https://x"]);
+    assert_eq!(args(&["-u", "root", "-phunter2", "shop"], "mysql"), ["-u", "root", &format!("-p{MASK}"), "shop"]);
+    assert_eq!(args(&["-phunter2"], "C:\\bin\\MariaDB.exe"), [format!("-p{MASK}")]);
+    assert_eq!(args(&["-p", "hunter2", "ssh", "h"], "sshpass"), ["-p", MASK, "ssh", "h"]);
+    // Not a password flag for other programs; `-u` with a drive path is not a user:password.
+    assert_eq!(args(&["-p", "kelpie"], "cargo"), ["-p", "kelpie"]);
+    assert_eq!(args(&["-u", "C:\\x.py"], "python"), ["-u", "C:\\x.py"]);
 }
 
 #[test]

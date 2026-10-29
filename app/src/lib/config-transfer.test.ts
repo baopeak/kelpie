@@ -214,6 +214,7 @@ function machine(opts: { refuse?: string; daemonGone?: boolean; keepRefused?: bo
     calls: [] as string[],
     backups: 0,
     down: false,
+    refusedOnce: false,
   };
   const list = () => [...m.automations.values()];
   const ctx: TransferContext = {
@@ -241,7 +242,9 @@ function machine(opts: { refuse?: string; daemonGone?: boolean; keepRefused?: bo
       if (method === "automation.state") return { error: null } as T;
       if (method === "automation.list") return JSON.parse(JSON.stringify(list())) as T;
       if (method === "automation.save") {
-        if (opts.refuse && params.name === opts.refuse) {
+        // The first save of that automation is refused; a later one (the undo putting it back) goes through.
+        if (opts.refuse && params.name === opts.refuse && !m.refusedOnce) {
+          m.refusedOnce = true;
           if (opts.daemonGone) m.down = true;
           // A daemon that changed its list in memory and then failed to write it.
           if (opts.keepRefused) m.automations.set(params.id, { ...params, command_approved: false });
@@ -479,7 +482,9 @@ describe("masked values", () => {
   it("without a value here: arguments lose the masked part, an item that needs it is left out, both are listed", () => {
     const p = planImport(masked(), ALL, cur(), { defaults, newId });
     const codex = p.settings!.profiles.find((x) => x.kind === "codex")!;
-    expect(codex.args).toEqual(["--search"]);
+    // The marker after --api-key was that flag's value: both go. `api_key=[redacted]` goes alone; the
+    // standalone -c before it is never dropped.
+    expect(codex.args).toEqual(["--search", "-c"]);
     expect(p.settings!.quickCommands.some((q) => q.label === "Deploy")).toBe(false);
     expect(p.automations.some((a) => a.next.name === "Report")).toBe(false);
     const added = p.vault!.hosts.find((h) => h.id === "h-new")!;
@@ -499,6 +504,58 @@ describe("masked values", () => {
   });
 });
 
+describe("masked arguments are matched by position, never by guess", () => {
+  const M = "[redacted]";
+  /** Plans one Claude profile with `args` from the file over this computer's `local` arguments. */
+  const agentArgs = (args: string[], local?: string[]) => {
+    const read = fileRead();
+    read.doc.sections.agents = [{ kind: "claude", label: "Claude Code", args, env: [] }];
+    const cur = current();
+    cur.settings.profiles = local ? [{ kind: "claude", label: "Claude Code", args: local }] : [];
+    const p = planImport(read, ["agents"], cur, { defaults, newId });
+    return { args: p.settings!.profiles.find((x) => x.kind === "claude")!.args, fill: p.fillIn, kept: p.keptLocal };
+  };
+
+  it("never drops a standalone flag in front of a masked positional", () => {
+    expect(agentArgs(["--read-only", `https://u:${M}@db/x`]).args).toEqual(["--read-only"]);
+    expect(agentArgs(["--safe", `TOKEN=${M}`]).args).toEqual(["--safe"]);
+    expect(agentArgs(["--read-only", `https://u:${M}@db/x`]).fill).toEqual([{ section: "agents", item: "Claude Code", fields: ["args:#2"], leftOut: false }]);
+  });
+
+  it("pairs a flag only with an exact marker, and takes the same occurrence of that flag here", () => {
+    expect(agentArgs(["--token", M, "--model", "opus"]).args).toEqual(["--model", "opus"]);
+    expect(agentArgs(["--token", M, "--token", M], ["--token", "first", "--token", "second"]).args).toEqual(["--token", "first", "--token", "second"]);
+    // A local flag followed by another flag has no value to take.
+    expect(agentArgs(["--token", M], ["--token", "--verbose"]).args).toEqual([]);
+  });
+
+  it("takes a repeated header only from the same occurrence with the same header name", () => {
+    const local = ["-H", "Accept: x", "-H", "Authorization: Bearer real"];
+    // Same position, other header: no value here, only the masked element goes.
+    expect(agentArgs(["-H", `Authorization: Bearer ${M}`], local).args).toEqual(["-H"]);
+    expect(agentArgs(["-H", "Accept: x", "-H", `Authorization: Bearer ${M}`], local).args).toEqual(local);
+  });
+
+  it("takes a masked positional from the same index only when both lists have the same shape", () => {
+    expect(agentArgs(["run", `https://u:${M}@h`], ["run", "https://u:pw@h"]).args).toEqual(["run", "https://u:pw@h"]);
+    expect(agentArgs(["run", `https://u:${M}@h`], ["run", "--other", "https://u:pw@h"]).args).toEqual(["run"]);
+    expect(agentArgs([`api_key=${M}`, `api_key=${M}`], ["api_key=one", "x", "api_key=two"]).args).toEqual(["api_key=one", "api_key=two"]);
+  });
+
+  it("says when this computer's value was kept", () => {
+    expect(agentArgs(["--api-key", M], ["--api-key", "realkey"]).kept).toEqual([{ section: "agents", item: "Claude Code", fields: ["args:--api-key"] }]);
+  });
+
+  it("leaves out a command that would run differently", () => {
+    const read = fileRead();
+    read.doc.sections.automations = [{ ...automation({ id: "d", name: "Deploy", action: "shell", kind: "", shell: { program: "pwsh", argv: ["deploy.ps1", "-WhatIf", `https://u:${M}@h`] } }), enabled: false, env: [] }]
+      .map(({ last_run: _a, last_session: _b, last_error: _c, next_run: _d, ...a }) => a);
+    const p = planImport(read, ["automations"], current(), { defaults, newId });
+    expect(p.automations).toEqual([]);
+    expect(p.fillIn).toEqual([{ section: "automations", item: "Deploy", fields: ["command:#3"], leftOut: true }]);
+  });
+});
+
 describe("what runs, round 2", () => {
   it("lists a host's key file and target, and an automation's trigger, schedule, action and delivery", () => {
     const read = fileRead();
@@ -513,6 +570,22 @@ describe("what runs, round 2", () => {
     expect(find("Report", "when")).toMatchObject({ before: null, after: "weekly 03:00 (0)" });
     expect(find("Report", "deliver")).toMatchObject({ before: null, after: "review" });
     expect(find("Report", "action")).toMatchObject({ before: null, after: "agent" });
+  });
+});
+
+describe("a daemon that kept a refused automation", () => {
+  it("is caught even when only switched-off, schedule or variables differ from the local one", async () => {
+    // The file's Nightly runs the same command as the local one; it differs only in what the earlier check
+    // ignored (switched off, its project, its schedule).
+    const read = fileRead();
+    read.doc.sections.automations = [{ ...automation({ id: "local-a", name: "Nightly", action: "shell", kind: "", shell: { program: "python", argv: ["old.py"] }, every: "weekly" }), enabled: false, env: [{ name: "TOKEN" }] }]
+      .map(({ last_run: _a, last_session: _b, last_error: _c, next_run: _d, ...a }) => a);
+    const { m, ctx } = machine({ refuse: "Nightly", keepRefused: true });
+    const preview = planImport(read, ["automations"], await loadCurrent(["automations"], ctx), { defaults, newId });
+    const err = await applyImport(read, ["automations"], preview, ctx, checked).catch((e) => e);
+    expect(err).toBeInstanceOf(ImportFailed);
+    // Put back as it was, with its approval.
+    expect(m.automations.get("local-a")).toMatchObject({ enabled: true, every: "daily", command_approved: true });
   });
 });
 
