@@ -133,5 +133,15 @@
   "the process changed: it is not the one that was listed": "tiến trình đã đổi: đó không phải tiến trình đã được liệt kê",
   "the process is not in the session's job": "tiến trình không nằm trong job của phiên",
   "that is the Kelpie daemon": "đó là dịch vụ nền của Kelpie",
-  "cannot open the process": "không mở được tiến trình"
+  "cannot open the process": "không mở được tiến trình",
+  "no local branch named": "không có nhánh cục bộ tên",
+  "invalid stash": "stash không hợp lệ",
+  "nothing was dropped": "không có gì bị xóa",
+  "the drop could not be checked": "không kiểm tra được việc xóa",
+  "is still in the list: refresh it and try again": "vẫn còn trong danh sách: hãy làm mới và thử lại",
+  "a stash dropped by mistake could not be put back, recover it with git stash store <id>": "không đặt lại được stash bị xóa nhầm, hãy khôi phục bằng git stash store <id>",
+  "the stash was dropped; another one dropped with it was put back": "stash đã bị xóa; một stash khác bị xóa cùng lúc đã được đặt lại",
+  "this needs git": "cần git",
+  "or newer": "hoặc mới hơn",
+  "the stash list changed (another worktree may have stashed or dropped): refresh it and try again": "danh sách stash đã thay đổi (có thể một worktree khác vừa stash hoặc xóa): hãy làm mới và thử lại"
 }

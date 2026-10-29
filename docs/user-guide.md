@@ -57,6 +57,26 @@ features earlier (running sessions stop for a moment; agents that can resume con
 6. **Files**: the right panel has Files (filter by name, or search contents), Changes (git) and
    Sessions. Click a file to open it in the editor (`Ctrl+S` saves; external changes are
    detected); click a change to see its diff. Ignored files are dimmed.
+   - **Switch branch**: click the branch name at the top of Changes for the local branches (filter by
+     typing, then `↓`/`↑` and `Enter`; most recently committed first). Picking one switches this folder to
+     that branch, only when nothing would be lost: nothing happens, and the panel says why, when
+     - another worktree has the branch checked out (marked *worktree*; a branch cannot be checked out twice):
+       the panel names that folder and, when it is in the sidebar, offers to go there;
+     - there are uncommitted changes (untracked files included): it offers *Open in a new worktree…*, which
+       checks that branch out in a new worktree and leaves this folder as it is;
+     - a merge, rebase, cherry-pick or revert is in progress;
+     - HEAD is detached on commits no branch, tag or remote has: switching would leave them behind, so
+       create a branch for them first (`git switch -c <name>`).
+
+     The switch runs your `post-checkout` hook like `git switch` in a terminal does (it is your own
+     action; Finish, which works unattended, runs no hooks).
+   - **History** (bottom of Changes, folded): the last 100 commits of this branch with short hash,
+     subject, author and age; it is read when you open it and again when the branch changes (Refresh
+     reads it again after new commits).
+   - **Stashes** (folded): the repository's stashes, *Apply* (the stash is kept) and *Drop* (asks first).
+     Git keeps one stash list per repository, so every worktree shows (and can drop) the same stashes. An
+     action checks that the stash is still the one shown: Apply uses that exact stash, and a Drop that
+     hit another one (the list moved at that instant) puts it back and says so; refresh and try again.
 7. **Panes**: hover a pane for split right / down, maximize (`Ctrl+Shift+Enter`) and close. A
    split (button, terminal menu or shortcut) opens an empty pane asking what to run: click an
    agent or *Terminal*, or press `1`–`9`; *More…* opens the new-session dialog for that pane

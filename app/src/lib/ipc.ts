@@ -80,7 +80,8 @@ export const searchText = (root: string, query: string, regex: boolean, caseSens
 
 export const gitStatus = (root: string) => invoke<GitStatus>("git_status", { root });
 export const gitWorktrees = (root: string) => invoke<Worktree[]>("git_worktrees", { root });
-export const gitWorktreeAdd = (root: string, path: string, branch: string, base?: string) => invoke<void>("git_worktree_add", { root, path, branch, base });
+/** `existing`: check out the local branch `branch` in the new worktree instead of creating it from `base`. */
+export const gitWorktreeAdd = (root: string, path: string, branch: string, base?: string, existing?: boolean) => invoke<void>("git_worktree_add", { root, path, branch, base, existing });
 export const gitWorktreePrune = (root: string) => invoke<void>("git_worktree_prune", { root });
 export const gitShowFile = (root: string, rev: string, path: string) => invoke<string | null>("git_show_file", { root, rev, path });
 export const gitHead = (root: string) => invoke<string>("git_head", { root });
@@ -155,6 +156,18 @@ export const gitAbort = (root: string) => invoke<string>("git_abort", { root });
 export const gitBranchDelete = (root: string, branch: string, force = false) => invoke<void>("git_branch_delete", { root, branch, force });
 export const gitRefs = (root: string) => invoke<{ name: string; kind: "local" | "remote" | "tag" }[]>("git_refs", { root });
 export const gitContext = (root: string, kind: "staged" | "branch" | "worktree", base?: string, max?: number) => invoke<string>("git_context", { root, kind, base, max });
+/** A local branch; `worktree` is the folder of another worktree that has it checked out. Times are Unix seconds. */
+export interface GitBranch { name: string; current: boolean; worktree: string | null; time: number }
+export interface GitCommit { hash: string; short: string; author: string; time: number; subject: string }
+export interface GitStash { name: string; oid: string; time: number; subject: string }
+/** A switch happens only from a clean worktree; otherwise nothing changed and this says why. */
+export type SwitchResult = { result: "switched" } | { result: "dirty"; files: number } | { result: "in_worktree"; path: string } | { result: "operation"; operation: string } | { result: "orphans"; commits: number };
+export const gitBranches = (root: string) => invoke<GitBranch[]>("git_branches", { root });
+export const gitSwitchBranch = (root: string, branch: string) => invoke<SwitchResult>("git_switch_branch", { root, branch });
+export const gitLog = (root: string) => invoke<GitCommit[]>("git_log", { root });
+export const gitStashes = (root: string) => invoke<GitStash[]>("git_stashes", { root });
+/** `oid` is the stash's commit from the list: the action is refused when `stash` points elsewhere now. */
+export const gitStashAction = (root: string, stash: string, oid: string, action: "apply" | "drop") => invoke<string>("git_stash_action", { root, stash, oid, action });
 export interface PullRequest { number: number; title: string; url: string; state: "OPEN" | "CLOSED" | "MERGED"; draft: boolean; base: string; checks: "passing" | "failing" | "pending" | "none"; provider?: "github" | "gitlab" }
 export const ghPrStatus = (root: string) => invoke<PullRequest | null>("gh_pr_status", { root });
 export const ghDefaultBranch = (root: string) => invoke<string | null>("gh_default_branch", { root });

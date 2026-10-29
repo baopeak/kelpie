@@ -107,15 +107,18 @@ export function worktreeFolder(repo: Project, branch: string): string {
 /**
  * Creates the worktree and its project. `config` (already shown to and approved by the user)
  * runs afterwards; its failures are reported, not thrown — the worktree exists by then.
+ * `existing`: the worktree checks out the existing local branch `branch` (no new branch, no base).
  */
-export async function createWorktree(repo: Project, opts: { branch: string; base?: string; path: string; config: KelpieConfig | null }) {
-  if (!validBranch(opts.branch)) throw new Error(t("\"{name}\" is not a valid branch name", { name: opts.branch }));
+export async function createWorktree(repo: Project, opts: { branch: string; base?: string; path: string; config: KelpieConfig | null; existing?: boolean }) {
+  // A new branch's name must be a safe one; an existing branch is checked by the native side (`refs/heads/` only).
+  if (!opts.existing && !validBranch(opts.branch)) throw new Error(t("\"{name}\" is not a valid branch name", { name: opts.branch }));
   // The branch this one forks from is what Finish merges into later (the main checkout may be on another branch by then).
-  const requested = opts.base?.trim();
+  const requested = opts.existing ? undefined : opts.base?.trim();
   let baseBranch: string | undefined;
   if (!requested || requested === "HEAD") baseBranch = store.projectInfo[repo.id]?.branch ?? undefined;
   else if ((await ipc.gitRefs(repo.path).catch(() => [])).some((r) => r.kind === "local" && r.name === requested)) baseBranch = requested;
-  await ipc.gitWorktreeAdd(repo.path, opts.path.trim(), opts.branch, opts.base?.trim() || undefined);
+  if (baseBranch === opts.branch) baseBranch = undefined;
+  await ipc.gitWorktreeAdd(repo.path, opts.path.trim(), opts.branch, requested || undefined, opts.existing || undefined);
   // Ignored files a checkout lacks (.env, node_modules): before setup runs, which may need them. Only
   // with the repository's `.kelpie.yaml` approved (`.worktreeinclude` too): without it the worktree is a
   // clean checkout.

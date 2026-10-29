@@ -1,0 +1,19 @@
+/* Changes panel: branch switcher, compact log, stash list */
+.branch-switcher { display: flex; flex-direction: column; gap: 6px; }
+.branch-switcher .refusal { overflow-wrap: anywhere; }
+.branch-switcher .refusal .btn { margin-top: 6px; }
+.branch-list { max-height: 240px; overflow: auto; margin: 0 -12px; }
+.branch-row.current { cursor: default; color: var(--text); }
+.branch-row .branch-mark { width: 12px; display: inline-flex; color: var(--accent); flex: none; }
+.branch-row .name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.branch-row .dir { text-align: right; }
+.git-section-tools { display: flex; align-items: center; padding: 0 12px 2px; }
+.git-section-tools .muted { padding: 0; flex: 1; font-size: 11px; }
+.git-section-tools .spacer { flex: 1; }
+.git-section-tools .icon-btn { width: 20px; height: 20px; }
+.commit-row, .stash-row { cursor: default; }
+.commit-row .hash { font: 11px var(--font-mono); color: var(--text-faint); flex: none; }
+.commit-row .subject, .stash-row .subject { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.commit-row .meta, .stash-row .meta { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); font-size: 11px; }
+.stash-shared { margin: 2px 12px 6px; font-size: 11.5px; }
+.stash-actions { display: flex; gap: 6px; flex: none; }

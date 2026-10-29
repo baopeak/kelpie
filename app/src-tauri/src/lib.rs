@@ -11,6 +11,7 @@ mod daemon_runtime;
 mod external_editor;
 mod fs_ops;
 mod git;
+mod git_basics;
 mod git_finish;
 mod git_sync;
 mod github;
@@ -295,6 +296,11 @@ pub fn run() {
             git_sync::git_branch_delete,
             git_sync::git_refs,
             git_sync::git_context,
+            git_basics::git_branches,
+            git_basics::git_switch_branch,
+            git_basics::git_log,
+            git_basics::git_stashes,
+            git_basics::git_stash_action,
             github::gh_pr_status,
             github::gh_default_branch,
             github::gh_pr_create,
