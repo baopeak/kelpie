@@ -23,6 +23,16 @@ jobs:
       # Linux: WebKitGTK, tray and SVG libraries for Tauri, D-Bus for the Secret Service keyring, ALSA for
       # the speech helper's microphone, linuxdeploy's needs for the AppImage, and the WebDriver + X server
       # the smoke test drives the app with.
+      # The Ubuntu image keeps ~14 GB free, and Linux debug builds carry their full DWARF inside target/:
+      # the app's test build alone filled the disk until the runner stopped answering. Drop toolchains
+      # this job never uses (Android, .NET, Haskell, CodeQL) and keep line tables only.
+      - name: Linux disk space
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
+          df -h /
       - name: Linux system packages
         if: runner.os == 'Linux'
         run: |
@@ -43,22 +53,26 @@ jobs:
         if: runner.os == 'Linux'
         continue-on-error: true
         timeout-minutes: 15
-        run: cargo test -p kelpie-proto
+        shell: bash
+        run: s=0; cargo test -p kelpie-proto || s=$?; df -h / | tail -1; du -sh target; exit $s
       - name: Rust tests on Linux (daemon)
         if: runner.os == 'Linux'
         continue-on-error: true
         timeout-minutes: 25
-        run: cargo test -p kelpied
+        shell: bash
+        run: s=0; cargo test -p kelpied || s=$?; df -h / | tail -1; du -sh target; exit $s
       - name: Rust tests on Linux (app backend)
         if: runner.os == 'Linux'
         continue-on-error: true
         timeout-minutes: 25
-        run: cargo test -p kelpie
+        shell: bash
+        run: s=0; cargo test -p kelpie || s=$?; df -h / | tail -1; du -sh target; exit $s
       - name: Rust tests on Linux (speech helper)
         if: runner.os == 'Linux'
         continue-on-error: true
         timeout-minutes: 20
-        run: cargo test -p kelpie-stt
+        shell: bash
+        run: s=0; cargo test -p kelpie-stt || s=$?; df -h / | tail -1; du -sh target; exit $s
       - name: Frontend typecheck
         working-directory: app
         run: |
