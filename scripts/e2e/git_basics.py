@@ -9,12 +9,15 @@ in MSEDGEDRIVER). The script starts its own kelpied (isolated endpoint and data 
 KELPIE_DATA_DIR are set in this process before anything talks to a daemon, so the user's own Kelpie is never
 reached. No network: the repository is local and has no remote.
 
-1. Switch from a clean working tree: the branch changes (and back).
+1. Switch from a clean working tree: the branch changes (and back). Keyboard: Enter with an empty filter does
+   nothing, ↓ moves into the list.
 2. With uncommitted changes the switch is refused and nothing moves; "Open in a new worktree…" opens the
-   worktree dialog for that existing branch, which checks it out in a new worktree.
+   worktree dialog for that existing branch, which checks it out in a new worktree. Once that worktree holds
+   the branch, the refusal names it (no worktree offer), uncommitted changes or not.
 3. A branch checked out in another worktree is refused with that worktree's folder.
-4. History shows the last 100 commits (of 121), newest first.
+4. History (a button) shows the last 100 commits (of 121), newest first, and follows a switch while open.
 5. Stashes: the "shared across worktrees" warning; Apply keeps the stash; Drop asks first (Cancel keeps it).
+6. Detached HEAD: refused while it has commits no branch has (HEAD stays); switches when it has none.
 """
 import importlib.util
 import os
@@ -137,6 +140,9 @@ def make_repo():
     subprocess.run(["git", "-C", REPO, "fast-import", "--quiet"], input="".join(stream).encode(), capture_output=True, check=True)
     for b in ("feature", "other", "held"):
         git(REPO, "branch", b)
+    # `other` is one commit ahead (History must change when the switch lands there).
+    tip = git(REPO, "commit-tree", "HEAD^{tree}", "-p", "other", "-m", "on other")
+    git(REPO, "branch", "-f", "other", tip)
     git(REPO, "worktree", "add", "-q", HELD, "held")
 
 
@@ -178,6 +184,11 @@ def scenario(run):
     run.check("…and the panel shows it", until(lambda: shown_branch(d) == "feature", 15), shown_branch(d))
     run.check("…and the switcher closes", until(lambda: not d.js("return !!document.querySelector('.branch-switcher')"), 5))
     open_switcher(d)
+    d.keys("enter")
+    time.sleep(1)
+    run.check("Enter with an empty filter switches nothing", head() == "feature" and d.js("return !!document.querySelector('.branch-switcher')"), head())
+    d.keys("down")
+    run.check("↓ moves from the filter to the first branch", d.js("return document.activeElement?.classList.contains('branch-row') && document.activeElement.dataset.branch === 'feature'"))
     run.check("the switcher lists local branches, current first, the held one marked",
               d.js("const r = [...document.querySelectorAll('.branch-row')]; return r[0].dataset.branch === 'feature' && r[0].classList.contains('current') && !!document.querySelector('.branch-row[data-branch=\"held\"] .chip')"))
     run.shot("01-switcher")
@@ -206,6 +217,11 @@ def scenario(run):
         run.check("…and the main checkout is untouched", head() == "main" and read(os.path.join(REPO, "a.txt")) == "dirty\n")
         d.js(f"{S}.switchProject(arguments[0]); {S}.showRightPanel('git')", pid)
         d.wait("return document.querySelector('.git-head .branch-switch') || null", 15)
+        pick(d, "feature")
+        refusal = d.wait("return document.querySelector('.refusal')?.dataset.refusal || null", 15)
+        run.check("dirty and held by the new worktree: refused as held, no worktree offer",
+                  refusal == "in_worktree" and not d.js("return !!document.querySelector('.refusal [data-act=\"open-worktree\"]')"), refusal)
+        d.keys("escape")
 
     # 3. a branch checked out in another worktree
     git(REPO, "checkout", "--", "a.txt")
@@ -218,6 +234,7 @@ def scenario(run):
     run.check("Escape closes the switcher (after a click on a row)", until(lambda: not d.js("return !!document.querySelector('.branch-switcher')"), 5))
 
     # 4. history: the last 100
+    run.check("History is a button that says it is folded", d.js("const b = document.querySelector('.group-label[data-section=\"log\"]'); return b.tagName === 'BUTTON' && b.getAttribute('aria-expanded') === 'false'"))
     d.click('.group-label[data-section="log"]')
     n = d.wait("const n = document.querySelectorAll('.commit-row').length; return n >= 100 ? n : null", 20)
     first = d.js("return document.querySelector('.commit-row .subject')?.textContent")
@@ -226,6 +243,11 @@ def scenario(run):
     run.check("…with short hash, author and relative date", len(row[0]) >= 7 and git(REPO, "rev-parse", "HEAD").startswith(row[0]) and "E2E Author" in row[1] and "ago" in row[1], str(row))
     run.check("…and says so", "Last 100 commits" in (d.js("return document.querySelector('.git-log .git-section-tools')?.textContent") or ""))
     run.shot("04-history")
+    pick(d, "other")
+    moved = until(lambda: d.js("return document.querySelector('.commit-row .subject')?.textContent === 'on other' || null"), 15)
+    run.check("open History follows a switch (no Refresh)", bool(moved) and head() == "other", d.js("return document.querySelector('.commit-row .subject')?.textContent"))
+    pick(d, "main")
+    run.check("…and back", until(lambda: head() == "main" and d.js("return document.querySelector('.commit-row .subject')?.textContent === 'commit 119' || null"), 15), head())
 
     # 5. stashes
     write(os.path.join(REPO, "a.txt"), "first\n")
@@ -253,6 +275,22 @@ def scenario(run):
     stashes = git(REPO, "stash", "list")
     run.check("…OK drops that one only", bool(left) and len(stashes.splitlines()) == 1 and "first" in stashes, stashes)
     run.shot("06-stash-dropped")
+
+    # 6. detached HEAD
+    git(REPO, "checkout", "--", "a.txt")
+    git(REPO, "switch", "-q", "--detach")
+    git(REPO, "commit", "-q", "--allow-empty", "-m", "on no branch")
+    tip = git(REPO, "rev-parse", "HEAD")
+    pick(d, "other")
+    refusal = d.wait("return document.querySelector('.refusal')?.dataset.refusal || null", 15)
+    text = d.js("return document.querySelector('.refusal')?.textContent || ''")
+    run.check("detached with a commit no branch has: refused, says so", refusal == "orphans" and "1 commit" in text and "leave them behind" in text, f"{refusal}: {text}")
+    run.check("…HEAD stays on that commit", git(REPO, "rev-parse", "HEAD") == tip)
+    run.shot("07-detached-refused")
+    d.keys("escape")
+    git(REPO, "switch", "-q", "--detach", "main")
+    pick(d, "other")
+    run.check("detached on a commit a branch has: switches", until(lambda: head() == "other", 15), head())
 
 
 def port_open():

@@ -22,5 +22,7 @@
   "Drop": "Xóa",
   "Drop {name} ({message})? Its changes are deleted.": "Xóa {name} ({message})? Các thay đổi trong đó sẽ bị xóa.",
   "Applied {name}": "Đã áp dụng {name}",
-  "Dropped {name}": "Đã xóa {name}"
+  "Dropped {name}": "Đã xóa {name}",
+  "Local branches": "Nhánh cục bộ",
+  "HEAD is detached on {n} commit(s) that no branch has: switching to {branch} would leave them behind. Create a branch for them first (git switch -c <name>).": "HEAD đang tách rời trên {n} commit mà không nhánh nào có: chuyển sang {branch} sẽ bỏ lại chúng. Hãy tạo một nhánh cho chúng trước (git switch -c <name>)."
 }

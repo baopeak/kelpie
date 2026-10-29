@@ -161,7 +161,7 @@ export interface GitBranch { name: string; current: boolean; worktree: string | 
 export interface GitCommit { hash: string; short: string; author: string; time: number; subject: string }
 export interface GitStash { name: string; oid: string; time: number; subject: string }
 /** A switch happens only from a clean worktree; otherwise nothing changed and this says why. */
-export type SwitchResult = { result: "switched" } | { result: "dirty"; files: number } | { result: "in_worktree"; path: string } | { result: "operation"; operation: string };
+export type SwitchResult = { result: "switched" } | { result: "dirty"; files: number } | { result: "in_worktree"; path: string } | { result: "operation"; operation: string } | { result: "orphans"; commits: number };
 export const gitBranches = (root: string) => invoke<GitBranch[]>("git_branches", { root });
 export const gitSwitchBranch = (root: string, branch: string) => invoke<SwitchResult>("git_switch_branch", { root, branch });
 export const gitLog = (root: string) => invoke<GitCommit[]>("git_log", { root });

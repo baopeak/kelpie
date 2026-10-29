@@ -136,5 +136,8 @@
   "cannot open the process": "không mở được tiến trình",
   "no local branch named": "không có nhánh cục bộ tên",
   "invalid stash": "stash không hợp lệ",
+  "nothing was dropped": "không có gì bị xóa",
+  "this needs git": "cần git",
+  "or newer": "hoặc mới hơn",
   "the stash list changed (another worktree may have stashed or dropped): refresh it and try again": "danh sách stash đã thay đổi (có thể một worktree khác vừa stash hoặc xóa): hãy làm mới và thử lại"
 }

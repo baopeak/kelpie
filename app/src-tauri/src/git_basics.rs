@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::fs_ops::{guard, CmdResult};
-use crate::git::{git, git_ok, git_worktree_env, parse_status, Worktree};
+use crate::git::{git, git_env, git_ok, git_worktree_env, parse_status, Worktree};
 
 /// The compact log shows this many commits.
 pub const LOG_LIMIT: usize = 100;
@@ -161,17 +161,33 @@ pub enum SwitchResult {
     InWorktree { path: String },
     /// A merge, rebase, cherry-pick or revert is in progress here.
     Operation { operation: String },
+    /// HEAD is detached on commits no branch, tag or remote has: a switch would leave them behind.
+    Orphans { commits: u32 },
 }
 
-/// What stops switching this worktree to `target`, if anything.
-fn refusal(status: &crate::git::GitStatus, operation: Option<&str>, target: &str, worktrees: &[Worktree]) -> Option<SwitchResult> {
+/// What stops switching this worktree to `target`, if anything. A branch held elsewhere comes before
+/// uncommitted changes: a new worktree could not check it out either. `orphans`: commits only a
+/// detached HEAD reaches (0 on a branch).
+fn refusal(status: &crate::git::GitStatus, operation: Option<&str>, target: &str, worktrees: &[Worktree], orphans: u32) -> Option<SwitchResult> {
     if let Some(op) = operation {
         return Some(SwitchResult::Operation { operation: op.to_string() });
+    }
+    if let Some(w) = worktrees.iter().find(|w| w.branch.as_deref() == Some(target)) {
+        return Some(SwitchResult::InWorktree { path: w.path.clone() });
     }
     if !status.files.is_empty() {
         return Some(SwitchResult::Dirty { files: status.files.len() });
     }
-    worktrees.iter().find(|w| w.branch.as_deref() == Some(target)).map(|w| SwitchResult::InWorktree { path: w.path.clone() })
+    (orphans > 0).then_some(SwitchResult::Orphans { commits: orphans })
+}
+
+/// Git too old for a command (`switch` needs 2.23, e.g. on a remote host): a readable error.
+fn old_git(stderr: &str, needs: &str) -> String {
+    if stderr.contains("is not a git command") || stderr.contains("unknown option") || stderr.contains("unrecognized argument") {
+        format!("this needs git {needs} or newer: {}", stderr.trim())
+    } else {
+        stderr.trim().to_string()
+    }
 }
 
 /// Switches this worktree to the local branch `branch`, only from a clean working tree.
@@ -189,13 +205,16 @@ pub async fn git_switch_branch(root: String, branch: String) -> CmdResult<Switch
     }
     let operation = crate::git_sync::operation(&dir).await;
     let worktrees = crate::git::git_worktrees(root.clone()).await?;
-    if let Some(refused) = refusal(&status, operation, &branch, &worktrees) {
+    // Detached: commits made there live only in this HEAD (git switch --quiet would drop them silently).
+    let orphans = if status.branch.is_none() { crate::git::orphan_count(&dir).await? } else { 0 };
+    if let Some(refused) = refusal(&status, operation, &branch, &worktrees, orphans) {
         return Ok(refused);
     }
     // Under the repository's worktree lock: a daemon run may be adding a worktree on this branch.
+    // Hooks (post-checkout) run, as when the user switches in a terminal.
     let switched = git_worktree_env(&dir, &["switch", "--no-guess", "--quiet", branch.as_str()], &[]).await?;
     if !switched.ok {
-        return Err(switched.stderr.trim().to_string());
+        return Err(old_git(&switched.stderr, "2.23"));
     }
     Ok(SwitchResult::Switched)
 }
@@ -205,12 +224,12 @@ pub async fn git_switch_branch(root: String, branch: String) -> CmdResult<Switch
 pub async fn git_log(root: String) -> CmdResult<Vec<Commit>> {
     let dir = guard(&root, "")?;
     let count = format!("--max-count={LOG_LIMIT}");
-    let out = git(&dir, &["log", count.as_str(), "--no-show-signature", "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s%x1e", "HEAD", "--"]).await?;
+    let out = git(&dir, &["log", count.as_str(), "--encoding=UTF-8", "--no-show-signature", "--format=%H%x1f%h%x1f%aN%x1f%at%x1f%s%x1e", "HEAD", "--"]).await?;
     if !out.ok {
         if !git(&dir, &["rev-parse", "--verify", "--quiet", "HEAD"]).await?.ok {
             return Ok(Vec::new()); // no commit yet
         }
-        return Err(out.stderr.trim().to_string());
+        return Err(old_git(&out.stderr, "2.10"));
     }
     Ok(parse_log(&String::from_utf8_lossy(&out.stdout)))
 }
@@ -219,12 +238,38 @@ pub async fn git_log(root: String) -> CmdResult<Vec<Commit>> {
 #[tauri::command]
 pub async fn git_stashes(root: String) -> CmdResult<Vec<Stash>> {
     let dir = guard(&root, "")?;
-    let out = git_ok(&dir, &["stash", "list", "--format=%gd%x1f%H%x1f%ct%x1f%gs%x1e"]).await?;
+    let out = git_ok(&dir, &["stash", "list", "--encoding=UTF-8", "--format=%gd%x1f%H%x1f%ct%x1f%gs%x1e"]).await?;
     Ok(parse_stashes(&out))
 }
 
+const STASH_MOVED: &str = "the stash list changed (another worktree may have stashed or dropped): refresh it and try again";
+
+/// The commit id in git's `Dropped stash@{N} (<oid>)` line.
+fn dropped_oid(output: &str) -> Option<&str> {
+    let start = output.rfind('(')? + 1;
+    let oid = &output[start..start + output[start..].find(')')?];
+    valid_oid(oid).then_some(oid)
+}
+
+/// After `stash drop`: when git dropped another stash than `expected` (the list moved between the
+/// check and the drop), stores that one back and reports the conflict.
+async fn verify_drop(dir: &Path, expected: &str, output: &str) -> CmdResult<()> {
+    let Some(dropped) = dropped_oid(output) else { return Ok(()) };
+    if dropped.eq_ignore_ascii_case(expected) {
+        return Ok(());
+    }
+    // A stash commit's own subject is the message it was listed with ("On main: …").
+    let subject = git_ok(dir, &["log", "-1", "--encoding=UTF-8", "--format=%s", dropped]).await.unwrap_or_default();
+    let message = if subject.trim().is_empty() { "restored by Kelpie" } else { subject.trim() };
+    match git_ok(dir, &["stash", "store", "-m", message, dropped]).await {
+        Ok(_) => Err(format!("{STASH_MOVED} (nothing was dropped)")),
+        Err(e) => Err(format!("{STASH_MOVED}; another stash was dropped and could not be put back ({e}): recover it with git stash store {dropped}")),
+    }
+}
+
 /// `apply` or `drop` the stash `stash` (`stash@{N}`), only while it is still the commit `oid` the
-/// list showed. Returns git's last line of output.
+/// list showed. Apply uses the commit itself; drop needs `stash@{N}`, so what git dropped is checked
+/// afterwards (and put back when it was another stash). Returns git's last line of output.
 #[tauri::command]
 pub async fn git_stash_action(root: String, stash: String, oid: String, action: String) -> CmdResult<String> {
     let dir = guard(&root, "")?;
@@ -238,12 +283,17 @@ pub async fn git_stash_action(root: String, stash: String, oid: String, action: 
     };
     let current = git(&dir, &["rev-parse", "--verify", "--quiet", stash.as_str()]).await?;
     if !current.ok || !String::from_utf8_lossy(&current.stdout).trim().eq_ignore_ascii_case(&oid) {
-        return Err("the stash list changed (another worktree may have stashed or dropped): refresh it and try again".into());
+        return Err(STASH_MOVED.into());
     }
-    let out = git(&dir, &["stash", action, stash.as_str()]).await?;
+    // English output: the drop line is parsed.
+    let target = if action == "apply" { oid.as_str() } else { stash.as_str() };
+    let out = git_env(&dir, &["stash", action, target], &[("LC_ALL", "C"), ("LANGUAGE", "C")]).await?;
     let text = format!("{}\n{}", String::from_utf8_lossy(&out.stdout).trim(), out.stderr.trim());
     if !out.ok {
         return Err(text.trim().to_string());
+    }
+    if action == "drop" {
+        verify_drop(&dir, &oid, &text).await?;
     }
     Ok(text.lines().map(str::trim).rev().find(|l| !l.is_empty()).unwrap_or("").to_string())
 }
@@ -386,12 +436,63 @@ mod tests {
         let feature = list.iter().find(|b| b.name == "feature").unwrap();
         assert!(!feature.current && feature.worktree.is_some());
         assert!(list.iter().any(|b| b.name == "main" && b.current && b.worktree.is_none()));
-        // Opening a branch in a new worktree needs an existing local branch.
+        // Held elsewhere comes first: with uncommitted changes too (a new worktree could not take it either).
+        std::fs::write(r.dir.join("a.txt"), "changed\n").unwrap();
+        assert!(matches!(git_switch_branch(root(&r), "feature".into()).await.unwrap(), SwitchResult::InWorktree { .. }));
+        sh(&r.dir, &["checkout", "--", "a.txt"]);
+        // Opening a branch in a new worktree needs an existing local branch that no worktree holds.
         let folder = r.base.join("third").to_string_lossy().into_owned();
+        assert!(crate::git::git_worktree_add(root(&r), folder.clone(), "feature".into(), None, Some(true)).await.is_err());
         assert!(crate::git::git_worktree_add(root(&r), folder.clone(), "nope".into(), None, Some(true)).await.is_err());
         sh(&r.dir, &["branch", "third"]);
         crate::git::git_worktree_add(root(&r), folder.clone(), "third".into(), None, Some(true)).await.unwrap();
         assert_eq!(sh(Path::new(&folder), &["rev-parse", "--abbrev-ref", "HEAD"]), "third");
+    }
+
+    #[tokio::test]
+    async fn refuses_to_leave_commits_only_a_detached_head_has() {
+        let r = repo("detached");
+        sh(&r.dir, &["switch", "-q", "--detach"]);
+        sh(&r.dir, &["commit", "-q", "--allow-empty", "-m", "on no branch"]);
+        let tip = sh(&r.dir, &["rev-parse", "HEAD"]);
+        assert_eq!(git_switch_branch(root(&r), "feature".into()).await.unwrap(), SwitchResult::Orphans { commits: 1 });
+        assert_eq!(sh(&r.dir, &["rev-parse", "HEAD"]), tip, "HEAD stays on the commit");
+        // Detached on a commit a branch has: nothing is left behind, the switch goes ahead.
+        sh(&r.dir, &["switch", "-q", "--detach", "main"]);
+        assert_eq!(git_switch_branch(root(&r), "feature".into()).await.unwrap(), SwitchResult::Switched);
+        assert_eq!(head(&r), "feature");
+    }
+
+    #[test]
+    fn reads_the_dropped_stash_and_old_git() {
+        let oid = "d".repeat(40);
+        assert_eq!(dropped_oid(&format!("Dropped stash@{{0}} ({oid})")), Some(oid.as_str()));
+        assert_eq!(dropped_oid("Dropped stash@{0} (not-an-id)"), None);
+        assert_eq!(dropped_oid("nothing"), None);
+        assert!(old_git("git: 'switch' is not a git command. See 'git --help'.", "2.23").starts_with("this needs git 2.23 or newer"));
+        assert_eq!(old_git("fatal: invalid reference: x\n", "2.23"), "fatal: invalid reference: x");
+    }
+
+    #[tokio::test]
+    async fn a_drop_that_hit_another_stash_is_put_back() {
+        let r = repo("droprace");
+        std::fs::write(r.dir.join("a.txt"), "older\n").unwrap();
+        sh(&r.dir, &["stash", "push", "-q", "-m", "older"]);
+        std::fs::write(r.dir.join("a.txt"), "newer\n").unwrap();
+        sh(&r.dir, &["stash", "push", "-q", "-m", "newer"]);
+        let list = git_stashes(root(&r)).await.unwrap();
+        let (newer, older) = (&list[0], &list[1]);
+        // The list moved under us: stash@{0} was dropped while the user meant `older`.
+        let out = sh(&r.dir, &["stash", "drop", "stash@{0}"]);
+        let err = verify_drop(&r.dir, &older.oid, &out).await.unwrap_err();
+        assert!(err.contains("nothing was dropped"), "{err}");
+        let after = git_stashes(root(&r)).await.unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().any(|s| s.oid == newer.oid && s.subject == "On main: newer"), "{after:?}");
+        // The expected one dropped: fine.
+        let out = sh(&r.dir, &["stash", "drop", &after.iter().find(|s| s.oid == older.oid).unwrap().name]);
+        verify_drop(&r.dir, &older.oid, &out).await.unwrap();
+        assert_eq!(git_stashes(root(&r)).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

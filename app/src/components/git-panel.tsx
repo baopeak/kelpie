@@ -47,6 +47,7 @@ export function GitPanel(props: { project: Project }) {
   const [prForm, setPrForm] = createSignal(false);
   const [branches, setBranches] = createSignal(false);
   const [section, setSection] = createSignal<"log" | "stashes" | null>(null);
+  let switchButton!: HTMLButtonElement;
   const st = () => gitState.status();
   const [repo, { refetch: refetchRepo }] = createResource(() => props.project.path, (root) => gitRepoState(root).catch(() => null));
   const staged = createMemo(() => (st()?.files ?? []).filter((f) => f.index !== "." && f.index !== "?" && f.index !== "U"));
@@ -149,7 +150,7 @@ export function GitPanel(props: { project: Project }) {
       <div class="git-head">
         <div class="branch">
           <Icon name="git" size={14} />
-          <button class="branch-switch" title={t("Switch branch")} disabled={!!busy()} onClick={() => setBranches(!branches())}>
+          <button ref={switchButton} class="branch-switch" title={t("Switch branch")} aria-expanded={branches()} disabled={!!busy()} onClick={() => setBranches(!branches())}>
             <span class="branch-name" title={st()?.upstream ? `${st()?.branch} → ${st()?.upstream}` : st()?.branch ?? ""}>{st()?.branch ?? "…"}</span>
             <Icon name="chevronDown" size={12} />
           </button>
@@ -163,7 +164,7 @@ export function GitPanel(props: { project: Project }) {
           <button class="icon-btn" title={t("Refresh")} onClick={() => { void gitState.refresh(); void refetchRepo(); void pullRequests.refresh(props.project.id, root()); }}><Icon name="refresh" size={14} /></button>
         </div>
         <Show when={branches()}>
-          <BranchSwitcher project={props.project} onClose={() => setBranches(false)} onSwitched={() => { refreshAll(); void pullRequests.refresh(props.project.id, root()); }}
+          <BranchSwitcher project={props.project} onClose={() => { setBranches(false); switchButton.focus(); }} onSwitched={() => { refreshAll(); void pullRequests.refresh(props.project.id, root()); }}
             onOpenWorktree={canWorktree() ? (branch) => openWorktreeDialog(repoId(), branch, undefined, { existing: true }) : undefined} />
         </Show>
         <Show when={overlapsOf(props.project.id).length}>
@@ -243,9 +244,9 @@ export function GitPanel(props: { project: Project }) {
 /** A collapsible group heading; one section is open at a time. */
 function SectionToggle(props: { id: "log" | "stashes"; label: string; open: "log" | "stashes" | null; set: (v: "log" | "stashes" | null) => void }) {
   return (
-    <div class="group-label section-toggle" data-section={props.id} onClick={() => props.set(props.open === props.id ? null : props.id)}>
+    <button type="button" class="group-label section-toggle" data-section={props.id} aria-expanded={props.open === props.id} onClick={() => props.set(props.open === props.id ? null : props.id)}>
       <Icon name={props.open === props.id ? "chevronDown" : "chevronRight"} size={12} /> {props.label}
-    </div>
+    </button>
   );
 }
 

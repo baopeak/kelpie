@@ -363,8 +363,11 @@ pub async fn git_show_file(root: String, rev: String, path: String) -> CmdResult
 /// only in its HEAD (detached checkouts) and would be lost with the worktree.
 #[tauri::command]
 pub async fn git_orphan_commits(root: String) -> CmdResult<u32> {
-    let dir = guard(&root, "")?;
-    let out = git_ok(&dir, &["rev-list", "--count", "HEAD", "--not", "--branches", "--tags", "--remotes"]).await?;
+    orphan_count(&guard(&root, "")?).await
+}
+
+pub(crate) async fn orphan_count(dir: &Path) -> CmdResult<u32> {
+    let out = git_ok(dir, &["rev-list", "--count", "HEAD", "--not", "--branches", "--tags", "--remotes"]).await?;
     out.trim().parse().map_err(|_| "unexpected git output".to_string())
 }
 

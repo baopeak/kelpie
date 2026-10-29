@@ -26,7 +26,18 @@ export function BranchSwitcher(props: { project: Project; onClose: () => void; o
   const projectAt = (path: string) => store.state.projects.find((p) => normPath(p.path) === normPath(path));
 
   let input!: HTMLInputElement;
+  let list!: HTMLDivElement;
   onMount(() => input.focus());
+
+  /** ↑ / ↓ between the rows (↑ from the first goes back to the filter). */
+  const moveFocus = (e: KeyboardEvent) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const rows = [...list.querySelectorAll<HTMLElement>(".branch-row")];
+    const i = rows.indexOf(document.activeElement as HTMLElement);
+    if (i < 0) return;
+    e.preventDefault();
+    (e.key === "ArrowDown" ? rows[Math.min(i + 1, rows.length - 1)] : i === 0 ? input : rows[i - 1]).focus();
+  };
 
   const pick = async (name: string) => {
     if (busy()) return;
@@ -51,7 +62,11 @@ export function BranchSwitcher(props: { project: Project; onClose: () => void; o
   return (
     <div class="branch-switcher" onKeyDown={(e) => e.key === "Escape" && props.onClose()}>
       <input ref={input} class="text-input" placeholder={t("Filter branches")} value={query()} onInput={(e) => setQuery(e.currentTarget.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && shown().length) { const b = shown().find((x) => !x.current); if (b) void pick(b.name); } }} />
+        onKeyDown={(e) => {
+          // Enter switches only to a branch the filter names (never just the most recent one); ↓ moves into the list.
+          if (e.key === "Enter" && query().trim()) { const b = shown().find((x) => !x.current); if (b) void pick(b.name); }
+          if (e.key === "ArrowDown") { e.preventDefault(); list.querySelector<HTMLElement>(".branch-row")?.focus(); }
+        }} />
       <Show when={refusal()}>
         {(r) => (
           <div class="git-note warn refusal" data-refusal={r().result}>
@@ -70,15 +85,20 @@ export function BranchSwitcher(props: { project: Project; onClose: () => void; o
             <Show when={r().result === "operation"}>
               {t("A {op} is in progress here: finish or abort it before switching branches.", { op: (r() as { operation: string }).operation })}
             </Show>
+            <Show when={r().result === "orphans"}>
+              {t("HEAD is detached on {n} commit(s) that no branch has: switching to {branch} would leave them behind. Create a branch for them first (git switch -c <name>).", { n: (r() as { commits: number }).commits, branch: r().branch })}
+            </Show>
           </div>
         )}
       </Show>
-      <div class="branch-list">
+      <div class="branch-list" role="listbox" aria-label={t("Local branches")} ref={list} onKeyDown={moveFocus}>
         <Show when={!branches.error} fallback={<div class="muted">{errorText(branches.error)}</div>}>
           <For each={shown()} fallback={<div class="muted">{branches.loading ? t("Loading…") : t("No branches")}</div>}>
             {(b) => (
               <div class="list-row branch-row" classList={{ current: b.current }} data-branch={b.name} title={b.worktree ? t("Checked out in {path}", { path: b.worktree }) : b.name}
-                onClick={() => !b.current && void pick(b.name)}>
+                role="option" aria-selected={b.current} tabIndex={0}
+                onClick={() => !b.current && void pick(b.name)}
+                onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && !b.current) { e.preventDefault(); void pick(b.name); } }}>
                 <span class="branch-mark">{b.current ? <Icon name="check" size={12} /> : null}</span>
                 <span class="name">{b.name}</span>
                 <Show when={b.worktree}><span class="chip">{t("worktree")}</span></Show>
@@ -93,9 +113,10 @@ export function BranchSwitcher(props: { project: Project; onClose: () => void; o
   );
 }
 
-/** The last 100 commits of HEAD. */
+/** The last 100 commits of HEAD; read again when the branch changes (a switch here or in a terminal). */
 export function CommitLog(props: { project: Project }) {
-  const [log, { refetch }] = createResource(() => props.project.path, (r) => gitLog(r));
+  const key = () => `${props.project.path}\n${gitState.status()?.branch ?? ""}`;
+  const [log, { refetch }] = createResource(key, () => gitLog(props.project.path));
   return (
     <div class="git-log">
       <div class="git-section-tools">
@@ -135,7 +156,10 @@ export function StashList(props: { project: Project }) {
     } finally {
       setBusy(false);
       void refetch();
-      if (action === "apply") void gitState.refresh();
+      if (action === "apply") {
+        void gitState.refresh();
+        store.refreshProjectInfo(props.project.id, 0);
+      }
     }
   };
 

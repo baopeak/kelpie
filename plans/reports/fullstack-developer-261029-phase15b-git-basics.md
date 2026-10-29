@@ -147,5 +147,68 @@ that still load at startup.
 - The log does not refresh by itself after a commit while it is open (no polling, by design); Refresh
   or reopening reads it again.
 
+## Review fixes
+
+Review: `plans/reports/code-reviewer-261029-phase15b-git-basics.md`.
+
+**H1, detached HEAD (blocking): fixed.**
+- On a detached HEAD, `git_switch_branch` counts commits no branch, tag or remote reaches, using the same
+  query as `git_orphan_commits` (now a shared `git::orphan_count`).
+- If any exist, it refuses with `orphans {commits}`, and the panel tells the user to create a branch first
+  (`git switch -c <name>`). HEAD is not moved.
+- With none, it switches silently.
+- Covered by a Rust test (refusal, then a clean detached switch) and an e2e step.
+
+**M1, stash race: fixed.**
+- `apply` now uses the commit id after the `stash@{N}` check, so it cannot apply a different stash.
+- `drop` still needs `stash@{N}`, run with `LC_ALL=C`. Afterwards the commit id is read from git's
+  `Dropped … (<oid>)` line.
+  - If it is not the expected stash, that stash is restored with `git stash store -m <its subject> <oid>`
+    and the action returns a conflict error ("… nothing was dropped").
+  - If it cannot be restored, the error says so and gives the commit id.
+- Rust tests:
+  - a drop that hit another stash is put back with its message, and a matching drop passes;
+  - parsing of the dropped line;
+  - the existing apply/drop test now goes through apply-by-oid.
+
+**Lows: fixed.**
+- **Order:** "held by another worktree" is checked before "dirty", so a held branch never offers a new
+  worktree. Covered by a Rust test (dirty and held gives `InWorktree`) and an e2e step after the worktree
+  is created. `git_worktree_add(existing)` on a held branch is an error, also tested.
+- **History** re-reads when the branch changes (resource keyed on path and branch); e2e: History open, a
+  switch to `other` shows its commit without Refresh, and back. Stash apply also refreshes the sidebar
+  project info.
+- **Accessibility:**
+  - History and Stashes toggles are `<button>` with `aria-expanded`.
+  - The branch button has `aria-expanded`, and focus returns to it when the switcher closes.
+  - Branch rows are focusable `option`s in a `listbox`: `↓` from the filter, `↑`/`↓` between rows (`↑` from
+    the first goes back to the filter), and Enter/Space to switch.
+  - Enter with an empty filter does nothing. The e2e checks this and the `↓` focus move.
+- **Encoding:** `--encoding=UTF-8` on `log` and `stash list`. The author is now `%aN`, so the mailmap
+  applies.
+- **Old git:** a failed `switch` (or `log`) because git is too old reads "this needs git 2.23 (2.10) or newer: …".
+  Tested.
+
+**Decisions applied:**
+- Hooks: `post-checkout` keeps running for a user-initiated switch, as in a terminal. The user guide now
+  says so, and contrasts it with Finish.
+- The standalone `scripts/e2e/git_basics.py` was accepted in place of extending `parity.py`.
+
+**Not changed:**
+- Ignored files overwritten by a switch: git parity, as the reviewer accepted.
+- The remote "Go to that worktree" never matching an `ssh://` root.
+- No remote test coverage.
+- The `\x1e`-in-subject edge case.
+
+**Verification after the fixes:**
+
+| Check | Result |
+|---|---|
+| `cargo test -p kelpie -j 2` | 184 passed, 0 failed, 5 ignored (15 in `git_basics`) |
+| `cargo clippy -p kelpie --all-targets -j 2` | clean |
+| `pnpm typecheck` / `pnpm test` / i18n check | ok / 42 files, 468 tests / 0 missing (2 new keys and 3 backend fragments) |
+| `pnpm build`, bundle gate | ok; entry 325.75 kB gz (limit 338.60; it was 325.05 before this work) |
+| `scripts/e2e/git_basics.py` | 36/36 on three consecutive runs (isolated daemon and data folder; only the user's own Kelpie processes remained afterwards) |
+
 Status: DONE
-Summary: Branch switcher (clean-only, with worktree offer and held-branch refusal), 100-commit log and stash apply/drop shipped as desktop-only commands with input guards, unit, vitest and isolated GUI e2e coverage (27/27 twice); entry bundle +0.62 kB.
+Summary: Branch switcher, 100-commit log and stash apply/drop are in the Changes panel, with the review fixes applied: detached-HEAD orphan refusal, race-safe stash actions, held-before-dirty order, keyboard access, a History that follows a switch, and UTF-8 log output. Unit, vitest and isolated GUI e2e (36/36 three times) are green.
