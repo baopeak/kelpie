@@ -79,3 +79,75 @@ closed (e2e), and 0 in 10 s with nothing asking (release and debug daemons).
   also escape the job's kill-on-close when a session is closed (pre-existing behaviour, not changed here).
 - `keep_set` treats a `cmd` root of an agent session as a batch launcher whose direct children are the agent.
 - macOS orphan test is `cfg(target_os = "macos")` and was not run here (Windows machine).
+
+## Review fixes (code review `code-reviewer-261029-phase13-processes-ports.md`)
+
+### Blocking
+- **Session restart (H1)**: `procs.rs` no longer pins a session's root identity. The root is whatever the session reports
+  now (the session holds its process until it records the exit: a handle on Windows, an unreaped child on Unix), so after a
+  restart under the same session id the new process is the root. The reported root PID is removed from the members (job
+  list included), always added to `keep`, and refused by `kill` even when its identity could not be read. What the
+  previous run left stays in `seen` (orphans while it runs). New test `a_restarted_session_s_new_process_is_its_own_and_is_never_stopped`
+  (kill old root, new root in a new job under the same id: listed as root, never a child, in `keep`, `kill` refused,
+  `kill_children` stops only its children). Checked that it fails on the old logic ("the new process is the session's").
+- **Linux threads (H2)**: the Unix reader uses `without_tasks()` and skips entries with `thread_kind()` set (table and
+  identity reads). New `cfg(target_os = "linux")` test `threads_are_not_listed_as_processes` (TIDs of the test process are
+  not in the table and have no identity). Not runnable here (no Linux toolchain/C cross compiler: `ring` needs one for
+  `cargo check --target x86_64-unknown-linux-gnu`); the reader code was type-checked and run against sysinfo 0.39.6 in a
+  throwaway crate on Windows, then removed. Runs in CI on Linux later.
+
+### Medium (controller decisions)
+- **Kill children keeps the agent's own programs (M3)**: `keep_set` keeps the root and, in an agent session, the agent's
+  process (the root when named like the agent; under a launcher the child named like the agent or whatever `cmd` starts
+  directly; a launcher with neither is taken as the agent) plus the agent's direct children (MCP servers, tool shells).
+  Grandchildren (a dev server a tool shell started) are stopped. Per-process Kill stays available for kept ones. Panel
+  confirmation and button tooltip say so for agent sessions; user guide and architecture updated.
+- **Windows stop (M2)**: no Ctrl+Break. Verified behaviour: `WM_CLOSE` to the process's top-level windows; a console
+  program is never asked and is terminated at once (or after the grace when a windowed program in the same stop was asked).
+  On Windows the confirmation now says "A program with a window is asked to close it and forced after 3 seconds; a console
+  program (a dev server, for one) is ended at once."; other systems keep "asked to end first and forced after 3 seconds".
+  User guide and architecture describe both.
+- **macOS lsof (M1)**: it was already one `lsof -a -p pid1,pid2,…` per look (not per PID). `process.ports` now asks for
+  ports only when some session has children or orphans, so a shell/agent with nothing under it (looked at after output)
+  costs no `lsof`. No new scan. Follow-up: libproc (`PROC_PIDLISTFDS` + `PROC_PIDFDSOCKETINFO`) for session PIDs and a
+  measurement on macOS. Trade-off: a session whose own process (not a child) listens gets no chip until something runs
+  under it (the panel still shows that port).
+- **Final-check test (M4)**: `the_final_check_refuses_a_live_process_with_another_identity` calls `os::terminate` directly
+  with a live stranger's identity altered (start ±1, other exe, no exe): all 4 refused, nothing closed/forced/gone, stranger
+  alive. The macOS orphan test now also waits for the orphan to end.
+
+### Low
+- L2 fixed: Unix executable path is read fresh (one `UpdateKind::Always` refresh of that PID) both when listing and before
+  each signal, through the same function, so a launcher that `exec`s is listed as what it runs and can be stopped; the
+  table refresh no longer reads exe paths at all.
+- L3 fixed: names are lowercased before `.exe` is trimmed (test: `Codex.Exe`).
+- L4: behaviour kept (output-triggered looks are what make a chip appear within ~1 s); module comment, user guide and
+  architecture now say looks follow output at most every 2 s. Their cost is reduced by the M1 change.
+- L5 fixed: chips of a session that left the screen are kept but marked `stale` (dimmed, dashed, tooltip "As of when this
+  session was last on screen"), fresh again on the next look. Vitest added.
+- L6 fixed: `ImageName.Buffer` is read only when it lies whole, 2-byte aligned, inside the filled buffer.
+- L7 fixed: the panel uses `Promise.allSettled`; a session that closed meanwhile is not an error, others keep their lists.
+- L8 fixed: the panel drops lists of sessions no longer shown; `process.ports` also forgets closed sessions.
+- L9 fixed: shared `uniquePorts` (processes.ts) used by the tab/sidebar chips and the panel.
+- L1 skipped: the Unix check→signal window needs a PID wrap between two adjacent syscalls; the Linux fix (`pidfd_open` +
+  `pidfd_send_signal`) is raw-syscall code that cannot be compiled or tested on this machine, and macOS has no equivalent.
+  Start-time granularity (1 s) is left for the same reason. Worth doing with the phase that adds Linux.
+
+### e2e (`scripts/e2e/processes.py`)
+The stand-in agent now runs a helper directly (as an MCP server) and a tool shell that starts the server. Step 5 checks
+that Kill children frees the port and keeps the agent and its helper; new step 5b kills and restarts the agent session
+(`session.kill` + `session.restart`, same id): the new root is listed as root, not a child, is in `keep`, `process.kill`
+on it is refused, and Kill children from the panel names only the new server, frees its port and keeps the new root, its
+helper and the session.
+
+### Verification (numbers)
+- `cargo test -p kelpie-proto -p kelpied -p kelpie` (target `D:\kelpie-p9-target`, `CARGO_INCREMENTAL=0`): kelpied
+  **348 passed / 3 ignored**, kelpie-proto 25 / 2 ignored, kelpie 169 / 5 ignored. (The first combined run hit rustc OOM on
+  this 8 GB machine compiling `kelpie` lib and lib-test in parallel; rerun with `-j 1` for `kelpie`.)
+- `cargo clippy -p kelpied -p kelpie-proto --all-targets -- -D warnings`: only master's `too_many_arguments` at
+  `mobile.rs:892`; clean with that lint allowed. (An MSRV 1.82 lint caught `is_multiple_of`; replaced.)
+- `pnpm typecheck` clean; `pnpm test` **460 passed** (was 458; +2); `pnpm i18n:check` 0 missing / 0 problems.
+- Rebuilt debug `kelpied` and `pnpm tauri build --debug --no-bundle`.
+- `processes.py`: two consecutive green runs, **53/53** and **53/53**. Chip 0.96 s / 0.86 s; idle 0 scans in 10 s; debug
+  daemon scan with 5 servers median 5.36 / 5.06 ms (release budget, reported only). No test process left afterwards.
+- Regressions: `attention.py` **15/15**, `finish.py` **72/72**.

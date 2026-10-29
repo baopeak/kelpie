@@ -16,7 +16,10 @@ script started itself (servers it typed into its own sessions, a stranger it spa
    second shell, and the scan of both sessions with five servers running is measured (daemon `took_us`; held to
    5 ms for a release build, only reported for a `debug` one).
 4. Kill (confirmed, with a preview naming the program and the port) frees the port; the shell stays.
-5. "Kill children" on an agent session stops its server and keeps the agent process.
+5. "Kill children" on an agent session stops the server its tool shell started and keeps the agent process
+   and what it runs directly (a helper, as an MCP server is). After the session is killed and restarted (same
+   session id, a new process in a new job), the new process is the session's own: listed as the root, never a
+   child, refused by Kill, and kept by Kill children, which still frees the new server's port.
 6. Guards: a stale identity (wrong start time, wrong program, a PID that is not in the tree, the session's
    own process) never stops anything; programs running in a session (token, no token, any shape of
    parameters) cannot list or stop processes.
@@ -53,13 +56,19 @@ for d_ in (BIN, PROJ):
     os.makedirs(d_, exist_ok=True)
 
 PY = sys.executable
-# A stand-in agent: starts a server as its child and stays.
+# A stand-in agent: a helper of its own (as an MCP server is), and a tool shell that runs a dev server; it stays.
+# It writes its helper's PID where the test reads it.
 AGENT = os.path.join(WORK, "fake_agent.py")
 with open(AGENT, "w", encoding="utf-8") as f:
     f.write(
         "import os, subprocess, sys, time\n"
-        "port = open(os.path.join(os.path.dirname(__file__), 'agent-port.txt')).read().strip()\n"
-        "child = subprocess.Popen([sys.executable, '-m', 'http.server', port, '--bind', '127.0.0.1'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "here = os.path.dirname(__file__)\n"
+        "port = open(os.path.join(here, 'agent-port.txt')).read().strip()\n"
+        "quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)\n"
+        "helper = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3600)'], **quiet)\n"
+        "tool = 'import subprocess, sys; subprocess.run([sys.executable, \"-m\", \"http.server\", sys.argv[1], \"--bind\", \"127.0.0.1\"])'\n"
+        "shell = subprocess.Popen([sys.executable, '-c', tool, port], **quiet)\n"
+        "open(os.path.join(here, 'agent-helper.txt'), 'w').write(str(helper.pid))\n"
         "print('fake agent ready, pid', os.getpid(), flush=True)\n"
         "time.sleep(3600)\n"
     )
@@ -181,6 +190,14 @@ def processes(c, sid):
     return c.call("process.list", {"session": sid})
 
 
+def helper_pid():
+    """The PID the stand-in agent wrote for its helper, once it has."""
+    try:
+        return open(os.path.join(WORK, "agent-helper.txt")).read().strip() or None
+    except OSError:
+        return None
+
+
 def scenario(run, c):
     global stranger
     d = run.d
@@ -298,14 +315,44 @@ def scenario(run, c):
     until(lambda: d.js("return !!" + btn), 15)
     # The open panel looks every 2 s: wait until it has seen the server listen
     until(lambda: d.js("return !!document.querySelector('[data-session=\"%s\"] .port-chip[data-port=\"%d\"]')" % (ag["id"], agent_port)), 15)
+    helper = int(until(lambda: helper_pid(), 15) or 0)
     d.js("window.__confirms.length = 0; " + btn + ".click()")
     until(lambda: d.js("return window.__confirms.length") == 1, 10)
     msg = d.js("return window.__confirms[0] || ''")
-    run.check("Kill children asks first and says the session keeps running", "keeps running" in msg and f":{agent_port}" in msg, msg.replace("\n", " | ")[:200])
-    run.check("Kill children frees the agent's port", bool(until(lambda: not listening(agent_port), 15)))
+    run.check("Kill children asks first and says the agent and its own programs keep running", "keep running" in msg and f":{agent_port}" in msg, msg.replace("\n", " | ")[:200])
+    run.check("…and says how Windows stops a console program", "console program" in msg if os.name == "nt" else True, msg.replace("\n", " | ")[-160:])
+    run.check("Kill children frees the agent's port (a server its tool shell started)", bool(until(lambda: not listening(agent_port), 15)))
     time.sleep(1)
     run.check("…the agent process and its session are still running", alive(agent_root) and info(c, ag["id"]).get("alive") is True)
+    run.check("…the agent's own helper (what it runs directly) too", bool(helper) and alive(helper), helper)
     run.check("…and the other session's servers too", all(listening(p_) for p_ in extra))
+
+    # 5b. a restart: the same session runs a new process (in a new job); it is the session's own, and Kill
+    # children stops what it started but never it
+    c.call("session.kill", {"handle": ag["handle"]})
+    run.check("the agent session ended", bool(until(lambda: info(c, ag["id"]).get("alive") is False, 15)))
+    agent_port2 = free_port()
+    open(os.path.join(WORK, "agent-port.txt"), "w").write(str(agent_port2))
+    os.remove(os.path.join(WORK, "agent-helper.txt"))
+    c.call("session.restart", {"handle": ag["handle"]})
+    up = until(lambda: listening(agent_port2), 30)
+    new_root = until(lambda: (lambda r: r if r and r != agent_root else None)((processes(c, ag["id"])["root"] or {}).get("pid")), 15)
+    run.check("after a restart the session runs a new process with its server", bool(up) and bool(new_root), f"{agent_root} -> {new_root}")
+    after = processes(c, ag["id"])
+    run.check("…the new process is the session's own, not one of its children",
+              after["root"] and after["root"]["pid"] == new_root and all(p["pid"] != new_root for p in after["children"] + after["orphans"]) and new_root in after["keep"],
+              json.dumps({k: after[k] for k in ("root", "keep")})[:300])
+    run.check("…and the session's own process cannot be stopped from the list",
+              refused(c, "process.kill", {"session": ag["id"], "pid": new_root, "start_time": after["root"]["start_time"], "exe": after["root"]["exe"]}))
+    helper2 = int(until(lambda: helper_pid(), 15) or 0)
+    until(lambda: d.js("return !!document.querySelector('[data-session=\"%s\"] .port-chip[data-port=\"%d\"]')" % (ag["id"], agent_port2)), 15)
+    d.js("window.__confirms.length = 0; " + btn + ".click()")
+    until(lambda: d.js("return window.__confirms.length") == 1, 10)
+    msg = d.js("return window.__confirms[0] || ''")
+    run.check("…Kill children after the restart names the server, not the agent's process", f":{agent_port2}" in msg and f"PID {new_root})" not in msg, msg.replace("\n", " | ")[:200])
+    run.check("…frees the port", bool(until(lambda: not listening(agent_port2), 15)))
+    time.sleep(1)
+    run.check("…and keeps the new process, its helper and the session", alive(new_root) and bool(helper2) and alive(helper2) and info(c, ag["id"]).get("alive") is True, f"root {new_root}, helper {helper2}")
 
     # 6. guards on the daemon
     list_ = processes(c, sid2)

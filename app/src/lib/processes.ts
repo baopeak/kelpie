@@ -1,8 +1,9 @@
 // What each session runs and the ports it holds (daemon `process.*`). The daemon never looks on its
 // own: this module asks, and only for what is on screen — the sessions of the visible tabs, once when
-// they appear, again shortly after their terminal prints something, and every few seconds for as long
-// as the last look found programs running under them. A session that is idle and had nothing under
-// it is not looked at again until it prints something.
+// they appear, again shortly after their terminal prints something (at most every 2 s, so a session
+// that keeps printing is looked at that often), and every few seconds for as long as the last look
+// found programs running under them. A session that is quiet and had nothing under it is not looked at
+// again until it prints something. A session that leaves the screen keeps its chips, marked stale.
 import { createEffect, createMemo, createRoot } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { daemon } from "./ipc";
@@ -67,8 +68,12 @@ export const portOwner = (port: number) => daemon<PortOwner | null>("process.por
 
 export const portUrl = (p: Pick<Port, "host" | "port">) => `http://${p.host}:${p.port}/`;
 
-/** The ports held by a session's processes, as of the last look. */
-export const [chips, setChips] = createStore<Record<string, { children: number; ports: Port[] }>>({});
+/** The ports held by a session's processes, as of the last look. `stale`: the session left the screen since, so it
+ *  is no longer looked at and the ports may have closed. */
+export const [chips, setChips] = createStore<Record<string, { children: number; ports: Port[]; stale?: boolean }>>({});
+
+/** One entry per port: a server that listens on both IPv4 and IPv6 is one port. */
+export const uniquePorts = (ports: Port[]): Port[] => ports.filter((p, i) => ports.findIndex((q) => q.port === p.port) === i);
 
 /** Opens a port in a browser pane: a tab, or split beside the focused pane. */
 export function openPort(p: Port, sessionId: string, where: "tab" | "right" = "tab") {
@@ -118,7 +123,10 @@ async function look() {
     const r = await daemon<{ sessions: Record<string, { children: number; ports: Port[] }> }>("process.ports", { sessions: ids });
     setChips(
       produce((m) => {
-        for (const id of Object.keys(m)) if (!store.sessions[id]?.alive) delete m[id];
+        for (const id of Object.keys(m)) {
+          if (!store.sessions[id]?.alive) delete m[id];
+          else if (!ids.includes(id)) m[id].stale = true;
+        }
         for (const id of ids) {
           const s = r.sessions[id];
           if (s) m[id] = { children: s.children, ports: s.ports };

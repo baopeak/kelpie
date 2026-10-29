@@ -977,20 +977,29 @@ task's run status is the Runs engine's.
   tree. A scan reads the process table once: on Windows one `NtQuerySystemInformation(SystemProcessInformation)`
   call (parents, start times, names, working set and CPU time of every process, ~2 ms; a Toolhelp snapshot or
   sysinfo cost ~6 ms each for the same), with the executable path read from the handle of each process listed;
-  on Unix sysinfo. Every process is keyed by its identity (pid, start time, exe path); one remembered in a tree
-  that still runs as the same process outside it is listed as an orphan, one whose identity changed is dropped.
+  on Unix sysinfo without threads (`without_tasks`; Linux would list each thread as a process), the executable
+  path read fresh for each process listed and again before each stop. Every process is keyed by its identity
+  (pid, start time, exe path); one remembered in a tree that still runs as the same process outside it is listed
+  as an orphan, one whose identity changed is dropped. The session's own process is the one the session reports
+  now (it holds it until it records the exit), so after a restart under the same session id the new process is
+  the root, never a child, and is always in the keep set; what the previous run left is remembered as orphans.
   Ports: Windows `GetExtendedTcpTable` (listeners, both families), Linux `/proc/net/tcp*` with socket inodes,
-  macOS `lsof`. Nothing scans by itself: `process.ports` (the chips) is asked by the app for the visible
-  sessions, once when they appear, ~0.8 s after their terminal prints, and every 3 s only while the last look
-  found children; `process.list` while the Processes panel is open (every 2 s). `daemon.info.process_scans`
+  macOS one `lsof` for all the PIDs of a look. Nothing scans by itself: `process.ports` (the chips) is asked by
+  the app for the visible sessions, once when they appear, ~0.8 s after their terminal prints (at most every 2
+  s), and every 3 s only while the last look found children; it asks for ports only when some session has
+  children or orphans. `process.list` while the Processes panel is open (every 2 s). `daemon.info.process_scans`
   counts scans. `process.kill {session, pid, start_time, exe?}` refuses unless the process is in the session's
   tree (or its orphans) with that identity, never the session's own process or the daemon; it stops the process
   and its descendants deepest first. Each victim is re-checked against its identity through the handle that
   stops it (Windows: an open process handle, so the PID cannot be reused in between; Unix: re-read before
-  `SIGTERM` and again before `SIGKILL`). Graceful first (Windows: `WM_CLOSE` to its windows, a console program
-  has none; Unix: `SIGTERM`), forced after 3 s. `process.kill_children` keeps the session's process and, under
-  a launcher, the agent's own process (the child named like the agent, or whatever a batch file run by `cmd`
-  starts directly). Kills answer from their own thread.
+  `SIGTERM` and again before `SIGKILL`). Graceful first (Windows: `WM_CLOSE` to its top-level windows, then
+  forced after 3 s; a console program has none and is not asked — no console control event is sent — but
+  terminated at once, or after the grace when a program with windows in the same stop was asked;
+  Unix: `SIGTERM`, forced after 3 s). `process.kill_children` keeps the session's process and, in an agent
+  session, the agent's process (the root when named like the agent; under a launcher the child named like the
+  agent, or whatever a batch file run by `cmd` starts directly; a launcher with neither is the agent) and the
+  agent's direct children (MCP servers, tool shells); their descendants are stopped. Kills answer from their own
+  thread.
 - **Automations** (`automations.rs`, `automation.*`, `automations.json`): hourly / daily /
   weekdays / weekly in local time (chrono). The ticker checks every 10 s and starts each due run on its own
   thread (never awaited: ten due runs cost the ticker about 2 ms); a run creates an ordinary session with

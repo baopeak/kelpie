@@ -1,14 +1,17 @@
 // The programs each session of the project runs, as a tree: name, PID, memory, CPU and the ports they
-// listen on. A program can be stopped (asked to end, forced after 3 s), or everything a session started
-// at once while the session itself keeps running. Both ask first and name what would end.
+// listen on. A program can be stopped (and what it started), or everything a session started at once
+// while the session itself keeps running (in an agent session, with the agent and what it runs
+// directly). Both ask first and name what would end. How a program is stopped depends on the system:
+// on Windows only a program with a window can be asked to close; a console program is ended at once.
 // Looks only while this panel is open (every 2 s); see lib/processes.ts for the chips.
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
-import { createStore } from "solid-js/store";
+import { createStore, produce } from "solid-js/store";
 import { store, sessionLabel } from "../lib/store";
 import { confirmDialog } from "../lib/confirm-dialog";
 import { errorText, t } from "../lib/i18n";
+import { isAgentKind } from "../lib/agents";
 import { KindGlyph } from "./icons";
-import { formatBytes, killChildren, killProcess, killSummary, listProcesses, openPort, portOwner, type KillReport, type Port, type ProcInfo, type ProcessList } from "../lib/processes";
+import { formatBytes, killChildren, killProcess, killSummary, listProcesses, openPort, portOwner, uniquePorts, type KillReport, type Port, type ProcInfo, type ProcessList } from "../lib/processes";
 import { rows, subtree, type Row } from "../lib/process-tree";
 import type { Project, SessionInfo } from "../lib/types";
 
@@ -16,17 +19,21 @@ import type { Project, SessionInfo } from "../lib/types";
 const LOOK_MS = 2000;
 /** Most programs named in a confirmation. */
 const NAMED = 8;
+const windows = /Win/.test(navigator.platform);
 
 /** The lines of a confirmation: what would end, with its ports, and how. */
 function preview(head: string, victims: ProcInfo[]): string {
   const lines = victims.slice(0, NAMED).map((v) => `  ${v.name} (PID ${v.pid})`);
   if (victims.length > NAMED) lines.push(t("  … and {n} more", { n: victims.length - NAMED }));
   const ports = [...new Set(victims.flatMap((v) => v.ports.map((x) => `:${x.port}`)))];
-  return [head, ...lines, ...(ports.length ? [t("Frees {ports}", { ports: ports.join(" ") })] : []), "", t("Each is asked to end first and forced after 3 seconds.")].join("\n");
+  const how = windows
+    ? t("A program with a window is asked to close it and forced after 3 seconds; a console program (a dev server, for one) is ended at once.")
+    : t("Each is asked to end first and forced after 3 seconds.");
+  return [head, ...lines, ...(ports.length ? [t("Frees {ports}", { ports: ports.join(" ") })] : []), "", how].join("\n");
 }
 
 function Chips(props: { ports: Port[]; session: string }) {
-  const unique = createMemo(() => props.ports.filter((p, i) => props.ports.findIndex((q) => q.port === p.port) === i));
+  const unique = createMemo(() => uniquePorts(props.ports));
   return (
     <For each={unique()}>
       {(p) => <button class="port-chip" data-port={p.port} title={`http://${p.host}:${p.port}/`} onClick={() => openPort(p, props.session, "tab")}>:{p.port}</button>}
@@ -57,7 +64,15 @@ function SessionGroup(props: { s: SessionInfo; list: ProcessList | null; busy: S
         <KindGlyph kind={props.s.kind} size={13} />
         <span class="proc-title">{sessionLabel(props.s)}</span>
         <Show when={kids().length}>
-          <button class="link-btn danger" data-act="kill-children" disabled={props.busy.has(-1)} title={t("Stops everything this session started; the session keeps running")} onClick={() => props.onStopChildren(props.s, kids())}>{t("Kill children")}</button>
+          <button
+            class="link-btn danger"
+            data-act="kill-children"
+            disabled={props.busy.has(-1)}
+            title={isAgentKind(props.s.kind) ? t("Stops what this session started; the agent and the programs it runs directly keep running") : t("Stops everything this session started; the session keeps running")}
+            onClick={() => props.onStopChildren(props.s, kids())}
+          >
+            {t("Kill children")}
+          </button>
         </Show>
       </header>
       <Show when={props.list} fallback={<div class="proc-empty">…</div>}>
@@ -87,14 +102,20 @@ export default function ProcessesPanel(props: { project: Project }) {
   let gone = false;
 
   async function look() {
-    try {
-      const got = await Promise.all(sessions().map((s) => listProcesses(s.id).then((l) => [s.id, l] as const)));
-      if (gone) return;
-      for (const [id, l] of got) setLists(id, l);
-      setError(null);
-    } catch (e) {
-      if (!gone) setError(errorText(e));
-    }
+    const ids = sessions().map((s) => s.id);
+    const got = await Promise.allSettled(ids.map((id) => listProcesses(id)));
+    if (gone) return;
+    setLists(
+      produce((m) => {
+        for (const id of Object.keys(m)) if (!ids.includes(id)) delete m[id];
+        got.forEach((r, i) => {
+          if (r.status === "fulfilled") m[ids[i]] = r.value;
+        });
+      }),
+    );
+    // A session that closed while it was being asked about is not an error.
+    const failed = got.find((r, i): r is PromiseRejectedResult => r.status === "rejected" && !!store.sessions[ids[i]]?.alive);
+    setError(failed ? errorText(failed.reason) : null);
   }
 
   function loop() {
@@ -139,7 +160,9 @@ export default function ProcessesPanel(props: { project: Project }) {
     if (await confirmDialog(preview(head, victims))) await stop(p.pid, victims, () => killProcess(s.id, p));
   };
   const onStopChildren = async (s: SessionInfo, victims: ProcInfo[]) => {
-    const head = t("Stop everything {name} started? The session itself keeps running.", { name: sessionLabel(s) });
+    const head = isAgentKind(s.kind)
+      ? t("Stop what {name} started? The session, its agent and the programs the agent runs directly (such as MCP servers) keep running.", { name: sessionLabel(s) })
+      : t("Stop everything {name} started? The session itself keeps running.", { name: sessionLabel(s) });
     if (await confirmDialog(preview(head, victims))) await stop(-1, victims, () => killChildren(s.id));
   };
 

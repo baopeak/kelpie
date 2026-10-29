@@ -1290,6 +1290,8 @@ input, textarea, select { font: inherit; color: var(--text); }
 .port-chip, .port-more { font: 10.5px/15px var(--font-mono); padding: 0 5px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg-elev-2); color: var(--accent-strong); cursor: pointer; white-space: nowrap; }
 .port-chip:hover { background: var(--accent-soft); border-color: var(--accent); }
 .port-more { cursor: default; color: var(--text-dim); }
+.port-chips.stale { opacity: .55; }
+.port-chips.stale .port-chip { color: var(--text-dim); border-style: dashed; }
 .proc-panel { font-size: 12px; padding: 6px 8px 12px; overflow: auto; height: 100%; }
 .proc-head, .proc-row { display: grid; grid-template-columns: minmax(70px, 1fr) 46px 56px 38px minmax(0, auto) 40px; gap: 6px; align-items: center; padding: 2px 4px; }
 .proc-head { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }

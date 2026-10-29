@@ -21,7 +21,7 @@ vi.mock("./browser", () => ({ openBrowser: vi.fn() }));
 vi.mock("./terminal-host", () => ({ onTerminalOutput: vi.fn() }));
 vi.mock("./i18n", () => ({ errorText: (s: string) => s, t: (s: string, v?: Record<string, string>) => s.replace(/\{(\w+)\}/g, (_: string, k: string) => v?.[k] ?? "") }));
 
-const { chips, noteOutput, killSummary, formatBytes } = await import("./processes");
+const { chips, noteOutput, killSummary, formatBytes, uniquePorts } = await import("./processes");
 const { rows, subtree } = await import("./process-tree");
 
 const p = (pid: number, ppid: number | null, name = `p${pid}`): ProcInfo => ({ pid, ppid, name, start_time: 1, exe: null, mem: 0, cpu: 0, ports: [] });
@@ -72,6 +72,36 @@ describe("looking for ports", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(calls).toHaveLength(seen);
     expect(chips.a?.ports).toEqual([]);
+  });
+
+  it("marks the chips of a session that left the screen as stale, and fresh again once it is looked at", async () => {
+    visible.add("a");
+    answer.children = 1;
+    noteOutput("a");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(chips.a?.stale).toBeFalsy();
+    visible.delete("a");
+    visible.add("b");
+    noteOutput("b");
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(calls.at(-1)?.params).toEqual({ sessions: ["b"] });
+    expect(chips.a?.stale).toBe(true);
+    expect(chips.a?.ports.map((x) => x.port)).toEqual([5173]);
+    expect(chips.b?.stale).toBeFalsy();
+    visible.add("a");
+    noteOutput("a");
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(chips.a?.stale).toBeFalsy();
+    // Nothing runs any more: the looks stop.
+    answer.children = 0;
+    await vi.advanceTimersByTimeAsync(4_000);
+  });
+});
+
+describe("ports", () => {
+  it("shows a port held on both address families once", () => {
+    const port = (n: number, addr: string) => ({ port: n, host: "localhost", addr });
+    expect(uniquePorts([port(5173, "127.0.0.1"), port(5173, "::1"), port(8000, "0.0.0.0")]).map((x) => x.port)).toEqual([5173, 8000]);
   });
 });
 

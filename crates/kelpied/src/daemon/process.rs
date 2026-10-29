@@ -99,8 +99,11 @@ impl Daemon {
                 let started = Instant::now();
                 let ids = param(&params, "sessions")?.as_array().ok_or_else(|| anyhow!("sessions must be a list"))?;
                 let targets: Vec<Target> = ids.iter().filter_map(Value::as_str).filter_map(|sid| self.process_target(sid).ok()).collect();
+                self.forget_closed_sessions();
                 let scans = if targets.is_empty() { Vec::new() } else { self.procs.scan(&targets) };
-                let listeners = if scans.iter().all(|s| s.children.is_empty() && s.root.is_none()) { Vec::new() } else { ports::listeners(Some(&pids_of(&scans))) };
+                // The ports are asked for only when something runs under a session: a shell or agent with nothing
+                // under it (asked about after each burst of output) costs no socket lookup (on macOS, an `lsof`).
+                let listeners = if scans.iter().all(|s| s.children.is_empty() && s.orphans.is_empty()) { Vec::new() } else { ports::listeners(Some(&pids_of(&scans))) };
                 let ports = by_owner(&listeners);
                 let mut sessions = serde_json::Map::new();
                 for s in &scans {

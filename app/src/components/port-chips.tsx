@@ -2,20 +2,19 @@
 // Click opens the port in a browser tab; the menu opens it beside the focused pane or copies the address.
 import { For, Show, createMemo } from "solid-js";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { chips, openPort, ownerLabel, portUrl, type Port } from "../lib/processes";
+import { chips, openPort, ownerLabel, portUrl, uniquePorts, type Port } from "../lib/processes";
 import { openContextMenu } from "./context-menu";
 import { t } from "../lib/i18n";
 
 export function PortChips(props: { id: string; max: number }) {
-  // A server that listens on both IPv4 and IPv6 is one port.
-  const ports = createMemo<Port[]>(() => {
-    const seen = new Set<number>();
-    return (chips[props.id]?.ports ?? []).filter((p) => !seen.has(p.port) && !!seen.add(p.port));
-  });
-  const title = (p: Port) => `${portUrl(p)}${ownerLabel(p) ? ` · ${ownerLabel(p)}` : ""}\n${t("Click to open · right-click for more")}`;
+  const ports = createMemo<Port[]>(() => uniquePorts(chips[props.id]?.ports ?? []));
+  // Off screen, the session is not looked at: its ports are as of when it was last on screen.
+  const stale = () => !!chips[props.id]?.stale;
+  const title = (p: Port) =>
+    `${portUrl(p)}${ownerLabel(p) ? ` · ${ownerLabel(p)}` : ""}\n${stale() ? `${t("As of when this session was last on screen")}\n` : ""}${t("Click to open · right-click for more")}`;
   return (
     <Show when={ports().length}>
-      <span class="port-chips">
+      <span class={`port-chips${stale() ? " stale" : ""}`}>
         <For each={ports().slice(0, props.max)}>
           {(p) => (
             <button
