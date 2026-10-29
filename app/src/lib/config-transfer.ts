@@ -251,8 +251,8 @@ function mergeList<T>(local: T[], incoming: T[], key: { id: (x: T) => string; na
 export const MASK = "[redacted]";
 const masked = (v: unknown) => (typeof v === "string" ? v.includes(MASK) : JSON.stringify(v ?? null).includes(MASK));
 
-/** What resolving masked values did to one item: fields left empty (or, for arguments, `args:<flag>`
- *  dropped) for want of a local value, and fields that took this computer's value instead of the file's. */
+/** What resolving masked values did to one item: fields (for arguments, `args:<flag>`) without a local
+ *  value, and fields that took this computer's value instead of the file's. */
 interface Track {
   missing: string[];
   kept: string[];
@@ -286,20 +286,23 @@ const headerName = (x: string | undefined) => (x ? /^\s*([A-Za-z][A-Za-z0-9-]*)\
 /** An argument list whose masked elements are filled in from this computer's arguments, matched by
  *  position, never by guess:
  *  - an element that is exactly the marker after a flag (`--api-key [redacted]`, what the export writes
- *    for a secret flag) takes the value after the same occurrence of that flag here; without one, the
- *    marker and that flag are left out together;
+ *    for a secret flag) takes the value after the same occurrence of that flag here;
  *  - `name=[redacted]` takes the same occurrence of `name=…` here;
  *  - a header (`Authorization: Bearer [redacted]` after `-H`) takes the value after the same occurrence of
  *    that flag here only when it is the same header;
  *  - anything else takes the element at the same index when both lists have the same shape (same length,
  *    same flags in the same places).
- *  Otherwise only the masked element is left out (a flag on its own is never dropped), named in
- *  `missing` (`args:--api-key`). Elements filled from here are named in `kept`. */
-function unmaskArgs(inc: readonly string[], loc: readonly string[] | undefined, tr: Track, field = "args"): string[] {
+ *  Elements filled from here are named in `kept`. When any masked element has no value here the list is
+ *  not usable at all (`null`; those elements are named in `missing`, e.g. `args:--api-key`): leaving out
+ *  only part of it could change what the rest means (`-c` taking the next argument, a flag losing its
+ *  value), and no element is guessed to be a flag's value. */
+function unmaskArgs(inc: readonly string[], loc: readonly string[] | undefined, tr: Track, field = "args"): string[] | null {
   const here = loc ?? [];
   const out: string[] = [];
   const usable = (x: string | undefined): x is string => x !== undefined && !masked(x);
   const sameShape = here.length === inc.length && inc.every((x, n) => !isFlag(x) || here[n] === x);
+  const kept: string[] = [];
+  const missing: string[] = [];
   for (let i = 0; i < inc.length; i++) {
     const a = inc[i];
     if (!masked(a)) {
@@ -314,12 +317,6 @@ function unmaskArgs(inc: readonly string[], loc: readonly string[] | undefined, 
       name = prev!;
       const j = nth(here, (x) => x === prev, before(inc, i - 1, (x) => x === prev));
       local = j >= 0 && !isFlag(here[j + 1]) ? here[j + 1] : undefined;
-      if (!usable(local)) {
-        // The marker is that flag's value: both go, so the flag cannot take the next argument instead.
-        if (out[out.length - 1] === prev) out.pop();
-        tr.missing.push(`${field}:${name}`);
-        continue;
-      }
     } else if (eq > 0 && !masked(a.slice(0, eq))) {
       name = a.slice(0, eq);
       const has = (x: string) => x.startsWith(`${name}=`);
@@ -336,9 +333,14 @@ function unmaskArgs(inc: readonly string[], loc: readonly string[] | undefined, 
     }
     if (usable(local)) {
       out.push(local);
-      tr.kept.push(`${field}:${name}`);
-    } else tr.missing.push(`${field}:${name}`);
+      kept.push(`${field}:${name}`);
+    } else missing.push(`${field}:${name}`);
   }
+  if (missing.length) {
+    tr.missing.push(...missing);
+    return null;
+  }
+  tr.kept.push(...kept);
   return out;
 }
 /** Environment from a file over a local one: values replace; a name without a value (or with a masked
@@ -424,14 +426,16 @@ export interface ImportPlan {
   missingPlugins: PluginEntry[];
   /** Agent variables the file names without a value and this computer does not have. */
   envNeeded: { kind: string; names: string[] }[];
-  /** Values masked in the file that this computer has no value for: left empty (`fields`, e.g. `notes`,
-   *  `args:--api-key`), or the whole item left out when it cannot do without them. */
+  /** Values masked in the file that this computer has no value for: left empty (`fields`, e.g. `notes`), or
+   *  the whole item left out when it cannot do without them (e.g. `command:#3`, or `args:--api-key` for a
+   *  new agent automation). Argument lists kept from this computer instead are in `argsNotImported`. */
   fillIn: { section: ConfigSection; item: string; fields: string[]; leftOut: boolean }[];
   /** Values masked in the file that took this computer's value instead (the file's version is not used). */
   keptLocal: { section: ConfigSection; item: string; fields: string[] }[];
-  /** Agent profiles (by label) whose arguments were not imported: a masked argument had no value here, and
-   *  the list without it could mean something else (`-c` with nothing after it, a flag losing its value). */
-  argsNotImported: string[];
+  /** Argument lists not imported because a masked argument had no value here (the list without it could
+   *  mean something else): an agent profile's, an agent automation's or the terminal's (`shellArgs`). This
+   *  computer's list stays as it was. */
+  argsNotImported: { section: ConfigSection; item: string }[];
   runs: RunChange[];
   hostTargets: HostTargetChange[];
 }
@@ -478,8 +482,15 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
       if (!masked(v)) continue;
       if (k === "shellArgs") {
         const tr = track();
-        (values as Record<string, unknown>)[k] = unmaskArgs(v as string[], cur.settings.shellArgs, tr);
-        fill("settings", k, tr);
+        const args = unmaskArgs(v as string[], cur.settings.shellArgs, tr);
+        if (args) {
+          (values as Record<string, unknown>)[k] = args;
+          fill("settings", k, tr);
+        } else {
+          // This computer's terminal arguments stay as they are.
+          delete (values as Record<string, unknown>)[k];
+          plan.argsNotImported.push({ section: "settings", item: k });
+        }
       } else {
         delete (values as Record<string, unknown>)[k];
         fill("settings", k, { missing: [], kept: [k] });
@@ -534,15 +545,14 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
       const old = at >= 0 ? profiles[at] : undefined;
       const tr = track();
       const label = unmaskText(a.label, old?.label, "label", track()) || a.kind;
-      let args = unmaskArgs(a.args, old?.args, tr);
-      if (tr.missing.some((f) => f.startsWith("args:"))) {
-        // A masked argument has no value here. Without it the list could mean something else (a `-c` left
-        // with nothing after it, a safety flag that seems to take the next argument), so the file's arguments
-        // are not used at all: this computer's stay as they are (none for a new profile).
+      // A masked argument without a value here: this computer's arguments stay as they are (none for a new
+      // profile) and the profile is named.
+      const argTr = track();
+      let args = unmaskArgs(a.args, old?.args, argTr);
+      if (args) tr.kept.push(...argTr.kept);
+      else {
         args = old ? old.args.slice() : [];
-        tr.missing = tr.missing.filter((f) => !f.startsWith("args:"));
-        tr.kept = tr.kept.filter((f) => !f.startsWith("args:"));
-        plan.argsNotImported.push(label);
+        plan.argsNotImported.push({ section: "agents", item: label });
       }
       const permission = a.permission ? unmaskText(a.permission, old?.permission, "permission", tr) : "";
       const { env, needed } = mergeEnv(old?.env, a.env);
@@ -616,14 +626,23 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
       clean: (raw, loc) => {
         const inc = raw as unknown as AutomationEntry;
         const tr = track();
-        const shell = inc.shell ? { program: unmaskText(inc.shell.program, loc?.shell?.program, "command", tr), argv: unmaskArgs(inc.shell.argv, loc?.shell?.argv, tr, "command") } : inc.shell;
+        // A command argument without a value here leaves the automation out (`command:…` in `missing`).
+        const shell = inc.shell ? { program: unmaskText(inc.shell.program, loc?.shell?.program, "command", tr), argv: unmaskArgs(inc.shell.argv, loc?.shell?.argv, tr, "command") ?? [] } : inc.shell;
+        // Agent arguments with a masked one that has no value here: the replaced automation's arguments stay
+        // as they are; with none to replace, the automation is left out (`args:…` in `missing`).
+        const argTr = track();
+        let args = unmaskArgs(inc.args, loc?.args, argTr);
+        const argsKeptLocal = !args && !!loc;
+        if (args) tr.kept.push(...argTr.kept);
+        else if (loc) args = loc.args.slice();
+        else tr.missing.push(...argTr.missing);
         const out = {
           ...inc,
           name: unmaskText(inc.name, loc?.name, "name", tr),
           cwd: unmaskText(inc.cwd, loc?.cwd, "cwd", tr),
           prompt: unmaskText(inc.prompt, loc?.prompt, "prompt", tr),
           quick_label: inc.quick_label ? unmaskText(inc.quick_label, loc?.quick_label, "quick_label", track()) : inc.quick_label,
-          args: unmaskArgs(inc.args, loc?.args, tr),
+          args: args ?? [],
           shell,
           trigger: inc.trigger ? { ...inc.trigger, glob: unmaskText(inc.trigger.glob, loc?.trigger?.glob, "trigger", tr) } : inc.trigger,
         };
@@ -633,11 +652,13 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
           const v = e.value !== undefined && !masked(e.value) ? e.value : loc?.env?.[e.name];
           if (v !== undefined && !masked(v)) env[e.name] = v;
         }
-        // It cannot run without these; agent arguments only lose the masked parts. A command that would run
-        // differently from the file's (an argument it could not restore) is left out whole.
-        const essential = tr.missing.filter((f) => ["name", "cwd", "trigger", "command"].includes(f) || f.startsWith("command:") || (f === "prompt" && inc.action !== "shell"));
+        // It cannot run without these. A command or agent arguments that would run differently from the
+        // file's (an argument it could not restore, with no local arguments to keep) leave it out whole.
+        const essential = tr.missing.filter((f) => ["name", "cwd", "trigger", "command"].includes(f) || f.startsWith("command:") || f.startsWith("args:") || (f === "prompt" && inc.action !== "shell"));
         fill("automations", inc.name, tr, essential.length > 0);
-        return essential.length ? null : ({ ...out, env } as unknown as ListedAutomation);
+        if (essential.length) return null;
+        if (argsKeptLocal) plan.argsNotImported.push({ section: "automations", item: inc.name });
+        return { ...out, env } as unknown as ListedAutomation;
       },
       adopt: (inc, _loc, id) => ({ ...inc, id }),
     }, opts.newId);

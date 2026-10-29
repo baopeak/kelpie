@@ -485,7 +485,7 @@ describe("masked values", () => {
     // Codex is new here and `-c api_key=[redacted]` has no value: no arguments rather than a `-c` with
     // nothing after it.
     expect(codex.args).toEqual([]);
-    expect(p.argsNotImported).toEqual(["Codex"]);
+    expect(p.argsNotImported).toEqual([{ section: "agents", item: "Codex" }]);
     expect(p.settings!.quickCommands.some((q) => q.label === "Deploy")).toBe(false);
     expect(p.automations.some((a) => a.next.name === "Report")).toBe(false);
     const added = p.vault!.hosts.find((h) => h.id === "h-new")!;
@@ -519,7 +519,7 @@ describe("masked arguments are matched by position, never by guess", () => {
   const notImported = (args: string[], local?: string[]) => {
     const r = agentArgs(args, local);
     expect(r.args).toEqual(local ?? []);
-    expect(r.notImported).toEqual(["Claude Code"]);
+    expect(r.notImported).toEqual([{ section: "agents", item: "Claude Code" }]);
     expect(r.fill).toEqual([]);
     expect(r.kept).toEqual([]);
   };
@@ -562,11 +562,59 @@ describe("masked arguments are matched by position, never by guess", () => {
     expect(agentArgs([`api_key=${M}`, `api_key=${M}`], ["api_key=one", "x", "api_key=two"]).args).toEqual(["api_key=one", "api_key=two"]);
   });
 
-  it("terminal arguments still lose only the masked part, a flag on its own is never dropped", () => {
+  /** Plans the file's terminal arguments `args` over this computer's `local` ones. */
+  const terminal = (args: string[], local: string[]) => {
     const read = fileRead();
-    read.doc.sections.settings = { ...read.doc.sections.settings, shellArgs: ["pwsh", "-NoLogo", `https://u:${M}@h`] };
-    const p = planImport(read, ["settings"], current(), { defaults, newId });
+    read.doc.sections.settings = { ...read.doc.sections.settings, shellArgs: args };
+    const cur = current();
+    cur.settings.shellArgs = local;
+    return planImport(read, ["settings"], cur, { defaults, newId });
+  };
+
+  it("keeps this computer's terminal arguments whole when a masked one has no value here", () => {
+    const p = terminal(["codex", "-c", `api_key=${M}`], ["pwsh", "-NoLogo"]);
     expect(p.settings!.shellArgs).toEqual(["pwsh", "-NoLogo"]);
+    expect(p.argsNotImported).toEqual([{ section: "settings", item: "shellArgs" }]);
+    expect(p.sections.settings!.changed).not.toContain("shellArgs");
+    expect(p.fillIn).toEqual([]);
+    expect(terminal(["pwsh", "-NoLogo", `https://u:${M}@h`], ["bash"]).settings!.shellArgs).toEqual(["bash"]);
+  });
+
+  it("imports terminal arguments whose masked ones are all filled in from here", () => {
+    const p = terminal(["codex", "--search", "-c", `api_key=${M}`], ["pwsh", "-c", "api_key=real"]);
+    expect(p.settings!.shellArgs).toEqual(["codex", "--search", "-c", "api_key=real"]);
+    expect(p.argsNotImported).toEqual([]);
+    expect(p.keptLocal).toEqual([{ section: "settings", item: "shellArgs", fields: ["args:api_key"] }]);
+  });
+
+  /** Plans one agent automation "Review" with `args` from the file, over a local one with `local` arguments
+   *  (none: the automation is new here). */
+  const agentAutomation = (args: string[], local?: string[]) => {
+    const read = fileRead();
+    read.doc.sections.automations = [{ ...automation({ id: "ag", name: "Review", args }), enabled: false, env: [] }]
+      .map(({ last_run: _a, last_session: _b, last_error: _c, next_run: _d, ...a }) => a);
+    const cur = current();
+    cur.automations = local ? [automation({ id: "ag", name: "Review", args: local })] : [];
+    return planImport(read, ["automations"], cur, { defaults, newId });
+  };
+
+  it("keeps an agent automation's local arguments whole, or leaves a new one out, when a masked one has no value here", () => {
+    const kept = agentAutomation(["--search", "-c", `api_key=${M}`], ["--model", "opus"]);
+    expect(kept.automations.map((a) => a.next.args)).toEqual([["--model", "opus"]]);
+    expect(kept.argsNotImported).toEqual([{ section: "automations", item: "Review" }]);
+    expect(kept.fillIn).toEqual([]);
+    const fresh = agentAutomation(["--search", "-c", `api_key=${M}`]);
+    expect(fresh.automations).toEqual([]);
+    expect(fresh.argsNotImported).toEqual([]);
+    expect(fresh.fillIn).toEqual([{ section: "automations", item: "Review", fields: ["args:api_key"], leftOut: true }]);
+    expect(fresh.sections.automations!.skipped).toBe(1);
+  });
+
+  it("imports an agent automation's arguments whose masked ones are all filled in from here", () => {
+    const p = agentAutomation(["--search", "-c", `api_key=${M}`], ["-c", "api_key=real"]);
+    expect(p.automations.map((a) => a.next.args)).toEqual([["--search", "-c", "api_key=real"]]);
+    expect(p.argsNotImported).toEqual([]);
+    expect(p.keptLocal).toEqual([{ section: "automations", item: "Review", fields: ["args:api_key"] }]);
   });
 
   it("says when this computer's value was kept", () => {

@@ -455,3 +455,24 @@ Numbers:
 - `cargo test -p kelpie -j 2 config_transfer`: 24 passed. `cargo clippy -p kelpie --all-targets` is clean. No Rust change was made.
 - Vitest: 506 passed; `config-transfer.test.ts` has 38 tests. `pnpm typecheck` is clean; `i18n:check` reports 0 missing.
 - `config_export.py`: 63/63 on a fresh debug build. Afterwards none of this script's processes were left; the `tauri-driver`, `msedgedriver` and `D:\Works\Kelpie` daemon belong to another workstream.
+## Follow-up: whole-list rule for every argument list
+
+At the coordinator's request, the whole-list fallback now applies to every argument list. The path that dropped only the masked element (and, for an exact marker, its flag) is removed.
+
+- `unmaskArgs` is all-or-nothing. It returns the list with every masked element filled in from this computer (position rules unchanged, named in `kept`), or `null` when any masked element has no value here (named in `missing`). Nothing else drops elements.
+- **Agent profile:** this computer's arguments stay as they are (none for a new profile), and the profile is named.
+- **Default shell (`shellArgs`):** this computer's value stays; it is not counted as a changed setting, and it is named in the preview and the result: "Default shell: arguments not imported, a hidden value couldn't be filled in here (re-enter it in Terminal settings)".
+- **Agent automation:**
+  - one that replaces a local automation keeps that automation's arguments, and is named: "{name}: arguments not imported, … (re-enter it on the Automations page)";
+  - a new one is left out and named like other left-out items, e.g. "Left out, masked in the file and not set here: Review (arguments api_key)". This matches shell automations.
+- **Shell automation command:** unchanged; left out whole.
+- `ImportPlan.argsNotImported` is now `{ section, item }[]` and stays part of `planShown`. Vietnamese translations were added for the two new messages.
+
+Tests: for the terminal and for an agent automation, a dangling `-c api_key=[redacted]` case and a successful restore. The agent automation also has a no-local-copy case (left out). The agent-profile cases from the previous follow-up are unchanged.
+
+The e2e needed no change: none of its argument lists has a masked element without a local value.
+
+Numbers:
+- `cargo test -p kelpie -j 2 config_transfer`: 24 passed. `cargo clippy -p kelpie --all-targets` is clean. No Rust change was made.
+- Vitest: 509 passed; `config-transfer.test.ts` has 41 tests. `pnpm typecheck` is clean; `i18n:check` reports 0 missing.
+- `config_export.py`: 63/63 on a fresh debug build. Afterwards only the user's own Kelpie app and daemon were running.
