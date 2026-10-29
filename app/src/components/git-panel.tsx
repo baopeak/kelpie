@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createResource, createSignal, onMount } from "solid-js";
+import { For, Show, createMemo, createResource, createSignal, lazy, onMount } from "solid-js";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { store } from "../lib/store";
 import { agentRun, ghDefaultBranch, ghPrCreate, gitAbort, gitCommit, gitContext, gitDiscard, gitRemote, gitRepoState, gitStage, type RemoteAction } from "../lib/ipc";
@@ -11,6 +11,12 @@ import type { GitFile, Project } from "../lib/types";
 import { t } from "../lib/i18n";
 import { confirmDialog } from "../lib/confirm-dialog";
 import { overlapsOf } from "../lib/review-queue";
+import { openWorktreeDialog } from "./worktree-dialog";
+
+// Branches, history and stashes load when first opened.
+const BranchSwitcher = lazy(() => import("./git-basics").then((m) => ({ default: m.BranchSwitcher })));
+const CommitLog = lazy(() => import("./git-basics").then((m) => ({ default: m.CommitLog })));
+const StashList = lazy(() => import("./git-basics").then((m) => ({ default: m.StashList })));
 
 function split(path: string) {
   const i = path.lastIndexOf("/");
@@ -39,6 +45,8 @@ export function GitPanel(props: { project: Project }) {
   const [busy, setBusy] = createSignal<string | null>(null);
   const [amend, setAmend] = createSignal(false);
   const [prForm, setPrForm] = createSignal(false);
+  const [branches, setBranches] = createSignal(false);
+  const [section, setSection] = createSignal<"log" | "stashes" | null>(null);
   const st = () => gitState.status();
   const [repo, { refetch: refetchRepo }] = createResource(() => props.project.path, (root) => gitRepoState(root).catch(() => null));
   const staged = createMemo(() => (st()?.files ?? []).filter((f) => f.index !== "." && f.index !== "?" && f.index !== "U"));
@@ -46,8 +54,17 @@ export function GitPanel(props: { project: Project }) {
   const conflicts = createMemo(() => (st()?.files ?? []).filter((f) => f.index === "U"));
   const root = () => props.project.path;
   const pr = () => pullRequests.prs[props.project.id];
+  const repoId = () => props.project.parentId ?? props.project.id;
+  /** A new worktree can be made from here (a local repository in the sidebar). */
+  const canWorktree = () => !props.project.remote && store.state.projects.some((p) => p.id === repoId()) && !!store.projectInfo[repoId()]?.is_repo;
 
   onMount(() => void pullRequests.refresh(props.project.id, root()));
+
+  const refreshAll = () => {
+    void gitState.refresh();
+    void refetchRepo();
+    store.refreshProjectInfo(props.project.id, 0);
+  };
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(label);
@@ -57,9 +74,7 @@ export function GitPanel(props: { project: Project }) {
       store.notify(String(e), undefined, 8000);
     } finally {
       setBusy(null);
-      void gitState.refresh();
-      void refetchRepo();
-      store.refreshProjectInfo(props.project.id, 0);
+      refreshAll();
     }
   };
 
@@ -134,7 +149,10 @@ export function GitPanel(props: { project: Project }) {
       <div class="git-head">
         <div class="branch">
           <Icon name="git" size={14} />
-          <span class="branch-name" title={st()?.upstream ? `${st()?.branch} → ${st()?.upstream}` : st()?.branch ?? ""}>{st()?.branch ?? "…"}</span>
+          <button class="branch-switch" title={t("Switch branch")} disabled={!!busy()} onClick={() => setBranches(!branches())}>
+            <span class="branch-name" title={st()?.upstream ? `${st()?.branch} → ${st()?.upstream}` : st()?.branch ?? ""}>{st()?.branch ?? "…"}</span>
+            <Icon name="chevronDown" size={12} />
+          </button>
           <Show when={st()?.upstream}><span style={{ color: "var(--text-faint)" }}>↑{ahead()} ↓{behind()}</span></Show>
           <span style={{ flex: 1 }} />
           <Show when={repo()?.has_remote}>
@@ -144,6 +162,10 @@ export function GitPanel(props: { project: Project }) {
           </Show>
           <button class="icon-btn" title={t("Refresh")} onClick={() => { void gitState.refresh(); void refetchRepo(); void pullRequests.refresh(props.project.id, root()); }}><Icon name="refresh" size={14} /></button>
         </div>
+        <Show when={branches()}>
+          <BranchSwitcher project={props.project} onClose={() => setBranches(false)} onSwitched={() => { refreshAll(); void pullRequests.refresh(props.project.id, root()); }}
+            onOpenWorktree={canWorktree() ? (branch) => openWorktreeDialog(repoId(), branch, undefined, { existing: true }) : undefined} />
+        </Show>
         <Show when={overlapsOf(props.project.id).length}>
           <div class="git-note warn">
             <For each={overlapsOf(props.project.id)}>
@@ -209,8 +231,21 @@ export function GitPanel(props: { project: Project }) {
         <For each={changes()}>{(f) => <Row f={f} staged={false} />}</For>
         <Show when={st() && !changes().length && !staged().length}><div class="muted">{t("Working tree clean.")}</div></Show>
         <Show when={st()?.truncated}><div class="muted">{t("Showing the first 5000 changes.")}</div></Show>
+        <SectionToggle id="log" label={t("History")} open={section()} set={setSection} />
+        <Show when={section() === "log"}><CommitLog project={props.project} /></Show>
+        <SectionToggle id="stashes" label={t("Stashes")} open={section()} set={setSection} />
+        <Show when={section() === "stashes"}><StashList project={props.project} /></Show>
       </div>
     </Show>
+  );
+}
+
+/** A collapsible group heading; one section is open at a time. */
+function SectionToggle(props: { id: "log" | "stashes"; label: string; open: "log" | "stashes" | null; set: (v: "log" | "stashes" | null) => void }) {
+  return (
+    <div class="group-label section-toggle" data-section={props.id} onClick={() => props.set(props.open === props.id ? null : props.id)}>
+      <Icon name={props.open === props.id ? "chevronDown" : "chevronRight"} size={12} /> {props.label}
+    </div>
   );
 }
 

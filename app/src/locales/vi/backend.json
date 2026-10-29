@@ -133,5 +133,8 @@
   "the process changed: it is not the one that was listed": "tiến trình đã đổi: đó không phải tiến trình đã được liệt kê",
   "the process is not in the session's job": "tiến trình không nằm trong job của phiên",
   "that is the Kelpie daemon": "đó là dịch vụ nền của Kelpie",
-  "cannot open the process": "không mở được tiến trình"
+  "cannot open the process": "không mở được tiến trình",
+  "no local branch named": "không có nhánh cục bộ tên",
+  "invalid stash": "stash không hợp lệ",
+  "the stash list changed (another worktree may have stashed or dropped): refresh it and try again": "danh sách stash đã thay đổi (có thể một worktree khác vừa stash hoặc xóa): hãy làm mới và thử lại"
 }

@@ -57,6 +57,18 @@ features earlier (running sessions stop for a moment; agents that can resume con
 6. **Files**: the right panel has Files (filter by name, or search contents), Changes (git) and
    Sessions. Click a file to open it in the editor (`Ctrl+S` saves; external changes are
    detected); click a change to see its diff. Ignored files are dimmed.
+   - **Switch branch**: click the branch name at the top of Changes for the local branches (filter by
+     typing, most recently committed first). A click switches this folder to that branch, only from a clean
+     working tree: with uncommitted changes (untracked files included) or a merge/rebase in progress nothing
+     happens and the panel says why; for uncommitted changes it offers *Open in a new worktree…*, which checks
+     that branch out in a new worktree and leaves this folder as it is. A branch already checked out in
+     another worktree (marked *worktree*) cannot be checked out twice; the panel names that folder and,
+     when it is in the sidebar, offers to go there.
+   - **History** (bottom of Changes, folded): the last 100 commits of this branch with short hash,
+     subject, author and age; it is read when you open it (Refresh reads it again).
+   - **Stashes** (folded): the repository's stashes, *Apply* (the stash is kept) and *Drop* (asks first).
+     Git keeps one stash list per repository, so every worktree shows (and can drop) the same stashes; an
+     action is refused when the list changed since it was shown, so refresh and try again.
 7. **Panes**: hover a pane for split right / down, maximize (`Ctrl+Shift+Enter`) and close. A
    split (button, terminal menu or shortcut) opens an empty pane asking what to run: click an
    agent or *Terminal*, or press `1`–`9`; *More…* opens the new-session dialog for that pane

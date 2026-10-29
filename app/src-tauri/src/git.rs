@@ -72,7 +72,7 @@ async fn run_git(slots: &Semaphore, cwd: &Path, args: &[&str], env: &[(&str, &st
     Ok(GitOutput { ok: out.status.success(), stdout: out.stdout, stderr: String::from_utf8_lossy(&out.stderr).into_owned() })
 }
 
-async fn git_ok(cwd: &Path, args: &[&str]) -> CmdResult<String> {
+pub(crate) async fn git_ok(cwd: &Path, args: &[&str]) -> CmdResult<String> {
     let out = git(cwd, args).await?;
     if !out.ok {
         return Err(out.stderr.trim().to_string());
@@ -279,6 +279,13 @@ pub struct Worktree {
     pub(crate) prunable: bool,
 }
 
+#[cfg(test)]
+impl Worktree {
+    pub(crate) fn for_test(path: &str, branch: Option<&str>) -> Self {
+        Worktree { path: path.into(), head: None, branch: branch.map(Into::into), bare: false, detached: branch.is_none(), prunable: false }
+    }
+}
+
 #[tauri::command]
 pub async fn git_worktrees(root: String) -> CmdResult<Vec<Worktree>> {
     let dir = guard(&root, "")?;
@@ -308,9 +315,10 @@ pub async fn git_worktrees(root: String) -> CmdResult<Vec<Worktree>> {
     Ok(list)
 }
 
-/// Creates `branch` from `base` in a new worktree at `path` (absolute).
+/// Creates `branch` from `base` in a new worktree at `path` (absolute). With `existing`, checks out
+/// the local branch `branch` there instead (`base` is ignored).
 #[tauri::command]
-pub async fn git_worktree_add(root: String, path: String, branch: String, base: Option<String>) -> CmdResult<()> {
+pub async fn git_worktree_add(root: String, path: String, branch: String, base: Option<String>, existing: Option<bool>) -> CmdResult<()> {
     let dir = guard(&root, "")?;
     let path = path.trim();
     if !Path::new(path).is_absolute() {
@@ -319,6 +327,11 @@ pub async fn git_worktree_add(root: String, path: String, branch: String, base: 
     // A leading "-" would be read as an option, not a name.
     if branch.starts_with('-') || base.as_deref().is_some_and(|b| b.trim().starts_with('-')) {
         return Err("branch and base must not start with '-'".into());
+    }
+    if existing.unwrap_or(false) {
+        // Only a real local branch: any other name would give a detached checkout of that commit.
+        crate::git_basics::require_local_branch(&dir, &branch).await?;
+        return worktree_ok(&dir, &["worktree", "add", "--", path, branch.as_str()]).await.map(|_| ());
     }
     let mut args = vec!["worktree", "add", "-b", branch.as_str(), "--", path];
     if let Some(b) = base.as_deref().map(str::trim).filter(|b| !b.is_empty()) {

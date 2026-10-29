@@ -1,0 +1,39 @@
+{
+  "label": "git-basics",
+  "created": "2026-10-29T20:05:44+07:00",
+  "machine": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "cpu": "Intel(R) Core(TM) i5-6440HQ CPU @ 2.60GHz",
+    "python": "3.14.6",
+    "cores": "4 physical / 4 logical",
+    "ram_gb": 7.9,
+    "commit": "31b5c06"
+  },
+  "runs": 3,
+  "metrics": {
+    "entry_gz_kb": 325.67
+  },
+  "spread_pct": {},
+  "range": {},
+  "bundle": {
+    "entry_file": "index-vUpTjFSL.js",
+    "lazy_chunks": 255,
+    "lazy_gz_kb": 1785.26,
+    "largest_lazy": {
+      "chunk-FOHPRMQF-DD4dKubD.js": 143.15,
+      "cytoscape.esm-BegBNzOV.js": 137.75,
+      "terminal-host-D3-nMYkK.js": 137.08,
+      "katex-DJhrJSbw.js": 77.43,
+      "i18n-yH_3iKQB.js": 68.19
+    }
+  },
+  "comparison": [
+    {
+      "metric": "entry_gz_kb",
+      "current": 325.67,
+      "baseline": 323.6,
+      "limit": "<= 338.60 KB",
+      "verdict": "ok"
+    }
+  ]
+}

@@ -11,14 +11,18 @@ import { t, errorText } from "../lib/i18n";
 
 const [repoId, setRepoId] = createSignal<string | null>(null);
 const [initialBranch, setInitialBranch] = createSignal<string | null>(null);
+/** The worktree checks out an existing local branch (no new branch, no start point). */
+const [existingBranch, setExistingBranch] = createSignal(false);
 /** Runs once the worktree exists (e.g. start an agent on the issue it was made for). */
 let afterCreate: ((project: import("../lib/types").Project) => void) | null = null;
 
-/** `branch`: a name typed elsewhere (search), turned into a valid branch name. */
-export function openWorktreeDialog(repo: string, branch?: string, then?: (project: import("../lib/types").Project) => void) {
+/** `branch`: a name typed elsewhere (search), turned into a valid branch name; with `existing`, the
+ *  name of a local branch the new worktree checks out as it is. */
+export function openWorktreeDialog(repo: string, branch?: string, then?: (project: import("../lib/types").Project) => void, opts?: { existing?: boolean }) {
   afterCreate = then ?? null;
   setRepoId(repo);
-  setInitialBranch(branch ? branch.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9._/-]/g, "").replace(/^[-./]+|[./]+$/g, "") || null : null);
+  setExistingBranch(!!opts?.existing && !!branch);
+  setInitialBranch(opts?.existing ? branch ?? null : branch ? branch.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9._/-]/g, "").replace(/^[-./]+|[./]+$/g, "") || null : null);
   store.setOverlay("worktree");
 }
 
@@ -37,13 +41,15 @@ type ConfigState = { config: KelpieConfig | null } | { error: string };
 export function WorktreeDialog() {
   const repo = () => store.state.projects.find((p) => p.id === repoId());
   const existing = () => store.state.projects.filter((p) => p.parentId === repoId()).map((p) => p.branch ?? "");
+  const existingMode = existingBranch();
   const [branch, setBranch] = createSignal(initialBranch() ?? suggestBranch(existing()));
-  const [base, setBase] = createSignal(store.projectInfo[repoId() ?? ""]?.branch ?? "HEAD");
+  // An existing branch is checked out as it is: its own `.kelpie.yaml` is the one that would run.
+  const [base, setBase] = createSignal(existingMode ? branch() : store.projectInfo[repoId() ?? ""]?.branch ?? "HEAD");
   const [folderEdited, setFolderEdited] = createSignal<string | null>(null);
   const folder = () => folderEdited() ?? (repo() ? worktreeFolder(repo()!, branch()) : "");
   const [runConfig, setRunConfig] = createSignal(false);
   // Start-from suggestions: local and remote branches, tags (a commit id works too).
-  const [refs] = createResource(() => repo()?.path, (root) => gitRefs(root).catch(() => []));
+  const [refs] = createResource(() => !existingMode && repo()?.path, (root) => gitRefs(root).catch(() => []));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -74,7 +80,7 @@ export function WorktreeDialog() {
   const create = async () => {
     const r = repo();
     if (!r || busy()) return;
-    if (!validBranch(branch())) return setError(t("\"{branch}\" is not a valid branch name", { branch: branch() }));
+    if (!existingMode && !validBranch(branch())) return setError(t("\"{branch}\" is not a valid branch name", { branch: branch() }));
     setBusy(true);
     setError(null);
     try {
@@ -84,7 +90,7 @@ export function WorktreeDialog() {
         store.approveSetup(r.path, cfg.setupKey);
         store.approveChecks(r.path, cfg.check);
       }
-      const project = await createWorktree(r, { branch: branch(), base: base(), path: folder(), config: cfg });
+      const project = await createWorktree(r, { branch: branch(), base: existingMode ? undefined : base(), path: folder(), config: cfg, existing: existingMode });
       if (store.overlay() === "worktree") store.setOverlay(null);
       const then = afterCreate;
       afterCreate = null;
@@ -102,18 +108,20 @@ export function WorktreeDialog() {
         if (e.key === "Escape" && !busy()) store.setOverlay(null);
         if (e.key === "Enter" && !(e.target as HTMLElement).matches("textarea, input[type=checkbox]")) void create();
       }}>
-        <h2>{t("New worktree of {name}", { name: repo()?.name ?? "" })}</h2>
+        <h2>{existingMode ? t("Open {branch} in a new worktree of {name}", { branch: branch(), name: repo()?.name ?? "" }) : t("New worktree of {name}", { name: repo()?.name ?? "" })}</h2>
         <div class="form-row">
           <label>{t("Branch")}</label>
-          <input ref={input} class="text-input" value={branch()} onInput={(e) => setBranch(e.currentTarget.value.trim())} />
+          <input ref={input} class="text-input" value={branch()} readOnly={existingMode} onInput={(e) => setBranch(e.currentTarget.value.trim())} />
         </div>
-        <div class="form-row">
-          <label>{t("From")}</label>
-          <input class="text-input" list="wt-refs" value={base()} placeholder={t("HEAD, a branch, origin/branch, a tag or a commit")} onInput={(e) => setBase(e.currentTarget.value)} />
-          <datalist id="wt-refs">
-            <For each={refs() ?? []}>{(r) => <option value={r.name}>{r.kind}</option>}</For>
-          </datalist>
-        </div>
+        <Show when={!existingMode}>
+          <div class="form-row">
+            <label>{t("From")}</label>
+            <input class="text-input" list="wt-refs" value={base()} placeholder={t("HEAD, a branch, origin/branch, a tag or a commit")} onInput={(e) => setBase(e.currentTarget.value)} />
+            <datalist id="wt-refs">
+              <For each={refs() ?? []}>{(r) => <option value={r.name}>{r.kind}</option>}</For>
+            </datalist>
+          </div>
+        </Show>
         <div class="form-row">
           <label>{t("Folder")}</label>
           <input class="text-input mono" value={folder()} onInput={(e) => setFolderEdited(e.currentTarget.value)} />
