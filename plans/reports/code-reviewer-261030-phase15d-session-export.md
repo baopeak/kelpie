@@ -842,3 +842,65 @@ The rest are contained in place, including:
 Status: DONE_WITH_CONCERNS
 Summary: The pulldown-cmark rewrite contains every probe from rounds 1–4 and 60 new ones in `marked`; the fallback fence cannot be closed from inside; the dependency is pinned, featureless and licence-neutral; and the golden render test does fail on broken exports. Remaining: a `marked`-only fence-closer leniency (```` ```~ ````) still lets crafted content render as raw HTML, and `escape_tags` is quadratic (64 s for a 1.6 MB span-heavy message).
 Concerns/Blockers: No blocking findings. R5-M1 and R5-M2 are recommended before release (both small). R5-L1 and R5-L2 can follow.
+
+---
+
+# Round 6 (final): `git diff f4f8269 ba61f4c`
+
+Commit ba61f4c, "fix(history): cover marked-only fence closers and keep export escaping linear".
+
+**Verdict: no blocking findings.** All four round-5 findings are fixed and verified.
+
+## Checks run
+
+| Check | Result |
+|---|---|
+| `cargo test -p kelpie -j 2 --lib session_export` | 27 passed, 1 ignored (bless). Includes `escaping_is_linear_in_the_message` and `the_adversarial_fixture_is_current`. |
+| `cargo test -p kelpie-proto -j 2` | 26 passed |
+| `pnpm exec vitest run src/lib/session-export-goldens.test.ts` | 5 passed (claude, codex, omp, adversarial, presence) |
+| `pnpm test` | 44 files, 515 passed |
+| Release-build probe | A verbatim copy of the final `contain`/`shape`/`escape_tags`/`marked_closer`/`as_plain`, run on 104 inputs and rendered with `marked`: **0 failures**. The inputs are every probe from rounds 1–5 plus 19 new ones covering closers in lists and quotes, cursor boundaries, the nesting limit and large sizes. |
+| Cursor cross-check | The cursor `escape_tags` compared with the old `any(contains)` version: 13 hand-made range sets, then every pair of ranges over a 12-byte string of tags (exhaustive). **0 mismatches.** |
+
+All Rust runs used target `D:\kelpie-p9-target`, `CARGO_INCREMENTAL=0` and TMP on D:. The worktree was clean at ba61f4c, apart from this uncommitted Round 6 section.
+
+## Results
+
+- **R5-M1 (fixed).** `shape` checks every content line of each fenced block with `marked_closer`. A line matches when its indentation is at most the opener column + 3 (counting spaces, tabs and `>`), it starts with at least the opener's run of the opener's character, and only `` ` ``, `~` and whitespace follow. Any match sends the message to `as_plain`.
+  - The rule errs towards plain text: `>` and tabs count as indentation, and trailing mixes are allowed.
+  - All three round-5 closer probes now go out as plain text and render cleanly.
+  - New probes also go to plain text and render cleanly: closers in a list item, in a quote, in a nested list, with a 2-space opener, and tab-indented.
+  - A run indented 4 or more columns stays code. Neither renderer closes on it, and that is tested.
+- **R5-M2 (fixed).** The code ranges are sorted by start. A cursor skips ranges that end at or before the current position and is "in code" when the current range starts at or before it. That is correct for adjacent, overlapping, nested and empty ranges:
+  - a `<` exactly at a range's (exclusive) end is outside and escaped;
+  - a `<` at a range's start is inside;
+  - the exhaustive cross-check agrees.
+
+  **Timings (release):**
+
+  | Input | Before | Now |
+  |---|---|---|
+  | 1.6 MB, 200k spans and tags | 64 s | 370 ms |
+  | 5 MB of prose | 12 s | 286 ms |
+  | 160 KB | 330 ms | 34 ms |
+- **R5-L1 (fixed).** `MAX_NESTING = 100` counts BlockQuote and List starts. Probes:
+  - 100 `>` stays Markdown and renders.
+  - 101 `>` goes to plain text.
+  - 99 nested lists stay Markdown and render.
+  - 60 levels of `> - ` (120 deep) go to plain text.
+  - 3,000 `>` and 1,500 `- ` go to plain text and no longer crash `marked`.
+- **R5-L2 (fixed, runs in CI).** `adversarial.md` holds every probe from the reviews (about 100 messages) as an export writes it, each followed by a tool block.
+  - **Rust side:** `the_adversarial_fixture_is_current` keeps it equal to `contain`'s output; the ignored `bless` rewrites it.
+  - **`marked` side:** `session-export-goldens.test.ts` globs `*.md`, so it renders the fixture, and it now requires the fixture to exist.
+  - **CI:** `.github/workflows/ci.yml` runs `cargo test -p kelpie-proto -p kelpied -p kelpie -p kelpie-stt`, then `pnpm test` (`vitest run`, whose `include` covers `src/**/*.test.ts`), on Windows and macOS.
+  - **Effect:** any `contain` change that alters the output fails the Rust check until re-blessed, and the re-blessed fixture must then pass `marked`. The disallowed-markup check now also catches `<?`, `<![` and `<!D`.
+
+## Notes (non-blocking)
+
+- **R6-L1 (Low).** `escaping_is_linear_in_the_message` asserts wall-clock times: under 2 s for `escape_tags` on 1.6 MB, and under 60 s for the whole of `contain`. CI runs debug builds on shared runners. It took about 2 s in total locally (debug), so the margins look adequate, but if it ever flakes, loosen the 2 s bound rather than delete the test.
+
+---
+
+Status: DONE
+Summary: Final check of 15d. The marked-closer check, linear cursor escaping (exhaustively cross-checked), the nesting limit and the adversarial fixture with its marked render test are all correct. 104 probes render cleanly in `marked`, and the focused Rust, kelpie-proto, golden and full frontend tests pass, with both checks wired into CI.
+Concerns/Blockers: None blocking. One Low note: the linear-escaping test has wall-clock bounds that could need loosening on slow CI runners. Scratch in `D:\kelpie-review-scratch` (probe crates, `run.js`, case files) needs removing by hand.

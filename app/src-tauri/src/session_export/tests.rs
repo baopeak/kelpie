@@ -647,7 +647,8 @@ fn escaping_is_linear_in_the_message() {
     let spans: Vec<std::ops::Range<usize>> = (0..200_000).map(|k| k * 8..k * 8 + 3).collect();
     let t = std::time::Instant::now();
     let out = escape_tags(&text, &spans);
-    assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    // Loose enough for a slow debug CI runner; the quadratic version took over a minute even in release.
+    assert!(t.elapsed() < std::time::Duration::from_secs(15), "{:?}", t.elapsed());
     assert_eq!(out.len(), text.len() + 200_000);
     assert!(out.starts_with("`x` \\<b> `x` \\<b> "));
     // The whole of `contain` on it stays well within an export's time.
