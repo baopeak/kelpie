@@ -476,3 +476,36 @@ Numbers:
 - `cargo test -p kelpie -j 2 config_transfer`: 24 passed. `cargo clippy -p kelpie --all-targets` is clean. No Rust change was made.
 - Vitest: 509 passed; `config-transfer.test.ts` has 41 tests. `pnpm typecheck` is clean; `i18n:check` reports 0 missing.
 - `config_export.py`: 63/63 on a fresh debug build. Afterwards only the user's own Kelpie app and daemon were running.
+## Review round 4: R4-L3 fixed, the other Lows left for later
+
+Round 4 found no blockers and no Medium findings (see the code-reviewer report). One Low was fixed before merge.
+
+**R4-L3: the Rust cleaner no longer shortens argument lists**
+- `texts()` is replaced by `arg_list`. It returns a list whole, or a reason:
+  - `tooMany`: more than 256 elements;
+  - `invalid`: an element that is not text, is longer than 64 KB or contains a NUL (or the value is not a list).
+- Previously such a list was filtered and cut, and the result could mean something else (`--append-system-prompt` taking the next argument).
+- **Agent and automation lists:** an agent's `args`, or an automation's `args` or `shell.argv`, that cannot be carried is left out of the cleaned item. The item gets `argsLeftOut: <reason>`, and nothing is skipped.
+  - The window then applies the whole-list rule. An agent profile, or an automation that replaces a local one, keeps this computer's list. A new automation, or a shell automation without its command list, is left out.
+  - Each is named with the reason, e.g. "Left out, its arguments could not be imported (there are more than 256 of them): Fresh".
+- **The terminal's `shellArgs`:** the setting is dropped, so the local value stays. It is named through `argsLeftOut` in the read result: "Default shell: arguments not imported, … (re-enter it in Terminal settings)".
+- **Export:** the same cleaner writes no part of such a list. The item carries `argsLeftOut`, the export result names it ("Arguments not exported, {reason}: {item} ({section})"), and reading that file back keeps the reason, so the list is never read as empty.
+- **Compatibility:** a file without a list and without the mark still means an empty list, as before.
+- `ImportPlan.argsNotImported` entries now carry `reason` (`masked` | `tooMany` | `invalid`) and `leftOut`. The messages take the reason as a phrase, with Vietnamese translations. The file's mark is removed before an automation goes to the daemon.
+- **Tests:**
+  - Rust: every reason for agents, an agent automation, a shell automation and `shellArgs`; exactly 256 is accepted; nothing is skipped and every list is named. The export leaves the lists out and names them, the reason survives a re-read, and a list missing without a mark is still empty.
+  - Vitest: the reader's marks give local lists kept (terminal, profile, replaced automation) and items left out (new automation, shell automation without argv), each named with its reason, and the mark is never sent to the daemon.
+
+**Left as follow-ups (Low, not blocking):**
+- **R4-L1:** `-p[redacted]` (mysql/mariadb/sshpass) counts as a flag in the shape check, so it can never be restored. A shell automation with `-pX` is always left out. Fix: treat a masked element as a value in `sameShape`, or add a `-p`-prefix rule like `name=`.
+- **R4-L2:** the position fallback can restore the wrong header when there is no space after the colon (`x-api-key:[redacted]`). It is listed under `keptLocal`, but the key header is lost. Fix: let `headerName` accept no space (not `://`), or require the text before the marker to match.
+- **R4-L4:** filter false positives: `PAT` as "pattern", `PASS_THROUGH`/`--pass-env`, `KEY_PATH`/`SSH_AUTH_SOCK`/`AUTH_URL`, `-u 1000:1000`, `-u C:\…` in text, the ssh `-p` after `sshpass -f`, "Authorization:" in prose, `X-Cache-Key`. These cost fidelity, not safety.
+- **R4-L5:** filter false negatives: plurals (`API_KEYS`, `SECRETS`, `PASSWORDS`), `PASSCODE`, `DSN`, `CONNECTION_STRING`, and the `apikey:`/`Cookie:`/`Api-Token:` headers. The UI warning already covers them.
+- **R4-L6:** the write-failure check does not normalise the trigger glob as the daemon does (cleared for non-file events, trimmed), so an odd file plus a write failure could be reported as "refused". Fix: normalise the same way, or compare against the previous automation.
+
+The round-4 review report (`code-reviewer-261029-phase15c-config-export.md`) is included in this commit.
+
+Numbers:
+- `cargo test -p kelpie -j 2 config_transfer`: 26 passed. `settings_carry_only_classified_keys` now gives `shellArgs` a list: a non-list value is left out whole and named, and the test asserts that. `cargo clippy -p kelpie --all-targets` is clean.
+- Vitest: 510 passed; `config-transfer.test.ts` has 42 tests. A first full run had `store-notes.test.ts` time out at 5 s while cargo was compiling; it passed alone and in the full re-run. `pnpm typecheck` is clean; `i18n:check` reports 0 missing.
+- `config_export.py`: 63/63 on a fresh debug build. Afterwards only the user's own Kelpie app and daemon, and another workstream's `D:\Works\Kelpie` daemon, were running.

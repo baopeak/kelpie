@@ -586,3 +586,160 @@ Fix:
 Status: DONE_WITH_CONCERNS
 Summary: Round 3 fixes R2-M1 (forget-first, with accurate failure messages) and R2-M2 (narrower names, keep-local, `[redacted]` never written), adds daemon-write-failure undo and completes the preview. Rust 21, Vitest 29, typecheck and i18n pass. Nothing blocks merge.
 Concerns/Blockers: No blockers. Recommended before release: R3-M1 (pair only an exact `[redacted]` element with its flag, and leave a shell automation out when its command lost arguments), R3-M2 (refuse network paths in shell argv, and add `\??\` to `is_unc`/`device_path`), R3-M3 (restore `SSHPASS`/`DBPASS`/`*KEY` suffixes and split acronym camel-case).
+
+(The status block above is round 3's. Round 4 follows.)
+
+---
+
+# Round 4: `git diff 6c36835 17483ca` (83512fe, e2e6f76, 17483ca)
+
+Checks run (HEAD 17483ca, worktree clean):
+- `cargo test -p kelpie -j 2 config_transfer` (CARGO_TARGET_DIR=D:\kelpie-p9-target, CARGO_INCREMENTAL=0): 24/24 pass.
+- `pnpm exec vitest run src/lib/config-transfer.test.ts`: 41/41 pass.
+- `pnpm typecheck`: clean.
+- `pnpm i18n:check`: 0 missing.
+- The round-4 name matcher and header/`-u`/`sshpass` patterns were probed with a Python port: `D:\kelpie-review-scratch\round4_matcher_check.py`, the only scratch file, on D:.
+
+No e2e was run, no daemon was started, and the keyring was not touched.
+
+The whole-list decision is accepted, as instructed. It is checked here for correctness only.
+
+## Verdict
+
+R3-M1, R3-M2, R3-M3 and every round-3 Low are fixed. The whole-list rule is implemented correctly: no list from the file is ever imported in part because of masking.
+
+Nothing in round 4 blocks merge, and there are no new Medium findings. All remaining items are Low. They are mostly matcher false positives and false negatives that the UI's "this is a filter" copy already covers.
+
+## 1. R3-M2: path classifier and refusal coverage: fixed
+
+**The classifier (`path_kind`, `config_transfer.rs:288-297`).**
+- It treats `/` and `\` the same.
+- `\\?\`, `\\.\` and `\??\` are classed as Device, or as Network when followed by `UNC\`. Any other leading `\\` is Network; everything else is Local.
+- So these are covered: `\\server`, `//server`, `\/server`, `/\?\…`, `//./pipe`, `\\?\UNC\…`, `\\.\UNC\…`, `\??\UNC\…`, `\??\C:\…`, `\\?\GLOBALROOT\…`, and the WebDAV form `\\host@SSL\…`.
+- I found no Windows prefix that reaches a share and slips through. On macOS and Linux, `//x` is classed as Network and refused, which is harmless over-refusal.
+
+**Where a path from the file is refused.**
+
+The file is cleaned in Rust before any plan is made, and `foreign_items` names each refusal in the preview and in the export result:
+- automation `cwd`;
+- shell `program`;
+- every `shell.argv` element, including `--x=<path>` and `-X:<path>` (`foreign_arg`);
+- host `identityFile`;
+- every element of `shellArgs`: the whole setting is dropped and the local value kept.
+
+**The daemon on save.**
+- `automation.save` → `command_hash` / `check_command` / `covered_files` only reads `cwd`, `program`, interpreter script arguments and each argv element taken whole as a path (`crates/kelpied/src/automations.rs:639-678`, `:752-768`, `:890-913`). All of these are classified.
+- For agent automations, `cwd` is the only path, used by `watch_head`, and it is classified.
+- Relative arguments are joined to a local `cwd` and cannot reach a share.
+
+**Not refused, by design (shown and consistent):**
+- agent-profile args and agent-automation args (`--settings \\srv\x.json`) are read by the agent at launch;
+- quick-command text;
+- layout `target.path` and host `folder`, which are remote.
+
+All of these appear in the run list behind the tick. Refusing network paths in profile args too would only add consistency.
+
+**The import-file path.**
+- `read_capped` / `write_file_atomic` refuse Device paths before `metadata`.
+- A network path chosen in the dialog is allowed, which is correct.
+
+## 2. R3-M1 and the whole-list rule: implemented correctly
+
+`unmaskArgs` (`config-transfer.ts:299-345`) now returns either the full list, with every masked element restored, or `null`. The callers handle `null` like this:
+
+| List | On `null` | Code |
+|---|---|---|
+| Agent profile args | Local list kept (none for a new profile); `argsNotImported` | `:551-556` |
+| `shellArgs` | Key deleted, local kept; `argsNotImported` | `:485-493` |
+| Agent automation args | Replaced automation: local args kept, `argsNotImported`. New automation: `args:` in `missing` → left out | `:633-660` |
+| Shell automation argv | `command:` in `missing` → left out | `:630`, `:657` |
+
+On the Rust side, `mask_args` never removes or adds elements, so the lengths match. Nothing else in the TS drops elements. No partial list can come in through masking.
+
+`argsNotImported`, `keptLocal` and `fillIn` are all in `planShown`, so applying a stale preview is refused. They are shown in the section notes and repeated in the result.
+
+**Restore pairing is correct:**
+- **Exact `[redacted]` after a flag:** the k-th occurrence of that flag in the file maps to the k-th here (`nth` / `before`). It is refused when the value here is missing, masked or another flag.
+- **`name=[redacted]`:** matched by the k-th occurrence of `name=`.
+- **Header after a flag:** matched by the k-th occurrence of the flag, and only when the header name is the same. A different order of `-H` flags gives "no value", so the list falls back to local. That is conservative and safe.
+- **Anything else:** the same index, and only when both lists have the same length with flags in the same places.
+- Tests cover a dangling `-c api_key=`, a successful restore, one-restored-one-missing, `--read-only <masked url>` with and without local args, and new versus replaced items.
+
+**R4-L1 (Low): some restorable values always fall back.**
+- `-p[redacted]` (mysql/mariadb/sshpass) looks like a flag to `isFlag`, so `sameShape` requires `here[n] === "-p[redacted]"`. That can never be true.
+- So a shell automation with `mysql … -pX` is always left out, even when it replaces an identical automation here.
+- Fix: treat a masked element as a value, not a flag, in `sameShape`, or add a `-p`-prefix rule like the `name=` rule.
+
+**R4-L2 (Low): the position fallback can pick the wrong header.**
+- It checks only flag positions. With a header that has no space after the colon (`x-api-key:[redacted]`, so `headerName` does not see it), `["-H","x-api-key:[redacted]","-H","Accept:json"]` over a local `["-H","Accept:json","-H","x-api-key:real"]` has the same shape and restores `Accept:json`.
+- The result is listed under `keptLocal` (`args:#2`), so it is visible, but the key header is lost.
+- Fix: allow no space in `headerName` (`/^\s*([A-Za-z][\w-]*)\s*:(?!\/\/)/`), or require the element here to share the incoming element's text before the marker.
+
+**R4-L3 (Low): Rust can still shorten a list from the file.**
+- `texts()` (`config_transfer.rs:222-227`) drops non-string, NUL-containing and >64 KB elements, and truncates at 256.
+- An own export with one huge `--append-system-prompt` value (>64 KB) is written without it, so the flag takes the next argument.
+- A hostile file controls the list anyway, so this is only about fidelity.
+- Fix: for argument lists, reject the item (or keep the local list) when any element is unusable or the list is over the cap, instead of filtering.
+
+## 3. R3-M3: name matching
+
+Fixed. The probe confirms these are caught:
+- `apiKey`, `OPENAI_API_KEY`, `x-api-key`, `SSHPASS`, `DBPASS`, `PRIVATEKEY`, `SECRETKEY`, `GITHUB_PAT`;
+- acronym camelCase: `HTTPAuth`, `OPENAIKey`, `OAuth`;
+- in free text: `x-*-key|token|secret|auth|password:` headers, `api-key:`, `private-token:`, `Authorization: Basic|Bearer|Token|Digest …`, any Bearer token of 8+ characters;
+- `-u user:pass` in an argument list (user of 2+ characters);
+- `-pPASS` (mysql/mariadb/sshpass) and `sshpass -p X`.
+
+The `NOT_SECRET_PARTS` exceptions work: `BYPASS`, `PASSTHROUGH`, `AUTHOR`, `COMPAT`, `PATH`, `PATCH`, `MONKEY`, `HOTKEY` and similar are not matched. `env_key` / `ENV_KEY` are exempt, and `DOTENV_KEY` is still caught.
+
+**R4-L4 (Low): false positives.** With the whole-list rule, these cost fidelity, not safety: the list is kept local, or the item is left out and named.
+- `PAT` as "pattern": `FILE_PAT`, `--exclude-pat`.
+- Split forms the exception list does not cover: `PASS_THROUGH`, `--pass-env`.
+- Paths: `KEY_PATH`, `--key-file`, `SORT_KEY`, `GPG_KEY_ID`, `SSH_AUTH_SOCK`, `AUTH_URL`.
+- Text from the text filter (`USER_PASSWORD`, `SSHPASS_PASSWORD`, `HEADER`):
+  - `docker run -u 1000:1000` → `1000:[redacted]`;
+  - `python -u C:\work\run.py` → `-u C:[redacted]` (the regex has no length-2 guard on the user);
+  - `sshpass -f pw.txt ssh -p 2222 host` → the ssh port is masked, because the lazy match stops at the first ` -p`;
+  - prose such as "Review the Authorization: header handling" → `Authorization: [redacted] handling`. This matters for agent prompts and quick-command text: on a computer without that item, the item is left out.
+  - `X-Cache-Key: foo` is masked.
+- Fix:
+  - require at least 2 characters for the user part and no drive letter (`[^\s:]{2,}:`);
+  - limit the `sshpass -p` match to sshpass's own options, before the program it runs;
+  - in prose, mask a header only when a value-looking token follows (`[A-Za-z0-9._~+/=-]{8,}`) or it is in quotes or after `-H`.
+
+**R4-L5 (Low): false negatives, all pre-existing.**
+- Names: plurals `API_KEYS`, `OPENAI_API_KEYS`, `MY_SECRETS`, `PASSWORDS`; `PASSCODE`; `SENTRY_DSN`, `NTFY_TOPIC`, `CONNECTION_STRING` (`Password=x;`).
+- Header text: `apikey:` (Supabase style), `Cookie: session=…`, `Api-Token:` without the `x-` prefix.
+- Fix: accept a trailing `S` on the secret words, add `PASSCODE`/`DSN` and add `cookie`/`apikey`/`[\w-]*-token` to `HEADER`. The UI warning already covers what is left.
+
+## 4. The Lows, and plan-match integrity
+
+- **R3-L1:** kept local values are now listed (`keptLocal`), in `planShown`, the preview and the result.
+- **R3-L2:** `automationContent` compares the whole automation (id, enabled, env, schedule, deliver, quick label, dry run and command).
+  - **R4-L6 (residual, Low):** the daemon normalises some fields in `validate`: it clears the glob for non-file events and trims it. A file whose non-file trigger has a glob would make the held copy differ from `op.next` after a write failure, and it would be reported as "refused". This needs both a write failure and an odd file. Fix: compare with the glob normalised the same way, or compare against `old`.
+- **R3-L3:** `path_kind` covers mixed separators and `\??\`.
+- **R3-L4:** the export result names hosts, automations and `shellArgs` left out for a network or device path.
+- **R3-L5:** acronym splitting is in.
+
+**Plan-match integrity:**
+- `argsNotImported` items use the resolved label or name, which is stable between preview and apply.
+- Agent profiles whose args are kept still apply the file's label, permission and env. These appear in the run list (`permission`, `env:*`) behind the tick, as the accepted decision requires.
+- Nothing that changes the result is missing from `planShown`. The preview, the apply-time re-plan and the settings re-plan all compare the same six lists.
+
+## Round 4 summary
+
+| ID | Severity | Blocking | Item |
+|---|---|---|---|
+| R3-M1 | — | no (fixed) | Whole-list rule: no argument list imported in part; restore pairing by occurrence and header name |
+| R3-M2 | — | no (fixed) | `path_kind` covers `\\`, `//`, `\??\`, `\\?\UNC`, `\\.\` and mixed separators; every file path the daemon reads at save is refused and named |
+| R3-M3 | — | no (fixed) | Compound, plural-free, acronym and header/`-u`/`-p` matching |
+| R4-L1 | Low | no | `-p[redacted]` never restorable, so a mysql shell automation is always left out |
+| R4-L2 | Low | no | The position fallback can restore the wrong header when there is no space after the colon |
+| R4-L3 | Low | no | Rust `texts()` can shorten an argument list (>64 KB element, NUL, more than 256 items) |
+| R4-L4 | Low | no | False positives: `PAT` as "pattern", `PASS_THROUGH`, `-u 1000:1000`, `-u C:\…`, an ssh `-p` after sshpass, "Authorization:" in prose |
+| R4-L5 | Low | no | False negatives: plurals (`API_KEYS`, `SECRETS`), `PASSCODE`, `DSN`, `apikey:`/`Cookie:`/`Api-Token:` headers |
+| R4-L6 | Low | no | The write-failure comparison does not normalise the trigger glob the way the daemon does |
+
+Status: DONE_WITH_CONCERNS
+Summary: Round 4 fixes R3-M1 to R3-M3 and every round-3 Low. The whole-list rule is implemented correctly (no argument list imported in part, restore pairing by occurrence and header name), and network and device paths are kept away from every read the daemon makes at save. Rust 24, Vitest 41, typecheck and i18n pass. Nothing blocks merge.
+Concerns/Blockers: No blockers and no Medium findings. Six Lows remain, mostly the credential filter matching too much or too little (R4-L4, R4-L5), plus some restorable arguments always falling back (R4-L1, R4-L2), a Rust step that can shorten a list (R4-L3), and the write-failure comparison (R4-L6). The import fails safe in all of them, and the UI copy already says the filter is a heuristic. They can wait for a follow-up.

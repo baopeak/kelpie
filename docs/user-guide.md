@@ -1063,7 +1063,9 @@ at the same place when both argument lists have the same shape). When this compu
 left empty and listed for you to fill in. An argument list (an agent's, an agent automation's, the
 default shell's) is then not imported at all: this computer's list stays as it is (none for a new
 agent), and the preview names it so you can enter the hidden value again. A new agent automation
-whose arguments cannot be filled in is left out. An item that cannot work without it (a quick
+whose arguments cannot be filled in is left out. The same holds for a list with more than 256
+arguments or with one longer than 64 KB, not text or containing a NUL character: it is never taken in
+part, on import or on export (the export leaves that list out and names it). An item that cannot work without it (a quick
 command's text, an automation's prompt, a command that would then run differently) is left out and
 named.
 Network and device paths (`\\server\share`, `//server/…`, `\\?\UNC\…`, `\??\…`) for a key file, an

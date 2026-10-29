@@ -485,7 +485,7 @@ describe("masked values", () => {
     // Codex is new here and `-c api_key=[redacted]` has no value: no arguments rather than a `-c` with
     // nothing after it.
     expect(codex.args).toEqual([]);
-    expect(p.argsNotImported).toEqual([{ section: "agents", item: "Codex" }]);
+    expect(p.argsNotImported).toEqual([{ section: "agents", item: "Codex", reason: "masked", leftOut: false }]);
     expect(p.settings!.quickCommands.some((q) => q.label === "Deploy")).toBe(false);
     expect(p.automations.some((a) => a.next.name === "Report")).toBe(false);
     const added = p.vault!.hosts.find((h) => h.id === "h-new")!;
@@ -519,7 +519,7 @@ describe("masked arguments are matched by position, never by guess", () => {
   const notImported = (args: string[], local?: string[]) => {
     const r = agentArgs(args, local);
     expect(r.args).toEqual(local ?? []);
-    expect(r.notImported).toEqual([{ section: "agents", item: "Claude Code" }]);
+    expect(r.notImported).toEqual([{ section: "agents", item: "Claude Code", reason: "masked", leftOut: false }]);
     expect(r.fill).toEqual([]);
     expect(r.kept).toEqual([]);
   };
@@ -574,7 +574,7 @@ describe("masked arguments are matched by position, never by guess", () => {
   it("keeps this computer's terminal arguments whole when a masked one has no value here", () => {
     const p = terminal(["codex", "-c", `api_key=${M}`], ["pwsh", "-NoLogo"]);
     expect(p.settings!.shellArgs).toEqual(["pwsh", "-NoLogo"]);
-    expect(p.argsNotImported).toEqual([{ section: "settings", item: "shellArgs" }]);
+    expect(p.argsNotImported).toEqual([{ section: "settings", item: "shellArgs", reason: "masked", leftOut: false }]);
     expect(p.sections.settings!.changed).not.toContain("shellArgs");
     expect(p.fillIn).toEqual([]);
     expect(terminal(["pwsh", "-NoLogo", `https://u:${M}@h`], ["bash"]).settings!.shellArgs).toEqual(["bash"]);
@@ -601,7 +601,7 @@ describe("masked arguments are matched by position, never by guess", () => {
   it("keeps an agent automation's local arguments whole, or leaves a new one out, when a masked one has no value here", () => {
     const kept = agentAutomation(["--search", "-c", `api_key=${M}`], ["--model", "opus"]);
     expect(kept.automations.map((a) => a.next.args)).toEqual([["--model", "opus"]]);
-    expect(kept.argsNotImported).toEqual([{ section: "automations", item: "Review" }]);
+    expect(kept.argsNotImported).toEqual([{ section: "automations", item: "Review", reason: "masked", leftOut: false }]);
     expect(kept.fillIn).toEqual([]);
     const fresh = agentAutomation(["--search", "-c", `api_key=${M}`]);
     expect(fresh.automations).toEqual([]);
@@ -615,6 +615,39 @@ describe("masked arguments are matched by position, never by guess", () => {
     expect(p.automations.map((a) => a.next.args)).toEqual([["--search", "-c", "api_key=real"]]);
     expect(p.argsNotImported).toEqual([]);
     expect(p.keptLocal).toEqual([{ section: "automations", item: "Review", fields: ["args:api_key"] }]);
+  });
+
+  it("keeps this computer's list, or leaves the item out, when the file's list could not be read whole", () => {
+    // What the reader gives for a list over 256 arguments or with an unusable one: no list, and the reason.
+    const read = fileRead();
+    read.doc.sections.agents = [{ kind: "claude", label: "Claude Code", argsLeftOut: "tooMany", env: [] }];
+    const strip = <T extends { last_run?: unknown; last_session?: unknown; last_error?: unknown; next_run?: unknown }>({ last_run: _a, last_session: _b, last_error: _c, next_run: _d, ...a }: T) => a;
+    const { args: _args, ...noArgs } = strip({ ...automation({ id: "ag", name: "Review" }), enabled: false, env: [] });
+    read.doc.sections.automations = [
+      { ...noArgs, argsLeftOut: "invalid" },
+      { ...noArgs, id: "fresh", name: "Fresh", argsLeftOut: "invalid" },
+      { ...strip({ ...automation({ id: "sh", name: "Shell", action: "shell", kind: "", shell: { program: "python", argv: [] } }), enabled: false, env: [] }), shell: { program: "python" }, argsLeftOut: "tooMany" },
+    ];
+    read.argsLeftOut = [{ section: "settings", name: "shellArgs", reason: "tooMany" }];
+    const cur = current();
+    cur.settings.shellArgs = ["pwsh", "-NoLogo"];
+    cur.settings.profiles = [{ kind: "claude", label: "Claude Code", args: ["--model", "opus"] }];
+    cur.automations = [automation({ id: "ag", name: "Review", args: ["--local"] })];
+    const p = planImport(read, ["settings", "agents", "automations"], cur, { defaults, newId });
+    expect(p.settings!.shellArgs).toEqual(["pwsh", "-NoLogo"]);
+    expect(p.settings!.profiles.find((x) => x.kind === "claude")!.args).toEqual(["--model", "opus"]);
+    expect(p.automations.map((a) => [a.next.name, a.next.args])).toEqual([["Review", ["--local"]]]);
+    // The mark is the file's, never sent to the daemon.
+    expect(JSON.stringify(p.automations)).not.toContain("argsLeftOut");
+    expect(p.argsNotImported).toEqual([
+      { section: "settings", item: "shellArgs", reason: "tooMany", leftOut: false },
+      { section: "agents", item: "Claude Code", reason: "tooMany", leftOut: false },
+      { section: "automations", item: "Review", reason: "invalid", leftOut: false },
+      { section: "automations", item: "Fresh", reason: "invalid", leftOut: true },
+      { section: "automations", item: "Shell", reason: "tooMany", leftOut: true },
+    ]);
+    expect(p.sections.automations!.skipped).toBe(2);
+    expect(p.fillIn).toEqual([]);
   });
 
   it("says when this computer's value was kept", () => {

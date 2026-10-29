@@ -313,11 +313,15 @@ fn settings_carry_only_classified_keys() {
     let excluded: Vec<&str> = lists["excluded"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
     let mut raw = Map::new();
     for k in SETTINGS_EXPORTED.iter().map(String::as_str).chain(excluded.iter().copied()).chain(["madeUp"]) {
-        raw.insert(k.to_string(), json!(1));
+        // The terminal's arguments must be a list (anything else is left out whole, see below).
+        raw.insert(k.to_string(), if k == "shellArgs" { json!(["pwsh"]) } else { json!(1) });
     }
-    let kept = settings(&Value::Object(raw)).unwrap();
+    let kept = settings(&Value::Object(raw.clone())).unwrap();
     let kept: Vec<&String> = kept.as_object().unwrap().keys().collect();
     assert_eq!(kept.len(), SETTINGS_EXPORTED.len());
+    raw.insert("shellArgs".into(), json!(1));
+    assert!(settings(&Value::Object(raw.clone())).unwrap().get("shellArgs").is_none());
+    assert_eq!(args_left_out(&Map::new(), Some(&Value::Object(raw))), vec![json!({ "section": "settings", "name": "shellArgs", "reason": ARGS_INVALID })]);
     assert!(excluded.iter().all(|k| !SETTINGS_EXPORTED.iter().any(|e| e == k)));
 }
 
@@ -456,4 +460,83 @@ fn a_path_that_is_not_a_regular_file_is_not_opened() {
     assert_eq!(read_capped(&dir).unwrap_err(), "not a file");
     assert!(read_capped(&dir.join("missing.json")).is_err());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_argument_list_from_a_file_is_taken_whole_or_left_out_with_the_reason() {
+    let long = "x".repeat(MAX_TEXT + 1);
+    let many: Vec<String> = (0..=MAX_LIST).map(|i| format!("a{i}")).collect();
+    let most: Vec<String> = (0..MAX_LIST).map(|i| format!("a{i}")).collect();
+    let file = json!({ "kind": KIND, "version": 1, "sections": {
+        "agents": [
+            { "kind": "claude", "label": "Long", "args": ["--append-system-prompt", long, "--model", "opus"] },
+            { "kind": "codex", "label": "Many", "args": many },
+            { "kind": "gemini", "label": "Not text", "args": ["--x", 5] },
+            { "kind": "omp", "label": "Nul", "args": ["a\0b"] },
+            { "kind": "amp", "label": "Most", "args": most },
+        ],
+        "automations": [
+            { "name": "Agent", "cwd": "C:/p", "args": many },
+            { "name": "Shell", "cwd": "C:/p", "action": "shell", "shell": { "program": "python", "argv": ["x.py", long] } },
+        ],
+        "settings": { "shellArgs": many, "fontSize": 14 },
+    } });
+    let read = read_doc(&serde_json::to_vec(&file).unwrap()).unwrap();
+    let s = &read["doc"]["sections"];
+    let agents = s["agents"].as_array().unwrap();
+    for (a, why) in agents.iter().zip([ARGS_INVALID, ARGS_TOO_MANY, ARGS_INVALID, ARGS_INVALID]) {
+        // Never a shortened list: none at all, and the reason.
+        assert!(a.get("args").is_none(), "{a}");
+        assert_eq!(a[ARGS_LEFT_OUT], why, "{a}");
+    }
+    assert_eq!(agents[4]["args"].as_array().unwrap().len(), MAX_LIST);
+    assert!(agents[4].get(ARGS_LEFT_OUT).is_none());
+    let autos = s["automations"].as_array().unwrap();
+    assert!(autos[0].get("args").is_none());
+    assert_eq!(autos[0][ARGS_LEFT_OUT], ARGS_TOO_MANY);
+    assert_eq!(autos[1]["shell"], json!({ "program": "python" }));
+    assert_eq!(autos[1][ARGS_LEFT_OUT], ARGS_INVALID);
+    assert!(s["settings"].get("shellArgs").is_none());
+    assert_eq!(s["settings"]["fontSize"], 14);
+    // Nothing is dropped as unusable: every item is there for the window to decide.
+    assert_eq!(read["skipped"], json!({}));
+    assert_eq!(read["argsLeftOut"], json!([
+        { "section": "settings", "name": "shellArgs", "reason": ARGS_TOO_MANY },
+        { "section": "agents", "name": "Long", "reason": ARGS_INVALID },
+        { "section": "agents", "name": "Many", "reason": ARGS_TOO_MANY },
+        { "section": "agents", "name": "Not text", "reason": ARGS_INVALID },
+        { "section": "agents", "name": "Nul", "reason": ARGS_INVALID },
+        { "section": "automations", "name": "Agent", "reason": ARGS_TOO_MANY },
+        { "section": "automations", "name": "Shell", "reason": ARGS_INVALID },
+    ]));
+}
+
+#[test]
+fn an_export_writes_no_part_of_a_list_it_cannot_carry_and_names_it() {
+    let many: Vec<String> = (0..=MAX_LIST).map(|i| format!("a{i}")).collect();
+    let mut raw = seeded_raw();
+    raw["agents"][0]["args"] = json!(["--append-system-prompt", "x".repeat(MAX_TEXT + 1), "--model", "opus"]);
+    raw["settings"]["shellArgs"] = json!(many);
+    raw["automations"][0]["shell"]["argv"] = json!(many);
+    let wanted: Vec<String> = ["settings", "agents", "automations"].iter().map(|s| s.to_string()).collect();
+    let doc = export_doc(&raw, &wanted, false, None, None, "t").unwrap();
+    let s = doc["sections"].as_object().unwrap();
+    assert!(s["agents"][0].get("args").is_none());
+    assert_eq!(s["agents"][0][ARGS_LEFT_OUT], ARGS_INVALID);
+    assert!(s["settings"].get("shellArgs").is_none());
+    assert_eq!(s["automations"][0]["shell"], json!({ "program": "python" }));
+    assert_eq!(s["automations"][0][ARGS_LEFT_OUT], ARGS_TOO_MANY);
+    assert_eq!(args_left_out(s, raw.get("settings")), vec![
+        json!({ "section": "settings", "name": "shellArgs", "reason": ARGS_TOO_MANY }),
+        json!({ "section": "agents", "name": "Claude Code", "reason": ARGS_INVALID }),
+        json!({ "section": "automations", "name": "Nightly", "reason": ARGS_TOO_MANY }),
+    ]);
+    // Reading that file back keeps the reason: the lists stay left out, never read as empty.
+    let read = read_doc(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert_eq!(read["doc"]["sections"]["agents"][0][ARGS_LEFT_OUT], ARGS_INVALID);
+    assert!(read["doc"]["sections"]["agents"][0].get("args").is_none());
+    assert_eq!(read["doc"]["sections"]["automations"][0][ARGS_LEFT_OUT], ARGS_TOO_MANY);
+    // A file without a list and without the mark has an empty one, as before.
+    let plain = json!({ "kind": KIND, "version": 1, "sections": { "agents": [{ "kind": "claude", "label": "C" }] } });
+    assert_eq!(read_doc(&serde_json::to_vec(&plain).unwrap()).unwrap()["doc"]["sections"]["agents"][0]["args"], json!([]));
 }

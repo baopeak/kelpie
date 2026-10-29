@@ -14,7 +14,7 @@ import { AUTOMATION_API } from "../../lib/automation-events";
 import { loadVault } from "../../lib/ssh-hosts";
 import { allViews } from "../../lib/terminal-host";
 import { kindInfo } from "../../lib/agents";
-import { CONFIG_SECTIONS, ImportFailed, applyImport, exportConfig, loadForPreview, planImport, readImportFile, type ConfigSection, type Current, type ImportPlan, type ImportRead, type RunChange, type TransferContext } from "../../lib/config-transfer";
+import { CONFIG_SECTIONS, ImportFailed, applyImport, exportConfig, loadForPreview, planImport, readImportFile, type ArgsReason, type ConfigSection, type Current, type ImportPlan, type ImportRead, type RunChange, type TransferContext } from "../../lib/config-transfer";
 import "./config-transfer.css";
 
 const LABELS: Record<ConfigSection, string> = {
@@ -125,6 +125,9 @@ export async function exportTo(path: string, wanted = exportSections().filter(av
   const r = await exportConfig(path, wanted, withValues, appContext());
   const lines = [t("Exported to {path}", { path: r.path })];
   if (r.foreign?.length) lines.push(t("Not exported, they use a network or device path: {names}", { names: r.foreign.map((f) => `${f.name} (${t(LABELS[f.section])})`).join(", ") }));
+  for (const f of r.argsLeftOut ?? []) {
+    lines.push(t("Arguments not exported, {reason}: {item} ({section})", { reason: t(ARGS_REASONS[f.reason]), item: f.section === "settings" ? t("Default shell") : f.name, section: t(LABELS[f.section]) }));
+  }
   setMessage({ text: lines.join("\n") });
   return r;
 }
@@ -193,14 +196,23 @@ const fillNotes = (k: ConfigSection, plan: ImportPlan) => [
     ),
   ...plan.argsNotImported
     .filter((f) => f.section === k)
-    .map((f) =>
-      f.section === "settings"
-        ? t("Default shell: arguments not imported, a hidden value couldn't be filled in here (re-enter it in Terminal settings)")
+    .map((f) => {
+      const reason = t(ARGS_REASONS[f.reason]);
+      if (f.leftOut) return t("Left out, its arguments could not be imported ({reason}): {item}", { reason, item: f.item });
+      return f.section === "settings"
+        ? t("Default shell: arguments not imported, {reason} (re-enter it in Terminal settings)", { reason })
         : f.section === "automations"
-          ? t("{item}: arguments not imported, a hidden value couldn't be filled in here (re-enter it on the Automations page)", { item: f.item })
-          : t("{item}: arguments not imported, a hidden value couldn't be filled in here (re-enter it in Agent settings)", { item: f.item }),
-    ),
+          ? t("{item}: arguments not imported, {reason} (re-enter it on the Automations page)", { item: f.item, reason })
+          : t("{item}: arguments not imported, {reason} (re-enter it in Agent settings)", { item: f.item, reason });
+    }),
 ];
+
+/** Why an argument list was not taken whole (it never is in part). */
+const ARGS_REASONS: Record<ArgsReason, string> = {
+  masked: msg("a hidden value couldn't be filled in here"),
+  tooMany: msg("there are more than 256 of them"),
+  invalid: msg("one is too long, not text or has a NUL character"),
+};
 
 /** Items the file had that use a network or device path (never brought in). */
 const foreignNotes = (k: ConfigSection, read: ImportRead) => {

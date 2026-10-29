@@ -219,11 +219,35 @@ fn filled(o: &Map<String, Value>, k: &str) -> Option<String> {
     text(o, k).filter(|s| !s.trim().is_empty())
 }
 
-fn texts(o: &Map<String, Value>, k: &str) -> Vec<String> {
-    o.get(k)
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).filter(|s| s.len() <= MAX_TEXT && !s.contains('\0')).take(MAX_LIST).map(str::to_string).collect())
-        .unwrap_or_default()
+/// The field on an agent or automation saying why one of its argument lists is not in the file (written by
+/// the export, kept by the import): [`ARGS_TOO_MANY`] or [`ARGS_INVALID`].
+const ARGS_LEFT_OUT: &str = "argsLeftOut";
+/// More than [`MAX_LIST`] arguments.
+const ARGS_TOO_MANY: &str = "tooMany";
+/// An argument that is not text, is longer than [`MAX_TEXT`] or has a NUL.
+const ARGS_INVALID: &str = "invalid";
+
+/// An argument list whole, or why it cannot be carried: a list is never shortened, since without one of
+/// its elements the rest can mean something else (a flag taking the next argument as its value). A missing
+/// list is empty, unless `marked` (the item's [`ARGS_LEFT_OUT`]) says the export left it out.
+fn arg_list(v: Option<&Value>, marked: Option<&str>) -> Result<Vec<String>, &'static str> {
+    let Some(v) = v.filter(|v| !v.is_null()) else {
+        return match marked {
+            Some(ARGS_TOO_MANY) => Err(ARGS_TOO_MANY),
+            Some(ARGS_INVALID) => Err(ARGS_INVALID),
+            _ => Ok(Vec::new()),
+        };
+    };
+    let a = v.as_array().ok_or(ARGS_INVALID)?;
+    if a.len() > MAX_LIST {
+        return Err(ARGS_TOO_MANY);
+    }
+    a.iter().map(|x| x.as_str().filter(|s| s.len() <= MAX_TEXT && !s.contains('\0')).map(str::to_string).ok_or(ARGS_INVALID)).collect()
+}
+
+/// The [`ARGS_LEFT_OUT`] mark an item carries already (a file written by an export).
+fn marked(o: &Map<String, Value>) -> Option<&str> {
+    o.get(ARGS_LEFT_OUT).and_then(Value::as_str)
 }
 
 fn flag(o: &Map<String, Value>, k: &str, default: bool) -> bool {
@@ -314,9 +338,9 @@ fn settings(v: &Value) -> CmdResult<Value> {
         if SETTINGS_EXPORTED.contains(k) && out.len() < MAX_SETTINGS {
             let val = match (k.as_str(), val.as_array()) {
                 // The terminal's program and arguments: same masking as an agent's arguments; never a
-                // network or device path.
-                ("shellArgs", Some(a)) => {
-                    let args: Vec<String> = a.iter().filter_map(Value::as_str).map(str::to_string).collect();
+                // network or device path, never shortened (left out whole instead, see `args_left_out`).
+                ("shellArgs", _) => {
+                    let Ok(args) = arg_list(Some(val), None) else { continue };
                     if args.iter().any(|x| foreign_arg(x)) {
                         continue;
                     }
@@ -386,19 +410,36 @@ fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
     let name = filled(o, "name")?;
     let cwd = filled(o, "cwd").filter(|c| !foreign_path(c))?;
     let action = one_of(o, "action", ACTIONS, "agent");
+    // A list that cannot be carried whole is left out with the reason (the window keeps this computer's
+    // list, or leaves the automation out).
+    let mut left_out = None;
     let shell = if action == "shell" {
         // The daemon reads the program and the scripts it is given when it saves the automation: a network
         // or device path anywhere in it leaves the whole automation out.
         let sh = o.get("shell")?.as_object()?;
         let program = filled(sh, "program").filter(|p| !foreign_path(p))?;
-        let argv = texts(sh, "argv");
-        if argv.iter().any(|a| foreign_arg(a)) {
-            return None;
+        match arg_list(sh.get("argv"), marked(o)) {
+            Ok(argv) => {
+                if argv.iter().any(|a| foreign_arg(a)) {
+                    return None;
+                }
+                let argv = mask_args(&argv, &program);
+                json!({ "program": program, "argv": argv })
+            }
+            Err(why) => {
+                left_out = Some(why);
+                json!({ "program": program })
+            }
         }
-        let argv = mask_args(&argv, &program);
-        json!({ "program": program, "argv": argv })
     } else {
         Value::Null
+    };
+    let args = match arg_list(o.get("args"), marked(o)) {
+        Ok(a) => Some(mask_args(&a, "")),
+        Err(why) => {
+            left_out = left_out.or(Some(why));
+            None
+        }
     };
     let trigger = o.get("trigger").and_then(Value::as_object).and_then(|t| {
         let event = t.get("event")?.as_str().filter(|e| EVENTS.contains(e))?;
@@ -406,7 +447,7 @@ fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
         Some(json!({ "event": event, "glob": text(t, "glob").unwrap_or_default(), "daily_cap": cap }))
     });
     let time = text(o, "time").filter(|t| t.len() == 5 && t.as_bytes()[2] == b':' && t.chars().enumerate().all(|(i, c)| i == 2 || c.is_ascii_digit())).unwrap_or_else(|| "09:00".into());
-    Some(json!({
+    let mut out = json!({
         "id": id_of(o),
         "name": name,
         "enabled": false,
@@ -414,7 +455,6 @@ fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
         "prompt": text(o, "prompt").unwrap_or_default(),
         "cwd": cwd,
         "project_id": text(o, "project_id").filter(|s| s.len() <= 128),
-        "args": mask_args(&texts(o, "args"), ""),
         "env": env_entries(o.get("env"), with_values),
         "every": one_of(o, "every", EVERY, "daily"),
         "time": time,
@@ -425,7 +465,14 @@ fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
         "shell": shell,
         "quick_label": text(o, "quick_label").filter(|s| s.len() <= 256),
         "dry_run": flag(o, "dry_run", false),
-    }))
+    });
+    if let Some(args) = args {
+        out["args"] = json!(args);
+    }
+    if let Some(why) = left_out {
+        out[ARGS_LEFT_OUT] = json!(why);
+    }
+    Some(out)
 }
 
 /// A saved host without credentials (it has no field for them; anything else is dropped) or what this
@@ -464,9 +511,13 @@ fn agent(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
     let mut a = json!({
         "kind": kind,
         "label": filled(o, "label").unwrap_or_else(|| kind.clone()),
-        "args": mask_args(&texts(o, "args"), ""),
         "env": env_entries(o.get("env"), with_values),
     });
+    // A list that cannot be carried whole is left out with the reason: the window keeps this computer's.
+    match arg_list(o.get("args"), marked(o)) {
+        Ok(args) => a["args"] = json!(mask_args(&args, "")),
+        Err(why) => a[ARGS_LEFT_OUT] = json!(why),
+    }
     if let Some(p) = filled(o, "permission").filter(|p| p.len() <= 64) {
         a["permission"] = json!(p);
     }
@@ -547,6 +598,24 @@ pub fn foreign_items(sections: &Map<String, Value>) -> Vec<Value> {
     out
 }
 
+/// Argument lists left out whole (never shortened), with the reason ([`ARGS_TOO_MANY`], [`ARGS_INVALID`]):
+/// the terminal's, checked on `raw_settings` (the settings section before cleaning), and each agent's
+/// (by label) and automation's (by name) marked in the cleaned `sections`.
+pub fn args_left_out(sections: &Map<String, Value>, raw_settings: Option<&Value>) -> Vec<Value> {
+    let mut out = Vec::new();
+    if let Some(Err(why)) = raw_settings.and_then(|s| s.get("shellArgs")).map(|v| arg_list(Some(v), None)) {
+        out.push(json!({ "section": "settings", "name": "shellArgs", "reason": why }));
+    }
+    for (section, name) in [("agents", "label"), ("automations", "name")] {
+        for item in sections.get(section).and_then(Value::as_array).into_iter().flatten() {
+            if let Some(why) = item.get(ARGS_LEFT_OUT).and_then(Value::as_str) {
+                out.push(json!({ "section": section, "name": item.get(name).and_then(Value::as_str).unwrap_or_default(), "reason": why }));
+            }
+        }
+    }
+    out
+}
+
 /// The export document: the window's sections plus the hosts and plugins read here, cleaned.
 pub fn export_doc(raw: &Map<String, Value>, wanted: &[String], with_values: bool, hosts: Option<&Vault>, plugins: Option<Vec<Value>>, exported_at: &str) -> CmdResult<Value> {
     let mut input = Map::new();
@@ -592,11 +661,13 @@ pub fn read_doc(bytes: &[u8]) -> CmdResult<Value> {
     let mut ignored = clean.ignored;
     ignored.extend(o.keys().filter(|k| !matches!(k.as_str(), "kind" | "version" | "exportedAt" | "appVersion" | "sections")).cloned());
     let stamp = |k: &str| text(o, k).map(|s| s.chars().filter(|c| !c.is_control()).take(64).collect::<String>());
+    let args_out = args_left_out(&clean.sections, sections.get("settings"));
     Ok(json!({
         "doc": { "kind": KIND, "version": VERSION, "exportedAt": stamp("exportedAt"), "appVersion": stamp("appVersion"), "sections": clean.sections },
         "skipped": clean.skipped,
         "ignored": ignored,
         "foreign": foreign_items(sections),
+        "argsLeftOut": args_out,
     }))
 }
 
@@ -697,7 +768,7 @@ fn prune_backups(root: &Path) {
 
 /// Writes the export to `path` (from the save dialog). `sections` holds the window's own sections;
 /// `wanted` names every section to include. Returns the item count of each section written, and by name
-/// the items left out for a network or device path.
+/// the items left out for a network or device path and the argument lists left out whole.
 #[tauri::command]
 pub async fn config_export(path: String, sections: Value, wanted: Vec<String>, include_env_values: bool, exported_at: String) -> CmdResult<Value> {
     blocking(move || {
@@ -725,7 +796,10 @@ pub async fn config_export(path: String, sections: Value, wanted: Vec<String>, i
                 _ => {}
             }
         }
-        Ok(json!({ "path": path, "counts": counts, "foreign": foreign_items(&considered) }))
+        let empty = Map::new();
+        let written = doc["sections"].as_object().unwrap_or(&empty);
+        let args_out = args_left_out(written, considered.get("settings"));
+        Ok(json!({ "path": path, "counts": counts, "foreign": foreign_items(&considered), "argsLeftOut": args_out }))
     })
     .await
 }

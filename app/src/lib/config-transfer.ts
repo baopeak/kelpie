@@ -35,14 +35,25 @@ export interface EnvEntry {
   /** Absent: the value was not exported (not asked for, or it looks like a secret). */
   value?: string;
 }
+/** Why an argument list is not taken from the file (it is never taken in part): a hidden value with none
+ *  here, more than 256 arguments, or an argument that is too long, not text or has a NUL. The last two are
+ *  found when the file is read (or when it was written: the export leaves such a list out). */
+export type ArgsReason = "masked" | "tooMany" | "invalid";
+/** Absent argument lists come with `argsLeftOut` (see {@link ArgsReason}). */
 export interface AgentEntry {
   kind: string;
   label: string;
-  args: string[];
+  args?: string[];
+  argsLeftOut?: Exclude<ArgsReason, "masked">;
   permission?: string;
   env: EnvEntry[];
 }
-export type AutomationEntry = Omit<Automation, "env" | "last_run" | "last_session" | "last_error" | "next_run"> & { env: EnvEntry[] };
+export type AutomationEntry = Omit<Automation, "env" | "args" | "shell" | "last_run" | "last_session" | "last_error" | "next_run"> & {
+  env: EnvEntry[];
+  args?: string[];
+  shell?: { program: string; argv?: string[] } | null;
+  argsLeftOut?: Exclude<ArgsReason, "masked">;
+};
 export interface PluginEntry {
   id: string;
   name: string;
@@ -75,6 +86,13 @@ export interface ImportRead {
   ignored: string[];
   /** Items left out because they point at a network or device path, by name. */
   foreign?: { section: ConfigSection; name: string }[];
+  /** Argument lists the file has but that cannot be taken whole, by name (the terminal's: `shellArgs`). */
+  argsLeftOut?: ArgsLeftOut[];
+}
+export interface ArgsLeftOut {
+  section: ConfigSection;
+  name: string;
+  reason: Exclude<ArgsReason, "masked">;
 }
 
 /** An automation as the daemon lists it. */
@@ -432,10 +450,10 @@ export interface ImportPlan {
   fillIn: { section: ConfigSection; item: string; fields: string[]; leftOut: boolean }[];
   /** Values masked in the file that took this computer's value instead (the file's version is not used). */
   keptLocal: { section: ConfigSection; item: string; fields: string[] }[];
-  /** Argument lists not imported because a masked argument had no value here (the list without it could
-   *  mean something else): an agent profile's, an agent automation's or the terminal's (`shellArgs`). This
-   *  computer's list stays as it was. */
-  argsNotImported: { section: ConfigSection; item: string }[];
+  /** Argument lists not imported (never in part: the list without an element could mean something else),
+   *  an agent profile's, an automation's or the terminal's (`shellArgs`), and why. This computer's list
+   *  stays as it was, or (`leftOut`: an automation with none here to keep) the item is left out. */
+  argsNotImported: { section: ConfigSection; item: string; reason: ArgsReason; leftOut: boolean }[];
   runs: RunChange[];
   hostTargets: HostTargetChange[];
 }
@@ -489,12 +507,16 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
         } else {
           // This computer's terminal arguments stay as they are.
           delete (values as Record<string, unknown>)[k];
-          plan.argsNotImported.push({ section: "settings", item: k });
+          plan.argsNotImported.push({ section: "settings", item: k, reason: "masked", leftOut: false });
         }
       } else {
         delete (values as Record<string, unknown>)[k];
         fill("settings", k, { missing: [], kept: [k] });
       }
+    }
+    // Terminal arguments the file has but that could not be read whole: this computer's stay.
+    for (const f of read.argsLeftOut ?? []) {
+      if (f.section === "settings") plan.argsNotImported.push({ section: "settings", item: f.name, reason: f.reason, leftOut: false });
     }
     const changed = Object.keys(values).filter((k) => !same(fieldOf(cur.settings, k), fieldOf(values, k)));
     next = { ...next, ...values };
@@ -548,11 +570,11 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
       // A masked argument without a value here: this computer's arguments stay as they are (none for a new
       // profile) and the profile is named.
       const argTr = track();
-      let args = unmaskArgs(a.args, old?.args, argTr);
+      let args = a.args ? unmaskArgs(a.args, old?.args, argTr) : null;
       if (args) tr.kept.push(...argTr.kept);
       else {
         args = old ? old.args.slice() : [];
-        plan.argsNotImported.push({ section: "agents", item: label });
+        plan.argsNotImported.push({ section: "agents", item: label, reason: a.args ? "masked" : (a.argsLeftOut ?? "invalid"), leftOut: false });
       }
       const permission = a.permission ? unmaskText(a.permission, old?.permission, "permission", tr) : "";
       const { env, needed } = mergeEnv(old?.env, a.env);
@@ -626,18 +648,24 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
       clean: (raw, loc) => {
         const inc = raw as unknown as AutomationEntry;
         const tr = track();
-        // A command argument without a value here leaves the automation out (`command:…` in `missing`).
-        const shell = inc.shell ? { program: unmaskText(inc.shell.program, loc?.shell?.program, "command", tr), argv: unmaskArgs(inc.shell.argv, loc?.shell?.argv, tr, "command") ?? [] } : inc.shell;
-        // Agent arguments with a masked one that has no value here: the replaced automation's arguments stay
-        // as they are; with none to replace, the automation is left out (`args:…` in `missing`).
+        // Why a list is missing from the file: it could not be carried whole.
+        const unreadable = inc.argsLeftOut ?? "invalid";
+        // A command argument without a value here leaves the automation out (`command:…` in `missing`), and
+        // so does a command list the file could not carry.
+        const argvLost = !!inc.shell && !inc.shell.argv;
+        const shell = inc.shell ? { program: unmaskText(inc.shell.program, loc?.shell?.program, "command", tr), argv: (inc.shell.argv && unmaskArgs(inc.shell.argv, loc?.shell?.argv, tr, "command")) ?? [] } : inc.shell;
+        // Agent arguments with a masked one that has no value here, or that the file could not carry: the
+        // replaced automation's arguments stay as they are; with none to replace, the automation is left out.
         const argTr = track();
-        let args = unmaskArgs(inc.args, loc?.args, argTr);
+        let args = inc.args ? unmaskArgs(inc.args, loc?.args, argTr) : null;
         const argsKeptLocal = !args && !!loc;
         if (args) tr.kept.push(...argTr.kept);
         else if (loc) args = loc.args.slice();
-        else tr.missing.push(...argTr.missing);
+        else if (inc.args) tr.missing.push(...argTr.missing);
+        const argsLost = argvLost || (!inc.args && !loc);
+        const { argsLeftOut: _mark, ...entry } = inc;
         const out = {
-          ...inc,
+          ...entry,
           name: unmaskText(inc.name, loc?.name, "name", tr),
           cwd: unmaskText(inc.cwd, loc?.cwd, "cwd", tr),
           prompt: unmaskText(inc.prompt, loc?.prompt, "prompt", tr),
@@ -652,12 +680,16 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
           const v = e.value !== undefined && !masked(e.value) ? e.value : loc?.env?.[e.name];
           if (v !== undefined && !masked(v)) env[e.name] = v;
         }
+        if (argsLost) {
+          plan.argsNotImported.push({ section: "automations", item: inc.name, reason: unreadable, leftOut: true });
+          return null;
+        }
         // It cannot run without these. A command or agent arguments that would run differently from the
         // file's (an argument it could not restore, with no local arguments to keep) leave it out whole.
         const essential = tr.missing.filter((f) => ["name", "cwd", "trigger", "command"].includes(f) || f.startsWith("command:") || f.startsWith("args:") || (f === "prompt" && inc.action !== "shell"));
         fill("automations", inc.name, tr, essential.length > 0);
         if (essential.length) return null;
-        if (argsKeptLocal) plan.argsNotImported.push({ section: "automations", item: inc.name });
+        if (argsKeptLocal) plan.argsNotImported.push({ section: "automations", item: inc.name, reason: inc.args ? "masked" : unreadable, leftOut: false });
         return { ...out, env } as unknown as ListedAutomation;
       },
       adopt: (inc, _loc, id) => ({ ...inc, id }),
@@ -742,7 +774,7 @@ export async function exportConfig(path: string, wanted: readonly ConfigSection[
     if (!ctx.automationsSupported()) throw new Error(t("Automations need a connected session daemon of this version."));
     sections.automations = await ctx.daemon<Automation[]>("automation.list");
   }
-  return ctx.invoke<{ path: string; counts: Partial<Record<ConfigSection, number>>; foreign?: { section: ConfigSection; name: string }[] }>("config_export", { path, sections, wanted, includeEnvValues, exportedAt: new Date().toISOString() });
+  return ctx.invoke<{ path: string; counts: Partial<Record<ConfigSection, number>>; foreign?: { section: ConfigSection; name: string }[]; argsLeftOut?: ArgsLeftOut[] }>("config_export", { path, sections, wanted, includeEnvValues, exportedAt: new Date().toISOString() });
 }
 
 export class ImportFailed extends Error {
