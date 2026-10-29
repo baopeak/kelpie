@@ -1,5 +1,5 @@
 // Past agent conversations (Claude / Codex / OMP transcripts on disk), scoped to this folder,
-// this project tree, or everything; resumable in a terminal or the chat view.
+// this project tree, or everything; resumable in a terminal or the chat view, exportable as Markdown.
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { store } from "../lib/store";
@@ -75,6 +75,9 @@ function projectFor(it: HistoryItem): string {
   if (owner) return owner.id;
   return store.addProject(it.folder || it.cwd);
 }
+
+/** Agents whose transcripts the app core can export (Markdown; lib/session-export.ts, loaded on use). */
+const EXPORTABLE = new Set(["claude", "codex", "omp"]);
 
 /** Conversations being resumed right now (double clicks must not start a second writer). */
 const resuming = new Set<string>();
@@ -163,7 +166,7 @@ export function HistoryPanel(props: { project: Project }) {
                   <div class="history-day">{g.day}</div>
                   <For each={g.items}>
                     {(it) => (
-                      <div class={`history-row${live().has(it.id) ? " running" : ""}`} title={[it.title, it.first_prompt, it.cwd].filter(Boolean).join("\n")} onDblClick={() => void resume(it, false)}>
+                      <div class={`history-row${live().has(it.id) ? " running" : ""}`} data-agent={it.agent} data-id={it.id} title={[it.title, it.first_prompt, it.cwd].filter(Boolean).join("\n")} onDblClick={() => void resume(it, false)}>
                         <KindGlyph kind={it.agent} size={14} />
                         <div class="history-text">
                           <div class="history-title">{it.title ?? it.first_prompt ?? t("(no prompt)")}</div>
@@ -179,6 +182,9 @@ export function HistoryPanel(props: { project: Project }) {
                           <button class="icon-btn" title={live().has(it.id) ? t("Show the running session") : t("Resume in terminal")} onClick={() => void resume(it, false)}><Icon name="terminal" size={13} /></button>
                           <Show when={supportsChat(it.agent) && !live().has(it.id)}>
                             <button class="icon-btn" title={t("Open in chat view")} onClick={() => void resume(it, true)}><Icon name="chat" size={13} /></button>
+                          </Show>
+                          <Show when={EXPORTABLE.has(it.agent)}>
+                            <button class="icon-btn" data-act="export" title={t("Export as Markdown…")} onClick={() => void import("../lib/session-export").then((m) => m.exportConversation(it))}><Icon name="pull" size={13} /></button>
                           </Show>
                           <button class="icon-btn" title={t("Copy resume command")} onClick={() => void writeText(resumeCommand(it)).then(() => store.notify(t("Resume command copied")))}><Icon name="copy" size={13} /></button>
                         </div>

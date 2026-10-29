@@ -24,6 +24,13 @@ pub(crate) fn claude_dir() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".claude"))
 }
 
+/// OMP's session folders. An end-to-end run (`KELPIE_E2E`) with `KELPIE_AGENT_CONFIG_HOME` reads them
+/// under that fixture home instead of the user's (OMP has no variable of its own for it).
+pub(crate) fn omp_sessions_dir() -> PathBuf {
+    let fixture = std::env::var_os("KELPIE_E2E").and(std::env::var_os("KELPIE_AGENT_CONFIG_HOME")).filter(|h| !h.is_empty());
+    fixture.map(PathBuf::from).unwrap_or_else(home).join(".omp/agent/sessions")
+}
+
 /// An account's config home (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`), else the default one.
 pub(crate) fn home_or(dir: Option<&str>, default: fn() -> PathBuf) -> PathBuf {
     dir.filter(|d| !d.is_empty()).map(PathBuf::from).unwrap_or_else(default)
@@ -64,13 +71,16 @@ pub async fn agent_latest_session(kind: String, cwd: String, home: Option<String
 }
 
 fn agent_latest_session_blocking(kind: String, cwd: String, account: Option<String>) -> CmdResult<Option<AgentSessionRef>> {
+    if !local_home(account.as_deref()) {
+        return Ok(None);
+    }
     match kind.as_str() {
         "claude" => Ok(newest(jsonl_in(&claude_project_dir(&home_or(account.as_deref(), claude_dir), &cwd))).map(|p| AgentSessionRef {
             id: p.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
             path: p.to_string_lossy().into_owned(),
         })),
         "omp" => {
-            let root = home().join(".omp/agent/sessions");
+            let root = omp_sessions_dir();
             let mut files: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(&root)
                 .map_err(err)?
                 .filter_map(|e| e.ok())
@@ -110,10 +120,10 @@ pub async fn agent_claude_transcript(session_id: String, cwd: Option<String>, ho
 }
 
 fn agent_claude_transcript_blocking(session_id: String, cwd: Option<String>, home: Option<String>) -> CmdResult<Vec<String>> {
-    let file_name = format!("{session_id}.jsonl");
-    if file_name.contains(['/', '\\']) {
+    if !file_id_ok(&session_id) || !local_home(home.as_deref()) {
         return Err("invalid session id".into());
     }
+    let file_name = format!("{session_id}.jsonl");
     let root = home_or(home.as_deref(), claude_dir);
     let direct = cwd.map(|c| claude_project_dir(&root, &c).join(&file_name)).filter(|p| p.exists());
     let path = match direct {
@@ -282,7 +292,7 @@ pub(crate) fn transcript_files(homes: &AccountHomes) -> Vec<(Agent, PathBuf, Opt
             }
         }
     }
-    for d in dirs_in(&home().join(".omp/agent/sessions")) {
+    for d in dirs_in(&omp_sessions_dir()) {
         out.extend(jsonl_in(&d).map(|p| (Agent::Omp, p, None)));
     }
     out
@@ -343,6 +353,49 @@ pub(crate) fn open_lines(path: &Path, offset: u64, limit: u64) -> Option<Lines> 
     Some(Lines { reader: BufReader::with_capacity(256 * 1024, inner.take(limit)), buf: Vec::new(), consumed: 0 })
 }
 
+impl Lines {
+    /// The next line (without its line ending) when it is at most `max` bytes; a longer one is
+    /// passed over without being kept and comes back as `Err(its length)`. Unlike the iterator, a
+    /// last line without a newline is returned too (it may be cut: callers parse it defensively).
+    /// `None` at the end or on a read error.
+    pub(crate) fn next_capped(&mut self, max: usize) -> Option<Result<String, u64>> {
+        self.buf.clear();
+        let (mut len, mut over) = (0u64, false);
+        loop {
+            let chunk = self.reader.fill_buf().ok()?;
+            if chunk.is_empty() {
+                break;
+            }
+            let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+                Some(i) => (i + 1, true),
+                None => (chunk.len(), false),
+            };
+            if !over && self.buf.len() + take > max + 1 {
+                over = true;
+                self.buf = Vec::new();
+            }
+            if !over {
+                self.buf.extend_from_slice(&chunk[..take]);
+            }
+            len += take as u64;
+            self.reader.consume(take);
+            if done {
+                break;
+            }
+        }
+        if len == 0 {
+            return None;
+        }
+        if over {
+            return Some(Err(len));
+        }
+        while matches!(self.buf.last(), Some(b'\n' | b'\r')) {
+            self.buf.pop();
+        }
+        Some(Ok(String::from_utf8_lossy(&self.buf).into_owned()))
+    }
+}
+
 impl Iterator for Lines {
     type Item = String;
     fn next(&mut self) -> Option<String> {
@@ -358,7 +411,7 @@ impl Iterator for Lines {
 
 /// User lines Claude records that the user did not type as a prompt: slash commands and their
 /// output, interruption markers.
-fn is_claude_command(text: &str) -> bool {
+pub(crate) fn is_claude_command(text: &str) -> bool {
     text.starts_with("<command-") || text.starts_with("<local-command") || text.starts_with("Caveat:") || text.starts_with("[Request interrupted")
 }
 
@@ -367,6 +420,18 @@ fn is_claude_command(text: &str) -> bool {
 pub(crate) fn valid_id(id: &str) -> bool {
     static ID: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$").unwrap());
     ID.is_match(id)
+}
+
+/// An id that is safe inside a file name in an agent's folder: a valid id without : (on Windows
+/// a folder joined with C:x is replaced by it) and without ...
+pub(crate) fn file_id_ok(id: &str) -> bool {
+    valid_id(id) && !id.contains(':') && !id.contains("..")
+}
+
+/// An account home from the window that may be read: none, or a local path (opening a network path
+/// would send the user's credentials to that server).
+pub(crate) fn local_home(home: Option<&str>) -> bool {
+    home.is_none_or(|h| !crate::config_transfer::foreign_path(h))
 }
 
 /// Folder for matching sidebar projects: on Windows, long names instead of 8.3 short names
@@ -443,11 +508,10 @@ fn parse_claude(path: &Path, len: u64) -> Option<HistoryItem> {
     (prompt.is_some() || title.is_some()).then_some(HistoryItem { agent: "claude".into(), id, cwd, folder: String::new(), title, first_prompt: prompt, updated_at: 0, turns: None, home: None })
 }
 
-/// First text block of a Codex user message that the user typed: Codex and IDEs inject
-/// context blocks (AGENTS.md, environment, open file...) as user messages too. Slash-command
-/// prompts (`<command-message>`) are kept, tags stripped.
-fn codex_prompt(content: &Value) -> Option<String> {
-    const INJECTED: [&str; 9] = [
+/// A Codex user message block that Codex or an IDE injected (AGENTS.md, environment, open
+/// file...) rather than the user typed. Slash-command prompts (`<command-message>`) are typed.
+pub(crate) fn codex_injected(text: &str) -> bool {
+    const INJECTED: [&str; 12] = [
         "# AGENTS.md",
         "<environment_context",
         "<recommended_plugins",
@@ -457,10 +521,19 @@ fn codex_prompt(content: &Value) -> Option<String> {
         "<local-command-stdout",
         "<user_instructions",
         "<permissions",
+        // Marker pairs Codex itself defines for injected user items (seen in its binary).
+        "<turn_aborted",
+        "<user_shell_command",
+        "<skill>",
     ];
+    INJECTED.iter().any(|p| text.starts_with(p))
+}
+
+/// First text block of a Codex user message that the user typed, tags stripped.
+fn codex_prompt(content: &Value) -> Option<String> {
     content.as_array()?.iter().find_map(|b| {
         let text = b["text"].as_str().filter(|_| b["type"] == "input_text" || b["type"] == "text")?;
-        if INJECTED.iter().any(|p| text.starts_with(p)) { None } else { clean_text(text) }
+        if codex_injected(text) { None } else { clean_text(text) }
     })
 }
 

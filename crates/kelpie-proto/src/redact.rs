@@ -85,9 +85,64 @@ pub fn redact(text: &str) -> String {
     out
 }
 
+/// Byte ranges of `text` that hold a secret, by the same patterns as [`redact`], each run on `text`
+/// itself (so a caller can merge the ranges found in two readings of one text, e.g. with and without
+/// JSON escapes). Sorted, overlapping ones merged.
+pub fn redact_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut found: Vec<std::ops::Range<usize>> = Vec::new();
+    for re in TOKENS.iter() {
+        found.extend(re.find_iter(text).map(|m| m.range()));
+    }
+    for re in [&*URL_PASSWORD].into_iter().chain(ASSIGNMENTS.iter()) {
+        found.extend(re.captures_iter(text).filter_map(|c| c.get(2)).map(|m| m.range()));
+    }
+    found.extend(BEARER.captures_iter(text).filter_map(|c| Some(c.get(1)?.end()..c.get(0)?.end())));
+    found.retain(|r| !r.is_empty());
+    found.sort_by_key(|r| r.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(found.len());
+    for r in found {
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => merged.push(r),
+        }
+    }
+    merged
+}
+
+/// `text` with each of `ranges` (sorted, not overlapping, on char boundaries) replaced by [`MASK`].
+pub fn mask_ranges(text: &str, ranges: &[std::ops::Range<usize>]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for r in ranges {
+        out.push_str(&text[at..r.start]);
+        out.push_str(MASK);
+        at = r.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranges_mask_what_redact_masks() {
+        let samples = [
+            "value ghp_0123456789abcdefghijABCDEFGHIJ012345 end",
+            "DB_PASSWORD=hunter2hunter2",
+            "export GITHUB_TOKEN=\"abcdef123456\"",
+            r#"{"api_key": "abcdef123456"}"#,
+            "Authorization: Bearer abcdefghijklmnop123456",
+            "postgres://app:s3cr3tpw@db.local:5432/x",
+            "password: hunter2x",
+            "a\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\nz",
+            "fn token_count(tokens: &[Token]) -> usize { tokens.len() }",
+        ];
+        for s in samples {
+            assert_eq!(mask_ranges(s, &redact_ranges(s)), redact(s), "{s}");
+        }
+    }
 
     #[test]
     fn masks_known_token_formats() {

@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::agent_history::{claude_dir, claude_project_dir, codex_dir, dirs_in, home_or, jsonl_in, line_ends_at, open_lines, valid_id, Agent};
+use crate::agent_history::{claude_dir, claude_project_dir, codex_dir, dirs_in, file_id_ok, home_or, jsonl_in, line_ends_at, local_home, open_lines, Agent};
 use crate::fs_ops::{blocking, CmdResult};
 
 /// Most a single update reads from the end of a transcript.
@@ -735,7 +735,7 @@ fn cached_find(key: String, miss_ttl: Duration, search: impl FnOnce() -> Option<
 }
 
 /// The newest file under `dir` (date folders descending) named `rollout-*<suffix>`.
-fn find_rollout(dir: &Path, suffix: &str, depth: u8) -> Option<PathBuf> {
+pub(crate) fn find_rollout(dir: &Path, suffix: &str, depth: u8) -> Option<PathBuf> {
     if depth > 5 {
         return None;
     }
@@ -798,7 +798,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 /// Codex thread ids are UUIDv7: the first 48 bits are the creation time. The rollout sits in the
 /// day folder of that time (the folder uses local time: a day either side is looked at too), so
 /// a few stats find it without walking the whole tree.
-fn find_rollout_by_date(root: &Path, id: &str, suffix: &str) -> Option<PathBuf> {
+pub(crate) fn find_rollout_by_date(root: &Path, id: &str, suffix: &str) -> Option<PathBuf> {
     let ms = u64::from_str_radix(id.replace('-', "").get(..12)?, 16).ok()?;
     let day = (ms / 86_400_000) as i64;
     [day, day - 1, day + 1].into_iter().find_map(|d| {
@@ -811,7 +811,7 @@ fn find_rollout_by_date(root: &Path, id: &str, suffix: &str) -> Option<PathBuf> 
 /// The transcript of conversation `id` under an agent's `root` (Claude / Codex: the config home;
 /// OMP: its sessions folder). `None` when there is none yet.
 pub fn resolve_in(agent: Agent, root: &Path, id: &str, transcript_path: Option<&str>, cwd: Option<&str>) -> Option<PathBuf> {
-    if !valid_id(id) || id == "latest" {
+    if !file_id_ok(id) || id == "latest" {
         return None;
     }
     match agent {
@@ -845,7 +845,7 @@ pub fn resolve_in(agent: Agent, root: &Path, id: &str, transcript_path: Option<&
     }
 }
 
-fn agent_of(kind: &str) -> Option<Agent> {
+pub(crate) fn agent_of(kind: &str) -> Option<Agent> {
     match kind {
         "claude" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
@@ -901,11 +901,14 @@ pub async fn session_usage(
     home: Option<String>,
 ) -> CmdResult<Option<SessionUsage>> {
     let (Some(agent), Some(id)) = (agent_of(&kind), agent_session_id) else { return Ok(None) };
+    if !local_home(home.as_deref()) {
+        return Ok(None);
+    }
     blocking(move || {
         let root = match agent {
             Agent::Claude => home_or(home.as_deref(), claude_dir),
             Agent::Codex => home_or(home.as_deref(), codex_dir),
-            Agent::Omp => crate::agent_history::home().join(".omp/agent/sessions"),
+            Agent::Omp => crate::agent_history::omp_sessions_dir(),
         };
         let Some(path) = resolve_in(agent, &root, &id, transcript_path.as_deref(), cwd.as_deref()) else { return Ok(None) };
         Ok(usage_of(agent, &path))

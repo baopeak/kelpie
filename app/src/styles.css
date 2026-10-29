@@ -526,6 +526,8 @@ input, textarea, select { font: inherit; color: var(--text); }
 .conn { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
 .conn.on { background: var(--idle); }
 .toast { position: fixed; bottom: 36px; left: 50%; transform: translateX(-50%); background: var(--bg-elev-2); border: 1px solid var(--border-strong); padding: 8px 10px 8px 14px; border-radius: 9px; z-index: 120; box-shadow: 0 12px 30px rgba(0,0,0,.5); max-width: 70vw; display: flex; align-items: center; }
+/* Messages put each fact on its own line; a long one (a hook's output) scrolls. */
+.toast > span { white-space: pre-line; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; }
 
 /* ---------- chat ---------- */
 /* Transcript and composer share one column: wide, with slim side gutters so more fits. */

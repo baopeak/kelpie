@@ -152,5 +152,11 @@
   "the saved SSH hosts could not be read": "không đọc được các SSH host đã lưu",
   "the saved SSH hosts changed since the preview; import again": "các SSH host đã lưu đã thay đổi sau khi xem trước; hãy nhập lại",
   "choose a file, not a folder": "hãy chọn một tệp, không phải thư mục",
-  "choose a file in a folder": "hãy chọn một tệp nằm trong thư mục"
+  "choose a file in a folder": "hãy chọn một tệp nằm trong thư mục",
+  "this agent's conversations cannot be exported": "không xuất được cuộc trò chuyện của agent này",
+  "the transcript of this conversation was not found": "không tìm thấy bản ghi của cuộc trò chuyện này",
+  "the transcript could not be opened": "không mở được bản ghi",
+  "choose a file other than the transcript": "hãy chọn một tệp khác với tệp bản ghi",
+  "the account folder is on another computer": "thư mục tài khoản nằm trên máy khác",
+  "could not create a temporary file beside the target": "không tạo được tệp tạm bên cạnh tệp đích"
 }

@@ -37,6 +37,8 @@ ureq = { version = "3", features = ["json"] }
 keyring = { version = "3.6", default-features = false, features = ["windows-native", "apple-native"] }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 zstd = "0.14.3"
+# Markdown structure of exported messages (session_export.rs): parsing only, no HTML output.
+pulldown-cmark = { version = "=0.13.5", default-features = false }
 toml_edit = "0.25"
 jsonc-parser = { version = "0.34", default-features = false, features = ["cst", "serde_json"] }
 
