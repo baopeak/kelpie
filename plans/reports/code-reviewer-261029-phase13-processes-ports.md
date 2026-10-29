@@ -261,3 +261,78 @@ Review only; no source edited. The controller's decisions (M2 docs-only, M3 keep
 ## Round 2 unresolved questions
 
 1. R2-M1: should the gate be macOS-only (simplest), or should custom sessions' roots always be included?
+
+---
+
+# Round 3: fixes in b44d807 (diff `0e327b5..b44d807`)
+
+Review only; no source edited.
+
+## Verdict
+
+**Approve. Nothing is blocking.** R2-M1 is fixed. R2-L1, R2-L2 and R2-L4 are fixed without opening a new hole. The reason for deferring R2-L3 is sound. The only new observations are informational.
+
+## 1. R2-M1, chips for a session that is itself the server: **fixed**
+
+- **Gate:** `daemon/process.rs:63-65`, `wants_ports`, is called with `cfg!(target_os = "macos")` (`:115`).
+  - On Windows and Linux, ports are looked up whenever a scanned session has a root, children or orphans.
+  - On macOS, the root of a custom session also counts. `custom = agent.is_none() && kind != "shell"` (`:76-78`).
+- **Ordering:** the `zip(targets, scans)` is sound because `Procs::scan` maps `targets` in order, one scan per target.
+- **Chat sessions:** their kind is always an agent kind, so `custom` is false. A kind whose custom agent preset was deleted counts as custom, which only means one extra lookup.
+- **Tests:** the unit test covers both platform settings, and a daemon test uses a custom session whose own process listens. Both pass here. e2e step 5c covers the user path (not run by me).
+- **Docs:** the architecture text matches. The user-guide promise of a chip for `python -m http.server` is true again.
+
+## 2. R2-L1, root start time recorded at spawn: **fixed, no new hole**
+
+- **Where it is recorded:**
+  - Terminal sessions: `session.rs:386-387` reads `start_time_of(pid)` right after `spawn_command`, before the waiter thread exists. The child is unreaped, so the PID cannot have been reused.
+  - Chat sessions: `chat.rs:365` does the same, right after `cmd.spawn()`. This is the only place `g.pid` is assigned (`:376`), and `pid_start` is overwritten on every spawn. After exit, `proc_root` returns `None` because `alive` is false, so a stale `pid_start` is never used.
+  - `Session::proc_root` and `ChatSession::proc_root` both return `procs::Root { pid, start, tree }`. Fakes record a start (`fake_process`) or have no PID.
+- **No false mismatch** (a mismatch would hide a live root):
+  - Windows: the recorded start comes from `GetProcessTimes` → `epoch_ms`. The scan's root start comes from the table (`NtQuerySystemInformation` CreateTime → `epoch_ms`), and `proc_of` already requires the table value to equal the handle read (`procs.rs:141-145`). Both are the same kernel value through the same conversion, so they are equal.
+  - Linux: every reading goes through the one shared `System` with one boot time, so they are equal even after a clock step.
+  - macOS: `pbi_start_tvsec` is absolute, so they are equal.
+  - If the start could not be read at spawn (`None`), `is_none_or` accepts the root, which is the round-2 behaviour, so this fails open only to the previous state.
+  - On Unix, `std::process::Command::spawn` returns after `exec`, and the start time (fork time) does not change across `exec`.
+- **If the root were hidden anyway (real reuse):**
+  - `root` is `None`, so nothing is walked from the stranger.
+  - `t.root` is still removed from members (`:251`), still put in `keep`, and still refused by `kill` (`:290`).
+  - Job members still come from the session's own job, which the `Target` holds, so they are the session's leftovers.
+  - The new test `a_process_under_the_session_s_pid_with_another_start_is_not_its_root` checks all of this and passes.
+- **Windows unchanged otherwise:** the only change on Windows is the extra start-time filter, and the restart test still passes.
+
+## 3. R2-L2 / R2-L4, one shared `System` on Unix: **correct**
+
+- **Lock scope:** `SYS` (`procs.rs:579`) is a leaf lock.
+  - It is taken only inside `os::now` (one PID refresh) and `Reader::read` (one refresh plus building the table), and released when they return.
+  - Neither function takes any other lock while holding it.
+  - `terminate` only takes it inside `check()`. The 50 ms and 25 ms sleeps, the 3 s grace and `libc::kill` all run outside the lock.
+- **No deadlock:** the lock order is `Procs.reader` → `Procs.tracked` → `SYS` (transient). `describe` takes `reader`, then `SYS`, then `tracked`, but never holds `SYS` while taking `tracked`, so there is no cycle.
+- **Spawn path:** `start_time_of` runs on the caller of `Session::spawn` / `ChatSession::spawn`, which is the RPC request worker or the automation thread. It runs before `inner.lock()` and outside `daemon.sessions` (`daemon.rs:964,975,1010`).
+- **PTY threads:** the reader, writer and waiter threads (`session.rs:413-457`) never call `procs`.
+- **Worst case:** a spawn waits for an in-flight `ProcessesToUpdate::All` refresh, tens of ms on a busy macOS or Linux machine. That is acceptable.
+- **Checked against sysinfo 0.39.6:**
+  - Refreshing `ProcessesToUpdate::Some(&[pid])` with `remove_dead = true` only removes that PID if it is dead (`common/system.rs:330-333`, `385-393`), so the shared cache that `read(None)` uses for CPU deltas is kept.
+  - On Linux, a cached entry is re-read from `/proc/<pid>/stat`. If the start differs (PID reused), sysinfo rebuilds the whole entry (`unix/linux/process.rs:642-680`), so identity checks remain correct.
+  - With `with_exe(UpdateKind::Always)`, `exe` is re-read for a known PID (`:496-518`).
+  - Thread entries that `now(tid)` might insert are filtered by `thread_kind`, and the next `All` refresh drops them because they are not updated.
+- **Compiles by inspection:**
+  - `LazyLock` is stable since Rust 1.80, below the MSRV of 1.82.
+  - `System` is `Send`, so the static `Mutex<System>` is `Sync`.
+  - The iterator chain in `read`'s tail expression has no `Drop` types, so it does not hit the guard-lifetime error.
+  - Callers of the changed `now`/`check` signatures are all updated, and the test module's `os::Reader::default()` still works with the unit struct.
+  - The developer also compiled the module verbatim against sysinfo on Windows, and CI will compile it on macOS.
+- **Info, not a finding:**
+  - `now()` refreshes without CPU, yet on Linux it still shifts a process's `old_utime` (`set_time`, `process.rs:799`, `363-365`). The next scan's CPU % for listed processes then covers a window shortened by the milliseconds between a table read and the identity reads. That error is negligible.
+  - sysinfo is built without `multithread` (`crates/kelpied/Cargo.toml:43`), so no rayon pool runs under the lock.
+
+## 4. R2-L3, deferred: **the reason is sound**
+
+For an npm agent (root `node`), MCP servers are often `node` and tool shells are `bash`. A rule like "descend into a sole same-named child" would pick a lone `node` MCP server or dev server as "the agent". It would then keep what that server starts and stop the real agent's tool shells. That is worse than today's behaviour, where the agent always survives and only its helpers may be stopped. Recognising these launchers by command line in a later phase is the right follow-up.
+
+## Verification (round 3)
+
+- `cargo test -p kelpied -j 2 -- procs:: ports:: proc_tree:: processes_ programs_in_a_session a_session_whose_own_process daemon::process::` at b44d807 (target `D:\kelpie-p9-target`, `CARGO_INCREMENTAL=0`): **27 passed**.
+- Not run: e2e, macOS, Linux. The Unix-only code was reviewed by reading it; CI compiles it for macOS.
+
+Blocking items: **none**.
