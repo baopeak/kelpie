@@ -1284,3 +1284,24 @@ input, textarea, select { font: inherit; color: var(--text); }
 .drawer-opt-body { display: flex; flex-direction: column; gap: 6px; padding: 0 10px 10px; }
 .drawer-foot { padding: 10px 14px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
 .drawer-foot .btn { flex: 1; justify-content: center; }
+
+/* Ports a session's programs listen on (chips on the tab and the sidebar row) and the Processes panel. */
+.port-chips { display: inline-flex; gap: 3px; align-items: center; flex: none; }
+.port-chip, .port-more { font: 10.5px/15px var(--font-mono); padding: 0 5px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg-elev-2); color: var(--accent-strong); cursor: pointer; white-space: nowrap; }
+.port-chip:hover { background: var(--accent-soft); border-color: var(--accent); }
+.port-more { cursor: default; color: var(--text-dim); }
+.proc-panel { font-size: 12px; padding: 6px 8px 12px; overflow: auto; height: 100%; }
+.proc-head, .proc-row { display: grid; grid-template-columns: minmax(70px, 1fr) 46px 56px 38px minmax(0, auto) 40px; gap: 6px; align-items: center; padding: 2px 4px; }
+.proc-head { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }
+.proc-session { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
+.proc-session header { display: flex; align-items: center; gap: 6px; padding: 2px 4px; }
+.proc-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.proc-row:hover { background: var(--bg-hover); }
+.proc-row.root { color: var(--text-dim); }
+.proc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proc-num { font: 11px var(--font-mono); text-align: right; color: var(--text-dim); }
+.proc-ports { display: flex; flex-wrap: wrap; gap: 3px; }
+.proc-act { text-align: right; }
+.proc-empty { color: var(--text-faint); padding: 6px 4px; }
+.proc-orphans { margin-top: 6px; padding: 2px 4px; color: var(--waiting); font-size: 11px; }
+.proc-error { color: var(--danger); padding: 4px; }

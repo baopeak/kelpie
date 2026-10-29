@@ -812,6 +812,13 @@ impl Session {
         }))
     }
 
+    /// The process the session runs, and its job when there is one; `None` once it has ended.
+    pub fn proc_root(&self) -> Option<(u32, Option<Arc<ProcTree>>)> {
+        let g = self.inner.lock();
+        let pty = g.pty.as_ref()?;
+        Some((pty.pid?, pty.tree.clone()))
+    }
+
     pub fn kill(&self) {
         let mut g = self.inner.lock();
         g.stopped = true;
@@ -1219,6 +1226,13 @@ impl ChildKiller for NoKill {
 
 #[cfg(test)]
 impl Session {
+    /// Makes the session look like it runs process `pid` (in `tree`, when it has a job).
+    pub(crate) fn fake_process(&self, pid: u32, tree: Option<Arc<ProcTree>>) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut g = self.inner.lock();
+        g.pty = Some(Pty { ctl: tx, killer: Box::new(NoKill), tree, pid: Some(pid) });
+    }
+
     /// Makes the session look like a running agent in `status`; what is typed into it shows up on the channel.
     pub(crate) fn fake_running(&self, status: Status) -> std::sync::mpsc::Receiver<Ctl> {
         let (tx, rx) = std::sync::mpsc::channel();

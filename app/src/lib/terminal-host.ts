@@ -52,6 +52,10 @@ export const setLinkOpener = (fn: (uri: string) => void) => (openLink = fn);
 let inputFanout: (sessionId: string) => number[] = () => [];
 export const setInputFanout = (fn: (sessionId: string) => number[]) => (inputFanout = fn);
 
+/** Told which session's terminal just printed something (live output, not a replay). */
+let outputListener: ((sessionId: string) => void) | null = null;
+export const onTerminalOutput = (fn: (sessionId: string) => void) => void (outputListener = fn);
+
 export class TermView {
   readonly el = document.createElement("div");
   readonly term: Terminal;
@@ -332,6 +336,7 @@ export class TermView {
       }
       this.write(data);
       this.lastSeq = seq;
+      outputListener?.(this.sessionId);
     }).catch((e) => {
       console.warn("attach failed", e);
       if (gen === this.attachGen) this.attached = false;

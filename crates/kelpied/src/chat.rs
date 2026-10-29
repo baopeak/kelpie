@@ -632,6 +632,15 @@ impl ChatSession {
         Some((g.tree.clone()?, if prioritize && !g.focused { Priority::Background } else { Priority::Normal }))
     }
 
+    /// See `Session::proc_root`.
+    pub fn proc_root(&self) -> Option<(u32, Option<Arc<ProcTree>>)> {
+        let g = self.inner.lock();
+        if !g.alive {
+            return None;
+        }
+        Some((g.pid?, g.tree.clone()))
+    }
+
     pub fn set_focus(&self, focused: bool) {
         let mut g = self.inner.lock();
         g.focused = focused;

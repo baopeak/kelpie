@@ -695,6 +695,22 @@ token-like values removed) and size, with a screenshot of the element; add a not
 to an agent** as one prompt. With Settings → Terminal → *Open localhost links in a browser
 pane*, `Ctrl/⌘+click` on a dev-server address in a terminal opens it next to the terminal.
 
+### Processes, ports and preview
+
+When a program in a session listens on a port (a dev server, `python -m http.server 8000`…), a
+`:8000` chip appears on the session's tab and its sidebar row. Click it to open the address in a
+browser pane; right-click for *Open preview beside* (split next to the focused pane), *Open in a
+browser tab* or *Copy address*. The **Processes** tab of the right panel (palette: *Processes and
+Ports*) lists what each running session of the project runs, as a tree with PID, memory, CPU and
+ports. **Kill** stops a program and what it started; **Kill children** stops everything a session
+started while the session itself (and its agent) keeps running. Both ask first and name what would
+end and which ports it frees; a program is asked to close and forced after 3 seconds. Kelpie only
+stops a process that is still the one it listed (same PID, start time and program): a program
+that already ended, or a number now used by another program, is never touched. A program that
+left its session but still runs is listed under *Left the session*. If a port is still in use
+after a stop, Kelpie says which program holds it. Kelpie looks at processes only while this tab is
+open or a visible session has programs running under it. Needs a daemon of API level 16.
+
 ### Remote projects (SSH)
 
 *Add Remote Project (SSH)…* (search, or the server icon in the sidebar's project toolbar) picks a host

@@ -14,6 +14,7 @@ use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub mod materialize;
+pub mod procs;
 pub mod redact;
 pub mod worktree_lock;
 pub use redact::redact;
@@ -24,8 +25,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// endpoint, so changing it orphans running daemons) this only lets a newer app notice an
 /// older daemon that is still running and offer to restart it. 14: a run's task may run on an SSH
 /// host (`runs::TaskHost`); an older daemon would ignore the field and run it here, so the app asks for it only at 14. 15: automations can have event
-/// triggers and approved commands; an older daemon would ignore those fields, so the app offers them only at 15.
-pub const API_LEVEL: u32 = 15;
+/// triggers and approved commands; an older daemon would ignore those fields, so the app offers them only at 15. 16: `process.*` lists a
+/// session's processes and their ports and stops them; an older daemon has no such methods, so the app offers them only at 16.
+pub const API_LEVEL: u32 = 16;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.
