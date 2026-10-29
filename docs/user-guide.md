@@ -1028,10 +1028,34 @@ a setting.
   with the window closed (events, turn length, away-only, screen text), notes about shortcuts kept
   from the terminal, first-run tips.
 - **Usage & Resources**: usage and memory meters, the per-session cost cap, the Usage & cost page.
-- **Session Daemon**: status, data folder and log, *Stop daemon & all sessions*.
+- **Session Daemon**: status, data folder and log, *Export and import settings*, *Stop daemon &
+  all sessions*.
 
 Settings and layouts live in `app-state.json` in the data folder; when its format changes the
 old file is first copied to `app-state.v<N>.bak.json`.
+
+### Export and import settings
+
+Settings → Session Daemon → **Export and import settings** moves your setup to another computer
+as one JSON file. Tick the parts you want: settings, quick commands, saved layouts, automations,
+SSH hosts, the plugin list and agent arguments and environment. **Export…** asks where to save it.
+
+What is never written to the file: SSH passwords, key passphrases and key files (a key's *path* is
+kept), integration, notification, phone-pairing, daemon and updater tokens, anything in the OS
+credential store, your Claude Code / Codex sign-ins, and any text that looks like a credential
+(it is replaced by `[redacted]`). Agent environment variables are listed by name; their values
+come along only when you tick *Include values of agent environment variables* (off by default:
+values are plain text in the file), and even then a value that looks like a secret is left out.
+
+**Import…** opens a file (at most 2 MB) and shows, per part, how many items are new and how many
+replace one with the same id or name; untick what you do not want, then **Import**. Before
+anything changes, the current configuration is copied to `backups/config-<time>` in the data
+folder; if a step fails, what was already changed is put back. Imported automations come in
+switched off, and their commands need approving again on this computer. Imported SSH hosts carry
+no passwords: enter them again on the Hosts page. Agent variables the file names without a value
+keep this computer's value, or are listed for you to fill in. The plugin list only tells you which
+plugins to install; nothing is installed. Automations need a session daemon of the same release
+(after an update, restart the daemon to export or import them).
 
 ## Automation
 

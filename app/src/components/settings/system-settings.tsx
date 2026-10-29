@@ -1,5 +1,5 @@
 // Session Daemon and About sections.
-import { Show, createResource } from "solid-js";
+import { Show, Suspense, createResource, lazy } from "solid-js";
 import { getVersion } from "@tauri-apps/api/app";
 import { store } from "../../lib/store";
 import { t } from "../../lib/i18n";
@@ -20,6 +20,9 @@ interface DaemonInfo {
 }
 
 const [platform] = createResource(() => platformInfo().catch(() => null));
+
+// Export / import loads when its row is shown, not with the app.
+const ConfigTransfer = lazy(() => import("./config-transfer"));
 
 export function DaemonSettings() {
   const [info, { refetch }] = createResource(() => store.connected(), () => daemon<DaemonInfo>("daemon.info").catch(() => null));
@@ -49,6 +52,11 @@ export function DaemonSettings() {
           <button class="btn" onClick={() => void revealEntry(info()?.data_dir ?? platform()!.data_dir, "").catch((e) => store.notify(String(e)))}>{t("Open folder")}</button>
           <button class="btn" onClick={() => void revealEntry(info()?.data_dir ?? platform()!.data_dir, "logs/kelpied.log").catch((e) => store.notify(String(e)))}>{t("Show log file")}</button>
         </div>
+      </SettingRow>
+      <SettingRow id="config-transfer" wide>
+        <Suspense fallback={<div class="muted-inline">{t("Loading…")}</div>}>
+          <ConfigTransfer />
+        </Suspense>
       </SettingRow>
       <SettingRow id="daemon-stop">
         <button class="btn danger" onClick={() => void stopAll()}>{t("Stop daemon & all sessions")}</button>

@@ -164,6 +164,13 @@ function createAppStore() {
     setState(produce(fn));
     persist();
   };
+  /** Saves now instead of after the debounce, and reports a failure (a settings import must know). */
+  async function saveNow() {
+    if (!loaded() || persistBlocked) throw new Error(t("App state cannot be saved in this session."));
+    clearTimeout(saveTimer);
+    await ipc.saveState(JSON.parse(JSON.stringify(state)));
+  }
+  const canPersist = () => loaded() && !persistBlocked;
 
   function notify(text: string, action?: Toast["action"], ms = 3500) {
     const t: Toast = { text, action };
@@ -1329,6 +1336,11 @@ function createAppStore() {
     update((s) => Object.assign(s.settings, patch));
   }
 
+  /** Swaps in a whole settings object (an import, or undoing one); the caller saves with `saveNow`. */
+  function replaceSettings(next: Settings) {
+    setState("settings", reconcile(JSON.parse(JSON.stringify(next))));
+  }
+
   /** Launch arguments and environment of an agent profile, permission mode included. */
   /** `yolo: false`: without the Yolo flags (chat view asks Allow / Deny itself). */
   function profileLaunch(kind: SessionKind, opts: { yolo?: boolean; account?: string | null } = {}): { args: string[]; env?: Record<string, string> } {
@@ -1633,7 +1645,7 @@ function createAppStore() {
     arrangeTab, tileCandidates, canTile, canSpread, tileTab, spreadTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
     splitPicker, moveTab, movePaneToTab, mergeTab,
     resumeSession, resumeInterrupted, setChatResumer,
-    replacePaneIn, updatePane, resizeSplit, setRightPanel, showRightPanel, setSettings, zoomed, toggleZoom,
+    replacePaneIn, updatePane, resizeSplit, setRightPanel, showRightPanel, setSettings, replaceSettings, saveNow, canPersist, zoomed, toggleZoom,
     topProjects, childrenOf, setProjectStatus, togglePin, approveSetup, approveChecks, linkHost, unlinkHost,
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
     registryAgent, settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,

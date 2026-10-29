@@ -143,5 +143,14 @@
   "the stash was dropped; another one dropped with it was put back": "stash đã bị xóa; một stash khác bị xóa cùng lúc đã được đặt lại",
   "this needs git": "cần git",
   "or newer": "hoặc mới hơn",
-  "the stash list changed (another worktree may have stashed or dropped): refresh it and try again": "danh sách stash đã thay đổi (có thể một worktree khác vừa stash hoặc xóa): hãy làm mới và thử lại"
+  "the stash list changed (another worktree may have stashed or dropped): refresh it and try again": "danh sách stash đã thay đổi (có thể một worktree khác vừa stash hoặc xóa): hãy làm mới và thử lại",
+  "not a Kelpie settings file": "không phải tệp cài đặt Kelpie",
+  "this settings file is from a newer Kelpie": "tệp cài đặt này từ một phiên bản Kelpie mới hơn",
+  "unknown settings file format": "định dạng tệp cài đặt không xác định",
+  "the settings file has no sections": "tệp cài đặt không có mục nào",
+  "the settings file is larger than 2 MB": "tệp cài đặt lớn hơn 2 MB",
+  "the saved SSH hosts could not be read": "không đọc được các SSH host đã lưu",
+  "the saved SSH hosts changed since the preview; import again": "các SSH host đã lưu đã thay đổi sau khi xem trước; hãy nhập lại",
+  "choose a file, not a folder": "hãy chọn một tệp, không phải thư mục",
+  "choose a file in a folder": "hãy chọn một tệp nằm trong thư mục"
 }

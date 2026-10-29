@@ -1,0 +1,9 @@
+/* Settings → Session Daemon → Export and import settings */
+.config-transfer { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: 100%; }
+.config-sections { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px 16px; width: 100%; }
+.config-preview { display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.config-preview-row { display: flex; flex-direction: column; gap: 2px; }
+.config-preview-row .muted-inline { margin-left: 24px; }
+.config-warning { color: var(--accent); font-size: 12px; }
+.config-error { color: var(--danger); font-size: 12px; white-space: pre-wrap; }
+.config-result { font-size: 12px; white-space: pre-wrap; }

@@ -152,22 +152,43 @@ fn read_plugin(dir: &Path, approvals: &BTreeMap<String, String>) -> PluginInfo {
     info
 }
 
+fn list_installed() -> Vec<PluginInfo> {
+    let approvals = approvals();
+    let mut out: Vec<PluginInfo> = std::fs::read_dir(plugins_dir())
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        // Dot folders are installs in progress.
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| read_plugin(&e.path(), &approvals))
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Installed plugins as a settings export lists them: id, name and version (no approvals, no files).
+pub fn export_list() -> Vec<Value> {
+    list_installed()
+        .into_iter()
+        .map(|p| {
+            let m = p.manifest.unwrap_or(Value::Null);
+            let name = m["name"].as_str().unwrap_or(&p.id).to_string();
+            let mut item = json!({ "id": p.id, "name": name });
+            if let Some(v) = m["version"].as_str() {
+                item["version"] = json!(v);
+            }
+            item
+        })
+        .collect()
+}
+
+pub fn valid_plugin_id(id: &str) -> bool {
+    valid_id(id)
+}
+
 #[tauri::command]
 pub async fn plugin_list() -> CmdResult<Vec<PluginInfo>> {
-    crate::fs_ops::blocking(|| {
-        let approvals = approvals();
-        let mut out: Vec<PluginInfo> = std::fs::read_dir(plugins_dir())
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            // Dot folders are installs in progress.
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().to_string_lossy().starts_with('.'))
-            .map(|e| read_plugin(&e.path(), &approvals))
-            .collect();
-        out.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(out)
-    })
-    .await
+    crate::fs_ops::blocking(|| Ok(list_installed())).await
 }
 
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
