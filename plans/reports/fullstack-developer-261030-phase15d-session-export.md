@@ -198,3 +198,70 @@ Review: "Round 2" in `plans/reports/code-reviewer-261030-phase15d-session-export
   - `pnpm build`: ok.
 - Bundle gate: entry 326.31 kB gz, limit 338.60: ok.
 - `scripts/e2e/session_export.py`: 28/28 in two consecutive runs on the rebuilt debug app. Test daemon, driver and scratch data were removed; only the user's own installed Kelpie stayed running, untouched.
+
+## Review fixes, round 3
+
+Review: "Round 3" in `plans/reports/code-reviewer-261030-phase15d-session-export.md`.
+
+### Approach
+
+I tracked fences with their indentation, quote depth and an end rule, rather than the plain-text fallback. Most assistant replies have code blocks under numbered steps, and wrapping each such message in an outer fence would have made ordinary exports worse. `contain` is rewritten around one rule: where it is unsure whether something is code or text, it treats it as text. The worst outcome is a visible `\` in code, never raw HTML in the file. This is documented on `contain` and in `docs/architecture.md`.
+
+### Fence inside a list item or blockquote (blocking)
+
+- **What is recorded.** An open fence now records its character, its length, its blockquote depth and its column after the quote markers. The column is where the fence run starts, after any list marker.
+- **When it ends.**
+  - At a closing line: indented any amount, with the same character, at least as long, and nothing after it. List markers are not stripped from a closing line.
+  - When a line has fewer `>` than the opener. A blank line counts, because it ends a quote.
+  - When the opener was indented (a list item) and a non-blank line is less indented than it, matching CommonMark's end of the list item. Escaping resumes on that line.
+- **Closer added at the end** of a message: the opener's quote markers and indentation, then the run. So `1. Install:` followed by an indented `bash` fence gets a closer at three spaces, which closes the fence and can't open a new one.
+- **Tests:** the review's two samples, a closer at the same quote depth, a quote fence ended by a blank line, and a closed list fence followed by text.
+- **Golden:** both samples are in `claude.md`.
+- **Rendered with the app's `marked`:**
+  - every `## ` heading survives: claude 8/8, codex 4/4, omp 2/2;
+  - every `<details>` survives: 10/10, 8/8, 6/6;
+  - no raw `<textarea|script|style|pre|iframe|title|xmp|noscript|plaintext` and no `<!--` outside code;
+  - each document ends with its last paragraph.
+
+### Inline tags
+
+- Every `<` followed by a letter, `/`, `!` or `?` is now escaped anywhere in a text line: at the start, behind quote or list markers, or mid-line (`Why does the <textarea> lose focus?`). A `<` already escaped by an odd number of backslashes is left alone.
+- **Code that keeps its text:**
+  - **Tracked fences.**
+  - **Indented code**, only where it can't be a list item's text: 4 or more columns, outside quotes, no list open, after a blank line or more indented code. A list stays open until a blank line is followed by a line at column 0 with no list marker.
+  - **Inline code spans**, only where the pairing is certain. Every line of the paragraph (the lines between blank lines and fences) must close its own backtick runs, using CommonMark same-length matching with backslash-escaped backticks skipped, and the line must have no `|`, since GFM splits table cells before code spans.
+- Anything else counts as text. So `x ` + "`" + ` / a ` + "`" + ` <b> ` + "`" + ` c` (a pair the renderer may make across lines) and a table row are escaped.
+- Tests cover all of these. The golden has `<textarea>` in prose, and `<script>` in inline code kept as written.
+
+### Redaction union
+
+- `kelpie_proto::redact` gains:
+  - `redact_ranges(text)`: the byte ranges the same patterns mask, each pattern run on the text itself, sorted and merged;
+  - `mask_ranges`.
+  - A kelpie-proto test checks that the two together equal `redact` on its sample corpus.
+- `redact_escaped` builds the unescaped text with a per-byte map back to the original. It merges the ranges found in the original and in the unescaped text, mapped back, and masks them on the original. Then it runs `redact` once more, which can only mask more.
+- The review's tie example is a test: both `s3cret1` and `abcdef123` are masked, and the text keeps its `\n`.
+- This adds two public functions to kelpie-proto. No protocol, daemon or API_LEVEL change.
+
+### Numbers and strings under secret keys
+
+- `redact_value` carries a "under a secret-named key" flag down through arrays and nested objects. Every number and non-empty string under such a key is masked: `{"password": [12345678, "hunter2"]}` and `{"token": {"value": 1234, "list": [{"x": "y"}]}}`. Booleans and nulls are kept.
+- `secret_name` now checks a quick word list (secret, token, pass, pwd, key, credential) before probing `redact`, so large JSON stays cheap.
+
+### Optional items, both done
+
+- **OMP root.** The session header's id is recorded, and an entry whose parent is that id is treated as a root. Branch selection works whether real files root at `null` or at the session id. Tested.
+- **Toast.** `overflow-wrap: anywhere` added.
+
+### Numbers after round 3
+
+- `session_export`: 22 tests and 1 ignored bless helper.
+- `cargo test -p kelpie -j 2`: 232 passed, 0 failed, 6 ignored. `cargo test -p kelpie-proto`: 26 passed, 0 failed, 2 ignored.
+- clippy `-p kelpie -p kelpie-proto --all-targets`: clean.
+- `scripts/e2e/session_export.py`: 28/28 in two consecutive runs on the rebuilt debug app. Test daemon, driver and scratch data were removed. The python processes still running belong to other sessions (a `fake_acp_agent.py` from the main checkout, an http.server) and were not touched.
+- Frontend:
+  - `pnpm typecheck`: ok.
+  - `pnpm test`: 510 passed.
+  - `pnpm i18n:check`: 0 missing, 0 problems.
+  - `pnpm build`: ok.
+- Bundle gate: entry 326.29 kB gz, limit 338.60: ok.

@@ -297,12 +297,12 @@ fn only_the_start_of_a_long_tool_output_is_redacted_and_never_half_a_secret() {
 #[test]
 fn messages_cannot_break_the_document() {
     let opened = contain("see:\n<details>\n<summary>x</summary>\n  <!-- hidden\n</details>\n```yaml\nport: 1\n<details>");
-    assert_eq!(opened, "see:\n\\<details>\n\\<summary>x</summary>\n  \\<!-- hidden\n\\</details>\n```yaml\nport: 1\n<details>\n```");
-    // Closed fences, tildes, inline backticks and a `<` inside a line are left alone.
-    assert_eq!(contain("~~~~\n<x>\n~~~~\nif a < b {}\n```inline``` text\n-<x> \n*<b>*"), "~~~~\n<x>\n~~~~\nif a < b {}\n```inline``` text\n-<x> \n*<b>*");
+    assert_eq!(opened, "see:\n\\<details>\n\\<summary>x\\</summary>\n  \\<!-- hidden\n\\</details>\n```yaml\nport: 1\n<details>\n```");
+    // Fenced code, a `<` that starts no tag, and markers without a space are left alone.
+    assert_eq!(contain("~~~~\n<x>\n~~~~\nif a < b {}\n-<x> "), "~~~~\n<x>\n~~~~\nif a < b {}\n-\\<x> ");
     // Behind blockquote and list markers, nested, or in a list item's indented continuation.
     let nested = "> quoted mail\n> <!-- tracking pixel\n- item\n  <textarea>\n- outer\n  - inner\n    <script>x</script>\n>> <details>\n1. > <style>\n2) <pre>\n- x\n\n    <!-- deep";
-    let want = "> quoted mail\n> \\<!-- tracking pixel\n- item\n  \\<textarea>\n- outer\n  - inner\n    \\<script>x</script>\n>> \\<details>\n1. > \\<style>\n2) \\<pre>\n- x\n\n    \\<!-- deep";
+    let want = "> quoted mail\n> \\<!-- tracking pixel\n- item\n  \\<textarea>\n- outer\n  - inner\n    \\<script>x\\</script>\n>> \\<details>\n1. > \\<style>\n2) \\<pre>\n- x\n\n    \\<!-- deep";
     assert_eq!(contain(nested), want);
     assert_eq!(after_containers(" > - 12. >\t<x>"), "<x>");
     assert_eq!(after_containers("1234567890. <x>"), "1234567890. <x>", "ten digits are not a list marker");
@@ -314,6 +314,38 @@ fn messages_cannot_break_the_document() {
     ]);
     let out = render_vec(Agent::Claude, lines, MAX_BODY).text;
     assert!(out.contains("- a\n```\n\n## User\n\nthanks"), "{out}");
+}
+
+#[test]
+fn a_fence_in_a_list_item_is_closed_where_the_item_is() {
+    // Left open inside the item: the closer keeps the opener's indentation (a column-0 one would open a fence).
+    assert_eq!(contain("1. Install:\n   ```bash\n   npm i"), "1. Install:\n   ```bash\n   npm i\n   ```");
+    // The item (and its fence) ends at a less-indented line: escaping resumes, nothing is added.
+    assert_eq!(contain("- step\n  ```\n  code\n<!-- hidden"), "- step\n  ```\n  code\n\\<!-- hidden");
+    // In a blockquote: closed at the same depth; a line with fewer `>` ends it.
+    assert_eq!(contain("> ```\n> <x>"), "> ```\n> <x>\n> ```");
+    assert_eq!(contain("> ```\n> <x>\n\n<y>"), "> ```\n> <x>\n\n\\<y>");
+    assert_eq!(contain("1. ```js\n   let a = '<b>';\n   ```\n<c>"), "1. ```js\n   let a = '<b>';\n   ```\n\\<c>");
+}
+
+#[test]
+fn inline_tags_are_escaped_outside_code() {
+    assert_eq!(contain("Why does the <textarea> lose focus?"), "Why does the \\<textarea> lose focus?");
+    assert_eq!(contain("a <details> b </details> <!-- c --> <?x?> <x/>"), "a \\<details> b \\</details> \\<!-- c --> \\<?x?> \\<x/>");
+    // Inline code keeps its text; an escape already there is not doubled.
+    assert_eq!(contain("use `<script>` or ``a ` <b>`` and \\<i>"), "use `<script>` or ``a ` <b>`` and \\<i>");
+    // Indented code after a blank line keeps its text; in a list it is the item's text.
+    assert_eq!(contain("text\n\n    <div>\n    </div>"), "text\n\n    <div>\n    </div>");
+    assert_eq!(contain("- a\n\n    <div>"), "- a\n\n    \\<div>");
+    // Pairing that is not certain keeps nothing: a run without its closer on the same line (the
+    // renderer may pair it across lines), or a table row (cells are split before code spans).
+    assert_eq!(contain("x `\na ` <b> ` c"), "x `\na ` \\<b> ` c");
+    assert_eq!(contain("| `a | <b> ` |"), "| `a | \\<b> ` |");
+    assert_eq!(contain("| `<b>` | ok |"), "| `\\<b>` | ok |");
+    // A blank line separates paragraphs: the next one's spans are certain again.
+    assert_eq!(contain("x `\n\nsee `<b>`"), "x `\n\nsee `<b>`");
+    let spans = code_spans("a \\` b `c`").map(|v| v.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>());
+    assert_eq!(spans, Some(vec![(7, 10)]), "an escaped backtick opens nothing");
 }
 
 #[test]
@@ -375,6 +407,14 @@ fn numbers_json_lines_and_escaped_json_are_redacted_too() {
     let v = redact_value(&json!({"password": 12345678, "port": 8080, "db": {"api_key": 42}}));
     assert_eq!(v, json!({"password": "[redacted]", "port": 8080, "db": {"api_key": "[redacted]"}}));
     assert!(secret_name("DB_PASSWORD") && secret_name("token") && !secret_name("port") && !secret_name("tokenizer"));
+    // At any depth under a secret-named key, in arrays too; strings there have no name for the patterns.
+    let v = redact_value(&json!({"password": [12345678, "hunter2"], "token": {"value": 1234, "list": [{"x": "y"}]}, "ports": [80, 443], "name": "ok"}));
+    assert_eq!(v, json!({"password": ["[redacted]", "[redacted]"], "token": {"value": "[redacted]", "list": [{"x": "[redacted]"}]}, "ports": [80, 443], "name": "ok"}));
+    // Both readings' finds are masked, even when each finds what the other misses (a tie by count).
+    let tie = "password: s3cret1\\tX\nlog: {\"env\":\"A=1\\nGITHUB_TOKEN=abcdef123\"}";
+    let out = redact_escaped(tie);
+    assert!(!out.contains("s3cret1") && !out.contains("abcdef123"), "{out}");
+    assert!(out.starts_with("password: [redacted]") && out.contains("\\nGITHUB_TOKEN=[redacted]"), "kept as written: {out}");
     // JSON lines: each line's strings, kept one per line; other lines untouched.
     let ndjson = format!("start\n{}\n{}", json!({"log": format!("x\n{gh}")}), json!({"env": format!("A=1\nDB_PASSWORD={pw}"), "n": 1}));
     let out = json_lines(&ndjson).unwrap();
@@ -433,4 +473,20 @@ fn a_write_that_fails_after_its_temporary_file_exists_removes_it() {
     let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n.to_string_lossy().ends_with(".tmp")).collect();
     assert!(left.is_empty(), "{left:?}");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn an_omp_root_may_point_at_the_session_header() {
+    let lines = json_lines_of(&[
+        json!({"type": "session", "id": "s1", "cwd": "/w"}),
+        json!({"type": "message", "id": "e1", "parentId": "s1", "message": {"role": "user", "content": "first"}}),
+        json!({"type": "message", "id": "a1", "parentId": "e1", "message": {"role": "user", "content": "left behind"}}),
+        json!({"type": "message", "id": "e2", "parentId": "e1", "message": {"role": "user", "content": "kept"}}),
+    ]);
+    let mut it = lines.clone().into_iter();
+    let keep = active_branch(|| it.next()).expect("the session header counts as the root");
+    assert_eq!(keep, ["e1", "e2"].into_iter().map(String::from).collect::<HashSet<_>>());
+    let mut it = lines.into_iter();
+    let out = render_lines(Agent::Omp, || it.next(), &Request { id: "s1", cwd: None, title: None }, MAX_BODY, Some(&keep)).text;
+    assert!(out.contains("first") && out.contains("kept") && !out.contains("left behind"), "{out}");
 }

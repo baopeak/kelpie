@@ -369,3 +369,167 @@ Confirmed with the app's `marked`: `"> quoted mail\n> <!-- tracking pixel"` foll
 Status: DONE_WITH_CONCERNS
 Summary: Round 2 fixes H1/M1 (leaf redaction plus a second net, covering inputs and JSON outputs) and every round-1 Low without regressions in the shared writer, resolvers or callers; 226 kelpie lib tests pass. The M2 fix still misses HTML openers inside blockquotes and lists, so `> <!--` can hide the rest of the rendered export.
 Concerns/Blockers: No blocking findings. R2-M1 is recommended before release. R2-L1 to R2-L4 can follow.
+
+---
+
+# Round 3: `git diff c756237 b19efa5`
+
+Commit b19efa5, "fix(history): contain quoted HTML and mask more secret shapes in exports".
+
+## Verdict
+
+**One blocking finding (R3-M1).**
+- `contain`'s fence tracking treats a fence opened inside a list item as a top-level fence. If such a fence is left open, the closer `contain` appends lands at column 0, where it *opens* a new top-level fence. That fence swallows the next heading and tool block.
+- This comes from round 2's `contain`; I missed it in round 2. The input is ordinary: an assistant reply cut off inside a code block under a numbered step.
+- Confirmed with the real `contain` code and the app's `marked`.
+
+**Fixed as specified:**
+- R2-M1: container-prefixed openers are now escaped.
+- R2-L1: the OMP walk falls back to file order on a broken chain.
+- R2-L2: JSON lines, prefixed JSON and numeric values under secret keys are now redacted.
+- R2-L3: the toast has a height cap.
+- R2-L4: a late write failure is now tested.
+
+**Also found, non-blocking:**
+- R3-M2 (Medium): an inline raw-HTML tag in prose (`<textarea>`, `<script>`, `<details>` mid-line) still reaches the rendered HTML. This existed before round 3.
+- R3-L1 (Low): the mask-count choice in `redact_escaped` can leak a secret. It needs a contrived input, but the leak is demonstrated.
+
+## Checks run (round 3)
+
+| Check | Result |
+|---|---|
+| `cargo test -p kelpie -j 2 --lib session_export` | 19 passed, 1 ignored |
+| `cargo test -p kelpie -j 2 --lib config_transfer` | 26 passed |
+| `cargo test -p kelpie -j 2 --lib session_usage` | 18 passed |
+| Scratch probe (`D:\kelpie-review-scratch\redact-probe`) | Ran the real `redact` plus a verbatim copy of `redact_escaped`. Separately ran a verbatim copy of `contain` and `after_containers`, extracted from b19efa5. |
+| `node -e` with the app's `marked` | Rendered the contained output followed by the usual `## …` / `<details>` tail. |
+
+All test runs used target `D:\kelpie-p9-target`, `CARGO_INCREMENTAL=0` and TMP on D:. The worktree was clean at b19efa5. b19efa5 also committed the round-2 section of this report; this Round 3 section is an uncommitted working-tree change. No e2e, no daemon, no real transcripts.
+
+## 1. R2-M1: escaping after quote and list markers
+
+**Openers covered.** `after_containers` (`session_export.rs:488-511`) strips, repeatedly:
+- spaces and tabs;
+- `>`, including `>>` and `> >` with spaces;
+- `-`, `*`, `+` markers;
+- ordered markers of 1 to 9 digits followed by `.` or `)`. A marker counts only when a space, a tab or the line end follows it.
+
+So `> <!--`, `- <textarea>`, `2) <pre>`, `1. > <style>`, `>> <details>`, deep nested list continuations and tab-indented lines are all escaped. The test `messages_cannot_break_the_document` covers them.
+
+These are correctly left alone:
+- `-<x>` is not a list item in CommonMark.
+- Ten-digit "markers" are not markers.
+- `- [ ] <b>` has inline HTML after `[`; that is not a block opener.
+
+Setext underlines, ATX headings (`# <x>` is inline content), tables and link definitions cannot start an HTML block, so no other block-level openers are missed. Inline HTML is a separate gap (R3-M2).
+
+**Visible `\` side effect.** The `<` test now runs at any indentation and behind containers, gated only by `fence.is_none()`. So a visible `\` appears before `<tag` lines inside:
+- top-level indented code blocks (4 or more spaces);
+- fences that `contain` does not track: fences inside `>` quotes, and fences indented 4 or more spaces in nested lists.
+
+This is cosmetic and acceptable. Lines inside a top-level fence that `contain` tracks are never altered. **But `contain`'s idea of "top-level" is wrong for list items: see R3-M1.**
+
+### R3-M1 (Medium, BLOCKING): the closer `contain` appends can open a new fence
+
+**Where.** `session_export.rs:451-485`. A fence line counts as a fence when it has up to 3 leading spaces (`indent < 4`), whatever container it sits in. So `   ```bash` inside `1. Install:` (content offset 3), or `  ```` inside `- step`, is tracked as a top-level fence.
+
+CommonMark ends such a fence when the list item ends:
+- at the end of the message;
+- or at the first following line indented less than the item's content.
+
+`contain`, however, still considers the fence open:
+
+1. **It appends a column-0 closer.** `contain("1. Install:\n   ```bash\n   npm i")` returns `"1. Install:\n   ```bash\n   npm i\n```"`; this is the real function's output. At column 0 that line is outside the list item, so it **opens** a new top-level fence. With `marked`, the following `## Assistant`, `<details>`, `<summary>` and the next tool block's text render as one code block, up to the next bare fence line. If a tool body contains a bare fence line, its following lines can render as live Markdown or HTML.
+2. **It skips escaping.** `"- step\n  ```\n  code\n<!-- hidden"` gives `<!-- hidden` unescaped plus an appended fence. CommonMark has already closed the list's fence at the column-0 line, so the raw `<!--` reaches the HTML and comments out the rest of the document (confirmed with `marked`).
+
+**Scenario.** The agent writes numbered steps with code blocks and the reply is interrupted mid-block (partial text recorded). Or a user pastes such a list.
+
+**Why blocking.** The round-1 export rendered this input correctly: the list item closed the fence. The containment fix introduced the breakage.
+
+**Fix (small).**
+- Append the closer with the opener's own indentation (`"   ```"` for an opener at indent 3). That stays a valid closer whether the opener was in a list item or at top level.
+- Treat an indented opener (1 to 3 spaces) as closed once a later non-blank line is indented less than the opener. Escaping then resumes, and nothing is appended.
+- The remaining risk is a top-level indented fence whose content is indented less than its opener. That is rare and only shows a cosmetic `\`.
+- Add the two samples above as test cases. A real CommonMark parser would be exact, but none is in `Cargo.lock` (no `pulldown-cmark` or `comrak`).
+
+### R3-M2 (Medium, non-blocking): inline raw HTML in prose passes through
+
+`contain` only escapes a `<` that would start an HTML *block*. Inline raw HTML is a complete open tag anywhere in a paragraph, and the renderer emits it verbatim.
+
+Confirmed with `marked`: `Why does the <textarea> lose focus?` renders as `<p>Why does the <textarea> lose focus?</p>`.
+- In a browser, `<textarea>`, `<script>`, `<style>`, `<title>`, `<xmp>`, `<iframe>`, `<noscript>` and `<plaintext>` switch the parser to raw text. The rest of the document becomes the element's content: hidden, or shown as text in a box.
+- An inline `<details>` closes the paragraph and folds what follows, until the next tool block's `</details>`.
+
+Plain mentions like "the `<script>` tag" without backticks are common in developer prose. This has existed since round 1, under M2. Exactly what survives depends on the viewer's sanitiser.
+
+**Fix.** Outside fences and inline code spans, backslash-escape `<` when followed by a letter, `/`, `!` or `?` anywhere in the line, or at least for the raw-text tag names above plus `details`/`summary`. Approximate code spans by matching backtick runs within the line.
+
+## 2. Redaction residues
+
+### JSON lines
+`json_lines` (`session_export.rs:371-389`) handles a line that is a whole JSON object or array: it re-serialises it compactly with leaf redaction, still one record per line. Other lines are untouched. It runs only when `json_text` (whole-document JSON) fails, and its output still passes the `redact_escaped` second net. Correct.
+
+Residue: lines with a prefix (`2026-… {"msg":…}`) are not parsed. They fall to `redact_escaped`, which covers the common shapes.
+
+### The unescaped variant: R3-L1 (Low, non-blocking): a count can choose the leaky variant
+
+`redact_escaped` (`session_export.rs:394-403`) keeps the unescaped redaction only when it has *more* `[redacted]` marks than the direct one. This is not a union. Wherever each variant masks a secret the other misses, the variant not chosen leaks its secret.
+
+Demonstrated with the real `redact` and a verbatim copy of `redact_escaped`. The input is a raw text line holding a literal `\t`, followed by text-prefixed JSON:
+
+```
+password: s3cret1\tX
+log: {"env":"A=1\nGITHUB_TOKEN=abcdef123"}
+```
+
+- The direct pass masks `s3cret1\tX`: the YAML rule sees `\t` as part of the value. It misses the token after `\n`.
+- The unescaped pass masks the token, but not the password: a real tab followed by `X` breaks the YAML rule's `\s*$`.
+- The counts tie at 1–1, so the direct output is chosen and **`abcdef123` leaks**.
+
+Realistic inputs mostly favour the unescaped variant: the direct pass tends to *merge* two secrets into one mask, so the unescaped count is higher. A tie or reversal needs a match that only the direct pass finds, and those come from the YAML rule's line anchors. Hence Low.
+
+**Sound fix.** Union the masked *ranges*. Expose a range-returning form of `redact` from `kelpie_proto` (e.g. `redact_ranges`), and map the plain text's ranges back through the unescape, which is a simple per-character index map. Then mask the union in the original text.
+
+`redact(unescape(redact(text)))` is **not** sound. A direct mask can swallow the next name (`TOKEN=abc\nSECRET=xyz` → `TOKEN=[redacted]=xyz`), and `xyz` would then leak.
+
+Source code with nothing to mask keeps its escapes. That case is tested and correct.
+
+### Numeric secret values
+`redact_value` masks a number whose key `secret_name` accepts. `secret_name` checks the key by redacting `"key": "probe-value-1"`, so the rule is the shared helper's own. It is called only for numbers (short-circuit). Tested for `password`, nested `api_key` and `pin_password`.
+
+Residue (Low): numbers inside an array (`{"password": [12345678]}`) or one level down (`{"password": {"value": 1234}}`) still pass. Recursing with a "parent key is secret" flag would cover both.
+
+## 3. R2-L1 fallback and the atomic writer
+
+**OMP fallback.** `active_branch` returns `None`, meaning file order, when the walk reaches an id that pass 1 did not record (`session_export.rs:709-715`). That covers a cut, too-long or malformed line, and an `activeLeafId` naming an entry that is not in the file. The root (`parentId: null`) ends the walk normally. Loops still end on the first revisit. Tested end to end through `render`.
+
+One unverifiable caveat: if real OMP sessions give the first entry `parentId: <session id>`, every walk would fall back to file order. The `session` header line is excluded from the map. That would be safe, but it would silently turn branch selection off. Please check against one real OMP session file, if a non-sensitive one is available.
+
+**Atomic writer.** `rename_retrying` (`config_transfer.rs:711-722`):
+- retries only on `ErrorKind::PermissionDenied`;
+- stops after 5 retries (`attempt < 5`), sleeping 20, 40, 60, 80 and 100 ms (300 ms worst case);
+- returns every other error at once.
+
+The wait is bounded. Both callers run on blocking threads: `config_export` inside `blocking(...)` at `config_transfer.rs:810`, and the export command. A genuinely read-only target costs at most 300 ms before failing. The temp file is removed on every failure path. `write_atomic_with` lets a test inject a failing rename; the new test confirms the temp file existed, is removed, and the target is untouched.
+
+## 4. Toast CSS
+
+`.toast > span { white-space: pre-line; max-height: 40vh; overflow: auto; }` (`styles.css:530`). A long hook or git error now scrolls inside the toast instead of growing off-screen. `.toast` is a flex row with `align-items: center`, so the action button stays beside the text.
+
+Minor: a long unbroken token (a path) still widens the span up to the toast's 70vw and then scrolls horizontally. Adding `overflow-wrap: anywhere` would wrap it. Cosmetic.
+
+## Round 3 findings
+
+| ID | Severity | Blocking | Summary |
+|---|---|---|---|
+| R3-M1 | Medium | **Yes** | `contain` treats a list-item fence as top-level. An unclosed one gets a column-0 closer that opens a new fence and swallows the next heading and tool block; a column-0 `<!--` after it is left unescaped. Introduced by the round-2 containment; confirmed with the real `contain` and `marked`. Fix: append at the opener's indentation, and end an indented fence at a less-indented line. |
+| R3-M2 | Medium | No | Inline raw HTML in prose (`<textarea>`, `<script>`, `<details>` mid-line) reaches the HTML and can swallow or fold the rest. Pre-existing. Escape `<tag` outside fences and code spans. |
+| R3-L1 | Low | No | `redact_escaped` picks one variant by mask count instead of taking the union. A leak is demonstrated, with contrived input. Union the masked ranges instead. |
+| R3-L2 | Low | No | Numeric secrets inside arrays or nested objects under a secret key are not masked. |
+| R3-L3 | Low | No | Unverified OMP root-parent convention: if real files root at the session id, branch selection silently falls back to file order. |
+
+---
+
+Status: DONE_WITH_CONCERNS
+Summary: Round 3 correctly fixes container-prefixed HTML openers, JSON-lines and numeric redaction, the OMP broken-chain fallback, the late-failure temp cleanup and the toast height, and the focused tests pass. But `contain` treats list-item code fences as top-level, so an unclosed one gets a column-0 closer that opens a new fence and swallows the following heading and tool block (confirmed with the real function and `marked`).
+Concerns/Blockers: R3-M1 is blocking (a small fix). R3-M2 is recommended in the same change. R3-L1 to R3-L3 can follow. The scratch probe is in `D:\kelpie-review-scratch`; deleting it was blocked earlier, so remove it by hand.

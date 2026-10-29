@@ -345,27 +345,41 @@ fn code(s: &str) -> String {
 }
 
 /// Every string in `v`, keys included, through `redact` on its own: once serialised, JSON escapes
-/// (`\n`, `\"`) would hide line starts and quotes from its patterns.
+/// (`\n`, `\"`) would hide line starts and quotes from its patterns. Under a secret-named key, at any
+/// depth (`{"password": [1234]}`, `{"token": {"value": "x"}}`), every number and string is masked:
+/// a bare value has no name next to it for the patterns.
 fn redact_value(v: &Value) -> Value {
+    redact_under(v, false)
+}
+
+fn redact_under(v: &Value, secret: bool) -> Value {
+    let mask = || Value::String(kelpie_proto::redact::MASK.into());
     match v {
+        Value::String(s) if secret && !s.is_empty() => mask(),
         Value::String(s) => Value::String(redact(s)),
-        Value::Array(a) => Value::Array(a.iter().map(redact_value).collect()),
-        Value::Object(o) => Value::Object(
-            o.iter()
-                .map(|(k, v)| {
-                    // A number has no quotes or name for the patterns: masked by its key's name.
-                    let v = if v.is_number() && secret_name(k) { Value::String(kelpie_proto::redact::MASK.into()) } else { redact_value(v) };
-                    (redact(k), v)
-                })
-                .collect(),
-        ),
+        Value::Number(_) if secret => mask(),
+        Value::Array(a) => Value::Array(a.iter().map(|x| redact_under(x, secret)).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (redact(k), redact_under(x, secret || secret_name(k)))).collect()),
         other => other.clone(),
     }
 }
 
-/// Whether `key` names a secret, by the credential filter's own rule (a quoted value under it is masked).
+/// Whether `key` names a secret, by the credential filter's own rule (a quoted value under it is
+/// masked). Keys without a secret-like word are not run through the patterns.
 fn secret_name(key: &str) -> bool {
-    redact(&format!("\"{key}\": \"probe-value-1\"")).contains(kelpie_proto::redact::MASK)
+    let k = key.to_ascii_lowercase();
+    ["secret", "token", "pass", "pwd", "key", "credential"].iter().any(|w| k.contains(w))
+        && redact(&format!("\"{key}\": \"probe-value-1\"")).contains(kelpie_proto::redact::MASK)
+}
+
+/// A JSON object or array given as text (an MCP result, a tool's JSON output), pretty-printed with
+/// its strings redacted one by one; `None` for any other text.
+fn json_text(text: &str) -> Option<String> {
+    let t = text.trim();
+    if !(t.starts_with('{') || t.starts_with('[')) {
+        return None;
+    }
+    serde_json::to_string_pretty(&redact_value(&serde_json::from_str::<Value>(t).ok()?)).ok()
 }
 
 /// Output with JSON values on lines of their own (JSON lines, `jq -c`, logs): each such line with its
@@ -389,38 +403,59 @@ fn json_lines(text: &str) -> Option<String> {
     found.then(|| out.join("\n"))
 }
 
-/// `text` redacted, also as it reads with JSON string escapes undone (`\n`, `\t`, `\"`, `\\`): JSON
-/// that is not whole (after a text prefix, cut, several blocks) hides line starts and quotes from the
-/// patterns. The unescaped form is used only when it masks more, so source code keeps its `\n`.
+/// `text` with every secret masked that the credential filter finds in it as written or as it reads
+/// with JSON string escapes undone (`\n`, `\t`, `\"`, `\\`): JSON that is not whole (after a text
+/// prefix, cut, several blocks) hides line starts and quotes from the patterns. The ranges of both
+/// readings are merged on the text as written (so source code keeps its `\n`), then the result is
+/// filtered once more, which can only mask more.
 fn redact_escaped(text: &str) -> String {
-    let direct = redact(text);
     if !text.contains('\\') {
-        return direct;
+        return redact(text);
     }
-    let plain = text.replace("\\\\", "\u{0}").replace("\\n", "\n").replace("\\t", "\t").replace("\\\"", "\"").replace('\u{0}', "\\");
-    let unescaped = redact(&plain);
-    let masks = |s: &str| s.matches(kelpie_proto::redact::MASK).count();
-    if masks(&unescaped) > masks(&direct) { unescaped } else { direct }
+    // The unescaped text, and for each of its bytes the bytes of `text` it came from.
+    let (mut plain, mut from) = (String::with_capacity(text.len()), Vec::with_capacity(text.len()));
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let unescaped = match (c, chars.peek()) {
+            ('\\', Some((_, 'n'))) => Some('\n'),
+            ('\\', Some((_, 't'))) => Some('\t'),
+            ('\\', Some((_, '"'))) => Some('"'),
+            ('\\', Some((_, '\\'))) => Some('\\'),
+            _ => None,
+        };
+        match unescaped {
+            Some(u) => {
+                chars.next();
+                plain.push(u);
+                from.push(i..i + 2);
+            }
+            None => {
+                plain.push(c);
+                from.extend(std::iter::repeat_n(i..i + c.len_utf8(), c.len_utf8()));
+            }
+        }
+    }
+    let mut ranges = kelpie_proto::redact::redact_ranges(text);
+    ranges.extend(kelpie_proto::redact::redact_ranges(&plain).into_iter().map(|r| from[r.start].start..from[r.end - 1].end));
+    ranges.sort_by_key(|r| r.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
+    for r in ranges {
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => merged.push(r),
+        }
+    }
+    redact(&kelpie_proto::redact::mask_ranges(text, &merged))
 }
 
-/// A JSON object or array given as text (an MCP result, a tool's JSON output), pretty-printed with
-/// its strings redacted one by one; `None` for any other text.
-fn json_text(text: &str) -> Option<String> {
-    let t = text.trim();
-    if !(t.starts_with('{') || t.starts_with('[')) {
-        return None;
-    }
-    serde_json::to_string_pretty(&redact_value(&serde_json::from_str::<Value>(t).ok()?)).ok()
-}
-
-/// What `redact` sees of a tool text beyond what a block keeps: a secret that starts in the kept
-/// part is masked whole while it is shorter than this (token and `NAME=` patterns match a prefix, a
-/// key block cut off is masked to its end).
+/// What a tool block keeps is cut from the start of its text: see [`window`].
 const REDACT_MARGIN: usize = 4096;
 
 /// The start of `text` a block can keep plus a margin (at most [`CUT_LINES`] + 1 lines and
 /// [`CUT_CHARS`] + [`REDACT_MARGIN`] characters), and how many lines come after it: only this much
-/// is redacted, however long the output.
+/// is redacted, however long the output. A secret that starts in the kept part is masked whole while
+/// it is shorter than the margin (token and `NAME=` patterns match a prefix, a key block cut off is
+/// masked to its end).
 fn window(text: &str) -> (&str, usize) {
     let mut end = text.match_indices('\n').nth(CUT_LINES).map_or(text.len(), |(i, _)| i);
     if let Some((i, _)) = text[..end].char_indices().nth(CUT_CHARS + REDACT_MARGIN) {
@@ -437,52 +472,32 @@ fn tool_text(text: &str) -> String {
     cut(&redact_escaped(head), after)
 }
 
-/// User or assistant text made safe to embed: outside code fences, a line that would open an HTML
-/// block (`<details>`, `</details>`, `<!--`, `<script>`…), also behind blockquote or list markers,
-/// gets its `<` escaped, and a fence the
-/// message leaves open is closed, so one message cannot fold, hide or swallow the rest of the file.
-fn contain(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 8);
-    let mut fence: Option<(char, usize)> = None;
-    for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        let body = &line[indent..];
-        if indent < 4 {
-            if let Some(c) = body.chars().next().filter(|c| *c == '`' || *c == '~') {
-                let n = body.chars().take_while(|x| *x == c).count();
-                let rest = &body[n..];
-                // A backtick fence's info string has no backticks (else it is inline code).
-                if n >= 3 && !(c == '`' && rest.contains('`')) {
-                    match fence {
-                        None => fence = Some((c, n)),
-                        Some((open, len)) if open == c && n >= len && rest.trim().is_empty() => fence = None,
-                        _ => {}
-                    }
-                    out.push_str(line);
-                    continue;
-                }
+/// `line` past its blockquote markers (each: up to 3 spaces, `>`, an optional space) and how many.
+fn after_quotes(line: &str) -> (usize, &str) {
+    let (mut depth, mut rest) = (0, line);
+    loop {
+        let s = rest.trim_start_matches(' ');
+        match s.strip_prefix('>') {
+            Some(after) if rest.len() - s.len() <= 3 => {
+                depth += 1;
+                rest = after.strip_prefix(' ').unwrap_or(after);
             }
+            _ => return (depth, rest),
         }
-        // Any indentation (a list item's continuation), blockquote markers and list markers come
-        // before what can open an HTML block (`> <!--`, `- <textarea>`, `1. > <script>`).
-        let at = line.len() - after_containers(line).len();
-        let mut chars = line[at..].chars();
-        if fence.is_none() && chars.next() == Some('<') && chars.next().is_some_and(|x| x.is_ascii_alphabetic() || matches!(x, '/' | '!' | '?')) {
-            out.push_str(&line[..at]);
-            out.push('\\');
-            out.push_str(&line[at..]);
-            continue;
+    }
+}
+
+/// Columns of leading whitespace (a tab reaches the next multiple of 4).
+fn lead(s: &str) -> usize {
+    let mut col = 0;
+    for c in s.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col += 4 - col % 4,
+            _ => break,
         }
-        out.push_str(line);
     }
-    if let Some((c, n)) = fence {
-        out.push('\n');
-        out.extend(std::iter::repeat_n(c, n));
-    }
-    out
+    col
 }
 
 /// `line` past its indentation, blockquote markers (`>`) and list markers (`-`, `*`, `+`, `1.`, `1)`),
@@ -509,6 +524,161 @@ fn after_containers(line: &str) -> &str {
         return s;
     }
 }
+
+/// The inline code spans of `line` (byte ranges, backticks included), or `None` when a backtick run
+/// has no closing run of the same length in the line.
+fn code_spans(line: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    let b = line.as_bytes();
+    let run = |at: usize| b[at..].iter().take_while(|&&c| c == b'`').count();
+    let (mut spans, mut i) = (Vec::new(), 0);
+    while i < b.len() {
+        match b[i] {
+            // A backslash-escaped backtick opens nothing.
+            b'\\' => i += if b.get(i + 1).is_some_and(u8::is_ascii_punctuation) { 2 } else { 1 },
+            b'`' => {
+                let n = run(i);
+                let mut j = i + n;
+                let close = loop {
+                    if j >= b.len() {
+                        break None;
+                    }
+                    if b[j] == b'`' {
+                        let m = run(j);
+                        if m == n {
+                            break Some(j + m);
+                        }
+                        j += m;
+                    } else {
+                        j += 1;
+                    }
+                };
+                let end = close?;
+                spans.push(i..end);
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    Some(spans)
+}
+
+/// A code fence `contain` is inside: its character and length, the blockquote depth and the column
+/// (after the quote markers) where it starts, and what a closing line has to start with.
+struct OpenFence {
+    ch: char,
+    len: usize,
+    depth: usize,
+    col: usize,
+    prefix: String,
+}
+
+/// User or assistant text made safe to embed, so one message cannot fold, hide or swallow the rest
+/// of the file (a Markdown viewer passes raw HTML through):
+/// - every `<` that starts a tag-like sequence (`<` then a letter, `/`, `!` or `?`) outside code is
+///   escaped, at a line's start, behind quote or list markers or within a line;
+/// - code is left as written: fenced code, indented code (only where it cannot be a list item's
+///   text) and inline code spans (only where their pairing is certain: in a paragraph whose every
+///   line closes its own spans, and on a line without `|`, which splits table cells first);
+/// - a fence the message leaves open is closed at the opener's own indentation and quote depth, so
+///   the closer cannot open a new fence; a fence inside a list item or blockquote ends where the item
+///   or quote does (a less-indented line, fewer `>`), as CommonMark ends it.
+///
+/// Where the code / text call is uncertain the text side wins: the worst case is a visible `\` in
+/// code, never raw HTML in the file.
+fn contain(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut chunk: Vec<&str> = Vec::new();
+    let mut fence: Option<OpenFence> = None;
+    let (mut list_open, mut prev_blank, mut prev_code) = (false, true, false);
+    for line in text.split('\n') {
+        let (depth, inner) = after_quotes(line);
+        let blank = inner.trim().is_empty();
+        if let Some(f) = &fence {
+            let ended = depth < f.depth || (!blank && f.col > 0 && lead(inner) < f.col);
+            if !ended {
+                let t = inner.trim_start();
+                let run = t.chars().take_while(|c| *c == f.ch).count();
+                if run >= f.len && t[run..].trim().is_empty() {
+                    fence = None;
+                }
+                out.push(line.to_string());
+                prev_blank = blank;
+                continue;
+            }
+            fence = None;
+        }
+        if blank {
+            flush(&mut chunk, &mut out);
+            out.push(line.to_string());
+            prev_blank = true;
+            continue;
+        }
+        let indent = lead(inner);
+        // Indented code: 4+ columns, not in a list, after a blank line or more indented code.
+        if depth == 0 && indent >= 4 && !list_open && (prev_blank || prev_code) {
+            flush(&mut chunk, &mut out);
+            out.push(line.to_string());
+            (prev_blank, prev_code) = (false, true);
+            continue;
+        }
+        prev_code = false;
+        let rest = after_containers(inner);
+        if let Some(ch) = rest.chars().next().filter(|c| *c == '`' || *c == '~') {
+            let n = rest.chars().take_while(|c| *c == ch).count();
+            // A backtick fence's info string has no backticks (else it is inline code).
+            if n >= 3 && !(ch == '`' && rest[n..].contains('`')) {
+                flush(&mut chunk, &mut out);
+                let col = inner.len() - rest.len();
+                fence = Some(OpenFence { ch, len: n, depth, col, prefix: "> ".repeat(depth) + &" ".repeat(col) });
+                out.push(line.to_string());
+                prev_blank = false;
+                continue;
+            }
+        }
+        let starts_item = rest.len() < inner.trim_start().len();
+        if starts_item {
+            list_open = true;
+        } else if depth == 0 && indent == 0 && prev_blank {
+            list_open = false;
+        }
+        chunk.push(line);
+        prev_blank = false;
+    }
+    flush(&mut chunk, &mut out);
+    if let Some(f) = fence {
+        out.push(format!("{}{}", f.prefix, f.ch.to_string().repeat(f.len)));
+    }
+    out.join("\n")
+}
+
+/// Writes a paragraph's lines with their tag-like `<` escaped (see [`contain`]).
+fn flush(chunk: &mut Vec<&str>, out: &mut Vec<String>) {
+    let spans: Vec<Option<Vec<std::ops::Range<usize>>>> = chunk.iter().map(|l| code_spans(l)).collect();
+    let certain = spans.iter().all(Option::is_some);
+    for (line, spans) in chunk.drain(..).zip(spans) {
+        let keep = if certain && !line.contains('|') { spans.unwrap_or_default() } else { Vec::new() };
+        out.push(escape_tags(line, &keep));
+    }
+}
+
+/// `line` with a `\` before each `<` that starts a tag-like sequence outside `keep`, unless a
+/// backslash already escapes it.
+fn escape_tags(line: &str, keep: &[std::ops::Range<usize>]) -> String {
+    let b = line.as_bytes();
+    let mut out = String::with_capacity(line.len() + 4);
+    for (i, c) in line.char_indices() {
+        if c == '<'
+            && b.get(i + 1).is_some_and(|x| x.is_ascii_alphabetic() || matches!(x, b'/' | b'!' | b'?'))
+            && !keep.iter().any(|r| r.contains(&i))
+            && b[..i].iter().rev().take_while(|&&x| x == b'\\').count() .is_multiple_of(2)
+        {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// At most [`CUT_LINES`] lines and [`CUT_CHARS`] characters of `text`, then "… N lines omitted"
 /// (`after`: lines that followed `text` in the original). A first line longer than the whole
 /// allowance keeps its start, marked with `…`.
@@ -696,10 +866,14 @@ struct Link {
 /// and progress lines, which a walk from the leaf would drop; Kelpie's chat view replays Claude
 /// history in file order too, so Claude is exported in file order. Codex rollouts are linear.
 fn active_branch(mut next: impl FnMut() -> Option<Result<String, u64>>) -> Option<HashSet<String>> {
-    let (mut parents, mut leaf, mut linked) = (HashMap::<String, Option<String>>::new(), None, false);
+    let (mut parents, mut leaf, mut linked, mut session) = (HashMap::<String, Option<String>>::new(), None, false, None);
     while let Some(line) = next() {
         let Some(link) = line.ok().and_then(|l| serde_json::from_str::<Link>(&l).ok()) else { continue };
-        let Some(id) = link.id.filter(|_| link.kind.as_deref() != Some("session")) else { continue };
+        if link.kind.as_deref() == Some("session") {
+            session = link.id;
+            continue;
+        }
+        let Some(id) = link.id else { continue };
         linked |= link.parent.is_some();
         leaf = Some(link.active_leaf.unwrap_or_else(|| id.clone()));
         parents.insert(id, link.parent);
@@ -708,6 +882,8 @@ fn active_branch(mut next: impl FnMut() -> Option<Result<String, u64>>) -> Optio
     let mut path = HashSet::new();
     while path.insert(at.clone()) {
         match parents.get(&at) {
+            // The root's parent is none, or the session header itself.
+            Some(Some(up)) if session.as_ref() == Some(up) => break,
             Some(Some(up)) => at = up.clone(),
             Some(None) => break,
             // A link to an entry that could not be read (cut, too long, malformed): which entries

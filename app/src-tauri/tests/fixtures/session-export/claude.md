@@ -177,7 +177,7 @@ File created successfully at: D:\work\demo\.env
 
 My notes, pasted as they are:
 \<details>
-\<summary>env</summary>
+\<summary>env\</summary>
 \<!-- private
 \</details>
 ```yaml
@@ -192,7 +192,7 @@ Forwarded mail:
   \<textarea>
 - outer
   - inner
-    \<script>alert(1)</script>
+    \<script>alert(1)\</script>
 
 ## Assistant
 
@@ -201,6 +201,22 @@ Here is the change I was about to make:
 - retries: 0
 + retries: 2
 ```
+
+## User
+
+Why does the \<textarea> lose focus? Keep `<script>` tags out.
+- step
+  ```
+  code
+\<!-- hidden
+
+## Assistant
+
+Two steps:
+1. Install:
+   ```bash
+   npm i
+   ```
 
 Done: `ci.yml` now retries twice and the build is green.
 
