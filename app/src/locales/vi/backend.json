@@ -156,5 +156,7 @@
   "this agent's conversations cannot be exported": "không xuất được cuộc trò chuyện của agent này",
   "the transcript of this conversation was not found": "không tìm thấy bản ghi của cuộc trò chuyện này",
   "the transcript could not be opened": "không mở được bản ghi",
-  "choose a file other than the transcript": "hãy chọn một tệp khác với tệp bản ghi"
+  "choose a file other than the transcript": "hãy chọn một tệp khác với tệp bản ghi",
+  "the account folder is on another computer": "thư mục tài khoản nằm trên máy khác",
+  "could not create a temporary file beside the target": "không tạo được tệp tạm bên cạnh tệp đích"
 }

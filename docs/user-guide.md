@@ -130,7 +130,9 @@ are named (`[image: image/png]`), never embedded. Every piece of text passes the
 filter as hand-offs (API keys, tokens, Bearer headers, passwords in URLs, `NAME=secret` lines
 become `[redacted]`; it is a best-effort filter, read the file before sharing it). The file has LF
 line endings; a very long conversation stops at 16 MiB with a note, and transcript lines that
-cannot be read are left out and counted. Only Claude, Codex and OMP conversations are listed and
+cannot be read are left out and counted. For OMP, only the branch the session is on is exported
+(turns left behind with `/tree` or a fork are not); Claude and Codex conversations are exported
+in the order they were written. Only Claude, Codex and OMP conversations are listed and
 exportable: other ACP agents keep their history where Kelpie cannot read it.
 
 ### Usage and memory

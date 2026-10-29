@@ -93,6 +93,35 @@ M config.ts
 
 </details>
 
+<details>
+<summary>Tool call: shell · <code>bash -lc set -e export GITHUB_TOKEN=[redacted] gh auth status</code></summary>
+
+```json
+{
+  "command": [
+    "bash",
+    "-lc",
+    "set -e\nexport GITHUB_TOKEN=[redacted]\ngh auth status"
+  ]
+}
+```
+
+</details>
+
+<details>
+<summary>Result: shell</summary>
+
+```json
+{
+  "result": {
+    "env": "PORT=1\nDB_PASSWORD=[redacted]"
+  },
+  "ok": true
+}
+```
+
+</details>
+
 ## User
 
 The test needs a fake key, see the screenshot:

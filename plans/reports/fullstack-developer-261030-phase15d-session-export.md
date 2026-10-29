@@ -42,7 +42,7 @@ Branch `phase15/session-export` (stacked on `phase15/config-export`). No daemon 
   - The Rust readers (resolver, streaming, zstd) and the redaction helper already lived in the core. The new code is only a line → event mapping per format.
 - **Thinking is left out**, with no option. OMP "narration" blocks, which are prose to the user, are kept.
 - **Header labels are English** in the file, so the golden files stay deterministic. The interface strings are translated.
-- **Format details.** OMP sessions are trees; entries are exported in file order. Claude sub-agent transcripts are not included; they are the sub-agent's internals.
+- **Format details.** OMP sessions are trees; only the active branch is exported (see Review fixes). Claude sub-agent transcripts are not included; they are the sub-agent's internals.
 
 ## Agents not covered
 
@@ -80,4 +80,74 @@ Branch `phase15/session-export` (stacked on `phase15/config-export`). No daemon 
 - **Over-masking.** `redact` sometimes masks harmless values (`API_KEY = process.env.API_KEY`, `API_KEY=test-key`). This is the shared helper's trade-off, visible in `codex.md`.
 - **Locked target file.** If the chosen file is open in a program that blocks deletes, the rename fails and the user sees an error toast. Retrying could be added.
 - **Size limits.** A transcript line over 32 MiB is skipped whole, for example one carrying a large pasted PDF, so that message's text is lost too.
-- **Possible additions.** A "include thinking" option, OMP branch selection, and sub-agent transcripts could be added if wanted.
+- **Possible additions.** An "include thinking" option and sub-agent transcripts could be added if wanted.
+
+## Review fixes
+
+Review: `plans/reports/code-reviewer-261030-phase15d-session-export.md`.
+
+### Redaction of structured tool text
+
+- **Tool inputs.** Every string in a structured tool input is redacted on its own (`redact_value`) before it is serialised. The serialised text is then redacted again as a second net. This covers Claude Write/Edit/Bash heredocs, Codex shell scripts and OMP edits.
+  - The new test shows the escaped form alone still leaks: `redact(to_string_pretty(...))` keeps a key at a line start.
+- **JSON outputs.** Tool outputs that are JSON text get the same treatment (`json_text`): parse, redact the leaves, then pretty-print. This covers MCP results, Codex outputs without an `output` key, and OMP results.
+- **Tests.**
+  - The redaction test now has a multi-line case for each format: a `.env` Write, a Bash heredoc, a Codex multi-line script, an OMP edit, and a JSON output with nested secrets.
+  - The golden fixtures have the same cases. Claude has a `.env` Write, a heredoc and an MCP JSON result; Codex has a multi-line script and a JSON output; OMP has a multi-line edit.
+
+### Document structure
+
+- User and assistant text goes through `contain`, so a message cannot break the document:
+  - an unclosed code fence (backtick or tilde, any length) is closed at the end of the message;
+  - outside fences, a line starting with `<` followed by a letter, `/`, `!` or `?` gets a backslash;
+  - indented code, inline backticks and a `<` inside a line are left alone.
+- Golden case in `claude.md`: pasted `<details>` / `<!--` / `</details>` lines with an unclosed `yaml` fence, and an assistant reply cut off inside a `diff` fence.
+
+### Branches
+
+- **OMP.** A first pass (`active_branch`, reading only the type, id, parentId and activeLeafId fields of each line) finds the leaf: the last entry, or the `activeLeafId` an off-branch entry names. It then walks `parentId` back to the root. The second pass exports only entries on that path; lines without an id are always read.
+  - Sessions without parent links are exported in file order.
+  - A parent loop ends the walk.
+  - `omp.jsonl` now has a branch the user left (`a1`, `a2`) and an off-branch late reply (`a3`, with `activeLeafId: e9`). None of them are exported.
+- **Claude stays in file order**, documented in code and docs. Its `parentUuid` chain also forks for parallel tool results and progress lines, so a walk from the leaf could drop real turns. Kelpie's chat view replays Claude history in file order too. I could not check real transcripts under the no-real-data rule.
+- **Codex** rollouts are linear.
+
+### Lows
+
+- **Device-path target.** `path_kind` is checked on the target's text before anything opens it; device targets are refused. Network targets chosen in the dialog stay allowed, as in config transfer.
+- **Conversation ids.** New `agent_history::file_id_ok`: a valid id with no `:` or `..`; separators were already refused.
+  - It is used by the shared resolver (`session_usage::resolve_in`, so usage gets it too), the export, and `agent_claude_transcript`. The last one previously only refused `/` and `\`, so it also accepted `C:x`.
+  - Test: `C:notes` resolves to nothing.
+- **Network account home.** New `agent_history::local_home` refuses a network home from IPC:
+  - the export returns an error;
+  - `session_usage`, `agent_latest_session` and `agent_claude_transcript` return nothing or an error.
+- **Atomic writer.** `config_transfer::write_file_atomic` now creates its temporary file with a name of its own (pid, a counter and the clock) using create-new semantics. It never writes through an existing file or link at that name, retries on a name clash, syncs, and removes the temporary file on any failure, not only a failed rename.
+  - Its other caller, `config_export`, keeps its behaviour, and the config-transfer tests pass.
+  - New test: four concurrent writers to one target leave one writer's whole text and no `.tmp` files.
+- **Windowed redaction.** A tool text is now redacted only over what its block can keep plus a 4 KiB margin (`window`): at most 41 lines and 8,096 characters. The lines after the window are counted into the "… N lines omitted" marker.
+  - A secret that starts in the kept part is masked whole while it is shorter than the margin: token and `NAME=` patterns match a prefix, and a cut key block is masked to its end.
+  - Test: a token straddling the 4,000-character cut is masked; a 5,000-line output is counted, not redacted whole.
+- **"Ended"** is now the time of the last line that produced exported content. In the Claude golden it moved from the interrupt marker to the last reply. "Started" is unchanged.
+- **Toast line breaks.** `.toast > span { white-space: pre-line; }`. Every toast that already put `\n` in its text now shows those breaks. The e2e checks the export toast's second line.
+- **Header values** (`Started`, `Ended`, models) are reduced to one line.
+- **Codex injected items.** `<turn_aborted`, `<user_shell_command` and `<skill>` were added to `codex_injected`, which the history list shares.
+  - The repo has no Codex rollout samples, so I checked the installed Codex binary (`codex.exe`, string search only). These markers sit in the same marker list as `# AGENTS.md instructions` and `<environment_context>`.
+  - `<subagent_notification>` is defined the same way but was not requested; it is left out.
+  - Fixture: `codex.jsonl` has a `<turn_aborted>` and a `<skill>` user item, and both are hidden.
+- **Not changed.** If a `.zst` rollout is corrupt, the export still ends silently at the read error, without a note. This was a test gap in the review, not a requested fix.
+
+### Numbers after the fixes
+
+- `cargo test -p kelpie -j 2`: 226 passed, 0 failed, 6 ignored. `session_export` has 16 tests, up from 10.
+- clippy `-p kelpie --all-targets`: clean.
+- Frontend:
+  - `pnpm typecheck`: ok.
+  - `pnpm test`: 510 passed.
+  - `pnpm i18n:check`: 0 missing, 0 problems.
+  - `pnpm build`: ok.
+- Bundle gate: entry 326.31 kB gz, limit 338.60: ok.
+- `scripts/e2e/session_export.py`: 28/28 in two consecutive runs. It now also checks that each toast puts its facts on separate lines. Test daemon, driver and scratch data were removed afterwards; only the user's own installed Kelpie stayed running, untouched.
+
+### Over-masking seen in the new golden
+
+In `omp.md`, `DB_PASSWORD=\nLOG_LEVEL=debug` became `DB_PASSWORD=\n[redacted]=debug`. The helper's `\s*` after `=` spans a newline. This is the shared helper's behaviour; it over-masks rather than leaks.

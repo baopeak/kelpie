@@ -58,10 +58,36 @@ LOG_LEVEL=debug
 </details>
 
 <details>
+<summary>Tool call: edit · <code>.env.example</code></summary>
+
+```json
+{
+  "path": ".env.example",
+  "edits": [
+    {
+      "old": "PORT=8080\nDB_PASSWORD=[redacted]\nLOG_LEVEL=debug",
+      "new": "PORT=8080\nDB_PASSWORD=\n[redacted]=debug"
+    }
+  ]
+}
+```
+
+</details>
+
+<details>
 <summary>Result: edit</summary>
 
 ```text
 Applied 1 edit to src/log.ts
+```
+
+</details>
+
+<details>
+<summary>Result: edit</summary>
+
+```text
+Applied 1 edit to .env.example
 ```
 
 </details>

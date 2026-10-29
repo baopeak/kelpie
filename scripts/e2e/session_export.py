@@ -196,6 +196,7 @@ def scenario(run):
         seeded = [s for s in SECRETS if s in raw]
         run.check(f"{agent}: the {len(seeded)} seeded secrets are gone", bool(seeded) and not any(s in text for s in seeded) and "[redacted]" in text, str([s for s in seeded if s in text]))
         run.check(f"{agent}: the toast names the file and the unreadable line", bool(said), said or toast(d))
+        run.check(f"{agent}: …on lines of their own", bool(said) and f"{target}\n1 unreadable" in said, repr(said))
         run.check(f"{agent}: suggested {suggested}", bool(re.fullmatch(rf"{agent}-{re.escape(xid[:8])}-\d{{4}}-\d{{2}}-\d{{2}}\.md", suggested or "")))
         run.check(f"{agent}: no temporary file is left beside it", not [f for f in os.listdir(OUT) if f.endswith(".tmp")], str(os.listdir(OUT)))
     run.shot("02-exported")

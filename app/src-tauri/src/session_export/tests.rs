@@ -29,7 +29,7 @@ fn export_fixture(name: &str, agent: Agent, id: &str, title: &str) -> Rendered {
 
 fn render_vec(agent: Agent, lines: Vec<Result<String, u64>>, max_body: usize) -> Rendered {
     let mut it = lines.into_iter();
-    render_lines(agent, || it.next(), &Request { id: "t1", cwd: Some("/w"), title: None }, max_body)
+    render_lines(agent, || it.next(), &Request { id: "t1", cwd: Some("/w"), title: None }, max_body, None)
 }
 
 fn json_lines(values: &[Value]) -> Vec<Result<String, u64>> {
@@ -120,16 +120,18 @@ fn secrets_in_every_part_of_a_turn_are_masked() {
 #[test]
 fn tool_text_is_cut_with_a_marker() {
     let many = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-    let out = cut(&many);
+    let out = cut(&many, 0);
     assert!(out.starts_with("line 1\n") && out.ends_with("line 40\n… 60 lines omitted"), "{out}");
-    assert_eq!(cut("short\ntext"), "short\ntext");
+    assert_eq!(cut("short\ntext", 0), "short\ntext");
     // The character allowance stops before the line cap: 200-character lines, 19 fit in 4000.
     let wide = (0..30).map(|_| "w".repeat(200)).collect::<Vec<_>>().join("\n");
-    assert!(cut(&wide).ends_with("\n… 11 lines omitted"));
+    assert!(cut(&wide, 0).ends_with("\n… 11 lines omitted"));
     // One huge line keeps its start.
     let huge = "x".repeat(10_000);
-    assert_eq!(cut(&huge), format!("{}…", "x".repeat(CUT_CHARS)));
-    assert_eq!(cut(&format!("{huge}\nnext")), format!("{}…\n… 1 line omitted", "x".repeat(CUT_CHARS)));
+    assert_eq!(cut(&huge, 0), format!("{}…", "x".repeat(CUT_CHARS)));
+    assert_eq!(cut(&format!("{huge}\nnext"), 0), format!("{}…\n… 1 line omitted", "x".repeat(CUT_CHARS)));
+    // Lines after the redacted window count too.
+    assert!(cut("a\nb", 5).ends_with("b\n… 5 lines omitted"));
 }
 
 #[test]
@@ -236,5 +238,126 @@ fn writes_the_chosen_file_only_from_the_agents_folder() {
     let xout = dir.join("codex.md");
     export_to("codex", xid, None, Some(&codex_home.to_string_lossy()), Some(xtitle), &xout.to_string_lossy()).unwrap();
     assert_eq!(std::fs::read_to_string(&xout).unwrap(), std::fs::read_to_string(fixtures().join("codex.md")).unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn secrets_on_later_lines_of_structured_tool_text_are_masked() {
+    let (gh, sk, pw, url_pw, aws) = (SECRETS[0], SECRETS[1], SECRETS[5], SECRETS[3], SECRETS[4]);
+    let env_file = format!("# local\nPORT=8080\nDB_PASSWORD={pw}\nGITHUB_TOKEN={gh}\n");
+    let heredoc = format!("cat <<EOF > deploy.sh\nexport API_KEY={sk}\ncurl https://admin:{url_pw}@ci.local/x\nEOF");
+    let json_out = json!({"vars": format!("A=1\nAWS_SECRET_ACCESS_KEY={aws}"), "nested": [{"token": gh}]}).to_string();
+    let claude = json_lines(&[
+        json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "w", "name": "Write", "input": {"file_path": ".env", "content": env_file}},
+            {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": heredoc}},
+            {"type": "tool_use", "id": "m", "name": "mcp__vault__read", "input": {}},
+        ]}}),
+        json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "m", "content": [{"type": "text", "text": json_out}]}]}}),
+    ]);
+    let codex = json_lines(&[
+        json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "call_id": "c", "arguments": json!({"command": ["bash", "-lc", format!("set -e\nexport GITHUB_TOKEN={gh}\nDB_PASSWORD={pw} ./migrate")]}).to_string()}}),
+        json!({"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c", "output": json_out}}),
+    ]);
+    let omp = json_lines(&[
+        json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "e", "name": "edit", "arguments": {"path": ".env", "edits": [{"old": env_file, "new": "PORT=8080\n"}]}}]}}),
+        json!({"type": "message", "message": {"role": "toolResult", "toolCallId": "e", "toolName": "edit", "content": [{"type": "text", "text": json_out}]}}),
+    ]);
+    for (agent, lines) in [(Agent::Claude, claude), (Agent::Codex, codex), (Agent::Omp, omp)] {
+        let out = render_vec(agent, lines, MAX_BODY).text;
+        for s in [gh, sk, pw, url_pw, aws] {
+            assert!(!out.contains(s), "{agent:?}: {s} leaked:\n{out}");
+        }
+        assert!(out.contains("```json"), "{agent:?}: JSON output shown as JSON:\n{out}");
+    }
+    // Redacting the leaves first is what catches them: the serialised form alone hides them.
+    let input = json!({ "content": format!("# keys\n{gh}\n") });
+    assert!(redact(&serde_json::to_string_pretty(&input).unwrap()).contains(gh), "the escaped form is the case this guards against");
+    assert!(!serde_json::to_string_pretty(&redact_value(&input)).unwrap().contains(gh));
+}
+
+#[test]
+fn only_the_start_of_a_long_tool_output_is_redacted_and_never_half_a_secret() {
+    let gh = SECRETS[0];
+    // A secret straddling the character cut is masked whole: the window reaches past the cut.
+    let text = format!("{} {gh} tail", "a".repeat(CUT_CHARS - 20));
+    let out = tool_text(&text);
+    assert!(!out.contains("ghp_FAKE") && out.contains("[redacted]"), "{out}");
+    // Many lines: what follows the window is counted, not redacted or kept.
+    let many = (0..5000).map(|i| format!("line {i} GITHUB_TOKEN={gh}")).collect::<Vec<_>>().join("\n");
+    let (head, after) = window(&many);
+    assert_eq!((head.lines().count(), after), (CUT_LINES + 1, 5000 - CUT_LINES - 1));
+    let out = tool_text(&many);
+    assert!(!out.contains(gh) && out.ends_with(&format!("… {} lines omitted", 5000 - CUT_LINES)), "{out}");
+    // One giant line: the window stops at the cap plus the margin.
+    let giant = "b".repeat(1 << 20);
+    assert_eq!(window(&giant).0.len(), CUT_CHARS + REDACT_MARGIN);
+}
+
+#[test]
+fn messages_cannot_break_the_document() {
+    let opened = contain("see:\n<details>\n<summary>x</summary>\n  <!-- hidden\n</details>\n```yaml\nport: 1\n<details>");
+    assert_eq!(opened, "see:\n\\<details>\n\\<summary>x</summary>\n  \\<!-- hidden\n\\</details>\n```yaml\nport: 1\n<details>\n```");
+    // Closed fences, tildes, inline backticks, indented code and plain `<` are left alone.
+    assert_eq!(contain("~~~~\n<x>\n~~~~\nif a < b {}\n    <pre>\n```inline``` text"), "~~~~\n<x>\n~~~~\nif a < b {}\n    <pre>\n```inline``` text");
+    assert_eq!(contain("````md\n```\nstill code"), "````md\n```\nstill code\n````");
+    // Each message is contained on its own: headings after an unclosed fence stay headings.
+    let lines = json_lines(&[
+        json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "fix:\n```diff\n- a"}]}}),
+        json!({"type": "user", "message": {"content": "thanks"}}),
+    ]);
+    let out = render_vec(Agent::Claude, lines, MAX_BODY).text;
+    assert!(out.contains("- a\n```\n\n## User\n\nthanks"), "{out}");
+}
+
+#[test]
+fn an_omp_export_follows_the_active_branch() {
+    let (name, agent, id, title) = CASES[2];
+    let raw = std::fs::read_to_string(fixtures().join(format!("{name}.jsonl"))).unwrap();
+    assert!(raw.contains("Abandoned"), "the fixture has a branch that was left");
+    let out = export_fixture(name, agent, id, title).text;
+    assert!(!out.contains("Abandoned") && out.contains("The logger now masks headers."), "{out}");
+    assert!(out.contains("- **Ended:** 2026-10-24T03:02:00.000Z"), "the end is the last exported entry");
+    // Without parent links (older sessions) everything is exported in file order.
+    let mut flat = json_lines(&[json!({"type": "message", "id": "x", "message": {"role": "user", "content": "one"}}), json!({"type": "message", "id": "y", "message": {"role": "user", "content": "two"}})]).into_iter();
+    assert!(active_branch(|| flat.next()).is_none());
+    // A parent loop ends the walk.
+    let mut looped = json_lines(&[json!({"id": "p", "parentId": "q"}), json!({"id": "q", "parentId": "p"})]).into_iter();
+    assert_eq!(active_branch(|| looped.next()).map(|s| s.len()), Some(2));
+}
+
+#[test]
+fn ids_homes_and_targets_that_could_reach_elsewhere_are_refused() {
+    use crate::agent_history::file_id_ok;
+    assert!(file_id_ok(CASES[0].2) && file_id_ok(CASES[2].2));
+    for bad in ["C:x", "a:b", "a..b", "../x", "x/y", "x\\y", "", "-x"] {
+        assert!(!file_id_ok(bad), "{bad}");
+    }
+    assert!(resolve_in(Agent::Claude, Path::new("D:\\nowhere"), "C:notes", None, None).is_none());
+    let out = std::env::temp_dir().join("kelpie-never-written.md").to_string_lossy().into_owned();
+    for (home, target) in [(Some("\\\\server\\share\\.claude"), out.as_str()), (None, "\\\\.\\pipe\\kelpie-test"), (None, "//./pipe/kelpie-test")] {
+        assert!(export_to("claude", CASES[0].2, None, home, None, target).is_err(), "{home:?} {target}");
+    }
+}
+
+#[test]
+fn a_failed_write_leaves_no_temporary_file() {
+    let dir = scratch("failed-write");
+    // The target is a folder: refused before anything is created.
+    assert!(crate::config_transfer::write_file_atomic(&dir, b"x").is_err());
+    // The temporary file cannot be created: the folder is missing.
+    assert!(crate::config_transfer::write_file_atomic(&dir.join("missing").join("out.md"), b"x").is_err());
+    // Two writes to one target each use their own temporary file.
+    let target = dir.join("out.md");
+    std::thread::scope(|s| {
+        for i in 0..4 {
+            let target = &target;
+            s.spawn(move || crate::config_transfer::write_file_atomic(target, format!("writer {i}\n").repeat(1000).as_bytes()).unwrap());
+        }
+    });
+    let text = std::fs::read_to_string(&target).unwrap();
+    assert!(text.lines().all(|l| l == text.lines().next().unwrap()), "one writer's text, whole");
+    let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n.to_string_lossy().ends_with(".tmp")).collect();
+    assert!(left.is_empty(), "{left:?}");
     std::fs::remove_dir_all(&dir).ok();
 }

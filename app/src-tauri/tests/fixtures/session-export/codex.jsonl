@@ -14,6 +14,10 @@
 this line is not JSON
 {"timestamp":"2026-10-24T02:00:08.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"pnpm test\"]}","call_id":"call_3"}}
 {"timestamp":"2026-10-24T02:00:09.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_3","output":"{\"output\":\"1 failing\\n\\n  config: expected API_KEY to be set\\n\",\"metadata\":{\"exit_code\":1,\"duration_seconds\":2.5}}"}}
+{"timestamp":"2026-10-24T02:00:09.500Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>"}]}}
+{"timestamp":"2026-10-24T02:00:09.600Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<skill>\n<name>tests</name>\n</skill>"}]}}
+{"timestamp":"2026-10-24T02:00:09.700Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"set -e\\nexport GITHUB_TOKEN=ghp_FAKEfakeFAKEfakeFAKEfakeFAKEfake1234\\ngh auth status\"]}","call_id":"call_4"}}
+{"timestamp":"2026-10-24T02:00:09.800Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_4","output":"{\"result\":{\"env\":\"PORT=1\\nDB_PASSWORD=hunter2hunter2\"},\"ok\":true}"}}
 {"timestamp":"2026-10-24T02:00:10.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"The test needs a fake key, see the screenshot:"},{"type":"input_image","image_url":"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ=="}]}}
 {"timestamp":"2026-10-24T02:00:11.000Z","type":"event_msg","payload":{"type":"token_count","info":null}}
 {"timestamp":"2026-10-24T02:04:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Added `API_KEY=test-key` to the test setup; all tests pass."}]}}

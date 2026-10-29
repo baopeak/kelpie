@@ -71,6 +71,9 @@ pub async fn agent_latest_session(kind: String, cwd: String, home: Option<String
 }
 
 fn agent_latest_session_blocking(kind: String, cwd: String, account: Option<String>) -> CmdResult<Option<AgentSessionRef>> {
+    if !local_home(account.as_deref()) {
+        return Ok(None);
+    }
     match kind.as_str() {
         "claude" => Ok(newest(jsonl_in(&claude_project_dir(&home_or(account.as_deref(), claude_dir), &cwd))).map(|p| AgentSessionRef {
             id: p.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
@@ -117,10 +120,10 @@ pub async fn agent_claude_transcript(session_id: String, cwd: Option<String>, ho
 }
 
 fn agent_claude_transcript_blocking(session_id: String, cwd: Option<String>, home: Option<String>) -> CmdResult<Vec<String>> {
-    let file_name = format!("{session_id}.jsonl");
-    if file_name.contains(['/', '\\']) {
+    if !file_id_ok(&session_id) || !local_home(home.as_deref()) {
         return Err("invalid session id".into());
     }
+    let file_name = format!("{session_id}.jsonl");
     let root = home_or(home.as_deref(), claude_dir);
     let direct = cwd.map(|c| claude_project_dir(&root, &c).join(&file_name)).filter(|p| p.exists());
     let path = match direct {
@@ -419,6 +422,18 @@ pub(crate) fn valid_id(id: &str) -> bool {
     ID.is_match(id)
 }
 
+/// An id that is safe inside a file name in an agent's folder: a valid id without : (on Windows
+/// a folder joined with C:x is replaced by it) and without ...
+pub(crate) fn file_id_ok(id: &str) -> bool {
+    valid_id(id) && !id.contains(':') && !id.contains("..")
+}
+
+/// An account home from the window that may be read: none, or a local path (opening a network path
+/// would send the user's credentials to that server).
+pub(crate) fn local_home(home: Option<&str>) -> bool {
+    home.is_none_or(|h| !crate::config_transfer::foreign_path(h))
+}
+
 /// Folder for matching sidebar projects: on Windows, long names instead of 8.3 short names
 /// (`PROGRA~1`) and no `\\?\` prefix. A folder that no longer exists keeps its recorded form.
 pub(crate) fn canonical_folder(cwd: &str) -> String {
@@ -496,7 +511,7 @@ fn parse_claude(path: &Path, len: u64) -> Option<HistoryItem> {
 /// A Codex user message block that Codex or an IDE injected (AGENTS.md, environment, open
 /// file...) rather than the user typed. Slash-command prompts (`<command-message>`) are typed.
 pub(crate) fn codex_injected(text: &str) -> bool {
-    const INJECTED: [&str; 9] = [
+    const INJECTED: [&str; 12] = [
         "# AGENTS.md",
         "<environment_context",
         "<recommended_plugins",
@@ -506,6 +521,10 @@ pub(crate) fn codex_injected(text: &str) -> bool {
         "<local-command-stdout",
         "<user_instructions",
         "<permissions",
+        // Marker pairs Codex itself defines for injected user items (seen in its binary).
+        "<turn_aborted",
+        "<user_shell_command",
+        "<skill>",
     ];
     INJECTED.iter().any(|p| text.starts_with(p))
 }

@@ -7,21 +7,27 @@
 //! - **Bounded.** The transcript is streamed line by line: a line over [`MAX_LINE`] is passed over
 //!   unread, and the Markdown stops (with a note) once it passes [`MAX_BODY`].
 //! - **Redacted.** Every piece of text (header values, messages, tool names, inputs and outputs) goes
-//!   through `kelpie_proto::redact` on its own, before it is cut or formatted.
-//! - **Content.** User and assistant messages in full; tool calls and results as folded `<details>`
+//!   through `kelpie_proto::redact` on its own, before it is cut or formatted. Structured tool input
+//!   and JSON tool output have each string redacted before they are serialised (JSON escapes would
+//!   hide line starts and quotes from the patterns), and the text again after. A tool text is
+//!   redacted over what its block keeps plus [`REDACT_MARGIN`], never the whole output.
+//! - **Content.** User and assistant messages in full, kept from breaking the document (an open code
+//!   fence is closed, a line-start HTML opener escaped); tool calls and results as folded `<details>`
 //!   blocks, each cut to [`CUT_LINES`] lines / [`CUT_CHARS`] characters with a "… N lines omitted"
 //!   marker; thinking left out; images and attachments named (`[image: image/png]`), never embedded.
-//!   Line endings are LF, whatever the transcript used.
+//!   Line endings are LF, whatever the transcript used. OMP sessions are trees: only the active branch
+//!   is exported (see [`active_branch`]).
 //! - **Written** beside the chosen file and renamed over it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use kelpie_proto::redact;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::agent_history::{claude_dir, codex_dir, codex_injected, home_or, is_claude_command, omp_sessions_dir, open_lines, valid_id, Agent};
+use crate::agent_history::{claude_dir, codex_dir, codex_injected, file_id_ok, home_or, is_claude_command, local_home, omp_sessions_dir, open_lines, Agent};
+use crate::config_transfer::{path_kind, PathKind};
 use crate::fs_ops::{blocking, CmdResult};
 use crate::session_usage::{agent_of, find_rollout, find_rollout_by_date, resolve_in};
 
@@ -77,10 +83,13 @@ struct Meta {
 }
 
 impl Meta {
-    fn time(&mut self, v: &Value) {
+    /// `exported`: the line gave the file something; the end is the last such line's time.
+    fn time(&mut self, v: &Value, exported: bool) {
         if let Some(t) = v["timestamp"].as_str().filter(|t| !t.is_empty()) {
             self.started.get_or_insert_with(|| t.to_string());
-            self.ended = Some(t.to_string());
+            if exported {
+                self.ended = Some(t.to_string());
+            }
         }
     }
 
@@ -335,9 +344,99 @@ fn code(s: &str) -> String {
     format!("{fence}{pad}{s}{pad}{fence}")
 }
 
-/// At most [`CUT_LINES`] lines and [`CUT_CHARS`] characters of `text`, then "… N lines omitted".
-/// A first line longer than the whole allowance keeps its start, marked with `…`.
-fn cut(text: &str) -> String {
+/// Every string in `v`, keys included, through `redact` on its own: once serialised, JSON escapes
+/// (`\n`, `\"`) would hide line starts and quotes from its patterns.
+fn redact_value(v: &Value) -> Value {
+    match v {
+        Value::String(s) => Value::String(redact(s)),
+        Value::Array(a) => Value::Array(a.iter().map(redact_value).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (redact(k), redact_value(v))).collect()),
+        other => other.clone(),
+    }
+}
+
+/// A JSON object or array given as text (an MCP result, a tool's JSON output), pretty-printed with
+/// its strings redacted one by one; `None` for any other text.
+fn json_text(text: &str) -> Option<String> {
+    let t = text.trim();
+    if !(t.starts_with('{') || t.starts_with('[')) {
+        return None;
+    }
+    serde_json::to_string_pretty(&redact_value(&serde_json::from_str::<Value>(t).ok()?)).ok()
+}
+
+/// What `redact` sees of a tool text beyond what a block keeps: a secret that starts in the kept
+/// part is masked whole while it is shorter than this (token and `NAME=` patterns match a prefix, a
+/// key block cut off is masked to its end).
+const REDACT_MARGIN: usize = 4096;
+
+/// The start of `text` a block can keep plus a margin (at most [`CUT_LINES`] + 1 lines and
+/// [`CUT_CHARS`] + [`REDACT_MARGIN`] characters), and how many lines come after it: only this much
+/// is redacted, however long the output.
+fn window(text: &str) -> (&str, usize) {
+    let mut end = text.match_indices('\n').nth(CUT_LINES).map_or(text.len(), |(i, _)| i);
+    if let Some((i, _)) = text[..end].char_indices().nth(CUT_CHARS + REDACT_MARGIN) {
+        end = i;
+    }
+    let lines = |s: &str| s.matches('\n').count() + 1;
+    (&text[..end], lines(text) - lines(&text[..end]))
+}
+
+/// A tool input or output for its block: LF endings, the start redacted, then cut.
+fn tool_text(text: &str) -> String {
+    let text = lf(text);
+    let (head, after) = window(text.trim_end().trim_start_matches('\n'));
+    cut(&redact(head), after)
+}
+
+/// User or assistant text made safe to embed: outside code fences, a line that would open an HTML
+/// block (`<details>`, `</details>`, `<!--`, `<script>`…) gets its `<` escaped, and a fence the
+/// message leaves open is closed, so one message cannot fold, hide or swallow the rest of the file.
+fn contain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut fence: Option<(char, usize)> = None;
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let body = &line[indent..];
+        if indent < 4 {
+            if let Some(c) = body.chars().next().filter(|c| *c == '`' || *c == '~') {
+                let n = body.chars().take_while(|x| *x == c).count();
+                let rest = &body[n..];
+                // A backtick fence's info string has no backticks (else it is inline code).
+                if n >= 3 && !(c == '`' && rest.contains('`')) {
+                    match fence {
+                        None => fence = Some((c, n)),
+                        Some((open, len)) if open == c && n >= len && rest.trim().is_empty() => fence = None,
+                        _ => {}
+                    }
+                    out.push_str(line);
+                    continue;
+                }
+            }
+            let mut chars = body.chars();
+            if fence.is_none() && chars.next() == Some('<') && chars.next().is_some_and(|x| x.is_ascii_alphabetic() || matches!(x, '/' | '!' | '?')) {
+                out.push_str(&line[..indent]);
+                out.push('\\');
+                out.push_str(body);
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    if let Some((c, n)) = fence {
+        out.push('\n');
+        out.extend(std::iter::repeat_n(c, n));
+    }
+    out
+}
+
+/// At most [`CUT_LINES`] lines and [`CUT_CHARS`] characters of `text`, then "… N lines omitted"
+/// (`after`: lines that followed `text` in the original). A first line longer than the whole
+/// allowance keeps its start, marked with `…`.
+fn cut(text: &str, after: usize) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     let (mut out, mut chars, mut used) = (String::new(), 0, 0);
     for line in &lines {
@@ -360,7 +459,7 @@ fn cut(text: &str) -> String {
         chars += n + 1;
         used += 1;
     }
-    match lines.len() - used {
+    match lines.len() - used + after {
         0 => {}
         1 => out.push_str("\n… 1 line omitted"),
         n => out.push_str(&format!("\n… {n} lines omitted")),
@@ -412,17 +511,19 @@ impl Doc {
                 if !id.is_empty() {
                     self.names.insert(id, name.clone());
                 }
+                // Strings are redacted before serialising (and the text again after, as a second net).
                 let (text, lang) = match &input {
-                    Value::String(s) => (s.clone(), "text"),
+                    Value::String(s) => json_text(s).map_or_else(|| (s.clone(), "text"), |j| (j, "json")),
                     Value::Null => (String::new(), "text"),
-                    v => (serde_json::to_string_pretty(v).unwrap_or_default(), "json"),
+                    v => (serde_json::to_string_pretty(&redact_value(v)).unwrap_or_default(), "json"),
                 };
                 let hint = hint(&input).map(|h| format!(" · <code>{}</code>", html(&h))).unwrap_or_default();
                 self.details(&format!("Tool call: {}{hint}", html(&one_line(&redact(&name)))), &text, lang);
             }
             Event::Result { id, name, output, error } => {
                 let name = name.or_else(|| self.names.get(&id).cloned()).map(|n| format!(": {}", html(&one_line(&redact(&n))))).unwrap_or_default();
-                self.details(&format!("Result{name}{}", if error { " (error)" } else { "" }), &output, "text");
+                let (text, lang) = json_text(&output).map_or_else(|| (output, "text"), |j| (j, "json"));
+                self.details(&format!("Result{name}{}", if error { " (error)" } else { "" }), &text, lang);
             }
         }
     }
@@ -434,7 +535,7 @@ impl Doc {
             return;
         }
         self.heading(role);
-        self.body.push_str(text);
+        self.body.push_str(&contain(text));
         self.body.push_str("\n\n");
     }
 
@@ -442,8 +543,7 @@ impl Doc {
     fn details(&mut self, summary: &str, text: &str, lang: &str) {
         // Tool steps belong to the assistant's turn (Claude records results as user lines).
         self.heading(Role::Assistant);
-        let text = redact(&lf(text));
-        let text = cut(text.trim_end().trim_start_matches('\n'));
+        let text = tool_text(text);
         self.body.push_str("<details>\n<summary>");
         self.body.push_str(summary);
         self.body.push_str("</summary>\n\n");
@@ -478,14 +578,14 @@ fn header(agent: Agent, req: &Request, meta: &Meta) -> String {
     }
     rows.push(("Session id", code(&redact(req.id))));
     if let Some(t) = &meta.started {
-        rows.push(("Started", redact(t)));
+        rows.push(("Started", one_line(&redact(t))));
     }
     if let Some(t) = &meta.ended {
-        rows.push(("Ended", redact(t)));
+        rows.push(("Ended", one_line(&redact(t))));
     }
     if !meta.models.is_empty() {
         let label = if meta.models.len() == 1 { "Model" } else { "Models" };
-        rows.push((label, meta.models.iter().map(|m| redact(m)).collect::<Vec<_>>().join(", ")));
+        rows.push((label, one_line(&meta.models.iter().map(|m| redact(m)).collect::<Vec<_>>().join(", "))));
     }
     let mut out = format!("# {title}\n\n");
     for (label, value) in rows {
@@ -495,9 +595,50 @@ fn header(agent: Agent, req: &Request, meta: &Meta) -> String {
     out
 }
 
+/// The parts of an OMP entry that place it in the session tree.
+#[derive(Deserialize)]
+struct Link {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    id: Option<String>,
+    #[serde(rename = "parentId")]
+    parent: Option<String>,
+    /// Set on an entry appended to another branch: the leaf stays where it was.
+    #[serde(rename = "activeLeafId")]
+    active_leaf: Option<String>,
+}
+
+/// The entries of an OMP session's active branch: from the leaf (the last entry, or the leaf an
+/// off-branch entry names) back to the root through `parentId`. Branches left by `/tree` or a fork
+/// are not part of what happened. `None` for a session without parent links (exported in file order).
+///
+/// Claude Code also links lines (`parentUuid`), but its chain also forks for parallel tool results
+/// and progress lines, which a walk from the leaf would drop; Kelpie's chat view replays Claude
+/// history in file order too, so Claude is exported in file order. Codex rollouts are linear.
+fn active_branch(mut next: impl FnMut() -> Option<Result<String, u64>>) -> Option<HashSet<String>> {
+    let (mut parents, mut leaf, mut linked) = (HashMap::<String, Option<String>>::new(), None, false);
+    while let Some(line) = next() {
+        let Some(link) = line.ok().and_then(|l| serde_json::from_str::<Link>(&l).ok()) else { continue };
+        let Some(id) = link.id.filter(|_| link.kind.as_deref() != Some("session")) else { continue };
+        linked |= link.parent.is_some();
+        leaf = Some(link.active_leaf.unwrap_or_else(|| id.clone()));
+        parents.insert(id, link.parent);
+    }
+    let mut at = leaf.filter(|_| linked)?;
+    let mut path = HashSet::new();
+    while path.insert(at.clone()) {
+        match parents.get(&at) {
+            Some(Some(up)) => at = up.clone(),
+            _ => break,
+        }
+    }
+    Some(path)
+}
+
 /// The Markdown of a transcript given as lines (`Err(len)`: a line too long to read), stopping after
-/// the line that takes it past `max_body` bytes.
-fn render_lines(agent: Agent, mut next: impl FnMut() -> Option<Result<String, u64>>, req: &Request, max_body: usize) -> Rendered {
+/// the line that takes it past `max_body` bytes. `keep`: the entry ids to export (lines without an
+/// id are always read).
+fn render_lines(agent: Agent, mut next: impl FnMut() -> Option<Result<String, u64>>, req: &Request, max_body: usize, keep: Option<&HashSet<String>>) -> Rendered {
     let (mut meta, mut doc, mut events) = (Meta::default(), Doc::default(), Vec::new());
     let (mut skipped, mut truncated) = (0u32, false);
     while let Some(line) = next() {
@@ -516,12 +657,17 @@ fn render_lines(agent: Agent, mut next: impl FnMut() -> Option<Result<String, u6
             skipped += 1;
             continue;
         };
-        meta.time(&v);
+        if let (Some(keep), Some(id)) = (keep, v["id"].as_str()) {
+            if v["type"] != "session" && !keep.contains(id) {
+                continue;
+            }
+        }
         match agent {
             Agent::Claude => claude(&v, &mut meta, &mut events),
             Agent::Codex => codex(&v, &mut meta, &mut events),
             Agent::Omp => omp(&v, &mut meta, &mut events),
         }
+        meta.time(&v, !events.is_empty());
         for e in events.drain(..) {
             doc.push(e);
         }
@@ -547,14 +693,21 @@ fn render_lines(agent: Agent, mut next: impl FnMut() -> Option<Result<String, u6
 
 /// The Markdown of the transcript at `path` (plain or zstd-compressed JSON lines).
 pub(crate) fn render(agent: Agent, path: &Path, req: &Request) -> CmdResult<Rendered> {
-    let mut lines = open_lines(path, 0, u64::MAX).ok_or("the transcript could not be opened")?;
-    Ok(render_lines(agent, || lines.next_capped(MAX_LINE), req, MAX_BODY))
+    let open = || open_lines(path, 0, u64::MAX).ok_or("the transcript could not be opened");
+    let keep = if agent == Agent::Omp {
+        let mut lines = open()?;
+        active_branch(|| lines.next_capped(MAX_LINE))
+    } else {
+        None
+    };
+    let mut lines = open()?;
+    Ok(render_lines(agent, || lines.next_capped(MAX_LINE), req, MAX_BODY, keep.as_ref()))
 }
 
 /// The transcript of conversation `id`, only under the agent's own folder (`home`: an account's
 /// config home, for Claude and Codex).
 fn locate(agent: Agent, id: &str, cwd: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
-    if !valid_id(id) {
+    if !file_id_ok(id) {
         return None;
     }
     let root = match agent {
@@ -571,12 +724,20 @@ fn locate(agent: Agent, id: &str, cwd: Option<&str>, home: Option<&str>) -> Opti
 
 fn export_to(kind: &str, id: &str, cwd: Option<&str>, home: Option<&str>, title: Option<&str>, path: &str) -> CmdResult<Exported> {
     let agent = agent_of(kind).ok_or("this agent's conversations cannot be exported")?;
+    // Classified by its text before anything opens it: even reading a device path's metadata opens
+    // it. A network share chosen in the dialog is the user's choice and allowed.
+    if path_kind(path) == PathKind::Device {
+        return Err("not a file".into());
+    }
     let target = Path::new(path);
     if !target.is_absolute() {
         return Err("choose a file in a folder".into());
     }
-    if !valid_id(id) {
+    if !file_id_ok(id) {
         return Err("invalid session id".into());
+    }
+    if !local_home(home) {
+        return Err("the account folder is on another computer".into());
     }
     let source = locate(agent, id, cwd, home).ok_or("the transcript of this conversation was not found")?;
     if target.canonicalize().ok().is_some_and(|t| source.canonicalize().ok() == Some(t)) {
