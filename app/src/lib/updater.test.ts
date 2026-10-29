@@ -39,6 +39,8 @@ describe("updater", () => {
     expect(daemonSurvivesUpdate("/Users/u/Library/Application Support/Kelpie/daemon/b/kelpied", false)).toBe(true);
     expect(daemonSurvivesUpdate(undefined, false)).toBe(false);
     expect(daemonSurvivesUpdate(undefined, true)).toBe(true);
+    // Linux: a .deb install runs the daemon from /usr/bin, which dpkg replaces without stopping it.
+    expect(daemonSurvivesUpdate("/usr/bin/kelpied", true)).toBe(true);
   });
 
   it("checks every six hours", () => {

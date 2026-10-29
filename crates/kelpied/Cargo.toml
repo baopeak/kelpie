@@ -47,3 +47,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Linux: the freedesktop Secret Service (GNOME Keyring, KWallet) over D-Bus, as in kelpie-proto.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["sync-secret-service", "crypto-rust"] }

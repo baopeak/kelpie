@@ -8,6 +8,7 @@
 //! reconnects to it. A newer daemon takes over only when nothing runs, or when the user asks
 //! (`checkDaemonApi` in the store), and goes into the slot the running one does not use. Two fixed
 //! paths, not one per build: firewall rules (phone access) and paths an agent was told keep working.
+//! A Linux AppImage does the same, as its files are only mounted while the app runs.
 
 use std::path::{Path, PathBuf};
 
@@ -18,10 +19,13 @@ const SLOTS: &[&str] = &["a", "b"];
 /// Which build a slot holds; written last, so a slot is used only once complete.
 const BUILD_FILE: &str = "build.txt";
 
-/// The daemon to start: a copy outside the install folder on Windows release builds, the
-/// installed binary everywhere else (or when no slot can take the copy).
+/// The daemon to start: a copy outside the install folder on Windows release builds and when
+/// running from a Linux AppImage, the installed binary everywhere else (or when no slot can take
+/// the copy). An AppImage's files live in a mount that goes away when the app quits and moves on
+/// every launch, while the daemon outlives the app and agents' hook settings name its path.
 pub fn runnable(installed: &Path) -> PathBuf {
-    if !cfg!(windows) || cfg!(debug_assertions) || std::env::var_os("KELPIE_DAEMON_PATH").is_some() {
+    let from_appimage = cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some();
+    if !(cfg!(windows) || from_appimage) || cfg!(debug_assertions) || std::env::var_os("KELPIE_DAEMON_PATH").is_some() {
         return installed.to_path_buf();
     }
     let root = kelpie_proto::data_dir().join("daemon");

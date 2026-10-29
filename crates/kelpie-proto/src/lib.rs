@@ -289,19 +289,32 @@ fn secret_get_moving(service: &str, legacy: &str, key: &str) -> Option<String> {
     Some(value)
 }
 
-pub fn secret_set(key: &str, value: &str) -> keyring::Result<()> {
-    keyring::Entry::new(&keyring_service(), key)?.set_password(value)
+/// Saves a secret in the OS credential store. The error says what to fix (on Linux: start a
+/// Secret Service); a secret is never kept anywhere else instead.
+pub fn secret_set(key: &str, value: &str) -> Result<(), String> {
+    keyring::Entry::new(&keyring_service(), key).and_then(|e| e.set_password(value)).map_err(secret_store_error)
 }
 
 /// Deletes a secret, including a copy still stored under the pre-rename service name.
-pub fn secret_delete(key: &str) -> keyring::Result<()> {
+pub fn secret_delete(key: &str) -> Result<(), String> {
     for service in [keyring_service(), keyring_service_named(LEGACY_NAME)] {
         match keyring::Entry::new(&service, key).and_then(|e| e.delete_credential()) {
             Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(secret_store_error(e)),
         }
     }
     Ok(())
+}
+
+/// A credential-store failure as the user should read it.
+fn secret_store_error(e: keyring::Error) -> String {
+    match e {
+        keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_) if cfg!(target_os = "linux") => format!(
+            "no Secret Service is available to keep it: install and unlock a keyring \
+             (GNOME Keyring, KWallet or another org.freedesktop.secrets provider), then try again ({e})"
+        ),
+        e => e.to_string(),
+    }
 }
 
 /// Credential-store key of a saved SSH host's password.
@@ -316,7 +329,9 @@ pub fn ssh_passphrase_key(key_path: &str) -> String {
     format!("ssh-passphrase:{}", if cfg!(windows) { p.to_lowercase() } else { p })
 }
 
-/// Root for daemon state: `%LOCALAPPDATA%\Kelpie` / `~/Library/Application Support/Kelpie`.
+/// Root for daemon state: `%LOCALAPPDATA%\Kelpie` / `~/Library/Application Support/Kelpie` /
+/// `$XDG_DATA_HOME/Kelpie` (else `~/.local/share/Kelpie`). The socket, logs, settings and the
+/// daemon's runtime files all live under it.
 pub fn data_dir() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("KELPIE_DATA_DIR") {
         return dir.into();
@@ -332,11 +347,16 @@ fn data_base() -> std::path::PathBuf {
             .map(|h| std::path::PathBuf::from(h).join("Library/Application Support"))
             .unwrap_or_else(|_| std::env::temp_dir())
     } else {
-        std::env::var("XDG_DATA_HOME")
-            .map(Into::into)
-            .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
-            .unwrap_or_else(|_| std::env::temp_dir())
+        xdg_data_home(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME")).unwrap_or_else(std::env::temp_dir)
     }
+}
+
+/// The XDG base directory for user data: `$XDG_DATA_HOME`, else `$HOME/.local/share`. The spec
+/// says an empty or relative `XDG_DATA_HOME` is invalid and must be ignored.
+fn xdg_data_home(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    let absolute = |v: std::ffi::OsString| Some(std::path::PathBuf::from(v)).filter(|p| p.is_absolute());
+    xdg.and_then(absolute)
+        .or_else(|| home.and_then(absolute).map(|h| h.join(".local").join("share")))
 }
 
 // ---------- moving data from the pre-rename install ----------
@@ -604,6 +624,46 @@ mod tests {
         assert_eq!(entry(&service).get_password().unwrap(), "s3cret");
         assert!(matches!(entry(&legacy).get_password(), Err(keyring::Error::NoEntry)));
         entry(&service).delete_credential().unwrap();
+    }
+
+    #[test]
+    fn a_missing_secret_service_says_what_to_install() {
+        let failure = || keyring::Error::PlatformFailure("org.freedesktop.secrets was not provided by any .service files".into());
+        let msg = secret_store_error(failure());
+        assert!(msg.contains("org.freedesktop.secrets was not provided"), "keeps the cause: {msg}");
+        assert_eq!(msg.contains("GNOME Keyring"), cfg!(target_os = "linux"), "{msg}");
+        assert_eq!(secret_store_error(keyring::Error::TooLong("user".into(), 255)), keyring::Error::TooLong("user".into(), 255).to_string());
+    }
+
+    #[test]
+    fn linux_data_folder_follows_xdg_data_home_else_local_share() {
+        let base = std::env::temp_dir();
+        let (xdg, home) = (base.join("xdg-data"), base.join("home-me"));
+        let os = |p: &std::path::Path| Some(p.as_os_str().to_os_string());
+
+        assert_eq!(xdg_data_home(os(&xdg), os(&home)), Some(xdg.clone()), "XDG_DATA_HOME set");
+        let local_share = home.join(".local").join("share");
+        assert_eq!(xdg_data_home(None, os(&home)), Some(local_share.clone()), "XDG_DATA_HOME unset");
+        // Invalid per the XDG spec: ignored.
+        assert_eq!(xdg_data_home(Some("".into()), os(&home)), Some(local_share.clone()), "empty");
+        assert_eq!(xdg_data_home(Some("relative/data".into()), os(&home)), Some(local_share), "relative");
+        assert_eq!(xdg_data_home(None, Some("relative-home".into())), None, "no usable folder at all");
+        assert_eq!(xdg_data_home(None, None), None);
+    }
+
+    /// The real resolution on Linux, without touching the process environment of other tests.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_data_folder_is_named_kelpie_under_the_xdg_base() {
+        let expected = xdg_data_home(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME")).unwrap().join("Kelpie");
+        assert_eq!(data_base().join("Kelpie"), expected);
+        if std::env::var_os("KELPIE_DATA_DIR").is_none() {
+            assert_eq!(data_dir(), expected);
+        }
+        if std::env::var_os("KELPIE_ENDPOINT").is_none() {
+            let Endpoint::Path(sock) = endpoint() else { panic!("a socket path on Unix") };
+            assert_eq!(sock.parent(), Some(data_dir().as_path()));
+        }
     }
 
     fn migration_root(name: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
