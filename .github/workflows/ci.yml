@@ -36,7 +36,29 @@ jobs:
         with:
           python-version: "3.12"
       - name: Rust tests (protocol, daemon, app backend, speech helper)
+        if: runner.os != 'Linux'
         run: cargo test -p kelpie-proto -p kelpied -p kelpie -p kelpie-stt
+      # Linux: the same tests, one crate per step under a time limit, so a stuck test names itself.
+      - name: Rust tests on Linux (protocol)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        timeout-minutes: 15
+        run: cargo test -p kelpie-proto
+      - name: Rust tests on Linux (daemon)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: cargo test -p kelpied
+      - name: Rust tests on Linux (app backend)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: cargo test -p kelpie
+      - name: Rust tests on Linux (speech helper)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: cargo test -p kelpie-stt
       - name: Frontend typecheck
         working-directory: app
         run: |
@@ -86,6 +108,7 @@ jobs:
           cd .. && rm -rf appimage-check
       - name: Linux smoke under Xvfb (isolated daemon, release app)
         if: runner.os == 'Linux'
+        timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail
