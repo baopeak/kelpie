@@ -7,7 +7,9 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde_json::{json, Map, Value};
 
 use crate::fs_ops::{blocking, err, CmdResult};
@@ -25,31 +27,108 @@ const KEPT_BACKUPS: usize = 5;
 
 pub const SECTIONS: &[&str] = &["settings", "quickCommands", "layouts", "automations", "sshHosts", "plugins", "agents"];
 
-/// Settings keys never written to or taken from a file: sections of their own, sign-ins and local
-/// files of this computer, and answers given on this computer.
-const SETTINGS_EXCLUDED: &[&str] = &["profiles", "quickCommands", "layouts", "accounts", "activeAccounts", "sshConfig", "rootYoloOk", "skippedUpdate"];
+/// The settings keys a file may carry. One list for the window and this side
+/// (`app/src/lib/settings-transfer.json`); a unit test there makes every new setting be classified.
+static SETTINGS_EXPORTED: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let lists: Value = serde_json::from_str(include_str!("../../src/lib/settings-transfer.json")).expect("settings-transfer.json");
+    lists["exported"].as_array().expect("exported list").iter().filter_map(Value::as_str).map(str::to_string).collect()
+});
 
 const EVERY: &[&str] = &["hourly", "daily", "weekdays", "weekly"];
 const EVENTS: &[&str] = &["file", "turn", "commit", "pr_checks_failed", "finished"];
 const ACTIONS: &[&str] = &["agent", "quick", "shell"];
+const MASK: &str = kelpie_proto::redact::MASK;
 
-/// Whether the redaction helper takes `value` (named `name`) for a credential: a known token format,
-/// or a value under a secret-sounding name (`GITHUB_TOKEN`, `"apiKey"`…).
+/// Words that make a variable or flag name hold a secret, whole or at the end of a part of the name
+/// (trailing digits aside): `SMTP_PASS`, `OPENAI_KEY`, `apiKey`, `--api-key`, `GH_AUTH`, `DB_PASS2`.
+const SECRET_WORDS: &[&str] = &["PASS", "PASSWD", "PASSWORD", "PWD", "SECRET", "TOKEN", "KEY", "AUTH", "CREDENTIAL", "CREDENTIALS", "COOKIE", "SESSION"];
+
+/// Whether a variable, key or flag name says its value is a secret (case-insensitive; parts split at
+/// `_`, `-`, `.`). Errs on the side of leaving a value out.
+pub fn secret_name(name: &str) -> bool {
+    name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|p| !p.is_empty()).any(|part| {
+        // `DB_PASS2`, `TOKEN_V1`: a number after the word does not change what it holds.
+        let part = part.to_ascii_uppercase();
+        let part = part.trim_end_matches(|c: char| c.is_ascii_digit());
+        SECRET_WORDS.iter().any(|w| part.ends_with(w))
+    })
+}
+
+/// Credentials in free text beyond the redaction helper's formats: a secret-named flag's value
+/// (`--api-key X`, `--password=x`), `mysql -pXXX`, `curl -u user:pass`, and `NAME=value` with a
+/// secret-sounding upper-case name whatever the value looks like.
+static FLAG_VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s"'(])(--?[A-Za-z][\w.-]*)(=|[ \t]+)("[^"]*"|'[^']*'|[^\s"']+)"#).expect("flag pattern"));
+static MYSQL_PASSWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(\bmysql(?:dump|admin|sh)?\b[^\n|;&]*?\s-p)([^\s-]\S*)").expect("mysql pattern"));
+static USER_PASSWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"((?:^|\s)(?:-u|--user)[ \t]+[^\s:]+:)(\S+)").expect("user pattern"));
+static ENV_ASSIGN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\b([A-Z][A-Z0-9_]*)=("[^"]*"|'[^']*'|\S+)"#).expect("env pattern"));
+
+fn masked_value(v: &str) -> String {
+    match v.chars().next() {
+        Some(q @ ('"' | '\'')) => format!("{q}{MASK}{q}"),
+        _ => MASK.to_string(),
+    }
+}
+
+/// `text` with recognisable credentials masked.
+pub fn mask_text(text: &str) -> String {
+    let out = FLAG_VALUE.replace_all(text, |c: &regex::Captures| {
+        if secret_name(&c[2]) { format!("{}{}{}{}", &c[1], &c[2], &c[3], masked_value(&c[4])) } else { c[0].to_string() }
+    });
+    let out = MYSQL_PASSWORD.replace_all(&out, format!("${{1}}{MASK}"));
+    let out = USER_PASSWORD.replace_all(&out, format!("${{1}}{MASK}"));
+    let out = ENV_ASSIGN.replace_all(&out, |c: &regex::Captures| {
+        if secret_name(&c[1]) { format!("{}={}", &c[1], masked_value(&c[2])) } else { c[0].to_string() }
+    });
+    kelpie_proto::redact(&out)
+}
+
+/// An argument list with the value after a secret-named flag masked (`--api-key X`, `--token=X`),
+/// `name=value` arguments with a secret name masked (`-c api_key=X`), and every argument through
+/// the text filter.
+pub fn mask_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut hide_next = false;
+    for a in args {
+        if std::mem::take(&mut hide_next) && !a.starts_with('-') {
+            out.push(MASK.to_string());
+            continue;
+        }
+        let (name, value) = match a.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (a.as_str(), None),
+        };
+        if secret_name(name) && (a.starts_with('-') || value.is_some()) {
+            match value {
+                Some(_) => out.push(format!("{name}={MASK}")),
+                None => {
+                    hide_next = true;
+                    out.push(a.clone());
+                }
+            }
+            continue;
+        }
+        out.push(mask_text(a));
+    }
+    out
+}
+
+/// Whether `value` (named `name`) holds a credential: the text filter changes it, or the redaction
+/// helper takes it for one under its name (`GITHUB_TOKEN=…`, `"apiKey": "…"`).
 pub fn is_secret(name: &str, value: &str) -> bool {
     if value.trim().is_empty() {
         return false;
     }
     let changed = |s: String| kelpie_proto::redact(&s) != s;
-    changed(value.to_string()) || changed(format!("{name}={value}")) || changed(format!("\"{name}\": \"{value}\""))
+    mask_text(value) != value || changed(format!("{name}={value}")) || changed(format!("\"{name}\": \"{value}\""))
 }
 
-/// Masks every string that holds a credential, keeping the rest of the text where the redaction
-/// helper can (`export GITHUB_TOKEN=[redacted]`).
+/// Masks every string that holds a credential, keeping the rest of the text where it can
+/// (`export GITHUB_TOKEN=[redacted]`).
 fn scrub(v: &mut Value, name: &str) {
     match v {
         Value::String(s) if is_secret(name, s) => {
-            let masked = kelpie_proto::redact(s);
-            *s = if masked != *s { masked } else { kelpie_proto::redact::MASK.to_string() };
+            let masked = mask_text(s);
+            *s = if masked != *s { masked } else { MASK.to_string() };
         }
         Value::Array(a) => a.iter_mut().for_each(|x| scrub(x, name)),
         Value::Object(o) => o.iter_mut().for_each(|(k, x)| scrub(x, k)),
@@ -90,8 +169,8 @@ fn valid_env_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 256 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !n.starts_with(|c: char| c.is_ascii_digit())
 }
 
-/// An environment as a file holds it, sorted by name: every name; a value only when values are wanted
-/// and the redaction helper does not take it for a secret. Reads a `{NAME: value}` map (the app's) or a
+/// An environment as a file holds it, sorted by name: every name; a value only when values are wanted,
+/// the name does not sound secret and the value does not look like one. Reads a `{NAME: value}` map (the app's) or a
 /// `[{name, value?}]` list (a file's).
 fn env_entries(v: Option<&Value>, with_values: bool) -> Value {
     let mut pairs: Vec<(String, Option<String>)> = match v {
@@ -107,7 +186,7 @@ fn env_entries(v: Option<&Value>, with_values: bool) -> Value {
         pairs
             .into_iter()
             .map(|(name, value)| {
-                let value = value.filter(|v| with_values && v.len() <= MAX_TEXT && !v.contains('\0') && !is_secret(&name, v));
+                let value = value.filter(|v| with_values && v.len() <= MAX_TEXT && !v.contains('\0') && !secret_name(&name) && !is_secret(&name, v));
                 let mut e = json!({ "name": name });
                 if let Some(v) = value {
                     e["value"] = json!(v);
@@ -120,12 +199,18 @@ fn env_entries(v: Option<&Value>, with_values: bool) -> Value {
 
 // ---------- sections ----------
 
+/// Only the settings classified as portable; the window checks each value's shape and range.
 fn settings(v: &Value) -> CmdResult<Value> {
     let o = v.as_object().ok_or("the settings section is not an object")?;
     let mut out = Map::new();
     for (k, val) in o {
-        if !SETTINGS_EXCLUDED.contains(&k.as_str()) && out.len() < MAX_SETTINGS {
-            out.insert(k.clone(), val.clone());
+        if SETTINGS_EXPORTED.contains(k) && out.len() < MAX_SETTINGS {
+            let val = match (k.as_str(), val.as_array()) {
+                // The terminal's program and arguments: same masking as an agent's arguments.
+                ("shellArgs", Some(a)) => json!(mask_args(&a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())),
+                _ => val.clone(),
+            };
+            out.insert(k.clone(), val);
         }
     }
     Ok(Value::Object(out))
@@ -189,7 +274,7 @@ fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
     let action = one_of(o, "action", ACTIONS, "agent");
     let shell = if action == "shell" {
         let sh = o.get("shell")?.as_object()?;
-        json!({ "program": filled(sh, "program")?, "argv": texts(sh, "argv") })
+        json!({ "program": filled(sh, "program")?, "argv": mask_args(&texts(sh, "argv")) })
     } else {
         Value::Null
     };
@@ -207,7 +292,7 @@ fn automation(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
         "prompt": text(o, "prompt").unwrap_or_default(),
         "cwd": cwd,
         "project_id": text(o, "project_id").filter(|s| s.len() <= 128),
-        "args": texts(o, "args"),
+        "args": mask_args(&texts(o, "args")),
         "env": env_entries(o.get("env"), with_values),
         "every": one_of(o, "every", EVERY, "daily"),
         "time": time,
@@ -227,7 +312,11 @@ fn ssh_host(v: &Value) -> Option<Value> {
     let mut h: Host = serde_json::from_value(v.clone()).ok()?;
     h.os.clear();
     h.last_connected = 0;
-    h.env.retain(|k, val| !is_secret(k, val));
+    h.env.retain(|k, val| !secret_name(k) && !is_secret(k, val));
+    // Saved passwords are keyed by id, which must be letters and digits: anything else gets a new one.
+    if !h.id.chars().all(|c| c.is_ascii_alphanumeric()) || h.id.len() > 64 {
+        h.id.clear();
+    }
     let checked = ssh_hosts::normalize(Vault { version: 1, hosts: vec![h], forwards: Vec::new() }).ok()?;
     let mut out = serde_json::to_value(checked.hosts.into_iter().next()?).ok()?;
     let o = out.as_object_mut()?;
@@ -250,7 +339,7 @@ fn agent(o: &Map<String, Value>, with_values: bool) -> Option<Value> {
     let mut a = json!({
         "kind": kind,
         "label": filled(o, "label").unwrap_or_else(|| kind.clone()),
-        "args": texts(o, "args"),
+        "args": mask_args(&texts(o, "args")),
         "env": env_entries(o.get("env"), with_values),
     });
     if let Some(p) = filled(o, "permission").filter(|p| p.len() <= 64) {
@@ -363,6 +452,10 @@ pub fn read_doc(bytes: &[u8]) -> CmdResult<Value> {
 
 /// At most [`MAX_FILE`] bytes of a regular file; a larger one is refused unread.
 fn read_capped(path: &Path) -> CmdResult<Vec<u8>> {
+    // Checked before opening: opening a FIFO blocks, and a pipe path connects to a server.
+    if !std::fs::metadata(path).map_err(err)?.is_file() {
+        return Err("not a file".into());
+    }
     let f = std::fs::File::open(path).map_err(err)?;
     let meta = f.metadata().map_err(err)?;
     if !meta.is_file() {

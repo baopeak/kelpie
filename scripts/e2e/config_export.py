@@ -78,6 +78,9 @@ EXPORT = os.path.join(WORK, "export-values.json")
 EXPORT_PLAIN = os.path.join(WORK, "export-plain.json")
 EXPORT_B = os.path.join(WORK, "export-b.json")
 results = []
+# A fake credential store: the import's "forget this host's password" is recorded here and never reaches the
+# OS store. (Tauri's invoke cannot be wrapped from the page: it is a read-only property.)
+SECRET_FAKE = "window.__secretCalls = []; window.__kelpie.configTransfer.replacePasswordStore((id) => { window.__secretCalls.push(id); return Promise.resolve(); });"
 
 
 def free_port():
@@ -167,6 +170,11 @@ class Phase:
         d = self.run.d
         d.set_window_size(1480, 920)
         d._req("POST", d.s("/timeouts"), {"script": 120000})
+        d.wait("return typeof window.__kelpie?.configTransfer?.replacePasswordStore === 'function' || null", 20)
+        d.js(SECRET_FAKE)
+        if d.js("return Array.isArray(window.__secretCalls)") is not True:
+            self.close()
+            raise SystemExit(f"{self.tag}: could not install the fake password store; refusing to run an import")
         return self.run
 
     def __exit__(self, *exc):
@@ -258,7 +266,7 @@ def without_name_only(entries):
 def phase_a(run):
     d = run.d
     ok(call(d, f"{S}.setSettings(arguments[0])", {
-        "fontSize": 15, "scrollback": 9000, "theme": "light", "wordWrap": True,
+        "fontSize": 15, "scrollback": 9000, "theme": "light", "wordWrap": True, "shellArgs": ["powershell.exe", "-NoLogo"],
         "integrations": {"linear": True, "jira": {"url": "https://jira.example.com", "email": "me@example.com"}, "gitlabHosts": ["gitlab.example.com"]},
         "quickCommands": [
             {"id": "qc-publish", "label": "Publish", "text": f"export GITHUB_TOKEN={GH} && npm publish", "action": "terminal", "enter": True, "projectId": None},
@@ -270,7 +278,7 @@ def phase_a(run):
     ok(call(d, f"{S}.setProfile('claude', arguments[0])", {"args": ["--model", "opus"], "permission": "plan", "env": {"PUBLIC_FLAG": "1", "GITHUB_TOKEN": GH, "DB_PASSWORD": DB_PW}}))
     ok(call(d, f"{S}.setProfile('codex', arguments[0])", {"args": ["--search"]}))
     ok(call(d, "window.__kelpie.sshHosts.saveHost(window.__kelpie.sshHosts.newHost(arguments[0]))", {
-        "label": "Build box", "hostname": "10.0.0.5", "user": "dev", "auth": "password", "identityFile": "~/.ssh/id_ed25519",
+        "label": "Build box", "hostname": "10.0.0.5", "user": "dev", "auth": "password", "identityFile": "~/.ssh/id_ed25519", "forwardAgent": True,
         "env": {"API_TOKEN": HOST_TOKEN, "LANG": "C.UTF-8"}, "notes": f"deploy key {GH}",
     }))
     for pid in ("acme-tools", "beta-tools"):
@@ -326,6 +334,10 @@ def phase_a(run):
 def phase_b(run, exported):
     d = run.d
     ok(call(d, "window.__kelpie.plugins.pluginInstallFolder(arguments[0])", os.path.join(PLUGINS_SRC, "acme-tools")))
+    # B already has a "build-box" that connects somewhere else, with agent forwarding and a port forward.
+    sh = "window.__kelpie.sshHosts"
+    local = ok(call(d, f"{sh}.saveHost({sh}.newHost(arguments[0]))", {"label": "Build box", "alias": "build-box", "hostname": "10.9.9.9", "user": "dev", "auth": "password", "forwardAgent": True}))
+    ok(call(d, f"{sh}.saveForward({{...{sh}.newForward(arguments[0]), label: 'web', bindPort: 18080, destHost: 'localhost', destPort: 80, autoStart: false}})", local["id"]))
     open_config_row(d)
     backups = os.path.join(os.environ["KELPIE_DATA_DIR"], "backups")
 
@@ -347,12 +359,26 @@ def phase_b(run, exported):
     d.wait("return !!document.querySelector('[data-part=\"import-preview\"]') || null", 10)
     counts = d.js("return Object.fromEntries([...document.querySelectorAll('[data-part=\"import-preview\"] .config-preview-row')].map(r => [r.dataset.section, r.querySelector('[data-part=\"counts\"]').textContent]))")
     run.check("B: preview counts automations as new", counts.get("automations", "").startswith("2 in the file: 2 new, 0 replacing"), json.dumps(counts))
-    run.check("B: preview counts the host and quick commands as new", counts.get("sshHosts", "").startswith("1 in the file: 1 new") and counts.get("quickCommands", "").startswith("2 in the file: 2 new"), json.dumps(counts))
+    run.check("B: preview counts the quick commands as new and the host as replacing", counts.get("sshHosts", "").startswith("1 in the file: 0 new, 1 replacing") and counts.get("quickCommands", "").startswith("2 in the file: 2 new"), json.dumps(counts))
     run.check("B: preview: the agents replace the default profiles", counts.get("agents", "").startswith("3 in the file: 0 new, 3 replacing"), counts.get("agents"))
     run.check("B: preview: one listed plugin is not installed here", counts.get("plugins", "").startswith("2 listed, 1 not installed"), counts.get("plugins"))
     notes = d.js("return document.querySelector('[data-part=\"import-preview\"]').textContent")
     run.check("B: preview says automations come in off and hosts without passwords", "switched off" in notes and "No passwords" in notes, notes[:300])
+    run.check("B: preview marks the host's connection target as changed, with password and forward",
+              "Connection target changed: build-box, dev@10.9.9.9 → dev@10.0.0.5. Its saved password will be forgotten and its 1 port forwards removed." in notes, notes[:600])
+
+    # What runs: every value shown old → new, and Import needs its own tick.
+    runs = d.js("return [...document.querySelectorAll('[data-part=\"runs\"] .config-run')].map(r => [r.dataset.section, r.dataset.field, r.querySelector('.config-run-what').textContent, r.querySelector('.config-run-before').textContent, r.querySelector('.config-run-after').textContent])")
+    find = lambda field, item=None: next((r for r in runs or [] if r[1] == field and (item is None or item in r[2])), None)  # noqa: E731
+    run.check("B: runs: the terminal program, old → new", find("shellArgs") and find("shellArgs")[3] == "(none)" and find("shellArgs")[4] == "powershell.exe -NoLogo", json.dumps(find("shellArgs")))
+    run.check("B: runs: claude's arguments, permission and variable values", find("args", "Claude Code")[4] == "--model opus" and find("permission", "Claude Code")[4] == "plan" and find("env:PUBLIC_FLAG", "Claude Code")[4] == "1", json.dumps(runs)[:600])
+    run.check("B: runs: quick command text, where it goes and Enter", find("text", "Publish") and find("text", "Publish")[4] == "$ export GITHUB_TOKEN=[redacted] && npm publish ⏎", json.dumps(find("text", "Publish")))
+    run.check("B: runs: the automation's command and the other's prompt", find("command", "Format notes")[4] == ".\\hook.cmd {file}" and "Summarise the repo" in find("prompt", "Morning summary")[4], json.dumps(runs)[:800])
+    button_off = lambda: d.js("return document.querySelector('[data-act=\"apply-import\"]').disabled")  # noqa: E731
+    run.check("B: Import stays off until the commands are checked", button_off() is True)
     run.shot("cfg-02-import-preview")
+    d.click('[data-part="runs-checked"]')
+    run.check("B: …and turns on with the tick", until(lambda: button_off() is False, 5))
     d.click('[data-act="apply-import"]')
     msg = d.wait("const m = document.querySelector('[data-setting=\"config-transfer\"] [data-part=\"message\"]'); return m && !document.querySelector('[data-part=\"import-preview\"]') ? m.textContent : null", 30)
     run.check("B: import reports success and the backup", (msg or "").startswith("Imported.") and backups.replace("\\", "/").lower() in (msg or "").replace("\\", "/").lower(), msg)
@@ -369,7 +395,12 @@ def phase_b(run, exported):
     run.check("B: agent arguments, permission and the non-secret variable arrived", claude["args"] == ["--model", "opus"] and claude.get("permission") == "plan" and claude.get("env") == {"PUBLIC_FLAG": "1"}, json.dumps(claude))
     run.check("B: no sign-ins came along", s.get("accounts") == [], json.dumps(s.get("accounts")))
     hosts = now["vault"]["hosts"]
-    run.check("B: the host arrived without credentials", len(hosts) == 1 and hosts[0]["alias"] == exported["sections"]["sshHosts"][0]["alias"] and hosts[0]["auth"] == "password", json.dumps(hosts))
+    run.check("B: the host replaced the local one, without credentials", len(hosts) == 1 and hosts[0]["id"] == local["id"] and hosts[0]["hostname"] == "10.0.0.5" and hosts[0]["auth"] == "password", json.dumps(hosts))
+    run.check("B: …agent forwarding is off, though the file and the old host had it on", hosts[0]["forwardAgent"] is False)
+    run.check("B: …its port forward was removed", now["vault"]["forwards"] == [], json.dumps(now["vault"]["forwards"]))
+    secret_calls = d.js("return window.__secretCalls")
+    run.check("B: …and its saved password was forgotten (fake store, never the OS one)", secret_calls == [local["id"]], json.dumps(secret_calls))
+    run.check("B: the result names the moved host", "build-box now connects to dev@10.0.0.5" in (msg or ""), msg)
     autos = sorted(now["automations"], key=lambda a: a["name"])
     run.check("B: both automations arrived switched off", [(a["name"], a["enabled"]) for a in autos] == [("Format notes", False), ("Morning summary", False)], json.dumps([(a["name"], a["enabled"]) for a in autos]))
     command = autos[0]
@@ -385,6 +416,9 @@ def phase_b(run, exported):
     text_b = open(EXPORT_B, encoding="utf-8").read()
     secrets_absent(run, "B's export", text_b)
     a_sec, b_sec = exported["sections"], json.loads(text_b)["sections"]
+    # The host replaced B's own: it keeps B's id, and agent forwarding never comes from a file.
+    host_view = lambda hosts: [{k: v for k, v in h.items() if k not in ("id", "forwardAgent")} for h in hosts]  # noqa: E731
+    a_sec, b_sec = {**a_sec, "sshHosts": host_view(a_sec["sshHosts"])}, {**b_sec, "sshHosts": host_view(b_sec["sshHosts"])}
     for name in ("settings", "quickCommands", "layouts", "sshHosts"):
         equal = a_sec[name] == b_sec[name]
         run.check(f"round trip: {name} equal", equal, "" if equal else f"{json.dumps(a_sec[name])[:300]} != {json.dumps(b_sec[name])[:300]}")

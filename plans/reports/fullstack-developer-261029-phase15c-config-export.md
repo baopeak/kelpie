@@ -185,3 +185,93 @@ fake one)
 
 Status: DONE
 Summary: Settings export/import is built: a Rust-owned file contract with secret filtering, a lazy settings UI with a per-section preview, backup and undo, and imported automations always off and unapproved. Unit tests (Rust 12, Vitest 17) and the two-phase GUI round trip (45/45 twice) pass, and the entry bundle is 326.02 of 338.60 kB gz.
+
+## Review fixes
+
+All findings in `plans/reports/code-reviewer-261029-phase15c-config-export.md` were addressed. No daemon change was made; `API_LEVEL` stays 16.
+
+**The preview now shows everything that decides what runs.**
+- `planImport` builds a list of these values, each shown old → new in full: `{section, item, field, before, after}`.
+  - Settings `shellArgs`, `agentPermissions` and `agentsScripting`.
+  - For each agent profile: `args`, `permission` and every `env:<NAME>` (name and value).
+  - The text of new and replaced quick commands, with where it goes (`$` terminal, `>` agent prompt) and whether Enter follows.
+  - Automation `kind`, `command` (program and argv), `args`, `prompt`, `cwd` and `env`.
+  - SSH host `startup`.
+  - Saved layouts whose panes start on another machine (`kind @ dest:port path`).
+  - Unchanged values are not listed.
+- When the list is not empty:
+  - Import stays disabled until "I've checked these commands; they will run on this computer." is ticked.
+  - Changing which sections are ticked clears that tick.
+  - `applyImport` refuses without the confirmation (`runsChecked`). It also re-plans and refuses when the sections, the list or the host changes differ from the preview.
+- Environment values from the file are imported as they are, and shown in this list.
+
+**A replaced SSH host whose connection target changed no longer keeps this computer's password.**
+- The target is user, hostname, port and jump. When any of these differs:
+  - the host is marked "Connection target changed: alias, before → after";
+  - the password saved for that host id is forgotten. This is the last step of the apply, so undo never needs to restore it;
+  - its `os` and `lastConnected` are reset.
+- Agent forwarding (`forwardAgent`) never comes from a file:
+  - a new host gets false;
+  - a replaced host keeps the local value only while its target is unchanged; otherwise false.
+- Port forwards bound to a moved host are removed rather than kept, and the preview says so. This is the safer choice: an auto-start forward would otherwise tunnel through the new destination. The removed forwards remain in the backup.
+
+**Secret filter.**
+- Names: `secret_name` is case-insensitive. It matches a name part that is, or ends with, PASS, PASSWD, PASSWORD, PWD, SECRET, TOKEN, KEY, AUTH, CREDENTIAL(S), COOKIE or SESSION, ignoring trailing digits.
+  - Such a variable's value is never exported, even with values on.
+  - Secret-named SSH `SetEnv` entries are dropped.
+- Argument lists (agent args, automation args, shell argv, `shellArgs`) are masked by `mask_args`:
+  - the value after a secret flag (`--api-key X`);
+  - the value in `--flag=value`;
+  - `name=value` arguments with a secret name (`-c api_key=X`);
+  - every argument also goes through the text filter.
+- Free text is masked by `mask_text`. This covers the same flags in text, `mysql -p…`, `curl -u user:…`, and upper-case `NAME=value` whatever the value looks like, followed by `redact`.
+- The copy in the catalog, the warning, the user guide and the architecture doc now describes what is filtered and says to check the file before sharing it.
+- Every case in the report has a Rust test.
+
+**Settings classification.**
+- `app/src/lib/settings-transfer.json` lists `exported` and `excluded` settings. It is the single source: the window imports it, and the app core reads it with `include_str!`. This also removes the duplicated exclusion list.
+- A Vitest test fails when a key of `defaultSettings` is in neither list or in both. `defaultSettings` moved to `lib/default-settings.ts`, re-exported from `store.ts`, so the test does not need the store.
+- A Rust test checks that only exported keys get through.
+
+**Value checks on import.**
+- Imported values are checked against the ranges and choices the settings page offers:
+  - font size 8–28, line height 1–2, scrollback 500–100 000;
+  - UI scale 0.9 / 1 / 1.1 / 1.2;
+  - panel widths, cost cap, hibernate minutes;
+  - every enum (theme, language, keep-awake, resume…);
+  - `integrations.jira` reduced to `{url, email}`.
+- Invalid values and unknown keys are left out and listed in the preview.
+
+**Refused automations.**
+- When the daemon refuses an automation (an agent or script that is not on this computer), it is skipped and named in the result; the rest of the import stays.
+- If the daemon no longer answers the follow-up `automation.state` check, the whole import is undone as before.
+
+**Low findings:**
+- The copy now says commands need approving "unless this computer already approved exactly the same command".
+- Settings are re-read and re-planned right before they are replaced, so a change made while the backup was being written is kept.
+- The preview reads each section on its own (`loadForPreview`). A section that cannot be read is shown as unavailable with the reason; this includes automations on an older daemon.
+- `read_capped` checks the path's metadata before opening it.
+- The exclusion list is no longer duplicated (see "Settings classification" above).
+- An imported host id that is not alphanumeric gets a new id, so a password can be saved for it.
+
+**E2E** (`config_export.py`):
+- Phase A also seeds `shellArgs` and turns agent forwarding on for its host.
+- Phase B first saves its own `build-box` with another target, agent forwarding on and a port forward. It then checks:
+  - the "connection target changed" note;
+  - the old → new values for the terminal program, claude's args, permission and variable, quick-command text, the automation command and the prompt;
+  - Import disabled until the tick, then enabled;
+  - after import: same host id, new hostname, agent forwarding off, forward removed, and that host's password forgotten;
+  - the round-trip comparison ignores host `id` and `forwardAgent`.
+- The password forget goes through `TransferContext.forgetPassword`. The e2e replaces it with a recorder via `configTransfer.replacePasswordStore`, which is only reachable through the dev/`KELPIE_E2E`-gated `window.__kelpie`. The script refuses to import if the recorder is not installed.
+- **Disclosure:** the first H2 attempt wrapped `__TAURI_INTERNALS__.invoke` in the page. Tauri defines that property read-only, so the wrapper silently did nothing. In that one run, the import's forget call reached `ssh_secret_set` and the OS credential store. It deleted `ssh-password:<id>` under the test endpoint's own service names, `Kelpie (kelpie-config-export-<pid>-b)` and the legacy `Erka (…)` copy, where nothing was stored. No real Kelpie entry was touched. The two green runs below used the recorder.
+
+**Numbers after the fixes**
+- Rust `config_transfer`: 18 tests (6 new).
+- `cargo test -p kelpie -j 2`: 202 passed, 5 ignored (pre-existing). `cargo clippy -p kelpie --all-targets` is clean.
+- Vitest: 492 passed; `config-transfer.test.ts` has 24 tests.
+- typecheck clean; `i18n:check` 0 missing.
+- `pnpm build` passes. Entry 326.06 kB gz against the 338.60 limit; lazy chunk 8.35 kB JS + 0.46 kB CSS.
+- E2E: 56/56, twice in a row. Afterwards only the user's own `kelpie.exe` and `kelpied.exe` were running.
+
+Status: DONE_WITH_CONCERNS
+Summary: All blocking, medium and low review findings are fixed and tested. During development, one e2e run reached the OS credential store under the test endpoint's isolated service name; nothing real was affected, and the final runs use a recorder.

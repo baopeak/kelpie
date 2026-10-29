@@ -23,65 +23,10 @@ import { confirmRootStart } from "./root-user";
 import type { WorkStatus, AgentProfile, AppState, BranchInfo, InboxItem, LayoutNode, LayoutTemplate, Pane, Project, ProjectHost, RecentItem, ReviewNote, SessionInfo, SessionKind, SessionTarget, Settings, Tab, Workspace, WorkspaceMeta } from "./types";
 import { confirmDialog } from "./confirm-dialog";
 import { remember } from "./prompt-history";
+import { defaultSettings } from "./default-settings";
 import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
 
-export const defaultSettings: Settings = {
-  fontFamily: '"JetBrains Mono", "Cascadia Code", "Cascadia Mono", Menlo, Consolas, "Symbols Nerd Font Mono", monospace',
-  fontSize: 13,
-  lineHeight: 1.2,
-  scrollback: 5000,
-  cursorBlink: true,
-  webgl: true,
-  shellArgs: [],
-  rightPanelWidth: 300,
-  sidebarWidth: 232,
-  sidebarCollapsed: false,
-  notifications: true,
-  shortcutHints: true,
-  projectFilter: "all",
-  projectSort: "manual",
-  usageMeters: true,
-  memoryMeter: true,
-  costCap: 0,
-  costCapEsc: false,
-  quickCommands: [],
-  theme: "dark",
-  density: "comfortable",
-  uiScale: 1,
-  tips: true,
-  tipsSeen: [],
-  agentPermissions: "manual",
-  hiddenAgents: [],
-  hibernate: false,
-  hibernateMinutes: 30,
-  keepAwake: "off",
-  prioritizeVisible: true,
-  checkpoints: false,
-  agentsScripting: true,
-  notificationSound: false,
-  updateChecks: true,
-  terminalTheme: "default",
-  wordWrap: false,
-  aiAgent: "claude",
-  autoWorktree: "ask",
-  floatingTerminal: true,
-  mascot: true,
-  mascotMotion: "system",
-  layouts: [],
-  resumeSessions: "shown",
-  accounts: [],
-  activeAccounts: {},
-  integrations: { linear: false, jira: null, gitlabHosts: [] },
-  localhostInBrowser: true,
-  sshConfig: "",
-  voice: { model: null, language: "auto", device: null },
-  language: "system",
-  profiles: [
-    { kind: "claude", label: "Claude Code", args: [] },
-    { kind: "codex", label: "Codex", args: [] },
-    { kind: "omp", label: "OMP", args: [] },
-  ],
-};
+export { defaultSettings };
 
 /** app-state.json format; older files are migrated (after a backup) on load. */
 const STATE_VERSION = 3;

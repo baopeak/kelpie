@@ -112,7 +112,8 @@ fn env_values_only_when_asked_and_never_secret_ones() {
 fn text_with_a_credential_keeps_the_rest() {
     let doc = export(false);
     assert_eq!(doc["sections"]["quickCommands"][0]["text"], "export GITHUB_TOKEN=[redacted] && npm publish");
-    assert_eq!(doc["sections"]["settings"]["notifyToken"], "[redacted]");
+    // Not a classified setting: not written at all.
+    assert!(doc["sections"]["settings"].get("notifyToken").is_none());
     assert_eq!(doc["sections"]["settings"]["fontSize"], 15);
     // Ordinary values are left alone.
     assert!(!is_secret("fontFamily", "\"JetBrains Mono\", monospace"));
@@ -241,5 +242,89 @@ fn backups_hold_everything_and_only_the_newest_are_kept() {
     left.sort();
     assert_eq!(left.len(), KEPT_BACKUPS);
     assert!(left.contains(&first.file_name().unwrap().to_string_lossy().into_owned()), "{left:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn secret_sounding_names_never_carry_a_value() {
+    for name in ["DB_PASSWORD", "SMTP_PASS", "OPENAI_KEY", "API_KEY", "apiKey", "GH_AUTH", "oauth", "MY_SECRET", "GITHUB_TOKEN", "AWS_CREDENTIALS", "SESSION_COOKIE", "MY_SESSION", "--api-key", "MYSQL_PWD"] {
+        assert!(secret_name(name), "{name}");
+    }
+    for name in ["PUBLIC_FLAG", "LANG", "PATH", "NODE_OPTIONS", "--model", "--permission-mode", "AUTHOR_NAME", "fontSize", "resumeSessions"] {
+        assert!(!secret_name(name), "{name}");
+    }
+    let env = json!({ "DB_PASSWORD": "p@ss:w0rd!", "DB_PASS2": "ab;cdefgh", "GITHUB_TOKEN": "my token value", "SMTP_PASS": "plain", "OPENAI_KEY": "k", "GH_AUTH": "a", "SESSION_COOKIE": "c", "PUBLIC_FLAG": "1" });
+    let entries = env_entries(Some(&env), true);
+    let with_value: Vec<&str> = entries.as_array().unwrap().iter().filter(|e| e.get("value").is_some()).map(|e| e["name"].as_str().unwrap()).collect();
+    assert_eq!(with_value, ["PUBLIC_FLAG"]);
+    assert_eq!(entries.as_array().unwrap().len(), 8, "every name is kept");
+}
+
+#[test]
+fn arguments_lose_the_value_of_a_secret_flag() {
+    let args = |a: &[&str]| mask_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert_eq!(args(&["--api-key", "c0ffee1234", "--model", "opus"]), ["--api-key", MASK, "--model", "opus"]);
+    assert_eq!(args(&["--token", "abc"]), ["--token", MASK]);
+    assert_eq!(args(&["--api-key=myrealkey123"]), [format!("--api-key={MASK}")]);
+    assert_eq!(args(&["--password=hunter"]), [format!("--password={MASK}")]);
+    assert_eq!(args(&["-c", "api_key=xyz", "-c", "model=o3"]), ["-c", &format!("api_key={MASK}"), "-c", "model=o3"]);
+    assert_eq!(args(&["--api-key", "--verbose"]), ["--api-key", "--verbose"], "a flag is never taken for the value");
+    assert_eq!(args(&["--settings", &format!("{{\"k\":\"{GH}\"}}")]), ["--settings", "{\"k\":\"[redacted]\"}"]);
+    assert_eq!(args(&["--model", "opus", "--permission-mode", "plan"]), ["--model", "opus", "--permission-mode", "plan"]);
+}
+
+#[test]
+fn credentials_in_command_text_are_masked() {
+    assert_eq!(mask_text("mysql -u root -phunter2 shop"), format!("mysql -u root -p{MASK} shop"));
+    assert_eq!(mask_text("curl -u admin:hunter2 https://x.example"), format!("curl -u admin:{MASK} https://x.example"));
+    assert_eq!(mask_text("DB_PASSWORD=p@ss:w0rd! npm start"), format!("DB_PASSWORD={MASK} npm start"));
+    assert_eq!(mask_text("deploy --token abc123 --env prod"), format!("deploy --token {MASK} --env prod"));
+    assert_eq!(mask_text("tool --api-key=\"my key\""), format!("tool --api-key=\"{MASK}\""));
+    for plain in ["npm test -- --all", "git push -u origin main", "Review the diff and list problems.", "cargo build -p kelpie"] {
+        assert_eq!(mask_text(plain), plain);
+    }
+}
+
+#[test]
+fn every_seeded_case_stays_out_of_the_file() {
+    let raw = json!({
+        "settings": { "shellArgs": ["pwsh", "-Command", "connect --token s3cr3tshell"] },
+        "quickCommands": [
+            { "id": "a", "label": "DB", "text": "mysql -u root -phunter2 shop" },
+            { "id": "b", "label": "Curl", "text": "curl -u admin:hunter2 https://x.example" },
+        ],
+        "agents": [{ "kind": "claude", "args": ["--api-key", "c0ffee1234", "--token=tok9876", "-c", "api_key=xyzxyz"], "env": { "DB_PASSWORD": "p@ss:w0rd!", "SMTP_PASS": "smtppass1", "OPENAI_KEY": "openaikey1", "GH_AUTH": "ghauth1" } }],
+        "automations": [{ "name": "n", "cwd": "C:/p", "args": ["--password", "autopass1"], "action": "shell", "shell": { "program": "tool", "argv": ["--api-key=argvkey1"] } }],
+    });
+    let hosts: Vault = serde_json::from_value(json!({ "version": 1, "hosts": [{ "id": "h-1!", "hostname": "h.example", "startup": "mysql -phostpass1", "env": { "SMTP_PASS": "hostenv1" } }], "forwards": [] })).unwrap();
+    let wanted: Vec<String> = ["settings", "quickCommands", "agents", "automations", "sshHosts"].iter().map(|s| s.to_string()).collect();
+    let doc = export_doc(raw.as_object().unwrap(), &wanted, true, Some(&hosts), None, "t").unwrap();
+    let text = doc.to_string();
+    for secret in ["s3cr3tshell", "hunter2", "c0ffee1234", "tok9876", "xyzxyz", "p@ss:w0rd!", "smtppass1", "openaikey1", "ghauth1", "autopass1", "argvkey1", "hostpass1", "hostenv1"] {
+        assert!(!text.contains(secret), "{secret} leaked: {text}");
+    }
+    let id = doc["sections"]["sshHosts"][0]["id"].as_str().unwrap();
+    assert!(!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()), "a host id passwords cannot be saved under is replaced: {id}");
+}
+
+#[test]
+fn settings_carry_only_classified_keys() {
+    let lists: Value = serde_json::from_str(include_str!("../../../src/lib/settings-transfer.json")).unwrap();
+    let excluded: Vec<&str> = lists["excluded"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    let mut raw = Map::new();
+    for k in SETTINGS_EXPORTED.iter().map(String::as_str).chain(excluded.iter().copied()).chain(["madeUp"]) {
+        raw.insert(k.to_string(), json!(1));
+    }
+    let kept = settings(&Value::Object(raw)).unwrap();
+    let kept: Vec<&String> = kept.as_object().unwrap().keys().collect();
+    assert_eq!(kept.len(), SETTINGS_EXPORTED.len());
+    assert!(excluded.iter().all(|k| !SETTINGS_EXPORTED.iter().any(|e| e == k)));
+}
+
+#[test]
+fn a_path_that_is_not_a_regular_file_is_not_opened() {
+    let dir = temp_dir("notfile");
+    assert_eq!(read_capped(&dir).unwrap_err(), "not a file");
+    assert!(read_capped(&dir.join("missing.json")).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
