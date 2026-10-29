@@ -703,6 +703,26 @@ fn read_capped(path: &Path) -> CmdResult<Vec<u8>> {
 /// a name of its own (two writes to one target never share it) and is created new, so a file or link
 /// already at that name is never written through; it is removed when anything fails.
 pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> CmdResult<()> {
+    write_atomic_with(path, bytes, rename_retrying)
+}
+
+/// `std::fs::rename`, tried again a few times when Windows refuses it for a moment (another rename
+/// to the same target, a virus scanner holding the file).
+fn rename_retrying(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && attempt < 5 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20 * attempt));
+            }
+            done => return done,
+        }
+    }
+}
+
+/// [`write_file_atomic`] with the final rename given (tests make it fail after the temporary file exists).
+pub(crate) fn write_atomic_with(path: &Path, bytes: &[u8], rename: impl Fn(&Path, &Path) -> std::io::Result<()>) -> CmdResult<()> {
     use std::io::Write;
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if device_path(path) {
@@ -727,7 +747,7 @@ pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> CmdResult<()> {
         .map_err(err)?;
     let written = file.write_all(bytes).and_then(|_| file.sync_all());
     drop(file);
-    written.and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| {
+    written.and_then(|_| rename(&tmp, path)).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         err(e)
     })

@@ -32,7 +32,7 @@ fn render_vec(agent: Agent, lines: Vec<Result<String, u64>>, max_body: usize) ->
     render_lines(agent, || it.next(), &Request { id: "t1", cwd: Some("/w"), title: None }, max_body, None)
 }
 
-fn json_lines(values: &[Value]) -> Vec<Result<String, u64>> {
+fn json_lines_of(values: &[Value]) -> Vec<Result<String, u64>> {
     values.iter().map(|v| Ok(v.to_string())).collect()
 }
 
@@ -83,7 +83,7 @@ fn fixture_secrets_never_reach_the_export() {
 #[test]
 fn secrets_in_every_part_of_a_turn_are_masked() {
     let (gh, sk, pw, bearer) = (SECRETS[0], SECRETS[1], SECRETS[5], SECRETS[2]);
-    let claude = json_lines(&[
+    let claude = json_lines_of(&[
         json!({"type": "user", "message": {"role": "user", "content": format!("user text {gh}")}}),
         json!({"type": "assistant", "message": {"role": "assistant", "content": [
             {"type": "text", "text": format!("assistant text {sk}")},
@@ -91,13 +91,13 @@ fn secrets_in_every_part_of_a_turn_are_masked() {
         ]}}),
         json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": format!("tool output Authorization: Bearer {bearer}")}]}}),
     ]);
-    let codex = json_lines(&[
+    let codex = json_lines_of(&[
         json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": format!("user text {gh}")}]}}),
         json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": format!("assistant text {sk}")}]}}),
         json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "call_id": "c", "arguments": json!({"command": ["bash", "-lc", format!("export API_KEY={pw}")]}).to_string()}}),
         json!({"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c", "output": format!("tool output Authorization: Bearer {bearer}")}}),
     ]);
-    let omp = json_lines(&[
+    let omp = json_lines_of(&[
         json!({"type": "message", "message": {"role": "user", "content": format!("user text {gh}")}}),
         json!({"type": "message", "message": {"role": "assistant", "content": [
             {"type": "text", "text": format!("assistant text {sk}")},
@@ -188,7 +188,7 @@ fn the_reader_skips_long_lines_and_keeps_an_unterminated_last_one() {
 #[test]
 fn the_export_stops_at_its_size_cap() {
     let line = |i: usize| json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": format!("reply {i} {}", "z".repeat(500))}]}});
-    let r = render_vec(Agent::Claude, json_lines(&(0..20).map(line).collect::<Vec<_>>()), 2000);
+    let r = render_vec(Agent::Claude, json_lines_of(&(0..20).map(line).collect::<Vec<_>>()), 2000);
     assert!(r.truncated);
     assert!(r.text.contains("reply 3 ") && !r.text.contains("reply 4 "), "{}", r.text);
     assert!(r.text.ends_with("*The export stops here: the conversation is longer than 2000 bytes of Markdown.*\n"));
@@ -197,10 +197,10 @@ fn the_export_stops_at_its_size_cap() {
 
 #[test]
 fn thinking_is_left_out_and_narration_kept() {
-    let claude = json_lines(&[json!({"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "secret plan"}, {"type": "redacted_thinking", "data": "x"}, {"type": "text", "text": "answer"}]}})]);
+    let claude = json_lines_of(&[json!({"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "secret plan"}, {"type": "redacted_thinking", "data": "x"}, {"type": "text", "text": "answer"}]}})]);
     let out = render_vec(Agent::Claude, claude, MAX_BODY).text;
     assert!(!out.contains("secret plan") && out.contains("answer"));
-    let omp = json_lines(&[json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "inner"}, {"type": "thinking", "thinking": "said aloud", "narration": true}]}})]);
+    let omp = json_lines_of(&[json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "inner"}, {"type": "thinking", "thinking": "said aloud", "narration": true}]}})]);
     let out = render_vec(Agent::Omp, omp, MAX_BODY).text;
     assert!(!out.contains("inner") && out.contains("said aloud"));
 }
@@ -247,7 +247,7 @@ fn secrets_on_later_lines_of_structured_tool_text_are_masked() {
     let env_file = format!("# local\nPORT=8080\nDB_PASSWORD={pw}\nGITHUB_TOKEN={gh}\n");
     let heredoc = format!("cat <<EOF > deploy.sh\nexport API_KEY={sk}\ncurl https://admin:{url_pw}@ci.local/x\nEOF");
     let json_out = json!({"vars": format!("A=1\nAWS_SECRET_ACCESS_KEY={aws}"), "nested": [{"token": gh}]}).to_string();
-    let claude = json_lines(&[
+    let claude = json_lines_of(&[
         json!({"type": "assistant", "message": {"content": [
             {"type": "tool_use", "id": "w", "name": "Write", "input": {"file_path": ".env", "content": env_file}},
             {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": heredoc}},
@@ -255,11 +255,11 @@ fn secrets_on_later_lines_of_structured_tool_text_are_masked() {
         ]}}),
         json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "m", "content": [{"type": "text", "text": json_out}]}]}}),
     ]);
-    let codex = json_lines(&[
+    let codex = json_lines_of(&[
         json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "call_id": "c", "arguments": json!({"command": ["bash", "-lc", format!("set -e\nexport GITHUB_TOKEN={gh}\nDB_PASSWORD={pw} ./migrate")]}).to_string()}}),
         json!({"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c", "output": json_out}}),
     ]);
-    let omp = json_lines(&[
+    let omp = json_lines_of(&[
         json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "e", "name": "edit", "arguments": {"path": ".env", "edits": [{"old": env_file, "new": "PORT=8080\n"}]}}]}}),
         json!({"type": "message", "message": {"role": "toolResult", "toolCallId": "e", "toolName": "edit", "content": [{"type": "text", "text": json_out}]}}),
     ]);
@@ -298,11 +298,17 @@ fn only_the_start_of_a_long_tool_output_is_redacted_and_never_half_a_secret() {
 fn messages_cannot_break_the_document() {
     let opened = contain("see:\n<details>\n<summary>x</summary>\n  <!-- hidden\n</details>\n```yaml\nport: 1\n<details>");
     assert_eq!(opened, "see:\n\\<details>\n\\<summary>x</summary>\n  \\<!-- hidden\n\\</details>\n```yaml\nport: 1\n<details>\n```");
-    // Closed fences, tildes, inline backticks, indented code and plain `<` are left alone.
-    assert_eq!(contain("~~~~\n<x>\n~~~~\nif a < b {}\n    <pre>\n```inline``` text"), "~~~~\n<x>\n~~~~\nif a < b {}\n    <pre>\n```inline``` text");
+    // Closed fences, tildes, inline backticks and a `<` inside a line are left alone.
+    assert_eq!(contain("~~~~\n<x>\n~~~~\nif a < b {}\n```inline``` text\n-<x> \n*<b>*"), "~~~~\n<x>\n~~~~\nif a < b {}\n```inline``` text\n-<x> \n*<b>*");
+    // Behind blockquote and list markers, nested, or in a list item's indented continuation.
+    let nested = "> quoted mail\n> <!-- tracking pixel\n- item\n  <textarea>\n- outer\n  - inner\n    <script>x</script>\n>> <details>\n1. > <style>\n2) <pre>\n- x\n\n    <!-- deep";
+    let want = "> quoted mail\n> \\<!-- tracking pixel\n- item\n  \\<textarea>\n- outer\n  - inner\n    \\<script>x</script>\n>> \\<details>\n1. > \\<style>\n2) \\<pre>\n- x\n\n    \\<!-- deep";
+    assert_eq!(contain(nested), want);
+    assert_eq!(after_containers(" > - 12. >\t<x>"), "<x>");
+    assert_eq!(after_containers("1234567890. <x>"), "1234567890. <x>", "ten digits are not a list marker");
     assert_eq!(contain("````md\n```\nstill code"), "````md\n```\nstill code\n````");
     // Each message is contained on its own: headings after an unclosed fence stay headings.
-    let lines = json_lines(&[
+    let lines = json_lines_of(&[
         json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "fix:\n```diff\n- a"}]}}),
         json!({"type": "user", "message": {"content": "thanks"}}),
     ]);
@@ -319,10 +325,10 @@ fn an_omp_export_follows_the_active_branch() {
     assert!(!out.contains("Abandoned") && out.contains("The logger now masks headers."), "{out}");
     assert!(out.contains("- **Ended:** 2026-10-24T03:02:00.000Z"), "the end is the last exported entry");
     // Without parent links (older sessions) everything is exported in file order.
-    let mut flat = json_lines(&[json!({"type": "message", "id": "x", "message": {"role": "user", "content": "one"}}), json!({"type": "message", "id": "y", "message": {"role": "user", "content": "two"}})]).into_iter();
+    let mut flat = json_lines_of(&[json!({"type": "message", "id": "x", "message": {"role": "user", "content": "one"}}), json!({"type": "message", "id": "y", "message": {"role": "user", "content": "two"}})]).into_iter();
     assert!(active_branch(|| flat.next()).is_none());
     // A parent loop ends the walk.
-    let mut looped = json_lines(&[json!({"id": "p", "parentId": "q"}), json!({"id": "q", "parentId": "p"})]).into_iter();
+    let mut looped = json_lines_of(&[json!({"id": "p", "parentId": "q"}), json!({"id": "q", "parentId": "p"})]).into_iter();
     assert_eq!(active_branch(|| looped.next()).map(|s| s.len()), Some(2));
 }
 
@@ -357,6 +363,73 @@ fn a_failed_write_leaves_no_temporary_file() {
     });
     let text = std::fs::read_to_string(&target).unwrap();
     assert!(text.lines().all(|l| l == text.lines().next().unwrap()), "one writer's text, whole");
+    let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n.to_string_lossy().ends_with(".tmp")).collect();
+    assert!(left.is_empty(), "{left:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn numbers_json_lines_and_escaped_json_are_redacted_too() {
+    let (gh, pw) = (SECRETS[0], SECRETS[5]);
+    // A number under a secret-named key.
+    let v = redact_value(&json!({"password": 12345678, "port": 8080, "db": {"api_key": 42}}));
+    assert_eq!(v, json!({"password": "[redacted]", "port": 8080, "db": {"api_key": "[redacted]"}}));
+    assert!(secret_name("DB_PASSWORD") && secret_name("token") && !secret_name("port") && !secret_name("tokenizer"));
+    // JSON lines: each line's strings, kept one per line; other lines untouched.
+    let ndjson = format!("start\n{}\n{}", json!({"log": format!("x\n{gh}")}), json!({"env": format!("A=1\nDB_PASSWORD={pw}"), "n": 1}));
+    let out = json_lines(&ndjson).unwrap();
+    assert!(!out.contains(gh) && !out.contains(pw) && out.starts_with("start\n{") && out.lines().count() == 3, "{out}");
+    assert!(json_lines("plain\ntext").is_none());
+    // JSON after a text prefix (not whole): its escapes are undone for redaction.
+    let prefixed = format!("Response:\n{}", json!({"vars": format!("A=1\nAWS_SECRET_ACCESS_KEY={}", SECRETS[4]), "k": format!("x\n{gh}")}));
+    assert!(redact(&prefixed).contains(gh), "the escaped form is the case this guards against");
+    let out = tool_text(&prefixed);
+    assert!(!out.contains(gh) && !out.contains(SECRETS[4]), "{out}");
+    // Source code with `\n` in a string literal and nothing to mask keeps its escapes.
+    assert_eq!(redact_escaped(r#"printf("a\nb\t\"c\"");"#), r#"printf("a\nb\t\"c\"");"#);
+    // Through a whole export: an NDJSON tool output and a numeric PIN in a tool input.
+    let lines = json_lines_of(&[
+        json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "tail log.jsonl", "pin_password": 98765432}}]}}),
+        json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": ndjson}]}}),
+    ]);
+    let out = render_vec(Agent::Claude, lines, MAX_BODY).text;
+    assert!(!out.contains(gh) && !out.contains(pw) && !out.contains("98765432"), "{out}");
+}
+
+#[test]
+fn a_broken_omp_chain_falls_back_to_file_order() {
+    let first = json!({"type": "message", "id": "e1", "parentId": null, "message": {"role": "user", "content": "first"}}).to_string();
+    let cut = r#"{"type":"message","id":"e2","parentId":"e1","message":"#.to_string();
+    let last = json!({"type": "message", "id": "e3", "parentId": "e2", "message": {"role": "user", "content": "last"}}).to_string();
+    // e2's line could not be read: the walk from e3 cannot reach the start.
+    let mut lines = vec![Ok(first.clone()), Ok(cut.clone()), Ok(last.clone())].into_iter();
+    assert!(active_branch(|| lines.next()).is_none());
+    // A leaf an off-branch entry names that is not in the file: file order too.
+    let mut lines = json_lines_of(&[json!({"id": "a", "parentId": null}), json!({"id": "b", "parentId": "a", "activeLeafId": "zz"})]).into_iter();
+    assert!(active_branch(|| lines.next()).is_none());
+    // Through `render`: the first message is kept.
+    let dir = scratch("broken-chain");
+    let path = dir.join("s.jsonl");
+    std::fs::write(&path, format!("{first}\n{cut}\n{last}\n")).unwrap();
+    let out = render(Agent::Omp, &path, &Request { id: "s", cwd: None, title: None }).unwrap().text;
+    assert!(out.contains("first") && out.contains("last"), "{out}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_write_that_fails_after_its_temporary_file_exists_removes_it() {
+    let dir = scratch("late-failure");
+    let target = dir.join("out.md");
+    std::fs::write(&target, "kept").unwrap();
+    let seen = std::sync::Mutex::new(None);
+    let failing = |from: &Path, _: &Path| {
+        *seen.lock().unwrap() = Some((from.to_path_buf(), from.exists()));
+        Err(std::io::Error::other("rename refused"))
+    };
+    assert!(crate::config_transfer::write_atomic_with(&target, b"new text", failing).is_err());
+    let (tmp, existed) = seen.lock().unwrap().clone().unwrap();
+    assert!(existed && !tmp.exists(), "the temporary file existed and is gone");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept", "the target is untouched");
     let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n.to_string_lossy().ends_with(".tmp")).collect();
     assert!(left.is_empty(), "{left:?}");
     std::fs::remove_dir_all(&dir).ok();

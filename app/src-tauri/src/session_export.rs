@@ -350,9 +350,57 @@ fn redact_value(v: &Value) -> Value {
     match v {
         Value::String(s) => Value::String(redact(s)),
         Value::Array(a) => Value::Array(a.iter().map(redact_value).collect()),
-        Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (redact(k), redact_value(v))).collect()),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, v)| {
+                    // A number has no quotes or name for the patterns: masked by its key's name.
+                    let v = if v.is_number() && secret_name(k) { Value::String(kelpie_proto::redact::MASK.into()) } else { redact_value(v) };
+                    (redact(k), v)
+                })
+                .collect(),
+        ),
         other => other.clone(),
     }
+}
+
+/// Whether `key` names a secret, by the credential filter's own rule (a quoted value under it is masked).
+fn secret_name(key: &str) -> bool {
+    redact(&format!("\"{key}\": \"probe-value-1\"")).contains(kelpie_proto::redact::MASK)
+}
+
+/// Output with JSON values on lines of their own (JSON lines, `jq -c`, logs): each such line with its
+/// strings redacted (kept on one line); `None` when no line is a JSON object or array.
+fn json_lines(text: &str) -> Option<String> {
+    let mut found = false;
+    let out: Vec<String> = text
+        .split('\n')
+        .map(|line| {
+            let t = line.trim();
+            let parsed = (t.starts_with('{') || t.starts_with('[')).then(|| serde_json::from_str::<Value>(t).ok()).flatten();
+            match parsed.and_then(|v| serde_json::to_string(&redact_value(&v)).ok()) {
+                Some(s) => {
+                    found = true;
+                    s
+                }
+                None => line.to_string(),
+            }
+        })
+        .collect();
+    found.then(|| out.join("\n"))
+}
+
+/// `text` redacted, also as it reads with JSON string escapes undone (`\n`, `\t`, `\"`, `\\`): JSON
+/// that is not whole (after a text prefix, cut, several blocks) hides line starts and quotes from the
+/// patterns. The unescaped form is used only when it masks more, so source code keeps its `\n`.
+fn redact_escaped(text: &str) -> String {
+    let direct = redact(text);
+    if !text.contains('\\') {
+        return direct;
+    }
+    let plain = text.replace("\\\\", "\u{0}").replace("\\n", "\n").replace("\\t", "\t").replace("\\\"", "\"").replace('\u{0}', "\\");
+    let unescaped = redact(&plain);
+    let masks = |s: &str| s.matches(kelpie_proto::redact::MASK).count();
+    if masks(&unescaped) > masks(&direct) { unescaped } else { direct }
 }
 
 /// A JSON object or array given as text (an MCP result, a tool's JSON output), pretty-printed with
@@ -386,11 +434,12 @@ fn window(text: &str) -> (&str, usize) {
 fn tool_text(text: &str) -> String {
     let text = lf(text);
     let (head, after) = window(text.trim_end().trim_start_matches('\n'));
-    cut(&redact(head), after)
+    cut(&redact_escaped(head), after)
 }
 
 /// User or assistant text made safe to embed: outside code fences, a line that would open an HTML
-/// block (`<details>`, `</details>`, `<!--`, `<script>`…) gets its `<` escaped, and a fence the
+/// block (`<details>`, `</details>`, `<!--`, `<script>`…), also behind blockquote or list markers,
+/// gets its `<` escaped, and a fence the
 /// message leaves open is closed, so one message cannot fold, hide or swallow the rest of the file.
 fn contain(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 8);
@@ -416,13 +465,16 @@ fn contain(text: &str) -> String {
                     continue;
                 }
             }
-            let mut chars = body.chars();
-            if fence.is_none() && chars.next() == Some('<') && chars.next().is_some_and(|x| x.is_ascii_alphabetic() || matches!(x, '/' | '!' | '?')) {
-                out.push_str(&line[..indent]);
-                out.push('\\');
-                out.push_str(body);
-                continue;
-            }
+        }
+        // Any indentation (a list item's continuation), blockquote markers and list markers come
+        // before what can open an HTML block (`> <!--`, `- <textarea>`, `1. > <script>`).
+        let at = line.len() - after_containers(line).len();
+        let mut chars = line[at..].chars();
+        if fence.is_none() && chars.next() == Some('<') && chars.next().is_some_and(|x| x.is_ascii_alphabetic() || matches!(x, '/' | '!' | '?')) {
+            out.push_str(&line[..at]);
+            out.push('\\');
+            out.push_str(&line[at..]);
+            continue;
         }
         out.push_str(line);
     }
@@ -433,6 +485,30 @@ fn contain(text: &str) -> String {
     out
 }
 
+/// `line` past its indentation, blockquote markers (`>`) and list markers (`-`, `*`, `+`, `1.`, `1)`),
+/// however deeply nested.
+fn after_containers(line: &str) -> &str {
+    let mut rest = line;
+    loop {
+        let s = rest.trim_start_matches([' ', '\t']);
+        if let Some(after) = s.strip_prefix('>') {
+            rest = after;
+            continue;
+        }
+        let digits = s.bytes().take_while(u8::is_ascii_digit).count();
+        let marker = match s.as_bytes().first() {
+            Some(b'-' | b'*' | b'+') => 1,
+            Some(_) if (1..=9).contains(&digits) && matches!(s.as_bytes().get(digits), Some(b'.' | b')')) => digits + 1,
+            _ => 0,
+        };
+        // A marker is one only when a space, a tab or the line's end follows it.
+        if marker > 0 && matches!(s.as_bytes().get(marker), None | Some(b' ' | b'\t')) {
+            rest = &s[marker..];
+            continue;
+        }
+        return s;
+    }
+}
 /// At most [`CUT_LINES`] lines and [`CUT_CHARS`] characters of `text`, then "… N lines omitted"
 /// (`after`: lines that followed `text` in the original). A first line longer than the whole
 /// allowance keeps its start, marked with `…`.
@@ -513,7 +589,7 @@ impl Doc {
                 }
                 // Strings are redacted before serialising (and the text again after, as a second net).
                 let (text, lang) = match &input {
-                    Value::String(s) => json_text(s).map_or_else(|| (s.clone(), "text"), |j| (j, "json")),
+                    Value::String(s) => json_text(s).map(|j| (j, "json")).unwrap_or_else(|| (json_lines(s).unwrap_or_else(|| s.clone()), "text")),
                     Value::Null => (String::new(), "text"),
                     v => (serde_json::to_string_pretty(&redact_value(v)).unwrap_or_default(), "json"),
                 };
@@ -522,7 +598,10 @@ impl Doc {
             }
             Event::Result { id, name, output, error } => {
                 let name = name.or_else(|| self.names.get(&id).cloned()).map(|n| format!(": {}", html(&one_line(&redact(&n))))).unwrap_or_default();
-                let (text, lang) = json_text(&output).map_or_else(|| (output, "text"), |j| (j, "json"));
+                let (text, lang) = match json_text(&output) {
+                    Some(j) => (j, "json"),
+                    None => (json_lines(&output).unwrap_or(output), "text"),
+                };
                 self.details(&format!("Result{name}{}", if error { " (error)" } else { "" }), &text, lang);
             }
         }
@@ -610,7 +689,8 @@ struct Link {
 
 /// The entries of an OMP session's active branch: from the leaf (the last entry, or the leaf an
 /// off-branch entry names) back to the root through `parentId`. Branches left by `/tree` or a fork
-/// are not part of what happened. `None` for a session without parent links (exported in file order).
+/// are not part of what happened. `None` (exported in file order) for a session without parent links,
+/// or when the chain reaches an entry that could not be read.
 ///
 /// Claude Code also links lines (`parentUuid`), but its chain also forks for parallel tool results
 /// and progress lines, which a walk from the leaf would drop; Kelpie's chat view replays Claude
@@ -629,7 +709,10 @@ fn active_branch(mut next: impl FnMut() -> Option<Result<String, u64>>) -> Optio
     while path.insert(at.clone()) {
         match parents.get(&at) {
             Some(Some(up)) => at = up.clone(),
-            _ => break,
+            Some(None) => break,
+            // A link to an entry that could not be read (cut, too long, malformed): which entries
+            // came before it is unknown, so everything is exported in file order instead.
+            None => return None,
         }
     }
     Some(path)

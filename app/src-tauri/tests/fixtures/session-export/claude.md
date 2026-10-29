@@ -184,6 +184,16 @@ My notes, pasted as they are:
 port: 8080
 ```
 
+Forwarded mail:
+> quoted mail
+> \<!-- tracking pixel
+>> \<details>
+- item
+  \<textarea>
+- outer
+  - inner
+    \<script>alert(1)</script>
+
 ## Assistant
 
 Here is the change I was about to make:

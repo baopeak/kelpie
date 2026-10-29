@@ -151,3 +151,50 @@ Review: `plans/reports/code-reviewer-261030-phase15d-session-export.md`.
 ### Over-masking seen in the new golden
 
 In `omp.md`, `DB_PASSWORD=\nLOG_LEVEL=debug` became `DB_PASSWORD=\n[redacted]=debug`. The helper's `\s*` after `=` spans a newline. This is the shared helper's behaviour; it over-masks rather than leaks.
+
+## Review fixes, round 2
+
+Review: "Round 2" in `plans/reports/code-reviewer-261030-phase15d-session-export.md`. It had no blocking findings.
+
+### HTML openers inside containers
+
+- `contain` now looks past any indentation, blockquote markers (`>`, nested `>>`) and list markers (`-`, `*`, `+`, `1.`, `1)`; 1 to 9 digits, followed by a space, a tab or the line end). This uses the new `after_containers`. When what remains starts with `<` followed by a letter, `/`, `!` or `?`, a backslash is inserted before that `<`.
+  - This covers `> <!--`, `- item` followed by `  <textarea>`, nested list items, `>>`, `1. > <style>`, and a list item's continuation indented 4 or more spaces.
+  - Only fences at the top level are tracked, as before. A fence inside a quote or list, or an indented code block, can show a visible `\`; the review accepted this.
+- I picked this over "escape every tag-like `<` anywhere". Inline HTML inside a line cannot open a block, and escaping it would mangle inline text and code spans.
+- **Golden.** `claude.md` has a forwarded-mail message with these cases.
+- **Check.** Rendering all three goldens with the app's `marked` gives no raw `<!--`, `<script>`, `<textarea>`, `<style>` or `<pre>` outside code. Every `## User` / `## Assistant` heading is present, and each document ends with its last message.
+
+### Redaction residues
+
+- **Numbers under secret-named keys.** These are masked: `{"password": 12345678}` becomes `"[redacted]"`. The key is judged by the credential filter's own rule (`secret_name` probes `redact` with a quoted value), so the list of secret names is not copied.
+- **JSON lines.** Tool text that is not one JSON value is tried as JSON lines (`json_lines`): each line that is a JSON object or array has its strings redacted and is kept on one line. Other lines are left alone.
+- **Escaped JSON fallback.** The windowed second net is now `redact_escaped`. It also redacts the text with `\n`, `\t`, `\"` and `\\` undone, and uses that form only when it masks more. This covers JSON after a text prefix and JSON in several blocks, while source code with `\n` in a string literal keeps its escapes.
+- Tests cover numbers, the probe, NDJSON, text-prefixed JSON, code that stays unchanged, and a whole export with an NDJSON output and a numeric PIN.
+
+### OMP chain broken by an unreadable line
+
+- When the walk from the leaf reaches a parent id that no readable line defines, `active_branch` now returns `None` and the session is exported in file order. Before, the start was dropped silently.
+- The same applies when an off-branch entry names a leaf that is not in the file.
+- Tests: a middle line that is cut off; a leaf that is not in the file; and a full `render` that keeps the first message.
+
+### Toasts
+
+`.toast > span` now also has `max-height: 40vh; overflow: auto`, so long multi-line git or hook output scrolls instead of growing past the window.
+
+### Atomic writer and its tests
+
+- **Testable rename.** `write_file_atomic` now goes through `write_atomic_with(path, bytes, rename)`, so a test can make the rename fail after the temporary file exists. New test: the temporary file existed, is gone afterwards, and the target is untouched.
+- **Retries.** The real rename (`rename_retrying`) is tried again up to 5 times, with 20 to 100 ms back-off, when Windows answers `PermissionDenied`. That happens with concurrent renames to one target or a scanner holding the file. This makes the four-writer test and real exports robust against that contention.
+
+### Numbers after round 2
+
+- `cargo test -p kelpie -j 2`: 229 passed, 0 failed, 6 ignored. clippy `-p kelpie --all-targets`: clean.
+- `session_export` now has 19 tests and 1 ignored bless helper.
+- Frontend:
+  - `pnpm typecheck`: ok.
+  - `pnpm test`: 510 passed.
+  - `pnpm i18n:check`: 0 missing, 0 problems.
+  - `pnpm build`: ok.
+- Bundle gate: entry 326.31 kB gz, limit 338.60: ok.
+- `scripts/e2e/session_export.py`: 28/28 in two consecutive runs on the rebuilt debug app. Test daemon, driver and scratch data were removed; only the user's own installed Kelpie stayed running, untouched.

@@ -1,13 +1,13 @@
 {
   "label": "phase-15d",
-  "created": "2026-10-30T01:04:51+07:00",
+  "created": "2026-10-30T01:25:47+07:00",
   "machine": {
     "os": "Windows-10-10.0.19045-SP0",
     "cpu": "Intel(R) Core(TM) i5-6440HQ CPU @ 2.60GHz",
     "python": "3.14.6",
     "cores": "4 physical / 4 logical",
     "ram_gb": 7.9,
-    "commit": "dc3f15d"
+    "commit": "c756237"
   },
   "runs": 3,
   "metrics": {
@@ -16,9 +16,9 @@
   "spread_pct": {},
   "range": {},
   "bundle": {
-    "entry_file": "index-_QGQKByj.js",
+    "entry_file": "index-DOrxGJ-F.js",
     "lazy_chunks": 257,
-    "lazy_gz_kb": 1801.14,
+    "lazy_gz_kb": 1801.09,
     "largest_lazy": {
       "chunk-FOHPRMQF-DD4dKubD.js": 143.15,
       "cytoscape.esm-BegBNzOV.js": 137.75,
