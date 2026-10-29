@@ -2,10 +2,14 @@
 # Builds the Kelpie installer for the current platform:
 #   Windows → NSIS installer (kelpied.exe, kelpie-stt.exe + sideloaded ConPTY next to Kelpie.exe)
 #   macOS   → Kelpie.app + .dmg (kelpied, kelpie-stt inside Contents/MacOS)
+#   Linux   → AppImage + .deb with `--bundles appimage,deb` (kelpied, kelpie-stt next to the app in usr/bin)
 # Usage: scripts/build-release.sh [extra tauri build args]
 # Bumps the patch version first (0.1.0 → 0.1.1), so each installer has its own number.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# Debian/Ubuntu ship only `python3`; Windows installs only `python` (its `python3` may be the Store stub).
+python() { if command -v python >/dev/null 2>&1; then command python "$@"; else command python3 "$@"; fi; }
 
 # Every build gets a new version: bump the patch number wherever the version is declared
 # (workspace Cargo.toml, app/package.json, tauri.conf.json), keeping them in step.

@@ -5,10 +5,13 @@
         --base-url https://github.com/baopeak/kelpie/releases/download/v0.1.3 \
         [--notes-file notes.md] \
         --artifact windows-x86_64=path/Kelpie_0.1.3_x64-setup.exe \
-        --artifact darwin-aarch64=path/Kelpie.app.tar.gz  > latest.json
+        --artifact darwin-aarch64=path/Kelpie.app.tar.gz \
+        --artifact linux-x86_64=path/Kelpie_0.1.3_amd64.AppImage  > latest.json
 
 Each artifact needs its minisign signature next to it (`<file>.sig`, made by the Tauri build with
-TAURI_SIGNING_PRIVATE_KEY). The app fetches
+TAURI_SIGNING_PRIVATE_KEY). Tauri 2 signs the installers themselves (`createUpdaterArtifacts: true`):
+on Linux the `.AppImage` is the update and `.AppImage.sig` its signature. The app looks for
+`<os>-<arch>-<bundle>` (e.g. `linux-x86_64-deb`) before `<os>-<arch>`. The app fetches
 https://github.com/baopeak/kelpie/releases/latest/download/latest.json and verifies the download
 against the public key in tauri.conf.json.
 """

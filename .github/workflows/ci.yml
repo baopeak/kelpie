@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +20,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # Linux: WebKitGTK, tray and SVG libraries for Tauri, D-Bus for the Secret Service keyring, ALSA for
+      # the speech helper's microphone, linuxdeploy's needs for the AppImage, and the WebDriver + X server
+      # the smoke test drives the app with.
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf \
+            libasound2-dev xdg-utils libfuse2 file \
+            webkit2gtk-driver xvfb dbus-x11
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Linux'
+        with:
+          python-version: "3.12"
       - name: Rust tests (protocol, daemon, app backend, speech helper)
         run: cargo test -p kelpie-proto -p kelpied -p kelpie -p kelpie-stt
       - name: Frontend typecheck
@@ -37,11 +52,61 @@ jobs:
           python scripts/perf/perf_gate.py --label ci-bench --metrics bench --runs 1
       - name: Bundle
         shell: bash
-        run: scripts/build-release.sh --bundles ${{ matrix.os == 'windows-latest' && 'nsis' || 'app,dmg' }}
+        env:
+          # linuxdeploy is itself an AppImage: run it without FUSE.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: scripts/build-release.sh --bundles ${{ matrix.os == 'windows-latest' && 'nsis' || matrix.os == 'macos-latest' && 'app,dmg' || 'appimage,deb' }}
+      - name: Linux packages install cleanly
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb=$(ls target/release/bundle/deb/*.deb | head -1)
+          img=$(ls target/release/bundle/appimage/*.AppImage | head -1)
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb" | tee deb-contents.txt
+          for f in ./usr/bin/kelpie ./usr/bin/kelpied ./usr/bin/kelpie-stt ./usr/share/applications/Kelpie.desktop; do
+            grep -q " $f\$" deb-contents.txt || { echo "missing from the .deb: $f"; exit 1; }
+          done
+          sudo dpkg -i "$deb" || { sudo apt-get install -f -y && sudo dpkg -i "$deb"; }
+          dpkg -s kelpie | grep -q '^Status: install ok installed'
+          # Every shared library the installed programs need resolves.
+          for f in /usr/bin/kelpie /usr/bin/kelpied /usr/bin/kelpie-stt; do
+            test -x "$f" || { echo "not installed: $f"; exit 1; }
+            if ldd "$f" | grep 'not found'; then echo "$f misses libraries"; exit 1; fi
+          done
+          sudo dpkg -r kelpie
+          test -x "$img" || { echo "$img is not executable"; exit 1; }
+          file "$img" | grep -q ELF
+          mkdir -p appimage-check && cd appimage-check
+          "../$img" --appimage-extract >/dev/null
+          for f in squashfs-root/usr/bin/kelpie squashfs-root/usr/bin/kelpied squashfs-root/usr/bin/kelpie-stt; do
+            test -x "$f" || { echo "missing from the AppImage: $f"; exit 1; }
+          done
+          cd .. && rm -rf appimage-check
+      - name: Linux smoke under Xvfb (isolated daemon, release app)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install tauri-driver --locked
+          python -m pip install psutil
+          mkdir -p smoke
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1600x1000x24" \
+            python scripts/e2e/boot_smoke.py smoke target/release/kelpie \
+              --out smoke/linux-smoke.json --baseline scripts/perf/linux-smoke-baseline.json
       - uses: actions/upload-artifact@v4
         with:
           name: kelpie-${{ matrix.os }}
           path: |
             target/release/bundle/nsis/*.exe
             target/release/bundle/dmg/*.dmg
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Linux'
+        with:
+          name: linux-smoke
+          path: smoke/
           if-no-files-found: ignore
