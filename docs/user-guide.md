@@ -24,7 +24,7 @@ Architecture and protocol: [architecture.md](architecture.md).
   issue-tracker tokens) need a Secret Service — GNOME Keyring, KWallet or another
   `org.freedesktop.secrets` provider, unlocked; without one, saving a secret fails with a message
   that says so and nothing is stored anywhere else. **Keep computer awake** uses
-  `systemd-inhibit` (systemd's logind) to stop automatic sleep, never a suspend you choose; on a system without it the setting has no effect and the
+  `systemd-inhibit` (systemd's logind) to block idle sleep and suspend while it is on; on a system without it the setting has no effect and the
   daemon log says why. Desktop notifications go through the desktop's notification service.
 
 Agents are not bundled: install the CLIs you use (`claude`, `codex`, `omp`) as usual. Kelpie
@@ -418,7 +418,7 @@ prompt**; for a terminal it is a startup command.
   project for N minutes are stopped; they resume their conversation when you open them
   again. *Sleep* in a project's menu does the same at once.
 - **Keep computer awake**: off, while an agent works, or always (status bar coffee icon). The
-  display may still turn off. Linux: through `systemd-inhibit` (automatic idle sleep only; suspending from the menu still works).
+  display may still turn off. Linux: through `systemd-inhibit`. While Kelpie keeps the computer awake, a suspend chosen from the system menu waits until it lets go; closing the lid still follows your system's setting; switch keep-awake off (or to *while an agent works*) when you want the computer to sleep.
 - **Prioritize visible terminals** (Settings → Agents, on by default, Windows): the terminal on
   screen gets the CPU first, so typing stays quick while other agents build and test or other
   programs keep the machine busy. Nothing else is slowed down.

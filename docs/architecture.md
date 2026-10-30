@@ -53,10 +53,10 @@ the dev scripts and tests).
 |---|---|---|---|
 | Data folder | `%LOCALAPPDATA%\Kelpie` | `~/Library/Application Support/Kelpie`, 0700 | `$XDG_DATA_HOME/Kelpie` or `~/.local/share/Kelpie`, 0700 (`ensure_private_dir`; an existing folder of ours is narrowed) |
 | Daemon endpoint | named pipe `\\.\pipe\kelpie-<user>-v1` | `kelpied-v1.sock` (0600) in the data folder | same as macOS |
-| Daemon runs from | a copy in `<data>/daemon/a` or `b` (release builds) | the app bundle | the install (`/usr/bin`, .deb) or, from an AppImage (whose mount ends with the app), a copy in `<data>/daemon/a`, rewritten for each new build (a running daemon keeps its unlinked file; `b` only when `a` cannot be written). The daemon gets the app's environment without the AppImage runtime and GTK hook variables (`appimage_env_fixes`), so sessions never see the mount |
+| Daemon runs from | a copy in `<data>/daemon/a` or `b` (release builds) | the app bundle | the install (`/usr/bin`, .deb) or, from an AppImage (whose mount ends with the app), a copy in `<data>/daemon/a`, rewritten for each new build (a running daemon keeps its unlinked file; `b` only when `a` cannot be written). The daemon, and every program the app starts (editors, `xdg-open`, git, ssh, user commands), gets the app's environment without the AppImage runtime and GTK hook variables (`daemon_runtime::clean_env`), so sessions and those programs never see the mount |
 | Session processes | Job Object per session, sideloaded ConPTY | process groups, `killpg` | same as macOS |
 | Agent PATH | PATH + PATHEXT, npm shims unwrapped | login shell: `$SHELL -l -c 'exec …'` | same as macOS; without `SHELL`, the account's shell from the user database, else `/bin/sh` |
-| Keep awake | `SetThreadExecutionState` | `caffeinate -i -w <daemon pid>` | `systemd-inhibit --what=idle --mode=block sleep infinity` (automatic idle sleep only, like Windows; a suspend the user picks still happens), `PR_SET_PDEATHSIG` ties it to the daemon; none without systemd (logged, also when logind refuses later) |
+| Keep awake | `SetThreadExecutionState` | `caffeinate -i -w <daemon pid>` | `systemd-inhibit --what=idle:sleep --mode=block sleep infinity` (whichever lock a desktop's automatic suspend honours; a menu suspend waits, the lid follows logind's `LidSwitchIgnoreInhibited`), `PR_SET_PDEATHSIG` ties it to the daemon; none without systemd (logged, also when logind refuses later) |
 | Secrets (`keyring`) | Credential Manager | Keychain | Secret Service over D-Bus (`sync-secret-service`, `crypto-rust`); no service = an error naming what to install, never a fallback |
 | Notifications | `tauri-plugin-notification` | same | same (freedesktop notifications over D-Bus) |
 | Packages | NSIS (`-setup.exe`) | `.app` + `.dmg`, universal | AppImage + `.deb`, built on Ubuntu 22.04 |
@@ -1106,9 +1106,9 @@ task's run status is the Runs engine's.
     `event` takes only `file`, `pr_checks_failed` and `finished`.
     `automation.list` adds `command_hash` to commands.
 - **Keep awake** (`awake.rs`, `daemon.set_awake`): Windows `SetThreadExecutionState` from one
-  dedicated thread, macOS a `caffeinate -i -w <pid>` child, Linux a `systemd-inhibit --what=idle` child that dies
+  dedicated thread, macOS a `caffeinate -i -w <pid>` child, Linux a `systemd-inhibit --what=idle:sleep` child that dies
   with the daemon (`PR_SET_PDEATHSIG`; logged once and skipped without systemd or when logind refuses it,
-  even later); like Windows and macOS it stops automatic sleep, never a suspend the user picks; mode *agents* holds it while any
+  even later); a suspend picked from the menu waits while it is held, the lid follows the system setting; mode *agents* holds it while any
   non-shell session is working.
 - **Terminal palette**: `daemon.set_theme` takes an optional palette (16 ANSI + fg/bg/cursor)
   so colour-query answers match the chosen terminal theme.
