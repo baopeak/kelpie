@@ -602,6 +602,21 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .chat { --chat-max: 1200px; --chat-gutter: 12px; --rail: 18px; position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--term-bg); }
 .chat-scroll { flex: 1; overflow-y: auto; padding: 14px 0 8px; user-select: text; }
 .chat-inner { max-width: var(--chat-max); margin: 0 auto; padding: 0 var(--chat-gutter); display: flex; flex-direction: column; gap: 12px; }
+/* The prompt the visible answer belongs to, laid over the transcript so its scroll height never
+   moves. Stops short of the 10px scrollbar, which keeps it usable and lines up with .chat-inner. */
+.chat-pinned { position: absolute; top: 0; left: 0; right: 10px; z-index: 4; padding: 4px 0; border: 0; border-bottom: 1px solid var(--border); background: var(--term-bg); color: var(--text-dim); font: 12.5px/1.4 var(--font-ui); cursor: pointer; }
+.chat-pinned:hover { color: var(--text); }
+.chat-pinned:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.chat-pinned-inner { display: flex; align-items: baseline; justify-content: flex-end; gap: 8px; max-width: var(--chat-max); margin: 0 auto; padding: 0 var(--chat-gutter); }
+.chat-pinned-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; text-align: right; }
+.chat-pinned .msg-time { flex: none; }
+/* Always clear of the bar, which can show a prompt from before the rendered window up here. */
+.chat-earlier { align-self: center; margin-top: 40px; }
+/* A jump must not land under the bar. */
+[data-item] { scroll-margin-top: 52px; }
+.chat-flash { outline: 2px solid var(--accent); outline-offset: 2px; animation: chat-flash 1.2s ease-out forwards; }
+@keyframes chat-flash { to { outline-color: transparent; } }
+@media (prefers-reduced-motion: reduce) { .chat-flash { animation: none; } }
 .msg-user { align-self: flex-end; max-width: 85%; background: var(--bg-active); border: 1px solid var(--user-msg-border); padding: 9px 13px; border-radius: 12px 12px 3px 12px; white-space: pre-wrap; }
 .msg-assistant { line-height: 1.6; }
 .msg-assistant p { margin: .35em 0; }

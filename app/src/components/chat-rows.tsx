@@ -76,7 +76,7 @@ export function ToolRow(props: { item: Tool; project: Project; nested?: boolean 
   const rel = createMemo(() => (view().path ? projectRelative(props.project, view().path!) : null));
   const isEdit = () => view().category === "edit";
   return (
-    <div class={`trow tool${dotClass(props.item.status)}${props.nested ? " nested" : ""}${props.item.status === "error" ? " error" : ""}`}>
+    <div class={`trow tool${dotClass(props.item.status)}${props.nested ? " nested" : ""}${props.item.status === "error" ? " error" : ""}`} data-item={props.nested ? undefined : props.item.id}>
       <div class="tool-head" onClick={() => hasBody() && setOpen(!isOpen())}>
         <span class="tdot" />
         <span class="tname">{view().verb}</span>
@@ -140,7 +140,7 @@ export function ToolRun(props: { items: Tool[]; project: Project }) {
     return (running() ? t("Exploring {what}", { what: parts.join(", ") }) : t("Explored {what}", { what: parts.join(", ") }));
   });
   return (
-    <div class={`trow tool run${running() ? " running" : failed() ? " error" : ""}`}>
+    <div class={`trow tool run${running() ? " running" : failed() ? " error" : ""}`} data-item={props.items[0].id}>
       <div class="tool-head" onClick={() => setOpen(!open())}>
         <span class="tdot" />
         <span class="tname">{label()}</span>
@@ -160,8 +160,8 @@ export function ThinkingRow(props: { item: Extract<ChatItem, { kind: "thinking" 
   const [open, setOpen] = createSignal(false);
   const secs = () => (props.item.at != null && props.item.doneAt != null ? Math.max(1, Math.round((props.item.doneAt - props.item.at) / 1000)) : null);
   return (
-    <Show when={!props.item.streaming} fallback={<div class="trow thinking running"><div class="msg-thinking live">{props.item.text.split("\n").slice(-6).join("\n")}</div></div>}>
-      <div class="trow thinking">
+    <Show when={!props.item.streaming} fallback={<div class="trow thinking running" data-item={props.item.id}><div class="msg-thinking live">{props.item.text.split("\n").slice(-6).join("\n")}</div></div>}>
+      <div class="trow thinking" data-item={props.item.id}>
         <div class="tool-head plain" onClick={() => setOpen(!open())}>
           <span class="tdot" />
           <span class="thought">{secs() ? t("Thought for {n}s", { n: secs()! }) : t("Thought")}</span>
@@ -196,7 +196,7 @@ export function PermissionCard(props: { item: Permission; project: Project; ctrl
   };
   const complete = () => (p().ask ?? []).every((q) => answers()[q.question]);
   return (
-    <div class="perm" classList={{ resolved: !!p().resolved }} data-perm={p().id}>
+    <div class="perm" classList={{ resolved: !!p().resolved }} data-item={p().id}>
       <div class="q">{p().title}</div>
       <Show when={p().detail}><div class="perm-detail">{p().detail}</div></Show>
       <Show when={p().command}><pre class="perm-command">{p().command}</pre></Show>
@@ -266,11 +266,11 @@ export function PermissionCard(props: { item: Permission; project: Project; ctrl
 }
 
 /** "3 files changed +42 −7", each file opening its changes. */
-export function TurnFiles(props: { files: FileChange[]; project: Project }) {
+export function TurnFiles(props: { itemId: string; files: FileChange[]; project: Project }) {
   const [open, setOpen] = createSignal(props.files.length <= 4);
   const total = () => props.files.reduce((acc, f) => ({ adds: acc.adds + f.adds, dels: acc.dels + f.dels }), { adds: 0, dels: 0 });
   return (
-    <div class="turn-files">
+    <div class="turn-files" data-item={props.itemId}>
       <div class="tool-head" onClick={() => setOpen(!open())}>
         <Icon name="git" size={12} />
         <span class="tname">{props.files.length === 1 ? t("1 file changed") : t("{n} files changed", { n: props.files.length })}</span>

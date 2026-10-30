@@ -8,6 +8,7 @@ import { findPane } from "../lib/layout";
 import { getController, switchToTerminal } from "../chat/mode-switch";
 import { CHAT_SANITIZE, chatMarkdownHtml, fileRefInCode, linkifyText } from "../chat/chat-links";
 import type { ChatItem } from "../chat/chat-model";
+import { PINNED_REACH, lastPromptBefore, pinnedPromptId, renderedPrompts } from "../chat/pinned-prompt";
 import { openTable, stableEnd } from "../chat/streaming-markdown";
 import { describeTool, diffStats, unifiedFiles } from "../chat/tool-view";
 import type { Project } from "../lib/types";
@@ -23,6 +24,13 @@ import { locale, t } from "../lib/i18n";
 const clockLocale = () => (locale() === "vi" ? "vi-VN" : []);
 
 const RENDER_WINDOW = 300;
+/** A jump has landed once its scrolling has been quiet this long (not every WebView has `scrollend`). */
+const JUMP_QUIET_MS = 150;
+const FLASH_MS = 1200;
+const BOTTOM_FRAMES = 60;
+const BOTTOM_CALM_FRAMES = 3;
+
+const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /** The turn panel's undo preview, loaded the first time a chat offers an undo. */
 const UndoDialog = lazy(() => import("./turn-timeline").then((m) => ({ default: m.UndoDialog })));
@@ -197,26 +205,168 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
   const items = createMemo(() => (showAll() ? ctrl.state.items : ctrl.state.items.slice(-RENDER_WINDOW)));
   const shape = createMemo(() => transcriptShape(items()));
 
+  // The prompt the bar over the transcript shows. Looked up by id, so its text updates without
+  // reading any layout; positions are read at most once a frame, however often this is asked for.
+  const [pinned, setPinned] = createSignal<string | null>(null);
+  const pinnedPrompt = createMemo(() => {
+    const id = pinned();
+    return id ? ctrl.state.items.find((i): i is Extract<ChatItem, { kind: "user" }> => i.kind === "user" && i.id === id) : undefined;
+  });
+  let promptEls: HTMLElement[] | null = null;
+  const earlierPrompt = createMemo(() => lastPromptBefore(ctrl.state.items, ctrl.state.items.length - items().length));
+  const updatePinned = () => {
+    // Not laid out (a hidden tab): every offset reads 0, which says nothing.
+    if (!scroller.clientHeight) return;
+    promptEls ??= [...scroller.querySelectorAll<HTMLElement>("[data-user]")];
+    // Both are offset from `.chat`, the nearest positioned ancestor; scrolling does not move them.
+    const origin = scroller.offsetTop;
+    const prompts = promptEls.map((el) => {
+      const top = el.offsetTop - origin;
+      return { id: el.dataset.item!, top, bottom: top + el.offsetHeight };
+    });
+    setPinned(pinnedPromptId(prompts, scroller.scrollTop, earlierPrompt(), PINNED_REACH));
+  };
+  let pinnedFrame = 0;
+  const schedulePinned = () => {
+    if (pinnedFrame) return;
+    pinnedFrame = requestAnimationFrame(() => {
+      pinnedFrame = 0;
+      updatePinned();
+    });
+  };
+  // The window slides once it is full, so its length alone would not notice a new set of rows.
+  createEffect(on(createMemo(() => renderedPrompts(items())), () => {
+    promptEls = null;
+    schedulePinned();
+  }));
+
   // Keep pinned to the bottom while streaming unless the user scrolled up; then offer a way back.
   const [away, setAway] = createSignal(false);
+  const syncStick = () => {
+    stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+    setAway(!stick);
+  };
   createEffect(() => {
     const last = ctrl.state.items[ctrl.state.items.length - 1];
     void (last && "text" in last ? (last as any).text : last);
     void ctrl.state.items.length;
-    if (stick) queueMicrotask(() => scroller && (scroller.scrollTop = scroller.scrollHeight));
+    if (stick) queueMicrotask(() => {
+      if (!scroller) return;
+      scroller.scrollTop = scroller.scrollHeight;
+      schedulePinned();
+    });
   });
+
+  /** A smooth scroll on its way to an item. Its first steps, still near the bottom, say nothing about
+   *  sticking, and it can land off target: rows not measured yet are estimates. */
+  let jump: { id: string; block: ScrollLogicalPosition; quiet: number } | null = null;
+  let jumpFrame = 0;
+  /** On the way to the bottom: rows not painted yet only estimate their height, so the first bottom is
+   *  not the last one. */
+  let bottomFrame = 0;
+  const stopJump = () => {
+    cancelAnimationFrame(jumpFrame);
+    cancelAnimationFrame(bottomFrame);
+    bottomFrame = 0;
+    clearTimeout(jump?.quiet);
+    jump = null;
+  };
+  /** The row an item shows in: one folded into a run shows in the run, under the run's first id. */
+  const itemEl = (id: string) => {
+    const { member, runs } = shape();
+    const first = member.has(id) ? [...runs].find(([, run]) => run.some((t) => t.id === id))?.[0] ?? id : id;
+    return scroller.querySelector<HTMLElement>(`[data-item="${CSS.escape(first)}"]`);
+  };
+  let flashed: HTMLElement | null = null;
+  let flashTimer = 0;
+  const flash = (el: HTMLElement) => {
+    clearTimeout(flashTimer);
+    flashed?.classList.remove("chat-flash");
+    flashed = el;
+    // A row flashing already starts over only if the browser sees the class gone.
+    void el.offsetWidth;
+    el.classList.add("chat-flash");
+    flashTimer = window.setTimeout(() => el.classList.remove("chat-flash"), FLASH_MS);
+  };
+  const land = () => {
+    if (!jump) return;
+    const { id, block } = jump;
+    stopJump();
+    const el = itemEl(id);
+    if (el) {
+      el.scrollIntoView({ block });
+      flash(el);
+    }
+    syncStick();
+  };
+  const awaitLanding = () => {
+    clearTimeout(jump!.quiet);
+    jump!.quiet = window.setTimeout(land, JUMP_QUIET_MS);
+  };
+  /** Brings an item into view, below the pinned bar, showing earlier items if it needs them. */
+  const scrollToItem = (id: string, options: { block?: ScrollLogicalPosition } = {}) => {
+    stopJump();
+    if (!ctrl.state.items.some((i) => i.id === id)) return;
+    if (!items().some((i) => i.id === id)) {
+      setShowAll(true);
+      jumpFrame = requestAnimationFrame(() => scrollToItem(id, options));
+      return;
+    }
+    const el = itemEl(id);
+    if (!el) return;
+    stick = false;
+    setAway(true);
+    const block = options.block ?? "start";
+    jump = { id, block, quiet: 0 };
+    awaitLanding();
+    el.scrollIntoView({ block, behavior: reducedMotion() ? "auto" : "smooth" });
+  };
+  const onScroll = () => {
+    if (jump) awaitLanding();
+    else if (!bottomFrame) syncStick();
+    schedulePinned();
+  };
+  // Whatever the user does meanwhile wins over the landing.
+  const takeOver = () => {
+    if (!jump && !bottomFrame) return;
+    stopJump();
+    syncStick();
+  };
+  onMount(() => {
+    scroller.addEventListener("scrollend", land);
+    // Passive: wheel scrolling must not wait on us.
+    for (const type of ["wheel", "pointerdown", "keydown"]) scroller.addEventListener(type, takeOver, { passive: true });
+  });
+  onCleanup(() => {
+    cancelAnimationFrame(pinnedFrame);
+    stopJump();
+    clearTimeout(flashTimer);
+  });
+
   const toBottom = () => {
+    stopJump();
     stick = true;
     setAway(false);
     scroller.scrollTop = scroller.scrollHeight;
+    // A frame's callbacks run before its layout: only a bottom that holds for a few frames is the last one.
+    let frames = BOTTOM_FRAMES;
+    let calm = 0;
+    const step = () => {
+      const gap = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      calm = gap > 1 ? 0 : calm + 1;
+      if (calm < BOTTOM_CALM_FRAMES && --frames > 0) {
+        if (gap > 1) scroller.scrollTop = scroller.scrollHeight;
+        bottomFrame = requestAnimationFrame(step);
+        return;
+      }
+      bottomFrame = 0;
+      syncStick();
+    };
+    bottomFrame = requestAnimationFrame(step);
   };
   /** An approval nobody answered yet: the pill leads to it. */
   const pending = createMemo(() => ctrl.state.items.find((i): i is Extract<ChatItem, { kind: "permission" }> => i.kind === "permission" && !i.resolved));
-  const toPending = () => {
-    const el = scroller.querySelector(`[data-perm="${CSS.escape(pending()!.id)}"]`);
-    if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
-    else toBottom();
-  };
+  const toPending = () => scrollToItem(pending()!.id, { block: "center" });
 
   // Elapsed time of the running turn.
   const [now, setNow] = createSignal(Date.now());
@@ -263,13 +413,34 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
 
   return (
     <div class="chat">
-      <div class="chat-scroll" ref={scroller} onScroll={(e) => {
-        stick = e.currentTarget.scrollHeight - e.currentTarget.scrollTop - e.currentTarget.clientHeight < 40;
-        setAway(!stick);
-      }}>
+      <Show when={pinnedPrompt()}>
+        {(u) => (
+          <button
+            class="chat-pinned"
+            title={t("Go to this message")}
+            // The caret stays in the composer: Esc there interrupts the agent, and this bar goes away on arrival.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              scrollToItem(u().id);
+              if (e.detail === 0) e.currentTarget.parentElement?.querySelector<HTMLTextAreaElement>(".composer-box textarea")?.focus();
+            }}
+            // Not inside the scroller, so the wheel would stop dead here.
+            onWheel={(e) => {
+              takeOver();
+              scroller.scrollTop += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * scroller.clientHeight : e.deltaY;
+            }}
+          >
+            <span class="chat-pinned-inner">
+              <span class="chat-pinned-text">{u().text.trim()}</span>
+              <Stamp at={u().at} />
+            </span>
+          </button>
+        )}
+      </Show>
+      <div class="chat-scroll" ref={scroller} onScroll={onScroll}>
         <div class="chat-inner">
           <Show when={!showAll() && ctrl.state.items.length > RENDER_WINDOW}>
-            <button class="btn" style={{ "align-self": "center" }} onClick={() => setShowAll(true)}>{t("Show {n} earlier items", { n: ctrl.state.items.length - RENDER_WINDOW })}</button>
+            <button class="btn chat-earlier" onClick={() => setShowAll(true)}>{t("Show {n} earlier items", { n: ctrl.state.items.length - RENDER_WINDOW })}</button>
           </Show>
           <Show when={ctrl.state.ready && ctrl.state.items.length === 0}>
             <div class="muted" style={{ "text-align": "center" }}>
@@ -284,7 +455,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                     const u = it() as Extract<ChatItem, { kind: "user" }>;
                     return (
                       <Show when={u.text}>
-                        <div class="msg-user-wrap">
+                        <div class="msg-user-wrap" data-item={u.id} data-user>
                           <div class="msg-meta">
                             <For each={undoable().get(u.id) ?? []}>
                               {(rec) => (
@@ -314,7 +485,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                 </Match>
                 <Match when={item.kind === "assistant" && item}>
                   {(it) => (
-                    <div class="msg-reply" classList={{ streaming: !!(it() as any).streaming }}>
+                    <div class="msg-reply" classList={{ streaming: !!(it() as any).streaming }} data-item={it().id}>
                       <div class="msg-meta">
                         <Show when={!(it() as any).streaming && (it() as any).text}><CopyButton text={(it() as any).text} /></Show>
                         <Stamp at={it().at} />
@@ -342,7 +513,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                   {(it) => {
                     const s = it() as Extract<ChatItem, { kind: "system" }>;
                     return (
-                      <div class="result-line" style={{ color: s.tone === "error" ? "var(--danger)" : undefined }}>
+                      <div class="result-line" style={{ color: s.tone === "error" ? "var(--danger)" : undefined }} data-item={s.id}>
                         {s.text}
                         <Show when={s.tui}>
                           {" "}<button class="btn" style={{ height: "22px" }} onClick={() => openInTerminal(s.tui!.command)}><Icon name="terminal" size={12} /> {t("Run it in the terminal")}</button>
@@ -354,8 +525,8 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                 <Match when={item.kind === "result" && item}>
                   {(it) => (
                     <>
-                      <Show when={shape().turnFiles.get(it().id)}>{(files) => <TurnFiles files={files()} project={props.project} />}</Show>
-                      <Show when={(it() as any).text}><div class="result-line">{(it() as any).text}<Show when={it().at}> · {clock(it().at!)}</Show></div></Show>
+                      <Show when={shape().turnFiles.get(it().id)}>{(files) => <TurnFiles itemId={it().id} files={files()} project={props.project} />}</Show>
+                      <Show when={(it() as any).text}><div class="result-line" data-item={it().id}>{(it() as any).text}<Show when={it().at}> · {clock(it().at!)}</Show></div></Show>
                     </>
                   )}
                 </Match>
@@ -378,7 +549,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
           </div>
         </Show>
       </div>
-      <ChatComposer ctrl={ctrl} session={session()} agentLabel={meta().label} focused={props.focused} onSent={() => (stick = true)} />
+      <ChatComposer ctrl={ctrl} session={session()} agentLabel={meta().label} focused={props.focused} onSent={toBottom} />
       {/* In the body: the work area contains layout, which would hold a fixed overlay inside it. */}
       <Show when={undoing()}>
         {(n) => (

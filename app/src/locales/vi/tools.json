@@ -402,5 +402,6 @@
   "The conversation is too long: the file stops at the size limit and says so.": "Cuộc trò chuyện quá dài: tệp dừng ở giới hạn kích thước và có ghi chú về điều đó.",
   "{n} unreadable transcript line was left out.": "Đã bỏ qua {n} dòng bản ghi không đọc được.",
   "{n} unreadable transcript lines were left out.": "Đã bỏ qua {n} dòng bản ghi không đọc được.",
-  "Could not export the conversation: {error}": "Không xuất được cuộc trò chuyện: {error}"
+  "Could not export the conversation: {error}": "Không xuất được cuộc trò chuyện: {error}",
+  "Go to this message": "Đến tin nhắn này"
 }
