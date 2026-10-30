@@ -122,27 +122,44 @@ From `plans/reports/code-reviewer-261030-phase15a-linux.md`.
 | [40976083881](https://github.com/baopeak/kelpie/actions/runs/40976083881) | The watchdog showed memory and disk fine (≈2 GB used, 105 GB free). Under `timeout` the test process alone was killed mid-run, which pointed at the `kill` call above. |
 | [40977107950](https://github.com/baopeak/kelpie/actions/runs/40977107950) | Windows ✓, macOS ✓. Linux: every Rust test passed (proto 27, daemon 345, app 240 including the new regression test, stt 4), plus frontend checks, perf gate and Bundle (`.deb` 32 MB, version 0.1.8). The `.deb` check failed only on its own grep (`dpkg-deb` lists `usr/bin/…` without `./`). |
 | [40985738280](https://github.com/baopeak/kelpie/actions/runs/40985738280) | With that grep fixed (7269ff5). Not watched, as the user asked. |
+| [40992930356](https://github.com/baopeak/kelpie/actions/runs/40992930356) | After the review fixes (cf97e08). **Windows ✓.**<br>Linux: tests ✓, bundling ✓, `.deb` install check ✓, AppImage check ✓. The smoke passed 7/8 and took its numbers: only the prompt check failed, because the screen text has trailing spaces trimmed, so bash's `$ ` reads as `$`.<br>macOS: a timing-dependent `procs` orphan test failed. It is mac-only and untouched by this branch: the scan still had the forked `sh`'s pre-exec name (`bash`) while its exe was already `/bin/sleep`. |
+| [40994932186](https://github.com/baopeak/kelpie/actions/runs/40994932186) | With both fixed (da1b258, 96ece38): **Windows ✓, macOS ✓, ubuntu-22.04 ✓**. Linux: every test (proto 28, daemon 345, app, stt 4), frontend checks, perf gate, bundles, the `.deb` install and AppImage checks, and the Xvfb smoke **8/8**. |
 
 The diagnostics (per-crate steps, `continue-on-error`, watchdog, disk cleanup) were removed again in 332ac5b. Linux now runs the same single test step as Windows and macOS.
 
-**Verified on Linux CI so far:**
-- every Rust test, including `kelpie-stt`, the XDG data-folder tests, the login-shell test and the systemd-inhibit hold/release test;
+**Verified on Linux CI** (run 40994932186):
+- every Rust test, including `kelpie-stt`, the XDG data-folder, private-folder, AppImage-environment, login-shell and keep-awake tests;
 - the frontend checks and the perf gate;
-- AppImage + `.deb` bundling. The `.deb` contains `usr/bin/kelpie`, `usr/bin/kelpied`, `usr/bin/kelpie-stt` and `Kelpie.desktop`, and depends on `libwebkit2gtk-4.1-0, libgtk-3-0`.
+- AppImage + `.deb` bundling. The `.deb` (version 0.1.8 after CI's bump) contains `usr/bin/kelpie`, `usr/bin/kelpied`, `usr/bin/kelpie-stt` and `Kelpie.desktop`, and depends on `libwebkit2gtk-4.1-0, libgtk-3-0`;
+- `dpkg -i` installs it, every shared library of the three programs resolves, and `dpkg -r` removes it;
+- the AppImage is an executable ELF, and `--appimage-extract` shows the app and both sidecars;
+- the Xvfb smoke under WebKitWebDriver against the release app:
+  - the app boots and connects to its own isolated daemon (same pid);
+  - a shell session opens and its terminal renders;
+  - the prompt appears; typing `echo hello` prints `hello` in the daemon's screen and in the xterm buffer;
+  - the session closes.
 
-**Only verifiable on Linux CI, not yet seen passing:**
-- `dpkg -i` with every library resolved;
-- the AppImage executable check and `--appimage-extract` contents;
-- the Xvfb smoke (`boot_smoke.py` with WebKitWebDriver) and its numbers;
-- the release job, which runs only on a tag.
+**Only on a real machine or a tag:**
+- the release job, which runs only on a tag;
+- the manual desktop checks under Follow-ups.
 
-**Checked locally (Windows):**
-- `cargo test` per crate at 332ac5b: kelpie-proto 28 ✓, kelpied 352 ✓, kelpie 237 ✓ (`-j 1`; `-j 2` ran out of memory on the 8 GB machine); clippy (only the known `mobile.rs:892` warning); `pnpm typecheck`, `pnpm test`, `pnpm i18n:check`;
-- the Linux-only daemon code (`awake.rs`, `login_shell`/`passwd_shell`, the `killpg` drop) type-checked for `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin` in a scratch crate;
-- `kelpie-proto` (keyring with Secret Service) `cargo check --target x86_64-unknown-linux-gnu`;
+**Checked locally (Windows), after the review fixes:**
+- `cargo test`: kelpie-proto 29 ✓, kelpied 352 ✓, kelpie 238 ✓ (`-j 1`; `-j 2` ran out of memory on the 8 GB machine);
+- clippy: only the known `mobile.rs:892` warning;
+- `pnpm typecheck`, `pnpm test` (515) and `pnpm i18n:check`;
+- type-checked for `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin`:
+  - the Linux-only daemon code (`awake.rs`, `login_shell`/`passwd_shell`, the `killpg` drop, the `adopt` guard), in a scratch crate;
+  - `kelpie-proto` itself (keyring with Secret Service, `ensure_private_dir`);
 - `bash -n` on `build-release.sh` and every workflow `run:` block; both workflows parse as YAML; the Python scripts compile.
 
-**Smoke numbers: none yet.** The smoke step has not run on CI. The first green run uploads `linux-smoke` (`linux-smoke.json`: `cold_start_ms`, `idle_cpu_pct`, `rss_mb`). Commit its `metrics` as `scripts/perf/linux-smoke-baseline.json`; CI then prints the comparison, still without gating.
+**Smoke numbers** (ubuntu-22.04 runner, 4 cores, Xvfb, software rendering; one shell; 30 s idle):
+
+| Run | cold_start_ms | idle_cpu_pct (of one core) | rss_mb |
+|---|---|---|---|
+| 40992930356 (now the baseline, `scripts/perf/linux-smoke-baseline.json`) | 634.0 | 4.53 | 505.7 |
+| 40994932186 (printed next to the baseline, not gated) | 1141.0 (×1.80) | 6.63 (×1.46) | 494.9 (×0.98) |
+
+Shared runners vary a lot between runs: cold start nearly doubled with no code change on that path. Any future gate needs several runs per sample and wide budgets.
 
 ## Decisions
 
@@ -158,9 +175,11 @@ The diagnostics (per-crate steps, `continue-on-error`, watchdog, disk cleanup) w
 
 ## Follow-ups
 
-- Run CI once after review and confirm the install check, AppImage check and Xvfb smoke. Commit the first smoke numbers as `scripts/perf/linux-smoke-baseline.json`.
-- Run `ui_tour.py` screenshots on Linux before the first Linux release (WebKitGTK rendering differences).
+- macOS process scan: a process read just before its `exec` can keep its old name (`bash` for `sleep`) in the Processes list. The test now matches on the program path; the cached name itself is a small display issue to look at.
+- The release job's step shell still holds the signing key in its initial environment (M2): signing in a separate step would need our own `.app.tar.gz` packing for macOS. This is an ops decision.
+- Other app-started programs (external editors, port forwards) still inherit the AppImage environment while the app runs. They end with the app, unlike the daemon.
+- Tauri downloads linuxdeploy unpinned during the signed bundling (documented in `release.yml`).- Run `ui_tour.py` screenshots on Linux before the first Linux release (WebKitGTK rendering differences).
 - Gate the Linux smoke numbers once there is a history (budgets relative to `linux-smoke-baseline.json`).
 - Manual checks on a real desktop: GNOME Keyring prompt/unlock flow, KWallet, keep-awake under GNOME/KDE (`systemd-inhibit --list`), notifications, AppImage self-update from a published release, `.deb` update through pkexec.
-- Wayland: not exercised (Xvfb only).
+- Wayland: not exercised (Xvfb only); the AppImage no longer forces `GDK_BACKEND=x11` on sessions, but the app itself still runs under the hook's X11 setting.
 - arm64 Linux builds are not produced.
