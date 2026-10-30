@@ -120,10 +120,10 @@ Frames (`crates/kelpie-proto`): `u32 LE length | u8 kind | payload`
 | 2 Output | daemon → app | `u32 handle \| u64 seq \| bytes` (`seq` = stream offset after the bytes) |
 | 3 Input | app → daemon | `u32 handle \| bytes` |
 
-RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
+RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, `mobile.load` (API 17: the machine-load level, lag percentiles; `{reset: true}` restarts the percentiles), and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
 `daemon.info` reports an `api` feature level (`kelpie_proto::API_LEVEL`); an app built for a
 higher level offers to restart an older daemon still running from a previous version.
-Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request`, `chat.resolved` (API 14: `{handle, id, request_id, by, dropped}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
+Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request`, `daemon.unresponsive` (API 17: `{seconds}`, the event loop has been silent for 30 s; sent by the watchdog, delivered when the loop runs again), `chat.resolved` (API 17: `{handle, id, request_id, by, dropped, answered_by, at}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
 
 ## Session threading (daemon)
 
@@ -299,7 +299,7 @@ including authentication. Disabling access revokes current permissions and cance
 generation's connections; enabling it again cannot revive an old socket. Paired device
 records remain available for a new connection.
 
-- **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `sub`, `unsub`, `chat_sub` need
+- **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `hb`, `ack`, `sub`, `unsub`, `chat_sub` need
   *read*; `input`, `key`, `answer`, `chat_answer` need *write*; anything else is `unknown_verb`. The
   permission is read from the device's record on every message, so a revoked or downgraded device is
   cut off at once. A request may carry `req` (echoed in its `ack` or `error {code, reason?, message}`)
@@ -311,8 +311,8 @@ records remain available for a new connection.
 - **The list is pushed**: the connection's adapter turns `session.updated|closed` events into a wake-up;
   it then rebuilds the list and sends `sessions {rev, sessions, projects}` only if it changed. Nothing
   polls. The adapter never blocks on the socket for events (only for chat lines, below) and a socket
-  that takes 30 s to accept a message is cut.
-- **Screens are state, not a stream** (`mobile/sync.rs`): `sub {id, height?, rev?}` follows a terminal
+  that takes 10 s to accept a message is cut (`slow_consumer`, see "Bad networks and busy machines").
+- **Screens are state, not a stream** (`mobile/sync.rs`): `sub {id, height?, have_rev?, focus?}` follows a terminal
   session. One task per followed session, shared by all its phones, waits on the session's `watch` (bumped
   by `ingest`, a resize, and a tick that changes the prompt or the wait) and, at most once per 100 ms,
   takes `Session::screen_view` (the last 200 logical lines, cursor, prompt, `waiting_since`, title) under
@@ -321,13 +321,21 @@ records remain available for a new connection.
   outside the lock. Frames: `screen {id, rev, base, shift, rows: [[index, text]], height, cursor, prompt,
   waiting_since, title}`: scroll the phone's lines up by `shift`, resize to `height` (the phone's own, the
   last rows of the render), replace the rows named. `base` is the frame it follows (`null`: the whole
-  view). A frame is reserved a place in the connection's queue (16) before the state is read, so a slow
-  socket gets the latest state, never a queue of old ones. A session whose frames average over 8 KiB
-  (a full-screen redraw, a flood of output) is followed at five frames a second. Rows are cut to 300
+  view). `base` is the last frame the phone *acknowledged* (`ack {id, rev}`), not the last one sent, and
+  the frame says everything that changed since it; a phone keeps the screens from `base` on and drops
+  older ones when a frame names a later `base`. At most 4 frames / 128 KiB wait for an acknowledgement per
+  (device, session): then nothing is sent until one arrives, and what goes next is the latest state, after
+  the acknowledged frame. Until the first acknowledgement frames are whole. A frame is reserved a place in the
+  connection's bulk lane (4) before the state is read, so a slow socket gets the latest state, never a
+  queue of old ones. A session whose frames average over 8 KiB (a full-screen redraw, a flood of output) is
+  followed at five frames a second. Frames carry `server_ts` and the load `level`. Rows are cut to 300
   characters and, together, to 56 KiB, so a frame stays under 64 KiB.
 - **Resume**: what was last sent is kept per (device, session) for 5 minutes after the connection
-  ends. `sub` with the `rev` the phone holds carries on from it (the new connection takes the slot over,
-  the old one's task ends), anything else gets a whole first frame; this is what makes a relay↔direct
+  ends. `sub` with the `have_rev` the phone holds (`rev` is read too) carries on from it when it is the last
+  frame the daemon had acknowledged (the new connection takes the slot over, the old one's task ends),
+  anything else gets a whole first frame. The cache keeps at most 64 KiB per (device, session), 20 sessions
+  per device, 8 devices and 16 MiB together (least recently used first), drops everything nobody follows when L3 is caused by memory (not when it is CPU or lag),
+  and forgets after 5 minutes; this is what makes a relay↔direct
   migration or a flaky connection cheap. A device has one connection: a newer one closes the older with
   4409 (the page then waits until it is looked at again). Close codes: 4401 the device was removed (the
   page forgets its token); 4408 connect again, the device stays paired (its permission changed, or the
@@ -343,16 +351,22 @@ records remain available for a new connection.
   shown unless `force`; when the Enter was skipped the ack says `entered: false` (the text is on the
   prompt line, unsent).
   `answer {id, waiting_since, key | text, enter?}` is typed only while the session still waits on that
-  prompt, checked and written under one lock. A wait is answered once: `answered_wait` is set by `answer`
+  prompt, checked and written under one lock. The page itself answers with `input` and `key`, which are credited to
+  its device the same way (a later `answer` from another device is `stale` naming it, from the same one `dup`). A wait is answered once: `answered_wait` is set by `answer`
   and by any typing (the desktop's keys included: a hook's `waiting` outlives the key press), and cleared
   when the session stops waiting or a hook reports anything but `waiting` (a second prompt within one
-  tick is a new wait). Refusals are `stale` with `reason` `not_waiting`, `moved` or `answered`.
+  tick is a new wait). The daemon keeps the last 20 answered waits per session for 10 minutes, with who
+  answered and when. The result of `answer` and `chat_answer` is `result`: `ok` (an `ack`), `stale` (somebody
+  else answered it, or the prompt is gone or moved: `answered_by` and `at` when known), `dup` (this device
+  answered it already, so a retry after a lost reply is harmless) or `refused`; `code` stays `stale`/`dup`/the
+  refusal's own, `reason` is `not_waiting`, `moved` or `answered`.
 - **Chat**: `chat_sub {id, since_seq?}` attaches as an observer (`ChatSession::observe`): it neither focuses
   the chat nor marks it read, and a chat may be asked for once a second per connection. The reply is
   small and the log follows as one output frame (nothing is encoded under the chat's lock). A
   connection has one budget for all the chat output it has not yet taken (4 MiB); while 256 KiB of it
-  is waiting, a new `chat_sub` is refused as `busy`, so a client that does not read cannot make the
-  daemon queue logs. The log after
+  is waiting, a new `chat_sub` is refused as `busy` (so is one while other phones' logs are on their way:
+  2 at L2, 1 at L3), so a client that does not read cannot make the daemon queue logs; the phone is sent
+  `chat_resync {id}` when there is room, as its signal to ask again. The log after
   `since_seq` arrives as a delta when that is a line boundary still in the log; otherwise the last 2 000
   lines (2 MiB) behind the handshake answers the adapters need (`PINNED_IDS`, also those still in the
   log). Messages: `chat {id, mode: reset|delta|more|live, seq, lines}` (chunks of about 64 KiB, each
@@ -368,14 +382,91 @@ records remain available for a new connection.
   message through this verb. Ids are compared as numbers (`7` and `7.0` are one id), the two dialects'
   never meet. Every line written to a chat agent, the desktop's too, is checked for being an answer: the
   first answer to a request wins, a second is dropped (`stale` for a phone), and every attached client
-  gets `chat.resolved {handle, id, request_id, by, dropped}` (API 14): `by` is who answered first
+  gets `chat.resolved {handle, id, request_id, by, dropped, answered_by, at}` (API 17): `by` is who answered first
   (`phone` or `desktop`); `dropped` means this event is about an answer that lost, so a chat view whose
   user clicked it shows what the agent got instead. The sets of answered and pending requests are per
   process run and forget the oldest first.
-- **Pairing** (`POST /pair`): failed attempts are counted per source address (10 a minute).
+- **Pairing** (`POST /pair`): failed attempts are counted per source address (10 a minute); at L2/L3 a
+  handshake within 1 s / 5 s of the last is refused (503) without spending its code.
 
-Checks: `cargo test -p kelpied` (verbs, diff, sync, answers, chat) and, against a real daemon,
-`scripts/e2e/mobile_protocol.py`; the cost of eight phones is measured by `scripts/e2e/mobile_perf.py`.
+### Bad networks and busy machines
+
+- **Heartbeat** (`mobile/lanes.rs`, verb `hb`, both ways): the daemon sends `hb {n, server_ts, level}` after
+  20 s of silence, again every 8 s, and drops the phone (4410) after 45 s; a phone answers with
+  `hb {echo: true}` (anything it sends counts) and may send `hb` itself, which is answered. Server
+  `SO_KEEPALIVE` (30 s / 10 s / 3) is the backstop. A deadline only counts if the daemon's own timer was on time
+  in that window; a gap of more than two ticks (stall, sleep) starts the clocks again (at most for 10 minutes
+  without hearing the phone). At L2+ the times double (40 s / 90 s).
+- **Legacy pages**: the first message is `{token, caps}`; a page that does not list both `ack` and `hb`
+  (one opened before this protocol and still running its old script) is served as before: each frame counts as
+  acknowledged when sent, so no window holds it back, and no silence is held against it (the OS keep-alive and
+  the write timeout still end a dead connection). `hello.hb.legacy` says which. Reloading the page ends it.
+- **Writer and lane**: one task owns the socket. Heartbeats, replies to the phone's own requests (answer results,
+  errors), the session list and `load.status` it writes itself, ahead of the bulk lane, so none of them (nor revoke)
+  waits for more than the send in progress. The bulk lane (4 messages of about 64 KiB) carries what other tasks
+  produce: screen frames and everything about a chat, in order, so `chat_resolved` and `chat_resync` are queued
+  after the lines they are about and never overtake the request. No room in the bulk lane for 10 s closes the
+  connection with 4411 `slow_consumer` (a socket that takes no write for 10 s is simply dropped). The daemon's events for a
+  phone use a bounded queue (`session::bounded_client_channel`, 256); when it overflows the phone is sent the
+  list again and `chat_resync` for each chat it watches. No phone path has an unbounded queue
+  (`mobile::tests::no_phone_path_has_an_unbounded_queue` greps for it).
+- **Load levels** (`load.rs`, started with phone access, stopped with it): the event loop's lag (a 100 ms timer,
+  p95 over 5 s), CPU and free memory (Windows `GetSystemTimes`, `GlobalMemoryStatusEx`, the low-memory
+  notification; macOS `host_statistics`, `kern.memorystatus_level`), battery saver (L1) and thermal (L2) only raise.
+  L1: lag > 30 ms or CPU > 85 %; L2: lag > 75 ms, CPU > 95 % for 3 s or free memory < 15 %; L3: lag > 200 ms or
+  free memory < 8 %. A higher level is entered after 2 samples in a row; a level is left after 10 s below it, at most
+  twice a minute (the limit holds back falls only).
+  `KELPIE_LOAD_FORCE=L2:thermal` pins it for tests. Shedding (`Level`): the focused session's frames 100/100/250/1000 ms
+  apart, others 100/250/1000 ms/paused, rows per frame 56/56/28/12 KiB (bottom rows first, the rest follows), heavy
+  sessions 5 frames a second (1 at L3). A session someone is typing into (`input`, `key`) is rendered and sent at the
+  calm rate for 3 s whatever the level, to every phone that follows it. Never shed: `input`, `key`, `answer`, `chat_answer`, revoke, heartbeats,
+  acknowledgements, the session list, `load.status`. Phones get `load.status {level, reason, since}` on change and every second
+  while the level is above 0. `mobile.load` reports it.
+- **Keeping the daemon schedulable**: it opts out of EcoQoS power throttling when phone access starts (Windows),
+  holds an activity against App Nap while a phone is connected (macOS: `NSActivityUserInitiatedAllowingIdleSystemSleep`,
+  so the Mac may still sleep; keeping it awake stays with the keep-awake setting; compiled, not run, in this
+  repository's checks) and never raises its priority class. The EcoQoS opt-out is not undone when phone access
+  is turned off. A watchdog thread logs "runtime stalled" (runtime
+  counters, the busiest threads on Windows) after 5 s without the timer running and broadcasts
+  `daemon.unresponsive {seconds}` after 30 s (an event to the app's connection).
+
+Checks: `cargo test -p kelpied` (verbs, diff, sync, answers, chat, load, lanes) and, against a real daemon,
+`scripts/e2e/mobile_protocol.py`; the cost of eight phones is measured by `scripts/e2e/mobile_perf.py`; bad networks
+by `scripts/e2e/mobile_resilience.py` (through `net_fault_proxy.py`); a busy machine by `scripts/e2e/stress.py`.
+
+### Phone client
+
+The page the daemon serves to phones is a SolidJS app of its own, `app/phone` (installable as a PWA), not the
+desktop frontend. It has its own build, `pnpm build:phone` (`app/vite.phone.config.ts` → `app/dist-phone/`); `pnpm build`
+stays the desktop's. `crates/kelpied/build.rs` embeds `dist-phone` as `PHONE_ASSETS` and `mobile.rs` serves it by path
+(hashed `/assets/*` are cacheable, the page, `sw.js` and the manifest are not). A development build without the bundle embeds
+a placeholder page; with `KELPIE_REQUIRE_PHONE=1` (`scripts/build-release.sh`, `ci.yml`, `release.yml`) the build script
+fails instead, and the release workflow greps the daemon for the placeholder's marker. `pnpm build:phone` must run before any
+`cargo build/test -p kelpied`. `scripts/check-phone-guard.sh` proves the guard. The bundle may not import `@tauri-apps/*`
+or `lib/ipc` (the build fails), is about 45 KB gzip, and carries only the Vietnamese strings its code uses
+(`app/phone/vite-dictionary.ts`, from `app/src/locales/vi/*.json`; the phone's own are in `phone.json`).
+
+- **One boundary**: `app/phone/src/link.ts` is the only file that knows the wire (today the JSON WebSocket above). It declares
+  `caps: ["ack","hb"]` in its first message, answers and sends heartbeats (it asks after 15 s of silence and drops the socket if
+  3 s pass without a word), reconnects with full-jitter backoff (first retry within 200 ms, then 1 s doubling to 30 s) and at once
+  on `visibilitychange`, `online` and a failed probe (at most every 2 s), resumes with `sub {have_rev}` / `chat_sub {since_seq}`,
+  and refuses writes while not connected: nothing is queued. An `answer` or `chat_answer` whose reply was lost with the
+  connection is sent once more after the next hello within a minute (same daemon run only); typing and keys are never retried.
+- **Connection state** (`conn-state.ts`): one enum shown by an always-visible indicator: live, degraded (round trip over
+  800 ms, a late heartbeat or frames 2 s behind), reconnecting (attempt, seconds to the next), no network, sign-in needed (a
+  same-origin probe got another page), computer offline since, relay unreachable (reserved for the relay), computer restarted
+  (epoch change), computer busy (`load.status`, worded by reason) and replaced. The last list and last screen are kept in
+  IndexedDB and painted first, dimmed, with "as of hh:mm:ss"; a data-age chip goes amber at 2 s and red at 5 s.
+- **Chat** reuses the desktop adapters through `chat/transport.ts` in observer mode (`ChatController`): no `start()`, no queue,
+  no `session.update`, no write the adapter makes by itself; only the person's answer to a card goes out, as `chat_answer`, and
+  the card settles on the daemon's verdict (ok / dup, "already answered on … " for stale, "not sure" for a lost reply).
+  `chat_sub` replies are applied with `applyLog` (`reset` replaces, `delta` / `more` carry on, `live` appends).
+- The phone has no `focus` or `visibility` verb (the table is closed): focus is `sub {focus}`, and a hidden page unsubscribes
+  everything and re-subscribes, resuming, when it is shown.
+- A service worker keeps the app shell, only on secure origins; plain `http://` works without it.
+
+Checks: `cd app && pnpm test` (link, sync, state, inbox, composer, observer), `scripts/e2e/mobile.py` on the real page (inbox
+order, prompt tap, chat answer, `#s=` link, reconnect).
 
 ## CPU priority (Windows)
 
@@ -1126,7 +1217,7 @@ task's run status is the Runs engine's.
 | Browser panes | `app/src-tauri/src/browser.rs`, `browser_picker.js` | Tauri child webviews positioned over the pane (hidden while an overlay covers them). Design mode injects a picker; picks travel through a cancelled navigation to a sentinel URL, are redacted and size-capped, and the element screenshot uses the WebView2 DevTools protocol (end-to-end tests also send trusted page input through it, `browser_test_input`, dev / e2e builds only). |
 | Remote (SSH) | `app/src-tauri/src/remote.rs`, `agents.rs` `build_remote_launch` | The system OpenSSH client (on Windows `System32\OpenSSH`, never a Git Bash one from PATH): sessions run `ssh -t host` with a login shell, inside `tmux new-session -A` when available; files, search and git run as remote commands with quoted arguments. Commands never prompt: secrets come from askpass, anything else fails. |
 | SSH hosts | `app/src-tauri/src/ssh_hosts.rs`, `crates/kelpied/src/askpass.rs`, `app/src/components/hosts-page.tsx` | Saved hosts and forward rules in `<data>/ssh/hosts.json`, rendered into `<data>/ssh/config` (one `Host` per saved host, then `Match all` + `Include` of the user's config) that every Kelpie `ssh` / `scp` reads with `-F`. Passwords and key passphrases live in the OS keyring (service `Kelpie (<endpoint>)`); ssh gets them through `SSH_ASKPASS=kelpied` + `SSH_ASKPASS_REQUIRE=force` + `KELPIE_ASKPASS=<host id>` — `kelpied` answers password / passphrase prompts and declines host-key questions, which the page settles with `ssh-keyscan` fingerprints first. Connecting to a host opens a remote project on it. Port forwards are `ssh -N` children of the app (stopped with it; auto-start rules restart on launch); transfers are `scp -r -p` (SFTP). Keys, agent and known hosts go through `ssh-keygen` / `ssh-add` and the known_hosts file. `KELPIE_SSH_DIR` replaces `~/.ssh` for the tests. |
-| Phone server | `crates/kelpied/src/mobile.rs`, `crates/kelpied/mobile/` | axum on a chosen address (default port 4817), optional rustls (ring). Pairing: a one-time code shown as a QR (2 min) and approved in the app; device tokens are stored as SHA-256 and compared in constant time; Origin checks, CSP, pairing attempts limited per source address; revoking closes the device's sockets. Protocol v2 (verbs, state sync, answers, chat): `mobile/verbs.rs`, `mobile/sync.rs` and "Phone protocol (v2)". |
+| Phone server | `crates/kelpied/src/mobile.rs`, `crates/kelpied/mobile/` | axum on a chosen address (default port 4817), optional rustls (ring). Pairing: a one-time code shown as a QR (2 min) and approved in the app; device tokens are stored as SHA-256 and compared in constant time; Origin checks, CSP, pairing attempts limited per source address; revoking closes the device's sockets. Protocol v2 (verbs, state sync, answers, chat): `mobile/verbs.rs`, `mobile/sync.rs`, `mobile/lanes.rs`, machine load in `load.rs`, and "Phone protocol (v2)". |
 | Plugins | `app/src-tauri/src/plugins.rs`, `lib/plugins.ts` | Declarative manifests (see [plugins.md](plugins.md)); approval bound to the manifest SHA-256; agents are sent to the daemon (`agent.set_custom`, kept in `custom-agents.json`). |
 | Agent setup | `app/src-tauri/src/agent_config.rs` (+ `agent_config/`), `lib/agent-setup.ts`, `components/agent-setup.tsx` | MCP servers, instruction files and skills of the agents, from their own files: Claude `~/.claude.json` / `.mcp.json`, Codex `config.toml`, Gemini `settings.json`, OpenCode `opencode.json(c)`, Cursor `.cursor/mcp.json`. One neutral `McpServer` with a codec per agent; reads happen only when the page opens. **One writer per file**: JSON and JSONC through a syntax tree (`jsonc-parser`: comments, order, indentation and unknown keys survive), TOML through `toml_edit` — the same writer `accounts.rs` uses to keep a Codex login in a file, so an MCP server copied into `config.toml` survives an account re-seed. **Trust**: a server found in a repository is `project` scope (untrusted); copying it to a user-level file needs an explicit confirmation, enforced by the app on apply, of everything it would run (argv per element, working folder, every env / header entry as the repository wrote it; relative paths are made absolute inside the project); none of its environment is carried unless opted in, and no reference to the user's variables is invented for it. A user's own environment and header values never reach the webview (names only), never a project file (they become `${VAR}`-style references in the destination's syntax, rewritten inside values too; Codex uses `env_vars`, `env_http_headers`, `bearer_token_env_var`), and are masked in every diff by position in the parsed tree. Project-scope paths (and `AGENTS.md` / `CLAUDE.md` / `GEMINI.md`, `.gemini/settings.json`, `.claude/settings.local.json`) are refused when a link or junction leads out of the project. **Writes** (one apply at a time): preview (a token over the files as read and as they would become, refused when stale) → per file, with Claude's own lock (`~/.claude.json.lock`, `mkdir`, stale after 10 s) held for `~/.claude.json`: compare with the previewed text → backup (`<data>/agent-config-backups`, private, newest 20 per file) → unique private temp file in the same folder (owner-only on unix, fsync) renamed over the target, retried and then refused, never rewritten in place → read back and parse. A write that is Kelpie's own and broken is put back (with the earlier files of the edit), but only while the file still holds what Kelpie wrote; a file another program saved since is left as it is and reported. The ACP registry (`agent_registry_fetch`) is one https GET per click (size- and time-capped); an entry becomes a custom agent (`npx` / `uvx`, an exact version; tags, ranges and URL or git specs are replaced by the registry's version or refused) that is stored in the settings and sent to the daemon with the plugin agents (`agent.set_custom`, the user's capability); it has no terminal interface, so the app starts it as a chat only. For tests only (`KELPIE_E2E`): `KELPIE_AGENT_CONFIG_HOME` replaces the user's home for every lookup (without it an end-to-end run cannot write), `KELPIE_ACP_REGISTRY_URL` moves the registry (plain http to 127.0.0.1 / localhost only), and a marker file `agent-setup-corrupt-next` corrupts the next write. |
 | Voice | `crates/kelpie-stt`, `app/src-tauri/src/voice.rs`, `lib/voice.ts` | A separate helper process: sherpa-onnx (static, offline) with a Vietnamese zipformer or Whisper; `cpal` microphone capture mixed to mono; JSON lines over stdin/stdout; models downloaded on request and verified by pinned SHA-256. Kept out of the app and daemon so the native engine can never take them down. |

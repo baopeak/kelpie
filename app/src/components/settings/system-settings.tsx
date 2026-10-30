@@ -44,7 +44,7 @@ export function DaemonSettings() {
           )}
         </Show>
       </SettingRow>
-      <SettingRow id="daemon-data">
+      <SettingRow id="daemon-data" wide>
         <div class="kv">
           <span>{t("Folder")}</span><span class="mono">{info()?.data_dir ?? platform()?.data_dir ?? ""}</span>
         </div>
@@ -84,20 +84,20 @@ export function AboutSettings() {
         <button class="btn" onClick={() => void checkNow()}>{t("Check now")}</button>
       </div>
     </SettingRow>
-    <SettingRow id="version">
-      <div style={{ display: "flex", "align-items": "center", gap: "12px", "margin-bottom": "12px" }}>
+    <SettingRow id="version" wide>
+      <div class="about-hero">
         <Kip mood="peek" size={72} />
-        <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+        <div class="about-brand">
           <BrandMark />
           <BrandWordmark height={18} />
         </div>
       </div>
       <div class="kv">
         <span>Kelpie</span><span>{version()}</span>
-        <span>{t("Platform")}</span><span>{platform()?.os ?? ""}</span>
+        <span>{t("Platform")}</span><span>{({ windows: "Windows", macos: "macOS", linux: "Linux" } as Record<string, string>)[platform()?.os ?? ""] ?? platform()?.os ?? ""}</span>
         <span>{t("Stack")}</span><span>Tauri 2 · SolidJS · xterm.js · Rust session daemon</span> {/* i18n-ignore: product names */}
       </div>
-      <div class="muted-inline" style={{ "font-size": "11.5px", "margin-top": "10px" }}>
+      <div class="about-note">
         {t("Agent names and logos are trademarks of their owners, shown only to identify the tools Kelpie launches. Kelpie is not affiliated with or endorsed by them.")}
       </div>
     </SettingRow>

@@ -7,3 +7,4 @@ app/src-tauri/gen/
 app/src-tauri/binaries/
 plans/261020-0823-erka-ui-improvements/assets/
 __pycache__/
+app/dist-phone/

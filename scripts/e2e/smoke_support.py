@@ -58,9 +58,11 @@ def daemon(d, method, params=None):
     return r["ok"]
 
 
-def restart_daemon(d, kelpied, kill=False):
+def restart_daemon(d, kelpied, kill=False, env=None):
     """Stops the daemon (its sessions keep running unless `kill`) and waits for a new one: the app
-    starts it itself when KELPIE_DAEMON_PATH is set, otherwise this starts `kelpied serve`."""
+    starts it itself when KELPIE_DAEMON_PATH is set, otherwise this starts `kelpied serve` with `env`
+    (this process's environment when none is given: callers that must not reach a daemon of the user's
+    pass an explicit, checked one)."""
     import time
     old = daemon(d, "daemon.info")["pid"]
     try:
@@ -82,7 +84,7 @@ def restart_daemon(d, kelpied, kill=False):
 
     if not wait(8):
         flags = 0x08000000 | 0x00000008 if os.name == "nt" else 0  # CREATE_NO_WINDOW | DETACHED_PROCESS
-        subprocess.Popen([kelpied, "serve"], env=os.environ.copy(), creationflags=flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen([kelpied, "serve"], env=env if env is not None else os.environ.copy(), creationflags=flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if not wait(40):
             raise TimeoutError("no new session daemon")
 
@@ -99,8 +101,9 @@ class Run:
         self.d.wait("return window.__kelpie.store.connected()", 30)
         # Scenarios close sessions and remove projects: never against the user's real data.
         data_dir = self.d.js_async("const done = arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('platform_info').then(i => done(i.data_dir));")
+        # No KELPIE_DATA_DIR bypass: this process's environment says nothing about the app's.
         real = real_data_dir()
-        if not os.environ.get("KELPIE_DATA_DIR") and os.path.normcase(os.path.normpath(data_dir)) == os.path.normcase(os.path.normpath(real)):
+        if os.path.normcase(os.path.normpath(data_dir)) == os.path.normcase(os.path.normpath(real)):
             raise SystemExit(f"refusing to run e2e against the real data folder {data_dir}; start tauri-driver with KELPIE_DATA_DIR set")
         # First-run tips would float over whatever a scenario clicks.
         if not tips:

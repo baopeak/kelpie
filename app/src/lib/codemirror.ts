@@ -7,6 +7,7 @@ import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { bracketMatching, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting, HighlightStyle, LanguageDescription } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import { tags as t } from "@lezer/highlight";
+import { msg, t as tr } from "./i18n";
 
 const syntax = HighlightStyle.define([
   { tag: [t.keyword, t.moduleKeyword, t.controlKeyword, t.operatorKeyword], color: "var(--syn-keyword)" },
@@ -32,21 +33,23 @@ const themeSpec = {
     ".cm-activeLineGutter": { backgroundColor: "var(--bg-hover)", color: "var(--text-dim)" },
     ".cm-activeLine": { backgroundColor: "var(--cm-active-line)" },
     "&.cm-focused .cm-cursor": { borderLeftColor: "var(--accent)", borderLeftWidth: "2px" },
-    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": { backgroundColor: "rgba(232,116,59,0.25) !important" },
-    ".cm-selectionMatch": { backgroundColor: "rgba(242,201,109,0.18)" },
-    ".cm-searchMatch": { backgroundColor: "rgba(242,201,109,0.28)", outline: "1px solid rgba(242,201,109,0.5)" },
+    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": { backgroundColor: "var(--selection) !important" },
+    ".cm-selectionMatch": { backgroundColor: "var(--search-match-soft)" },
+    ".cm-searchMatch": { backgroundColor: "var(--search-match)", outline: "1px solid color-mix(in srgb, var(--waiting) 50%, transparent)" },
     ".cm-panels": { backgroundColor: "var(--bg-elev-2)", color: "var(--text)", borderColor: "var(--border-strong)" },
     ".cm-panels input, .cm-panels button": { color: "var(--text)" },
     ".cm-textfield": { backgroundColor: "var(--bg)", border: "1px solid var(--border-strong)", borderRadius: "5px" },
     ".cm-button": { backgroundImage: "none", backgroundColor: "var(--bg-hover)", border: "1px solid var(--border-strong)", borderRadius: "5px" },
     ".cm-foldGutter span": { color: "var(--text-faint)" },
     ".cm-tooltip": { backgroundColor: "var(--bg-elev-2)", border: "1px solid var(--border-strong)" },
-    // merge view
-    ".cm-changedLine": { backgroundColor: "rgba(232,116,59,0.06)" },
-    ".cm-insertedLine, .cm-changedText": { backgroundColor: "rgba(139,213,139,0.14)" },
-    ".cm-deletedChunk, .cm-deletedLine": { backgroundColor: "rgba(255,107,122,0.12)" },
-    ".cm-merge-a .cm-changedText": { backgroundColor: "rgba(255,107,122,0.22)" },
-    ".cm-merge-b .cm-changedText": { backgroundColor: "rgba(139,213,139,0.22)" },
+    // merge view: cm-merge-a / cm-merge-b sit on the editor itself, hence `&.`
+    ".cm-changedLine": { backgroundColor: "var(--diff-changed-bg)" },
+    ".cm-insertedLine, .cm-changedText": { backgroundColor: "var(--diff-add-bg)" },
+    ".cm-deletedChunk, .cm-deletedLine": { backgroundColor: "var(--diff-del-bg)" },
+    "&.cm-merge-a .cm-changedLine": { backgroundColor: "var(--diff-del-bg)" },
+    "&.cm-merge-b .cm-changedLine": { backgroundColor: "var(--diff-add-bg)" },
+    "&.cm-merge-a .cm-changedText": { backgroundColor: "var(--diff-del-bg-strong)" },
+    "&.cm-merge-b .cm-changedText": { backgroundColor: "var(--diff-add-bg-strong)" },
 };
 
 // Colours come from CSS variables; the dark flag picks CodeMirror's matching base theme for
@@ -68,8 +71,17 @@ export function setEditorTheme(isDark: boolean) {
   for (const v of live) v.dispatch({ effects: themeSlot.reconfigure(isDark ? darkTheme : lightTheme) });
 }
 
+/** CodeMirror's own interface text (merge view, search panel, folding), translated when the editor opens. */
+const PHRASES = [
+  msg("$ unchanged lines"), msg("Find"), msg("Replace"), msg("next"), msg("previous"), msg("all"), msg("match case"),
+  msg("regexp"), msg("by word"), msg("replace"), msg("replace all"), msg("close"), msg("Go to line"), msg("go"),
+  msg("Folded lines"), msg("Unfolded lines"), msg("folded code"), msg("unfold"), msg("Fold line"), msg("Unfold line"),
+];
+export const editorPhrases = () => EditorState.phrases.of(Object.fromEntries(PHRASES.map((p) => [p, tr(p)])));
+
 export function baseExtensions(opts: { readOnly?: boolean; onSave?: () => void } = {}): Extension[] {
   const exts: Extension[] = [
+    editorPhrases(),
     lineNumbers(),
     highlightActiveLineGutter(),
     highlightSpecialChars(),

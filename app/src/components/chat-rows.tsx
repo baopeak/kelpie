@@ -193,7 +193,7 @@ export function PermissionCard(props: { item: Permission; ctrl: ChatController; 
   };
   const complete = () => (p().ask ?? []).every((q) => answers()[q.question]);
   return (
-    <div class="perm" data-perm={p().id}>
+    <div class="perm" classList={{ resolved: !!p().resolved }} data-perm={p().id}>
       <div class="q">{p().title}</div>
       <Show when={p().detail}><div class="perm-detail">{p().detail}</div></Show>
       <Show when={p().command}><pre class="perm-command">{p().command}</pre></Show>

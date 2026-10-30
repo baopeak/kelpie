@@ -14,6 +14,10 @@ pub enum Permission {
 pub enum Verb {
     /// The session list again.
     List,
+    /// A heartbeat, either way: any message counts as proof of life, this one is only for that.
+    Hb,
+    /// The phone has applied screen frame `rev` of a session: frames follow it from now on.
+    Ack,
     /// Follow a terminal session's screen.
     Sub,
     Unsub,
@@ -32,6 +36,8 @@ impl Verb {
     pub fn parse(name: &str) -> Option<Verb> {
         Some(match name {
             "list" => Verb::List,
+            "hb" => Verb::Hb,
+            "ack" => Verb::Ack,
             "sub" => Verb::Sub,
             "unsub" => Verb::Unsub,
             "chat_sub" => Verb::ChatSub,
@@ -45,7 +51,7 @@ impl Verb {
 
     pub fn needs(self) -> Permission {
         match self {
-            Verb::List | Verb::Sub | Verb::Unsub | Verb::ChatSub => Permission::Read,
+            Verb::List | Verb::Hb | Verb::Ack | Verb::Sub | Verb::Unsub | Verb::ChatSub => Permission::Read,
             Verb::Input | Verb::Key | Verb::Answer | Verb::ChatAnswer => Permission::Write,
         }
     }
@@ -91,15 +97,15 @@ pub fn key_bytes(key: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const ALL: [Verb; 8] = [Verb::List, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer];
+    const ALL: [Verb; 10] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer];
 
     #[test]
     fn the_table_is_closed_and_every_verb_has_its_permission() {
-        let names = ["list", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer"];
+        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer"];
         for (name, verb) in names.iter().zip(ALL) {
             assert_eq!(Verb::parse(name), Some(verb), "{name}");
         }
-        let reads = ["list", "sub", "unsub", "chat_sub"];
+        let reads = ["list", "hb", "ack", "sub", "unsub", "chat_sub"];
         for (name, verb) in names.iter().zip(ALL) {
             let expected = if reads.contains(name) { Permission::Read } else { Permission::Write };
             assert_eq!(verb.needs(), expected, "{name}");
@@ -114,7 +120,7 @@ mod tests {
     fn write_verbs_need_more_than_a_read_only_device_has() {
         let read_only = Permission::Read;
         let reachable: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() <= read_only).collect();
-        assert_eq!(reachable, [Verb::List, Verb::Sub, Verb::Unsub, Verb::ChatSub]);
+        assert_eq!(reachable, [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub]);
         assert!(ALL.into_iter().all(|v| v.needs() <= Permission::Write));
     }
 

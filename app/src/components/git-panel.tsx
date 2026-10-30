@@ -154,7 +154,7 @@ export function GitPanel(props: { project: Project }) {
             <span class="branch-name" title={st()?.upstream ? `${st()?.branch} → ${st()?.upstream}` : st()?.branch ?? ""}>{st()?.branch ?? "…"}</span>
             <Icon name="chevronDown" size={12} />
           </button>
-          <Show when={st()?.upstream}><span style={{ color: "var(--text-faint)" }}>↑{ahead()} ↓{behind()}</span></Show>
+          <Show when={st()?.upstream}><span style={{ color: "var(--text-faint)", "white-space": "nowrap" }}>↑{ahead()} ↓{behind()}</span></Show>
           <span style={{ flex: 1 }} />
           <Show when={repo()?.has_remote}>
             <button class="icon-btn" title={t("Pull (fast-forward only)")} disabled={!!busy() || !st()?.upstream} onClick={() => remote("pull")}><Icon name="pull" size={14} /></button>

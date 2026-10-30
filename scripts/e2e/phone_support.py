@@ -1,5 +1,6 @@
-"""Shared by the phone protocol e2e scripts (mobile_protocol.py, mobile_perf.py): an isolated daemon,
-pairing a phone, and a phone-like WebSocket client that applies screen frames the way the page does.
+"""Shared by the phone protocol e2e scripts (mobile_protocol.py, mobile_perf.py, mobile_resilience.py,
+stress.py): an isolated daemon, pairing a phone, and a phone-like WebSocket client that applies screen
+frames, acknowledges them and answers heartbeats the way the page does.
 
 Everything runs in the caller's own process with its own KELPIE_ENDPOINT and data folder, so it
 never reaches the user's real daemon.
@@ -43,14 +44,17 @@ def isolate(tag):
 class Daemon:
     """A kelpied of this script's own: `Daemon(exe).start()`, `.call(method, params)`, `.stop()`."""
 
-    def __init__(self, exe):
+    def __init__(self, exe, env=None):
         assert os.environ.get("KELPIE_ENDPOINT"), "call isolate() first"
         self.exe = exe
+        self.env = env
         self.proc = None
         self.conn = None
+        self.lock = threading.Lock()
 
     def start(self):
-        self.proc = subprocess.Popen([self.exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        env = {**os.environ, **self.env} if self.env else None
+        self.proc = subprocess.Popen([self.exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         self.conn = None
         for _ in range(200):
             try:
@@ -61,7 +65,8 @@ class Daemon:
         raise RuntimeError("the test daemon did not start")
 
     def call(self, method, params=None):
-        return self.conn.call(method, params or {})
+        with self.lock:  # one connection, used from the test's threads too
+            return self.conn.call(method, params or {})
 
     def stop(self, wait=15):
         """Ends the daemon this script started (and its sessions)."""
@@ -94,7 +99,18 @@ class Daemon:
 
 
 def pair(d, base, name, can_write):
-    """Pairs a phone with the daemon's phone access at `base` (http://host:port/); returns (token, device id)."""
+    """Pairs a phone with the daemon's phone access at `base` (http://host:port/); returns (token, device id).
+    A busy machine paces pairing (503): it is tried again a few seconds later."""
+    for attempt in range(8):
+        try:
+            return _pair_once(d, base, name, can_write)
+        except RuntimeError as e:
+            if "503" not in str(e) or attempt == 7:
+                raise
+            time.sleep(6)
+
+
+def _pair_once(d, base, name, can_write):
     link = d.call("mobile.pair_start")["url"]
     code = link.split("#p=")[1]
     got = {}
@@ -125,25 +141,43 @@ def pair(d, base, name, can_write):
 
 
 class Phone:
-    """A phone: connects to /ws, keeps every message it was sent, and applies screen frames to the
-    lines it holds (a frame that follows one it does not hold is recorded in `lost`)."""
+    """A phone: connects to /ws, keeps every message it was sent, applies screen frames to the lines it
+    holds (a frame that follows one it does not hold is recorded in `lost`), acknowledges them (every
+    second frame, or 250 ms after the first one not acknowledged) and answers the daemon's heartbeats.
+    `auto_ack` and `auto_hb` switch those off for tests of what a silent phone gets."""
 
-    def __init__(self, base, token):
+    def __init__(self, base, token, auto_ack=True, auto_hb=True, caps=True):
         self.url = base.replace("http://", "ws://").replace("https://", "wss://") + "ws"
         self.token = token
+        self.auto_ack, self.auto_hb = auto_ack, auto_hb
+        self.caps = ["ack", "hb"] if caps else None  # None: a page from before frames were acknowledged
         self.log = []
         self.lines = {}
         self.rev = {}
+        # By session: the screens a frame may still be built on (frame number -> lines), the last frame
+        # acknowledged, and how many were applied since.
+        self.held = {}
+        self.acked = {}
+        self.unacked = {}
         self.lost = []
         self.closed = None
+        self.close_reason = None
         self._next = 0
 
     async def open(self):
         self.ws = await websockets.connect(self.url, max_size=None, open_timeout=10, ping_interval=None)
-        await self.ws.send(json.dumps({"token": self.token}))
+        await self.ws.send(json.dumps({"token": self.token, **({"caps": self.caps} if self.caps else {})}))
         self.reader = asyncio.ensure_future(self._read())
+        self.acker = asyncio.ensure_future(self._flush_acks())
         await self.wait(lambda m: m["type"] == "hello", 10)
         return self.hello()
+
+    def resume_from(self, other):
+        """Carries what `other` (a connection that ended) held over to this one: the screens it can resume from."""
+        self.held = {sid: dict(h) for sid, h in other.held.items()}
+        self.acked = dict(other.acked)
+        for sid, rev in self.acked.items():
+            self.lines[sid], self.rev[sid] = self.held[sid][rev], rev
 
     def hello(self):
         return next(m for m in self.log if m["type"] == "hello")
@@ -154,24 +188,61 @@ class Phone:
                 m = json.loads(raw)
                 m["_t"] = time.monotonic()
                 m["_w"] = time.time()
+                m["_size"] = len(raw)
                 self.log.append(m)
                 if m["type"] == "screen":
-                    self._apply(m)
+                    await self._apply(m)
+                elif m["type"] == "hb" and not m.get("echo") and self.auto_hb:
+                    await self.send(type="hb", echo=True, n=m.get("n"))
         except websockets.ConnectionClosed as e:
             self.closed = e.rcvd.code if e.rcvd else 1006
+            self.close_reason = e.rcvd.reason if e.rcvd else None
         finally:
             self.closed = self.closed or 1006
 
-    def _apply(self, m):
+    async def _apply(self, m):
         sid = m["id"]
-        if m["base"] is not None and m["base"] != self.rev.get(sid):
+        held = self.held.setdefault(sid, {})
+        if m["base"] is not None and m["base"] not in held:
             self.lost.append(m)
             return
-        old = [] if m["base"] is None else self.lines.get(sid, [])
+        old = [] if m["base"] is None else held[m["base"]]
         lines = (old[m["shift"]:] + [""] * m["height"])[: m["height"]]
         for i, text in m["rows"]:
             lines[i] = text
+        # The daemon builds on `base` from now on: older screens are not needed. A whole frame says
+        # nothing of that (an acknowledgement of ours may still be on its way), so only what we have
+        # acknowledged ourselves is let go.
+        keep = self.acked.get(sid, 0) if m["base"] is None else m["base"]
+        for rev in [r for r in held if r < keep]:
+            del held[rev]
+        held[m["rev"]] = lines
         self.lines[sid], self.rev[sid] = lines, m["rev"]
+        self.unacked[sid] = self.unacked.get(sid, 0) + 1
+        if self.auto_ack and self.unacked[sid] >= 2:
+            await self.ack(sid)
+
+    async def ack(self, sid):
+        """Tells the daemon the last frame applied for `sid` is held."""
+        self.unacked[sid] = 0
+        self.acked[sid] = self.rev[sid]
+        await self.send(type="ack", id=sid, rev=self.rev[sid])
+
+    async def _flush_acks(self):
+        """A frame not followed by another is acknowledged within about 250 ms."""
+        since = {}
+        try:
+            while True:
+                await asyncio.sleep(0.05)
+                now = time.monotonic()
+                for sid, n in list(self.unacked.items()):
+                    if not n:
+                        since.pop(sid, None)
+                    elif self.auto_ack and now - since.setdefault(sid, now) >= 0.25 and self.closed is None:
+                        since.pop(sid, None)
+                        await self.ack(sid)
+        except (asyncio.CancelledError, websockets.ConnectionClosed):
+            pass
 
     def text(self, sid):
         return "\n".join(self.lines.get(sid, []))
@@ -210,6 +281,7 @@ class Phone:
         except Exception:  # noqa: BLE001
             pass
         self.reader.cancel()
+        self.acker.cancel()
 
 
 def wait_for(fn, timeout):
@@ -230,3 +302,9 @@ async def async_wait_for(fn, timeout):
             return v
         await asyncio.sleep(0.1)
     return None
+
+
+def rss_mb(pid):
+    """Resident memory of a process in MiB (psutil)."""
+    import psutil
+    return psutil.Process(pid).memory_info().rss / (1 << 20)

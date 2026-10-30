@@ -33,7 +33,7 @@ export function Dashboard() {
       <div class="dash-head">
         <h2>{t("Agents")}</h2>
         <span class="stats">
-          {t("{n} running", { n: all().filter((s) => s.alive).length })} · {store.state.projects.length === 1 ? t("{n} project", { n: 1 }) : t("{n} projects", { n: store.state.projects.length })}
+          {all().filter((s) => s.alive).length === 1 ? t("{n} session", { n: 1 }) : t("{n} sessions", { n: all().filter((s) => s.alive).length })} · {store.state.projects.length === 1 ? t("{n} project", { n: 1 }) : t("{n} projects", { n: store.state.projects.length })}
         </span>
         <span class="spacer" />
         <button class="icon-btn" title={t("Close (Esc)")} onClick={() => store.setOverlay(null)}><Icon name="close" /></button>
@@ -59,7 +59,7 @@ export function Dashboard() {
                           </div>
                           <div class="meta">
                             <Show when={project()}>
-                              {(p) => <span class="chip" style={{ "border-color": p().color, color: p().color }}>{p().name}</span>}
+                              {(p) => <span class="chip project-chip" style={{ "--kc": p().color }}>{p().name}</span>}
                             </Show>
                             <span>{s.alive ? t(STATUS_WORDS[s.status]) : t("exited {code}", { code: s.exit_code ?? "" })}</span>
                             <Show when={col.id === "waiting" && s.waiting_since} fallback={<span>· {relTime(s.created_at)}</span>}>

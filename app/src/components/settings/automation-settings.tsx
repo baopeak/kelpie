@@ -152,7 +152,7 @@ function Editor(props: { initial: Automation; onDone: () => void }) {
           </label>
           <Show when={a().every === "weekly"}>
             <label class="field">
-              <span>{t("On")}</span>
+              <span>{t("Day")}</span>
               <select class="text-input" value={a().weekday} onChange={(e) => set({ weekday: +e.currentTarget.value })}>
                 <For each={DAYS}>{(d, i) => <option value={i()}>{t(d)}</option>}</For>
               </select>

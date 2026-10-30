@@ -75,6 +75,19 @@ describe("pictures", () => {
 });
 
 describe("createAcpAdapter", () => {
+  it("words an unusual stop reason and adds nothing to a normal finish", () => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    openSession(a);
+    const id = h.written.find((w) => w.method === "session/prompt").id;
+    a.onMessage({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } }, "");
+    expect(h.items().find((i) => i.kind === "result")).toMatchObject({ text: "" });
+    a.send("again");
+    const id2 = h.written.filter((w) => w.method === "session/prompt")[1].id;
+    a.onMessage({ jsonrpc: "2.0", id: id2, result: { stopReason: "max_tokens" } }, "");
+    expect(h.items().filter((i) => i.kind === "result").map((i: any) => i.text)).toEqual(["", "Stopped: response length limit"]);
+  });
+
   it("offers /new and /clear ahead of the agent's own commands, without the agent's own clear", () => {
     const h = harness();
     const a = createAcpAdapter(h.ctx);

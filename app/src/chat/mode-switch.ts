@@ -7,6 +7,7 @@
 //      we never have two writers on one conversation,
 //   3. start the other front-end resuming that id, in the same pane.
 import { ChatController, type Adapter, type AdapterContext } from "./chat-model";
+import { desktopTransport } from "./desktop-transport";
 import { applyClaudeMessage, claudeArgs, createClaudeAdapter } from "./claude-adapter";
 import { codexArgs, createCodexAdapter } from "./codex-adapter";
 import { createAcpAdapter } from "./acp-adapter";
@@ -95,7 +96,7 @@ export function getController(s: SessionInfo): ChatController {
   if (c) return c;
   const make = (ctx: AdapterContext): Adapter =>
     s.kind === "claude" ? createClaudeAdapter(ctx) : s.kind === "codex" ? createCodexAdapter(ctx) : createAcpAdapter(ctx);
-  c = new ChatController(s.id, s.cwd, s.agent_session_id, make);
+  c = new ChatController(s.id, s.cwd, s.agent_session_id, make, { transport: desktopTransport() });
   if (s.kind === "claude" && s.agent_session_id) {
     const resumeId = s.agent_session_id;
     const createdAt = s.created_at;

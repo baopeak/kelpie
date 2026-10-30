@@ -15,6 +15,20 @@ import { version as appVersion } from "../../package.json";
 /** ACP tool kinds → the transcript's categories. */
 const KINDS: Record<string, ToolCategory> = { read: "read", search: "search", edit: "edit", delete: "edit", move: "edit", execute: "command", fetch: "fetch" };
 
+/** A turn's ACP stop reason in words: nothing for a normal finish (the reply is the result), and
+ *  unknown reasons (newer protocol versions) as sent. */
+const STOP_TEXT = (): Record<string, string> => ({
+    end_turn: "",
+    max_tokens: t("Stopped: response length limit"),
+    max_turn_requests: t("Stopped: step limit for this turn"),
+    refusal: t("The agent declined this request"),
+    cancelled: t("Cancelled"),
+});
+const stopText = (reason: string): string => {
+  const words = STOP_TEXT();
+  return Object.hasOwn(words, reason) ? words[reason] : reason;
+};
+
 
 const INIT_ID = "kelpie-init";
 const SESSION_ID = "kelpie-session";
@@ -291,7 +305,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
         } else if (m.result && "stopReason" in m.result) {
           lastKind = null;
           for (const it of ctx.state.items) if ((it as any).streaming) ctx.patch(it.id, (i: any) => (i.streaming = false));
-          ctx.upsert({ kind: "result", id: `stop-${String(m.id)}`, text: m.result.stopReason });
+          ctx.upsert({ kind: "result", id: `stop-${String(m.id)}`, text: stopText(String(m.result.stopReason)) });
           // Last: going idle sends the next queued message.
           ctx.set("busy", false);
         }

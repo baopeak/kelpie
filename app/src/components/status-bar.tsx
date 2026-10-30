@@ -59,7 +59,7 @@ export function StatusBar() {
         {store.connected() ? "kelpied" : t("kelpied offline")}
       </span>
       <Show when={branch()}>
-        <span class="item clickable" onClick={() => store.setRightPanel("git")}><Icon name="git" size={13} /> {branch()}</span>
+        <span class="item clickable branch" title={branch()!} onClick={() => store.setRightPanel("git")}><Icon name="git" size={13} /> <span class="label">{branch()}</span></span>
       </Show>
       <span class="spacer" />
       <Show when={store.daemonNeedsSwitch()}>

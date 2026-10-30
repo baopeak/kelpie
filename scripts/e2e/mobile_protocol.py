@@ -7,12 +7,14 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
 
 1. Pairing two devices (one may type, one may not); `hello` carries v 2, the daemon epoch and the list rev.
 2. The session list is pushed when it changes (no polling), sessions are addressed by id.
-3. A followed session sends row diffs: the first frame is whole, later ones carry only what changed,
-   the lines the phone holds match the terminal, an output-heavy session costs at most ten frames a
-   second, a session nobody follows sends none, and a phone that reconnects carries on from its last frame.
+3. A followed session sends row diffs: the first frame is whole, later ones follow the last frame the phone
+   acknowledged and carry only what changed, the lines the phone holds match the terminal, an output-heavy
+   session costs at most ten frames a second, a session nobody follows sends none, and a phone that
+   reconnects carries on from the last frame it acknowledged. Heartbeats are answered in both directions.
 4. A frame arrives within 150 ms of the output (p95).
-5. A menu prompt: `input` is refused while it shows, `answer` lands once (double tap: one ack, one stale).
-6. An agent that reports through hooks: a wait answered at the keyboard cannot be answered again from the phone.
+5. A menu prompt: `input` is refused while it shows, `answer` lands once (double tap: one ok, one dup).
+6. An agent that reports through hooks: a wait answered at the keyboard cannot be answered again from the
+   phone, and the refusal says who answered and when.
 7. A read-only device cannot type; names that are not verbs (`session.close`…) are refused; a revoked
    device is disconnected.
 8. Chat: watching it from a phone does not clear the desktop's unread; the phone answers a permission,
@@ -123,10 +125,20 @@ async def main(d):
     hello = await phone.open()
     epoch = hello["daemon_epoch"]
     check("hello carries v 2, the daemon epoch, the list rev and the api level", hello["v"] == 2 and len(epoch) >= 16 and isinstance(hello["rev"], int) and isinstance(hello["api"], int), {k: hello[k] for k in ("v", "daemon_epoch", "rev", "api")})
+    check("…and the heartbeat and acknowledgement terms, the load and the server time", hello["hb"] == {"idle_s": 20, "pong_s": 8, "dead_s": 45, "legacy": False, "ack_frames": 4, "ack_bytes": 131072, "ack_every_frames": 2, "ack_every_ms": 250} and hello["load"]["level"] in range(4) and hello["server_ts"] > 0, {k: hello.get(k) for k in ("hb", "load", "server_ts")})
+    beat = await phone.ask(type="hb", n=41)
+    check("a heartbeat is answered with the server time and the load level", beat and beat["type"] == "hb" and beat["echo"] is True and beat["n"] == 41 and beat["server_ts"] > 0 and beat["level"] in range(4), beat)
+    mark = phone.mark()
+    await phone.send(type="hb", echo=True, n=42)
+    await asyncio.sleep(0.3)
+    check("…and the answer to one is not answered again", not [m for m in phone.log[mark:] if m["type"] == "hb"])
+    mobile_load = d.call("mobile.load")
+    check("the load probe runs while phone access is on", mobile_load["running"] is True and mobile_load["level"] in (0, 1, 2, 3), mobile_load)
     check("the list has no handles (sessions are addressed by id)", all("handle" not in s and s["id"] for s in hello["sessions"]))
 
     # ---------- 2. pushed list ----------
-    # Best of three: a loaded machine can delay any one push, a poll could not be early.
+    # Three probes: a loaded machine can delay any one push, but a 1 s poll is under 0.25 s only about
+    # one time in four, so two of three that fast (or a median under 0.3 s) is a push.
     lags = []
     for n in range(3):
         mark = phone.mark()
@@ -135,7 +147,8 @@ async def main(d):
         got = await phone.wait(lambda m: m["type"] == "sessions" and any(s["id"] == probe["id"] for s in m["sessions"]), 5, mark)
         lags.append(round(got["_t"] - created, 3) if got else None)
         d.call("session.close", {"handle": probe["handle"]})
-    check("a new session is pushed to the phone at once", all(x is not None for x in lags) and min(lags) < 0.5, lags)
+    seen = sorted(x for x in lags if x is not None)
+    check("a new session is pushed to the phone at once", len(seen) == 3 and (sum(x < 0.25 for x in seen) >= 2 or seen[1] < 0.3), lags)
     mark = phone.mark()
     a = await asyncio.to_thread(d.call, "session.create", {"kind": "shell", "cwd": work, "name": "phone-a"})
     got = await phone.wait(lambda m: m["type"] == "sessions" and any(s["id"] == a["id"] for s in m["sessions"]), 5, mark)
@@ -159,6 +172,7 @@ async def main(d):
     first = await phone.wait(lambda m: m["type"] == "screen" and m["id"] == a["id"], 5, mark)
     check("following a session gets a whole first frame", ack and ack["type"] == "ack" and first and first["base"] is None and first["rev"] >= 1, first and {k: first[k] for k in ("base", "rev", "height")})
     check("it matches the terminal", "PS " in phone.text(a["id"]))
+    await ps.async_wait_for(lambda: phone.acked.get(a["id"]), 3)
     mark = phone.mark()
     await phone.ask(type="input", id=a["id"], text="echo phone-$((6*7))", enter=True)
     done = await phone.wait(lambda m: m["type"] == "screen" and "phone-42" in phone.text(a["id"]), 15, mark)
@@ -173,6 +187,7 @@ async def main(d):
 
     await asyncio.sleep(1)
     check("the lines the phone holds are the terminal's", same_as_terminal(), phone.lines[a["id"]][-4:])
+    check("the phone acknowledged the frames it applied", phone.acked.get(a["id"]) == phone.rev[a["id"]], (phone.acked.get(a["id"]), phone.rev[a["id"]]))
 
     # an output-heavy session: at most ten frames a second
     mark = phone.mark()
@@ -198,19 +213,22 @@ async def main(d):
     # resume: a phone that reconnects carries on from its last frame
     await phone.ask(type="sub", id=a["id"], height=50)
     await phone.wait(lambda m: m["type"] == "screen" and "after-unsub" in phone.text(a["id"]), 10, phone.mark() - 1)
-    last_rev = phone.rev[a["id"]]
+    await ps.async_wait_for(lambda: phone.acked.get(a["id"]) == phone.rev[a["id"]], 3)
+    last_rev = phone.acked[a["id"]]
+    old = phone
     await phone.close()
     d.call("session.input", {"handle": info(d, a["id"])["handle"], "data": "echo while-away\r"})
     await asyncio.sleep(1)
     phone = ps.Phone(BASE, token)
     await phone.open()
-    phone.rev[a["id"]], phone.lines[a["id"]] = last_rev, []
+    phone.resume_from(old)
     mark = phone.mark()
-    await phone.ask(type="sub", id=a["id"], height=50, rev=last_rev)
+    await phone.ask(type="sub", id=a["id"], height=50, have_rev=last_rev)
     resumed = await phone.wait(lambda m: m["type"] == "screen" and m["id"] == a["id"], 5, mark)
-    check("a reconnecting phone carries on from its last frame", resumed and resumed["base"] == last_rev and len(resumed["rows"]) < 10, resumed and (resumed["base"], len(resumed["rows"])))
+    check("a reconnecting phone carries on from the last frame it acknowledged", resumed and resumed["base"] == last_rev and len(resumed["rows"]) < 10, resumed and (resumed["base"], len(resumed["rows"])))
+    check("…and its screen is the terminal's again", "while-away" in phone.text(a["id"]) and not phone.lost)
     mark = phone.mark()
-    await phone.ask(type="sub", id=a["id"], height=50, rev=last_rev + 99)
+    await phone.ask(type="sub", id=a["id"], height=50, have_rev=last_rev + 99)
     whole = await phone.wait(lambda m: m["type"] == "screen" and m["id"] == a["id"], 5, mark)
     check("one that lost its place gets the whole screen", whole and whole["base"] is None)
     await phone.ask(type="unsub", id=a["id"])
@@ -252,11 +270,13 @@ async def main(d):
         phone.ask(type="answer", id=m1["id"], waiting_since=since, text="1", enter=True),
     )
     acks = sorted(x["type"] for x in (a1, a2))
-    check("a double tap: one answer lands, the other is stale", acks == ["ack", "error"] and next(x for x in (a1, a2) if x["type"] == "error")["code"] == "stale", (a1, a2))
+    lost = next((x for x in (a1, a2) if x["type"] == "error"), {})
+    won = next((x for x in (a1, a2) if x["type"] == "ack"), {})
+    check("a double tap: one answer lands, the other is a duplicate", acks == ["ack", "error"] and lost["code"] == "dup" and lost["result"] == "dup" and won["result"] == "ok", (a1, a2))
     got = ps.wait_for(lambda: "ANSWERED=1" in read(d, m1["id"])["text"], 20)
     check("the menu answer reaches the program, once", bool(got) and read(d, m1["id"])["text"].count("ANSWERED=") == 1)
     late = await phone.ask(type="answer", id=m1["id"], waiting_since=since, text="2")
-    check("an answer to a prompt that is gone is stale", late["type"] == "error" and late["code"] == "stale", late)
+    check("an answer to a prompt this device answered is a duplicate, even later", late["type"] == "error" and late["code"] == "dup", late)
     await phone.ask(type="unsub", id=m1["id"])
 
     # ---------- 6. an agent that reports through hooks ----------
@@ -270,7 +290,7 @@ async def main(d):
     d.call("session.input", {"handle": info(d, h["id"])["handle"], "data": "1"})
     check("the hook still says waiting after a key at the keyboard", info(d, h["id"])["status"] == "waiting")
     reply = await phone.ask(type="answer", id=h["id"], waiting_since=since, text="1")
-    check("the phone cannot answer what the desktop answered", reply["type"] == "error" and reply["code"] == "stale" and reply["reason"] == "answered", reply)
+    check("the phone cannot answer what the desktop answered, and is told who and when", reply["type"] == "error" and reply["code"] == "stale" and reply["result"] == "stale" and reply["reason"] == "answered" and reply["answered_by"] == "desktop" and abs(reply["at"] - time.time() * 1000) < 120000, reply)
     # The agent works on and asks again at once: no tick sees it working in between.
     hook("PostToolUse")
     hook("PermissionRequest")
@@ -278,7 +298,7 @@ async def main(d):
     check("the next wait can be answered", fresh is not None)
     since2 = next(s for s in fresh["sessions"] if s["id"] == h["id"])["waiting_since"]
     ok = await phone.ask(type="answer", id=h["id"], waiting_since=since2, text="echo answered-from-phone", enter=True)
-    check("…from the phone", ok["type"] == "ack", ok)
+    check("…from the phone", ok["type"] == "ack" and ok["result"] == "ok", ok)
     check("…and it was typed", bool(ps.wait_for(lambda: "answered-from-phone" in read(d, h["id"])["text"], 15)))
     old = await phone.ask(type="answer", id=h["id"], waiting_since=since, text="x")
     check("an answer naming the first wait is stale", old["type"] == "error" and old["code"] == "stale", old)
@@ -321,7 +341,7 @@ async def main(d):
     ps.wait_for(lambda: len(agent_log()) >= 1, 10)
     mark2 = phone.mark()
     r2 = await phone.ask(type="chat_answer", id=c1["id"], request_id=7, line=answer_line)
-    check("a second answer is stale", r2["type"] == "error" and r2["code"] == "stale", r2)
+    check("a second answer from the same device is a duplicate", r2["type"] == "error" and r2["code"] == "dup" and r2["result"] == "dup", r2)
     d.call("session.input", {"handle": c1["handle"], "data": answer_line + "\n"})
     await asyncio.sleep(1)
     check("the agent got exactly one answer (the desktop's came second and was dropped)", len(agent_log()) == 1, agent_log())
@@ -364,7 +384,7 @@ async def main(d):
     told = await phone.wait(lambda m: m["type"] == "chat_resolved" and m["id"] == c2["id"], 5, mark)
     check("when the desktop answers first the phone is told", told is not None)
     late = await phone.ask(type="chat_answer", id=c2["id"], request_id=7, line=answer_line)
-    check("…and its own answer is stale", late["type"] == "error" and late["code"] == "stale", late)
+    check("…and its own answer is stale, naming the desktop", late["type"] == "error" and late["code"] == "stale" and late["answered_by"] == "desktop", late)
 
     # a second connection of the same device ends the first, with a reason of its own
     second = ps.Phone(BASE, token)
@@ -431,7 +451,8 @@ async def main(d):
     await phone.close()
 
 
-d = ps.Daemon(exe).start()
+# Pinned calm: the timings below are the calm ones, whatever else this machine is doing.
+d = ps.Daemon(exe, env={"KELPIE_LOAD_FORCE": "L0:calm"}).start()
 try:
     asyncio.run(main(d))
 except Exception:

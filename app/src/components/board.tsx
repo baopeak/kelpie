@@ -60,8 +60,8 @@ function Card(props: { project: Project; ghost?: boolean; onPointerDown?: (e: Po
       onContextMenu={(e) => !props.ghost && openContextMenu(e, cardMenu(props.project, () => props.onOpen?.()))}
     >
       <div class="board-card-head">
-        <Show when={parent()} fallback={<span class="project-swatch" style={{ background: props.project.color }}>{props.project.name.slice(0, 1).toUpperCase()}</span>}>
-          <span class="wt-glyph" style={{ color: props.project.color }}><Icon name="branch" size={13} /></span>
+        <Show when={parent()} fallback={<span class="project-swatch" style={{ "--kc": props.project.color }}>{props.project.name.slice(0, 1).toUpperCase()}</span>}>
+          <span class="wt-glyph" style={{ "--kc": props.project.color }}><Icon name="branch" size={13} /></span>
         </Show>
         <span class="board-card-name">{props.project.name}</span>
         <button class={`icon-btn mini pin${props.project.pinned ? " on" : ""}`} title={props.project.pinned ? t("Unpin") : t("Pin to top")}
