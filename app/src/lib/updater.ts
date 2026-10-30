@@ -24,11 +24,12 @@ export function offered(info: UpdateInfo | null, skipped?: string): UpdateInfo |
   return info && info.version !== skipped ? info : null;
 }
 
-/** Whether the connected daemon keeps running through an install: on macOS and Linux always (a
- *  running program's file can be replaced: the bundle, AppImage or package is swapped while it
- *  runs), on Windows when it runs from its copy (`…/daemon/<build>/`). */
+/** Whether the connected daemon keeps running through an install: on macOS and Linux (a running
+ *  program's file can be replaced: the bundle, AppImage or package is swapped while it runs) unless
+ *  it runs from inside an AppImage's mount (its copy could not be made), which ends with the app; on
+ *  Windows when it runs from its copy (`…/daemon/<build>/`). */
 export function daemonSurvivesUpdate(exe: string | undefined, unix: boolean): boolean {
-  if (unix) return true;
+  if (unix) return !exe || !/\/\.mount_[^/]*\//.test(exe);
   return !!exe && /[\\/]daemon[\\/][^\\/]+[\\/][^\\/]+$/.test(exe);
 }
 

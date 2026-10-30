@@ -3,6 +3,7 @@ import { Show, createResource, createSignal } from "solid-js";
 import { store } from "../lib/store";
 import { t } from "../lib/i18n";
 import { daemon } from "../lib/ipc";
+import { isWindows } from "../lib/platform";
 import { available, daemonSurvivesUpdate, installUpdate, installWhenIdle, progress, skipUpdate, whenIdle } from "../lib/updater";
 
 export default function UpdateDialog() {
@@ -10,7 +11,7 @@ export default function UpdateDialog() {
   const [busy, setBusy] = createSignal(false);
   // A daemon started from the install folder (Kelpie 0.1.x, or a copy that could not be made)
   // has to stop for this one update.
-  const [survives] = createResource(() => daemon<{ exe?: string }>("daemon.info").then((i) => daemonSurvivesUpdate(i.exe, !/Win/.test(navigator.platform))).catch(() => true));
+  const [survives] = createResource(() => daemon<{ exe?: string }>("daemon.info").then((i) => daemonSurvivesUpdate(i.exe, !isWindows)).catch(() => true));
   const close = () => store.setOverlay(null);
   const install = async () => {
     setBusy(true);

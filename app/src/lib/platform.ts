@@ -1,6 +1,7 @@
 import { formatRelative, t } from "./i18n";
 
 export const isMac = /Mac|iPhone|iPad/.test(navigator.platform) || navigator.userAgent.includes("Mac OS");
+export const isWindows = /Win/.test(navigator.platform);
 
 /** Human label for a chord like "mod+shift+p". */
 export function chordLabel(chord: string): string {

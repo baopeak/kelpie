@@ -8,7 +8,10 @@
 //! reconnects to it. A newer daemon takes over only when nothing runs, or when the user asks
 //! (`checkDaemonApi` in the store), and goes into the slot the running one does not use. Two fixed
 //! paths, not one per build: firewall rules (phone access) and paths an agent was told keep working.
-//! A Linux AppImage does the same, as its files are only mounted while the app runs.
+//! A Linux AppImage copies its daemon too, as its files are only mounted while the app runs. There
+//! nothing stops a running program's file from being removed, so the copy goes to slot `a` every
+//! time (`b` only when `a` cannot be written): a daemon already running from `a` keeps its own,
+//! now unlinked, file, as a daemon under a replaced macOS bundle or .deb does.
 
 use std::path::{Path, PathBuf};
 
@@ -31,11 +34,70 @@ pub fn runnable(installed: &Path) -> PathBuf {
     let root = kelpie_proto::data_dir().join("daemon");
     match copy_runtime(installed, &root, env!("CARGO_PKG_VERSION")) {
         Ok(exe) => exe,
+        Err(e) if from_appimage => {
+            // Started from the mount it still runs, but it stops when Kelpie quits (its files go away),
+            // and with it every session; the update dialog says so (`daemonSurvivesUpdate`).
+            tracing::warn!("could not copy the daemon out of the AppImage ({e:#}): it runs from the AppImage and stops when Kelpie quits");
+            installed.to_path_buf()
+        }
         Err(e) => {
             tracing::warn!("daemon runs from the install folder ({e:#}); updates will have to stop it");
             installed.to_path_buf()
         }
     }
+}
+
+/// Variables only the AppImage runtime and its GTK hook (linuxdeploy-plugin-gtk, which Tauri bundles)
+/// set: they point into the AppImage's mount or force its bundled GTK setup.
+const APPIMAGE_ONLY: &[&str] = &[
+    "APPIMAGE",
+    "APPDIR",
+    "ARGV0",
+    "OWD",
+    "GTK_PATH",
+    "GTK_IM_MODULE_FILE",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GIO_EXTRA_MODULES",
+    "GSETTINGS_SCHEMA_DIR",
+    "GTK_EXE_PREFIX",
+    "GTK_DATA_PREFIX",
+    "GI_TYPELIB_PATH",
+];
+/// Search paths the runtime or hook put `$APPDIR` entries into; the user's own entries stay.
+const APPIMAGE_LISTS: &[&str] = &["XDG_DATA_DIRS", "PATH", "LD_LIBRARY_PATH", "PYTHONPATH", "PERL5LIB"];
+
+/// How the daemon's environment differs from the app's when the app runs from an AppImage: each
+/// `(name, None)` is removed, each `(name, Some(value))` replaces the app's value. The daemon outlives
+/// the app, and every terminal and agent inherits its environment: none of them may see the mount,
+/// which disappears when the app quits, or the bundled GTK modules, which belong to the AppImage's
+/// own libraries. The runtime and hook keep no copy of the values they replace, so a forced
+/// `GDK_BACKEND=x11` or `GTK_THEME=Adwaita:dark|light` is removed rather than restored.
+pub fn appimage_env_fixes(vars: &[(String, String)]) -> Vec<(String, Option<String>)> {
+    let get = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+    if get("APPIMAGE").is_none() {
+        return Vec::new();
+    }
+    let appdir = get("APPDIR").map(|d| d.trim_end_matches('/')).filter(|d| d.len() > 1);
+    let inside = |v: &str| appdir.is_some_and(|d| v == d || v.starts_with(&format!("{d}/")));
+    let mut out = Vec::new();
+    for (name, value) in vars {
+        let forced = match name.as_str() {
+            "GDK_BACKEND" => value == "x11",
+            "GTK_THEME" => value == "Adwaita:dark" || value == "Adwaita:light",
+            _ => false,
+        };
+        if APPIMAGE_ONLY.contains(&name.as_str()) || forced {
+            out.push((name.clone(), None));
+        } else if APPIMAGE_LISTS.contains(&name.as_str()) {
+            let kept: Vec<&str> = value.split(':').filter(|e| !e.is_empty() && !inside(e)).collect();
+            if kept.len() != value.split(':').count() {
+                out.push((name.clone(), (!kept.is_empty()).then(|| kept.join(":"))));
+            }
+        } else if inside(value) {
+            out.push((name.clone(), None));
+        }
+    }
+    out
 }
 
 /// Puts the daemon files next to `installed` into a slot under `root` (unless one already holds
@@ -132,6 +194,53 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&next).unwrap(), "daemon version two");
         drop(held);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn vars(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn the_daemon_never_inherits_the_appimage_mount_or_its_gtk_setup() {
+        let d = "/tmp/.mount_KelpieAb12";
+        // What the type-2 runtime and Tauri's GTK hook leave in the app's environment, next to the user's own.
+        let app = vars(&[
+            ("APPIMAGE", "/home/me/Apps/Kelpie_0.1.8_amd64.AppImage"),
+            ("APPDIR", d),
+            ("ARGV0", "./Kelpie.AppImage"),
+            ("OWD", "/home/me"),
+            ("GDK_BACKEND", "x11"),
+            ("GTK_THEME", "Adwaita:dark"),
+            ("XDG_DATA_DIRS", &format!("{d}/usr/share:/usr/share:/usr/local/share:/usr/share")),
+            ("GSETTINGS_SCHEMA_DIR", &format!("{d}//usr/share/glib-2.0/schemas")),
+            ("GTK_EXE_PREFIX", &format!("{d}//usr")),
+            ("GTK_PATH", &format!("{d}//usr/lib/gtk-3.0")),
+            ("GTK_IM_MODULE_FILE", &format!("{d}//usr/lib/gtk-3.0/3.0.0/immodules.cache")),
+            ("GDK_PIXBUF_MODULE_FILE", &format!("{d}//usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache")),
+            ("GIO_EXTRA_MODULES", &format!("{d}//usr/lib/gio/modules")),
+            ("SOME_HOOK_VALUE", &format!("{d}/usr/lib/thing")),
+            ("PATH", &format!("{d}/usr/bin:/home/me/.local/bin:/usr/bin")),
+            ("LD_LIBRARY_PATH", &format!("{d}/usr/lib")),
+            ("PYTHONPATH", "/home/me/py"),
+            ("HOME", "/home/me"),
+            ("SHELL", "/bin/bash"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("NOT_THE_MOUNT", &format!("{d}-other/x")),
+        ]);
+        let fixes = appimage_env_fixes(&app);
+        let fix = |k: &str| fixes.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        for gone in ["APPIMAGE", "APPDIR", "ARGV0", "OWD", "GDK_BACKEND", "GTK_THEME", "GSETTINGS_SCHEMA_DIR", "GTK_EXE_PREFIX", "GTK_PATH", "GTK_IM_MODULE_FILE", "GDK_PIXBUF_MODULE_FILE", "GIO_EXTRA_MODULES", "SOME_HOOK_VALUE", "LD_LIBRARY_PATH"] {
+            assert_eq!(fix(gone), Some(None), "{gone} is removed");
+        }
+        assert_eq!(fix("XDG_DATA_DIRS"), Some(Some("/usr/share:/usr/local/share:/usr/share".into())), "only the mount's entry goes");
+        assert_eq!(fix("PATH"), Some(Some("/home/me/.local/bin:/usr/bin".into())));
+        for kept in ["PYTHONPATH", "HOME", "SHELL", "WAYLAND_DISPLAY", "NOT_THE_MOUNT"] {
+            assert_eq!(fix(kept), None, "{kept} is the user's");
+        }
+        // A theme or backend the user chose is theirs.
+        assert!(appimage_env_fixes(&vars(&[("APPIMAGE", "/a.AppImage"), ("APPDIR", d), ("GDK_BACKEND", "wayland"), ("GTK_THEME", "Yaru")])).iter().all(|(n, _)| n != "GDK_BACKEND" && n != "GTK_THEME"));
+        // Not an AppImage (a .deb install, Windows, macOS): nothing changes, whatever the variables say.
+        assert!(appimage_env_fixes(&vars(&[("APPDIR", d), ("GDK_BACKEND", "x11"), ("GTK_PATH", "/usr/lib/gtk-3.0")])).is_empty());
     }
 
     #[test]

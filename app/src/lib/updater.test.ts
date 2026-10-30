@@ -41,6 +41,9 @@ describe("updater", () => {
     expect(daemonSurvivesUpdate(undefined, true)).toBe(true);
     // Linux: a .deb install runs the daemon from /usr/bin, which dpkg replaces without stopping it.
     expect(daemonSurvivesUpdate("/usr/bin/kelpied", true)).toBe(true);
+    expect(daemonSurvivesUpdate("/home/u/.local/share/Kelpie/daemon/a/kelpied", true)).toBe(true);
+    // An AppImage daemon that could not be copied out runs from the mount, which ends with the app.
+    expect(daemonSurvivesUpdate("/tmp/.mount_KelpieAb12/usr/bin/kelpied", true)).toBe(false);
   });
 
   it("checks every six hours", () => {
