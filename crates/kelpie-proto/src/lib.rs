@@ -220,7 +220,10 @@ pub fn read_user_token(endpoint: &Endpoint) -> Option<String> {
 pub fn write_user_token(endpoint: &Endpoint, token: &str) -> io::Result<()> {
     let path = auth_token_path(endpoint);
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        if let Some(kelpie) = dir.parent() {
+            ensure_private_dir(kelpie)?;
+        }
+        ensure_private_dir(dir)?;
     }
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -337,6 +340,28 @@ pub fn data_dir() -> std::path::PathBuf {
         return dir.into();
     }
     data_base().join("Kelpie")
+}
+
+/// Creates `dir` (with missing parents) for this OS user only. Unix: mode 0700, as the XDG spec asks
+/// for its folders; an existing folder of ours that others may read is narrowed to 0700 (one owned
+/// by someone else is left alone). Windows: a plain create; the per-user profile is private already.
+pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
+    if dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        let meta = std::fs::metadata(dir)?;
+        // SAFETY: geteuid has no preconditions.
+        if meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
 }
 
 fn data_base() -> std::path::PathBuf {
@@ -633,6 +658,30 @@ mod tests {
         assert!(msg.contains("org.freedesktop.secrets was not provided"), "keeps the cause: {msg}");
         assert_eq!(msg.contains("GNOME Keyring"), cfg!(target_os = "linux"), "{msg}");
         assert_eq!(secret_store_error(keyring::Error::TooLong("user".into(), 255)), keyring::Error::TooLong("user".into(), 255).to_string());
+    }
+
+    #[test]
+    fn the_data_folder_is_created_for_this_user_only() {
+        let root = std::env::temp_dir().join(format!("kelpie-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let fresh = root.join("share").join("Kelpie");
+        ensure_private_dir(&fresh).unwrap();
+        assert!(fresh.is_dir());
+        ensure_private_dir(&fresh).unwrap(); // already there: fine
+        ensure_private_dir(std::path::Path::new("")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&fresh), 0o700, "a new folder");
+            assert_eq!(mode(&root.join("share")), 0o700, "and the parents it had to make");
+            let open = root.join("open");
+            std::fs::create_dir_all(&open).unwrap();
+            std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+            ensure_private_dir(&open).unwrap();
+            assert_eq!(mode(&open), 0o700, "an existing folder of ours that others could read");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

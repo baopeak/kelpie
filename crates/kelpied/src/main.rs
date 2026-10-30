@@ -219,6 +219,8 @@ fn serve() -> Result<()> {
         eprintln!("kelpied: could not move data from the Erka folder: {e}");
     }
     let data_dir = kelpie_proto::data_dir();
+    // Logs, session state and file snapshots: for this user only (0700 on Unix).
+    kelpie_proto::ensure_private_dir(&data_dir)?;
     std::fs::create_dir_all(data_dir.join("logs"))?;
     let _lock = match acquire_lock(&data_dir.join("kelpied.lock")) {
         Some(lock) => lock,
