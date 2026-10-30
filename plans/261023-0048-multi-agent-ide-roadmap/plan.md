@@ -1,7 +1,7 @@
 ---
 title: "Multi-agent IDE roadmap"
 description: "Bring the best of 2026 AI IDEs to Kelpie in a vendor-neutral way for many agent CLIs, each feature gated by tests and a performance budget."
-status: pending
+status: completed
 priority: P1
 effort: "~52d"
 tags: [roadmap, multi-agent, acp, performance, ux, security]
@@ -49,7 +49,7 @@ tests and a performance budget. Supersedes [261023-0036-vibe-coder-gaps](../2610
 | 12 | [Off-machine notify & limit actions](phase-12-notify-limits-redaction.md) | P1 | 3d | 1, 3, 5 | completed |
 | 13 | [Processes, ports & preview](phase-13-processes-ports.md) | P2 | 3d | 1 | completed |
 | 14 | [Agent setup: MCP, instructions, skills](phase-14-agent-setup.md) | P2 | 3d | 1 | completed |
-| 15 | [Platform & hygiene](phase-15-platform-hygiene.md) | P3 | 3d | 1, 2 | pending |
+| 15 | [Platform & hygiene](phase-15-platform-hygiene.md) | P3 | 3d | 1, 2 | completed |
 
 Order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 9 → 12 → 8 → 10 → 11 → 13 → 14 → 15.
 Parallel-safe once 1 lands: (2, 3), (9, 13), (13, 14). Phases 6/7/8 share git + diff view → sequential.
@@ -82,7 +82,7 @@ No new permanent bars: chips on existing rows/tabs, right-panel tabs, Board colu
 Status keeps colour + shape. Destructive actions preview and confirm. Shortcuts pass the conflict checker. Bell keeps its unread count; "needs you" is a separate dot.
 
 ## Success criteria
-- [ ] All 15 phases meet the definition of done.
+- [x] All 15 phases meet the definition of done (manual checks and follow-ups listed below).
 - [ ] Global budgets hold at the end (final perf report).
 - [ ] Scripted "day in the life" e2e (5 agents, 3 vendors: plan → compose → run → review → finish) passes.
 
@@ -135,11 +135,12 @@ feature on an older daemon; never assume app and daemon are the same release.
 - Phase 12: manual checks pending (real Telegram bot, ntfy.sh, a real Claude usage limit, Codex resume after switch account, phone link); no limit signal for Codex/chat; non-Windows idle unit-tested only.
 - Phase 9: fuzzy p95 > 30 ms under full CPU load (17–21 ms quiet); remote Windows hosts get POSIX quoting; `chat_ui.py` (real Claude/Codex) not run.
 - Phase 10: `session.create` lets a program inside a session open ssh to any saved host (pre-existing; product decision needed); host tasks verified under Git Bash only.
-- Phase 13: Unix-only process code first compiles in CI (Linux untested); Gemini/Volta shims may lose agent helpers on Kill children; programs escaping the Job survive session close; macOS `lsof` → libproc and a Mac scan measurement.
+- Phase 15: Linux release job unexercised (tag-only), signing key visible to the bundle step and Tauri's unpinned linuxdeploy; manual Linux desktop checks, Wayland/arm64, `ui_tour.py` on Linux; 15c/15d Low follow-ups in their dev reports.
+- Phase 13: Unix-only process code now compiles and passes on Linux CI (phase 15); Gemini/Volta shims may lose agent helpers on Kill children; programs escaping the Job survive session close; macOS `lsof` → libproc and a Mac scan measurement.
 - Perf gate `bench` measures unfocused sessions, which the CPU-priority work (separate change) deliberately slows under load: compare bench with `daemon.set_priority {enabled:false}` or budget it separately.
 
 ## Unresolved questions
 1. Gemini / OpenCode / Copilot: native ACP or adapter, exact flags — phase 4 spike.
 2. Release host (public vs private GitHub Releases) and who holds the signing key — phase 2.
-3. Linux format (AppImage vs .deb) and whether Linux users exist — phase 15.
+3. ~~Linux format (AppImage vs .deb)~~ — resolved in phase 15: both (AppImage is the update channel, .deb for apt users). Whether Linux users exist remains open.
 4. Opt-in for scripts outside sessions calling `kelpied call` with the app token — default off, confirm in phase 1 review.

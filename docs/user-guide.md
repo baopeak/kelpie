@@ -10,9 +10,27 @@ Architecture and protocol: [architecture.md](architecture.md).
 
 - **Windows 10 1809+ / 11**: run the `Kelpie_x.y.z_x64-setup.exe` installer (per-user, no admin).
 - **macOS 12+**: open the `.dmg` and drag Kelpie to Applications.
+- **Linux (x86-64; built on Ubuntu 22.04, so glibc 2.35 or newer)**, either format:
+  - **AppImage**: `chmod +x Kelpie_x.y.z_amd64.AppImage` and run it. It updates itself in place.
+    Running an AppImage needs FUSE 2 (`sudo apt install libfuse2` on Ubuntu 22.04+, or start it
+    with `--appimage-extract-and-run`).
+  - **.deb** (Debian, Ubuntu and derivatives): `sudo apt install ./Kelpie_x.y.z_amd64.deb`; apt
+    pulls in WebKitGTK. Kelpie is then `kelpie` on the PATH and in the applications menu.
+
+  Data lives in `$XDG_DATA_HOME/Kelpie` (usually `~/.local/share/Kelpie`, readable by you only):
+  settings, logs, the session daemon's socket and, for the AppImage, the copy of the session daemon
+  that runs (an AppImage's files exist only while the app runs). Terminals and agents get your
+  desktop's environment, not the AppImage's own GTK setup. Saved secrets (SSH passwords, notification and
+  issue-tracker tokens) need a Secret Service — GNOME Keyring, KWallet or another
+  `org.freedesktop.secrets` provider, unlocked; without one, saving a secret fails with a message
+  that says so and nothing is stored anywhere else. **Keep computer awake** uses
+  `systemd-inhibit` (systemd's logind) to block idle sleep and suspend while it is on; on a system without it the setting has no effect and the
+  daemon log says why. Desktop notifications go through the desktop's notification service.
 
 Agents are not bundled: install the CLIs you use (`claude`, `codex`, `omp`) as usual. Kelpie
-finds them on your PATH (Windows) or through your login shell (macOS).
+finds them on your PATH (Windows) or through your login shell (macOS, Linux: apps started from
+the desktop do not see the PATH your shell profile sets, so each agent starts through
+`$SHELL -l`, or the account's shell when `SHELL` is not set).
 
 **Updates.** Kelpie looks for a newer release on GitHub 30 s after it starts and every 6 hours
 (Settings → About → **Check for updates**, or **Check now**). A newer release shows as
@@ -399,7 +417,8 @@ prompt**; for a terminal it is a startup command.
 - **Hibernation** (Settings → Agents): agents that finished and sat unseen in a background
   project for N minutes are stopped; they resume their conversation when you open them
   again. *Sleep* in a project's menu does the same at once.
-- **Keep computer awake**: off, while an agent works, or always (status bar coffee icon).
+- **Keep computer awake**: off, while an agent works, or always (status bar coffee icon). The
+  display may still turn off. Linux: through `systemd-inhibit`. While Kelpie keeps the computer awake, a suspend chosen from the system menu waits until it lets go; closing the lid still follows your system's setting; switch keep-awake off (or to *while an agent works*) when you want the computer to sleep.
 - **Prioritize visible terminals** (Settings → Agents, on by default, Windows): the terminal on
   screen gets the CPU first, so typing stays quick while other agents build and test or other
   programs keep the machine busy. Nothing else is slowed down.
@@ -1121,12 +1140,16 @@ kelpied call session.read '{"handle":3}'
 
 ## Build from source
 
-Requirements: Rust (stable), Node 22+, pnpm, and on Windows the MSVC build tools.
+Requirements: Rust (stable), Node 22+, pnpm, and on Windows the MSVC build tools. On Linux
+(Debian/Ubuntu names): `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+libdbus-1-dev libasound2-dev patchelf xdg-utils`, and `libfuse2` (or
+`APPIMAGE_EXTRACT_AND_RUN=1`) to build the AppImage.
 
 ```
 cd app && pnpm install && cd ..
-scripts/build-release.sh --bundles nsis      # Windows installer
-scripts/build-release.sh --bundles app,dmg   # macOS
+scripts/build-release.sh --bundles nsis           # Windows installer
+scripts/build-release.sh --bundles app,dmg        # macOS
+scripts/build-release.sh --bundles appimage,deb   # Linux
 ```
 
 Each run bumps the patch version (in `Cargo.toml`, `app/package.json` and
@@ -1141,4 +1164,5 @@ Development: `scripts/dev-daemon.sh run` (isolated endpoint/data dir), then in `
 `pnpm i18n:check` (every interface text has a Vietnamese translation), `kelpied bench --sessions
 20 --mb 2`, `kelpied bench-echo` (keystroke latency; `--cmd claude --ready ❯`, `--load N` busy
 sessions, `--external N` busy processes), and the WebDriver end-to-end scripts in `scripts/e2e/`
-(require `tauri-driver` + a matching `msedgedriver`).
+(require `tauri-driver` + a matching `msedgedriver`; on Linux `WebKitWebDriver` from
+`webkit2gtk-driver`, under Xvfb when headless — `scripts/e2e/boot_smoke.py` is the minimal one).

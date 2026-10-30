@@ -57,6 +57,7 @@ async fn run_git(slots: &Semaphore, cwd: &Path, args: &[&str], env: &[(&str, &st
         return crate::remote::git(dir, args).await;
     }
     let mut cmd = tokio::process::Command::new("git");
+    crate::daemon_runtime::clean_env(cmd.as_std_mut());
     cmd.args(["-c", "core.quotepath=off", "-c", "color.ui=false"])
         .args(args)
         .current_dir(cwd)

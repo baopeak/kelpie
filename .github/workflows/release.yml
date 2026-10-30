@@ -15,7 +15,8 @@ permissions:
 jobs:
   build:
     strategy:
-      fail-fast: true
+      # One platform failing (the first Linux release, say) must not cancel the others' builds of the tag.
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -25,6 +26,10 @@ jobs:
           - os: macos-latest
             bundles: app,dmg
             target: universal-apple-darwin
+          # Built on the oldest supported Ubuntu, so the AppImage runs on newer glibc too.
+          - os: ubuntu-22.04
+            bundles: appimage,deb
+            target: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +42,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf \
+            libasound2-dev xdg-utils libfuse2 file
       - name: The tag names the version every manifest declares
         shell: bash
         run: |
@@ -47,7 +59,13 @@ jobs:
           for v in "$cargo" "$pkg" "$conf"; do
             [ "$v" = "$tag" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $cargo, package.json $pkg, tauri.conf.json $conf"; exit 1; }
           done
-      # Dependencies install without the signing key in the environment.
+      # Dependencies install in a step without the signing key. The next step has it in its environment;
+      # scripts/build-release.sh removes it from what it passes on, so the sidecar builds and its own
+      # `pnpm install` do not inherit it, and hands it only to `pnpm tauri build`, which builds the frontend,
+      # bundles and signs. Known exposures: any same-user process of that step can still read the step shell's
+      # starting environment (/proc/<pid>/environ); and during `tauri build` Tauri's AppImage bundler downloads
+      # linuxdeploy and its GTK plugin (unpinned, Tauri's own choice) and runs them. Signing in a separate step,
+      # with no key in the build's environment at all, is the real fix.
       - name: Install frontend dependencies
         working-directory: app
         run: pnpm install --frozen-lockfile
@@ -58,14 +76,18 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           KELPIE_KEEP_VERSION: "1"
           KELPIE_TARGET: ${{ matrix.target }}
+          # linuxdeploy is itself an AppImage: run it without FUSE.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: scripts/build-release.sh --bundles ${{ matrix.bundles }} --config src-tauri/tauri.updater.json
       - name: The release build carries no updater test hooks
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
             bin=target/release/kelpie.exe
-          else
+          elif [ "$RUNNER_OS" = "macOS" ]; then
             bin=target/universal-apple-darwin/release/kelpie
+          else
+            bin=target/release/kelpie
           fi
           [ -f "$bin" ] || { echo "app binary not found: $bin"; exit 1; }
           if grep -a -q KELPIE_UPDATE_ENDPOINT "$bin"; then echo "$bin was built with e2e-updater"; exit 1; fi
@@ -78,6 +100,10 @@ jobs:
             target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
             target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
             target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/*.AppImage.sig
+            target/release/bundle/deb/*.deb
+            target/release/bundle/deb/*.deb.sig
           if-no-files-found: error
 
   publish:
@@ -108,12 +134,20 @@ jobs:
           [ -s notes.md ] || echo "Kelpie $v" > notes.md
           exe=$(ls dist/*-setup.exe | head -1)
           mac=$(ls dist/*.app.tar.gz | head -1)
+          appimage=$(ls dist/*.AppImage | head -1)
+          # The updater looks for linux-x86_64-<bundle> before linux-x86_64: a .deb install updates from the
+          # signed .deb (pkexec dpkg -i). Without that entry it would be offered the AppImage, which it refuses
+          # to install as a package (an error, never a broken install).
+          deb=$(ls dist/*.deb 2>/dev/null | head -1 || true)
+          extra=()
+          if [ -n "$deb" ] && [ -f "$deb.sig" ]; then extra+=(--artifact "linux-x86_64-deb=$deb"); fi
           python3 scripts/release/latest_json.py --version "$v" \
             --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
             --notes-file notes.md \
             --artifact "windows-x86_64=$exe" \
             --artifact "darwin-aarch64=$mac" \
-            --artifact "darwin-x86_64=$mac" > dist/latest.json
+            --artifact "darwin-x86_64=$mac" \
+            --artifact "linux-x86_64=$appimage" "${extra[@]}" > dist/latest.json
           cat dist/latest.json
       - name: Create the draft release
         shell: bash

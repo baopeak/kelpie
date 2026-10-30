@@ -80,7 +80,8 @@ pub async fn update_check(app: AppHandle, pending: State<'_, PendingUpdate>) -> 
 
 /// Downloads and verifies the pending update (progress as `update-progress` events), then runs
 /// the installer. Windows: the installer takes over, this app exits and the installer starts the
-/// new one. macOS: the bundle is replaced in place and the app restarts.
+/// new one. macOS: the bundle is replaced in place and the app restarts. Linux: the AppImage is
+/// replaced in place (a .deb install is upgraded through `pkexec dpkg -i`), then the app restarts.
 #[tauri::command]
 pub async fn update_install(app: AppHandle, pending: State<'_, PendingUpdate>) -> CmdResult<()> {
     if pending.installing.swap(true, Ordering::SeqCst) {

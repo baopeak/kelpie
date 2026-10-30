@@ -219,6 +219,8 @@ fn serve() -> Result<()> {
         eprintln!("kelpied: could not move data from the Erka folder: {e}");
     }
     let data_dir = kelpie_proto::data_dir();
+    // Logs, session state and file snapshots: for this user only (0700 on Unix).
+    let data_dir_warning = kelpie_proto::ensure_private_dir(&data_dir)?;
     std::fs::create_dir_all(data_dir.join("logs"))?;
     let _lock = match acquire_lock(&data_dir.join("kelpied.lock")) {
         Some(lock) => lock,
@@ -228,6 +230,9 @@ fn serve() -> Result<()> {
         }
     };
     init_logging(&data_dir);
+    if let Some(w) = data_dir_warning {
+        tracing::warn!("{w}");
+    }
     // Before any session spawns: their environment carries tokens derived from this daemon's secret.
     auth::init(&kelpie_proto::endpoint())?;
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kelpied"));

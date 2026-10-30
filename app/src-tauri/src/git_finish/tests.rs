@@ -719,6 +719,24 @@ async fn cancel_ends_a_running_check() {
     assert!(cancelled && !r.ok);
 }
 
+/// Stopping a check signals its own process group and nothing else: no other program of the user, whatever the
+/// check's pid looks like.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stopped_check_never_reaches_programs_outside_it() {
+    use std::os::unix::process::CommandExt as _;
+    let f = fixture("bystander");
+    let mut bystander = Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+    for _ in 0..3 {
+        let (r, _) = run_check(&f.repo, "sleep 60", Duration::from_millis(300), std::future::pending()).await;
+        assert!(!r.ok && r.output.contains("timed out"), "{r:?}");
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(bystander.try_wait().unwrap().is_none(), "a program outside the check was stopped");
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+}
+
 #[tokio::test]
 async fn errors_after_the_base_moved_are_reported_with_the_merge() {
     let f = fixture("after");

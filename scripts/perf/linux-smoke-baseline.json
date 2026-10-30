@@ -1,0 +1,17 @@
+{
+  "metrics": {
+    "cold_start_ms": 634.0,
+    "idle_cpu_pct": 4.53,
+    "rss_mb": 505.7,
+    "idle_seconds": 30
+  },
+  "label": "linux-smoke",
+  "created": "2026-10-30T03:20:00+07:00",
+  "source": "https://github.com/baopeak/kelpie/actions/runs/40992930356 (artifact linux-smoke)",
+  "machine": {
+    "os": "Linux-6.8.0-1070-azure-x86_64-with-glibc2.35 (GitHub ubuntu-22.04 runner)",
+    "cores": 4,
+    "display": "Xvfb 1600x1000x24 under dbus-run-session, WebKitGTK software rendering (DMA-BUF renderer and compositing off)"
+  },
+  "notes": "One run of scripts/e2e/boot_smoke.py against the release app: cold start = __kelpie.perf.interactiveAt minus app process creation; idle = app + its WebKit processes + kelpied, 30 s with one shell open, percent of one core; RSS = median of the same processes. Not gated: CI prints the current numbers next to these. Shared runners vary, so move this baseline only with a reason, never to hide a regression."
+}

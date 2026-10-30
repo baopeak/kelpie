@@ -291,6 +291,8 @@ fn spawn_daemon() -> Result<()> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // From an AppImage: sessions must not inherit its mount or its bundled GTK setup.
+    crate::daemon_runtime::clean_env(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

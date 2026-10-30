@@ -158,24 +158,58 @@ pub fn installed_presets() -> Vec<&'static str> {
         let presets = all_presets();
         let bins: Vec<&str> = presets.iter().map(|p| p.bin).filter(|b| b.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))).collect();
         let script = format!("for b in {}; do command -v \"$b\" >/dev/null 2>&1 && echo \"$b\"; done", bins.join(" "));
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        let found = std::process::Command::new(shell).args(["-l", "-c", &script]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        let found = std::process::Command::new(login_shell()).args(["-l", "-c", &script]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
         let found: Vec<&str> = found.lines().collect();
         presets.into_iter().filter(|p| found.contains(&p.bin)).map(|p| p.id).collect()
     }
 }
 
 /// Default interactive shell for plain terminal sessions.
+#[cfg(windows)]
 pub fn default_shell() -> Vec<String> {
-    if cfg!(windows) {
-        for candidate in ["pwsh.exe", "powershell.exe"] {
-            if let Some(p) = which(candidate) {
-                return vec![p.to_string_lossy().into_owned(), "-NoLogo".into()];
-            }
+    for candidate in ["pwsh.exe", "powershell.exe"] {
+        if let Some(p) = which(candidate) {
+            return vec![p.to_string_lossy().into_owned(), "-NoLogo".into()];
         }
-        vec![std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into())]
-    } else {
-        vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into()), "-l".into()]
+    }
+    vec![std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into())]
+}
+
+/// Default interactive shell for plain terminal sessions.
+#[cfg(unix)]
+pub fn default_shell() -> Vec<String> {
+    vec![login_shell(), "-l".into()]
+}
+
+/// The user's login shell: `$SHELL`, else on Linux the account's shell from the user database
+/// (a desktop session may start apps without `SHELL`), else the platform default.
+#[cfg(unix)]
+pub fn login_shell() -> String {
+    let passwd = if cfg!(target_os = "macos") { None } else { passwd_shell() };
+    pick_login_shell(std::env::var("SHELL").ok(), passwd, cfg!(target_os = "macos"))
+}
+
+#[cfg(unix)]
+fn pick_login_shell(env: Option<String>, passwd: Option<String>, macos: bool) -> String {
+    let usable = |s: &String| s.starts_with('/') && !s.ends_with("/nologin") && !s.ends_with("/false");
+    env.filter(|s| !s.is_empty())
+        .or_else(|| passwd.filter(usable))
+        .unwrap_or_else(|| if macos { "/bin/zsh" } else { "/bin/sh" }.into())
+}
+
+/// The shell recorded for this user (`/etc/passwd`, LDAP… through NSS).
+#[cfg(unix)]
+fn passwd_shell() -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: zeroed `passwd` is a valid out-parameter; `buf` outlives every pointer it receives,
+    // and the shell string is copied out before `buf` is dropped.
+    unsafe {
+        let mut pwd: libc::passwd = std::mem::zeroed();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        if libc::getpwuid_r(libc::getuid(), &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) != 0 || result.is_null() || pwd.pw_shell.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(pwd.pw_shell).to_str().ok().map(str::to_string)
     }
 }
 
@@ -522,10 +556,11 @@ fn wrap_for_platform(argv: Vec<String>) -> Result<Vec<String>> {
 }
 
 /// Runs the agent through the user's login shell so PATH (nvm, bun, homebrew…) matches what
-/// they get in Terminal.app. `exec` keeps the agent as the PTY's direct child.
+/// they get in a terminal: GUI-launched apps on macOS and Linux do not inherit the shell's PATH.
+/// `exec` keeps the agent as the PTY's direct child.
 #[cfg(unix)]
 fn wrap_for_platform(argv: Vec<String>) -> Result<Vec<String>> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let shell = login_shell();
     let joined = argv.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
     Ok(vec![shell, "-l".into(), "-c".into(), format!("exec {joined}")])
 }
@@ -627,6 +662,22 @@ pub fn which(program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn login_shell_is_shell_env_else_the_account_shell_else_the_platform_default() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(pick_login_shell(s("/usr/bin/fish"), s("/bin/bash"), false), "/usr/bin/fish");
+        // A desktop launcher may start the app without SHELL.
+        assert_eq!(pick_login_shell(None, s("/bin/bash"), false), "/bin/bash");
+        assert_eq!(pick_login_shell(s(""), s("/usr/bin/zsh"), false), "/usr/bin/zsh");
+        for unusable in ["/usr/sbin/nologin", "/bin/false", "bash", ""] {
+            assert_eq!(pick_login_shell(None, s(unusable), false), "/bin/sh", "{unusable}");
+        }
+        assert_eq!(pick_login_shell(None, None, true), "/bin/zsh");
+        // The test runner's own account has a shell the user database reports.
+        assert!(login_shell().starts_with('/'));
+    }
 
     #[test]
     fn concurrent_hook_settings_are_published_as_complete_json() {

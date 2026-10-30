@@ -277,8 +277,14 @@ mod imp {
     }
 
     impl ProcTree {
+        /// `pid` leads its own process group (spawned with `setsid` / `process_group(0)`), so its pid is the group id.
+        /// Group ids 0 and 1 (and our own group) are refused: `killpg` on them would reach the daemon's own group or
+        /// every process of the user.
         pub fn adopt(pid: u32, _console: Option<u32>, _agent: Option<&str>) -> io::Result<ProcTree> {
-            Ok(ProcTree { pgid: pid as i32, released: std::sync::atomic::AtomicBool::new(false) })
+            // SAFETY: getpgrp has no preconditions.
+            let own = unsafe { libc::getpgrp() };
+            let pgid = i32::try_from(pid).ok().filter(|p| *p > 1 && *p != own).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("not a process group of its own: {pid}")))?;
+            Ok(ProcTree { pgid, released: std::sync::atomic::AtomicBool::new(false) })
         }
 
         /// SIGHUP+SIGTERM now, SIGKILL after a grace period for anything still alive.

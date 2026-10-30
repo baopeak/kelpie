@@ -351,7 +351,7 @@ fn fs_reveal_blocking(root: String, path: String) -> CmdResult<()> {
     #[cfg(target_os = "macos")]
     let result = std::process::Command::new("open").arg("-R").arg(&full).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let result = std::process::Command::new("xdg-open").arg(full.parent().unwrap_or(&full)).spawn();
+    let result = crate::daemon_runtime::clean_env(&mut std::process::Command::new("xdg-open")).arg(full.parent().unwrap_or(&full)).spawn();
     result.map(|_| ()).map_err(err)
 }
 

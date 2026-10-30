@@ -220,7 +220,11 @@ pub fn read_user_token(endpoint: &Endpoint) -> Option<String> {
 pub fn write_user_token(endpoint: &Endpoint, token: &str) -> io::Result<()> {
     let path = auth_token_path(endpoint);
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        // A filesystem without Unix permissions only weakens the folder (the token file itself is 0600).
+        if let Some(kelpie) = dir.parent() {
+            let _ = ensure_private_dir(kelpie)?;
+        }
+        let _ = ensure_private_dir(dir)?;
     }
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -289,19 +293,32 @@ fn secret_get_moving(service: &str, legacy: &str, key: &str) -> Option<String> {
     Some(value)
 }
 
-pub fn secret_set(key: &str, value: &str) -> keyring::Result<()> {
-    keyring::Entry::new(&keyring_service(), key)?.set_password(value)
+/// Saves a secret in the OS credential store. The error says what to fix (on Linux: start a
+/// Secret Service); a secret is never kept anywhere else instead.
+pub fn secret_set(key: &str, value: &str) -> Result<(), String> {
+    keyring::Entry::new(&keyring_service(), key).and_then(|e| e.set_password(value)).map_err(secret_store_error)
 }
 
 /// Deletes a secret, including a copy still stored under the pre-rename service name.
-pub fn secret_delete(key: &str) -> keyring::Result<()> {
+pub fn secret_delete(key: &str) -> Result<(), String> {
     for service in [keyring_service(), keyring_service_named(LEGACY_NAME)] {
         match keyring::Entry::new(&service, key).and_then(|e| e.delete_credential()) {
             Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(secret_store_error(e)),
         }
     }
     Ok(())
+}
+
+/// A credential-store failure as the user should read it.
+fn secret_store_error(e: keyring::Error) -> String {
+    match e {
+        keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_) if cfg!(target_os = "linux") => format!(
+            "no Secret Service is available to keep it: install and unlock a keyring \
+             (GNOME Keyring, KWallet or another org.freedesktop.secrets provider), then try again ({e})"
+        ),
+        e => e.to_string(),
+    }
 }
 
 /// Credential-store key of a saved SSH host's password.
@@ -316,7 +333,9 @@ pub fn ssh_passphrase_key(key_path: &str) -> String {
     format!("ssh-passphrase:{}", if cfg!(windows) { p.to_lowercase() } else { p })
 }
 
-/// Root for daemon state: `%LOCALAPPDATA%\Kelpie` / `~/Library/Application Support/Kelpie`.
+/// Root for daemon state: `%LOCALAPPDATA%\Kelpie` / `~/Library/Application Support/Kelpie` /
+/// `$XDG_DATA_HOME/Kelpie` (else `~/.local/share/Kelpie`). The socket, logs, settings and the
+/// daemon's runtime files all live under it.
 pub fn data_dir() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("KELPIE_DATA_DIR") {
         return dir.into();
@@ -324,6 +343,43 @@ pub fn data_dir() -> std::path::PathBuf {
     data_base().join("Kelpie")
 }
 
+/// Creates `dir` (with missing parents) for this OS user only. Unix: mode 0700, as the XDG spec asks
+/// for its folders; an existing folder of ours that others may read is narrowed to 0700. A folder
+/// owned by another user is refused: someone else could read or plant what Kelpie keeps there.
+/// When narrowing is not possible (a filesystem without Unix permissions, such as vfat or a CIFS
+/// share) the folder is still used and the returned warning says why. Windows: a plain create; the
+/// per-user profile is private already.
+pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<Option<String>> {
+    if dir.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        let meta = std::fs::metadata(dir)?;
+        // SAFETY: geteuid has no preconditions.
+        let me = unsafe { libc::geteuid() };
+        if meta.uid() != me {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} belongs to another user (uid {}, not {me}): remove it, or point KELPIE_DATA_DIR or XDG_DATA_HOME at a folder of your own",
+                    dir.display(),
+                    meta.uid()
+                ),
+            ));
+        }
+        if meta.mode() & 0o077 != 0 {
+            if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+                return Ok(Some(format!("{} stays readable by other users: its filesystem does not take Unix permissions ({e})", dir.display())));
+            }
+        }
+        Ok(None)
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir).map(|()| None)
+}
 fn data_base() -> std::path::PathBuf {
     if cfg!(windows) {
         std::env::var("LOCALAPPDATA").map(Into::into).unwrap_or_else(|_| std::env::temp_dir())
@@ -332,11 +388,16 @@ fn data_base() -> std::path::PathBuf {
             .map(|h| std::path::PathBuf::from(h).join("Library/Application Support"))
             .unwrap_or_else(|_| std::env::temp_dir())
     } else {
-        std::env::var("XDG_DATA_HOME")
-            .map(Into::into)
-            .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
-            .unwrap_or_else(|_| std::env::temp_dir())
+        xdg_data_home(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME")).unwrap_or_else(std::env::temp_dir)
     }
+}
+
+/// The XDG base directory for user data: `$XDG_DATA_HOME`, else `$HOME/.local/share`. The spec
+/// says an empty or relative `XDG_DATA_HOME` is invalid and must be ignored.
+fn xdg_data_home(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    let absolute = |v: std::ffi::OsString| Some(std::path::PathBuf::from(v)).filter(|p| p.is_absolute());
+    xdg.and_then(absolute)
+        .or_else(|| home.and_then(absolute).map(|h| h.join(".local").join("share")))
 }
 
 // ---------- moving data from the pre-rename install ----------
@@ -604,6 +665,77 @@ mod tests {
         assert_eq!(entry(&service).get_password().unwrap(), "s3cret");
         assert!(matches!(entry(&legacy).get_password(), Err(keyring::Error::NoEntry)));
         entry(&service).delete_credential().unwrap();
+    }
+
+    #[test]
+    fn a_missing_secret_service_says_what_to_install() {
+        let failure = || keyring::Error::PlatformFailure("org.freedesktop.secrets was not provided by any .service files".into());
+        let msg = secret_store_error(failure());
+        assert!(msg.contains("org.freedesktop.secrets was not provided"), "keeps the cause: {msg}");
+        assert_eq!(msg.contains("GNOME Keyring"), cfg!(target_os = "linux"), "{msg}");
+        assert_eq!(secret_store_error(keyring::Error::TooLong("user".into(), 255)), keyring::Error::TooLong("user".into(), 255).to_string());
+    }
+
+    #[test]
+    fn the_data_folder_is_created_for_this_user_only() {
+        let root = std::env::temp_dir().join(format!("kelpie-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let fresh = root.join("share").join("Kelpie");
+        assert_eq!(ensure_private_dir(&fresh).unwrap(), None);
+        assert!(fresh.is_dir());
+        assert_eq!(ensure_private_dir(&fresh).unwrap(), None, "already there: fine");
+        assert_eq!(ensure_private_dir(std::path::Path::new("")).unwrap(), None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&fresh), 0o700, "a new folder");
+            assert_eq!(mode(&root.join("share")), 0o700, "and the parents it had to make");
+            let open = root.join("open");
+            std::fs::create_dir_all(&open).unwrap();
+            std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(ensure_private_dir(&open).unwrap(), None);
+            assert_eq!(mode(&open), 0o700, "an existing folder of ours that others could read");
+            // Someone else's folder is refused, with what to do about it (root owns every folder: nothing to show).
+            // SAFETY: geteuid has no preconditions.
+            if unsafe { libc::geteuid() } != 0 {
+                let err = ensure_private_dir(std::path::Path::new("/")).unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+                assert!(err.to_string().contains("KELPIE_DATA_DIR"), "{err}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn linux_data_folder_follows_xdg_data_home_else_local_share() {
+        let base = std::env::temp_dir();
+        let (xdg, home) = (base.join("xdg-data"), base.join("home-me"));
+        let os = |p: &std::path::Path| Some(p.as_os_str().to_os_string());
+
+        assert_eq!(xdg_data_home(os(&xdg), os(&home)), Some(xdg.clone()), "XDG_DATA_HOME set");
+        let local_share = home.join(".local").join("share");
+        assert_eq!(xdg_data_home(None, os(&home)), Some(local_share.clone()), "XDG_DATA_HOME unset");
+        // Invalid per the XDG spec: ignored.
+        assert_eq!(xdg_data_home(Some("".into()), os(&home)), Some(local_share.clone()), "empty");
+        assert_eq!(xdg_data_home(Some("relative/data".into()), os(&home)), Some(local_share), "relative");
+        assert_eq!(xdg_data_home(None, Some("relative-home".into())), None, "no usable folder at all");
+        assert_eq!(xdg_data_home(None, None), None);
+    }
+
+    /// The real resolution on Linux, without touching the process environment of other tests.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_data_folder_is_named_kelpie_under_the_xdg_base() {
+        let expected = xdg_data_home(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME")).unwrap().join("Kelpie");
+        assert_eq!(data_base().join("Kelpie"), expected);
+        if std::env::var_os("KELPIE_DATA_DIR").is_none() {
+            assert_eq!(data_dir(), expected);
+        }
+        if std::env::var_os("KELPIE_ENDPOINT").is_none() {
+            let Endpoint::Path(sock) = endpoint() else { panic!("a socket path on Unix") };
+            assert_eq!(sock.parent(), Some(data_dir().as_path()));
+        }
     }
 
     fn migration_root(name: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {

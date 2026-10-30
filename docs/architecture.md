@@ -42,8 +42,26 @@ Claude). An id never saved to a transcript (nothing sent yet) starts again under
 on an SSH host the remote shell checks for the transcript and runs `--resume` or
 `--session-id`. Other agents' ids come from hooks or are recovered from transcripts.
 
-Data: `%LOCALAPPDATA%\Kelpie` (Windows), `~/Library/Application Support/Kelpie` (macOS).
-`KELPIE_DATA_DIR` and `KELPIE_ENDPOINT` override both (used by the dev scripts and tests).
+Data: `%LOCALAPPDATA%\Kelpie` (Windows), `~/Library/Application Support/Kelpie` (macOS),
+`$XDG_DATA_HOME/Kelpie`, else `~/.local/share/Kelpie` (Linux; an empty or relative `XDG_DATA_HOME`
+is ignored, as the XDG spec says). `KELPIE_DATA_DIR` and `KELPIE_ENDPOINT` override both (used by
+the dev scripts and tests).
+
+### Platforms
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| Data folder | `%LOCALAPPDATA%\Kelpie` | `~/Library/Application Support/Kelpie`, 0700 | `$XDG_DATA_HOME/Kelpie` or `~/.local/share/Kelpie`, 0700 (`ensure_private_dir`; an existing folder of ours is narrowed) |
+| Daemon endpoint | named pipe `\\.\pipe\kelpie-<user>-v1` | `kelpied-v1.sock` (0600) in the data folder | same as macOS |
+| Daemon runs from | a copy in `<data>/daemon/a` or `b` (release builds) | the app bundle | the install (`/usr/bin`, .deb) or, from an AppImage (whose mount ends with the app), a copy in `<data>/daemon/a`, rewritten for each new build (a running daemon keeps its unlinked file; `b` only when `a` cannot be written). The daemon, and every program the app starts (editors, `xdg-open`, git, ssh, user commands), gets the app's environment without the AppImage runtime and GTK hook variables (`daemon_runtime::clean_env`), so sessions and those programs never see the mount |
+| Session processes | Job Object per session, sideloaded ConPTY | process groups, `killpg` | same as macOS |
+| Agent PATH | PATH + PATHEXT, npm shims unwrapped | login shell: `$SHELL -l -c 'exec …'` | same as macOS; without `SHELL`, the account's shell from the user database, else `/bin/sh` |
+| Keep awake | `SetThreadExecutionState` | `caffeinate -i -w <daemon pid>` | `systemd-inhibit --what=idle:sleep --mode=block sleep infinity` (whichever lock a desktop's automatic suspend honours; a menu suspend waits, the lid follows logind's `LidSwitchIgnoreInhibited`), `PR_SET_PDEATHSIG` ties it to the daemon; none without systemd (logged, also when logind refuses later) |
+| Secrets (`keyring`) | Credential Manager | Keychain | Secret Service over D-Bus (`sync-secret-service`, `crypto-rust`); no service = an error naming what to install, never a fallback |
+| Notifications | `tauri-plugin-notification` | same | same (freedesktop notifications over D-Bus) |
+| Packages | NSIS (`-setup.exe`) | `.app` + `.dmg`, universal | AppImage + `.deb`, built on Ubuntu 22.04 |
+| Updater entry (`latest.json`) | `windows-x86_64` | `darwin-aarch64`, `darwin-x86_64` | `linux-x86_64` (the `.AppImage` + `.sig`); `linux-x86_64-deb` when the bundler signed the `.deb` |
+| CI | `windows-latest` | `macos-latest` | `ubuntu-22.04`: tests, package checks (`dpkg-deb`, AppImage contents), `scripts/e2e/boot_smoke.py` under Xvfb with WebKitWebDriver |
 
 Daemon state is published through unique same-directory temporary files. Windows uses
 `FileRenameInfoEx` with POSIX replacement semantics: existing readers keep their old file
@@ -56,7 +74,7 @@ network data directories require separate validation of the native operation.
 ## Transport
 
 Local socket only — no TCP port. Windows: named pipe `\\.\pipe\kelpie-<user>-v1` with a
-protected DACL (SYSTEM + owner). macOS: `kelpied-v1.sock` (mode 0600) in the data dir.
+protected DACL (SYSTEM + owner). macOS and Linux: `kelpied-v1.sock` (mode 0600) in the data dir.
 Single instance is enforced with an exclusive lock file.
 
 **Callers** (`crates/kelpied/src/auth.rs`). A connection names itself with `auth` before
@@ -127,8 +145,8 @@ queries with the palette of the app's current theme (`daemon.set_theme`).
 Windows: each session runs in its own Job Object (kill-on-close, owned by the daemon) so a
 kill reaches the whole process tree; the daemon (started by the app in a new process group,
 which Windows marks as ignoring Ctrl+C) clears that mark at start so sessions still get Ctrl+C; a modern `conpty.dll`/`OpenConsole.exe` is sideloaded
-(see `third_party/conpty`). macOS: process groups (`killpg`) and a login shell (`$SHELL -l -c
-exec …`) so agents see the user's PATH.
+(see `third_party/conpty`). macOS and Linux: process groups (`killpg`) and a login shell (`$SHELL -l -c
+exec …`) so agents see the user's PATH (GUI-launched apps do not inherit it).
 
 ## Attach semantics
 
@@ -664,7 +682,7 @@ A 100,000-file repository was not measured (building the fixture did not finish 
 | `sys_stats.rs` | Memory of the app + WebView tree, the daemon and its descendants (PID-reuse safe). |
 | `git.rs` | Status, branch summary, diffs, staging, commits, worktrees (`add` new or existing branch / `remove` / `prune`, file at a revision, commits only a detached HEAD reaches). |
 | `git_basics.rs` | Branch switcher (refused before git when another worktree holds the branch, the tree is dirty, an operation is in progress, or a detached HEAD has commits no ref reaches; hooks run as in a terminal), compact log (last 100), stash list with apply / drop. Branch names must be existing `refs/heads/` names that cannot read as options. A stash action names `stash@{N}` plus the commit the list showed and is refused when they no longer match (the stash is per repository, shared by worktrees); apply then uses the commit itself; after a drop the list is compared with the one taken just before (never git's message, which a remote host may translate), any other stash that went missing is stored back, and anything unconfirmed is an error naming the commit. |
-| `updater.rs` | Updates through `tauri-plugin-updater`: `latest.json` from GitHub Releases, verified with the minisign public key in `tauri.conf.json`. Install = download (signature checked) → installer (Windows, passive with restart; the app exits) or in-place bundle swap and restart (macOS). The daemon is never stopped. Dev builds and `KELPIE_E2E` runs never check. Endpoint/key overrides and a dry install exist only with the `e2e-updater` feature. |
+| `updater.rs` | Updates through `tauri-plugin-updater`: `latest.json` from GitHub Releases, verified with the minisign public key in `tauri.conf.json`. Install = download (signature checked) → installer (Windows, passive with restart; the app exits) or in-place bundle swap and restart (macOS; Linux: the AppImage, or a `.deb` through `pkexec dpkg -i`). The daemon is never stopped. Dev builds and `KELPIE_E2E` runs never check. Endpoint/key overrides and a dry install exist only with the `e2e-updater` feature. |
 
 **Updates keep sessions running.** Windows cannot replace a running program, so the app
 (`daemon_runtime.rs`, release builds) starts the daemon from a copy in one of two fixed slots,
@@ -700,7 +718,8 @@ saves them as running before the process exits, and `restore()` marks them inter
 sidecars `build-release.sh` stages for each architecture before joining them with `lipo`
 when `KELPIE_TARGET` says so), and
 `scripts/release/latest_json.py` writes the manifest (`darwin-aarch64` and `darwin-x86_64` both point
-at the universal bundle) into a **draft** release; apps see it once the draft is published.
+at the universal bundle; `linux-x86_64` at the signed AppImage from the `ubuntu-22.04` job) into a
+**draft** release; apps see it once the draft is published.
 The release job fetches the remote tag object into a separate ref before reading its
 description; a checkout-local lightweight ref must not turn annotated release notes into
 the merge commit message.
@@ -1087,7 +1106,9 @@ task's run status is the Runs engine's.
     `event` takes only `file`, `pr_checks_failed` and `finished`.
     `automation.list` adds `command_hash` to commands.
 - **Keep awake** (`awake.rs`, `daemon.set_awake`): Windows `SetThreadExecutionState` from one
-  dedicated thread, macOS a `caffeinate -i -w <pid>` child; mode *agents* holds it while any
+  dedicated thread, macOS a `caffeinate -i -w <pid>` child, Linux a `systemd-inhibit --what=idle:sleep` child that dies
+  with the daemon (`PR_SET_PDEATHSIG`; logged once and skipped without systemd or when logind refuses it,
+  even later); a suspend picked from the menu waits while it is held, the lid follows the system setting; mode *agents* holds it while any
   non-shell session is working.
 - **Terminal palette**: `daemon.set_theme` takes an optional palette (16 ANSI + fg/bg/cursor)
   so colour-query answers match the chosen terminal theme.

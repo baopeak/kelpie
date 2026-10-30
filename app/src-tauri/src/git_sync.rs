@@ -19,6 +19,7 @@ async fn git_net(cwd: &Path, args: &[&str]) -> CmdResult<String> {
         return if out.ok { Ok(text.trim().to_string()) } else { Err(text.trim().to_string()) };
     }
     let mut cmd = tokio::process::Command::new("git");
+    crate::daemon_runtime::clean_env(cmd.as_std_mut());
     cmd.args(["-c", "color.ui=false"])
         .args(args)
         .current_dir(cwd)

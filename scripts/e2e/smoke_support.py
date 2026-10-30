@@ -1,12 +1,45 @@
 """Shared helpers for the WebDriver e2e scripts."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 
 from wd import Driver
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+LINUX = sys.platform.startswith("linux")
+
+
+def native_driver():
+    """The browser driver tauri-driver hands the app to: WebKitWebDriver (Debian/Ubuntu package
+    `webkit2gtk-driver`; WEBKITWEBDRIVER or PATH) on Linux, else msedgedriver matching the installed
+    WebView2 (MSEDGEDRIVER or PATH)."""
+    if LINUX:
+        return os.environ.get("WEBKITWEBDRIVER") or shutil.which("WebKitWebDriver")
+    return os.environ.get("MSEDGEDRIVER") or shutil.which("msedgedriver")
+
+
+def native_driver_hint():
+    if LINUX:
+        return "WebKitWebDriver (apt install webkit2gtk-driver; PATH or WEBKITWEBDRIVER)"
+    return "msedgedriver (PATH or MSEDGEDRIVER)"
+
+
+def tauri_driver():
+    return shutil.which("tauri-driver") or shutil.which(os.path.join(os.path.expanduser("~"), ".cargo", "bin", "tauri-driver"))
+
+
+def real_data_dir():
+    """The user's own Kelpie data folder (kelpie_proto::data_dir without KELPIE_DATA_DIR)."""
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA", "")
+    elif sys.platform == "darwin":
+        base = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        xdg = os.environ.get("XDG_DATA_HOME", "")
+        base = xdg if os.path.isabs(xdg) else os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "Kelpie")
 
 
 def default_app():
@@ -66,7 +99,7 @@ class Run:
         self.d.wait("return window.__kelpie.store.connected()", 30)
         # Scenarios close sessions and remove projects: never against the user's real data.
         data_dir = self.d.js_async("const done = arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('platform_info').then(i => done(i.data_dir));")
-        real = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Kelpie")
+        real = real_data_dir()
         if not os.environ.get("KELPIE_DATA_DIR") and os.path.normcase(os.path.normpath(data_dir)) == os.path.normcase(os.path.normpath(real)):
             raise SystemExit(f"refusing to run e2e against the real data folder {data_dir}; start tauri-driver with KELPIE_DATA_DIR set")
         # First-run tips would float over whatever a scenario clicks.

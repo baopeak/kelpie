@@ -2,11 +2,22 @@
 # Builds the Kelpie installer for the current platform:
 #   Windows → NSIS installer (kelpied.exe, kelpie-stt.exe + sideloaded ConPTY next to Kelpie.exe)
 #   macOS   → Kelpie.app + .dmg (kelpied, kelpie-stt inside Contents/MacOS)
+#   Linux   → AppImage + .deb with `--bundles appimage,deb` (kelpied, kelpie-stt next to the app in usr/bin)
 # Usage: scripts/build-release.sh [extra tauri build args]
 # Bumps the patch version first (0.1.0 → 0.1.1), so each installer has its own number.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Debian/Ubuntu ship only `python3`; Windows installs only `python` (its `python3` may be the Store stub).
+python() { if command -v python >/dev/null 2>&1; then command python "$@"; else command python3 "$@"; fi; }
+
+# The updater signing key (release builds) is not passed on to the sidecar builds or `pnpm install`:
+# only the `tauri build` command below, which signs the bundles, gets it in its environment. This keeps
+# it from being inherited; it does not hide it from same-user processes, which can read this shell's
+# starting environment (/proc/<pid>/environ). Never run this script with `bash -x` when the key is set.
+signing_key="${TAURI_SIGNING_PRIVATE_KEY-}"
+signing_password="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}"
+unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 # Every build gets a new version: bump the patch number wherever the version is declared
 # (workspace Cargo.toml, app/package.json, tauri.conf.json), keeping them in step.
 # KELPIE_KEEP_VERSION=1 (the release workflow) builds the version the tag names instead.
@@ -71,5 +82,10 @@ fi
 cd app
 pnpm install --frozen-lockfile
 # (macOS ships bash 3.2: an empty array needs the ${a[@]+…} form under `set -u`.)
-pnpm tauri build --config src-tauri/tauri.bundle.json ${target_args[@]+"${target_args[@]}"} "$@"
+if [ -n "$signing_key" ]; then
+  TAURI_SIGNING_PRIVATE_KEY="$signing_key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$signing_password" \
+    pnpm tauri build --config src-tauri/tauri.bundle.json ${target_args[@]+"${target_args[@]}"} "$@"
+else
+  pnpm tauri build --config src-tauri/tauri.bundle.json ${target_args[@]+"${target_args[@]}"} "$@"
+fi
 echo "Bundles: $bundle_dir"

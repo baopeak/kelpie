@@ -13,6 +13,14 @@ regex = "1"
 fs2 = "0.4"
 keyring = { version = "3.6", default-features = false, features = ["windows-native", "apple-native"] }
 
+# Linux: the freedesktop Secret Service (GNOME Keyring, KWallet) over D-Bus. Without one running, saving a
+# secret fails with an error that says so; nothing is ever kept in plain text or in memory instead.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 widestring = "1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
