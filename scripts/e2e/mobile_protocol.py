@@ -736,6 +736,15 @@ async def main(d):
     target = moved[0]
     d.call("session.restart", {"handle": info(d, target)["handle"]})
     ps.wait_for(lambda: info(d, target).get("alive") and "PS " in read(d, target)["text"], 150)
+    # A prompt on screen is not yet a shell reading input: on a busy host PowerShell prints "PS …>" before it takes keys, and
+    # a line typed then can be lost. The phone's write is sent once the restarted shell has run a command of its own (the
+    # output "restarted-ready-42" only exists once the line was evaluated), so what follows tests where the write lands.
+    def shell_ready():
+        if "restarted-ready-42" in read(d, target)["text"]:
+            return True
+        d.call("session.input", {"handle": info(d, target)["handle"], "data": "echo restarted-ready-$((40+2))\r"})
+        return ps.wait_for(lambda: "restarted-ready-42" in read(d, target)["text"], 5)
+    ps.wait_for(shell_ready, 120)
     typed = await phone.ask(type="input", id=target, text="echo by-id-$((3*5))", enter=True, epoch=hello2["daemon_epoch"])
     landed = ps.wait_for(lambda: "by-id-15" in read(d, target)["text"], 15)
     others = [x["id"] for x in d.call("session.list") if x["id"] != target and x["alive"] and not x["chat"]]
