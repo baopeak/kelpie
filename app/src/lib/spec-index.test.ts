@@ -339,7 +339,7 @@ describe("whole-file parsing, on the main thread or in the worker", () => {
     expect(doc.total).toBeGreaterThan(4000);
     // A runaway only: the real bound (no turn of the page over 50 ms) is the worker's, measured in the app by spec_panel.py.
     expect(performance.now() - t0).toBeLessThan(30_000);
-  });
+  }, 30_000);
 });
 
 describe("tickText", () => {

@@ -3,17 +3,18 @@ import { Portal } from "solid-js/web";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { sessionLabel, store } from "../lib/store";
 import { CHECKPOINT_API } from "../lib/checkpoint-api";
 import { listTurns, turnsByMessage } from "../lib/checkpoints";
 import { findPane } from "../lib/layout";
 import { getController, switchToTerminal } from "../chat/mode-switch";
 import type { ChatItem } from "../chat/chat-model";
+import { openTable, stableEnd } from "../chat/streaming-markdown";
 import { describeTool, diffStats, unifiedFiles } from "../chat/tool-view";
 import type { Project } from "../lib/types";
 import { Icon } from "./icons";
 import { ChatComposer } from "./chat-composer";
+import { CopyButton, copyText } from "./chat-copy";
 import { type FileChange, PermissionCard, ThinkingRow, ToolRow, ToolRun, TurnFiles } from "./chat-rows";
 import { isAgentKind, kindInfo } from "../lib/agents";
 import { locale, t } from "../lib/i18n";
@@ -56,17 +57,6 @@ function MarkdownHtml(props: { text: string; class?: string; onClick?: (e: Mouse
   return <div ref={el} class={props.class} onClick={props.onClick} />;
 }
 
-/** Copies `text`, ticking the button that asked for a moment. */
-function copyText(text: string, button: HTMLElement) {
-  void writeText(text).then(
-    () => {
-      button.classList.add("copied");
-      setTimeout(() => button.classList.remove("copied"), 1200);
-    },
-    () => store.notify(t("Could not copy")),
-  );
-}
-
 /** Links open in the browser; a code block's button copies its code. */
 function onMarkdownClick(e: MouseEvent) {
   const target = e.target as HTMLElement;
@@ -86,37 +76,18 @@ function Markdown(props: { text: string }) {
   return <MarkdownHtml class="msg-assistant" text={props.text} onClick={onMarkdownClick} />;
 }
 
-function CopyButton(props: { text: string }) {
-  return (
-    <button class="msg-action" title={t("Copy")} aria-label={t("Copy")} onClick={(e) => copyText(props.text, e.currentTarget)}>
-      <span class="i-copy"><Icon name="copy" size={12} /></span><span class="i-done"><Icon name="check" size={12} /></span>
-    </button>
-  );
-}
-
-/** Where streamed text can be cut: after the last blank line outside a code fence. Blocks
- *  before it are final, so they are parsed once, not again on every delta. */
-export function stableEnd(text: string): number {
-  let end = 0;
-  let fence = false;
-  let i = 0;
-  for (const line of text.split("\n")) {
-    const next = i + line.length + 1;
-    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
-    else if (!fence && line.trim() === "" && next <= text.length) end = next;
-    i = next;
-  }
-  return end;
-}
-
-/** A reply that is still arriving: finished blocks as markdown, the open one as plain text. */
+/** A reply that is still arriving: finished blocks as markdown, the open one as plain text (or
+ *  as a table once it is one: only that open table is parsed again per delta). */
 function StreamingMarkdown(props: { text: string }) {
   const cut = createMemo(() => stableEnd(props.text));
   const done = createMemo(() => props.text.slice(0, cut()));
+  const tail = () => props.text.slice(cut());
   return (
     <div class="msg-assistant" onClick={onMarkdownClick}>
       <MarkdownHtml text={done()} />
-      <div style={{ "white-space": "pre-wrap" }}>{props.text.slice(cut())}</div>
+      <Show when={openTable(tail())} fallback={<div style={{ "white-space": "pre-wrap" }}>{tail()}</div>}>
+        <MarkdownHtml text={tail()} />
+      </Show>
     </div>
   );
 }
@@ -305,6 +276,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                                 </button>
                               )}
                             </For>
+                            <CopyButton text={u.text} />
                             <Stamp at={u.at} />
                           </div>
                           <div class="msg-user" style={{ opacity: u.pending ? 0.7 : 1 }}>{u.text}</div>
@@ -315,7 +287,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                 </Match>
                 <Match when={item.kind === "assistant" && item}>
                   {(it) => (
-                    <div class="msg-reply">
+                    <div class="msg-reply" classList={{ streaming: !!(it() as any).streaming }}>
                       <div class="msg-meta">
                         <Show when={!(it() as any).streaming && (it() as any).text}><CopyButton text={(it() as any).text} /></Show>
                         <Stamp at={it().at} />

@@ -960,6 +960,7 @@ impl Daemon {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let entry = if let Some(argv) = p.chat_argv {
             anyhow::ensure!(!argv.is_empty(), "chat_argv is empty");
+            let argv = if spec.kind == "claude" && spec.remote.is_none() { agents::claude_chat_argv(argv, &spec.env) } else { argv };
             let chat = ChatSession::new(handle, spec);
             chat.spawn(&agents::platform_argv(argv)?)?;
             Entry::Chat(chat)
@@ -967,7 +968,7 @@ impl Daemon {
             let fresh = Self::preset_conversation(&mut spec);
             let resume = match spec.agent_session_id.as_deref() {
                 Some(id) if fresh => Resume::New(id),
-                Some(id) => Resume::Id(id),
+                Some(_) => Self::resume_for(&spec),
                 None => Resume::None,
             };
             let launch = Self::launch_for(&spec, resume, p.prompt.as_deref(), &self.exe, &self.data_dir)?;

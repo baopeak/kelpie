@@ -73,11 +73,11 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
   function prompt(text: string, images: ChatImage[] = []) {
     if (isNewConversation(text)) {
       sessionId = null;
-      lastKind = null;
+      endStreaming();
       rpc(NEW_SESSION_ID, "session/new", { cwd: ctx.cwd, mcpServers: [] });
       return;
     }
-    lastKind = null;
+    endStreaming();
     ctx.set("busy", true);
     const pictures = canImage ? images.map((i) => ({ type: "image", mimeType: i.mime, data: i.data })) : [];
     const words = [text, ...(canImage ? [] : images.map((i) => i.path))].filter(Boolean).join("\n");
@@ -97,11 +97,19 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
     else rpc(SESSION_ID, "session/new", { cwd: ctx.cwd, mcpServers: [] });
   }
 
+  /** The open segment is complete: ACP has no end-of-message event, so whatever comes after it
+   *  (a tool call, another kind of chunk, the turn's or the load's end) says so. */
+  function endStreaming() {
+    if (lastKind && lastKind !== "user" && lastId) ctx.patch(lastId, (i: any) => (i.streaming = false));
+    lastKind = null;
+  }
+
   function appendChunk(kind: "assistant" | "thinking" | "user", text: string) {
     if (lastKind === kind && lastId) {
       ctx.patch(lastId, (i: any) => (i.text += text));
       return;
     }
+    endStreaming();
     lastKind = kind;
     lastId = `${kind}-${++seq}`;
     ctx.upsert({ kind, id: lastId, text, streaming: kind !== "user" } as ChatItem);
@@ -179,7 +187,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
         appendChunk("user", textOf(u.content));
         break;
       case "tool_call": {
-        lastKind = null;
+        endStreaming();
         const c = toolContent(u.content);
         ctx.upsert({
           kind: "tool", id: u.toolCallId, name: u.title ?? u.kind ?? "tool", summary: summarize(u.locations?.[0]?.path ?? u.rawInput ?? ""), input: u.rawInput,
@@ -188,7 +196,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
         break;
       }
       case "tool_call_update": {
-        lastKind = null;
+        endStreaming();
         const c = toolContent(u.content);
         ctx.patch(u.toolCallId, (i: any) => {
           if (u.title) i.name = u.title;
@@ -248,6 +256,8 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
       if (!m || typeof m !== "object") return;
       if ("id" in m && !("method" in m)) {
         if (m.error) {
+          // A load that failed part way replays no more of that reply.
+          if (m.id === SESSION_ID) endStreaming();
           // Not signed in: `session/new` answers `auth_required` (-32000), maybe with the methods.
           const needsAuth = (m.id === SESSION_ID || m.id === NEW_SESSION_ID) && !(m.id === SESSION_ID && loading)
             && (m.error.code === -32000 || /auth/i.test(String(m.error.message ?? "")));
@@ -261,7 +271,10 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
             askSignIn(authMethods);
             return;
           }
-          if (String(m.id).startsWith("kelpie-prompt-")) ctx.set("busy", false);
+          if (String(m.id).startsWith("kelpie-prompt-")) {
+            endStreaming();
+            ctx.set("busy", false);
+          }
           // No new session: stay in the one shown.
           if (m.id === NEW_SESSION_ID) sessionId = ctx.state.conversationId;
           if (m.id === SESSION_ID && ctx.state.conversationId && !ctx.replaying()) {
@@ -291,7 +304,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
           if (sessionId) ctx.setConversation(sessionId);
           applyConfig(m.result?.configOptions);
           applyLegacy(m.result);
-          lastKind = null;
+          endStreaming();
           if (!ctx.replaying()) {
             // "Busy" only covered the wait for the session; a prompt sets it again.
             if (queued.length) ctx.set("busy", false);
@@ -303,8 +316,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
         } else if (Array.isArray(m.result?.configOptions)) {
           applyConfig(m.result.configOptions);
         } else if (m.result && "stopReason" in m.result) {
-          lastKind = null;
-          for (const it of ctx.state.items) if ((it as any).streaming) ctx.patch(it.id, (i: any) => (i.streaming = false));
+          endStreaming();
           ctx.upsert({ kind: "result", id: `stop-${String(m.id)}`, text: stopText(String(m.result.stopReason)) });
           // Last: going idle sends the next queued message.
           ctx.set("busy", false);

@@ -286,7 +286,14 @@ export class ChatController {
     this.answering = this.transport.answer(id, line);
   }
 
+  /** Now, or while replaying (log, transcript) the time the log carried. */
+  private now() {
+    return this.isReplaying || this.loadingHistory ? this.clock : Date.now();
+  }
+
   upsert(item: ChatItem) {
+    // The daemon's reader and its exit watcher race: the agent's last lines can come after its exit.
+    if (this.state.exited && "streaming" in item && item.streaming) item = { ...item, streaming: false };
     if (item.kind === "permission" && this.resolved.has(item.id)) item = { ...item, resolved: this.resolved.get(item.id) };
     if (item.kind === "permission" && !item.resolved) {
       const saved = this.unsettled.get(item.id);
@@ -306,11 +313,10 @@ export class ChatController {
       const prev = this.state.items[i];
       item = { ...item, at: prev.at ?? item.at } as ChatItem;
       if (item.kind === "thinking" && prev.kind === "thinking") item.doneAt = prev.doneAt;
-      this.set("items", i, finished(item));
+      this.set("items", i, finished(item, this.now()));
       return;
     }
-    // Live items are stamped now; replayed ones (log, transcript) with the time the log carried.
-    const at = this.isReplaying || this.loadingHistory ? this.clock : Date.now();
+    const at = this.now();
     if (item.at == null && at != null) item = { ...item, at } as ChatItem;
     this.index.set(item.id, this.state.items.length);
     this.set("items", this.state.items.length, item);
@@ -321,7 +327,7 @@ export class ChatController {
     if (i == null) return;
     this.set("items", i, produce((it: ChatItem) => {
       fn(it);
-      finished(it);
+      finished(it, this.now());
     }));
   }
 
@@ -355,6 +361,8 @@ export class ChatController {
       }
       if (msg?.type === "kelpie_exit") {
         this.set({ exited: true, busy: false, tasks: [] });
+        // Nothing will finish what was still arriving.
+        for (const it of this.state.items) if ((it as { streaming?: boolean }).streaming) this.patch(it.id, (i: any) => (i.streaming = false));
         this.upsert({ kind: "system", id: `exit-${Date.now()}`, text: t("Agent process exited (code {code}).", { code: String(msg.code) }), tone: "info" });
         // Nothing can take them now: show what was not sent rather than keep dead chips.
         if (this.state.queue.length) {
@@ -676,8 +684,8 @@ export function answeredBeforeText(by: string | undefined, at: number | undefine
 }
 
 /** A thinking item that just stopped streaming gets its end time (for "Thought for 4s"). */
-function finished(item: ChatItem): ChatItem {
-  if (item.kind === "thinking" && !item.streaming && item.at != null && item.doneAt == null) item.doneAt = Date.now();
+function finished(item: ChatItem, now: number | null): ChatItem {
+  if (item.kind === "thinking" && !item.streaming && item.at != null && item.doneAt == null && now != null) item.doneAt = now;
   return item;
 }
 

@@ -229,6 +229,18 @@ pub fn claude_conversation_saved(id: &str, env: &std::collections::BTreeMap<Stri
     std::fs::read_dir(projects).into_iter().flatten().filter_map(|e| e.ok()).any(|d| d.path().join(&file).is_file())
 }
 
+/// The command line of a Claude chat: `--resume` of a conversation never saved exits at once
+/// ("No conversation found"), so a chat taking over a terminal that had no turn yet starts that
+/// conversation under the same id.
+pub fn claude_chat_argv(mut argv: Vec<String>, env: &std::collections::BTreeMap<String, String>) -> Vec<String> {
+    if let Some(i) = argv.iter().position(|a| a == "--resume") {
+        if argv.get(i + 1).is_some_and(|id| !claude_conversation_saved(id, env)) {
+            argv[i] = "--session-id".into();
+        }
+    }
+    argv
+}
+
 /// Whether Codex saved thread `id` (so `codex resume <id>` finds it). Codex also runs unsaved
 /// background threads of its own (suggestions, skill selection) that report through `notify`
 /// too; their ids must not replace the conversation's. Rollouts live in
@@ -751,6 +763,20 @@ mod conversation_tests {
         assert!(claude_conversation_saved("abc-123", &env));
         assert!(!claude_conversation_saved("never-saved", &env));
         assert!(!claude_conversation_saved("../abc-123", &env));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_claude_chat_starts_a_conversation_never_saved_instead_of_resuming_it() {
+        let home = std::env::temp_dir().join(format!("kelpie-claude-chat-home-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("projects").join("C--some-project")).unwrap();
+        std::fs::write(home.join("projects").join("C--some-project").join("saved-id.jsonl"), "{}\n").unwrap();
+        let env: std::collections::BTreeMap<String, String> = [("CLAUDE_CONFIG_DIR".to_string(), home.to_string_lossy().into_owned())].into();
+        let argv = |flag: &str, id: &str| vec!["claude".to_string(), "-p".into(), flag.into(), id.into(), "--model".into(), "x".into()];
+        assert_eq!(claude_chat_argv(argv("--resume", "saved-id"), &env), argv("--resume", "saved-id"));
+        assert_eq!(claude_chat_argv(argv("--resume", "new-id"), &env), argv("--session-id", "new-id"));
+        let plain = vec!["claude".to_string(), "-p".into()];
+        assert_eq!(claude_chat_argv(plain.clone(), &env), plain);
         std::fs::remove_dir_all(&home).unwrap();
     }
 
