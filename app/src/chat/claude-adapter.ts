@@ -341,7 +341,7 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
           ctx.upsert({
             kind: "result",
             id: `result-${m.uuid ?? ctx.state.items.length}`,
-            text: [m.is_error ? t("Error: {error}", { error: String(m.result ?? m.subtype) }) : null, m.duration_ms ? `${(m.duration_ms / 1000).toFixed(1)}s` : null, m.num_turns ? (m.num_turns === 1 ? t("{n} turn", { n: m.num_turns }) : t("{n} turns", { n: m.num_turns })) : null, m.total_cost_usd != null ? `$${m.total_cost_usd.toFixed(3)}` : null].filter(Boolean).join(" · "),
+            text: [m.is_error ? t("Error: {error}", { error: String(m.result ?? (Array.isArray(m.errors) && m.errors.length ? m.errors.join("; ") : m.subtype)) }) : null, m.duration_ms ? `${(m.duration_ms / 1000).toFixed(1)}s` : null, m.num_turns ? (m.num_turns === 1 ? t("{n} turn", { n: m.num_turns }) : t("{n} turns", { n: m.num_turns })) : null, m.total_cost_usd != null ? `$${m.total_cost_usd.toFixed(3)}` : null].filter(Boolean).join(" · "),
           });
           // Close any stale streaming markers.
           for (const it of ctx.state.items) if ((it as any).streaming) ctx.patch(it.id, (i: any) => (i.streaming = false));
