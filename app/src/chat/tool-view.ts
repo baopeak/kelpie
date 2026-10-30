@@ -13,6 +13,9 @@ export interface ToolView {
   detail?: string;
   /** Shell command, shown as the IN block. */
   command?: string;
+  /** The file the call reads or changes, as the agent named it, and where a read starts. */
+  path?: string;
+  line?: number;
 }
 
 export const basename = (p: string) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
@@ -60,14 +63,14 @@ function describe(item: Tool): ToolView {
     case "Read": {
       const from = Number(input.offset) || 0;
       const lines = input.limit ? t("lines {from}-{to}", { from: String(from || 1), to: String((from || 1) + Number(input.limit) - 1) }) : from ? t("from line {n}", { n: String(from) }) : undefined;
-      return { category, verb: t("Read"), target: basename(path), detail: lines };
+      return { category, verb: t("Read"), target: basename(path), detail: lines, path: path || undefined, line: from > 0 ? from : undefined };
     }
     case "Write":
-      return { category, verb: t("Write"), target: basename(path), detail: t("{n} lines", { n: String(str(input.content).split("\n").length) }) };
+      return { category, verb: t("Write"), target: basename(path), detail: t("{n} lines", { n: String(str(input.content).split("\n").length) }), path: path || undefined };
     case "Edit":
     case "MultiEdit":
     case "NotebookEdit":
-      return { category, verb: t("Edit"), target: basename(path) };
+      return { category, verb: t("Edit"), target: basename(path), path: path || undefined };
     case "Glob":
       return { category, verb: t("Search"), target: str(input.pattern), detail: path ? basename(path) : undefined };
     case "Grep":
@@ -94,7 +97,7 @@ function describe(item: Tool): ToolView {
   // Codex shells and ACP calls carry their own category; their name is the agent's title.
   // The summary is cut short (or is a location, for ACP): the row shows it, the IN block and its copy need it whole.
   if (category === "command") return { category, verb: item.name === "Shell" ? t("Run") : item.name, target: item.summary, command: commandText(input.command) || commandText(input.cmd) || str(item.input) || item.summary };
-  if (category === "edit" && item.diff?.length) return { category, verb: t("Edit"), target: item.diff.map((d) => basename(d.path)).join(", ") };
+  if (category === "edit" && item.diff?.length) return { category, verb: t("Edit"), target: item.diff.map((d) => basename(d.path)).join(", "), path: item.diff[0].path };
   if (category === "read" || category === "search") return { category, verb: category === "read" ? t("Read") : t("Search"), target: item.summary || item.name };
   return { category, verb: item.name, target: item.summary };
 }

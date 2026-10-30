@@ -70,6 +70,38 @@ describe("describeTool", () => {
   });
 });
 
+describe("describeTool's file", () => {
+  const tool = (name: string, input: unknown, extra: object = {}) => ({ kind: "tool", id: "1", name, summary: "", status: "done", input, ...extra }) as any;
+
+  it("names the file a Read opens, at its offset", () => {
+    expect(describeTool(tool("Read", { file_path: "D:\\p\\a.ts", offset: 40, limit: 5 }))).toMatchObject({ path: "D:\\p\\a.ts", line: 40 });
+    const whole = describeTool(tool("Read", { file_path: "D:\\p\\a.ts" }));
+    expect(whole.path).toBe("D:\\p\\a.ts");
+    expect(whole.line).toBeUndefined();
+    expect(describeTool(tool("Read", { file_path: "a.ts", offset: -3 })).line).toBeUndefined();
+  });
+
+  it.each([
+    ["Write", { file_path: "a.ts", content: "x" }, "a.ts"],
+    ["Edit", { file_path: "a.ts" }, "a.ts"],
+    ["MultiEdit", { file_path: "a.ts" }, "a.ts"],
+    ["NotebookEdit", { notebook_path: "n.ipynb" }, "n.ipynb"],
+  ])("names the file %s changes", (name, input, path) => {
+    expect(describeTool(tool(name, input)).path).toBe(path);
+  });
+
+  it("takes a generic edit's file from its first diff", () => {
+    const view = describeTool(tool("Apply patch", {}, { category: "edit", diff: [{ path: "x/a.ts", text: "+1" }, { path: "b.ts", text: "+2" }] }));
+    expect(view.path).toBe("x/a.ts");
+  });
+
+  it("has no file while the input is still arriving, or for other tools", () => {
+    expect(describeTool(tool("Read", {})).path).toBeUndefined();
+    expect(describeTool(tool("Bash", { command: "ls" })).path).toBeUndefined();
+    expect(describeTool(tool("Grep", { pattern: "x", path: "src" })).path).toBeUndefined();
+  });
+});
+
 describe("stripProjectRoot", () => {
   it("removes a Windows root", () => {
     expect(stripProjectRoot("D:\\a\\b\\src\\x.ts", "D:\\a\\b")).toBe("src\\x.ts");

@@ -220,9 +220,18 @@ pub async fn git_file_versions(root: String, path: String, staged: bool, base: O
     } else if crate::remote::is_remote(&root) {
         crate::remote::read_file(&root, &path, 8 << 20).await.ok().map(|(b, _, _)| String::from_utf8_lossy(&b).into_owned())
     } else {
-        std::fs::read(&full).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+        crate::fs_ops::blocking(move || Ok(worktree_text(&full))).await?
     };
     Ok(FileVersions { original, modified })
+}
+
+/// The file's text in the working tree, or None when there is no such file. Reading a FIFO or a
+/// Windows device name (`sub\CON`) would wait forever, so only a regular file is opened.
+fn worktree_text(full: &Path) -> Option<String> {
+    if !std::fs::metadata(full).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    std::fs::read(full).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 #[tauri::command]
@@ -517,5 +526,44 @@ u UU N... 100644 100644 100644 100644 a b c conflict.rs\0\
         assert_eq!(st.files[1].path, "new.rs");
         assert_eq!(st.files[2].index, 'U');
         assert_eq!(st.files[3].path, "notes.txt");
+    }
+
+    fn folder_with_file(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kelpie-{label}-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "é").unwrap();
+        dir
+    }
+
+    fn text_of(path: std::path::PathBuf) -> Option<String> {
+        crate::fs_ops::unblocked(move || worktree_text(&path))
+    }
+
+    #[test]
+    fn worktree_text_is_only_for_regular_files() {
+        let dir = folder_with_file("worktree");
+        assert_eq!(text_of(dir.join("a.txt")).as_deref(), Some("é"));
+        assert_eq!(text_of(dir.join("sub")), None);
+        assert_eq!(text_of(dir.join("gone.txt")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_text_does_not_block_on_a_fifo() {
+        let dir = folder_with_file("worktree-fifo");
+        assert!(std::process::Command::new("mkfifo").arg(dir.join("pipe")).status().unwrap().success());
+        assert_eq!(text_of(dir.join("pipe")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worktree_text_does_not_block_on_a_device_name() {
+        let dir = folder_with_file("worktree-device");
+        for name in ["CON", "sub/CON", "NUL", "sub/NUL", "sub/CONIN$", "sub/AUX"] {
+            assert_eq!(text_of(dir.join(name)), None, "{name} was read");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -209,6 +209,10 @@ fn fs_read_file_blocking(root: String, path: String, max_bytes: Option<u64>, as_
     use std::io::Read;
     let full = guard(&root, &path)?;
     let meta = std::fs::metadata(&full).map_err(err)?;
+    // Opening a FIFO waits for a writer, however few bytes are asked for.
+    if !meta.is_file() {
+        return Err(format!("{path}: not a file"));
+    }
     let limit = max_bytes.unwrap_or(8 << 20);
     let mut buf = Vec::with_capacity(meta.len().min(limit) as usize);
     std::fs::File::open(&full).map_err(err)?.take(limit).read_to_end(&mut buf).map_err(err)?;
@@ -446,6 +450,16 @@ pub async fn fs_write_temp(label: String, ext: String, base64: String) -> CmdRes
     .await
 }
 
+/// Runs `f` on its own thread: a read that blocks fails its test instead of hanging the suite.
+#[cfg(test)]
+pub(crate) fn unblocked<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the read blocked")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +479,47 @@ mod tests {
         assert!(write_temp(&dir, "x", "exe", b"x").is_err());
         assert!(write_temp(&dir, "x", "", b"x").is_err());
         assert!(write_temp(&dir, "x", "png", &vec![0; TEMP_MAX_BYTES + 1]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn folder_with_file(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kelpie-{label}-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"abc").unwrap();
+        dir
+    }
+
+    fn read(dir: &Path, path: &str) -> CmdResult<FileContent> {
+        let (root, path) = (dir.to_string_lossy().into_owned(), path.to_string());
+        unblocked(move || fs_read_file_blocking(root, path, Some(1), None))
+    }
+
+    #[test]
+    fn reads_only_regular_files() {
+        let dir = folder_with_file("read");
+        assert_eq!(read(&dir, "a.txt").unwrap().size, 3);
+        assert_eq!(read(&dir, "sub").err().unwrap(), "sub: not a file");
+        // Missing stays what it was: the system's own error, not a claim about the path's kind.
+        assert!(!read(&dir, "gone.txt").err().unwrap().contains("not a file"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_does_not_block_a_read() {
+        let dir = folder_with_file("read-fifo");
+        assert!(std::process::Command::new("mkfifo").arg(dir.join("pipe")).status().unwrap().success());
+        assert_eq!(read(&dir, "pipe").err().unwrap(), "pipe: not a file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_device_name_does_not_block_a_read() {
+        let dir = folder_with_file("read-device");
+        for path in ["CON", "sub/CON", "sub\\con", "NUL", "sub/NUL", "sub/COM1", "sub/CONIN$", "sub/AUX", "sub/PRN", "sub/CON.txt", "sub/con .txt"] {
+            assert!(read(&dir, path).is_err(), "{path} was read");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

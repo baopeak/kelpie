@@ -1,13 +1,12 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, lazy, on, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
-import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { sessionLabel, store } from "../lib/store";
 import { CHECKPOINT_API } from "../lib/checkpoint-api";
 import { listTurns, turnsByMessage } from "../lib/checkpoints";
 import { findPane } from "../lib/layout";
 import { getController, switchToTerminal } from "../chat/mode-switch";
+import { CHAT_SANITIZE, chatMarkdownHtml, fileRefInCode, linkifyText } from "../chat/chat-links";
 import type { ChatItem } from "../chat/chat-model";
 import { openTable, stableEnd } from "../chat/streaming-markdown";
 import { describeTool, diffStats, unifiedFiles } from "../chat/tool-view";
@@ -15,6 +14,7 @@ import type { Project } from "../lib/types";
 import { Icon } from "./icons";
 import { ChatComposer } from "./chat-composer";
 import { CopyButton, copyText } from "./chat-copy";
+import { openChatFile, openChatLink } from "./chat-open-file";
 import { type FileChange, PermissionCard, ThinkingRow, ToolRow, ToolRun, TurnFiles } from "./chat-rows";
 import { isAgentKind, kindInfo } from "../lib/agents";
 import { locale, t } from "../lib/i18n";
@@ -32,12 +32,16 @@ const COPY_ICONS =
   '<svg class="i-copy" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3.5 10.5h-1v-8h8v1"/></svg>' +
   '<svg class="i-done" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>';
 
-const toHtml = (text: string) => DOMPurify.sanitize(marked.parse(text, { gfm: true, async: false }) as string);
+const toHtml = (text: string) => DOMPurify.sanitize(chatMarkdownHtml(text), CHAT_SANITIZE);
 
-/** Sanitized markdown whose code blocks get a copy button. The buttons are added to the DOM
+/** Dragging over text to select it ends in a click too: that one should not follow anything. */
+const selecting = () => window.getSelection()?.isCollapsed === false;
+
+/** Sanitized markdown whose code blocks get a copy button and whose inline code naming a file gets
+ *  marked (given a project; nothing is looked up until a click). Both are added to the DOM
  *  afterwards, never spliced into the sanitized markup: some WebKit builds serialize `<` and `>`
  *  unescaped in attribute values, so a string edit could turn an attribute into live markup. */
-function MarkdownHtml(props: { text: string; class?: string; onClick?: (e: MouseEvent) => void }) {
+function MarkdownHtml(props: { text: string; project?: Project; class?: string; onClick?: (e: MouseEvent) => void }) {
   let el!: HTMLDivElement;
   createEffect(() => {
     el.innerHTML = toHtml(props.text);
@@ -53,40 +57,54 @@ function MarkdownHtml(props: { text: string; class?: string; onClick?: (e: Mouse
       pre.replaceWith(block);
       block.append(button, pre);
     }
+    if (!props.project) return;
+    for (const code of el.querySelectorAll<HTMLElement>(":not(pre) > code")) {
+      const text = code.textContent ?? "";
+      if (code.closest("a") || !fileRefInCode(text)) continue;
+      code.dataset.fileRef = text;
+      code.classList.add("file-ref");
+    }
   });
   return <div ref={el} class={props.class} onClick={props.onClick} />;
 }
 
-/** Links open in the browser; a code block's button copies its code. */
-function onMarkdownClick(e: MouseEvent) {
+/** A code block's button copies its code; links and inline code naming a file are followed. All of
+ *  it is the agent's text: `data-href` and `data-file-ref` only ever go through the parsers. An
+ *  `<a>` the agent wrote as HTML has no `data-href`, only what DOMPurify left of its `href`. No
+ *  click navigates the window, even on something the sanitizer should already have removed. */
+const onMarkdownClick = (project?: Project) => (e: MouseEvent) => {
   const target = e.target as HTMLElement;
   const copy = target.closest<HTMLElement>(".code-copy");
   if (copy) {
     copyText(copy.parentElement?.querySelector("pre")?.textContent ?? "", copy);
     return;
   }
+  if (target.closest("a, area, form, button, input")) e.preventDefault();
   const a = target.closest("a");
-  if (!a) return;
-  e.preventDefault();
-  const href = a.getAttribute("href") ?? "";
-  if (/^https?:/i.test(href)) void openUrl(href);
-}
+  if (a) {
+    if (!selecting()) openChatLink(a.dataset.href ?? a.getAttribute("href") ?? "", project);
+    return;
+  }
+  const code = target.closest<HTMLElement>("[data-file-ref]");
+  const ref = code && project && !selecting() ? fileRefInCode(code.dataset.fileRef ?? "") : null;
+  if (ref) void openChatFile(project!, ref);
+};
 
-function Markdown(props: { text: string }) {
-  return <MarkdownHtml class="msg-assistant" text={props.text} onClick={onMarkdownClick} />;
+function Markdown(props: { text: string; project?: Project }) {
+  return <MarkdownHtml class="msg-assistant" text={props.text} project={props.project} onClick={onMarkdownClick(props.project)} />;
 }
 
 /** A reply that is still arriving: finished blocks as markdown, the open one as plain text (or
  *  as a table once it is one: only that open table is parsed again per delta). */
-function StreamingMarkdown(props: { text: string }) {
+function StreamingMarkdown(props: { text: string; project?: Project }) {
   const cut = createMemo(() => stableEnd(props.text));
   const done = createMemo(() => props.text.slice(0, cut()));
   const tail = () => props.text.slice(cut());
   return (
-    <div class="msg-assistant" onClick={onMarkdownClick}>
-      <MarkdownHtml text={done()} />
+    <div class="msg-assistant" onClick={onMarkdownClick(props.project)}>
+      <MarkdownHtml text={done()} project={props.project} />
       <Show when={openTable(tail())} fallback={<div style={{ "white-space": "pre-wrap" }}>{tail()}</div>}>
-        <MarkdownHtml text={tail()} />
+        <MarkdownHtml text={tail()} project={props.project} />
       </Show>
     </div>
   );
@@ -279,7 +297,16 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                             <CopyButton text={u.text} />
                             <Stamp at={u.at} />
                           </div>
-                          <div class="msg-user" style={{ opacity: u.pending ? 0.7 : 1 }}>{u.text}</div>
+                          <div class="msg-user" style={{ opacity: u.pending ? 0.7 : 1 }}>
+                            <For each={linkifyText(u.text)}>
+                              {(part) => ("url" in part
+                                ? <a href={part.url} draggable={false} onClick={(e) => {
+                                    e.preventDefault();
+                                    if (!selecting()) openChatLink(part.url);
+                                  }}>{part.url}</a>
+                                : part.text)}
+                            </For>
+                          </div>
                         </div>
                       </Show>
                     );
@@ -292,7 +319,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                         <Show when={!(it() as any).streaming && (it() as any).text}><CopyButton text={(it() as any).text} /></Show>
                         <Stamp at={it().at} />
                       </div>
-                      <Show when={(it() as any).streaming} fallback={<Markdown text={(it() as any).text} />}><StreamingMarkdown text={(it() as any).text} /></Show>
+                      <Show when={(it() as any).streaming} fallback={<Markdown text={(it() as any).text} project={props.project} />}><StreamingMarkdown text={(it() as any).text} project={props.project} /></Show>
                     </div>
                   )}
                 </Match>
@@ -309,7 +336,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                   )}
                 </Match>
                 <Match when={item.kind === "permission" && item}>
-                  {(it) => <PermissionCard item={it() as any} ctrl={ctrl} markdown={(text) => <Markdown text={text} />} />}
+                  {(it) => <PermissionCard item={it() as any} project={props.project} ctrl={ctrl} markdown={(text) => <Markdown text={text} project={props.project} />} />}
                 </Match>
                 <Match when={item.kind === "system" && item}>
                   {(it) => {

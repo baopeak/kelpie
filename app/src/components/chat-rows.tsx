@@ -2,6 +2,7 @@
 // diffs, folded runs of reads and searches, collapsed thinking, approval cards (with questions,
 // plans and a message for the agent) and the files a turn changed.
 import { For, Show, createMemo, createSignal } from "solid-js";
+import { projectRelative } from "../chat/chat-links";
 import type { ChatController, ChatItem } from "../chat/chat-model";
 import { type ToolView, basename, describeTool, diffStats, stripProjectRoot } from "../chat/tool-view";
 import { store } from "../lib/store";
@@ -13,18 +14,6 @@ import { t } from "../lib/i18n";
 type Tool = Extract<ChatItem, { kind: "tool" }>;
 type Permission = Extract<ChatItem, { kind: "permission" }>;
 export interface FileChange { path: string; adds: number; dels: number }
-
-/** `path` relative to the project folder, or null when it lies outside. */
-export function projectRelative(project: Project, path: string): string | null {
-  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-  const root = norm(project.path);
-  const p = norm(path).replace(/^\.\//, "");
-  if (p.split("/").includes("..")) return null;
-  if (!/^([a-zA-Z]:)?\//.test(p)) return p;
-  const win = /^[a-zA-Z]:/.test(root);
-  const same = (a: string, b: string) => (win ? a.toLowerCase() === b.toLowerCase() : a === b);
-  return same(p.slice(0, root.length), root) && p[root.length] === "/" ? p.slice(root.length + 1) : null;
-}
 
 /** Long text cut to `lines` (the first ones, or the last for output), with a way to see it all. */
 function Clamped(props: { text: string; lines?: number; tail?: boolean; class?: string }) {
@@ -84,12 +73,22 @@ export function ToolRow(props: { item: Tool; project: Project; nested?: boolean 
   const hasBody = () => !!(props.item.diff?.length || view().command || props.item.output || props.item.input);
   // Reads and searches name project files, so they show them relative to it.
   const target = () => (view().category === "read" || view().category === "search" ? stripProjectRoot(view().target, props.project.path) : view().target);
+  const rel = createMemo(() => (view().path ? projectRelative(props.project, view().path!) : null));
+  const isEdit = () => view().category === "edit";
   return (
     <div class={`trow tool${dotClass(props.item.status)}${props.nested ? " nested" : ""}${props.item.status === "error" ? " error" : ""}`}>
       <div class="tool-head" onClick={() => hasBody() && setOpen(!isOpen())}>
         <span class="tdot" />
         <span class="tname">{view().verb}</span>
-        <span class="tsum" title={view().target}>{target()}</span>
+        {/* Only the name is the button: the rest of the row still folds it. */}
+        <span class="tsum" title={view().target}>
+          <Show when={rel()} fallback={target()}>
+            <button class="link-btn tool-target" title={isEdit() ? t("Open the file's changes") : t("Open file")} onClick={(e) => {
+              e.stopPropagation();
+              store.openFile(props.project.id, rel()!, isEdit() ? { diff: true } : { line: view().line });
+            }}>{target()}</button>
+          </Show>
+        </span>
         <Show when={view().detail}><span class="tdetail">{view().detail}</span></Show>
         <Show when={stats().adds || stats().dels}><Stats {...stats()} /></Show>
         <Show when={hasBody()}><Icon name={isOpen() ? "chevronDown" : "chevronRight"} size={12} /></Show>
@@ -175,7 +174,7 @@ export function ThinkingRow(props: { item: Extract<ChatItem, { kind: "thinking" 
 }
 
 /** An approval, with what it is about: the command, the edit, the plan, or questions to answer. */
-export function PermissionCard(props: { item: Permission; ctrl: ChatController; markdown: (text: string) => any }) {
+export function PermissionCard(props: { item: Permission; project: Project; ctrl: ChatController; markdown: (text: string) => any }) {
   const p = () => props.item;
   const [message, setMessage] = createSignal("");
   const [picked, setPicked] = createSignal<Record<string, string[]>>({});
@@ -203,7 +202,22 @@ export function PermissionCard(props: { item: Permission; ctrl: ChatController; 
       <Show when={p().command}><pre class="perm-command">{p().command}</pre></Show>
       <Show when={p().diff?.length}>
         <div class="tool-body perm-diff">
-          <For each={p().diff}>{(d) => <><div class="diff-file">{basename(d.path)}</div><DiffLines text={d.text} /></>}</For>
+          <For each={p().diff}>
+            {(d) => {
+              const rel = projectRelative(props.project, d.path);
+              return (
+                <>
+                  <div class="diff-file">
+                    {/* The file, not its changes: until this is answered they are not on disk. */}
+                    <Show when={rel} fallback={basename(d.path)}>
+                      <button class="link-btn" title={t("Open file")} onClick={() => store.openFile(props.project.id, rel!)}>{rel}</button>
+                    </Show>
+                  </div>
+                  <DiffLines text={d.text} />
+                </>
+              );
+            }}
+          </For>
         </div>
       </Show>
       <Show when={p().plan}><div class="perm-plan">{props.markdown(p().plan!)}</div></Show>
