@@ -1087,10 +1087,11 @@ pub(crate) mod tests {
         let mut root = Command::new("sh").args(["-c", "sleep 60 & echo $!; wait"]).stdout(Stdio::piped()).spawn().unwrap();
         let t = Target { id: "s".into(), root: Some(root.id()), root_start: start_time_of(root.id()), tree: None, agent: None, custom: false };
         // The first child seen can still be the forked `sh` that has not yet become `sleep`: wait for `sleep` itself.
+        // Its name can keep the one read before the exec (`bash`) while its program is already /bin/sleep.
         let end = Instant::now() + Duration::from_secs(15);
         let child = loop {
             let scan = wait_for_children(&procs, &t);
-            if let Some(c) = scan.children.iter().find(|c| c.name.contains("sleep")) {
+            if let Some(c) = scan.children.iter().find(|c| c.name.contains("sleep") || c.exe.as_deref().is_some_and(|e| e.ends_with("/sleep"))) {
                 break c.clone();
             }
             assert!(Instant::now() < end, "the background program: {:?}", scan.children);
