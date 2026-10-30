@@ -168,7 +168,9 @@ describe("ChatController observer mode", () => {
       await new Promise((r) => setTimeout(r, 0));
       ctrl.retryAnswer("req-1");
       await new Promise((r) => setTimeout(r, 0));
-      expect(ctrl.state.items.find((i) => i.id === "req-1")).toMatchObject({ resolved: "Allowed", retry: undefined });
+      const card = ctrl.state.items.find((i) => i.id === "req-1") as { resolved?: string; retry?: string };
+      expect(card.resolved).toBe("Allowed");
+      expect(card.retry).toBeUndefined();
     });
   });
 
@@ -207,7 +209,9 @@ describe("ChatController observer mode", () => {
     it("a lost reply's own answer, back on reconnect, settles the card in the words it was given", async () => {
       const { ctrl, calls, card } = await lostReply();
       ctrl.applyLog("delta", [logged("Pixel")]);
-      expect(card()).toMatchObject({ resolved: "Allowed", retry: undefined, answerError: undefined });
+      expect(card().resolved).toBe("Allowed");
+      expect(card().retry).toBeUndefined();
+      expect(card().answerError).toBeUndefined();
       expect(card().answered?.by).toBeUndefined();
       // Nothing is left to send again.
       ctrl.retryAnswer("req-1");
@@ -217,7 +221,9 @@ describe("ChatController observer mode", () => {
     it("a lost reply and somebody else's answer: says who, and nothing is left to send again", async () => {
       const { ctrl, calls, card } = await lostReply();
       ctrl.applyLog("delta", [logged("Tablet")]);
-      expect(card()).toMatchObject({ resolved: "Already answered on Tablet 2 min ago", retry: undefined, answerError: undefined, answered: { by: "Tablet" } });
+      expect(card()).toMatchObject({ resolved: "Already answered on Tablet 2 min ago", answered: { by: "Tablet" } });
+      expect(card().retry).toBeUndefined();
+      expect(card().answerError).toBeUndefined();
       ctrl.retryAnswer("req-1");
       expect(calls).toHaveLength(1);
     });
