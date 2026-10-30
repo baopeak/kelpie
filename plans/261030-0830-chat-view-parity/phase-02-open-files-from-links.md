@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "Open files from links"
-status: pending
+status: completed
 priority: P1
 effort: "6h"
 dependencies: [1]
