@@ -233,3 +233,189 @@ Remaining edges:
 Status: DONE_WITH_CONCERNS
 Summary: The process-safety fix is correct, no other negative-pid `kill` remains, Windows and macOS are unchanged, and the updater keys are valid. One High finding: the AppImage/GTK runtime environment leaks through the daemon into every session.
 Concerns/Blockers: H1 blocks an AppImage release. M1 (0700 data dir) and M2 (signing key exposed to bundler downloads) should be decided before the first Linux release. The CI install check and smoke have never run.
+
+---
+
+## Round 2 (`git diff 00596b0 fc831c8`)
+
+Reviewed the fix commits:
+- `51f2b90`: AppImage env;
+- `9195f57`: private data dir;
+- `7454b2b`: keep-awake;
+- `659ab1e`: pgid guard;
+- `466fdd9`: key scoping;
+- `da1b258`: macOS procs test;
+- `96ece38`: smoke prompt and baseline;
+- `45bae79`: docs.
+
+CI run 40994932186 is reported green on all three OSes, including the `.deb` and AppImage checks and the Xvfb
+smoke. I did not re-run CI.
+
+Local checks (Windows, `D:\kelpie-p9-target`, `-j 1`):
+- `cargo test -p kelpie-proto`: 29 passed, including `the_data_folder_is_created_for_this_user_only`. Only its non-Unix part runs here.
+- `cargo test -p kelpied awake`: 1 passed.
+- `cargo test -p kelpie --lib daemon_runtime`: 3 passed, including `the_daemon_never_inherits_the_appimage_mount_or_its_gtk_setup`.
+- `vitest run src/lib/updater.test.ts`: 5 passed.
+
+### Disposition of round-1 findings
+
+| Round 1 | Status | Notes |
+|---|---|---|
+| H1 AppImage env leak | **Fixed (daemon side)** | See R2-1 and R2-2 |
+| M1 data folder 0700 | **Fixed** | See R2-3 |
+| M2 signing key exposure | **Reduced, documented** | See R2-4: the claim of containment is too strong |
+| L1 slot `a` always rewritten | **Fixed (documented)** | Module docs and the architecture table now describe the Linux behaviour |
+| L1/L2 copy failure → mount daemon | **Fixed** | See R2-5 |
+| L2 keep-awake edges | **Fixed, new risk** | See R2-6 |
+| L3 `xauth`, `.deb` line, fail-fast, `stop()` | **Fixed** | `xauth` added; `|| true`; `fail-fast: false`; `stop()` signals the group even after its leader exits, tolerates ESRCH and escalates to SIGKILL |
+| L4 `/tmp` fallback | Open (pre-existing) | Folded into R2-3 |
+| L5 proc_tree pgid guard | **Fixed** | See R2-7 |
+| Nits | **Fixed** | `isWindows` in `platform.ts`. The redundant keyring entries stay, which is harmless |
+
+### R2-1: the `appimage_env_fixes` filter (`app/src-tauri/src/daemon_runtime.rs:115-166`), verified
+
+- **Gating:** the filter returns nothing unless `APPIMAGE` is in the app's environment (`:142`). `spawn_daemon`
+  calls it only under `cfg!(target_os = "linux")` (`daemon_client.rs:294`). So `.deb`, Windows and macOS are
+  untouched, and the test covers the "not an AppImage" case (`:219`).
+- **Complete against the GTK hook I fetched:**
+  - The base hook's `APPDIR`, `GTK_DATA_PREFIX`, `GTK_THEME` and `GDK_BACKEND` are handled. The two forced values are removed only when they equal what the hook writes.
+  - The base hook's `XDG_DATA_DIRS` has its `$APPDIR` entries dropped.
+  - The conditional exports `GSETTINGS_SCHEMA_DIR`, `GI_TYPELIB_PATH`, `GTK_EXE_PREFIX`, `GTK_PATH`, `GTK_IM_MODULE_FILE`, `GDK_PIXBUF_MODULE_FILE` and `GIO_EXTRA_MODULES` are all handled.
+- **Complete against the type-2 runtime:** `APPIMAGE`, `APPDIR`, `ARGV0` and `OWD` are removed.
+- **Catch-all:** any other variable whose whole value is `$APPDIR` or under `$APPDIR/` is removed. That covers the hook's `$APPDIR//usr/...` double slash and plugins such as gstreamer's.
+  - `$APPDIR` is trimmed, and `/` (`len > 1`) is refused, so a degenerate `APPDIR=/` cannot wipe the whole environment.
+  - Prefix matching is on `{d}/`, so `/tmp/.mount_X-other` is kept (tested).
+- **User values are kept:**
+  - `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH` and `PERL5LIB` lose only the `$APPDIR` entries; an empty result unsets the variable.
+  - A user's `GDK_BACKEND=wayland` or `GTK_THEME=Yaru` is kept (tested).
+- **Residual (Low, non-blocking):** `APPIMAGE_ONLY` removes `GTK_PATH`, `GI_TYPELIB_PATH`, `GIO_EXTRA_MODULES` and `GSETTINGS_SCHEMA_DIR` *unconditionally*.
+  - The hook exports these only when the bundled GTK has them (build-time detection).
+  - So a user's own value survives in the app's environment whenever the hook did not overwrite it, and the filter then drops it anyway.
+  - Treating them as `APPIMAGE_LISTS` (drop only `$APPDIR` entries) keeps the user's value and still removes the hook's.
+- **Negligible:** non-UTF-8 variables are skipped by the scan (`daemon_client.rs:296`), so one pointing into the mount would survive.
+- **Upgrade note:** a daemon started by an earlier AppImage build keeps its polluted environment until it is restarted. It only applies to pre-release AppImage testers.
+
+### R2-2 (Medium, non-blocking, new): programs the *app* starts still inherit the AppImage environment
+
+- The H1 fix covers the daemon and therefore sessions. The app itself also starts long-lived GUI programs with
+  its own environment, which still has the hook's GTK setup:
+  - `external_editor.rs` (`code` and the other editors);
+  - `xdg-open` at `agent_config.rs:1228` and `fs_ops.rs:354`.
+- Scenario:
+  1. "Open in VS Code" or "reveal in folder" from the AppImage starts VS Code or the file manager with `GDK_BACKEND=x11`, `GTK_PATH`/`GIO_EXTRA_MODULES`/`GDK_PIXBUF_MODULE_FILE` pointing into `/tmp/.mount_…`, and `APPIMAGE` set.
+  2. They outlive Kelpie.
+  3. Once Kelpie quits, their GTK file dialogs, icons and input methods hit a dead mount.
+- Fix: a shared helper, for example `daemon_runtime::clean_appimage_env(&mut Command)`, applied to those spawn sites.
+
+### R2-3: `ensure_private_dir` (`crates/kelpie-proto/src/lib.rs:345-362`), verified with two Low notes
+
+- **Creation:** `DirBuilder::recursive(true).mode(0o700)` creates the folder and any missing parents as 0700 (the XDG spec asks the same for `$XDG_DATA_HOME`).
+- **Narrowing:**
+  - Only when `uid == geteuid()` and `mode & 0o077 != 0`, so another user's folder is never chmodded.
+  - `metadata` follows a symlink, so a symlinked data folder narrows its target, and only when we own the target. That is correct.
+- **Call sites:**
+  - app start (`app/src-tauri/src/lib.rs:233-236`, logs only);
+  - daemon start (`kelpied/src/main.rs:223`, fatal);
+  - token write (`kelpie-proto/src/lib.rs:223-226`: the folder above `auth/` and `auth/` itself).
+- **macOS:** `~/Library/Application Support/Kelpie` goes from 0755 to 0700. Every consumer (app, daemon, phone server, CLI) runs as the same user, so I see no regression. Windows is a plain `create_dir_all`, as before.
+- **Low (non-blocking): a failed chmod is fatal for the daemon.**
+  - On a filesystem without POSIX modes (vfat/exFAT/CIFS mounted with `uid=` the user, without `quiet`), the folder reports 0755 and `chmod` returns EPERM.
+  - That error goes up through `main.rs:223` and through `write_user_token` → `auth::init`, so `kelpied` refuses to start.
+  - It needs `XDG_DATA_HOME` or `KELPIE_DATA_DIR` on such a mount, so it is rare.
+  - Fix: log a warning when the narrowing `set_permissions` fails, and only fail when the folder cannot be created.
+- **Low (pre-existing L4): a folder owned by someone else is "left alone" and then used.**
+  - With the `/tmp` fallback, or an `XDG_DATA_HOME` pointing at a shared place, a pre-created foreign `Kelpie` folder is accepted silently.
+  - Refusing such a folder (or one that is group- or world-writable and not ours) would close L4 at almost no cost.
+
+### R2-4 (Medium, non-blocking): key scoping: correct mechanics, overstated isolation
+
+- **Mechanics are correct:**
+  - `scripts/build-release.sh:14-18` copies the key into *unexported* shell variables and unsets the environment variables before any other command. `cargo build` of the sidecars, the version bump and `pnpm install` cannot inherit it.
+  - `:83-88` passes it as a command-prefix assignment only to `pnpm tauri build`.
+  - Nothing echoes it. The script never enables `set -x`.
+  - The empty-key branch keeps local and CI unsigned builds working.
+- **Trace caveat:** under a manual `bash -x scripts/build-release.sh`, the `signing_key=…` assignment and the prefixed command would print the key. Actions masks registered secrets in logs, and the workflow does not use `-x`. Acceptable; a one-line comment would help.
+- **The claim is too strong.** Comments at `release.yml:62-65` and `build-release.sh:14-15` say the earlier commands "never see" the key, but the step's own shell still has it.
+  - The release step's shell (`bash -e {0}` started with `env: TAURI_SIGNING_PRIVATE_KEY`) and the script's starting environment both still hold the key.
+  - On Linux, any same-uid process (a dependency's `build.rs`, a pnpm lifecycle script) can read `/proc/<ancestor pid>/environ`. On macOS, `KERN_PROCARGS2` gives the same for a same-uid process.
+  - So the unset stops *accidental* inheritance (tools that dump their environment), not a malicious build step.
+  - `pnpm tauri build` itself (frontend build, the app crate's dependency build scripts, and the linuxdeploy and GTK plugin downloads) still runs with the key. The comment acknowledges that.
+- Real containment: bundle with no key in the job's environment, then sign in a separate step (`tauri signer sign` on each updater artifact). That is the decision left open in round 1 (unresolved question 2).
+- Until then, reword the two comments to "not passed on to …" rather than "never see".
+
+### R2-5: copy-failure path, verified
+
+- `daemon_runtime.rs:37-42`: a failed copy under an AppImage logs that the daemon runs from the mount and stops when Kelpie quits.
+- `updater.ts:304`: `daemonSurvivesUpdate` returns `false` for an `exe` matching `/\.mount_[^/]*\//`.
+  - The AppImage runtime always mounts at `<tmp>/.mount_<name><random>`, whatever `TMPDIR` is, so the pattern matches.
+  - A slot copy (`…/Kelpie/daemon/a/kelpied`) or `/usr/bin/kelpied` still survives. All three cases are tested.
+  - So the update dialog now warns correctly.
+- Slot rewrite on Linux is documented: the module docs (`:11-14`) and the architecture table say `a` is rewritten each build, and `b` is used only when `a` cannot be written.
+
+### R2-6 (Medium, non-blocking; verify on GNOME before release): keep-awake `--what=idle` may not stop GNOME's automatic suspend
+
+- **Mechanics are fine:**
+  - `recv_timeout(5 s)` runs only while a lock is held (`awake.rs:430-443`); with no lock it is a plain blocking `recv`, so there are no wakeups at idle. While held, 0.2 Hz is negligible.
+  - A late refusal is caught by `exited()`, reaped and logged once (`:444-451`), so there is no zombie and no leak.
+  - Remaining minor point: after a late refusal, `Awake::held()` stays `true`, and `set(true)` deduplicates, so nothing retries until the mode toggles. Acceptable; the log says why.
+- **The concern is behavioural:**
+  - A logind `idle` lock is honoured by logind's own `IdleAction`, which defaults to `ignore`.
+  - On GNOME (Ubuntu's default), automatic suspend is triggered by gnome-settings-daemon, which follows gnome-session's own inhibitors. Whether it consults logind `idle` inhibitors is unclear, and I could not confirm it. Public reports are mixed:
+    - [gnome-session#110](https://gitlab.gnome.org/GNOME/gnome-session/-/issues/110);
+    - [a GNOME Discourse thread on inhibitors](https://discourse.gnome.org/t/why-does-gnome-shell-doesnt-notify-user-about-suspend-being-blocked-by-inhibitor/34077).
+  - One forum report says GNOME's menu suspend went through *despite* a logind sleep block lock ([Zorin forum](https://forum.zorin.com/t/caffeine-in-zorin-lite/69157?page=2)). If that holds, round 1's `idle:sleep` did not actually block menu suspend on GNOME, and the narrowing may have removed the part that worked.
+  - My round-1 L2 prompted this change, so I flag the risk rather than assert it.
+- **Verify on a real GNOME and KDE desktop before the Linux release:**
+  1. Set a 1-minute automatic suspend.
+  2. Hold keep-awake with an agent working.
+  3. Check with `systemd-inhibit --list`.
+- If GNOME ignores it, either restore `idle:sleep`, or add `org.gnome.SessionManager.Inhibit` / `org.freedesktop.PowerManagement.Inhibit` (flags idle and suspend) on D-Bus.
+- The docs currently promise "stops automatic sleep", which is unverified.
+
+### R2-7: proc_tree pgid guard (`crates/kelpied/src/proc_tree.rs:280-288`), verified
+
+- `adopt` refuses a pid that does not fit an `i32`, a pgid ≤ 1, and the daemon's own `getpgrp()`, with `InvalidInput`.
+- Every caller already handles an `Err`:
+  - `session.rs:389` (`.ok()` + warn);
+  - `chat.rs:366` (`.ok()`, then the `kill_pid` fallback);
+  - `automation.rs:557` (`.ok()`);
+  - `procs.rs:724` (`.ok()`).
+- Real children are never rejected: they are new group leaders, so their pid can never equal the daemon's pgid. Windows is untouched.
+
+### R2-8: the macOS `procs` test change (`crates/kelpied/src/procs.rs:1090-1094`), correct; no real bug masked
+
+- The process table refreshes with `refresh_kind()` = memory + CPU only (`:567-569`), and sysinfo keeps the name it read when it first saw a pid. So a forked `sh` (bash on macOS) seen before its `exec` keeps the name `bash` after it becomes `/bin/sleep`.
+- The identity used for listing and killing comes from `now()` with `with_exe(UpdateKind::Always)` (`:583-589`), applied in `proc_of` (`:153-157`). So `exe` is always current.
+- The test now accepts a fresh `exe` ending in `/sleep`. It still asserts:
+  - orphan detection with a matching start time (`:1103-1104`);
+  - a kill with no refusal (`:1106`);
+  - that the process is gone (`:1111`).
+
+  Kill safety (pid + start time + fresh exe) is still fully exercised, so nothing is masked.
+- Production consequence (Low, cosmetic): the Processes panel can show a stale name (`bash`) for a process that `exec`'d into another program, which phase 13 also touched. Optional: display the fresh `exe` file name when it differs from the table name.
+
+### Other round-2 changes
+
+- `boot_smoke.py`:
+  - Prompt detection is now per line with trailing spaces trimmed (`$`, `%`, `#`, `>`). That matches bash's `user@host:~$`. `PS` is dropped, which is fine because the script is Unix/CI-oriented.
+  - The 1 s wait before the screenshot is harmless.
+- `scripts/perf/linux-smoke-baseline.json`:
+  - It records cold start 634 ms, idle CPU 4.53 % and RSS 505.7 MB from run 40992930356, with provenance, and is not gated.
+  - 4.5 % idle CPU under Xvfb software rendering is worth watching against the spec's "no idle cost". Under Xvfb it is likely WebKit software compositing, but a later gate should compare like with like.
+- Docs (architecture table, keep-awake bullet, user guide) match the code, except the unverified keep-awake promise (R2-6).
+
+### Round 2 blocking summary
+
+- **Blocking: none.** H1 is fixed for the daemon and sessions.
+- **Before the first Linux release (non-blocking for merge):**
+  - **R2-6:** verify keep-awake on GNOME and KDE (it may silently not work on GNOME).
+  - **R2-2:** clean the AppImage environment for the app's own external launches.
+  - **R2-4:** a separate signing step, or at least accurate comments.
+- **Low:**
+  - R2-1 (list treatment for the 4 GTK variables);
+  - R2-3 (EPERM on a non-POSIX filesystem is fatal; accept or refuse a foreign data folder);
+  - R2-8 (stale display name).
+
+Status: DONE_WITH_CONCERNS
+Summary: The round-1 findings are fixed or documented, and the focused tests pass. H1 is resolved for the daemon and every session, M1 and the pgid guard are correct, and the macOS procs test change is sound and masks no kill-safety bug.
+Concerns/Blockers: No blocking findings. Before the Linux release: R2-6 (keep-awake `--what=idle` may not stop GNOME's automatic suspend; verify on a desktop), R2-2 (app-launched editors and `xdg-open` still get the AppImage environment), R2-4 (the step shell still holds the signing key, readable through `/proc`; the comments overstate the isolation).

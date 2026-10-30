@@ -106,13 +106,44 @@ From `plans/reports/code-reviewer-261030-phase15a-linux.md`.
   - The release matrix has `fail-fast: false`.
   - `boot_smoke.py` `stop()` signals the process group even when its leader already exited, waits for it, then SIGKILLs the group with every `killpg` guarded.
 - **Keep-awake.**
-  - `--what=idle` only: automatic idle sleep is blocked, but a suspend the user picks from the menu still happens, like `ES_SYSTEM_REQUIRED` on Windows.
+  - Round 1 narrowed it to `--what=idle`. Round 2 restored `idle:sleep`, as the controller decided (see Round 2 below).
   - While a lock is held, the daemon looks at the child every 5 s, so a refusal that arrives after the 300 ms probe is reaped and logged. There is no timer while nothing is held.
 - **L5, `proc_tree`**: `ProcTree::adopt` refuses process group ids ≤ 1 and the daemon's own group, so every `killpg` site is guarded.
 - **Not changed (as reviewed):**
   - the redundant Linux `keyring` entries in kelpied and the app (harmless);
   - L4, the `/tmp` fallback when `HOME` is unset (pre-existing, practically unreachable).
 
+## Round 2 review fixes
+
+From the Round 2 section of `plans/reports/code-reviewer-261030-phase15a-linux.md`.
+
+- **R2-2, programs the app starts.**
+  - One helper, `daemon_runtime::clean_env(&mut Command)`, applies `appimage_env_fixes` to the app's own environment, computed once. It is a no-op outside an AppImage and off Linux.
+  - Every program the app spawns now goes through it:
+    - the daemon;
+    - external editors and both `xdg-open` reveal sites (`agent_config.rs`, `fs_ops.rs`);
+    - git (`git.rs`, `git_sync.rs`, `integrations.rs`, plugin clone), which can start pinentry or credential GUIs;
+    - `gh`;
+    - Finish check commands;
+    - plugin shell commands;
+    - `ssh` / `scp` / `ssh-keygen` / `ssh-add` (`remote.rs`, `ssh_hosts.rs`).
+  - The bundled speech helper keeps the app's environment (it is ours and lives inside the mount). URLs opened through `tauri-plugin-opener` are outside our control (follow-up).
+  - New test: outside an AppImage a started program's environment is untouched.
+- **R2-1, GTK lists.**
+  - `GTK_PATH`, `GI_TYPELIB_PATH`, `GIO_EXTRA_MODULES` and `GSETTINGS_SCHEMA_DIR` are now treated like `PATH`: only their `$APPDIR` entries go.
+  - Only the runtime's `APPIMAGE`, `APPDIR`, `ARGV0` and `OWD` are removed unconditionally. Every other variable is removed only when its value lies inside the mount (the hook's module and loader files and GTK prefixes).
+  - The test covers a user's own `GTK_PATH` entry kept beside the hook's, and user-set `GI_TYPELIB_PATH`, `GSETTINGS_SCHEMA_DIR` and `GDK_PIXBUF_MODULE_FILE` kept.
+- **R2-3, data folder.**
+  - `ensure_private_dir` returns a warning instead of failing when the folder cannot be narrowed to 0700 (vfat, CIFS…). The daemon logs it after logging starts; the app prints it.
+  - A folder owned by another user is refused: "… belongs to another user (uid N, not M): remove it, or point KELPIE_DATA_DIR or XDG_DATA_HOME at a folder of your own". This also closes the pre-created `/tmp/Kelpie` case (L4).
+  - Test (Unix, non-root): `/` is refused with that message.
+- **R2-4, signing-key wording.**
+  - `build-release.sh` and `release.yml` now say the key is *not passed on* to the sidecar builds and `pnpm install`, rather than "never seen".
+  - They name the `/proc/<pid>/environ` exposure and say a separate signing step is the real fix. The script warns never to run it with `bash -x` while the key is set.
+- **R2-6, keep-awake (controller decision).**
+  - Back to `--what=idle:sleep --mode=block`: a long agent run must never be cut off, and GNOME's automatic suspend may not honour an idle lock alone.
+  - The 5 s late-refusal check stays.
+  - The user guide says what this means: while Kelpie keeps the computer awake, a suspend chosen from the menu waits; closing the lid follows the system setting; keep-awake can be switched off (or set to *while an agent works*). The architecture doc says the same.
 ## CI
 
 | Run | Result |
@@ -143,8 +174,8 @@ The diagnostics (per-crate steps, `continue-on-error`, watchdog, disk cleanup) w
 - the release job, which runs only on a tag;
 - the manual desktop checks under Follow-ups.
 
-**Checked locally (Windows), after the review fixes:**
-- `cargo test`: kelpie-proto 29 ✓, kelpied 352 ✓, kelpie 238 ✓ (`-j 1`; `-j 2` ran out of memory on the 8 GB machine);
+**Checked locally (Windows), after the round-2 fixes:**
+- `cargo test`: kelpie-proto 29 ✓, kelpied 352 ✓, kelpie 239 ✓ (`-j 1`; `-j 2` ran out of memory on the 8 GB machine);
 - clippy: only the known `mobile.rs:892` warning;
 - `pnpm typecheck`, `pnpm test` (515) and `pnpm i18n:check`;
 - type-checked for `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin`:
@@ -176,9 +207,15 @@ Shared runners vary a lot between runs: cold start nearly doubled with no code c
 ## Follow-ups
 
 - macOS process scan: a process read just before its `exec` can keep its old name (`bash` for `sleep`) in the Processes list. The test now matches on the program path; the cached name itself is a small display issue to look at.
-- The release job's step shell still holds the signing key in its initial environment (M2): signing in a separate step would need our own `.app.tar.gz` packing for macOS. This is an ops decision.
-- Other app-started programs (external editors, port forwards) still inherit the AppImage environment while the app runs. They end with the app, unlike the daemon.
-- Tauri downloads linuxdeploy unpinned during the signed bundling (documented in `release.yml`).- Run `ui_tour.py` screenshots on Linux before the first Linux release (WebKitGTK rendering differences).
+- **Signing key** (M2/R2-4): the release step's shell keeps the key in its starting environment, which any same-user process of the step can read through `/proc/<pid>/environ` (`KERN_PROCARGS2` on macOS). This includes dependency build scripts, pnpm lifecycle scripts, and the linuxdeploy that Tauri downloads unpinned.
+  - The real fix is a separate signing step: bundle with no key anywhere in the job's environment, then `tauri signer sign` each updater artifact in a step of its own.
+  - For macOS that means packing the `.app.tar.gz` ourselves. This is an ops decision.
+- URLs opened through `tauri-plugin-opener` (`xdg-open` inside the plugin) still get the AppImage environment. A browser started that way outlives the app.
+- Keep-awake on a real GNOME and KDE desktop:
+  1. Set a 1-minute automatic suspend and hold keep-awake.
+  2. Check `systemd-inhibit --list`.
+  3. Confirm automatic suspend waits and a menu suspend waits.
+- Run `ui_tour.py` screenshots on Linux before the first Linux release (WebKitGTK rendering differences).
 - Gate the Linux smoke numbers once there is a history (budgets relative to `linux-smoke-baseline.json`).
 - Manual checks on a real desktop: GNOME Keyring prompt/unlock flow, KWallet, keep-awake under GNOME/KDE (`systemd-inhibit --list`), notifications, AppImage self-update from a published release, `.deb` update through pkexec.
 - Wayland: not exercised (Xvfb only); the AppImage no longer forces `GDK_BACKEND=x11` on sessions, but the app itself still runs under the hook's X11 setting.
