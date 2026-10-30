@@ -197,7 +197,8 @@ def scenario(run, t_launch):
     rendered = until(lambda: d.js("return document.querySelectorAll('.pane .xterm-screen').length > 0"), 20)
     run.check("its terminal renders", bool(rendered))
     screen = lambda: daemon(d, "session.read", {"handle": handle})["text"]  # noqa: E731
-    prompt = until(lambda: any(m in screen() for m in ("$ ", "% ", "# ", "> ", "PS ")), 60, 0.3)
+    # The screen text comes with trailing spaces trimmed: bash's "user@host:~$ " reads as "...$".
+    prompt = until(lambda: any(line.rstrip().endswith(("$", "%", "#", ">")) for line in screen().splitlines()), 60, 0.3)
     run.check("the shell prints its prompt", bool(prompt), repr(screen()[-200:]))
 
     # Real keyboard events through the terminal view.
@@ -213,6 +214,7 @@ def scenario(run, t_launch):
     ) or ""
     shown = until(lambda: "hello" in [line.strip() for line in view_text().splitlines()], 10, 0.2)
     run.check("…and the terminal view shows it", bool(shown))
+    time.sleep(1)  # software rendering under Xvfb draws the canvas a frame or two after the buffer
     run.shot("01-echo-hello")
 
     if app_proc is not None:
