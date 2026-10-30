@@ -79,9 +79,12 @@ fn run(rx: mpsc::Receiver<bool>) {
     }
 }
 
-/// Linux: a `systemd-inhibit --what=idle … sleep infinity` child holds an idle inhibitor lock from
-/// logind for as long as it runs: like Windows' `ES_SYSTEM_REQUIRED`, it stops the computer going to
-/// sleep by itself, never a suspend the user asks for. It gets SIGTERM when this thread ends
+/// Linux: a `systemd-inhibit --what=idle:sleep --mode=block … sleep infinity` child holds idle and
+/// sleep inhibitor locks from logind for as long as it runs, so a long agent run is never cut off:
+/// desktops differ in which lock their automatic suspend honours (GNOME's may not look at an idle
+/// lock alone), and a sleep lock covers them all. A suspend picked from the menu waits while it is
+/// held; closing the lid follows the system's own setting (logind's `LidSwitchIgnoreInhibited`), and
+/// the user switches keep-awake off in Kelpie. It gets SIGTERM when this thread ends
 /// (`PR_SET_PDEATHSIG`), so a daemon that dies never leaves the computer awake; `systemd-inhibit` in
 /// turn takes its `sleep` down with it. Without systemd (or logind) the request is logged once and
 /// otherwise ignored. While a lock is held the child is looked at every few seconds, so a refusal
@@ -139,7 +142,7 @@ fn run(rx: mpsc::Receiver<bool>) {
 }
 
 #[cfg(any(target_os = "linux", test))]
-const INHIBIT_ARGS: &[&str] = &["--what=idle", "--who=Kelpie", "--why=An agent is working", "--mode=block", "sleep", "infinity"];
+const INHIBIT_ARGS: &[&str] = &["--what=idle:sleep", "--who=Kelpie", "--why=An agent is working", "--mode=block", "sleep", "infinity"];
 
 #[cfg(target_os = "linux")]
 fn inhibit() -> Result<std::process::Child, String> {
@@ -200,10 +203,10 @@ fn run(rx: mpsc::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn linux_inhibitor_blocks_idle_sleep_only_until_it_is_stopped() {
+    fn linux_inhibitor_blocks_idle_and_sleep_until_it_is_stopped() {
         let args = super::INHIBIT_ARGS;
-        // Idle only: a suspend the user picks from the menu is never blocked (as on Windows and macOS).
-        assert_eq!(&args[..4], ["--what=idle", "--who=Kelpie", "--why=An agent is working", "--mode=block"]);
+        // Idle and sleep: whichever lock a desktop's automatic suspend honours, a working agent holds it.
+        assert_eq!(&args[..4], ["--what=idle:sleep", "--who=Kelpie", "--why=An agent is working", "--mode=block"]);
         assert_eq!(&args[4..], ["sleep", "infinity"], "runs until killed");
     }
 
