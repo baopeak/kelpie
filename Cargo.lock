@@ -2669,6 +2669,7 @@ dependencies = [
  "jsonc-parser",
  "kelpie-proto",
  "keyring",
+ "libc",
  "notify",
  "nucleo-matcher",
  "parking_lot",

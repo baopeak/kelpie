@@ -207,9 +207,12 @@ impl Tree {
 #[cfg(not(windows))]
 impl Drop for Tree {
     fn drop(&mut self) {
-        if let Some(pid) = self.0.get() {
-            // The check was started as the leader of its own process group.
-            let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{pid}")]).output();
+        // The check was started as the leader of its own process group: the group id is its pid.
+        // Signalled directly, never through the `kill` program: procps' `kill -KILL -1234` reads
+        // `-1234` as options and signals pid -1, which is every process of the user.
+        if let Some(pgid) = self.0.get().and_then(|p| libc::pid_t::try_from(p).ok()).filter(|p| *p > 1) {
+            // SAFETY: plain syscall; a group that is already gone just reports ESRCH.
+            unsafe { libc::killpg(pgid, libc::SIGKILL) };
         }
     }
 }
