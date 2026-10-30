@@ -16,7 +16,10 @@ import { Icon } from "./icons";
 import { ChatComposer } from "./chat-composer";
 import { type FileChange, PermissionCard, ThinkingRow, ToolRow, ToolRun, TurnFiles } from "./chat-rows";
 import { isAgentKind, kindInfo } from "../lib/agents";
-import { t } from "../lib/i18n";
+import { locale, t } from "../lib/i18n";
+
+/** Vietnamese interface: Vietnamese dates; English: the system's own date format. */
+const clockLocale = () => (locale() === "vi" ? "vi-VN" : []);
 
 const RENDER_WINDOW = 300;
 
@@ -158,8 +161,8 @@ function transcriptShape(items: ChatItem[]) {
 }
 
 /** "23/10 16:02" (the full date and time on hover). */
-const clock = (at: number) => new Date(at).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
-const fullClock = (at: number) => new Date(at).toLocaleString([], { dateStyle: "full", timeStyle: "medium" });
+const clock = (at: number) => new Date(at).toLocaleString(clockLocale(), { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+const fullClock = (at: number) => new Date(at).toLocaleString(clockLocale(), { dateStyle: "full", timeStyle: "medium" });
 
 /** The date and time a message was sent, in the top right corner. */
 function Stamp(props: { at?: number }) {

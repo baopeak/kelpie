@@ -98,10 +98,9 @@ export default function PushSettings() {
       <div class="form-note">{t("Also tell your phone, with Kelpie's window closed. The session daemon sends these; nothing is sent until you switch a channel on.")}</div>
       <Show when={error()}><div class="form-note error">{error()}</div></Show>
 
-      <SettingRow id="push-ntfy" wide>
-        <div class="push-block">
-          <Toggle on={cfg().ntfy.enabled} onChange={(on) => edit((c) => (c.ntfy.enabled = on))} />
-          <Show when={cfg().ntfy.enabled}>
+      <SettingRow id="push-ntfy" wide aside={<Toggle on={cfg().ntfy.enabled} onChange={(on) => edit((c) => (c.ntfy.enabled = on))} />}>
+        <Show when={cfg().ntfy.enabled}>
+          <div class="push-block">
             <div class="inline-fields">
               <input class="text-input" placeholder="https://ntfy.sh" value={cfg().ntfy.server} title={t("ntfy server")} onChange={(e) => edit((c) => (c.ntfy.server = e.currentTarget.value.trim()))} />
               <button class="btn mini" onClick={() => void test("ntfy")}>{t("Send a test")}</button>
@@ -116,35 +115,33 @@ export default function PushSettings() {
             <div class="form-note">{t("Subscribe to this topic in the ntfy app. It is 128 random bits that only you know; anyone who learns it can read your notifications, so make a new one if it was shared.")}</div>
             <SecretField set={secrets().ntfy_token} placeholder={t("Access token (optional)")} onSave={(v) => void save(undefined, { ntfy_token: v })} />
             <Show when={tested().ntfy ?? status("ntfy")?.error}><div class="form-note">{tested().ntfy ?? status("ntfy")?.error}</div></Show>
-          </Show>
-        </div>
+          </div>
+        </Show>
       </SettingRow>
 
-      <SettingRow id="push-telegram" wide>
-        <div class="push-block">
-          <Toggle on={cfg().telegram.enabled} onChange={(on) => edit((c) => (c.telegram.enabled = on))} />
-          <Show when={cfg().telegram.enabled}>
+      <SettingRow id="push-telegram" wide aside={<Toggle on={cfg().telegram.enabled} onChange={(on) => edit((c) => (c.telegram.enabled = on))} />}>
+        <Show when={cfg().telegram.enabled}>
+          <div class="push-block">
             <SecretField set={secrets().telegram_token} placeholder={t("Bot token from @BotFather")} onSave={(v) => void save(undefined, { telegram_token: v })} />
             <div class="inline-fields">
               <input class="text-input" placeholder={t("Chat id")} value={cfg().telegram.chat_id} onChange={(e) => edit((c) => (c.telegram.chat_id = e.currentTarget.value.trim()))} />
               <button class="btn mini" disabled={!secrets().telegram_token || !cfg().telegram.chat_id} onClick={() => void test("telegram")}>{t("Send a test")}</button>
             </div>
             <Show when={tested().telegram ?? status("telegram")?.error}><div class="form-note">{tested().telegram ?? status("telegram")?.error}</div></Show>
-          </Show>
-        </div>
+          </div>
+        </Show>
       </SettingRow>
 
-      <SettingRow id="push-webhook" wide>
-        <div class="push-block">
-          <Toggle on={cfg().webhook.enabled} onChange={(on) => edit((c) => (c.webhook.enabled = on))} />
-          <Show when={cfg().webhook.enabled}>
+      <SettingRow id="push-webhook" wide aside={<Toggle on={cfg().webhook.enabled} onChange={(on) => edit((c) => (c.webhook.enabled = on))} />}>
+        <Show when={cfg().webhook.enabled}>
+          <div class="push-block">
             <div class="inline-fields">
               <SecretField set={secrets().webhook_url} placeholder={t("https://example.com/hook")} onSave={(v) => void save(undefined, { webhook_url: v })} />
               <button class="btn mini" disabled={!secrets().webhook_url} onClick={() => void test("webhook")}>{t("Send a test")}</button>
             </div>
             <Show when={tested().webhook ?? status("webhook")?.error}><div class="form-note">{tested().webhook ?? status("webhook")?.error}</div></Show>
-          </Show>
-        </div>
+          </div>
+        </Show>
       </SettingRow>
 
       <SettingRow id="push-events" wide>
@@ -163,7 +160,7 @@ export default function PushSettings() {
         <div class="push-block">
           <div class="inline-fields">
             <span class="muted-inline">{t("A finished turn must last at least")}</span>
-            <input class="text-input" type="number" min="0" max="86400" style={{ width: "80px" }} value={cfg().min_turn_s}
+            <input class="text-input num" type="number" min="0" max="86400" value={cfg().min_turn_s}
               onChange={(e) => edit((c) => (c.min_turn_s = Math.max(0, Math.round(+e.currentTarget.value || 0))))} />
             <span class="muted-inline">{t("seconds")}</span>
           </div>
@@ -173,21 +170,15 @@ export default function PushSettings() {
         </div>
       </SettingRow>
 
-      <SettingRow id="push-screen" wide>
-        <div class="push-block">
-          <Toggle on={cfg().include_screen} onChange={(on) => void setScreen(on)} />
-          <Show when={cfg().include_screen}>
-            <div class="form-note warn-note">{t("The last lines of the terminal leave this computer, through the server you chose (ntfy.sh is a public service). Credentials Kelpie recognises are masked, but that is a best effort. Turn this on only for servers you trust.")}</div>
-          </Show>
-        </div>
+      <SettingRow id="push-screen" wide aside={<Toggle on={cfg().include_screen} onChange={(on) => void setScreen(on)} />}>
+        <Show when={cfg().include_screen}>
+          <div class="form-note warn-note">{t("The last lines of the terminal leave this computer, through the server you chose (ntfy.sh is a public service). Credentials Kelpie recognises are masked, but that is a best effort. Turn this on only for servers you trust.")}</div>
+        </Show>
       </SettingRow>
-      <SettingRow id="push-link" wide>
-        <div class="push-block">
-          <Toggle on={cfg().phone_link} onChange={(on) => edit((c) => (c.phone_link = on))} />
-          <div class="form-note">{t("With phone access on, the link holds this computer's address on your network (no code, no token), and goes to the server you chose.")}</div>
-        </div>
+      <SettingRow id="push-link" wide aside={<Toggle on={cfg().phone_link} onChange={(on) => edit((c) => (c.phone_link = on))} />}>
+        <div class="form-note">{t("With phone access on, the link holds this computer's address on your network (no code, no token), and goes to the server you chose.")}</div>
       </SettingRow>
-      <div class="form-note">{pushSummary(cfg(), secrets())}</div>
+      <div class="push-summary">{pushSummary(cfg(), secrets())}</div>
       <Show when={state()?.dropped}><div class="form-note warn-note">{t("{n} messages were not sent: the server did not answer in time and they queued up.", { n: state()!.dropped! })}</div></Show>
     </Show>
   );

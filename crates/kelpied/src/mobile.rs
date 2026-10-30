@@ -2,10 +2,12 @@
 //! every session, what needs the user, read a session's screen and (when allowed) answer it.
 //!
 //! Protocol v2 (`/ws`, JSON text messages): the session list is pushed when it changes; a
-//! terminal session's screen is followed with `sub` and arrives as row diffs (`sync`); a chat
-//! session is watched with `chat_sub` and its permission requests answered with `chat_answer`.
-//! Sessions are addressed by id (handles are not stable across daemon restarts) and what a phone
-//! may ask for is the closed table in `verbs`.
+//! terminal session's screen is followed with `sub` and arrives as row diffs (`sync`) that the phone
+//! acknowledges (`ack`); a chat session is watched with `chat_sub` and its permission requests
+//! answered with `chat_answer`. Sessions are addressed by id (handles are not stable across daemon
+//! restarts) and what a phone may ask for is the closed table in `verbs`. A connection is built for
+//! a bad network and a busy computer: heartbeats in both directions, two bounded lanes to the socket
+//! (`lanes`), and rates that follow the machine's load (`load`).
 //!
 //! The page is a remote shell on this machine, so: off by default; bound to one chosen IPv4
 //! address (a private or Tailscale one), never 0.0.0.0; a device pairs with a one-time code
@@ -14,13 +16,14 @@
 //! allowed to type; WebSockets must come from the page's own origin; and HTTPS is used when a
 //! certificate is configured (e.g. from `tailscale cert`).
 
+mod lanes;
 mod sync;
 mod verbs;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,11 +38,13 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::{broadcast, mpsc, oneshot, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
 use crate::daemon::{Daemon, Entry};
+use crate::load::{Level, Load};
 use crate::persist::write_atomic;
-use crate::session::{next_client_id, now_millis, Answer, AnswerError, ClientTx, Outgoing};
+use crate::session::{bounded_client_channel, next_client_id, now_millis, Answer, AnswerError, By, ClientTx, Outgoing, Resolution};
+use lanes::{Beat, Liveness, SLOW_AFTER};
 use verbs::{Permission, Verb};
 
 pub const DEFAULT_PORT: u16 = 4817;
@@ -57,6 +62,9 @@ const MAX_ANSWER_LINE: usize = 64 * 1024;
 const CHAT_MESSAGE_BYTES: usize = 64 * 1024;
 /// Least time between two `chat_sub` for one chat on one connection: each can mean a log of 2 MiB.
 const CHAT_SUB_GAP: Duration = Duration::from_secs(1);
+/// What the daemon has to say to one phone and has not yet been turned into messages: a phone
+/// that lets more than this pile up is told to ask for its state again.
+const EVENT_QUEUE: usize = 256;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Device {
@@ -113,6 +121,10 @@ impl Generation {
         let mut stopped = self.stopped.subscribe();
         let _ = stopped.wait_for(|stopped| *stopped).await;
     }
+
+    fn watch(&self) -> watch::Receiver<bool> {
+        self.stopped.subscribe()
+    }
 }
 
 struct Pending {
@@ -136,6 +148,12 @@ pub struct Mobile {
     connections: Mutex<HashMap<String, (u64, Arc<Notify>)>>,
     /// What each phone was last sent of each session, and the renders they share (see `sync`).
     views: Arc<sync::Views>,
+    /// How busy the computer is; measured only while phone access is on.
+    pub load: Arc<Load>,
+    /// Chat output each open connection has been sent and has not yet taken (the logs in flight).
+    waiting: Mutex<HashMap<u64, Arc<AtomicUsize>>>,
+    /// When a pairing handshake was last let through (they are paced when the machine is loaded).
+    paired_at: Mutex<Option<Instant>>,
     /// Project names from the app (the daemon only knows ids).
     projects: Mutex<HashMap<String, String>>,
     /// Revoked device ids: their open sockets close.
@@ -177,6 +195,7 @@ impl Mobile {
     pub fn load(dir: &Path) -> Mobile {
         let path = dir.join("mobile.json");
         let config = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let load = Load::new();
         Mobile {
             path,
             config: Mutex::new(config),
@@ -187,7 +206,10 @@ impl Mobile {
             failures: Mutex::new(HashMap::new()),
             epoch: uuid::Uuid::new_v4().simple().to_string(),
             connections: Mutex::new(HashMap::new()),
-            views: Arc::new(sync::Views::default()),
+            views: Arc::new(sync::Views::new(load.clone())),
+            load,
+            waiting: Mutex::new(HashMap::new()),
+            paired_at: Mutex::new(None),
             projects: Mutex::new(HashMap::new()),
             revoked: broadcast::channel(16).0,
         }
@@ -242,6 +264,20 @@ impl Mobile {
             by_ip.remove(&ip);
         }
         recent.is_some_and(|n| n >= PAIR_FAILURES)
+    }
+
+    /// Whether a pairing handshake is too soon after the last, for the load the machine is under.
+    fn pairing_paced(&self) -> bool {
+        let gap = self.load.level().pairing_gap();
+        if gap.is_zero() {
+            return false;
+        }
+        let mut last = self.paired_at.lock();
+        if last.is_some_and(|at| at.elapsed() < gap) {
+            return true;
+        }
+        *last = Some(Instant::now());
+        false
     }
 
     fn pairing_failed(&self, ip: IpAddr) {
@@ -421,13 +457,9 @@ async fn start(daemon: Arc<Daemon>) -> Result<String> {
     let url = format!("{}://{ip}:{port}/", if tls.is_some() { "https" } else { "http" });
     let stop = Arc::new(Generation::new());
     let app = Router::new()
-        .route("/", get(page))
-        .route("/app.js", get(page))
-        .route("/app.css", get(page))
-        .route("/manifest.webmanifest", get(page))
-        .route("/icon.svg", get(page))
         .route("/pair", post(pair))
         .route("/ws", get(socket))
+        .fallback(page)
         .with_state(daemon.clone())
         .layer(axum::Extension(stop.clone()));
     let stop2 = stop.clone();
@@ -440,6 +472,16 @@ async fn start(daemon: Arc<Daemon>) -> Result<String> {
             old.stop.cancel();
         }
     }
+    // Measuring the machine's load runs exactly as long as this server does.
+    let told = Arc::downgrade(&daemon);
+    daemon.mobile.load.start(
+        stop.watch(),
+        Arc::new(move |seconds| {
+            if let Some(daemon) = told.upgrade() {
+                daemon.broadcast("daemon.unresponsive", json!({"seconds": seconds}));
+            }
+        }),
+    );
     tokio::spawn(async move {
         loop {
             let accepted = tokio::select! {
@@ -448,6 +490,7 @@ async fn start(daemon: Arc<Daemon>) -> Result<String> {
                 a = listener.accept() => a,
             };
             let Ok((tcp, peer)) = accepted else { continue };
+            keep_alive(&tcp);
             // Who is calling, for the pairing limiter.
             let app = app.clone().layer(axum::Extension(ConnectInfo(peer)));
             let tls = tls.clone();
@@ -475,6 +518,15 @@ async fn start(daemon: Arc<Daemon>) -> Result<String> {
     Ok(url)
 }
 
+/// Asks the OS to probe an idle connection (after 30 s, every 10 s, three times): a backstop for
+/// the heartbeat, which notices a path that died first.
+fn keep_alive(tcp: &tokio::net::TcpStream) {
+    let probes = socket2::TcpKeepalive::new().with_time(Duration::from_secs(30)).with_interval(Duration::from_secs(10)).with_retries(3);
+    if let Err(e) = socket2::SockRef::from(tcp).set_tcp_keepalive(&probes) {
+        tracing::debug!("keep-alive: {e}");
+    }
+}
+
 fn tls_acceptor(cert: &str, key: &str) -> Result<tokio_rustls::TlsAcceptor> {
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -489,11 +541,14 @@ fn tls_acceptor(cert: &str, key: &str) -> Result<tokio_rustls::TlsAcceptor> {
 
 // ---------- HTTP ----------
 
-const INDEX: &str = include_str!("../mobile/index.html");
-const APP_JS: &str = include_str!("../mobile/app.js");
-const APP_CSS: &str = include_str!("../mobile/app.css");
-const MANIFEST: &str = include_str!("../mobile/manifest.webmanifest");
-const ICON: &str = include_str!("../mobile/icon.svg");
+// The phone client (app/phone, built by `pnpm build:phone`), embedded by build.rs as `PHONE_ASSETS`.
+include!(concat!(env!("OUT_DIR"), "/phone_assets.rs"));
+
+/// The embedded file for a request path: `/` is the page; anything else must be a file of the bundle.
+fn phone_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
+    let path = if path == "/" { "/index.html" } else { path };
+    PHONE_ASSETS.iter().find(|(p, _, _)| *p == path).map(|(_, ty, body)| (*ty, *body))
+}
 
 fn secure_headers(mut r: Response) -> Response {
     let h = r.headers_mut();
@@ -505,15 +560,20 @@ fn secure_headers(mut r: Response) -> Response {
     r
 }
 
-async fn page(uri: axum::http::Uri) -> Response {
-    let (body, ty) = match uri.path() {
-        "/app.js" => (APP_JS, "text/javascript; charset=utf-8"),
-        "/app.css" => (APP_CSS, "text/css; charset=utf-8"),
-        "/manifest.webmanifest" => (MANIFEST, "application/manifest+json"),
-        "/icon.svg" => (ICON, "image/svg+xml"),
-        _ => (INDEX, "text/html; charset=utf-8"),
+async fn page(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+        return secure_headers(StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
+    let Some((ty, body)) = phone_asset(uri.path()) else {
+        return secure_headers(StatusCode::NOT_FOUND.into_response());
     };
-    secure_headers(([(header::CONTENT_TYPE, ty)], body).into_response())
+    let mut r = secure_headers(([(header::CONTENT_TYPE, ty)], body).into_response());
+    // Files under /assets/ carry a hash of their content in their name: the browser may keep them. The page,
+    // the service worker and the manifest are asked for again every time.
+    if uri.path().starts_with("/assets/") {
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
+    }
+    r
 }
 
 #[derive(Deserialize)]
@@ -529,6 +589,10 @@ async fn pair(State(daemon): State<Arc<Daemon>>, ConnectInfo(peer): ConnectInfo<
     let refuse = |status: StatusCode, msg: &str| secure_headers((status, Json(json!({"error": msg}))).into_response());
     if m.pairing_blocked(ip) {
         return refuse(StatusCode::TOO_MANY_REQUESTS, "too many attempts, wait a minute");
+    }
+    // Kelpie is short of CPU or memory: one handshake at a time, spaced out. The code is not spent.
+    if m.pairing_paced() {
+        return refuse(StatusCode::SERVICE_UNAVAILABLE, "this computer is busy, try again in a few seconds");
     }
     // Single use: whatever happens, this code is spent.
     let valid = m.code.lock().take().is_some_and(|(code, at)| at.elapsed() < CODE_TTL && same(&code, &req.code));
@@ -584,21 +648,22 @@ fn sessions(daemon: &Daemon) -> Value {
         .collect::<Vec<_>>())
 }
 
-/// A socket that takes longer than this to accept a message is cut: the phone is gone, or too far
+/// A socket that takes a message for longer than `SLOW_AFTER` is cut: the phone is gone, or too far
 /// behind to catch up (it reconnects and gets the current state).
-const SEND_TIMEOUT: Duration = Duration::from_secs(30);
-
 async fn send(ws: &mut WebSocket, text: impl Into<String>) -> bool {
-    matches!(tokio::time::timeout(SEND_TIMEOUT, ws.send(Message::Text(text.into().into()))).await, Ok(Ok(())))
+    matches!(tokio::time::timeout(SLOW_AFTER, ws.send(Message::Text(text.into().into()))).await, Ok(Ok(())))
 }
 
 /// Close codes: 4401 the device is not paired (the page forgets its token); 4408 the connection must
 /// be made again, the device stays paired (its permission changed, or it fell too far behind);
 /// 4409 another connection of this device took over (the page waits until it is looked at again
-/// instead of fighting for the slot).
+/// instead of fighting for the slot); 4410 the phone stopped answering heartbeats; 4411 it cannot
+/// take what is sent (`slow_consumer`). The last two are for reconnecting.
 const NOT_PAIRED: u16 = 4401;
 const RECONNECT: u16 = 4408;
 const REPLACED: u16 = 4409;
+const SILENT: u16 = 4410;
+const SLOW_CONSUMER: u16 = 4411;
 
 /// How long a close frame may take to leave: a peer that stopped reading must not keep its
 /// connection (and what hangs on it) alive.
@@ -626,55 +691,80 @@ fn closing(event: Result<(String, bool), broadcast::error::RecvError>, device: &
 }
 
 /// A request that was not carried out: `code` for programs, `message` for people; `reason` says
-/// why an answer is stale.
+/// why an answer is stale. An answer's result is `stale` (somebody else answered it, or it
+/// moved on: `answered_by` and `at` say who and when), `dup` (this device answered it already)
+/// or `refused`.
 struct Refusal {
     code: &'static str,
     reason: Option<&'static str>,
     message: String,
+    result: &'static str,
+    answered: Option<Box<Resolution>>,
 }
 
 fn refuse(code: &'static str, message: impl Into<String>) -> Refusal {
-    Refusal { code, reason: None, message: message.into() }
+    Refusal { code, reason: None, message: message.into(), result: "refused", answered: None }
 }
 
-impl From<AnswerError> for Refusal {
-    fn from(e: AnswerError) -> Refusal {
-        match e {
-            AnswerError::Prompt => refuse("prompt", "A prompt is waiting on this session: answer it, or send the text anyway."),
-            AnswerError::Stale(reason) => Refusal { code: "stale", reason: Some(reason), message: "That prompt was answered already, or has changed.".into() },
-            AnswerError::UnknownKey => refuse("bad_request", "unknown key"),
-        }
+/// What a device is told about an answer that was not written.
+fn already_answered(device: &str, answer: Resolution, message: &str) -> Refusal {
+    let mine = answer.by.id == device;
+    let result = if mine { "dup" } else { "stale" };
+    Refusal { code: result, reason: Some("answered"), message: message.into(), result, answered: Some(Box::new(answer)) }
+}
+
+fn answer_refusal(device: &str, e: AnswerError) -> Refusal {
+    match e {
+        AnswerError::Prompt => refuse("prompt", "A prompt is waiting on this session: answer it, or send the text anyway."),
+        AnswerError::Stale(reason) => Refusal { code: "stale", reason: Some(reason), message: "That prompt was answered already, or has changed.".into(), result: "stale", answered: None },
+        AnswerError::Answered(answer) => already_answered(device, answer, "That prompt was answered already."),
+        AnswerError::UnknownKey => refuse("bad_request", "unknown key"),
     }
 }
 
-impl From<crate::chat::NotAnswered> for Refusal {
-    fn from(e: crate::chat::NotAnswered) -> Refusal {
-        match e {
-            crate::chat::NotAnswered::NotAnAnswer => refuse(e.code(), "That is not the answer to that request."),
-            crate::chat::NotAnswered::AlreadyAnswered => Refusal { code: e.code(), reason: Some("answered"), message: "That request was answered already.".into() },
-        }
+fn chat_answer_refusal(device: &str, e: crate::chat::NotAnswered) -> Refusal {
+    match e {
+        crate::chat::NotAnswered::NotAnAnswer => refuse("bad_answer", "That is not the answer to that request."),
+        crate::chat::NotAnswered::AlreadyAnswered(answer) => already_answered(device, answer, "That request was answered already."),
     }
+}
+
+/// A terminal session a phone follows.
+struct Followed {
+    task: tokio::task::JoinHandle<()>,
+    /// The one the phone is looking at; the others are paced harder when the machine is busy.
+    focused: Arc<AtomicBool>,
 }
 
 /// One phone's connection.
 struct Conn {
     daemon: Arc<Daemon>,
     device: String,
+    /// The device's name, for the other side of an answer to say who answered.
+    name: String,
     /// This connection as a client of the daemon (it hears the daemon's events, and attaches to chats).
     id: u64,
     tx: ClientTx,
-    /// Where frames and chat messages (JSON text) wait for the socket.
+    /// Where screen frames and chat messages (JSON text) wait for the socket, and where what must not
+    /// wait behind them does.
     out: mpsc::Sender<String>,
     /// Terminal sessions followed, by session id.
-    followed: HashMap<String, tokio::task::JoinHandle<()>>,
+    followed: HashMap<String, Followed>,
     /// Chat sessions watched.
     watched: HashSet<String>,
+    /// Chats a phone asked for and was told `busy`: it is told when to ask again (`chat_resync`).
+    owed: HashSet<String>,
     /// When each chat was last asked for (`chat_sub`).
     chat_at: HashMap<String, Instant>,
     /// Chat output sent to this connection and not yet taken by its socket.
     waiting: Arc<AtomicUsize>,
+    /// The daemon had more to say than the queue holds: the next look at the list is a full one.
+    overflowed: Arc<AtomicBool>,
     list: Option<(Value, Value)>,
     rev: u64,
+    /// The phone does not acknowledge frames or answer heartbeats (see `acknowledges`).
+    legacy: bool,
+    _phone: Option<crate::load::PhoneGuard>,
 }
 
 impl Conn {
@@ -702,8 +792,50 @@ impl Conn {
                 Some(reply)
             }
             Ok(None) => tag.map(|t| json!({"type": "ack", "req": t})),
-            Err(r) => Some(json!({"type": "error", "req": tag, "code": r.code, "reason": r.reason, "message": r.message})),
+            Err(r) => {
+                let mut reply = json!({"type": "error", "req": tag, "code": r.code, "reason": r.reason, "message": r.message});
+                if matches!(name, "answer" | "chat_answer") {
+                    reply["result"] = json!(r.result);
+                    if let Some(answer) = r.answered {
+                        reply["answered_by"] = json!(answer.by.name);
+                        reply["at"] = json!(answer.at);
+                    }
+                }
+                Some(reply)
+            }
         }
+    }
+
+    /// What the phone is told now and then: that it should ask again for a chat it was refused, and
+    /// the whole picture after the daemon had more to say than the queue held.
+    fn housekeeping(&mut self) -> Vec<Value> {
+        let mut told = Vec::new();
+        if self.overflowed.swap(false, Ordering::Relaxed) {
+            told.extend(self.publish(true));
+            told.extend(self.watched.iter().map(|id| json!({"type": "chat_resync", "id": id})));
+            self.owed.clear();
+        }
+        // The log that made it busy has been taken, and no other phone's start-over is in the way.
+        if !self.owed.is_empty() && self.chat_room().is_ok() {
+            told.extend(self.owed.drain().map(|id| json!({"type": "chat_resync", "id": id})));
+        }
+        told
+    }
+
+    /// Whether another chat log may start towards this phone: it has taken the last, and not too
+    /// many are on their way to phones at the machine's load.
+    fn chat_room(&self) -> Result<(), Refusal> {
+        if self.waiting.load(Ordering::Relaxed) >= crate::chat::RESET_WAITING_MAX {
+            return Err(refuse("busy", "The last chat log is still being sent."));
+        }
+        let limit = self.daemon.mobile.load.level().chat_resets();
+        if limit != usize::MAX {
+            let others = self.daemon.mobile.waiting.lock().iter().filter(|(id, waiting)| **id != self.id && waiting.load(Ordering::Relaxed) > 0).count();
+            if others >= limit {
+                return Err(refuse("busy", "Kelpie is busy sending chat logs to other phones."));
+            }
+        }
+        Ok(())
     }
 
     fn entry(&self, req: &Value) -> Result<(String, Entry), Refusal> {
@@ -727,11 +859,12 @@ impl Conn {
 
     /// Room for one more followed or watched session (finished ones do not count).
     fn make_room(&mut self, id: &str) -> Result<(), Refusal> {
-        self.followed.retain(|_, t| !t.is_finished());
+        self.followed.retain(|_, f| !f.task.is_finished());
         // A chat that was closed while watched is no longer open.
         let daemon = self.daemon.clone();
         self.watched.retain(|w| daemon.by_id(w).is_some());
         self.chat_at.retain(|c, _| daemon.by_id(c).is_some());
+        self.owed.retain(|c| daemon.by_id(c).is_some());
         if !self.followed.contains_key(id) && !self.watched.contains(id) && self.followed.len() + self.watched.len() >= MAX_FOLLOWED {
             return Err(refuse("too_many", "Too many sessions open at once."));
         }
@@ -751,24 +884,49 @@ impl Conn {
         let enter = req["enter"].as_bool() == Some(true);
         match verb {
             Verb::List => return Ok(self.publish(true)),
+            Verb::Hb => {
+                // Answered unless it is an answer itself.
+                if req["echo"].as_bool() == Some(true) {
+                    return Ok(None);
+                }
+                let load = self.daemon.mobile.load.level();
+                return Ok(Some(json!({"type": "hb", "echo": true, "n": req["n"], "server_ts": now_millis(), "level": load.number()})));
+            }
+            Verb::Ack => {
+                let id = req["id"].as_str().filter(|i| !i.is_empty() && i.len() <= 128).ok_or_else(|| refuse("bad_request", "missing session id"))?;
+                let rev = req["rev"].as_u64().ok_or_else(|| refuse("bad_request", "missing rev"))?;
+                self.daemon.mobile.views.ack(&self.device, id, self.id, rev);
+            }
             Verb::Sub => {
                 let (id, session) = self.terminal(req)?;
                 self.make_room(&id)?;
                 let height = req["height"].as_u64().map_or(sync::MAX_HEIGHT, |h| h as usize).clamp(sync::MIN_HEIGHT, sync::MAX_HEIGHT);
                 if let Some(previous) = self.followed.remove(&id) {
-                    previous.abort();
+                    previous.task.abort();
                 }
+                // The session being looked at is the last one asked for, unless the phone says it is a background one.
+                let focused = req["focus"].as_bool() != Some(false);
+                if focused {
+                    for other in self.followed.values() {
+                        other.focused.store(false, Ordering::Relaxed);
+                    }
+                }
+                let focused = Arc::new(AtomicBool::new(focused));
                 let m = &self.daemon.mobile;
-                m.views.open(&self.device, &id, self.id, req["rev"].as_u64());
-                let follow = sync::Follow { views: m.views.clone(), device: self.device.clone(), conn: self.id, id: id.clone(), height, session: Arc::downgrade(&session), out: self.out.clone() };
-                self.followed.insert(id, tokio::spawn(sync::run(follow)));
+                let have = req["have_rev"].as_u64().or_else(|| req["rev"].as_u64());
+                let acked = m.views.open_as(&self.device, &id, self.id, have, self.legacy);
+                let follow = sync::Follow { views: m.views.clone(), device: self.device.clone(), conn: self.id, id: id.clone(), height, session: Arc::downgrade(&session), out: self.out.clone(), focused: focused.clone(), acked };
+                self.followed.insert(id, Followed { task: tokio::spawn(sync::run(follow)), focused });
             }
             Verb::Unsub => {
                 // Let go first: a session that is gone still counts against the limit until then.
                 let id = req["id"].as_str().filter(|i| !i.is_empty() && i.len() <= 128).ok_or_else(|| refuse("bad_request", "missing session id"))?;
-                if let Some(task) = self.followed.remove(id) {
-                    task.abort();
+                if let Some(followed) = self.followed.remove(id) {
+                    followed.task.abort();
+                    // Aborted before it could say so: nothing follows it for this device any more.
+                    self.daemon.mobile.views.close(&self.device, id, self.id);
                 }
+                self.owed.remove(id);
                 self.chat_at.remove(id);
                 if self.watched.remove(id) {
                     if let Some(Entry::Chat(c)) = self.daemon.by_id(id) {
@@ -782,13 +940,21 @@ impl Conn {
                 if self.chat_at.get(&id).is_some_and(|at| at.elapsed() < CHAT_SUB_GAP) {
                     return Err(refuse("too_fast", "Asked for that chat again too soon."));
                 }
+                // Refused while a log is still on its way, here or (at a busy load) to other phones: the
+                // phone is told to ask again when there is room.
+                if let Err(busy) = self.chat_room() {
+                    self.owed.insert(id);
+                    return Err(busy);
+                }
                 chat.observe(self.id, &self.tx, &json!(format!("chat:{id}")), req["since_seq"].as_u64(), &self.waiting)
                     .map_err(|_| refuse("busy", "The last chat log is still being sent."))?;
+                self.owed.remove(&id);
                 self.chat_at.insert(id.clone(), Instant::now());
                 self.watched.insert(id);
             }
             Verb::Input => {
-                let (_, session) = self.terminal(req)?;
+                let (id, session) = self.terminal(req)?;
+                self.daemon.mobile.views.boost(&id);
                 let text = req["text"].as_str().ok_or_else(|| refuse("bad_request", "missing text"))?;
                 if text.len() > MAX_TYPED {
                     return Err(refuse("too_long", "too long"));
@@ -796,7 +962,8 @@ impl Conn {
                 if !session.is_alive() {
                     return Err(refuse("exited", "This session has stopped."));
                 }
-                let typed = session.type_message(text, req["force"].as_bool() == Some(true))?;
+                let by = By { id: self.device.clone(), name: self.name.clone() };
+                let typed = session.type_message_by(text, req["force"].as_bool() == Some(true), by).map_err(|e| answer_refusal(&self.device, e))?;
                 if enter {
                     // Waited for here: the next message of this phone then starts after this Enter.
                     tokio::time::sleep(crate::session::ENTER_DELAY).await;
@@ -807,12 +974,13 @@ impl Conn {
                 }
             }
             Verb::Key => {
-                let (_, session) = self.terminal(req)?;
+                let (id, session) = self.terminal(req)?;
+                self.daemon.mobile.views.boost(&id);
                 let bytes = req["key"].as_str().and_then(verbs::key_bytes).ok_or_else(|| refuse("bad_request", "unknown key"))?;
                 if !session.is_alive() {
                     return Err(refuse("exited", "This session has stopped."));
                 }
-                session.input(bytes);
+                session.input_by(bytes, By { id: self.device.clone(), name: self.name.clone() });
             }
             Verb::Answer => {
                 let (_, session) = self.terminal(req)?;
@@ -821,63 +989,78 @@ impl Conn {
                     (None, Some(text)) if text.len() <= MAX_TYPED => Answer::Text(text),
                     _ => return Err(refuse("bad_request", "an answer is a key or text")),
                 };
-                session.answer(req["waiting_since"].as_u64(), answer, enter)?;
+                let by = By { id: self.device.clone(), name: self.name.clone() };
+                session.answer_by(req["waiting_since"].as_u64(), answer, enter, by).map_err(|e| answer_refusal(&self.device, e))?;
+                return Ok(Some(json!({"type": "ack", "result": "ok"})));
             }
             Verb::ChatAnswer => {
                 let (_, chat) = self.chat(req)?;
                 let request_id = req.get("request_id").filter(|r| r.is_string() || r.is_number()).ok_or_else(|| refuse("bad_request", "missing request_id"))?;
                 let line = req["line"].as_str().filter(|l| l.len() <= MAX_ANSWER_LINE).ok_or_else(|| refuse("bad_request", "missing or too long line"))?;
-                chat.answer(request_id, line)?;
+                let by = By { id: self.device.clone(), name: self.name.clone() };
+                chat.answer(request_id, line, by).map_err(|e| chat_answer_refusal(&self.device, e))?;
+                return Ok(Some(json!({"type": "ack", "result": "ok"})));
             }
         }
         Ok(None)
     }
 
     fn end(&mut self) {
-        for (_, task) in self.followed.drain() {
-            task.abort();
+        for (_, followed) in self.followed.drain() {
+            followed.task.abort();
         }
         self.daemon.mobile.views.leave(&self.device, self.id);
+        self.daemon.mobile.waiting.lock().remove(&self.id);
         self.daemon.unregister_client(self.id);
     }
 }
 
 async fn client(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Generation>) {
     // Cancellation covers authentication too, including an upgrade completed before disable.
-    let token = tokio::select! {
+    let first = tokio::select! {
         biased;
         _ = generation.cancelled() => return,
-        token = tokio::time::timeout(Duration::from_secs(10), ws.recv()) => match token {
-            Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<Value>(&t).ok().and_then(|v| v["token"].as_str().map(str::to_string)),
+        first = tokio::time::timeout(Duration::from_secs(10), ws.recv()) => match first {
+            Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<Value>(&t).ok(),
             _ => None,
         },
     };
     if generation.is_cancelled() {
         return;
     }
+    let legacy = !acknowledges(first.as_ref());
+    let token = first.as_ref().and_then(|v| v["token"].as_str().map(str::to_string));
     let Some(device) = token.and_then(|t| daemon.mobile.device_for(&t)) else {
         close(&mut ws, NOT_PAIRED, "not paired").await;
         return;
     };
-    // The daemon's events reach the phone through an adapter: a connection is a client like the app.
+    // The daemon's events reach the phone through an adapter: a connection is a client like the app,
+    // with a queue that has a limit.
     let id = next_client_id();
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx, overflowed) = bounded_client_channel(EVENT_QUEUE);
     daemon.register_client(id, tx.clone());
     daemon.set_client_role(id, &crate::auth::Role::User);
-    let (out, mut out_rx) = mpsc::channel(16);
+    let lanes = lanes::lanes();
     let dirty = Arc::new(Notify::new());
-    let mut adapter = tokio::spawn(adapt(daemon.clone(), rx, out.clone(), dirty.clone()));
-    let mut conn = Conn { daemon: daemon.clone(), device: device.id.clone(), id, tx, out, followed: HashMap::new(), watched: HashSet::new(), chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), list: None, rev: 0 };
+    let mut adapter = tokio::spawn(adapt(daemon.clone(), rx, lanes.bulk.clone(), lanes.slow.clone(), dirty.clone()));
+    let waiting = Arc::new(AtomicUsize::new(0));
+    daemon.mobile.waiting.lock().insert(id, waiting.clone());
+    let mut conn = Conn {
+        daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(),
+        followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(), chat_at: HashMap::new(), waiting, overflowed,
+        list: None, rev: 0, legacy, _phone: Some(daemon.mobile.load.phone()),
+    };
     // The device's older connection, if any, is told it was replaced.
     let replaced = Arc::new(Notify::new());
     if let Some((_, older)) = daemon.mobile.connections.lock().insert(device.id.clone(), (id, replaced.clone())) {
         older.notify_one();
     }
+    let mut wires = Wires { bulk_rx: lanes.bulk_rx, slow: lanes.slow, dirty, replaced };
     // Dropping serve cancels an in-flight request/send, then the common cleanup still runs.
     tokio::select! {
         biased;
         _ = generation.cancelled() => {}
-        _ = serve(&mut conn, &mut ws, &device, &mut out_rx, &dirty, &mut adapter, &replaced, &generation) => {}
+        _ = serve(&mut conn, &mut ws, &device, &mut wires, &mut adapter, &generation) => {}
     }
     adapter.abort();
     {
@@ -889,50 +1072,129 @@ async fn client(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Generati
     conn.end();
 }
 
-async fn serve(conn: &mut Conn, ws: &mut WebSocket, device: &Device, out_rx: &mut mpsc::Receiver<String>, dirty: &Notify, adapter: &mut tokio::task::JoinHandle<()>, replaced: &Notify, generation: &Generation) {
+/// Whether the first message (`{token, caps}`) says the phone acknowledges frames and answers heartbeats.
+/// A page from before that (still open in a tab or an installed app after the daemon was updated) says
+/// nothing, and is served the way it was built for: nothing is withheld until it acknowledges and no
+/// silence is held against it (the OS keep-alive and the write timeout still end a dead one).
+fn acknowledges(first: Option<&Value>) -> bool {
+    let caps = first.and_then(|v| v["caps"].as_array());
+    ["ack", "hb"].iter().all(|c| caps.is_some_and(|caps| caps.iter().any(|x| x == c)))
+}
+
+/// What a connection waits on besides its socket.
+struct Wires {
+    bulk_rx: mpsc::Receiver<String>,
+    /// Something decided this phone cannot take what it is sent.
+    slow: Arc<Notify>,
+    /// The session list may have changed.
+    dirty: Arc<Notify>,
+    /// Another connection of this device took over.
+    replaced: Arc<Notify>,
+}
+
+/// A heartbeat: `n` counts them, `server_ts` lets the phone see the clock and data age.
+fn heartbeat(n: u64, level: Level) -> String {
+    json!({"type": "hb", "n": n, "server_ts": now_millis(), "level": level.number()}).to_string()
+}
+
+/// What a phone is told about the machine's load: the level, why, since when.
+fn load_status(load: &Load) -> String {
+    let mut msg = load.status().json();
+    msg["type"] = json!("load.status");
+    msg["server_ts"] = json!(now_millis());
+    msg.to_string()
+}
+
+async fn serve(conn: &mut Conn, ws: &mut WebSocket, device: &Device, wires: &mut Wires, adapter: &mut tokio::task::JoinHandle<()>, generation: &Generation) {
     if generation.is_cancelled() {
         return;
     }
+    let load = conn.daemon.mobile.load.clone();
     let mut revoked = conn.daemon.mobile.revoked.subscribe();
+    let mut load_changes = load.subscribe();
     let first = conn.publish(true).expect("forced");
     let hello = json!({
         "type": "hello", "v": 2, "api": kelpie_proto::API_LEVEL, "daemon_epoch": conn.daemon.mobile.epoch, "rev": first["rev"],
         "device": {"name": device.name, "can_write": device.can_write}, "sessions": first["sessions"], "projects": first["projects"],
+        "load": load.status().json(), "server_ts": now_millis(),
+        "hb": {"idle_s": 20, "pong_s": 8, "dead_s": 45, "legacy": conn.legacy, "ack_frames": sync::WINDOW_FRAMES, "ack_bytes": sync::WINDOW_BYTES, "ack_every_frames": 2, "ack_every_ms": 250},
     });
     if !send(ws, hello.to_string()).await {
         return;
     }
+    let (mut live, mut beats) = (Liveness::new(Instant::now()), 0);
+    let mut tick = tokio::time::interval(lanes::TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         // Also check synchronously: a busy socket can keep this future ready without yielding.
         if generation.is_cancelled() {
             return;
         }
+        // In this order: what ends the connection, the heartbeat, then the
+        // phone's own requests and the list, and the bulk lane last.
         tokio::select! {
+            biased;
             r = revoked.recv() => {
                 if let Some((code, reason)) = closing(r, &device.id) {
                     close(ws, code, reason).await;
                     return;
                 }
             }
+            _ = wires.slow.notified() => {
+                close(ws, SLOW_CONSUMER, "slow_consumer").await;
+                return;
+            }
             _ = &mut *adapter => return,
-            _ = replaced.notified() => {
+            _ = wires.replaced.notified() => {
                 close(ws, REPLACED, "replaced").await;
                 return;
             }
-            _ = dirty.notified() => {
+            _ = tick.tick() => {
+                let level = load.level();
+                let beat = live.tick(Instant::now(), level.patience(), |since| load.healthy_since(since));
+                match if conn.legacy { Beat::Quiet } else { beat } {
+                    Beat::Dead => {
+                        close(ws, SILENT, "silent").await;
+                        return;
+                    }
+                    Beat::Ping => {
+                        beats += 1;
+                        if !send(ws, heartbeat(beats, level)).await {
+                            return;
+                        }
+                    }
+                    Beat::Quiet => {}
+                }
+                // While the machine is loaded the phone hears it every second (a missed one is soon replaced).
+                if level > Level::L0 && !send(ws, load_status(&load)).await {
+                    return;
+                }
+                conn.daemon.mobile.views.sweep();
+                for msg in conn.housekeeping() {
+                    if !send(ws, msg.to_string()).await {
+                        return;
+                    }
+                }
+            }
+            changed = load_changes.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                if !send(ws, load_status(&load)).await {
+                    return;
+                }
+            }
+            _ = wires.dirty.notified() => {
                 if let Some(list) = conn.publish(false) {
                     if !send(ws, list.to_string()).await {
                         return;
                     }
                 }
             }
-            Some(msg) = out_rx.recv() => {
-                if !send(ws, msg).await {
-                    return;
-                }
-            }
             msg = ws.recv() => {
                 let Some(Ok(msg)) = msg else { return };
+                // Anything at all, a ping frame included, says the phone is there.
+                live.heard(Instant::now());
                 let Message::Text(text) = msg else { continue };
                 let Ok(req) = serde_json::from_str::<Value>(&text) else { continue };
                 if generation.is_cancelled() {
@@ -949,6 +1211,11 @@ async fn serve(conn: &mut Conn, ws: &mut WebSocket, device: &Device, out_rx: &mu
                     }
                 }
             }
+            Some(msg) = wires.bulk_rx.recv() => {
+                if !send(ws, msg).await {
+                    return;
+                }
+            }
         }
     }
 }
@@ -956,18 +1223,26 @@ async fn serve(conn: &mut Conn, ws: &mut WebSocket, device: &Device, out_rx: &mu
 /// Turns what the daemon tells this connection (a client like any other) into messages for the
 /// phone: a changed session list wakes the connection to publish it, a chat's log arrives as
 /// `chat` messages, and a request answered elsewhere as `chat_resolved`.
-async fn adapt(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<Outgoing>, out: mpsc::Sender<String>, dirty: Arc<Notify>) {
+async fn adapt(daemon: Arc<Daemon>, mut rx: mpsc::Receiver<Outgoing>, bulk: mpsc::Sender<String>, slow: Arc<Notify>, dirty: Arc<Notify>) {
     let mut translator = Translator::default();
     while let Some(o) = rx.recv().await {
         for msg in translator.translate(&daemon, &o.data, &dirty) {
-            if !matches!(tokio::time::timeout(SEND_TIMEOUT, out.send(msg.to_string())).await, Ok(Ok(()))) {
-                return;
+            // Everything about a chat goes the same way, in order: a resolution or a resync is queued after
+            // the lines it is about, and the lane is first in, first out. A message waits for room in the
+            // lane; no room for `SLOW_AFTER` means a phone that cannot keep up.
+            match tokio::time::timeout(SLOW_AFTER, bulk.send(msg.to_string())).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return,
+                Err(_) => {
+                    slow.notify_one();
+                    return;
+                }
             }
         }
         // Written off only once the phone's queue took it: a phone that cannot keep up makes the
         // chat stop feeding it (and tell it to resync) instead of a backlog growing here.
         if let Some(credit) = o.credit {
-            credit.fetch_sub(o.data.len(), std::sync::atomic::Ordering::Relaxed);
+            credit.fetch_sub(o.data.len(), Ordering::Relaxed);
         }
     }
 }
@@ -1010,7 +1285,7 @@ impl Translator {
                 }
                 let parse = || serde_json::from_slice::<Value>(body).ok();
                 if is("chat.resolved") {
-                    return parse().map(|v| vec![json!({"type": "chat_resolved", "id": v["params"]["id"], "request_id": v["params"]["request_id"], "by": v["params"]["by"], "dropped": v["params"]["dropped"]})]).unwrap_or_default();
+                    return parse().map(|v| vec![json!({"type": "chat_resolved", "id": v["params"]["id"], "request_id": v["params"]["request_id"], "by": v["params"]["by"], "dropped": v["params"]["dropped"], "answered_by": v["params"]["answered_by"], "at": v["params"]["at"]})]).unwrap_or_default();
                 }
                 if is("session.resync") {
                     let handle = parse().and_then(|v| v["params"]["handle"].as_u64()).and_then(|h| u32::try_from(h).ok());
@@ -1142,9 +1417,12 @@ mod tests {
         let device = Device { id: "phone".into(), name: "Phone".into(), token_sha256: String::new(), can_write: true, created_at: 0, last_seen: 0 };
         daemon.mobile.config.lock().devices.push(device);
         daemon.mobile.config.lock().enabled = true;
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx, overflowed) = bounded_client_channel(8);
         let (out_tx, out) = mpsc::channel(16);
-        let conn = Conn { daemon: daemon.clone(), device: "phone".into(), id: 1, tx, out: out_tx, followed: HashMap::new(), watched: HashSet::new(), chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), list: None, rev: 0 };
+        let conn = Conn {
+            daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, list: None, rev: 0, legacy: false, _phone: None,
+        };
         Rig { daemon, conn, out, term, typed, chat }
     }
 
@@ -1317,6 +1595,60 @@ mod tests {
         assert!(matches!(ended, Ok(0) | Err(_)), "old HTTP connection still serves requests");
     }
 
+    /// Whether this daemon carries the phone client (`pnpm build:phone` ran before it was built) or the placeholder page.
+    fn has_phone_client() -> bool {
+        !phone_asset("/").is_some_and(|(_, body)| String::from_utf8_lossy(body).contains("KELPIE_PHONE_BUNDLE_MISSING"))
+    }
+
+    #[test]
+    fn the_phone_client_is_found_by_path_and_nothing_else_is() {
+        let (ty, body) = phone_asset("/").expect("the page");
+        assert!(ty.starts_with("text/html") && body.starts_with(b"<!doctype html"), "{ty}");
+        assert_eq!(phone_asset("/index.html").map(|(_, b)| b.len()), Some(body.len()));
+        for path in ["/nope.js", "/../Cargo.toml", "/assets/../index.html", "/app.js", "//", ""] {
+            assert!(phone_asset(path).is_none(), "{path}");
+        }
+        if has_phone_client() {
+            for path in ["/sw.js", "/manifest.webmanifest", "/icon.svg"] {
+                assert!(phone_asset(path).is_some(), "{path}");
+            }
+            assert!(PHONE_ASSETS.iter().all(|(p, _, _)| !p.ends_with(".map")), "source maps are not served");
+            assert!(PHONE_ASSETS.iter().any(|(p, ty, _)| p.starts_with("/assets/") && ty.starts_with("text/javascript")));
+        } else {
+            assert_eq!(PHONE_ASSETS.len(), 1, "the placeholder is one page");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_phone_client_is_served_with_its_headers() {
+        use tokio::io::AsyncWriteExt;
+        let network = NetworkRig::new().await;
+        let head = |path: String| {
+            let network = &network;
+            async move {
+                let mut http = network.http().await;
+                http.write_all(format!("HEAD {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", network.addr).as_bytes()).await.unwrap();
+                http_head(&mut http).await.to_ascii_lowercase()
+            }
+        };
+        let page = head("/".into()).await;
+        assert!(page.starts_with("http/1.1 200") && page.contains("text/html") && page.contains("script-src 'self'") && page.contains("no-store"), "{page}");
+        assert!(head("/nothing-here".into()).await.starts_with("http/1.1 404"));
+        assert!(head("/app.js".into()).await.starts_with("http/1.1 404"), "the old page's script is gone");
+        if has_phone_client() {
+            let worker = head("/sw.js".into()).await;
+            assert!(worker.starts_with("http/1.1 200") && worker.contains("text/javascript") && worker.contains("no-store"), "{worker}");
+            let (path, _, _) = PHONE_ASSETS.iter().find(|(p, ty, _)| p.starts_with("/assets/") && ty.starts_with("text/javascript")).unwrap();
+            let asset = head(path.to_string()).await;
+            assert!(asset.starts_with("http/1.1 200") && asset.contains("immutable"), "{asset}");
+        }
+        // Only reading: a POST to the page, and a GET of the pairing endpoint, are refused.
+        let mut http = network.http().await;
+        http.write_all(format!("POST / HTTP/1.1\r\nHost: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", network.addr).as_bytes()).await.unwrap();
+        assert!(http_head(&mut http).await.starts_with("HTTP/1.1 405"));
+        assert!(head("/pair".into()).await.starts_with("http/1.1 405"));
+    }
+
     fn code(reply: &Value) -> Option<&str> {
         reply["code"].as_str()
     }
@@ -1326,6 +1658,8 @@ mod tests {
         let mut r = rig();
         let requests = [
             json!({"type": "list"}),
+            json!({"type": "hb"}),
+            json!({"type": "ack", "id": "t1", "rev": 1}),
             json!({"type": "sub", "id": "t1"}),
             json!({"type": "unsub", "id": "t1"}),
             json!({"type": "chat_sub", "id": "c1"}),
@@ -1399,10 +1733,12 @@ mod tests {
         let since = crate::session::fake::wait_on_user(&r.term);
         let answer = json!({"type": "answer", "id": "t1", "waiting_since": since, "text": "1"});
         assert_eq!(r.ask_write(answer.clone()).await["type"], "ack");
-        // The second tap, and the same from another phone: stale.
+        // The second tap of this device: a duplicate, not somebody else's answer.
         let second = r.ask_write(answer.clone()).await;
-        assert_eq!((code(&second), second["reason"].as_str()), (Some("stale"), Some("answered")));
+        assert_eq!((code(&second), second["result"].as_str(), second["reason"].as_str()), (Some("dup"), Some("dup"), Some("answered")));
         assert_eq!(r.typed.writes(), vec![b"1".to_vec()]);
+        let ok = r.ask_write(json!({"type": "answer", "id": "t9", "waiting_since": 1, "text": "1"})).await;
+        assert_eq!((ok["type"].as_str(), ok["result"].as_str()), (Some("error"), Some("refused")), "{ok}");
 
         // A hook wait the user answered at the keyboard stays `waiting` until the next hook.
         let (term2, typed2) = crate::session::fake::running(3, "t2", "claude");
@@ -1410,8 +1746,18 @@ mod tests {
         let since = crate::session::fake::wait_on_user(&term2);
         term2.input(b"2".to_vec());
         let reply = r.ask_write(json!({"type": "answer", "id": "t2", "waiting_since": since, "text": "1"})).await;
-        assert_eq!((code(&reply), reply["reason"].as_str()), (Some("stale"), Some("answered")));
+        assert_eq!((code(&reply), reply["result"].as_str(), reply["answered_by"].as_str()), (Some("stale"), Some("stale"), Some("desktop")));
+        assert!(reply["at"].as_u64().is_some_and(|at| at <= now_millis() && at > now_millis() - 10_000), "{reply}");
         assert_eq!(typed2.writes(), vec![b"2".to_vec()], "only the desktop's key reached the agent");
+
+        // Another phone answered first: the tap is told whose answer stood.
+        let (term4, typed4) = crate::session::fake::running(5, "t4", "claude");
+        r.daemon.insert_for_test(Entry::Term(term4.clone()));
+        let since = crate::session::fake::wait_on_user(&term4);
+        term4.answer_by(Some(since), Answer::Text("1"), false, By { id: "tablet".into(), name: "Tablet".into() }).unwrap();
+        let reply = r.ask_write(json!({"type": "answer", "id": "t4", "waiting_since": since, "text": "2"})).await;
+        assert_eq!((code(&reply), reply["result"].as_str(), reply["answered_by"].as_str()), (Some("stale"), Some("stale"), Some("Tablet")));
+        assert_eq!(typed4.writes(), vec![b"1".to_vec()]);
 
         // A prompt that is not the one the phone showed.
         let (term3, typed3) = crate::session::fake::running(4, "t3", "claude");
@@ -1444,11 +1790,15 @@ mod tests {
         // A request the agent never made cannot be answered, whatever the line.
         let unasked = json!({"type": "chat_answer", "id": "c1", "request_id": "r0", "line": line.replace("r1", "r0")});
         assert_eq!(code(&r.ask_write(unasked).await), Some("bad_answer"));
-        assert_eq!(r.ask_write(answer.clone()).await["type"], "ack");
+        let first = r.ask_write(answer.clone()).await;
+        assert_eq!((first["type"].as_str(), first["result"].as_str()), (Some("ack"), Some("ok")));
         let again = r.ask_write(answer).await;
-        assert_eq!((code(&again), again["reason"].as_str()), (Some("stale"), Some("answered")));
+        assert_eq!((code(&again), again["result"].as_str(), again["reason"].as_str()), (Some("dup"), Some("dup"), Some("answered")));
         // The desktop's answer to it is dropped too (the chat checks every line written to the agent).
         r.chat.input(format!("{line}\n").into_bytes());
+        // Another device is told whose answer stood.
+        let other_device = chat_answer_refusal("tablet", r.chat.answer(&json!("r1"), &line, By { id: "tablet".into(), name: "Tablet".into() }).unwrap_err());
+        assert_eq!((other_device.code, other_device.result, other_device.answered.map(|a| a.by.name)), ("stale", "stale", Some("Phone".to_string())));
         // A line that is not that request's answer is not an answer.
         let other = json!({"type": "chat_answer", "id": "c1", "request_id": "r2", "line": line});
         assert_eq!(code(&r.ask_write(other).await), Some("bad_answer"));
@@ -1486,6 +1836,8 @@ mod tests {
         assert_eq!(r.ask_write(json!({"type": "sub", "id": "t1", "height": 20})).await["type"], "ack");
         let first = next_frame(&mut r.out).await.unwrap();
         assert_eq!((first["type"].as_str(), first["id"].as_str(), first["base"].clone()), (Some("screen"), Some("t1"), Value::Null));
+        // Until the phone confirms a frame, the next is whole again; after it, only what changed.
+        assert_eq!(r.ask_write(json!({"type": "ack", "id": "t1", "rev": first["rev"]})).await["type"], "ack");
         r.term.ingest(b"hello\r\n");
         let next = next_frame(&mut r.out).await.unwrap();
         assert_eq!((next["base"].clone(), next["rows"].clone()), (first["rev"].clone(), json!([[0, "hello"]])));
@@ -1519,8 +1871,8 @@ mod tests {
         assert!(t.translate(&r.daemon, &event("notify.event", json!({"kind": "waiting"})), &dirty).is_empty());
         assert!(tokio::time::timeout(Duration::from_millis(50), dirty.notified()).await.is_err(), "other events are not about the list");
 
-        let resolved = t.translate(&r.daemon, &event("chat.resolved", json!({"handle": 2, "id": "c1", "request_id": "r1", "by": "phone", "dropped": false})), &dirty);
-        assert_eq!(resolved, vec![json!({"type": "chat_resolved", "id": "c1", "request_id": "r1", "by": "phone", "dropped": false})]);
+        let resolved = t.translate(&r.daemon, &event("chat.resolved", json!({"handle": 2, "id": "c1", "request_id": "r1", "by": "phone", "dropped": false, "answered_by": "Pixel", "at": 5})), &dirty);
+        assert_eq!(resolved, vec![json!({"type": "chat_resolved", "id": "c1", "request_id": "r1", "by": "phone", "dropped": false, "answered_by": "Pixel", "at": 5})]);
         let resync = t.translate(&r.daemon, &event("session.resync", json!({"handle": 2})), &dirty);
         assert_eq!(resync, vec![json!({"type": "chat_resync", "id": "c1"})]);
 
@@ -1619,6 +1971,7 @@ mod tests {
         assert_eq!(closing(events.recv().await, "phone"), Some((NOT_PAIRED, "revoked")));
         assert_ne!(NOT_PAIRED, RECONNECT);
         assert_ne!(RECONNECT, REPLACED);
+        assert_eq!(([SILENT, SLOW_CONSUMER].iter().collect::<HashSet<_>>().len(), [NOT_PAIRED, RECONNECT, REPLACED].contains(&SILENT)), (2, false));
     }
 
     #[tokio::test]
@@ -1654,6 +2007,340 @@ mod tests {
         assert_eq!(code(&reply), Some("busy"), "{reply}");
         r.conn.waiting.store(0, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(r.ask_write(json!({"type": "chat_sub", "id": "c1"})).await["type"], "ack");
+    }
+
+
+    /// A second device's connection to the same daemon.
+    fn other_conn(r: &Rig, device: &str, name: &str, id: u64) -> Conn {
+        let (tx, _rx, overflowed) = bounded_client_channel(8);
+        let (out, _out_rx) = mpsc::channel(16);
+        Conn {
+            daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, list: None, rev: 0, legacy: false, _phone: None,
+        }
+    }
+
+    async fn ask_as(conn: &mut Conn, mut req: Value) -> Value {
+        req["req"] = json!(1);
+        conn.handle(Permission::Write, &req).await.expect("a reply")
+    }
+
+    #[tokio::test]
+    async fn an_answer_typed_through_input_or_key_belongs_to_the_device_that_sent_it() {
+        let mut r = rig();
+        let mut tablet = other_conn(&r, "tablet", "Tablet", 2);
+        // The page answers with a key.
+        let since = crate::session::fake::wait_on_user(&r.term);
+        assert_eq!(r.ask_write(json!({"type": "key", "id": "t1", "key": "1"})).await["type"], "ack");
+        let answer = json!({"type": "answer", "id": "t1", "waiting_since": since, "text": "2"});
+        let other = ask_as(&mut tablet, answer.clone()).await;
+        assert_eq!((code(&other), other["result"].as_str(), other["answered_by"].as_str()), (Some("stale"), Some("stale"), Some("Phone")), "{other}");
+        let same = r.ask_write(answer).await;
+        assert_eq!((code(&same), same["result"].as_str()), (Some("dup"), Some("dup")), "{same}");
+        assert_eq!(r.typed.writes(), vec![b"1".to_vec()], "nothing else reached the agent");
+
+        // The page answers by typing text.
+        let (term2, typed2) = crate::session::fake::running(3, "t2", "claude");
+        r.daemon.insert_for_test(Entry::Term(term2.clone()));
+        let since = crate::session::fake::wait_on_user(&term2);
+        let typed = r.ask_write(json!({"type": "input", "id": "t2", "text": "1", "enter": false, "force": true})).await;
+        assert_eq!(typed["type"], "ack");
+        let answer = json!({"type": "answer", "id": "t2", "waiting_since": since, "text": "2"});
+        let other = ask_as(&mut tablet, answer.clone()).await;
+        assert_eq!((code(&other), other["answered_by"].as_str()), (Some("stale"), Some("Phone")), "{other}");
+        let same = r.ask_write(answer).await;
+        assert_eq!(code(&same), Some("dup"), "{same}");
+        assert_eq!(typed2.writes(), vec![b"1".to_vec()]);
+        // The desktop's own key is still the desktop's.
+        let (term3, _typed3) = crate::session::fake::running(4, "t3", "claude");
+        r.daemon.insert_for_test(Entry::Term(term3.clone()));
+        let since = crate::session::fake::wait_on_user(&term3);
+        term3.input(b"1".to_vec());
+        let late = ask_as(&mut tablet, json!({"type": "answer", "id": "t3", "waiting_since": since, "text": "2"})).await;
+        assert_eq!(late["answered_by"].as_str(), Some("desktop"), "{late}");
+    }
+
+    #[tokio::test]
+    async fn letting_go_of_a_session_frees_its_place_in_the_resume_cache() {
+        let mut r = rig();
+        assert_eq!(r.ask_write(json!({"type": "sub", "id": "t1"})).await["type"], "ack");
+        assert_eq!(r.daemon.mobile.views.slot_count(), 1);
+        assert_eq!(r.ask_write(json!({"type": "unsub", "id": "t1"})).await["type"], "ack");
+        assert_eq!(r.daemon.mobile.views.slot_count(), 0);
+    }
+
+    #[test]
+    fn only_a_first_message_that_names_both_capabilities_is_not_a_page_from_before() {
+        assert!(acknowledges(Some(&json!({"token": "t", "caps": ["ack", "hb"]}))));
+        assert!(acknowledges(Some(&json!({"caps": ["hb", "x", "ack"]}))));
+        for first in [json!({"token": "t"}), json!({"token": "t", "caps": ["ack"]}), json!({"caps": ["hb"]}), json!({"caps": "ack hb"})] {
+            assert!(!acknowledges(Some(&first)), "{first}");
+        }
+        assert!(!acknowledges(None));
+    }
+
+    #[tokio::test]
+    async fn a_page_that_says_nothing_of_acknowledgements_keeps_getting_frames() {
+        let network = NetworkRig::new().await;
+        let mut phone = network.websocket().await;
+        authenticate(&mut phone).await; // no `caps`: a page from before
+        phone_send(&mut phone, json!({"type": "sub", "id": "t1", "height": 20, "req": 1})).await.unwrap();
+        let mut previous = loop {
+            let m = phone_recv(&mut phone).await.unwrap();
+            if m["type"] == "screen" {
+                break m["rev"].as_u64().unwrap();
+            }
+        };
+        // Twice the window of frames, and not one acknowledged: each follows the one before.
+        for i in 0..2 * sync::WINDOW_FRAMES {
+            network.rig.term.ingest(format!("line {i}\r\n").as_bytes());
+            let frame = loop {
+                let m = phone_recv(&mut phone).await.unwrap();
+                if m["type"] == "screen" {
+                    break m;
+                }
+            };
+            assert_eq!(frame["base"].as_u64(), Some(previous), "frame {i}");
+            previous = frame["rev"].as_u64().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_resolved_is_never_told_ahead_of_the_chat_lines_it_is_about() {
+        let network = NetworkRig::new().await;
+        let mut phone = network.websocket().await;
+        authenticate(&mut phone).await;
+        phone_send(&mut phone, json!({"type": "chat_sub", "id": "c1", "req": 1})).await.unwrap();
+        let (mut acked, mut log) = (false, false);
+        while !(acked && log) {
+            match phone_recv(&mut phone).await.unwrap()["type"].as_str() {
+                Some("ack") => acked = true,
+                Some("chat") => log = true,
+                _ => {}
+            }
+        }
+        // Nothing yields between the two, so the connection finds the line in the bulk lane and the
+        // resolution in the bulk lane behind it at the same moment.
+        let request = json!({"type": "control_request", "request_id": "r1", "request": {"subtype": "can_use_tool"}}).to_string();
+        network.rig.chat.ingest_for_test(request);
+        let answer = json!({"type": "control_response", "response": {"subtype": "success", "request_id": "r1", "response": {"behavior": "allow"}}});
+        network.rig.chat.input(format!("{answer}\n").into_bytes());
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            let m = phone_recv(&mut phone).await.unwrap();
+            let kind = m["type"].as_str().unwrap_or_default().to_string();
+            if kind == "chat" && m["lines"].to_string().contains("r1") {
+                seen.push("line");
+            } else if kind == "chat_resolved" {
+                seen.push("resolved");
+                break;
+            }
+        }
+        assert_eq!(seen, ["line", "resolved"], "the request line comes first");
+    }
+
+    #[tokio::test]
+    async fn a_revoked_device_is_cut_off_within_a_send_however_full_the_lanes_are_kept() {
+        let network = NetworkRig::new().await;
+        let mut phone = network.websocket().await;
+        authenticate(&mut phone).await;
+        phone_send(&mut phone, json!({"type": "sub", "id": "t1", "height": 20, "req": 1})).await.unwrap();
+        phone_send(&mut phone, json!({"type": "chat_sub", "id": "c1", "req": 2})).await.unwrap();
+        // A chat that never stops (asking and being answered every few lines, so `chat_resolved` keeps
+        // coming) and a screen that never stops changing, towards a phone that reads slowly: the socket's
+        // buffers fill, and the bulk lane is full whenever the writer looks at it.
+        let (chat, term) = (network.rig.chat.clone(), network.rig.term.clone());
+        let feeder = tokio::spawn(async move {
+            let pad = "y".repeat(20_000);
+            for i in 0..12_000 {
+                chat.ingest_for_test(json!({"type": "assistant", "n": i, "pad": pad}).to_string());
+                term.ingest(format!("line {i}\r\n").as_bytes());
+                if i % 4 == 0 {
+                    chat.ingest_for_test(json!({"type": "control_request", "request_id": format!("q{i}"), "request": {"subtype": "can_use_tool"}}).to_string());
+                    let answer = json!({"type": "control_response", "response": {"subtype": "success", "request_id": format!("q{i}"), "response": {"behavior": "allow"}}});
+                    chat.input(format!("{answer}\n").into_bytes());
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+        let began = Instant::now();
+        let mut revoked_at = None;
+        let mut read = 0;
+        // The daemon's side of the connection is what is timed (the phone only sees the close after the
+        // data in the socket's buffers): it must be gone within a close timeout of the revoke, though
+        // the feeder runs for twenty-five seconds.
+        while network.rig.daemon.mobile.connections.lock().len() == 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if revoked_at.is_none() && began.elapsed() > Duration::from_millis(2500) {
+                assert!(read > 10, "the phone was being sent a stream ({read} messages)");
+                network.rig.daemon.mobile.revoke("phone").unwrap();
+                revoked_at = Some(Instant::now());
+            }
+            match phone_recv(&mut phone).await {
+                Some(_) => read += 1,
+                None => break,
+            }
+            assert!(revoked_at.is_none_or(|at| at.elapsed() < CLOSE_TIMEOUT + Duration::from_secs(4)), "still connected {:?} after the revoke, with the lanes full", revoked_at.map(|at| at.elapsed()));
+        }
+        feeder.abort();
+        assert!(revoked_at.is_some(), "the connection ended by itself");
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_is_answered_with_the_time_and_the_load_and_an_answer_to_one_is_not() {
+        let mut r = rig();
+        let reply = r.ask(Permission::Read, json!({"type": "hb", "n": 7})).await;
+        assert_eq!((reply["type"].as_str(), reply["echo"].clone(), reply["n"].clone(), reply["level"].clone()), (Some("hb"), json!(true), json!(7), json!(0)), "{reply}");
+        assert!(reply["server_ts"].as_u64().is_some());
+        r.daemon.mobile.load.set_for_test(Level::L2);
+        assert_eq!(r.ask(Permission::Read, json!({"type": "hb"})).await["level"], 2);
+        // The phone's answer to the daemon's own heartbeat needs no answer (it would be a loop).
+        assert!(r.conn.handle(Permission::Read, &json!({"type": "hb", "echo": true})).await.is_none());
+        let line = heartbeat(3, Level::L2);
+        let beat: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!((beat["type"].as_str(), beat["n"].clone(), beat["level"].clone()), (Some("hb"), json!(3), json!(2)));
+        assert!(beat.get("echo").is_none(), "only the answer says echo");
+    }
+
+    #[tokio::test]
+    async fn a_chat_it_was_refused_is_asked_for_again_once_the_log_in_flight_has_been_taken() {
+        let mut r = rig();
+        assert_eq!(r.ask_write(json!({"type": "chat_sub", "id": "c1"})).await["type"], "ack");
+        r.conn.chat_at.clear();
+        r.conn.waiting.store(crate::chat::RESET_WAITING_MAX, Ordering::Relaxed);
+        assert_eq!(code(&r.ask_write(json!({"type": "chat_sub", "id": "c1"})).await), Some("busy"));
+        assert!(r.conn.housekeeping().is_empty(), "nothing to say while the log is still on its way");
+        r.conn.waiting.store(0, Ordering::Relaxed);
+        assert_eq!(r.conn.housekeeping(), vec![json!({"type": "chat_resync", "id": "c1"})], "told to ask again, once");
+        assert!(r.conn.housekeeping().is_empty());
+    }
+
+    #[tokio::test]
+    async fn at_a_busy_load_only_a_few_chat_logs_are_on_their_way_at_once() {
+        let mut r = rig();
+        let others: Vec<Arc<AtomicUsize>> = (10..13).map(|id| {
+            let waiting = Arc::new(AtomicUsize::new(1000));
+            r.daemon.mobile.waiting.lock().insert(id, waiting.clone());
+            waiting
+        }).collect();
+        // Calm: any number.
+        assert_eq!(r.ask_write(json!({"type": "chat_sub", "id": "c1"})).await["type"], "ack");
+        r.conn.chat_at.clear();
+        // L2: two at most; three are on their way already.
+        r.daemon.mobile.load.set_for_test(Level::L2);
+        assert_eq!(code(&r.ask_write(json!({"type": "chat_sub", "id": "c1"})).await), Some("busy"));
+        others[0].store(0, Ordering::Relaxed);
+        others[1].store(0, Ordering::Relaxed);
+        assert_eq!(r.ask_write(json!({"type": "chat_sub", "id": "c1"})).await["type"], "ack", "one other log is on its way: room for this one");
+        // L3: one at most.
+        r.conn.chat_at.clear();
+        r.daemon.mobile.load.set_for_test(Level::L3);
+        assert_eq!(code(&r.ask_write(json!({"type": "chat_sub", "id": "c1"})).await), Some("busy"));
+        // …and the phone is told when to ask again, as soon as the others have been taken.
+        others[2].store(0, Ordering::Relaxed);
+        assert_eq!(r.conn.housekeeping(), vec![json!({"type": "chat_resync", "id": "c1"})]);
+    }
+
+    #[tokio::test]
+    async fn pairing_handshakes_are_spaced_out_when_the_machine_is_loaded() {
+        let r = rig();
+        let m = &r.daemon.mobile;
+        assert!(!m.pairing_paced() && !m.pairing_paced(), "calm: no spacing");
+        m.load.set_for_test(Level::L2);
+        assert!(!m.pairing_paced(), "the first goes");
+        assert!(m.pairing_paced(), "the next within a second waits");
+        *m.paired_at.lock() = Some(Instant::now() - Duration::from_millis(1100));
+        assert!(!m.pairing_paced());
+        m.load.set_for_test(Level::L3);
+        *m.paired_at.lock() = Some(Instant::now() - Duration::from_millis(1100));
+        assert!(m.pairing_paced(), "five seconds at L3");
+    }
+
+    /// An attempt turned away because the machine is busy is turned away before the code is looked at: it
+    /// cannot be used to test a guess, spends nothing and counts as no failure.
+    #[tokio::test]
+    async fn a_pairing_attempt_turned_away_for_load_never_looks_at_the_code() {
+        let r = rig();
+        let m = &r.daemon.mobile;
+        *m.code.lock() = Some(("the-right-code".into(), Instant::now()));
+        m.load.set_for_test(Level::L3);
+        *m.paired_at.lock() = Some(Instant::now());
+        let peer: SocketAddr = "10.0.0.7:5000".parse().unwrap();
+        for guess in ["the-right-code", "a-wrong-one", "a-wrong-one"] {
+            let reply = pair(State(r.daemon.clone()), ConnectInfo(peer), Json(PairRequest { code: guess.into(), name: "x".into() })).await;
+            assert_eq!(reply.status(), StatusCode::SERVICE_UNAVAILABLE, "{guess}");
+        }
+        assert!(m.code.lock().is_some(), "the code is not spent");
+        assert!(m.failures.lock().is_empty(), "nothing is counted as a failed guess");
+    }
+
+    /// A chat log that finds the bulk lane full waits for room; a phone that makes none for `SLOW_AFTER`
+    /// is cut as a slow consumer (4411), and not before.
+    #[tokio::test]
+    async fn a_chat_log_with_no_room_for_ten_seconds_cuts_the_phone_as_a_slow_consumer() {
+        let r = rig();
+        let lanes = lanes::lanes();
+        while lanes.bulk.try_send("frame".into()).is_ok() {}
+        // One terminal output frame for the chat (handle 2): `u32 length | u8 kind | u32 handle | u64 seq | bytes`.
+        let mut frame = vec![0, 0, 0, 0, kelpie_proto::KIND_OUTPUT];
+        frame.extend_from_slice(&2u32.to_le_bytes());
+        frame.extend_from_slice(&1u64.to_le_bytes());
+        frame.extend_from_slice(b"hello\n");
+        let (tx, rx) = mpsc::channel::<Outgoing>(8);
+        let task = tokio::spawn(adapt(r.daemon.clone(), rx, lanes.bulk.clone(), lanes.slow.clone(), Arc::new(Notify::new())));
+        tx.send(Outgoing { data: frame.into(), credit: None }).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(9), lanes.slow.notified()).await.is_err(), "the log waits for room");
+        tokio::time::timeout(Duration::from_secs(3), lanes.slow.notified()).await.expect("cut after ten seconds without room");
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_phone_that_falls_behind_is_told_to_start_over_not_queued() {
+        let (tx, mut rx, overflowed) = bounded_client_channel(2);
+        let credit = Arc::new(AtomicUsize::new(0));
+        for _ in 0..5 {
+            credit.fetch_add(10, Ordering::Relaxed);
+            tx.send(Outgoing { data: Arc::from(vec![0u8; 10]), credit: Some(credit.clone()) }).expect("a full queue is not a closed one");
+        }
+        assert!(overflowed.load(Ordering::Relaxed));
+        let mut queued = 0;
+        while rx.try_recv().is_ok() {
+            queued += 1;
+        }
+        assert_eq!(queued, 2, "the queue held two");
+        assert_eq!(credit.load(Ordering::Relaxed), 20, "what was dropped is no longer counted as waiting");
+        drop(rx);
+        assert!(tx.send(Outgoing { data: Arc::from(vec![1u8]), credit: None }).is_err(), "a gone client is");
+
+        // The connection's next look: the whole list again, and every watched chat asked for again.
+        let mut r = rig();
+        assert_eq!(r.ask_write(json!({"type": "chat_sub", "id": "c1"})).await["type"], "ack");
+        r.conn.overflowed.store(true, Ordering::Relaxed);
+        let told = r.conn.housekeeping();
+        assert_eq!(told.iter().map(|m| m["type"].as_str().unwrap()).collect::<Vec<_>>(), ["sessions", "chat_resync"]);
+        assert!(r.conn.housekeeping().is_empty());
+    }
+
+    /// Nothing a phone does may queue without a limit: no unbounded channel on any of its paths.
+    #[test]
+    fn no_phone_path_has_an_unbounded_queue() {
+        let needles = [concat!("unbounded", "_channel"), concat!("Unbounded", "Sender"), concat!("Unbounded", "Receiver"), concat!("ClientTx::", "Unbounded")];
+        let sources = [
+            ("mobile.rs", include_str!("mobile.rs")),
+            ("mobile/sync.rs", include_str!("mobile/sync.rs")),
+            ("mobile/lanes.rs", include_str!("mobile/lanes.rs")),
+            ("mobile/verbs.rs", include_str!("mobile/verbs.rs")),
+            ("load.rs", include_str!("load.rs")),
+        ];
+        // The part of each file before its tests: what ships.
+        for (name, source) in sources {
+            let shipped = source.split("#[cfg(test)]").next().unwrap();
+            for needle in needles {
+                assert!(!shipped.contains(needle), "{name} uses {needle}: a phone's queue must have a limit");
+            }
+        }
+        // And the one place a phone connects registers a bounded queue.
+        assert!(include_str!("mobile.rs").contains(concat!("bounded_client_channel(", "EVENT_QUEUE)")));
     }
 
 }

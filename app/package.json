@@ -1,11 +1,12 @@
 {
   "name": "kelpie-app",
   "private": true,
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:phone": "tsc --noEmit && vite build --config vite.phone.config.ts",
     "typecheck": "tsc --noEmit",
     "i18n:check": "node scripts/i18n-check.mjs",
     "test": "vitest run",

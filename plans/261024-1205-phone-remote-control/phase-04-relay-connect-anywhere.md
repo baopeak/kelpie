@@ -23,6 +23,7 @@ and on open-source `workerd` (self-host). The client side (connect race, migrati
   - **Pairing independent of the LAN listener**: with the relay on, `pair_start` works even when no LAN address binds (today it bails, `mobile.rs:192-193`). [RT-15]
   - **Forwarding**: binary frames ≤ 64 KiB; slot id per phone socket; ≤ 8 phones per room; `desktop_offline` frame; nothing queued or stored.
   - **Limits**: per-room 4 MB/s burst and 20 GB/month soft cap for session traffic; browser-takeover frames (phase 7) have their own 200 MB/h budget outside the room cap; violations close with explained codes.
+  - **Relay admission requires `caps`**: the relay path admits only clients whose first message declares `caps` ack+hb. The daemon's legacy mode (pages from before acknowledged frames: no ack window, no heartbeat deadline) is for the LAN and PWA only, because it has no application-level liveness and a relay keeps its own TCP connection alive, so a dead legacy client would never be noticed.
   - **Revoke while offline**: pending allow-list removals persisted on the desktop and applied first on relay reconnect. [RT-12]
   - **Logging**: counters and error codes only; no payloads; no persisted IPs (Cloudflare edge logs documented).
   - **Daemon**: outbound WSS only when "Connect from anywhere" is on (user presence required, phase 3); jittered backoff 1 s → 60 s; each slot feeds the same link handler as `/link`.

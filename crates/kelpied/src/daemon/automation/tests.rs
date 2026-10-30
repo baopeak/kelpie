@@ -46,7 +46,7 @@ fn command_automation(id: &str, cwd: &str, event: EventKind, glob: &str, program
 
 /// A user connection on `client`, the app when `app`.
 fn connect(daemon: &Arc<Daemon>, client: u64, app: bool) -> (ClientTx, tokio::sync::mpsc::UnboundedReceiver<crate::session::Outgoing>) {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = crate::session::client_channel();
     daemon.register_client(client, tx.clone());
     daemon.set_client_role(client, &Role::User);
     daemon.mark_app(client, app);

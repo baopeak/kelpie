@@ -6,6 +6,7 @@
 // grid of R rows × C columns is a `col` split of R `row` splits.
 import type { LayoutNode, LayoutTemplate, LeafNode, Pane, SessionKind, SessionTarget, SplitNode } from "./types";
 import { uid } from "./platform";
+import { t } from "./i18n";
 
 export const leaf = (pane: Pane): LeafNode => ({ type: "leaf", id: uid(), pane });
 
@@ -225,7 +226,7 @@ export const cellCount = (spec: GridSpec) => spec.counts.reduce((a, b) => a + b,
 export function gridLabel(spec: GridSpec): string {
   const c = spec.counts;
   if (c.every((n) => n === c[0])) return spec.mode === "rows" ? `${c.length} × ${c[0]}` : `${c[0]} × ${c.length}`;
-  return spec.mode === "rows" ? `Rows ${c.join(" + ")}` : `Columns ${c.join(" + ")}`;
+  return spec.mode === "rows" ? t("Rows {counts}", { counts: c.join(" + ") }) : t("Columns {counts}", { counts: c.join(" + ") });
 }
 
 /** Built-in arrangements offered in the layout menu. */

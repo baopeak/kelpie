@@ -10,7 +10,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SRC = path.join(ROOT, "src");
+// The phone client (app/phone) is checked like the desktop: its strings are in the same dictionaries.
+const PHONE = path.join(ROOT, "phone", "src");
 const args = process.argv.slice(2);
 const onlyFiles = args.filter((a) => !a.startsWith("--")).map((f) => path.resolve(f));
 const showUnused = args.includes("--unused");
@@ -47,9 +50,9 @@ const missing = [];
 const problems = [];
 const untranslated = [];
 
-for (const file of walk(SRC)) {
+for (const file of [...walk(SRC), ...walk(PHONE)]) {
   if (file.endsWith(path.join("lib", "i18n.ts"))) continue;
-  const rel = path.relative(SRC, file).replace(/\\/g, "/");
+  const rel = path.relative(ROOT, file).replace(/\\/g, "/");
   const checkThis = !onlyFiles.length || onlyFiles.includes(file);
   const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
   lines.forEach((line, i) => {

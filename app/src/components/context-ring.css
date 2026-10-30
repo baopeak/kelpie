@@ -2,7 +2,7 @@
 .ctx-ring-btn { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 4px; flex: none; cursor: pointer; padding: 1px 2px; border-radius: 6px; }
 .ctx-ring-btn:hover { background: var(--bg-hover); }
 .ctx-ring-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.ctx-ring .track { fill: none; stroke: var(--border-strong); stroke-width: 2.4; }
+.ctx-ring .track { fill: none; stroke: var(--control-border); stroke-width: 2.4; }
 .ctx-ring .fill { fill: none; stroke: var(--text-faint); stroke-width: 2.4; stroke-linecap: round; }
 .ctx-ring.warn .fill { stroke: var(--waiting); }
 /* Red also gets a heavier stroke: the level is not carried by colour alone. */

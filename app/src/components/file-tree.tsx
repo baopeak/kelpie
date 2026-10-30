@@ -26,10 +26,10 @@ const extIcon: Record<string, [string, string]> = {
 };
 
 function FileIcon(props: { entry: DirEntry; open: boolean }) {
-  if (props.entry.is_dir) return <span class="ficon" style={{ color: "#8fa6c8" }}>{props.open ? "▾" : "▸"}</span>;
+  if (props.entry.is_dir) return <span class="ficon" style={{ "--ic": "#8fa6c8" }}>{props.open ? "▾" : "▸"}</span>;
   const ext = props.entry.name.split(".").pop()?.toLowerCase() ?? "";
   const [g, c] = extIcon[ext] ?? ["·", "#636c7d"];
-  return <span class="ficon" style={{ color: c, "font-size": g.length > 1 ? "8.5px" : "11px", "font-weight": 700 }}>{g}</span>;
+  return <span class="ficon" style={{ "--ic": c, "font-size": g.length > 1 ? "8.5px" : "11px", "font-weight": 700 }}>{g}</span>;
 }
 
 interface Row { entry: DirEntry; depth: number; index: number; ignored: boolean }

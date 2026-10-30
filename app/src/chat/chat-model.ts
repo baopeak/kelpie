@@ -1,8 +1,8 @@
 // Chat-mode state shared by all agent adapters. Adapters translate their wire protocol
 // (Claude stream-json, Codex app-server, ACP) into these items; the UI only knows items.
 import { createStore, produce, type SetStoreFunction } from "solid-js/store";
-import { attachTerminal, b64ToBytes, daemon, sendInput } from "../lib/ipc";
 import { t } from "../lib/i18n";
+import type { AnswerOutcome, ChatTransport } from "./transport";
 
 /** What a tool call does, for its row and for folding runs of reads and searches. */
 export type ToolCategory = "read" | "search" | "edit" | "command" | "fetch" | "agent" | "plan" | "other";
@@ -34,6 +34,12 @@ export type ChatItem =
       ask?: AskQuestion[];
       /** The deny option can carry a message to the agent. */
       feedback?: boolean;
+      /** Observer mode: the answer is on its way, not yet settled by the daemon. */
+      answering?: boolean;
+      /** Observer mode: the answer may not have gone through (`unknown`) or was refused; the person can answer again. */
+      answerError?: string;
+      /** Observer mode: an answer was sent and its fate is not known; this is what it said. Asking again sends that same answer. */
+      retry?: string;
     }
   /** `tui`: the agent can run `command` only in its terminal UI; offer to continue there. */
   | { kind: "system"; id: string; text: string; tone?: "error" | "info"; tui?: { command: string }; at?: number }
@@ -180,7 +186,6 @@ export class ChatController {
   private buffer = "";
   private decoder = new TextDecoder();
   private adapter!: Adapter;
-  private handle: number | null = null;
   private attachGen = 0;
   private isReplaying = false;
   /** Answered approval ids (the agent's log does not contain our answers). */
@@ -193,8 +198,31 @@ export class ChatController {
   private loadingHistory = false;
   /** Renders the agent's own transcript (history from before chat mode) ahead of the log. */
   loadHistory: ((ctx: AdapterContext) => Promise<void>) | null = null;
+  readonly transport: ChatTransport;
+  /** A watcher (the phone): it never starts or configures the agent, never answers on its own, never
+   *  sends a queued message and never changes the session; it only shows the log and passes on the
+   *  person's answers to the agent's questions. */
+  readonly observer: boolean;
+  /** Set while the person's own answer is being written (`respond`): the only write an observer lets
+   *  through. `false` outside it; a promise once the answer was passed on. */
+  private answering: Promise<AnswerOutcome> | null | false = false;
+  /** What the person's answer wrote, noted by `write` while `answering` is `null`. */
+  private written: { requestId: string | number; line: string } | null = null;
+  /** The first answer given to each card whose fate is still unknown (it was lost, or refused): asking again
+   *  sends exactly that line. The adapters forget a request once they answered it, and a second answer
+   *  built from nothing would be wrong (Claude: an empty `updatedInput`); the same line is what the daemon
+   *  recognises as this device's own answer, so a repeat is harmless. */
+  private unsettled = new Map<string, { requestId: string | number; line: string; label: string; identity: string }>();
+  /** Cards whose answer is on its way. A log loaded again rebuilds the card, which must stay locked until the
+   *  reply says what became of the answer that was sent: a second tap would send another and the card would
+   *  be labelled with the one that lost. */
+  private inFlight = new Set<string>();
+  /** Counts the times ids and positions were forgotten: a reply that was waited for across one belongs to nothing now. */
+  private generation = 0;
 
-  constructor(readonly sessionId: string, readonly cwd: string, readonly resumeId: string | null, makeAdapter: (ctx: AdapterContext) => Adapter) {
+  constructor(readonly sessionId: string, readonly cwd: string, readonly resumeId: string | null, makeAdapter: (ctx: AdapterContext) => Adapter, opts: { transport?: ChatTransport; observer?: boolean } = {}) {
+    this.transport = opts.transport ?? {};
+    this.observer = opts.observer ?? false;
     const [state, set] = createStore<ChatState>(emptyChatState(resumeId));
     this.state = state;
     // Any state change may start or end a turn: note when work starts, send the next queued message.
@@ -213,7 +241,7 @@ export class ChatController {
       state: this.state,
       set: this.set,
       // Replays must never talk to the agent: those messages were answered long ago.
-      write: (obj) => this.handle != null && !this.isReplaying && void sendInput(this.handle, JSON.stringify(obj) + "\n"),
+      write: (obj) => this.write(obj),
       upsert: (item) => this.upsert(item),
       patch: (id, fn) => this.patch(id, fn as (i: ChatItem) => void),
       find: (id) => {
@@ -227,12 +255,12 @@ export class ChatController {
       setConversation: (id) => {
         if (this.state.conversationId === id) return;
         this.set("conversationId", id);
-        void daemon("session.update", { handle: this.handle, agent_session_id: id }).catch(() => {});
+        if (!this.observer) this.transport.update?.({ agent_session_id: id });
       },
       setModel: (model) => {
         if (this.state.model === model) return;
         this.set("model", model);
-        if (model && !this.isReplaying) void daemon("session.update", { handle: this.handle, model }).catch(() => {});
+        if (model && !this.isReplaying && !this.observer) this.transport.update?.({ model });
       },
       setClock: (at) => (this.clock = at),
       cwd: this.cwd,
@@ -241,8 +269,38 @@ export class ChatController {
     };
   }
 
+  /** A line from an adapter to the agent. An observer lets one kind through: the answer the person
+   *  just gave (see `respond`), passed on as the answer to that request. Everything else an adapter
+   *  writes by itself (handshakes, replies to the agent's own requests, interrupts) is dropped. */
+  private write(obj: unknown) {
+    if (this.isReplaying) return;
+    if (!this.observer) {
+      this.transport.send?.(JSON.stringify(obj) + "\n");
+      return;
+    }
+    if (this.answering !== null || !this.transport.answer) return;
+    const id = answeredRequest(obj);
+    if (id == null) return;
+    const line = JSON.stringify(obj);
+    this.written = { requestId: id, line };
+    this.answering = this.transport.answer(id, line);
+  }
+
   upsert(item: ChatItem) {
     if (item.kind === "permission" && this.resolved.has(item.id)) item = { ...item, resolved: this.resolved.get(item.id) };
+    if (item.kind === "permission" && !item.resolved) {
+      const saved = this.unsettled.get(item.id);
+      const same = !!saved && saved.identity === cardIdentity(item);
+      if (saved && !same) this.unsettled.delete(item.id);
+      if (this.observer) {
+        // A store merge keeps what it is not told to drop: say it all. The error about an answer belongs to
+        // the request it was about; a new request under a reused id starts clean.
+        const at = this.index.get(item.id);
+        const before = at == null ? undefined : this.state.items[at];
+        const error = same && before?.kind === "permission" ? before.answerError : undefined;
+        item = { ...item, retry: same ? saved!.label : undefined, answerError: error, answering: this.inFlight.has(item.id) ? true : undefined };
+      }
+    }
     const i = this.index.get(item.id);
     if (i != null) {
       const prev = this.state.items[i];
@@ -275,7 +333,11 @@ export class ChatController {
   }
 
   private feed(bytes: Uint8Array) {
-    this.buffer += this.decoder.decode(bytes, { stream: true });
+    this.feedText(this.decoder.decode(bytes, { stream: true }));
+  }
+
+  private feedText(text: string) {
+    this.buffer += text;
     let nl: number;
     while ((nl = this.buffer.indexOf("\n")) >= 0) {
       const line = this.buffer.slice(0, nl).trim();
@@ -316,11 +378,11 @@ export class ChatController {
   }
 
   async attach(handle: number) {
+    if (this.observer || !this.transport.attach) return;
     const gen = ++this.attachGen;
-    this.handle = handle;
     const early: Uint8Array[] = [];
     let applied = false;
-    const reply = await attachTerminal(handle, null, (_seq, data) => {
+    const snapshot = await this.transport.attach(handle, (data) => {
       if (gen !== this.attachGen) return;
       if (applied) this.feed(data);
       else early.push(data);
@@ -328,7 +390,7 @@ export class ChatController {
       this.upsert({ kind: "system", id: "attach-error", text: t("Could not attach: {error}", { error: String(e) }), tone: "error" });
       return null;
     });
-    if (!reply || gen !== this.attachGen) return;
+    if (!snapshot || gen !== this.attachGen) return;
     this.resetState();
     this.clock = null;
     this.loadingHistory = true;
@@ -337,7 +399,7 @@ export class ChatController {
     if (gen !== this.attachGen) return;
     this.clock = null;
     this.isReplaying = true;
-    this.feed(b64ToBytes(reply.data));
+    this.feed(snapshot);
     this.isReplaying = false;
     applied = true;
     for (const chunk of early) this.feed(chunk);
@@ -350,11 +412,37 @@ export class ChatController {
 
   detach() {
     this.attachGen++;
-    if (this.handle != null) void daemon("session.detach", { handle: this.handle }).catch(() => {});
+    this.transport.detach?.();
+  }
+
+  /** Observer: the daemon's chat message `{mode, lines}`. `reset` replaces what is shown with the log;
+   *  `delta` and `more` carry on a log (history catching up: applied without a reset and acted on
+   *  by nobody); `live` is output as it is printed. Nothing here talks to the agent. */
+  applyLog(mode: "reset" | "delta" | "more" | "live", lines: string[]) {
+    if (!this.observer) return;
+    const text = lines.length ? lines.join("\n") + "\n" : "";
+    if (mode === "live") return this.feedText(text);
+    if (mode === "reset") {
+      this.resetState();
+      this.clock = null;
+      // The log was loaded again: what is asked now is rebuilt from it, and an answer saved for the old
+      // picture must not stand in for one given to the new.
+      this.unsettled.clear();
+    }
+    const was = this.isReplaying;
+    this.isReplaying = true;
+    try {
+      this.feedText(text);
+    } finally {
+      this.isReplaying = was;
+    }
+    this.clock = null;
+    if (!this.state.ready) this.set("ready", true);
   }
 
   /** Sends now, or queues while the agent works (or while earlier queued messages wait). */
   send(text: string, typed = false, images?: ChatImage[]) {
+    if (this.observer) return;
     if ((!text.trim() && !images?.length) || this.state.exited) return;
     // Not attached yet: a re-attach replays the log and would wipe what is sent now.
     if ((this.state.busy || this.state.queue.length || !this.state.ready) && !this.adapter.immediate?.(text, typed)) {
@@ -368,7 +456,7 @@ export class ChatController {
   /** Sends the next queued message once the agent is idle — a microtask later, as this runs
    *  inside the adapter's own state change, which must finish first. */
   private flushQueue() {
-    if (this.flushing || !this.state.queue.length) return;
+    if (this.observer || this.flushing || !this.state.queue.length) return;
     this.flushing = true;
     queueMicrotask(() => {
       this.flushing = false;
@@ -442,13 +530,13 @@ export class ChatController {
    *  its card stops asking. Each adapter names a request's card after the agent's id its own way.
    *  `lost`: the daemon dropped an answer given here because another one had already counted, so a card
    *  that shows what was clicked here shows what happened instead. */
-  resolvedElsewhere(requestId: string | number, lost = false) {
+  resolvedElsewhere(requestId: string | number, lost = false, who?: { answeredBy?: string; at?: number }) {
     const id = String(requestId);
     for (const key of [id, `approval-${id}`, `perm-${id}`, `elicit-${id}`]) {
       const i = this.index.get(key);
       const item = i == null ? undefined : this.state.items[i];
-      if (item?.kind !== "permission") continue;
-      const label = t("Answered on another device");
+      if (item?.kind !== "permission" || item.answering) continue;
+      const label = who ? answeredBeforeText(who.answeredBy, who.at) : t("Answered on another device");
       if (item.resolved && !(lost && item.resolved !== label)) continue;
       this.resolved.set(key, label);
       this.patch(key, (it) => {
@@ -457,14 +545,134 @@ export class ChatController {
     }
   }
 
+  /** An observer's answer goes to the daemon as the answer to that request; the daemon lets the first
+   *  answer win, so the card settles on what it says: ours, somebody else's, or "not sure". */
+  private async respondObserved(permissionId: string, optionId: string, label: string, reply?: PermissionReply) {
+    this.answering = null;
+    this.written = null;
+    let outcome: Promise<AnswerOutcome> | null | false;
+    try {
+      this.adapter.respond(permissionId, optionId, reply);
+    } finally {
+      outcome = this.answering as Promise<AnswerOutcome> | null | false; // set by write() while the adapter ran
+      this.answering = false;
+    }
+    const card = this.state.items[this.index.get(permissionId) ?? -1];
+    if (this.written && card?.kind === "permission") {
+      this.unsettled.set(permissionId, { ...(this.written as { requestId: string | number; line: string }), label, identity: cardIdentity(card) });
+    }
+    this.written = null;
+    await this.settleAnswer(permissionId, label, outcome);
+  }
+
+  /** Observer: sends the answer already given to this card once more, byte for byte (see `unsettled`). Only
+   *  this, never an ordinary answer button, may stand in for the saved line. */
+  retryAnswer(permissionId: string) {
+    const saved = this.unsettled.get(permissionId);
+    const card = this.state.items[this.index.get(permissionId) ?? -1];
+    if (!saved || card?.kind !== "permission" || card.answering || card.resolved || this.resolved.has(permissionId) || this.inFlight.has(permissionId)) return;
+    // The card is no longer the request that was answered (the log was loaded again, a restart reused the id).
+    if (saved.identity !== cardIdentity(card) || !this.transport.answer) {
+      this.unsettled.delete(permissionId);
+      this.patch(permissionId, (i) => {
+        if (i.kind === "permission") i.retry = undefined;
+      });
+      return;
+    }
+    void this.settleAnswer(permissionId, saved.label, this.transport.answer(saved.requestId, saved.line));
+  }
+
+  /** The restart of a daemon, or anything else that makes ids and positions mean nothing: answers saved
+   *  for retries and the memory of answered cards are dropped, so a new request that reuses an id is
+   *  answered as itself. */
+  forgetSentAnswers() {
+    this.unsettled.clear();
+    this.resolved.clear();
+    this.inFlight.clear();
+    this.generation++;
+  }
+
+  private async settleAnswer(permissionId: string, label: string, outcome: Promise<AnswerOutcome> | null | false) {
+    const generation = this.generation;
+    if (!outcome) {
+      // Nothing was written: this card is not an answer to a request the daemon tracks (a sign-in card, say).
+      this.patch(permissionId, (i) => {
+        if (i.kind === "permission") i.answerError = t("This can only be answered on the computer.");
+      });
+      return;
+    }
+    this.inFlight.add(permissionId);
+    this.patch(permissionId, (i) => {
+      if (i.kind === "permission") {
+        i.answering = true;
+        i.answerError = undefined;
+      }
+    });
+    const done = await outcome.catch((): AnswerOutcome => ({ result: "unknown" }));
+    // Ids and positions were forgotten meanwhile (the daemon restarted): the reply is about a request that is gone.
+    if (generation !== this.generation) return;
+    this.inFlight.delete(permissionId);
+    const settle = (text: string | null, error?: string) => {
+      if (text != null) {
+        this.resolved.set(permissionId, text);
+        this.unsettled.delete(permissionId);
+      }
+      this.patch(permissionId, (i) => {
+        if (i.kind !== "permission") return;
+        i.answering = false;
+        i.answerError = error;
+        i.retry = text == null ? this.unsettled.get(permissionId)?.label : undefined;
+        if (text != null) i.resolved = text;
+      });
+    };
+    if (done.result === "ok" || done.result === "dup") settle(label);
+    else if (done.result === "stale") settle(answeredBeforeText(done.answeredBy, done.at));
+    else settle(null, done.result === "refused" ? done.message : t("Not sure this was sent. Check the connection and answer again."));
+  }
+
   respond(permissionId: string, optionId: string, label: string, reply?: PermissionReply) {
     if (this.resolved.has(permissionId)) return;
+    if (this.observer) {
+      const card = this.state.items[this.index.get(permissionId) ?? -1];
+      // One answer in flight at a time, and none by a button while an earlier answer is waiting to be sent
+      // again: that goes through retryAnswer, with the same line.
+      if (!(card?.kind === "permission" && card.answering) && !this.inFlight.has(permissionId) && !this.unsettled.has(permissionId)) void this.respondObserved(permissionId, optionId, label, reply);
+      return;
+    }
     this.resolved.set(permissionId, label);
     this.adapter.respond(permissionId, optionId, reply);
     this.patch(permissionId, (i) => {
       if (i.kind === "permission") i.resolved = label;
     });
   }
+}
+
+/** What a permission card asks, as one string: two cards with the same id that ask different things are different requests. */
+function cardIdentity(item: Extract<ChatItem, { kind: "permission" }>): string {
+  return JSON.stringify([item.title, item.detail, item.command, item.plan, item.ask, item.options.map((o) => o.id)]);
+}
+
+/** The request an agent's answer message answers: Claude's `control_response` names it in
+ *  `response.request_id`, the JSON-RPC dialects (Codex, ACP) in `id`. */
+export function answeredRequest(obj: unknown): string | number | null {
+  const o = obj as { type?: unknown; response?: { request_id?: unknown }; id?: unknown; method?: unknown } | null;
+  if (!o || typeof o !== "object" || "method" in o) return null;
+  const id = o.type === "control_response" ? o.response?.request_id : o.id;
+  return typeof id === "string" || typeof id === "number" ? id : null;
+}
+
+/** "the desktop", or a device's name, for "Already answered on …". */
+function whoAnswered(by: string | undefined): string {
+  return !by || by === "desktop" ? t("the desktop") : by;
+}
+
+/** What a card says when somebody else's answer got there first. */
+export function answeredBeforeText(by: string | undefined, at: number | undefined, now = Date.now()): string {
+  const who = whoAnswered(by);
+  if (at == null) return t("Already answered on {who}", { who });
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  const ago = s < 60 ? t("just now") : s < 3600 ? t("{n} min ago", { n: Math.floor(s / 60) }) : t("{n} h ago", { n: Math.floor(s / 3600) });
+  return t("Already answered on {who} {ago}", { who, ago });
 }
 
 /** A thinking item that just stopped streaming gets its end time (for "Thought for 4s"). */

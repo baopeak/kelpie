@@ -5,7 +5,8 @@
 
 Daemon only (own endpoint and data folder; phone access on 127.0.0.1; Windows). Use a release build:
 the numbers of a dev build say little. Phones here only count what they are sent, so that the machine
-the daemon runs on is not busy parsing for them.
+the daemon runs on is not busy parsing for them (they do acknowledge frames, every second one, and answer
+heartbeats: the daemon sends nothing past four unacknowledged frames).
 
 1. Steady output: printing sessions (Python printers) run for `--seconds` with nobody connected and
    with `--phones` phones each following all of them, `--rounds` times each, alternating. What the
@@ -18,6 +19,9 @@ the daemon runs on is not busy parsing for them.
    how much the phones slow the daemon's intake is gated by the in-process
    `cargo test --release -p kelpied --bin kelpied -- --ignored ingest_speed --nocapture` (within 5 %).
 3. A further session prints too and nobody follows it. Gate: 0 frames for it.
+4. The daemon's own event-loop lag (`mobile.load`) during the steady runs with phones, with no stress from
+   outside. Reported, and the input to the runtime-split decision: p99 above 30 ms would move the phone
+   server onto a runtime of its own.
 """
 import asyncio
 import ctypes
@@ -89,10 +93,11 @@ class Light:
         self.token, self.quiet_id = token, quiet_id
         self.frames = self.bytes = self.quiet = 0
         self.subs = set()
+        self.unacked = {}
 
     async def open(self):
         self.ws = await websockets.connect(self.url, max_size=None, ping_interval=None)
-        await self.ws.send(json.dumps({"token": self.token}))
+        await self.ws.send(json.dumps({"token": self.token, "caps": ["ack", "hb"]}))
         await self.ws.recv()  # hello
         self.reader = asyncio.ensure_future(self._read())
 
@@ -103,6 +108,19 @@ class Light:
                     self.frames += 1
                     self.bytes += len(raw)
                     self.quiet += self.quiet_id in raw
+                    # {"type":"screen","id":"...","rev":N,...}: read the two fields without parsing the frame.
+                    start = raw.index('"id":"') + 6
+                    sid = raw[start:raw.index('"', start)]
+                    start = raw.index('"rev":', start) + 6
+                    end = start
+                    while raw[end].isdigit():
+                        end += 1
+                    self.unacked[sid] = self.unacked.get(sid, 0) + 1
+                    if self.unacked[sid] >= 2:
+                        self.unacked[sid] = 0
+                        await self.ws.send('{"type":"ack","id":"%s","rev":%s}' % (sid, raw[start:end]))
+                elif '"type":"hb"' in raw and '"echo"' not in raw:
+                    await self.ws.send('{"type":"hb","echo":true}')
         except websockets.ConnectionClosed:
             pass
 
@@ -191,6 +209,7 @@ async def main(d):
     for p in phones:
         await p.open()
 
+    lag = []
     steady_runs = {"without": [], "with": []}
     flat_runs = {"without": [], "with": []}
     for round_ in range(1, ROUNDS + 1):
@@ -198,7 +217,9 @@ async def main(d):
         for p in phones:
             await p.follow([s["id"] for s in sessions])
         await asyncio.sleep(1)
+        d.call("mobile.load", {"reset": True})
         steady_runs["with"].append(await steady(d, sessions, quiet, phones, f"steady {round_}: {PHONES} phones"))
+        lag.append(d.call("mobile.load"))
         for p in phones:
             await p.let_go()
         await asyncio.sleep(1)
@@ -219,6 +240,8 @@ async def main(d):
     print(f"flat out (not gated, ConPTY sets the pace): {SESSIONS} x {MIB} MiB in {base:.2f} s without phones ({statistics.median(r['MBps'] for r in flat_runs['without']):.1f} MB/s), {with_:.2f} s with {PHONES} ({slower:+.1f} %); "
           f"daemon CPU {statistics.median(r['cpu_s'] for r in flat_runs['without']):.1f} s -> {statistics.median(r['cpu_s'] for r in flat_runs['with']):.1f} s; "
           f"{statistics.median(r['frames_per_phone_per_s'] for r in flat_runs['with']):.1f} frames/s/phone of {statistics.median(r['avg_frame_kB'] for r in flat_runs['with']):.1f} kB")
+    print("event-loop lag with the phones and the printers (no outside stress): " + "; ".join(
+        f"run {i + 1}: p99 {x['lag_p99_ms']} ms, p99.9 {x['lag_p999_ms']} ms over {x['probes']} probes, level {x['level']}" for i, x in enumerate(lag)))
     quiet_frames = sum(r["quiet_frames"] for runs in (steady_runs, flat_runs) for r in runs["with"])
     print(f"frames for the sessions nobody follows: {quiet_frames}")
     ok = quiet_frames == 0 and statistics.median(extra) <= 5

@@ -1,6 +1,6 @@
 /* Turns panel, undo preview and the files of a turn. */
 .turns { display: flex; flex-direction: column; min-height: 0; flex: 1; }
-.turns .explorer-tools { display: flex; gap: 6px; align-items: center; }
+.turns .explorer-tools { display: flex; flex-direction: row; gap: 6px; align-items: center; }
 .turns .explorer-tools select { flex: 1; min-width: 0; }
 .turns-list { flex: 1; overflow: auto; }
 .turns-notice { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin: 8px 12px; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-elev); font-size: 12px; color: var(--text-dim); }

@@ -134,11 +134,14 @@ pub enum Answer<'a> {
 }
 
 /// Why a typed answer or message was not written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnswerError {
     UnknownKey,
-    /// The prompt is gone, another one, or already answered (`not_waiting`, `moved`, `answered`).
+    /// The prompt is gone, another one, or answered by someone not remembered (`not_waiting`,
+    /// `moved`, `answered`).
     Stale(&'static str),
+    /// That wait was answered, by this one.
+    Answered(Resolution),
     /// A prompt is shown and the text was not forced.
     Prompt,
 }
@@ -180,7 +183,81 @@ pub struct ScreenView {
     pub title: Option<String>,
 }
 
-pub type ClientTx = tokio::sync::mpsc::UnboundedSender<Outgoing>;
+/// Where a client's messages from the daemon wait. The app and the CLI have an unbounded queue; a
+/// phone has a bounded one (`bounded_client_channel`): when it is full the message is dropped and
+/// the queue says so (`overflowed`), so a phone that cannot keep up is told to resync instead of the
+/// daemon holding a backlog for it.
+#[derive(Clone)]
+pub enum ClientTx {
+    Unbounded(tokio::sync::mpsc::UnboundedSender<Outgoing>),
+    Bounded { tx: tokio::sync::mpsc::Sender<Outgoing>, overflowed: Arc<std::sync::atomic::AtomicBool> },
+}
+
+/// The client is gone.
+#[derive(Debug)]
+pub struct Closed;
+
+impl ClientTx {
+    pub fn send(&self, message: Outgoing) -> Result<(), Closed> {
+        match self {
+            ClientTx::Unbounded(tx) => tx.send(message).map_err(|_| Closed),
+            ClientTx::Bounded { tx, overflowed } => match tx.try_send(message) {
+                Ok(()) => Ok(()),
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(Closed),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(dropped)) => {
+                    // What was counted for it will never be taken.
+                    if let Some(credit) = dropped.credit {
+                        credit.fetch_sub(dropped.data.len(), Ordering::Relaxed);
+                    }
+                    overflowed.store(true, Ordering::Relaxed);
+                    Ok(())
+                }
+            },
+        }
+    }
+}
+
+/// A queue without a limit, for the app and the CLI.
+pub fn client_channel() -> (ClientTx, tokio::sync::mpsc::UnboundedReceiver<Outgoing>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (ClientTx::Unbounded(tx), rx)
+}
+
+/// A queue of at most `cap` messages, and the flag that says one was dropped because it was full.
+pub fn bounded_client_channel(cap: usize) -> (ClientTx, tokio::sync::mpsc::Receiver<Outgoing>, Arc<std::sync::atomic::AtomicBool>) {
+    let (tx, rx) = tokio::sync::mpsc::channel(cap);
+    let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    (ClientTx::Bounded { tx, overflowed: overflowed.clone() }, rx, overflowed)
+}
+
+/// Who answered a wait: the desktop (`id` "desktop"), or a paired phone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct By {
+    pub id: String,
+    pub name: String,
+}
+
+impl By {
+    pub fn desktop() -> By {
+        By { id: "desktop".into(), name: "desktop".into() }
+    }
+
+    pub fn is_desktop(&self) -> bool {
+        self.id == "desktop"
+    }
+}
+
+/// An answered wait: by whom and when (ms since the epoch).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    pub by: By,
+    pub at: u64,
+}
+
+/// Waits whose answer is remembered per session, and for how long: a tap from a push that arrives
+/// late is told who answered it and when.
+const RESOLVED_KEPT: usize = 20;
+const RESOLVED_TTL_MS: u64 = 10 * 60 * 1000;
 
 pub fn json_out(value: &Value) -> Outgoing {
     Outgoing { data: Frame::json(value).encode().into(), credit: None }
@@ -275,6 +352,12 @@ struct Inner {
     /// The wait on the user that `waiting_since` names has been answered (typed into): a hook
     /// keeps saying `waiting` until its next report, and nothing may answer the same wait twice.
     answered_wait: bool,
+    /// The last waits answered, newest last (see `RESOLVED_KEPT`), by their `waiting_since`.
+    resolved: VecDeque<(u64, Resolution)>,
+    /// Who answered the wait that is open now (kept as long as it is, past the ring's ten minutes).
+    answered_now: Option<Resolution>,
+    /// Who the next write answers for (set by the answering paths just before they write).
+    typing_by: Option<By>,
 }
 
 struct PendingPrompt {
@@ -346,6 +429,9 @@ impl Session {
                 last_output: None,
                 interrupted: false,
                 answered_wait: false,
+                resolved: VecDeque::new(),
+                answered_now: None,
+                typing_by: None,
             }),
         })
     }
@@ -566,8 +652,15 @@ impl Session {
     }
 
     pub fn input(&self, bytes: Vec<u8>) {
+        self.input_by(bytes, By::desktop());
+    }
+
+    /// [`Self::input`] for `by`: if the session waits on the user, this is whose answer it is.
+    pub fn input_by(&self, bytes: Vec<u8>, by: By) {
         let mut g = self.inner.lock();
+        g.typing_by = Some(by);
         Self::write_input(&mut g, bytes);
+        g.typing_by = None;
     }
 
     fn write_input(g: &mut Inner, bytes: Vec<u8>) {
@@ -589,8 +682,15 @@ impl Session {
             // Typing answers a wait the agent reported (a hook outlives the answer); the
             // terminal's own mouse and query reports do not.
             if !is_terminal_report(&bytes) && g.activity.status(Instant::now()) == Status::Waiting {
+                // Only the first write answers the wait: whoever types into it later is not who answered.
+                let first = !g.answered_wait;
                 g.answered_wait = true;
+                let by = g.typing_by.take().unwrap_or_else(By::desktop);
+                if first {
+                    Self::note_resolved(g, by);
+                }
             }
+            g.typing_by = None;
             g.activity.last_input = Some(Instant::now());
             g.last_activity = now_millis();
             g.activity.bell = None;
@@ -609,8 +709,14 @@ impl Session {
     /// `waiting_since` and nobody has answered that wait — checked and written under one lock, so
     /// nothing can answer it in between. Refused with why: not waiting any more, a different
     /// prompt, or already answered.
-    fn answer_bytes(&self, waiting_since: Option<u64>, bytes: Vec<u8>) -> Result<Typed, AnswerError> {
+    fn answer_bytes(&self, waiting_since: Option<u64>, bytes: Vec<u8>, by: By) -> Result<Typed, AnswerError> {
         let mut g = self.inner.lock();
+        // A wait answered before says who answered it, whatever the session is doing now.
+        let now = now_millis();
+        g.resolved.retain(|(_, r)| now.saturating_sub(r.at) < RESOLVED_TTL_MS);
+        if let Some((_, resolution)) = waiting_since.and_then(|w| g.resolved.iter().rev().find(|(since, _)| *since == w)) {
+            return Err(AnswerError::Answered(resolution.clone()));
+        }
         if g.activity.status(Instant::now()) != Status::Waiting || g.waiting_since.is_none() {
             return Err(AnswerError::Stale("not_waiting"));
         }
@@ -618,10 +724,26 @@ impl Session {
             return Err(AnswerError::Stale("moved"));
         }
         if g.answered_wait {
-            return Err(AnswerError::Stale("answered"));
+            // Past the ring's ten minutes the open wait still knows who answered it.
+            return Err(g.answered_now.clone().map_or(AnswerError::Stale("answered"), AnswerError::Answered));
         }
+        g.typing_by = Some(by);
         Self::write_input(&mut g, bytes);
         Ok(Self::typed_marker(&g))
+    }
+
+    /// Remembers that the current wait was answered by `by`.
+    fn note_resolved(g: &mut Inner, by: By) {
+        let Some(since) = g.waiting_since else { return };
+        let at = now_millis();
+        g.resolved.retain(|(_, r)| at.saturating_sub(r.at) < RESOLVED_TTL_MS);
+        if g.resolved.iter().all(|(s, _)| *s != since) {
+            g.resolved.push_back((since, Resolution { by: by.clone(), at }));
+            g.answered_now = Some(Resolution { by, at });
+        }
+        while g.resolved.len() > RESOLVED_KEPT {
+            g.resolved.pop_front();
+        }
     }
 
     /// The one way a person answers the prompt a session waits on from a surface that is not its
@@ -629,13 +751,18 @@ impl Session {
     /// still waits on the prompt named by `waiting_since`, then `enter` follows after the agent's
     /// Enter delay (see [`Self::enter_if`]).
     pub fn answer(self: &Arc<Self>, waiting_since: Option<u64>, answer: Answer<'_>, enter: bool) -> Result<(), AnswerError> {
+        self.answer_by(waiting_since, answer, enter, By::desktop())
+    }
+
+    /// [`Self::answer`] on behalf of `by`, who is told apart from whoever answers next.
+    pub fn answer_by(self: &Arc<Self>, waiting_since: Option<u64>, answer: Answer<'_>, enter: bool, by: By) -> Result<(), AnswerError> {
         let bytes = match answer {
             Answer::Key("esc") => b"\x1b".to_vec(),
             Answer::Key("enter") => b"\r".to_vec(),
             Answer::Key(_) => return Err(AnswerError::UnknownKey),
             Answer::Text(text) => typed_text(text).into_bytes(),
         };
-        let typed = self.answer_bytes(waiting_since, bytes)?;
+        let typed = self.answer_bytes(waiting_since, bytes, by)?;
         if enter {
             self.enter_later(typed);
         }
@@ -645,7 +772,13 @@ impl Session {
     /// Types a message on the prompt line. Refused while a prompt is shown (the text would go to
     /// its dialog) unless `force`. The caller sends Enter with [`Self::enter_if`] after
     /// `ENTER_DELAY`, waiting itself so that the next message does not run into this one's Enter.
+    #[cfg(test)]
     pub fn type_message(&self, text: &str, force: bool) -> Result<Typed, AnswerError> {
+        self.type_message_by(text, force, By::desktop())
+    }
+
+    /// [`Self::type_message`] for `by` (see [`Self::input_by`]).
+    pub fn type_message_by(&self, text: &str, force: bool, by: By) -> Result<Typed, AnswerError> {
         let mut g = self.inner.lock();
         if !force && g.screen_prompt.is_some() {
             return Err(AnswerError::Prompt);
@@ -659,6 +792,7 @@ impl Session {
         } else {
             body.replace('\n', "\r").into_bytes()
         };
+        g.typing_by = Some(by);
         Self::write_input(&mut g, bytes);
         Ok(Self::typed_marker(&g))
     }
@@ -863,6 +997,7 @@ impl Session {
         // `waiting` (a second notice of the same request) is not.
         if status != Status::Waiting {
             g.answered_wait = false;
+            g.answered_now = None;
             g.waiting_since = None;
         }
     }
@@ -1022,6 +1157,7 @@ impl Session {
         };
         if status != Status::Waiting {
             g.answered_wait = false;
+            g.answered_now = None;
         }
         // A remote view shows the prompt and the wait too, which change without any output.
         if before.is_some_and(|b| b != (g.waiting_since, g.screen_prompt.clone())) {
@@ -1463,9 +1599,89 @@ mod tests {
         let (s, rx) = fake::running(1, "s1", "claude");
         let since = fake::wait_on_user(&s);
         assert_eq!(s.answer(Some(since), Answer::Text("1"), false), Ok(()));
-        // A second tap, from this device or another: the wait was answered.
-        assert_eq!(s.answer(Some(since), Answer::Text("1"), false), Err(AnswerError::Stale("answered")));
+        // A second tap, from this device or another: the wait was answered, by the desktop.
+        assert_eq!(answered_by(s.answer(Some(since), Answer::Text("1"), false)), Some("desktop".to_string()));
         assert_eq!(rx.writes(), vec![b"1".to_vec()], "only the first answer was typed");
+    }
+
+    /// Who the error says answered, when it says that.
+    fn answered_by(result: Result<(), AnswerError>) -> Option<String> {
+        match result {
+            Err(AnswerError::Answered(r)) => Some(r.by.name),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_late_answer_is_told_who_answered_and_when() {
+        let (s, rx) = fake::running(1, "s1", "claude");
+        let since = fake::wait_on_user(&s);
+        let phone = By { id: "d1".into(), name: "Pixel".into() };
+        assert_eq!(s.answer_by(Some(since), Answer::Text("1"), false, phone.clone()), Ok(()));
+        let after = now_millis();
+        let late = s.answer_by(Some(since), Answer::Text("2"), false, By { id: "d2".into(), name: "iPad".into() });
+        let Err(AnswerError::Answered(r)) = late else { panic!("{late:?}") };
+        assert_eq!((r.by, r.at <= after), (phone, true));
+        // Still told after the agent moved on and asked again: the wait it answered is remembered.
+        s.set_hook_status(Status::Working, false);
+        std::thread::sleep(Duration::from_millis(3));
+        let second = fake::wait_on_user(&s);
+        assert_ne!(since, second);
+        assert_eq!(answered_by(s.answer(Some(since), Answer::Text("3"), false)), Some("Pixel".to_string()));
+        assert_eq!(rx.writes(), vec![b"1".to_vec()]);
+    }
+
+    #[test]
+    fn an_open_wait_knows_who_answered_it_after_the_ring_has_forgotten() {
+        let (s, _rx) = fake::running(1, "s1", "claude");
+        let since = fake::wait_on_user(&s);
+        let by = By { id: "d1".into(), name: "Pixel".into() };
+        s.input_by(b"1".to_vec(), by.clone());
+        s.inner.lock().resolved.clear();
+        let late = s.answer_by(Some(since), Answer::Text("2"), false, By { id: "d2".into(), name: "iPad".into() });
+        let Err(AnswerError::Answered(r)) = late else { panic!("{late:?}") };
+        assert_eq!(r.by, by);
+        // Once the agent moves on there is nothing to say about it any more.
+        s.set_hook_status(Status::Working, false);
+        assert!(s.inner.lock().answered_now.is_none());
+    }
+
+    #[test]
+    fn the_first_to_answer_stays_the_one_who_did_past_the_rings_ten_minutes() {
+        let (s, _rx) = fake::running(1, "s1", "claude");
+        let since = fake::wait_on_user(&s);
+        let first = By { id: "d1".into(), name: "Pixel".into() };
+        s.input_by(b"1".to_vec(), first.clone());
+        // The ring has forgotten the wait; someone else types into it (it is still open) and asks.
+        s.inner.lock().resolved.clear();
+        s.input_by(b"2".to_vec(), By { id: "d2".into(), name: "iPad".into() });
+        s.input(b"3".to_vec());
+        let late = s.answer_by(Some(since), Answer::Text("4"), false, By { id: "d3".into(), name: "Tab".into() });
+        let Err(AnswerError::Answered(r)) = late else { panic!("{late:?}") };
+        assert_eq!(r.by, first, "the later keys did not take the credit");
+        assert!(s.inner.lock().resolved.is_empty(), "and left no entry of their own");
+    }
+
+    #[test]
+    fn the_last_twenty_answered_waits_are_remembered() {
+        let (s, _rx) = fake::running(1, "s1", "claude");
+        let mut waits = Vec::new();
+        for _ in 0..(RESOLVED_KEPT + 3) {
+            let since = fake::wait_on_user(&s);
+            assert_eq!(s.answer(Some(since), Answer::Text("1"), false), Ok(()));
+            waits.push(since);
+            s.set_hook_status(Status::Working, false);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(s.inner.lock().resolved.len(), RESOLVED_KEPT);
+        // The oldest are forgotten: all that is known of them is that they are gone.
+        assert_eq!(s.answer(Some(waits[0]), Answer::Text("x"), false), Err(AnswerError::Stale("not_waiting")));
+        assert!(answered_by(s.answer(Some(*waits.last().unwrap()), Answer::Text("x"), false)).is_some());
+        // And nothing is remembered past ten minutes.
+        for (_, r) in s.inner.lock().resolved.iter_mut() {
+            r.at -= RESOLVED_TTL_MS + 1;
+        }
+        assert_eq!(s.answer(Some(*waits.last().unwrap()), Answer::Text("x"), false), Err(AnswerError::Stale("not_waiting")));
     }
 
     #[test]
@@ -1475,7 +1691,7 @@ mod tests {
         let since = fake::wait_on_user(&s);
         s.input(b"1".to_vec());
         assert_eq!(s.info().status, Status::Waiting, "the hook still says so");
-        assert_eq!(s.answer(Some(since), Answer::Text("1"), false), Err(AnswerError::Stale("answered")));
+        assert_eq!(answered_by(s.answer(Some(since), Answer::Text("1"), false)), Some("desktop".to_string()));
         assert_eq!(rx.writes(), vec![b"1".to_vec()]);
 
         // What the terminal view reports on its own is not an answer.
@@ -1494,14 +1710,14 @@ mod tests {
         // The agent works on, then asks again.
         s.inner.lock().activity.on_hook(Status::Working, false, Instant::now());
         s.tick(Instant::now());
-        assert_eq!(s.answer(Some(first), Answer::Text("1"), false), Err(AnswerError::Stale("not_waiting")));
+        assert!(answered_by(s.answer(Some(first), Answer::Text("1"), false)).is_some(), "the first wait was answered");
         std::thread::sleep(Duration::from_millis(3));
         let second = fake::wait_on_user(&s);
         assert_ne!(first, second);
-        assert_eq!(s.answer(Some(first), Answer::Text("1"), false), Err(AnswerError::Stale("moved")), "an answer to the old prompt");
+        assert!(answered_by(s.answer(Some(first), Answer::Text("1"), false)).is_some(), "an answer to the old prompt");
         assert_eq!(s.answer(Some(second), Answer::Text("2"), false), Ok(()));
         assert_eq!(rx.writes(), vec![b"1".to_vec(), b"2".to_vec()]);
-        assert_eq!(s.answer(Some(second), Answer::Text("2"), false), Err(AnswerError::Stale("answered")));
+        assert!(answered_by(s.answer(Some(second), Answer::Text("2"), false)).is_some());
     }
 
     #[test]
@@ -1569,12 +1785,12 @@ mod tests {
         s.tick(Instant::now());
         let second = s.info().waiting_since.expect("waiting again");
         assert_ne!(first, second);
-        assert_eq!(s.answer(Some(first), Answer::Text("1"), false), Err(AnswerError::Stale("moved")));
+        assert!(answered_by(s.answer(Some(first), Answer::Text("1"), false)).is_some());
         assert_eq!(s.answer(Some(second), Answer::Text("2"), false), Ok(()));
         assert_eq!(rx.writes(), vec![b"1".to_vec(), b"2".to_vec()]);
         // A second notice of the same request is the same wait, and stays answered.
         s.set_hook_status(Status::Waiting, false);
-        assert_eq!(s.answer(Some(second), Answer::Text("2"), false), Err(AnswerError::Stale("answered")));
+        assert!(answered_by(s.answer(Some(second), Answer::Text("2"), false)).is_some());
     }
 
     #[test]

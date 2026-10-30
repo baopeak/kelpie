@@ -1,7 +1,7 @@
 /* Settings → Agent setup */
 .as-page { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .as-tabs { display: flex; align-items: center; gap: 4px; border-bottom: 1px solid var(--border); padding-bottom: 6px; flex-wrap: wrap; }
-.as-tab { background: none; border: 1px solid transparent; border-radius: 6px; padding: 4px 10px; color: var(--text-dim); font: 12.5px var(--font-ui); cursor: pointer; }
+.as-tab { background: none; border: 1px solid transparent; border-radius: 6px; padding: 6px 12px; color: var(--text-dim); font: 12.5px var(--font-ui); cursor: pointer; }
 .as-tab:hover { background: var(--bg-hover); color: var(--text); }
 .as-tab.on { color: var(--text); border-color: var(--border); background: var(--bg-active); font-weight: 600; }
 .as-spacer { flex: 1; }
@@ -10,7 +10,7 @@
 .as-agent-name { font-weight: 600; }
 .as-file { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); min-width: 0; }
 .as-file-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.as-path { font-family: var(--mono, monospace); font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.as-path { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
 .as-chip { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
 .as-chip.user { color: var(--working); border-color: var(--working); }
 .as-chip.project { color: var(--waiting); border-color: var(--waiting); }
@@ -21,9 +21,9 @@
 .as-server-line { display: flex; align-items: center; gap: 10px; }
 .as-server-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .as-server-name { font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
-.as-cmd { font-family: var(--mono, monospace); font-size: 11.5px; padding: 3px 6px; border-radius: 4px; background: var(--bg); white-space: pre-wrap; word-break: break-all; align-self: flex-start; max-width: 100%; }
+.as-cmd { font-family: var(--font-mono); font-size: 11.5px; padding: 3px 6px; border-radius: 4px; background: var(--bg); white-space: pre-wrap; word-break: break-all; align-self: flex-start; max-width: 100%; }
 .as-cmd.big { font-size: 12px; padding: 6px 8px; align-self: stretch; }
-.as-env { font-family: var(--mono, monospace); font-size: 11px; color: var(--text-faint); word-break: break-all; }
+.as-env { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); word-break: break-all; }
 .as-copy { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 6px; background: var(--bg); }
 .as-targets { display: flex; flex-wrap: wrap; gap: 6px 14px; }
 .as-check { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; }
@@ -35,13 +35,13 @@
 .as-untrusted { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--waiting); border-radius: 6px; }
 .as-untrusted-head { font-size: 12px; }
 .as-run { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
-.as-run code { font-family: var(--mono, monospace); font-size: 11.5px; padding: 3px 6px; border-radius: 4px; background: var(--bg); white-space: pre-wrap; word-break: break-all; }
+.as-run code { font-family: var(--font-mono); font-size: 11.5px; padding: 3px 6px; border-radius: 4px; background: var(--bg); white-space: pre-wrap; word-break: break-all; }
 .as-diff { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .as-diff-head { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
-.as-diff-head code { font-family: var(--mono, monospace); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.as-diff-head code { font-family: var(--font-mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .as-add { color: var(--working); }
 .as-del { color: var(--danger); }
-.as-lines { margin: 0; max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); font-family: var(--mono, monospace); font-size: 11.5px; user-select: text; }
+.as-lines { margin: 0; max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); font-family: var(--font-mono); font-size: 11.5px; user-select: text; }
 .as-line { padding: 0 8px; white-space: pre; }
 .as-line.add { background: color-mix(in srgb, var(--working) 16%, transparent); }
 .as-line.del { background: color-mix(in srgb, var(--danger) 16%, transparent); }
@@ -57,5 +57,5 @@
 .as-card { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); }
 .as-page .text-input { width: auto; flex: 1; min-width: 120px; }
 .as-uv { display: flex; align-items: baseline; gap: 8px; font-size: 12px; padding-left: 8px; }
-.as-uv code { font-family: var(--mono, monospace); font-size: 11.5px; }
+.as-uv code { font-family: var(--font-mono); font-size: 11.5px; }
 .as-uv span:nth-child(2) { flex: 1; min-width: 0; word-break: break-all; }

@@ -51,7 +51,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let id = next_client_id();
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outgoing>();
+    let (out_tx, mut out_rx) = crate::session::client_channel();
     daemon.register_client(id, out_tx.clone());
 
     let writer = tokio::spawn(async move {
