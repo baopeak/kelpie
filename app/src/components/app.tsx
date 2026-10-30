@@ -18,7 +18,7 @@ import { NewSessionMenu } from "./new-session-menu";
 import { Welcome } from "./welcome";
 import { ContextMenuHost } from "./context-menu";
 import { ImageLightbox } from "./image-lightbox";
-import { SavedReplyDialog } from "./bookmarks-panel";
+import { bookmarks } from "../lib/chat-bookmarks";
 import { FloatingTerminal } from "./floating-terminal";
 import { LayoutMenuHost } from "./layout-menu";
 import { RunsPage } from "./runs-page";
@@ -47,6 +47,7 @@ import { initNotifySync } from "../lib/notify-sync";
 import { initLimits } from "../lib/limits";
 
 const Board = lazy(() => import("./board").then((m) => ({ default: m.Board })));
+const SavedReplyDialog = lazy(() => import("./bookmarks-panel").then((m) => ({ default: m.SavedReplyDialog })));
 const FinishDialog = lazy(() => import("./finish-dialog"));
 const ReviewWithDialog = lazy(() => import("./review-with-dialog"));
 const TryDialog = lazy(() => import("./try-dialog"));
@@ -183,7 +184,7 @@ export function App() {
       </Show>
       <RootUserDialogHost />
       <ContextMenuHost />
-      <SavedReplyDialog />
+      <Show when={bookmarks.shown()}><SavedReplyDialog /></Show>
       <ImageLightbox />
       <LayoutMenuHost />
       <MobileApprovals />

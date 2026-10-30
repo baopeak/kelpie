@@ -520,21 +520,33 @@ open (`pending`) and that can still take it (its stdin is open). `answer` is san
 A line is at most 16 KiB: above that only the verdict stays. A request over 1 MiB is not tracked,
 so its answer is not recorded and after a replay its card says "No longer needed". ACP's
 `cancelled`, which a stop sends for a permission, writes no line; the `{"action":"cancel"}` it sends
-for an elicitation does, as it cannot be told from the person's own Cancel. A stop answers only
-what is open and came live: a card only seen in a replay stays the person's to answer.
-`ChatController` applies the line ahead of the adapter
+for an elicitation does, as it cannot be told from the person's own Cancel. A stop answers what is
+still open, also a card a replay showed, since the agent is waiting on it; one answered or expired is
+left alone. `ChatController` applies the line ahead of the adapter
 (`Adapter.describeAnswer` puts it in the card's words) and it never reaches an agent: a replayed
 answer only changes what a card shows. An older daemon writes none, and its cards say what they
 did; an older app's adapters ignore the type. Level 20 skips 18 and 19, which belong to the phone
-work on other branches. A line over 2 MiB (`PICTURE_LINE_MAX`) loses the bytes of the pictures in
+work on other branches. Claude 2.1.314 shrinks a picture before it echoes it (a 4 MB picture came
+back in a 680 KB line), so a replay usually shows the picture from the log. As a safety net, a line
+over 2 MiB (`PICTURE_LINE_MAX`) loses the bytes of the pictures in
 the person's message before it is logged or sent to anyone attached, because one 5 MB picture would
 evict most of the 12 MiB log, and a line over 4 MiB (`MAX_LINE`) would be replaced by a notice and
 take its words with it. That covers a Claude `user` line (the echo, or an image in a tool's result)
 and an ACP `user_message_chunk`; Codex logs carry paths, not bytes. Each picture keeps its type, with
 `data` empty and `kelpie_stripped` holding the length it had; everything else stays, and a shorter
 line is logged byte for byte. The transcript then shows the picture from its path if it was attached
-in this window, and otherwise a named placeholder. Adapters in `app/src/chat` map each
-dialect to one item model (user, assistant, thinking, tool card with diff, permission, result):
+in this window, and otherwise a named placeholder. A path in a log or a history is agent output:
+`chat/chat-images.ts` reads one only if it was attached in this window or lies directly in the
+composer's temp folder, and `fs_read_image` refuses network paths in every spelling (`\\`, `//`,
+`/\`, `\??\`). A replay feeds the log in one Solid `batch`, as loading a history does: what watches
+the whole list would otherwise run for every line. Adapters in `app/src/chat` map each
+dialect to one item model (user, assistant, thinking, tool card with diff, permission, result).
+The agent map (`chat/agent-runs.ts`) is derived from the same stream, so a replay rebuilds it: on
+Claude Code a run's status comes from its `task_*` events and never from its tool row, because the
+Agent tool returns `async_launched` as soon as the agent is launched. Links in a reply carry their
+target in `data-href`, read on click by `parseChatLink` alone (`chat/chat-links.ts`): DOMPurify
+empties `file:` and `a.ts:42` hrefs, and `CHAT_SANITIZE` also drops what could navigate the window or
+cover its buttons (`form`, `area`, `style`, `class`). Nothing an agent names is ever launched.
 
 | Agent | Process | Protocol |
 |---|---|---|

@@ -6,7 +6,6 @@ import { Explorer } from "./explorer";
 import { GitPanel } from "./git-panel";
 import { HistoryPanel } from "./history-panel";
 import { IssuesPanel } from "./issues-panel";
-import { BookmarksPanel } from "./bookmarks-panel";
 import { bookmarks } from "../lib/chat-bookmarks";
 import { CHECKPOINT_API } from "../lib/checkpoint-api";
 import { PROCESS_API } from "../lib/process-api";
@@ -14,6 +13,7 @@ import { inReview } from "../lib/review-queue";
 import type { Project } from "../lib/types";
 import { t } from "../lib/i18n";
 
+const BookmarksPanel = lazy(() => import("./bookmarks-panel").then((m) => ({ default: m.BookmarksPanel })));
 const TurnTimeline = lazy(() => import("./turn-timeline"));
 const ReviewPanel = lazy(() => import("./review-panel"));
 const PlanPanel = lazy(() => import("./plan-panel"));

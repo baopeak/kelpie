@@ -16,7 +16,6 @@ import { openTable, stableEnd } from "../chat/streaming-markdown";
 import { describeTool, diffStats, unifiedFiles } from "../chat/tool-view";
 import type { Project } from "../lib/types";
 import { Icon } from "./icons";
-import { AgentMapDialog } from "./agent-map";
 import { ChatComposer } from "./chat-composer";
 import { BookmarkButton, CopyButton, copyText } from "./chat-copy";
 import { openChatFile, openChatLink } from "./chat-open-file";
@@ -38,6 +37,7 @@ const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)"
 
 /** The turn panel's undo preview, loaded the first time a chat offers an undo. */
 const UndoDialog = lazy(() => import("./turn-timeline").then((m) => ({ default: m.UndoDialog })));
+const AgentMapDialog = lazy(() => import("./agent-map").then((m) => ({ default: m.AgentMapDialog })));
 
 // The code block copy button's icons (our own constant markup); `.copied` shows the tick.
 const COPY_ICONS =
