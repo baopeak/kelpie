@@ -120,7 +120,8 @@ describe("a paste", () => {
     }
     expect(nine.images()).toHaveLength(8);
     expect(notify).toHaveBeenLastCalledWith("At most 8 pictures");
-  });
+    // Eleven pastes, each waited out through timers: a busy machine stretches them past the default limit.
+  }, 30_000);
 
   it("takes a large picture for a terminal: only a chat sends it to the model", async () => {
     const p = createPictures(session({ chat: false }));

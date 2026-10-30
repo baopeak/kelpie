@@ -1,5 +1,6 @@
 // Chat-mode state shared by all agent adapters. Adapters translate their wire protocol
 // (Claude stream-json, Codex app-server, ACP) into these items; the UI only knows items.
+import { createSignal } from "solid-js";
 import { createStore, produce, type SetStoreFunction } from "solid-js/store";
 import { t } from "../lib/i18n";
 import type { AnswerOutcome, ChatTransport } from "./transport";
@@ -226,6 +227,24 @@ export function emptyChatState(conversationId: string | null = null): ChatState 
   return {
     items: [], commands: [], skills: [], settings: [], busy: false, model: null, conversationId, ready: false, exited: false, status: null,
     busySince: null, queue: [], queuePaused: false, plan: null, usage: null, tasks: [],
+  };
+}
+
+/** One mount's attaches. A controller outlives its mounts and `ready` with it: while this mount's attach
+ *  is on its way, `state` is still what the last mount left, about to be reset. `whole`: the transcript
+ *  is what this mount's newest attach brought. */
+export function mountAttach(ctrl: ChatController) {
+  const [attached, setAttached] = createSignal(false);
+  let newest = 0;
+  return {
+    attach(handle: number) {
+      const mine = ++newest;
+      setAttached(false);
+      void ctrl.attach(handle).then(() => {
+        if (mine === newest) setAttached(true);
+      });
+    },
+    whole: () => attached() && ctrl.state.ready,
   };
 }
 

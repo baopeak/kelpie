@@ -118,6 +118,10 @@ features earlier (running sessions stop for a moment; agents that can resume con
      date), also after a restart or when you come back to the chat later. Hover a reply to copy
      it, or a code block to copy its code. Hover a prompt whose turn changed files for
      *Undo this turn…*: the same previewed undo as the Turns panel.
+   - The bookmark next to a finished reply's copy button saves it to the *Saved* tab of the right
+     panel, per project and newest first, also after its session is gone. Click one to go to the
+     reply; if it is no longer in a chat, its saved text opens in a dialog to read and copy. A reply
+     over 64 KiB is saved cut short, and a project holds up to 500.
    - Background work Claude left running (background commands, subagents) is listed above the
      message field as *In the background*; click it for each task's status.
    - Messages sent while the agent works wait above the message field and go when its turn ends.

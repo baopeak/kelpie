@@ -7,6 +7,7 @@ import { App } from "./components/app";
 import { installKeymap } from "./lib/commands";
 import { startNavHistory } from "./lib/nav-history";
 import { store } from "./lib/store";
+import { bookmarks } from "./lib/chat-bookmarks";
 import { platformInfo } from "./lib/ipc";
 
 // Paint the last used theme before the state file is read (no dark flash in light mode).
@@ -102,6 +103,7 @@ void Promise.all([document.fonts.load('13px "JetBrains Mono"'), document.fonts.l
   .catch(() => {})
   .finally(() => {
     void store.init();
+    void bookmarks.load();
     render(() => <App />, document.getElementById("root")!);
   });
 

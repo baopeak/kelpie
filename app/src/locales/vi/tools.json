@@ -415,5 +415,18 @@
   "{n} pictures": "{n} ảnh",
   "This picture is no longer available": "Ảnh này không còn nữa",
   "Fit to the window": "Vừa cửa sổ",
-  "Actual size": "Kích thước thật"
+  "Actual size": "Kích thước thật",
+  "Save this reply": "Lưu câu trả lời này",
+  "Remove from saved": "Bỏ khỏi mục đã lưu",
+  "Saved replies are read-only: the file could not be read": "Câu trả lời đã lưu chỉ đọc được: không đọc được tệp",
+  "Saved": "Đã lưu",
+  "No saved replies yet. Use the bookmark on a reply to keep it here.": "Chưa có câu trả lời nào được lưu. Bấm dấu trang trên một câu trả lời để giữ nó ở đây.",
+  "Saved replies could not be read, so this list is read-only. chat-bookmarks.json in the data folder was left as it is: fix or remove it, then restart Kelpie.": "Không đọc được các câu trả lời đã lưu nên danh sách này chỉ đọc. Tệp chat-bookmarks.json trong thư mục dữ liệu được giữ nguyên: hãy sửa hoặc xóa nó rồi khởi động lại Kelpie.",
+  "Saved replies could not be read: {error}. chat-bookmarks.json was left as it is, and nothing can be saved until it is fixed and Kelpie restarted.": "Không đọc được các câu trả lời đã lưu: {error}. Tệp chat-bookmarks.json được giữ nguyên, và không lưu được gì cho đến khi nó được sửa và Kelpie khởi động lại.",
+  "the file has an unexpected shape": "tệp có cấu trúc không đúng",
+  "Could not update saved replies: {error}": "Không cập nhật được các câu trả lời đã lưu: {error}",
+  "This project already has {n} saved replies: remove one first.": "Dự án này đã có {n} câu trả lời được lưu: hãy gỡ bớt một câu trước.",
+  "Removed from saved": "Đã bỏ khỏi mục đã lưu",
+  "Cut short": "Đã cắt bớt",
+  "This reply was longer than 64 KiB: only the start of it was saved.": "Câu trả lời này dài hơn 64 KiB: chỉ phần đầu được lưu."
 }

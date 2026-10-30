@@ -21,7 +21,7 @@ Kelpie (Tauri app)                        kelpied (session daemon, one per user)
 
 | Process | Lifetime | Owns |
 |---|---|---|
-| `Kelpie` | while the window is open | layout, settings (`app-state.json`), views |
+| `Kelpie` | while the window is open | layout, settings (`app-state.json`), saved chat replies (`chat-bookmarks.json`), views |
 | `kelpied` | until stopped explicitly (or logoff) | PTYs, agent processes, terminal state, `sessions.json`, snapshots |
 | `kelpie-stt` | while dictation is used (exits after 10 idle minutes) | the loaded speech model, the microphone stream |
 | agent CLIs | per session | — |
@@ -30,6 +30,12 @@ Kelpie (Tauri app)                        kelpied (session daemon, one per user)
 unknown format or one that cannot be read is first copied to
 `app-state.<label>-<time>.bak.json`; if that copy fails, or the file comes from a newer Kelpie,
 the app runs without saving rather than overwrite it.
+
+`chat-bookmarks.json` holds saved replies with their full text, so they outlast their session. Every
+change is applied by a native command to the file as it is at that moment and written atomically, so
+another running Kelpie's changes, a restored copy and entries this build does not understand all stay.
+A file that cannot be read is an error: it stays byte-identical, the feature is read-only until the next
+start, and the user is told once.
 
 Closing or crashing the app never stops a session. If `kelpied` itself stops, sessions that
 were running are restored *interrupted* with their last screen; the app resumes them when they

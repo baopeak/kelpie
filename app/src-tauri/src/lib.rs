@@ -158,6 +158,280 @@ mod backup_tests {
     }
 }
 
+/// Replies the user saved from chats, with their full text: they outlast the session, and
+/// `app-state.json` is rewritten too often to carry them.
+const BOOKMARKS_FILE: &str = "chat-bookmarks.json";
+
+const MAX_BOOKMARKS_PER_PROJECT: usize = 500;
+/// A temporary file this old was left by a crash, not by a write under way.
+const BOOKMARKS_STALE_TEMP: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+#[tauri::command]
+async fn bookmarks_load() -> CmdResult<Vec<Value>> {
+    crate::fs_ops::blocking(|| {
+        let dir = kelpie_proto::data_dir();
+        if let Some(cutoff) = std::time::SystemTime::now().checked_sub(BOOKMARKS_STALE_TEMP) {
+            bookmarks_sweep_temps(&dir, cutoff);
+        }
+        bookmarks_read(&dir)
+    })
+    .await
+}
+
+/// Removes temporary files of writes that never finished (see `write_file_atomic`), older than `cutoff`.
+fn bookmarks_sweep_temps(dir: &std::path::Path, cutoff: std::time::SystemTime) {
+    let prefix = format!(".{BOOKMARKS_FILE}.");
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|at| at < cutoff);
+        if old && name.starts_with(&prefix) && name.ends_with(".tmp") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn bookmarks_read(dir: &std::path::Path) -> CmdResult<Vec<Value>> {
+    match std::fs::read(dir.join(BOOKMARKS_FILE)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(err),
+        // As with the app state: only a missing file means "none yet". A file that is corrupt or
+        // locked is an error, and the UI then keeps its hands off it.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(err(e)),
+    }
+}
+
+/// The file after a change. `at_limit`: `add` was refused, its project has this many.
+#[derive(serde::Serialize, Debug, PartialEq)]
+struct BookmarksApplied {
+    items: Vec<Value>,
+    at_limit: Option<usize>,
+}
+
+/// Applies one change to the file as it is now, never to what a window remembers: another running
+/// Kelpie's changes, a restored copy and items this build does not understand all stay.
+#[tauri::command]
+async fn bookmarks_apply(add: Option<Value>, remove: Option<String>) -> CmdResult<BookmarksApplied> {
+    crate::fs_ops::blocking(move || bookmarks_change(&kelpie_proto::data_dir(), add, remove.as_deref())).await
+}
+
+fn bookmarks_change(dir: &std::path::Path, add: Option<Value>, remove: Option<&str>) -> CmdResult<BookmarksApplied> {
+    // Within this process. Across processes the window is the few milliseconds of this function.
+    static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    // An error here also stops a file that went bad after the UI read it: it is never replaced.
+    let mut items = bookmarks_read(dir)?;
+    let before = items.len();
+    if let Some(id) = remove {
+        items.retain(|b| b.get("id").and_then(Value::as_str) != Some(id));
+    }
+    let mut changed = items.len() != before;
+    let mut at_limit = None;
+    if let Some(item) = add {
+        if !items.iter().any(|b| same_bookmark(b, &item)) {
+            if items.iter().filter(|b| b.get("projectId") == item.get("projectId")).count() >= MAX_BOOKMARKS_PER_PROJECT {
+                at_limit = Some(MAX_BOOKMARKS_PER_PROJECT);
+            } else {
+                items.push(item);
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        std::fs::create_dir_all(dir).map_err(err)?;
+        config_transfer::write_file_atomic(&dir.join(BOOKMARKS_FILE), &serde_json::to_vec_pretty(&items).map_err(err)?)?;
+    }
+    Ok(BookmarksApplied { items, at_limit })
+}
+
+/// The same bookmark, or the same reply saved already (from another window, say): one anchor in one
+/// session or conversation, as the UI's `isSaved` sees it.
+fn same_bookmark(a: &Value, b: &Value) -> bool {
+    let text = |v: &'_ Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
+    let same = |key: &str| text(a, key).is_some() && text(a, key) == text(b, key);
+    same("id") || (same("anchor") && (same("sessionId") || same("conversationId")))
+}
+
+#[cfg(test)]
+mod bookmarks_tests {
+    use super::{bookmarks_change, bookmarks_read, bookmarks_sweep_temps, BOOKMARKS_FILE, MAX_BOOKMARKS_PER_PROJECT};
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    fn item(id: &str, project: &str, anchor: &str) -> Value {
+        json!({ "id": id, "projectId": project, "sessionId": format!("session-of-{id}"), "anchor": anchor, "text": "café\n```\ncode\n```", "at": 1 })
+    }
+
+    fn ids(items: &[Value]) -> Vec<&str> {
+        items.iter().map(|b| b["id"].as_str().unwrap_or("?")).collect()
+    }
+
+    fn dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kelpie-bookmarks-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn a_missing_file_is_an_empty_list() {
+        assert_eq!(bookmarks_read(&dir("missing")).unwrap(), Vec::<serde_json::Value>::new());
+    }
+
+    #[test]
+    fn what_is_added_reads_back_and_goes_again_with_nothing_left_beside_it() {
+        let dir = dir("round-trip");
+        let done = bookmarks_change(&dir, Some(item("a", "p", "1")), None).unwrap();
+        assert_eq!(done.items, [item("a", "p", "1")]);
+        assert_eq!(done.at_limit, None);
+        bookmarks_change(&dir, Some(item("b", "p", "2")), None).unwrap();
+        assert_eq!(bookmarks_read(&dir).unwrap(), [item("a", "p", "1"), item("b", "p", "2")]);
+
+        let done = bookmarks_change(&dir, None, Some("a")).unwrap();
+        assert_eq!(done.items, [item("b", "p", "2")]);
+        assert_eq!(bookmarks_read(&dir).unwrap(), done.items);
+        assert_eq!(names(&dir), [BOOKMARKS_FILE]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_change_starts_from_the_file_so_another_process_and_a_restored_copy_stay() {
+        let dir = dir("others");
+        bookmarks_change(&dir, Some(item("mine", "p", "1")), None).unwrap();
+        // Another Kelpie, or a backup put back, while this one remembers only "mine".
+        let theirs = serde_json::to_vec(&[item("theirs", "p", "2"), item("restored", "q", "3")]).unwrap();
+        std::fs::write(dir.join(BOOKMARKS_FILE), theirs).unwrap();
+
+        let done = bookmarks_change(&dir, Some(item("new", "p", "4")), None).unwrap();
+        assert_eq!(ids(&done.items), ["theirs", "restored", "new"]);
+        let done = bookmarks_change(&dir, None, Some("mine")).unwrap();
+        assert_eq!(ids(&done.items), ["theirs", "restored", "new"]);
+        assert_eq!(bookmarks_read(&dir).unwrap(), done.items);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn items_this_build_does_not_understand_stay_as_they_are() {
+        let dir = dir("unknown");
+        let unknown = [json!({ "kind": "from-a-later-build", "nested": { "a": [1, 2] } }), json!(42), json!("text"), json!({ "id": 7 })];
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(BOOKMARKS_FILE), serde_json::to_vec(&unknown).unwrap()).unwrap();
+
+        bookmarks_change(&dir, Some(item("a", "p", "1")), None).unwrap();
+        let done = bookmarks_change(&dir, None, Some("a")).unwrap();
+        assert_eq!(done.items, unknown);
+        assert_eq!(bookmarks_read(&dir).unwrap(), unknown);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_full_project_refuses_one_more_and_keeps_every_one_it_has() {
+        let dir = dir("limit");
+        let full: Vec<Value> = (0..MAX_BOOKMARKS_PER_PROJECT).map(|i| item(&format!("old{i}"), "p", &format!("a{i}"))).collect();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(BOOKMARKS_FILE);
+        std::fs::write(&path, serde_json::to_vec(&full).unwrap()).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+
+        let done = bookmarks_change(&dir, Some(item("one-too-many", "p", "x")), None).unwrap();
+        assert_eq!(done.at_limit, Some(MAX_BOOKMARKS_PER_PROJECT));
+        assert_eq!(done.items, full);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "nothing to write");
+
+        // Another project has its own count, and with one gone there is room again.
+        assert_eq!(bookmarks_change(&dir, Some(item("elsewhere", "q", "x")), None).unwrap().at_limit, None);
+        let done = bookmarks_change(&dir, Some(item("fits-now", "p", "x")), Some("old0")).unwrap();
+        assert_eq!(done.at_limit, None);
+        assert!(ids(&done.items).contains(&"fits-now") && !ids(&done.items).contains(&"old0"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_same_reply_is_not_saved_twice_also_by_two_windows() {
+        let dir = dir("twice");
+        let first = json!({ "id": "a", "projectId": "p", "sessionId": "s1", "conversationId": "c1", "anchor": "1" });
+        bookmarks_change(&dir, Some(first.clone()), None).unwrap();
+        let path = dir.join(BOOKMARKS_FILE);
+        let bytes = std::fs::read(&path).unwrap();
+
+        for same in [
+            json!({ "id": "a", "projectId": "p", "sessionId": "other", "anchor": "other" }),
+            json!({ "id": "b", "projectId": "p", "sessionId": "s1", "anchor": "1" }),
+            json!({ "id": "c", "projectId": "p", "sessionId": "s2", "conversationId": "c1", "anchor": "1" }),
+        ] {
+            assert_eq!(bookmarks_change(&dir, Some(same), None).unwrap().items, [first.clone()]);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "nothing to write");
+
+        for other in [
+            json!({ "id": "d", "projectId": "p", "sessionId": "s1", "anchor": "2" }),
+            json!({ "id": "e", "projectId": "p", "sessionId": "s2", "conversationId": "c2", "anchor": "1" }),
+            json!({ "id": "f", "projectId": "p", "sessionId": "s3", "anchor": "1" }),
+        ] {
+            bookmarks_change(&dir, Some(other), None).unwrap();
+        }
+        assert_eq!(ids(&bookmarks_read(&dir).unwrap()), ["a", "d", "e", "f"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn changes_at_the_same_moment_do_not_lose_each_other() {
+        let dir = dir("threads");
+        std::thread::scope(|scope| {
+            for i in 0..16 {
+                let dir = &dir;
+                scope.spawn(move || bookmarks_change(dir, Some(item(&format!("t{i}"), "p", &format!("a{i}"))), None).unwrap());
+            }
+        });
+        assert_eq!(bookmarks_read(&dir).unwrap().len(), 16);
+        assert_eq!(names(&dir), [BOOKMARKS_FILE]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_old_temporary_files_of_this_file_are_swept() {
+        let dir = dir("sweep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        let write = |name: &str, at: SystemTime| {
+            std::fs::write(dir.join(name), "x").unwrap();
+            std::fs::File::options().write(true).open(dir.join(name)).unwrap().set_modified(at).unwrap();
+        };
+        write(".chat-bookmarks.json.1-2-3.tmp", old);
+        write(".chat-bookmarks.json.4-5-6.tmp", SystemTime::now());
+        write(BOOKMARKS_FILE, old);
+        write(".other.json.1-2-3.tmp", old);
+        write("chat-bookmarks.json.tmp", old);
+        write(".chat-bookmarks.json.bak", old);
+
+        bookmarks_sweep_temps(&dir, SystemTime::now() - Duration::from_secs(24 * 60 * 60));
+        let mut left = names(&dir);
+        left.sort();
+        assert_eq!(left, [".chat-bookmarks.json.4-5-6.tmp", ".chat-bookmarks.json.bak", ".other.json.1-2-3.tmp", BOOKMARKS_FILE, "chat-bookmarks.json.tmp"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_file_errors_and_stays_byte_identical() {
+        let dir = dir("corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(BOOKMARKS_FILE);
+        // Cut short, not JSON, empty, and valid JSON that is no list.
+        for bytes in [&b"[{\"id\":\"a\",\"te"[..], b"\xff\xfe not json \r\n", b"", b"{\"id\":\"a\"}"] {
+            std::fs::write(&path, bytes).unwrap();
+            bookmarks_read(&dir).unwrap_err();
+            bookmarks_change(&dir, Some(item("new", "p", "1")), None).unwrap_err();
+            bookmarks_change(&dir, None, Some("a")).unwrap_err();
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(names(&dir), [BOOKMARKS_FILE]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[tauri::command]
 fn platform_info() -> Value {
     serde_json::json!({
@@ -259,6 +533,8 @@ pub fn run() {
             state_load,
             state_save,
             state_backup,
+            bookmarks_load,
+            bookmarks_apply,
             platform_info,
             redact_batch,
             config_transfer::config_export,

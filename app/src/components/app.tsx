@@ -18,6 +18,7 @@ import { NewSessionMenu } from "./new-session-menu";
 import { Welcome } from "./welcome";
 import { ContextMenuHost } from "./context-menu";
 import { ImageLightbox } from "./image-lightbox";
+import { SavedReplyDialog } from "./bookmarks-panel";
 import { FloatingTerminal } from "./floating-terminal";
 import { LayoutMenuHost } from "./layout-menu";
 import { RunsPage } from "./runs-page";
@@ -182,6 +183,7 @@ export function App() {
       </Show>
       <RootUserDialogHost />
       <ContextMenuHost />
+      <SavedReplyDialog />
       <ImageLightbox />
       <LayoutMenuHost />
       <MobileApprovals />

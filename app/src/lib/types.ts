@@ -149,7 +149,7 @@ export interface Tab {
   name?: string;
 }
 
-export type RightPanel = "files" | "git" | "search" | "history" | "issues" | "turns" | "review" | "plan" | "processes" | null;
+export type RightPanel = "files" | "git" | "search" | "history" | "issues" | "turns" | "review" | "plan" | "saved" | "processes" | null;
 
 export interface Workspace {
   tabs: Tab[];

@@ -3,19 +3,20 @@ import { Portal } from "solid-js/web";
 import DOMPurify from "dompurify";
 import { sessionLabel, store } from "../lib/store";
 import { CHECKPOINT_API } from "../lib/checkpoint-api";
+import { bookmarks, findReply } from "../lib/chat-bookmarks";
 import { listTurns, turnsByMessage } from "../lib/checkpoints";
 import { findPane } from "../lib/layout";
 import { getController, switchToTerminal } from "../chat/mode-switch";
 import { CHAT_SANITIZE, chatMarkdownHtml, fileRefInCode, linkifyText } from "../chat/chat-links";
 import { imageUrl } from "../chat/chat-images";
-import type { ChatItem, UserImage } from "../chat/chat-model";
+import { mountAttach, type ChatItem, type UserImage } from "../chat/chat-model";
 import { PINNED_REACH, lastPromptBefore, pinnedPromptId, renderedPrompts } from "../chat/pinned-prompt";
 import { openTable, stableEnd } from "../chat/streaming-markdown";
 import { describeTool, diffStats, unifiedFiles } from "../chat/tool-view";
 import type { Project } from "../lib/types";
 import { Icon } from "./icons";
 import { ChatComposer } from "./chat-composer";
-import { CopyButton, copyText } from "./chat-copy";
+import { BookmarkButton, CopyButton, copyText } from "./chat-copy";
 import { openChatFile, openChatLink } from "./chat-open-file";
 import { clock, type FileChange, fullClock, PermissionCard, ThinkingRow, ToolRow, ToolRun, TurnFiles } from "./chat-rows";
 import { openLightbox } from "./image-lightbox";
@@ -105,7 +106,7 @@ const onMarkdownClick = (project?: Project) => (e: MouseEvent) => {
   if (ref) void openChatFile(project!, ref);
 };
 
-function Markdown(props: { text: string; project?: Project }) {
+export function Markdown(props: { text: string; project?: Project }) {
   return <MarkdownHtml class="msg-assistant" text={props.text} project={props.project} onClick={onMarkdownClick(props.project)} />;
 }
 
@@ -234,10 +235,11 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
 
   // Attach only when the handle or the daemon connection changes — not on every status tick.
   const target = createMemo(() => (store.connected() ? session()?.handle ?? null : null));
+  const transcript = mountAttach(ctrl);
   onMount(() => {
-    createEffect(on(target, (handle) => handle != null && void ctrl.attach(handle)));
+    createEffect(on(target, (handle) => handle != null && transcript.attach(handle)));
     // The daemon dropped us for falling behind: re-attach (full replay).
-    const onResync = (e: Event) => (e as CustomEvent).detail === props.sessionId && target() != null && void ctrl.attach(target()!);
+    const onResync = (e: Event) => (e as CustomEvent).detail === props.sessionId && target() != null && transcript.attach(target()!);
     window.addEventListener("kelpie:chat-resync", onResync);
     // A phone answered one of the agent's requests first.
     const onResolved = (e: Event) => {
@@ -421,6 +423,17 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
     };
     bottomFrame = requestAnimationFrame(step);
   };
+  // A saved reply asks to be shown: looked up once this mount has the whole transcript, whether this
+  // chat was open already or was only just mounted for it.
+  createEffect(() => {
+    const want = bookmarks.pendingReveal();
+    if (want?.sessionId !== props.sessionId || !transcript.whole()) return;
+    const reply = findReply(ctrl.state.items, want.bookmark.anchor);
+    bookmarks.settleReveal(want, !!reply);
+    // A frame later: the rows of a replay, and the tab just brought forward, need laying out first.
+    if (reply) jumpFrame = requestAnimationFrame(() => scrollToItem(reply.id));
+  });
+
   /** An approval nobody answered yet: the pill leads to it. */
   const pending = createMemo(() => ctrl.state.items.find((i): i is Extract<ChatItem, { kind: "permission" }> => i.kind === "permission" && !i.resolved));
   const toPending = () => scrollToItem(pending()!.id, { block: "center" });
@@ -548,7 +561,10 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                   {(it) => (
                     <div class="msg-reply" classList={{ streaming: !!(it() as any).streaming }} data-item={it().id}>
                       <div class="msg-meta">
-                        <Show when={!(it() as any).streaming && (it() as any).text}><CopyButton text={(it() as any).text} /></Show>
+                        <Show when={!(it() as any).streaming && (it() as any).text}>
+                          <CopyButton text={(it() as any).text} />
+                          <BookmarkButton text={(it() as any).text} sessionId={props.sessionId} conversationId={ctrl.state.conversationId} project={props.project} />
+                        </Show>
                         <Stamp at={it().at} />
                       </div>
                       <Show when={(it() as any).streaming} fallback={<Markdown text={(it() as any).text} project={props.project} />}><StreamingMarkdown text={(it() as any).text} project={props.project} /></Show>

@@ -35,6 +35,8 @@ const paths: Record<string, () => JSX.Element> = {
   minimize: () => <path d="M6 3v3H3M10 3v3h3M13 10h-3v3M3 10h3v3" />,
   pin: () => <><path d="M6 2.5h4l-.5 4 2 2v1.5h-7V8.5l2-2z" /><path d="M8 10v4" /></>,
   copy: () => <><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M3.5 10.5h-1v-8h8v1" /></>,
+  bookmark: () => <path d="M4.5 2.5h7v11L8 10.8l-3.5 2.7z" />,
+  bookmarkFilled: () => <path d="M4.5 2.5h7v11L8 10.8l-3.5 2.7z" fill="currentColor" />,
   history: () => <><path d="M3 8a5 5 0 1 0 1.5-3.6" /><path d="M3 2.5v3h3" /><path d="M8 5.5V8l2 1.5" /></>,
   back: () => <path d="M9.5 4L5.5 8l4 4" />,
   forward: () => <path d="M6.5 4l4 4-4 4" />,
