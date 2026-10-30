@@ -1,7 +1,7 @@
 ---
 phase: 1
 title: "Transcript polish"
-status: pending
+status: completed
 priority: P2
 effort: "4h"
 dependencies: []

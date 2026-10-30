@@ -39,7 +39,7 @@ Already good, do not rebuild:
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | [Transcript polish](./phase-01-transcript-polish.md) | Pending |
+| 1 | [Transcript polish](./phase-01-transcript-polish.md) | Completed |
 | 2 | [Open files from links](./phase-02-open-files-from-links.md) | Pending |
 | 3 | [Pinned prompt](./phase-03-pinned-prompt.md) | Pending |
 | 4 | [Persist question answers](./phase-04-persist-question-answers.md) | Pending |
@@ -65,12 +65,12 @@ Phone client UI (`app/phone/`, which must still build and pass tests), terminal 
 
 ## Execution rules
 
-- **Start in your own worktree.** `D:\Works\Kelpie` is on `phone/phase3-link` with about 130 uncommitted paths (phone phase 3, kelpie-link, has no other copy; on 2026-10-30 they included `styles.css`, `icons.tsx`, `store.ts`, `types.ts`). Never switch branches, stash, reset or clean there. Run `git worktree list`, then create a worktree on a new branch `feat/chat-view-parity` from `origin/master`. Do not wait for phone phase 3. Mind the disk rule below: share one Rust target directory (`CARGO_TARGET_DIR`) instead of building a new one in the worktree.
+- **Start in your own worktree.** `D:\Works\Kelpie` is on `phone/phase3-link` with about 130 uncommitted paths (phone phase 3, kelpie-link, has no other copy; on 2026-10-30 they included `styles.css`, `icons.tsx`, `store.ts`, `types.ts`). Never switch branches, stash, reset or clean there. Run `git worktree list`, then create a worktree on a new branch `feat/chat-view-parity` from `origin/master`. Do not wait for phone phase 3.
 - **This plan's files are untracked in `D:\Works\Kelpie`,** so they are not on `origin/master`. Copy `plans/261030-0830-chat-view-parity/` into the new worktree and commit it there first. Do not remove the original until the phone session has finished.
 - **Expect overlap at merge time.** Phone phases 2b and 3 touch `app/src/chat/*`, `app/src/lib/store.ts` and `mobile-settings.tsx`; 2b is committed locally on `phone/phase2b-chat-send`. Before each phase, check `git log origin/master` for what has landed, and rebase rather than copy phone code across.
 - **Commits:** one commit per phase, conventional format, stage by explicit path, no push or PR unless asked. No plan or phase numbers in code, tests or commit messages.
 - **Review:** each phase ends with tests, an independent code review and fixes, then the commit. Do not trim this loop to go faster.
-- **Disk is tight:** `CARGO_INCREMENTAL=0`, no extra Rust target directories, no installer builds; test in dev.
+- **Disk is tight:** `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`, no installer builds; test in dev. This worktree builds into its own `CARGO_TARGET_DIR=C:\kelpie-chat-target`: two worktrees sharing a target get the same Cargo fingerprints and silently run each other's binaries. Delete it when done.
 - **Daemon safety:** use only the isolated dev daemon (`bash scripts/dev-daemon.sh run`, endpoint `kelpie-dev`). Never stop or mutate the default daemon. Set `KELPIE_ENDPOINT` inside any test script's own process.
 - **Claude test sessions:** exit them cleanly. Hard-killing them turns off the user's fullscreen TUI.
 - **Strings:** every visible string goes through `t()`, with a Vietnamese entry (chat strings in `app/src/locales/vi/tools.json`, composer strings in `composer.json`).
