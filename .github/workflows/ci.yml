@@ -124,8 +124,9 @@ jobs:
           img=$(ls target/release/bundle/appimage/*.AppImage | head -1)
           dpkg-deb --info "$deb"
           dpkg-deb --contents "$deb" | tee deb-contents.txt
-          for f in ./usr/bin/kelpie ./usr/bin/kelpied ./usr/bin/kelpie-stt ./usr/share/applications/Kelpie.desktop; do
-            grep -q " $f\$" deb-contents.txt || { echo "missing from the .deb: $f"; exit 1; }
+          # dpkg-deb lists paths with or without a leading "./" depending on how the archive was built.
+          for f in usr/bin/kelpie usr/bin/kelpied usr/bin/kelpie-stt usr/share/applications/Kelpie.desktop; do
+            grep -Eq " (\./)?$f\$" deb-contents.txt || { echo "missing from the .deb: $f"; exit 1; }
           done
           sudo dpkg -i "$deb" || { sudo apt-get install -f -y && sudo dpkg -i "$deb"; }
           dpkg -s kelpie | grep -q '^Status: install ok installed'
