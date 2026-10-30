@@ -23,16 +23,6 @@ jobs:
       # Linux: WebKitGTK, tray and SVG libraries for Tauri, D-Bus for the Secret Service keyring, ALSA for
       # the speech helper's microphone, linuxdeploy's needs for the AppImage, and the WebDriver + X server
       # the smoke test drives the app with.
-      # The Ubuntu image keeps ~14 GB free, and Linux debug builds carry their full DWARF inside target/:
-      # the app's test build alone filled the disk until the runner stopped answering. Drop toolchains
-      # this job never uses (Android, .NET, Haskell, CodeQL) and keep line tables only.
-      - name: Linux disk space
-        if: runner.os == 'Linux'
-        run: |
-          df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
-          df -h /
       - name: Linux system packages
         if: runner.os == 'Linux'
         run: |
@@ -46,56 +36,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Rust tests (protocol, daemon, app backend, speech helper)
-        if: runner.os != 'Linux'
         run: cargo test -p kelpie-proto -p kelpied -p kelpie -p kelpie-stt
-      # Linux: the same tests, one crate per step under a time limit, so a stuck test names itself.
-      - name: Rust tests on Linux (protocol)
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        timeout-minutes: 15
-        shell: bash
-        run: s=0; cargo test -p kelpie-proto || s=$?; df -h / | tail -1; du -sh target; exit $s
-      - name: Rust tests on Linux (daemon)
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        timeout-minutes: 25
-        shell: bash
-        run: s=0; cargo test -p kelpied || s=$?; df -h / | tail -1; du -sh target; exit $s
-      - name: Rust tests on Linux (app backend)
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        timeout-minutes: 25
-        shell: bash
-        run: |
-          # Watchdog: memory, disk and process count every 20 s, with the biggest processes.
-          ( while sleep 20; do
-              echo "== $(date +%T) mem $(free -m | awk 'NR==2{print $3"/"$2" MB"}') disk $(df -h / | awk 'NR==2{print $4" free"}') procs $(ps -e --no-headers | wc -l)"
-              ps -eo pid,ppid,rss,etime,comm --sort=-rss | head -5
-            done ) &
-          watchdog=$!
-          s=0
-          timeout -k 20 15m cargo test -p kelpie --no-run || s=$?
-          echo "build exit $s"
-          if [ "$s" = 0 ]; then
-            ulimit -u 3000
-            ulimit -v 12000000
-            timeout -k 20 8m cargo test -p kelpie -- --test-threads=2 2>&1 | tee app-tests.log || s=$?
-          fi
-          kill $watchdog || true
-          df -h / | tail -1; du -sh target
-          exit $s
-      - uses: actions/upload-artifact@v4
-        if: always() && runner.os == 'Linux'
-        with:
-          name: linux-app-tests-log
-          path: app-tests.log
-          if-no-files-found: ignore
-      - name: Rust tests on Linux (speech helper)
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        timeout-minutes: 20
-        shell: bash
-        run: s=0; cargo test -p kelpie-stt || s=$?; df -h / | tail -1; du -sh target; exit $s
       - name: Frontend typecheck
         working-directory: app
         run: |
@@ -148,14 +89,22 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 20
         shell: bash
+        env:
+          # No GPU under Xvfb: WebKitGTK's DMA-BUF renderer and compositing can leave the window blank there.
+          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+          WEBKIT_DISABLE_COMPOSITING_MODE: "1"
         run: |
           set -euo pipefail
           cargo install tauri-driver --locked
           python -m pip install psutil
           mkdir -p smoke
+          # Cold start and idle numbers are recorded (artifact `linux-smoke`) and shown next to the Linux
+          # baseline once one is committed; they are not gated yet.
+          baseline=()
+          if [ -f scripts/perf/linux-smoke-baseline.json ]; then baseline=(--baseline scripts/perf/linux-smoke-baseline.json); fi
           dbus-run-session -- xvfb-run -a -s "-screen 0 1600x1000x24" \
             python scripts/e2e/boot_smoke.py smoke target/release/kelpie \
-              --out smoke/linux-smoke.json --baseline scripts/perf/linux-smoke-baseline.json
+              --out smoke/linux-smoke.json "${baseline[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: kelpie-${{ matrix.os }}
