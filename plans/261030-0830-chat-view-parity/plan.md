@@ -44,7 +44,7 @@ Already good, do not rebuild:
 | 3 | [Pinned prompt](./phase-03-pinned-prompt.md) | Completed |
 | 4 | [Persist question answers](./phase-04-persist-question-answers.md) | Completed |
 | 5 | [Paste and zoom images](./phase-05-paste-and-zoom-images.md) | Completed |
-| 6 | [Response bookmarks](./phase-06-response-bookmarks.md) | Pending |
+| 6 | [Response bookmarks](./phase-06-response-bookmarks.md) | Completed |
 | 7 | [Agent map](./phase-07-agent-map.md) | Pending |
 | 8 | [Docs and final verification](./phase-08-docs-and-final-verification.md) | Pending |
 

@@ -15,6 +15,18 @@ A dialog listing every subagent of the conversation as a tree: live status, runn
 
 Today only the transcript's "Agent" rows and the "In the background" strip exist. The strip drops tasks when they end (`applyTaskEvent`). Nested agents are skipped on purpose (`parent_task_id`, `owned_by_subagent`), and subagent messages return early (`m.parent_tool_use_id`, at `case "stream_event"` and `case "assistant"/"user"`).
 
+## Captured stream (claude 2.1.314, 2026-10-31)
+
+Step 1 below is done. Two parallel agents, one nested, one background, on the small model; the raw log is `D:\kelpie-chat-e2e\scratch\agents-stream.jsonl` (test content only). **It changes this plan:**
+
+- **The Agent tool's result says nothing about the agent.** Every top-level call returned at once with `tool_use_result: { isAsync, status: "async_launched", agentId, description, resolvedModel, prompt, outputFile, canReadOutputFile, canContinueAgent }`, even without `run_in_background`, so its tool row is `done` while the agent still runs. There are no `totalTokens`/`totalDurationMs` fields. A run's status therefore comes from task events, never from its tool item; `mergeRuns` must not prefer the item's status for a run it knows from task events. A nested call with `run_in_background: false` had a plain `tool_result` with no `tool_use_result`.
+- `task_started`: `task_id`, `tool_use_id`, `description`, `subagent_type`, `prompt`, `is_backgrounded` (true also for agents the tool launched in parallel), `spawn_depth`, `task_type: "local_agent"`, and `parent_task_id` on a nested one. Filter on `task_type === "local_agent"`; background shells have another type.
+- `task_progress`: `task_id`, `tool_use_id`, `usage: { total_tokens, tool_uses, duration_ms }`, `last_tool_name`, and a `description` that is **the current activity** ("Reading notes.txt"), not the agent's name. Keep the name from `task_started`; show this one as its latest activity.
+- `task_notification`: `task_id`, `tool_use_id`, `status: "completed"`, `summary` (**the agent's final answer**), `output_file`, `usage`. This is the result shown in the details, and its usage is the final count. Other statuses (`failed`, `stopped`) were not seen: map known ones and show anything else as its text.
+- `task_updated`: `task_id`, `patch`, comes just before the notification. Ignorable.
+- A subagent's own tool calls arrive as `assistant` lines with `parent_tool_use_id` set to the Agent call's id. A nested Agent call appears the same way, before its `task_started`.
+- Order: the Agent `tool_use`, then `task_started`, then the tool's `tool_result`, then progress. `task_started` for a nested one can come after its parent's `task_progress`. A notification comes before the parent's final tool result.
+
 ## Requirements
 
 - Functional:
