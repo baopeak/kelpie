@@ -17,13 +17,14 @@ Architecture and protocol: [architecture.md](architecture.md).
   - **.deb** (Debian, Ubuntu and derivatives): `sudo apt install ./Kelpie_x.y.z_amd64.deb`; apt
     pulls in WebKitGTK. Kelpie is then `kelpie` on the PATH and in the applications menu.
 
-  Data lives in `$XDG_DATA_HOME/Kelpie` (usually `~/.local/share/Kelpie`): settings, logs,
-  the session daemon's socket and its runtime copy (an AppImage's files exist only while the app
-  runs, so the daemon runs from a copy there). Saved secrets (SSH passwords, notification and
+  Data lives in `$XDG_DATA_HOME/Kelpie` (usually `~/.local/share/Kelpie`, readable by you only):
+  settings, logs, the session daemon's socket and, for the AppImage, the copy of the session daemon
+  that runs (an AppImage's files exist only while the app runs). Terminals and agents get your
+  desktop's environment, not the AppImage's own GTK setup. Saved secrets (SSH passwords, notification and
   issue-tracker tokens) need a Secret Service — GNOME Keyring, KWallet or another
   `org.freedesktop.secrets` provider, unlocked; without one, saving a secret fails with a message
   that says so and nothing is stored anywhere else. **Keep computer awake** uses
-  `systemd-inhibit` (systemd's logind); on a system without it the setting has no effect and the
+  `systemd-inhibit` (systemd's logind) to stop automatic sleep, never a suspend you choose; on a system without it the setting has no effect and the
   daemon log says why. Desktop notifications go through the desktop's notification service.
 
 Agents are not bundled: install the CLIs you use (`claude`, `codex`, `omp`) as usual. Kelpie
@@ -417,7 +418,7 @@ prompt**; for a terminal it is a startup command.
   project for N minutes are stopped; they resume their conversation when you open them
   again. *Sleep* in a project's menu does the same at once.
 - **Keep computer awake**: off, while an agent works, or always (status bar coffee icon). The
-  display may still turn off. Linux: through `systemd-inhibit` (idle and sleep).
+  display may still turn off. Linux: through `systemd-inhibit` (automatic idle sleep only; suspending from the menu still works).
 - **Prioritize visible terminals** (Settings → Agents, on by default, Windows): the terminal on
   screen gets the CPU first, so typing stays quick while other agents build and test or other
   programs keep the machine busy. Nothing else is slowed down.
