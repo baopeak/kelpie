@@ -45,7 +45,7 @@ Already good, do not rebuild:
 | 4 | [Persist question answers](./phase-04-persist-question-answers.md) | Completed |
 | 5 | [Paste and zoom images](./phase-05-paste-and-zoom-images.md) | Completed |
 | 6 | [Response bookmarks](./phase-06-response-bookmarks.md) | Completed |
-| 7 | [Agent map](./phase-07-agent-map.md) | Pending |
+| 7 | [Agent map](./phase-07-agent-map.md) | Completed |
 | 8 | [Docs and final verification](./phase-08-docs-and-final-verification.md) | Pending |
 
 Phases 6 and 7 use `scrollToItem` from phase 3. Phase 5 uses the user-message action row from phase 1. Phase 4 is the only one that changes the daemon.

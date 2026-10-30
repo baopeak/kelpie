@@ -1,7 +1,7 @@
 ---
 phase: 7
 title: "Agent map"
-status: pending
+status: completed
 priority: P2
 effort: "12h"
 dependencies: [3]
@@ -37,16 +37,16 @@ Step 1 below is done. Two parallel agents, one nested, one background, on the sm
   - Times tick while running and the dialog is open.
   - Click: details with type, status, duration, tokens, tool-use count, prompt, latest summary, activity list (recent tool calls), result (rendered markdown), and "Show in chat", which closes the dialog and scrolls to its row.
   - Esc: from details back to the list, then closes; never interrupts the agent. Use `window.addEventListener("keydown", fn, true)` with `stopPropagation`, as `context-menu.tsx` does: focus can return to the textarea, whose `onKeyDown` interrupts on Esc.
-  - Works for Claude fully. For Codex and ACP it lists what they report as `agent` category tools, without tokens.
+  - Works for Claude fully. For Codex it lists `collabAgentToolCall` items with `tool: spawnAgent` as `agent` category tools, without tokens. ACP has no agent kind in its `ToolKind`, so it does not apply there.
 - Non-functional:
   - Built only from messages already received, so a replayed log rebuilds the same map. Never sends anything to the agent.
   - Normal transcript and `state.tasks` unchanged (the strip stays as is, and its tests pass).
-  - `activity` capped at 200 entries per agent. Tool outputs not stored in the run; result comes from the transcript item.
+  - `activity` capped at 200 entries per agent. Tool outputs are not stored in the run. The result is the notification's `summary`; only a run without one falls back to its transcript item's output (never the launch notice).
   - No timer running when the dialog is closed.
 
 ## Architecture
 
-Data already exists. The schema in `claude-adapter.test.ts` (claude 2.1.310) shows `task_started` with `tool_use_id` and `task_type`, and `task_progress` with `usage: { total_tokens, tool_uses, duration_ms }` and `summary`; `task_notification` has `status`. Subagent messages arrive with `parent_tool_use_id`.
+Data already exists, as captured above: a run's name, type and prompt come from its Agent call and `task_started`, its numbers and current activity from `task_progress`, its end and answer from `task_notification`. Subagent messages arrive with `parent_tool_use_id`. An older stream (no `task_type`, or totals in `tool_use_result`) is read defensively: a missing number shows nothing.
 
 New pure module `chat/agent-runs.ts`:
 
@@ -55,25 +55,32 @@ export interface AgentRun {
   id: string;            // the Agent/Task tool_use id
   taskId?: string;
   parent?: string;       // parent run id
-  description: string;
+  parentTask?: string;   // parent_task_id, for a parent known only by its task
+  description: string;   // the name, from the call or task_started
   type?: string;         // subagent_type
   prompt?: string;
   status: "running" | "done" | "error" | "stopped";
+  statusText?: string;   // an ended status not known here, as the agent put it
   at?: number; endedAt?: number;
   tokens?: number; toolUses?: number; durationMs?: number;
-  summary?: string;
-  activity: { name: string; target: string; status: "running" | "done" | "error" }[];
+  summary?: string;      // the current activity, from task_progress
+  result?: string;       // the final answer, from task_notification
+  activity: { id: string; name: string; target: string; status: "running" | "done" | "error" }[];
 }
-export function startRun(list, tool, parent?): …;
-export function applyRunTaskEvent(list, m): …;
-export function applySubagentMessage(list, m): …;
-export function mergeRuns(runs: AgentRun[], items: ChatItem[]): AgentRun[]; // adds agent-category tool items with no run
+// These change the list in place, inside a store's `produce`: nothing copies it per message.
+export function startRun(list, tool, parent?, at?): AgentRun;
+export function applyRunTaskEvent(list, m, at?): void;
+export function applyRunResult(list, block, meta, at?): void;
+export function applySubagentMessage(list, m, at?): void;
+export function mergeRuns(runs: AgentRun[], items: ChatItem[], busy?: boolean, previous?: AgentRun[]): AgentRun[]; // adds agent-category tool items with no run; reuses `previous`'s objects
 export function runTree(runs): { run: AgentRun; children: … }[]; // sorted
+export function runDuration(run, now): number | undefined;
+export function runResult(run, output?): string | undefined;
 ```
 
-`ChatState` gains `agentRuns: AgentRun[]`, cleared by the same resets as `tasks` and on `/clear`. On agent exit, `running` becomes `stopped` (where `tasks` is emptied). The view reads `mergeRuns(state.agentRuns, state.items)`, so history-loaded conversations and other agents still list rows, and status of a top-level run prefers its tool item's status.
+`ChatState` gains `agentRuns: AgentRun[]`, cleared by the same resets as `tasks` and on `/clear`. On agent exit, `running` becomes `stopped` (where `tasks` is emptied). The view reads `mergeRuns(state.agentRuns, state.items, state.busy && !state.exited, previous)`, so history-loaded conversations (which have no task events, and so no runs) and other agents still list rows. `mergeRuns` never changes a run the list has: its status comes from task events, not from its tool item.
 
-Times: `AdapterContext` gets `now()`, which returns the replay clock while replaying and `Date.now()` otherwise. `at` and `endedAt` use it, or the "identical replay" test cannot hold. A replayed log has `kelpie_time` lines; history may have none, so times can be absent.
+Times: `AdapterContext` gets an optional `now()` (as `setClock`, so existing test contexts stand), which returns the replay clock while replaying and `Date.now()` otherwise. `at` and `endedAt` use it, or the "identical replay" test cannot hold. A replayed log has `kelpie_time` lines; history may have none, so times can be absent.
 
 ## Related Code Files
 
@@ -100,12 +107,12 @@ Check `app/phone/` builds: it uses `chat-model.ts`, and the new state field need
    - In `applyClaudeMessage`'s tool_use handling and in `stream_event`'s `content_block_start`: for `Task`/`Agent`, `startRun` with description, type and prompt from `input` (stream start has no input; the completed message fills it).
    - In `applyTaskEvent`: **before** its filters, feed `applyRunTaskEvent`. Keep the existing strip logic byte for byte.
    - At the `m.parent_tool_use_id` early returns: for `assistant` and `user`, call `applySubagentMessage` and then return as before. Skip `stream_event` deltas: completed messages are enough. A nested `Agent` tool_use makes a child run.
-   - On a top-level Agent `tool_result`: take tokens and duration from `tool_use_result` if the capture confirmed it; set `endedAt`.
-   - Only runs with a linked Agent tool. Background shells do not appear (filter `task_type` per the capture).
+   - On an Agent `tool_result`: it says nothing on 2.1.314. `async_launched` leaves the run running, and a plain result of a run with task events waits for the notification. For an older stream, `totalTokens`, `totalDurationMs` and `totalToolUseCount` are taken when present, and a result ends a run that has no task events, or that says so; an error ends any run still running. A conversation's history makes no runs: `mergeRuns` lists it by its rows.
+   - Only runs with a linked Agent tool: `task_type === "local_agent"` (or, with no type, a `subagent_type`) and a `tool_use_id`. Background shells and housekeeping tasks do not appear. A notification for an unknown task is ignored, as a shell's looks the same.
 4. **Dialog.** `AgentMapDialog` via `Portal` from `ChatBody` (as `UndoDialog`), using `.overlay` and `.modal`. List and detail are two states of one dialog.
-5. **Layout, CSS only:** two-column flex; root box vertically centred; children column with `border-left` connector and a `::before` tick for each card, using `var(--border-strong)`. Cards: `.agent-card`, a `<button>`, description with ellipsis and full text in `title`. Nested: same pattern indented inside the column. The list scrolls inside the modal (`max-height: 80vh`). Under 560 px, stack the root above the list. Dots reuse `.tdot` with `.running`, `.error` rules; add a grey `.stopped`.
+5. **Layout, CSS only:** two-column flex; root box vertically centred; children column with `border-left` connector and a `::before` tick for each card, using `var(--border-strong)`. Cards: `.agent-map-card` (`.agent-card` is Settings'), a `<button>`, description with ellipsis and full text in `title`. Nested: same pattern indented inside the column. The list scrolls inside the modal (`max-height: 80vh`). Under 560 px, stack the root above the list. Dots reuse `.tdot` with `.running`, `.error` rules; add a grey `.stopped`.
 6. **Helpers.** `formatTokens` (`90.9k`, `1.2M`), `formatDuration` (`3m 49s`, `99m 3s`), shared with `elapsed` in `chat-pane.tsx` if the output fits. Timer: one `setInterval` while open and something is running, cleared in `onCleanup`.
-7. **Details.** Fields as in Requirements. Prompt through `Clamped`, result through `Markdown` (phase 2's links work), from the tool item's `output`. "Show in chat" hides when the item is not found.
+7. **Details.** Fields as in Requirements. Prompt through `Clamped`, result through `Markdown` (phase 2's links work), from `runResult`. "Show in chat" hides when the item is not found.
 8. **Entry.** Chip in `composer-row`, next to the context meter, `data-testid`-free, using `.setting-btn` style; shows a pulse dot when something runs. Palette command in `commands.ts` next to `composer.open`, using `focusedSession`; notify if the focused session is not a chat. The dialog's state lives in `ChatBody`, so the command dispatches a `kelpie:chat-agent-map` window event with the session id, which `ChatBody` listens for, as it does for its other events.
 9. Run checks, then the real-app script below.
 
@@ -131,12 +138,12 @@ Check `app/phone/` builds: it uses `chat-model.ts`, and the new state field need
 - [ ] Nested agent appears under its parent.
 - [ ] Click: details are correct; "Show in chat" lands on the row, also inside a folded run or beyond the window.
 - [ ] Close and reopen the window: the map is the same (statuses, tokens), apart from what the log trim removed.
-- [ ] Codex or ACP session with an agent tool lists it, without tokens, and no errors.
+- [ ] Codex session that spawns an agent lists it, without tokens, and no errors. (ACP: not applicable, it has no agent kind.)
 - [ ] Transcript looks unchanged; with 50 runs the dialog scrolls smoothly and streaming is not slowed (perf gate).
 
 ## Risk Assessment
 
 - **Task event fields change between Claude versions.** The fields are read defensively, and a missing number shows nothing. Signal: blank tokens in the real app. Response: fall back to `tool_use_result`, then to none; do not parse transcripts.
-- **Log trim loses a run's start.** `applyRunTaskEvent` creates a run from `task_progress`'s `description` when unknown.
+- **Log trim loses a run's start.** `applyRunTaskEvent` creates a run from an unknown agent's `task_progress`, with a neutral name (`description` alone is its activity, shown as such) until the call, `task_started` or a subagent line's `task_description` gives one.
 - **Volume.** Subagent messages can be numerous. `applySubagentMessage` stores only a short target per tool call, and updates by index, not by copying the array of runs per message. Signal: a perf-gate regression during subagent-heavy streams. Response: batch updates per frame.
 - **Prompt and result text** are rendered through the same sanitizer as replies; prompts as plain text.
