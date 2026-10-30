@@ -79,15 +79,48 @@ fn run(rx: mpsc::Receiver<bool>) {
     }
 }
 
-/// Linux: a `systemd-inhibit … sleep infinity` child holds an idle + sleep inhibitor lock from
-/// logind for as long as it runs. It gets SIGTERM when this thread ends (`PR_SET_PDEATHSIG`), so a
-/// daemon that dies never leaves the computer awake; `systemd-inhibit` in turn takes its `sleep`
-/// down with it. Without systemd (or logind) the request is logged once and otherwise ignored.
+/// Linux: a `systemd-inhibit --what=idle … sleep infinity` child holds an idle inhibitor lock from
+/// logind for as long as it runs: like Windows' `ES_SYSTEM_REQUIRED`, it stops the computer going to
+/// sleep by itself, never a suspend the user asks for. It gets SIGTERM when this thread ends
+/// (`PR_SET_PDEATHSIG`), so a daemon that dies never leaves the computer awake; `systemd-inhibit` in
+/// turn takes its `sleep` down with it. Without systemd (or logind) the request is logged once and
+/// otherwise ignored. While a lock is held the child is looked at every few seconds, so a refusal
+/// that arrives late (a slow D-Bus) is reaped and logged too.
 #[cfg(target_os = "linux")]
 fn run(rx: mpsc::Receiver<bool>) {
     let mut child: Option<std::process::Child> = None;
     let mut warned = false;
-    while let Ok(hold) = rx.recv() {
+    let mut warn = |e: String| {
+        if !warned {
+            warned = true;
+            tracing::warn!("keep awake is unavailable: {e}");
+        } else {
+            tracing::debug!("keep awake: {e}");
+        }
+    };
+    loop {
+        // Nothing to look after while no lock is held: no timer then.
+        let msg = if child.is_some() {
+            match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(hold) => Some(hold),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(hold) => Some(hold),
+                Err(_) => break,
+            }
+        };
+        let Some(hold) = msg else {
+            if let Some(c) = child.as_mut() {
+                if let Some(why) = exited(c) {
+                    child = None;
+                    warn(why);
+                }
+            }
+            continue;
+        };
         if let Some(mut c) = child.take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -95,11 +128,7 @@ fn run(rx: mpsc::Receiver<bool>) {
         if hold {
             match inhibit() {
                 Ok(c) => child = Some(c),
-                Err(e) if !warned => {
-                    warned = true;
-                    tracing::warn!("keep awake is unavailable: {e}");
-                }
-                Err(e) => tracing::debug!("keep awake: {e}"),
+                Err(e) => warn(e),
             }
         }
     }
@@ -110,11 +139,10 @@ fn run(rx: mpsc::Receiver<bool>) {
 }
 
 #[cfg(any(target_os = "linux", test))]
-const INHIBIT_ARGS: &[&str] = &["--what=idle:sleep", "--who=Kelpie", "--why=An agent is working", "--mode=block", "sleep", "infinity"];
+const INHIBIT_ARGS: &[&str] = &["--what=idle", "--who=Kelpie", "--why=An agent is working", "--mode=block", "sleep", "infinity"];
 
 #[cfg(target_os = "linux")]
 fn inhibit() -> Result<std::process::Child, String> {
-    use std::io::Read as _;
     use std::os::unix::process::CommandExt as _;
     let parent = std::process::id() as libc::pid_t;
     let mut cmd = std::process::Command::new("systemd-inhibit");
@@ -139,21 +167,31 @@ fn inhibit() -> Result<std::process::Child, String> {
         std::io::ErrorKind::NotFound => "systemd-inhibit was not found (a system without systemd); the computer may sleep while agents work".to_string(),
         _ => format!("systemd-inhibit: {e}"),
     })?;
-    // It exits at once when logind refuses the lock (no session, no permission).
+    // It usually exits at once when logind refuses the lock (no session, no permission); a later
+    // refusal is caught by `run`.
     std::thread::sleep(std::time::Duration::from_millis(300));
+    match exited(&mut child) {
+        None => Ok(child),
+        Some(why) => Err(why),
+    }
+}
+
+/// Why the inhibitor is gone, once it has exited (it is reaped then); `None` while it holds the lock.
+#[cfg(target_os = "linux")]
+fn exited(child: &mut std::process::Child) -> Option<String> {
+    use std::io::Read as _;
     match child.try_wait() {
-        Ok(None) => Ok(child),
+        Ok(None) => None,
         Ok(Some(status)) => {
             let mut why = String::new();
             if let Some(mut err) = child.stderr.take() {
                 let _ = err.read_to_string(&mut why);
             }
-            Err(format!("systemd-inhibit exited ({status}): {}", why.trim()))
+            Some(format!("systemd-inhibit exited ({status}): {}", why.trim()))
         }
-        Err(e) => Err(format!("systemd-inhibit: {e}")),
+        Err(e) => Some(format!("systemd-inhibit: {e}")),
     }
 }
-
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn run(rx: mpsc::Receiver<bool>) {
     while rx.recv().is_ok() {}
@@ -162,9 +200,10 @@ fn run(rx: mpsc::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn linux_inhibitor_blocks_idle_and_sleep_until_it_is_stopped() {
+    fn linux_inhibitor_blocks_idle_sleep_only_until_it_is_stopped() {
         let args = super::INHIBIT_ARGS;
-        assert_eq!(&args[..4], ["--what=idle:sleep", "--who=Kelpie", "--why=An agent is working", "--mode=block"]);
+        // Idle only: a suspend the user picks from the menu is never blocked (as on Windows and macOS).
+        assert_eq!(&args[..4], ["--what=idle", "--who=Kelpie", "--why=An agent is working", "--mode=block"]);
         assert_eq!(&args[4..], ["sleep", "infinity"], "runs until killed");
     }
 
