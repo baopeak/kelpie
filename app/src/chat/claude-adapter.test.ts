@@ -57,13 +57,13 @@ describe("claudeArgs", () => {
 describe("a failed result", () => {
   it("shows the reason Claude gave, not only its subtype", () => {
     const { ctx, items } = harness();
-    createClaudeAdapter(ctx).onMessage({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["No conversation found with session ID: abc"], total_cost_usd: 0 });
+    createClaudeAdapter(ctx).onMessage({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["No conversation found with session ID: abc"], total_cost_usd: 0 }, "");
     expect(items()[0]).toMatchObject({ kind: "result", text: "Error: No conversation found with session ID: abc · $0.000" });
   });
 
   it("falls back to the subtype without a reason", () => {
     const { ctx, items } = harness();
-    createClaudeAdapter(ctx).onMessage({ type: "result", subtype: "error_during_execution", is_error: true, errors: [] });
+    createClaudeAdapter(ctx).onMessage({ type: "result", subtype: "error_during_execution", is_error: true, errors: [] }, "");
     expect(items()[0]).toMatchObject({ kind: "result", text: "Error: error_during_execution" });
   });
 });
