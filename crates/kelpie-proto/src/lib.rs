@@ -220,10 +220,11 @@ pub fn read_user_token(endpoint: &Endpoint) -> Option<String> {
 pub fn write_user_token(endpoint: &Endpoint, token: &str) -> io::Result<()> {
     let path = auth_token_path(endpoint);
     if let Some(dir) = path.parent() {
+        // A filesystem without Unix permissions only weakens the folder (the token file itself is 0600).
         if let Some(kelpie) = dir.parent() {
-            ensure_private_dir(kelpie)?;
+            let _ = ensure_private_dir(kelpie)?;
         }
-        ensure_private_dir(dir)?;
+        let _ = ensure_private_dir(dir)?;
     }
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -343,11 +344,14 @@ pub fn data_dir() -> std::path::PathBuf {
 }
 
 /// Creates `dir` (with missing parents) for this OS user only. Unix: mode 0700, as the XDG spec asks
-/// for its folders; an existing folder of ours that others may read is narrowed to 0700 (one owned
-/// by someone else is left alone). Windows: a plain create; the per-user profile is private already.
-pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
+/// for its folders; an existing folder of ours that others may read is narrowed to 0700. A folder
+/// owned by another user is refused: someone else could read or plant what Kelpie keeps there.
+/// When narrowing is not possible (a filesystem without Unix permissions, such as vfat or a CIFS
+/// share) the folder is still used and the returned warning says why. Windows: a plain create; the
+/// per-user profile is private already.
+pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<Option<String>> {
     if dir.as_os_str().is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     #[cfg(unix)]
     {
@@ -355,15 +359,27 @@ pub fn ensure_private_dir(dir: &std::path::Path) -> io::Result<()> {
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         let meta = std::fs::metadata(dir)?;
         // SAFETY: geteuid has no preconditions.
-        if meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o077 != 0 {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        let me = unsafe { libc::geteuid() };
+        if meta.uid() != me {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} belongs to another user (uid {}, not {me}): remove it, or point KELPIE_DATA_DIR or XDG_DATA_HOME at a folder of your own",
+                    dir.display(),
+                    meta.uid()
+                ),
+            ));
         }
-        Ok(())
+        if meta.mode() & 0o077 != 0 {
+            if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+                return Ok(Some(format!("{} stays readable by other users: its filesystem does not take Unix permissions ({e})", dir.display())));
+            }
+        }
+        Ok(None)
     }
     #[cfg(not(unix))]
-    std::fs::create_dir_all(dir)
+    std::fs::create_dir_all(dir).map(|()| None)
 }
-
 fn data_base() -> std::path::PathBuf {
     if cfg!(windows) {
         std::env::var("LOCALAPPDATA").map(Into::into).unwrap_or_else(|_| std::env::temp_dir())
@@ -665,10 +681,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("kelpie-private-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let fresh = root.join("share").join("Kelpie");
-        ensure_private_dir(&fresh).unwrap();
+        assert_eq!(ensure_private_dir(&fresh).unwrap(), None);
         assert!(fresh.is_dir());
-        ensure_private_dir(&fresh).unwrap(); // already there: fine
-        ensure_private_dir(std::path::Path::new("")).unwrap();
+        assert_eq!(ensure_private_dir(&fresh).unwrap(), None, "already there: fine");
+        assert_eq!(ensure_private_dir(std::path::Path::new("")).unwrap(), None);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -678,8 +694,15 @@ mod tests {
             let open = root.join("open");
             std::fs::create_dir_all(&open).unwrap();
             std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
-            ensure_private_dir(&open).unwrap();
+            assert_eq!(ensure_private_dir(&open).unwrap(), None);
             assert_eq!(mode(&open), 0o700, "an existing folder of ours that others could read");
+            // Someone else's folder is refused, with what to do about it (root owns every folder: nothing to show).
+            // SAFETY: geteuid has no preconditions.
+            if unsafe { libc::geteuid() } != 0 {
+                let err = ensure_private_dir(std::path::Path::new("/")).unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+                assert!(err.to_string().contains("KELPIE_DATA_DIR"), "{err}");
+            }
         }
         let _ = std::fs::remove_dir_all(&root);
     }

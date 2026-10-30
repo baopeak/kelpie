@@ -225,8 +225,10 @@ pub fn run() {
         eprintln!("kelpie: could not move data from the Erka folder: {e}");
     }
     // Settings, history caches and the daemon copies live here: for this user only (0700 on Unix).
-    if let Err(e) = kelpie_proto::ensure_private_dir(&kelpie_proto::data_dir()) {
-        eprintln!("kelpie: could not prepare the data folder: {e}");
+    match kelpie_proto::ensure_private_dir(&kelpie_proto::data_dir()) {
+        Ok(None) => {}
+        Ok(Some(warning)) => eprintln!("kelpie: {warning}"),
+        Err(e) => eprintln!("kelpie: could not prepare the data folder: {e}"),
     }
     move_legacy_webview_profile();
     tauri::Builder::default()
