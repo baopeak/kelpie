@@ -110,6 +110,7 @@ pub struct Output {
 /// Runs `script` with `sh -c` on the host (stdin optional).
 pub async fn exec(r: &RemoteRoot, script: &str, stdin: Option<Vec<u8>>, timeout: Duration) -> CmdResult<Output> {
     let mut cmd = tokio::process::Command::new(crate::ssh_hosts::program("ssh"));
+    crate::daemon_runtime::clean_env(cmd.as_std_mut());
     cmd.args(ssh_base(r))
         .envs(ssh_env(r))
         .arg(format!("sh -c {}", q(script)))
@@ -148,6 +149,7 @@ pub async fn exec_ok(r: &RemoteRoot, script: &str) -> CmdResult<String> {
 /// Blocking variant for synchronous callers (GitLab project lookup).
 pub fn exec_blocking(r: &RemoteRoot, script: &str) -> Option<String> {
     let mut cmd = std::process::Command::new(crate::ssh_hosts::program("ssh"));
+    crate::daemon_runtime::clean_env(&mut cmd);
     cmd.args(ssh_base(r)).envs(ssh_env(r)).arg(format!("sh -c {}", q(script))).stdin(Stdio::null());
     #[cfg(windows)]
     {

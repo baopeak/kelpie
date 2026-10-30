@@ -85,6 +85,7 @@ pub fn editor_open(editor: String, path: String) -> CmdResult<()> {
         // must never become a second command.
         let exe = which(e.cli).ok_or_else(|| format!("{} is not on PATH", e.label))?;
         let mut c = std::process::Command::new(exe);
+        crate::daemon_runtime::clean_env(&mut c);
         match &remote {
             Some(r) => {
                 let host = match r.port {

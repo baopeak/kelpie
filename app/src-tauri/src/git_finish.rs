@@ -878,6 +878,7 @@ async fn run_check(dir: &Path, line: &str, timeout: Duration, stop: impl std::fu
         return fail(format!("command not found: {}", words.first().map(String::as_str).unwrap_or("")));
     };
     let mut cmd = tokio::process::Command::new(program);
+    crate::daemon_runtime::clean_env(cmd.as_std_mut());
     cmd.args(&words[1..])
         .current_dir(dir)
         .stdin(std::process::Stdio::null())

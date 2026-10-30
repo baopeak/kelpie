@@ -1225,7 +1225,7 @@ pub async fn agent_setup_reveal(project: Option<String>, path: String) -> CmdRes
         #[cfg(target_os = "macos")]
         let result = std::process::Command::new("open").arg("-R").arg(&shown).spawn();
         #[cfg(all(unix, not(target_os = "macos")))]
-        let result = std::process::Command::new("xdg-open").arg(if shown.is_dir() { shown.clone() } else { shown.parent().map(Path::to_path_buf).unwrap_or(shown.clone()) }).spawn();
+        let result = crate::daemon_runtime::clean_env(&mut std::process::Command::new("xdg-open")).arg(if shown.is_dir() { shown.clone() } else { shown.parent().map(Path::to_path_buf).unwrap_or(shown.clone()) }).spawn();
         result.map(|_| ()).map_err(err)
     })
     .await

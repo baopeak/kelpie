@@ -260,6 +260,7 @@ pub async fn plugin_install_git(url: String) -> CmdResult<String> {
     std::fs::create_dir_all(plugins_dir()).map_err(err)?;
     let clone = |shallow: bool| {
         let mut cmd = tokio::process::Command::new("git");
+        crate::daemon_runtime::clean_env(cmd.as_std_mut());
         cmd.arg("clone");
         if shallow {
             cmd.args(["--depth", "1"]);
@@ -401,6 +402,7 @@ pub async fn plugin_status(id: String, item: String, cwd: Option<String>) -> Cmd
     } else {
         let mut c = tokio::process::Command::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
         c.args(["-lc", &command]);
+        crate::daemon_runtime::clean_env(c.as_std_mut());
         c
     };
     if let Some(dir) = cwd.filter(|d| Path::new(d).is_dir()) {

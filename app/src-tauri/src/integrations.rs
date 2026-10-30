@@ -448,6 +448,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
         return crate::remote::exec_blocking(&r, &script).filter(|s| !s.is_empty());
     }
     let mut cmd = std::process::Command::new("git");
+    crate::daemon_runtime::clean_env(&mut cmd);
     cmd.arg("-C").arg(root).args(args).stdin(std::process::Stdio::null());
     #[cfg(windows)]
     {

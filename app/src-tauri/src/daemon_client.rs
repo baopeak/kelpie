@@ -292,15 +292,7 @@ fn spawn_daemon() -> Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // From an AppImage: sessions must not inherit its mount or its bundled GTK setup.
-    if cfg!(target_os = "linux") {
-        let vars: Vec<(String, String)> = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
-        for (name, value) in crate::daemon_runtime::appimage_env_fixes(&vars) {
-            match value {
-                Some(v) => cmd.env(name, v),
-                None => cmd.env_remove(name),
-            };
-        }
-    }
+    crate::daemon_runtime::clean_env(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

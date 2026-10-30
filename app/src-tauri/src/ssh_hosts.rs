@@ -186,6 +186,7 @@ pub fn program(name: &str) -> PathBuf {
 /// A process for an OpenSSH tool (no console window on Windows).
 pub fn tool(name: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(program(name));
+    crate::daemon_runtime::clean_env(cmd.as_std_mut());
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);

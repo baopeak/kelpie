@@ -12,6 +12,7 @@ use crate::fs_ops::{guard, CmdResult};
 
 async fn gh(cwd: &Path, args: &[&str]) -> CmdResult<(bool, String, String)> {
     let mut cmd = tokio::process::Command::new("gh");
+    crate::daemon_runtime::clean_env(cmd.as_std_mut());
     cmd.args(args)
         .current_dir(cwd)
         .env("GH_PROMPT_DISABLED", "1")
