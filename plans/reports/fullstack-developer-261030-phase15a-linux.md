@@ -69,6 +69,50 @@ Branch `phase15/linux`, from `phase15/session-export` (95c7585). No daemon RPC o
   - The fix is `libc::killpg(pgid, SIGKILL)` directly, with pid > 1. The app crate gains `libc` for unix targets.
   - Regression test `a_stopped_check_never_reaches_programs_outside_it` (unix): a bystander process in its own group survives three stopped checks.
 
+## Review fixes
+
+From `plans/reports/code-reviewer-261030-phase15a-linux.md`.
+
+- **H1, AppImage environment** (`daemon_runtime::appimage_env_fixes`, used by `daemon_client::spawn_daemon` on Linux).
+  - When `APPIMAGE` is set, the daemon starts without the AppImage runtime and GTK hook variables:
+    - removed: `APPIMAGE`, `APPDIR`, `ARGV0`, `OWD`, `GTK_PATH`, `GTK_IM_MODULE_FILE`, `GDK_PIXBUF_MODULE_FILE`, `GIO_EXTRA_MODULES`, `GSETTINGS_SCHEMA_DIR`, `GTK_EXE_PREFIX`, `GTK_DATA_PREFIX`, `GI_TYPELIB_PATH`;
+    - also removed: any other variable whose value points into `$APPDIR`;
+    - removed only when they carry the hook's values: `GDK_BACKEND=x11` and `GTK_THEME=Adwaita:dark|light`.
+  - `$APPDIR` entries are dropped from `XDG_DATA_DIRS`, `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH` and `PERL5LIB`, and an emptied list is removed.
+  - Nothing is restored, because neither the type-2 runtime nor linuxdeploy-plugin-gtk keeps the values it overwrites.
+  - The filter is pure, and its unit test (runs on every OS) covers:
+    - the hook's real variable set, kept user values, and the `-other` prefix trap;
+    - a user-chosen backend and theme, which are kept;
+    - no change when not an AppImage.
+- **M1, private data folder** (`kelpie_proto::ensure_private_dir`).
+  - Unix creates the folder (and missing parents) with 0700. An existing folder that is ours and readable by others is narrowed to 0700; one owned by someone else is left alone.
+  - It runs at daemon start, at app start, and for the auth-token folder. Windows is a plain create.
+  - Test: new folder, its parents, and an existing 0755 folder (mode checks on Unix).
+- **M2, signing key.**
+  - `build-release.sh` takes `TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)` out of its environment at once and passes them only to `pnpm tauri build`. The sidecar cargo builds and `pnpm install` run without the key.
+  - The workflow's dependency install was already a separate step without the key.
+  - Known exposure, documented in `release.yml`:
+    - the `tauri build` command (frontend build, bundling, signing) has the key;
+    - in that command Tauri itself downloads linuxdeploy and its GTK plugin, unpinned, and runs them. The build script downloads nothing, so there is nothing for us to pin.
+  - Also, the step's own shell still has the key in its initial environment. Removing that would mean signing in a separate step with our own `.app.tar.gz` packing for macOS; that is a product/ops decision.
+- **L1, slots on Linux**: the module doc and architecture now say what Linux does. The AppImage copy goes to slot `a` each new build; the running daemon keeps its unlinked file, and `b` is used only when `a` cannot be written.
+- **L2, failed copy**:
+  - `runnable` warns that a daemon left running from the AppImage mount stops when Kelpie quits.
+  - `daemonSurvivesUpdate` returns false for an `exe` under `/.mount_…/` (vitest case).
+  - `isWindows` moved to `lib/platform.ts`.
+- **L3.**
+  - `xauth` added to the CI apt list.
+  - The optional `.deb` line in `release.yml` is `|| true`-safe under `bash -e`.
+  - The release matrix has `fail-fast: false`.
+  - `boot_smoke.py` `stop()` signals the process group even when its leader already exited, waits for it, then SIGKILLs the group with every `killpg` guarded.
+- **Keep-awake.**
+  - `--what=idle` only: automatic idle sleep is blocked, but a suspend the user picks from the menu still happens, like `ES_SYSTEM_REQUIRED` on Windows.
+  - While a lock is held, the daemon looks at the child every 5 s, so a refusal that arrives after the 300 ms probe is reaped and logged. There is no timer while nothing is held.
+- **L5, `proc_tree`**: `ProcTree::adopt` refuses process group ids ≤ 1 and the daemon's own group, so every `killpg` site is guarded.
+- **Not changed (as reviewed):**
+  - the redundant Linux `keyring` entries in kelpied and the app (harmless);
+  - L4, the `/tmp` fallback when `HOME` is unset (pre-existing, practically unreachable).
+
 ## CI
 
 | Run | Result |
