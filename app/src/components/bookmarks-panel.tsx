@@ -70,7 +70,7 @@ export function SavedReplyDialog() {
             <h2>{b.sessionName}</h2>
             <span class="muted-inline">{fullClock(b.at)}</span>
             <Show when={b.truncated}><p class="update-warning">{t("This reply was longer than 64 KiB: only the start of it was saved.")}</p></Show>
-            <div class="saved-reply-text"><Markdown text={b.text} project={store.state.projects.find((p) => p.id === b.projectId)} /></div>
+            <div class="saved-reply-text"><Markdown text={b.text} project={store.state.projects.find((p) => p.id === b.projectId)} onOpenFile={() => bookmarks.closeSaved()} /></div>
             <div class="footer">
               <button class="btn saved-copy" onClick={(e) => copyText(b.text, e.currentTarget)}>
                 <span class="i-copy"><Icon name="copy" size={13} /></span><span class="i-done"><Icon name="check" size={13} /></span> {t("Copy")}

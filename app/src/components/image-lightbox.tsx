@@ -61,10 +61,10 @@ export function ImageLightbox() {
     window.addEventListener("keydown", onKey, true);
     // The app's shortcuts listen in the capture phase on the window too, and came first: a chord
     // pressed here would close a pane behind the picture.
-    suspendKeymap(true);
+    suspendKeymap(true, "image-lightbox");
     onCleanup(() => {
       window.removeEventListener("keydown", onKey, true);
-      suspendKeymap(false);
+      suspendKeymap(false, "image-lightbox");
     });
   });
   /** The stage's own scrollbars are part of it: dragging one (a picture at actual size) is no click on the backdrop. */

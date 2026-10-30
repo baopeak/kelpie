@@ -110,6 +110,37 @@ describe("openChatFile", () => {
   });
 });
 
+describe("what shows a file opening", () => {
+  it("is told just before the file opens, so that the file ends up with the keyboard", async () => {
+    const order: string[] = [];
+    openFile.mockImplementationOnce(() => void order.push("open"));
+    await openChatFile(project, { path: "src/a.ts" }, () => order.push("told"));
+    expect(order).toEqual(["told", "open"]);
+  });
+
+  it("is told for a file found elsewhere under its name, and through a link", async () => {
+    readFile.mockRejectedValue(new Error("missing"));
+    quickOpen.mockResolvedValue([hit("D:\\proj\\src\\a.ts")]);
+    const told = vi.fn();
+    await openChatFile(project, { path: "a.ts" }, told);
+    expect(told).toHaveBeenCalledTimes(1);
+    readFile.mockResolvedValue({ size: 1 });
+    openChatLink("src/a.ts", project, told);
+    await settled();
+    expect(told).toHaveBeenCalledTimes(2);
+  });
+
+  it("is not told when nothing opened, nor for a web link", async () => {
+    const told = vi.fn();
+    await openChatFile(project, { path: "D:\\other\\a.ts" }, told);
+    readFile.mockRejectedValue(new Error("missing"));
+    await openChatFile(project, { path: "gone.ts" }, told);
+    openChatLink("https://x.y", project, told);
+    await settled();
+    expect(told).not.toHaveBeenCalled();
+  });
+});
+
 describe("openChatLink", () => {
   it("sends only http(s) to the browser", async () => {
     openChatLink("HTTPS://x.y/z", project);

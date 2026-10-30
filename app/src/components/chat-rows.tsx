@@ -22,7 +22,7 @@ export const clock = (at: number) => new Date(at).toLocaleString(clockLocale(), 
 export const fullClock = (at: number) => new Date(at).toLocaleString(clockLocale(), { dateStyle: "full", timeStyle: "medium" });
 
 /** Long text cut to `lines` (the first ones, or the last for output), with a way to see it all. */
-function Clamped(props: { text: string; lines?: number; tail?: boolean; class?: string }) {
+export function Clamped(props: { text: string; lines?: number; tail?: boolean; class?: string }) {
   const [all, setAll] = createSignal(false);
   const rows = createMemo(() => props.text.replace(/\n+$/, "").split("\n"));
   const max = () => props.lines ?? 12;

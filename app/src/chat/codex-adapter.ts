@@ -5,7 +5,7 @@
 // `thread/compact/start`, `/review` → `review/start`, `/new` (or `/clear`, `/reset`) → `thread/start`, `!cmd` →
 // `thread/shellCommand`); model, effort and approval mode ride on the next `turn/start`, which
 // Codex keeps for later turns; `$skill` mentions add a `skill` input item.
-import { type Adapter, type AdapterContext, type ChatCommand, type ChatImage, type ToolCategory, NEW_CONVERSATION_COMMANDS, pathImage, putSetting, sentImages, setSettingValue, slashCommand, textOf } from "./chat-model";
+import { type Adapter, type AdapterContext, type ChatCommand, type ChatImage, type ToolCategory, NEW_CONVERSATION_COMMANDS, pathImage, putSetting, sentImages, setSettingValue, slashCommand, summarize, textOf } from "./chat-model";
 import { basename, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 
@@ -279,6 +279,13 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
           status: !done ? "running" : item.error ? "error" : "done",
         });
         break;
+      case "collabAgentToolCall": {
+        // Its other tools (sendInput, wait, closeAgent) are about agents already listed.
+        if (item.tool !== "spawnAgent") break;
+        const prompt = typeof item.prompt === "string" ? item.prompt : "";
+        ctx.upsert({ kind: "tool", id: item.id, name: "Agent", category: "agent", summary: summarize(prompt), input: { prompt }, status: !done ? "running" : item.status === "failed" ? "error" : "done" });
+        break;
+      }
       case "webSearch":
         ctx.upsert({ kind: "tool", id: item.id, name: "WebSearch", summary: item.query ?? "", category: "fetch", status: done ? "done" : "running" });
         break;

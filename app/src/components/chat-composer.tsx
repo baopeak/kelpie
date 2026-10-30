@@ -13,6 +13,7 @@ import { confirmDialog } from "../lib/confirm-dialog";
 import { draftAfterSend } from "../lib/composer-core";
 import { createPictures } from "../lib/composer-pictures";
 import { errorText, t } from "../lib/i18n";
+import type { AgentRun } from "../chat/agent-runs";
 import { type ChatController, type ChatCommand, type ChatItem, type ChatSetting, withImageNames } from "../chat/chat-model";
 import type { SessionInfo } from "../lib/types";
 
@@ -50,7 +51,7 @@ const MAX_SUGGESTIONS = 50;
 /** Permission modes without approvals: Shift+Tab never steps into them, and their chip warns. */
 const UNGUARDED = new Set(["full-access", "bypassPermissions"]);
 
-export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo | undefined; agentLabel: string; focused: boolean; onSent: () => void }) {
+export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo | undefined; agentLabel: string; focused: boolean; onSent: () => void; agents: AgentRun[]; onAgentMap: () => void }) {
   const ctrl = props.ctrl;
   let root!: HTMLDivElement;
   let textarea!: HTMLTextAreaElement;
@@ -327,6 +328,13 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
             <span class="composer-id" title={t("Agent conversation id")}>{ctrl.state.conversationId!.slice(0, 8)}</span>
           </Show>
           <span class="spacer" />
+          <Show when={props.agents.length}>
+            {/* The caret stays in the message field, for the dialog to give the keyboard back to. */}
+            <button class="setting-btn agent-chip" title={t("Show Agent Map")} onMouseDown={(e) => e.preventDefault()} onClick={() => props.onAgentMap()}>
+              <Show when={props.agents.some((r) => r.status === "running")}><span class="tdot running" /></Show>
+              <span class="setting-label">{t("Agents {n}", { n: props.agents.length })}</span>
+            </button>
+          </Show>
           <ContextMeter ctrl={ctrl} />
           <Show when={modeSetting()}>
             {(mode) => <SettingPicker settings={[mode()]} right warn={UNGUARDED.has(mode().value ?? "")} disabled={ctrl.state.exited} onPick={(id, v) => ctrl.setSetting(id, v)} />}

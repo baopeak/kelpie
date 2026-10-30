@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createEffect, createMemo, createRoot } from "solid-js";
 import { createAcpAdapter } from "./acp-adapter";
 import { createClaudeAdapter } from "./claude-adapter";
 import { createCodexAdapter } from "./codex-adapter";
@@ -595,5 +596,129 @@ describe("matchAnswer", () => {
     const { chosen, other } = matchAnswer(["Red, green", ...typed, "Blue"].join(", "), options("Red, green", "Blue", "a, b, c, d"));
     expect(chosen).toEqual(new Set(["Red, green", "Blue"]));
     expect(other).toBe(typed.join(", "));
+  });
+});
+
+describe("replaying a log", () => {
+  afterEach(() => vi.useRealTimers());
+
+  const bytes = (lines: unknown[]) => new TextEncoder().encode(lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  const tool = (id: string, name = "Read") => ({ type: "assistant", message: { id: `m-${id}`, content: [{ type: "tool_use", id, name, input: { file_path: "a.ts", description: `Call ${id}` } }] } });
+  const TURN = [
+    { type: "kelpie_time", at: 1000 },
+    { type: "system", subtype: "init", session_id: "c-1", model: "claude-opus-5-5", permissionMode: "default" },
+    { type: "user", uuid: "u1", message: { content: "Look" } },
+    { type: "stream_event", event: { type: "message_start", message: { id: "m1" } } },
+    { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } } },
+    { type: "assistant", message: { id: "m1", content: [{ type: "text", text: "Hello" }], usage: { input_tokens: 10, output_tokens: 2 } } },
+    tool("t1"),
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "text" }] } },
+    { type: "control_request", request_id: "r1", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "ls" } } },
+    { type: "kelpie_answer", request_id: "r1", answered_by: "desktop", at: 1500, answer: { behavior: "allow" } },
+    { type: "control_request", request_id: "r2", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "rm" } } },
+    { type: "kelpie_time", at: 2000 },
+    tool("a1", "Agent"),
+    { type: "system", subtype: "task_started", task_id: "k1", tool_use_id: "a1", description: "Call a1", task_type: "local_agent", is_backgrounded: true },
+    { type: "system", subtype: "task_progress", task_id: "k1", tool_use_id: "a1", description: "Reading", usage: { total_tokens: 7 } },
+    { type: "system", subtype: "task_notification", task_id: "k1", tool_use_id: "a1", status: "completed", summary: "Done", usage: { total_tokens: 9 } },
+    { type: "result", uuid: "res1", subtype: "success", duration_ms: 1000, num_turns: 1, total_cost_usd: 0.5, modelUsage: {} },
+  ];
+  const EXITED = [...TURN, tool("t2"), { type: "kelpie_exit", code: 0 }];
+
+  /** A controller over the Claude adapter whose attach brings `log`. `sends`: what reached the agent, and when. */
+  function controller(log: Uint8Array) {
+    const sends: { line: any; ready: boolean; replaying: boolean }[] = [];
+    const ctrl: ChatController = new ChatController("s1", "/work", null, createClaudeAdapter, {
+      transport: {
+        send: (line: string) => void sends.push({ line: JSON.parse(line), ready: ctrl.state.ready, replaying: (ctrl as any).isReplaying }),
+        attach: async () => log,
+      } as never,
+    });
+    return { ctrl, sends };
+  }
+  const snapshot = (ctrl: ChatController) => JSON.parse(JSON.stringify(ctrl.state));
+
+  it.each([["a turn", TURN], ["an exit", EXITED]])("ends in the same state as feeding it line by line: %s", async (_name, lines) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(50_000);
+    const log = bytes(lines);
+    const whole = controller(log);
+    await whole.ctrl.attach(1);
+
+    const byLine = controller(log);
+    const plain = byLine.ctrl as any;
+    plain.isReplaying = true;
+    for (const line of lines) plain.feed(bytes([line]));
+    plain.isReplaying = false;
+    plain.set("ready", true);
+    if (!plain.state.exited) plain.adapter.start();
+
+    expect(snapshot(whole.ctrl)).toEqual(snapshot(byLine.ctrl));
+    expect(whole.ctrl.state.items.length).toBeGreaterThan(4);
+    expect(whole.ctrl.state.agentRuns[0]).toMatchObject({ id: "a1", status: "done", at: 2000, endedAt: 2000, tokens: 9 });
+  });
+
+  it("settles what watches the transcript once, at the end of the log, while still replaying", async () => {
+    const { ctrl } = controller(bytes(TURN));
+    const seen: [number, boolean, boolean][] = [];
+    let computed = 0;
+    const dispose = createRoot((dispose) => {
+      const lengths = createMemo(() => {
+        computed++;
+        return ctrl.state.items.length;
+      });
+      createEffect(() => seen.push([lengths(), ctrl.state.ready, (ctrl as any).isReplaying]));
+      return dispose;
+    });
+    computed = 0;
+    await ctrl.attach(1);
+    const n = ctrl.state.items.length;
+    expect(n).toBeGreaterThan(4);
+    expect(computed).toBeLessThanOrEqual(2); // The reset, and the log.
+    // It saw the whole log before `ready`, and `ready` once the replay was over: nothing in between.
+    expect(seen.filter(([len]) => len > 0)).toEqual([[n, false, true], [n, true, false]]);
+    dispose();
+  });
+
+  it("keeps state current for the adapter during the feed, watched or not", async () => {
+    let ctx!: AdapterContext;
+    const read: unknown[] = [];
+    const adapter: Adapter = {
+      start() {},
+      reset() {},
+      send() {},
+      interrupt() {},
+      respond() {},
+      onMessage(m) {
+        ctx.upsert({ kind: "system", id: m.id, text: m.id });
+        ctx.set("busy", m.busy);
+        read.push([ctx.state.items.length, ctx.find(m.id)?.id, ctx.state.busy, ctx.state.busySince, ctx.replaying()]);
+      },
+    };
+    const ctrl = new ChatController("s1", "/work", null, (c) => ((ctx = c), adapter), {
+      transport: { attach: async () => bytes([{ id: "a", busy: true }, { id: "b", busy: false }, { id: "c", busy: true }]) } as never,
+    });
+    const dispose = createRoot((dispose) => {
+      createMemo(() => [ctrl.state.items.length, ctrl.state.busy]);
+      return dispose;
+    });
+    await ctrl.attach(1);
+    expect(read).toEqual([[1, "a", true, null, true], [2, "b", false, null, true], [3, "c", true, null, true]]);
+    dispose();
+  });
+
+  it("sends a queued message only after the replay, once the chat is ready", async () => {
+    const { ctrl, sends } = controller(bytes(TURN));
+    ctrl.send("Queued while attaching");
+    expect(ctrl.state.queue).toHaveLength(1);
+    await ctrl.attach(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ctrl.state.queue).toEqual([]);
+    const sent = sends.filter((s) => s.line.type === "user");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ ready: true, replaying: false });
+    expect(sends.every((s) => !s.replaying)).toBe(true);
   });
 });

@@ -15,6 +15,8 @@
 //   session id and a `result` of no turns;
 // - slash commands are sent as plain user text and run by the CLI (`/context` answers with a
 //   synthetic assistant message).
+import { produce } from "solid-js/store";
+import { type AgentRun, applyRunResult, applyRunTaskEvent, applySubagentMessage, isAgentTool, startRun, stopRunning } from "./agent-runs";
 import { type Adapter, type AdapterContext, type AskQuestion, type ChatCommand, type ChatItem, type UserImage, logQuestionAnswers, loggedImage, putSetting, sentImages, setSettingValue, slashCommand, summarize, textOf } from "./chat-model";
 import { lineDiff, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
@@ -48,6 +50,16 @@ function imageBlocks(content: any[], names: boolean, sent?: Map<string, UserImag
   });
 }
 
+/** Changes the agent map's runs in place: a subagent's stream can be large. The agent's last lines can
+ *  come after its exit: nothing will finish what they start. */
+function updateRuns(ctx: AdapterContext, change: (list: AgentRun[], at?: number) => void) {
+  ctx.set("agentRuns", produce((list: AgentRun[]) => {
+    const at = ctx.now?.() ?? undefined;
+    change(list, at);
+    if (ctx.state.exited) stopRunning(list, at);
+  }));
+}
+
 /** Renders one Claude transcript/stream message (assistant or user) into items. */
 export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: string | null; sent?: Map<string, UserImage> }, history = false) {
   // Transcript entries (history from before chat view) carry their own time.
@@ -74,6 +86,8 @@ export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: s
           it.output = output;
           it.status = block.is_error ? "error" : "done";
         });
+        // A conversation's history has no task events: the map goes by its rows.
+        if (!history) updateRuns(ctx, (list, at) => applyRunResult(list, block, m, at));
       } else if (block.type === "text") {
         if (isClaudesOwnText(ctx, String(block.text))) {
           claudes = true;
@@ -99,6 +113,7 @@ export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: s
       if (block.name === "TodoWrite" && Array.isArray(block.input?.todos)) {
         ctx.set("plan", { entries: block.input.todos.map((x: any) => ({ text: String(x.status === "in_progress" && x.activeForm ? x.activeForm : x.content ?? ""), status: planStatus(x.status) })) });
       }
+      if (!history && isAgentTool(block.name)) updateRuns(ctx, (list, at) => startRun(list, block, undefined, at));
       const prev = ctx.find(block.id);
       ctx.upsert({
         kind: "tool", id: block.id, name: block.name, input: block.input, summary: summarize(block.input),
@@ -123,6 +138,8 @@ export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: s
  *  (`skip_transcript`, `ambient`) and a subagent's own tasks (internals, as in the transcript)
  *  are not listed; one the turn waits for (`awaited`) is not background work. */
 export function applyTaskEvent(ctx: AdapterContext, m: any) {
+  // The agent map lists what the filters below leave out, and keeps what ended.
+  updateRuns(ctx, (list, at) => applyRunTaskEvent(list, m, at));
   const id = typeof m.task_id === "string" ? m.task_id : null;
   if (!id) return;
   const tasks = ctx.state.tasks;
@@ -299,6 +316,7 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
               blocks.set(e.index, b.id);
               partialJson.set(e.index, "");
               ctx.upsert({ kind: "tool", id: b.id, name: b.name, summary: "", status: "running" });
+              if (isAgentTool(b.name)) updateRuns(ctx, (list, at) => startRun(list, b, undefined, at));
             }
           } else if (e.type === "content_block_delta") {
             const id = blocks.get(e.index);
@@ -317,7 +335,10 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
         }
         case "assistant":
         case "user":
-          if (m.parent_tool_use_id) return;
+          if (m.parent_tool_use_id) {
+            updateRuns(ctx, (list, at) => applySubagentMessage(list, m, at));
+            return;
+          }
           applyClaudeMessage(ctx, m, live);
           if (m.type === "user" && !m.isReplay) ctx.set("busy", true);
           return;

@@ -97,6 +97,7 @@ export const commands: Command[] = [
   { id: "panel.turns", label: msg("Agent Turns and Undo"), run: () => store.showRightPanel("turns"), when: () => hasProject() && store.daemonApi() >= CHECKPOINT_API },
   // Always bound: with no live session the chord must not fall through to the webview's DevTools shortcut.
   { id: "composer.open", label: msg("Compose Prompt…"), win: "mod+shift+i", mac: "mod+shift+i", run: () => { const s = focusedSession(); if (s?.alive) toggleComposer(s.id); else store.notify(t("Focus a running session to compose a prompt in")); } },
+  { id: "agent.map", label: msg("Show Agent Map"), run: () => { const s = focusedSession(); if (s?.chat) window.dispatchEvent(new CustomEvent("kelpie:chat-agent-map", { detail: s.id })); else store.notify(t("Focus a chat session to see its agents")); } },
   { id: "browser.open", label: msg("Open Browser"), win: "mod+shift+u", mac: "mod+shift+u", run: () => openBrowser(), when: hasProject },
   { id: "browser.split", label: msg("Open Browser to the Right"), run: () => openBrowser("", "right"), when: hasProject },
   { id: "new.menu", label: msg("New Session…"), win: "mod+shift+n", mac: "mod+shift+n", run: () => store.setOverlay("newsession"), when: hasProject },
@@ -307,12 +308,13 @@ export function commandsWithChord(chord: string, except?: string): Command[] {
   return commands.filter((c) => c.id !== except && chordOf(c) && normalizeChord(chordOf(c)!) === n);
 }
 
-/** While the shortcut editor records a key, no command may run. */
-let suspended = false;
-export const suspendKeymap = (on: boolean) => (suspended = on);
+/** Who holds the commands back: while the shortcut editor records a key, or a dialog over the chat is
+ *  open (which can have the picture lightbox over it), no command may run. */
+const suspended = new Set<string>();
+export const suspendKeymap = (on: boolean, by = "shortcut-editor") => void (on ? suspended.add(by) : suspended.delete(by));
 
 function match(e: KeyboardEvent): Command | undefined {
-  if (suspended) return undefined;
+  if (suspended.size) return undefined;
   const chord = normalizeChord(eventChord(e));
   return commands.find((c) => {
     const k = chordOf(c);

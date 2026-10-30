@@ -556,3 +556,52 @@ describe("task events", () => {
     expect(h.state.tasks[0].background).toBe(false);
   });
 });
+
+describe("the agent map's runs", () => {
+  const started = (id: string, extra: object = {}) => ({ type: "system", subtype: "task_started", task_id: id, tool_use_id: `toolu_${id}`, description: `Run ${id}`, task_type: "local_agent", is_backgrounded: true, ...extra });
+  const subagent = (type: string, content: unknown[]) => ({ type, parent_tool_use_id: "toolu_a1", message: { id: "m", content } });
+
+  it("adds no rows and writes nothing for a subagent's lines, while the map follows them", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage(started("a1"), "");
+    a.onMessage(subagent("assistant", [{ type: "tool_use", id: "toolu_r", name: "Read", input: { file_path: "a.ts" } }, { type: "text", text: "Reading" }]), "");
+    a.onMessage(subagent("user", [{ type: "tool_result", tool_use_id: "toolu_r", content: "secret output" }]), "");
+    a.onMessage({ type: "stream_event", parent_tool_use_id: "toolu_a1", event: { type: "message_start", message: { id: "m2" } } }, "");
+    expect(h.items()).toEqual([]);
+    expect(h.written).toEqual([]);
+    expect(h.state.busy).toBe(false);
+    expect(h.state.agentRuns[0].activity.map((c) => [c.name, c.target, c.status])).toEqual([["Read", "a.ts", "done"]]);
+    expect(JSON.stringify(h.state.agentRuns)).not.toContain("secret output");
+  });
+
+  it("leaves the strip as it is: it drops what ended and skips what is nested, and the map keeps both", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage(started("a1"), "");
+    a.onMessage(started("n1", { parent_task_id: "a1" }), "");
+    expect(h.state.tasks.map((x) => x.id)).toEqual(["a1"]);
+    a.onMessage({ type: "system", subtype: "task_notification", task_id: "a1", tool_use_id: "toolu_a1", status: "completed", summary: "done" }, "");
+    expect(h.state.tasks).toEqual([]);
+    expect(h.state.agentRuns.map((r) => [r.id, r.status])).toEqual([["toolu_a1", "done"], ["toolu_n1", "running"]]);
+  });
+
+  it("starts a run when an Agent call begins to stream, and names it when the call is complete", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "c1", name: "Task", input: {} } } }, "");
+    expect(h.state.agentRuns).toMatchObject([{ id: "c1", description: "", status: "running" }]);
+    a.onMessage({ type: "assistant", message: { id: "m", content: [{ type: "tool_use", id: "c1", name: "Task", input: { description: "Look", subagent_type: "explore", prompt: "Go" } }] } }, "");
+    expect(h.state.agentRuns).toMatchObject([{ id: "c1", description: "Look", type: "explore", prompt: "Go" }]);
+    expect(h.items()).toHaveLength(1);
+  });
+
+  it("makes no run of other tools, and none from a conversation's history, which lists by its rows", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage({ type: "assistant", message: { id: "m", content: [{ type: "tool_use", id: "c1", name: "Bash", input: { command: "ls" } }] } }, "");
+    applyClaudeMessage(h.ctx, { type: "assistant", message: { id: "m2", content: [{ type: "tool_use", id: "c2", name: "Agent", input: { description: "Old" } }] } }, { msgId: null }, true);
+    expect(h.state.agentRuns).toEqual([]);
+    expect(h.items().map((i) => i.id)).toEqual(["c1", "c2"]);
+  });
+});

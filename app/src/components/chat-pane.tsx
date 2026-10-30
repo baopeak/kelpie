@@ -9,12 +9,14 @@ import { findPane } from "../lib/layout";
 import { getController, switchToTerminal } from "../chat/mode-switch";
 import { CHAT_SANITIZE, chatMarkdownHtml, fileRefInCode, linkifyText } from "../chat/chat-links";
 import { imageUrl } from "../chat/chat-images";
+import { type AgentRun, formatDuration, mergeRuns } from "../chat/agent-runs";
 import { mountAttach, type ChatItem, type UserImage } from "../chat/chat-model";
 import { PINNED_REACH, lastPromptBefore, pinnedPromptId, renderedPrompts } from "../chat/pinned-prompt";
 import { openTable, stableEnd } from "../chat/streaming-markdown";
 import { describeTool, diffStats, unifiedFiles } from "../chat/tool-view";
 import type { Project } from "../lib/types";
 import { Icon } from "./icons";
+import { AgentMapDialog } from "./agent-map";
 import { ChatComposer } from "./chat-composer";
 import { BookmarkButton, CopyButton, copyText } from "./chat-copy";
 import { openChatFile, openChatLink } from "./chat-open-file";
@@ -82,7 +84,7 @@ function MarkdownHtml(props: { text: string; project?: Project; class?: string; 
  *  it is the agent's text: `data-href` and `data-file-ref` only ever go through the parsers. An
  *  `<a>` the agent wrote as HTML has no `data-href`, only what DOMPurify left of its `href`. No
  *  click navigates the window, even on something the sanitizer should already have removed. */
-const onMarkdownClick = (project?: Project) => (e: MouseEvent) => {
+const onMarkdownClick = (project?: Project, onOpenFile?: () => void) => (e: MouseEvent) => {
   const target = e.target as HTMLElement;
   const copy = target.closest<HTMLElement>(".code-copy");
   if (copy) {
@@ -98,16 +100,17 @@ const onMarkdownClick = (project?: Project) => (e: MouseEvent) => {
   }
   const a = target.closest("a");
   if (a) {
-    if (!selecting()) openChatLink(a.dataset.href ?? a.getAttribute("href") ?? "", project);
+    if (!selecting()) openChatLink(a.dataset.href ?? a.getAttribute("href") ?? "", project, onOpenFile);
     return;
   }
   const code = target.closest<HTMLElement>("[data-file-ref]");
   const ref = code && project && !selecting() ? fileRefInCode(code.dataset.fileRef ?? "") : null;
-  if (ref) void openChatFile(project!, ref);
+  if (ref) void openChatFile(project!, ref, onOpenFile);
 };
 
-export function Markdown(props: { text: string; project?: Project }) {
-  return <MarkdownHtml class="msg-assistant" text={props.text} project={props.project} onClick={onMarkdownClick(props.project)} />;
+/** `onOpenFile`: a link in it is about to open a file, for a dialog that shows it to get out of the way. */
+export function Markdown(props: { text: string; project?: Project; onOpenFile?: () => void }) {
+  return <MarkdownHtml class="msg-assistant" text={props.text} project={props.project} onClick={onMarkdownClick(props.project, props.onOpenFile)} />;
 }
 
 /** A reply that is still arriving: finished blocks as markdown, the open one as plain text (or
@@ -231,6 +234,9 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
   const session = () => store.sessions[props.sessionId];
   const ctrl = getController(session());
   const [showAll, setShowAll] = createSignal(false);
+  const [agentMap, setAgentMap] = createSignal(false);
+  /** Only structure is read here, so an agent's progress does not recompute it. */
+  const agentRuns = createMemo<AgentRun[]>((previous) => mergeRuns(ctrl.state.agentRuns, ctrl.state.items, ctrl.state.busy && !ctrl.state.exited, previous), []);
   let stick = true;
 
   // Attach only when the handle or the daemon connection changes — not on every status tick.
@@ -248,7 +254,10 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
       if (d?.id === props.sessionId && !(d.dropped && d.by === "desktop")) ctrl.resolvedElsewhere(d.request_id, !!d.dropped);
     };
     window.addEventListener("kelpie:chat-resolved", onResolved);
+    const onAgentMap = (e: Event) => (e as CustomEvent).detail === props.sessionId && setAgentMap(true);
+    window.addEventListener("kelpie:chat-agent-map", onAgentMap);
     onCleanup(() => {
+      window.removeEventListener("kelpie:chat-agent-map", onAgentMap);
       window.removeEventListener("kelpie:chat-resync", onResync);
       window.removeEventListener("kelpie:chat-resolved", onResolved);
       ctrl.detach();
@@ -449,8 +458,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
   const elapsed = () => {
     const since = ctrl.state.busySince;
     if (since == null) return "";
-    const s = Math.max(0, Math.floor((now() - since) / 1000));
-    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+    return formatDuration(now() - since);
   };
 
   /** Continues the conversation in the agent's terminal UI and runs `command` there. */
@@ -626,7 +634,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
           </div>
         </Show>
       </div>
-      <ChatComposer ctrl={ctrl} session={session()} agentLabel={meta().label} focused={props.focused} onSent={toBottom} />
+      <ChatComposer ctrl={ctrl} session={session()} agentLabel={meta().label} focused={props.focused} onSent={toBottom} agents={agentRuns()} onAgentMap={() => setAgentMap(true)} />
       {/* In the body: the work area contains layout, which would hold a fixed overlay inside it. */}
       <Show when={undoing()}>
         {(n) => (
@@ -642,6 +650,23 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
             />
           </Portal>
         )}
+      </Show>
+      <Show when={agentMap()}>
+        <Portal>
+          <AgentMapDialog
+            runs={agentRuns()}
+            ctrl={ctrl}
+            sessionName={session() ? sessionLabel(session()!) : ""}
+            project={props.project}
+            markdown={(text) => <Markdown text={text} project={props.project} onOpenFile={() => setAgentMap(false)} />}
+            composerField={() => scroller.parentElement?.querySelector(".chat-composer textarea") as HTMLElement | null}
+            onClose={() => setAgentMap(false)}
+            onShow={(id) => {
+              setAgentMap(false);
+              scrollToItem(id, { block: "center" });
+            }}
+          />
+        </Portal>
       </Show>
     </div>
   );

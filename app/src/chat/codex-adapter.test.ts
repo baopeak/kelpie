@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createStore, produce } from "solid-js/store";
+import { mergeRuns } from "./agent-runs";
 import { codexArgs, createCodexAdapter } from "./codex-adapter";
 import { type AdapterContext, type ChatItem, type ChatState, emptyChatState } from "./chat-model";
 
@@ -387,5 +388,38 @@ describe("createCodexAdapter", () => {
     a.onMessage({ id: req.id, error: { message: "no active turn" } }, "");
     expect(h.state.queue.map((q) => q.text)).toEqual(["also check b.ts"]);
     expect(h.items().filter((i) => i.kind === "system")).toEqual([]);
+  });
+});
+
+describe("a subagent call", () => {
+  const spawn = (extra: object = {}) => ({ type: "collabAgentToolCall", id: "s1", tool: "spawnAgent", prompt: "Look at the tests", status: "inProgress", senderThreadId: "thr-1", receiverThreadIds: [], agentsStates: {}, ...extra });
+
+  it("shows as an agent row that the agent map lists, without tokens", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    openThread(a);
+    a.onMessage({ method: "item/started", params: { item: spawn() } }, "");
+    expect(h.items()).toEqual([{ kind: "tool", id: "s1", name: "Agent", category: "agent", summary: "Look at the tests", input: { prompt: "Look at the tests" }, status: "running" }]);
+    a.onMessage({ method: "item/completed", params: { item: spawn({ status: "completed", receiverThreadIds: ["thr-2"] }) } }, "");
+    expect(h.items()).toMatchObject([{ id: "s1", status: "done" }]);
+    const [one] = mergeRuns(h.state.agentRuns, h.state.items, true);
+    expect(one).toMatchObject({ id: "s1", description: "Look at the tests", prompt: "Look at the tests", status: "done" });
+    expect(one.tokens).toBeUndefined();
+  });
+
+  it("marks a failed spawn, and takes a call with no prompt", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    openThread(a);
+    a.onMessage({ method: "item/completed", params: { item: spawn({ status: "failed", prompt: null }) } }, "");
+    expect(h.items()).toMatchObject([{ id: "s1", name: "Agent", summary: "", status: "error" }]);
+  });
+
+  it("shows nothing for its other collaboration calls", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    openThread(a);
+    for (const tool of ["sendInput", "resumeAgent", "wait", "closeAgent", undefined]) a.onMessage({ method: "item/completed", params: { item: spawn({ tool }) } }, "");
+    expect(h.items()).toEqual([]);
   });
 });

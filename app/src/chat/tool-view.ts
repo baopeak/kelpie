@@ -38,7 +38,7 @@ const str = (v: unknown) => (typeof v === "string" ? v : "");
 const commandText = (v: unknown) => (Array.isArray(v) ? v.join(" ") : str(v));
 
 /** Claude Code's tool names → category (other agents report one themselves). */
-function claudeCategory(name: string): ToolCategory {
+export function claudeCategory(name: string): ToolCategory {
   if (/^(Read|LS|NotebookRead)$/.test(name)) return "read";
   if (/^(Glob|Grep|ToolSearch)$/.test(name)) return "search";
   if (/^(Edit|MultiEdit|Write|NotebookEdit)$/.test(name)) return "edit";

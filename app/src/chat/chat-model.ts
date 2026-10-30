@@ -1,8 +1,9 @@
 // Chat-mode state shared by all agent adapters. Adapters translate their wire protocol
 // (Claude stream-json, Codex app-server, ACP) into these items; the UI only knows items.
-import { createSignal } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { createStore, produce, type SetStoreFunction } from "solid-js/store";
 import { t } from "../lib/i18n";
+import { type AgentRun, stopRunning } from "./agent-runs";
 import type { AnswerOutcome, ChatTransport } from "./transport";
 
 /** What a tool call does, for its row and for folding runs of reads and searches. */
@@ -167,6 +168,8 @@ export interface ChatState {
   usage: { used: number; size: number | null; cost?: number } | null;
   /** Tasks still running (Claude's task events); emptied when the agent exits. */
   tasks: AgentTask[];
+  /** Every subagent of the conversation, finished ones too, for the agent map. */
+  agentRuns: AgentRun[];
 }
 
 export interface Adapter {
@@ -213,6 +216,8 @@ export interface AdapterContext {
   setModel(model: string | null): void;
   /** A replayed transcript line's own time (unix ms): items added after it carry it. */
   setClock?(at: number): void;
+  /** Now, or while replaying the time the log carried (none when it has not said): what a replay can rebuild. */
+  now?(): number | null;
   /** The turn ended: cards still open can no longer be answered. Going idle says so too; this is for a turn
    *  `busy` knows nothing of (a replay has no ACP prompt, which is what sets it there). */
   expireApprovals?(): void;
@@ -226,7 +231,7 @@ export interface AdapterContext {
 export function emptyChatState(conversationId: string | null = null): ChatState {
   return {
     items: [], commands: [], skills: [], settings: [], busy: false, model: null, conversationId, ready: false, exited: false, status: null,
-    busySince: null, queue: [], queuePaused: false, plan: null, usage: null, tasks: [],
+    busySince: null, queue: [], queuePaused: false, plan: null, usage: null, tasks: [], agentRuns: [],
   };
 }
 
@@ -322,7 +327,7 @@ export class ChatController {
       },
       clear: () => {
         this.index.clear();
-        this.set({ items: [], plan: null, usage: null });
+        this.set({ items: [], plan: null, usage: null, agentRuns: [] });
       },
       setConversation: (id) => {
         if (this.state.conversationId === id) return;
@@ -335,6 +340,7 @@ export class ChatController {
         if (model && !this.isReplaying && !this.observer) this.transport.update?.({ model });
       },
       setClock: (at) => (this.clock = at),
+      now: () => this.now(),
       expireApprovals: () => this.expireApprovals(),
       cwd: this.cwd,
       resumeId: this.resumeId,
@@ -420,7 +426,7 @@ export class ChatController {
   private resetState() {
     this.index.clear();
     this.buffer = "";
-    this.set({ items: [], busy: false, ready: false, status: null, plan: null, usage: null, tasks: [] });
+    this.set({ items: [], busy: false, ready: false, status: null, plan: null, usage: null, tasks: [], agentRuns: [] });
     this.adapter.reset();
   }
 
@@ -451,6 +457,7 @@ export class ChatController {
       }
       if (msg?.type === "kelpie_exit") {
         this.set({ exited: true, busy: false, tasks: [] });
+        this.set("agentRuns", produce((runs: AgentRun[]) => stopRunning(runs, this.now() ?? undefined)));
         // Also when `busy` did not know of the turn (an ACP replay): nothing can answer these now.
         this.expireApprovals();
         // Nothing will finish what was still arriving.
@@ -499,7 +506,9 @@ export class ChatController {
     if (gen !== this.attachGen) return;
     this.clock = null;
     this.isReplaying = true;
-    this.feed(snapshot);
+    // As one update: what watches the transcript settles once, on the whole log, and not per line. The
+    // state itself changes as before, line by line; and nothing could paint in between either way.
+    batch(() => this.feed(snapshot));
     this.isReplaying = false;
     applied = true;
     for (const chunk of early) this.feed(chunk);
