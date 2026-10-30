@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { PHONE_API } from "../../src/lib/attention";
 import { canAct, deriveConn } from "./conn-state";
 import { Link, PING_AFTER_MS, PROBE_MS, RETRY_WINDOW_MS, type Env, type Hello, type LinkHandlers, type Outcome, type SocketLike } from "./link";
 
@@ -34,7 +35,7 @@ class FakeSocket implements SocketLike {
 
 function hello(over: Partial<Hello> = {}): Hello {
   return {
-    v: 2, api: 17, daemon_epoch: "e1", rev: 1, device: { name: "Test", can_write: true }, sessions: [], projects: {},
+    v: 2, api: PHONE_API, daemon_epoch: "e1", rev: 1, device: { name: "Test", can_write: true }, sessions: [], projects: {},
     load: { level: 0, reason: [], since: 0 }, server_ts: 1000, hb: { idle_s: 20, pong_s: 8, dead_s: 45, legacy: false }, ...over,
   };
 }
@@ -69,6 +70,7 @@ function rig(opts: { random?: number; token?: string | null } = {}) {
   };
   const log: string[] = [];
   const frames: unknown[] = [];
+  const queues: { id: string }[] = [];
   let have: Record<string, number | null> = {};
   const handlers: LinkHandlers = {
     changed: () => {},
@@ -77,6 +79,7 @@ function rig(opts: { random?: number; token?: string | null } = {}) {
     frame: (m) => frames.push(m),
     chat: () => {},
     chatResolved: () => {},
+    chatQueue: (m) => void queues.push(m),
     chatResync: (id) => log.push(`resync ${id}`),
     unpaired: () => log.push("unpaired"),
     haveRev: (id) => have[id] ?? null,
@@ -101,7 +104,7 @@ function rig(opts: { random?: number; token?: string | null } = {}) {
     last().open();
     last().say({ type: "hello", ...hello({ server_ts: t, ...h }) });
   };
-  return { link, env, sockets, last, advance, connect, log, frames, setOnline: (v: boolean) => (online = v), setReach: (r: typeof reach) => (reach = r), setHave: (h: typeof have) => (have = h), now: () => t };
+  return { link, env, sockets, last, advance, connect, log, frames, queues, setOnline: (v: boolean) => (online = v), setReach: (r: typeof reach) => (reach = r), setHave: (h: typeof have) => (have = h), now: () => t };
 }
 
 describe("Link handshake", () => {
@@ -125,6 +128,13 @@ describe("Link handshake", () => {
     expect(r.link.facts.outdated).toBe(true);
     r.last().say({ type: "hb", n: 3, server_ts: 5, level: 0 });
     expect(r.last().sent.at(-1)).toEqual({ type: "hb", echo: true, n: 3 });
+  });
+
+  it("flags a daemon one level below sending from the phone: level 20 has no chat_send", () => {
+    const r = rig();
+    r.link.start();
+    r.connect({ api: 20 });
+    expect(r.link.facts.outdated).toBe(true);
   });
 
   it("follows what it wants after the hello, resuming a terminal from the frame it holds", () => {
@@ -551,6 +561,59 @@ describe("Link requests: nothing is queued while offline", () => {
     await Promise.resolve();
     expect(restarted).toEqual({ t: "unknown" });
     expect(q.sockets.flatMap((s) => s.sent).filter((m) => m.type === "answer")).toHaveLength(1);
+  });
+
+  it("a chat message lost to a drop is sent once more under the same cid, and the daemon's dup is the answer", async () => {
+    r.connect();
+    let out: Outcome | null = null;
+    void r.link.chatSend("c1", "cid-1", "hello").then((o) => (out = o));
+    expect(r.last().sent.at(-1)).toMatchObject({ type: "chat_send", id: "c1", cid: "cid-1", text: "hello", epoch: "e1" });
+    r.last().die();
+    await Promise.resolve();
+    expect(out).toBeNull();
+    r.advance(300);
+    r.connect();
+    const again = r.last().sent.filter((m) => m.type === "chat_send");
+    expect(again).toHaveLength(1);
+    expect(again[0].cid).toBe("cid-1");
+    r.last().say({ type: "ack", req: again[0].req, result: "dup", qid: "q4", state: "queued" });
+    await Promise.resolve();
+    expect(out).toMatchObject({ t: "ack", result: "dup", qid: "q4", state: "queued" });
+    expect(r.sockets.flatMap((s) => s.sent).filter((m) => m.type === "chat_send")).toHaveLength(2);
+  });
+
+  it("a chat message is not sent again into another run of the daemon, or after a second loss", async () => {
+    r.connect();
+    let restarted: Outcome | null = null;
+    void r.link.chatSend("c1", "cid-1", "hello").then((o) => (restarted = o));
+    r.last().die();
+    r.advance(300);
+    r.connect({ daemon_epoch: "e2" });
+    await Promise.resolve();
+    expect(restarted).toEqual({ t: "unknown" });
+    expect(r.sockets.flatMap((s) => s.sent).filter((m) => m.type === "chat_send")).toHaveLength(1);
+
+    const q = rig();
+    q.link.start();
+    q.connect();
+    let twice: Outcome | null = null;
+    void q.link.chatSend("c1", "cid-2", "again").then((o) => (twice = o));
+    q.last().die();
+    q.advance(300);
+    q.connect();
+    q.last().die();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(twice).toEqual({ t: "unknown" });
+    q.advance(300);
+    q.connect();
+    expect(q.sockets.flatMap((s) => s.sent).filter((m) => m.type === "chat_send")).toHaveLength(2);
+  });
+
+  it("tells the app about the queue of a chat", () => {
+    r.connect();
+    r.last().say({ type: "chat_queue", id: "c1", items: [], paused: false, held: false, in_flight: false });
+    expect(r.queues.map((m) => m.id)).toEqual(["c1"]);
   });
 
   it("typing is never retried: it is unknown, and the draft stays with the person", async () => {

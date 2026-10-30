@@ -13,10 +13,14 @@ Covers: off by default; turning it on (status, URL); security headers and the em
 (SolidJS, app/phone); pairing with a QR link, approval on the desktop, the device list; the phone's
 inbox (a session that needs you comes first), a session's screen, typing and quick keys reaching the
 terminal, a prompt answered with one tap, a chat permission answered from the phone (the agent gets
-exactly one answer), a `#s=` deep link, the page coming back by itself after the server went away;
-a read-only device cannot type; a used or wrong pairing code is refused, too many attempts are
-rate limited; a socket from another origin is refused; unpairing disconnects the phone; turning it
-off stops the server.
+exactly one answer), a message sent to a chat from the phone (the desktop shows the phone's chip, then the
+transcript item with its origin; Stop works; either side cancels; a read-only device has no message box;
+a desktop message only the computer can send holding the queue is explained on the phone's own chip, with Skip, and
+noticed on the desktop outside the chat pane), a `#s=` deep link, the page coming back by itself after the
+server went away; a read-only device cannot type; a socket from another origin is refused; unpairing
+disconnects the phone; turning it off stops the server; after the computer restarted, what waited is shown
+as lost with its text in the stopped chat, also after a reload, until discarded; a used or wrong pairing
+code is refused, too many attempts are rate limited (last, so the limiter cannot refuse a pairing above).
 """
 import http.client
 import json
@@ -260,9 +264,14 @@ try:
     wait(lambda: "Pinging" in daemon(d, "session.read", {"handle": handle, "lines": 40})["text"] if os.name == "nt" else True, 30)
     time.sleep(0.5)
     phone.js("[...document.querySelectorAll('.keys button')].find(b => b.textContent === 'Ctrl+C').click()")
-    time.sleep(1.5)
+    # The next command is typed only once the Ctrl+C has stopped the running one: the phone's key and this script's input
+    # take different ways to the PTY, and a console drops what was typed ahead when it handles Ctrl+C. A fixed pause raced
+    # the phone's round trip on a busy host (the echo went first and was dropped, although the Ctrl+C had worked).
+    stopped_mark = "Control-C" if os.name == "nt" else "^C"
+    stopped = wait(lambda: stopped_mark in daemon(d, "session.read", {"handle": handle, "lines": 40})["text"].split("ping")[-1], 15)
+    run.check("quick keys (Ctrl+C) reach the terminal: the running command stops", bool(stopped), str(phone.js("return document.querySelector('.notice')?.textContent ?? null")))
     daemon(d, "session.input", {"handle": handle, "data": "echo after-ctrl-c\r"})
-    run.check("quick keys (Ctrl+C) reach the terminal", bool(wait(lambda: "after-ctrl-c" in daemon(d, "session.read", {"handle": handle, "lines": 40})["text"].split("ping")[-1], 15)))
+    run.check("…and the shell takes the next command", bool(wait(lambda: "after-ctrl-c" in daemon(d, "session.read", {"handle": handle, "lines": 40})["text"].split("ping")[-1], 15)))
 
     # ---------- inbox, prompt tap ----------
     menu = os.path.join(scratch, "phone_menu.py")
@@ -377,6 +386,157 @@ for n in (1, 2, 3):
     run.check("the card settles on the answer that was given", bool(resolved) and "Allow" in resolved, str(resolved))
     run.check("the phone shows the agent's reply", bool(phone.wait("return document.querySelector('.chat-log')?.textContent.includes('thanks')", 15)))
 
+    # ---------- chat: a message sent from the phone ----------
+    import phone_support as ps
+    turn_agent, turn_trace, turn_hold = ps.write_turn_agent(scratch)
+    for f in (turn_trace, turn_hold):
+        if os.path.exists(f):
+            os.remove(f)
+
+    def trace_lines():
+        return open(turn_trace, encoding="utf-8").read().splitlines() if os.path.exists(turn_trace) else []
+
+    def arrivals():
+        return [t[len("ARRIVE "):] for t in trace_lines() if t.startswith("ARRIVE ")]
+
+    def hold(on):
+        if on:
+            open(turn_hold, "w").close()
+        elif os.path.exists(turn_hold):
+            os.remove(turn_hold)
+
+    def phone_type(text):
+        phone.js("const ta = document.querySelector('.chat-composer textarea'); ta.value = arguments[0]; ta.dispatchEvent(new Event('input', {bubbles: true}));", text)
+
+    last_send = [0.0]
+
+    def phone_send():
+        """Taps Send once it can be tapped (an earlier send may still be on its way, or the link reconnecting), and says
+        what the page showed when the box did not empty (a notice, a disabled button): a tap that did nothing is not silent.
+        Sends are paced a little over a second apart: the daemon lets one phone send three at once and then one a second
+        (`rate_limited`), and on an idle host this script would otherwise send faster than that."""
+        time.sleep(max(0.0, last_send[0] + 1.1 - time.time()))
+        last_send[0] = time.time()
+        ready = phone.wait("const b = document.querySelector('.chat-composer .send-row .btn.primary'); return !!b && !b.disabled", 20)
+        text = phone.js("return document.querySelector('.chat-composer textarea')?.value ?? ''")
+        phone.js("document.querySelector('.chat-composer .send-row .btn.primary').click()")
+        if not phone.wait("return document.querySelector('.chat-composer textarea')?.value === ''", 15):
+            state = phone.js("const b = document.querySelector('.chat-composer .send-row .btn.primary'); return {notice: document.querySelector('.chat-composer .notice')?.textContent ?? null, disabled: b?.disabled, conn: document.querySelector('.conn')?.dataset.state, box: document.querySelector('.chat-composer textarea')?.value}")
+            sent = [(f.get("cid"), f.get("text"), f.get("req")) for f in phone.socket_frames("Network.webSocketFrameSent") if f.get("type") == "chat_send"]
+            got = [(f.get("type"), f.get("code"), f.get("result"), f.get("req")) for f in phone.socket_frames("Network.webSocketFrameReceived") if f.get("re") or f.get("req") or f.get("type") in ("ack", "error")][-12:]
+            print(f"NOTE the send of {text!r} did not empty the box (Send was {'ready' if ready else 'not ready'}): {state}; chat_send frames sent: {sent}; last replies: {got}", flush=True)
+
+    sendchat = daemon(d, "session.create", {"kind": "claude", "cwd": proj, "chat_argv": [sys.executable, "-u", turn_agent, turn_trace, turn_hold], "name": "phone-send", "project_id": pid})
+    d.js(f"const s = {S}; s.setSessions(arguments[0].id, arguments[0]); s.placePane(arguments[1], {{ id: 'send-pane', kind: 'chat', sessionId: arguments[0].id }}, 'tab');", sendchat, pid)
+    run.check("the chat is open in the desktop window", bool(d.wait("return !!document.querySelector('.chat-composer textarea')", 20)))
+    phone.js("document.querySelector('header .icon').click()")
+    phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-send'))", 20)
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-send')).click()")
+    run.check("a chat opened on a device that may type has a message box and a Send button", bool(phone.wait("return !!document.querySelector('.chat-composer textarea') && !!document.querySelector('.chat-composer .send-row .btn.primary')", 20)))
+    run.check("the box is for prose: sentences are capitalised and spelling is checked", phone.js("const t = document.querySelector('.chat-composer textarea'); return t.getAttribute('autocapitalize') === 'sentences' && t.spellcheck === true"))
+    phone_type("first line")
+    enter_prevented = phone.js("const t = document.querySelector('.chat-composer textarea'); const e = new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}); t.dispatchEvent(e); return e.defaultPrevented")
+    time.sleep(0.5)
+    run.check("Enter is a new line: it sends nothing", enter_prevented is False and arrivals() == [])
+    phone_type("hello from the phone")
+    phone_send()
+    run.check("Send writes the message to the agent once", bool(wait(lambda: arrivals() == ["hello from the phone"], 20)), str(arrivals()))
+    run.check("the box is empty again", phone.js("return document.querySelector('.chat-composer textarea').value") == "")
+    own = phone.wait("return [...document.querySelectorAll('.msg.user')].some(m => m.textContent.includes('hello from the phone') && !m.querySelector('.from'))", 20)
+    run.check("it shows in the phone's transcript, with no 'from' label on its own message", bool(own), str(phone.js("return [...document.querySelectorAll('.msg.user')].map(m => m.outerHTML).join(' | ')")))
+    shown = d.wait("return [...document.querySelectorAll('.msg-user-wrap')].some(w => w.textContent.includes('hello from the phone') && /from /.test(w.querySelector('.msg-meta')?.textContent ?? ''))", 20)
+    run.check("the desktop shows the message in its transcript, with who sent it", bool(shown))
+
+    hold(True)
+    phone_type("a long job")
+    phone_send()
+    wait(lambda: "a long job" in arrivals(), 20)
+    phone_type("queued from the phone")
+    phone_send()
+    run.check("the phone shows what is waiting, with its state", bool(phone.wait("return [...document.querySelectorAll('.chat-composer .chip')].some(c => c.textContent.includes('queued from the phone') && /Queued/.test(c.textContent))", 20)))
+    run.check("the desktop shows the phone's message as a chip, with where it came from", bool(d.wait("return [...document.querySelectorAll('.queue-chip')].some(c => c.textContent.includes('queued from the phone') && /from /.test(c.textContent))", 20)))
+    run.check("the agent has not been given it", "queued from the phone" not in arrivals())
+    run.check("while the agent works the phone has a Stop button of its own", bool(phone.wait("return !!document.querySelector('.chat-composer .stop') && !document.querySelector('.chat-composer .stop').disabled", 20)))
+    phone.shot(os.path.join(shots, "10-phone-chat-send.png"))
+    phone.js("document.querySelector('.chat-composer .stop').click()")
+    run.check("Stop interrupts the agent's turn", bool(wait(lambda: "STOP" in trace_lines(), 15)), str(trace_lines()[-3:]))
+    run.check("…and the queue waits: stopping means wait", bool(phone.wait("return /paused/i.test(document.querySelector('.chat-composer .confirm')?.textContent ?? '')", 15)) and "queued from the phone" not in arrivals())
+    run.check("the Stop button is gone once the agent is idle", bool(phone.wait("return !document.querySelector('.chat-composer .stop')", 15)))
+    run.check("the desktop says the queue is stopped too", bool(d.wait("return !!document.querySelector('.queue-note')", 15)))
+    d.js("document.querySelector('.queue-chip .icon-btn.mini').click()")
+    run.check("the desktop cancels the phone's waiting message: the phone says so and keeps the text", bool(phone.wait("return [...document.querySelectorAll('.chat-composer .chip')].some(c => c.textContent.includes('queued from the phone') && c.textContent.includes('Cancelled on desktop'))", 15)))
+    phone.js("[...document.querySelectorAll('.chat-composer .chip')].find(c => c.textContent.includes('Cancelled on desktop')).querySelectorAll('.link-btn')[1].click()")
+    run.check("…and Discard lets it go", bool(phone.wait("return ![...document.querySelectorAll('.chat-composer .chip')].some(c => c.textContent.includes('Cancelled on desktop'))", 10)))
+    hold(False)
+    phone_type("to cancel on the phone")
+    hold(True)
+    phone_send()
+    wait(lambda: "to cancel on the phone" in arrivals(), 15)
+    phone_type("to be cancelled here")
+    phone_send()
+    phone.wait("return [...document.querySelectorAll('.chat-composer .chip')].some(c => c.textContent.includes('to be cancelled here'))", 15)
+    phone.js("[...document.querySelectorAll('.chat-composer .chip')].find(c => c.textContent.includes('to be cancelled here')).querySelector('.icon').click()")
+    run.check("the phone cancels its own waiting message", bool(phone.wait("return ![...document.querySelectorAll('.chat-composer .chip')].some(c => c.textContent.includes('to be cancelled here'))", 15)))
+    run.check("…and the desktop's chip goes too", bool(d.wait("return ![...document.querySelectorAll('.queue-chip')].some(c => c.textContent.includes('to be cancelled here'))", 15)))
+    hold(False)
+    time.sleep(1.5)
+    run.check("the cancelled messages never reached the agent", "queued from the phone" not in arrivals() and "to be cancelled here" not in arrivals(), str(arrivals()))
+
+    # ---------- a desktop message only the window can send holds the queue: the phone says why, Skip lets the rest go ----------
+    # The chat is not open on the desktop, so the picture (queued by the app's own connection) waits at the head in strict order.
+    held_chat = daemon(d, "session.create", {"kind": "claude", "cwd": proj, "chat_argv": [sys.executable, "-u", turn_agent, turn_trace, turn_hold], "name": "phone-held", "project_id": pid})
+    phone.js("document.querySelector('header .icon').click()")
+    phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-held'))", 20)
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-held')).click()")
+    phone.wait("return !!document.querySelector('.chat-composer textarea')", 20)
+    hold(True)
+    phone_type("busy before the picture")
+    phone_send()
+    wait(lambda: "busy before the picture" in arrivals(), 20)
+    daemon(d, "chat.send", {"handle": held_chat["handle"], "cid": "e2e-desktop-picture", "text": "desktop picture", "rich": True, "images": ["a.png"]})
+    phone.wait("return !document.querySelector('.chat-composer .send-row .btn.primary').disabled", 10)
+    phone_type("behind the picture")
+    phone_send()
+    phone.wait("return [...document.querySelectorAll('.chat-composer .chip')].some(c => c.textContent.includes('behind the picture'))", 15)
+    hold(False)
+    held_note = phone.wait("return [...document.querySelectorAll('.chat-composer .chip.held')].find(c => c.textContent.includes('behind the picture'))?.querySelector('.chip-note')?.textContent ?? null", 30)
+    run.check("a phone message behind a desktop message only the computer can send says why it waits, on its own chip", bool(held_note) and "only the computer can send" in held_note and "Skip" in held_note, str(held_note))
+    time.sleep(1.0)
+    run.check("…and it does wait: the order is kept", "behind the picture" not in arrivals() and "desktop picture" not in arrivals(), str(arrivals()))
+    run.check("the desktop says so outside the chat pane, which is not open there", bool(d.wait("return !!document.querySelector('.chat-wait-notice[data-session=\"%s\"]')" % held_chat["id"], 15)))
+    phone.js("[...document.querySelectorAll('.chat-composer .chip.held')].find(c => c.textContent.includes('behind the picture')).querySelector('[data-skip]').click()")
+    run.check("Skip on the phone's own chip lets the rest go", bool(wait(lambda: "behind the picture" in arrivals(), 20)), str(arrivals()))
+    run.check("…the skipped message is not sent", "desktop picture" not in arrivals())
+    run.check("…and the desktop's notice goes", bool(d.wait("return !document.querySelector('.chat-wait-notice')", 15)))
+    d.js(f"const s = {S}; if (!s.sessions[arguments[0].id]) s.setSessions(arguments[0].id, arguments[0]); s.placePane(arguments[1], {{ id: 'held-pane', kind: 'chat', sessionId: arguments[0].id }}, 'tab');", held_chat, pid)
+    skipped = d.wait("return [...document.querySelectorAll('.chat-scroll')].some(s => s.textContent.includes('desktop picture') && /cancelled from/.test(s.textContent))", 20)
+    run.check("the chat opened on the desktop afterwards notes the skipped message as not sent", bool(skipped))
+
+    # ---------- the desktop cancels a phone's message while the phone is offline: back online, it says so and keeps the text ----------
+    hold(True)
+    phone_type("busy while the phone is away")
+    phone_send()
+    wait(lambda: "busy while the phone is away" in arrivals(), 20)
+    phone_type("cancelled while away")
+    phone_send()
+    phone.wait("return [...document.querySelectorAll('.chat-composer .chip')].some(c => c.textContent.includes('cancelled while away') && /Queued/.test(c.textContent))", 15)
+    phone.js("window.dispatchEvent(new Event('offline'))")
+    phone.wait("return document.querySelector('.conn')?.dataset.state !== 'live'", 10)
+    d.wait("return [...document.querySelectorAll('.queue-chip')].some(c => c.textContent.includes('cancelled while away'))", 15)
+    d.js("[...document.querySelectorAll('.queue-chip')].find(c => c.textContent.includes('cancelled while away')).querySelector('.icon-btn.mini').click()")
+    d.wait("return ![...document.querySelectorAll('.queue-chip')].some(c => c.textContent.includes('cancelled while away'))", 15)
+    phone.js("window.dispatchEvent(new Event('online'))")
+    phone.wait(LIVE, 30)
+    away_js = "return [...document.querySelectorAll('.chat-composer .chip')].find(c => c.textContent.includes('cancelled while away'))?.textContent ?? null"
+    away = phone.wait("return [...document.querySelectorAll('.chat-composer .chip')].find(c => c.textContent.includes('cancelled while away') && c.textContent.includes('Cancelled on desktop'))?.textContent ?? null", 20)
+    run.check("a message the desktop cancelled while the phone was offline shows as cancelled on desktop once it is back, with its text", bool(away), str(phone.js(away_js)))
+    time.sleep(6)  # longer than a written message stays as "Sent"
+    still = phone.js(away_js)
+    run.check("…and it stays (it is not taken for sent and let go)", bool(still) and "Cancelled on desktop" in still, str(still))
+    run.check("…and it never reached the agent", "cancelled while away" not in arrivals())
+    phone.js("[...[...document.querySelectorAll('.chat-composer .chip')].find(c => c.textContent.includes('cancelled while away')).querySelectorAll('.link-btn')].find(b => b.textContent === 'Discard').click()")
+    hold(False)
+
     # ---------- deep link ----------
     sid = next(x["id"] for x in daemon(d, "session.list") if x["handle"] == handle)
     phone.go("about:blank")
@@ -421,12 +581,17 @@ for n in (1, 2, 3):
     phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-shell')).click()")
     ro = phone.wait("return document.querySelector('.readonly')?.textContent ?? null")
     run.check("a read-only device sees the screen but no input", bool(ro) and "only read" in ro and not phone.js("return !!document.querySelector('.send textarea')"), str(ro))
+    phone.js("document.querySelector('header .icon').click()")
+    phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-send'))", 15)
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-send')).click()")
+    ro_chat = phone.wait("return document.querySelector('.session.chat .readonly')?.textContent ?? null", 15)
+    run.check("a read-only device sees a chat but has no message box", bool(ro_chat) and not phone.js("return !!document.querySelector('.chat-composer')"), str(ro_chat))
+    phone.js("document.querySelector('header .icon').click()")
+    phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-shell'))", 15)
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-shell')).click()")
     status, _, _ = http_get(base + "ws", {"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13", "Origin": "http://evil.example"})
     run.check("a socket from another site is refused", status == 403, str(status))
-    run.check("a wrong pairing code is refused", post_pair(base, "0" * 64) == 403)
-    for _ in range(10):
-        post_pair(base, "1" * 64)
-    run.check("repeated bad codes are rate limited", post_pair(base, "2" * 64) == 429)
+    # The bad pairing codes are tried last (after the restart scenario, which pairs a phone): the limiter would refuse that pairing.
 
     # ---------- unpair, off ----------
     reader = next(x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Reader")
@@ -443,6 +608,60 @@ for n in (1, 2, 3):
     for dev in daemon(d, "mobile.status")["devices"]:
         daemon(d, "mobile.revoke", {"id": dev["id"]})
     daemon(d, "session.close", {"handle": handle})
+
+    # ---------- after the computer restarted: what waited is shown as lost, with its text ----------
+    class _Calls:
+        """What phone_support.pair needs of the daemon: `call`."""
+
+        def call(self, method, params=None):
+            return daemon(d, method, params or {})
+
+    daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    lost_token, _lost_id = ps.pair(_Calls(), base, "Restart phone", True)
+    lost_chat = daemon(d, "session.create", {"kind": "claude", "cwd": proj, "chat_argv": [sys.executable, "-u", turn_agent, turn_trace, turn_hold], "name": "phone-lost", "project_id": pid})
+    phone.go(base)
+    phone.js("localStorage.setItem('kelpie-token', arguments[0])", lost_token)
+    phone.go("about:blank")
+    phone.go(base)
+    phone.wait(LIVE, 30)
+    phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-lost'))", 20)
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-lost')).click()")
+    phone.wait("return !!document.querySelector('.chat-composer textarea')", 20)
+    hold(True)
+    phone_type("running when it restarts")
+    phone_send()
+    wait(lambda: "running when it restarts" in arrivals(), 20)
+    phone_type("queued when it restarts")
+    phone_send()
+    phone.wait("return [...document.querySelectorAll('.chat-composer .chip')].some(c => c.textContent.includes('queued when it restarts'))", 20)
+    restart_daemon(d, kelpied, kill=True, env=ISOLATED)
+    check_daemon(d, ISOLATED)
+    # Every chat comes back not running after a restart: no box, but what waited stays on screen with its text.
+    lost_js = "return [...document.querySelectorAll('.kept-chips .chip.warn')].find(c => c.textContent.includes('queued when it restarts') && /restarted/.test(c.textContent))?.textContent ?? null"
+    lost = phone.wait(lost_js, 90)
+    run.check("after the computer restarted the phone shows what waited as lost, with its text kept, in a chat that is not running", bool(lost), str(lost))
+    hint = phone.js("return document.querySelector('.session.chat .readonly')?.textContent ?? ''")
+    run.check("…under the hint to open the chat on the desktop", "Open it on the desktop" in hint, hint)
+    run.check("…with its text to copy", bool(phone.js("return [...document.querySelectorAll('.kept-chips .chip.warn .link-btn')].some(b => b.textContent === 'Copy')")))
+    phone.go("about:blank")
+    phone.go(base)
+    phone.wait(LIVE, 60)
+    phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-lost'))", 20)
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-lost')).click()")
+    kept = phone.wait(lost_js, 30)
+    run.check("a reload of the page keeps it, text and all", bool(kept), str(kept))
+    phone.js("[...[...document.querySelectorAll('.kept-chips .chip.warn')].find(c => c.textContent.includes('queued when it restarts')).querySelectorAll('.link-btn')].find(b => b.textContent === 'Discard').click()")
+    run.check("Discard lets it go", bool(phone.wait("return !document.querySelector('.kept-chips')", 15)))
+    run.check("…for good: nothing of it is kept on the phone", not phone.js("return Object.keys(localStorage).some(k => k.startsWith('kelpie-draft:chat-pending:'))"))
+    hold(False)
+    # Last, so the limiter does not refuse a pairing this script still needs.
+    run.check("a wrong pairing code is refused", post_pair(base, "0" * 64) == 403)
+    for _ in range(10):
+        post_pair(base, "1" * 64)
+    run.check("repeated bad codes are rate limited", post_pair(base, "2" * 64) == 429)
+    for dev in daemon(d, "mobile.status")["devices"]:
+        daemon(d, "mobile.revoke", {"id": dev["id"]})
+    daemon(d, "mobile.disable")
 except Exception:
     import traceback
     traceback.print_exc()

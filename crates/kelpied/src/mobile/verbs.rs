@@ -30,6 +30,14 @@ pub enum Verb {
     Answer,
     /// Answer a chat agent's request (permission, question).
     ChatAnswer,
+    /// Queue a message for a chat's agent; the daemon writes it when the agent is idle.
+    ChatSend,
+    /// Take a message that still waits out of a chat's queue.
+    ChatCancel,
+    /// Stop the turn a chat's agent is running.
+    ChatStop,
+    /// End the wait a stop asked for.
+    ChatResume,
 }
 
 impl Verb {
@@ -45,6 +53,10 @@ impl Verb {
             "key" => Verb::Key,
             "answer" => Verb::Answer,
             "chat_answer" => Verb::ChatAnswer,
+            "chat_send" => Verb::ChatSend,
+            "chat_cancel" => Verb::ChatCancel,
+            "chat_stop" => Verb::ChatStop,
+            "chat_resume" => Verb::ChatResume,
             _ => return None,
         })
     }
@@ -52,7 +64,7 @@ impl Verb {
     pub fn needs(self) -> Permission {
         match self {
             Verb::List | Verb::Hb | Verb::Ack | Verb::Sub | Verb::Unsub | Verb::ChatSub => Permission::Read,
-            Verb::Input | Verb::Key | Verb::Answer | Verb::ChatAnswer => Permission::Write,
+            Verb::Input | Verb::Key | Verb::Answer | Verb::ChatAnswer | Verb::ChatSend | Verb::ChatCancel | Verb::ChatStop | Verb::ChatResume => Permission::Write,
         }
     }
 }
@@ -97,11 +109,11 @@ pub fn key_bytes(key: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const ALL: [Verb; 10] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer];
+    const ALL: [Verb; 14] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume];
 
     #[test]
     fn the_table_is_closed_and_every_verb_has_its_permission() {
-        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer"];
+        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume"];
         for (name, verb) in names.iter().zip(ALL) {
             assert_eq!(Verb::parse(name), Some(verb), "{name}");
         }
@@ -111,7 +123,7 @@ mod tests {
             assert_eq!(verb.needs(), expected, "{name}");
         }
         // The daemon's own methods, admin ones above all, are not verbs, whatever they are named.
-        for other in ["session.update", "session.attach", "session.answer", "session.input", "session.close", "mobile.approve", "mobile.revoke", "daemon.shutdown", "read", "auth", "", "LIST", "list "] {
+        for other in ["chat.send", "chat.queue_op", "chat.write_turn", "chat_queue", "chat_write", "session.update", "session.attach", "session.answer", "session.input", "session.close", "mobile.approve", "mobile.revoke", "daemon.shutdown", "read", "auth", "", "LIST", "list "] {
             assert_eq!(Verb::parse(other), None, "{other:?}");
         }
     }

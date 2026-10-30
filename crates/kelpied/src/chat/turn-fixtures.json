@@ -1,0 +1,14 @@
+{
+  "claude": {
+    "turn": {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}},
+    "interrupt": {"type": "control_request", "request_id": "*", "request": {"subtype": "interrupt"}}
+  },
+  "codex": {
+    "turn": {"id": "*", "method": "turn/start", "params": {"threadId": "T1", "input": [{"type": "text", "text": "hello", "text_elements": []}]}},
+    "interrupt": {"id": "*", "method": "turn/interrupt", "params": {"threadId": "T1", "turnId": "TURN1"}}
+  },
+  "acp": {
+    "turn": {"jsonrpc": "2.0", "id": "*", "method": "session/prompt", "params": {"sessionId": "S1", "prompt": [{"type": "text", "text": "hello"}]}},
+    "interrupt": {"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "S1"}}
+  }
+}

@@ -249,6 +249,16 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
   }
 
   return {
+    showsSent: true,
+    snapshot() {
+      // `/new` forgets the session until the answer names the next one: if the lines are not taken, it is still this one.
+      const before = { sessionId, lastKind, waiting: queued.length };
+      return () => {
+        sessionId = before.sessionId;
+        lastKind = before.lastKind;
+        queued.length = Math.min(queued.length, before.waiting);
+      };
+    },
     reset() {
       initialized = false;
       canLoad = false;
@@ -389,7 +399,8 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
     takesPictures: () => !initialized || canImage,
     isCommand: (text) => isNewConversation(text),
     send(text, _typed, images) {
-      if (!isNewConversation(text)) ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text, images: sentImages(images) });
+      // With the daemon's queue the prompt is shown from the log (`kelpie_sent`), where it is the same on every screen.
+      if (!isNewConversation(text) && !ctx.daemonQueue?.()) ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text, images: sentImages(images) });
       if (!sessionId) {
         queued.push({ text, images });
         ctx.set("busy", true);

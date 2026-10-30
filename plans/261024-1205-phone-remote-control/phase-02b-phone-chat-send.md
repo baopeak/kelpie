@@ -249,6 +249,7 @@ Three commits. Each passes `cargo test -p kelpied` and `pnpm typecheck && pnpm t
 ## Validation log
 
 - 2026-10-30, user decisions: D14 daemon-owned queue approved; desktop and phone may cancel each other's queued messages (one user); Codex `/compact`, `/review`, `/new` and `!cmd` from the phone are refused with a hint to use the desktop; revoking a device drops its queued messages but lets a running turn finish (Stop stays available on the desktop).
+- 2026-10-30, user decision: a rich desktop entry held at the head as `needs_window` keeps strict order (nothing reorders or expires on its own). The phone shows a clear "a desktop message with an attachment is waiting for the desktop window" notice with a one-tap Skip (cancel), and the desktop shows a notice outside the chat pane.
 
 ## Risk Assessment
 | Risk | L×I | Mitigation |

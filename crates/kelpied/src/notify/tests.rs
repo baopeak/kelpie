@@ -23,6 +23,7 @@ fn info(handle: u32, status: Status, failed: bool, alive: bool) -> SessionInfo {
         last_activity: 0,
         interrupted: false,
         waiting_since: None,
+        waits_for_window: false,
     }
 }
 

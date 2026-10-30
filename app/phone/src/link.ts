@@ -60,6 +60,17 @@ export interface ChatMsg {
   lines: string[];
 }
 
+/** The daemon's queue of messages for a chat (the whole state: the latest message replaces the last). `by` names the sender,
+ *  `mine` says it is this device's, `kind` is `desktop` for a message from the computer's own window. */
+export interface ChatQueueMsg {
+  id: string;
+  items: { qid: string; cid: string; by: string; mine: boolean; kind: "phone" | "desktop"; text: string }[];
+  paused: boolean;
+  held: boolean;
+  in_flight: boolean;
+  dropped?: { qid: string; cid: string; by: string; mine: boolean; text: string; reason: string }[];
+}
+
 export interface ChatResolved {
   id: string;
   request_id: string | number;
@@ -81,7 +92,8 @@ export interface ReplyError {
 
 /** What became of a request: the daemon's reply, or why there was none. */
 export type Outcome =
-  | { t: "ack"; entered?: boolean; result?: string }
+  /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. */
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -96,6 +108,7 @@ export interface LinkHandlers {
   frame(m: ScreenFrame): void;
   chat(m: ChatMsg): void;
   chatResolved(m: ChatResolved): void;
+  chatQueue?(m: ChatQueueMsg): void;
   chatResync(id: string): void;
   /** The device was removed on the computer: forget the token. */
   unpaired(): void;
@@ -409,6 +422,24 @@ export class Link {
     return this.request({ type: "chat_answer", id, request_id: requestId, line }, { retry: true });
   }
 
+  /** Sends a message to a chat. `cid` names it: if the connection drops with it in flight it is sent once more, with the
+   *  same `cid`, after the next hello, and the daemon answers `dup` for a message it has (never a second one). */
+  chatSend(id: string, cid: string, text: string) {
+    return this.request({ type: "chat_send", id, cid, text }, { retry: true });
+  }
+
+  chatCancel(id: string, qid: string) {
+    return this.request({ type: "chat_cancel", id, qid });
+  }
+
+  chatStop(id: string) {
+    return this.request({ type: "chat_stop", id });
+  }
+
+  chatResume(id: string) {
+    return this.request({ type: "chat_resume", id });
+  }
+
   // ---------- socket ----------
 
   private open() {
@@ -577,6 +608,9 @@ export class Link {
       case "chat_resolved":
         this.h.chatResolved(m as ChatResolved);
         break;
+      case "chat_queue":
+        this.h.chatQueue?.(m as ChatQueueMsg);
+        break;
       case "chat_resync":
         this.refollow(m.id);
         this.h.chatResync(m.id);
@@ -649,7 +683,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead });
     }
     this.h.changed();
     return true;

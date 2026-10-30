@@ -816,6 +816,10 @@ impl Daemon {
         self.notifier.drop_client(id);
         for entry in self.sessions.read().values() {
             entry.detach(id);
+            // A window that is gone cannot build what it queued.
+            if let Entry::Chat(c) = entry {
+                c.client_gone(id);
+            }
         }
     }
 
@@ -871,6 +875,14 @@ impl Daemon {
     #[cfg(test)]
     pub(crate) fn remove_for_test(&self, handle: u32) {
         self.sessions.write().remove(&handle);
+    }
+
+    /// Drops the chat messages a phone has waiting (it was revoked, or may no longer write).
+    pub fn drop_device_queues(&self, device: &str, reason: &'static str) {
+        let chats: Vec<Arc<ChatSession>> = self.sessions.read().values().filter_map(|e| if let Entry::Chat(c) = e { Some(c.clone()) } else { None }).collect();
+        for c in chats {
+            c.drop_device(device, reason);
+        }
     }
 
     pub fn entry(&self, handle: u32) -> Result<Entry> {
@@ -1601,6 +1613,12 @@ impl Daemon {
             }
             "mobile.disable" => {
                 self.mobile.disable();
+                // Nobody is let in any more: what phones had waiting is not written.
+                for e in self.sessions.read().values() {
+                    if let Entry::Chat(c) = e {
+                        c.drop_phones("revoked");
+                    }
+                }
                 self.broadcast("mobile.updated", json!({}));
                 json!(true)
             }
@@ -1611,12 +1629,18 @@ impl Daemon {
                 v
             }
             "mobile.revoke" => {
+                // The permission goes first, then what the device has waiting: a message that was being queued as this runs finds
+                // the permission gone (`enqueue_if`), or is dropped here. A turn already written runs on.
                 let v = self.mobile.revoke(param(&params, "id")?.as_str().unwrap_or_default())?;
+                self.drop_device_queues(param(&params, "id")?.as_str().unwrap_or_default(), "revoked");
                 self.broadcast("mobile.updated", json!({}));
                 v
             }
             "mobile.set_write" => {
                 let v = self.mobile.set_write(param(&params, "id")?.as_str().unwrap_or_default(), params.get("can_write").and_then(Value::as_bool).unwrap_or(false))?;
+                if params.get("can_write").and_then(Value::as_bool) != Some(true) {
+                    self.drop_device_queues(param(&params, "id")?.as_str().unwrap_or_default(), "revoked");
+                }
                 self.broadcast("mobile.updated", json!({}));
                 v
             }
@@ -1765,6 +1789,11 @@ impl Daemon {
                 }
                 Entry::Chat(_) => bail!("session.read is for terminal sessions"),
             },
+            // The turn queue (`chat.rs`): the desktop's messages go through it with a phone's.
+            m @ ("chat.send" | "chat.write_turn" | "chat.queue_op") => {
+                let Entry::Chat(c) = self.entry(handle_of(&params)?)? else { bail!("{m} is for chat sessions") };
+                c.queue_rpc(client, m, &params)?
+            }
             "chat.close_stdin" => {
                 if let Entry::Chat(c) = self.entry(handle_of(&params)?)? {
                     c.close_stdin();

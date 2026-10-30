@@ -36,5 +36,16 @@
   "{name}: text too long to inline cannot be sent to a session on another machine": "{name}: văn bản quá dài để chèn không thể gửi tới phiên chạy trên máy khác",
   "{name}: this name cannot be written safely for a terminal": "{name}: tên này không thể viết an toàn vào terminal",
   "This terminal does not take a multi-line paste yet (every line would be sent as its own command): write one line, or wait until the program has started": "Terminal này chưa nhận được dán nhiều dòng (mỗi dòng sẽ bị gửi như một lệnh riêng): hãy viết một dòng, hoặc đợi chương trình khởi động xong",
-  "Message {target}…  (@ files, folders, selection, diff, terminals, issues · paste or drop a picture · Enter to send, Shift+Enter for a new line, ↑ for earlier prompts)": "Nhắn {target}…  (@ tệp, thư mục, phần chọn, diff, terminal, issue · dán hoặc thả ảnh · Enter để gửi, Shift+Enter xuống dòng, ↑ xem lời nhắc trước)"
+  "Message {target}…  (@ files, folders, selection, diff, terminals, issues · paste or drop a picture · Enter to send, Shift+Enter for a new line, ↑ for earlier prompts)": "Nhắn {target}…  (@ tệp, thư mục, phần chọn, diff, terminal, issue · dán hoặc thả ảnh · Enter để gửi, Shift+Enter xuống dòng, ↑ xem lời nhắc trước)",
+  "Not sent (this window could not prepare it):\n{messages}": "Chưa gửi (cửa sổ này không chuẩn bị được):\n{messages}",
+  "Not sent (the computer could not prepare it):\n{messages}": "Chưa gửi (máy tính không chuẩn bị được):\n{messages}",
+  "Not sent (the phone lost access):\n{messages}": "Chưa gửi (điện thoại đã mất quyền truy cập):\n{messages}",
+  "Not sent ({reason}):\n{messages}": "Chưa gửi ({reason}):\n{messages}",
+  "from {device}": "từ {device}",
+  "needs the desktop window": "cần cửa sổ trên máy tính",
+  "This message has a picture or a command that only the Kelpie window it was typed in can prepare. It waits there; remove it to let the others go.": "Tin nhắn này có ảnh hoặc lệnh mà chỉ cửa sổ Kelpie nơi bạn gõ mới chuẩn bị được. Nó đang chờ ở đó; hãy xóa nó để các tin khác được gửi đi.",
+  "Not sent (cancelled from {device}):\n{messages}": "Chưa gửi (đã hủy từ {device}):\n{messages}",
+  "a phone": "một điện thoại",
+  "A message in “{chat}” can only be sent with its chat open here. Messages sent after it wait too.": "Một tin nhắn trong “{chat}” chỉ gửi được khi cuộc trò chuyện đang mở ở đây. Các tin gửi sau nó cũng phải chờ.",
+  "Open chat": "Mở cuộc trò chuyện"
 }

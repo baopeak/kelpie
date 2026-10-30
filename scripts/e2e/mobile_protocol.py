@@ -21,9 +21,16 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
    the agent gets exactly one answer whoever is first, the other side is told (`chat_resolved`,
    `chat.resolved`); a watcher resumes with a delta.
 9. A daemon restart gives a new epoch; the session ids still resolve; a request from the old epoch is refused.
+10. Sending to a chat from the phone (the daemon's queue): an idle agent gets the message once, a busy one
+    after its turn; phone and desktop messages go out in the order received, with the window attached or
+    gone; a retry under the same `cid` makes no second message; either side cancels the other's; a stop
+    pauses the queue until a resume; a revoked device's waiting messages are dropped; the limits; an ACP
+    agent (fake_acp_agent.py) shows the prompt through `kelpie_sent`, and a stop cancels its permission.
 """
 import asyncio
+import json
 import os
+import struct
 import sys
 import tempfile
 import threading
@@ -72,6 +79,39 @@ open(CHAT_AGENT, "w", encoding="utf-8").write(
     "        out({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'thanks'}}}})\n")
 
 
+# A Claude-style chat agent that takes one turn at a time (phone_support.TURN_AGENT_SOURCE): it traces when a message arrives (ARRIVE)
+# and when its turn ends (END), holds a turn while TURN_HOLD exists, and ends it early on an interrupt.
+TURN_AGENT, TURN_TRACE, TURN_HOLD = ps.write_turn_agent(work)
+ACP_LOG = os.path.join(work, "acp-agent.log")
+FAKE_ACP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_acp_agent.py")
+
+
+async def say(who, **msg):
+    # A chat_send, tried again a moment later while the rate limit says wait (the same cid: a retry is harmless).
+    for _ in range(6):
+        r = await who.ask(type="chat_send", **msg)
+        if r and r.get("code") == "rate_limited":
+            await asyncio.sleep(1.1)
+            continue
+        return r
+    return r
+
+
+def trace():
+    return open(TURN_TRACE, encoding="utf-8").read().splitlines() if os.path.exists(TURN_TRACE) else []
+
+
+def arrived():
+    return [t[len("ARRIVE "):] for t in trace() if t.startswith("ARRIVE ")]
+
+
+def hold(on):
+    if on:
+        open(TURN_HOLD, "w").close()
+    elif os.path.exists(TURN_HOLD):
+        os.remove(TURN_HOLD)
+
+
 def info(d, sid):
     return next((s for s in d.call("session.list") if s["id"] == sid), {})
 
@@ -92,6 +132,66 @@ def chat_lines(phone, sid, since=0):
 
 def agent_log():
     return open(CHAT_LOG, encoding="utf-8").read().splitlines() if os.path.exists(CHAT_LOG) else []
+
+
+class Window(threading.Thread):
+    """A desktop window attached to a chat, as the app's chat view is: it keeps the events it is sent, and answers the daemon's
+    offer of a queued message (`chat.turn_ready`) with the Claude line it built for the text it queued (`texts`).
+    One thread reads and writes the connection (a pipe handle cannot be read and written from two threads at once on Windows):
+    it looks at how much is waiting before it reads."""
+
+    def __init__(self, handle):
+        super().__init__(daemon=True)
+        self.conn = ps.kc.Conn()
+        self.events = []
+        self.texts = {}
+        self.handle = handle
+        self.n = 10_000
+        self.outbox = []
+        self.stopped = False
+        self.conn.call("session.attach", {"handle": handle})
+        self.start()
+
+    def send(self, method, params):
+        self.outbox.append((method, params))
+
+    def waiting(self):
+        import ctypes
+        import msvcrt
+        n = ctypes.c_ulong(0)
+        ok = ctypes.windll.kernel32.PeekNamedPipe(ctypes.c_void_p(msvcrt.get_osfhandle(self.conn.f.fileno())), None, 0, None, ctypes.byref(n), None)
+        return n.value if ok else -1
+
+    def run(self):
+        try:
+            while not self.stopped:
+                while self.outbox:
+                    method, params = self.outbox.pop(0)
+                    self.n += 1
+                    body = json.dumps({"id": self.n, "method": method, "params": params}).encode()
+                    self.conn.write(struct.pack("<I", len(body) + 1) + bytes([1]) + body)
+                avail = self.waiting()
+                if avail < 0:
+                    return
+                if avail == 0:
+                    time.sleep(0.005)
+                    continue
+                kind, body = self.conn.frame()
+                if kind != 1:
+                    continue
+                e = json.loads(body)
+                self.events.append(e)
+                if e.get("event") == "chat.turn_ready" and e["params"]["handle"] == self.handle:
+                    text = self.texts.get(e["params"]["cid"])
+                    lines = None if text is None else [json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}})]
+                    self.send("chat.write_turn", {"handle": self.handle, "qid": e["params"]["qid"], "lines": lines, "turn": True})
+        except Exception:  # noqa: BLE001
+            pass
+
+    def queue(self):
+        """The last queue the daemon told this window of."""
+        states = [e["params"] for e in self.events if e.get("event") == "chat.queue"]
+        return states[-1] if states else None
 
 
 class Watcher(threading.Thread):
@@ -412,6 +512,200 @@ async def main(d):
     d.call("session.close", {"handle": c3["handle"]})
     gone = await phone.ask(type="unsub", id=c3["id"])
     check("a watched chat that was closed can be let go of", gone["type"] == "ack", gone)
+
+
+    # ---------- 8b. sending to a chat from the phone ----------
+    cs = d.call("session.create", {"kind": "claude", "cwd": work, "chat_argv": [sys.executable, "-u", TURN_AGENT, TURN_TRACE, TURN_HOLD], "name": "phone-send"})
+    ps.wait_for(lambda: info(d, cs["id"]).get("alive"), 20)
+    mark = phone.mark()
+    await phone.ask(type="chat_sub", id=cs["id"])
+    first_queue = await phone.wait(lambda m: m["type"] == "chat_queue" and m["id"] == cs["id"], 5, mark)
+    check("following a chat brings the state of its queue", first_queue is not None and first_queue["items"] == [] and first_queue["paused"] is False and first_queue["in_flight"] is False, first_queue)
+
+    mark = phone.mark()
+    r = await say(phone, id=cs["id"], cid="idle-1", text="first message")
+    check("a message to an idle agent is written at once", r["type"] == "ack" and r["result"] == "ok" and r["state"] == "sent", r)
+    check("…the agent got it once and finished the turn", ps.wait_for(lambda: "END first message" in trace(), 15) and arrived() == ["first message"], trace())
+    sent = await phone.wait(lambda m: m["type"] == "chat" and m["id"] == cs["id"] and any('"kelpie_sent"' in line and "idle-1" in line for line in m["lines"]), 10, mark)
+    sent_line = next((json.loads(line) for line in sent["lines"] if "kelpie_sent" in line), None) if sent else None
+    check("the log shows it was sent, by whom and with which cid", sent_line is not None and sent_line["by"] == "phone" and sent_line["name"] == "Writer" and sent_line["text"] == "first message" and sent_line["cid"] == "idle-1", sent_line)
+    check("the agent's echo and answer reach the phone as chat lines", await phone.wait(lambda m: m["type"] == "chat" and m["id"] == cs["id"] and any("on it: first message" in line for line in m["lines"]), 10, mark) is not None)
+
+    # A window is attached from here on (the app's chat view).
+    window = Window(cs["handle"])
+    # busy: the next messages wait
+    hold(True)
+    await say(phone, id=cs["id"], cid="run-1", text="long job")
+    ps.wait_for(lambda: "long job" in arrived(), 10)
+    mark = phone.mark()
+    q1 = await say(phone, id=cs["id"], cid="w-1", text="phone while busy")
+    check("a message to a busy agent is queued, with how many are ahead", q1["type"] == "ack" and q1["state"] == "queued" and q1["ahead"] == 0, q1)
+    window.texts["d-1"] = "desktop while busy"
+    window.send("chat.send", {"handle": cs["handle"], "cid": "d-1", "text": "desktop while busy", "rich": False})
+    # The window's send leaves from its own thread: the phone's next one is sent once the daemon has it, so the order the
+    # daemon received them in is the order this script means.
+    ps.wait_for(lambda: any(i["cid"] == "d-1" for i in (window.queue() or {}).get("items", [])), 10)
+    q3 = await say(phone, id=cs["id"], cid="w-2", text="phone second")
+    check("…behind the desktop's, in the order the daemon got them", q3["ahead"] == 2, q3)
+    queued = await phone.wait(lambda m: m["type"] == "chat_queue" and m["id"] == cs["id"] and len(m["items"]) == 3, 5, mark)
+    check("the phone sees every origin in the queue, its own marked", queued is not None and [i["text"] for i in queued["items"]] == ["phone while busy", "desktop while busy", "phone second"] and [i["mine"] for i in queued["items"]] == [True, False, True] and queued["items"][1]["kind"] == "desktop", queued)
+    check("the desktop sees the phone's messages with their sender", ps.wait_for(lambda: (window.queue() or {}).get("items") and [i["by"]["name"] for i in window.queue()["items"]] == ["Writer", "desktop", "Writer"], 5), window.queue())
+    check("nothing was written to the busy agent", arrived() == ["first message", "long job"], arrived())
+    dup = await say(phone, id=cs["id"], cid="w-1", text="phone while busy")
+    check("a retry under the same cid is a duplicate with the same qid", dup["type"] == "ack" and dup["result"] == "dup" and dup["qid"] == q1["qid"] and dup["state"] == "queued", dup)
+
+    # cancel from either side
+    phone_extra = await say(phone, id=cs["id"], cid="w-3", text="to cancel from the desktop")
+    window.send("chat.queue_op", {"handle": cs["handle"], "op": "cancel", "qid": phone_extra["qid"]})
+    check("the desktop cancels a phone's message", ps.wait_for(lambda: all(i["cid"] != "w-3" for i in (window.queue() or {"items": [{"cid": "w-3"}]})["items"]), 5), window.queue())
+    window.texts["d-2"] = "to cancel from the phone"
+    window.send("chat.send", {"handle": cs["handle"], "cid": "d-2", "text": "to cancel from the phone", "rich": False})
+    gone_q = await phone.wait(lambda m: m["type"] == "chat_queue" and m["id"] == cs["id"] and any(i["cid"] == "d-2" for i in m["items"]), 5, mark)
+    cancelled = await phone.ask(type="chat_cancel", id=cs["id"], qid=next(i["qid"] for i in gone_q["items"] if i["cid"] == "d-2"))
+    check("the phone cancels the desktop's message", cancelled["type"] == "ack", cancelled)
+    again = await phone.ask(type="chat_cancel", id=cs["id"], qid=cancelled and next(i["qid"] for i in gone_q["items"] if i["cid"] == "d-2"))
+    check("a second cancel is too late", again["type"] == "error" and again["code"] == "too_late", again)
+    redo = await say(phone, id=cs["id"], cid="w-3", text="to cancel from the desktop")
+    check("a retry of a cancelled message says so and sends nothing", redo["result"] == "dup" and redo["state"] == "cancelled", redo)
+
+    hold(False)
+    check("after the turn the waiting messages go out in order, each after the last one ended", ps.wait_for(lambda: arrived() == ["first message", "long job", "phone while busy", "desktop while busy", "phone second"], 20), arrived())
+    tr = [t for t in trace() if t.startswith(("ARRIVE", "END"))]
+    check("the agent never had two turns at once", all(tr[i].startswith("ARRIVE") and tr[i + 1].startswith("END") for i in range(0, len(tr) - 1, 2)) and all(tr[i][tr[i].index(" "):] == tr[i + 1][tr[i + 1].index(" "):] for i in range(0, len(tr) - 1, 2)), tr)
+    check("the queue is empty again, on both sides", ps.wait_for(lambda: (window.queue() or {}).get("items") == [] and (window.queue() or {}).get("in_flight") is False, 10), window.queue())
+    seen_desktop = await phone.wait(lambda m: m["type"] == "chat" and m["id"] == cs["id"] and any('"kelpie_sent"' in line and '"by":"desktop"' in line and "desktop while busy" in line for line in m["lines"]), 10)
+    check("the desktop's message was built by the window and logged as the desktop's", seen_desktop is not None)
+
+    # stop pauses the queue until a resume
+    hold(True)
+    await say(phone, id=cs["id"], cid="s-1", text="stoppable")
+    ps.wait_for(lambda: "stoppable" in arrived(), 10)
+    await say(phone, id=cs["id"], cid="s-2", text="after the stop")
+    mark = phone.mark()
+    stop = await phone.ask(type="chat_stop", id=cs["id"])
+    check("stop is acknowledged", stop["type"] == "ack" and stop["result"] == "ok", stop)
+    check("…the agent got the interrupt and ended its turn", ps.wait_for(lambda: "STOP" in trace() and "END stoppable" in trace(), 10), trace()[-4:])
+    paused = await phone.wait(lambda m: m["type"] == "chat_queue" and m["id"] == cs["id"] and m["paused"], 5, mark)
+    await asyncio.sleep(1)
+    check("…and the queue waits: stopping means wait", paused is not None and "after the stop" not in arrived(), arrived()[-2:])
+    nothing = await phone.ask(type="chat_stop", id=cs["id"])
+    check("a stop with nothing running is a no-op", nothing["type"] == "ack" and nothing["result"] == "noop", nothing)
+    resumed = await phone.ask(type="chat_resume", id=cs["id"])
+    check("a resume lets it go on", resumed["type"] == "ack" and ps.wait_for(lambda: "after the stop" in arrived(), 10) is not None, resumed)
+    hold(False)
+
+    # a revoked device's waiting messages are dropped, its running turn goes on
+    temp_token, temp_id = ps.pair(d, BASE, "Temporary", True)
+    temp = ps.Phone(BASE, temp_token)
+    await temp.open()
+    hold(True)
+    await say(temp, id=cs["id"], cid="t-1", text="temporary running")
+    ps.wait_for(lambda: "temporary running" in arrived(), 10)
+    await say(temp, id=cs["id"], cid="t-2", text="temporary waiting")
+    await say(phone, id=cs["id"], cid="w-9", text="survivor")
+    d.call("mobile.revoke", {"id": temp_id})
+    dropped = ps.wait_for(lambda: any(e.get("event") == "chat.queue" and any(x["reason"] == "revoked" and x["text"] == "temporary waiting" for x in e["params"].get("dropped", [])) for e in window.events), 5)
+    check("revoking a device drops its waiting messages (the desktop is told)", bool(dropped))
+    hold(False)
+    check("…the running turn finished and the others went on", ps.wait_for(lambda: "END temporary running" in trace() and "survivor" in arrived(), 15) and "temporary waiting" not in arrived(), arrived()[-3:])
+    await temp.close()
+
+    # limits and refusals
+    lim_token, lim_id = ps.pair(d, BASE, "Limits", True)
+    lim = ps.Phone(BASE, lim_token)
+    await lim.open()
+    hold(True)
+    await say(lim, id=cs["id"], cid="l-0", text="hold the agent")
+    ps.wait_for(lambda: "hold the agent" in arrived(), 10)
+    replies = [await lim.ask(type="chat_send", id=cs["id"], cid=f"l-{i}", text=f"limit {i}") for i in range(1, 6)]
+    check("a device may send three at once, then one a second", [r["type"] for r in replies[:2]] == ["ack", "ack"] and any(r["type"] == "error" and r["code"] == "rate_limited" for r in replies), [r.get("code") or r["type"] for r in replies])
+    await asyncio.sleep(1.2)
+    for i in range(6, 9):
+        await lim.ask(type="chat_send", id=cs["id"], cid=f"l-{i}", text=f"limit {i}")
+        await asyncio.sleep(1.1)
+    full = await lim.ask(type="chat_send", id=cs["id"], cid="l-over", text="one too many")
+    check("five waiting from one device is the most", full["type"] == "error" and full["code"] == "queue_full", full)
+    await asyncio.sleep(1.2)
+    empty = await lim.ask(type="chat_send", id=cs["id"], cid="e-1", text="  ")
+    long = await lim.ask(type="chat_send", id=cs["id"], cid="e-2", text="x" * 16385)
+    check("an empty message and one over 16 KiB are refused", empty.get("code") == "empty" and long.get("code") == "too_long", (empty, long))
+    hold(False)
+    ps.wait_for(lambda: (window.queue() or {}).get("items") == [], 30)
+    await lim.close()
+    d.call("mobile.revoke", {"id": lim_id})
+    reader2_token, reader2_id = ps.pair(d, BASE, "Reader2", False)
+    reader2 = ps.Phone(BASE, reader2_token)
+    await reader2.open()
+    for req in (dict(type="chat_send", id=cs["id"], cid="r-1", text="x"), dict(type="chat_cancel", id=cs["id"], qid="q1"), dict(type="chat_stop", id=cs["id"]), dict(type="chat_resume", id=cs["id"])):
+        r = await reader2.ask(**req)
+        check(f"a read-only device cannot {req['type']}", r["type"] == "error" and r["code"] == "read_only", r)
+    await reader2.close()
+    d.call("mobile.revoke", {"id": reader2_id})
+    r = await phone.ask(type="chat_send", id=a["id"], cid="not-a-chat", text="x")
+    check("chat_send to a terminal session is refused", r["type"] == "error" and r["code"] == "not_chat", r)
+    r = await phone.ask(type="chat_send", id=cs["id"], cid="old-run", text="x", epoch="not-this-run")
+    check("…and one from another run of the daemon is refused", r["type"] == "error" and r["code"] == "epoch", r)
+    r = await phone.ask(type="input", id=cs["id"], text="x")
+    check("input on a chat is still refused", r["type"] == "error" and r["code"] == "chat", r)
+
+    # the desktop's window closes: a phone's (and a closed window's) messages still go out
+    window.send("session.detach", {"handle": cs["handle"]})
+    await asyncio.sleep(0.5)
+    mark = phone.mark()
+    before = len(arrived())
+    r = await say(phone, id=cs["id"], cid="closed-1", text="window closed")
+    check("with the window closed a phone's message is still written", r["type"] == "ack" and ps.wait_for(lambda: "window closed" in arrived()[before:], 10) is not None, r)
+    dr = d.call("chat.send", {"handle": cs["handle"], "cid": "closed-2", "text": "from a closed window", "rich": False})
+    check("…and so is the desktop's plain text", dr.get("qid") and ps.wait_for(lambda: "from a closed window" in arrived(), 10) is not None, dr)
+    rich = d.call("chat.send", {"handle": cs["handle"], "cid": "closed-3", "text": "with a picture", "rich": True, "images": ["a.png"]})
+    told = await phone.wait(lambda m: m["type"] == "chat_queue" and m["id"] == cs["id"] and any(x["text"] == "with a picture" and x.get("needs_window") for x in m["items"]), 5, mark)
+    check("…but a picture needs the window: while the window's connection lives it waits at the head, visibly, and is not guessed", rich.get("qid") and told is not None and "with a picture" not in arrived(), rich)
+    # Anyone may cancel it.
+    waiting = next((x for x in told["items"] if x["text"] == "with a picture"), None) if told else None
+    freed = await phone.ask(type="chat_cancel", id=cs["id"], qid=waiting["qid"]) if waiting else None
+    check("…and the phone cancels it, which lets the queue go on", freed is not None and freed["type"] == "ack", freed)
+    cancel_note = await phone.wait(lambda m: m["type"] == "chat" and m["id"] == cs["id"] and any('"kelpie_unsent"' in line and '"cancelled"' in line and "with a picture" in line for line in m["lines"]), 10, mark)
+    check("…and the log keeps a note of it (the desktop's pane may be closed when it happens)", cancel_note is not None)
+    # A window that says it does not have its own message (a reload lost it, building it failed) lets it go: never held for ever.
+    window.send("session.attach", {"handle": cs["handle"]})
+    await asyncio.sleep(0.5)
+    mark = phone.mark()
+    window.send("chat.send", {"handle": cs["handle"], "cid": "forgot-1", "text": "a picture this window forgot", "rich": True, "images": ["b.png"]})
+    declined = await phone.wait(lambda m: m["type"] == "chat_queue" and m["id"] == cs["id"] and any(x.get("cid") == "forgot-1" and x.get("reason") == "declined" for x in m.get("dropped") or []), 10, mark)
+    check("a picture its own window says it does not have is dropped as declined, not held", declined is not None, declined)
+    declined_note = await phone.wait(lambda m: m["type"] == "chat" and m["id"] == cs["id"] and any('"kelpie_unsent"' in line and '"declined"' in line for line in m["lines"]), 10, mark)
+    check("…with a lasting note in the log", declined_note is not None)
+    check("…and nothing of it reached the agent", "a picture this window forgot" not in arrived())
+    window.send("session.detach", {"handle": cs["handle"]})
+    await asyncio.sleep(0.5)
+    note_mark = phone.mark()
+    r = await say(phone, id=cs["id"], cid="vi-1", text="Xin chào, tiếng Việt: ăn cơm chưa?")
+    check("a Vietnamese message reaches the agent byte for byte", r["type"] == "ack" and ps.wait_for(lambda: "Xin chào, tiếng Việt: ăn cơm chưa?" in arrived(), 10) is not None, arrived()[-2:])
+
+    # ACP: the prompt is visible through kelpie_sent, and a stop cancels a permission
+    ca = d.call("session.create", {"kind": "omp", "cwd": work, "chat_argv": [sys.executable, "-u", FAKE_ACP, "--log", ACP_LOG], "name": "phone-acp"})
+    ps.wait_for(lambda: info(d, ca["id"]).get("alive"), 20)
+    init = json.dumps({"jsonrpc": "2.0", "id": "kelpie-init", "method": "initialize", "params": {"protocolVersion": 1, "clientInfo": {"name": "kelpie"}}})
+    d.call("session.input", {"handle": ca["handle"], "data": init + "\n"})
+    d.call("session.input", {"handle": ca["handle"], "data": json.dumps({"jsonrpc": "2.0", "id": "kelpie-session", "method": "session/new", "params": {"cwd": work, "mcpServers": []}}) + "\n"})
+    ps.wait_for(lambda: info(d, ca["id"]).get("status") == "idle" and os.path.exists(ACP_LOG) and "session/new" in open(ACP_LOG, encoding="utf-8").read(), 20)
+    mark = phone.mark()
+    await phone.ask(type="chat_sub", id=ca["id"])
+    await asyncio.sleep(1.2)
+    r = await say(phone, id=ca["id"], cid="acp-1", text="read the notes")
+    check("an ACP chat takes a phone's message and runs it as a prompt", r["type"] == "ack" and ps.wait_for(lambda: "session/prompt" in open(ACP_LOG, encoding="utf-8").read() and "read the notes" in open(ACP_LOG, encoding="utf-8").read(), 15) is not None, r)
+    seen = await phone.wait(lambda m: m["type"] == "chat" and m["id"] == ca["id"] and any('"kelpie_sent"' in line and "read the notes" in line for line in m["lines"]), 10, mark)
+    check("…and the log shows the prompt (the agent never echoes it)", seen is not None)
+    asked = await phone.wait(lambda m: m["type"] == "chat" and m["id"] == ca["id"] and any("session/request_permission" in line for line in m["lines"]), 15, mark)
+    check("the agent asks for a permission", asked is not None)
+    mark = phone.mark()
+    stop = await phone.ask(type="chat_stop", id=ca["id"])
+    check("a stop cancels it, and every card closes (chat_resolved by the phone)", stop["result"] == "ok" and await phone.wait(lambda m: m["type"] == "chat_resolved" and m["id"] == ca["id"] and m["by"] == "phone" and m["answered_by"] == "Writer", 10, mark) is not None)
+    log = open(ACP_LOG, encoding="utf-8").read()
+    check("…the agent was sent session/cancel and a cancelled outcome", "session/cancel" in log and "cancelled" in log, log[-300:])
+    check("…and its turn ended", ps.wait_for(lambda: info(d, ca["id"]).get("status") == "idle", 15) is not None)
+    code = (await phone.ask(type="chat_send", id=ca["id"], cid="acp-new", text="/new"))
+    check("a command only the client runs is refused for ACP", code["type"] == "error" and code["code"] == "command_needs_desktop", code)
 
     # ---------- 9. a daemon restart ----------
     handles = {x["id"]: x["handle"] for x in d.call("session.list")}

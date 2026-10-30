@@ -284,6 +284,46 @@ class Phone:
         self.acker.cancel()
 
 
+# A Claude-style chat agent that takes one turn at a time. It traces when a message arrives (`ARRIVE <text>`) and when its
+# turn ends (`END <text>`) in the file given as its first argument, keeps a turn open while the file named by its second
+# argument exists, and ends the turn early (`STOP`) on an interrupt. Run it as `python -u turn_agent.py <trace> <hold>`.
+TURN_AGENT_SOURCE = """import json, os, queue, sys, threading, time
+sys.stdin.reconfigure(encoding='utf-8'); sys.stdout.reconfigure(encoding='utf-8')
+trace, hold = sys.argv[1], sys.argv[2]
+def out(m):
+    sys.stdout.write(json.dumps(m) + '\\n'); sys.stdout.flush()
+def note(s):
+    open(trace, 'a', encoding='utf-8').write(s + '\\n')
+turns, stop = queue.Queue(), threading.Event()
+def reader():
+    for line in sys.stdin:
+        m = json.loads(line)
+        if m.get('type') == 'control_request' and m['request']['subtype'] == 'interrupt':
+            note('STOP'); stop.set()
+            out({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': m['request_id'], 'response': {}}})
+        elif m.get('type') == 'user':
+            note('ARRIVE ' + m['message']['content'][0]['text']); turns.put(m)
+threading.Thread(target=reader, daemon=True).start()
+while True:
+    m = turns.get(); stop.clear()
+    text = m['message']['content'][0]['text']
+    out({'type': 'user', 'message': m['message']})
+    out({'type': 'assistant', 'message': {'id': 'a-' + text, 'role': 'assistant', 'content': [{'type': 'text', 'text': 'on it: ' + text}]}})
+    while os.path.exists(hold) and not stop.is_set():
+        time.sleep(0.05)
+    note('END ' + text)
+    out({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'})
+"""
+
+
+def write_turn_agent(folder):
+    """Writes the turn-taking chat agent into `folder`; returns (script path, trace path, hold path)."""
+    script = os.path.join(folder, "turn_agent.py")
+    with open(script, "w", encoding="utf-8") as f:
+        f.write(TURN_AGENT_SOURCE)
+    return script, os.path.join(folder, "turn-agent.trace"), os.path.join(folder, "turn-agent.hold")
+
+
 def wait_for(fn, timeout):
     end = time.time() + timeout
     while time.time() < end:

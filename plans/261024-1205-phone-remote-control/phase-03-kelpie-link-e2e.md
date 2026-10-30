@@ -32,7 +32,7 @@ the user token (`docs/architecture.md:72`, `auth.rs:19-21`). Replaces bearer tok
     Effective permission is capped by the transport, enforced by the daemon per connection: a PWA link over TLS or from a Tailscale address (100.64.0.0/10, fd7a:115c:a1e0::/48) may use `write`;
     a PWA link over plain `http://` from any other address is capped at `read` (the page could have been swapped). Native-app links are not capped.
   - Framing: one WS binary message = one Noise transport message (≤ 65 535 B); app messages chunked to ≤ 1 MiB; JSON body = phase-1 protocol; rekey every 2^16 messages or 30 min.
-  - `client_id` dedupe per **device** across connections (answers 10 min, input/key 60 s — see Resilience requirements), cleared on `daemon_epoch` change. [RT-8]
+  - `client_id` dedupe per **device** across connections (answers and `chat_send` 10 min, input/key 60 s — see Resilience requirements), cleared on `daemon_epoch` change. [RT-8]
   - **Live permission checks**: every received message checks the device's current record by key; `broadcast::RecvError::Lagged` ⇒ re-check all; revoke/downgrade synchronously
     stops that device's control grants (phase 7/8 hooks) before closing sockets. [RT-12]
   - **Listeners**: bind `/link` on every `usable()` address (private + Tailscale, never 0.0.0.0) and rebind on interface change (`if-addrs`); QR lists bound addresses. [RT-15]
@@ -49,7 +49,7 @@ the user token (`docs/architecture.md:72`, `auth.rs:19-21`). Replaces bearer tok
 - **Address advertisement**: after every handshake and on every rebind (debounced 2 s) the daemon sends `addrs {seq, list, hostname}` (Tailscale MagicDNS name if present, else `<host>.local`), also over the relay; the phone stores the last-known set. Desktop network-change detection: `NotifyIpInterfaceChange` (Windows) / `SCDynamicStore` or a 5 s `if-addrs` poll (macOS) triggers rebind. Test: change the daemon's IP while the phone is on the relay ⇒ phone dials the new address ≤ 5 s.
 - PWA limit: its origin is the old IP after a DHCP change; the browser-pairing QR uses the hostname when available; docs recommend a DHCP reservation or Tailscale; the native app is the recovery path.
 - The phase-1 writer's priority path (heartbeat, replies, revoke; there is no separate control lane), heartbeat and lag-aware liveness run **inside** the Noise channel; `grant_alive: Arc<AtomicBool>` is checked per input event in every control path (independent of the async scheduler) so revoke stops input < 1 s even at L3.
-- Dedupe windows: `answer`/`chat_answer` 10 min per device, `input`/`key` 60 s (a phone offline for minutes then reconnecting must not double-answer). 100 fuzzed disconnect/replay trials ⇒ 0 duplicates.
+- Dedupe windows: `answer`/`chat_answer`/`chat_send` 10 min per device (`chat_send` is deduped by its `cid`: a retry gets `dup` with the message's real state, never a second message; the link retries it once within 60 s, never into another daemon epoch), `input`/`key` 60 s (a phone offline for minutes then reconnecting must not double-answer). 100 fuzzed disconnect/replay trials ⇒ 0 duplicates.
 
 ## Architecture
 ```

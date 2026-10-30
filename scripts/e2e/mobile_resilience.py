@@ -20,6 +20,8 @@ Windows (PowerShell sessions, ConPTY). Takes about six minutes; `--quick` skips 
 7. A loaded computer (the load level pinned by KELPIE_LOAD_FORCE): L2 and L3 shed frame rate and size, pause
    background sessions at L3, tell the phone (`load.status`, `level` in frames), stretch the heartbeat
    (40 s / 90 s at L2) and pace pairing.
+8. A message sent to a chat whose reply was lost (or that never got there): retried under the same `cid` on a new
+   connection it is a duplicate (or lands once), and the agent never gets a second turn.
 """
 import asyncio
 import os
@@ -114,7 +116,7 @@ async def connect(base, token, sid=None, old=None, **kw):
 
 async def main(d):
     d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
-    devices = {name: ps.pair(d, BASE, name, True) for name in ("Silent", "Half", "Latent", "Legacy", "B10", "B30", "B90", "Kill", "Slow", "Alice", "Bob")}
+    devices = {name: ps.pair(d, BASE, name, True) for name in ("Silent", "Half", "Latent", "Legacy", "B10", "B30", "B90", "Kill", "Slow", "Alice", "Bob", "ChatA", "ChatB")}
     ticker = custom(d, "ticker", TICKER)
     await ps.async_wait_for(lambda: "T=0000" in read(d, ticker), 60)
 
@@ -249,8 +251,66 @@ async def main(d):
         await q.close()
         await p.close()
 
+    def new_turn_chat(name):
+        # A chat whose agent takes one turn at a time and traces what it is given (phone_support.TURN_AGENT_SOURCE).
+        folder = os.path.join(work, name)
+        os.makedirs(folder, exist_ok=True)
+        agent, trace, hold = ps.write_turn_agent(folder)
+        chat = d.call("session.create", {"kind": "claude", "cwd": work, "chat_argv": [sys.executable, "-u", agent, trace, hold], "name": name})
+        ps.wait_for(lambda: info(d, chat["id"]).get("alive"), 20)
+        arrived = lambda: [t[len("ARRIVE "):] for t in (open(trace, encoding="utf-8").read().splitlines() if os.path.exists(trace) else []) if t.startswith("ARRIVE ")]  # noqa: E731
+        return chat, arrived
+
+    async def chat_reply_lost():
+        # A message reached the daemon but its reply did not: the phone cannot tell, retries under the same cid on a new
+        # connection, and is told it is a duplicate; the agent was given the message once.
+        token, _ = devices["ChatA"]
+        chat, arrived = new_turn_chat("send-reply-lost")
+        px, base = await proxy()
+        p = await connect(base, token)
+        await p.ask(type="chat_sub", id=chat["id"])
+        px.stall("down", 300)
+        await p.send(type="chat_send", id=chat["id"], cid="lost-reply", text="hello once", req="c1")
+        await ps.async_wait_for(lambda: arrived() == ["hello once"], 15)
+        check("a chat message whose reply is lost has reached the agent", arrived() == ["hello once"], arrived())
+        px.kill_all()
+        await px.stop()
+        q = await connect(BASE, token)
+        mark = q.mark()
+        await q.ask(type="chat_sub", id=chat["id"])
+        seen = await q.wait(lambda m: m["type"] == "chat" and m["id"] == chat["id"] and any('"kelpie_sent"' in line and "lost-reply" in line for line in m["lines"]), 10, mark)
+        check("the log shows the phone it was sent, even though the reply was lost", seen is not None)
+        retry = await q.ask(type="chat_send", id=chat["id"], cid="lost-reply", text="hello once")
+        check("its retry is a duplicate that says it was sent", retry["type"] == "ack" and retry["result"] == "dup" and retry["state"] == "sent", retry)
+        await asyncio.sleep(1)
+        check("…and the agent was given one turn", arrived() == ["hello once"], arrived())
+        await q.close()
+        await p.close()
+
+    async def chat_send_in_blackhole():
+        # A message sent into a blackhole never gets there: the retry on a new connection lands once.
+        token, _ = devices["ChatB"]
+        chat, arrived = new_turn_chat("send-blackhole")
+        px, base = await proxy()
+        p = await connect(base, token)
+        await p.ask(type="chat_sub", id=chat["id"])
+        px.blackhole(300)
+        await p.send(type="chat_send", id=chat["id"], cid="lost-send", text="into the void", req="c1")
+        await asyncio.sleep(1.5)
+        check("a chat message sent into a blackhole has not reached the agent", arrived() == [], arrived())
+        px.kill_all()
+        await px.stop()
+        q = await connect(BASE, token)
+        first = await q.ask(type="chat_send", id=chat["id"], cid="lost-send", text="into the void")
+        check("the retry on a new connection lands", first["type"] == "ack" and first["result"] == "ok", first)
+        again = await q.ask(type="chat_send", id=chat["id"], cid="lost-send", text="into the void")
+        await asyncio.sleep(1)
+        check("a second retry is a duplicate and the agent got one turn", again["result"] == "dup" and arrived() == ["into the void"], (again, arrived()))
+        await q.close()
+        await p.close()
+
     quick_note = " (quick: 90 s blackhole skipped)" if QUICK else ""
-    jobs = [old_page(), latent(), blackhole("B10", 10, False), blackhole("B30", 30, False), lost_answer_in_blackhole(), reply_lost()]
+    jobs = [old_page(), latent(), blackhole("B10", 10, False), blackhole("B30", 30, False), lost_answer_in_blackhole(), reply_lost(), chat_reply_lost(), chat_send_in_blackhole()]
     if not QUICK:
         jobs += [silent(), half_open(), blackhole("B90", 90, True)]
     for outcome in await asyncio.gather(*jobs, return_exceptions=True):

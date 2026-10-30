@@ -303,6 +303,18 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
   }
 
   return {
+    snapshot() {
+      // `/new` forgets the thread until the daemon's answer names the next one: if the lines are not taken, it is still this one.
+      const before = { threadId, turnId, threadReady, shown, conversation: ctx.state.conversationId, waiting: queued.length };
+      return () => {
+        threadId = before.threadId;
+        turnId = before.turnId;
+        threadReady = before.threadReady;
+        shown = before.shown;
+        queued.length = Math.min(queued.length, before.waiting);
+        if (ctx.state.conversationId !== before.conversation) ctx.set("conversationId", before.conversation);
+      };
+    },
     reset() {
       initialized = false;
       threadReady = false;
@@ -330,7 +342,9 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
           if (steer != null) {
             // The turn ended (or takes no input) meanwhile: the message goes next instead.
             steered.delete(String(m.id));
-            if (!ctx.replaying()) ctx.set("queue", (q) => [{ id: `q-steer-${String(m.id)}`, text: steer, typed: false }, ...q]);
+            if (ctx.replaying()) return;
+            if (ctx.requeue) ctx.requeue(steer);
+            else ctx.set("queue", (q) => [{ id: `q-steer-${String(m.id)}`, text: steer, typed: false }, ...q]);
             return;
           }
           ctx.upsert({ kind: "system", id: `e-${String(m.id)}-${ctx.state.items.length}`, text: t("Codex: {error}", { error: String(m.error.message ?? JSON.stringify(m.error)) }), tone: "error" });

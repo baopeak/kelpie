@@ -2,6 +2,7 @@
 import { attachTerminal, b64ToBytes, daemon, sendInput } from "../lib/ipc";
 import { errorText } from "../lib/i18n";
 import { store } from "../lib/store";
+import type { EnqueueResult } from "./chat-queue";
 import type { ChatTransport } from "./transport";
 
 export function desktopTransport(): ChatTransport {
@@ -21,6 +22,23 @@ export function desktopTransport(): ChatTransport {
     },
     update(patch) {
       if (handle != null) void daemon("session.update", { handle, ...patch }).catch(() => {});
+    },
+    async enqueue(cid, text, rich, images) {
+      if (handle == null) throw new Error("not attached");
+      return daemon<EnqueueResult>("chat.send", { handle, cid, text, rich, images });
+    },
+    async writeTurn(qid, lines, turn, retry) {
+      if (handle == null) throw new Error("not attached");
+      try {
+        await daemon("chat.write_turn", { handle, qid, lines, turn, ...(retry ? { retry: true } : {}) });
+      } catch (e) {
+        // The daemon's reason: too_late, busy, switching.
+        throw new Error(String(e).replace(/^Error:\s*/, ""));
+      }
+    },
+    async queueOp(op, qid, opts) {
+      if (handle == null) throw new Error("not attached");
+      await daemon("chat.queue_op", { handle, op, qid, ...opts });
     },
   };
 }

@@ -114,6 +114,10 @@ pub struct SessionInfo {
     /// Wall-clock ms since it has been waiting on the user (`status == waiting`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_since: Option<u64>,
+    /// A chat's next message waits for the desktop window that queued it (one only that window can build, such as a picture),
+    /// and everything behind it waits too. The app says so outside the chat pane, which may be closed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub waits_for_window: bool,
 }
 
 /// How long after typed text its Enter follows (the desktop waits the same: `typeInto`).
@@ -1137,6 +1141,7 @@ impl Session {
             last_activity: g.last_activity,
             interrupted: g.interrupted,
             waiting_since: g.waiting_since,
+            waits_for_window: false,
         }
     }
 

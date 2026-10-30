@@ -126,10 +126,10 @@ Frames (`crates/kelpie-proto`): `u32 LE length | u8 kind | payload`
 | 2 Output | daemon → app | `u32 handle \| u64 seq \| bytes` (`seq` = stream offset after the bytes) |
 | 3 Input | app → daemon | `u32 handle \| bytes` |
 
-RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, `mobile.load` (API 17: the machine-load level, lag percentiles; `{reset: true}` restarts the percentiles), and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
+RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `chat.send|write_turn|queue_op` (API 21: the chat's message queue, below), `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, `mobile.load` (API 17: the machine-load level, lag percentiles; `{reset: true}` restarts the percentiles), and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
 `daemon.info` reports an `api` feature level (`kelpie_proto::API_LEVEL`); an app built for a
 higher level offers to restart an older daemon still running from a previous version.
-Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request`, `daemon.unresponsive` (API 17: `{seconds}`, the event loop has been silent for 30 s; sent by the watchdog, delivered when the loop runs again), `chat.resolved` (API 17: `{handle, id, request_id, by, dropped, answered_by, at}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
+Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request`, `daemon.unresponsive` (API 17: `{seconds}`, the event loop has been silent for 30 s; sent by the watchdog, delivered when the loop runs again), `chat.resolved` (API 17: `{handle, id, request_id, by, dropped, answered_by, at}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), `chat.queue` and `chat.turn_ready` (API 21: the chat's message queue and the offer of its next message to the window that queued it; see "Chat mode"), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
 
 ## Session threading (daemon)
 
@@ -306,7 +306,8 @@ generation's connections; enabling it again cannot revive an old socket. Paired 
 records remain available for a new connection.
 
 - **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `hb`, `ack`, `sub`, `unsub`, `chat_sub` need
-  *read*; `input`, `key`, `answer`, `chat_answer` need *write*; anything else is `unknown_verb`. The
+  *read*; `input`, `key`, `answer`, `chat_answer`, `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume` need *write*;
+  anything else is `unknown_verb`. The
   permission is read from the device's record on every message, so a revoked or downgraded device is
   cut off at once. A request may carry `req` (echoed in its `ack` or `error {code, reason?, message}`)
   and, for write verbs, the `epoch` it was made under (refused as `epoch` after a daemon restart).
@@ -392,6 +393,17 @@ records remain available for a new connection.
   (`phone` or `desktop`); `dropped` means this event is about an answer that lost, so a chat view whose
   user clicked it shows what the agent got instead. The sets of answered and pending requests are per
   process run and forget the oldest first.
+- **Sending to a chat** (API 21; the queue itself is under "Chat mode"): `chat_send {id, cid, text}` queues a message of at most
+  16 KiB (bytes); the reply is `ack {result: ok, qid, state: queued|sent, ahead}`, or `ack {result: dup, qid, state}` for a `cid`
+  the chat remembers (10 minutes, per device; `state` is `queued`, `sent`, `cancelled` or `dropped`), or an `error` with one of
+  `read_only`, `epoch`, `not_chat`, `no_session`, `exited`, `switching`, `empty`, `too_long`, `rate_limited` (one a second per
+  device, bursts of three), `queue_full` (20 in a chat, 5 from one device) and `command_needs_desktop` (a Codex `/command` or
+  `!shell`, or an ACP `/new`, `/clear`, `/reset`: the desktop's client runs them). `chat_cancel {id, qid}` takes a message that still
+  waits out of the queue, whoever queued it (`too_late` once it was offered to its builder or written); `chat_stop {id}` stops the turn
+  (`result: noop` when nothing runs); `chat_resume {id}` ends the wait a stop asked for. The phone is told the queue as
+  `chat_queue {id, items: [{qid, cid, by, mine, kind, text}], paused, held, in_flight, dropped?}`: the whole state each time, once
+  after `chat_sub` and on every change. Revoking a device, or taking its write permission away, drops what it has waiting
+  (`dropped` with the reason `revoked`); a turn already written runs on.
 - **Pairing** (`POST /pair`): failed attempts are counted per source address (10 a minute); at L2/L3 a
   handshake within 1 s / 5 s of the last is refused (503) without spending its code.
 
@@ -425,7 +437,8 @@ records remain available for a new connection.
   `KELPIE_LOAD_FORCE=L2:thermal` pins it for tests. Shedding (`Level`): the focused session's frames 100/100/250/1000 ms
   apart, others 100/250/1000 ms/paused, rows per frame 56/56/28/12 KiB (bottom rows first, the rest follows), heavy
   sessions 5 frames a second (1 at L3). A session someone is typing into (`input`, `key`) is rendered and sent at the
-  calm rate for 3 s whatever the level, to every phone that follows it. Never shed: `input`, `key`, `answer`, `chat_answer`, revoke, heartbeats,
+  calm rate for 3 s whatever the level, to every phone that follows it. Never shed: `input`, `key`, `answer`, `chat_answer`, `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume` (their replies go
+  out on the writer's own path; the `chat_queue` mirror they change is coalesced to the latest state), revoke, heartbeats,
   acknowledgements, the session list, `load.status`. Phones get `load.status {level, reason, since}` on change and every second
   while the level is above 0. `mobile.load` reports it.
 - **Keeping the daemon schedulable**: it opts out of EcoQoS power throttling when phone access starts (Windows),
@@ -463,10 +476,19 @@ or `lib/ipc` (the build fails), is about 45 KB gzip, and carries only the Vietna
   same-origin probe got another page), computer offline since, relay unreachable (reserved for the relay), computer restarted
   (epoch change), computer busy (`load.status`, worded by reason) and replaced. The last list and last screen are kept in
   IndexedDB and painted first, dimmed, with "as of hh:mm:ss"; a data-age chip goes amber at 2 s and red at 5 s.
-- **Chat** reuses the desktop adapters through `chat/transport.ts` in observer mode (`ChatController`): no `start()`, no queue,
-  no `session.update`, no write the adapter makes by itself; only the person's answer to a card goes out, as `chat_answer`, and
-  the card settles on the daemon's verdict (ok / dup, "already answered on … " for stale, "not sure" for a lost reply).
-  `chat_sub` replies are applied with `applyLog` (`reset` replaces, `delta` / `more` carry on, `live` appends).
+- **Chat** reuses the desktop adapters through `chat/transport.ts` in observer mode (`ChatController`): no `start()`, no queue
+  of its own, no `session.update`, no write the adapter makes by itself; only the person's answer to a card goes out, as
+  `chat_answer`, and the card settles on the daemon's verdict (ok / dup, "already answered on … " for stale, "not sure" for a lost
+  reply). `chat_sub` replies are applied with `applyLog` (`reset` replaces, `delta` / `more` carry on, `live` appends).
+- **Sending to a chat** (`chat-send.ts`, `ChatComposer`): text only; the daemon builds the turn. A message goes
+  `sending…` → `queued (n ahead)` → `sent` (its own `cid` seen in a `kelpie_sent` line) → the transcript. A `chat_send` whose
+  reply was lost with the connection is sent once more after the next hello within a minute, under the same `cid` (the daemon
+  answers `dup`, never a second message); after that, or after a computer restart, it is shown as *not sure it was sent* or
+  *lost*, with its text, and Retry, Put back or Discard. A refusal puts the text back in the box with the reason. Enter is a
+  new line; the Send button (or Ctrl/Cmd+Enter) sends, which keeps Telex/VNI composition safe. Stop is a button of its own while
+  the agent works; a stopped queue shows *Resume*. The chips list every origin's waiting messages, each with ✕ (Edit on the
+  phone's own). Codex `/` and `!` commands, ACP `/new`, `/clear`, `/reset` and Claude's terminal-only commands are refused on the
+  phone with a hint to use the computer.
 - The phone has no `focus` or `visibility` verb (the table is closed): focus is `sub {focus}`, and a hidden page unsubscribes
   everything and re-subscribes, resuming, when it is shown.
 - A service worker keeps the app shell, only on secure origins; plain `http://` works without it.
@@ -584,10 +606,10 @@ Beyond the items, adapters fill shared state the UI renders the same way for eve
 | tool category | tool name | `commandActions` (read / listFiles / search) | tool `kind` |
 
 `chat/tool-view.ts` turns a tool item into a row (verb, target, detail, IN/OUT) and diffs
-edit strings line by line. `ChatController` queues what is sent while the agent is busy and
+edit strings line by line. Below API 21 `ChatController` queues what is sent while the agent is busy and
 sends it when the turn ends (adapters set `busy = false` last); *Send now* uses the adapter's
 `steer` (Claude: written mid-turn, the CLI reads it at its next step; Codex: `turn/steer`,
-queued again if refused) or stops the turn; stopping holds the queue. Approvals carry what they
+queued again if refused) or stops the turn; stopping holds the queue. From API 21 the queue is the daemon's, below. Approvals carry what they
 are about (command, edit diff, plan) and Claude's `AskUserQuestion` / `ExitPlanMode` are
 answered in their card (`updatedInput.answers`, `updatedPermissions: setMode acceptEdits`).
 
@@ -602,6 +624,71 @@ its pickers until a turn reports the model); back in the terminal, chat view's p
 flags (Codex: `-s`/`-a` or `--dangerously-bypass-approvals-and-sandbox`, `-m`,
 `-c model_reasoning_effort`), replacing the profile's own. Codex's app-server and OMP restore a
 conversation's own settings themselves.
+
+### The message queue (API 21)
+
+One bounded FIFO per chat lives in the daemon (`chat/queue.rs`; at most 20 messages, 5 per phone), fed by the window and by phones,
+in the order the daemon received them. Exactly one writer feeds the agent: the daemon's pump writes the head of the queue
+only when the agent is alive, the queue is neither `held` (a hand-off to a terminal is under way) nor `paused` (a stop), no turn
+is in flight and the agent's own lines say it is idle (`classify`); for Codex and ACP the conversation must be known too
+(`chat/turns.rs` follows the thread and session ids in the handshake answers, and a `thread/start` or `session/new` makes the old id
+wrong until the answer). A turn is *in flight* from a write until an `Idle` line, an error answer to the request that started it, or
+the process ending; a turn-shaped line that reaches stdin by `session.input` (an older app, an adapter's own pre-thread queue, a
+steer) is observed and counts too, never blocked, and an interrupt line seen from either side pauses a queue that has something in
+it. A turn that was written, drew no output and left the agent idle for 30 s is given up.
+
+Who builds the line depends on who holds the state. A **phone's** message is plain text and the daemon builds the turn when it
+writes it (`turns.rs`: three user-turn builders and the interrupts, checked against one golden fixture,
+`chat/turn-fixtures.json`, by cargo and vitest). A **window's** message is built by its adapter at dequeue (pictures, Codex skills and
+picks, client-side commands): the daemon sends `chat.turn_ready {handle, qid, cid}` to the window that queued it, which runs
+`adapter.send` with the writes captured and answers `chat.write_turn {handle, qid, lines|null, turn, retry?}`. `lines: null` with
+`retry` means "not now" (replaying the log, loading history, not attached yet): the daemon asks again after a second, never gives up
+on it, and announces nothing while what clients see is unchanged. A plain `null` means the window does not have the message (a reload
+lost it) or could not build it (the adapter threw): that is final. Plain text (nothing a picture or a command needs) is built by the
+daemon when the window is not attached, says `null`, or does not answer within 15 s. Anything else *waits at the head* (`needs_window:
+true` on its item, shown to every viewer, cancellable from either side) for as long as the window's daemon connection is alive and the
+window has not said `null`; it is offered again when the window attaches, and a window that is attached but never answers is asked
+every 30 s (15 s to answer, then 15 s before the next offer). It holds up what is behind it, in strict order: nothing reorders or
+expires on its own. The phone shows "a message only the computer can send is waiting for its chat to be open there" with Skip (a cancel of
+that message) on every phone message behind it, and the session's info carries `waits_for_window`, so the app says so outside the chat
+pane, which a tab or project switch unmounts. When the connection is gone it is dropped as `needs_window`, when the window said `null`
+as `declined`, and a `{"type":"kelpie_unsent",...}` line in the chat log keeps the note for whoever looks next (the daemon's
+`client_gone`). If the daemon does not take the lines (`busy`, `switching`,
+`too_late`) the window undoes what building them did: the pending bubble, `busy` and the adapter's own state (`Adapter.snapshot`).
+The window's `chat.send {handle, cid, text, rich, images?}` answers `{qid, state, ahead}` or `{refused, message}`.
+`chat.queue_op {handle, op, qid?}` is `cancel` (any queued message, whoever's; an offered or written one is `too_late`), `front`
+("send now"; `interrupt: true` when the adapter's interrupt follows and must not pause the queue), `take` (the window puts the message
+in the running turn itself), `resume`, and `hold` (`held: false` releases it; mode switches hold before they interrupt and close
+stdin, so no turn slips in). `chat.queue {handle, id, items, paused, held, in_flight, dropped?}` goes to every client attached, on
+every change and on attach; a window shows the chips from it and the not-sent notes from `dropped` (`exited`, `closed`, `revoked`,
+`needs_window`, `declined`, and `cancelled` with `cancelled_by` when someone other than the sender took the message out: the sender's
+phone shows "Cancelled on desktop" or "Cancelled on phone" and keeps the text, the desktop notes it). Every such cancel is also logged
+as a `kelpie_unsent` line with `reason: "cancelled"`, so a sender that missed the live event learns it from the log: a desktop pane
+that was closed, or a phone that was offline (it matches its own `cid` in the log replayed on reconnect, so the message is not taken
+for sent). The phone keeps a copy of what still needs a decision (at most 20 per chat and 60 in all; copies for chats the computer
+no longer lists are dropped), and says so when the browser would not keep one. Once a window has been told the queue
+it stays on the daemon path (it never flushes the mirrored queue itself, whatever the connection does), and a send that cannot reach
+the daemon is shown as not sent with its text. A phone's `chat_send` re-checks the device's permission once the chat is locked
+(`enqueue_if`), and a revoke or downgrade takes the permission away before it drops what the device had queued, so nothing is left
+behind; turning phone access off drops every phone's waiting messages. A send the chat refuses (too long, a command for the computer,
+a full queue, a chat that is not running) does not spend a rate-limit token.
+
+*A stuck "working".* The gate trusts the agent's last classified line. A turn that is not in flight (the queue and every raw turn line
+set one) and has printed nothing for 60 s is taken as over for the queue only (a late chunk after a result leaves the last line a
+working one); a turn in flight, or a question waiting for the person, is never taken as idle. A stop (the phone's, or an interrupt
+line seen from the window) of a running turn makes nothing idle until that turn's `Idle` line, so no message goes into a turn that
+is still stopping (Codex answers a `turn/start` during a turn with an error). A stopped turn that printed nothing at all for 30 s is
+let go of by the queue only (`released`, until the agent's next classified line): the session's status, turn count and
+notifications stay as the agent's lines made them. Neither rule writes a second turn into a live one, and neither interrupts
+anything. A Stop with nothing to address it to (Codex before `turn/started`) still pauses the queue.
+
+Every message that starts a turn is logged as `{"type":"kelpie_sent","qid","cid","by","name","text","images"}` ahead of the write
+(text cut at 64 KiB): ACP agents do not echo a prompt, so their transcript shows the user item from this line, live and on replay;
+Claude and Codex echo their own, and the line only names the sender. It is display-only: history replay never sends a command to an
+agent. With no window attached the daemon also answers an ACP agent's request for the client (`fs/*`, `terminal/*`) with `-32601`, so a
+turn cannot hang on it. The queue is in memory and dies with the daemon run, by design. Below API 21 the window keeps its own queue.
+
+
 
 ## Composer
 

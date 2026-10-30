@@ -24,6 +24,26 @@ export const store = {
       memory.delete(key);
     }
   },
+  /** Like `set`, but only into the browser's storage: false when it would not take it (full, or refused), and nothing is
+   *  kept for the page alone, so the caller can tell the person. */
+  keep(key: string, value: string): boolean {
+    try {
+      localStorage.setItem(key, value);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  /** The keys that start with `prefix`. */
+  keys(prefix: string): string[] {
+    let stored: string[] = [];
+    try {
+      stored = Object.keys(localStorage);
+    } catch {
+      /* no storage */
+    }
+    return [...new Set([...stored, ...memory.keys()])].filter((k) => k.startsWith(prefix));
+  },
   json<T>(key: string, fallback: T): T {
     try {
       const raw = store.get(key);

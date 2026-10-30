@@ -158,6 +158,16 @@ pub struct Mobile {
     projects: Mutex<HashMap<String, String>>,
     /// Revoked device ids: their open sockets close.
     revoked: broadcast::Sender<(String, bool)>,
+    /// How fast each device has been sending chat messages (see `allow_send`).
+    send_rate: Mutex<HashMap<String, SendBucket>>,
+}
+
+/// Chat messages one device may send: this many at once, then one a second.
+const SEND_BURST: f64 = 3.0;
+
+struct SendBucket {
+    tokens: f64,
+    at: Instant,
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -212,7 +222,34 @@ impl Mobile {
             paired_at: Mutex::new(None),
             projects: Mutex::new(HashMap::new()),
             revoked: broadcast::channel(16).0,
+            send_rate: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Gives back the token `allow_send` took.
+    fn refund_send(&self, device: &str) {
+        if let Some(b) = self.send_rate.lock().get_mut(device) {
+            b.tokens = (b.tokens + 1.0).min(SEND_BURST);
+        }
+    }
+
+    /// Whether `device` may send a chat message now: at most one a second, in bursts of three. A message the chat then refuses
+    /// (`refund_send`: too long, a command for the computer, a full queue) costs nothing: only a message that gets in spends one.
+    /// The limiter is as strong as it was for what gets in.
+    fn allow_send(&self, device: &str) -> bool {
+        let now = Instant::now();
+        let mut buckets = self.send_rate.lock();
+        if buckets.len() > 256 {
+            buckets.retain(|_, b| now.duration_since(b.at) < Duration::from_secs(5));
+        }
+        let b = buckets.entry(device.to_string()).or_insert(SendBucket { tokens: SEND_BURST, at: now });
+        b.tokens = (b.tokens + now.duration_since(b.at).as_secs_f64()).min(SEND_BURST);
+        b.at = now;
+        if b.tokens < 1.0 {
+            return false;
+        }
+        b.tokens -= 1.0;
+        true
     }
 
     fn save(&self) {
@@ -993,6 +1030,53 @@ impl Conn {
                 session.answer_by(req["waiting_since"].as_u64(), answer, enter, by).map_err(|e| answer_refusal(&self.device, e))?;
                 return Ok(Some(json!({"type": "ack", "result": "ok"})));
             }
+            Verb::ChatSend => {
+                let (_, chat) = self.chat(req)?;
+                let cid = req["cid"].as_str().filter(|c| !c.is_empty() && c.len() <= 64).ok_or_else(|| refuse("bad_request", "missing cid"))?;
+                let text = req["text"].as_str().ok_or_else(|| refuse("bad_request", "missing text"))?;
+                let by = By { id: self.device.clone(), name: self.name.clone() };
+                // A retry of a message the queue remembers costs nothing and makes no second one.
+                if let Some((qid, state)) = chat.sent_state(&by.id, cid) {
+                    return Ok(Some(json!({"type": "ack", "result": "dup", "qid": qid, "state": state.name()})));
+                }
+                if text.len() > MAX_TYPED {
+                    return Err(refuse("too_long", crate::chat::SendRefused::TooLong.message()));
+                }
+                if !self.daemon.mobile.allow_send(&self.device) {
+                    return Err(refuse("rate_limited", "Sending too fast: wait a moment."));
+                }
+                let new = crate::chat::NewMessage { cid: cid.to_string(), by, text: text.to_string(), images: Vec::new(), origin: crate::chat::MessageOrigin::Phone };
+                // The permission is read again once the chat's queue is locked: a revoke that came in since the check at the top
+                // leaves nothing behind. A message the queue refuses spent nothing.
+                let daemon = self.daemon.clone();
+                let device = self.device.clone();
+                let q = chat
+                    .enqueue_if(new, &|| daemon.mobile.permission(&device) == Some(Permission::Write))
+                    .map_err(|r| {
+                        self.daemon.mobile.refund_send(&self.device);
+                        refuse(r.code(), r.message())
+                    })?;
+                if q.dup {
+                    self.daemon.mobile.refund_send(&self.device);
+                }
+                return Ok(Some(json!({"type": "ack", "result": if q.dup { "dup" } else { "ok" }, "qid": q.qid, "state": q.state.name(), "ahead": q.ahead})));
+            }
+            Verb::ChatCancel => {
+                let (_, chat) = self.chat(req)?;
+                let qid = req["qid"].as_str().filter(|q| !q.is_empty() && q.len() <= 64).ok_or_else(|| refuse("bad_request", "missing qid"))?;
+                chat.cancel_by(qid, &By { id: self.device.clone(), name: self.name.clone() }).map_err(|_| refuse("too_late", "That message already went out, or was cancelled."))?;
+                return Ok(Some(json!({"type": "ack", "result": "ok"})));
+            }
+            Verb::ChatStop => {
+                let (_, chat) = self.chat(req)?;
+                let stopped = chat.stop(By { id: self.device.clone(), name: self.name.clone() });
+                return Ok(Some(json!({"type": "ack", "result": if stopped == crate::chat::Stopped::Done { "ok" } else { "noop" }})));
+            }
+            Verb::ChatResume => {
+                let (_, chat) = self.chat(req)?;
+                chat.resume();
+                return Ok(Some(json!({"type": "ack", "result": "ok"})));
+            }
             Verb::ChatAnswer => {
                 let (_, chat) = self.chat(req)?;
                 let request_id = req.get("request_id").filter(|r| r.is_string() || r.is_number()).ok_or_else(|| refuse("bad_request", "missing request_id"))?;
@@ -1042,7 +1126,7 @@ async fn client(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Generati
     daemon.set_client_role(id, &crate::auth::Role::User);
     let lanes = lanes::lanes();
     let dirty = Arc::new(Notify::new());
-    let mut adapter = tokio::spawn(adapt(daemon.clone(), rx, lanes.bulk.clone(), lanes.slow.clone(), dirty.clone()));
+    let mut adapter = tokio::spawn(adapt(daemon.clone(), rx, lanes.bulk.clone(), lanes.slow.clone(), dirty.clone(), device.id.clone()));
     let waiting = Arc::new(AtomicUsize::new(0));
     daemon.mobile.waiting.lock().insert(id, waiting.clone());
     let mut conn = Conn {
@@ -1223,10 +1307,21 @@ async fn serve(conn: &mut Conn, ws: &mut WebSocket, device: &Device, wires: &mut
 /// Turns what the daemon tells this connection (a client like any other) into messages for the
 /// phone: a changed session list wakes the connection to publish it, a chat's log arrives as
 /// `chat` messages, and a request answered elsewhere as `chat_resolved`.
-async fn adapt(daemon: Arc<Daemon>, mut rx: mpsc::Receiver<Outgoing>, bulk: mpsc::Sender<String>, slow: Arc<Notify>, dirty: Arc<Notify>) {
-    let mut translator = Translator::default();
-    while let Some(o) = rx.recv().await {
-        for msg in translator.translate(&daemon, &o.data, &dirty) {
+async fn adapt(daemon: Arc<Daemon>, mut rx: mpsc::Receiver<Outgoing>, bulk: mpsc::Sender<String>, slow: Arc<Notify>, dirty: Arc<Notify>, device: String) {
+    let mut translator = Translator { device, ..Default::default() };
+    while let Some(first) = rx.recv().await {
+        // What else is waiting is taken with it: of several states of one chat's queue only the
+        // latest is worth sending.
+        let mut batch = vec![first];
+        while batch.len() < 16 {
+            match rx.try_recv() {
+                Ok(o) => batch.push(o),
+                Err(_) => break,
+            }
+        }
+        let mut messages: Vec<Value> = batch.iter().flat_map(|o| translator.translate(&daemon, &o.data, &dirty)).collect();
+        latest_queue_only(&mut messages);
+        for msg in messages {
             // Everything about a chat goes the same way, in order: a resolution or a resync is queued after
             // the lines it is about, and the lane is first in, first out. A message waits for room in the
             // lane; no room for `SLOW_AFTER` means a phone that cannot keep up.
@@ -1241,8 +1336,43 @@ async fn adapt(daemon: Arc<Daemon>, mut rx: mpsc::Receiver<Outgoing>, bulk: mpsc
         }
         // Written off only once the phone's queue took it: a phone that cannot keep up makes the
         // chat stop feeding it (and tell it to resync) instead of a backlog growing here.
-        if let Some(credit) = o.credit {
-            credit.fetch_sub(o.data.len(), Ordering::Relaxed);
+        for o in batch {
+            if let Some(credit) = o.credit {
+                credit.fetch_sub(o.data.len(), Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Of several `chat_queue` messages for one chat, keeps the last: each says the whole state of the
+/// queue, and the ones in between are out of date. What they list as dropped is kept (it is news,
+/// not state).
+fn latest_queue_only(messages: &mut Vec<Value>) {
+    let mut later: HashSet<String> = HashSet::new();
+    let mut carried: HashMap<String, Vec<Value>> = HashMap::new();
+    let mut keep = vec![true; messages.len()];
+    for (i, m) in messages.iter().enumerate().rev() {
+        if m["type"] != "chat_queue" {
+            continue;
+        }
+        let id = m["id"].as_str().unwrap_or_default().to_string();
+        if !later.insert(id.clone()) {
+            keep[i] = false;
+            if let Some(d) = m["dropped"].as_array() {
+                carried.entry(id).or_default().extend(d.iter().cloned());
+            }
+        }
+    }
+    let mut at = 0;
+    messages.retain(|_| {
+        at += 1;
+        keep[at - 1]
+    });
+    for m in messages.iter_mut().filter(|m| m["type"] == "chat_queue") {
+        if let Some(extra) = carried.remove(m["id"].as_str().unwrap_or_default()) {
+            let mut all: Vec<Value> = extra;
+            all.extend(m["dropped"].as_array().cloned().unwrap_or_default());
+            m["dropped"] = json!(all);
         }
     }
 }
@@ -1250,6 +1380,8 @@ async fn adapt(daemon: Arc<Daemon>, mut rx: mpsc::Receiver<Outgoing>, bulk: mpsc
 /// What `adapt` remembers between frames.
 #[derive(Default)]
 struct Translator {
+    /// The device this connection is for: its own queued messages are marked `mine`.
+    device: String,
     /// Session id of each handle seen.
     ids: HashMap<u32, String>,
     /// Chats whose attach reply came: the next output frame of that handle is the log it promised,
@@ -1287,6 +1419,9 @@ impl Translator {
                 if is("chat.resolved") {
                     return parse().map(|v| vec![json!({"type": "chat_resolved", "id": v["params"]["id"], "request_id": v["params"]["request_id"], "by": v["params"]["by"], "dropped": v["params"]["dropped"], "answered_by": v["params"]["answered_by"], "at": v["params"]["at"]})]).unwrap_or_default();
                 }
+                if is("chat.queue") {
+                    return parse().map(|v| vec![queue_message(&v["params"], &self.device)]).unwrap_or_default();
+                }
                 if is("session.resync") {
                     let handle = parse().and_then(|v| v["params"]["handle"].as_u64()).and_then(|h| u32::try_from(h).ok());
                     return handle.and_then(|h| self.session_of(daemon, h)).map(|id| vec![json!({"type": "chat_resync", "id": id})]).unwrap_or_default();
@@ -1303,6 +1438,26 @@ impl Translator {
             _ => Vec::new(),
         }
     }
+}
+
+/// The queue of a chat as the phone is told it: who queued each message (`mine`: this device did).
+fn queue_message(p: &Value, device: &str) -> Value {
+    let item = |e: &Value| {
+        let text: String = e["text"].as_str().unwrap_or_default().chars().take(300).collect();
+        let mut v = json!({"qid": e["qid"], "cid": e["cid"], "by": e["by"]["name"], "mine": e["by"]["id"].as_str() == Some(device), "kind": e["kind"], "text": text, "reason": e["reason"], "needs_window": e["needs_window"]});
+        // Who cancelled it, for the phone whose message it was: the computer, or another phone.
+        if e["cancelled_by"].is_object() {
+            v["cancelled_by"] = json!(if e["cancelled_by"]["id"] == "desktop" { "desktop" } else { "phone" });
+            v["cancelled_by_name"] = e["cancelled_by"]["name"].clone();
+        }
+        v
+    };
+    let list = |key: &str| p[key].as_array().map(|a| a.iter().map(item).collect::<Vec<_>>());
+    let mut msg = json!({"type": "chat_queue", "id": p["id"], "items": list("items").unwrap_or_default(), "paused": p["paused"], "held": p["held"], "in_flight": p["in_flight"]});
+    if let Some(dropped) = list("dropped") {
+        msg["dropped"] = json!(dropped);
+    }
+    msg
 }
 
 /// A chat's log lines as messages of about `CHAT_MESSAGE_BYTES`. `seq` is the log position after
@@ -1667,6 +1822,10 @@ mod tests {
             json!({"type": "key", "id": "t1", "key": "enter"}),
             json!({"type": "answer", "id": "t1", "waiting_since": 1, "text": "1"}),
             json!({"type": "chat_answer", "id": "c1", "request_id": "r", "line": "{}"}),
+            json!({"type": "chat_send", "id": "c1", "cid": "x", "text": "hi"}),
+            json!({"type": "chat_cancel", "id": "c1", "qid": "q1"}),
+            json!({"type": "chat_stop", "id": "c1"}),
+            json!({"type": "chat_resume", "id": "c1"}),
         ];
         for req in &requests {
             let name = req["type"].as_str().unwrap();
@@ -2297,7 +2456,7 @@ mod tests {
         frame.extend_from_slice(&1u64.to_le_bytes());
         frame.extend_from_slice(b"hello\n");
         let (tx, rx) = mpsc::channel::<Outgoing>(8);
-        let task = tokio::spawn(adapt(r.daemon.clone(), rx, lanes.bulk.clone(), lanes.slow.clone(), Arc::new(Notify::new())));
+        let task = tokio::spawn(adapt(r.daemon.clone(), rx, lanes.bulk.clone(), lanes.slow.clone(), Arc::new(Notify::new()), "phone".into()));
         tx.send(Outgoing { data: frame.into(), credit: None }).await.unwrap();
         assert!(tokio::time::timeout(Duration::from_secs(9), lanes.slow.notified()).await.is_err(), "the log waits for room");
         tokio::time::timeout(Duration::from_secs(3), lanes.slow.notified()).await.expect("cut after ten seconds without room");
@@ -2329,6 +2488,274 @@ mod tests {
         let told = r.conn.housekeeping();
         assert_eq!(told.iter().map(|m| m["type"].as_str().unwrap()).collect::<Vec<_>>(), ["sessions", "chat_resync"]);
         assert!(r.conn.housekeeping().is_empty());
+    }
+
+    fn sent_text(stdin: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(bytes) = stdin.try_recv() {
+            for line in String::from_utf8(bytes).unwrap().lines() {
+                let v: Value = serde_json::from_str(line).unwrap();
+                out.push(v.pointer("/message/content/0/text").and_then(Value::as_str).unwrap_or("<other>").to_string());
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_phone_sends_a_message_and_a_retry_makes_no_second_one() {
+        let mut r = rig();
+        let mut stdin = r.chat.live_for_test();
+        let ok = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "m1", "text": "hello"})).await;
+        assert_eq!((ok["type"].clone(), ok["result"].clone(), ok["state"].clone(), ok["ahead"].clone()), (json!("ack"), json!("ok"), json!("sent"), json!(0)), "{ok}");
+        let qid = ok["qid"].clone();
+        assert_eq!(sent_text(&mut stdin), ["hello"]);
+        let dup = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "m1", "text": "hello"})).await;
+        assert_eq!((dup["result"].clone(), dup["qid"].clone(), dup["state"].clone()), (json!("dup"), qid, json!("sent")), "{dup}");
+        assert!(sent_text(&mut stdin).is_empty(), "a retry writes nothing");
+        // A message that waits behind the running turn.
+        let queued = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "m2", "text": "next"})).await;
+        assert_eq!((queued["state"].clone(), queued["ahead"].clone()), (json!("queued"), json!(0)));
+        let again = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "m2", "text": "next"})).await;
+        assert_eq!((again["result"].clone(), again["state"].clone(), again["qid"].clone()), (json!("dup"), json!("queued"), queued["qid"].clone()));
+        // Cancel it, and a second cancel is too late.
+        let cancel = json!({"type": "chat_cancel", "id": "c1", "qid": queued["qid"]});
+        assert_eq!(r.ask_write(cancel.clone()).await["result"], "ok");
+        assert_eq!(code(&r.ask_write(cancel).await), Some("too_late"));
+        let gone = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "m2", "text": "next"})).await;
+        assert_eq!((gone["result"].clone(), gone["state"].clone()), (json!("dup"), json!("cancelled")));
+    }
+
+    #[tokio::test]
+    async fn a_chat_send_is_checked_before_it_is_queued() {
+        let mut r = rig();
+        let mut stdin = r.chat.live_for_test();
+        let send = |cid: &str, text: &str| json!({"type": "chat_send", "id": "c1", "cid": cid, "text": text});
+        for (req, expected) in [
+            (send("", "x"), "bad_request"),
+            (send(&"c".repeat(65), "x"), "bad_request"),
+            (json!({"type": "chat_send", "id": "c1", "cid": "a"}), "bad_request"),
+            (send("a", "  \n"), "empty"),
+            (send("a", &"x".repeat(MAX_TYPED + 1)), "too_long"),
+            (json!({"type": "chat_send", "id": "t1", "cid": "a", "text": "x"}), "not_chat"),
+            (json!({"type": "chat_send", "id": "nope", "cid": "a", "text": "x"}), "no_session"),
+            (json!({"type": "chat_send", "id": "c1", "cid": "a", "text": "x", "epoch": "old"}), "epoch"),
+        ] {
+            let reply = r.ask_write(req.clone()).await;
+            assert_eq!(code(&reply), Some(expected), "{req}: {reply}");
+            r.daemon.mobile.send_rate.lock().clear();
+        }
+        assert!(sent_text(&mut stdin).is_empty());
+        // A chat whose agent is gone.
+        let dead = crate::chat::ChatSession::new(3, crate::session::SessionSpec { id: "c2".into(), kind: "claude".into(), cwd: ".".into(), ..Default::default() });
+        r.daemon.insert_for_test(Entry::Chat(dead));
+        assert_eq!(code(&r.ask_write(json!({"type": "chat_send", "id": "c2", "cid": "a", "text": "x"})).await), Some("exited"));
+        // The chat is being handed to a terminal.
+        r.chat.hold(true);
+        assert_eq!(code(&r.ask_write(send("h", "x")).await), Some("switching"));
+        r.chat.hold(false);
+        // Codex commands run on the computer.
+        let codex = crate::chat::ChatSession::new(4, crate::session::SessionSpec { id: "cx".into(), kind: "codex".into(), cwd: ".".into(), ..Default::default() });
+        let _codex_stdin = codex.live_for_test();
+        r.daemon.insert_for_test(Entry::Chat(codex));
+        assert_eq!(code(&r.ask_write(json!({"type": "chat_send", "id": "cx", "cid": "a", "text": "/compact"})).await), Some("command_needs_desktop"));
+        // `input` on a chat is still refused: a phone's way to a chat is the verbs above.
+        assert_eq!(code(&r.ask_write(json!({"type": "input", "id": "c1", "text": "x"})).await), Some("chat"));
+    }
+
+    #[tokio::test]
+    async fn a_phone_sends_one_message_a_second_in_bursts_of_three_and_five_may_wait() {
+        let mut r = rig();
+        let _stdin = r.chat.live_for_test();
+        let send = |i: usize| json!({"type": "chat_send", "id": "c1", "cid": format!("m{i}"), "text": format!("t{i}")});
+        for i in 0..3 {
+            assert_eq!(r.ask_write(send(i)).await["type"], "ack", "{i}");
+        }
+        assert_eq!(code(&r.ask_write(send(3)).await), Some("rate_limited"));
+        // A retry of one that was accepted is not a new send.
+        assert_eq!(r.ask_write(send(1)).await["result"], "dup");
+        // A second later there is one more.
+        r.daemon.mobile.send_rate.lock().get_mut("phone").unwrap().at -= Duration::from_millis(1100);
+        assert_eq!(r.ask_write(send(3)).await["type"], "ack");
+        // Five waiting from one device is the most (the first one is running).
+        for i in 4..7 {
+            r.daemon.mobile.send_rate.lock().clear();
+            let reply = r.ask_write(send(i)).await;
+            assert_eq!(reply["type"], if i < 6 { "ack" } else { "error" }, "{i}: {reply}");
+            if i >= 6 {
+                assert_eq!(code(&reply), Some("queue_full"));
+            }
+        }
+        // Another device has its own five.
+        r.daemon.mobile.config.lock().devices.push(Device { id: "other".into(), name: "Other".into(), token_sha256: String::new(), can_write: true, created_at: 0, last_seen: 0 });
+        r.conn.device = "other".into();
+        r.conn.name = "Other".into();
+        assert_eq!(r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "o1", "text": "x"})).await["type"], "ack");
+    }
+
+    #[tokio::test]
+    async fn chat_verbs_are_never_shed_at_the_worst_load() {
+        let mut r = rig();
+        let mut stdin = r.chat.live_for_test();
+        r.daemon.mobile.load.set_for_test(Level::L3);
+        let sent = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "a", "text": "run"})).await;
+        assert_eq!(sent["result"], "ok", "{sent}");
+        let queued = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "b", "text": "wait"})).await;
+        assert_eq!(queued["state"], "queued");
+        assert_eq!(r.ask_write(json!({"type": "chat_cancel", "id": "c1", "qid": queued["qid"]})).await["result"], "ok");
+        let queued = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "c", "text": "wait again"})).await;
+        assert_eq!(queued["state"], "queued");
+        let stopped = r.ask_write(json!({"type": "chat_stop", "id": "c1"})).await;
+        assert_eq!((stopped["type"].clone(), stopped["result"].clone()), (json!("ack"), json!("ok")));
+        assert_eq!(r.ask_write(json!({"type": "chat_resume", "id": "c1"})).await["result"], "ok");
+        assert_eq!(sent_text(&mut stdin), ["run", "<other>"], "the message and the interrupt");
+    }
+
+    #[tokio::test]
+    async fn revoking_or_downgrading_a_device_drops_its_waiting_messages_but_not_its_running_turn() {
+        let mut r = rig();
+        let mut stdin = r.chat.live_for_test();
+        r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "a", "text": "running"})).await;
+        r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "b", "text": "waiting"})).await;
+        assert_eq!(sent_text(&mut stdin), ["running"]);
+        r.daemon.drop_device_queues("phone", "revoked");
+        r.chat.ingest_for_test(json!({"type": "result"}).to_string());
+        assert!(sent_text(&mut stdin).is_empty(), "dropped: never written");
+        let dup = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "b", "text": "waiting"})).await;
+        assert_eq!((dup["result"].clone(), dup["state"].clone()), (json!("dup"), json!("dropped")));
+        // Through the daemon's own methods.
+        let (tx, _rx) = crate::session::client_channel();
+        r.daemon.mobile.send_rate.lock().clear();
+        r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "c", "text": "running again"})).await;
+        r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "d", "text": "waiting again"})).await;
+        r.daemon.dispatch(1, &tx, &json!(1), "mobile.set_write", json!({"id": "phone", "can_write": false})).unwrap();
+        r.chat.ingest_for_test(json!({"type": "result"}).to_string());
+        assert_eq!(sent_text(&mut stdin), ["running again"]);
+        assert_eq!(r.daemon.mobile.permission("phone"), Some(Permission::Read));
+        r.daemon.mobile.send_rate.lock().clear();
+        r.daemon.mobile.set_write("phone", true).unwrap();
+        r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "e", "text": "running once more"})).await;
+        r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "f", "text": "waiting once more"})).await;
+        r.daemon.dispatch(1, &tx, &json!(2), "mobile.revoke", json!({"id": "phone"})).unwrap();
+        r.chat.ingest_for_test(json!({"type": "result"}).to_string());
+        assert_eq!(sent_text(&mut stdin), ["running once more"]);
+    }
+
+    #[tokio::test]
+    async fn the_phone_hears_the_queue_of_its_chat_and_only_the_latest_state() {
+        let r = rig();
+        let dirty = Notify::new();
+        let mut t = Translator { device: "phone".into(), ..Default::default() };
+        let state = |n: usize, paused: bool| {
+            let items: Vec<Value> = (0..n)
+                .map(|i| {
+                    let (id, name, kind) = if i == 0 { ("phone", "Pixel", "phone") } else { ("desktop", "desktop", "desktop") };
+                    json!({"qid": format!("q{i}"), "cid": format!("c{i}"), "by": {"id": id, "name": name}, "kind": kind, "text": "t".repeat(500), "at": 1})
+                })
+                .collect();
+            crate::session::json_out(&json!({"event": "chat.queue", "params": {"handle": 2, "id": "c1", "items": items, "paused": paused, "held": false, "in_flight": true}})).data
+        };
+        let messages = t.translate(&r.daemon, &state(2, true), &dirty);
+        assert_eq!(messages.len(), 1);
+        let m = &messages[0];
+        assert_eq!((m["type"].clone(), m["id"].clone(), m["paused"].clone(), m["in_flight"].clone()), (json!("chat_queue"), json!("c1"), json!(true), json!(true)));
+        assert_eq!((m["items"][0]["mine"].clone(), m["items"][0]["by"].clone(), m["items"][1]["mine"].clone(), m["items"][1]["kind"].clone()), (json!(true), json!("Pixel"), json!(false), json!("desktop")));
+        assert_eq!(m["items"][0]["text"].as_str().unwrap().chars().count(), 300, "the chip shows the start of a long message");
+        let dropped = crate::session::json_out(&json!({"event": "chat.queue", "params": {"handle": 2, "id": "c1", "items": [], "paused": false, "held": false, "in_flight": false, "dropped": [{"qid": "q9", "cid": "z", "by": {"id": "phone", "name": "Pixel"}, "text": "lost", "reason": "revoked"}]}})).data;
+        let mut all: Vec<Value> = [state(3, false), state(1, false)].iter().flat_map(|f| t.translate(&r.daemon, f, &dirty)).collect();
+        all.extend(t.translate(&r.daemon, &dropped, &dirty));
+        all.extend(t.translate(&r.daemon, &state(0, false), &dirty));
+        latest_queue_only(&mut all);
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[0]["items"].as_array().unwrap().len(), 0);
+        assert_eq!((all[0]["dropped"][0]["text"].clone(), all[0]["dropped"][0]["mine"].clone()), (json!("lost"), json!(true)), "news that was in the states left out is kept");
+        // Other messages stay where they are.
+        let mut mixed = vec![json!({"type": "chat_queue", "id": "a", "items": []}), json!({"type": "chat", "id": "a"}), json!({"type": "chat_queue", "id": "b", "items": []}), json!({"type": "chat_queue", "id": "a", "items": [1]})];
+        latest_queue_only(&mut mixed);
+        let kinds: Vec<String> = mixed.iter().map(|m| format!("{}:{}", m["type"].as_str().unwrap(), m["id"].as_str().unwrap())).collect();
+        assert_eq!(kinds, ["chat:a", "chat_queue:b", "chat_queue:a"]);
+    }
+
+    #[tokio::test]
+    async fn a_chat_send_the_chat_refuses_costs_no_token_and_the_limit_is_as_strong_for_what_gets_in() {
+        let mut r = rig();
+        let mut stdin = r.chat.live_for_test();
+        for i in 0..8 {
+            let reply = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": format!("blank-{i}"), "text": "  "})).await;
+            assert_eq!(code(&reply), Some("empty"), "{i}: {reply}");
+        }
+        // Eight refusals later the whole burst is still there, and no more than the burst.
+        for i in 0..3 {
+            assert_eq!(r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": format!("ok-{i}"), "text": format!("t{i}")})).await["type"], "ack", "{i}");
+        }
+        assert_eq!(code(&r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "ok-3", "text": "t3"})).await), Some("rate_limited"));
+        assert_eq!(sent_text(&mut stdin).len(), 1, "one running, two waiting");
+        // A full queue costs nothing either.
+        for i in 0..20 {
+            r.daemon.mobile.send_rate.lock().clear();
+            r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": format!("fill-{i}"), "text": "x"})).await;
+        }
+        r.daemon.mobile.send_rate.lock().clear();
+        for i in 0..3 {
+            let full = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": format!("over-{i}"), "text": "x"})).await;
+            assert!(matches!(code(&full), Some("queue_full")), "{i}: {full}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_revoked_between_the_check_and_the_queue_leaves_nothing_behind() {
+        let mut r = rig();
+        let mut stdin = r.chat.live_for_test();
+        // The connection was granted Write a moment ago; the record says Read by the time the message reaches the queue.
+        r.daemon.mobile.set_write("phone", false).unwrap();
+        let reply = r.conn.handle(Permission::Write, &json!({"type": "chat_send", "id": "c1", "cid": "late", "text": "too late", "req": 1})).await.unwrap();
+        assert_eq!(code(&reply), Some("read_only"), "{reply}");
+        assert!(sent_text(&mut stdin).is_empty());
+        assert_eq!(r.chat.sent_state("phone", "late"), None);
+        r.daemon.mobile.set_write("phone", true).unwrap();
+        r.daemon.mobile.revoke("phone").unwrap();
+        let gone = r.conn.handle(Permission::Write, &json!({"type": "chat_send", "id": "c1", "cid": "later", "text": "revoked", "req": 2})).await.unwrap();
+        assert_eq!(code(&gone), Some("read_only"));
+        assert!(sent_text(&mut stdin).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_send_to_a_chat_that_is_not_running_says_how_to_start_it() {
+        let mut r = rig();
+        // The rig's chat has no process, as one restored after a daemon restart.
+        let reply = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "a", "text": "hello"})).await;
+        assert_eq!(code(&reply), Some("exited"));
+        assert!(reply["message"].as_str().unwrap().contains("Open this chat on the desktop to resume it"), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_by_the_other_side_reaches_the_one_whose_message_it_was() {
+        let mut r = rig();
+        let _stdin = r.chat.live_for_test();
+        r.chat.ingest_for_test(json!({"type": "assistant", "message": {}}).to_string());
+        let (window, mut rx) = crate::session::client_channel();
+        r.chat.attach(9, &window, &json!(1));
+        let queued = r.ask_write(json!({"type": "chat_send", "id": "c1", "cid": "m1", "text": "waiting"})).await;
+        while rx.try_recv().is_ok() {}
+        r.chat.cancel(queued["qid"].as_str().unwrap()).unwrap();
+        let mut told = None;
+        while let Ok(o) = rx.try_recv() {
+            if o.data[4] != kelpie_proto::KIND_JSON {
+                continue;
+            }
+            let v: Value = serde_json::from_slice(&o.data[5..]).unwrap();
+            if v["event"] == "chat.queue" {
+                told = Some(v["params"].clone());
+            }
+        }
+        assert_eq!(told.unwrap()["dropped"][0]["cancelled_by"]["id"], "desktop");
+        // The phone's own view of the same event.
+        let dirty = Notify::new();
+        let mut t = Translator { device: "phone".into(), ..Default::default() };
+        let event = crate::session::json_out(&json!({"event": "chat.queue", "params": {"handle": 2, "id": "c1", "items": [], "paused": false, "held": false, "in_flight": false,
+            "dropped": [{"qid": "q1", "cid": "m1", "by": {"id": "phone", "name": "Phone"}, "text": "waiting", "reason": "cancelled", "cancelled_by": {"id": "desktop", "name": "desktop"}}]}})).data;
+        let told = t.translate(&r.daemon, &event, &dirty);
+        let m = &told[0];
+        assert_eq!((m["dropped"][0]["reason"].clone(), m["dropped"][0]["cancelled_by"].clone(), m["dropped"][0]["mine"].clone()), (json!("cancelled"), json!("desktop"), json!(true)));
     }
 
     /// Nothing a phone does may queue without a limit: no unbounded channel on any of its paths.

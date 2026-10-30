@@ -27,6 +27,7 @@ import { RootUserDialogHost } from "./root-user-dialog";
 import { HostsPage } from "./hosts-page";
 import { initSshHosts, vault } from "../lib/ssh-hosts";
 import { MobileApprovals } from "./settings/mobile-settings";
+import { ChatWaitNotice } from "./chat-wait-notice";
 import { daemon as daemonCall } from "../lib/ipc";
 import { loadSshConfigPath, remoteConfigure } from "../lib/remote";
 import { initRuns } from "../lib/runs";
@@ -160,6 +161,7 @@ export function App() {
         <VoicePill />
         <StatusBar />
       </div>
+      <ChatWaitNotice />
       <Switch>
         <Match when={store.overlay() === "dashboard"}><Dashboard /></Match>
         <Match when={store.overlay() === "settings"}><SettingsPage /></Match>

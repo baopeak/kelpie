@@ -11,6 +11,7 @@ import { CHAT_SANITIZE, chatMarkdownHtml, fileRefInCode, linkifyText } from "../
 import { imageUrl } from "../chat/chat-images";
 import { type AgentRun, formatDuration, mergeRuns } from "../chat/agent-runs";
 import { mountAttach, type ChatItem, type UserImage } from "../chat/chat-model";
+import { fromDaemonEvent } from "../chat/chat-queue";
 import { PINNED_REACH, lastPromptBefore, pinnedPromptId, renderedPrompts } from "../chat/pinned-prompt";
 import { openTable, stableEnd } from "../chat/streaming-markdown";
 import { describeTool, diffStats, unifiedFiles } from "../chat/tool-view";
@@ -256,8 +257,21 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
     window.addEventListener("kelpie:chat-resolved", onResolved);
     const onAgentMap = (e: Event) => (e as CustomEvent).detail === props.sessionId && setAgentMap(true);
     window.addEventListener("kelpie:chat-agent-map", onAgentMap);
+    // The daemon's queue of messages for this chat, and its offer of the next one to this window.
+    const onQueue = (e: Event) => {
+      const d = (e as CustomEvent).detail;
+      if (d?.id === props.sessionId) ctrl.applyQueue(fromDaemonEvent(d));
+    };
+    const onTurnReady = (e: Event) => {
+      const d = (e as CustomEvent).detail;
+      if (d?.handle === session()?.handle) ctrl.turnReady(String(d.qid), String(d.cid));
+    };
+    window.addEventListener("kelpie:chat-queue", onQueue);
+    window.addEventListener("kelpie:chat-turn-ready", onTurnReady);
     onCleanup(() => {
       window.removeEventListener("kelpie:chat-agent-map", onAgentMap);
+      window.removeEventListener("kelpie:chat-queue", onQueue);
+      window.removeEventListener("kelpie:chat-turn-ready", onTurnReady);
       window.removeEventListener("kelpie:chat-resync", onResync);
       window.removeEventListener("kelpie:chat-resolved", onResolved);
       ctrl.detach();
@@ -545,6 +559,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                               )}
                             </For>
                             <Show when={u.text}><CopyButton text={u.text} /></Show>
+                            <Show when={u.from}><span class="msg-time">{t("from {device}", { device: u.from! })}</span></Show>
                             <Stamp at={u.at} />
                           </div>
                           <Show when={u.images?.length}><UserImages images={u.images!} pending={u.pending} root={() => scroller} onLoad={onImageLoad} /></Show>
