@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createAcpAdapter } from "./acp-adapter";
 import { type Adapter, type AdapterContext, ChatController } from "./chat-model";
 
 /** A controller over an adapter that records what it is asked to do. */
@@ -180,5 +181,39 @@ describe("ChatController queue", () => {
     (ctrl as any).feed(new TextEncoder().encode(JSON.stringify({ type: "kelpie_exit", code: 0 }) + "\n"));
     expect(ctrl.state.exited).toBe(true);
     expect(ctrl.state.tasks).toEqual([]);
+  });
+
+  it("ends what was streaming when the agent exits: nothing will finish it", () => {
+    const { ctrl } = setup();
+    ctrl.upsert({ kind: "thinking", id: "th", text: "hm", streaming: true });
+    ctrl.upsert({ kind: "assistant", id: "a", text: "hel", streaming: true });
+    (ctrl as any).feed(new TextEncoder().encode(JSON.stringify({ type: "kelpie_exit", code: 1 }) + "\n"));
+    expect(ctrl.state.items.filter((i: any) => i.streaming)).toEqual([]);
+    expect(ctrl.state.items.find((i) => i.id === "a")).toMatchObject({ text: "hel" });
+  });
+
+  it("times a replayed thinking row by the log, not by how old the log is", async () => {
+    const update = (sessionUpdate: string, text: string) => ({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate, content: { type: "text", text } } } });
+    const log = [{ type: "kelpie_time", at: 1000 }, update("agent_thought_chunk", "hm"), { type: "kelpie_time", at: 5000 }, update("agent_message_chunk", "done")].map((m) => JSON.stringify(m) + "\n").join("");
+    const ctrl = new ChatController("s1", "/work", null, createAcpAdapter, { transport: { attach: async () => new TextEncoder().encode(log) } });
+    await ctrl.attach(1);
+    expect(ctrl.state.items.find((i) => i.kind === "thinking")).toMatchObject({ at: 1000, doneAt: 5000 });
+  });
+
+  it("does not stream what arrives after the agent's exit", async () => {
+    const chunk = { jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "last words" } } } };
+    const log = [{ type: "kelpie_exit", code: 1 }, chunk].map((m) => JSON.stringify(m) + "\n").join("");
+    const ctrl = new ChatController("s1", "/work", null, createAcpAdapter, { transport: { attach: async () => new TextEncoder().encode(log) } });
+    await ctrl.attach(1);
+    expect(ctrl.state.items.find((i) => i.kind === "assistant")).toMatchObject({ text: "last words", streaming: false });
+  });
+
+  it("ends what was streaming when a replayed log shows the agent exited", async () => {
+    const chunk = { jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hel" } } } };
+    const log = [chunk, { type: "kelpie_exit", code: 1 }].map((m) => JSON.stringify(m) + "\n").join("");
+    const ctrl = new ChatController("s1", "/work", null, createAcpAdapter, { transport: { attach: async () => new TextEncoder().encode(log) } });
+    await ctrl.attach(1);
+    expect(ctrl.state.exited).toBe(true);
+    expect(ctrl.state.items.find((i) => i.kind === "assistant")).toMatchObject({ text: "hel", streaming: false });
   });
 });

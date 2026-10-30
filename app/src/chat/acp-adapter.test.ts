@@ -74,6 +74,92 @@ describe("pictures", () => {
   });
 });
 
+describe("what is still streaming", () => {
+  const chunk = (sessionUpdate: string, text: string) => ({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate, content: { type: "text", text } } } });
+  const toolUpdate = (sessionUpdate: string) => ({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate, toolCallId: "t1", title: "Run", kind: "execute", status: "in_progress" } } });
+  const streaming = (h: ReturnType<typeof harness>) => h.items().filter((i: any) => i.streaming).map((i: any) => i.text);
+  const promptId = (h: ReturnType<typeof harness>) => h.written.filter((w) => w.method === "session/prompt").at(-1).id;
+
+  it("ends every reply a session/load replayed, live or from the log", () => {
+    for (const replaying of [false, true]) {
+      const h = harness(replaying);
+      const a = createAcpAdapter(h.ctx);
+      h.ctx.set("conversationId", "s-old");
+      a.start();
+      a.onMessage({ jsonrpc: "2.0", id: "kelpie-init", result: { agentCapabilities: { loadSession: true } } }, "");
+      for (const m of [chunk("user_message_chunk", "q1"), chunk("agent_thought_chunk", "hm"), chunk("agent_message_chunk", "a1"), chunk("user_message_chunk", "q2"), chunk("agent_message_chunk", "a2")]) a.onMessage(m, "");
+      expect(streaming(h)).toEqual(["a2"]);
+      a.onMessage({ jsonrpc: "2.0", id: "kelpie-session", result: { sessionId: "s-old" } }, "");
+      expect(streaming(h)).toEqual([]);
+      expect(h.state.busy).toBe(false);
+    }
+  });
+
+  it("ends the reply a session/load left unfinished when the load fails", () => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    h.ctx.set("conversationId", "s-old");
+    a.start();
+    a.onMessage({ jsonrpc: "2.0", id: "kelpie-init", result: { agentCapabilities: { loadSession: true } } }, "");
+    a.onMessage(chunk("agent_message_chunk", "part"), "");
+    a.onMessage({ jsonrpc: "2.0", id: "kelpie-session", error: { code: -32000, message: "no such session" } }, "");
+    expect(streaming(h)).toEqual([]);
+  });
+
+  it("ends a text segment when a tool call interrupts it, and the next one at the turn's end", () => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    openSession(a);
+    expect(streaming(h)).toEqual(["hello"]);
+    a.onMessage(toolUpdate("tool_call"), "");
+    expect(streaming(h)).toEqual([]);
+    a.onMessage(chunk("agent_message_chunk", "after"), "");
+    a.onMessage(chunk("agent_message_chunk", " the tool"), "");
+    expect(streaming(h)).toEqual(["after the tool"]);
+    a.onMessage(toolUpdate("tool_call_update"), "");
+    expect(streaming(h)).toEqual([]);
+    a.onMessage(chunk("agent_message_chunk", "last"), "");
+    expect(streaming(h)).toEqual(["last"]);
+    a.onMessage({ jsonrpc: "2.0", id: promptId(h), result: { stopReason: "end_turn" } }, "");
+    expect(streaming(h)).toEqual([]);
+  });
+
+  it("ends a thought when the reply starts", () => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    openSession(a);
+    a.onMessage(chunk("agent_thought_chunk", "hm"), "");
+    expect(streaming(h)).toEqual(["hm"]);
+    a.onMessage(chunk("agent_message_chunk", "reply"), "");
+    expect(streaming(h)).toEqual(["reply"]);
+  });
+
+  it("ends the reply when the prompt fails or the next prompt goes out", () => {
+    const failed = harness();
+    const a = createAcpAdapter(failed.ctx);
+    openSession(a);
+    a.onMessage({ jsonrpc: "2.0", id: promptId(failed), error: { message: "boom" } }, "");
+    expect(streaming(failed)).toEqual([]);
+    expect(failed.state.busy).toBe(false);
+
+    const next = harness();
+    const b = createAcpAdapter(next.ctx);
+    openSession(b);
+    b.send("again");
+    expect(streaming(next)).toEqual([]);
+  });
+
+  it("leaves user messages without a streaming mark", () => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    openSession(a);
+    a.onMessage(chunk("user_message_chunk", "q"), "");
+    a.onMessage(chunk("agent_message_chunk", "a"), "");
+    expect(h.items().find((i: any) => i.text === "q")).toMatchObject({ streaming: false });
+    expect(streaming(h)).toEqual(["a"]);
+  });
+});
+
 describe("createAcpAdapter", () => {
   it("words an unusual stop reason and adds nothing to a normal finish", () => {
     const h = harness();

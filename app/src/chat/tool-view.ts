@@ -17,7 +17,22 @@ export interface ToolView {
 
 export const basename = (p: string) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
 
+/** `text` with the project `root` removed from the paths it names: the exact root, in either
+ *  slash style, not part of a longer path, URL or remote path, followed by a separator and something
+ *  left to show. Paths under a drive letter ignore case. */
+export function stripProjectRoot(text: string, root: string): string {
+  const trimmed = root.replace(/[\\/]+$/, "");
+  if (!trimmed) return text;
+  const parts = trimmed.split(/[\\/]+/).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const before = String.raw`(?<![\p{L}\p{M}\p{N}_\\/.~:-])`;
+  const after = String.raw`(?![\s"'\x60)\]}>,;:|\\/]|$)`;
+  return text.replace(new RegExp(`${before}${parts.join(String.raw`[\\/]+`)}${String.raw`[\\/]+`}${after}`, /^[a-zA-Z]:/.test(trimmed) ? "giu" : "gu"), "");
+}
+
 const str = (v: unknown) => (typeof v === "string" ? v : "");
+
+/** A command as agents send it: one string, or an array of words. */
+const commandText = (v: unknown) => (Array.isArray(v) ? v.join(" ") : str(v));
 
 /** Claude Code's tool names → category (other agents report one themselves). */
 function claudeCategory(name: string): ToolCategory {
@@ -77,7 +92,8 @@ function describe(item: Tool): ToolView {
   const mcp = /^mcp__(.+?)__(.+)$/.exec(item.name);
   if (mcp) return { category, verb: `${mcp[1]} · ${mcp[2]}`, target: item.summary };
   // Codex shells and ACP calls carry their own category; their name is the agent's title.
-  if (category === "command") return { category, verb: item.name === "Shell" ? t("Run") : item.name, target: item.summary, command: item.summary };
+  // The summary is cut short (or is a location, for ACP): the row shows it, the IN block and its copy need it whole.
+  if (category === "command") return { category, verb: item.name === "Shell" ? t("Run") : item.name, target: item.summary, command: commandText(input.command) || commandText(input.cmd) || str(item.input) || item.summary };
   if (category === "edit" && item.diff?.length) return { category, verb: t("Edit"), target: item.diff.map((d) => basename(d.path)).join(", ") };
   if (category === "read" || category === "search") return { category, verb: category === "read" ? t("Read") : t("Search"), target: item.summary || item.name };
   return { category, verb: item.name, target: item.summary };

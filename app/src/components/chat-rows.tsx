@@ -3,9 +3,10 @@
 // plans and a message for the agent) and the files a turn changed.
 import { For, Show, createMemo, createSignal } from "solid-js";
 import type { ChatController, ChatItem } from "../chat/chat-model";
-import { type ToolView, basename, describeTool, diffStats } from "../chat/tool-view";
+import { type ToolView, basename, describeTool, diffStats, stripProjectRoot } from "../chat/tool-view";
 import { store } from "../lib/store";
 import type { Project } from "../lib/types";
+import { CopyButton } from "./chat-copy";
 import { Icon } from "./icons";
 import { t } from "../lib/i18n";
 
@@ -81,12 +82,14 @@ export function ToolRow(props: { item: Tool; project: Project; nested?: boolean 
   const [open, setOpen] = createSignal<boolean | null>(null);
   const isOpen = () => open() ?? (view().category === "edit" || view().category === "command" || props.item.status === "error");
   const hasBody = () => !!(props.item.diff?.length || view().command || props.item.output || props.item.input);
+  // Reads and searches name project files, so they show them relative to it.
+  const target = () => (view().category === "read" || view().category === "search" ? stripProjectRoot(view().target, props.project.path) : view().target);
   return (
     <div class={`trow tool${dotClass(props.item.status)}${props.nested ? " nested" : ""}${props.item.status === "error" ? " error" : ""}`}>
       <div class="tool-head" onClick={() => hasBody() && setOpen(!isOpen())}>
         <span class="tdot" />
         <span class="tname">{view().verb}</span>
-        <span class="tsum" title={view().target}>{view().target}</span>
+        <span class="tsum" title={view().target}>{target()}</span>
         <Show when={view().detail}><span class="tdetail">{view().detail}</span></Show>
         <Show when={stats().adds || stats().dels}><Stats {...stats()} /></Show>
         <Show when={hasBody()}><Icon name={isOpen() ? "chevronDown" : "chevronRight"} size={12} /></Show>
@@ -111,10 +114,10 @@ export function ToolRow(props: { item: Tool; project: Project; nested?: boolean 
             </For>
           </Show>
           <Show when={view().command}>
-            <div class="io"><span class="io-tag">IN</span><Clamped class="io-text" text={view().command!} lines={8} /></div>
+            <div class="io"><span class="io-tag">IN</span><Clamped class="io-text" text={view().command!} lines={8} /><CopyButton text={view().command!} /></div>
           </Show>
           <Show when={props.item.output}>
-            <div class="io"><span class="io-tag">OUT</span><Clamped class="io-text" text={props.item.output!.length > 20000 ? props.item.output!.slice(-20000) : props.item.output!} lines={12} tail /></div>
+            <div class="io"><span class="io-tag">OUT</span><Clamped class="io-text" text={props.item.output!.length > 20000 ? props.item.output!.slice(-20000) : props.item.output!} lines={12} tail /><CopyButton text={props.item.output!} /></div>
           </Show>
           <Show when={!props.item.diff?.length && !view().command && !props.item.output && props.item.input}>
             <Clamped class="io-text" text={JSON.stringify(props.item.input, null, 2)} lines={12} />
@@ -130,6 +133,7 @@ export function ToolRun(props: { items: Tool[]; project: Project }) {
   const [open, setOpen] = createSignal(false);
   const running = () => props.items.some((i) => i.status === "running");
   const failed = () => props.items.some((i) => i.status === "error");
+  const targets = () => props.items.map((i) => describeTool(i).target).join(" · ");
   const label = createMemo(() => {
     const reads = props.items.filter((i) => describeTool(i).category === "read").length;
     const searches = props.items.length - reads;
@@ -141,7 +145,7 @@ export function ToolRun(props: { items: Tool[]; project: Project }) {
       <div class="tool-head" onClick={() => setOpen(!open())}>
         <span class="tdot" />
         <span class="tname">{label()}</span>
-        <span class="tsum">{props.items.map((i) => describeTool(i).target).join(" · ")}</span>
+        <span class="tsum" title={targets()}>{stripProjectRoot(targets(), props.project.path)}</span>
         <Icon name={open() ? "chevronDown" : "chevronRight"} size={12} />
       </div>
       <Show when={open()}>
