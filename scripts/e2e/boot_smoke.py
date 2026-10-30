@@ -108,23 +108,40 @@ def spawn(name, argv):
     procs[name] = subprocess.Popen(argv, env=os.environ.copy(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **extra)
 
 
+def killpg(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except OSError:  # the group is gone
+        return False
+
+
 def stop(name):
+    """Stops what this script started as `name`, with the processes it started (its own process group on Unix:
+    the group is signalled even when its leader already exited, so a WebKitWebDriver or app left in it goes too)."""
     p = procs.get(name)
-    if p is None or p.poll() is not None:
+    if p is None:
         return
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True)
+        if p.poll() is None:
+            subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True)
     else:
-        try:
-            os.killpg(p.pid, signal.SIGTERM)
-        except OSError:
-            pass
+        killpg(p.pid, signal.SIGTERM)
     try:
         p.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        if os.name != "nt":
-            os.killpg(p.pid, signal.SIGKILL)
+        if os.name == "nt":
+            p.kill()
+    if os.name != "nt":
+        # Whatever ignored SIGTERM, leader or not.
+        end = time.time() + 5
+        while killpg(p.pid, 0) and time.time() < end:
+            time.sleep(0.2)
+        killpg(p.pid, signal.SIGKILL)
+    try:
         p.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        print(f"{name} (pid {p.pid}) did not stop", flush=True)
 
 
 def port_open():

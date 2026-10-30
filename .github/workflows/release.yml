@@ -15,7 +15,8 @@ permissions:
 jobs:
   build:
     strategy:
-      fail-fast: true
+      # One platform failing (the first Linux release, say) must not cancel the others' builds of the tag.
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -58,7 +59,10 @@ jobs:
           for v in "$cargo" "$pkg" "$conf"; do
             [ "$v" = "$tag" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $cargo, package.json $pkg, tauri.conf.json $conf"; exit 1; }
           done
-      # Dependencies install without the signing key in the environment.
+      # Dependencies install in a step without the signing key. The next step has it in its environment, but
+      # scripts/build-release.sh takes it out at once and hands it only to `pnpm tauri build`, which builds the
+      # frontend, bundles and signs. Known exposure: during that command Tauri's AppImage bundler downloads
+      # linuxdeploy and its GTK plugin from their GitHub releases (unpinned, Tauri's own choice) and runs them.
       - name: Install frontend dependencies
         working-directory: app
         run: pnpm install --frozen-lockfile
@@ -131,7 +135,7 @@ jobs:
           # The updater looks for linux-x86_64-<bundle> before linux-x86_64: a .deb install updates from the
           # signed .deb (pkexec dpkg -i). Without that entry it would be offered the AppImage, which it refuses
           # to install as a package (an error, never a broken install).
-          deb=$(ls dist/*.deb 2>/dev/null | head -1)
+          deb=$(ls dist/*.deb 2>/dev/null | head -1 || true)
           extra=()
           if [ -n "$deb" ] && [ -f "$deb.sig" ]; then extra+=(--artifact "linux-x86_64-deb=$deb"); fi
           python3 scripts/release/latest_json.py --version "$v" \

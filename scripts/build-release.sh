@@ -11,6 +11,11 @@ cd "$(dirname "$0")/.."
 # Debian/Ubuntu ship only `python3`; Windows installs only `python` (its `python3` may be the Store stub).
 python() { if command -v python >/dev/null 2>&1; then command python "$@"; else command python3 "$@"; fi; }
 
+# The updater signing key (release builds) reaches only the `tauri build` command below, which signs
+# the bundles: the sidecar builds and dependency installs before it never see it in their environment.
+signing_key="${TAURI_SIGNING_PRIVATE_KEY-}"
+signing_password="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}"
+unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 # Every build gets a new version: bump the patch number wherever the version is declared
 # (workspace Cargo.toml, app/package.json, tauri.conf.json), keeping them in step.
 # KELPIE_KEEP_VERSION=1 (the release workflow) builds the version the tag names instead.
@@ -75,5 +80,10 @@ fi
 cd app
 pnpm install --frozen-lockfile
 # (macOS ships bash 3.2: an empty array needs the ${a[@]+…} form under `set -u`.)
-pnpm tauri build --config src-tauri/tauri.bundle.json ${target_args[@]+"${target_args[@]}"} "$@"
+if [ -n "$signing_key" ]; then
+  TAURI_SIGNING_PRIVATE_KEY="$signing_key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$signing_password" \
+    pnpm tauri build --config src-tauri/tauri.bundle.json ${target_args[@]+"${target_args[@]}"} "$@"
+else
+  pnpm tauri build --config src-tauri/tauri.bundle.json ${target_args[@]+"${target_args[@]}"} "$@"
+fi
 echo "Bundles: $bundle_dir"
