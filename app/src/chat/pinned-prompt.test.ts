@@ -108,4 +108,13 @@ describe("renderedPrompts", () => {
     ];
     expect(renderedPrompts(items).map((u) => u.id)).toEqual(["a", "c"]);
   });
+
+  it("counts a picture without text as a row", () => {
+    const items: ChatItem[] = [
+      { kind: "user", id: "a", text: "", images: [{ name: "x.png" }] },
+      { kind: "user", id: "b", text: "", images: [] },
+    ];
+    expect(renderedPrompts(items).map((u) => u.id)).toEqual(["a"]);
+    expect(lastPromptBefore(items, 2)).toBe("a");
+  });
 });

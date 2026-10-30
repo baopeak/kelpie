@@ -110,7 +110,7 @@ export function getController(s: SessionInfo): ChatController {
         let m: any;
         try { m = JSON.parse(line); } catch { continue; }
         if (m.timestamp && Date.parse(m.timestamp) >= createdAt) break;
-        if (m.type === "user" || m.type === "assistant") applyClaudeMessage(ctx, m, live);
+        if (m.type === "user" || m.type === "assistant") applyClaudeMessage(ctx, m, live, true);
       }
       if (ctx.state.items.length) ctx.upsert({ kind: "system", id: "history-mark", text: t("↑ earlier in this conversation · continued in chat view ↓"), tone: "info" });
     };

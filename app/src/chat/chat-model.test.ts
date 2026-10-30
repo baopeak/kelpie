@@ -5,7 +5,7 @@ import { createCodexAdapter } from "./codex-adapter";
 import { type Adapter, type AdapterContext, ChatController, matchAnswer } from "./chat-model";
 
 /** A controller over an adapter that records what it is asked to do. */
-function setup(opts: { steer?: boolean } = {}) {
+function setup(opts: { steer?: boolean; command?: string } = {}) {
   const calls: string[] = [];
   let ctx!: AdapterContext;
   const adapter: Adapter = {
@@ -22,6 +22,7 @@ function setup(opts: { steer?: boolean } = {}) {
     respond() {},
     immediate: (text) => text === "/model x",
     ...(opts.steer ? { steer: (text: string) => (calls.push(`steer ${text}`), true) } : {}),
+    ...(opts.command ? { isCommand: (text: string) => text === opts.command } : {}),
   };
   const ctrl = new ChatController("s1", "/work", null, (c) => ((ctx = c), adapter));
   ctrl.set("ready", true);
@@ -58,6 +59,56 @@ describe("ChatController queue", () => {
     await idle();
     await idle();
     expect(calls).toEqual(["send one", "send two +1", "send  +2"]);
+  });
+
+  it("a queued picture message keeps its images when the turn ends", async () => {
+    const ctrl = new ChatController("s1", "/work", null, createClaudeAdapter);
+    ctrl.set("ready", true);
+    const pic = { mime: "image/png", data: "AA==", path: "/tmp/kelpie-composer/a.png" };
+    ctrl.send("one");
+    ctrl.send("two", true, [pic]);
+    ctrl.send("", true, [pic]);
+    expect(ctrl.state.items).toHaveLength(1);
+    for (const text of ["two", ""]) {
+      ctrl.set("busy", false);
+      await Promise.resolve();
+      expect(ctrl.state.items.at(-1)).toMatchObject({ kind: "user", pending: true, text, images: [{ name: "a.png", path: pic.path }] });
+    }
+    expect(ctrl.state.queue).toEqual([]);
+  });
+
+  it("blanks text that is only white space next to a picture, and leaves other text as it is", () => {
+    const { ctrl, calls } = setup();
+    const pic = { mime: "image/png", data: "AA==", path: "/tmp/a.png" };
+    ctrl.send("  \n ", true, [pic]);
+    expect(calls).toEqual(["send  +1"]);
+    ctrl.send("  \n ", true, [pic]);
+    expect(ctrl.state.queue[0].text).toBe("");
+    ctrl.send("  kept  ", true, [pic]);
+    expect(ctrl.state.queue[1].text).toBe("  kept  ");
+  });
+
+  it("says which text takes no pictures", () => {
+    const { ctrl } = setup({ command: "/compact" });
+    expect(ctrl.takesPicturesWith("/compact")).toBe(false);
+    expect(ctrl.takesPicturesWith("look at this")).toBe(true);
+    // An adapter that has no commands of its own.
+    expect(setup().ctrl.takesPicturesWith("/compact")).toBe(true);
+  });
+
+  it("names the pictures of what could not be sent", async () => {
+    let feed!: (data: Uint8Array) => void;
+    const ctrl = new ChatController("s1", "/work", null, createClaudeAdapter, {
+      transport: { attach: async (_handle, onData) => ((feed = onData), new Uint8Array()), send: () => {} },
+    });
+    await ctrl.attach(1);
+    const pic = { mime: "image/png", data: "AA==", path: "/tmp/a.png" };
+    ctrl.send("one");
+    ctrl.send("two", true, [pic]);
+    ctrl.send("", true, [pic]);
+    feed(new TextEncoder().encode(`${JSON.stringify({ type: "kelpie_exit", code: 0 })}\n`));
+    expect(ctrl.state.items.at(-1)).toMatchObject({ kind: "system", text: "Not sent:\ntwo\n[a.png]\n[a.png]" });
+    expect(ctrl.state.queue).toEqual([]);
   });
 
   it("never queues a picker command", () => {

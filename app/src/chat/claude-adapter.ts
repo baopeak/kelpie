@@ -15,7 +15,7 @@
 //   session id and a `result` of no turns;
 // - slash commands are sent as plain user text and run by the CLI (`/context` answers with a
 //   synthetic assistant message).
-import { type Adapter, type AdapterContext, type AskQuestion, type ChatCommand, type ChatItem, logQuestionAnswers, putSetting, setSettingValue, slashCommand, summarize, textOf, withImageNames } from "./chat-model";
+import { type Adapter, type AdapterContext, type AskQuestion, type ChatCommand, type ChatItem, type UserImage, logQuestionAnswers, loggedImage, putSetting, sentImages, setSettingValue, slashCommand, summarize, textOf } from "./chat-model";
 import { lineDiff, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 
@@ -33,8 +33,23 @@ export function claudeArgs(resumeId: string | null, extra: string[] = []): strin
   ];
 }
 
+/** How a picture sent from here is found again in an echo the daemon took its bytes out of. */
+const sentKey = (mime: unknown, base64Length: unknown) => `${mime}:${base64Length}`;
+
+/** The picture blocks of a user message. `names` (Claude's own transcript, which has no byte limit
+ *  unlike the daemon's log, or a watcher): names only, or a long conversation would be held in memory
+ *  whole. A block the daemon emptied is a picture sent from this window if `sent` knows it. */
+function imageBlocks(content: any[], names: boolean, sent?: Map<string, UserImage>): UserImage[] {
+  return content.filter((b) => b.type === "image").map((b, i) => {
+    const own = !names && b.source?.kelpie_stripped != null ? sent?.get(sentKey(b.source.media_type, b.source.kelpie_stripped)) : undefined;
+    if (own) return { ...own };
+    const bytes = !names && b.source?.type === "base64";
+    return loggedImage(i + 1, bytes ? b.source.media_type : undefined, bytes ? b.source.data : undefined);
+  });
+}
+
 /** Renders one Claude transcript/stream message (assistant or user) into items. */
-export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: string | null }) {
+export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: string | null; sent?: Map<string, UserImage> }, history = false) {
   // Transcript entries (history from before chat view) carry their own time.
   const at = typeof m.timestamp === "string" ? Date.parse(m.timestamp) : NaN;
   if (!Number.isNaN(at)) ctx.setClock?.(at);
@@ -43,9 +58,14 @@ export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: s
   if (m.type === "user") {
     if (m.isMeta || m.isCompactSummary) return;
     if (typeof content === "string") {
-      if (!content.startsWith("<")) pushUser(ctx, content, m.uuid);
+      if (!isClaudesOwnText(ctx, content)) pushUser(ctx, content, m.uuid);
       return;
     }
+    // The pictures go with the message's first text, or are a message of their own, unless the only
+    // text beside them is Claude's: then they are not the person's message either.
+    let images: UserImage[] | undefined = imageBlocks(content ?? [], history || !!ctx.namesOnly, live.sent);
+    if (!images.length) images = undefined;
+    let claudes = false;
     for (const block of content ?? []) {
       if (block.type === "tool_result") {
         const output = textOf(block.content);
@@ -54,10 +74,16 @@ export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: s
           it.output = output;
           it.status = block.is_error ? "error" : "done";
         });
-      } else if (block.type === "text" && !String(block.text).startsWith("<")) {
-        pushUser(ctx, block.text, m.uuid);
+      } else if (block.type === "text") {
+        if (isClaudesOwnText(ctx, String(block.text))) {
+          claudes = true;
+          continue;
+        }
+        pushUser(ctx, block.text, m.uuid, images);
+        images = undefined;
       }
     }
+    if (images && !claudes) pushUser(ctx, "", m.uuid, images);
     return;
   }
   if (m.type !== "assistant" || !Array.isArray(content)) return;
@@ -123,13 +149,22 @@ export function applyTaskEvent(ctx: AdapterContext, m: any) {
   }
 }
 
-function pushUser(ctx: AdapterContext, text: string, uuid?: string) {
+/** Our optimistic copy of a message with this text, the oldest first. */
+const waitingCopy = (ctx: AdapterContext, text: string) => ctx.state.items.find((i) => i.kind === "user" && i.pending && i.text.trim() === text.trim());
+
+/** Tagged text (`<system-reminder>`, `<command-name>`) is Claude's, not a message, unless the person
+ *  just sent exactly that: then this is its echo, and the message must not wait for ever. */
+const isClaudesOwnText = (ctx: AdapterContext, text: string) => text.startsWith("<") && !waitingCopy(ctx, text);
+
+function pushUser(ctx: AdapterContext, text: string, uuid?: string, images?: UserImage[]) {
   // Ctrl+C used to stop the TUI during a mode switch leaves this marker; it is not a message.
   if (/^\[Request interrupted by user/.test(text.trim())) return;
-  // Replace our optimistic copy instead of duplicating it.
-  const pending = ctx.state.items.find((i) => i.kind === "user" && i.pending && i.text.trim() === text.trim());
+  // Replace our optimistic copy instead of duplicating it. It keeps its own pictures, by path: the
+  // echo's bytes are not held for a message that has them on disk. A picture sent alone echoes with
+  // no text, so its copy is the oldest one waiting with none.
+  const pending = waitingCopy(ctx, text);
   if (pending) ctx.patch(pending.id, (i: any) => (i.pending = false));
-  else ctx.upsert({ kind: "user", id: uuid ?? `u-${ctx.state.items.length}`, text });
+  else ctx.upsert({ kind: "user", id: uuid ?? `u-${ctx.state.items.length}`, text, ...(images ? { images } : {}) });
 }
 
 export function diffFor(name: string, input: any): { path: string; text: string }[] | undefined {
@@ -163,7 +198,8 @@ const modes = (auto: boolean, current: string | null) => [
 ];
 
 export function createClaudeAdapter(ctx: AdapterContext): Adapter {
-  const live = { msgId: null as string | null };
+  /** `sent`: the pictures sent from this window. A log replayed here keeps them, by path. */
+  const live = { msgId: null as string | null, sent: new Map<string, UserImage>() };
   let blocks = new Map<number, string>(); // stream block index → item id
   let partialJson = new Map<number, string>();
   let interruptSeq = 0;
@@ -357,7 +393,9 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
         ctx.upsert({ kind: "system", id: `tui-${Date.now()}`, text: t("/{name} works only in the terminal UI.", { name: slash[0] }), tone: "info", tui: { command: text.trim() } });
         return;
       }
-      ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text: withImageNames(text, images), pending: true });
+      const shown = sentImages(images);
+      images?.forEach((image, i) => live.sent.set(sentKey(image.mime, image.data.length), shown![i]));
+      ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text, images: shown, pending: true });
       ctx.set("busy", true);
       const pictures = (images ?? []).map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } }));
       ctx.write({ type: "user", message: { role: "user", content: [...pictures, ...(text.trim() ? [{ type: "text", text }] : [])] } });
@@ -370,6 +408,10 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
     immediate(text) {
       const slash = slashCommand(text);
       return !!slash && tuiOnly.has(slash[0]);
+    },
+    // Only what never reaches Claude: anything else it is sent, pictures and all.
+    isCommand(text) {
+      return this.immediate!(text, true);
     },
     interrupt() {
       ctx.write({ type: "control_request", request_id: `kelpie-interrupt-${++interruptSeq}`, request: { subtype: "interrupt" } });

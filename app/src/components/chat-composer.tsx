@@ -1,15 +1,19 @@
 // Chat view composer: the message field with the agent's own completions — `/` commands at the
 // start of a message, `$` skills (Codex) and `@` files anywhere — and pickers for the settings
 // the agent exposes (model, effort, permission mode).
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { MicButton } from "./voice";
 import { Icon } from "./icons";
+import { AttachedPictures } from "./image-lightbox";
 import { store } from "../lib/store";
 import { isMac } from "../lib/platform";
 import { quickOpen } from "../lib/ipc";
 import { confirmDialog } from "../lib/confirm-dialog";
-import { t } from "../lib/i18n";
-import type { ChatController, ChatCommand, ChatItem, ChatSetting } from "../chat/chat-model";
+import { draftAfterSend } from "../lib/composer-core";
+import { createPictures } from "../lib/composer-pictures";
+import { errorText, t } from "../lib/i18n";
+import { type ChatController, type ChatCommand, type ChatItem, type ChatSetting, withImageNames } from "../chat/chat-model";
 import type { SessionInfo } from "../lib/types";
 
 type Trigger = "/" | "$" | "@";
@@ -48,7 +52,10 @@ const UNGUARDED = new Set(["full-access", "bypassPermissions"]);
 
 export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo | undefined; agentLabel: string; focused: boolean; onSent: () => void }) {
   const ctrl = props.ctrl;
+  let root!: HTMLDivElement;
   let textarea!: HTMLTextAreaElement;
+  const pictures = createPictures(() => props.session);
+  const [dropping, setDropping] = createSignal(false);
   const [draft, setDraft] = createSignal("");
   const [caret, setCaret] = createSignal(0);
   const [selected, setSelected] = createSignal(0);
@@ -113,13 +120,27 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
   /** When the last message went: the send button turns into Stop under the pointer right away,
    *  and the second click of a double-click must not stop the turn it just started. */
   let sentAt = 0;
-  const send = () => {
+  /** Getting a message's pictures ready takes a moment: a second Enter must not send it twice. */
+  let sending = false;
+  const send = async () => {
     const text = draft();
-    if (!text.trim()) return;
-    ctrl.send(text, true);
-    sentAt = Date.now();
-    setText("");
-    props.onSent();
+    const attached = pictures.images();
+    if (sending || (!text.trim() && !attached.length)) return;
+    sending = true;
+    try {
+      const withPictures = attached.length > 0 && ctrl.takesPicturesWith(text);
+      if (attached.length && !withPictures) store.notify(t("A command takes no pictures: they stay here for your next message"), undefined, 6000);
+      ctrl.send(text, true, withPictures ? await pictures.forChat() : undefined);
+      // Only what went: something added while the pictures were being got ready stays.
+      if (withPictures) pictures.forget(attached);
+      sentAt = Date.now();
+      setText(draftAfterSend(draft(), text));
+      props.onSent();
+    } catch (e) {
+      store.notify(errorText(e), undefined, 7000);
+    } finally {
+      sending = false;
+    }
   };
   // A click on the round button keeps the caret in the message field: the button it clicked
   // is replaced (Send ↔ Stop), which would drop the focus.
@@ -128,11 +149,28 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
     textarea.focus();
   };
   const sendFromButton = () => {
-    send();
+    void send();
     textarea.focus();
   };
 
   createEffect(() => props.focused && store.overlay() === null && queueMicrotask(() => textarea?.focus()));
+
+  // A picture dropped here. What is on top under the pointer decides, so a floating composer over
+  // this chat takes its own drops; anything but a picture goes nowhere, as it always did here.
+  onMount(() => {
+    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      const { type } = event.payload;
+      if (type === "leave") return setDropping(false);
+      const ratio = window.devicePixelRatio || 1;
+      const { x, y } = (event.payload as { position: { x: number; y: number } }).position;
+      const inside = !ctrl.state.exited && root.contains(document.elementFromPoint(x / ratio, y / ratio));
+      if (type === "drop") {
+        setDropping(false);
+        if (inside) void pictures.drop((event.payload as { paths: string[] }).paths).then(() => textarea.focus());
+      } else setDropping(inside);
+    });
+    onCleanup(() => void unlisten.then((f) => f()));
+  });
 
   /** The newest approval the running turn is waiting on (asked live — not one from a replayed
    *  log — and with options rather than questions to fill in). */
@@ -147,8 +185,8 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
   /** Model and effort share one chip ("Opus 5.5 · high"); other settings get their own. */
   const modelGroup = () => ["model", "effort"].map((id) => ctrl.state.settings.find((s) => s.id === id)).filter((s): s is ChatSetting => !!s);
   const otherSettings = () => ctrl.state.settings.filter((s) => !["model", "effort", "mode"].includes(s.id));
-  /** Busy with nothing typed: the send button stops the turn instead, as in Claude Code. */
-  const stops = () => ctrl.state.busy && !draft().trim();
+  /** Busy with nothing to send: the send button stops the turn instead, as in Claude Code. */
+  const stops = () => ctrl.state.busy && !draft().trim() && !pictures.images().length;
   const sendKey = isMac ? "↩" : "⏎";
   const cycleMode = () => {
     const mode = modeSetting()!;
@@ -186,7 +224,7 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
         // Enter sends when the token is already complete (a command, skill or file typed out in
         // full, as in the agents' terminal UIs) or a bare `@` / `$` was typed; Tab always picks.
         const typedOut = tk && list.some((s) => s.insert === draft().slice(tk.start, caret()));
-        if (e.key === "Enter" && tk && (typedOut || (tk.trigger !== "/" && !tk.query))) send();
+        if (e.key === "Enter" && tk && (typedOut || (tk.trigger !== "/" && !tk.query))) void send();
         else accept(list[selected()]);
         return;
       }
@@ -198,7 +236,7 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      send();
+      void send();
     } else if (e.key === "Escape" && ctrl.state.busy) {
       e.preventDefault();
       ctrl.interrupt();
@@ -206,7 +244,7 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
   };
 
   return (
-    <div class="chat-composer">
+    <div class="chat-composer" classList={{ dropping: dropping() }} ref={root}>
       <TaskStrip ctrl={ctrl} />
       <PlanPanel ctrl={ctrl} />
       <Show when={ctrl.state.queue.length}>
@@ -219,9 +257,9 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
           </Show>
           <For each={ctrl.state.queue}>
             {(m) => (
-              <div class="queue-chip" title={m.text}>
+              <div class="queue-chip" title={withImageNames(m.text, m.images)}>
                 <Icon name="clock" size={11} />
-                <span class="queue-text">{m.text}</span>
+                <span class="queue-text">{withImageNames(m.text, m.images)}</span>
                 <button class="link-btn" title={t("Give it to the agent now, during its current turn")} onClick={() => ctrl.sendNow(m.id)}>{t("Send now")}</button>
                 <button class="icon-btn mini" title={t("Remove from the queue")} onClick={() => ctrl.unqueue(m.id)}><Icon name="close" size={11} /></button>
               </div>
@@ -252,6 +290,10 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
             </For>
           </div>
         </Show>
+        <AttachedPictures images={pictures.images()} onRemove={pictures.remove} />
+        <Show when={pictures.images().length && !ctrl.takesPictures()}>
+          <div class="composer-attached-note">{t("{agent} is given where the picture is, not the picture itself: it may not be able to read it.", { agent: props.agentLabel })}</div>
+        </Show>
         <textarea
           ref={textarea}
           rows={2}
@@ -274,6 +316,7 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
           onBlur={() => setDismissed(tokenKey())}
           onFocus={() => setDismissed(null)}
           onKeyDown={onKeyDown}
+          onPaste={pictures.paste}
         />
         <div class="composer-row">
           <Show when={modelGroup().length} fallback={<span class="composer-agent">{props.agentLabel}<Show when={ctrl.state.model}> · {ctrl.state.model}</Show></span>}>
@@ -297,7 +340,7 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
           <Show
             when={stops()}
             fallback={
-              <button class="send-btn" disabled={!draft().trim() || ctrl.state.exited} onClick={sendFromButton}
+              <button class="send-btn" disabled={(!draft().trim() && !pictures.images().length) || ctrl.state.exited} onClick={sendFromButton}
                 title={ctrl.state.busy ? t("Queue {key}", { key: sendKey }) : t("Send {key}", { key: sendKey })} aria-label={ctrl.state.busy ? t("Queue {key}", { key: sendKey }) : t("Send {key}", { key: sendKey })}>
                 <Icon name="up" size={15} />
               </button>

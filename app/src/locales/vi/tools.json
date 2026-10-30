@@ -408,5 +408,12 @@
   "{n} unreadable transcript line was left out.": "Đã bỏ qua {n} dòng bản ghi không đọc được.",
   "{n} unreadable transcript lines were left out.": "Đã bỏ qua {n} dòng bản ghi không đọc được.",
   "Could not export the conversation: {error}": "Không xuất được cuộc trò chuyện: {error}",
-  "Go to this message": "Đến tin nhắn này"
+  "Go to this message": "Đến tin nhắn này",
+  "Picture": "Ảnh",
+  "Picture {n}": "Ảnh {n}",
+  "{n} picture": "{n} ảnh",
+  "{n} pictures": "{n} ảnh",
+  "This picture is no longer available": "Ảnh này không còn nữa",
+  "Fit to the window": "Vừa cửa sổ",
+  "Actual size": "Kích thước thật"
 }

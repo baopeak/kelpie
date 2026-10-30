@@ -405,25 +405,29 @@ fn image_mime(ext: &str) -> Option<&'static str> {
 /// Only picture types, and not past the temp-file limit.
 #[tauri::command]
 pub async fn fs_read_image(path: String) -> CmdResult<ImageData> {
-    blocking(move || {
-        use std::io::Read;
-        // A network path would make Windows sign in to whatever host it names.
-        if path.starts_with("\\\\") || path.starts_with("//") {
-            return Err("pictures on a network path are not read".into());
-        }
-        let path = Path::new(&path);
-        let mime = path.extension().and_then(|e| e.to_str()).and_then(image_mime).ok_or("not a picture file")?;
-        if std::fs::symlink_metadata(path).map_err(err)?.file_type().is_symlink() {
-            return Err("a link to a picture is not followed".into());
-        }
-        let mut data = Vec::new();
-        std::fs::File::open(path).map_err(err)?.take(TEMP_MAX_BYTES as u64 + 1).read_to_end(&mut data).map_err(err)?;
-        if data.len() > TEMP_MAX_BYTES {
-            return Err(format!("larger than {} MiB: too large to attach", TEMP_MAX_BYTES >> 20));
-        }
-        Ok(ImageData { mime, base64: base64::engine::general_purpose::STANDARD.encode(data) })
-    })
-    .await
+    blocking(move || read_image(path)).await
+}
+
+fn read_image(path: String) -> CmdResult<ImageData> {
+    use std::io::Read;
+    // A network path would make Windows sign in to whatever host it names. Windows takes either
+    // slash in either place, and `\??\` reaches the same redirector (`\??\UNC\host\…`,
+    // `\??\GLOBALROOT\Device\Mup\host\…`).
+    let forward = path.replace('\\', "/");
+    if forward.starts_with("//") || forward.starts_with("/??/") {
+        return Err("pictures on a network path are not read".into());
+    }
+    let path = Path::new(&path);
+    let mime = path.extension().and_then(|e| e.to_str()).and_then(image_mime).ok_or("not a picture file")?;
+    if std::fs::symlink_metadata(path).map_err(err)?.file_type().is_symlink() {
+        return Err("a link to a picture is not followed".into());
+    }
+    let mut data = Vec::new();
+    std::fs::File::open(path).map_err(err)?.take(TEMP_MAX_BYTES as u64 + 1).read_to_end(&mut data).map_err(err)?;
+    if data.len() > TEMP_MAX_BYTES {
+        return Err(format!("larger than {} MiB: too large to attach", TEMP_MAX_BYTES >> 20));
+    }
+    Ok(ImageData { mime, base64: base64::engine::general_purpose::STANDARD.encode(data) })
 }
 
 /// Removes what the composer left in the temp folder more than a few days ago (also at start-up:
@@ -520,6 +524,29 @@ mod tests {
         for path in ["CON", "sub/CON", "sub\\con", "NUL", "sub/NUL", "sub/COM1", "sub/CONIN$", "sub/AUX", "sub/PRN", "sub/CON.txt", "sub/con .txt"] {
             assert!(read(&dir, path).is_err(), "{path} was read");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Refused before the system is asked: Windows would sign in to whatever host the path names.
+    #[test]
+    fn a_network_path_is_not_read_as_a_picture() {
+        for path in [r"/\host\x.png", r"\/host\x.png", r"\\host\x.png", "//host/x.png", r"\??\UNC\host\x.png", r"\??\GLOBALROOT\Device\Mup\host\x.png", "/??/UNC/host/x.png"] {
+            let given = path.to_string();
+            assert_eq!(unblocked(move || read_image(given)).err().unwrap(), "pictures on a network path are not read", "{path}");
+        }
+    }
+
+    #[test]
+    fn a_picture_in_a_folder_is_read_and_anything_else_is_not() {
+        let dir = folder_with_file("read-image");
+        std::fs::write(dir.join("x.PNG"), [1, 2, 3]).unwrap();
+        let read = |name: &str| {
+            let path = dir.join(name).to_string_lossy().into_owned();
+            unblocked(move || read_image(path))
+        };
+        let image = read("x.PNG").ok().unwrap();
+        assert_eq!((image.mime, image.base64.as_str()), ("image/png", "AQID"));
+        assert_eq!(read("a.txt").err().unwrap(), "not a picture file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -27,6 +27,9 @@ const LOG_MAX_LINES: usize = 20_000;
 /// Base64 of the replayed log must stay well under `kelpie_proto::MAX_FRAME_LEN`.
 const LOG_MAX_BYTES: usize = 12 << 20;
 const MAX_LINE: usize = 4 << 20;
+/// A line longer than this loses the bytes of a picture the person sent: one 5 MB picture would
+/// otherwise evict most of the log, or be over `MAX_LINE` and lost with its message's words.
+const PICTURE_LINE_MAX: usize = 2 << 20;
 /// The longest `kelpie_answer` line: an answer that does not fit keeps only its verdict.
 const ANSWER_LINE_MAX: usize = 16 * 1024;
 /// What a phone that watches (rather than runs) the chat is sent when it starts or lost its place:
@@ -132,6 +135,47 @@ impl Inner {
         let found = found.into_iter().rev().map(|(_, l)| l);
         kept.into_iter().chain(found).chain(self.log.iter().skip(cut)).flat_map(|l| l.iter().copied()).collect()
     }
+}
+
+/// `line` without the bytes of the pictures in the person's message, if it is one that has any: a
+/// Claude `user` line (the echo of what was sent, or a tool's picture in its result), or an ACP
+/// `user_message_chunk` (a loaded conversation). The words stay; each picture keeps its type, with
+/// `data` empty and `kelpie_stripped` saying how long it was. Codex logs carry paths, not bytes.
+fn without_picture_bytes(line: &str) -> Option<String> {
+    let mut v: Value = serde_json::from_str(line).ok()?;
+    let changed = if v.get("type").and_then(Value::as_str) == Some("user") {
+        strip_image_blocks(v.pointer_mut("/message/content")?.as_array_mut()?)
+    } else if v.get("method").and_then(Value::as_str) == Some("session/update") && v.pointer("/params/update/sessionUpdate").and_then(Value::as_str) == Some("user_message_chunk") {
+        strip_image_data(v.pointer_mut("/params/update/content")?)
+    } else {
+        false
+    };
+    changed.then(|| v.to_string())
+}
+
+/// Claude's image blocks, also those inside a tool's result.
+fn strip_image_blocks(blocks: &mut [Value]) -> bool {
+    let mut changed = false;
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("image") => changed |= block.get_mut("source").is_some_and(strip_data),
+            Some("tool_result") => changed |= block.get_mut("content").and_then(Value::as_array_mut).is_some_and(|inner| strip_image_blocks(inner)),
+            _ => {}
+        }
+    }
+    changed
+}
+
+/// ACP's image content, which holds its `data` directly.
+fn strip_image_data(content: &mut Value) -> bool {
+    content.get("type").and_then(Value::as_str) == Some("image") && strip_data(content)
+}
+
+fn strip_data(holder: &mut Value) -> bool {
+    let Some(len) = holder.get("data").and_then(Value::as_str).map(str::len) else { return false };
+    holder["data"] = json!("");
+    holder["kelpie_stripped"] = json!(len);
+    true
 }
 
 /// Which kind of handshake answer (`PINNED_IDS`) a log entry is, if it is one.
@@ -476,6 +520,11 @@ impl ChatSession {
     fn ingest_line(&self, mut line: String) {
         if line.trim().is_empty() {
             return;
+        }
+        if line.len() > PICTURE_LINE_MAX {
+            if let Some(lighter) = without_picture_bytes(&line) {
+                line = lighter;
+            }
         }
         if line.len() > MAX_LINE {
             // Keep frames bounded; the agent's line is replaced by a notice.
@@ -1299,6 +1348,118 @@ mod tests {
         assert!(exact.contains("xxx"));
         assert!(!answer_line(&json!(1), &reply(ANSWER_LINE_MAX - size + 1), &who).unwrap().contains("xxx"));
         assert_eq!(answer_line(&json!(big), &json!({"id": big, "result": {}}), &who), None);
+    }
+
+    /// A Claude echo with `bytes` of picture data in one image block, and its words.
+    fn echo_with_picture(bytes: usize) -> Value {
+        json!({"type": "user", "session_id": "s", "message": {"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A".repeat(bytes)}},
+            {"type": "text", "text": "what is this?"},
+        ]}})
+    }
+
+    /// The log's lines, without its times.
+    fn log_lines(c: &ChatSession) -> Vec<Value> {
+        log_text(c).lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["type"] != "kelpie_time").collect()
+    }
+
+    #[test]
+    fn a_large_echo_loses_its_picture_bytes_and_keeps_its_words() {
+        // Over MAX_LINE too: without this it would be replaced by a notice, and the message stay dim.
+        for bytes in [PICTURE_LINE_MAX + 1, MAX_LINE + 1, 7 << 20] {
+            let (c, _stdin) = chat();
+            c.ingest_line(echo_with_picture(bytes).to_string());
+            let lines = log_lines(&c);
+            assert_eq!(lines.len(), 1, "{bytes}");
+            assert_eq!(lines[0]["type"], "user");
+            let content = &lines[0]["message"]["content"];
+            assert_eq!(content[0]["source"]["data"], "");
+            assert_eq!(content[0]["source"]["media_type"], "image/png");
+            assert_eq!(content[0]["source"]["kelpie_stripped"], json!(bytes));
+            assert_eq!(content[1]["text"], "what is this?");
+        }
+    }
+
+    #[test]
+    fn a_large_echo_does_not_evict_the_transcript() {
+        let (c, _stdin) = chat();
+        c.ingest_line(json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "kept"}]}}).to_string());
+        for _ in 0..4 {
+            c.ingest_line(echo_with_picture(7 << 20).to_string());
+        }
+        assert!(log_text(&c).contains("kept"));
+        assert_eq!(log_lines(&c).len(), 5);
+    }
+
+    #[test]
+    fn a_small_echo_stays_as_the_agent_wrote_it() {
+        let (c, _stdin) = chat();
+        // Spaces and an order of keys no re-serializing would keep.
+        let line = format!(r#"{{ "type": "user",  "message": {{"role":"user", "content": [{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{}"}}}}]}}}}"#, "A".repeat(PICTURE_LINE_MAX - 200));
+        assert!(line.len() <= PICTURE_LINE_MAX);
+        c.ingest_line(line.clone());
+        assert!(log_text(&c).contains(&line));
+    }
+
+    #[test]
+    fn other_large_lines_stay_as_the_agent_wrote_them() {
+        for line in [
+            // The agent's own message, whatever is in it.
+            json!({"type": "assistant", "message": {"content": [{"type": "image", "source": {"type": "base64", "data": "A".repeat(3 << 20)}}]}}).to_string(),
+            // A user line with nothing to take out.
+            json!({"type": "user", "message": {"content": [{"type": "text", "text": "A".repeat(3 << 20)}]}}).to_string(),
+            // Not JSON.
+            format!("noise {}", "A".repeat(3 << 20)),
+        ] {
+            let (c, _stdin) = chat();
+            c.ingest_line(line.clone());
+            assert!(log_text(&c).contains(&line), "{}", &line[..40]);
+        }
+    }
+
+    #[test]
+    fn a_large_line_with_nothing_to_take_out_still_ends_in_the_notice() {
+        let (c, _stdin) = chat();
+        c.ingest_line(json!({"type": "assistant", "text": "A".repeat(MAX_LINE + 1)}).to_string());
+        assert!(log_lines(&c)[0]["text"].as_str().unwrap().starts_with("[dropped a "));
+    }
+
+    #[test]
+    fn a_picture_in_a_tool_result_loses_its_bytes_too() {
+        let (c, _stdin) = chat();
+        let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A".repeat(MAX_LINE + 1)}});
+        c.ingest_line(json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": [image, {"type": "text", "text": "read"}]}]}}).to_string());
+        let block = &log_lines(&c)[0]["message"]["content"][0];
+        assert_eq!(block["tool_use_id"], "t1");
+        assert_eq!(block["content"][0]["source"]["data"], "");
+        assert_eq!(block["content"][1]["text"], "read");
+    }
+
+    #[test]
+    fn a_large_picture_in_a_loaded_acp_conversation_loses_its_bytes() {
+        let (c, _stdin) = chat();
+        let chunk = |sort: &str, data: String| json!({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {"sessionUpdate": sort, "content": {"type": "image", "mimeType": "image/png", "data": data}}}}).to_string();
+        c.ingest_line(chunk("user_message_chunk", "A".repeat(MAX_LINE + 1)));
+        let content = &log_lines(&c)[0]["params"]["update"]["content"];
+        assert_eq!(content["data"], "");
+        assert_eq!(content["mimeType"], "image/png");
+        assert_eq!(content["kelpie_stripped"], json!(MAX_LINE + 1));
+        // The agent's own picture is not the person's message: left as it was.
+        let own = chunk("agent_message_chunk", "A".repeat(3 << 20));
+        c.ingest_line(own.clone());
+        assert!(log_text(&c).contains(&own));
+    }
+
+    #[test]
+    fn someone_watching_gets_the_lighter_line() {
+        let (c, _stdin) = chat();
+        let (tx, mut rx) = client();
+        c.attach(1, &tx, &json!(1));
+        let _ = received(&mut rx);
+        c.ingest_line(echo_with_picture(7 << 20).to_string());
+        let sent = received(&mut rx).iter().map(|o| o["output"].as_str().unwrap_or("").to_string()).collect::<String>();
+        assert!(sent.contains("what is this?"));
+        assert!(sent.len() < 1 << 20, "{}", sent.len());
     }
 
     #[test]

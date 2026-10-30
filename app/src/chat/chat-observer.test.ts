@@ -52,6 +52,13 @@ describe("ChatController observer mode", () => {
     expect(calls).toEqual([]);
   });
 
+  it("keeps no picture bytes from the log: it shows only their names", () => {
+    const { ctrl } = observer();
+    ctrl.applyLog("reset", [INIT, JSON.stringify({ type: "user", uuid: "u1", message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } }, { type: "text", text: "look" }] } })]);
+    expect(JSON.stringify(ctrl.state.items)).not.toContain("QUJD");
+    expect(ctrl.state.items.at(-1)).toMatchObject({ kind: "user", text: "look", images: [{ name: "Picture 1" }] });
+  });
+
   it("applies a delta on top of what is shown instead of starting over", () => {
     const { ctrl } = observer();
     ctrl.applyLog("reset", [INIT, JSON.stringify({ type: "user", message: { role: "user", content: "first" } })]);

@@ -7,7 +7,7 @@
 // (`available_commands_update`, run by sending `/name args` as prompt text) and its settings
 // (`configOptions`: mode, model, thought level) itself. `/new`, `/clear` and `/reset` start a
 // new session (`session/new`) whatever the agent lists.
-import { type Adapter, type AdapterContext, type ChatCommand, type ChatImage, type ChatItem, type ToolCategory, NEW_CONVERSATION_COMMANDS, logQuestionAnswers, putSetting, setSettingValue, slashCommand, summarize, textOf, withImageNames } from "./chat-model";
+import { type Adapter, type AdapterContext, type ChatCommand, type ChatImage, type ChatItem, type ToolCategory, NEW_CONVERSATION_COMMANDS, logQuestionAnswers, loggedImage, putSetting, sentImages, setSettingValue, slashCommand, summarize, textOf } from "./chat-model";
 import { lineDiff, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 import { version as appVersion } from "../../package.json";
@@ -121,6 +121,15 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
     ctx.upsert({ kind, id: lastId, text, streaming: kind !== "user" } as ChatItem);
   }
 
+  /** A picture of the user message being loaded: its bytes, never a location the agent names for it. */
+  function appendUserImage(c: any) {
+    if (lastKind !== "user") appendChunk("user", "");
+    ctx.patch(lastId!, (i: any) => {
+      const images = i.images ?? [];
+      i.images = [...images, loggedImage(images.length + 1, c.mimeType, ctx.namesOnly ? undefined : c.data)];
+    });
+  }
+
   function applyConfig(options: any[] | undefined) {
     for (const o of options ?? []) {
       if (o.type !== "select" || !Array.isArray(o.options)) continue;
@@ -190,7 +199,8 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
         appendChunk("thinking", textOf(u.content));
         break;
       case "user_message_chunk":
-        appendChunk("user", textOf(u.content));
+        if (u.content?.type === "image") appendUserImage(u.content);
+        else appendChunk("user", textOf(u.content));
         break;
       case "tool_call": {
         endStreaming();
@@ -375,8 +385,11 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
         if (!ctx.replaying()) ctx.write({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `Kelpie does not implement ${m.method}` } });
       }
     },
+    // Until the agent says what it takes there is nothing to warn about.
+    takesPictures: () => !initialized || canImage,
+    isCommand: (text) => isNewConversation(text),
     send(text, _typed, images) {
-      if (!isNewConversation(text)) ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text: withImageNames(text, images) });
+      if (!isNewConversation(text)) ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text, images: sentImages(images) });
       if (!sessionId) {
         queued.push({ text, images });
         ctx.set("busy", true);

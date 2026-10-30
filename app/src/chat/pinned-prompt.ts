@@ -2,8 +2,8 @@ import type { ChatItem } from "./chat-model";
 
 type UserItem = Extract<ChatItem, { kind: "user" }>;
 
-/** A user item that shows a row: one without text renders nothing to measure or jump to. */
-const isPrompt = (it: ChatItem): it is UserItem => it.kind === "user" && !!it.text;
+/** A user item that shows a row: one with neither text nor pictures renders nothing to measure or jump to. */
+const isPrompt = (it: ChatItem): it is UserItem => it.kind === "user" && (!!it.text || !!it.images?.length);
 
 export const renderedPrompts = (items: readonly ChatItem[]) => items.filter(isPrompt);
 

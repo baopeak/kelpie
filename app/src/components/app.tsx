@@ -17,6 +17,7 @@ import { WorktreeDialog } from "./worktree-dialog";
 import { NewSessionMenu } from "./new-session-menu";
 import { Welcome } from "./welcome";
 import { ContextMenuHost } from "./context-menu";
+import { ImageLightbox } from "./image-lightbox";
 import { FloatingTerminal } from "./floating-terminal";
 import { LayoutMenuHost } from "./layout-menu";
 import { RunsPage } from "./runs-page";
@@ -181,6 +182,7 @@ export function App() {
       </Show>
       <RootUserDialogHost />
       <ContextMenuHost />
+      <ImageLightbox />
       <LayoutMenuHost />
       <MobileApprovals />
       <Tips />

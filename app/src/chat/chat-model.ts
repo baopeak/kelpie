@@ -33,7 +33,7 @@ export interface PlanEntry {
 
 /** `at` / `doneAt`: when the item appeared / finished, live only (a replayed log has no times). */
 export type ChatItem =
-  | { kind: "user"; id: string; text: string; pending?: boolean; at?: number }
+  | { kind: "user"; id: string; text: string; images?: UserImage[]; pending?: boolean; at?: number }
   | { kind: "assistant"; id: string; text: string; streaming?: boolean; group?: string; at?: number }
   | { kind: "thinking"; id: string; text: string; streaming?: boolean; group?: string; at?: number; doneAt?: number }
   | { kind: "tool"; id: string; name: string; summary: string; input?: unknown; output?: string; status: "running" | "done" | "error"; diff?: { path: string; text: string }[]; category?: ToolCategory; at?: number }
@@ -72,11 +72,37 @@ export interface ChatImage {
   path: string;
 }
 
-/** What a message shows in the transcript: its text, and the names of the pictures under it. */
+/** A picture of a message in the transcript. One sent from here keeps its `path` and is read when
+ *  shown; one replayed from the log has the `data` the log kept, or is only a name. A path that did
+ *  not come from here is the agent's word for it: see `chat-images.ts` before reading one. */
+export interface UserImage {
+  name: string;
+  mime?: string;
+  path?: string;
+  data?: string;
+}
+
+const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+/** A message's text where only text will do (a queue chip, a note of what was not sent), the names of its pictures under it. */
 export function withImageNames(text: string, images?: ChatImage[]): string {
   if (!images?.length) return text;
-  const names = images.map((i) => `[${i.path.split(/[\\/]/).pop()}]`).join(" ");
+  const names = images.map((i) => `[${fileName(i.path)}]`).join(" ");
   return text ? `${text}\n${names}` : names;
+}
+
+/** The pictures of a message sent from here, as the transcript keeps them: by path, without their bytes. */
+export function sentImages(images?: ChatImage[]): UserImage[] | undefined {
+  return images?.length ? images.map((i) => ({ name: fileName(i.path), mime: i.mime, path: i.path })) : undefined;
+}
+
+/** A picture the agent's log names by path. */
+export const pathImage = (path: string): UserImage => ({ name: fileName(path), path });
+
+/** A picture the log has no name for, the `n`th of its message: with its bytes if it kept them. */
+export function loggedImage(n: number, mime?: unknown, data?: unknown): UserImage {
+  const name = t("Picture {n}", { n });
+  return typeof mime === "string" && typeof data === "string" && data ? { name, mime, data } : { name };
 }
 
 /** A message sent while the agent was busy, sent when its turn ends. */
@@ -166,6 +192,10 @@ export interface Adapter {
   seed?(settings: { model?: string | null; effort?: string | null }): void;
   /** How a picked file goes into the message (default `@path`). */
   mention?(path: string): string;
+  /** False when the agent is told where a picture is instead of being given it (default true). */
+  takesPictures?(): boolean;
+  /** Text that runs as a command rather than going to the agent as a message: no pictures go with it. */
+  isCommand?(text: string, typed: boolean): boolean;
 }
 
 export interface AdapterContext {
@@ -188,6 +218,8 @@ export interface AdapterContext {
   cwd: string;
   resumeId: string | null;
   replaying: () => boolean;
+  /** A watcher shows no pictures: the bytes a log has for one are not kept, only its name. */
+  namesOnly?: boolean;
 }
 
 export function emptyChatState(conversationId: string | null = null): ChatState {
@@ -288,6 +320,7 @@ export class ChatController {
       cwd: this.cwd,
       resumeId: this.resumeId,
       replaying: () => this.isReplaying,
+      namesOnly: this.observer,
     };
   }
 
@@ -406,7 +439,7 @@ export class ChatController {
         this.upsert({ kind: "system", id: `exit-${Date.now()}`, text: t("Agent process exited (code {code}).", { code: String(msg.code) }), tone: "info" });
         // Nothing can take them now: show what was not sent rather than keep dead chips.
         if (this.state.queue.length) {
-          this.upsert({ kind: "system", id: `unsent-${Date.now()}`, text: t("Not sent:\n{messages}", { messages: this.state.queue.map((q) => q.text).join("\n") }), tone: "info" });
+          this.upsert({ kind: "system", id: `unsent-${Date.now()}`, text: t("Not sent:\n{messages}", { messages: this.state.queue.map((q) => withImageNames(q.text, q.images)).join("\n") }), tone: "info" });
           this.set("queue", []);
         }
         continue;
@@ -492,6 +525,8 @@ export class ChatController {
   send(text: string, typed = false, images?: ChatImage[]) {
     if (this.observer) return;
     if ((!text.trim() && !images?.length) || this.state.exited) return;
+    // White space beside a picture is no text: it would show as an empty bubble.
+    if (!text.trim()) text = "";
     // Not attached yet: a re-attach replays the log and would wipe what is sent now.
     if ((this.state.busy || this.state.queue.length || !this.state.ready) && !this.adapter.immediate?.(text, typed)) {
       this.set("queue", (q) => [...q, { id: `q-${++this.queued}`, text, typed, images }]);
@@ -572,6 +607,15 @@ export class ChatController {
 
   mention(path: string): string {
     return this.adapter.mention?.(path) ?? `@${path}`;
+  }
+
+  takesPictures(): boolean {
+    return this.adapter.takesPictures?.() ?? true;
+  }
+
+  /** Whether pictures go with this text; a command takes none. */
+  takesPicturesWith(text: string, typed = true): boolean {
+    return !this.adapter.isCommand?.(text, typed);
   }
 
   /** The agent's request `requestId` was answered by someone else (a phone, the first to answer wins):

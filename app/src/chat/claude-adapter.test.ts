@@ -135,13 +135,174 @@ describe("pictures", () => {
       type: "user",
       message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: PIC.data } }, { type: "text", text: "what is this?" }] },
     });
-    expect(h.items()[0]).toMatchObject({ kind: "user", text: "what is this?\n[image-1.png]" });
+    // The picture is not part of the words: it travels beside them, by path, with no bytes in the store.
+    expect(h.items()[0]).toMatchObject({ kind: "user", text: "what is this?", pending: true, images: [{ name: "image-1.png", mime: "image/png", path: PIC.path }] });
+    expect((h.items()[0] as any).images[0].data).toBeUndefined();
   });
 
   it("sends a picture alone without an empty text block", () => {
     const h = harness();
     createClaudeAdapter(h.ctx).send("", true, [PIC]);
     expect(h.written[0].message.content).toEqual([{ type: "image", source: { type: "base64", media_type: "image/png", data: PIC.data } }]);
+  });
+
+  // The echo as recorded from Claude Code 2.1.314: picture blocks ahead of the text, or alone.
+  const IMAGE = { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } };
+  const echo = (...content: unknown[]) => ({ type: "user", uuid: "u1", message: { role: "user", content }, session_id: "s" });
+
+  it("confirms a message with a picture when its echo comes, without a second copy", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.send("what is this?", true, [PIC]);
+    a.onMessage(echo(IMAGE, { type: "text", text: "what is this?" }), "");
+    expect(h.items()).toHaveLength(1);
+    expect(h.items()[0]).toMatchObject({ text: "what is this?", pending: false, images: [{ name: "image-1.png", path: PIC.path }] });
+    // The echo's bytes are not kept: this message has its path.
+    expect((h.items()[0] as any).images[0].data).toBeUndefined();
+  });
+
+  it("confirms a picture alone: its echo has no text", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.send("", true, [PIC]);
+    a.onMessage(echo(IMAGE), "");
+    expect(h.items()).toHaveLength(1);
+    expect(h.items()[0]).toMatchObject({ text: "", pending: false, images: [{ path: PIC.path }] });
+  });
+
+  it("confirms the oldest waiting picture first", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    h.ctx.upsert({ kind: "user", id: "first", text: "", pending: true, images: [{ name: "image-1.png", path: PIC.path }] });
+    h.ctx.upsert({ kind: "user", id: "second", text: "", pending: true, images: [{ name: "image-2.png", path: PIC.path }] });
+    a.onMessage(echo(IMAGE), "");
+    expect(h.items().map((i: any) => i.pending)).toEqual([false, true]);
+  });
+
+  it("leaves plain text as it was", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.send("hello");
+    a.onMessage(echo({ type: "text", text: "hello" }), "");
+    expect(h.items()).toHaveLength(1);
+    expect(h.items()[0]).toMatchObject({ text: "hello", pending: false });
+    expect((h.items()[0] as any).images).toBeUndefined();
+  });
+
+  it("a replayed message keeps the picture bytes the log has, apart from its text", () => {
+    const h = harness(true);
+    createClaudeAdapter(h.ctx).onMessage(echo(IMAGE, { type: "text", text: "what is this?" }), "");
+    expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "what is this?", images: [{ name: "Picture 1", mime: "image/png", data: "QUJD" }] }]);
+    expect(h.written).toEqual([]);
+  });
+
+  it("a replayed picture alone shows as a message", () => {
+    const h = harness(true);
+    createClaudeAdapter(h.ctx).onMessage(echo(IMAGE, IMAGE), "");
+    expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "", images: [{ name: "Picture 1", mime: "image/png", data: "QUJD" }, { name: "Picture 2", mime: "image/png", data: "QUJD" }] }]);
+  });
+
+  it("history from Claude's own transcript keeps only the names of its pictures", () => {
+    const h = harness();
+    applyClaudeMessage(h.ctx, echo(IMAGE, { type: "text", text: "old" }), { msgId: null }, true);
+    expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "old", images: [{ name: "Picture 1" }] }]);
+  });
+
+  describe("a message that starts with <", () => {
+    const TAGGED = "<b>bold</b> what is this?";
+
+    it("is confirmed by its echo, with its picture: not dim for ever, no second copy", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.send(TAGGED, true, [PIC]);
+      a.onMessage(echo(IMAGE, { type: "text", text: TAGGED }), "");
+      expect(h.items()).toHaveLength(1);
+      expect(h.items()[0]).toMatchObject({ text: TAGGED, pending: false, images: [{ name: "image-1.png", path: PIC.path }] });
+    });
+
+    it("is confirmed without a picture too", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.send(TAGGED);
+      a.onMessage(echo({ type: "text", text: TAGGED }), "");
+      expect(h.items()).toHaveLength(1);
+      expect(h.items()[0]).toMatchObject({ text: TAGGED, pending: false });
+    });
+
+    it("does not clear a picture waiting alone", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      h.ctx.upsert({ kind: "user", id: "alone", text: "", pending: true, images: [{ name: "image-1.png", path: PIC.path }] });
+      a.send(TAGGED, true, [PIC]);
+      a.onMessage(echo(IMAGE, { type: "text", text: TAGGED }), "");
+      expect(h.items().map((i: any) => [i.text, i.pending])).toEqual([["", true], [TAGGED, false]]);
+    });
+
+    it("is Claude's own when nothing is waiting with that text: no bubble, and nothing cleared", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.send("", true, [PIC]);
+      a.onMessage(echo(IMAGE, { type: "text", text: "<system-reminder>x</system-reminder>" }), "");
+      expect(h.items()).toHaveLength(1);
+      expect(h.items()[0]).toMatchObject({ text: "", pending: true });
+    });
+
+    it("gives a picture to the words beside Claude's own text", () => {
+      const h = harness();
+      createClaudeAdapter(h.ctx).onMessage(echo({ type: "text", text: "<system-reminder>x</system-reminder>" }, IMAGE, { type: "text", text: "real" }), "");
+      expect(h.items()).toMatchObject([{ text: "real", images: [{ name: "Picture 1" }] }]);
+    });
+  });
+
+  describe("an echo the daemon took the bytes out of", () => {
+    const STRIPPED = { type: "image", source: { type: "base64", media_type: "image/png", data: "", kelpie_stripped: PIC.data.length } };
+
+    it("confirms the message, which keeps its own picture", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.send("what is this?", true, [PIC]);
+      a.onMessage(echo(STRIPPED, { type: "text", text: "what is this?" }), "");
+      expect(h.items()).toHaveLength(1);
+      expect(h.items()[0]).toMatchObject({ pending: false, images: [{ path: PIC.path }] });
+    });
+
+    it("finds a picture sent from this window again when the log is replayed", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.send("", true, [PIC]);
+      h.ctx.clear();
+      a.reset();
+      a.onMessage(echo(STRIPPED), "");
+      expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "", images: [{ name: "image-1.png", mime: "image/png", path: PIC.path }] }]);
+    });
+
+    it("is only a name when it was not sent from this window", () => {
+      const h = harness(true);
+      createClaudeAdapter(h.ctx).onMessage(echo(STRIPPED, { type: "text", text: "old" }), "");
+      expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "old", images: [{ name: "Picture 1" }] }]);
+    });
+  });
+
+  it("a watcher keeps only the names of replayed pictures", () => {
+    const h = harness(true);
+    h.ctx.namesOnly = true;
+    createClaudeAdapter(h.ctx).onMessage(echo(IMAGE, { type: "text", text: "look" }), "");
+    expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "look", images: [{ name: "Picture 1" }] }]);
+  });
+
+  it("a command takes no pictures", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage(INIT, "");
+    expect(a.isCommand!("/login", true)).toBe(true);
+    expect(a.isCommand!("what is /login?", true)).toBe(false);
+    expect(a.isCommand!("/compact", true)).toBe(false);
+  });
+
+  it("a picture block with something other than bytes in it is only a name", () => {
+    const h = harness();
+    applyClaudeMessage(h.ctx, echo({ type: "image", source: { type: "url", url: "https://example.com/x.png" } }), { msgId: null });
+    expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "", images: [{ name: "Picture 1" }] }]);
   });
 });
 

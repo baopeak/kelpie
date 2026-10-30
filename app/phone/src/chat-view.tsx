@@ -10,8 +10,12 @@ import type { SessionRow } from "./link";
 
 type Permission = Extract<ChatItem, { kind: "permission" }>;
 type Tool = Extract<ChatItem, { kind: "tool" }>;
+type User = Extract<ChatItem, { kind: "user" }>;
 
 const SHOWN = 200;
+
+/** The phone shows no pictures: a message that is only pictures shows their names, not an empty bubble. */
+const userText = (u: User) => u.text || (u.images ?? []).map((i) => `[${i.name}]`).join(" ");
 
 /** Text with fenced code as code blocks; everything else as is, line breaks kept. Plain text nodes only: nothing is parsed into markup. */
 export function splitFences(text: string): { code: boolean; text: string }[] {
@@ -133,7 +137,7 @@ function PermissionCard(props: { item: Permission }) {
 function Row(props: { item: ChatItem }) {
   return (
     <Switch>
-      <Match when={props.item.kind === "user"}><div class="msg user"><Rich text={(props.item as { text: string }).text} /></div></Match>
+      <Match when={props.item.kind === "user"}><div class="msg user"><Rich text={userText(props.item as User)} /></div></Match>
       <Match when={props.item.kind === "assistant"}><div class="msg assistant"><Rich text={(props.item as { text: string }).text} /></div></Match>
       <Match when={props.item.kind === "thinking"}>
         <details class="thinking"><summary>{t("Thinking")}</summary><p class="prose">{(props.item as { text: string }).text}</p></details>

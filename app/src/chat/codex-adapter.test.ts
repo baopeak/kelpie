@@ -87,6 +87,40 @@ describe("pictures", () => {
     a.onMessage({ id: "kelpie-thread", result: { thread: { id: "thr-1", turns: [] } } }, "");
     expect(h.written.find((w) => w.method === "turn/start").params.input).toContainEqual({ type: "localImage", path: PIC.path });
   });
+
+  it("shows a waiting prompt's picture apart from its text, and hides both once the thread is open", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    a.start();
+    a.send("early", true, [PIC]);
+    expect(h.items()[0]).toMatchObject({ kind: "user", pending: true, text: "early", images: [{ name: "image-1.png", mime: "image/png", path: PIC.path }] });
+    a.onMessage({ id: "kelpie-init", result: {} }, "");
+    a.onMessage({ id: "kelpie-thread", result: { thread: { id: "thr-1", turns: [] } } }, "");
+    const shown = h.items()[0] as any;
+    expect(shown.text).toBe("");
+    expect(shown.images).toBeUndefined();
+  });
+
+  it("reads the local pictures of a user message, its text apart", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    a.onMessage({ method: "item/completed", params: { item: { type: "userMessage", id: "i1", content: [{ type: "text", text: "look" }, { type: "localImage", path: PIC.path }] } } }, "");
+    expect(h.items()).toEqual([{ kind: "user", id: "i1", text: "look", images: [{ name: "image-1.png", path: PIC.path }] }]);
+  });
+
+  it("knows what runs as a command, which takes no pictures", () => {
+    const a = createCodexAdapter(harness().ctx);
+    for (const text of ["/compact", "/review now", "/new", "/model x", "/diff", "!ls"]) expect(a.isCommand!(text, true), text).toBe(true);
+    for (const text of ["look at this", "/tmp is full", "/new thing", "", "!"]) expect(a.isCommand!(text, true), text).toBe(false);
+    expect(a.isCommand!("!ls", false)).toBe(false);
+  });
+
+  it("reads a picture alone from a replayed thread", () => {
+    const h = harness(true);
+    const a = createCodexAdapter(h.ctx);
+    a.onMessage({ id: "kelpie-thread", result: { thread: { id: "thr-1", turns: [{ items: [{ type: "userMessage", id: "i1", content: [{ type: "localImage", path: "/tmp/a.png" }] }] }] } } }, "");
+    expect(h.items()).toEqual([{ kind: "user", id: "i1", text: "", images: [{ name: "a.png", path: "/tmp/a.png" }] }]);
+  });
 });
 
 describe("codexArgs", () => {

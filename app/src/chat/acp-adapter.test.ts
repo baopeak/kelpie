@@ -121,6 +121,52 @@ describe("pictures", () => {
     const prompt = h.written.find((w) => w.method === "session/prompt");
     expect(prompt.params.prompt[0]).toMatchObject({ type: "image", data: PIC.data });
   });
+
+  it("shows the picture beside the text, without its bytes", () => {
+    const { h, a } = open(true);
+    a.send("what is this?", true, [PIC]);
+    expect(h.items().at(-1)).toMatchObject({ kind: "user", text: "what is this?", images: [{ name: "image-1.png", mime: "image/png", path: PIC.path }] });
+    expect((h.items().at(-1) as any).images[0].data).toBeUndefined();
+  });
+
+  it("says when the agent cannot take the picture itself", () => {
+    expect(open(true).a.takesPictures!()).toBe(true);
+    expect(open(false).a.takesPictures!()).toBe(false);
+    // Not known yet: nothing to warn about.
+    expect(createAcpAdapter(harness().ctx).takesPictures!()).toBe(true);
+  });
+
+  it("reads the pictures of a loaded conversation's user message", () => {
+    const { h, a } = open(true);
+    const chunk = (content: unknown) => ({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "user_message_chunk", content } } });
+    a.onMessage(chunk({ type: "image", mimeType: "image/png", data: "QUJD" }), "");
+    a.onMessage(chunk({ type: "text", text: "look" }), "");
+    a.onMessage(chunk({ type: "image", uri: "file:///etc/x.png" }), "");
+    expect(h.items().at(-1)).toMatchObject({ kind: "user", text: "look", images: [{ name: "Picture 1", mime: "image/png", data: "QUJD" }, { name: "Picture 2" }] });
+    // A location the agent names is not kept: it could point anywhere.
+    expect(JSON.stringify(h.items().at(-1))).not.toContain("file:");
+  });
+
+  const imageChunk = (content: unknown) => ({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "user_message_chunk", content } } });
+
+  it("is only a name when the daemon took the picture's bytes out", () => {
+    const { h, a } = open(true);
+    a.onMessage(imageChunk({ type: "image", mimeType: "image/png", data: "", kelpie_stripped: 9 }), "");
+    expect(h.items().at(-1)).toEqual({ kind: "user", id: expect.any(String), text: "", streaming: false, images: [{ name: "Picture 1" }] });
+  });
+
+  it("a watcher keeps only the names of replayed pictures", () => {
+    const { h, a } = open(true);
+    h.ctx.namesOnly = true;
+    a.onMessage(imageChunk({ type: "image", mimeType: "image/png", data: "QUJD" }), "");
+    expect((h.items().at(-1) as any).images).toEqual([{ name: "Picture 1" }]);
+  });
+
+  it("a new conversation takes no pictures", () => {
+    const { a } = open(true);
+    expect(a.isCommand!("/new", true)).toBe(true);
+    expect(a.isCommand!("look", true)).toBe(false);
+  });
 });
 
 describe("what is still streaming", () => {

@@ -5,7 +5,7 @@
 // `thread/compact/start`, `/review` → `review/start`, `/new` (or `/clear`, `/reset`) → `thread/start`, `!cmd` →
 // `thread/shellCommand`); model, effort and approval mode ride on the next `turn/start`, which
 // Codex keeps for later turns; `$skill` mentions add a `skill` input item.
-import { type Adapter, type AdapterContext, type ChatCommand, type ChatImage, type ToolCategory, NEW_CONVERSATION_COMMANDS, putSetting, setSettingValue, slashCommand, textOf, withImageNames } from "./chat-model";
+import { type Adapter, type AdapterContext, type ChatCommand, type ChatImage, type ToolCategory, NEW_CONVERSATION_COMMANDS, pathImage, putSetting, sentImages, setSettingValue, slashCommand, textOf } from "./chat-model";
 import { basename, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 
@@ -234,9 +234,11 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
   function renderItem(item: any, done: boolean) {
     if (!item?.id) return;
     switch (item.type) {
-      case "userMessage":
-        ctx.upsert({ kind: "user", id: item.id, text: textOf((item.content ?? []).filter((c: any) => c.type === "text")) });
+      case "userMessage": {
+        const images = (item.content ?? []).filter((c: any) => c.type === "localImage" && typeof c.path === "string").map((c: any) => pathImage(c.path));
+        ctx.upsert({ kind: "user", id: item.id, text: textOf((item.content ?? []).filter((c: any) => c.type === "text")), ...(images.length ? { images } : {}) });
         break;
+      }
       case "agentMessage":
         ctx.upsert({ kind: "assistant", id: item.id, text: item.text ?? "", streaming: !done });
         break;
@@ -368,7 +370,8 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
           refreshSettings();
           renderTurns(thread?.turns);
           if (!ctx.replaying()) {
-            for (const it of ctx.state.items) if (it.id.startsWith("queued-")) ctx.patch(it.id, (i: any) => (i.text = ""));
+            // Hidden: the thread echoes these with their pictures.
+            for (const it of ctx.state.items) if (it.id.startsWith("queued-")) ctx.patch(it.id, (i: any) => { i.text = ""; i.images = undefined; });
             // "Busy" only covered the wait for the thread; whatever starts a turn sets it again.
             if (queued.length) ctx.set("busy", false);
             while (queued.length) {
@@ -461,7 +464,7 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
       if (runCommand(text, typed)) return;
       if (!threadId) {
         queued.push({ text, typed, images });
-        ctx.upsert({ kind: "user", id: `queued-${Date.now()}`, text: withImageNames(text, images), pending: true });
+        ctx.upsert({ kind: "user", id: `queued-${Date.now()}`, text, images: sentImages(images), pending: true });
         ctx.set("busy", true);
         return;
       }
@@ -478,6 +481,14 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
     immediate(text) {
       const slash = slashCommand(text);
       return !!slash && (slash[0] === "model" || TUI_ONLY.has(slash[0]));
+    },
+    // What `runCommand` takes: none of it starts a turn, so no picture would go anywhere.
+    isCommand(text, typed) {
+      if (typed && text.startsWith("!") && text.length > 1) return true;
+      const slash = slashCommand(text);
+      if (!slash) return false;
+      const [name, args] = slash;
+      return name === "compact" || name === "review" || name === "model" || TUI_ONLY.has(name) || (NEW_CONVERSATION_COMMANDS.has(name) && !args);
     },
     interrupt() {
       if (threadId && turnId) request(`kelpie-int-${++seq}`, "turn/interrupt", { threadId, turnId });

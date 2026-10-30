@@ -7,7 +7,8 @@ import { listTurns, turnsByMessage } from "../lib/checkpoints";
 import { findPane } from "../lib/layout";
 import { getController, switchToTerminal } from "../chat/mode-switch";
 import { CHAT_SANITIZE, chatMarkdownHtml, fileRefInCode, linkifyText } from "../chat/chat-links";
-import type { ChatItem } from "../chat/chat-model";
+import { imageUrl } from "../chat/chat-images";
+import type { ChatItem, UserImage } from "../chat/chat-model";
 import { PINNED_REACH, lastPromptBefore, pinnedPromptId, renderedPrompts } from "../chat/pinned-prompt";
 import { openTable, stableEnd } from "../chat/streaming-markdown";
 import { describeTool, diffStats, unifiedFiles } from "../chat/tool-view";
@@ -17,6 +18,7 @@ import { ChatComposer } from "./chat-composer";
 import { CopyButton, copyText } from "./chat-copy";
 import { openChatFile, openChatLink } from "./chat-open-file";
 import { clock, type FileChange, fullClock, PermissionCard, ThinkingRow, ToolRow, ToolRun, TurnFiles } from "./chat-rows";
+import { openLightbox } from "./image-lightbox";
 import { isAgentKind, kindInfo } from "../lib/agents";
 import { t } from "../lib/i18n";
 
@@ -26,6 +28,8 @@ const JUMP_QUIET_MS = 150;
 const FLASH_MS = 1200;
 const BOTTOM_FRAMES = 60;
 const BOTTOM_CALM_FRAMES = 3;
+/** A thumbnail is read when its row comes this close to the transcript's view. */
+const THUMBNAIL_NEAR_PX = 600;
 
 const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -85,6 +89,12 @@ const onMarkdownClick = (project?: Project) => (e: MouseEvent) => {
     return;
   }
   if (target.closest("a, area, form, button, input")) e.preventDefault();
+  // Only a picture that loaded: a remote one is stopped by the content policy, and is not enlarged either.
+  const img = target.closest("img");
+  if (img && img.naturalWidth > 0) {
+    if (!selecting()) openLightbox([{ url: img.currentSrc || img.src, name: img.alt || t("Picture") }], 0, img);
+    return;
+  }
   const a = target.closest("a");
   if (a) {
     if (!selecting()) openChatLink(a.dataset.href ?? a.getAttribute("href") ?? "", project);
@@ -157,6 +167,54 @@ function transcriptShape(items: ChatItem[]) {
 /** The date and time a message was sent, in the top right corner. */
 function Stamp(props: { at?: number }) {
   return <Show when={props.at}><span class="msg-time" title={fullClock(props.at!)}>{clock(props.at!)}</span></Show>;
+}
+
+/** A message's pictures, each a thumbnail that enlarges (the caret staying in the composer, for the
+ *  lightbox to give the keyboard back to), or its name when it cannot be shown: gone from disk, not in
+ *  the log, not a place to read from. Nothing is read until the row nears the view of `root`, the
+ *  transcript's scroller: up to 300 rows are mounted, most of them out of sight. `onLoad`: the row
+ *  just changed height. */
+function UserImages(props: { images: UserImage[]; pending?: boolean; root: () => HTMLElement; onLoad: () => void }) {
+  let row!: HTMLDivElement;
+  const [near, setNear] = createSignal(false);
+  onMount(() => {
+    const seen = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      setNear(true);
+      seen.disconnect();
+    }, { root: props.root(), rootMargin: `${THUMBNAIL_NEAR_PX}px 0px` });
+    seen.observe(row);
+    onCleanup(() => seen.disconnect());
+  });
+  /** Per picture: undefined while it is being fetched, null when there is nothing to show. */
+  const [urls, setUrls] = createSignal<(string | null)[]>([]);
+  createEffect(() => {
+    if (!near()) return;
+    let current = true;
+    onCleanup(() => (current = false));
+    void Promise.all(props.images.map((img) => imageUrl(img))).then((list) => current && setUrls(list));
+  });
+  const fail = (i: number) => setUrls((list) => list.map((u, at) => (at === i ? null : u)));
+  const open = (i: number, from: Element) => {
+    const shown = props.images.flatMap((img, at) => (urls()[at] ? [{ url: urls()[at]!, name: img.name, at }] : []));
+    openLightbox(shown, shown.findIndex((s) => s.at === i), from);
+  };
+  return (
+    <div class="msg-user-images" ref={row} style={{ opacity: props.pending ? 0.7 : 1 }}>
+      <For each={props.images}>
+        {(img, i) => (
+          <Show
+            when={urls()[i()] !== null}
+            fallback={<span class="msg-image-missing" title={t("This picture is no longer available")}><Icon name="files" size={13} /><span class="name">{img.name}</span></span>}
+          >
+            <Show when={urls()[i()]} fallback={<span class="msg-image-wait" title={img.name} />}>
+              {(url) => <button class="msg-user-image" title={img.name} aria-label={img.name} onMouseDown={(e) => e.preventDefault()} onClick={(e) => open(i(), e.currentTarget)}><img src={url()} alt={img.name} loading="lazy" onLoad={props.onLoad} onError={() => fail(i())} /></button>}
+            </Show>
+          </Show>
+        )}
+      </For>
+    </div>
+  );
 }
 
 export function ChatPane(props: { sessionId: string; project: Project; focused: boolean }) {
@@ -336,6 +394,12 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
     clearTimeout(flashTimer);
   });
 
+  /** A thumbnail came in: the rows below it moved, and the bottom with them. */
+  const onImageLoad = () => {
+    if (stick && !jump) scroller.scrollTop = scroller.scrollHeight;
+    schedulePinned();
+  };
+
   const toBottom = () => {
     stopJump();
     stick = true;
@@ -425,7 +489,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
             }}
           >
             <span class="chat-pinned-inner">
-              <span class="chat-pinned-text">{u().text.trim()}</span>
+              <span class="chat-pinned-text">{u().text.trim() || (u().images?.length === 1 ? t("{n} picture", { n: 1 }) : t("{n} pictures", { n: u().images?.length ?? 0 }))}</span>
               <Stamp at={u().at} />
             </span>
           </button>
@@ -448,7 +512,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                   {(it) => {
                     const u = it() as Extract<ChatItem, { kind: "user" }>;
                     return (
-                      <Show when={u.text}>
+                      <Show when={u.text || u.images?.length}>
                         <div class="msg-user-wrap" data-item={u.id} data-user>
                           <div class="msg-meta">
                             <For each={undoable().get(u.id) ?? []}>
@@ -459,19 +523,22 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                                 </button>
                               )}
                             </For>
-                            <CopyButton text={u.text} />
+                            <Show when={u.text}><CopyButton text={u.text} /></Show>
                             <Stamp at={u.at} />
                           </div>
-                          <div class="msg-user" style={{ opacity: u.pending ? 0.7 : 1 }}>
-                            <For each={linkifyText(u.text)}>
-                              {(part) => ("url" in part
-                                ? <a href={part.url} draggable={false} onClick={(e) => {
-                                    e.preventDefault();
-                                    if (!selecting()) openChatLink(part.url);
-                                  }}>{part.url}</a>
-                                : part.text)}
-                            </For>
-                          </div>
+                          <Show when={u.images?.length}><UserImages images={u.images!} pending={u.pending} root={() => scroller} onLoad={onImageLoad} /></Show>
+                          <Show when={u.text}>
+                            <div class="msg-user" style={{ opacity: u.pending ? 0.7 : 1 }}>
+                              <For each={linkifyText(u.text)}>
+                                {(part) => ("url" in part
+                                  ? <a href={part.url} draggable={false} onClick={(e) => {
+                                      e.preventDefault();
+                                      if (!selecting()) openChatLink(part.url);
+                                    }}>{part.url}</a>
+                                  : part.text)}
+                              </For>
+                            </div>
+                          </Show>
                         </div>
                       </Show>
                     );

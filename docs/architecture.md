@@ -520,7 +520,14 @@ what is open and came live: a card only seen in a replay stays the person's to a
 (`Adapter.describeAnswer` puts it in the card's words) and it never reaches an agent: a replayed
 answer only changes what a card shows. An older daemon writes none, and its cards say what they
 did; an older app's adapters ignore the type. Level 20 skips 18 and 19, which belong to the phone
-work on other branches. Adapters in `app/src/chat` map each
+work on other branches. A line over 2 MiB (`PICTURE_LINE_MAX`) loses the bytes of the pictures in
+the person's message before it is logged or sent to anyone attached, because one 5 MB picture would
+evict most of the 12 MiB log, and a line over 4 MiB (`MAX_LINE`) would be replaced by a notice and
+take its words with it. That covers a Claude `user` line (the echo, or an image in a tool's result)
+and an ACP `user_message_chunk`; Codex logs carry paths, not bytes. Each picture keeps its type, with
+`data` empty and `kelpie_stripped` holding the length it had; everything else stays, and a shorter
+line is logged byte for byte. The transcript then shows the picture from its path if it was attached
+in this window, and otherwise a named placeholder. Adapters in `app/src/chat` map each
 dialect to one item model (user, assistant, thinking, tool card with diff, permission, result):
 
 | Agent | Process | Protocol |
