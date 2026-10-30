@@ -1,7 +1,7 @@
 ---
 title: "Chat view parity with Claude Code"
 description: "Close the gaps between Kelpie's desktop chat view and the Claude Code reference: live status, file links, pinned prompt, kept answers, pictures, bookmarks and an agent map."
-status: pending
+status: completed
 priority: P2
 effort: 56h
 branch: feat/chat-view-parity
@@ -46,7 +46,7 @@ Already good, do not rebuild:
 | 5 | [Paste and zoom images](./phase-05-paste-and-zoom-images.md) | Completed |
 | 6 | [Response bookmarks](./phase-06-response-bookmarks.md) | Completed |
 | 7 | [Agent map](./phase-07-agent-map.md) | Completed |
-| 8 | [Docs and final verification](./phase-08-docs-and-final-verification.md) | Pending |
+| 8 | [Docs and final verification](./phase-08-docs-and-final-verification.md) | Completed |
 
 Phases 6 and 7 use `scrollToItem` from phase 3. Phase 5 uses the user-message action row from phase 1. Phase 4 is the only one that changes the daemon.
 
