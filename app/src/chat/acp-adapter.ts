@@ -7,7 +7,7 @@
 // (`available_commands_update`, run by sending `/name args` as prompt text) and its settings
 // (`configOptions`: mode, model, thought level) itself. `/new`, `/clear` and `/reset` start a
 // new session (`session/new`) whatever the agent lists.
-import { type Adapter, type AdapterContext, type ChatCommand, type ChatImage, type ChatItem, type ToolCategory, NEW_CONVERSATION_COMMANDS, putSetting, setSettingValue, slashCommand, summarize, textOf, withImageNames } from "./chat-model";
+import { type Adapter, type AdapterContext, type ChatCommand, type ChatImage, type ChatItem, type ToolCategory, NEW_CONVERSATION_COMMANDS, logQuestionAnswers, putSetting, setSettingValue, slashCommand, summarize, textOf, withImageNames } from "./chat-model";
 import { lineDiff, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 import { version as appVersion } from "../../package.json";
@@ -67,6 +67,12 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
   let authMethods: any[] = [];
   /** Open elicitations: card id → the request id and the schema properties behind each question. */
   const elicitations = new Map<string, { rid: unknown; fields: { key: string; question: string; type: string }[] }>();
+  /** The turn is over, whether or not `busy` knew of it: a replay has no prompt, which is what sets it. */
+  const endTurn = () => {
+    ctx.expireApprovals?.();
+    // Last: going idle sends the next queued message.
+    ctx.set("busy", false);
+  };
   /** Prompts typed before the session was ready; sent once it is. */
   const queued: { text: string; images?: ChatImage[] }[] = [];
 
@@ -240,6 +246,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
       sessionId = null;
       lastKind = null;
       requests.clear();
+      elicitations.clear();
     },
     start() {
       if (!ctx.state.commands.length) ctx.set("commands", ownCommands());
@@ -273,7 +280,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
           }
           if (String(m.id).startsWith("kelpie-prompt-")) {
             endStreaming();
-            ctx.set("busy", false);
+            endTurn();
           }
           // No new session: stay in the one shown.
           if (m.id === NEW_SESSION_ID) sessionId = ctx.state.conversationId;
@@ -318,8 +325,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
         } else if (m.result && "stopReason" in m.result) {
           endStreaming();
           ctx.upsert({ kind: "result", id: `stop-${String(m.id)}`, text: stopText(String(m.result.stopReason)) });
-          // Last: going idle sends the next queued message.
-          ctx.set("busy", false);
+          endTurn();
         }
         return;
       }
@@ -346,7 +352,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
             const source = f.type === "array" ? def.items ?? {} : def;
             const choices: string[] = source.enum ?? (source.oneOf ?? source.anyOf ?? []).map((o: any) => o.const ?? o.title) ?? [];
             const options = f.type === "boolean" ? [{ label: t("Yes") }, { label: t("No") }] : choices.map((c) => ({ label: String(c) }));
-            return { question: f.question, header: def.title && def.description ? String(def.description) : undefined, options, multiSelect: f.type === "array" };
+            return { key: f.key, question: f.question, header: def.title && def.description ? String(def.description) : undefined, options, multiSelect: f.type === "array" };
           }),
           // Nothing to fill in: the agent only asks to go ahead.
           options: [...(fields.length ? [] : [{ id: "answer", label: t("Accept"), tone: "allow" as const }]), { id: "decline", label: t("Decline"), tone: "deny" }, { id: "cancel", label: t("Cancel") }],
@@ -381,24 +387,32 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
     interrupt() {
       if (!sessionId) return;
       notify("session/cancel", { sessionId });
+      // Settled meanwhile (answered elsewhere, expired): that request is over. One still open, also if a
+      // replay showed it, is what the agent is waiting on, and this is the person's own Stop.
+      const settled = (id: string) => {
+        const card = ctx.find(id);
+        return card?.kind === "permission" && !!card.resolved;
+      };
       // ACP: after a cancel the client answers every open permission request as cancelled,
       // or the agent may never end the turn.
       for (const [id, rid] of requests) {
         if (rid === "auth") continue;
+        requests.delete(id);
+        if (settled(id)) continue;
         ctx.write({ jsonrpc: "2.0", id: rid, result: { outcome: { outcome: "cancelled" } } });
         ctx.patch(id, (i: any) => {
           if (i.kind === "permission" && !i.resolved) i.resolved = t("Cancelled");
         });
-        requests.delete(id);
       }
       // Questions the agent asked would keep it waiting just the same.
       for (const [id, e] of elicitations) {
+        elicitations.delete(id);
+        if (settled(id)) continue;
         ctx.write({ jsonrpc: "2.0", id: e.rid, result: { action: "cancel" } });
         ctx.patch(id, (i: any) => {
           if (i.kind === "permission" && !i.resolved) i.resolved = t("Cancelled");
         });
       }
-      elicitations.clear();
     },
     setSetting(id, value) {
       if (!sessionId) return;
@@ -438,6 +452,22 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
       if (rid === undefined) return;
       requests.delete(id);
       ctx.write({ jsonrpc: "2.0", id: rid, result: { outcome: { outcome: "selected", optionId: option } } });
+    },
+    describeAnswer(card, answer) {
+      const result = answer.result ?? {};
+      if (result.action === "accept") {
+        const said: Record<string, string> = {};
+        for (const q of card.ask ?? []) {
+          const v = result.content?.[q.key ?? q.question];
+          if (v === undefined) continue;
+          said[q.question] = v === true ? t("Yes") : v === false ? t("No") : Array.isArray(v) ? v.join(", ") : String(v);
+        }
+        const questions = logQuestionAnswers(said);
+        if (questions) return questions;
+      }
+      const id = result.action === "accept" ? "answer" : result.action ?? result.outcome?.optionId;
+      const label = card.options.find((o) => o.id === id)?.label;
+      return label ? { label } : null;
     },
   };
 }

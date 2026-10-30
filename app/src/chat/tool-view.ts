@@ -91,6 +91,10 @@ function describe(item: Tool): ToolView {
     }
     case "Skill":
       return { category, verb: t("Skill"), target: str(input.skill) || str(input.command) || item.summary };
+    case "AskUserQuestion": {
+      const questions: any[] = Array.isArray(input.questions) ? input.questions : [];
+      return { category, verb: t("Questions"), target: questions.map((q) => str(q?.question)).filter(Boolean).join(" · ") };
+    }
   }
   const mcp = /^mcp__(.+?)__(.+)$/.exec(item.name);
   if (mcp) return { category, verb: `${mcp[1]} · ${mcp[2]}`, target: item.summary };

@@ -67,6 +67,9 @@ function commandView(item: any, cmd: string): { category: ToolCategory; summary:
 
 interface CodexModel { id: string; model?: string; displayName?: string; description?: string; hidden?: boolean; isDefault?: boolean; defaultReasoningEffort?: string; supportedReasoningEfforts?: { reasoningEffort: string; description?: string }[] }
 
+/** A decision as an answer wrote it (the older approvals have their own words) → the card's option. */
+const LOGGED_DECISION: Record<string, string> = { accept: "accept", approved: "accept", acceptForSession: "acceptForSession", approved_for_session: "acceptForSession", decline: "decline", denied: "decline" };
+
 export function createCodexAdapter(ctx: AdapterContext): Adapter {
   let initialized = false;
   let threadReady = false;
@@ -500,6 +503,11 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
       const legacy = a.method === "execCommandApproval" || a.method === "applyPatchApproval";
       const decision = legacy ? { accept: "approved", acceptForSession: "approved_for_session", decline: "denied" }[option] ?? "denied" : option;
       ctx.write({ id: a.id, result: { decision } });
+    },
+    describeAnswer(card, answer) {
+      const option = LOGGED_DECISION[String(answer.result?.decision)];
+      const label = card.options.find((o) => o.id === option)?.label;
+      return label ? { label } : null;
     },
   };
 }

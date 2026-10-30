@@ -36,6 +36,55 @@ function openSession(a: ReturnType<typeof createAcpAdapter>) {
   a.onMessage({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hello" } } } }, "");
 }
 
+describe("a logged answer", () => {
+  const LINE = { type: "kelpie_answer", request_id: 5, by: "desktop", answered_by: "desktop", at: 1, answer: { result: { outcome: { outcome: "selected", optionId: "once" } } } };
+  const permission = () => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    a.onMessage({ jsonrpc: "2.0", id: 5, method: "session/request_permission", params: { toolCall: { title: "Run ls" }, options: [{ optionId: "once", name: "Allow once", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } }, "");
+    return { a, h, card: h.items()[0] as Extract<ChatItem, { kind: "permission" }> };
+  };
+  const form = (properties: Record<string, unknown>) => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    a.onMessage({ jsonrpc: "2.0", id: 6, method: "elicitation/create", params: { message: "Tell me", requestedSchema: { properties } } }, "");
+    return { a, h, card: h.items()[0] as Extract<ChatItem, { kind: "permission" }> };
+  };
+
+  it("is not the adapter's to read: the controller takes it first", () => {
+    const { a, h } = permission();
+    const before = h.items();
+    a.onMessage(LINE, JSON.stringify(LINE));
+    expect(h.items()).toEqual(before);
+    expect(h.written).toEqual([]);
+  });
+
+  it("names the option the agent offered", () => {
+    const { a, card } = permission();
+    expect(a.describeAnswer!(card, LINE.answer)).toEqual({ label: "Allow once" });
+    expect(a.describeAnswer!(card, { result: { outcome: { outcome: "selected", optionId: "no" } } })).toEqual({ label: "Reject" });
+    expect(a.describeAnswer!(card, { result: { outcome: { outcome: "selected", optionId: "gone" } } })).toBeNull();
+    expect(a.describeAnswer!(card, { error: true })).toBeNull();
+  });
+
+  it("gives a form's fields back under their questions", () => {
+    const { a, card } = form({ db: { type: "string", title: "Which database?", enum: ["Postgres", "Mongo"] }, ok: { type: "boolean", title: "Sure?" }, many: { type: "array", title: "Which?", items: { enum: ["A", "B"] } } });
+    const said = a.describeAnswer!(card, { result: { action: "accept", content: { db: "Mongo", ok: false, many: ["A", "B"] } } });
+    expect(said?.answers).toEqual({ "Which database?": "Mongo", "Sure?": "No", "Which?": "A, B" });
+    expect(said?.label).toBe("Mongo · No · A, B");
+  });
+
+  it("names how a form was turned down, and does not make up answers", () => {
+    const { a, card } = form({ db: { type: "string", title: "Which database?" } });
+    expect(a.describeAnswer!(card, { result: { action: "decline" } })).toEqual({ label: "Decline" });
+    expect(a.describeAnswer!(card, { result: { action: "cancel" } })).toEqual({ label: "Cancel" });
+    // Only the verdict was kept (the answer was too long for the log).
+    expect(a.describeAnswer!(card, { result: { action: "accept" } })).toBeNull();
+    const nothingToFill = form({});
+    expect(nothingToFill.a.describeAnswer!(nothingToFill.card, { result: { action: "accept", content: {} } })).toEqual({ label: "Accept" });
+  });
+});
+
 describe("pictures", () => {
   const PIC = { mime: "image/png", data: "iVBORw0KGgo=", path: "C:\\Temp\\kelpie-composer\\image-1.png" };
   const open = (image: boolean) => {

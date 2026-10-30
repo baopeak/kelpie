@@ -761,6 +761,14 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .ask-opt { height: auto; padding: 5px 10px; flex-direction: column; align-items: flex-start; }
 .ask-opt .detail { font-size: 11px; color: var(--text-faint); }
 .ask-opt.sel { border-color: var(--accent); color: var(--accent); }
+.perm-answers { display: flex; flex-direction: column; gap: 8px; }
+.perm-answers-head { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12.5px; color: var(--text-dim); }
+.perm-answers .ask-opt { cursor: default; opacity: .6; }
+.perm-answers .ask-opt:hover { background: var(--bg-elev-2); }
+.perm-answers .ask-opt.sel { opacity: 1; }
+.perm-who { font-size: 11.5px; color: var(--text-faint); }
+.perm-other { font-size: 12.5px; color: var(--text-dim); white-space: pre-wrap; }
+.perm-said { font-size: 12.5px; color: var(--text-dim); white-space: pre-wrap; border-left: 2px solid var(--border-strong); padding-left: 8px; }
 .turn-files { border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); }
 .turn-files .spacer { flex: 1; }
 .turn-file { display: flex; align-items: center; gap: 8px; padding: 3px 11px 3px 31px; border-top: 1px solid var(--border); }

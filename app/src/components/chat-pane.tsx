@@ -16,12 +16,9 @@ import { Icon } from "./icons";
 import { ChatComposer } from "./chat-composer";
 import { CopyButton, copyText } from "./chat-copy";
 import { openChatFile, openChatLink } from "./chat-open-file";
-import { type FileChange, PermissionCard, ThinkingRow, ToolRow, ToolRun, TurnFiles } from "./chat-rows";
+import { clock, type FileChange, fullClock, PermissionCard, ThinkingRow, ToolRow, ToolRun, TurnFiles } from "./chat-rows";
 import { isAgentKind, kindInfo } from "../lib/agents";
-import { locale, t } from "../lib/i18n";
-
-/** Vietnamese interface: Vietnamese dates; English: the system's own date format. */
-const clockLocale = () => (locale() === "vi" ? "vi-VN" : []);
+import { t } from "../lib/i18n";
 
 const RENDER_WINDOW = 300;
 /** A jump has landed once its scrolling has been quiet this long (not every WebView has `scrollend`). */
@@ -156,10 +153,6 @@ function transcriptShape(items: ChatItem[]) {
   endRun();
   return { runs, member, turnFiles };
 }
-
-/** "23/10 16:02" (the full date and time on hover). */
-const clock = (at: number) => new Date(at).toLocaleString(clockLocale(), { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
-const fullClock = (at: number) => new Date(at).toLocaleString(clockLocale(), { dateStyle: "full", timeStyle: "medium" });
 
 /** The date and time a message was sent, in the top right corner. */
 function Stamp(props: { at?: number }) {
@@ -367,6 +360,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
   /** An approval nobody answered yet: the pill leads to it. */
   const pending = createMemo(() => ctrl.state.items.find((i): i is Extract<ChatItem, { kind: "permission" }> => i.kind === "permission" && !i.resolved));
   const toPending = () => scrollToItem(pending()!.id, { block: "center" });
+  const noAskCards = createMemo(() => !ctrl.state.items.some((i) => i.kind === "permission" && !!i.ask?.length));
 
   // Elapsed time of the running turn.
   const [now, setNow] = createSignal(Date.now());
@@ -500,7 +494,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                 <Match when={item.kind === "tool" && item}>
                   {(it) => (
                     <Show when={!shape().member.has(it().id)}>
-                      <Show when={shape().runs.get(it().id)} fallback={<ToolRow item={it() as Tool} project={props.project} />}>
+                      <Show when={shape().runs.get(it().id)} fallback={<ToolRow item={it() as Tool} project={props.project} noAskCards={noAskCards()} />}>
                         {(run) => <ToolRun items={run()} project={props.project} />}
                       </Show>
                     </Show>

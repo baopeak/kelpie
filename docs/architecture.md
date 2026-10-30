@@ -504,7 +504,23 @@ A chat session is a daemon `ChatSession`: the agent runs with piped stdio and th
 relays JSON lines (logged for replay on re-attach). The agents' lines carry no time, so the
 daemon puts a `{"type":"kelpie_time","at":<unix ms>}` line ahead of the first line of each
 second; a replay dates every item from it (Claude history read from its transcript uses the
-entries' own `timestamp`). Adapters in `app/src/chat` map each
+entries' own `timestamp`). Since API 20 the log also keeps the answers to the agent's questions, so
+a reopened window shows what was chosen, who chose it and when, for every dialect:
+`{"type":"kelpie_answer","request_id":…,"by":"desktop"|"phone","answered_by":<device name>,"at":<unix ms>,"answer":…}`,
+written after the answer went to the agent, once, for the first answer to a request the agent had
+open (`pending`) and that can still take it (its stdin is open). `answer` is sanitized: Claude's
+`behavior`, `message`, a question's `answers`, `lasting` and `mode`, never the rest of
+`updatedInput`, which can hold whole files; JSON-RPC's `result`, or `{"error":true}`.
+A line is at most 16 KiB: above that only the verdict stays. A request over 1 MiB is not tracked,
+so its answer is not recorded and after a replay its card says "No longer needed". ACP's
+`cancelled`, which a stop sends for a permission, writes no line; the `{"action":"cancel"}` it sends
+for an elicitation does, as it cannot be told from the person's own Cancel. A stop answers only
+what is open and came live: a card only seen in a replay stays the person's to answer.
+`ChatController` applies the line ahead of the adapter
+(`Adapter.describeAnswer` puts it in the card's words) and it never reaches an agent: a replayed
+answer only changes what a card shows. An older daemon writes none, and its cards say what they
+did; an older app's adapters ignore the type. Level 20 skips 18 and 19, which belong to the phone
+work on other branches. Adapters in `app/src/chat` map each
 dialect to one item model (user, assistant, thinking, tool card with diff, permission, result):
 
 | Agent | Process | Protocol |

@@ -15,7 +15,7 @@
 //   session id and a `result` of no turns;
 // - slash commands are sent as plain user text and run by the CLI (`/context` answers with a
 //   synthetic assistant message).
-import { type Adapter, type AdapterContext, type AskQuestion, type ChatCommand, type ChatItem, putSetting, setSettingValue, slashCommand, summarize, textOf, withImageNames } from "./chat-model";
+import { type Adapter, type AdapterContext, type AskQuestion, type ChatCommand, type ChatItem, logQuestionAnswers, putSetting, setSettingValue, slashCommand, summarize, textOf, withImageNames } from "./chat-model";
 import { lineDiff, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 
@@ -148,6 +148,8 @@ export function diffFor(name: string, input: any): { path: string; text: string 
 
 /** Request id of our `initialize` (the daemon keeps its answer when it trims the replay log). */
 const INIT_ID = "kelpie-init";
+/** What a denial tells the agent when the person wrote nothing. */
+const DENIED = "The user denied this action.";
 
 interface ClaudeModel { value: string; resolvedModel?: string; displayName?: string; description?: string; supportedEffortLevels?: string[]; supportsAutoMode?: boolean }
 
@@ -390,13 +392,26 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
       const input = (pending?.input ?? {}) as Record<string, unknown>;
       const response =
         option === "deny"
-          ? { behavior: "deny", message: reply?.message?.trim() || "The user denied this action." }
+          ? { behavior: "deny", message: reply?.message?.trim() || DENIED }
           : option === "answer"
             ? { behavior: "allow", updatedInput: { ...input, answers: reply?.answers ?? {} } }
             : option === "plan-accept-edits"
               ? { behavior: "allow", updatedInput: input, updatedPermissions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }] }
               : { behavior: "allow", updatedInput: input, ...(option === "allow-session" && pending?.suggestions ? { updatedPermissions: pending.suggestions } : {}) };
       ctx.write({ type: "control_response", response: { subtype: "success", request_id: id, response } });
+    },
+    describeAnswer(card, answer) {
+      const option = (id: string) => card.options.find((o) => o.id === id)?.label;
+      if (answer.behavior === "deny") {
+        const label = option("deny");
+        return label ? { label, message: typeof answer.message === "string" && answer.message !== DENIED ? answer.message : undefined } : null;
+      }
+      if (answer.behavior !== "allow") return null;
+      // Only a question's: another tool can have an input of that name.
+      const questions = card.ask?.length ? logQuestionAnswers(answer.answers) : null;
+      if (questions) return questions;
+      const label = (answer.mode && option("plan-accept-edits")) || (answer.lasting && option("allow-session")) || option("allow");
+      return label ? { label } : null;
     },
   };
 }

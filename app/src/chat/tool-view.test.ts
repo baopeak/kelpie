@@ -5,6 +5,17 @@ import { type ChatItem, summarize } from "./chat-model";
 const tool = (name: string, input: unknown, extra: Partial<Extract<ChatItem, { kind: "tool" }>> = {}) =>
   ({ kind: "tool", id: "t", name, input, summary: "", status: "done", ...extra }) as Extract<ChatItem, { kind: "tool" }>;
 
+describe("a question's row", () => {
+  it("names the questions; the agent's own text for the answers stays its output", () => {
+    const row = tool("AskUserQuestion", { questions: [{ question: "Which database?" }, { question: "Which port?" }] }, { output: 'User has answered your questions: "Which database?"="Postgres"' });
+    expect(describeTool(row)).toMatchObject({ verb: "Questions", target: "Which database? · Which port?", category: "other" });
+  });
+
+  it("falls back to the summary when the input is not there yet", () => {
+    expect(describeTool(tool("AskUserQuestion", {}, { summary: "Which?" })).target).toBe("Which?");
+  });
+});
+
 describe("lineDiff", () => {
   it("keeps shared lines as context and marks only what changed", () => {
     expect(lineDiff("a\nb\nc", "a\nB\nc")).toBe(" a\n-b\n+B\n c");

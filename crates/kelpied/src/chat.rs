@@ -27,6 +27,8 @@ const LOG_MAX_LINES: usize = 20_000;
 /// Base64 of the replayed log must stay well under `kelpie_proto::MAX_FRAME_LEN`.
 const LOG_MAX_BYTES: usize = 12 << 20;
 const MAX_LINE: usize = 4 << 20;
+/// The longest `kelpie_answer` line: an answer that does not fit keeps only its verdict.
+const ANSWER_LINE_MAX: usize = 16 * 1024;
 /// What a phone that watches (rather than runs) the chat is sent when it starts or lost its place:
 /// the last of the log, with the handshake answers the adapters need ahead of it.
 const OBSERVER_LINES: usize = 2_000;
@@ -232,19 +234,78 @@ fn request_key(line: &str) -> Option<String> {
 }
 
 /// The request a line written to the agent's stdin answers, if it looks like an answer to one
-/// (used to let the first answer win, from wherever it comes; not to decide what may be written).
-fn answered_key(line: &[u8]) -> Option<(String, Value)> {
+/// (used to let the first answer win, from wherever it comes; not to decide what may be written):
+/// its key, the id as written, and the line parsed.
+fn answered_key(line: &[u8]) -> Option<(String, Value, Value)> {
     if line.len() > 1 << 20 {
         return None;
     }
     let v: Value = serde_json::from_slice(line).ok()?;
     if v.get("type").and_then(Value::as_str) == Some("control_response") {
-        let id = v.pointer("/response/request_id").filter(|id| id.is_string())?;
-        return Some((format!("control:{}", id.as_str()?), id.clone()));
+        let id = v.pointer("/response/request_id").filter(|id| id.is_string())?.clone();
+        return Some((format!("control:{}", id.as_str()?), id, v));
     }
     // A response has an id and a result or error, and no method (a request does).
-    let id = v.get("id")?;
-    (v.get("method").is_none() && (v.get("result").is_some() || v.get("error").is_some())).then(|| id_key(id).map(|k| (format!("rpc:{k}"), id.clone()))).flatten()
+    let id = v.get("id")?.clone();
+    if v.get("method").is_some() || (v.get("result").is_none() && v.get("error").is_none()) {
+        return None;
+    }
+    let key = format!("rpc:{}", id_key(&id)?);
+    Some((key, id, v))
+}
+
+/// What the log keeps of an answer: the verdict and what the person said, never the tool input it
+/// echoes (`updatedInput` can hold whole files). Claude: `behavior`, `message`, a question's `answers`,
+/// `lasting` (it also changes permissions) and the `mode` it sets. JSON-RPC (Codex, ACP): `result`, or that it failed.
+fn answer_record(line: &Value) -> Value {
+    if line.get("type").and_then(Value::as_str) != Some("control_response") {
+        return line.get("result").map_or_else(|| json!({"error": true}), |result| json!({"result": result}));
+    }
+    if line.pointer("/response/subtype").and_then(Value::as_str) != Some("success") {
+        return json!({"error": true});
+    }
+    let r = &line["response"]["response"];
+    let permissions = r.get("updatedPermissions").filter(|p| !p.is_null());
+    let mut record = json!({"lasting": permissions.is_some()});
+    for key in ["behavior", "message"] {
+        if let Some(text) = r.get(key).filter(|v| v.is_string()) {
+            record[key] = text.clone();
+        }
+    }
+    // Only a question's, which echoes its `questions`: another tool can have an input of that name.
+    let input = r.get("updatedInput").filter(|i| i.get("questions").is_some_and(Value::is_array));
+    if let Some(answers) = input.and_then(|i| i.get("answers")).filter(|a| a.is_object()) {
+        record["answers"] = answers.clone();
+    }
+    let set_mode = permissions.and_then(Value::as_array).and_then(|list| list.iter().find(|p| p["type"] == "setMode"));
+    if let Some(mode) = set_mode.and_then(|p| p.get("mode")).filter(|m| m.is_string()) {
+        record["mode"] = mode.clone();
+    }
+    record
+}
+
+/// `record` without what the person wrote.
+fn verdict_of(record: &Value) -> Value {
+    let keep = |from: &Value, keys: &[&str]| -> Value { keys.iter().filter_map(|k| from.get(*k).map(|v| (k.to_string(), v.clone()))).collect() };
+    match record.get("result") {
+        Some(result) => json!({"result": keep(result, &["decision", "outcome", "action"])}),
+        None => keep(record, &["behavior", "lasting", "mode", "error"]),
+    }
+}
+
+/// The log line for the answer that counted, at most `ANSWER_LINE_MAX` long. None for what is nobody's
+/// answer (ACP's `cancelled`, which a stop sends) and for what would not fit even as a verdict.
+fn answer_line(request_id: &Value, line: &Value, who: &Resolution) -> Option<String> {
+    if line.pointer("/result/outcome/outcome").and_then(Value::as_str) == Some("cancelled") {
+        return None;
+    }
+    let entry = |answer: &Value| json!({"type": "kelpie_answer", "request_id": request_id, "by": kind(&who.by), "answered_by": who.by.name, "at": who.at, "answer": answer}).to_string();
+    let record = answer_record(line);
+    let full = entry(&record);
+    if full.len() <= ANSWER_LINE_MAX {
+        return Some(full);
+    }
+    Some(entry(&verdict_of(&record))).filter(|l| l.len() <= ANSWER_LINE_MAX)
 }
 
 /// `line` if it is exactly the answer to request `request_id` in the agent's own dialect and
@@ -425,7 +486,6 @@ impl ChatSession {
         let failed_turn = derived == Some(Status::Idle) && turn_failed(&line);
         let title = conversation_title(&line);
         let request = request_key(&line);
-        line.push('\n');
         let mut g = self.inner.lock();
         if title.is_some() {
             g.title = title;
@@ -433,6 +493,17 @@ impl ChatSession {
         if let Some(key) = request {
             g.pending.insert(key, ());
         }
+        self.append(&mut g, line);
+        g.activity.on_output(now);
+        g.last_activity = crate::session::now_millis();
+        if let Some(status) = derived {
+            g.activity.on_hook(status, failed_turn, now);
+        }
+    }
+
+    /// Adds a line to the log and sends it to everyone attached.
+    fn append(&self, g: &mut Inner, mut line: String) {
+        line.push('\n');
         // The agents' lines carry no time: a `kelpie_time` line ahead of the first one of each
         // second lets a replayed transcript show when every message came.
         let wall = crate::session::now_millis();
@@ -455,11 +526,6 @@ impl ChatSession {
             }
             g.pinned_bytes += old.len();
             g.pinned.push((kind, old));
-        }
-        g.activity.on_output(now);
-        g.last_activity = crate::session::now_millis();
-        if let Some(status) = derived {
-            g.activity.on_hook(status, failed_turn, now);
         }
         if g.subs.is_empty() {
             return;
@@ -533,14 +599,17 @@ impl ChatSession {
 
     /// Writes raw bytes (normally one JSON line) to the agent's stdin. A line that answers a
     /// request already answered (from the desktop or a phone) is dropped: the first answer wins,
-    /// and everyone attached is told which answer that was.
+    /// and everyone attached is told which answer that was. The answers that counted go in the log.
     pub fn input(&self, bytes: Vec<u8>) {
         let mut g = self.inner.lock();
         g.activity.last_input = Some(Instant::now());
         g.last_activity = crate::session::now_millis();
-        let bytes = Self::keep_unanswered(&mut g, self.handle, &self.spec.lock().id, bytes);
+        let (bytes, answers) = Self::keep_unanswered(&mut g, self.handle, &self.spec.lock().id, bytes);
         if let Some(stdin) = g.stdin.as_ref().filter(|_| !bytes.is_empty()) {
             let _ = stdin.send(bytes);
+        }
+        for line in answers {
+            self.append(&mut g, line);
         }
     }
 
@@ -556,11 +625,15 @@ impl ChatSession {
         if g.pending.get(&key).is_none() {
             return Err(NotAnswered::NotAnAnswer);
         }
-        Self::resolve(&mut g, self.handle, &self.spec.lock().id, key, request_id.clone(), by);
+        let who = Self::resolve(&mut g, self.handle, &self.spec.lock().id, key, request_id.clone(), by);
         g.activity.last_input = Some(Instant::now());
         g.last_activity = crate::session::now_millis();
         if let Some(stdin) = &g.stdin {
             let _ = stdin.send(format!("{clean}\n").into_bytes());
+        }
+        // With no agent to take it, it was not given: a card left open after the exit stays unanswered.
+        if let Some(line) = who.filter(|_| g.stdin.is_some()).and_then(|who| answer_line(request_id, &clean, &who)) {
+            self.append(&mut g, line);
         }
         Ok(())
     }
@@ -568,8 +641,8 @@ impl ChatSession {
     /// Notes the answer to request `key` and tells every attached client (`chat.resolved`, with
     /// who answered). If it was answered before, nothing changes except that they are told whose
     /// answer stood (`dropped`), so a view that showed this one's click can correct itself.
-    /// Returns whether this answer is the one that counts.
-    fn resolve(g: &mut Inner, handle: u32, session: &str, key: String, id: Value, by: By) -> bool {
+    /// Returns who and when when this answer is the one that counts.
+    fn resolve(g: &mut Inner, handle: u32, session: &str, key: String, id: Value, by: By) -> Option<Resolution> {
         let winner = g.answered.get(&key);
         let first = winner.clone().unwrap_or_else(|| Resolution { by, at: crate::session::now_millis() });
         if winner.is_none() {
@@ -581,21 +654,26 @@ impl ChatSession {
             "answered_by": first.by.name, "at": first.at,
         }}));
         g.subs.retain(|s| s.tx.send(Outgoing { data: event.data.clone(), credit: None }).is_ok());
-        winner.is_none()
+        winner.is_none().then_some(first)
     }
 
-    /// `bytes` without the lines that answer a request answered before.
-    fn keep_unanswered(g: &mut Inner, handle: u32, session: &str, bytes: Vec<u8>) -> Vec<u8> {
+    /// `bytes` without the lines that answer a request answered before, and the log lines for those
+    /// that answered a question the agent had open and can still take it (not every response is one:
+    /// the ACP adapter's "not implemented" to a request it does not know, say).
+    fn keep_unanswered(g: &mut Inner, handle: u32, session: &str, bytes: Vec<u8>) -> (Vec<u8>, Vec<String>) {
         let mut kept = Vec::with_capacity(bytes.len());
+        let mut answers = Vec::new();
         for line in bytes.split_inclusive(|b| *b == b'\n') {
-            if let Some((key, id)) = answered_key(line) {
-                if !Self::resolve(g, handle, session, key, id, By::desktop()) {
-                    continue;
+            if let Some((key, id, parsed)) = answered_key(line) {
+                let asked = g.pending.get(&key).is_some();
+                let Some(who) = Self::resolve(g, handle, session, key, id.clone(), By::desktop()) else { continue };
+                if asked && g.stdin.is_some() {
+                    answers.extend(answer_line(&id, &parsed, &who));
                 }
             }
             kept.extend_from_slice(line);
         }
-        kept
+        (kept, answers)
     }
 
     pub fn close_stdin(&self) {
@@ -906,7 +984,7 @@ mod tests {
 
     #[test]
     fn answers_are_told_apart_from_everything_else_written_to_an_agent() {
-        let key = |v: Value| answered_key(v.to_string().as_bytes()).map(|(k, _)| k);
+        let key = |v: Value| answered_key(v.to_string().as_bytes()).map(|(k, ..)| k);
         assert_eq!(key(allow("r1")), Some("control:r1".into()));
         // JSON-RPC: a response has an id and a result or an error, no method.
         assert_eq!(key(json!({"jsonrpc": "2.0", "id": 5, "result": {"decision": "accept"}})), Some("rpc:n:5".into()));
@@ -1095,6 +1173,214 @@ mod tests {
         assert!(stdin.try_recv().is_err());
         let told: Vec<_> = received(&mut rx).into_iter().filter(|e| e["event"] == "chat.resolved").collect();
         assert_eq!(told[0]["params"]["by"], "desktop");
+    }
+
+    /// The answers the log kept, in order; each is what a replay will apply.
+    fn logged_answers(c: &ChatSession) -> Vec<Value> {
+        let g = c.inner.lock();
+        g.log.iter().flat_map(|l| String::from_utf8_lossy(l).lines().map(str::to_string).collect::<Vec<_>>()).filter_map(|l| serde_json::from_str::<Value>(&l).ok()).filter(|v| v["type"] == "kelpie_answer").collect()
+    }
+
+    fn log_text(c: &ChatSession) -> String {
+        c.inner.lock().log.iter().map(|l| String::from_utf8_lossy(l).into_owned()).collect()
+    }
+
+    fn written(c: &ChatSession, line: &Value) {
+        c.input(format!("{line}\n").into_bytes());
+    }
+
+    #[test]
+    fn an_answer_from_a_window_is_logged_once_without_the_input_it_echoes() {
+        let (c, mut stdin) = chat();
+        let (tx, mut rx) = client();
+        c.attach(1, &tx, &json!(1));
+        received(&mut rx);
+        asks(&c, "r1");
+        received(&mut rx);
+        let line = json!({"type": "control_response", "response": {"subtype": "success", "request_id": "r1", "response": {
+            "behavior": "allow",
+            "updatedInput": {"questions": [{"question": "Which?", "text": "THE WHOLE FILE"}], "file_path": "a.rs", "content": "THE WHOLE FILE", "answers": {"Which?": "Postgres, Mongo"}},
+        }}});
+        written(&c, &line);
+
+        // The agent got all of it; the log keeps the verdict and the answers.
+        assert_eq!(stdin.try_recv().unwrap(), format!("{line}\n").into_bytes());
+        assert!(stdin.try_recv().is_err(), "no record reaches the agent");
+        let logged = logged_answers(&c);
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert_eq!((&logged[0]["request_id"], &logged[0]["by"], &logged[0]["answered_by"]), (&json!("r1"), &json!("desktop"), &json!("desktop")));
+        assert!(logged[0]["at"].as_u64().is_some_and(|at| at > 0));
+        assert_eq!(logged[0]["answer"], json!({"behavior": "allow", "answers": {"Which?": "Postgres, Mongo"}, "lasting": false}));
+        assert!(!log_text(&c).contains("THE WHOLE FILE"));
+        // It follows its request, and a window attached sees it as any other line.
+        let log = log_text(&c);
+        assert!(log.find("can_use_tool").unwrap() < log.find("kelpie_answer").unwrap());
+        let live: String = received(&mut rx).iter().filter_map(|o| o["output"].as_str().map(str::to_string)).collect();
+        assert!(live.contains("kelpie_answer"), "{live}");
+    }
+
+    #[test]
+    fn a_dropped_second_answer_logs_nothing() {
+        let (c, mut stdin) = chat();
+        asks(&c, "r1");
+        written(&c, &allow("r1"));
+        written(&c, &allow("r1"));
+        assert!(matches!(answer(&c, &json!("r1"), &allow("r1").to_string()), Err(NotAnswered::AlreadyAnswered(_))));
+        assert_eq!(logged_answers(&c).len(), 1);
+        assert!(stdin.try_recv().is_ok());
+        assert!(stdin.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_phones_answer_is_logged_with_its_device_name() {
+        let (c, mut stdin) = chat();
+        asks(&c, "r1");
+        assert_eq!(answer(&c, &json!("r1"), &json!({"type": "control_response", "response": {"subtype": "success", "request_id": "r1", "response": {"behavior": "deny", "message": "not now"}}}).to_string()), Ok(()));
+        let logged = logged_answers(&c);
+        assert_eq!(logged.len(), 1);
+        assert_eq!((&logged[0]["by"], &logged[0]["answered_by"]), (&json!("phone"), &json!("Phone")));
+        assert_eq!(logged[0]["answer"], json!({"behavior": "deny", "message": "not now", "lasting": false}));
+        assert_eq!(stdin.try_recv().unwrap().iter().filter(|b| **b == b'\n').count(), 1);
+        assert!(stdin.try_recv().is_err(), "no record reaches the agent");
+    }
+
+    #[test]
+    fn an_answer_to_an_agent_that_is_gone_is_not_recorded_as_chosen() {
+        let (c, _stdin) = chat();
+        asks(&c, "r1");
+        asks(&c, "r2");
+        c.inner.lock().stdin = None;
+        written(&c, &allow("r1"));
+        assert_eq!(answer(&c, &json!("r2"), &allow("r2").to_string()), Ok(()));
+        assert_eq!(logged_answers(&c), Vec::<Value>::new());
+    }
+
+    #[test]
+    fn what_an_answer_keeps_in_each_dialect() {
+        let claude = |response: Value| answer_record(&json!({"type": "control_response", "response": {"subtype": "success", "request_id": "r", "response": response}}));
+        // Answers only to a question: a tool can have an `answers` input of its own.
+        assert_eq!(claude(json!({"behavior": "allow", "updatedInput": {"answers": {"Q": "the tool's input"}}})), json!({"behavior": "allow", "lasting": false}));
+        assert_eq!(claude(json!({"behavior": "allow", "updatedInput": {"questions": "not a list", "answers": {"Q": "A"}}})), json!({"behavior": "allow", "lasting": false}));
+        assert_eq!(claude(json!({"behavior": "allow", "updatedInput": {"questions": [{"question": "Q"}], "answers": {"Q": "A"}}})), json!({"behavior": "allow", "lasting": false, "answers": {"Q": "A"}}));
+        assert_eq!(claude(json!({"behavior": "allow", "updatedInput": {"command": "ls"}, "updatedPermissions": [{"type": "addRules"}]})), json!({"behavior": "allow", "lasting": true}));
+        assert_eq!(
+            claude(json!({"behavior": "allow", "updatedInput": {"plan": "x"}, "updatedPermissions": [{"type": "addRules"}, {"type": "setMode", "mode": "acceptEdits", "destination": "session"}]})),
+            json!({"behavior": "allow", "lasting": true, "mode": "acceptEdits"})
+        );
+        assert_eq!(answer_record(&json!({"type": "control_response", "response": {"subtype": "error", "request_id": "r", "error": "no"}})), json!({"error": true}));
+        // JSON-RPC: the result as it is, or that it failed (never the error's text).
+        assert_eq!(answer_record(&json!({"id": 3, "result": {"decision": "acceptForSession"}})), json!({"result": {"decision": "acceptForSession"}}));
+        assert_eq!(answer_record(&json!({"jsonrpc": "2.0", "id": 4, "result": {"outcome": {"outcome": "selected", "optionId": "once"}}})), json!({"result": {"outcome": {"outcome": "selected", "optionId": "once"}}}));
+        assert_eq!(answer_record(&json!({"jsonrpc": "2.0", "id": 5, "error": {"code": -1, "message": "secret"}})), json!({"error": true}));
+    }
+
+    #[test]
+    fn an_oversized_answer_keeps_only_the_verdict() {
+        let (c, _stdin) = chat();
+        let big = "x".repeat(ANSWER_LINE_MAX);
+        asks(&c, "r1");
+        written(&c, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": "r1", "response": {"behavior": "deny", "message": big}}}));
+        asks(&c, "r2");
+        written(&c, &json!({"type": "control_response", "response": {"subtype": "success", "request_id": "r2", "response": {"behavior": "allow", "updatedInput": {"questions": [], "answers": {"Q": big}}, "updatedPermissions": [{"type": "setMode", "mode": "plan"}]}}}));
+        asks_rpc(&c, json!(3));
+        written(&c, &json!({"id": 3, "result": {"action": "accept", "content": {"text": big}}}));
+        let logged = logged_answers(&c);
+        assert_eq!(logged[0]["answer"], json!({"behavior": "deny", "lasting": false}));
+        assert_eq!(logged[1]["answer"], json!({"behavior": "allow", "lasting": true, "mode": "plan"}));
+        assert_eq!(logged[2]["answer"], json!({"result": {"action": "accept"}}));
+        assert!(!log_text(&c).contains(&big));
+
+        // Exactly at the limit is kept; a line that would not fit even as a verdict is not logged at all.
+        let who = Resolution { by: By::desktop(), at: 1 };
+        let reply = |n: usize| json!({"id": 1, "result": {"text": "x".repeat(n)}});
+        let size = answer_line(&json!(1), &reply(0), &who).unwrap().len();
+        let exact = answer_line(&json!(1), &reply(ANSWER_LINE_MAX - size), &who).unwrap();
+        assert_eq!(exact.len(), ANSWER_LINE_MAX);
+        assert!(exact.contains("xxx"));
+        assert!(!answer_line(&json!(1), &reply(ANSWER_LINE_MAX - size + 1), &who).unwrap().contains("xxx"));
+        assert_eq!(answer_line(&json!(big), &json!({"id": big, "result": {}}), &who), None);
+    }
+
+    #[test]
+    fn an_ordinary_line_logs_nothing() {
+        let (c, mut stdin) = chat();
+        asks(&c, "r1");
+        asks_rpc(&c, json!(2));
+        for line in [
+            json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "r1"}]}}),
+            json!({"type": "control_request", "request_id": "kelpie-req-1", "request": {"subtype": "set_model", "model": "x"}}),
+            json!({"jsonrpc": "2.0", "id": "kelpie-prompt-1", "method": "session/prompt", "params": {}}),
+        ] {
+            written(&c, &line);
+            assert!(stdin.try_recv().is_ok(), "{line}");
+        }
+        assert_eq!(logged_answers(&c), Vec::<Value>::new());
+    }
+
+    #[test]
+    fn a_response_to_a_request_never_pending_logs_nothing() {
+        let (c, mut stdin) = chat();
+        // The ACP adapter's "not implemented", an answer to the client's file access, and a reply to nothing.
+        c.ingest_line(json!({"jsonrpc": "2.0", "id": 2, "method": "fs/read_text_file", "params": {"path": "x"}}).to_string());
+        c.ingest_line(json!({"jsonrpc": "2.0", "id": 3, "method": "some/thing", "params": {}}).to_string());
+        written(&c, &json!({"jsonrpc": "2.0", "id": 2, "result": {"content": "the file"}}));
+        written(&c, &json!({"jsonrpc": "2.0", "id": 3, "error": {"code": -32601, "message": "Kelpie does not implement some/thing"}}));
+        written(&c, &json!({"jsonrpc": "2.0", "id": 99, "result": {}}));
+        written(&c, &allow("never-asked"));
+        for _ in 0..4 {
+            assert!(stdin.try_recv().is_ok(), "they all still reach the agent");
+        }
+        assert_eq!(logged_answers(&c), Vec::<Value>::new());
+        assert!(!log_text(&c).contains("the file"));
+    }
+
+    #[test]
+    fn a_stop_logs_nothing() {
+        let (c, mut stdin) = chat();
+        asks(&c, "r1");
+        asks_rpc(&c, json!(2));
+        // Claude's and ACP's stop lines, then the "cancelled" a window answers ACP's open questions with.
+        written(&c, &json!({"type": "control_request", "request_id": "kelpie-interrupt-1", "request": {"subtype": "interrupt"}}));
+        written(&c, &json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "s"}}));
+        written(&c, &json!({"jsonrpc": "2.0", "id": 2, "result": {"outcome": {"outcome": "cancelled"}}}));
+        for _ in 0..3 {
+            assert!(stdin.try_recv().is_ok());
+        }
+        c.kill();
+        assert_eq!(logged_answers(&c), Vec::<Value>::new());
+        // That "cancelled" still closed the request: a late answer is dropped.
+        assert!(matches!(answer(&c, &json!(2), &json!({"id": 2, "result": {}}).to_string()), Err(NotAnswered::AlreadyAnswered(_))));
+    }
+
+    #[test]
+    fn the_answer_line_is_nothing_else_the_daemon_reads_in_a_log() {
+        let who = Resolution { by: By::desktop(), at: 1 };
+        // What was typed is an escaped string in the line: it cannot pass for a handshake or a request.
+        let typed = r#"{"id":"kelpie-init","method":"session/request_permission","type":"control_request","sessionUpdate":"available_commands_update"}"#;
+        let reply = json!({"type": "control_response", "response": {"subtype": "success", "request_id": "r1", "response": {"behavior": "deny", "message": typed}}});
+        let line = answer_line(&json!("r1"), &reply, &who).unwrap();
+        assert_eq!(pinned_kind(line.as_bytes()), None);
+        assert_eq!(request_key(&line), None);
+        assert_eq!(classify(&line), None);
+        assert!(answered_key(line.as_bytes()).is_none());
+        assert_eq!(conversation_title(&line), None);
+    }
+
+    #[test]
+    fn a_phone_is_sent_the_answer_line_as_it_is() {
+        let (c, _stdin) = chat();
+        let (phone, mut rx) = client();
+        asks(&c, "r1");
+        watch(&c, 1, &phone, &json!("chat:chat-1"), None);
+        attached(&mut rx);
+        written(&c, &allow("r1"));
+        let live: Vec<_> = received(&mut rx).into_iter().filter_map(|o| o["output"].as_str().map(str::to_string)).collect();
+        let line = live.iter().flat_map(|o| o.lines()).find(|l| l.contains("kelpie_answer")).expect("the line").to_string();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), logged_answers(&c)[0]);
+        // And when it starts over: the request, then its answer.
+        watch(&c, 1, &phone, &json!("chat:chat-1"), None);
+        let lines = attached(&mut rx).1;
+        assert!(lines[0].contains("can_use_tool") && lines[1].contains("kelpie_answer"), "{lines:?}");
     }
 
     #[test]

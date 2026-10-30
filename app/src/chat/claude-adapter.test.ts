@@ -247,6 +247,57 @@ describe("createClaudeAdapter", () => {
     expect(h.written.at(-1).response.response).toEqual({ behavior: "allow", updatedInput: { ...input, answers: { "Which database?": "Postgres" } } });
   });
 
+  describe("a logged answer", () => {
+    const LINE = { type: "kelpie_answer", request_id: "req-1", by: "desktop", answered_by: "desktop", at: 1, answer: { behavior: "allow", lasting: false } };
+    const card = (tool: string, input: unknown) => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.onMessage({ type: "control_request", request_id: "req-1", request: { subtype: "can_use_tool", tool_name: tool, input } }, "");
+      return { a, h, card: h.items()[0] as Extract<ChatItem, { kind: "permission" }> };
+    };
+
+    it("is not the adapter's to read: the controller takes it first", () => {
+      const { a, h } = card("Bash", { command: "ls" });
+      const before = h.items();
+      a.onMessage(LINE, JSON.stringify(LINE));
+      expect(h.items()).toEqual(before);
+      expect(h.written).toEqual([]);
+    });
+
+    it("is described in the card's own words", () => {
+      const bash = card("Bash", { command: "ls" });
+      const describe = (c: typeof bash, answer: unknown) => c.a.describeAnswer!(c.card, answer);
+      expect(describe(bash, { behavior: "allow", lasting: false })).toEqual({ label: "Allow" });
+      expect(describe(bash, { behavior: "allow", lasting: true })).toEqual({ label: "Allow for session" });
+      // A suggestion can set a mode on an ordinary card: the card has no such option.
+      expect(describe(bash, { behavior: "allow", lasting: true, mode: "acceptEdits" })).toEqual({ label: "Allow for session" });
+      expect(describe(bash, { behavior: "deny", message: "use dir", lasting: false })).toEqual({ label: "Deny", message: "use dir" });
+      const plan = card("ExitPlanMode", { plan: "x" });
+      expect(describe(plan, { behavior: "allow", lasting: true, mode: "acceptEdits" })).toEqual({ label: "Yes, and accept edits" });
+      expect(describe(plan, { behavior: "allow", lasting: false })).toEqual({ label: "Yes, ask before edits" });
+      expect(describe(plan, { behavior: "deny", lasting: false })).toMatchObject({ label: "Keep planning" });
+    });
+
+    it("says what the person answered, not the agent's words for a denial with no message", () => {
+      const ask = card("AskUserQuestion", { questions: [{ question: "Which?", options: [{ label: "A" }] }, { question: "Where?", options: [{ label: "B" }] }] });
+      expect(ask.a.describeAnswer!(ask.card, { behavior: "allow", answers: { "Which?": "A", "Where?": "there" }, lasting: false })).toEqual({ label: "A · there", answers: { "Which?": "A", "Where?": "there" } });
+      expect(ask.a.describeAnswer!(ask.card, { behavior: "deny", message: "The user denied this action.", lasting: false })).toEqual({ label: "Skip", message: undefined });
+    });
+
+    it("does not take a tool's own `answers` input for answers to a question", () => {
+      const tool = card("mcp__survey__submit", { answers: { "Q?": "the tool's input" } });
+      expect(tool.a.describeAnswer!(tool.card, { behavior: "allow", answers: { "Q?": "the tool's input" }, lasting: false })).toEqual({ label: "Allow" });
+    });
+
+    it("is not known when it is not one, or only the verdict of a question is left", () => {
+      const ask = card("AskUserQuestion", { questions: [{ question: "Which?", options: [{ label: "A" }] }] });
+      expect(ask.a.describeAnswer!(ask.card, { behavior: "allow", lasting: false })).toBeNull();
+      expect(ask.a.describeAnswer!(ask.card, { behavior: "allow", answers: { "Which?": 3 }, lasting: false })).toBeNull();
+      expect(ask.a.describeAnswer!(ask.card, { error: true })).toBeNull();
+      expect(ask.a.describeAnswer!(ask.card, {})).toBeNull();
+    });
+  });
+
   it("approves a plan and can switch to accepting edits", () => {
     const h = harness();
     const a = createClaudeAdapter(h.ctx);

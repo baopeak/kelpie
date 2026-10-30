@@ -3,17 +3,23 @@
 // plans and a message for the agent) and the files a turn changed.
 import { For, Show, createMemo, createSignal } from "solid-js";
 import { projectRelative } from "../chat/chat-links";
-import type { ChatController, ChatItem } from "../chat/chat-model";
+import { type ChatController, type ChatItem, matchAnswer } from "../chat/chat-model";
 import { type ToolView, basename, describeTool, diffStats, stripProjectRoot } from "../chat/tool-view";
 import { store } from "../lib/store";
 import type { Project } from "../lib/types";
 import { CopyButton } from "./chat-copy";
 import { Icon } from "./icons";
-import { t } from "../lib/i18n";
+import { locale, t } from "../lib/i18n";
 
 type Tool = Extract<ChatItem, { kind: "tool" }>;
 type Permission = Extract<ChatItem, { kind: "permission" }>;
 export interface FileChange { path: string; adds: number; dels: number }
+
+/** Vietnamese interface: Vietnamese dates; English: the system's own date format. */
+const clockLocale = () => (locale() === "vi" ? "vi-VN" : []);
+/** "23/10 16:02" (the full date and time on hover). */
+export const clock = (at: number) => new Date(at).toLocaleString(clockLocale(), { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+export const fullClock = (at: number) => new Date(at).toLocaleString(clockLocale(), { dateStyle: "full", timeStyle: "medium" });
 
 /** Long text cut to `lines` (the first ones, or the last for output), with a way to see it all. */
 function Clamped(props: { text: string; lines?: number; tail?: boolean; class?: string }) {
@@ -61,7 +67,9 @@ function Stats(props: { adds: number; dels: number }) {
 
 const dotClass = (status: Tool["status"]) => (status === "running" ? " running" : status === "error" ? " error" : "");
 
-export function ToolRow(props: { item: Tool; project: Project; nested?: boolean }) {
+/** `noAskCards`: the transcript has no question cards (a conversation reloaded from the agent's own
+ *  history), so a question's row, with what was answered as its output, stands in for its card. */
+export function ToolRow(props: { item: Tool; project: Project; nested?: boolean; noAskCards?: boolean }) {
   const view = createMemo<ToolView>(() => describeTool(props.item));
   const stats = createMemo(() => (props.item.diff ?? []).reduce((acc, d) => {
     const s = diffStats(d.text);
@@ -69,7 +77,7 @@ export function ToolRow(props: { item: Tool; project: Project; nested?: boolean 
   }, { adds: 0, dels: 0 }));
   // Edits and commands show their content; reads, searches and the rest only when asked.
   const [open, setOpen] = createSignal<boolean | null>(null);
-  const isOpen = () => open() ?? (view().category === "edit" || view().category === "command" || props.item.status === "error");
+  const isOpen = () => open() ?? (view().category === "edit" || view().category === "command" || props.item.status === "error" || (!!props.noAskCards && props.item.name === "AskUserQuestion" && !!props.item.output));
   const hasBody = () => !!(props.item.diff?.length || view().command || props.item.output || props.item.input);
   // Reads and searches name project files, so they show them relative to it.
   const target = () => (view().category === "read" || view().category === "search" ? stripProjectRoot(view().target, props.project.path) : view().target);
@@ -173,6 +181,55 @@ export function ThinkingRow(props: { item: Extract<ChatItem, { kind: "thinking" 
   );
 }
 
+/** What a settled card says: who answered and when, then the questions with the choices marked, or the
+ *  option chosen, and the message that went with a denial. */
+function CardAnswerView(props: { item: Permission }) {
+  const a = () => props.item.answered;
+  const [open, setOpen] = createSignal(true);
+  const questions = () => (a()?.answers ? props.item.ask ?? [] : []);
+  return (
+    <>
+      <Show when={a()?.by} fallback={<Show when={a()?.at}><div class="perm-who" title={fullClock(a()!.at!)}>{clock(a()!.at!)}</div></Show>}>
+        <div class="perm-who">{props.item.resolved}</div>
+      </Show>
+      <Show when={questions().length} fallback={<div class="muted perm-chosen" style={{ padding: 0 }}>→ {a()?.label ?? props.item.resolved}</div>}>
+        <div class="perm-answers">
+          <div class="perm-answers-head" onClick={() => setOpen(!open())}>
+            <span>{questions().length === 1 ? t("Answered · 1 question") : t("Answered · {n} questions", { n: questions().length })}</span>
+            <Icon name={open() ? "chevronDown" : "chevronRight"} size={12} />
+          </div>
+          <Show when={open()}>
+            <For each={questions()}>
+              {(q) => {
+                const match = createMemo(() => matchAnswer(a()?.answers?.[q.question] ?? "", q.options));
+                return (
+                  <div class="ask">
+                    <div class="ask-q"><Show when={q.header}><span class="ask-tag">{q.header}</span></Show>{q.question}</div>
+                    <Show when={q.options.length}>
+                      <div class="ask-opts">
+                        <For each={q.options}>
+                          {(o) => (
+                            <span class={`btn ask-opt${match().chosen.has(o.label) ? " sel" : ""}`} aria-disabled="true" title={o.description}>
+                              {o.label}<Show when={o.description}><span class="detail">{o.description}</span></Show>
+                            </span>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                    {/* A question with no options only has what was typed. */}
+                    <Show when={match().other}><div class="perm-other">{q.options.length ? t("Other: {text}", { text: match().other }) : match().other}</div></Show>
+                  </div>
+                );
+              }}
+            </For>
+          </Show>
+        </div>
+      </Show>
+      <Show when={a()?.message}><div class="perm-said">{a()!.message}</div></Show>
+    </>
+  );
+}
+
 /** An approval, with what it is about: the command, the edit, the plan, or questions to answer. */
 export function PermissionCard(props: { item: Permission; project: Project; ctrl: ChatController; markdown: (text: string) => any }) {
   const p = () => props.item;
@@ -221,7 +278,7 @@ export function PermissionCard(props: { item: Permission; project: Project; ctrl
         </div>
       </Show>
       <Show when={p().plan}><div class="perm-plan">{props.markdown(p().plan!)}</div></Show>
-      <Show when={!p().resolved} fallback={<div class="muted" style={{ padding: 0 }}>→ {p().resolved}</div>}>
+      <Show when={!p().resolved} fallback={<CardAnswerView item={p()} />}>
         <Show when={p().ask?.length}>
           <For each={p().ask}>
             {(q) => (

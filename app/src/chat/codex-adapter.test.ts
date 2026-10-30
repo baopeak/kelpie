@@ -34,6 +34,37 @@ function openThread(a: ReturnType<typeof createCodexAdapter>) {
   a.onMessage({ id: "kelpie-thread", result: { thread: { id: "thr-1", turns: [] }, model: "gpt-5", sandbox: { type: "workspaceWrite" } } }, "");
 }
 
+describe("a logged answer", () => {
+  const LINE = { type: "kelpie_answer", request_id: 7, by: "desktop", answered_by: "desktop", at: 1, answer: { result: { decision: "accept" } } };
+  const make = (method = "item/commandExecution/requestApproval") => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    a.onMessage({ id: 7, method, params: { command: "ls" } }, "");
+    return { a, h, card: h.items()[0] as Extract<ChatItem, { kind: "permission" }> };
+  };
+
+  it("is not the adapter's to read: the controller takes it first", () => {
+    const { a, h } = make();
+    const before = h.items();
+    a.onMessage(LINE, JSON.stringify(LINE));
+    expect(h.items()).toEqual(before);
+    expect(h.written).toEqual([]);
+  });
+
+  it("maps the decision to the card's option, in the words of either kind of approval", () => {
+    const { a, card } = make();
+    const label = (decision: unknown) => a.describeAnswer!(card, { result: { decision } })?.label;
+    for (const [decision, want] of [["accept", "Allow"], ["approved", "Allow"], ["acceptForSession", "Allow for session"], ["approved_for_session", "Allow for session"], ["decline", "Decline"], ["denied", "Decline"]]) expect(label(decision)).toBe(want);
+  });
+
+  it("is not known when it is something else", () => {
+    const { a, card } = make();
+    expect(a.describeAnswer!(card, { result: { decision: "constructor" } })).toBeNull();
+    expect(a.describeAnswer!(card, { result: { decision: { somethingNew: true } } })).toBeNull();
+    expect(a.describeAnswer!(card, { error: true })).toBeNull();
+  });
+});
+
 describe("pictures", () => {
   const PIC = { mime: "image/png", data: "iVBORw0KGgo=", path: "C:\\Temp\\kelpie-composer\\image-1.png" };
 
