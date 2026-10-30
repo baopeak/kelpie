@@ -59,10 +59,13 @@ jobs:
           for v in "$cargo" "$pkg" "$conf"; do
             [ "$v" = "$tag" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $cargo, package.json $pkg, tauri.conf.json $conf"; exit 1; }
           done
-      # Dependencies install in a step without the signing key. The next step has it in its environment, but
-      # scripts/build-release.sh takes it out at once and hands it only to `pnpm tauri build`, which builds the
-      # frontend, bundles and signs. Known exposure: during that command Tauri's AppImage bundler downloads
-      # linuxdeploy and its GTK plugin from their GitHub releases (unpinned, Tauri's own choice) and runs them.
+      # Dependencies install in a step without the signing key. The next step has it in its environment;
+      # scripts/build-release.sh removes it from what it passes on, so the sidecar builds and its own
+      # `pnpm install` do not inherit it, and hands it only to `pnpm tauri build`, which builds the frontend,
+      # bundles and signs. Known exposures: any same-user process of that step can still read the step shell's
+      # starting environment (/proc/<pid>/environ); and during `tauri build` Tauri's AppImage bundler downloads
+      # linuxdeploy and its GTK plugin (unpinned, Tauri's own choice) and runs them. Signing in a separate step,
+      # with no key in the build's environment at all, is the real fix.
       - name: Install frontend dependencies
         working-directory: app
         run: pnpm install --frozen-lockfile

@@ -11,8 +11,10 @@ cd "$(dirname "$0")/.."
 # Debian/Ubuntu ship only `python3`; Windows installs only `python` (its `python3` may be the Store stub).
 python() { if command -v python >/dev/null 2>&1; then command python "$@"; else command python3 "$@"; fi; }
 
-# The updater signing key (release builds) reaches only the `tauri build` command below, which signs
-# the bundles: the sidecar builds and dependency installs before it never see it in their environment.
+# The updater signing key (release builds) is not passed on to the sidecar builds or `pnpm install`:
+# only the `tauri build` command below, which signs the bundles, gets it in its environment. This keeps
+# it from being inherited; it does not hide it from same-user processes, which can read this shell's
+# starting environment (/proc/<pid>/environ). Never run this script with `bash -x` when the key is set.
 signing_key="${TAURI_SIGNING_PRIVATE_KEY-}"
 signing_password="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}"
 unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
