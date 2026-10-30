@@ -1,7 +1,7 @@
 ---
 phase: 2b
 title: "Send chat messages from the phone (single writer)"
-status: pending
+status: completed
 priority: P1
 effort: "6d"
 dependencies: [2]

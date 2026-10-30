@@ -85,7 +85,7 @@ Phone (PWA on LAN | native app anywhere) ── one SolidJS client (app/phone)
 |---|---|---|---|---|---|
 | 1 | [Phone protocol v2: state-sync, prompts, safe answers](phase-01-phone-protocol-v2.md) (+ resilience addendum, second commit) | P1 | 4d + 3d | roadmap phase 12 | done |
 | 2 | [Phone client app (SolidJS, PWA)](phase-02-phone-client-app.md) | P1 | 7d | 1 | done |
-| 2b | [Send chat messages from the phone (single writer)](phase-02b-phone-chat-send.md) | P1 | 6d | 2 | pending |
+| 2b | [Send chat messages from the phone (single writer)](phase-02b-phone-chat-send.md) | P1 | 6d | 2 | done |
 | 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) | P1 | 7d | 2; 2b for chat-write verbs | pending |
 | 4 | [Relay: connect from anywhere](phase-04-relay-connect-anywhere.md) | P1 | 5d | 3 | pending |
 | 5 | [Native mobile shell (Tauri 2 iOS/Android)](phase-05-native-mobile-shell.md) | P1 | 7d | 3, 4 | pending |
