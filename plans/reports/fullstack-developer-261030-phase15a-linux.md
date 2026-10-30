@@ -155,10 +155,11 @@ From the Round 2 section of `plans/reports/code-reviewer-261030-phase15a-linux.m
 | [40985738280](https://github.com/baopeak/kelpie/actions/runs/40985738280) | With that grep fixed (7269ff5). Not watched, as the user asked. |
 | [40992930356](https://github.com/baopeak/kelpie/actions/runs/40992930356) | After the review fixes (cf97e08). **Windows ✓.**<br>Linux: tests ✓, bundling ✓, `.deb` install check ✓, AppImage check ✓. The smoke passed 7/8 and took its numbers: only the prompt check failed, because the screen text has trailing spaces trimmed, so bash's `$ ` reads as `$`.<br>macOS: a timing-dependent `procs` orphan test failed. It is mac-only and untouched by this branch: the scan still had the forked `sh`'s pre-exec name (`bash`) while its exe was already `/bin/sleep`. |
 | [40994932186](https://github.com/baopeak/kelpie/actions/runs/40994932186) | With both fixed (da1b258, 96ece38): **Windows ✓, macOS ✓, ubuntu-22.04 ✓**. Linux: every test (proto 28, daemon 345, app, stt 4), frontend checks, perf gate, bundles, the `.deb` install and AppImage checks, and the Xvfb smoke **8/8**. |
+| [41001537847](https://github.com/baopeak/kelpie/actions/runs/41001537847) | After the round-2 fixes (eab8717): **Windows ✓, macOS ✓, ubuntu-22.04 ✓**. Linux: tests, bundles, the `.deb` install and AppImage checks, and the Xvfb smoke **8/8**. Smoke numbers, not gated: cold start 1624 ms (×2.56), idle CPU 6.63 % (×1.46), RSS 495.0 MB (×0.98). |
 
 The diagnostics (per-crate steps, `continue-on-error`, watchdog, disk cleanup) were removed again in 332ac5b. Linux now runs the same single test step as Windows and macOS.
 
-**Verified on Linux CI** (run 40994932186):
+**Verified on Linux CI** (runs 40994932186 and, after round 2, 41001537847):
 - every Rust test, including `kelpie-stt`, the XDG data-folder, private-folder, AppImage-environment, login-shell and keep-awake tests;
 - the frontend checks and the perf gate;
 - AppImage + `.deb` bundling. The `.deb` (version 0.1.8 after CI's bump) contains `usr/bin/kelpie`, `usr/bin/kelpied`, `usr/bin/kelpie-stt` and `Kelpie.desktop`, and depends on `libwebkit2gtk-4.1-0, libgtk-3-0`;
@@ -189,6 +190,7 @@ The diagnostics (per-crate steps, `continue-on-error`, watchdog, disk cleanup) w
 |---|---|---|---|
 | 40992930356 (now the baseline, `scripts/perf/linux-smoke-baseline.json`) | 634.0 | 4.53 | 505.7 |
 | 40994932186 (printed next to the baseline, not gated) | 1141.0 (×1.80) | 6.63 (×1.46) | 494.9 (×0.98) |
+| 41001537847 (round 2, not gated) | 1624.0 (×2.56) | 6.63 (×1.46) | 495.0 (×0.98) |
 
 Shared runners vary a lot between runs: cold start nearly doubled with no code change on that path. Any future gate needs several runs per sample and wide budgets.
 
