@@ -42,7 +42,7 @@ Already good, do not rebuild:
 | 1 | [Transcript polish](./phase-01-transcript-polish.md) | Completed |
 | 2 | [Open files from links](./phase-02-open-files-from-links.md) | Completed |
 | 3 | [Pinned prompt](./phase-03-pinned-prompt.md) | Completed |
-| 4 | [Persist question answers](./phase-04-persist-question-answers.md) | Pending |
+| 4 | [Persist question answers](./phase-04-persist-question-answers.md) | Completed |
 | 5 | [Paste and zoom images](./phase-05-paste-and-zoom-images.md) | Pending |
 | 6 | [Response bookmarks](./phase-06-response-bookmarks.md) | Pending |
 | 7 | [Agent map](./phase-07-agent-map.md) | Pending |
