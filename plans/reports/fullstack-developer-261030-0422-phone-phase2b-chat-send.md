@@ -261,3 +261,68 @@ Isolation and cleanup:
 
 - Test flakes under heavy load that are not this phase's: the `acp_chat` status sampler, which can miss a short `working`, and `mobile_protocol`'s "handles moved" check, which types right after "PS " shows. Harden them in a separate, test-only change?
 - The R2-S3 desktop notice showing in every app connected to one daemon is still open (low priority, per the reviewer).
+
+## Follow-up after commit
+
+Phase 2b is committed as `4a1224a`. Two separate follow-ups, neither staged nor committed. Rust and the desktop app are unchanged in both.
+
+### 1. R3-W1: the lost messages of a resumed or closed chat are kept and shown (product)
+
+- **Cause** (re-review 3): resuming a stopped chat starts a new session and closes the old one. The next session list then made `forgetGoneChats` delete that chat's kept copies at once, and no screen showed a chat that was gone anyway.
+- **`kept-messages.ts`:**
+  - **Stored form:** each chat now stores `{v: 2, name, savedAt, items}`. A plain list from the first build is still read; its `savedAt` is the newest `at`. `name` is the chat's label when it was last saved, and a save that no longer knows the name keeps the stored one.
+  - **Pruning:** `forgetGoneChats(chats, now)` drops a gone chat's copies only once they have not changed for **7 days** (`GONE_KEEP_MS`). An empty list still deletes nothing. The caps (20 per chat, 60 in all) still bound storage.
+  - **Listing:** new `goneChats(chats)` lists the chats with kept messages that the computer's list no longer has. It takes the daemon's list as given, even an empty one, because listing deletes nothing.
+  - **Discarding:** new `discardKept(chat, cid)` removes one message. The rest keep their week.
+- **`phone-state.ts`:**
+  - It saves with the chat's name (`labelOf(row)`).
+  - A `notSent` signal is refreshed on `hello` and `sessions`.
+  - `discardNotSent` also tells the sender that holds the message on this page, so it is not saved again.
+  - Unpair and forget clear the list.
+- **Inbox (`inbox.tsx`):** a **"Not sent"** section under the session groups shows each gone chat's name (or "A chat that was closed"), each message's full selectable text, and **Copy** and **Discard**, with the hint "From chats that are no longer running here (closed, or resumed as a new chat). Copy the text to send it again." CSS is in `phone.css`; en and vi strings are in `vi/phone.json`.
+- **Successor link: not added.** The daemon exposes no predecessor or successor id: a resumed session gets a fresh id, and `SessionSpec` and the phone's `SessionRow` carry nothing that links the two. The agent's own conversation id (`agent_session_id`) is not sent to phones. A link would need a protocol change, so it is left out.
+- **Tests:**
+  - vitest (`kept-messages.test.ts`):
+    - a gone chat's copies stay and are listed with their name;
+    - an empty list deletes nothing but lists both;
+    - a save without a name keeps the old name;
+    - one discard keeps the rest;
+    - pruning happens at exactly 7 days after the last change, never for a listed chat;
+    - the first build's plain-list format is read and pruned by its newest `at`;
+    - the full-storage case still holds with the new form.
+  - `mobile.py` (restart scenario): after the lost message survived a reload, the chat is closed on the desktop. The inbox then lists the message under Not sent with the chat's name, also after another reload, and Discard empties both the section and storage.
+
+**Files (commit 1):** `app/phone/src/kept-messages.ts`, `app/phone/src/kept-messages.test.ts`, `app/phone/src/phone-state.ts`, `app/phone/src/inbox.tsx`, `app/phone/src/phone.css`, `app/src/locales/vi/phone.json`, `scripts/e2e/mobile.py`. None has foreign hunks. The daemon embeds the new phone bundle (`pnpm build:phone`, then `cargo build -p kelpied`); no Rust source changed.
+
+### 2. Two load-sensitive checks waiting on real conditions (test only)
+
+- **`acp_chat.py`, "the status went working, waiting, working, idle":**
+  - *Why it flaked:* the timeline was built by polling `session.list` between WebDriver calls. On a busy host one round took longer than the fake agent's 0.8 s of work before it asks for a permission, so the first `working` was missed (`['idle', 'waiting', …]`) although the daemon reported it.
+  - *Change:* a `StatusEvents` thread reads the daemon's own `session.updated` events on a connection of its own. The daemon broadcasts every status change from its 250 ms tick, so a 0.8 s phase always appears. `watch_status(sid)` starts the timeline where `TL.clear()` used to, and `track()` only waits for its condition.
+  - *What it asserts:* unchanged (working before waiting, working again after it, idle last). It now reads the daemon's account rather than a sample of it.
+- **`mobile_protocol.py`, "a write by id lands in the right session after handles moved":**
+  - *Why it flaked:* it typed through the phone as soon as "PS " showed after `session.restart`. On a busy host PowerShell prints its prompt before it reads keys, so the line could be lost: `entered: true`, but nothing was on screen within 15 s.
+  - *Change:* before the phone's write, the script waits until the restarted shell has evaluated a command of its own, `echo restarted-ready-$((40+2))`, whose output "restarted-ready-42" exists only once the line ran. It is resent every 5 s, for up to 120 s.
+  - *What it asserts:* unchanged. The phone's write by id, its `ack`, the text landing in that session, and its absence from every other live terminal.
+
+**Files (commit 2):** `scripts/e2e/acp_chat.py`, `scripts/e2e/mobile_protocol.py`.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `pnpm typecheck` | clean |
+| `pnpm test` | 52 files, **646 / 646** (`kept-messages` 6) |
+| `pnpm i18n:check` | 2218 keys, 0 missing |
+| `pnpm build:phone` → `cargo build -p kelpied` | ok (`kelpied.exe` 13:18) |
+| cargo test / clippy | not needed: no Rust source changed |
+| Desktop rebuild | not needed: no desktop source changed (`kelpie.exe` 12:13 is current) |
+| `mobile.py` ×2 | **90 / 90, 90 / 90** (new: Not sent with the chat's name, after a reload, Discard) |
+| `mobile_protocol.py` ×2 | **130 / 130, 130 / 130** ("handles moved" passed both times) |
+| `acp_chat.py` ×2 | **56 / 56, 56 / 56** (timeline `['working', 'waiting', 'working', 'idle']` both times) |
+
+Isolation as before: the GUI runs went through the scratchpad runner (own endpoint, temp data folder, tauri-driver with `--native-driver`, everything stopped after), and the daemon-only scripts isolated themselves. Afterwards only PIDs 8836 and 10588 run. My temp folders are removed.
+
+### Unresolved
+
+- A link from a gone chat to the chat that resumed it needs the daemon to expose the predecessor id (or `agent_session_id`) to phones: a small protocol addition, if wanted.

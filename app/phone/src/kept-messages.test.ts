@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PendingSend } from "./chat-send";
-import { forgetGoneChats, KEPT_PER_CHAT, KEPT_PREFIX, KEPT_TOTAL, loadKept, saveKept } from "./kept-messages";
+import { discardKept, forgetGoneChats, goneChats, GONE_KEEP_MS, KEPT_PER_CHAT, KEPT_PREFIX, KEPT_TOTAL, loadKept, saveKept } from "./kept-messages";
 
 /** A browser's storage, with room for `limit` characters of values (null: unlimited). */
 function fakeStorage(limit: number | null = null) {
@@ -43,19 +43,45 @@ describe("the copies a phone keeps of what waits for a decision", () => {
 
   it("says none were kept when the browser is full, and leaves no older copy behind", () => {
     // Room for one message's copy, not two.
-    (globalThis as { localStorage?: unknown }).localStorage = fakeStorage(80);
+    (globalThis as { localStorage?: unknown }).localStorage = fakeStorage(130);
     expect(saveKept("chat-a", [msg("old")])).toEqual([]);
     expect(saveKept("chat-a", [msg("old"), msg("new2")])).toEqual(["old", "new2"]);
     expect(loadKept("chat-a")).toEqual([]);
   });
 
-  it("drops the copies for chats the computer no longer has, and nothing on an empty list", () => {
-    saveKept("kept", [msg("k")]);
-    saveKept("gone", [msg("g")]);
-    forgetGoneChats([]);
-    expect(loadKept("gone")).toHaveLength(1);
-    forgetGoneChats(["kept", "a-terminal"]);
+  it("keeps a gone chat's copies, shown with the chat's name, for a week after they last changed", () => {
+    const t0 = 1_800_000_000_000;
+    saveKept("kept", [msg("k")], "Live chat", t0);
+    saveKept("resumed", [msg("r1"), msg("r2")], "Fix the tests", t0);
+    // An empty list deletes nothing (it may not be the whole story yet); listed, both are gone from it.
+    forgetGoneChats([], t0);
+    expect(loadKept("resumed")).toHaveLength(2);
+    expect(goneChats([]).map((c) => c.chat).sort()).toEqual(["kept", "resumed"]);
+    // The chat was resumed as a new session: the old id is gone from the computer's list. Its messages stay, and are listed.
+    forgetGoneChats(["kept", "new-session", "a-terminal"], t0 + 60_000);
+    expect(loadKept("resumed")).toHaveLength(2);
+    expect(goneChats(["kept", "new-session"]).map((c) => [c.chat, c.name, c.items.map((p) => p.cid)])).toEqual([["resumed", "Fix the tests", ["r1", "r2"]]]);
+    // A save that no longer knows the name keeps the one it had.
+    saveKept("resumed", [msg("r1"), msg("r2")], undefined, t0 + 120_000);
+    expect(goneChats(["kept"])[0].name).toBe("Fix the tests");
+    // Discarding one leaves the other; discarding the last leaves nothing.
+    discardKept("resumed", "r1");
+    expect(loadKept("resumed").map((p) => p.cid)).toEqual(["r2"]);
+    // A week after it last changed it goes; a chat still listed never does.
+    forgetGoneChats(["kept"], t0 + 120_000 + GONE_KEEP_MS - 1);
+    expect(loadKept("resumed")).toHaveLength(1);
+    forgetGoneChats(["kept"], t0 + 120_000 + GONE_KEEP_MS + 1);
+    expect(loadKept("resumed")).toEqual([]);
     expect(loadKept("kept")).toHaveLength(1);
-    expect(loadKept("gone")).toEqual([]);
+    discardKept("kept", "k");
+    expect(localStorage.getItem(`${KEPT_PREFIX}kept`)).toBeNull();
+  });
+
+  it("reads what the first build stored (a plain list) as a gone chat's messages too", () => {
+    localStorage.setItem(`${KEPT_PREFIX}old-format`, JSON.stringify([{ ...msg("o"), at: 5 }]));
+    expect(loadKept("old-format").map((p) => p.cid)).toEqual(["o"]);
+    expect(goneChats(["other"]).map((c) => [c.chat, c.name])).toEqual([["old-format", undefined]]);
+    forgetGoneChats(["other"], 5 + GONE_KEEP_MS + 1);
+    expect(loadKept("old-format")).toEqual([]);
   });
 });

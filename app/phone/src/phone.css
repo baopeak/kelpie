@@ -132,4 +132,6 @@ main { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: 
 /* What waited when the chat stopped running: shown, copyable, until the person lets it go. */
 .kept-chips { padding: 8px 12px 0; border-top: 1px solid var(--border); }
 .kept-chips .chip { flex-wrap: wrap; }
+.not-sent .kept-chips { border-top: 0; padding-bottom: 8px; }
+.not-sent-hint { margin: 0 12px; font-size: 12.5px; }
 .kept-chips .chip-text { flex-basis: 100%; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }

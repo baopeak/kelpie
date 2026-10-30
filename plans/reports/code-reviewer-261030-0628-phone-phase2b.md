@@ -480,3 +480,66 @@ Do R2-W1 next, together with R2-S1 and R2-S2, in a small follow-up before phase 
 ## Verdict
 
 **Phase 2b is ready to commit**, with the developer's three-commit split and the hunk-only staging listed in round 2. Do R3-W1 as the first follow-up, before phone access is used in production.
+
+---
+
+# Follow-up review (after commit `4a1224a`)
+
+Read-only: my Bash tool still returns no output. I read the code below; test results are the developer's.
+
+## 1. R3-W1: the lost messages of a resumed or closed chat are kept and shown. **Ready to commit.**
+
+**What I read:**
+- `kept-messages.ts`: all of it;
+- `phone-state.ts`: lines 85-136 (`hello`, `sessions`, `unpaired`), 250-276 (`save`), 425-462 (`forgetDevice`, `notSent`, `discardNotSent`, `forgetSenders`);
+- `inbox.tsx`: lines 8-43.
+
+**A discarded message stays discarded:**
+- `discardNotSent` (`phone-state.ts:447-452`) takes the message out of the sender in this page's memory when that sender has it. The sender's next save then writes its list without the message, or deletes the key once the list is empty.
+- Otherwise it removes the message from storage (`discardKept`).
+- The sender's next save writes only its own list, so a message discarded from storage cannot come back from memory either.
+- A chat no longer on the computer's list cannot be opened, so no new sender can be made for it that would reload the old copy.
+
+**The 7-day cutoff and the caps:**
+- `forgetGoneChats` deletes a gone chat's copy once it has not changed for 7 days (`now - savedAt > GONE_KEEP_MS`), or once it is empty. It does nothing on an empty list, and it runs only on `hello` and `sessions`, which always carry the daemon's full session list.
+- Copies from the first build (a plain list) get `savedAt` from their newest `at`.
+- The 20-per-chat and 60-total caps still hold. Gone chats count toward the total.
+- One trade-off: for up to a week, gone chats' copies use up part of the 60. A live chat's newest messages can then be flagged "could not save a copy" with the Copy alert. That is visible and bounded, so I accept it.
+
+**Rendered as text:** yes.
+- The chat name, each message's text and the notice are Solid text nodes (`inbox.tsx:28` and `32`). Copy uses `navigator.clipboard.writeText`.
+- There is no `innerHTML` anywhere under `app/phone/src`.
+
+**Forget and unpair:**
+- Both call `wipeTypedText()`, which removes every `kelpie-draft:*` key, these copies included.
+- Both then call `forgetSenders()`, which clears `notSent`, the in-memory senders and their `save`.
+
+**Suggestions (non-blocking):**
+- **F-S1.** "Not sent" also lists messages in the `unknown` state, which may in fact have gone out. Label those "Not sure it was sent" (the existing string), so the person does not send one twice.
+- **F-S2.** `goneChats` displays items as stored, with no shape check. `ChatSender` filters bad items when it loads; this path does not. It is the phone's own storage, so the risk is low. Skip items whose `cid` or `text` is not a string, as the sender does.
+
+## 2. Test-only hardening. **Ready to commit.**
+
+**`acp_chat.py`:**
+- **Asserts no less:**
+  - The order check at line 309 is unchanged: "working" before "waiting", "working" after it, and "idle" last.
+  - `watch_status(sid)` is called before `send(...)` (line 294), so the first "working" cannot be missed.
+  - The "waiting" and "idle" checks still poll the live status.
+  - The timeline now comes from the daemon's own `session.updated` events instead of samples. That is a more faithful record of the same sequence.
+- **Connection isolated:**
+  - `kc.Conn()` uses `KELPIE_ENDPOINT`, which line 56 sets to the script's isolated endpoint before `StatusEvents` starts. It authenticates with that endpoint's token.
+  - It only reads events and makes no calls, so the destructive-call guard is not involved.
+- **Connection closed:** not explicitly. It is a daemon thread, and it ends when the isolated daemon shuts down (a read error, caught) or when the process exits. That is acceptable for a script. A `conn.close()` in the scenario's `finally` would be tidier.
+
+**`mobile_protocol.py`, lines 736-751:**
+- **Asserts no less:**
+  - The readiness probe types `echo restarted-ready-$((40+2))`. "restarted-ready-42" appears only when the shell has actually evaluated the line, because the typed text shows `$((40+2))`. So the probe waits for a real condition.
+  - The final check is unchanged: the `ack`, "by-id-15" (again only from evaluation) landing in the target session, and in no other live terminal.
+  - If the shell never becomes ready, the wait times out after 120 s and that final check fails; nothing passes by default.
+  - Extra probe lines sent while the shell is slow only print "restarted-ready-42" again, and cannot be taken for the phone's write.
+- **Isolated:** the probe goes only to the target session of the script's own isolated daemon.
+
+## Verdict
+
+- **R3-W1 follow-up (commit 1): ready to commit.** F-S1 is worth doing in the same commit if it is convenient.
+- **Test hardening (commit 2): ready to commit.**

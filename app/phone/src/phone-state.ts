@@ -15,7 +15,8 @@ import { canAct, dataAge, deriveConn, type ConnState } from "./conn-state";
 import { browserEnv, Link, type ChatMsg, type ChatQueueMsg, type ChatResolved, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
 import { emptyView, ScreenSync, type Prompt, type ScreenFrame, type ScreenView } from "./screen-sync";
 import { forgetHistory } from "./history";
-import { forgetGoneChats, loadKept, saveKept } from "./kept-messages";
+import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
+import { labelOf } from "./inbox-order";
 import { loadToken, store, TOKEN_KEY, wipeTypedText } from "./storage";
 import { t } from "./i18n";
 
@@ -91,6 +92,7 @@ const link = new Link(browserEnv(), loadToken, {
       if (open) setScreen(syncs.get(open)?.view ?? emptyView());
     });
     forgetGoneChats(h.sessions.map((s) => s.id));
+    refreshNotSent();
     persistList();
     const wanted = wantSession && h.sessions.find((s) => s.id === wantSession);
     wantSession = null;
@@ -106,6 +108,7 @@ const link = new Link(browserEnv(), loadToken, {
     // A buzz when something starts needing you.
     if (m.sessions.some((s) => s.alive && s.status === "waiting" && before.get(s.id) !== "waiting")) navigator.vibrate?.(200);
     forgetGoneChats(m.sessions.map((s) => s.id));
+    refreshNotSent();
     persistList();
     if (openId() && !m.sessions.some((s) => s.id === openId())) closeSession();
   },
@@ -255,7 +258,10 @@ function watchSender(id: string, kind: string) {
         now: () => Date.now(),
         newCid: () => globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`,
         // What the person still has to decide about outlives a reload (kept-messages.ts); what could not be kept says so.
-        save: (kept) => saveKept(id, kept),
+        save: (kept) => {
+          const row = sessions().find((s) => s.id === id);
+          return saveKept(id, kept, row ? labelOf(row) : undefined);
+        },
       },
       kind,
       () => chats.controller(id)?.state.commands ?? [],
@@ -430,8 +436,25 @@ export function forgetDevice() {
   setPaired(false);
 }
 
+/** The kept messages of chats the computer no longer lists (closed, or resumed as a new session): shown in the inbox under
+ *  "Not sent", with their text, until the person lets them go (or a week after they last changed). */
+export const [notSent, setNotSent] = createSignal<GoneChat[]>([]);
+
+function refreshNotSent() {
+  setNotSent(goneChats(sessions().map((s) => s.id)));
+}
+
+/** Lets a message from the "Not sent" list go, from the sender that still holds it on this page as well. */
+export function discardNotSent(chat: string, cid: string) {
+  const sender = senders.get(chat);
+  if (sender?.pending.some((p) => p.cid === cid)) sender.discard(cid);
+  else discardKept(chat, cid);
+  refreshNotSent();
+}
+
 /** Nothing typed on this phone outlives its pairing: the messages on their way (and their kept copies, wiped with the drafts). */
 function forgetSenders() {
+  setNotSent([]);
   unwatchSender?.();
   unwatchSender = undefined;
   for (const s of senders.values()) s.dispose();

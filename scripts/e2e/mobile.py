@@ -650,8 +650,19 @@ for n in (1, 2, 3):
     phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-lost')).click()")
     kept = phone.wait(lost_js, 30)
     run.check("a reload of the page keeps it, text and all", bool(kept), str(kept))
-    phone.js("[...[...document.querySelectorAll('.kept-chips .chip.warn')].find(c => c.textContent.includes('queued when it restarts')).querySelectorAll('.link-btn')].find(b => b.textContent === 'Discard').click()")
-    run.check("Discard lets it go", bool(phone.wait("return !document.querySelector('.kept-chips')", 15)))
+    # The chat goes from the computer's list (closed here; resuming it on the desktop does the same: a new session takes its
+    # place). The message is not lost with it: the inbox lists it under "Not sent", with the chat's name.
+    lost_handle = next(x["handle"] for x in daemon(d, "session.list") if x["id"] == lost_chat["id"])
+    daemon(d, "session.close", {"handle": lost_handle})
+    not_sent_js = "return [...document.querySelectorAll('.not-sent .chip')].find(c => c.textContent.includes('queued when it restarts'))?.closest('.kept-chips')?.textContent ?? null"
+    listed = phone.wait(not_sent_js, 30)
+    run.check("once the chat is gone, the inbox lists the message under Not sent, with the chat's name", bool(listed) and "phone-lost" in listed, str(listed))
+    phone.go("about:blank")
+    phone.go(base)
+    phone.wait(LIVE, 60)
+    run.check("…also after a reload", bool(phone.wait(not_sent_js, 30)))
+    phone.js("[...[...document.querySelectorAll('.not-sent .chip')].find(c => c.textContent.includes('queued when it restarts')).querySelectorAll('.link-btn')].find(b => b.textContent === 'Discard').click()")
+    run.check("Discard lets it go", bool(phone.wait("return !document.querySelector('.not-sent')", 15)))
     run.check("…for good: nothing of it is kept on the phone", not phone.js("return Object.keys(localStorage).some(k => k.startsWith('kelpie-draft:chat-pending:'))"))
     hold(False)
     # Last, so the limiter does not refuse a pairing this script still needs.

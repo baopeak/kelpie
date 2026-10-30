@@ -114,5 +114,8 @@
   "This chat is not running. Open it on the desktop to resume it.": "Cuộc trò chuyện này không chạy. Hãy mở nó trên máy tính để tiếp tục.",
   "A message only the computer can send is waiting for its chat to be open there": "Một tin nhắn chỉ máy tính gửi được đang chờ cuộc trò chuyện được mở trên máy tính",
   "This phone could not save a copy: copy the text now, or it is lost if the page reloads.": "Điện thoại này không lưu được bản sao: hãy sao chép đoạn văn bản ngay, nếu không nó sẽ mất khi tải lại trang.",
-  "Could not copy: select the text and copy it.": "Không sao chép được: hãy chọn đoạn văn bản rồi sao chép."
+  "Could not copy: select the text and copy it.": "Không sao chép được: hãy chọn đoạn văn bản rồi sao chép.",
+  "Not sent": "Chưa gửi",
+  "From chats that are no longer running here (closed, or resumed as a new chat). Copy the text to send it again.": "Từ các cuộc trò chuyện không còn chạy ở đây (đã đóng, hoặc đã được tiếp tục thành một cuộc trò chuyện mới). Hãy sao chép đoạn văn bản để gửi lại.",
+  "A chat that was closed": "Một cuộc trò chuyện đã đóng"
 }
