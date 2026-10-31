@@ -33,8 +33,8 @@ the desktop do not see the PATH your shell profile sets, so each agent starts th
 `$SHELL -l`, or the account's shell when `SHELL` is not set).
 
 **Updates.** Kelpie looks for a newer release on GitHub 30 s after it starts and every 6 hours
-(Settings → About → **Check for updates**, or **Check now**). A newer release shows as
-*Update x.y.z* in the status bar; its dialog shows the release notes, with **Install now**,
+(Settings → About → **Check for updates**, or **Check now**). A notice says so once per release, and
+a newer release stays as *Update x.y.z* in the status bar; its dialog shows the release notes, with **Install now**,
 **Install when idle** (as soon as no session is working) and **Skip this version**. Updates are
 signed; Kelpie installs nothing else. Installing restarts only the app: every session keeps
 running and is there when Kelpie reopens (running an installer by hand over a running Kelpie works

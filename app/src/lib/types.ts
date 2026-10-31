@@ -225,6 +225,8 @@ export interface Settings {
   updateChecks: boolean;
   /** A release the user chose to skip; newer ones are offered again. */
   skippedUpdate?: string;
+  /** The last release the window said was out, so each is announced once. */
+  announcedUpdate?: string;
   /** Terminal colour theme id (lib/terminal-themes.ts); "default" follows the app theme. */
   terminalTheme: string;
   /** Editor soft wrap. */
