@@ -64,6 +64,11 @@ export function checkSend(text: string): SendCheck {
   return { ok: true, text };
 }
 
+/** What stays in the field after `sent` went: anything typed behind it while it was on its way. */
+export function draftAfterSend(now: string, sent: string): string {
+  return now.startsWith(sent) ? now.slice(sent.length).trimStart() : now;
+}
+
 /** Runs one send at a time: Enter pressed again, or the button tapped, while the first is still on its way does nothing. */
 export class SendLatch {
   private busy = false;

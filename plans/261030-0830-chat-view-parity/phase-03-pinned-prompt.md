@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: "Pinned prompt"
-status: pending
+status: completed
 priority: P1
 effort: "5h"
 dependencies: [1]

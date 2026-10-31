@@ -22,6 +22,8 @@ export interface ChatTransport {
   send?(line: string): void;
   /** Answers the agent's request `requestId` with `line` (the agent's own answer message). */
   answer?(requestId: string | number, line: string): Promise<AnswerOutcome>;
+  /** The name the daemon knows this device by, in a log's `answered_by` (a phone; a window is always the desktop). */
+  deviceName?(): string | undefined;
   /** Tells the daemon what the conversation turned out to be (desktop only: an observer never changes a session). */
   update?(patch: { agent_session_id?: string; model?: string }): void;
 }

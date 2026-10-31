@@ -28,7 +28,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// triggers and approved commands; an older daemon would ignore those fields, so the app offers them only at 15. 16: `process.*` lists a
 /// session's processes and their ports and stops them; an older daemon has no such methods, so the app offers them only at 16. 17: the phone protocol (`mobile.rs`: acknowledged
 /// screen frames, heartbeats, answer results, `load.status`, `chat.resolved` with its `by`); an older phone server speaks the old protocol, so the app and the phone page rely on it only at 17.
-pub const API_LEVEL: u32 = 17;
+/// 20: a chat's replay log keeps the answers to the agent's questions (`kelpie_answer` lines); an older daemon writes none and its cards show what they did, an older app ignores the lines.
+pub const API_LEVEL: u32 = 20;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

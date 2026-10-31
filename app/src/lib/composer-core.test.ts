@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { checkSend, Composer, EnterGuard, isLongPaste, LONG_PASTE_CHARS, MAX_SEND_CHARS } from "./composer-core";
+import { checkSend, Composer, draftAfterSend, EnterGuard, isLongPaste, LONG_PASTE_CHARS, MAX_SEND_CHARS } from "./composer-core";
+
+describe("draftAfterSend", () => {
+  it("empties a field that holds only what was sent", () => {
+    expect(draftAfterSend("hello", "hello")).toBe("");
+  });
+
+  it("keeps what was typed after it while the message was on its way", () => {
+    expect(draftAfterSend("hello and more", "hello")).toBe("and more");
+  });
+
+  it("leaves a field that was changed some other way", () => {
+    expect(draftAfterSend("hell", "hello")).toBe("hell");
+  });
+});
 
 describe("EnterGuard", () => {
   const clock = () => {

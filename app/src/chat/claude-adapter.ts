@@ -15,7 +15,9 @@
 //   session id and a `result` of no turns;
 // - slash commands are sent as plain user text and run by the CLI (`/context` answers with a
 //   synthetic assistant message).
-import { type Adapter, type AdapterContext, type AskQuestion, type ChatCommand, type ChatItem, putSetting, setSettingValue, slashCommand, summarize, textOf, withImageNames } from "./chat-model";
+import { produce } from "solid-js/store";
+import { type AgentRun, applyRunResult, applyRunTaskEvent, applySubagentMessage, isAgentTool, startRun, stopRunning } from "./agent-runs";
+import { type Adapter, type AdapterContext, type AskQuestion, type ChatCommand, type ChatItem, type UserImage, logQuestionAnswers, loggedImage, putSetting, sentImages, setSettingValue, slashCommand, summarize, textOf } from "./chat-model";
 import { lineDiff, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 
@@ -33,8 +35,33 @@ export function claudeArgs(resumeId: string | null, extra: string[] = []): strin
   ];
 }
 
+/** How a picture sent from here is found again in an echo the daemon took its bytes out of. */
+const sentKey = (mime: unknown, base64Length: unknown) => `${mime}:${base64Length}`;
+
+/** The picture blocks of a user message. `names` (Claude's own transcript, which has no byte limit
+ *  unlike the daemon's log, or a watcher): names only, or a long conversation would be held in memory
+ *  whole. A block the daemon emptied is a picture sent from this window if `sent` knows it. */
+function imageBlocks(content: any[], names: boolean, sent?: Map<string, UserImage>): UserImage[] {
+  return content.filter((b) => b.type === "image").map((b, i) => {
+    const own = !names && b.source?.kelpie_stripped != null ? sent?.get(sentKey(b.source.media_type, b.source.kelpie_stripped)) : undefined;
+    if (own) return { ...own };
+    const bytes = !names && b.source?.type === "base64";
+    return loggedImage(i + 1, bytes ? b.source.media_type : undefined, bytes ? b.source.data : undefined);
+  });
+}
+
+/** Changes the agent map's runs in place: a subagent's stream can be large. The agent's last lines can
+ *  come after its exit: nothing will finish what they start. */
+function updateRuns(ctx: AdapterContext, change: (list: AgentRun[], at?: number) => void) {
+  ctx.set("agentRuns", produce((list: AgentRun[]) => {
+    const at = ctx.now?.() ?? undefined;
+    change(list, at);
+    if (ctx.state.exited) stopRunning(list, at);
+  }));
+}
+
 /** Renders one Claude transcript/stream message (assistant or user) into items. */
-export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: string | null }) {
+export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: string | null; sent?: Map<string, UserImage> }, history = false) {
   // Transcript entries (history from before chat view) carry their own time.
   const at = typeof m.timestamp === "string" ? Date.parse(m.timestamp) : NaN;
   if (!Number.isNaN(at)) ctx.setClock?.(at);
@@ -43,9 +70,14 @@ export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: s
   if (m.type === "user") {
     if (m.isMeta || m.isCompactSummary) return;
     if (typeof content === "string") {
-      if (!content.startsWith("<")) pushUser(ctx, content, m.uuid);
+      if (!isClaudesOwnText(ctx, content)) pushUser(ctx, content, m.uuid);
       return;
     }
+    // The pictures go with the message's first text, or are a message of their own, unless the only
+    // text beside them is Claude's: then they are not the person's message either.
+    let images: UserImage[] | undefined = imageBlocks(content ?? [], history || !!ctx.namesOnly, live.sent);
+    if (!images.length) images = undefined;
+    let claudes = false;
     for (const block of content ?? []) {
       if (block.type === "tool_result") {
         const output = textOf(block.content);
@@ -54,10 +86,18 @@ export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: s
           it.output = output;
           it.status = block.is_error ? "error" : "done";
         });
-      } else if (block.type === "text" && !String(block.text).startsWith("<")) {
-        pushUser(ctx, block.text, m.uuid);
+        // A conversation's history has no task events: the map goes by its rows.
+        if (!history) updateRuns(ctx, (list, at) => applyRunResult(list, block, m, at));
+      } else if (block.type === "text") {
+        if (isClaudesOwnText(ctx, String(block.text))) {
+          claudes = true;
+          continue;
+        }
+        pushUser(ctx, block.text, m.uuid, images);
+        images = undefined;
       }
     }
+    if (images && !claudes) pushUser(ctx, "", m.uuid, images);
     return;
   }
   if (m.type !== "assistant" || !Array.isArray(content)) return;
@@ -73,6 +113,7 @@ export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: s
       if (block.name === "TodoWrite" && Array.isArray(block.input?.todos)) {
         ctx.set("plan", { entries: block.input.todos.map((x: any) => ({ text: String(x.status === "in_progress" && x.activeForm ? x.activeForm : x.content ?? ""), status: planStatus(x.status) })) });
       }
+      if (!history && isAgentTool(block.name)) updateRuns(ctx, (list, at) => startRun(list, block, undefined, at));
       const prev = ctx.find(block.id);
       ctx.upsert({
         kind: "tool", id: block.id, name: block.name, input: block.input, summary: summarize(block.input),
@@ -97,6 +138,8 @@ export function applyClaudeMessage(ctx: AdapterContext, m: any, live: { msgId: s
  *  (`skip_transcript`, `ambient`) and a subagent's own tasks (internals, as in the transcript)
  *  are not listed; one the turn waits for (`awaited`) is not background work. */
 export function applyTaskEvent(ctx: AdapterContext, m: any) {
+  // The agent map lists what the filters below leave out, and keeps what ended.
+  updateRuns(ctx, (list, at) => applyRunTaskEvent(list, m, at));
   const id = typeof m.task_id === "string" ? m.task_id : null;
   if (!id) return;
   const tasks = ctx.state.tasks;
@@ -123,13 +166,22 @@ export function applyTaskEvent(ctx: AdapterContext, m: any) {
   }
 }
 
-function pushUser(ctx: AdapterContext, text: string, uuid?: string) {
+/** Our optimistic copy of a message with this text, the oldest first. */
+const waitingCopy = (ctx: AdapterContext, text: string) => ctx.state.items.find((i) => i.kind === "user" && i.pending && i.text.trim() === text.trim());
+
+/** Tagged text (`<system-reminder>`, `<command-name>`) is Claude's, not a message, unless the person
+ *  just sent exactly that: then this is its echo, and the message must not wait for ever. */
+const isClaudesOwnText = (ctx: AdapterContext, text: string) => text.startsWith("<") && !waitingCopy(ctx, text);
+
+function pushUser(ctx: AdapterContext, text: string, uuid?: string, images?: UserImage[]) {
   // Ctrl+C used to stop the TUI during a mode switch leaves this marker; it is not a message.
   if (/^\[Request interrupted by user/.test(text.trim())) return;
-  // Replace our optimistic copy instead of duplicating it.
-  const pending = ctx.state.items.find((i) => i.kind === "user" && i.pending && i.text.trim() === text.trim());
+  // Replace our optimistic copy instead of duplicating it. It keeps its own pictures, by path: the
+  // echo's bytes are not held for a message that has them on disk. A picture sent alone echoes with
+  // no text, so its copy is the oldest one waiting with none.
+  const pending = waitingCopy(ctx, text);
   if (pending) ctx.patch(pending.id, (i: any) => (i.pending = false));
-  else ctx.upsert({ kind: "user", id: uuid ?? `u-${ctx.state.items.length}`, text });
+  else ctx.upsert({ kind: "user", id: uuid ?? `u-${ctx.state.items.length}`, text, ...(images ? { images } : {}) });
 }
 
 export function diffFor(name: string, input: any): { path: string; text: string }[] | undefined {
@@ -148,6 +200,8 @@ export function diffFor(name: string, input: any): { path: string; text: string 
 
 /** Request id of our `initialize` (the daemon keeps its answer when it trims the replay log). */
 const INIT_ID = "kelpie-init";
+/** What a denial tells the agent when the person wrote nothing. */
+const DENIED = "The user denied this action.";
 
 interface ClaudeModel { value: string; resolvedModel?: string; displayName?: string; description?: string; supportedEffortLevels?: string[]; supportsAutoMode?: boolean }
 
@@ -161,7 +215,8 @@ const modes = (auto: boolean, current: string | null) => [
 ];
 
 export function createClaudeAdapter(ctx: AdapterContext): Adapter {
-  const live = { msgId: null as string | null };
+  /** `sent`: the pictures sent from this window. A log replayed here keeps them, by path. */
+  const live = { msgId: null as string | null, sent: new Map<string, UserImage>() };
   let blocks = new Map<number, string>(); // stream block index → item id
   let partialJson = new Map<number, string>();
   let interruptSeq = 0;
@@ -261,6 +316,7 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
               blocks.set(e.index, b.id);
               partialJson.set(e.index, "");
               ctx.upsert({ kind: "tool", id: b.id, name: b.name, summary: "", status: "running" });
+              if (isAgentTool(b.name)) updateRuns(ctx, (list, at) => startRun(list, b, undefined, at));
             }
           } else if (e.type === "content_block_delta") {
             const id = blocks.get(e.index);
@@ -279,7 +335,10 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
         }
         case "assistant":
         case "user":
-          if (m.parent_tool_use_id) return;
+          if (m.parent_tool_use_id) {
+            updateRuns(ctx, (list, at) => applySubagentMessage(list, m, at));
+            return;
+          }
           applyClaudeMessage(ctx, m, live);
           if (m.type === "user" && !m.isReplay) ctx.set("busy", true);
           return;
@@ -355,7 +414,9 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
         ctx.upsert({ kind: "system", id: `tui-${Date.now()}`, text: t("/{name} works only in the terminal UI.", { name: slash[0] }), tone: "info", tui: { command: text.trim() } });
         return;
       }
-      ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text: withImageNames(text, images), pending: true });
+      const shown = sentImages(images);
+      images?.forEach((image, i) => live.sent.set(sentKey(image.mime, image.data.length), shown![i]));
+      ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text, images: shown, pending: true });
       ctx.set("busy", true);
       const pictures = (images ?? []).map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } }));
       ctx.write({ type: "user", message: { role: "user", content: [...pictures, ...(text.trim() ? [{ type: "text", text }] : [])] } });
@@ -368,6 +429,10 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
     immediate(text) {
       const slash = slashCommand(text);
       return !!slash && tuiOnly.has(slash[0]);
+    },
+    // Only what never reaches Claude: anything else it is sent, pictures and all.
+    isCommand(text) {
+      return this.immediate!(text, true);
     },
     interrupt() {
       ctx.write({ type: "control_request", request_id: `kelpie-interrupt-${++interruptSeq}`, request: { subtype: "interrupt" } });
@@ -390,13 +455,26 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
       const input = (pending?.input ?? {}) as Record<string, unknown>;
       const response =
         option === "deny"
-          ? { behavior: "deny", message: reply?.message?.trim() || "The user denied this action." }
+          ? { behavior: "deny", message: reply?.message?.trim() || DENIED }
           : option === "answer"
             ? { behavior: "allow", updatedInput: { ...input, answers: reply?.answers ?? {} } }
             : option === "plan-accept-edits"
               ? { behavior: "allow", updatedInput: input, updatedPermissions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }] }
               : { behavior: "allow", updatedInput: input, ...(option === "allow-session" && pending?.suggestions ? { updatedPermissions: pending.suggestions } : {}) };
       ctx.write({ type: "control_response", response: { subtype: "success", request_id: id, response } });
+    },
+    describeAnswer(card, answer) {
+      const option = (id: string) => card.options.find((o) => o.id === id)?.label;
+      if (answer.behavior === "deny") {
+        const label = option("deny");
+        return label ? { label, message: typeof answer.message === "string" && answer.message !== DENIED ? answer.message : undefined } : null;
+      }
+      if (answer.behavior !== "allow") return null;
+      // Only a question's: another tool can have an input of that name.
+      const questions = card.ask?.length ? logQuestionAnswers(answer.answers) : null;
+      if (questions) return questions;
+      const label = (answer.mode && option("plan-accept-edits")) || (answer.lasting && option("allow-session")) || option("allow");
+      return label ? { label } : null;
     },
   };
 }

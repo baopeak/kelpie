@@ -1807,6 +1807,16 @@ mod tests {
         assert_eq!(code(&r.ask_write(json!({"type": "chat_answer", "id": "t1", "request_id": "r2", "line": line})).await), Some("not_chat"));
     }
 
+    #[test]
+    fn a_kelpie_answer_line_reaches_the_phone_unchanged() {
+        let line = r#"{"answer":{"behavior":"allow","lasting":false},"answered_by":"desktop","at":1,"by":"desktop","request_id":"r1","type":"kelpie_answer"}"#;
+        let data = format!("{{\"type\":\"kelpie_time\",\"at\":1}}\n{line}\n");
+        let messages = chat_messages("c1", "live", 10, data.as_bytes());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["mode"], "live");
+        assert_eq!(messages[0]["lines"][1], line);
+    }
+
     #[tokio::test]
     async fn the_list_is_pushed_when_it_changes_and_carries_the_waiting_prompt() {
         let mut r = rig();

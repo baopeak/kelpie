@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "Persist question answers"
-status: pending
+status: completed
 priority: P1
 effort: "10h"
 dependencies: []
@@ -56,7 +56,7 @@ Frontend:
 answered?: { label: string; answers?: Record<string, string>; message?: string; by?: string; at?: number };
 ```
 
-`resolved` stays a string (phone's `prompt-card.tsx` reads it).
+`resolved` stays a string (the phone's `chat-view.tsx` reads it).
 
 Restart path: after a daemon restart, a conversation reloads from the agent's own history, which has no cards, only the `AskUserQuestion` tool row with its result text. Show that row open when no question card exists in the transcript (step 8).
 

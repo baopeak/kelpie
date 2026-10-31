@@ -1,7 +1,7 @@
 ---
 phase: 5
 title: "Paste and zoom images"
-status: pending
+status: completed
 priority: P1
 effort: "9h"
 dependencies: [1, 3]
@@ -55,9 +55,18 @@ Bug visible in the code, to reproduce first: `pushUser` matches a pending messag
 ## Implementation Steps
 
 1. **Capture real data.** On the isolated daemon, send a picture from the floating composer to a real Claude chat, and exit it cleanly. Note from the log: does the echo include the image block with its base64? Does the message duplicate or stick at pending? Record the result in the phase file. `LOG_MAX_BYTES` is 12 MiB, so one 5 MB picture (6.7 MB of base64) can evict much of the transcript: if the echo holds base64, keep that in mind before relying on it.
+
+   **Result** (real Claude 2.1.314 on an isolated daemon, a picture sent through `ctrl.send`):
+   - Text plus picture: two user items. `{text: "What color...\n[red.png]", pending: true}` stays dim for ever, then the echo `{text: "What color..."}`. The duplicate bug is real.
+   - Picture alone: one item `{text: "[red.png]", pending: true}`, pending for ever.
+   - The echo is logged as `{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}},{"type":"text","text":"..."}]},"session_id":...}`; a picture alone has only the image block. So the daemon log holds the base64, and a replayed Claude message can carry `data`.
+   - History loaded from Claude's own transcript stays name-only: `applyClaudeMessage` is told it is history.
+   - Decided after review: the daemon takes the picture bytes out of a line over 2 MiB (`PICTURE_LINE_MAX`), so `data` in a replay holds only smaller pictures. See `docs/architecture.md`.
 2. **Fix matching, test first.** Pending items store the raw `text` and `images`; `pushUser` matches on raw text. An echo with no text matches the oldest pending image-only item. New tests: text plus picture leaves one item, not pending; image-only leaves one item, not pending; plain text behaves as now.
 3. **Transcript model.** `claude-adapter.send` and `acp-adapter.send` (line with `withImageNames`) put `images: [{name, mime, path}]` on the user item. Codex: same; on replay read `localImage` paths from `userMessage` content at `case "userMessage"`. Claude on replay: read `image` blocks in `applyClaudeMessage` (`m.message.content`), with `data` if step 1 showed it, otherwise a name-only placeholder entry. `loadHistory` also goes through `applyClaudeMessage`, capped at 6000 lines with no byte limit, so history images are always name-only. ACP: `user_message_chunk` image content when present. Codex: where `renderTurns` blanks `queued-` items' text so they hide (`i.text = ""`), also clear `images`, or they stay and duplicate the echo. Update the test expecting `"what is this?\n[image-1.png]"`, deliberately.
 4. **Keep `withImageNames` where text is the right form:** queue chips and unsent notes (`chat-model.ts` near `enqueueNew`, `applyQueue`). In `noteSent` (`kelpie_sent`), the path ACP uses with the daemon queue: on the desktop take `images` from `this.mine.get(cid)`, otherwise name-only entries from `msg.images`; an observer (the phone) keeps today's `[name]` text. Do not change the wire format. An image-only item must not render an empty bubble on the phone: add a minimal fallback in `chat-view.tsx`.
+
+   **Not applied yet:** `noteSent`, `kelpie_sent`, `this.mine`, `enqueueNew` and `applyQueue` exist only on the phone branches, so the `noteSent` part of this step must be applied when they merge. Queue chips and the "Not sent" note were done here.
 5. **Render.** `chat-pane.tsx`: change `<Show when={u.text}>` to `u.text || u.images?.length`. Add `.msg-user-images`, a wrapping row of thumbnails (`max-height: 120px`, radius 8px, `object-fit: cover`, `loading="lazy"`, `alt={name}`, `<button>` wrapper). Show the placeholder for a null URL. Pinned prompt: text, or `t("{n} pictures")`.
 6. **`composer-pictures.ts`.** Move `Attached`, `attach`, `IMAGE_EXT`, `IMAGE_MIME`, `CHAT_IMAGE_MAX`, `MAX_IMAGES`, and the "read bytes at send" step. `drop` also turns non-pictures into mentions and edits the textarea, so it becomes `createPictures(session, onOther)`, with mention handling left in `composer.tsx` as the `onOther` callback. Move the `.composer-attached` and `.composer-image` rules from `composer.css` to `styles.css`: `composer.css` is imported only by the lazy `composer.tsx`, so they would be unstyled in the chat input until the floating composer opens. Run the composer's behaviour by hand afterwards: terminal sessions, mentions for non-pictures, and the floating composer's drop.
 7. **Chat input.**

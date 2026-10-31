@@ -596,8 +596,8 @@ def scenario(run):
         blocks = prompts[-1]["params"]["prompt"] if prompts else []
         check("a chat gets the picture as an image block", any(b.get("type") == "image" and b.get("mimeType") == "image/png" and b.get("data") == PNG_B64 for b in blocks), json.dumps(blocks)[:200])
         check("…next to the text", any(b.get("type") == "text" and b.get("text") == "describe the picture" for b in blocks))
-        user = until(lambda: d.js("const c = window.__kelpie.chat.getController(window.__kelpie.store.sessions[arguments[0]]); return c.state.items.filter(i => i.kind === 'user').map(i => i.text)", chat["id"]), 10)
-        check("…and the transcript names the picture", bool(user) and "describe the picture" in user[-1] and ".png]" in user[-1], str(user))
+        user = until(lambda: d.js("const c = window.__kelpie.chat.getController(window.__kelpie.store.sessions[arguments[0]]); return c.state.items.filter(i => i.kind === 'user').map(i => ({ text: i.text, images: i.images?.length ?? 0 }))", chat["id"]), 10)
+        check("…and the transcript shows the picture beside the text", bool(user) and user[-1]["text"] == "describe the picture" and user[-1]["images"] == 1, str(user))
         run.shot("03-chat-picture")
 
     # A picture dropped from the file manager: the app receives the path from the window.

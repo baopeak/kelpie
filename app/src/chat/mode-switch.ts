@@ -6,6 +6,7 @@
 //   2. stop the old process cleanly (Ctrl+C ×2, then kill) so it flushes its transcript and
 //      we never have two writers on one conversation,
 //   3. start the other front-end resuming that id, in the same pane.
+import { batch } from "solid-js";
 import { ChatController, type Adapter, type AdapterContext } from "./chat-model";
 import { desktopTransport } from "./desktop-transport";
 import { applyClaudeMessage, claudeArgs, createClaudeAdapter } from "./claude-adapter";
@@ -106,12 +107,15 @@ export function getController(s: SessionInfo): ChatController {
       const lines = await claudeTranscript(resumeId, s.cwd, sessionHome(s)).catch(() => []);
       c!.seed(claudeSettingsFrom(lines));
       const live = { msgId: null as string | null };
-      for (const line of lines) {
-        let m: any;
-        try { m = JSON.parse(line); } catch { continue; }
-        if (m.timestamp && Date.parse(m.timestamp) >= createdAt) break;
-        if (m.type === "user" || m.type === "assistant") applyClaudeMessage(ctx, m, live);
-      }
+      // In one go, as a replay: what watches the whole list would otherwise run for every line.
+      batch(() => {
+        for (const line of lines) {
+          let m: any;
+          try { m = JSON.parse(line); } catch { continue; }
+          if (m.timestamp && Date.parse(m.timestamp) >= createdAt) break;
+          if (m.type === "user" || m.type === "assistant") applyClaudeMessage(ctx, m, live, true);
+        }
+      });
       if (ctx.state.items.length) ctx.upsert({ kind: "system", id: "history-mark", text: t("↑ earlier in this conversation · continued in chat view ↓"), tone: "info" });
     };
   }

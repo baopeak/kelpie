@@ -5,6 +5,17 @@ import { type ChatItem, summarize } from "./chat-model";
 const tool = (name: string, input: unknown, extra: Partial<Extract<ChatItem, { kind: "tool" }>> = {}) =>
   ({ kind: "tool", id: "t", name, input, summary: "", status: "done", ...extra }) as Extract<ChatItem, { kind: "tool" }>;
 
+describe("a question's row", () => {
+  it("names the questions; the agent's own text for the answers stays its output", () => {
+    const row = tool("AskUserQuestion", { questions: [{ question: "Which database?" }, { question: "Which port?" }] }, { output: 'User has answered your questions: "Which database?"="Postgres"' });
+    expect(describeTool(row)).toMatchObject({ verb: "Questions", target: "Which database? · Which port?", category: "other" });
+  });
+
+  it("falls back to the summary when the input is not there yet", () => {
+    expect(describeTool(tool("AskUserQuestion", {}, { summary: "Which?" })).target).toBe("Which?");
+  });
+});
+
 describe("lineDiff", () => {
   it("keeps shared lines as context and marks only what changed", () => {
     expect(lineDiff("a\nb\nc", "a\nB\nc")).toBe(" a\n-b\n+B\n c");
@@ -67,6 +78,38 @@ describe("describeTool", () => {
   it("names Codex shells Run and shows what they ran", () => {
     const view = describeTool(tool("Shell", { command: "git status" }, { category: "command", summary: "git status" }));
     expect(view).toMatchObject({ verb: "Run", target: "git status", command: "git status" });
+  });
+});
+
+describe("describeTool's file", () => {
+  const tool = (name: string, input: unknown, extra: object = {}) => ({ kind: "tool", id: "1", name, summary: "", status: "done", input, ...extra }) as any;
+
+  it("names the file a Read opens, at its offset", () => {
+    expect(describeTool(tool("Read", { file_path: "D:\\p\\a.ts", offset: 40, limit: 5 }))).toMatchObject({ path: "D:\\p\\a.ts", line: 40 });
+    const whole = describeTool(tool("Read", { file_path: "D:\\p\\a.ts" }));
+    expect(whole.path).toBe("D:\\p\\a.ts");
+    expect(whole.line).toBeUndefined();
+    expect(describeTool(tool("Read", { file_path: "a.ts", offset: -3 })).line).toBeUndefined();
+  });
+
+  it.each([
+    ["Write", { file_path: "a.ts", content: "x" }, "a.ts"],
+    ["Edit", { file_path: "a.ts" }, "a.ts"],
+    ["MultiEdit", { file_path: "a.ts" }, "a.ts"],
+    ["NotebookEdit", { notebook_path: "n.ipynb" }, "n.ipynb"],
+  ])("names the file %s changes", (name, input, path) => {
+    expect(describeTool(tool(name, input)).path).toBe(path);
+  });
+
+  it("takes a generic edit's file from its first diff", () => {
+    const view = describeTool(tool("Apply patch", {}, { category: "edit", diff: [{ path: "x/a.ts", text: "+1" }, { path: "b.ts", text: "+2" }] }));
+    expect(view.path).toBe("x/a.ts");
+  });
+
+  it("has no file while the input is still arriving, or for other tools", () => {
+    expect(describeTool(tool("Read", {})).path).toBeUndefined();
+    expect(describeTool(tool("Bash", { command: "ls" })).path).toBeUndefined();
+    expect(describeTool(tool("Grep", { pattern: "x", path: "src" })).path).toBeUndefined();
   });
 });
 

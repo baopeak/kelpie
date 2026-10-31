@@ -13,25 +13,19 @@ import { isMac, basename, joinPath } from "../lib/platform";
 import { closeComposer, currentSelection, type ComposerRequest } from "../lib/composer-state";
 import { droppedFileMention, expandMentions, hasUnsafeName, issueMention, looksLikeMention, mentionAt, pathMention, pathReference, shellQuote, terminalMention, MAX_TOTAL_BYTES, type Mention, type MentionContext, type ShellStyle } from "../lib/mentions";
 import { stepHistory } from "../lib/prompt-history";
-import { gitContext, isDir, listDir, quickOpen, readFile, readImage, redact, writeTempFile } from "../lib/ipc";
+import { gitContext, isDir, listDir, quickOpen, readFile, redact, writeTempFile } from "../lib/ipc";
+import { createPictures } from "../lib/composer-pictures";
+import { AttachedPictures } from "./image-lightbox";
 import { sendToSession } from "../lib/send-to-agent";
 import { sessionTranscript } from "../lib/agent-actions";
 import { getController } from "../chat/mode-switch";
 import { peekView } from "../lib/terminal-host";
 import { isAgentKind } from "../lib/agents";
 import { gitlabIssues, gitlabProject, jiraIssues, linearIssues, type Issue } from "../lib/integrations";
-import type { ChatImage } from "../chat/chat-model";
 import type { Project, SessionInfo } from "../lib/types";
 
 interface Suggestion { label: string; detail?: string; insert: string; /** More follows (`terminal:`): no space, menu stays. */ more?: boolean }
 
-interface Attached { id: number; name: string; mime: string; path: string; /** Base64 bytes: kept for chat views, which take the picture itself. */ data?: string; url?: string }
-
-const IMAGE_EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp", "image/bmp": "bmp" };
-const IMAGE_MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
-const MAX_IMAGES = 8;
-/** A picture a chat sends to the model: the API refuses more than 5 MB. */
-const CHAT_IMAGE_MAX = 5 * 1024 * 1024;
 const windows = /Win/.test(navigator.platform);
 const KEYWORDS: { name: string; detail: string; more?: boolean }[] = [
   { name: "selection", detail: msg("The selection in an editor, diff or terminal") },
@@ -52,14 +46,6 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(out);
 }
 
-const readAsBase64 = (file: File) =>
-  new Promise<string>((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
-    r.onerror = () => reject(r.error);
-    r.readAsDataURL(file);
-  });
-
 /** How a shell (or another program that is not an agent) wants a path written. */
 function shellStyle(s: SessionInfo): ShellStyle {
   // A session on another machine: its host is taken for a POSIX one (the local OS says nothing about it).
@@ -68,8 +54,6 @@ function shellStyle(s: SessionInfo): ShellStyle {
   if (/(^|[\\/])(bash|zsh|sh|fish)(\.exe)?$/.test(program)) return "posix";
   return /(^|[\\/])cmd(\.exe)?$/.test(program) ? "cmd" : "pwsh";
 }
-
-const base64Bytes = (data: string) => Math.floor((data.length * 3) / 4);
 
 function problemText(m: Mention): string {
   switch (m.kind) {
@@ -150,7 +134,6 @@ export function Composer(props: { session: SessionInfo; project: Project; reques
   let root!: HTMLDivElement;
   let textarea!: HTMLTextAreaElement;
   const session = () => store.sessions[props.session.id] ?? props.session;
-  const chat = () => session().chat;
   /** The composer went away (Esc) while a send was still looking things up: that send is dropped. */
   let disposed = false;
   const [draft, setDraft] = createSignal([drafts.get(props.session.id), props.request.draft].filter(Boolean).join("\n"));
@@ -158,12 +141,10 @@ export function Composer(props: { session: SessionInfo; project: Project; reques
   const [selected, setSelected] = createSignal(0);
   const [dismissed, setDismissed] = createSignal<number | null>(null);
   const [found, setFound] = createSignal<Suggestion[]>([]);
-  const [images, setImages] = createSignal<Attached[]>([]);
   const [sending, setSending] = createSignal(false);
   const [dropping, setDropping] = createSignal(false);
   /** An earlier prompt is on screen (↑ / ↓): its mentions are not completions until the user types. */
   const [walking, setWalking] = createSignal(false);
-  let attachedId = 0;
 
   const kindDetail = (s: SessionInfo) => (s.alive ? s.kind : t("exited"));
   const token = () => (walking() ? null : mentionAt(draft(), caret()));
@@ -237,44 +218,13 @@ export function Composer(props: { session: SessionInfo; project: Project; reques
   }
 
   // ---------- pictures ----------
-  async function attach(file: File) {
-    const ext = IMAGE_EXT[file.type];
-    if (!ext) return;
-    if (images().length >= MAX_IMAGES) return store.notify(t("At most {n} pictures", { n: MAX_IMAGES }));
-    if (session().remote) return store.notify(t("Pictures cannot be sent to a session on another machine"));
-    if (chat() && file.size > CHAT_IMAGE_MAX) return store.notify(t("A picture sent to a chat can be at most 5 MB"), undefined, 6000);
-    try {
-      const data = await readAsBase64(file);
-      const path = await writeTempFile("image", ext, data);
-      setImages((l) => [...l, { id: ++attachedId, name: basename(path), mime: file.type, path, data, url: `data:${file.type};base64,${data}` }]);
-    } catch (e) {
-      store.notify(errorText(e), undefined, 6000);
-    }
-  }
-
-  /** A dropped file: a picture is attached by its own path, anything else becomes a mention. */
-  async function drop(paths: string[]) {
+  /** A dropped file that is not a picture becomes a mention. */
+  const { images, drop, paste, forChat, remove } = createPictures(session, (others) => {
     const rels: string[] = [];
-    for (const p of paths) {
-      const mime = IMAGE_MIME[p.split(".").pop()?.toLowerCase() ?? ""];
-      if (!mime) {
-        const mention = droppedFileMention(relativeToProject(p));
-        if (mention === null) store.notify(t("{name}: this name cannot be written safely for a terminal", { name: JSON.stringify(basename(p)) }), undefined, 6000);
-        else rels.push(mention);
-        continue;
-      }
-      if (images().length >= MAX_IMAGES) return store.notify(t("At most {n} pictures", { n: MAX_IMAGES }));
-      if (session().remote) return store.notify(t("Pictures cannot be sent to a session on another machine"));
-      try {
-        const data = chat() ? (await readImage(p)).base64 : undefined;
-        if (data && base64Bytes(data) > CHAT_IMAGE_MAX) {
-          store.notify(t("A picture sent to a chat can be at most 5 MB"), undefined, 6000);
-          continue;
-        }
-        setImages((l) => [...l, { id: ++attachedId, name: basename(p), mime, path: p, data, url: data ? `data:${mime};base64,${data}` : undefined }]);
-      } catch (e) {
-        store.notify(errorText(e), undefined, 6000);
-      }
+    for (const p of others) {
+      const mention = droppedFileMention(relativeToProject(p));
+      if (mention === null) store.notify(t("{name}: this name cannot be written safely for a terminal", { name: JSON.stringify(basename(p)) }), undefined, 6000);
+      else rels.push(mention);
     }
     if (rels.length) {
       const text = draft();
@@ -283,7 +233,7 @@ export function Composer(props: { session: SessionInfo; project: Project; reques
       setText(text.slice(0, at) + insert + text.slice(at), at + insert.length);
     }
     textarea.focus();
-  }
+  });
 
   const relativeToProject = (p: string) => {
     const root = joinPath(props.project.path, "").replace(/[\\/]+$/, "");
@@ -302,8 +252,8 @@ export function Composer(props: { session: SessionInfo; project: Project; reques
       if (type === "leave") return setDropping(false);
       const ratio = window.devicePixelRatio || 1;
       const { x, y } = (event.payload as { position: { x: number; y: number } }).position;
-      const r = root.getBoundingClientRect();
-      const inside = x / ratio >= r.left && x / ratio <= r.right && y / ratio >= r.top && y / ratio <= r.bottom;
+      // What is on top under the pointer: nothing goes into a composer that a dialog or a lightbox covers.
+      const inside = root.contains(document.elementFromPoint(x / ratio, y / ratio));
       if (type === "drop") {
         setDropping(false);
         if (inside) void drop((event.payload as { paths: string[] }).paths);
@@ -358,14 +308,7 @@ export function Composer(props: { session: SessionInfo; project: Project; reques
         return store.notify([...out.problems.map(problemText), t("Press Enter again to send it as written")].join("\n"), undefined, 7000);
       }
       if (s.chat) {
-        // The bytes of a picture dropped while the session was a terminal are read now.
-        const attachments: ChatImage[] = await Promise.all(
-          pictures.map(async (i) => {
-            const data = i.data ?? (await readImage(i.path)).base64;
-            if (base64Bytes(data) > CHAT_IMAGE_MAX) throw new Error(t("A picture sent to a chat can be at most 5 MB"));
-            return { mime: i.mime, data, path: i.path };
-          }),
-        );
+        const attachments = await forChat();
         if (disposed) return;
         getController(s).send(out.text, true, attachments);
         store.revealSession(s.id);
@@ -430,13 +373,6 @@ export function Composer(props: { session: SessionInfo; project: Project; reques
     }
   };
 
-  const onPaste = (e: ClipboardEvent) => {
-    const pictures = [...(e.clipboardData?.files ?? [])].filter((f) => f.type in IMAGE_EXT);
-    if (!pictures.length) return;
-    e.preventDefault();
-    for (const f of pictures) void attach(f);
-  };
-
   const target = () => {
     const s = session();
     return `${sessionLabel(s)}${s.chat ? ` · ${t("chat")}` : ""}`;
@@ -466,19 +402,7 @@ export function Composer(props: { session: SessionInfo; project: Project; reques
             </For>
           </div>
         </Show>
-        <Show when={images().length}>
-          <div class="composer-attached">
-            <For each={images()}>
-              {(img) => (
-                <span class="composer-image" title={img.path}>
-                  <Show when={img.url} fallback={<Icon name="files" size={14} />}><img src={img.url} alt="" /></Show>
-                  <span class="name">{img.name}</span>
-                  <button class="icon-btn mini" title={t("Remove")} onClick={() => setImages((l) => l.filter((x) => x.id !== img.id))}><Icon name="close" size={11} /></button>
-                </span>
-              )}
-            </For>
-          </div>
-        </Show>
+        <AttachedPictures images={images()} onRemove={remove} />
         <textarea
           ref={textarea}
           rows={2}
@@ -496,7 +420,7 @@ export function Composer(props: { session: SessionInfo; project: Project; reques
           onClick={() => setCaret(textarea.selectionStart ?? 0)}
           onFocus={() => setDismissed(null)}
           onKeyDown={onKeyDown}
-          onPaste={onPaste}
+          onPaste={paste}
         />
         <div class="composer-row">
           <Icon name="compose" size={12} />

@@ -115,11 +115,32 @@ features earlier (running sessions stop for a moment; agents that can resume con
      fold into *Explored 4 files, 2 searches*, and thinking folds into *Thought for 6s*. After a
      turn, *N files changed* lists each file with its line counts; click one to open its changes.
    - Every prompt and reply shows its date and time in the top right corner (hover for the full
-     date), also after a restart or when you come back to the chat later. Hover a reply to copy
-     it, or a code block to copy its code. Hover a prompt whose turn changed files for
-     *Undo this turn…*: the same previewed undo as the Turns panel.
+     date), also after a restart or when you come back to the chat later. The icon beside it copies
+     the message, and a tool's *IN* and *OUT* have one too, for the whole text; hover a code block to
+     copy its code. A prompt whose turn changed files has *Undo this turn…* there: the same previewed
+     undo as the Turns panel. A reply's dot pulses while it is being written, and a table appears as
+     its rows arrive.
+   - The bar over the transcript names the prompt of the turn you are reading; click it to go back to
+     that prompt, also from far up a long conversation. It leaves the caret in the message field.
+   - Click a file in a reply to open it: a link, a path in inline code (`src/a.ts:42` opens at that
+     line), a tool's target (an edit's opens its changes) or the file on an approval card. Something
+     outside the project only shows a message: nothing an agent names is ever launched. Addresses in
+     your own messages open in the browser.
+   - Paste (`Ctrl+V`) or drop pictures into the message field, up to 8 and 5 MB each, also on their
+     own and while the agent works. Click a thumbnail, or a picture in a reply, to enlarge it: click
+     again for its real size, the arrows go through a message's pictures, `Esc` closes it without
+     stopping the agent. A picture no longer available shows its name instead. An agent that cannot
+     take pictures is given the path, and the field says so.
+   - The bookmark next to a finished reply's copy button saves it to the *Saved* tab of the right
+     panel, per project and newest first, also after its session is gone. Click one to go to the
+     reply; if it is no longer in a chat, its saved text opens in a dialog to read and copy. A reply
+     over 64 KiB is saved cut short, and a project holds up to 500.
    - Background work Claude left running (background commands, subagents) is listed above the
      message field as *In the background*; click it for each task's status.
+   - *Agents N* next to the context ring, or *Show Agent Map* in the palette, opens the conversation's
+     subagents as a tree with their status, time and tokens (Claude; Codex lists its agents without
+     tokens, and ACP has no such thing to list). Click one for its prompt, what it did and its answer,
+     and *Show in chat* for its row. `Esc` steps back, and never stops the agent.
    - Messages sent while the agent works wait above the message field and go when its turn ends.
      *Send now* gives one to the agent during its turn (Codex and Claude; for other agents it stops
      the turn first); stopping the agent holds the queue until you send again.
@@ -129,7 +150,10 @@ features earlier (running sessions stop for a moment; agents that can resume con
    - Approvals show the command or the edit they are about; press `1`–`9` (with an empty message
      field) to pick an option, or type what the agent should do instead and *Deny*. Questions the
      agent asks (Claude's multiple-choice questions) and plans it wants approved are answered in
-     their card. *Waiting for your approval* appears when the card is scrolled out of view.
+     their card. *Waiting for your approval* appears when the card is scrolled out of view. An
+     answered card keeps what was asked and chosen, any message sent with a denial, and who answered
+     from another device, also after the window is closed; *No longer needed* is left for requests
+     nobody answered.
 
 ### Past conversations
 

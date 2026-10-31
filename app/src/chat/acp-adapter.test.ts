@@ -36,6 +36,55 @@ function openSession(a: ReturnType<typeof createAcpAdapter>) {
   a.onMessage({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hello" } } } }, "");
 }
 
+describe("a logged answer", () => {
+  const LINE = { type: "kelpie_answer", request_id: 5, by: "desktop", answered_by: "desktop", at: 1, answer: { result: { outcome: { outcome: "selected", optionId: "once" } } } };
+  const permission = () => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    a.onMessage({ jsonrpc: "2.0", id: 5, method: "session/request_permission", params: { toolCall: { title: "Run ls" }, options: [{ optionId: "once", name: "Allow once", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } }, "");
+    return { a, h, card: h.items()[0] as Extract<ChatItem, { kind: "permission" }> };
+  };
+  const form = (properties: Record<string, unknown>) => {
+    const h = harness();
+    const a = createAcpAdapter(h.ctx);
+    a.onMessage({ jsonrpc: "2.0", id: 6, method: "elicitation/create", params: { message: "Tell me", requestedSchema: { properties } } }, "");
+    return { a, h, card: h.items()[0] as Extract<ChatItem, { kind: "permission" }> };
+  };
+
+  it("is not the adapter's to read: the controller takes it first", () => {
+    const { a, h } = permission();
+    const before = h.items();
+    a.onMessage(LINE, JSON.stringify(LINE));
+    expect(h.items()).toEqual(before);
+    expect(h.written).toEqual([]);
+  });
+
+  it("names the option the agent offered", () => {
+    const { a, card } = permission();
+    expect(a.describeAnswer!(card, LINE.answer)).toEqual({ label: "Allow once" });
+    expect(a.describeAnswer!(card, { result: { outcome: { outcome: "selected", optionId: "no" } } })).toEqual({ label: "Reject" });
+    expect(a.describeAnswer!(card, { result: { outcome: { outcome: "selected", optionId: "gone" } } })).toBeNull();
+    expect(a.describeAnswer!(card, { error: true })).toBeNull();
+  });
+
+  it("gives a form's fields back under their questions", () => {
+    const { a, card } = form({ db: { type: "string", title: "Which database?", enum: ["Postgres", "Mongo"] }, ok: { type: "boolean", title: "Sure?" }, many: { type: "array", title: "Which?", items: { enum: ["A", "B"] } } });
+    const said = a.describeAnswer!(card, { result: { action: "accept", content: { db: "Mongo", ok: false, many: ["A", "B"] } } });
+    expect(said?.answers).toEqual({ "Which database?": "Mongo", "Sure?": "No", "Which?": "A, B" });
+    expect(said?.label).toBe("Mongo · No · A, B");
+  });
+
+  it("names how a form was turned down, and does not make up answers", () => {
+    const { a, card } = form({ db: { type: "string", title: "Which database?" } });
+    expect(a.describeAnswer!(card, { result: { action: "decline" } })).toEqual({ label: "Decline" });
+    expect(a.describeAnswer!(card, { result: { action: "cancel" } })).toEqual({ label: "Cancel" });
+    // Only the verdict was kept (the answer was too long for the log).
+    expect(a.describeAnswer!(card, { result: { action: "accept" } })).toBeNull();
+    const nothingToFill = form({});
+    expect(nothingToFill.a.describeAnswer!(nothingToFill.card, { result: { action: "accept", content: {} } })).toEqual({ label: "Accept" });
+  });
+});
+
 describe("pictures", () => {
   const PIC = { mime: "image/png", data: "iVBORw0KGgo=", path: "C:\\Temp\\kelpie-composer\\image-1.png" };
   const open = (image: boolean) => {
@@ -71,6 +120,52 @@ describe("pictures", () => {
     a.onMessage({ jsonrpc: "2.0", id: "kelpie-session", result: { sessionId: "s-1" } }, "");
     const prompt = h.written.find((w) => w.method === "session/prompt");
     expect(prompt.params.prompt[0]).toMatchObject({ type: "image", data: PIC.data });
+  });
+
+  it("shows the picture beside the text, without its bytes", () => {
+    const { h, a } = open(true);
+    a.send("what is this?", true, [PIC]);
+    expect(h.items().at(-1)).toMatchObject({ kind: "user", text: "what is this?", images: [{ name: "image-1.png", mime: "image/png", path: PIC.path }] });
+    expect((h.items().at(-1) as any).images[0].data).toBeUndefined();
+  });
+
+  it("says when the agent cannot take the picture itself", () => {
+    expect(open(true).a.takesPictures!()).toBe(true);
+    expect(open(false).a.takesPictures!()).toBe(false);
+    // Not known yet: nothing to warn about.
+    expect(createAcpAdapter(harness().ctx).takesPictures!()).toBe(true);
+  });
+
+  it("reads the pictures of a loaded conversation's user message", () => {
+    const { h, a } = open(true);
+    const chunk = (content: unknown) => ({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "user_message_chunk", content } } });
+    a.onMessage(chunk({ type: "image", mimeType: "image/png", data: "QUJD" }), "");
+    a.onMessage(chunk({ type: "text", text: "look" }), "");
+    a.onMessage(chunk({ type: "image", uri: "file:///etc/x.png" }), "");
+    expect(h.items().at(-1)).toMatchObject({ kind: "user", text: "look", images: [{ name: "Picture 1", mime: "image/png", data: "QUJD" }, { name: "Picture 2" }] });
+    // A location the agent names is not kept: it could point anywhere.
+    expect(JSON.stringify(h.items().at(-1))).not.toContain("file:");
+  });
+
+  const imageChunk = (content: unknown) => ({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "user_message_chunk", content } } });
+
+  it("is only a name when the daemon took the picture's bytes out", () => {
+    const { h, a } = open(true);
+    a.onMessage(imageChunk({ type: "image", mimeType: "image/png", data: "", kelpie_stripped: 9 }), "");
+    expect(h.items().at(-1)).toEqual({ kind: "user", id: expect.any(String), text: "", streaming: false, images: [{ name: "Picture 1" }] });
+  });
+
+  it("a watcher keeps only the names of replayed pictures", () => {
+    const { h, a } = open(true);
+    h.ctx.namesOnly = true;
+    a.onMessage(imageChunk({ type: "image", mimeType: "image/png", data: "QUJD" }), "");
+    expect((h.items().at(-1) as any).images).toEqual([{ name: "Picture 1" }]);
+  });
+
+  it("a new conversation takes no pictures", () => {
+    const { a } = open(true);
+    expect(a.isCommand!("/new", true)).toBe(true);
+    expect(a.isCommand!("look", true)).toBe(false);
   });
 });
 

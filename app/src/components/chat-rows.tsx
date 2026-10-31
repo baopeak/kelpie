@@ -2,32 +2,27 @@
 // diffs, folded runs of reads and searches, collapsed thinking, approval cards (with questions,
 // plans and a message for the agent) and the files a turn changed.
 import { For, Show, createMemo, createSignal } from "solid-js";
-import type { ChatController, ChatItem } from "../chat/chat-model";
+import { projectRelative } from "../chat/chat-links";
+import { type ChatController, type ChatItem, matchAnswer } from "../chat/chat-model";
 import { type ToolView, basename, describeTool, diffStats, stripProjectRoot } from "../chat/tool-view";
 import { store } from "../lib/store";
 import type { Project } from "../lib/types";
 import { CopyButton } from "./chat-copy";
 import { Icon } from "./icons";
-import { t } from "../lib/i18n";
+import { locale, t } from "../lib/i18n";
 
 type Tool = Extract<ChatItem, { kind: "tool" }>;
 type Permission = Extract<ChatItem, { kind: "permission" }>;
 export interface FileChange { path: string; adds: number; dels: number }
 
-/** `path` relative to the project folder, or null when it lies outside. */
-export function projectRelative(project: Project, path: string): string | null {
-  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-  const root = norm(project.path);
-  const p = norm(path).replace(/^\.\//, "");
-  if (p.split("/").includes("..")) return null;
-  if (!/^([a-zA-Z]:)?\//.test(p)) return p;
-  const win = /^[a-zA-Z]:/.test(root);
-  const same = (a: string, b: string) => (win ? a.toLowerCase() === b.toLowerCase() : a === b);
-  return same(p.slice(0, root.length), root) && p[root.length] === "/" ? p.slice(root.length + 1) : null;
-}
+/** Vietnamese interface: Vietnamese dates; English: the system's own date format. */
+const clockLocale = () => (locale() === "vi" ? "vi-VN" : []);
+/** "23/10 16:02" (the full date and time on hover). */
+export const clock = (at: number) => new Date(at).toLocaleString(clockLocale(), { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+export const fullClock = (at: number) => new Date(at).toLocaleString(clockLocale(), { dateStyle: "full", timeStyle: "medium" });
 
 /** Long text cut to `lines` (the first ones, or the last for output), with a way to see it all. */
-function Clamped(props: { text: string; lines?: number; tail?: boolean; class?: string }) {
+export function Clamped(props: { text: string; lines?: number; tail?: boolean; class?: string }) {
   const [all, setAll] = createSignal(false);
   const rows = createMemo(() => props.text.replace(/\n+$/, "").split("\n"));
   const max = () => props.lines ?? 12;
@@ -72,7 +67,9 @@ function Stats(props: { adds: number; dels: number }) {
 
 const dotClass = (status: Tool["status"]) => (status === "running" ? " running" : status === "error" ? " error" : "");
 
-export function ToolRow(props: { item: Tool; project: Project; nested?: boolean }) {
+/** `noAskCards`: the transcript has no question cards (a conversation reloaded from the agent's own
+ *  history), so a question's row, with what was answered as its output, stands in for its card. */
+export function ToolRow(props: { item: Tool; project: Project; nested?: boolean; noAskCards?: boolean }) {
   const view = createMemo<ToolView>(() => describeTool(props.item));
   const stats = createMemo(() => (props.item.diff ?? []).reduce((acc, d) => {
     const s = diffStats(d.text);
@@ -80,16 +77,26 @@ export function ToolRow(props: { item: Tool; project: Project; nested?: boolean 
   }, { adds: 0, dels: 0 }));
   // Edits and commands show their content; reads, searches and the rest only when asked.
   const [open, setOpen] = createSignal<boolean | null>(null);
-  const isOpen = () => open() ?? (view().category === "edit" || view().category === "command" || props.item.status === "error");
+  const isOpen = () => open() ?? (view().category === "edit" || view().category === "command" || props.item.status === "error" || (!!props.noAskCards && props.item.name === "AskUserQuestion" && !!props.item.output));
   const hasBody = () => !!(props.item.diff?.length || view().command || props.item.output || props.item.input);
   // Reads and searches name project files, so they show them relative to it.
   const target = () => (view().category === "read" || view().category === "search" ? stripProjectRoot(view().target, props.project.path) : view().target);
+  const rel = createMemo(() => (view().path ? projectRelative(props.project, view().path!) : null));
+  const isEdit = () => view().category === "edit";
   return (
-    <div class={`trow tool${dotClass(props.item.status)}${props.nested ? " nested" : ""}${props.item.status === "error" ? " error" : ""}`}>
+    <div class={`trow tool${dotClass(props.item.status)}${props.nested ? " nested" : ""}${props.item.status === "error" ? " error" : ""}`} data-item={props.nested ? undefined : props.item.id}>
       <div class="tool-head" onClick={() => hasBody() && setOpen(!isOpen())}>
         <span class="tdot" />
         <span class="tname">{view().verb}</span>
-        <span class="tsum" title={view().target}>{target()}</span>
+        {/* Only the name is the button: the rest of the row still folds it. */}
+        <span class="tsum" title={view().target}>
+          <Show when={rel()} fallback={target()}>
+            <button class="link-btn tool-target" title={isEdit() ? t("Open the file's changes") : t("Open file")} onClick={(e) => {
+              e.stopPropagation();
+              store.openFile(props.project.id, rel()!, isEdit() ? { diff: true } : { line: view().line });
+            }}>{target()}</button>
+          </Show>
+        </span>
         <Show when={view().detail}><span class="tdetail">{view().detail}</span></Show>
         <Show when={stats().adds || stats().dels}><Stats {...stats()} /></Show>
         <Show when={hasBody()}><Icon name={isOpen() ? "chevronDown" : "chevronRight"} size={12} /></Show>
@@ -141,7 +148,7 @@ export function ToolRun(props: { items: Tool[]; project: Project }) {
     return (running() ? t("Exploring {what}", { what: parts.join(", ") }) : t("Explored {what}", { what: parts.join(", ") }));
   });
   return (
-    <div class={`trow tool run${running() ? " running" : failed() ? " error" : ""}`}>
+    <div class={`trow tool run${running() ? " running" : failed() ? " error" : ""}`} data-item={props.items[0].id}>
       <div class="tool-head" onClick={() => setOpen(!open())}>
         <span class="tdot" />
         <span class="tname">{label()}</span>
@@ -161,8 +168,8 @@ export function ThinkingRow(props: { item: Extract<ChatItem, { kind: "thinking" 
   const [open, setOpen] = createSignal(false);
   const secs = () => (props.item.at != null && props.item.doneAt != null ? Math.max(1, Math.round((props.item.doneAt - props.item.at) / 1000)) : null);
   return (
-    <Show when={!props.item.streaming} fallback={<div class="trow thinking running"><div class="msg-thinking live">{props.item.text.split("\n").slice(-6).join("\n")}</div></div>}>
-      <div class="trow thinking">
+    <Show when={!props.item.streaming} fallback={<div class="trow thinking running" data-item={props.item.id}><div class="msg-thinking live">{props.item.text.split("\n").slice(-6).join("\n")}</div></div>}>
+      <div class="trow thinking" data-item={props.item.id}>
         <div class="tool-head plain" onClick={() => setOpen(!open())}>
           <span class="tdot" />
           <span class="thought">{secs() ? t("Thought for {n}s", { n: secs()! }) : t("Thought")}</span>
@@ -174,8 +181,57 @@ export function ThinkingRow(props: { item: Extract<ChatItem, { kind: "thinking" 
   );
 }
 
+/** What a settled card says: who answered and when, then the questions with the choices marked, or the
+ *  option chosen, and the message that went with a denial. */
+function CardAnswerView(props: { item: Permission }) {
+  const a = () => props.item.answered;
+  const [open, setOpen] = createSignal(true);
+  const questions = () => (a()?.answers ? props.item.ask ?? [] : []);
+  return (
+    <>
+      <Show when={a()?.by} fallback={<Show when={a()?.at}><div class="perm-who" title={fullClock(a()!.at!)}>{clock(a()!.at!)}</div></Show>}>
+        <div class="perm-who">{props.item.resolved}</div>
+      </Show>
+      <Show when={questions().length} fallback={<div class="muted perm-chosen" style={{ padding: 0 }}>→ {a()?.label ?? props.item.resolved}</div>}>
+        <div class="perm-answers">
+          <div class="perm-answers-head" onClick={() => setOpen(!open())}>
+            <span>{questions().length === 1 ? t("Answered · 1 question") : t("Answered · {n} questions", { n: questions().length })}</span>
+            <Icon name={open() ? "chevronDown" : "chevronRight"} size={12} />
+          </div>
+          <Show when={open()}>
+            <For each={questions()}>
+              {(q) => {
+                const match = createMemo(() => matchAnswer(a()?.answers?.[q.question] ?? "", q.options));
+                return (
+                  <div class="ask">
+                    <div class="ask-q"><Show when={q.header}><span class="ask-tag">{q.header}</span></Show>{q.question}</div>
+                    <Show when={q.options.length}>
+                      <div class="ask-opts">
+                        <For each={q.options}>
+                          {(o) => (
+                            <span class={`btn ask-opt${match().chosen.has(o.label) ? " sel" : ""}`} aria-disabled="true" title={o.description}>
+                              {o.label}<Show when={o.description}><span class="detail">{o.description}</span></Show>
+                            </span>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                    {/* A question with no options only has what was typed. */}
+                    <Show when={match().other}><div class="perm-other">{q.options.length ? t("Other: {text}", { text: match().other }) : match().other}</div></Show>
+                  </div>
+                );
+              }}
+            </For>
+          </Show>
+        </div>
+      </Show>
+      <Show when={a()?.message}><div class="perm-said">{a()!.message}</div></Show>
+    </>
+  );
+}
+
 /** An approval, with what it is about: the command, the edit, the plan, or questions to answer. */
-export function PermissionCard(props: { item: Permission; ctrl: ChatController; markdown: (text: string) => any }) {
+export function PermissionCard(props: { item: Permission; project: Project; ctrl: ChatController; markdown: (text: string) => any }) {
   const p = () => props.item;
   const [message, setMessage] = createSignal("");
   const [picked, setPicked] = createSignal<Record<string, string[]>>({});
@@ -197,17 +253,32 @@ export function PermissionCard(props: { item: Permission; ctrl: ChatController; 
   };
   const complete = () => (p().ask ?? []).every((q) => answers()[q.question]);
   return (
-    <div class="perm" classList={{ resolved: !!p().resolved }} data-perm={p().id}>
+    <div class="perm" classList={{ resolved: !!p().resolved }} data-item={p().id}>
       <div class="q">{p().title}</div>
       <Show when={p().detail}><div class="perm-detail">{p().detail}</div></Show>
       <Show when={p().command}><pre class="perm-command">{p().command}</pre></Show>
       <Show when={p().diff?.length}>
         <div class="tool-body perm-diff">
-          <For each={p().diff}>{(d) => <><div class="diff-file">{basename(d.path)}</div><DiffLines text={d.text} /></>}</For>
+          <For each={p().diff}>
+            {(d) => {
+              const rel = projectRelative(props.project, d.path);
+              return (
+                <>
+                  <div class="diff-file">
+                    {/* The file, not its changes: until this is answered they are not on disk. */}
+                    <Show when={rel} fallback={basename(d.path)}>
+                      <button class="link-btn" title={t("Open file")} onClick={() => store.openFile(props.project.id, rel!)}>{rel}</button>
+                    </Show>
+                  </div>
+                  <DiffLines text={d.text} />
+                </>
+              );
+            }}
+          </For>
         </div>
       </Show>
       <Show when={p().plan}><div class="perm-plan">{props.markdown(p().plan!)}</div></Show>
-      <Show when={!p().resolved} fallback={<div class="muted" style={{ padding: 0 }}>→ {p().resolved}</div>}>
+      <Show when={!p().resolved} fallback={<CardAnswerView item={p()} />}>
         <Show when={p().ask?.length}>
           <For each={p().ask}>
             {(q) => (
@@ -252,11 +323,11 @@ export function PermissionCard(props: { item: Permission; ctrl: ChatController; 
 }
 
 /** "3 files changed +42 −7", each file opening its changes. */
-export function TurnFiles(props: { files: FileChange[]; project: Project }) {
+export function TurnFiles(props: { itemId: string; files: FileChange[]; project: Project }) {
   const [open, setOpen] = createSignal(props.files.length <= 4);
   const total = () => props.files.reduce((acc, f) => ({ adds: acc.adds + f.adds, dels: acc.dels + f.dels }), { adds: 0, dels: 0 });
   return (
-    <div class="turn-files">
+    <div class="turn-files" data-item={props.itemId}>
       <div class="tool-head" onClick={() => setOpen(!open())}>
         <Icon name="git" size={12} />
         <span class="tname">{props.files.length === 1 ? t("1 file changed") : t("{n} files changed", { n: props.files.length })}</span>

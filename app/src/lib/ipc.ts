@@ -44,6 +44,9 @@ export const sendInput = (handle: number, data: string, binary = false) =>
 export const loadState = () => invoke<unknown>("state_load");
 export const saveState = (state: unknown) => invoke<void>("state_save", { state });
 export const stateBackup = (label: string) => invoke<string | null>("state_backup", { label });
+export const loadBookmarks = () => invoke<unknown>("bookmarks_load");
+/** Applied to the file as it is now. `at_limit`: `add` was refused, the project has this many. */
+export const applyBookmarks = (change: { add?: unknown; remove?: string }) => invoke<{ items: unknown[]; at_limit: number | null }>("bookmarks_apply", change);
 /** `text` with recognisable credentials masked (`kelpie_proto::redact`): for anything Kelpie
  *  sends out of a session. */
 export const redact = (text: string) => invoke<string[]>("redact_batch", { texts: [text] }).then((r) => r[0] ?? "");

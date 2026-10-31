@@ -135,13 +135,174 @@ describe("pictures", () => {
       type: "user",
       message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: PIC.data } }, { type: "text", text: "what is this?" }] },
     });
-    expect(h.items()[0]).toMatchObject({ kind: "user", text: "what is this?\n[image-1.png]" });
+    // The picture is not part of the words: it travels beside them, by path, with no bytes in the store.
+    expect(h.items()[0]).toMatchObject({ kind: "user", text: "what is this?", pending: true, images: [{ name: "image-1.png", mime: "image/png", path: PIC.path }] });
+    expect((h.items()[0] as any).images[0].data).toBeUndefined();
   });
 
   it("sends a picture alone without an empty text block", () => {
     const h = harness();
     createClaudeAdapter(h.ctx).send("", true, [PIC]);
     expect(h.written[0].message.content).toEqual([{ type: "image", source: { type: "base64", media_type: "image/png", data: PIC.data } }]);
+  });
+
+  // The echo as recorded from Claude Code 2.1.314: picture blocks ahead of the text, or alone.
+  const IMAGE = { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } };
+  const echo = (...content: unknown[]) => ({ type: "user", uuid: "u1", message: { role: "user", content }, session_id: "s" });
+
+  it("confirms a message with a picture when its echo comes, without a second copy", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.send("what is this?", true, [PIC]);
+    a.onMessage(echo(IMAGE, { type: "text", text: "what is this?" }), "");
+    expect(h.items()).toHaveLength(1);
+    expect(h.items()[0]).toMatchObject({ text: "what is this?", pending: false, images: [{ name: "image-1.png", path: PIC.path }] });
+    // The echo's bytes are not kept: this message has its path.
+    expect((h.items()[0] as any).images[0].data).toBeUndefined();
+  });
+
+  it("confirms a picture alone: its echo has no text", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.send("", true, [PIC]);
+    a.onMessage(echo(IMAGE), "");
+    expect(h.items()).toHaveLength(1);
+    expect(h.items()[0]).toMatchObject({ text: "", pending: false, images: [{ path: PIC.path }] });
+  });
+
+  it("confirms the oldest waiting picture first", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    h.ctx.upsert({ kind: "user", id: "first", text: "", pending: true, images: [{ name: "image-1.png", path: PIC.path }] });
+    h.ctx.upsert({ kind: "user", id: "second", text: "", pending: true, images: [{ name: "image-2.png", path: PIC.path }] });
+    a.onMessage(echo(IMAGE), "");
+    expect(h.items().map((i: any) => i.pending)).toEqual([false, true]);
+  });
+
+  it("leaves plain text as it was", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.send("hello");
+    a.onMessage(echo({ type: "text", text: "hello" }), "");
+    expect(h.items()).toHaveLength(1);
+    expect(h.items()[0]).toMatchObject({ text: "hello", pending: false });
+    expect((h.items()[0] as any).images).toBeUndefined();
+  });
+
+  it("a replayed message keeps the picture bytes the log has, apart from its text", () => {
+    const h = harness(true);
+    createClaudeAdapter(h.ctx).onMessage(echo(IMAGE, { type: "text", text: "what is this?" }), "");
+    expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "what is this?", images: [{ name: "Picture 1", mime: "image/png", data: "QUJD" }] }]);
+    expect(h.written).toEqual([]);
+  });
+
+  it("a replayed picture alone shows as a message", () => {
+    const h = harness(true);
+    createClaudeAdapter(h.ctx).onMessage(echo(IMAGE, IMAGE), "");
+    expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "", images: [{ name: "Picture 1", mime: "image/png", data: "QUJD" }, { name: "Picture 2", mime: "image/png", data: "QUJD" }] }]);
+  });
+
+  it("history from Claude's own transcript keeps only the names of its pictures", () => {
+    const h = harness();
+    applyClaudeMessage(h.ctx, echo(IMAGE, { type: "text", text: "old" }), { msgId: null }, true);
+    expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "old", images: [{ name: "Picture 1" }] }]);
+  });
+
+  describe("a message that starts with <", () => {
+    const TAGGED = "<b>bold</b> what is this?";
+
+    it("is confirmed by its echo, with its picture: not dim for ever, no second copy", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.send(TAGGED, true, [PIC]);
+      a.onMessage(echo(IMAGE, { type: "text", text: TAGGED }), "");
+      expect(h.items()).toHaveLength(1);
+      expect(h.items()[0]).toMatchObject({ text: TAGGED, pending: false, images: [{ name: "image-1.png", path: PIC.path }] });
+    });
+
+    it("is confirmed without a picture too", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.send(TAGGED);
+      a.onMessage(echo({ type: "text", text: TAGGED }), "");
+      expect(h.items()).toHaveLength(1);
+      expect(h.items()[0]).toMatchObject({ text: TAGGED, pending: false });
+    });
+
+    it("does not clear a picture waiting alone", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      h.ctx.upsert({ kind: "user", id: "alone", text: "", pending: true, images: [{ name: "image-1.png", path: PIC.path }] });
+      a.send(TAGGED, true, [PIC]);
+      a.onMessage(echo(IMAGE, { type: "text", text: TAGGED }), "");
+      expect(h.items().map((i: any) => [i.text, i.pending])).toEqual([["", true], [TAGGED, false]]);
+    });
+
+    it("is Claude's own when nothing is waiting with that text: no bubble, and nothing cleared", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.send("", true, [PIC]);
+      a.onMessage(echo(IMAGE, { type: "text", text: "<system-reminder>x</system-reminder>" }), "");
+      expect(h.items()).toHaveLength(1);
+      expect(h.items()[0]).toMatchObject({ text: "", pending: true });
+    });
+
+    it("gives a picture to the words beside Claude's own text", () => {
+      const h = harness();
+      createClaudeAdapter(h.ctx).onMessage(echo({ type: "text", text: "<system-reminder>x</system-reminder>" }, IMAGE, { type: "text", text: "real" }), "");
+      expect(h.items()).toMatchObject([{ text: "real", images: [{ name: "Picture 1" }] }]);
+    });
+  });
+
+  describe("an echo the daemon took the bytes out of", () => {
+    const STRIPPED = { type: "image", source: { type: "base64", media_type: "image/png", data: "", kelpie_stripped: PIC.data.length } };
+
+    it("confirms the message, which keeps its own picture", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.send("what is this?", true, [PIC]);
+      a.onMessage(echo(STRIPPED, { type: "text", text: "what is this?" }), "");
+      expect(h.items()).toHaveLength(1);
+      expect(h.items()[0]).toMatchObject({ pending: false, images: [{ path: PIC.path }] });
+    });
+
+    it("finds a picture sent from this window again when the log is replayed", () => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.send("", true, [PIC]);
+      h.ctx.clear();
+      a.reset();
+      a.onMessage(echo(STRIPPED), "");
+      expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "", images: [{ name: "image-1.png", mime: "image/png", path: PIC.path }] }]);
+    });
+
+    it("is only a name when it was not sent from this window", () => {
+      const h = harness(true);
+      createClaudeAdapter(h.ctx).onMessage(echo(STRIPPED, { type: "text", text: "old" }), "");
+      expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "old", images: [{ name: "Picture 1" }] }]);
+    });
+  });
+
+  it("a watcher keeps only the names of replayed pictures", () => {
+    const h = harness(true);
+    h.ctx.namesOnly = true;
+    createClaudeAdapter(h.ctx).onMessage(echo(IMAGE, { type: "text", text: "look" }), "");
+    expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "look", images: [{ name: "Picture 1" }] }]);
+  });
+
+  it("a command takes no pictures", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage(INIT, "");
+    expect(a.isCommand!("/login", true)).toBe(true);
+    expect(a.isCommand!("what is /login?", true)).toBe(false);
+    expect(a.isCommand!("/compact", true)).toBe(false);
+  });
+
+  it("a picture block with something other than bytes in it is only a name", () => {
+    const h = harness();
+    applyClaudeMessage(h.ctx, echo({ type: "image", source: { type: "url", url: "https://example.com/x.png" } }), { msgId: null });
+    expect(h.items()).toEqual([{ kind: "user", id: "u1", text: "", images: [{ name: "Picture 1" }] }]);
   });
 });
 
@@ -247,6 +408,57 @@ describe("createClaudeAdapter", () => {
     expect(h.written.at(-1).response.response).toEqual({ behavior: "allow", updatedInput: { ...input, answers: { "Which database?": "Postgres" } } });
   });
 
+  describe("a logged answer", () => {
+    const LINE = { type: "kelpie_answer", request_id: "req-1", by: "desktop", answered_by: "desktop", at: 1, answer: { behavior: "allow", lasting: false } };
+    const card = (tool: string, input: unknown) => {
+      const h = harness();
+      const a = createClaudeAdapter(h.ctx);
+      a.onMessage({ type: "control_request", request_id: "req-1", request: { subtype: "can_use_tool", tool_name: tool, input } }, "");
+      return { a, h, card: h.items()[0] as Extract<ChatItem, { kind: "permission" }> };
+    };
+
+    it("is not the adapter's to read: the controller takes it first", () => {
+      const { a, h } = card("Bash", { command: "ls" });
+      const before = h.items();
+      a.onMessage(LINE, JSON.stringify(LINE));
+      expect(h.items()).toEqual(before);
+      expect(h.written).toEqual([]);
+    });
+
+    it("is described in the card's own words", () => {
+      const bash = card("Bash", { command: "ls" });
+      const describe = (c: typeof bash, answer: unknown) => c.a.describeAnswer!(c.card, answer);
+      expect(describe(bash, { behavior: "allow", lasting: false })).toEqual({ label: "Allow" });
+      expect(describe(bash, { behavior: "allow", lasting: true })).toEqual({ label: "Allow for session" });
+      // A suggestion can set a mode on an ordinary card: the card has no such option.
+      expect(describe(bash, { behavior: "allow", lasting: true, mode: "acceptEdits" })).toEqual({ label: "Allow for session" });
+      expect(describe(bash, { behavior: "deny", message: "use dir", lasting: false })).toEqual({ label: "Deny", message: "use dir" });
+      const plan = card("ExitPlanMode", { plan: "x" });
+      expect(describe(plan, { behavior: "allow", lasting: true, mode: "acceptEdits" })).toEqual({ label: "Yes, and accept edits" });
+      expect(describe(plan, { behavior: "allow", lasting: false })).toEqual({ label: "Yes, ask before edits" });
+      expect(describe(plan, { behavior: "deny", lasting: false })).toMatchObject({ label: "Keep planning" });
+    });
+
+    it("says what the person answered, not the agent's words for a denial with no message", () => {
+      const ask = card("AskUserQuestion", { questions: [{ question: "Which?", options: [{ label: "A" }] }, { question: "Where?", options: [{ label: "B" }] }] });
+      expect(ask.a.describeAnswer!(ask.card, { behavior: "allow", answers: { "Which?": "A", "Where?": "there" }, lasting: false })).toEqual({ label: "A · there", answers: { "Which?": "A", "Where?": "there" } });
+      expect(ask.a.describeAnswer!(ask.card, { behavior: "deny", message: "The user denied this action.", lasting: false })).toEqual({ label: "Skip", message: undefined });
+    });
+
+    it("does not take a tool's own `answers` input for answers to a question", () => {
+      const tool = card("mcp__survey__submit", { answers: { "Q?": "the tool's input" } });
+      expect(tool.a.describeAnswer!(tool.card, { behavior: "allow", answers: { "Q?": "the tool's input" }, lasting: false })).toEqual({ label: "Allow" });
+    });
+
+    it("is not known when it is not one, or only the verdict of a question is left", () => {
+      const ask = card("AskUserQuestion", { questions: [{ question: "Which?", options: [{ label: "A" }] }] });
+      expect(ask.a.describeAnswer!(ask.card, { behavior: "allow", lasting: false })).toBeNull();
+      expect(ask.a.describeAnswer!(ask.card, { behavior: "allow", answers: { "Which?": 3 }, lasting: false })).toBeNull();
+      expect(ask.a.describeAnswer!(ask.card, { error: true })).toBeNull();
+      expect(ask.a.describeAnswer!(ask.card, {})).toBeNull();
+    });
+  });
+
   it("approves a plan and can switch to accepting edits", () => {
     const h = harness();
     const a = createClaudeAdapter(h.ctx);
@@ -342,5 +554,54 @@ describe("task events", () => {
     const a = createClaudeAdapter(h.ctx);
     a.onMessage(started("w1", { task_type: "local_agent", awaited: true }), "");
     expect(h.state.tasks[0].background).toBe(false);
+  });
+});
+
+describe("the agent map's runs", () => {
+  const started = (id: string, extra: object = {}) => ({ type: "system", subtype: "task_started", task_id: id, tool_use_id: `toolu_${id}`, description: `Run ${id}`, task_type: "local_agent", is_backgrounded: true, ...extra });
+  const subagent = (type: string, content: unknown[]) => ({ type, parent_tool_use_id: "toolu_a1", message: { id: "m", content } });
+
+  it("adds no rows and writes nothing for a subagent's lines, while the map follows them", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage(started("a1"), "");
+    a.onMessage(subagent("assistant", [{ type: "tool_use", id: "toolu_r", name: "Read", input: { file_path: "a.ts" } }, { type: "text", text: "Reading" }]), "");
+    a.onMessage(subagent("user", [{ type: "tool_result", tool_use_id: "toolu_r", content: "secret output" }]), "");
+    a.onMessage({ type: "stream_event", parent_tool_use_id: "toolu_a1", event: { type: "message_start", message: { id: "m2" } } }, "");
+    expect(h.items()).toEqual([]);
+    expect(h.written).toEqual([]);
+    expect(h.state.busy).toBe(false);
+    expect(h.state.agentRuns[0].activity.map((c) => [c.name, c.target, c.status])).toEqual([["Read", "a.ts", "done"]]);
+    expect(JSON.stringify(h.state.agentRuns)).not.toContain("secret output");
+  });
+
+  it("leaves the strip as it is: it drops what ended and skips what is nested, and the map keeps both", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage(started("a1"), "");
+    a.onMessage(started("n1", { parent_task_id: "a1" }), "");
+    expect(h.state.tasks.map((x) => x.id)).toEqual(["a1"]);
+    a.onMessage({ type: "system", subtype: "task_notification", task_id: "a1", tool_use_id: "toolu_a1", status: "completed", summary: "done" }, "");
+    expect(h.state.tasks).toEqual([]);
+    expect(h.state.agentRuns.map((r) => [r.id, r.status])).toEqual([["toolu_a1", "done"], ["toolu_n1", "running"]]);
+  });
+
+  it("starts a run when an Agent call begins to stream, and names it when the call is complete", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "c1", name: "Task", input: {} } } }, "");
+    expect(h.state.agentRuns).toMatchObject([{ id: "c1", description: "", status: "running" }]);
+    a.onMessage({ type: "assistant", message: { id: "m", content: [{ type: "tool_use", id: "c1", name: "Task", input: { description: "Look", subagent_type: "explore", prompt: "Go" } }] } }, "");
+    expect(h.state.agentRuns).toMatchObject([{ id: "c1", description: "Look", type: "explore", prompt: "Go" }]);
+    expect(h.items()).toHaveLength(1);
+  });
+
+  it("makes no run of other tools, and none from a conversation's history, which lists by its rows", () => {
+    const h = harness();
+    const a = createClaudeAdapter(h.ctx);
+    a.onMessage({ type: "assistant", message: { id: "m", content: [{ type: "tool_use", id: "c1", name: "Bash", input: { command: "ls" } }] } }, "");
+    applyClaudeMessage(h.ctx, { type: "assistant", message: { id: "m2", content: [{ type: "tool_use", id: "c2", name: "Agent", input: { description: "Old" } }] } }, { msgId: null }, true);
+    expect(h.state.agentRuns).toEqual([]);
+    expect(h.items().map((i) => i.id)).toEqual(["c1", "c2"]);
   });
 });

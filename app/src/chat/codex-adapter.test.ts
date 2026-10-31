@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createStore, produce } from "solid-js/store";
+import { mergeRuns } from "./agent-runs";
 import { codexArgs, createCodexAdapter } from "./codex-adapter";
 import { type AdapterContext, type ChatItem, type ChatState, emptyChatState } from "./chat-model";
 
@@ -34,6 +35,37 @@ function openThread(a: ReturnType<typeof createCodexAdapter>) {
   a.onMessage({ id: "kelpie-thread", result: { thread: { id: "thr-1", turns: [] }, model: "gpt-5", sandbox: { type: "workspaceWrite" } } }, "");
 }
 
+describe("a logged answer", () => {
+  const LINE = { type: "kelpie_answer", request_id: 7, by: "desktop", answered_by: "desktop", at: 1, answer: { result: { decision: "accept" } } };
+  const make = (method = "item/commandExecution/requestApproval") => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    a.onMessage({ id: 7, method, params: { command: "ls" } }, "");
+    return { a, h, card: h.items()[0] as Extract<ChatItem, { kind: "permission" }> };
+  };
+
+  it("is not the adapter's to read: the controller takes it first", () => {
+    const { a, h } = make();
+    const before = h.items();
+    a.onMessage(LINE, JSON.stringify(LINE));
+    expect(h.items()).toEqual(before);
+    expect(h.written).toEqual([]);
+  });
+
+  it("maps the decision to the card's option, in the words of either kind of approval", () => {
+    const { a, card } = make();
+    const label = (decision: unknown) => a.describeAnswer!(card, { result: { decision } })?.label;
+    for (const [decision, want] of [["accept", "Allow"], ["approved", "Allow"], ["acceptForSession", "Allow for session"], ["approved_for_session", "Allow for session"], ["decline", "Decline"], ["denied", "Decline"]]) expect(label(decision)).toBe(want);
+  });
+
+  it("is not known when it is something else", () => {
+    const { a, card } = make();
+    expect(a.describeAnswer!(card, { result: { decision: "constructor" } })).toBeNull();
+    expect(a.describeAnswer!(card, { result: { decision: { somethingNew: true } } })).toBeNull();
+    expect(a.describeAnswer!(card, { error: true })).toBeNull();
+  });
+});
+
 describe("pictures", () => {
   const PIC = { mime: "image/png", data: "iVBORw0KGgo=", path: "C:\\Temp\\kelpie-composer\\image-1.png" };
 
@@ -55,6 +87,40 @@ describe("pictures", () => {
     a.onMessage({ id: "kelpie-init", result: {} }, "");
     a.onMessage({ id: "kelpie-thread", result: { thread: { id: "thr-1", turns: [] } } }, "");
     expect(h.written.find((w) => w.method === "turn/start").params.input).toContainEqual({ type: "localImage", path: PIC.path });
+  });
+
+  it("shows a waiting prompt's picture apart from its text, and hides both once the thread is open", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    a.start();
+    a.send("early", true, [PIC]);
+    expect(h.items()[0]).toMatchObject({ kind: "user", pending: true, text: "early", images: [{ name: "image-1.png", mime: "image/png", path: PIC.path }] });
+    a.onMessage({ id: "kelpie-init", result: {} }, "");
+    a.onMessage({ id: "kelpie-thread", result: { thread: { id: "thr-1", turns: [] } } }, "");
+    const shown = h.items()[0] as any;
+    expect(shown.text).toBe("");
+    expect(shown.images).toBeUndefined();
+  });
+
+  it("reads the local pictures of a user message, its text apart", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    a.onMessage({ method: "item/completed", params: { item: { type: "userMessage", id: "i1", content: [{ type: "text", text: "look" }, { type: "localImage", path: PIC.path }] } } }, "");
+    expect(h.items()).toEqual([{ kind: "user", id: "i1", text: "look", images: [{ name: "image-1.png", path: PIC.path }] }]);
+  });
+
+  it("knows what runs as a command, which takes no pictures", () => {
+    const a = createCodexAdapter(harness().ctx);
+    for (const text of ["/compact", "/review now", "/new", "/model x", "/diff", "!ls"]) expect(a.isCommand!(text, true), text).toBe(true);
+    for (const text of ["look at this", "/tmp is full", "/new thing", "", "!"]) expect(a.isCommand!(text, true), text).toBe(false);
+    expect(a.isCommand!("!ls", false)).toBe(false);
+  });
+
+  it("reads a picture alone from a replayed thread", () => {
+    const h = harness(true);
+    const a = createCodexAdapter(h.ctx);
+    a.onMessage({ id: "kelpie-thread", result: { thread: { id: "thr-1", turns: [{ items: [{ type: "userMessage", id: "i1", content: [{ type: "localImage", path: "/tmp/a.png" }] }] }] } } }, "");
+    expect(h.items()).toEqual([{ kind: "user", id: "i1", text: "", images: [{ name: "a.png", path: "/tmp/a.png" }] }]);
   });
 });
 
@@ -322,5 +388,38 @@ describe("createCodexAdapter", () => {
     a.onMessage({ id: req.id, error: { message: "no active turn" } }, "");
     expect(h.state.queue.map((q) => q.text)).toEqual(["also check b.ts"]);
     expect(h.items().filter((i) => i.kind === "system")).toEqual([]);
+  });
+});
+
+describe("a subagent call", () => {
+  const spawn = (extra: object = {}) => ({ type: "collabAgentToolCall", id: "s1", tool: "spawnAgent", prompt: "Look at the tests", status: "inProgress", senderThreadId: "thr-1", receiverThreadIds: [], agentsStates: {}, ...extra });
+
+  it("shows as an agent row that the agent map lists, without tokens", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    openThread(a);
+    a.onMessage({ method: "item/started", params: { item: spawn() } }, "");
+    expect(h.items()).toEqual([{ kind: "tool", id: "s1", name: "Agent", category: "agent", summary: "Look at the tests", input: { prompt: "Look at the tests" }, status: "running" }]);
+    a.onMessage({ method: "item/completed", params: { item: spawn({ status: "completed", receiverThreadIds: ["thr-2"] }) } }, "");
+    expect(h.items()).toMatchObject([{ id: "s1", status: "done" }]);
+    const [one] = mergeRuns(h.state.agentRuns, h.state.items, true);
+    expect(one).toMatchObject({ id: "s1", description: "Look at the tests", prompt: "Look at the tests", status: "done" });
+    expect(one.tokens).toBeUndefined();
+  });
+
+  it("marks a failed spawn, and takes a call with no prompt", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    openThread(a);
+    a.onMessage({ method: "item/completed", params: { item: spawn({ status: "failed", prompt: null }) } }, "");
+    expect(h.items()).toMatchObject([{ id: "s1", name: "Agent", summary: "", status: "error" }]);
+  });
+
+  it("shows nothing for its other collaboration calls", () => {
+    const h = harness();
+    const a = createCodexAdapter(h.ctx);
+    openThread(a);
+    for (const tool of ["sendInput", "resumeAgent", "wait", "closeAgent", undefined]) a.onMessage({ method: "item/completed", params: { item: spawn({ tool }) } }, "");
+    expect(h.items()).toEqual([]);
   });
 });

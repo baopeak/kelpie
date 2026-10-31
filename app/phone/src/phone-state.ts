@@ -219,6 +219,7 @@ function chatTransport(id: string): ChatTransport {
     async answer(requestId, line): Promise<AnswerOutcome> {
       return chatOutcome(await link.chatAnswer(id, requestId, line));
     },
+    deviceName: () => device()?.name,
   };
 }
 

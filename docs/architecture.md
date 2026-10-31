@@ -21,7 +21,7 @@ Kelpie (Tauri app)                        kelpied (session daemon, one per user)
 
 | Process | Lifetime | Owns |
 |---|---|---|
-| `Kelpie` | while the window is open | layout, settings (`app-state.json`), views |
+| `Kelpie` | while the window is open | layout, settings (`app-state.json`), saved chat replies (`chat-bookmarks.json`), views |
 | `kelpied` | until stopped explicitly (or logoff) | PTYs, agent processes, terminal state, `sessions.json`, snapshots |
 | `kelpie-stt` | while dictation is used (exits after 10 idle minutes) | the loaded speech model, the microphone stream |
 | agent CLIs | per session | — |
@@ -30,6 +30,12 @@ Kelpie (Tauri app)                        kelpied (session daemon, one per user)
 unknown format or one that cannot be read is first copied to
 `app-state.<label>-<time>.bak.json`; if that copy fails, or the file comes from a newer Kelpie,
 the app runs without saving rather than overwrite it.
+
+`chat-bookmarks.json` holds saved replies with their full text, so they outlast their session. Every
+change is applied by a native command to the file as it is at that moment and written atomically, so
+another running Kelpie's changes, a restored copy and entries this build does not understand all stay.
+A file that cannot be read is an error: it stays byte-identical, the feature is read-only until the next
+start, and the user is told once.
 
 Closing or crashing the app never stops a session. If `kelpied` itself stops, sessions that
 were running are restored *interrupted* with their last screen; the app resumes them when they
@@ -504,8 +510,43 @@ A chat session is a daemon `ChatSession`: the agent runs with piped stdio and th
 relays JSON lines (logged for replay on re-attach). The agents' lines carry no time, so the
 daemon puts a `{"type":"kelpie_time","at":<unix ms>}` line ahead of the first line of each
 second; a replay dates every item from it (Claude history read from its transcript uses the
-entries' own `timestamp`). Adapters in `app/src/chat` map each
-dialect to one item model (user, assistant, thinking, tool card with diff, permission, result):
+entries' own `timestamp`). Since API 20 the log also keeps the answers to the agent's questions, so
+a reopened window shows what was chosen, who chose it and when, for every dialect:
+`{"type":"kelpie_answer","request_id":…,"by":"desktop"|"phone","answered_by":<device name>,"at":<unix ms>,"answer":…}`,
+written after the answer went to the agent, once, for the first answer to a request the agent had
+open (`pending`) and that can still take it (its stdin is open). `answer` is sanitized: Claude's
+`behavior`, `message`, a question's `answers`, `lasting` and `mode`, never the rest of
+`updatedInput`, which can hold whole files; JSON-RPC's `result`, or `{"error":true}`.
+A line is at most 16 KiB: above that only the verdict stays. A request over 1 MiB is not tracked,
+so its answer is not recorded and after a replay its card says "No longer needed". ACP's
+`cancelled`, which a stop sends for a permission, writes no line; the `{"action":"cancel"}` it sends
+for an elicitation does, as it cannot be told from the person's own Cancel. A stop answers what is
+still open, also a card a replay showed, since the agent is waiting on it; one answered or expired is
+left alone. `ChatController` applies the line ahead of the adapter
+(`Adapter.describeAnswer` puts it in the card's words) and it never reaches an agent: a replayed
+answer only changes what a card shows. An older daemon writes none, and its cards say what they
+did; an older app's adapters ignore the type. Level 20 skips 18 and 19, which belong to the phone
+work on other branches. Claude 2.1.314 shrinks a picture before it echoes it (a 4 MB picture came
+back in a 680 KB line), so a replay usually shows the picture from the log. As a safety net, a line
+over 2 MiB (`PICTURE_LINE_MAX`) loses the bytes of the pictures in
+the person's message before it is logged or sent to anyone attached, because one 5 MB picture would
+evict most of the 12 MiB log, and a line over 4 MiB (`MAX_LINE`) would be replaced by a notice and
+take its words with it. That covers a Claude `user` line (the echo, or an image in a tool's result)
+and an ACP `user_message_chunk`; Codex logs carry paths, not bytes. Each picture keeps its type, with
+`data` empty and `kelpie_stripped` holding the length it had; everything else stays, and a shorter
+line is logged byte for byte. The transcript then shows the picture from its path if it was attached
+in this window, and otherwise a named placeholder. A path in a log or a history is agent output:
+`chat/chat-images.ts` reads one only if it was attached in this window or lies directly in the
+composer's temp folder, and `fs_read_image` refuses network paths in every spelling (`\\`, `//`,
+`/\`, `\??\`). A replay feeds the log in one Solid `batch`, as loading a history does: what watches
+the whole list would otherwise run for every line. Adapters in `app/src/chat` map each
+dialect to one item model (user, assistant, thinking, tool card with diff, permission, result).
+The agent map (`chat/agent-runs.ts`) is derived from the same stream, so a replay rebuilds it: on
+Claude Code a run's status comes from its `task_*` events and never from its tool row, because the
+Agent tool returns `async_launched` as soon as the agent is launched. Links in a reply carry their
+target in `data-href`, read on click by `parseChatLink` alone (`chat/chat-links.ts`): DOMPurify
+empties `file:` and `a.ts:42` hrefs, and `CHAT_SANITIZE` also drops what could navigate the window or
+cover its buttons (`form`, `area`, `style`, `class`). Nothing an agent names is ever launched.
 
 | Agent | Process | Protocol |
 |---|---|---|

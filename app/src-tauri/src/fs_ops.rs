@@ -209,6 +209,10 @@ fn fs_read_file_blocking(root: String, path: String, max_bytes: Option<u64>, as_
     use std::io::Read;
     let full = guard(&root, &path)?;
     let meta = std::fs::metadata(&full).map_err(err)?;
+    // Opening a FIFO waits for a writer, however few bytes are asked for.
+    if !meta.is_file() {
+        return Err(format!("{path}: not a file"));
+    }
     let limit = max_bytes.unwrap_or(8 << 20);
     let mut buf = Vec::with_capacity(meta.len().min(limit) as usize);
     std::fs::File::open(&full).map_err(err)?.take(limit).read_to_end(&mut buf).map_err(err)?;
@@ -401,25 +405,29 @@ fn image_mime(ext: &str) -> Option<&'static str> {
 /// Only picture types, and not past the temp-file limit.
 #[tauri::command]
 pub async fn fs_read_image(path: String) -> CmdResult<ImageData> {
-    blocking(move || {
-        use std::io::Read;
-        // A network path would make Windows sign in to whatever host it names.
-        if path.starts_with("\\\\") || path.starts_with("//") {
-            return Err("pictures on a network path are not read".into());
-        }
-        let path = Path::new(&path);
-        let mime = path.extension().and_then(|e| e.to_str()).and_then(image_mime).ok_or("not a picture file")?;
-        if std::fs::symlink_metadata(path).map_err(err)?.file_type().is_symlink() {
-            return Err("a link to a picture is not followed".into());
-        }
-        let mut data = Vec::new();
-        std::fs::File::open(path).map_err(err)?.take(TEMP_MAX_BYTES as u64 + 1).read_to_end(&mut data).map_err(err)?;
-        if data.len() > TEMP_MAX_BYTES {
-            return Err(format!("larger than {} MiB: too large to attach", TEMP_MAX_BYTES >> 20));
-        }
-        Ok(ImageData { mime, base64: base64::engine::general_purpose::STANDARD.encode(data) })
-    })
-    .await
+    blocking(move || read_image(path)).await
+}
+
+fn read_image(path: String) -> CmdResult<ImageData> {
+    use std::io::Read;
+    // A network path would make Windows sign in to whatever host it names. Windows takes either
+    // slash in either place, and `\??\` reaches the same redirector (`\??\UNC\host\…`,
+    // `\??\GLOBALROOT\Device\Mup\host\…`).
+    let forward = path.replace('\\', "/");
+    if forward.starts_with("//") || forward.starts_with("/??/") {
+        return Err("pictures on a network path are not read".into());
+    }
+    let path = Path::new(&path);
+    let mime = path.extension().and_then(|e| e.to_str()).and_then(image_mime).ok_or("not a picture file")?;
+    if std::fs::symlink_metadata(path).map_err(err)?.file_type().is_symlink() {
+        return Err("a link to a picture is not followed".into());
+    }
+    let mut data = Vec::new();
+    std::fs::File::open(path).map_err(err)?.take(TEMP_MAX_BYTES as u64 + 1).read_to_end(&mut data).map_err(err)?;
+    if data.len() > TEMP_MAX_BYTES {
+        return Err(format!("larger than {} MiB: too large to attach", TEMP_MAX_BYTES >> 20));
+    }
+    Ok(ImageData { mime, base64: base64::engine::general_purpose::STANDARD.encode(data) })
 }
 
 /// Removes what the composer left in the temp folder more than a few days ago (also at start-up:
@@ -446,6 +454,16 @@ pub async fn fs_write_temp(label: String, ext: String, base64: String) -> CmdRes
     .await
 }
 
+/// Runs `f` on its own thread: a read that blocks fails its test instead of hanging the suite.
+#[cfg(test)]
+pub(crate) fn unblocked<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the read blocked")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +483,70 @@ mod tests {
         assert!(write_temp(&dir, "x", "exe", b"x").is_err());
         assert!(write_temp(&dir, "x", "", b"x").is_err());
         assert!(write_temp(&dir, "x", "png", &vec![0; TEMP_MAX_BYTES + 1]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn folder_with_file(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kelpie-{label}-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"abc").unwrap();
+        dir
+    }
+
+    fn read(dir: &Path, path: &str) -> CmdResult<FileContent> {
+        let (root, path) = (dir.to_string_lossy().into_owned(), path.to_string());
+        unblocked(move || fs_read_file_blocking(root, path, Some(1), None))
+    }
+
+    #[test]
+    fn reads_only_regular_files() {
+        let dir = folder_with_file("read");
+        assert_eq!(read(&dir, "a.txt").unwrap().size, 3);
+        assert_eq!(read(&dir, "sub").err().unwrap(), "sub: not a file");
+        // Missing stays what it was: the system's own error, not a claim about the path's kind.
+        assert!(!read(&dir, "gone.txt").err().unwrap().contains("not a file"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_does_not_block_a_read() {
+        let dir = folder_with_file("read-fifo");
+        assert!(std::process::Command::new("mkfifo").arg(dir.join("pipe")).status().unwrap().success());
+        assert_eq!(read(&dir, "pipe").err().unwrap(), "pipe: not a file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_device_name_does_not_block_a_read() {
+        let dir = folder_with_file("read-device");
+        for path in ["CON", "sub/CON", "sub\\con", "NUL", "sub/NUL", "sub/COM1", "sub/CONIN$", "sub/AUX", "sub/PRN", "sub/CON.txt", "sub/con .txt"] {
+            assert!(read(&dir, path).is_err(), "{path} was read");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Refused before the system is asked: Windows would sign in to whatever host the path names.
+    #[test]
+    fn a_network_path_is_not_read_as_a_picture() {
+        for path in [r"/\host\x.png", r"\/host\x.png", r"\\host\x.png", "//host/x.png", r"\??\UNC\host\x.png", r"\??\GLOBALROOT\Device\Mup\host\x.png", "/??/UNC/host/x.png"] {
+            let given = path.to_string();
+            assert_eq!(unblocked(move || read_image(given)).err().unwrap(), "pictures on a network path are not read", "{path}");
+        }
+    }
+
+    #[test]
+    fn a_picture_in_a_folder_is_read_and_anything_else_is_not() {
+        let dir = folder_with_file("read-image");
+        std::fs::write(dir.join("x.PNG"), [1, 2, 3]).unwrap();
+        let read = |name: &str| {
+            let path = dir.join(name).to_string_lossy().into_owned();
+            unblocked(move || read_image(path))
+        };
+        let image = read("x.PNG").ok().unwrap();
+        assert_eq!((image.mime, image.base64.as_str()), ("image/png", "AQID"));
+        assert_eq!(read("a.txt").err().unwrap(), "not a picture file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

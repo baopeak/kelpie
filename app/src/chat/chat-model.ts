@@ -1,7 +1,9 @@
 // Chat-mode state shared by all agent adapters. Adapters translate their wire protocol
 // (Claude stream-json, Codex app-server, ACP) into these items; the UI only knows items.
+import { batch, createSignal } from "solid-js";
 import { createStore, produce, type SetStoreFunction } from "solid-js/store";
 import { t } from "../lib/i18n";
+import { type AgentRun, stopRunning } from "./agent-runs";
 import type { AnswerOutcome, ChatTransport } from "./transport";
 
 /** What a tool call does, for its row and for folding runs of reads and searches. */
@@ -13,6 +15,17 @@ export interface AskQuestion {
   header?: string;
   options: { label: string; description?: string }[];
   multiSelect?: boolean;
+  /** What the agent calls this answer, when that is not the question (ACP's form fields). */
+  key?: string;
+}
+
+/** What a resolved card says was answered. `answers` by question; `by` names another device. */
+export interface CardAnswer {
+  label: string;
+  answers?: Record<string, string>;
+  message?: string;
+  by?: string;
+  at?: number;
 }
 
 export interface PlanEntry {
@@ -22,7 +35,7 @@ export interface PlanEntry {
 
 /** `at` / `doneAt`: when the item appeared / finished, live only (a replayed log has no times). */
 export type ChatItem =
-  | { kind: "user"; id: string; text: string; pending?: boolean; at?: number }
+  | { kind: "user"; id: string; text: string; images?: UserImage[]; pending?: boolean; at?: number }
   | { kind: "assistant"; id: string; text: string; streaming?: boolean; group?: string; at?: number }
   | { kind: "thinking"; id: string; text: string; streaming?: boolean; group?: string; at?: number; doneAt?: number }
   | { kind: "tool"; id: string; name: string; summary: string; input?: unknown; output?: string; status: "running" | "done" | "error"; diff?: { path: string; text: string }[]; category?: ToolCategory; at?: number }
@@ -34,6 +47,8 @@ export type ChatItem =
       ask?: AskQuestion[];
       /** The deny option can carry a message to the agent. */
       feedback?: boolean;
+      /** What `resolved` stands for, when the answer is known. */
+      answered?: CardAnswer;
       /** Observer mode: the answer is on its way, not yet settled by the daemon. */
       answering?: boolean;
       /** Observer mode: the answer may not have gone through (`unknown`) or was refused; the person can answer again. */
@@ -59,11 +74,37 @@ export interface ChatImage {
   path: string;
 }
 
-/** What a message shows in the transcript: its text, and the names of the pictures under it. */
+/** A picture of a message in the transcript. One sent from here keeps its `path` and is read when
+ *  shown; one replayed from the log has the `data` the log kept, or is only a name. A path that did
+ *  not come from here is the agent's word for it: see `chat-images.ts` before reading one. */
+export interface UserImage {
+  name: string;
+  mime?: string;
+  path?: string;
+  data?: string;
+}
+
+const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+/** A message's text where only text will do (a queue chip, a note of what was not sent), the names of its pictures under it. */
 export function withImageNames(text: string, images?: ChatImage[]): string {
   if (!images?.length) return text;
-  const names = images.map((i) => `[${i.path.split(/[\\/]/).pop()}]`).join(" ");
+  const names = images.map((i) => `[${fileName(i.path)}]`).join(" ");
   return text ? `${text}\n${names}` : names;
+}
+
+/** The pictures of a message sent from here, as the transcript keeps them: by path, without their bytes. */
+export function sentImages(images?: ChatImage[]): UserImage[] | undefined {
+  return images?.length ? images.map((i) => ({ name: fileName(i.path), mime: i.mime, path: i.path })) : undefined;
+}
+
+/** A picture the agent's log names by path. */
+export const pathImage = (path: string): UserImage => ({ name: fileName(path), path });
+
+/** A picture the log has no name for, the `n`th of its message: with its bytes if it kept them. */
+export function loggedImage(n: number, mime?: unknown, data?: unknown): UserImage {
+  const name = t("Picture {n}", { n });
+  return typeof mime === "string" && typeof data === "string" && data ? { name, mime, data } : { name };
 }
 
 /** A message sent while the agent was busy, sent when its turn ends. */
@@ -127,6 +168,8 @@ export interface ChatState {
   usage: { used: number; size: number | null; cost?: number } | null;
   /** Tasks still running (Claude's task events); emptied when the agent exits. */
   tasks: AgentTask[];
+  /** Every subagent of the conversation, finished ones too, for the agent map. */
+  agentRuns: AgentRun[];
 }
 
 export interface Adapter {
@@ -142,6 +185,9 @@ export interface Adapter {
   immediate?(text: string, typed: boolean): boolean;
   interrupt(): void;
   respond(permissionId: string, optionId: string, reply?: PermissionReply): void;
+  /** A logged answer (the daemon's `kelpie_answer` record, in this dialect) in the card's own words, or
+   *  null when it is not one this card knows. Only reads: an answer replayed from the log is long gone. */
+  describeAnswer?(card: Extract<ChatItem, { kind: "permission" }>, answer: any): Pick<CardAnswer, "label" | "answers" | "message"> | null;
   /** Reset internal bookkeeping before a full log replay. */
   reset(): void;
   setSetting?(id: string, value: string): void;
@@ -150,6 +196,10 @@ export interface Adapter {
   seed?(settings: { model?: string | null; effort?: string | null }): void;
   /** How a picked file goes into the message (default `@path`). */
   mention?(path: string): string;
+  /** False when the agent is told where a picture is instead of being given it (default true). */
+  takesPictures?(): boolean;
+  /** Text that runs as a command rather than going to the agent as a message: no pictures go with it. */
+  isCommand?(text: string, typed: boolean): boolean;
 }
 
 export interface AdapterContext {
@@ -166,15 +216,40 @@ export interface AdapterContext {
   setModel(model: string | null): void;
   /** A replayed transcript line's own time (unix ms): items added after it carry it. */
   setClock?(at: number): void;
+  /** Now, or while replaying the time the log carried (none when it has not said): what a replay can rebuild. */
+  now?(): number | null;
+  /** The turn ended: cards still open can no longer be answered. Going idle says so too; this is for a turn
+   *  `busy` knows nothing of (a replay has no ACP prompt, which is what sets it there). */
+  expireApprovals?(): void;
   cwd: string;
   resumeId: string | null;
   replaying: () => boolean;
+  /** A watcher shows no pictures: the bytes a log has for one are not kept, only its name. */
+  namesOnly?: boolean;
 }
 
 export function emptyChatState(conversationId: string | null = null): ChatState {
   return {
     items: [], commands: [], skills: [], settings: [], busy: false, model: null, conversationId, ready: false, exited: false, status: null,
-    busySince: null, queue: [], queuePaused: false, plan: null, usage: null, tasks: [],
+    busySince: null, queue: [], queuePaused: false, plan: null, usage: null, tasks: [], agentRuns: [],
+  };
+}
+
+/** One mount's attaches. A controller outlives its mounts and `ready` with it: while this mount's attach
+ *  is on its way, `state` is still what the last mount left, about to be reset. `whole`: the transcript
+ *  is what this mount's newest attach brought. */
+export function mountAttach(ctrl: ChatController) {
+  const [attached, setAttached] = createSignal(false);
+  let newest = 0;
+  return {
+    attach(handle: number) {
+      const mine = ++newest;
+      setAttached(false);
+      void ctrl.attach(handle).then(() => {
+        if (mine === newest) setAttached(true);
+      });
+    },
+    whole: () => attached() && ctrl.state.ready,
   };
 }
 
@@ -188,8 +263,10 @@ export class ChatController {
   private adapter!: Adapter;
   private attachGen = 0;
   private isReplaying = false;
-  /** Answered approval ids (the agent's log does not contain our answers). */
-  private resolved = new Map<string, string>();
+  /** Settled approval ids, for an older daemon's log (which does not contain our answers) and for what was
+   *  settled here. `fromLog`: the log says it again on a replay, so a request under that id arriving now is that
+   *  replay or a new request that reuses the id, and asks until its own answer comes. `own`: the person's answer here. */
+  private resolved = new Map<string, { label: string; answered?: CardAnswer; fromLog?: boolean; own?: boolean }>();
   private started = false;
   private flushing = false;
   private queued = 0;
@@ -250,7 +327,7 @@ export class ChatController {
       },
       clear: () => {
         this.index.clear();
-        this.set({ items: [], plan: null, usage: null });
+        this.set({ items: [], plan: null, usage: null, agentRuns: [] });
       },
       setConversation: (id) => {
         if (this.state.conversationId === id) return;
@@ -263,9 +340,12 @@ export class ChatController {
         if (model && !this.isReplaying && !this.observer) this.transport.update?.({ model });
       },
       setClock: (at) => (this.clock = at),
+      now: () => this.now(),
+      expireApprovals: () => this.expireApprovals(),
       cwd: this.cwd,
       resumeId: this.resumeId,
       replaying: () => this.isReplaying,
+      namesOnly: this.observer,
     };
   }
 
@@ -294,7 +374,17 @@ export class ChatController {
   upsert(item: ChatItem) {
     // The daemon's reader and its exit watcher race: the agent's last lines can come after its exit.
     if (this.state.exited && "streaming" in item && item.streaming) item = { ...item, streaming: false };
-    if (item.kind === "permission" && this.resolved.has(item.id)) item = { ...item, resolved: this.resolved.get(item.id) };
+    if (item.kind === "permission") {
+      const settled = this.resolved.get(item.id);
+      if (settled?.fromLog) this.resolved.delete(item.id);
+      else if (settled) item = { ...item, resolved: settled.label, answered: settled.answered };
+      // A request among the agent's last lines, which can come after its exit: nothing can take an answer.
+      if (this.state.exited && !item.resolved) {
+        const label = t("No longer needed");
+        this.resolved.set(item.id, { label, fromLog: this.isReplaying });
+        item = { ...item, resolved: label };
+      }
+    }
     if (item.kind === "permission" && !item.resolved) {
       const saved = this.unsettled.get(item.id);
       const same = !!saved && saved.identity === cardIdentity(item);
@@ -313,6 +403,8 @@ export class ChatController {
       const prev = this.state.items[i];
       item = { ...item, at: prev.at ?? item.at } as ChatItem;
       if (item.kind === "thinking" && prev.kind === "thinking") item.doneAt = prev.doneAt;
+      // A store merge keeps what it is not told to drop: a request under a reused id is not answered yet.
+      if (item.kind === "permission") item = { ...item, resolved: item.resolved, answered: item.answered };
       this.set("items", i, finished(item, this.now()));
       return;
     }
@@ -334,7 +426,7 @@ export class ChatController {
   private resetState() {
     this.index.clear();
     this.buffer = "";
-    this.set({ items: [], busy: false, ready: false, status: null, plan: null, usage: null, tasks: [] });
+    this.set({ items: [], busy: false, ready: false, status: null, plan: null, usage: null, tasks: [], agentRuns: [] });
     this.adapter.reset();
   }
 
@@ -359,14 +451,21 @@ export class ChatController {
         this.clock = msg.at;
         continue;
       }
+      if (msg?.type === "kelpie_answer") {
+        this.applyLoggedAnswer(msg);
+        continue;
+      }
       if (msg?.type === "kelpie_exit") {
         this.set({ exited: true, busy: false, tasks: [] });
+        this.set("agentRuns", produce((runs: AgentRun[]) => stopRunning(runs, this.now() ?? undefined)));
+        // Also when `busy` did not know of the turn (an ACP replay): nothing can answer these now.
+        this.expireApprovals();
         // Nothing will finish what was still arriving.
         for (const it of this.state.items) if ((it as { streaming?: boolean }).streaming) this.patch(it.id, (i: any) => (i.streaming = false));
         this.upsert({ kind: "system", id: `exit-${Date.now()}`, text: t("Agent process exited (code {code}).", { code: String(msg.code) }), tone: "info" });
         // Nothing can take them now: show what was not sent rather than keep dead chips.
         if (this.state.queue.length) {
-          this.upsert({ kind: "system", id: `unsent-${Date.now()}`, text: t("Not sent:\n{messages}", { messages: this.state.queue.map((q) => q.text).join("\n") }), tone: "info" });
+          this.upsert({ kind: "system", id: `unsent-${Date.now()}`, text: t("Not sent:\n{messages}", { messages: this.state.queue.map((q) => withImageNames(q.text, q.images)).join("\n") }), tone: "info" });
           this.set("queue", []);
         }
         continue;
@@ -407,7 +506,9 @@ export class ChatController {
     if (gen !== this.attachGen) return;
     this.clock = null;
     this.isReplaying = true;
-    this.feed(snapshot);
+    // As one update: what watches the transcript settles once, on the whole log, and not per line. The
+    // state itself changes as before, line by line; and nothing could paint in between either way.
+    batch(() => this.feed(snapshot));
     this.isReplaying = false;
     applied = true;
     for (const chunk of early) this.feed(chunk);
@@ -452,6 +553,8 @@ export class ChatController {
   send(text: string, typed = false, images?: ChatImage[]) {
     if (this.observer) return;
     if ((!text.trim() && !images?.length) || this.state.exited) return;
+    // White space beside a picture is no text: it would show as an empty bubble.
+    if (!text.trim()) text = "";
     // Not attached yet: a re-attach replays the log and would wipe what is sent now.
     if ((this.state.busy || this.state.queue.length || !this.state.ready) && !this.adapter.immediate?.(text, typed)) {
       this.set("queue", (q) => [...q, { id: `q-${++this.queued}`, text, typed, images }]);
@@ -476,12 +579,12 @@ export class ChatController {
     });
   }
 
-  /** A turn that ended took its open approvals with it (answered before a replay — the log has
-   *  no answers — or dropped by the agent): they must not look, or be answered, as waiting. */
+  /** A turn that ended took its open approvals with it (dropped by the agent, or answered before a replay
+   *  of an older daemon's log, which has no answers): they must not look, or be answered, as waiting. */
   private expireApprovals() {
     for (const it of this.state.items) {
       if (it.kind === "permission" && !it.resolved) {
-        this.resolved.set(it.id, t("No longer needed"));
+        this.resolved.set(it.id, { label: t("No longer needed"), fromLog: this.isReplaying });
         this.patch(it.id, (i) => {
           if (i.kind === "permission") i.resolved = t("No longer needed");
         });
@@ -534,23 +637,83 @@ export class ChatController {
     return this.adapter.mention?.(path) ?? `@${path}`;
   }
 
+  takesPictures(): boolean {
+    return this.adapter.takesPictures?.() ?? true;
+  }
+
+  /** Whether pictures go with this text; a command takes none. */
+  takesPicturesWith(text: string, typed = true): boolean {
+    return !this.adapter.isCommand?.(text, typed);
+  }
+
   /** The agent's request `requestId` was answered by someone else (a phone, the first to answer wins):
    *  its card stops asking. Each adapter names a request's card after the agent's id its own way.
    *  `lost`: the daemon dropped an answer given here because another one had already counted, so a card
    *  that shows what was clicked here shows what happened instead. */
   resolvedElsewhere(requestId: string | number, lost = false, who?: { answeredBy?: string; at?: number }) {
+    const key = this.findCard(requestId);
+    const item = key == null ? undefined : this.state.items[this.index.get(key)!];
+    if (key == null || item?.kind !== "permission" || item.answering) return;
+    const label = who ? answeredBeforeText(who.answeredBy, who.at) : t("Answered on another device");
+    if (item.resolved && !(lost && item.resolved !== label)) return;
+    // The log already told who it was, and what they said.
+    if (item.answered?.by) return;
+    this.resolved.set(key, { label });
+    this.patch(key, (it) => {
+      if (it.kind === "permission") {
+        it.resolved = label;
+        it.answered = undefined;
+      }
+    });
+  }
+
+  /** The card of the agent's request `requestId`: each adapter names it after the agent's id its own
+   *  way. If a restart reused the id for another kind of request, the one still open. */
+  private findCard(requestId: string | number): string | undefined {
     const id = String(requestId);
-    for (const key of [id, `approval-${id}`, `perm-${id}`, `elicit-${id}`]) {
-      const i = this.index.get(key);
-      const item = i == null ? undefined : this.state.items[i];
-      if (item?.kind !== "permission" || item.answering) continue;
-      const label = who ? answeredBeforeText(who.answeredBy, who.at) : t("Answered on another device");
-      if (item.resolved && !(lost && item.resolved !== label)) continue;
-      this.resolved.set(key, label);
-      this.patch(key, (it) => {
-        if (it.kind === "permission") it.resolved = label;
-      });
+    const card = (key: string) => {
+      const item = this.state.items[this.index.get(key) ?? -1];
+      return item?.kind === "permission" ? item : undefined;
+    };
+    const keys = [id, `approval-${id}`, `perm-${id}`, `elicit-${id}`].filter((key) => card(key));
+    return keys.find((key) => !card(key)!.resolved) ?? keys[0];
+  }
+
+  /** The daemon's record of an answer that counted (`kelpie_answer`, in the log, so also on a replay): the
+   *  card shows what was chosen. Nothing here goes near the adapter's `respond` or the agent. */
+  private applyLoggedAnswer(msg: any) {
+    const key = this.findCard(msg.request_id);
+    const card = key == null ? undefined : this.state.items[this.index.get(key)!];
+    if (key == null || card?.kind !== "permission") return;
+    // On its way, and the reply will settle it: a phone's own answer must not read "Already answered on Pixel".
+    if (card.answering || this.inFlight.has(key)) return;
+    const settled = this.resolved.get(key);
+    if (this.observer && settled?.own) return;
+    const by: string | undefined = msg.answered_by;
+    const at: number | undefined = msg.at;
+    // Who "here" is: a window answers as the desktop, a phone under its own name; anyone else is another device.
+    const fromHere = this.observer ? !!by && by === this.transport.deviceName?.() : !by || by === "desktop";
+    // What is left of an answer whose reply was lost: its fate is known now, whoever's answer this is.
+    const saved = this.unsettled.get(key);
+    this.unsettled.delete(key);
+    let entry: { label: string; answered: CardAnswer; fromLog: boolean };
+    if (fromHere && settled?.own && settled.answered) {
+      // What was clicked here, confirmed.
+      entry = { label: settled.label, answered: { ...settled.answered, at }, fromLog: true };
+    } else {
+      const said = this.adapter.describeAnswer?.(card, msg.answer ?? {}) ?? { label: t("Answered") };
+      const given = saved?.identity === cardIdentity(card) ? saved.label : said.label;
+      entry = fromHere ? { label: given, answered: { ...said, label: given, at }, fromLog: true } : { label: answeredBeforeText(by, at), answered: { ...said, by: by ?? "desktop", at }, fromLog: true };
     }
+    this.resolved.set(key, entry);
+    this.patch(key, (it) => {
+      if (it.kind === "permission") {
+        it.resolved = entry.label;
+        it.answered = entry.answered;
+        it.answerError = undefined;
+        it.retry = undefined;
+      }
+    });
   }
 
   /** An observer's answer goes to the daemon as the answer to that request; the daemon lets the first
@@ -622,7 +785,7 @@ export class ChatController {
     this.inFlight.delete(permissionId);
     const settle = (text: string | null, error?: string) => {
       if (text != null) {
-        this.resolved.set(permissionId, text);
+        this.resolved.set(permissionId, { label: text, own: done.result === "ok" || done.result === "dup" });
         this.unsettled.delete(permissionId);
       }
       this.patch(permissionId, (i) => {
@@ -647,10 +810,14 @@ export class ChatController {
       if (!(card?.kind === "permission" && card.answering) && !this.inFlight.has(permissionId) && !this.unsettled.has(permissionId)) void this.respondObserved(permissionId, optionId, label, reply);
       return;
     }
-    this.resolved.set(permissionId, label);
+    const answered: CardAnswer = { label, answers: reply?.answers, message: reply?.message };
+    this.resolved.set(permissionId, { label, answered, own: true });
     this.adapter.respond(permissionId, optionId, reply);
     this.patch(permissionId, (i) => {
-      if (i.kind === "permission") i.resolved = label;
+      if (i.kind === "permission") {
+        i.resolved = label;
+        i.answered = answered;
+      }
     });
   }
 }
@@ -681,6 +848,33 @@ export function answeredBeforeText(by: string | undefined, at: number | undefine
   const s = Math.max(0, Math.round((now - at) / 1000));
   const ago = s < 60 ? t("just now") : s < 3600 ? t("{n} min ago", { n: Math.floor(s / 60) }) : t("{n} h ago", { n: Math.floor(s / 3600) });
   return t("Already answered on {who} {ago}", { who, ago });
+}
+
+/** A logged `{question: answer}` map as what a card shows, or null when there is nothing in it. */
+export function logQuestionAnswers(raw: unknown): { label: string; answers: Record<string, string> } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const answers = Object.fromEntries(Object.entries(raw).filter((e): e is [string, string] => typeof e[1] === "string"));
+  const said = Object.values(answers);
+  return said.length ? { label: said.join(" · "), answers } : null;
+}
+
+/** Which of a question's options an answer chose, and what is left over (what was typed as "Other"). The
+ *  card joins them with ", " and a label can contain that too: the longest label that fits comes first. */
+export function matchAnswer(answer: string, options: { label: string }[]): { chosen: Set<string>; other: string } {
+  const labels = new Set(options.map((o) => o.label));
+  const longest = Math.max(1, ...options.map((o) => o.label.split(", ").length));
+  const parts = answer.split(", ");
+  const chosen = new Set<string>();
+  const rest: string[] = [];
+  for (let i = 0; i < parts.length; ) {
+    let end = Math.min(parts.length, i + longest);
+    while (end > i && !labels.has(parts.slice(i, end).join(", "))) end--;
+    if (end > i) {
+      chosen.add(parts.slice(i, end).join(", "));
+      i = end;
+    } else rest.push(parts[i++]);
+  }
+  return { chosen, other: rest.join(", ") };
 }
 
 /** A thinking item that just stopped streaming gets its end time (for "Thought for 4s"). */

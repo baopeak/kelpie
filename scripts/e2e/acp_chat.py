@@ -186,7 +186,7 @@ def scenario(run, c):
         return ctl(sid, ITEMS)
 
     def open_perm():
-        return d.js(f"const p = {OPEN_PERM}.pop(); if (!p) return null; return {{id: p.dataset.perm, title: p.querySelector('.q').innerText, buttons: [...p.querySelectorAll('.actions .btn')].map(b => b.innerText.replace(/\\s+/g, ' ').trim()), asks: [...p.querySelectorAll('.ask-q')].map(q => q.innerText.trim())}};")
+        return d.js(f"const p = {OPEN_PERM}.pop(); if (!p) return null; return {{id: p.dataset.item, title: p.querySelector('.q').innerText, buttons: [...p.querySelectorAll('.actions .btn')].map(b => b.innerText.replace(/\\s+/g, ' ').trim()), asks: [...p.querySelectorAll('.ask-q')].map(q => q.innerText.trim())}};")
 
     def click_perm(label):
         return d.js(f"const p = {OPEN_PERM}.pop(); const b = p && [...p.querySelectorAll('.actions .btn')].find(x => x.innerText.trim().endsWith(arguments[0])); if (!b) return false; b.click(); return true;", label)

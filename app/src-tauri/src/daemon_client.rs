@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use kelpie_proto::{read_frame, transport, Frame};
+use kelpie_proto::{read_frame, transport, Frame, MAX_FRAME_LEN};
 use interprocess::local_socket::traits::tokio::Stream as _;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -218,7 +218,7 @@ impl DaemonClient {
     fn send_frame(&self, frame: &Frame) -> Result<()> {
         let out = self.out.lock();
         let tx = out.as_ref().ok_or_else(|| anyhow!("daemon disconnected"))?;
-        tx.send(frame.encode()).map_err(|_| anyhow!("daemon disconnected"))
+        tx.send(encode_within_limit(frame)?).map_err(|_| anyhow!("daemon disconnected"))
     }
 
     async fn request(&self, method: &str, params: Value, pending: impl FnOnce(oneshot::Sender<Result<Value, String>>) -> Pending) -> Result<Value> {
@@ -270,6 +270,18 @@ impl DaemonClient {
     }
 }
 
+/// A frame as it goes on the wire, if the daemon will take it: it hangs up on a client that sends
+/// a longer one, which would end the connection for every session.
+fn encode_within_limit(frame: &Frame) -> Result<Vec<u8>> {
+    let bytes = frame.encode();
+    // The length on the wire counts everything after itself.
+    let len = bytes.len() - 4;
+    if len > MAX_FRAME_LEN {
+        return Err(anyhow!("too large to send to the daemon: {} MiB, the limit is {} MiB", len >> 20, MAX_FRAME_LEN >> 20));
+    }
+    Ok(bytes)
+}
+
 /// `kelpied` next to our executable (or `KELPIE_DAEMON_PATH`).
 pub fn daemon_exe() -> std::path::PathBuf {
     std::env::var_os("KELPIE_DAEMON_PATH").map(std::path::PathBuf::from).unwrap_or_else(|| {
@@ -314,4 +326,33 @@ fn spawn_daemon() -> Result<()> {
     }
     cmd.spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read_back(bytes: &[u8]) -> std::io::Result<Option<Frame>> {
+        let mut reader = bytes;
+        tauri::async_runtime::block_on(read_frame(&mut reader))
+    }
+
+    /// `input` goes through this: what it lets out is what the daemon takes, and it stops the
+    /// first frame the daemon would hang up on.
+    #[test]
+    fn an_input_over_the_frame_limit_is_an_error_not_a_lost_connection() {
+        // One byte of kind and four of handle count towards the limit.
+        let largest = MAX_FRAME_LEN - 5;
+        let fits = encode_within_limit(&Frame::Input { handle: 1, data: vec![0; largest] }).unwrap();
+        assert!(read_back(&fits).unwrap().is_some());
+        let over = Frame::Input { handle: 1, data: vec![0; largest + 1] };
+        assert!(encode_within_limit(&over).unwrap_err().to_string().contains("too large"));
+        assert!(read_back(&over.encode()).is_err());
+    }
+
+    #[test]
+    fn a_json_frame_over_the_limit_is_an_error_too() {
+        assert!(encode_within_limit(&Frame::Json(vec![b' '; MAX_FRAME_LEN - 1])).is_ok());
+        assert!(encode_within_limit(&Frame::Json(vec![b' '; MAX_FRAME_LEN])).is_err());
+    }
 }

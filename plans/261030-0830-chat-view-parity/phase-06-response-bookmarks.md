@@ -1,7 +1,7 @@
 ---
 phase: 6
 title: "Response bookmarks"
-status: pending
+status: completed
 priority: P2
 effort: "7h"
 dependencies: [1, 3]

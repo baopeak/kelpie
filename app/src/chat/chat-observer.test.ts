@@ -52,6 +52,13 @@ describe("ChatController observer mode", () => {
     expect(calls).toEqual([]);
   });
 
+  it("keeps no picture bytes from the log: it shows only their names", () => {
+    const { ctrl } = observer();
+    ctrl.applyLog("reset", [INIT, JSON.stringify({ type: "user", uuid: "u1", message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } }, { type: "text", text: "look" }] } })]);
+    expect(JSON.stringify(ctrl.state.items)).not.toContain("QUJD");
+    expect(ctrl.state.items.at(-1)).toMatchObject({ kind: "user", text: "look", images: [{ name: "Picture 1" }] });
+  });
+
   it("applies a delta on top of what is shown instead of starting over", () => {
     const { ctrl } = observer();
     ctrl.applyLog("reset", [INIT, JSON.stringify({ type: "user", message: { role: "user", content: "first" } })]);
@@ -161,7 +168,9 @@ describe("ChatController observer mode", () => {
       await new Promise((r) => setTimeout(r, 0));
       ctrl.retryAnswer("req-1");
       await new Promise((r) => setTimeout(r, 0));
-      expect(ctrl.state.items.find((i) => i.id === "req-1")).toMatchObject({ resolved: "Allowed", retry: undefined });
+      const card = ctrl.state.items.find((i) => i.id === "req-1") as { resolved?: string; retry?: string };
+      expect(card.resolved).toBe("Allowed");
+      expect(card.retry).toBeUndefined();
     });
   });
 
@@ -182,6 +191,84 @@ describe("ChatController observer mode", () => {
     settle({ result: "dup" });
     await new Promise((r) => setTimeout(r, 0));
     expect(ctrl.state.items.find((i) => i.id === "req-1")).toMatchObject({ resolved: "Allowed" });
+  });
+
+  describe("an answer kept in the log", () => {
+    const logged = (by: string, answer: unknown = { behavior: "allow", lasting: false }) => JSON.stringify({ type: "kelpie_answer", request_id: "req-1", by: by === "desktop" ? "desktop" : "phone", answered_by: by, at: Date.now() - 125_000, answer });
+    /** A phone named Pixel whose answer's reply was lost with the connection. */
+    const lostReply = async () => {
+      const { calls, transport } = recorder({ result: "unknown" });
+      const ctrl = new ChatController("c1", "/work", null, createClaudeAdapter, { transport: { ...transport, deviceName: () => "Pixel" }, observer: true });
+      ctrl.applyLog("reset", [INIT, ASK]);
+      ctrl.respond("req-1", "allow", "Allowed");
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ctrl.state.items.find((i) => i.id === "req-1")).toMatchObject({ retry: "Allowed", answerError: expect.stringMatching(/Not sure/) });
+      return { ctrl, calls, card: () => ctrl.state.items.find((i) => i.id === "req-1") as { resolved?: string; retry?: string; answerError?: string; answered?: { by?: string } } };
+    };
+
+    it("a lost reply's own answer, back on reconnect, settles the card in the words it was given", async () => {
+      const { ctrl, calls, card } = await lostReply();
+      ctrl.applyLog("delta", [logged("Pixel")]);
+      expect(card().resolved).toBe("Allowed");
+      expect(card().retry).toBeUndefined();
+      expect(card().answerError).toBeUndefined();
+      expect(card().answered?.by).toBeUndefined();
+      // Nothing is left to send again.
+      ctrl.retryAnswer("req-1");
+      expect(calls).toHaveLength(1);
+    });
+
+    it("a lost reply and somebody else's answer: says who, and nothing is left to send again", async () => {
+      const { ctrl, calls, card } = await lostReply();
+      ctrl.applyLog("delta", [logged("Tablet")]);
+      expect(card()).toMatchObject({ resolved: "Already answered on Tablet 2 min ago", answered: { by: "Tablet" } });
+      expect(card().retry).toBeUndefined();
+      expect(card().answerError).toBeUndefined();
+      ctrl.retryAnswer("req-1");
+      expect(calls).toHaveLength(1);
+    });
+
+    it("a page reloaded on this device reads its own answer as its own", () => {
+      const { transport } = recorder();
+      const ctrl = new ChatController("c1", "/work", null, createClaudeAdapter, { transport: { ...transport, deviceName: () => "Pixel" }, observer: true });
+      ctrl.applyLog("reset", [INIT, ASK, logged("Pixel")]);
+      const card = ctrl.state.items.find((i) => i.id === "req-1") as { resolved?: string; answered?: { by?: string; label: string } };
+      expect(card.resolved).toBe("Allow");
+      expect(card.answered).toMatchObject({ label: "Allow" });
+      expect(card.answered?.by).toBeUndefined();
+    });
+
+    it("settles a card on a log that is loaded, and passes nothing on", () => {
+      const { ctrl, calls } = observer();
+      ctrl.applyLog("reset", [INIT, ASK, logged("Pixel")]);
+      expect(ctrl.state.items.find((i) => i.id === "req-1")).toMatchObject({ resolved: "Already answered on Pixel 2 min ago", answered: { label: "Allow", by: "Pixel" } });
+      expect(calls).toEqual([]);
+    });
+
+    it("a window's answer is another device's, to a phone", () => {
+      const { ctrl } = observer();
+      ctrl.applyLog("reset", [INIT, ASK, logged("desktop")]);
+      expect(ctrl.state.items.find((i) => i.id === "req-1")).toMatchObject({ resolved: "Already answered on the desktop 2 min ago", answered: { by: "desktop" } });
+    });
+
+    it("the phone's own answer stays its own: on the way, once settled and when the log comes again", async () => {
+      let settle!: (o: AnswerOutcome) => void;
+      const { ctrl, calls } = observer("claude", () => new Promise<AnswerOutcome>((r) => (settle = r)));
+      ctrl.applyLog("reset", [INIT, ASK]);
+      ctrl.respond("req-1", "allow", "Allowed");
+      ctrl.applyLog("live", [logged("Pixel")]);
+      const card = () => ctrl.state.items.find((i) => i.id === "req-1") as { resolved?: string; answering?: boolean };
+      expect(card().resolved).toBeUndefined();
+      expect(card().answering).toBe(true);
+      settle({ result: "ok" });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(card().resolved).toBe("Allowed");
+      ctrl.applyLog("live", [logged("Pixel")]);
+      expect(card().resolved).toBe("Allowed");
+      ctrl.applyLog("reset", [INIT, ASK, logged("Pixel")]);
+      expect(card().resolved).toBe("Allowed");
+      expect(calls).toHaveLength(1);
+    });
   });
 
   it("the desktop controller still writes the answer as a line to the agent, and no chat_answer", () => {

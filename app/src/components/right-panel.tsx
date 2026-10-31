@@ -6,12 +6,14 @@ import { Explorer } from "./explorer";
 import { GitPanel } from "./git-panel";
 import { HistoryPanel } from "./history-panel";
 import { IssuesPanel } from "./issues-panel";
+import { bookmarks } from "../lib/chat-bookmarks";
 import { CHECKPOINT_API } from "../lib/checkpoint-api";
 import { PROCESS_API } from "../lib/process-api";
 import { inReview } from "../lib/review-queue";
 import type { Project } from "../lib/types";
 import { t } from "../lib/i18n";
 
+const BookmarksPanel = lazy(() => import("./bookmarks-panel").then((m) => ({ default: m.BookmarksPanel })));
 const TurnTimeline = lazy(() => import("./turn-timeline"));
 const ReviewPanel = lazy(() => import("./review-panel"));
 const PlanPanel = lazy(() => import("./plan-panel"));
@@ -72,11 +74,14 @@ export function RightPanel(props: { project: Project }) {
     el.addEventListener("pointerup", up);
   };
 
-  const tab = (id: "files" | "git" | "history" | "issues" | "turns" | "review" | "plan" | "processes", label: string) => (
+  const savedCount = () => bookmarks.inProject(props.project.id).length;
+
+  const tab = (id: "files" | "git" | "history" | "issues" | "turns" | "review" | "plan" | "saved" | "processes", label: string) => (
     <button class={`ptab${panel() === id || (id === "files" && panel() === "search") ? " active" : ""}`} onClick={() => store.showRightPanel(id)}>
       {label}
       {id === "git" && gitState.status()?.files.length ? ` ${gitState.status()!.files.length}` : ""}
       {id === "review" && reviewCount() ? ` ${reviewCount()}` : ""}
+      {id === "saved" && savedCount() ? ` ${savedCount()}` : ""}
     </button>
   );
 
@@ -91,6 +96,7 @@ export function RightPanel(props: { project: Project }) {
         <Show when={store.daemonApi() >= CHECKPOINT_API}>{tab("turns", t("Turns"))}</Show>
         <Show when={reviewable()}>{tab("review", t("Review"))}</Show>
         {tab("plan", t("Plan"))}
+        {tab("saved", t("Saved"))}
         <Show when={store.daemonApi() >= PROCESS_API}>{tab("processes", t("Processes"))}</Show>
       </div>
       <div class="panel-body">
@@ -102,6 +108,7 @@ export function RightPanel(props: { project: Project }) {
           <Match when={panel() === "turns" && store.daemonApi() >= CHECKPOINT_API}><TurnTimeline project={props.project} /></Match>
           <Match when={panel() === "review"}><ReviewPanel project={props.project} /></Match>
           <Match when={panel() === "plan"}><PlanPanel project={props.project} /></Match>
+          <Match when={panel() === "saved"}><BookmarksPanel project={props.project} /></Match>
           <Match when={panel() === "processes" && store.daemonApi() >= PROCESS_API}><ProcessesPanel project={props.project} /></Match>
         </Switch>
       </div>
