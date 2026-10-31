@@ -1,0 +1,5 @@
+# relay/ stands alone: it is not part of the app's workspace or build.
+# Both ship their native binary as an optional dependency, so neither install script is needed.
+allowBuilds:
+  esbuild: false
+  workerd: false

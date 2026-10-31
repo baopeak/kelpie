@@ -1,0 +1,21 @@
+# The room: a Durable Object per room, reached only through the router's binding.
+name = "kelpie-relay-room"
+main = "src/room.ts"
+compatibility_date = "2026-10-15"
+workers_dev = false
+preview_urls = false
+
+[observability]
+enabled = false
+
+[vars]
+RELAY_VERSION = "dev"
+
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+# The Free plan only has the SQLite backend for Durable Objects.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
