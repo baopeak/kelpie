@@ -5882,12 +5882,20 @@ mod tests {
         assert_eq!(fake.changes().len(), changes);
         assert_eq!(publish(&d).await, port);
         assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry(port));
-        // A MagicDNS rename: a new origin, and phones hear of it.
+        // A MagicDNS rename: serve keeps its entry under the old name, so the new one gets no answer. Phones are not told an address that does not
+        // answer; restoring publishes under the new name, and then they hear of it.
         let seq = d.mobile.addrs.borrow().seq;
+        let old = fake.serve.lock().clone();
         *fake.status.lock() = tailscale::fake::READY.replace("desk.", "newname.");
         let told = tailscale::status(d.clone()).await.unwrap();
-        assert_eq!(told["origin"], "newname.tail1234.ts.net:8443");
-        assert!(d.mobile.addrs.borrow().seq > seq);
+        assert_eq!((told["serve"].as_str(), told["origin"].is_null()), (Some("renamed"), true), "{told}");
+        assert_eq!(*fake.serve.lock(), old, "nothing changed by looking");
+        let (tx, mut replies) = app_client(&d, 103);
+        d.presence.inject(|_| Ok(()));
+        let told = ask_app(&d, &tx, &mut replies, 103, "mobile.set_tailscale", json!({"on": true})).await;
+        assert_eq!((told["result"]["serve"].as_str(), told["result"]["origin"].as_str()), (Some("ours"), Some("newname.tail1234.ts.net:8443")), "{told}");
+        assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry_named("newname.tail1234.ts.net", port));
+        assert!(d.mobile.addrs.borrow().seq > seq, "phones hear of it");
     }
 
     #[tokio::test]

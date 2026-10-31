@@ -108,6 +108,8 @@ pub enum Entry {
     Free,
     /// Our one handler, forwarding to this loopback port.
     Ours(u16),
+    /// Ours, under a name that is no longer this machine's: serve keeps its entries by name, so the name it has now gets no answer from it.
+    Renamed(u16),
     /// Anything else: not ours to change.
     Taken,
     Unreadable,
@@ -123,8 +125,9 @@ fn proxied_port(handler: &Value) -> Option<u16> {
     target.strip_prefix("http://127.0.0.1:")?.trim_end_matches('/').parse().ok()
 }
 
-/// One serve configuration's use of the port: none, or the loopback port of an entry that could be ours, or `Err` for anything else.
-fn use_of_port(config: &Value) -> Result<Option<u16>, ()> {
+/// One serve configuration's use of the port: none; or the loopback port of an entry that could be ours, and whether one is under `name` (any name
+/// when none is given); or `Err` for anything else.
+fn use_of_port(config: &Value, name: Option<&str>) -> Result<Option<(u16, bool)>, ()> {
     let port = HTTPS_PORT.to_string();
     let suffix = format!(":{port}");
     let open_to_internet = config.get("AllowFunnel").and_then(Value::as_object).is_some_and(|f| f.iter().any(|(k, on)| k.ends_with(&suffix) && on.as_bool() != Some(false)));
@@ -138,7 +141,9 @@ fn use_of_port(config: &Value) -> Result<Option<u16>, ()> {
             return Err(());
         }
     }
+    let wanted = name.map(|n| format!("{n}{suffix}"));
     let mut found = None;
+    let mut under_name = wanted.is_none();
     for (host, site) in config.get("Web").and_then(Value::as_object).into_iter().flatten() {
         if !host.ends_with(&suffix) {
             continue;
@@ -150,15 +155,17 @@ fn use_of_port(config: &Value) -> Result<Option<u16>, ()> {
             return Err(());
         }
         found = Some(at);
+        under_name |= wanted.as_deref().is_some_and(|w| host.eq_ignore_ascii_case(w));
     }
     if tcp.is_some() && found.is_none() {
         return Err(());
     }
-    Ok(found)
+    Ok(found.map(|at| (at, under_name)))
 }
 
-/// `tailscale serve status --json`: `{}` (or `null`) when nothing is served. `known` is the loopback port our entry forwards to.
-pub fn parse_serve(text: &str, known: Option<u16>) -> Entry {
+/// `tailscale serve status --json`: `{}` (or `null`) when nothing is served. `known` is the loopback port our entry forwards to, `name` this machine's name
+/// now, when that matters.
+pub fn parse_serve(text: &str, known: Option<u16>, name: Option<&str>) -> Entry {
     let Ok(doc) = serde_json::from_str::<Value>(text) else { return Entry::Unreadable };
     if doc.is_null() {
         return Entry::Free;
@@ -167,13 +174,14 @@ pub fn parse_serve(text: &str, known: Option<u16>) -> Entry {
         return Entry::Unreadable;
     }
     // A `tailscale serve` running in some terminal keeps its own configuration: on this port it is not ours whatever it says.
-    let foreground = doc.get("Foreground").and_then(Value::as_object).into_iter().flatten().any(|(_, c)| !matches!(use_of_port(c), Ok(None)));
+    let foreground = doc.get("Foreground").and_then(Value::as_object).into_iter().flatten().any(|(_, c)| !matches!(use_of_port(c, None), Ok(None)));
     if foreground {
         return Entry::Taken;
     }
-    match use_of_port(&doc) {
+    match use_of_port(&doc, name) {
         Ok(None) => Entry::Free,
-        Ok(Some(port)) if Some(port) == known => Entry::Ours(port),
+        Ok(Some((port, true))) if Some(port) == known => Entry::Ours(port),
+        Ok(Some((port, false))) if Some(port) == known => Entry::Renamed(port),
         _ => Entry::Taken,
     }
 }
@@ -279,9 +287,9 @@ pub fn detect(cli: &dyn Cli) -> Detected {
     }
 }
 
-pub fn read_entry(cli: &dyn Cli, known: Option<u16>) -> Entry {
+pub fn read_entry(cli: &dyn Cli, known: Option<u16>, name: Option<&str>) -> Entry {
     match cli.run(&["serve", "status", "--json"]) {
-        Ran::Done { ok: true, stdout, .. } => parse_serve(&stdout, known),
+        Ran::Done { ok: true, stdout, .. } => parse_serve(&stdout, known, name),
         // Uninstalled: there is nothing to serve anything, and nothing to wait for.
         Ran::Missing => Entry::Free,
         _ => Entry::Unreadable,
@@ -322,10 +330,10 @@ fn unpublish(cli: &dyn Cli) -> Result<(), &'static str> {
 
 /// Removes our entry if it is there; anything else on the port stays as it is. Err when ours could not be removed or cannot be told apart.
 pub fn remove_ours(cli: &dyn Cli, known: Option<u16>) -> Result<(), &'static str> {
-    match read_entry(cli, known) {
+    match read_entry(cli, known, None) {
         Entry::Free | Entry::Taken => Ok(()),
         Entry::Unreadable => Err(NOT_REMOVED),
-        Entry::Ours(_) => unpublish(cli),
+        Entry::Ours(_) | Entry::Renamed(_) => unpublish(cli),
     }
 }
 
@@ -345,7 +353,7 @@ fn install_qr(origin: &str) -> Option<String> {
 /// What Settings says about it: `state` is `Detected::name`, `serve` one of `off`, `ours`, `missing` (the mode is on and the entry is gone),
 /// `left_behind` (the mode is off and our entry could not be removed), `port_busy` (the mode is on, another program holds our loopback port, and the entry
 /// could not be removed, so phones may be reaching that program), `not_listening` (the mode is on and our listener is not up, with no such program),
-/// `taken`, `unknown`.
+/// `renamed` (the mode is on and our entry is under the machine's old name), `taken`, `unknown`.
 fn described(m: &Mobile, detected: &Detected, entry: Option<Entry>) -> Value {
     let on = m.config.lock().tailscale;
     let origin = m.tailscale_origin();
@@ -357,6 +365,8 @@ fn described(m: &Mobile, detected: &Detected, entry: Option<Entry>) -> Value {
         (Some(Entry::Ours(_)), true, false) if lost => "port_busy",
         (Some(Entry::Ours(_)), true, false) => "not_listening",
         (Some(Entry::Ours(_)), true, true) => "ours",
+        (Some(Entry::Renamed(_)), false, _) => "left_behind",
+        (Some(Entry::Renamed(_)), true, _) => "renamed",
         (Some(Entry::Taken), ..) => "taken",
         (Some(Entry::Unreadable) | None, ..) => "unknown",
     };
@@ -382,7 +392,8 @@ pub async fn status(daemon: Arc<Daemon>) -> Result<Value> {
         let detected = detect(cli);
         let ready = matches!(detected, Detected::Ready { .. });
         let removed = (ready && to_remove).then(|| remove_ours(cli, known).is_ok());
-        let entry = ready.then(|| read_entry(cli, known));
+        let name = if let Detected::Ready { fqdn } = &detected { Some(fqdn.as_str()) } else { None };
+        let entry = ready.then(|| read_entry(cli, known, name));
         (detected, entry, removed)
     })
     .await?;
@@ -416,8 +427,8 @@ pub async fn check_can_turn_on(daemon: &Arc<Daemon>) -> Result<u64> {
     let asked_at = m.tailscale_ended.load(Ordering::SeqCst);
     let known = m.config.lock().tailscale_port;
     let refusal = off_runtime(m, move |cli| match detect(cli) {
-        Detected::Ready { .. } => match read_entry(cli, known) {
-            Entry::Free | Entry::Ours(_) => None,
+        Detected::Ready { fqdn } => match read_entry(cli, known, Some(&fqdn)) {
+            Entry::Free | Entry::Ours(_) | Entry::Renamed(_) => None,
             Entry::Taken => Some(PORT_TAKEN),
             Entry::Unreadable => Some(NOT_READABLE),
         },
@@ -529,9 +540,11 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
     let me = daemon.clone();
     let done = off_runtime(m, move |cli| -> Result<String, &'static str> {
         let Detected::Ready { fqdn } = detect(cli) else { return Err(NOT_READY) };
-        match read_entry(cli, known) {
+        match read_entry(cli, known, Some(&fqdn)) {
             Entry::Ours(at) if at == port => return Ok(fqdn),
             Entry::Ours(_) => unpublish(cli).map_err(|_| NOT_PUBLISHED)?,
+            // Under the old name the CLI may not find it to take it off. It leads nowhere, and publishing under the new name does not wait for it.
+            Entry::Renamed(_) => drop(unpublish(cli)),
             Entry::Free => {}
             Entry::Taken => return Err(PORT_TAKEN),
             Entry::Unreadable => return Err(NOT_READABLE),
@@ -539,7 +552,7 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
         // No entry of ours is there now. From here on one may be, whatever the command says.
         me.mobile.remember_port(port);
         // What Tailscale holds now, not what it said it would do.
-        let published = publish(cli, port).and_then(|()| match read_entry(cli, Some(port)) {
+        let published = publish(cli, port).and_then(|()| match read_entry(cli, Some(port), Some(&fqdn)) {
             Entry::Ours(at) if at == port => Ok(()),
             _ => Err(NOT_PUBLISHED),
         });
@@ -697,7 +710,15 @@ pub mod fake {
         }
 
         pub fn entry(port: u16) -> String {
-            format!(r#"{{"TCP":{{"8443":{{"HTTPS":true}}}},"Web":{{"desk.tail1234.ts.net:8443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:{port}"}}}}}}}}}}"#)
+            Fake::entry_named("desk.tail1234.ts.net", port)
+        }
+
+        pub fn entry_named(name: &str, port: u16) -> String {
+            format!(r#"{{"TCP":{{"8443":{{"HTTPS":true}}}},"Web":{{"{name}:8443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:{port}"}}}}}}}}}}"#)
+        }
+
+        fn name_now(&self) -> String {
+            serde_json::from_str::<serde_json::Value>(&self.status.lock()).ok().and_then(|v| v["CertDomains"][0].as_str().map(str::to_string)).unwrap_or_default()
         }
 
         /// Calls that change anything.
@@ -720,7 +741,7 @@ pub mod fake {
                     answer(self.serve.lock().clone())
                 }
                 "serve --https=8443 off" => {
-                    if *self.off_fails.lock() {
+                    if *self.off_fails.lock() || !self.serve.lock().contains(&format!("{}:8443", self.name_now())) {
                         return Ran::Done { ok: false, stdout: String::new(), stderr: "no".into() };
                     }
                     *self.serve.lock() = "{}".into();
@@ -735,7 +756,7 @@ pub mod fake {
                         return Ran::Done { ok: false, stdout: String::new(), stderr: said };
                     }
                     let port = call.rsplit(':').next().and_then(|p| p.parse().ok()).expect("a serve command with a port");
-                    *self.serve.lock() = Fake::entry(port);
+                    *self.serve.lock() = Fake::entry_named(&self.name_now(), port);
                     if *self.publish_times_out.lock() {
                         return Ran::TimedOut;
                     }
@@ -786,17 +807,21 @@ mod tests {
         assert_eq!(detect(&Says(|| Ran::Failed)), Detected::Stopped);
         assert_eq!(detect(&Says(|| Ran::Done { ok: false, stdout: String::new(), stderr: "failed to connect to local Tailscale service".into() })), Detected::Stopped);
         assert_eq!(detect(&Says(|| Ran::Done { ok: true, stdout: "gibberish".into(), stderr: String::new() })), Detected::Unreadable);
-        assert_eq!(read_entry(&Says(|| Ran::TimedOut), Some(1)), Entry::Unreadable, "not knowing is not free");
+        assert_eq!(read_entry(&Says(|| Ran::TimedOut), Some(1), None), Entry::Unreadable, "not knowing is not free");
     }
 
     #[test]
     fn only_the_one_proxy_to_our_port_is_ours() {
         let ours = fake::Fake::entry(5000);
-        assert_eq!(parse_serve(&ours, Some(5000)), Entry::Ours(5000));
-        assert_eq!(parse_serve(&ours, Some(5001)), Entry::Taken, "another port: someone else's");
-        assert_eq!(parse_serve(&ours, None), Entry::Taken, "we never had one");
+        assert_eq!(parse_serve(&ours, Some(5000), None), Entry::Ours(5000));
+        assert_eq!(parse_serve(&ours, Some(5000), Some("desk.tail1234.ts.net")), Entry::Ours(5000));
+        assert_eq!(parse_serve(&ours, Some(5000), Some("DESK.tail1234.ts.net")), Entry::Ours(5000), "names are not case sensitive");
+        assert_eq!(parse_serve(&ours, Some(5000), Some("new.tail1234.ts.net")), Entry::Renamed(5000), "under the name it had");
+        assert_eq!(parse_serve(&ours, Some(5001), Some("new.tail1234.ts.net")), Entry::Taken, "not ours under any name");
+        assert_eq!(parse_serve(&ours, Some(5001), None), Entry::Taken, "another port: someone else's");
+        assert_eq!(parse_serve(&ours, None, None), Entry::Taken, "we never had one");
         for free in ["{}", "null", r#"{"TCP":{"443":{"HTTPS":true}},"Web":{"desk.tail1234.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}"#] {
-            assert_eq!(parse_serve(free, Some(5000)), Entry::Free, "{free}");
+            assert_eq!(parse_serve(free, Some(5000), None), Entry::Free, "{free}");
         }
         let site = |handlers: &str| format!(r#"{{"TCP":{{"8443":{{"HTTPS":true}}}},"Web":{{"desk.tail1234.ts.net:8443":{{"Handlers":{handlers}}}}}}}"#);
         for (what, taken) in [
@@ -810,10 +835,10 @@ mod tests {
             ("a terminal's own serve", format!(r#"{{"Foreground":{{"abc":{ours}}}}}"#)),
             ("a port with no site", r#"{"TCP":{"8443":{"HTTPS":true}}}"#.to_string()),
         ] {
-            assert_eq!(parse_serve(&taken, Some(5000)), Entry::Taken, "{what}");
+            assert_eq!(parse_serve(&taken, Some(5000), None), Entry::Taken, "{what}");
         }
         for garbage in ["", "not json", "[]", "7"] {
-            assert_eq!(parse_serve(garbage, Some(5000)), Entry::Unreadable, "{garbage:?}");
+            assert_eq!(parse_serve(garbage, Some(5000), None), Entry::Unreadable, "{garbage:?}");
         }
     }
 
