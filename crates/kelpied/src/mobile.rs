@@ -15,7 +15,7 @@
 //! minutes) and only after the person types, in the Kelpie app, the code the phone shows and passes the OS
 //! verification the daemon runs (`user_presence`); each device is a public key in a MAC'd record (`store`), `read` until raised, revocable; a
 //! page in a browser may type only over HTTPS or Tailscale; and HTTPS is used when a certificate is
-//! configured (e.g. from `tailscale cert`).
+//! configured (e.g. from `tailscale cert`), or by Tailscale Serve in front of one loopback listener (`tailscale`).
 
 mod audit;
 mod lanes;
@@ -23,6 +23,7 @@ mod link;
 mod listen;
 mod store;
 mod sync;
+pub mod tailscale;
 mod verbs;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -126,6 +127,17 @@ struct Running {
     port: u16,
     listeners: Arc<listen::Listeners>,
     stop: Arc<Generation>,
+    /// The routes, before they are told which listener's stop they answer to.
+    app: Router,
+    /// The listener Tailscale Serve forwards to, while the mode is on.
+    loopback: Option<LoopbackListener>,
+    /// `<name>:8443` while Tailscale publishes this computer: the name, our entry and the listener all hold.
+    ts_origin: Option<String>,
+}
+
+struct LoopbackListener {
+    port: u16,
+    stop: Arc<Generation>,
 }
 
 /// Sticky shutdown: late subscribers (including HTTP upgrades) also see cancellation.
@@ -167,6 +179,8 @@ struct Pending {
     want: Permission,
     /// Where the request came from.
     address: IpAddr,
+    /// It came from a page on an HTTPS origin.
+    secure_origin: bool,
     reply: oneshot::Sender<Option<Device>>,
 }
 
@@ -310,6 +324,8 @@ impl DeviceEvent {
 struct Addrs {
     seq: u64,
     list: Vec<String>,
+    /// The Tailscale HTTPS origin, `<name>:8443`.
+    ts: Option<String>,
 }
 
 /// The replies kept for one device: (`cid`, when, how long it counts, the reply).
@@ -380,6 +396,12 @@ pub struct Mobile {
     locked_out: AtomicBool,
     /// The credential store would not give the key that checks device records the last time it was asked.
     key_unreadable: Mutex<bool>,
+    /// How Tailscale is asked (see `tailscale`).
+    tailscale_cli: Mutex<Arc<dyn tailscale::Cli>>,
+    /// Held while Tailscale is looked at: one child at a time.
+    tailscale_check: tokio::sync::Mutex<()>,
+    /// Phone access went off with the mode on: our serve entry is still to go.
+    serve_to_remove: AtomicBool,
     /// A test on the only address it can bind holds this machine to the limits for an address.
     #[cfg(test)]
     loopback_is_remote: AtomicBool,
@@ -486,6 +508,12 @@ impl Mobile {
             handshake_budget: Mutex::new(SendBucket { tokens: HANDSHAKES_PER_SECOND, at: Instant::now() }),
             locked_out: AtomicBool::new(false),
             key_unreadable: Mutex::new(false),
+            #[cfg(not(test))]
+            tailscale_cli: Mutex::new(Arc::new(tailscale::Program)),
+            #[cfg(test)]
+            tailscale_cli: Mutex::new(Arc::new(tailscale::Absent)),
+            tailscale_check: tokio::sync::Mutex::new(()),
+            serve_to_remove: AtomicBool::new(false),
             #[cfg(test)]
             loopback_is_remote: AtomicBool::new(false),
         };
@@ -683,7 +711,7 @@ impl Mobile {
             flood.noted = Some(Instant::now());
             let events = flood.events;
             drop(flood);
-            self.audit.add("-", "flood", &format!("{events} connections given way or refused in a minute, the last: {what} from {ip}"));
+            self.audit.add("-", "flood", &format!("{events} connections given way or refused in a minute, the last: {what} from {}", listen::shown(ip)));
         }
     }
 
@@ -722,12 +750,13 @@ impl Mobile {
             "ips": listen::addresses().into_iter().map(|(ip, name)| json!({"ip": ip.to_string(), "name": name})).collect::<Vec<_>>(),
             "devices": c.devices.iter().map(|d| json!({
                 "id": d.id, "name": d.name, "permission": d.permission.name(), "kind": d.kind.name(), "can_write": d.permission >= Permission::Write,
-                "created_at": d.created_at, "last_seen": d.last_seen, "state": if d.verified { "ok" } else if key_unreadable { "unchecked" } else { "unverified" },
+                "created_at": d.created_at, "last_seen": d.last_seen, "secure_origin": d.secure_origin, "state": if d.verified { "ok" } else if key_unreadable { "unchecked" } else { "unverified" },
             })).collect::<Vec<_>>(),
             "legacy": c.legacy.iter().map(|d| json!({"id": d.id, "name": d.name, "created_at": d.created_at})).collect::<Vec<_>>(),
             "pairing_expires_in": code,
-            "pending": self.pending.lock().iter().map(|(id, p)| json!({"id": id, "name": p.name, "kind": p.kind.name(), "fingerprint": fingerprint(&p.pk), "want": p.want.name(), "address": p.address.to_string()})).collect::<Vec<_>>(),
+            "pending": self.pending.lock().iter().map(|(id, p)| json!({"id": id, "name": p.name, "kind": p.kind.name(), "fingerprint": fingerprint(&p.pk), "want": p.want.name(), "address": listen::shown(p.address)})).collect::<Vec<_>>(),
             "dormant_days": c.dormant_days.unwrap_or(store::DEFAULT_DORMANT_DAYS),
+            "tailscale": {"on": c.tailscale, "origin": running.as_ref().and_then(|r| r.ts_origin.clone())},
             "app": app,
         })
     }
@@ -1014,8 +1043,8 @@ impl Mobile {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn add_pending(&self, id: &str, name: &str, kind: Kind, pk: [u8; 32], code: String, want: Permission, address: IpAddr, reply: oneshot::Sender<Option<Device>>) {
-        self.pending.lock().insert(id.to_string(), Pending { name: name.to_string(), kind, pk, code, tries: 0, want, address, reply });
+    fn add_pending(&self, id: &str, name: &str, kind: Kind, pk: [u8; 32], code: String, want: Permission, address: IpAddr, secure_origin: bool, reply: oneshot::Sender<Option<Device>>) {
+        self.pending.lock().insert(id.to_string(), Pending { name: name.to_string(), kind, pk, code, tries: 0, want, address, secure_origin, reply });
     }
 
     fn remove_pending(&self, id: &str) {
@@ -1071,7 +1100,7 @@ impl Mobile {
     /// A paired device as `approve` makes one (its record sealed with this store's key).
     fn add_test_device(&self, id: &str, name: &str, pk: [u8; 32], permission: Permission, kind: Kind) {
         let key = self.mac_key(true).expect("a readable store").expect("a key");
-        let mut d = Device { id: id.into(), name: name.into(), pk: kelpie_link::b64(&pk), permission, kind, created_at: 1, last_seen: now_millis(), mac: String::new(), verified: false };
+        let mut d = Device { id: id.into(), name: name.into(), pk: kelpie_link::b64(&pk), permission, kind, created_at: 1, last_seen: now_millis(), mac: String::new(), secure_origin: false, secure_mac: String::new(), verified: false };
         store::seal(&mut d, &key);
         self.config.lock().devices.push(d);
     }
@@ -1095,10 +1124,13 @@ impl Mobile {
         self.projects.lock().get(id).cloned()
     }
 
-    /// The phone web app's address while phone access is on.
+    /// The phone web app's address while phone access is on: the Tailscale origin when there is one, which opens away from home too.
     pub fn running_url(&self) -> Option<String> {
         let running = self.running.lock();
         let r = running.as_ref()?;
+        if let Some(origin) = &r.ts_origin {
+            return Some(format!("https://{origin}/"));
+        }
         let addr = r.listeners.addrs().into_iter().next()?;
         Some(format!("{}://{}/", if r.tls { "https" } else { "http" }, listen::host(&addr)))
     }
@@ -1108,13 +1140,47 @@ impl Mobile {
         *self.projects.lock() = map;
     }
 
-    /// A pairing QR code: the explicit browser pairing, whose link opens this daemon's page. Until a native app exists nothing
-    /// else can be asked for: a native client's record has no ceiling below `control` and no cap on its transport.
-    pub fn pair_start(&self) -> Result<Value> {
-        let (tls, addrs, port) = {
+    /// The Tailscale origin (`<name>:8443`) while this computer is published.
+    pub fn tailscale_origin(&self) -> Option<String> {
+        self.running.lock().as_ref().and_then(|r| r.ts_origin.clone())
+    }
+
+    fn loopback_port(&self) -> Option<u16> {
+        self.running.lock().as_ref().and_then(|r| r.loopback.as_ref().map(|l| l.port))
+    }
+
+    /// Sets the origin phones are told; true when that changed something.
+    fn set_tailscale_origin(&self, origin: Option<String>) -> bool {
+        let listeners = {
+            let mut running = self.running.lock();
+            let Some(r) = running.as_mut() else { return false };
+            if r.ts_origin == origin {
+                return false;
+            }
+            r.ts_origin = origin;
+            r.listeners.clone()
+        };
+        advertise(self, &listeners);
+        true
+    }
+
+    /// Stops the listener behind Tailscale Serve and what came through it.
+    fn stop_loopback(&self) {
+        let stopped = self.running.lock().as_mut().and_then(|r| r.loopback.take());
+        if let Some(l) = stopped {
+            l.stop.cancel();
+        }
+        self.set_tailscale_origin(None);
+    }
+
+    /// A pairing QR code, whose link opens this daemon's page: at the Tailscale origin while there is one, unless `plain` asks for this
+    /// network's own address (the separate, read-only pairing). Until a native app exists nothing else can be asked for: a native
+    /// client's record has no ceiling below `control` and no cap on its transport.
+    pub fn pair_start(&self, plain: bool) -> Result<Value> {
+        let (tls, addrs, port, ts) = {
             let running = self.running.lock();
             let r = running.as_ref().ok_or_else(|| anyhow!("turn mobile access on first"))?;
-            (r.tls, r.listeners.addrs(), r.port)
+            (r.tls, r.listeners.addrs(), r.port, r.ts_origin.clone().filter(|_| !plain))
         };
         let kind = Kind::Pwa;
         let key = self.link_key()?;
@@ -1128,18 +1194,17 @@ impl Mobile {
             codes.push(Code { psk, kind, at: Instant::now(), attempts: HashMap::new() });
         }
         let lan: Vec<String> = addrs.iter().map(listen::host).collect();
-        let endpoints = lan.iter().map(|a| kelpie_link::Endpoint::lan(a)).collect();
+        // The Tailscale origin first: what does not fit in a QR code is left out from the end, so it is the last to go.
+        let endpoints = ts.iter().map(|a| kelpie_link::Endpoint::tailscale(a)).chain(lan.iter().map(|a| kelpie_link::Endpoint::lan(a))).collect();
         // The secret travels in the fragment: browsers never send it in a request or a Referer.
         let preferred = self.config.lock().ip.clone();
-        let host = preferred.and_then(|ip| ip.parse::<IpAddr>().ok()).map(|ip| listen::host(&SocketAddr::new(ip, port))).or_else(|| lan.first().cloned()).ok_or_else(|| anyhow!("no address to pair on"))?;
-        let (link, qr) = pair_link(if tls { "https" } else { "http" }, &host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints, name: listen::hostname() })?;
-        let svg = qr
-            .render::<qrcode::render::svg::Color>()
-            .min_dimensions(240, 240)
-            .dark_color(qrcode::render::svg::Color("#141823"))
-            .light_color(qrcode::render::svg::Color("#ffffff"))
-            .build();
-        Ok(json!({"url": link, "qr": svg, "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": tls}))
+        let host = match &ts {
+            Some(origin) => origin.clone(),
+            None => preferred.and_then(|ip| ip.parse::<IpAddr>().ok()).map(|ip| listen::host(&SocketAddr::new(ip, port))).or_else(|| lan.first().cloned()).ok_or_else(|| anyhow!("no address to pair on"))?,
+        };
+        let secure = tls || ts.is_some();
+        let (link, qr) = pair_link(if secure { "https" } else { "http" }, &host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints, name: listen::hostname() })?;
+        Ok(json!({"url": link, "qr": qr_svg(&qr), "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": secure, "tailscale": ts.is_some()}))
     }
 
     /// The person says no to a pairing request (no verification: it adds nothing).
@@ -1192,7 +1257,7 @@ impl Mobile {
                 bail!("the credential store did not give the device key ({why}): phone access cannot pair devices on this computer");
             }
         };
-        let mut device = Device { id: uuid::Uuid::new_v4().to_string(), name: p.name.clone(), pk: kelpie_link::b64(&p.pk), permission: wanted, kind: p.kind, created_at: now_millis(), last_seen: now_millis(), mac: String::new(), verified: false };
+        let mut device = Device { id: uuid::Uuid::new_v4().to_string(), name: p.name.clone(), pk: kelpie_link::b64(&p.pk), permission: wanted, kind: p.kind, created_at: now_millis(), last_seen: now_millis(), mac: String::new(), secure_origin: p.secure_origin, secure_mac: String::new(), verified: false };
         store::seal(&mut device, &key);
         let replaced: Vec<(String, String)> = {
             let mut c = self.config.lock();
@@ -1270,9 +1335,17 @@ impl Mobile {
         Ok(event)
     }
 
+    /// Turns phone access off. Tailscale mode ends with it, and only the person can bring it back: `mobile.enable` is open to the plain
+    /// user token and must not publish anything. The serve entry goes in `tailscale::remove_after_off`, which the caller starts.
     pub fn disable(&self) {
         self.stop_all_grants();
-        self.config.lock().enabled = false;
+        {
+            let mut c = self.config.lock();
+            c.enabled = false;
+            if std::mem::replace(&mut c.tailscale, false) {
+                self.serve_to_remove.store(true, Ordering::SeqCst);
+            }
+        }
         if let Some(r) = self.running.lock().take() {
             r.listeners.stop_all();
             r.stop.cancel();
@@ -1413,22 +1486,26 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
         return Err(error.unwrap_or_else(|| anyhow!("nothing to listen on")));
     }
     let stop = Arc::new(Generation::new());
-    let app = Router::new().route("/link", get(link_socket)).fallback(page).with_state(daemon.clone()).layer(axum::Extension(stop.clone()));
+    let routes = Router::new().route("/link", get(link_socket)).fallback(page).with_state(daemon.clone());
+    let app = routes.clone().layer(axum::Extension(stop.clone()));
     {
         let c = daemon.mobile.config.lock();
         if !c.enabled {
             listeners.stop_all();
             bail!("mobile access was disabled while starting");
         }
-        if let Some(old) = daemon.mobile.running.lock().replace(Running { tls: tls.is_some(), port, listeners: listeners.clone(), stop: stop.clone() }) {
+        if let Some(old) = daemon.mobile.running.lock().replace(Running { tls: tls.is_some(), port, listeners: listeners.clone(), stop: stop.clone(), app: routes, loopback: None, ts_origin: None }) {
             old.listeners.stop_all();
             old.stop.cancel();
         }
     }
     for (listener, own) in fresh {
-        tokio::spawn(serve_listener(listener, app.clone(), tls.clone(), stop.clone(), own));
+        tokio::spawn(serve_listener(listener, app.clone(), tls.clone(), stop.clone(), own, false));
     }
     advertise(&daemon.mobile, &listeners);
+    if daemon.mobile.config.lock().tailscale {
+        tokio::spawn(tailscale::resume(daemon.clone()));
+    }
     // Measuring the machine's load runs exactly as long as this server does.
     let told = Arc::downgrade(&daemon);
     daemon.mobile.load.start(
@@ -1474,7 +1551,7 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
                 let ips = listen::wanted(None).unwrap_or_default();
                 let (fresh, changed, _) = listeners.rebind(&ips, port).await;
                 for (listener, own) in fresh {
-                    tokio::spawn(serve_listener(listener, app.clone(), tls.clone(), stop.clone(), own));
+                    tokio::spawn(serve_listener(listener, app.clone(), tls.clone(), stop.clone(), own, false));
                 }
                 if changed {
                     tracing::info!("phone access now on {:?}", listeners.addrs());
@@ -1491,16 +1568,19 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
 /// Tells every connected phone (and the next to connect) where this computer can be reached.
 fn advertise(m: &Mobile, listeners: &listen::Listeners) {
     let list: Vec<String> = listeners.addrs().iter().map(listen::host).collect();
+    let ts = m.tailscale_origin();
     m.addrs.send_modify(|a| {
-        if a.list != list {
+        if a.list != list || a.ts != ts {
             a.seq += 1;
             a.list = list;
+            a.ts = ts;
         }
     });
 }
 
-/// Accepts connections on one address until that address or the whole server stops.
-async fn serve_listener(listener: tokio::net::TcpListener, app: Router, tls: Option<tokio_rustls::TlsAcceptor>, all: Arc<Generation>, own: Arc<Generation>) {
+/// Accepts connections on one address until that address or the whole server stops. `through_serve`: the loopback listener behind Tailscale
+/// Serve, whose connections end with it (`own` holds for what came through it, whichever of the two stopped).
+async fn serve_listener(listener: tokio::net::TcpListener, app: Router, tls: Option<tokio_rustls::TlsAcceptor>, all: Arc<Generation>, own: Arc<Generation>, through_serve: bool) {
     loop {
         let accepted = tokio::select! {
             biased;
@@ -1515,9 +1595,10 @@ async fn serve_listener(listener: tokio::net::TcpListener, app: Router, tls: Opt
             tracing::debug!("nodelay: {e}");
         }
         // Who is calling, for the pairing limiter and the transport's cap.
-        let app = app.clone().layer(axum::Extension(Peer { addr, tls: tls.is_some() }));
+        let peer = if through_serve { Peer::behind_serve(addr) } else { Peer::direct(addr, tls.is_some()) };
+        let app = app.clone().layer(axum::Extension(peer));
         let tls = tls.clone();
-        let connection_stop = all.clone();
+        let connection_stop = if through_serve { own.clone() } else { all.clone() };
         tokio::spawn(async move {
             tokio::select! {
                 biased;
@@ -1535,6 +1616,9 @@ async fn serve_listener(listener: tokio::net::TcpListener, app: Router, tls: Opt
                 } => {}
             }
         });
+    }
+    if through_serve {
+        own.cancel();
     }
 }
 
@@ -1560,9 +1644,9 @@ fn tls_acceptor(cert: &str, key: &str) -> Result<tokio_rustls::TlsAcceptor> {
 }
 
 /// The most a connection may do whatever its device's record says: a page in a browser (a device paired as one, or any
-/// connection whose upgrade carried a browser's `Origin`) may type only over HTTPS or from a Tailscale address (or from this
-/// machine itself, which no network sits between); over plain HTTP elsewhere the page could have been swapped on the way, so it
-/// may only read. The native app is not capped.
+/// connection whose upgrade carried a browser's `Origin`) may type only over HTTPS (its listener's own, or Tailscale Serve's) or from a
+/// Tailscale address (or from this machine itself, which no network sits between); over plain HTTP elsewhere the page could have been
+/// swapped on the way, so it may only read. The native app is not capped.
 fn transport_cap(kind: Kind, browser: bool, peer: &Peer) -> Permission {
     if kind == Kind::App && !browser {
         return Permission::Control;
@@ -1628,6 +1712,7 @@ async fn link_socket(State(daemon): State<Arc<Daemon>>, axum::Extension(generati
     if !same_origin(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let peer = peer.with_headers(&headers);
     if !daemon.mobile.upgrade_allowed(peer.ip()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
@@ -2232,6 +2317,15 @@ fn load_status(load: &Load) -> String {
     msg.to_string()
 }
 
+/// A QR code as the desktop shows it.
+fn qr_svg(qr: &qrcode::QrCode) -> String {
+    qr.render::<qrcode::render::svg::Color>()
+        .min_dimensions(240, 240)
+        .dark_color(qrcode::render::svg::Color("#141823"))
+        .light_color(qrcode::render::svg::Color("#ffffff"))
+        .build()
+}
+
 /// The pairing link and its QR code. A QR code holds about 2 KB, less than the payload may be: addresses that would not fit are left
 /// out, as a page knows the address it came from, so a computer with many of them can still pair. The secret stays in the fragment.
 fn pair_link(scheme: &str, host: &str, mut payload: kelpie_link::QrPayload) -> Result<(String, qrcode::QrCode)> {
@@ -2253,9 +2347,11 @@ fn device_hello(device: &Device, record: Permission, cap: Permission) -> Value {
     json!({"id": device.id, "name": device.name, "can_write": effective >= Permission::Write, "permission": effective.name(), "kind": device.kind.name(), "capped": effective < record})
 }
 
-/// Where this computer can be reached, for a phone to dial next time (after an address change above all).
+/// Where this computer can be reached, for a phone to dial next time (after an address change above all). `list` is what a page from
+/// before `endpoints` reads: the direct addresses only.
 fn addrs_message(a: &Addrs) -> String {
-    json!({"type": "addrs", "seq": a.seq, "list": a.list, "hostname": listen::hostname()}).to_string()
+    let endpoints: Vec<kelpie_link::Endpoint> = a.ts.iter().map(|o| kelpie_link::Endpoint::tailscale(o)).chain(a.list.iter().map(|l| kelpie_link::Endpoint::lan(l))).collect();
+    json!({"type": "addrs", "seq": a.seq, "list": a.list, "endpoints": endpoints, "hostname": listen::hostname()}).to_string()
 }
 
 /// The record allows nothing now: a phone whose record is gone is told so, one that is merely not let in now (phone access off)
@@ -2657,7 +2753,7 @@ mod tests {
 
     #[test]
     fn a_browser_page_types_only_over_https_or_tailscale_and_never_controls() {
-        let at = |addr: &str, tls: bool| Peer { addr: addr.parse().unwrap(), tls };
+        let at = |addr: &str, tls: bool| Peer::direct(addr.parse().unwrap(), tls);
         assert_eq!(transport_cap(Kind::Pwa, true, &at("192.168.1.9:5000", false)), Permission::Read, "plain http on the LAN: the page could be swapped");
         assert_eq!(transport_cap(Kind::Pwa, true, &at("192.168.1.9:5000", true)), Permission::Write);
         assert_eq!(transport_cap(Kind::Pwa, true, &at("100.100.1.2:5000", false)), Permission::Write, "tailscale");
@@ -2667,7 +2763,7 @@ mod tests {
         assert_eq!(transport_cap(Kind::Pwa, false, &at("192.168.1.9:5000", true)), Permission::Write, "a page paired as one stays one");
         assert_eq!(transport_cap(Kind::Pwa, true, &at("127.0.0.1:5000", false)), Permission::Write, "no network between: nothing to swap the page");
         // What the phone hears.
-        let mut d = Device { id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), verified: true };
+        let mut d = Device { id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), verified: true };
         let capped = device_hello(&d, d.permission, Permission::Read);
         assert_eq!((capped["permission"].as_str(), capped["can_write"].as_bool(), capped["capped"].as_bool()), (Some("read"), Some(false), Some(true)));
         d.permission = Permission::Read;
@@ -4662,7 +4758,7 @@ mod tests {
 
     /// A pairing secret as `mobile.pair_start` makes one (for a browser page).
     fn pairing_code(daemon: &Daemon) -> [u8; 32] {
-        let made = daemon.mobile.pair_start().unwrap();
+        let made = daemon.mobile.pair_start(false).unwrap();
         let url = made["url"].as_str().unwrap();
         assert!(url.starts_with("http://127.0.0.1:") && url.contains("/#p="), "{url}");
         let payload = kelpie_link::QrPayload::decode(url.split("#p=").nth(1).unwrap()).unwrap();
@@ -5492,6 +5588,453 @@ mod tests {
     }
 
     /// Nothing a phone does may queue without a limit: no unbounded channel on any of its paths.
+    /// A daemon that believes `fake` is Tailscale, with phone access on again so that its start sees it.
+    async fn on_tailscale(network: &mut NetworkRig, fake: &Arc<tailscale::fake::Fake>) {
+        *network.rig.daemon.mobile.tailscale_cli.lock() = fake.clone();
+        network.restart().await;
+    }
+
+    /// Asks as the verified app and gets the reply.
+    async fn ask_app(d: &Arc<Daemon>, tx: &ClientTx, replies: &mut mpsc::UnboundedReceiver<Outgoing>, client: u64, method: &str, params: Value) -> Value {
+        assert_eq!(d.dispatch(client, tx, &json!(1), method, params).unwrap(), None, "{method} answers later");
+        later_reply(replies).await
+    }
+
+    const ORIGIN: &str = "desk.tail1234.ts.net:8443";
+
+    /// The mode on, as the person would have turned it on. Returns the loopback port.
+    async fn publish(d: &Arc<Daemon>) -> u16 {
+        let (tx, mut replies) = app_client(d, 91);
+        d.presence.inject(|_| Ok(()));
+        let on = ask_app(d, &tx, &mut replies, 91, "mobile.set_tailscale", json!({"on": true})).await;
+        assert_eq!(on["result"]["origin"], ORIGIN, "{on}");
+        d.mobile.loopback_port().expect("listening")
+    }
+
+    /// A WebSocket to `/link` the way Tailscale Serve would make it.
+    async fn through_serve(d: &Daemon, port: u16, keys: kelpie_link::Keypair, headers: &str) -> TestPhone {
+        use tokio::io::AsyncWriteExt;
+        let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        tcp.write_all(format!("GET /link HTTP/1.1\r\nHost: {ORIGIN}\r\n{headers}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").as_bytes()).await.unwrap();
+        assert!(http_head(&mut tcp).await.starts_with("HTTP/1.1 101"));
+        TestPhone { tcp, session: None, keys, desktop: d.mobile.link_key().unwrap().public, closed: None }
+    }
+
+    #[test]
+    fn who_is_calling_through_serve_is_believed_there_and_nowhere_else() {
+        let ts: IpAddr = "100.101.102.103".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        let with = |pairs: &[(&'static str, &str)]| {
+            let mut h = HeaderMap::new();
+            for (k, v) in pairs {
+                h.append(*k, v.parse().unwrap());
+            }
+            h
+        };
+        let serve = Peer::behind_serve(loopback);
+        assert_eq!(serve.ip(), listen::BEHIND_SERVE, "with no word yet: the shared bucket, never this machine");
+        for (what, value, want) in [
+            ("a phone on the tailnet", "100.101.102.103", ts),
+            ("nearest last", "8.8.8.8, 100.101.102.103", ts),
+            ("v6", "fd7a:115c:a1e0::5", "fd7a:115c:a1e0::5".parse().unwrap()),
+            ("mapped", "::ffff:100.101.102.103", ts),
+            ("passing for this machine", "127.0.0.1", listen::BEHIND_SERVE),
+            ("passing for this machine, v6", "::1", listen::BEHIND_SERVE),
+            ("not a tailnet address", "192.168.1.5", listen::BEHIND_SERVE),
+            ("an address last that is not one", "100.101.102.103, 127.0.0.1", listen::BEHIND_SERVE),
+            ("garbage", "unknown", listen::BEHIND_SERVE),
+        ] {
+            let p = serve.with_headers(&with(&[("x-forwarded-for", value)]));
+            assert_eq!(p.ip(), want, "{what}");
+            assert!(!p.ip().is_loopback(), "{what}");
+        }
+        assert_eq!(serve.with_headers(&with(&[])).ip(), listen::BEHIND_SERVE, "serve sent none: one bucket for all of it");
+        assert_eq!(serve.with_headers(&with(&[("x-forwarded-for", "100.1.1.1"), ("x-forwarded-for", "100.101.102.103")])).ip(), ts, "the last header");
+        // Anywhere else the header is anyone's to send.
+        for direct in [Peer::direct("192.168.1.9:5000".parse().unwrap(), false), Peer::direct("192.168.1.9:5000".parse().unwrap(), true), Peer::direct(loopback, false)] {
+            let p = direct.with_headers(&with(&[("x-forwarded-for", "100.101.102.103")]));
+            assert_eq!(p.ip(), direct.addr.ip(), "{direct:?}");
+        }
+        // Secure for the transport, whoever it turns out to be, and only an HTTPS page is a secure origin.
+        assert_eq!(transport_cap(Kind::Pwa, true, &serve), Permission::Write);
+        assert_eq!(transport_cap(Kind::Pwa, true, &serve.with_headers(&with(&[("x-forwarded-for", "8.8.8.8")]))), Permission::Write);
+        assert!(serve.with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")])).secure_origin);
+        assert!(!serve.with_headers(&with(&[("origin", "http://127.0.0.1:50000")])).secure_origin);
+        assert!(!serve.with_headers(&with(&[])).secure_origin, "no page at all");
+        assert!(!Peer::direct(loopback, false).with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")])).secure_origin, "plain HTTP cannot be an HTTPS page's");
+        assert!(Peer::direct("192.168.1.9:5000".parse().unwrap(), true).with_headers(&with(&[("origin", "https://192.168.1.9:5000")])).secure_origin, "a certificate of the person's own");
+        assert_eq!(listen::shown(listen::BEHIND_SERVE), "Tailscale");
+    }
+
+    #[tokio::test]
+    async fn off_means_no_listener_and_no_child() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(fake.calls.lock().is_empty(), "nothing asked Tailscale anything");
+        assert_eq!(d.mobile.loopback_port(), None);
+        let status = d.mobile.status(true);
+        assert_eq!((status["tailscale"]["on"].as_bool(), status["tailscale"]["origin"].as_str()), (Some(false), None));
+        d.mobile.disable();
+        tailscale::remove_after_off(&d);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(fake.calls.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_plain_user_token_cannot_change_tailscale_mode() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        no_prompt_expected(&d);
+        d.set_client_role(92, &crate::auth::Role::User);
+        let (tx, _replies) = crate::session::client_channel();
+        for on in [true, false] {
+            assert!(d.dispatch(92, &tx, &json!(1), "mobile.set_tailscale", json!({"on": on})).is_err());
+        }
+        assert!(crate::auth::user_may(&crate::auth::Role::User, "mobile.set_tailscale").is_err());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(fake.calls.lock().is_empty(), "not even a look");
+    }
+
+    #[tokio::test]
+    async fn it_publishes_only_after_the_person_verified_and_off_leaves_tailscale_as_it_was() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let (tx, mut replies) = app_client(&d, 93);
+        d.presence.inject(|_| Err("Verification was cancelled.".into()));
+        let refused = ask_app(&d, &tx, &mut replies, 93, "mobile.set_tailscale", json!({"on": true})).await;
+        assert!(refused["error"].is_object(), "{refused}");
+        assert!(fake.changes().is_empty() && d.mobile.loopback_port().is_none() && !d.mobile.config.lock().tailscale);
+
+        let port = publish(&d).await;
+        assert_eq!(fake.changes(), [format!("serve --bg --https=8443 http://127.0.0.1:{port}")]);
+        assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry(port));
+        assert!(d.mobile.config.lock().tailscale);
+        assert_eq!(d.mobile.status(true)["tailscale"]["origin"], ORIGIN);
+
+        // The QR code holds the origin, first; every channel's link opens there.
+        let made = d.mobile.pair_start(false).unwrap();
+        let url = made["url"].as_str().unwrap();
+        assert!(url.starts_with(&format!("https://{ORIGIN}/#p=")), "{url}");
+        assert_eq!((made["tls"].as_bool(), made["tailscale"].as_bool()), (Some(true), Some(true)));
+        let payload = kelpie_link::QrPayload::decode(url.split("#p=").nth(1).unwrap()).unwrap();
+        assert_eq!(payload.endpoints, [kelpie_link::Endpoint::tailscale(ORIGIN), kelpie_link::Endpoint::lan(&network.addr.to_string())]);
+        assert_eq!(d.mobile.running_url().unwrap(), format!("https://{ORIGIN}/"));
+        // The plain pairing stays a separate thing, on this network's own address.
+        let plain = d.mobile.pair_start(true).unwrap();
+        let url = plain["url"].as_str().unwrap();
+        assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+        assert_eq!(kelpie_link::QrPayload::decode(url.split("#p=").nth(1).unwrap()).unwrap().endpoints, [kelpie_link::Endpoint::lan(&network.addr.to_string())]);
+        // Phones are told, and a page from before `endpoints` still reads `list`.
+        let told: Value = serde_json::from_str(&addrs_message(&d.mobile.addrs.borrow())).unwrap();
+        assert_eq!(told["list"], json!([network.addr.to_string()]));
+        assert_eq!(told["endpoints"], json!([{"t": "ts", "a": ORIGIN}, {"t": "lan", "a": network.addr.to_string()}]));
+
+        // The page answers on the loopback listener.
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut http = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            http.write_all(format!("HEAD / HTTP/1.1\r\nHost: {ORIGIN}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            assert!(http_head(&mut http).await.starts_with("HTTP/1.1 200"));
+        }
+        // Asked again, nothing changes: a second turn-on finds the entry ours.
+        d.presence.inject(|_| Ok(()));
+        let again = ask_app(&d, &tx, &mut replies, 93, "mobile.set_tailscale", json!({"on": true})).await;
+        assert_eq!(again["result"]["serve"], "ours", "{again}");
+        assert_eq!(fake.changes().len(), 1);
+
+        // A phone through serve is cut when the mode goes off; one on the network is not.
+        let mut phone = through_serve(&d, port, network.rig.phone.clone(), "X-Forwarded-For: 100.101.102.103\r\n").await;
+        phone.reconnect().await.expect("a paired key");
+        phone_send(&mut phone, json!({"caps": ["ack", "hb"]})).await.unwrap();
+        assert_eq!(phone_recv(&mut phone).await.unwrap()["type"], "hello");
+        no_prompt_expected(&d);
+        let off = ask_app(&d, &tx, &mut replies, 93, "mobile.set_tailscale", json!({"on": false})).await;
+        assert_eq!((off["result"]["on"].as_bool(), off["result"]["serve"].as_str()), (Some(false), Some("off")), "{off}");
+        assert!(!until_closed(&mut phone).await, "cut, and not told it was removed: it stays paired");
+        assert_eq!(fake.changes(), [format!("serve --bg --https=8443 http://127.0.0.1:{port}"), "serve --https=8443 off".to_string()]);
+        assert_eq!(*fake.serve.lock(), "{}", "as it was before");
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err(), "nothing listens");
+        assert_eq!(d.mobile.running_url().unwrap(), format!("http://{}/", network.addr), "back to this network's address");
+        assert!(d.mobile.pair_start(false).unwrap()["tailscale"] == false);
+        assert!(fake.calls.lock().iter().all(|c| !c.contains("reset") && !c.contains("funnel")));
+        let _ = network.http().await; // the other listeners go on
+    }
+
+    #[tokio::test]
+    async fn what_cannot_be_published_is_refused_with_no_prompt_and_nothing_changed() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let (tx, mut replies) = app_client(&d, 94);
+        no_prompt_expected(&d);
+        let refused = |r: Value| r["error"]["message"].as_str().unwrap_or_default().to_string();
+        *fake.serve.lock() = tailscale::fake::Fake::entry(3000);
+        let taken = ask_app(&d, &tx, &mut replies, 94, "mobile.set_tailscale", json!({"on": true})).await;
+        assert_eq!(refused(taken), tailscale::PORT_TAKEN);
+        assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry(3000));
+        *fake.serve.lock() = "garbage".into();
+        assert_eq!(refused(ask_app(&d, &tx, &mut replies, 94, "mobile.set_tailscale", json!({"on": true})).await), tailscale::NOT_READABLE);
+        *fake.serve.lock() = "{}".into();
+        *fake.status.lock() = r#"{"BackendState":"Running","CertDomains":null}"#.into();
+        assert_eq!(refused(ask_app(&d, &tx, &mut replies, 94, "mobile.set_tailscale", json!({"on": true})).await), tailscale::NOT_READY);
+        assert!(fake.changes().is_empty());
+        assert_eq!(d.mobile.loopback_port(), None);
+        // What Tailscale said when it would not do it is not what the person reads.
+        *fake.status.lock() = tailscale::fake::READY.into();
+        *fake.publish_fails.lock() = Some("Access denied: serve config denied; node key nodekey:SECRET".into());
+        d.presence.inject(|_| Ok(()));
+        let denied = refused(ask_app(&d, &tx, &mut replies, 94, "mobile.set_tailscale", json!({"on": true})).await);
+        assert_eq!(denied, tailscale::DENIED);
+        assert!(!denied.contains("SECRET"));
+        assert!(d.mobile.loopback_port().is_none() && !d.mobile.config.lock().tailscale, "nothing was left open");
+    }
+
+    #[tokio::test]
+    async fn each_state_is_told_and_only_a_good_one_makes_an_origin() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        for (status, state) in [
+            (r#"{"BackendState":"Stopped"}"#, "stopped"),
+            (r#"{"BackendState":"NeedsLogin"}"#, "needs_login"),
+            (r#"{"BackendState":"Running","CertDomains":null}"#, "https_off"),
+            ("garbage", "unreadable"),
+            (tailscale::fake::READY, "ready"),
+        ] {
+            *fake.status.lock() = status.into();
+            let told = tailscale::status(d.clone()).await.unwrap();
+            assert_eq!(told["state"], state, "{status}");
+            assert!(told["origin"].is_null(), "the mode is off");
+            assert!(told["install_qr"].is_null());
+        }
+        *fake.status.lock() = tailscale::fake::READY.into();
+        let port = publish(&d).await;
+        let told = tailscale::status(d.clone()).await.unwrap();
+        assert_eq!((told["serve"].as_str(), told["fqdn"].as_str()), (Some("ours"), Some("desk.tail1234.ts.net")));
+        assert!(told["install_qr"].as_str().unwrap().contains("<svg"));
+        // Tailscale going away: told, the origin goes, the sessions do not care, and it comes back with it.
+        *fake.status.lock() = r#"{"BackendState":"Stopped"}"#.into();
+        assert_eq!(tailscale::status(d.clone()).await.unwrap()["state"], "stopped");
+        assert_eq!(d.mobile.tailscale_origin(), None);
+        assert_eq!(d.mobile.loopback_port(), Some(port), "the listener stays for when it is back");
+        *fake.status.lock() = tailscale::fake::READY.into();
+        assert_eq!(tailscale::status(d.clone()).await.unwrap()["origin"], ORIGIN);
+        // The entry removed by hand: said so, not put back behind the person's back, and one click restores it.
+        *fake.serve.lock() = "{}".into();
+        let changes = fake.changes().len();
+        let told = tailscale::status(d.clone()).await.unwrap();
+        assert_eq!((told["serve"].as_str(), told["origin"].is_null()), (Some("missing"), true));
+        assert_eq!(fake.changes().len(), changes);
+        assert_eq!(publish(&d).await, port);
+        assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry(port));
+        // A MagicDNS rename: a new origin, and phones hear of it.
+        let seq = d.mobile.addrs.borrow().seq;
+        *fake.status.lock() = tailscale::fake::READY.replace("desk.", "newname.");
+        let told = tailscale::status(d.clone()).await.unwrap();
+        assert_eq!(told["origin"], "newname.tail1234.ts.net:8443");
+        assert!(d.mobile.addrs.borrow().seq > seq);
+    }
+
+    #[tokio::test]
+    async fn turning_phone_access_off_ends_the_mode_and_the_plain_token_cannot_bring_it_back() {
+        for method in ["mobile.disable", "mobile.revoke_all"] {
+            let mut network = NetworkRig::new().await;
+            let fake = Arc::new(tailscale::fake::Fake::ready());
+            on_tailscale(&mut network, &fake).await;
+            let d = network.rig.daemon.clone();
+            let port = publish(&d).await;
+            d.set_client_role(95, &crate::auth::Role::User);
+            let (tx, _replies) = crate::session::client_channel();
+            assert!(d.dispatch(95, &tx, &json!(1), method, json!({})).unwrap().is_some());
+            for _ in 0..500 {
+                if fake.changes().iter().any(|c| c == "serve --https=8443 off") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(*fake.serve.lock(), "{}", "{method}: the entry goes");
+            assert!(!d.mobile.config.lock().tailscale, "{method}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err(), "{method}: nothing listens");
+            // On again, as anyone with the user token can: nothing is published, nothing listens for serve.
+            let changes = fake.changes().len();
+            enable(d.clone(), json!({})).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(fake.changes().len(), changes, "{method}");
+            assert_eq!(d.mobile.loopback_port(), None, "{method}");
+            assert_eq!(d.mobile.tailscale_origin(), None, "{method}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_starts_again_looks_and_never_publishes_by_itself() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let port = publish(&d).await;
+        let changes = fake.changes();
+        let until_origin = |d: Arc<Daemon>, want: bool| async move {
+            for _ in 0..500 {
+                if d.mobile.tailscale_origin().is_some() == want {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the origin did not come to {want}");
+        };
+        // Same port, same origin: the entry a crash left behind is ours and carries on.
+        d.mobile.running.lock().as_mut().unwrap().ts_origin = None;
+        network.restart().await;
+        until_origin(d.clone(), true).await;
+        assert_eq!(d.mobile.loopback_port(), Some(port));
+        assert_eq!(fake.changes(), changes, "nothing was published");
+        // Someone else has that port now: our entry would lead to them, so it goes.
+        d.mobile.stop_loopback();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let held = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        network.restart().await;
+        for _ in 0..500 {
+            if *fake.serve.lock() == "{}" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(*fake.serve.lock(), "{}");
+        assert_eq!(d.mobile.loopback_port(), None);
+        assert_eq!(d.mobile.tailscale_origin(), None);
+        // Turning it on again takes another port.
+        let other = publish(&d).await;
+        assert_ne!(other, port);
+        assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry(other));
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn a_page_through_serve_pairs_as_a_secure_origin_and_is_held_to_the_limits_of_an_address() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let port = publish(&d).await;
+        let page = format!("Origin: https://{ORIGIN}\r\nX-Forwarded-For: 100.101.102.103\r\n");
+        let code = |d: &Daemon| kelpie_link::QrPayload::decode(d.mobile.pair_start(false).unwrap()["url"].as_str().unwrap().split("#p=").nth(1).unwrap()).unwrap().psk;
+        let keys = kelpie_link::Keypair::generate().unwrap();
+        let mut phone = through_serve(&d, port, keys.clone(), &page).await;
+        start_pairing(&mut phone, &code(&d), "Pixel").await.expect("the desktop replies");
+        let shown = phone.session.as_ref().unwrap().pair_code();
+        let id = pending_request(&d).await;
+        assert_eq!(d.mobile.status(true)["pending"][0]["address"], "100.101.102.103", "who it is, not this machine");
+        d.mobile.approve(&json!({"id": id, "allow": true, "code": shown, "permission": "write"})).unwrap();
+        let paired = phone_recv(&mut phone).await.unwrap();
+        let device = paired["device"]["id"].as_str().unwrap().to_string();
+        let record = d.mobile.config.lock().devices.iter().find(|x| x.id == device).cloned().unwrap();
+        assert!(record.secure_origin && !record.secure_mac.is_empty());
+        assert!(store::verify(&record, &d.mobile.mac_key(false).unwrap().unwrap()));
+        assert_eq!(d.mobile.status(true)["devices"].as_array().unwrap().iter().find(|x| x["id"] == device.as_str()).unwrap()["secure_origin"], true);
+        // It may type here.
+        let mut again = through_serve(&d, port, keys, &page).await;
+        again.reconnect().await.expect("a paired key");
+        phone_send(&mut again, json!({"caps": ["ack", "hb"]})).await.unwrap();
+        let hello = phone_recv(&mut again).await.unwrap();
+        assert_eq!((hello["device"]["can_write"].as_bool(), hello["device"]["capped"].as_bool()), (Some(true), Some(false)), "{hello}");
+        // Paired from a plain page it would not be a secure origin.
+        let keys = kelpie_link::Keypair::generate().unwrap();
+        let mut plain = network.socket_as(keys, true).await;
+        start_pairing(&mut plain, &pairing_code_plain(&d), "Plain").await.expect("the desktop replies");
+        let shown = plain.session.as_ref().unwrap().pair_code();
+        let id = pending_request(&d).await;
+        d.mobile.approve(&json!({"id": id, "allow": true, "code": shown})).unwrap();
+        let device = phone_recv(&mut plain).await.unwrap()["device"]["id"].as_str().unwrap().to_string();
+        assert!(!d.mobile.config.lock().devices.iter().find(|x| x.id == device).unwrap().secure_origin);
+
+        // What fails is counted against who sent it; with no word of who that was, against all of serve at once; and never against no one.
+        let failures = |d: &Daemon, ip: &str| d.mobile.failures.lock().get(&ip.parse::<IpAddr>().unwrap()).map_or(0, VecDeque::len);
+        for (headers, counted) in [("X-Forwarded-For: 100.64.9.9\r\n", "100.64.9.9"), ("", "0.0.0.0"), ("X-Forwarded-For: 127.0.0.1\r\n", "0.0.0.0")] {
+            let before = failures(&d, counted);
+            let mut stranger = through_serve(&d, port, kelpie_link::Keypair::generate().unwrap(), headers).await;
+            assert!(stranger.reconnect().await.is_none());
+            assert_eq!(stranger.closed, Some(NOT_PAIRED));
+            assert_eq!(failures(&d, counted), before + 1, "{headers:?}");
+        }
+        // The header means nothing on any other listener.
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut tcp = network.http().await;
+            tcp.write_all(format!("GET /link HTTP/1.1\r\nHost: {}\r\nX-Forwarded-For: 100.64.8.8\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", network.addr).as_bytes()).await.unwrap();
+            assert!(http_head(&mut tcp).await.starts_with("HTTP/1.1 101"));
+            let mut stranger = TestPhone { tcp, session: None, keys: kelpie_link::Keypair::generate().unwrap(), desktop: d.mobile.link_key().unwrap().public, closed: None };
+            assert!(stranger.reconnect().await.is_none());
+            assert_eq!(failures(&d, "100.64.8.8"), 0);
+        }
+        // Another site's page gets no socket, whichever way it comes.
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            tcp.write_all(format!("GET /link HTTP/1.1\r\nHost: {ORIGIN}\r\nOrigin: https://evil.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").as_bytes()).await.unwrap();
+            assert!(http_head(&mut tcp).await.starts_with("HTTP/1.1 403"));
+        }
+    }
+
+    /// A plain pairing secret while the mode is on.
+    fn pairing_code_plain(d: &Daemon) -> [u8; 32] {
+        let made = d.mobile.pair_start(true).unwrap();
+        kelpie_link::QrPayload::decode(made["url"].as_str().unwrap().split("#p=").nth(1).unwrap()).unwrap().psk
+    }
+
+    #[test]
+    fn the_tailscale_endpoint_is_the_last_to_be_left_out_of_a_qr_code() {
+        let long = "a-computer-with-quite-a-long-name.some-tailnet-name-here.ts.net:8443";
+        let mut endpoints = vec![kelpie_link::Endpoint::tailscale(long)];
+        endpoints.extend((0..100).map(|i| kelpie_link::Endpoint::lan(&format!("[fd7a:115c:a1e0:ab12:4843:cd96:6257:{i:x}]:4817"))));
+        for name in ["desk.local".to_string(), "máy tính của tôi 😀".repeat(20)] {
+            let (link, _qr) = pair_link("https", long, kelpie_link::QrPayload { dpk: [1; 32], psk: [2; 32], endpoints: endpoints.clone(), name }).unwrap();
+            let got = kelpie_link::QrPayload::decode(link.split("#p=").nth(1).unwrap()).unwrap();
+            assert_eq!(got.endpoints[0], endpoints[0], "it stays");
+            assert!(got.endpoints.len() < endpoints.len(), "the others went");
+        }
+    }
+
+    /// The phone's QR decoder is tested on what the encoder this daemon uses really makes (`qr-decode.test.ts`). With
+    /// `KELPIE_WRITE_QR_FIXTURES` set this writes the file again.
+    #[test]
+    fn the_qr_fixtures_are_what_the_encoder_makes() {
+        let rows = |text: &str| -> Vec<String> {
+            let qr = qrcode::QrCode::new(text.as_bytes()).unwrap();
+            let colors = qr.to_colors();
+            colors.chunks(qr.width()).map(|row| row.iter().map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' }).collect()).collect()
+        };
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../app/phone/src/qr-fixtures.json");
+        if std::env::var_os("KELPIE_WRITE_QR_FIXTURES").is_some() {
+            let link = |endpoints: Vec<kelpie_link::Endpoint>| pair_link("https", ORIGIN, kelpie_link::QrPayload { dpk: [1; 32], psk: [2; 32], endpoints, name: "desk.local".into() }).unwrap().0;
+            let lan = |n: u8| kelpie_link::Endpoint::lan(&format!("192.168.1.{n}:4817"));
+            let texts = [
+                "HELLO 12345".to_string(),
+                "12345678901234567890".to_string(),
+                format!("https://{ORIGIN}/"),
+                link(vec![kelpie_link::Endpoint::tailscale(ORIGIN), lan(5)]),
+                link(std::iter::once(kelpie_link::Endpoint::tailscale(ORIGIN)).chain((1..24).map(lan)).collect()),
+            ];
+            let codes: Vec<Value> = texts.iter().map(|t| json!({"text": t, "rows": rows(t)})).collect();
+            std::fs::write(&path, serde_json::to_string(&json!({"codes": codes})).unwrap()).unwrap();
+        }
+        let file: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for code in file["codes"].as_array().unwrap() {
+            let text = code["text"].as_str().unwrap();
+            let want: Vec<String> = code["rows"].as_array().unwrap().iter().map(|r| r.as_str().unwrap().to_string()).collect();
+            assert_eq!(rows(text), want, "{text}");
+        }
+    }
+
     #[test]
     fn no_phone_path_has_an_unbounded_queue() {
         let needles = [concat!("unbounded", "_channel"), concat!("Unbounded", "Sender"), concat!("Unbounded", "Receiver"), concat!("ClientTx::", "Unbounded")];

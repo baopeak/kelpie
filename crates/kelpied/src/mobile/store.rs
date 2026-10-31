@@ -61,7 +61,14 @@ pub struct Device {
     pub last_seen: u64,
     /// HMAC-SHA256 (hex) of the fields above but `last_seen`.
     pub mac: String,
-    /// Set when the record was loaded or made here and its MAC checked out.
+    /// It paired on an HTTPS origin, so a page swapped on the network cannot have done it. What later grants rest on (the relay, control).
+    #[serde(default)]
+    pub secure_origin: bool,
+    /// HMAC-SHA256 (hex) saying so, for a record with `secure_origin` only. A second tag, not a field of the first: a record paired here
+    /// still verifies for an older Kelpie, which ignores both, and setting the flag in the file does not verify anywhere.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub secure_mac: String,
+    /// Set when the record was loaded or made here and its MACs checked out.
     #[serde(skip)]
     pub verified: bool,
 }
@@ -97,6 +104,12 @@ pub struct Store {
     /// A device unused for this many days must be paired again (`None`: `DEFAULT_DORMANT_DAYS`; 0: never).
     #[serde(default)]
     pub dormant_days: Option<u32>,
+    /// Tailscale mode: this computer is published with `tailscale serve`.
+    #[serde(default)]
+    pub tailscale: bool,
+    /// The loopback port our serve entry forwards to, which is how the entry is known for ours.
+    #[serde(default)]
+    pub tailscale_port: Option<u16>,
 }
 
 pub const DEFAULT_DORMANT_DAYS: u32 = 90;
@@ -154,7 +167,7 @@ fn broken(path: &Path, bytes: &[u8], why: String) -> Loaded {
 fn from_legacy(dir: &Path) -> Store {
     let old = std::fs::read(dir.join(LEGACY_FILE)).ok().and_then(|b| serde_json::from_slice::<LegacyStore>(&b).ok());
     match old {
-        Some(o) => Store { version: VERSION, enabled: o.enabled, ip: o.ip, port: o.port, cert: o.cert, key: o.key, devices: Vec::new(), legacy: o.devices, dormant_days: None },
+        Some(o) => Store { version: VERSION, enabled: o.enabled, ip: o.ip, port: o.port, cert: o.cert, key: o.key, legacy: o.devices, ..Default::default() },
         None => Store { version: VERSION, ..Default::default() },
     }
 }
@@ -181,19 +194,35 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub fn seal(d: &mut Device, key: &[u8; 32]) {
+/// What `secure_mac` covers: this record and no other, and no other tag of it.
+fn secure_input(d: &Device) -> Vec<u8> {
+    let mut out = b"kelpie-device-secure/1".to_vec();
+    out.extend_from_slice(d.mac.as_bytes());
+    out
+}
+
+fn tag(key: &[u8; 32], input: &[u8]) -> String {
     let mut m = HmacSha256::new_from_slice(key).expect("any key length");
-    m.update(&mac_input(d));
-    d.mac = hex(&m.finalize().into_bytes());
+    m.update(input);
+    hex(&m.finalize().into_bytes())
+}
+
+fn tag_holds(key: &[u8; 32], input: &[u8], hex_tag: &str) -> bool {
+    let Some(tag) = unhex(hex_tag) else { return false };
+    let mut m = HmacSha256::new_from_slice(key).expect("any key length");
+    m.update(input);
+    m.verify_slice(&tag).is_ok()
+}
+
+pub fn seal(d: &mut Device, key: &[u8; 32]) {
+    d.mac = tag(key, &mac_input(d));
+    d.secure_mac = if d.secure_origin { tag(key, &secure_input(d)) } else { String::new() };
     d.verified = true;
 }
 
-/// Whether the record is as it was sealed with `key` (constant time).
+/// Whether the record is as it was sealed with `key` (constant time). A record that says it paired on a secure origin must prove that too.
 pub fn verify(d: &Device, key: &[u8; 32]) -> bool {
-    let Some(tag) = unhex(&d.mac) else { return false };
-    let mut m = HmacSha256::new_from_slice(key).expect("any key length");
-    m.update(&mac_input(d));
-    m.verify_slice(&tag).is_ok()
+    tag_holds(key, &mac_input(d), &d.mac) && (!d.secure_origin || tag_holds(key, &secure_input(d), &d.secure_mac))
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
@@ -214,7 +243,7 @@ mod tests {
     }
 
     fn device(key: &[u8; 32]) -> Device {
-        let mut d = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: String::new(), verified: false };
+        let mut d = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), verified: false };
         seal(&mut d, key);
         d
     }
@@ -242,6 +271,38 @@ mod tests {
         assert!(!verify(&garbage, &key));
         garbage.mac = String::new();
         assert!(!verify(&garbage, &key));
+    }
+
+    #[test]
+    fn a_secure_origin_cannot_be_claimed_in_the_file_and_an_older_kelpie_still_reads_the_record() {
+        let key = [3u8; 32];
+        let plain = device(&key);
+        assert!(plain.secure_mac.is_empty(), "as before");
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("secure_mac").is_none());
+
+        let mut claimed = plain.clone();
+        claimed.secure_origin = true;
+        assert!(!verify(&claimed, &key), "the flag set in the file");
+        claimed.secure_mac = plain.mac.clone();
+        assert!(!verify(&claimed, &key), "the other tag copied over");
+
+        let mut secure = plain.clone();
+        secure.secure_origin = true;
+        seal(&mut secure, &key);
+        assert!(verify(&secure, &key));
+        assert_eq!(secure.mac, plain.mac, "what an older Kelpie checks has not changed");
+        let mut other = device(&key);
+        other.id = "d2".into();
+        seal(&mut other, &key);
+        other.secure_origin = true;
+        other.secure_mac = secure.secure_mac.clone();
+        assert!(!verify(&other, &key), "another record's tag");
+
+        // A record written before this field exists: no flag, and it verifies.
+        let old: Device = serde_json::from_str(&format!(r#"{{"id":"d1","name":"Phone","pk":"AAAA","permission":"read","kind":"pwa","created_at":7,"last_seen":0,"mac":"{}"}}"#, plain.mac)).unwrap();
+        assert!(!old.secure_origin);
+        assert!(verify(&old, &key));
     }
 
     #[test]

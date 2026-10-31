@@ -176,5 +176,12 @@
   "Windows could not verify you": "Windows không xác minh được bạn",
   "Removed for now, but this could not be saved: it will come back after a restart unless this is fixed.": "Đã gỡ tạm thời, nhưng không lưu được: thiết bị sẽ quay lại sau khi khởi động lại nếu lỗi này chưa được khắc phục.",
   "Changed for now, but this could not be saved: the phone will have its old permission after a restart unless this is fixed.": "Đã đổi tạm thời, nhưng không lưu được: điện thoại sẽ có lại quyền cũ sau khi khởi động lại nếu lỗi này chưa được khắc phục.",
-  "Turned off for now, but this could not be saved: it will come back on after a restart unless this is fixed.": "Đã tắt tạm thời, nhưng không lưu được: truy cập sẽ bật lại sau khi khởi động lại nếu lỗi này chưa được khắc phục."
+  "Turned off for now, but this could not be saved: it will come back on after a restart unless this is fixed.": "Đã tắt tạm thời, nhưng không lưu được: truy cập sẽ bật lại sau khi khởi động lại nếu lỗi này chưa được khắc phục.",
+  "Tailscale is not ready on this computer: follow the instruction in Settings → Mobile.": "Tailscale chưa sẵn sàng trên máy tính này: hãy làm theo hướng dẫn trong Cài đặt → Điện thoại.",
+  "Port 8443 of Tailscale Serve is used by something else, and Kelpie left it alone. Free that port, then turn this on again.": "Cổng 8443 của Tailscale Serve đang được dùng cho việc khác và Kelpie không động đến nó. Hãy giải phóng cổng đó rồi bật lại.",
+  "Kelpie could not read what Tailscale Serve is doing, so it changed nothing. Update Tailscale and try again.": "Kelpie không đọc được trạng thái của Tailscale Serve nên không thay đổi gì. Hãy cập nhật Tailscale rồi thử lại.",
+  "Tailscale did not let Kelpie publish this computer. On Linux, allow your user once with `sudo tailscale set --operator=$USER`; then try again.": "Tailscale không cho Kelpie công bố máy tính này. Trên Linux, hãy cho phép người dùng của bạn một lần bằng `sudo tailscale set --operator=$USER` rồi thử lại.",
+  "Tailscale did not publish this computer. Check that HTTPS certificates and Serve are allowed for your tailnet, then try again.": "Tailscale chưa công bố máy tính này. Hãy kiểm tra chứng chỉ HTTPS và Serve đã được cho phép trên tailnet của bạn rồi thử lại.",
+  "Kelpie stopped answering through Tailscale, but its entry in Tailscale Serve could not be removed. Start Tailscale and press Remove in Settings → Mobile.": "Kelpie đã ngừng phản hồi qua Tailscale, nhưng không gỡ được mục của nó trong Tailscale Serve. Hãy khởi động Tailscale rồi bấm Gỡ trong Cài đặt → Điện thoại.",
+  "Kelpie could not open the local port Tailscale Serve forwards to. Try again in a moment.": "Kelpie không mở được cổng cục bộ mà Tailscale Serve chuyển tiếp tới. Hãy thử lại sau giây lát."
 }
