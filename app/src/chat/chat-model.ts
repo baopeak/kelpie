@@ -834,10 +834,10 @@ export class ChatController {
         console.warn("the daemon did not take the message", why);
         // `busy`: another turn started meanwhile, which is why it is busy; the rest is as if nothing had been built.
         this.rollback(added, wasBusy, restore, !/busy/.test(why));
-        // Those it asks again about, or that it already dealt with (the note comes with its word). Anything else would only fail
-        // again each time it is offered, and hold up what waits behind it: a final no. A message over the connection's own limit
-        // never reached the daemon, so it is told why.
-        if (!/too_late|busy|switching|too_large/.test(why)) void this.transport.writeTurn?.(qid, null, false, false, /too large/i.test(why)).catch(() => {});
+        // Those it asks again about. Anything else would only fail again each time it is offered, and hold up what waits behind it: a
+        // final no, sent after the rollback above, as the daemon offers the next message when it gets it. Too large, by its limit or
+        // the connection's: it is told why, and the note comes with its word.
+        if (!/too_late|busy|switching/.test(why)) void this.transport.writeTurn?.(qid, null, false, false, /too.large/i.test(why)).catch(() => {});
       },
     );
   }

@@ -232,7 +232,7 @@ describe("a message too large to write", () => {
     await tick();
     expect(ctrl.state.items.filter((i) => i.kind === "user"), "the pending bubble is gone").toHaveLength(0);
     expect(ctrl.state.busy).toBe(false);
-    expect(asked.write.filter((w) => w.lines === null), "it already dealt with it: nothing more is asked").toEqual([]);
+    expect(asked.write.at(-1), "given up, after the rollback above, so the next message is offered after it").toMatchObject({ qid: "q1", lines: null, turn: false, tooLarge: true });
     ctrl.applyQueue(fromDaemonEvent({ items: [], paused: false, held: false, in_flight: false, dropped: [{ qid: "q1", cid, by: { id: "desktop", name: "desktop" }, text: "look", images: ["big.png"], reason: "too_large" }] }));
     expect(noteOf(ctrl)?.text).toBe("Not sent (too large to send to the agent):\nlook\n[big.png]");
     // The log line that outlives it says the same, under the same id.

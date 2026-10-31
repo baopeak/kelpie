@@ -782,9 +782,9 @@ pane, which a tab or project switch unmounts. When the connection is gone it is 
 as `declined`, and a `{"type":"kelpie_unsent",...}` line in the chat log keeps the note for whoever looks next (the daemon's
 `client_gone`). If the daemon does not take the lines (`busy`, `switching`,
 `too_late`) the window undoes what building them did: the pending bubble, `busy` and the adapter's own state (`Adapter.snapshot`).
-Lines over 16 MiB cannot go, whoever builds them: `chat.write_turn` answers `too_large` and the message leaves the queue with that reason, so everyone is told
-and what waits behind it moves on. A window whose own connection refused the lines (over the frame limit) says so with `{lines: null,
-too_large: true}`, and any other failure is a final `null`. Both `chat.queue`'s `dropped` and `kelpie_unsent` carry the names of the pictures (`images`), so a note
+Lines over 16 MiB cannot go, whoever builds them: `chat.write_turn` answers `too_large` and changes nothing, the window undoes what building them did and says so with `{lines: null,
+too_large: true}`, as it does when its own connection refused the lines (over the frame limit). The message then leaves the queue with that reason, everyone is told
+and what waits behind it moves on, so the next offer cannot be undone by that rollback. Any other failure is a final `null`. Both `chat.queue`'s `dropped` and `kelpie_unsent` carry the names of the pictures (`images`), so a note
 keeps them after a reload.
 The window's `chat.send {handle, cid, text, rich, images?}` answers `{qid, state, ahead}` or `{refused, message}`.
 `chat.queue_op {handle, op, qid?}` is `cancel` (any queued message, whoever's; an offered or written one is `too_late`), `front`

@@ -34,7 +34,8 @@ export interface ChatTransport {
   enqueue?(cid: string, text: string, rich: boolean, images: string[]): Promise<EnqueueResult>;
   /** Desktop: the lines the adapter built for the message offered as `qid` (`null`: it cannot build them).
    *  `lines: null` with `retry`: not now (replaying, loading), ask again; without it, this window does not have the message.
-   *  Rejects with `too_late`, `busy` or `switching` when the daemon does not take them. */
+   *  With `tooLarge`: they cannot go, so the message leaves the queue with that reason.
+   *  Rejects with `too_late`, `busy`, `switching` or `too_large` when the daemon does not take them. */
   writeTurn?(qid: string, lines: string[] | null, turn: boolean, retry?: boolean, tooLarge?: boolean): Promise<void>;
   /** Desktop and phone: `cancel` a waiting message, `resume` a stopped queue. The desktop also has
    *  `front` (`interrupt`: an interrupt follows that must not pause), `take` and `hold`. */

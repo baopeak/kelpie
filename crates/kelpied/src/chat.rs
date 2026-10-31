@@ -1336,11 +1336,11 @@ impl ChatSession {
                         WriteRefused::Switching => "switching",
                     })
                 };
+                // Nothing changes yet: the window undoes what building them did, then says so (next), so the next message is offered only after that.
                 if lines.as_ref().is_some_and(|l| l.iter().map(String::len).sum::<usize>() > TURN_MAX) {
-                    self.turn_too_large(client, qid).map_err(refusal)?;
                     anyhow::bail!("too_large");
                 }
-                // The window could not even hand the lines over (over the frame limit).
+                // The lines cannot go: they are over the limit above, or the window could not even hand them over (over the frame limit).
                 if lines.is_none() && params.get("too_large").and_then(Value::as_bool) == Some(true) {
                     self.turn_too_large(client, qid).map_err(refusal)?;
                     return Ok(json!(true));
@@ -2868,16 +2868,39 @@ mod tests {
     }
 
     #[test]
-    fn lines_over_the_limit_are_refused_and_the_message_leaves_the_queue() {
+    fn lines_over_the_limit_are_refused_and_the_message_leaves_the_queue_once_the_window_says_so() {
         let (c, mut stdin) = live();
         let (qid, mut rx, mut prx, _window, _phone) = offered_with_a_message_behind(&c);
-        let at_limit = "x".repeat(TURN_MAX + 1);
-        let refused = c.queue_rpc(1, "chat.write_turn", &json!({"qid": qid, "lines": [at_limit], "turn": true})).unwrap_err().to_string();
+        let over = "x".repeat(TURN_MAX + 1);
+        let refused = c.queue_rpc(1, "chat.write_turn", &json!({"qid": qid, "lines": [over], "turn": true})).unwrap_err().to_string();
         assert_eq!(refused, "too_large");
+        assert_eq!(texts(&c), ["look", "waits behind"], "nothing moved while the window undoes what it built");
+        assert!(written_lines(&mut stdin).is_empty());
+        assert_eq!(c.queue_rpc(1, "chat.write_turn", &json!({"qid": qid, "lines": null, "turn": false, "too_large": true})).unwrap(), json!(true));
         too_large_is_told_and_the_queue_moves(&c, &mut stdin, &mut prx);
         assert!(received(&mut rx).iter().any(|e| e["event"] == "chat.queue" && e["params"]["dropped"][0]["reason"] == "too_large"), "the window hears it too");
         // Asked again, there is nothing left of it.
         assert_eq!(c.queue_rpc(1, "chat.write_turn", &json!({"qid": qid, "lines": ["small"], "turn": true})).unwrap_err().to_string(), "too_late");
+    }
+
+    /// The refusal goes ahead of the next offer: a window undoing the big message's state cannot undo the next one's.
+    #[test]
+    fn the_next_desktop_message_is_offered_only_after_the_window_said_it_gave_up() {
+        let (c, _stdin) = live();
+        let (window, mut rx) = client();
+        c.attach(1, &window, &json!(1));
+        c.ingest_line(json!({"type": "assistant", "message": {}}).to_string());
+        c.enqueue(from_desktop(1, "pic", "look", true)).unwrap();
+        c.enqueue(from_desktop(1, "next", "and this", true)).unwrap();
+        c.ingest_line(json!({"type": "result"}).to_string());
+        let offers = |rx: &mut Feed| received(rx).into_iter().filter(|e| e["event"] == "chat.turn_ready").map(|e| e["params"]["cid"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(offers(&mut rx), ["pic"]);
+        let pic = c.queue_view()["items"][0]["qid"].as_str().unwrap().to_string();
+        let over = "x".repeat(TURN_MAX + 1);
+        assert_eq!(c.queue_rpc(1, "chat.write_turn", &json!({"qid": pic, "lines": [over], "turn": true})).unwrap_err().to_string(), "too_large");
+        assert!(offers(&mut rx).is_empty(), "not yet");
+        assert_eq!(c.queue_rpc(1, "chat.write_turn", &json!({"qid": pic, "lines": null, "turn": false, "too_large": true})).unwrap(), json!(true));
+        assert_eq!(offers(&mut rx), ["next"]);
     }
 
     #[test]
