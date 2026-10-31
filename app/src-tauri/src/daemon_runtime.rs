@@ -171,6 +171,29 @@ fn fill_slot(dir: &Path, src: &Path, exe_name: &std::ffi::OsStr, build: &str) ->
     Ok(exe)
 }
 
+/// An AppImage's mount moves on every launch, and the daemon it started outlives it, so this launch would find a slot that names a
+/// mount long gone, and the daemon would not take this window for the app. Runs at start, before the first connection says who it is:
+/// a daemon already running is connected to at once, with no copy that would name the folder.
+pub fn name_app_folder(installed: &Path) {
+    let from_appimage = cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some();
+    if !from_appimage || cfg!(debug_assertions) || std::env::var_os("KELPIE_DAEMON_PATH").is_some() {
+        return;
+    }
+    if let Some(src) = installed.parent() {
+        name_source_in_slots(&kelpie_proto::data_dir().join("daemon"), src);
+    }
+}
+
+/// Only in a slot that names a folder already: any other holds no daemon of an app.
+fn name_source_in_slots(root: &Path, src: &Path) {
+    for slot in SLOTS {
+        let dir = root.join(slot);
+        if dir.join("source.txt").is_file() {
+            name_source(&dir, src);
+        }
+    }
+}
+
 /// Tells the daemon in a slot where the app is installed: only that app's executable may ask for phone-access decisions
 /// (`peer_identity.rs` in kelpied, `SLOT_SOURCE`).
 fn name_source(dir: &Path, src: &Path) {
@@ -194,6 +217,29 @@ mod tests {
             std::fs::write(install.join(name), body).unwrap();
         }
         install.join("kelpied.exe")
+    }
+
+    /// The mount moved while the daemon lived: the next launch names the new one, and copies nothing.
+    #[test]
+    fn a_later_launch_names_its_own_folder_in_each_slot_that_names_one() {
+        let base = std::env::temp_dir().join(format!("kelpie-runtime-source-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("daemon");
+        let (first, second) = (base.join("mount-first"), base.join("mount-second"));
+        for slot in ["a", "b"] {
+            std::fs::create_dir_all(root.join(slot)).unwrap();
+        }
+        name_source(&root.join("a"), &first);
+        let source = |slot: &str| std::fs::read_to_string(root.join(slot).join("source.txt")).ok();
+        assert_eq!(source("a").as_deref(), Some(first.to_string_lossy().as_ref()));
+        name_source_in_slots(&root, &second);
+        assert_eq!(source("a").as_deref(), Some(second.to_string_lossy().as_ref()), "the new mount");
+        assert_eq!(source("b"), None, "a slot that names nothing stays so");
+        assert!(!root.join("a").join(BUILD_FILE).exists() && !root.join("a").join("kelpied.exe").exists(), "no copy");
+        // With no slots yet (the first launch), nothing is made.
+        name_source_in_slots(&base.join("nowhere"), &second);
+        assert!(!base.join("nowhere").exists());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

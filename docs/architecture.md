@@ -91,7 +91,7 @@ anything but `daemon.info` answers:
   outside a session, `scripts/kelpie-call.py`. Full access; raw Input frames are accepted from it only.
 - the **verified app** (`Role::App`): the user token, `client: "app"`, *and* the connection's peer process runs the Kelpie
   app's executable (`crates/kelpied/src/peer_identity.rs`: `kelpie` next to the daemon, or in the folder named by a runtime slot's
-  `source.txt`; on macOS a path check only, no code-signature check, a known weakening to fix or accept before macOS ships). Only
+  `source.txt`, which an AppImage rewrites at every start because its mount moves while the daemon lives; on macOS a path check only, no code-signature check, a known weakening to fix or accept before macOS ships). Only
   it may ask for the phone decisions `mobile.approve`, `mobile.set_permission`, `mobile.set_write`, `mobile.reset`
   (`auth::APP_ONLY`), and for a `mobile.set_options` that keeps unused phones longer. Those that raise access take effect only
   after **the daemon itself** asked the operating system to verify the person (`crates/kelpied/src/user_presence.rs`: Windows

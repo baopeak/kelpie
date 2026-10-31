@@ -522,6 +522,7 @@ pub fn run() {
         .setup(|app| {
             fs_ops::sweep_temp();
             let index = Arc::new(search::FileIndex::default());
+            daemon_runtime::name_app_folder(&daemon_client::daemon_exe());
             app.manage(DaemonClient::start(app.handle().clone()));
             app.manage(watcher::Watchers::new(app.handle().clone(), index.clone()));
             app.manage(index);
