@@ -1,5 +1,6 @@
 //! The person at the computer proves they are there before a phone-access decision that raises access takes effect: Windows
-//! Hello, else the Windows password of the signed-in account; on macOS Touch ID or the login password.
+//! Hello, else the Windows password of the signed-in account; on macOS Touch ID or the login password; on Linux polkit, whose own
+//! agent asks in its own words ([`polkit`]), so there the app's approval dialog is where the person sees which phone this is about.
 //!
 //! This is the gate, and it runs in the daemon because whoever holds the user token can impersonate anything else here:
 //! `Role::App` (`peer_identity`) only decides who may raise the prompt. A forged app gains a prompt whose text the daemon wrote
@@ -620,8 +621,75 @@ mod os {
 mod os {
     use super::Cancel;
 
-    pub fn verify(_window: Option<i64>, _reason: &str, _cancel: &Cancel) -> Result<(), String> {
-        Err("Verifying the person is not available on this system, so phone access cannot be changed here.".into())
+    /// polkit shows its own text: the daemon's reason cannot be passed to it, and there is no window to parent.
+    pub fn verify(_window: Option<i64>, _reason: &str, cancel: &Cancel) -> Result<(), String> {
+        super::polkit::verify("pkcheck", std::process::id(), cancel)
+    }
+}
+
+/// Verifying the person through polkit on Linux, by running `pkcheck` as this process. It runs nothing as root, which `pkexec` would have
+/// to, and says what happened in its exit code. `org.freedesktop.policykit.exec` is an action every polkit has; its default asks an
+/// administrator's password, so this passes only for someone who could also have used `pkexec`. Fails closed: with no polkit,
+/// no agent to ask through (a headless login) or anything unclear, nothing passes. Not platform code, so it is built and tested on every system;
+/// only `os::verify` above reaches it, and only on Linux, and tests run stand-ins, never a real prompt.
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+mod polkit {
+    use std::io::ErrorKind;
+    use std::process::{Child, Command, Stdio};
+    use std::time::Duration;
+
+    use super::{Cancel, NOT_IN_TIME};
+
+    const CANCELLED: &str = "Verification was cancelled.";
+    pub const NO_POLKIT: &str = "Kelpie cannot verify you here because polkit is not installed. Install polkit and an authentication agent for your desktop, then try again.";
+    pub const NO_AGENT: &str = "Kelpie cannot verify you here because no polkit authentication agent is running. Sign in to a desktop session that has one, then try again.";
+    pub const NOT_ALLOWED: &str = "polkit did not allow this account. Sign in as an administrator of this computer, then try again.";
+    pub const COULD_NOT_CHECK: &str = "polkit could not check this: please try again.";
+
+    pub fn arguments(pid: u32) -> Vec<String> {
+        ["--action-id", "org.freedesktop.policykit.exec", "--process", &pid.to_string(), "--allow-user-interaction"].map(str::to_string).to_vec()
+    }
+
+    /// `pkcheck`'s exit code (pkcheck(1)); none when a signal ended it. Only 0 passes.
+    pub fn result_of(code: Option<i32>) -> Result<(), &'static str> {
+        match code {
+            Some(0) => Ok(()),
+            Some(1) => Err(NOT_ALLOWED),
+            Some(2) => Err(NO_AGENT),
+            Some(3) => Err(CANCELLED),
+            _ => Err(COULD_NOT_CHECK),
+        }
+    }
+
+    pub fn verify(program: &str, pid: u32, cancel: &Cancel) -> Result<(), String> {
+        let mut child = Command::new(program)
+            .args(arguments(pid))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| if e.kind() == ErrorKind::NotFound { NO_POLKIT } else { COULD_NOT_CHECK }.to_string())?;
+        wait(&mut child, cancel)
+    }
+
+    /// Waits for the child; when the time is up it is ended, which takes its request back.
+    pub fn wait(child: &mut Child, cancel: &Cancel) -> Result<(), String> {
+        loop {
+            if cancel.fired() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(NOT_IN_TIME.to_string());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => return result_of(status.code()).map_err(str::to_string),
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(COULD_NOT_CHECK.to_string());
+                }
+            }
+        }
     }
 }
 
@@ -747,6 +815,60 @@ mod tests {
         assert!(!p.refused_at(t0, false) && !p.refused_at(t0 + Duration::from_secs(1), false));
         p.passed();
         assert!(!p.refused_at(t0 + Duration::from_secs(2), false));
+    }
+
+    #[test]
+    fn polkit_is_asked_about_this_process_and_may_ask_the_person() {
+        assert_eq!(polkit::arguments(4321), ["--action-id", "org.freedesktop.policykit.exec", "--process", "4321", "--allow-user-interaction"]);
+    }
+
+    /// pkcheck(1): 0 authorized, 1 not, 2 no agent or no interaction, 3 dismissed, 126 bad options, 127 an error.
+    #[test]
+    fn only_a_clean_pass_from_polkit_passes() {
+        assert_eq!(polkit::result_of(Some(0)), Ok(()));
+        assert_eq!(polkit::result_of(Some(1)), Err(polkit::NOT_ALLOWED));
+        assert_eq!(polkit::result_of(Some(2)), Err(polkit::NO_AGENT));
+        assert_eq!(polkit::result_of(Some(3)), Err("Verification was cancelled."));
+        for unclear in [Some(126), Some(127), Some(-1), None] {
+            assert_eq!(polkit::result_of(unclear), Err(polkit::COULD_NOT_CHECK), "{unclear:?}");
+        }
+    }
+
+    #[test]
+    fn no_polkit_on_the_computer_refuses_and_says_what_to_do() {
+        let refused = polkit::verify("kelpie-no-such-program", 1, &Cancel::default()).unwrap_err();
+        assert_eq!(refused, polkit::NO_POLKIT);
+        assert!(refused.contains("Install polkit"));
+    }
+
+    /// A stand-in that stays until it is ended: no polkit is involved.
+    fn staying_child() -> std::process::Child {
+        let mut c = if cfg!(windows) {
+            let mut c = std::process::Command::new("ping");
+            c.args(["-n", "60", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("60");
+            c
+        };
+        c.stdout(std::process::Stdio::null()).spawn().unwrap()
+    }
+
+    #[test]
+    fn the_time_limit_ends_the_polkit_child() {
+        let mut child = staying_child();
+        let cancel = Cancel::default();
+        let later = cancel.clone();
+        let fire = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            later.fire();
+        });
+        let began = Instant::now();
+        assert_eq!(polkit::wait(&mut child, &cancel).unwrap_err(), NOT_IN_TIME);
+        assert!(began.elapsed() < Duration::from_secs(30), "it did not wait for the child");
+        assert!(child.try_wait().unwrap().is_some(), "the child is gone");
+        fire.join().unwrap();
     }
 
     #[test]
