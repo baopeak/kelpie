@@ -1,7 +1,8 @@
 //! Phone-access decisions from the app's window: approving a phone, raising what one may do, resetting phone access. The
 //! daemon verifies the person itself before any of these raises access (`user_presence.rs` in kelpied) and builds what the
 //! prompt says; this only carries the request on the app's verified connection, and lets the daemon's dialog come up in front
-//! of this window.
+//! of this window. That dialog locks the window while it is up, as a dialog in front of its parent does, and nothing here leaves it locked:
+//! [`Unlock`] enables the window again when the call ends, however it ends.
 
 use std::sync::Arc;
 
@@ -29,16 +30,32 @@ pub async fn mobile_secure_call(app: AppHandle, client: State<'_, Arc<DaemonClie
         return Err(format!("{method} is not a phone-access decision"));
     }
     #[cfg(windows)]
-    prepare_prompt(&app, &client, &mut params).await;
+    let _unlock = prepare_prompt(&app, &client, &mut params).await;
     #[cfg(not(windows))]
     let _ = &app;
     client.call(&method, params).await.map_err(|e| e.to_string())
 }
 
-/// A process that is not in the foreground cannot bring a window to the front: this one, where the person just clicked, lets the
-/// daemon's dialog do it. Failing that the dialog still works, behind Kelpie.
+/// Enables the window when dropped. A dialog enables its parent when it closes, but one whose daemon died, or that was given up on, may
+/// not; a window left disabled takes no click or key at all. Sessions keep running either way, so all this has to do is never let
+/// the lock outlive the call.
 #[cfg(windows)]
-async fn prepare_prompt(app: &AppHandle, client: &DaemonClient, params: &mut Value) {
+struct Unlock(isize);
+
+#[cfg(windows)]
+impl Drop for Unlock {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+        // SAFETY: a plain Win32 call; a window that is gone by now is refused and nothing happens.
+        let _ = unsafe { EnableWindow(HWND(self.0 as *mut _), true) };
+    }
+}
+
+/// A process that is not in the foreground cannot bring a window to the front: this one, where the person just clicked, lets the
+/// daemon's dialog do it. Failing that the dialog still works, behind Kelpie. Returns what enables the window again.
+#[cfg(windows)]
+async fn prepare_prompt(app: &AppHandle, client: &DaemonClient, params: &mut Value) -> Option<Unlock> {
     use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
     if let Ok(info) = client.call("daemon.info", json!({})).await {
         if let Some(pid) = info.get("pid").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok()) {
@@ -48,10 +65,11 @@ async fn prepare_prompt(app: &AppHandle, client: &DaemonClient, params: &mut Val
             }
         }
     }
-    let window = app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize as i64);
+    let window = app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize);
     if let (Some(window), Some(params)) = (window, params.as_object_mut()) {
-        params.insert("window".into(), json!(window));
+        params.insert("window".into(), json!(window as i64));
     }
+    window.map(Unlock)
 }
 
 #[cfg(test)]
