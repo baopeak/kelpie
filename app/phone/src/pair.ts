@@ -2,6 +2,8 @@
 // single-use secret. The first message carries nothing; the computer answers only if the secret is live. The phone then says
 // what it calls itself in its first sealed message, shows six digits (from the handshake) and its key's fingerprint for the
 // person to check and type on the computer, and waits for `paired`, `declined` or `timeout` over the encrypted channel.
+// A browser that already holds a pairing with this computer pairs again under the same key: the computer keeps one record per key, so
+// the new record replaces the old one, and only once it is approved.
 import { decodePairPayload, fingerprint, Initiator, keypair, MODE_PAIR, type Session } from "./noise";
 import type { Pairing } from "./pairing-store";
 import { t } from "./i18n";
@@ -38,12 +40,14 @@ function closedBecause(code: number): string {
   }
 }
 
+const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+
 /** Pairs with the computer the link came from. `code` is told the six digits and this phone's key fingerprint to show once
- *  the computer answered. */
-export function pair(payloadText: string, name: string, socket: () => PairSocket, code: (digits: string, key: string) => void): Promise<PairResult> {
+ *  the computer answered. `held`: the pairing this browser holds, if any. */
+export function pair(payloadText: string, name: string, socket: () => PairSocket, code: (digits: string, key: string) => void, held?: Pairing | null): Promise<PairResult> {
   const payload = decodePairPayload(payloadText);
   if (!payload) return Promise.resolve({ ok: false, message: t("This pairing link is not valid. Show a new QR code in Kelpie on your computer.") });
-  const me = keypair();
+  const me = held && sameBytes(held.dpk, payload.dpk) ? keypair(held.priv) : keypair();
   const hello = new TextEncoder().encode(JSON.stringify({ type: "pair", name: name.trim().slice(0, 40) || t("Phone"), want: "read" }));
   return new Promise((resolve) => {
     let done = false;

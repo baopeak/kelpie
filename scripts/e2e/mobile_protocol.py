@@ -863,6 +863,29 @@ async def security(d):
     check("…so it connects again once it is back on", (await fresh.open() or {}).get("device", {}).get("can_write") is True, fresh.closed)
     await fresh.close()
 
+    # ---------- pairing again from the same browser ----------
+    records = lambda name: [x for x in d.call("mobile.status")["devices"] if x["name"] == name]  # noqa: E731
+    same, same_id = ps.pair(d, BASE, "Same browser", True)
+    still = ps.Phone(BASE, same)
+    await still.open()
+    attempt = await ps.PairAttempt(BASE, d.call("mobile.pair_start")["url"], "Same browser", "write", key=(same.priv, same.pub)).start()
+    d.call("mobile.approve", {"id": ps.pending_request(d, "Same browser")["id"], "allow": False})
+    check("a pairing again under the same key that is declined says so", (await attempt.outcome(10) or {}).get("type") == "declined")
+    await asyncio.sleep(0.5)
+    check("…and leaves the old record and its connection alone", [x["id"] for x in records("Same browser")] == [same_id] and still.closed is None, (records("Same browser"), still.closed))
+    attempt = await ps.PairAttempt(BASE, d.call("mobile.pair_start")["url"], "Same browser", "write", key=(same.priv, same.pub)).start()
+    d.call("mobile.approve", {"id": ps.pending_request(d, "Same browser")["id"], "allow": True, "code": attempt.code(), "permission": "write"})
+    told = await attempt.outcome(10) or {}
+    check("the same key paired again is approved", told.get("type") == "paired", told)
+    await still.wait(lambda m: False, 1)
+    listed = records("Same browser")
+    check("…and leaves one record, a new one", [x["id"] for x in listed] == [told.get("device", {}).get("id")] and listed[0]["id"] != same_id, listed)
+    check("…whose old connection is told it was replaced, not that the pairing is gone", still.closed == 4409 and not any(m["type"] == "revoked" for m in still.log), (still.closed, [m["type"] for m in still.log][-4:]))
+    await still.close()
+    again = ps.Phone(BASE, same)
+    check("…and that key connects as the new record", ((await again.open()) or {}).get("device", {}).get("id") == told.get("device", {}).get("id"), again.closed)
+    await again.close()
+
     # ---------- what keeps phones longer ----------
     plain = ps.kc.Conn()
     days = d.call("mobile.status")["dormant_days"]

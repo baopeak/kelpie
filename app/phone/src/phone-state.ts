@@ -156,8 +156,7 @@ const link = new Link(browserEnv(), () => {
   },
   deviceChanged(m) {
     const name = m.name;
-    setDeviceNews(m.change === "added" ? t("A new device was paired with this computer: {name}.", { name }) : m.change === "removed" ? t("A device was removed from this computer: {name}.", { name }) : t("What {name} may do was changed on this computer.", { name }));
-    setTimeout(() => setDeviceNews(null), 8000);
+    tellDeviceNews(m.change === "added" ? t("A new device was paired with this computer: {name}.", { name }) : m.change === "removed" || m.change === "replaced" ? t("A device was removed from this computer: {name}.", { name }) : t("What {name} may do was changed on this computer.", { name }));
   },
   unpaired() {
     void forgetPairing();
@@ -177,6 +176,11 @@ const link = new Link(browserEnv(), () => {
 });
 
 export { link };
+
+function tellDeviceNews(text: string) {
+  setDeviceNews(text);
+  setTimeout(() => setDeviceNews(null), 8000);
+}
 
 function recompute() {
   const at = Date.now();
@@ -442,9 +446,18 @@ export function resumeChat() {
 export async function pairDevice(code: string, name: string): Promise<string | null> {
   setPairShown(null);
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/link`;
-  const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }));
+  const held = await loadPairing();
+  const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }), held);
   setPairShown(null);
-  if (!r.ok) return r.message;
+  if (!r.ok) {
+    if (!held) return r.message;
+    // Nothing changed for the pairing it holds: back to it, with what went wrong.
+    setPairing(null);
+    setPaired(true);
+    link.start();
+    tellDeviceNews(r.message);
+    return null;
+  }
   const kept = await savePairing(r.pairing);
   setNotPairedMessage(kept ? null : t("This browser would not keep the pairing: it lasts until this page is closed."));
   setPairing(null);

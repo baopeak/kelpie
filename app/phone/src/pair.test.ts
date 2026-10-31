@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { b64url, keypair } from "./noise";
 import { pair, type PairSocket } from "./pair";
+import type { Pairing } from "./pairing-store";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -55,10 +56,10 @@ class FakeSocket implements PairSocket {
 const desktop = keypair();
 const link = b64url(encoder.encode(JSON.stringify({ v: 1, dpk: b64url(desktop.pub), psk: b64url(new Uint8Array(32).fill(7)), ep: [{ t: "lan", a: "192.168.1.5:4817" }], name: "Desk" })));
 
-function start(name = " Pixel ") {
+function start(name = " Pixel ", held?: Pairing | null, from = link) {
   const ws = new FakeSocket();
   const shown: [string, string][] = [];
-  const result = pair(link, name, () => ws, (digits, key) => shown.push([digits, key]));
+  const result = pair(from, name, () => ws, (digits, key) => shown.push([digits, key]), held);
   ws.onopen?.({});
   return { ws, shown, result };
 }
@@ -152,6 +153,43 @@ describe("pairing a phone", () => {
     const text = start();
     text.ws.onmessage?.({ data: "plain text" });
     expect((await text.result).ok).toBe(false);
+  });
+
+  describe("a browser that already holds a pairing", () => {
+    const mine = keypair();
+    const held = (dpk: Uint8Array): Pairing => ({ priv: mine.priv, pub: mine.pub, dpk, deviceId: "old", name: "Pixel", computer: "Desk", endpoints: [], addrsSeq: 0 });
+    const paired = async (run: ReturnType<typeof start>) => {
+      run.ws.receive(new Uint8Array([9]));
+      run.ws.say({ type: "paired", device: { id: "new", name: "Pixel" } });
+      const r = await run.result;
+      if (!r.ok) throw new Error(r.message);
+      return r.pairing;
+    };
+
+    it("keeps its key for the same computer, so the computer replaces the old record", async () => {
+      const run = start(" Pixel ", held(desktop.pub));
+      const pairing = await paired(run);
+      expect([...pairing.pub]).toEqual([...mine.pub]);
+      expect([...pairing.priv]).toEqual([...mine.priv]);
+      expect(pairing.deviceId).toBe("new");
+    });
+
+    it("makes a new key for another computer, and when it holds nothing", async () => {
+      const other = await paired(start(" Pixel ", held(keypair().pub)));
+      expect([...other.pub]).not.toEqual([...mine.pub]);
+      const none = await paired(start(" Pixel ", null));
+      expect([...none.pub]).not.toEqual([...mine.pub]);
+    });
+
+    it("changes nothing when the attempt does not end in a pairing", async () => {
+      const before = held(desktop.pub);
+      const copy = structuredClone(before);
+      const run = start(" Pixel ", before);
+      run.ws.receive(new Uint8Array([9]));
+      run.ws.say({ type: "declined" });
+      expect((await run.result).ok).toBe(false);
+      expect(before).toEqual(copy);
+    });
   });
 
   it("refuses a link it cannot read without opening a socket", async () => {

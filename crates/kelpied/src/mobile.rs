@@ -755,6 +755,11 @@ impl Mobile {
         self.broken.lock().is_none() && !self.config.lock().devices.iter().any(|d| d.id == id)
     }
 
+    /// Whether a record holds this key: one that lost its record to a new pairing of the same key is still paired.
+    fn key_paired(&self, pk: &str) -> bool {
+        self.config.lock().devices.iter().any(|d| d.pk == pk)
+    }
+
     /// What is known of Noise static key `pk`. Looking changes nothing: a first message can be a replay. [`Self::seen`] follows
     /// once the phone proved it finished the handshake.
     fn lookup_key(&self, pk: &[u8; 32]) -> KeyLookup {
@@ -1201,7 +1206,7 @@ impl Mobile {
         let replaced_ids = replaced.iter().map(|(id, _)| id.clone()).collect();
         for (id, name) in replaced {
             self.stop_grants(&id);
-            let _ = self.revoked.send(DeviceEvent { id, name, change: "removed", permission: None });
+            let _ = self.revoked.send(DeviceEvent { id, name, change: "replaced", permission: None });
         }
         self.audit.add(&device.id, "pair", &format!("{}, key {}, {}, {}", device.name, fingerprint(&p.pk), device.kind.name(), device.permission.name()));
         let event = DeviceEvent { id: device.id.clone(), name: device.name.clone(), change: "added", permission: Some(device.permission) };
@@ -1685,6 +1690,10 @@ fn on_event(event: Result<DeviceEvent, broadcast::error::RecvError>, device: &st
         Ok(e) if e.id == device => {
             if e.change == "removed" {
                 OnEvent::Close(NOT_PAIRED, "revoked")
+            } else if e.change == "replaced" {
+                // The same key was paired again. Whatever still uses the old record (another tab of the browser) holds that key
+                // and the pairing just saved, so it must not be told to forget them.
+                OnEvent::Close(REPLACED, "replaced")
             } else {
                 OnEvent::Close(RECONNECT, "changed")
             }
@@ -2236,8 +2245,10 @@ fn addrs_message(a: &Addrs) -> String {
 
 /// The record allows nothing now: a phone whose record is gone is told so, one that is merely not let in now (phone access off)
 /// connects again.
-async fn no_access(wire: &mut Wire, m: &Mobile, device: &str) {
-    if m.removed(device) {
+async fn no_access(wire: &mut Wire, m: &Mobile, device: &Device) {
+    if m.removed(&device.id) && m.key_paired(&device.pk) {
+        wire.close(REPLACED, "replaced").await;
+    } else if m.removed(&device.id) {
         wire.close(NOT_PAIRED, "revoked").await;
     } else {
         wire.close(RECONNECT, "off").await;
@@ -2256,7 +2267,7 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
     let mut addrs = m.addrs.subscribe();
     // What the record allowed when the connection began: a change means connect again.
     let Some(record) = m.permission(&device.id) else {
-        no_access(wire, m, &device.id).await;
+        no_access(wire, m, device).await;
         return;
     };
     let first = conn.publish(true).expect("forced");
@@ -2301,7 +2312,7 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                     // Something may have been missed: the record decides.
                     OnEvent::Recheck => match conn.daemon.mobile.permission(&device.id) {
                         None => {
-                            no_access(wire, m, &device.id).await;
+                            no_access(wire, m, device).await;
                             return;
                         }
                         Some(now) if now != record => {
@@ -2395,7 +2406,7 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                 }
                 // Every request is checked against the device's record as it is now, and held to what this transport allows.
                 let Some(granted) = conn.daemon.mobile.permission(&device.id) else {
-                    no_access(wire, m, &device.id).await;
+                    no_access(wire, m, device).await;
                     return;
                 };
                 if let Some(reply) = conn.handle(granted.min(conn.cap), &req).await {
@@ -4203,6 +4214,19 @@ mod tests {
         }
         assert!(ids[0].replaced.is_empty());
         assert_eq!(ids[1].replaced, [ids[0].event.id.clone()], "its waiting messages go with it");
+        // One record, under the new id; the key is still paired, so what used the old record is not told to forget it.
+        let status = d.mobile.status(true);
+        let records: Vec<&str> = status["devices"].as_array().unwrap().iter().filter(|x| x["name"] == "Pixel").filter_map(|x| x["id"].as_str()).collect();
+        assert_eq!(records, [ids[1].event.id.as_str()]);
+        assert!(d.mobile.removed(&ids[0].event.id) && d.mobile.key_paired(&kelpie_link::b64(&keys.public)));
+    }
+
+    #[test]
+    fn a_connection_on_a_replaced_record_is_not_told_to_forget_the_pairing() {
+        let event = |change| Ok(DeviceEvent { id: "phone".into(), name: "Pixel".into(), change, permission: None });
+        assert_eq!(on_event(event("replaced"), "phone"), OnEvent::Close(REPLACED, "replaced"));
+        assert_eq!(on_event(event("removed"), "phone"), OnEvent::Close(NOT_PAIRED, "revoked"));
+        assert!(matches!(on_event(event("replaced"), "another"), OnEvent::Tell(_)), "other phones hear of it");
     }
 
     #[test]
