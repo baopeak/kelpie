@@ -389,8 +389,12 @@ pub async fn status(daemon: Arc<Daemon>) -> Result<Value> {
     let m = &daemon.mobile;
     // One look at a time: a window that asks again does not start another child.
     let _one = m.tailscale_check.lock().await;
-    // With the mode off this may remove an entry or forget its port, which must not cross a change under way.
-    let _change = if m.config.lock().tailscale { None } else { Some(m.tailscale_change.lock().await) };
+    // With the mode off, or an entry still to go, this may remove an entry or forget its port, which must not cross a change under way.
+    let quiet = {
+        let c = m.config.lock();
+        c.tailscale && !c.tailscale_remove
+    };
+    let _change = if quiet { None } else { Some(m.tailscale_change.lock().await) };
     let (known, to_remove) = {
         let c = m.config.lock();
         (c.tailscale_port, c.tailscale_remove)
@@ -587,17 +591,22 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
         }
     };
     // The last step, under the lock what takes access away holds: this server, still on, with nothing ended since the person was asked.
+    // The origin goes with it: turning off, which takes this lock first, then always finds it to clear.
     let committed = {
         let mut c = m.config.lock();
-        let same_run = m.running.lock().as_ref().is_some_and(|r| Arc::ptr_eq(&r.stop, &run));
-        let holds = c.enabled && same_run && m.tailscale_ended.load(Ordering::SeqCst) == asked_at;
-        if holds {
-            c.tailscale = true;
-            c.tailscale_remove = false;
+        let mut running = m.running.lock();
+        let this_run = running.as_mut().filter(|r| Arc::ptr_eq(&r.stop, &run));
+        match this_run {
+            Some(r) if c.enabled && m.tailscale_ended.load(Ordering::SeqCst) == asked_at => {
+                c.tailscale = true;
+                c.tailscale_remove = false;
+                r.ts_origin = Some(format!("{fqdn}:{HTTPS_PORT}"));
+                Some(r.listeners.clone())
+            }
+            _ => None,
         }
-        holds
     };
-    if !committed {
+    let Some(listeners) = committed else {
         m.stop_loopback();
         let removed = off_runtime(m, move |cli| remove_ours(cli, Some(port))).await?;
         m.removal_done(removed.is_ok());
@@ -605,10 +614,10 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
             m.audit("-", "tailscale_off", "ended while turning on, and the entry in Tailscale Serve could not be removed");
         }
         bail!(ENDED_MEANWHILE);
-    }
+    };
     m.keep();
     m.audit("-", "tailscale_on", &format!("published as {fqdn}:{HTTPS_PORT}"));
-    m.set_tailscale_origin(Some(format!("{fqdn}:{HTTPS_PORT}")));
+    super::advertise(m, &listeners);
     daemon.broadcast("mobile.updated", json!({}));
     drop(change);
     status(daemon.clone()).await
@@ -646,23 +655,31 @@ pub async fn resume(daemon: Arc<Daemon>) {
     let m = &daemon.mobile;
     match listen_loopback(&daemon, false).await {
         Ok(_) | Err(Listen::NoServer) => {}
-        Err(Listen::PortTaken) => {
-            tracing::warn!("phone access: tailscale: {LISTEN_FAILED}");
-            let change = m.tailscale_change.lock().await;
-            let known = m.config.lock().tailscale_port;
-            if let Ok(removed) = off_runtime(m, move |cli| remove_ours(cli, known)).await {
-                if let Some(r) = m.running.lock().as_mut() {
-                    r.loopback_lost = removed.is_err();
-                }
-                m.config.lock().tailscale_remove = removed.is_err();
-                m.keep();
-            }
-            drop(change);
-        }
+        Err(Listen::PortTaken) => after_failed_bind(&daemon).await,
     }
     if let Err(e) = status(daemon.clone()).await {
         tracing::debug!("phone access: tailscale: {e:#}");
     }
+}
+
+/// The port our entry forwards to could not be had. If someone else holds it the entry would lead to them, so it goes. If our own listener does, a start at the same
+/// time got there first, and all is well.
+pub(super) async fn after_failed_bind(daemon: &Arc<Daemon>) {
+    let m = &daemon.mobile;
+    let change = m.tailscale_change.lock().await;
+    if m.loopback_port().is_some() {
+        return;
+    }
+    tracing::warn!("phone access: tailscale: {LISTEN_FAILED}");
+    let known = m.config.lock().tailscale_port;
+    if let Ok(removed) = off_runtime(m, move |cli| remove_ours(cli, known)).await {
+        if let Some(r) = m.running.lock().as_mut() {
+            r.loopback_lost = removed.is_err();
+        }
+        m.config.lock().tailscale_remove = removed.is_err();
+        m.keep();
+    }
+    drop(change);
 }
 
 /// Removes an entry that is still to go: after phone access was turned off, by whatever means (the mode ended with it, `Mobile::disable`), and each

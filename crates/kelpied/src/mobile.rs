@@ -1192,8 +1192,13 @@ impl Mobile {
     }
 
     /// The loopback port our entry forwards to is this one, from before the entry is written: whatever becomes of the command, what it leaves can be told for ours.
+    /// With the mode off the entry counts as still to go until the turn-on finishes: a daemon that dies in between removes it at its next start.
     fn remember_port(&self, port: u16) {
-        self.config.lock().tailscale_port = Some(port);
+        {
+            let mut c = self.config.lock();
+            c.tailscale_port = Some(port);
+            c.tailscale_remove = c.tailscale_remove || !c.tailscale;
+        }
         self.keep();
     }
 
@@ -1246,7 +1251,8 @@ impl Mobile {
         let preferred = self.config.lock().ip.clone();
         let host = match &ts {
             Some(origin) => origin.clone(),
-            None => preferred.and_then(|ip| ip.parse::<IpAddr>().ok()).map(|ip| listen::host(&SocketAddr::new(ip, port))).or_else(|| lan.first().cloned()).ok_or_else(|| anyhow!("no address to pair on"))?,
+            // The address chosen, if something listens there: with Tailscale mode on the server also runs with this network's listeners down.
+            None => preferred.and_then(|ip| ip.parse::<IpAddr>().ok()).filter(|ip| addrs.iter().any(|a| a.ip() == *ip)).map(|ip| listen::host(&SocketAddr::new(ip, port))).or_else(|| lan.first().cloned()).ok_or_else(|| anyhow!("no address to pair on"))?,
         };
         let secure = tls || ts.is_some();
         let (link, qr) = pair_link(if secure { "https" } else { "http" }, &host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints, name: listen::hostname() })?;
@@ -6236,24 +6242,89 @@ mod tests {
 
     #[tokio::test]
     async fn a_daemon_or_phone_access_starting_again_removes_what_was_left() {
+        for how in ["the daemon starting", "phone access turned on"] {
+            let mut network = NetworkRig::new().await;
+            let fake = Arc::new(tailscale::fake::Fake::ready());
+            on_tailscale(&mut network, &fake).await;
+            let d = network.rig.daemon.clone();
+            publish(&d).await;
+            // With phone access off and nothing asked to remove it yet, as after Tailscale would not.
+            d.mobile.disable();
+            assert!(d.mobile.config.lock().tailscale_remove);
+            assert_ne!(*fake.serve.lock(), "{}");
+            if how == "the daemon starting" {
+                autostart(d.clone()).await;
+            } else {
+                network.restart().await;
+            }
+            for _ in 0..500 {
+                if *fake.serve.lock() == "{}" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(*fake.serve.lock(), "{}", "{how}");
+            assert!(fake.changes().iter().filter(|c| c.starts_with("serve --bg")).count() == 1, "{how}: and nothing was published again");
+        }
+    }
+
+    /// A daemon that dies between writing the entry and finishing the turn-on finds it at its next start.
+    #[tokio::test]
+    async fn a_turn_on_that_never_finishes_leaves_word_on_disk_of_what_it_wrote() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let (tx, mut replies) = app_client(&d, 106);
+        d.presence.inject(|_| Ok(()));
+        let (reached_tx, reached) = std::sync::mpsc::channel();
+        let (go, held) = std::sync::mpsc::channel();
+        *fake.publish_holds.lock() = Some((reached_tx, held));
+        assert_eq!(d.dispatch(106, &tx, &json!("on"), "mobile.set_tailscale", json!({"on": true})).unwrap(), None);
+        for _ in 0..1000 {
+            if reached.try_recv().is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let on_disk = store::load(&d.mobile.dir).store;
+        assert!(on_disk.tailscale_remove && on_disk.tailscale_port.is_some(), "as a daemon starting now would find it");
+        assert!(!on_disk.tailscale);
+        go.send(()).unwrap();
+        assert_eq!(later_reply(&mut replies).await["result"]["serve"], "ours");
+        let on_disk = store::load(&d.mobile.dir).store;
+        assert!(!on_disk.tailscale_remove && on_disk.tailscale, "finished: nothing is to go");
+    }
+
+    /// Our own listener holding the port is no port taken: a start that loses the race for it leaves the entry alone.
+    #[tokio::test]
+    async fn a_resume_that_finds_our_own_listener_on_the_port_leaves_the_entry_alone() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let port = publish(&d).await;
+        let changes = fake.changes();
+        // Two starts at once, with the listener of the first up by the time the second has failed to bind.
+        tailscale::after_failed_bind(&d).await;
+        assert_eq!(fake.changes(), changes);
+        assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry(port));
+    }
+
+    /// Turning off right behind a turn-on leaves no address for phones to be told, even when the entry could not be removed.
+    #[tokio::test]
+    async fn turning_off_right_after_turning_on_leaves_no_origin() {
         let mut network = NetworkRig::new().await;
         let fake = Arc::new(tailscale::fake::Fake::ready());
         on_tailscale(&mut network, &fake).await;
         let d = network.rig.daemon.clone();
         publish(&d).await;
-        *fake.serve_down.lock() = true;
-        d.mobile.disable();
-        *fake.serve_down.lock() = false;
-        assert!(d.mobile.config.lock().tailscale_remove);
-        network.restart().await;
-        for _ in 0..500 {
-            if *fake.serve.lock() == "{}" {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(*fake.serve.lock(), "{}");
-        assert!(fake.changes().iter().filter(|c| c.starts_with("serve --bg")).count() == 1, "and nothing was published again");
+        let (tx, mut replies) = app_client(&d, 107);
+        *fake.off_fails.lock() = true;
+        let off = ask_app(&d, &tx, &mut replies, 107, "mobile.set_tailscale", json!({"on": false})).await;
+        assert!(off["error"].is_object(), "{off}");
+        assert_eq!(d.mobile.tailscale_origin(), None);
+        assert_eq!(d.mobile.running_url().unwrap(), format!("http://{}/", network.addr));
     }
 
     #[tokio::test]
@@ -6319,7 +6390,7 @@ mod tests {
         // The port it remembers is held by someone, and Tailscale then stops answering: the store goes on naming the entry that is there.
         let off = ask_app(&d, &tx, &mut replies, 101, "mobile.set_tailscale", json!({"on": false})).await;
         assert_eq!(off["result"]["serve"], "off");
-        d.mobile.remember_port(port);
+        d.mobile.config.lock().tailscale_port = Some(port);
         *fake.serve.lock() = tailscale::fake::Fake::entry(port);
         let held = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
         let asked_at = tailscale::check_can_turn_on(&d).await.unwrap();
@@ -6397,6 +6468,7 @@ mod tests {
         assert_eq!(d.mobile.loopback_port(), Some(port));
         assert_eq!(d.mobile.running_url().unwrap(), format!("https://{ORIGIN}/"));
         assert!(d.mobile.pair_start(false).unwrap()["url"].as_str().unwrap().starts_with(&format!("https://{ORIGIN}/#p=")));
+        assert!(d.mobile.pair_start(true).is_err(), "no code for an address nothing listens on");
         // With the mode off it is the error it always was.
         let (tx, mut replies) = app_client(&d, 102);
         ask_app(&d, &tx, &mut replies, 102, "mobile.set_tailscale", json!({"on": false})).await;
