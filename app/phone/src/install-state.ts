@@ -34,9 +34,10 @@ export function firstScreen(f: PageFacts): FirstScreen {
   return f.hasCode ? "pair" : "scan";
 }
 
-/** What becomes of a pairing that failed. The code is often spent or expired, and the installed app has no address bar to bring a new one: on a secure origin it goes
- *  back to the scanner, saying what went wrong. A plain http:// page stays, and a new scan reaches it through its address. */
-export const afterFailedPairing = (https: boolean): "back_to_scanner" | "stay" => (https ? "back_to_scanner" : "stay");
+/** What becomes of a pairing that failed, given what this page would show with no code. The code is often spent or expired, and the installed app has no address bar to
+ *  bring a new one: where the scanner is what comes next it goes back there, saying what went wrong. Any other page stays where the message can be read, and a new scan
+ *  reaches it through its address. */
+export const afterFailedPairing = (withNoCode: FirstScreen): "back_to_scanner" | "stay" => (withNoCode === "scan" ? "back_to_scanner" : "stay");
 
 export type CodeReading =
   | { ok: true; code: string }

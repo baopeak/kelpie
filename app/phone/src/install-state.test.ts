@@ -32,12 +32,14 @@ describe("the first screen", () => {
     expect(firstScreen(facts({ tailnet: false }))).toBe("install");
   });
 
-  it("a pairing that failed on a secure origin leads back to the scanner, not to a code that is spent", () => {
-    expect(afterFailedPairing(true)).toBe("back_to_scanner");
-    // With the code cleared, that is what the installed app shows.
-    expect(firstScreen(facts({ installed: true, hasCode: false }))).toBe("scan");
-    expect(firstScreen(facts({ stayInBrowser: true, hasCode: false }))).toBe("scan");
-    expect(afterFailedPairing(false)).toBe("stay");
+  it("a pairing that failed leads back to the scanner where that is what comes next, and otherwise stays where it can be read", () => {
+    const after = (over: Partial<PageFacts>) => afterFailedPairing(firstScreen(facts({ ...over, hasCode: false })));
+    expect(after({ installed: true })).toBe("back_to_scanner");
+    expect(after({ stayInBrowser: true })).toBe("back_to_scanner");
+    expect(after({ tailnet: false, stayInBrowser: true })).toBe("back_to_scanner");
+    // A browser tab on a person's own certificate: with the code cleared it would land on the install steps, with no word of what went wrong.
+    expect(after({ tailnet: false })).toBe("stay");
+    expect(after({ https: false })).toBe("stay");
   });
 
   it("a paired device is past all of it", () => {

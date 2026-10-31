@@ -51,7 +51,7 @@ export function browserScanEnv(): ScanEnv {
   };
 }
 
-/** The decoder, loaded the first time a frame needs it. */
+/** The decoder, loaded the first time a frame needs it. Where it is the only way to read, it is loaded first (`chooseDetect`): if it cannot be, there is no scanner to offer. */
 function viaDecoder(env: ScanEnv): Detect {
   let decode: Awaited<ReturnType<ScanEnv["decoder"]>> | undefined;
   return async (source) => {
@@ -86,7 +86,11 @@ export async function chooseDetect(env: ScanEnv): Promise<Detect> {
       /* the decoder, then */
     }
   }
-  return fallback;
+  const decode = await env.decoder();
+  return async (source) => {
+    const frame = env.pixels(source);
+    return frame ? decode(frame.data, frame.width, frame.height) : null;
+  };
 }
 
 export interface Scanner {

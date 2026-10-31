@@ -20,6 +20,7 @@ import { forgetHistory } from "./history";
 import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
+import { screenNow } from "./install-guide";
 import { afterFailedPairing, movedTo } from "./install-state";
 import { t } from "./i18n";
 
@@ -457,7 +458,7 @@ export async function pairDevice(code: string, name: string): Promise<string | n
   setPairShown(null);
   if (!r.ok) {
     if (!held) {
-      if (afterFailedPairing(location.protocol === "https:") === "stay") return r.message;
+      if (afterFailedPairing(screenNow(false, false)) === "stay") return r.message;
       setPairing(null);
       setNotPairedMessage(r.message);
       return null;

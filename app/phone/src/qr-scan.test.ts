@@ -65,6 +65,13 @@ describe("the camera", () => {
     expect(await startScan(fakeVideo(), () => {}, env({ camera: () => Promise.reject(new Error("denied")) }))).toBeNull();
   });
 
+  it("a decoder that cannot be loaded leaves pasting too, with the camera let go", async () => {
+    const s = stream();
+    const scanner = await startScan(fakeVideo(), () => {}, env({ camera: async () => s.value, decoder: () => Promise.reject(new Error("no such chunk")) }));
+    expect(scanner).toBeNull();
+    expect(s.stop).toHaveBeenCalled();
+  });
+
   it("a video that will not play lets the camera go", async () => {
     const s = stream();
     const scanner = await startScan(fakeVideo(() => Promise.reject(new Error("no"))), () => {}, env({ camera: async () => s.value }));
