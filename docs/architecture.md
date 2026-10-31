@@ -946,10 +946,13 @@ connect, and an older daemon without API 10 never sees it and the app hides ever
   written twice). The copy is given the real index's modification time. Git reads a file whose size and
   times match its entry only if the file is as new as the index file, so where git compares whole seconds
   that time is all that shows a same-size edit in the second of the entry; a copy stamped later would hide
-  it (a Linux copy gets a new time unless it is set; a Windows one keeps it). A same-size edit that also keeps its modification time is **not** seen by a
-  snapshot, as it is not by `git status`: reading every file would cost too much here (numbers below),
-  and undo does read them. The user's HEAD, branch, files and the index file are never written by a
-  snapshot or an undo. Every git call runs with `GIT_LITERAL_PATHSPECS=1`, `GIT_OPTIONAL_LOCKS=0`
+  it (a Linux copy gets a new time unless it is set; a Windows one keeps it). The time is read back: a
+  filesystem that does not keep it fails the snapshot rather than letting git trust the copy. A same-size
+  edit that also keeps its modification time is **not** seen by a snapshot, as it is not by `git status`
+  (on Linux and macOS a later change time usually gives it away): reading every file would cost too much
+  here (numbers below), and undo does read the turn's files. The user's HEAD, branch and index file are
+  never written by a snapshot or an undo; a snapshot does not write the user's files either, and an undo
+  writes only the files of the turn it restores or deletes. Every git call runs with `GIT_LITERAL_PATHSPECS=1`, `GIT_OPTIONAL_LOCKS=0`
   and `core.hooksPath` pointing at an empty folder: the repository's `reference-transaction`,
   `post-checkout` and other hook scripts never run for these calls. Files another program holds open are
   skipped and listed in the record (`unreadable`); paths outside a sparse checkout do not fail it. Git
@@ -991,15 +994,20 @@ connect, and an older daemon without API 10 never sees it and the app hides ever
   or skip for links and submodules) with a state: *shared* when a stretch of another session overlaps and
   its record lists the file, or may list it (a gap window, a record with too many files or unreadable ones),
   or that session is working in the folder right now; *modified* when the folder no longer matches the end of
-  the turn, the file differed between turns (the look at the start), could not be read by this or the previous
-  snapshot, was written before the turn's start (file mtime) or removed before it (its folder's mtime);
+  the turn, the file differed between turns (the look at the start), could not be read by the plan itself, by this
+  or by the previous snapshot, was written before the turn's start (file mtime) or removed before it (its folder's mtime);
   else *clean*. Because every
   session's snapshot holds the others' concurrent edits, files in a shared folder are often shared. `undo` changes nothing and returns
-  `needs_confirmation` unless every shared or modified file is named in `confirm`. The plan's look at the
-  folder and the restore both use a copy of the index stamped older than any file, so git reads the files
-  instead of trusting its stat cache: a same-size edit cannot pass for the state the turn left, and a file
-  that only looks like its index entry is still written. This cost is not counted towards auto-off. Restores
-  are `git restore --source=<base> --worktree` with literal pathspecs from stdin, on that copy, so the real
+  `needs_confirmation` unless every shared or modified file is named in `confirm`. The plan reads only the
+  turn's files, by name, into a temporary index filled from the turn's tree (`read-tree`, then `add -A` with
+  literal pathspecs from stdin): it has no stat data or assume-unchanged marks to trust, so a same-size edit
+  cannot pass for the state the turn left, and nothing else in the folder is read. A path outside a sparse
+  checkout stays as the turn left it. This cost is not counted towards auto-off. Just before writing, `undo` compares each
+  file's size and modification time with what they were just before the read; a file saved since is reported in
+  `needs_confirmation` again, even if it was confirmed. That leaves the moment until `git restore` reaches the
+  file, and a same-size save that also keeps its time: the gap is much smaller, not gone. Restores
+  are `git restore --source=<base> --worktree` with literal pathspecs from stdin, on a copy of the index
+  stamped second 1 of 1970, so a file that only looks like its index entry is still written and the real
   index's lock is not involved; deletes remove only paths that pass `safe_rel`
   and are not behind a link, then folders they leave empty. A file already equal to its state before the turn
   is skipped, so an undo can be repeated. The result is recorded as its own `undo` step. Restores follow the
@@ -1031,8 +1039,9 @@ same bench, `KELPIE_CP_REPO` reuses one repository, `KELPIE_CP_REPEATS` sets the
 3.3 MB). Trusting it: unchanged turn p50 153-160 ms, git CPU 156-203 ms; changed turn p50 357-392 ms, git CPU
 265-296 ms. Reading every file: unchanged turn p50 1004 ms, git CPU 1000 ms; changed turn p50 1232 ms, git CPU
 1156 ms, and two such snapshots switched the repository off. The kept design is as cheap as before, also on 10k files
-of 208 MB (unchanged p50 157 ms, changed p50 363 ms). An undo reads them: `undo_plan` took about 1.2 s on 3.3 MB and
-2.0 s on 208 MB, on its own thread and outside the auto-off count.
+of 208 MB (unchanged p50 157 ms, changed p50 363 ms). An undo reads only the turn's files: `undo_plan` of a four-file
+turn takes p50 411-433 ms on 3.3 MB and 402-410 ms on 208 MB (it took 1.14-1.18 s and 1.97 s reading the whole folder),
+on its own thread and outside the auto-off count. Turns with large files cost what reading those files costs.
 
 A 100,000-file repository was not measured (building the fixture did not finish in 90 minutes); expect several seconds per snapshot there, so such a repository switches itself off after two.
 
