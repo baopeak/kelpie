@@ -20,6 +20,7 @@ import { forgetHistory } from "./history";
 import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
+import { movedTo } from "./install-state";
 import { t } from "./i18n";
 
 // ---------- signals the views read ----------
@@ -48,6 +49,8 @@ export const [conn, setConn] = createSignal<ConnState>({ kind: "connecting" });
 export const [now, setNow] = createSignal(Date.now());
 export const [dataState, setDataState] = createSignal<"fresh" | "slow" | "stuck">("fresh");
 export const [lastLiveAt, setLastLiveAt] = createSignal(0);
+/** The computer's Tailscale origin, when this page is somewhere else. */
+export const [movedHost, setMovedHost] = createSignal<string | null>(null);
 /** The one message about the open session that outlives what it is about (see notice.ts). */
 export const [notice, setNotice] = createSignal<Notice | null>(null);
 const board = new NoticeBoard();
@@ -150,9 +153,12 @@ const link = new Link(browserEnv(), () => {
   },
   chatResync() {},
   addrs(m) {
-    // Kept for a client that can dial another address (a page's origin cannot change; the native app's can).
+    // Kept for a client that can dial another address (a page's origin cannot change; the native app's can). What this page can do with
+    // them is say so when the computer's Tailscale origin is not where it is.
+    const known = m.endpoints ?? m.list.map((a) => ({ t: "lan", a }));
+    setMovedHost(movedTo(known, location.host));
     const p = currentPairing();
-    if (p && m.seq > p.addrsSeq) void savePairing({ ...p, endpoints: [...m.list.map((a) => ({ t: "lan", a })), ...p.endpoints.filter((e) => e.t !== "lan")], addrsSeq: m.seq });
+    if (p && m.seq > p.addrsSeq) void savePairing({ ...p, endpoints: [...known, ...p.endpoints.filter((e) => e.t !== "lan" && e.t !== "ts")], addrsSeq: m.seq });
   },
   deviceChanged(m) {
     const name = m.name;
@@ -566,6 +572,7 @@ export function startApp() {
       return;
     }
     setPaired(true);
+    setMovedHost(movedTo(p.endpoints, location.host));
     void loadList().then((c) => {
       if (c && !link.facts.ready && !sessions().length) {
         batch(() => {

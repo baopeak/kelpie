@@ -10,7 +10,9 @@ export type Reach =
   /** Something answered with a page that is not Kelpie's: a captive portal wants a sign-in. */
   | "portal"
   /** Nothing answered. */
-  | "unreachable";
+  | "unreachable"
+  /** A Tailscale name failed at once, as a name does with Tailscale off on this phone (a computer that is off makes it wait instead). */
+  | "no_tailnet";
 
 export interface ConnFacts {
   /** `navigator.onLine`. */
@@ -65,6 +67,7 @@ export type ConnState =
   | { kind: "no_network" }
   | { kind: "sign_in" }
   | { kind: "computer_offline"; since: number }
+  | { kind: "no_tailnet" }
   | { kind: "relay_unreachable" }
   | { kind: "restarted"; resyncing: boolean }
   | { kind: "busy"; level: number; reasons: string[] }
@@ -98,10 +101,19 @@ export function deriveConn(f: ConnFacts, now: number): ConnState {
   if (!f.online) return { kind: "no_network" };
   if (f.attempt === 0 && f.connecting && f.lastLiveAt === 0) return { kind: "connecting" };
   if (f.reach === "portal") return { kind: "sign_in" };
+  if (f.reach === "no_tailnet" && f.attempt >= 2) return { kind: "no_tailnet" };
   if (f.reach === "unreachable" && f.attempt >= 2) {
     return f.route === "relay" ? { kind: "relay_unreachable" } : { kind: "computer_offline", since: f.lastLiveAt };
   }
   return { kind: "reconnecting", attempt: Math.max(f.attempt, 1), nextInS: f.nextAt === null ? null : Math.max(0, Math.ceil((f.nextAt - now) / 1000)) };
+}
+
+/** Failing this fast is no computer that stopped answering. */
+export const NAME_FAILS_WITHIN_MS = 1500;
+
+/** What a request that got no answer says: on a Tailscale name, a failure at once means the name does not resolve here. */
+export function whyNoAnswer(host: string, timedOut: boolean, tookMs: number): Reach {
+  return host.endsWith(".ts.net") && !timedOut && tookMs < NAME_FAILS_WITHIN_MS ? "no_tailnet" : "unreachable";
 }
 
 /** Whether typing, keys and answers may be sent now. Allowed while the socket is open and authenticated and

@@ -50,6 +50,12 @@ export function describeConn(s: ConnState): { label: string; detail: string; ton
         detail: t("Your computer does not answer. It may be asleep, off, or on another network. What you see is the last state."),
         tone: "bad",
       };
+    case "no_tailnet":
+      return {
+        label: t("Turn on Tailscale"),
+        detail: t("Turn on Tailscale on this phone: Kelpie reaches your computer through it. If it is on already, your computer may be off. What you see is the last state."),
+        tone: "bad",
+      };
     case "relay_unreachable":
       return { label: t("Relay unreachable"), detail: t("The relay cannot be reached. What you see is the last state."), tone: "bad" };
     case "restarted":

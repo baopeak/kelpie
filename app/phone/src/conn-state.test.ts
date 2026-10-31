@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backoffMs, canAct, dataAge, deriveConn, LagMeter, RESTARTED_SHOWN_MS, type ConnFacts } from "./conn-state";
+import { backoffMs, canAct, dataAge, deriveConn, LagMeter, NAME_FAILS_WITHIN_MS, RESTARTED_SHOWN_MS, whyNoAnswer, type ConnFacts } from "./conn-state";
 
 const NOW = 10_000_000;
 const facts = (over: Partial<ConnFacts> = {}): ConnFacts => ({
@@ -46,6 +46,18 @@ describe("deriveConn", () => {
     expect(deriveConn(facts({ ready: false, attempt: 1, reach: "unreachable" }), NOW).kind).toBe("reconnecting");
     expect(deriveConn(facts({ ready: false, attempt: 3, reach: "unreachable", lastLiveAt: NOW - 90_000 }), NOW)).toEqual({ kind: "computer_offline", since: NOW - 90_000 });
     expect(deriveConn(facts({ ready: false, attempt: 3, reach: "unreachable", route: "relay" }), NOW).kind).toBe("relay_unreachable");
+  });
+
+  it("a Tailscale name that fails at once asks for Tailscale, not for the computer", () => {
+    expect(deriveConn(facts({ ready: false, attempt: 3, reach: "no_tailnet" }), NOW)).toEqual({ kind: "no_tailnet" });
+    expect(deriveConn(facts({ ready: false, attempt: 1, reach: "no_tailnet" }), NOW).kind).toBe("reconnecting");
+    expect(deriveConn(facts({ ready: false, attempt: 3, online: false, reach: "no_tailnet" }), NOW).kind).toBe("no_network");
+    expect(canAct({ kind: "no_tailnet" })).toBe(false);
+    const name = "desk.tail1234.ts.net";
+    expect(whyNoAnswer(name, false, 40)).toBe("no_tailnet");
+    expect(whyNoAnswer(name, false, NAME_FAILS_WITHIN_MS + 1)).toBe("unreachable");
+    expect(whyNoAnswer(name, true, 40)).toBe("unreachable");
+    expect(whyNoAnswer("192.168.1.5", false, 40)).toBe("unreachable");
   });
 
   it("the first connection is just 'connecting'", () => {
