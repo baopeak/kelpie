@@ -101,7 +101,7 @@ anything but `daemon.info` answers:
   cannot say which phone this is about.** The app's approval dialog names the device, its key and what it asks for before the
   prompt comes up, so that is what the person reads. That action's default asks for an administrator's password, so an account that is
   not an administrator cannot pass, and a distribution's polkit rules can change what it asks. With no polkit, or no agent to ask through
-  (a headless login), it is refused with a message saying what to do; past the time limit `pkcheck` is ended. This has not yet run on a real Linux desktop. Declining a phone and lowering a permission ask nobody; `mobile.reset` always asks. What
+  (a headless login), it is refused with a message saying what to do, which does not count as the person refusing; past the time limit `pkcheck` is ended. What `pkcheck` wrote to stderr goes to the debug log. This has not yet run on a real Linux desktop. Declining a phone and lowering a permission ask nobody; `mobile.reset` always asks. What
   the prompt says is built by the daemon from its own records, with a phone's name in quotes; a caller supplies no text. The
   prompt runs on a thread of its own (`Daemon::after_verifying`), the request is answered when it ends, one prompt at a time, for at
   most 280 s: then the caller gets an error, Hello and macOS's prompt are cancelled, a password dialog (which cannot be) is ignored, and whatever it says

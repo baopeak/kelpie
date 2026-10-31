@@ -89,6 +89,8 @@ pub struct Unverified {
     pub message: String,
     /// Nobody answered in time (as opposed to a refusal or a failure).
     pub timed_out: bool,
+    /// This computer has no way to ask anyone: it says nothing about the person.
+    pub could_not_ask: bool,
 }
 
 /// What a prompt asks of the person. Its text is the daemon's own, from its own records.
@@ -234,7 +236,7 @@ impl Presence {
 
     /// A verification was refused, failed or was left unanswered. True when this one stops new prompts for a while.
     pub fn refused(&self, why: &Unverified) -> bool {
-        self.refused_at(Instant::now(), why.timed_out)
+        !why.could_not_ask && self.refused_at(Instant::now(), why.timed_out)
     }
 
     fn refused_at(&self, now: Instant, timed_out: bool) -> bool {
@@ -278,7 +280,7 @@ impl Presence {
     /// time, or a panic on the way, ends here: what it says afterwards goes nowhere, so a late pass cannot make anything happen.
     /// `window` only parents the dialog: it comes from the caller, so it is checked and otherwise ignored.
     pub fn verify(&self, window: Option<i64>, reason: &str) -> Result<(), Unverified> {
-        let failed = |message: &str, timed_out| Unverified { message: message.to_string(), timed_out };
+        let failed = |message: &str, timed_out| Unverified { message: message.to_string(), timed_out, could_not_ask: polkit::could_not_ask(message) };
         let (answer, answered) = std::sync::mpsc::sync_channel(1);
         let cancel = Cancel::default();
         let (reason, asked) = (reason.to_string(), cancel.clone());
@@ -634,7 +636,7 @@ mod os {
 /// only `os::verify` above reaches it, and only on Linux, and tests run stand-ins, never a real prompt.
 #[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 mod polkit {
-    use std::io::ErrorKind;
+    use std::io::{ErrorKind, Read};
     use std::process::{Child, Command, Stdio};
     use std::time::Duration;
 
@@ -645,6 +647,14 @@ mod polkit {
     pub const NO_AGENT: &str = "Kelpie cannot verify you here because no polkit authentication agent is running. Sign in to a desktop session that has one, then try again.";
     pub const NOT_ALLOWED: &str = "polkit did not allow this account. Sign in as an administrator of this computer, then try again.";
     pub const COULD_NOT_CHECK: &str = "polkit could not check this: please try again.";
+
+    /// The most of `pkcheck`'s complaints that is kept for the log. It is told no secret: the agent asks for the password, not it.
+    const STDERR_KEPT: u64 = 4096;
+
+    /// The computer has no way to ask anyone, which is no refusal by the person.
+    pub fn could_not_ask(message: &str) -> bool {
+        message == NO_POLKIT || message == NO_AGENT
+    }
 
     pub fn arguments(pid: u32) -> Vec<String> {
         ["--action-id", "org.freedesktop.policykit.exec", "--process", &pid.to_string(), "--allow-user-interaction"].map(str::to_string).to_vec()
@@ -666,30 +676,43 @@ mod polkit {
             .args(arguments(pid))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| if e.kind() == ErrorKind::NotFound { NO_POLKIT } else { COULD_NOT_CHECK }.to_string())?;
-        wait(&mut child, cancel)
+        let (result, said) = wait(&mut child, cancel);
+        if !said.is_empty() {
+            tracing::debug!("pkcheck: {said}");
+        }
+        result
     }
 
-    /// Waits for the child; when the time is up it is ended, which takes its request back.
-    pub fn wait(child: &mut Child, cancel: &Cancel) -> Result<(), String> {
-        loop {
+    /// Waits for the child, and says what it wrote to stderr; when the time is up it is ended, which takes its request back.
+    pub fn wait(child: &mut Child, cancel: &Cancel) -> (Result<(), String>, String) {
+        // On a thread: a child that fills the pipe would otherwise wait for us while we wait for it.
+        let reader = child.stderr.take().map(|pipe| {
+            std::thread::spawn(move || {
+                let mut said = Vec::new();
+                let _ = pipe.take(STDERR_KEPT).read_to_end(&mut said);
+                String::from_utf8_lossy(&said).trim().to_string()
+            })
+        });
+        let result = loop {
             if cancel.fired() {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(NOT_IN_TIME.to_string());
+                break Err(NOT_IN_TIME.to_string());
             }
             match child.try_wait() {
-                Ok(Some(status)) => return result_of(status.code()).map_err(str::to_string),
+                Ok(Some(status)) => break result_of(status.code()).map_err(str::to_string),
                 Ok(None) => std::thread::sleep(Duration::from_millis(100)),
                 Err(_) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(COULD_NOT_CHECK.to_string());
+                    break Err(COULD_NOT_CHECK.to_string());
                 }
             }
-        }
+        };
+        (result, reader.and_then(|r| r.join().ok()).unwrap_or_default())
     }
 }
 
@@ -841,6 +864,47 @@ mod tests {
         assert!(refused.contains("Install polkit"));
     }
 
+    /// No polkit, or no agent, is the computer's lack: however often, it does not read "You refused" or stop new prompts.
+    #[test]
+    fn a_computer_that_cannot_ask_is_not_a_person_refusing() {
+        for message in [polkit::NO_POLKIT, polkit::NO_AGENT] {
+            let p = Presence::default();
+            p.inject(move |_| Err(message.to_string()));
+            for _ in 0..REFUSALS * 2 {
+                let turn = p.begin().expect("never paused for this");
+                let why = p.verify(None, "x").unwrap_err();
+                assert!(why.could_not_ask && !why.timed_out);
+                assert_eq!(why.message, message);
+                assert!(!p.refused(&why), "not counted");
+                drop(turn);
+            }
+        }
+        // A person's no still counts.
+        let p = Presence::default();
+        p.inject(|_| Err("Verification was cancelled.".to_string()));
+        let refused: Vec<bool> = (0..REFUSALS).map(|_| p.refused(&p.verify(None, "x").unwrap_err())).collect();
+        assert_eq!(refused, [false, false, true]);
+        assert!(p.begin().unwrap_err().contains("You refused"));
+    }
+
+    /// What it wrote to stderr is there for the log, and its exit code still decides. A stand-in: no polkit is involved.
+    #[test]
+    fn what_the_polkit_child_complains_of_is_kept_for_the_log() {
+        let mut c = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", "echo no agent here 1>&2 & exit /b 2"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", "echo no agent here >&2; exit 2"]);
+            c
+        };
+        let mut child = c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        let (result, said) = polkit::wait(&mut child, &Cancel::default());
+        assert_eq!(result.unwrap_err(), polkit::NO_AGENT);
+        assert_eq!(said, "no agent here");
+    }
+
     /// A stand-in that stays until it is ended: no polkit is involved.
     fn staying_child() -> std::process::Child {
         let mut c = if cfg!(windows) {
@@ -865,7 +929,7 @@ mod tests {
             later.fire();
         });
         let began = Instant::now();
-        assert_eq!(polkit::wait(&mut child, &cancel).unwrap_err(), NOT_IN_TIME);
+        assert_eq!(polkit::wait(&mut child, &cancel).0.unwrap_err(), NOT_IN_TIME);
         assert!(began.elapsed() < Duration::from_secs(30), "it did not wait for the child");
         assert!(child.try_wait().unwrap().is_some(), "the child is gone");
         fire.join().unwrap();
