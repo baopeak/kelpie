@@ -652,7 +652,6 @@ pub async fn turn_off(daemon: Arc<Daemon>) -> Result<Value> {
 /// an entry the person removed by hand stays removed until they say otherwise. If that port is someone else's now, our entry would lead
 /// to them, so it goes.
 pub async fn resume(daemon: Arc<Daemon>) {
-    let m = &daemon.mobile;
     match listen_loopback(&daemon, false).await {
         Ok(_) | Err(Listen::NoServer) => {}
         Err(Listen::PortTaken) => after_failed_bind(&daemon).await,
