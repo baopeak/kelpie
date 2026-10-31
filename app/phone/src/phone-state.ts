@@ -20,7 +20,7 @@ import { forgetHistory } from "./history";
 import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
-import { movedTo } from "./install-state";
+import { afterFailedPairing, movedTo } from "./install-state";
 import { t } from "./i18n";
 
 // ---------- signals the views read ----------
@@ -456,7 +456,12 @@ export async function pairDevice(code: string, name: string): Promise<string | n
   const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }), held);
   setPairShown(null);
   if (!r.ok) {
-    if (!held) return r.message;
+    if (!held) {
+      if (afterFailedPairing(location.protocol === "https:") === "stay") return r.message;
+      setPairing(null);
+      setNotPairedMessage(r.message);
+      return null;
+    }
     // Nothing changed for the pairing it holds: back to it, with what went wrong.
     setPairing(null);
     setPaired(true);

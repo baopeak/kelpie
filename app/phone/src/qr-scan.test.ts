@@ -39,6 +39,21 @@ describe("how frames are read", () => {
     expect(await (await chooseDetect(env({ BarcodeDetector: broken })))(frame)).toBe("from the decoder");
   });
 
+  it("a detector that claims QR codes and then refuses a frame gives way to the decoder for good", async () => {
+    let asked = 0;
+    const refusing = class {
+      static getSupportedFormats = async () => ["qr_code"];
+      async detect() {
+        asked++;
+        throw new Error("this frame cannot be read");
+      }
+    } as unknown as ScanEnv["BarcodeDetector"];
+    const detect = await chooseDetect(env({ BarcodeDetector: refusing }));
+    expect(await detect(frame)).toBe("from the decoder");
+    expect(await detect(frame)).toBe("from the decoder");
+    expect(asked).toBe(1);
+  });
+
   it("a frame with nothing in it yet is nothing", async () => {
     expect(await (await chooseDetect(env({ pixels: () => null })))(frame)).toBeNull();
   });

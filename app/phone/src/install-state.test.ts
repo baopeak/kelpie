@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { firstScreen, movedTo, platformOf, readCode, type PageFacts } from "./install-state";
+import { afterFailedPairing, firstScreen, movedTo, platformOf, readCode, type PageFacts } from "./install-state";
 import { b64url, randomBytes } from "./noise";
 
-const facts = (over: Partial<PageFacts> = {}): PageFacts => ({ https: true, installed: false, paired: false, hasCode: false, stayInBrowser: false, ...over });
+const facts = (over: Partial<PageFacts> = {}): PageFacts => ({ https: true, tailnet: true, installed: false, paired: false, hasCode: false, stayInBrowser: false, ...over });
 const code = b64url(new TextEncoder().encode(JSON.stringify({ v: 1, dpk: b64url(randomBytes(32)), psk: b64url(randomBytes(32)), ep: [{ t: "ts", a: "desk.tail1234.ts.net:8443" }], name: "Desk" })));
 const HERE = "desk.tail1234.ts.net:8443";
 
@@ -25,6 +25,19 @@ describe("the first screen", () => {
   it("the person may go on in the browser", () => {
     expect(firstScreen(facts({ stayInBrowser: true }))).toBe("scan");
     expect(firstScreen(facts({ stayInBrowser: true, hasCode: true }))).toBe("pair");
+  });
+
+  it("a person's own certificate on this network pairs from the link as it always did", () => {
+    expect(firstScreen(facts({ tailnet: false, hasCode: true }))).toBe("pair");
+    expect(firstScreen(facts({ tailnet: false }))).toBe("install");
+  });
+
+  it("a pairing that failed on a secure origin leads back to the scanner, not to a code that is spent", () => {
+    expect(afterFailedPairing(true)).toBe("back_to_scanner");
+    // With the code cleared, that is what the installed app shows.
+    expect(firstScreen(facts({ installed: true, hasCode: false }))).toBe("scan");
+    expect(firstScreen(facts({ stayInBrowser: true, hasCode: false }))).toBe("scan");
+    expect(afterFailedPairing(false)).toBe("stay");
   });
 
   it("a paired device is past all of it", () => {

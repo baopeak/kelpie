@@ -21,6 +21,8 @@ interface Scope {
 declare const __PRECACHE__: string[];
 declare const __VERSION__: string;
 
+export {};
+
 const sw = self as unknown as Scope;
 const CACHE = `kelpie-phone-${__VERSION__}`;
 /** How long a page request waits for the computer before the kept shell is used instead. */

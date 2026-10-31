@@ -51,25 +51,42 @@ export function browserScanEnv(): ScanEnv {
   };
 }
 
-/** How frames are read here: the browser's detector when it does QR codes, or the decoder. */
+/** The decoder, loaded the first time a frame needs it. */
+function viaDecoder(env: ScanEnv): Detect {
+  let decode: Awaited<ReturnType<ScanEnv["decoder"]>> | undefined;
+  return async (source) => {
+    decode ??= await env.decoder();
+    const frame = env.pixels(source);
+    return frame ? decode(frame.data, frame.width, frame.height) : null;
+  };
+}
+
+/** How frames are read here: the browser's detector when it does QR codes, or the decoder. A detector that claims to and then refuses a frame is not asked again. */
 export async function chooseDetect(env: ScanEnv): Promise<Detect> {
+  const fallback = viaDecoder(env);
   const Native = env.BarcodeDetector;
   if (Native) {
     try {
       const formats = await Native.getSupportedFormats?.();
       if (!formats || formats.includes("qr_code")) {
         const detector = new Native({ formats: ["qr_code"] });
-        return async (source) => (await detector.detect(source))[0]?.rawValue ?? null;
+        let works = true;
+        return async (source) => {
+          if (works) {
+            try {
+              return (await detector.detect(source))[0]?.rawValue ?? null;
+            } catch {
+              works = false;
+            }
+          }
+          return fallback(source);
+        };
       }
     } catch {
       /* the decoder, then */
     }
   }
-  const decode = await env.decoder();
-  return async (source) => {
-    const frame = env.pixels(source);
-    return frame ? decode(frame.data, frame.width, frame.height) : null;
-  };
+  return fallback;
 }
 
 export interface Scanner {

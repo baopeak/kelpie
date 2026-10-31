@@ -8,7 +8,7 @@
 // policy: nothing is queued, requests made while not connected are refused at once, and an answer whose reply was lost
 // is retried once under the same `cid` (the daemon lets the first answer win and recognises a repeat).
 import { PHONE_API } from "../../src/lib/attention";
-import { backoffMs, LagMeter, whyNoAnswer, type ConnFacts, type Reach } from "./conn-state";
+import { backoffMs, LagMeter, reachFromAnswer, whyNoAnswer, type ConnFacts, type Reach } from "./conn-state";
 import { Initiator, MODE_RECONNECT, type Endpoint, type Session } from "./noise";
 import type { Pairing } from "./pairing-store";
 import type { ScreenFrame } from "./screen-sync";
@@ -232,10 +232,7 @@ export function browserEnv(): Env {
       try {
         // A file the service worker leaves alone, so that the answer comes from the network.
         const r = await fetch(`/manifest.webmanifest?probe=${Date.now()}`, { cache: "no-store", signal: abort.signal });
-        const type = r.headers.get("content-type") ?? "";
-        // Tailscale answering for a computer whose Kelpie does not: that is no Wi-Fi login page.
-        if (r.status >= 500) return "unreachable";
-        return r.ok && !r.redirected && type.includes("manifest+json") ? "reachable" : "portal";
+        return reachFromAnswer(r.status, r.redirected, r.headers.get("content-type") ?? "");
       } catch {
         return whyNoAnswer(location.hostname, abort.signal.aborted, Date.now() - began);
       } finally {

@@ -14,6 +14,8 @@ export function platformOf(userAgent: string, touchPoints: number): Platform {
 
 export interface PageFacts {
   https: boolean;
+  /** At a Tailscale name. A person's own certificate on this network is HTTPS too, and pairing there worked before any of this. */
+  tailnet: boolean;
   /** Opened from the Home Screen, not in a browser tab. */
   installed: boolean;
   paired: boolean;
@@ -28,9 +30,13 @@ export type FirstScreen = "install" | "scan" | "pair";
 
 export function firstScreen(f: PageFacts): FirstScreen {
   if (!f.https || f.paired) return "pair";
-  if (!f.installed && !f.stayInBrowser) return "install";
+  if (!f.installed && !f.stayInBrowser && (f.tailnet || !f.hasCode)) return "install";
   return f.hasCode ? "pair" : "scan";
 }
+
+/** What becomes of a pairing that failed. The code is often spent or expired, and the installed app has no address bar to bring a new one: on a secure origin it goes
+ *  back to the scanner, saying what went wrong. A plain http:// page stays, and a new scan reaches it through its address. */
+export const afterFailedPairing = (https: boolean): "back_to_scanner" | "stay" => (https ? "back_to_scanner" : "stay");
 
 export type CodeReading =
   | { ok: true; code: string }

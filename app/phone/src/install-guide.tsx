@@ -32,7 +32,7 @@ function runsInstalled(): boolean {
 }
 
 export function screenNow(paired: boolean, hasCode: boolean): FirstScreen {
-  return firstScreen({ https: location.protocol === "https:", installed: runsInstalled(), paired, hasCode, stayInBrowser: stayInBrowser() });
+  return firstScreen({ https: location.protocol === "https:", tailnet: location.hostname.endsWith(".ts.net"), installed: runsInstalled(), paired, hasCode, stayInBrowser: stayInBrowser() });
 }
 
 function codeProblem(r: CodeReading & { ok: false }): string {

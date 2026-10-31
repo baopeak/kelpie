@@ -108,6 +108,12 @@ export function deriveConn(f: ConnFacts, now: number): ConnState {
   return { kind: "reconnecting", attempt: Math.max(f.attempt, 1), nextInS: f.nextAt === null ? null : Math.max(0, Math.ceil((f.nextAt - now) / 1000)) };
 }
 
+/** What an answer to the reachability request says. A 5xx is Tailscale answering for a computer whose Kelpie does not: no Wi-Fi login page. */
+export function reachFromAnswer(status: number, redirected: boolean, contentType: string): Reach {
+  if (status >= 500) return "unreachable";
+  return status >= 200 && status < 300 && !redirected && contentType.includes("manifest+json") ? "reachable" : "portal";
+}
+
 /** Failing this fast is no computer that stopped answering. */
 export const NAME_FAILS_WITHIN_MS = 1500;
 
