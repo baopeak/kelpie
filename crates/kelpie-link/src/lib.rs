@@ -254,21 +254,35 @@ struct QrWire {
 
 /// The QR payload's format.
 pub const QR_VERSION: u8 = 1;
+/// What `QrPayload::decode` takes, and so what `encode` writes.
+const QR_MAX_BYTES: usize = 4096;
+const QR_MAX_ENDPOINTS: usize = 32;
+const QR_MAX_NAME_CHARS: usize = 64;
 
 impl QrPayload {
-    /// Base64url of its JSON.
+    /// Base64url of its JSON, always something [`Self::decode`] takes: a computer's name can be any length, and it can have any number
+    /// of addresses. The name is cut, and the last addresses are left out, as a client skips what it cannot use anyway.
     pub fn encode(&self) -> String {
-        let wire = QrWire { v: QR_VERSION, dpk: b64(&self.dpk), psk: b64(&self.psk), ep: self.endpoints.clone(), name: self.name.clone() };
-        b64(&serde_json::to_vec(&wire).expect("serializable"))
+        let name: String = self.name.chars().take(QR_MAX_NAME_CHARS).collect();
+        let mut ep: Vec<Endpoint> = self.endpoints.iter().take(QR_MAX_ENDPOINTS).cloned().collect();
+        loop {
+            let wire = QrWire { v: QR_VERSION, dpk: b64(&self.dpk), psk: b64(&self.psk), ep, name: name.clone() };
+            let json = serde_json::to_vec(&wire).expect("serializable");
+            ep = wire.ep;
+            // With no address left the keys and the cut name are far under the limit, even with every character escaped.
+            if json.len() <= QR_MAX_BYTES || ep.pop().is_none() {
+                return b64(&json);
+            }
+        }
     }
 
     pub fn decode(text: &str) -> Result<QrPayload, LinkError> {
         let bytes = unb64(text)?;
-        if bytes.len() > 4096 {
+        if bytes.len() > QR_MAX_BYTES {
             return Err(LinkError::Malformed);
         }
         let wire: QrWire = serde_json::from_slice(&bytes).map_err(|_| LinkError::Malformed)?;
-        if wire.v != QR_VERSION || wire.ep.len() > 32 || wire.name.chars().count() > 64 {
+        if wire.v != QR_VERSION || wire.ep.len() > QR_MAX_ENDPOINTS || wire.name.chars().count() > QR_MAX_NAME_CHARS {
             return Err(LinkError::Malformed);
         }
         Ok(QrPayload { dpk: to_key(&unb64(&wire.dpk)?)?, psk: to_key(&unb64(&wire.psk)?)?, endpoints: wire.ep, name: wire.name })

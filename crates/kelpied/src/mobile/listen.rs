@@ -81,7 +81,17 @@ pub fn host(addr: &SocketAddr) -> String {
 /// The computer's name for the phone (`<name>.local`, which most phones resolve on the LAN).
 pub fn hostname() -> String {
     let name = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).ok().filter(|n| !n.is_empty()).or_else(os_hostname).unwrap_or_else(|| "kelpie".into());
-    format!("{}.local", name.to_lowercase())
+    local_name(&name)
+}
+
+/// A Mac's own name usually ends in `.local` already.
+fn local_name(name: &str) -> String {
+    let name = name.to_lowercase();
+    if name.ends_with(".local") {
+        name
+    } else {
+        format!("{name}.local")
+    }
 }
 
 #[cfg(unix)]
@@ -225,6 +235,8 @@ mod tests {
         assert!(wanted(Some("0.0.0.0")).is_err(), "never every address at once");
         assert_eq!(wanted(Some("127.0.0.1")).unwrap(), vec!["127.0.0.1".parse::<IpAddr>().unwrap()], "loopback for tests");
         assert!(hostname().ends_with(".local"));
+        assert_eq!(local_name("DESK"), "desk.local");
+        assert_eq!(local_name("Mac-mini.local"), "mac-mini.local", "not twice");
     }
 
     #[tokio::test]

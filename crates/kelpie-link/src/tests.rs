@@ -245,6 +245,31 @@ fn the_qr_payload_round_trips_and_refuses_anything_else() {
         assert!(text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "url-safe");
         assert_eq!(QrPayload::decode(&text).unwrap(), p);
     }
+    // Whatever the computer is called and however many addresses it has, what is encoded decodes.
+    let qr = |name: String, endpoints: Vec<Endpoint>| QrPayload { dpk: [1; 32], psk: [2; 32], endpoints, name };
+    let many = |n: usize, addr: &str| (0..n).map(|i| Endpoint::lan(&format!("{addr}{i}"))).collect::<Vec<_>>();
+    let exactly = "m".repeat(64);
+    assert_eq!(QrPayload::decode(&qr(exactly.clone(), vec![]).encode()).unwrap().name, exactly, "64 characters stay whole");
+    let cases = [
+        // A build machine's: long, with a uuid in it.
+        ("sjc20-bp143_3e3a48ed-5ebb-42e0-a85f-fa71d2f6bd50-a1b2c3d4e5f6.local".repeat(3), many(1, "127.0.0.1:")),
+        // Characters are not bytes: neither a cut nor the limit may split one.
+        ("máy tính của tôi 😀".repeat(20), many(3, "192.168.1.1:")),
+        // What JSON writes six bytes for.
+        ("\u{1}".repeat(300), many(1, "10.0.0.1:")),
+        // More addresses than it may list, and more bytes than it may hold.
+        ("n".into(), many(100, "10.0.0.1:")),
+        ("n".into(), many(32, &format!("[fd7a:115c:a1e0:ab12:4843:cd96:6257:b01%{}]:", "e".repeat(200)))),
+        ("\u{1}".repeat(300), many(100, &format!("[fd7a:115c:a1e0:ab12:4843:cd96:6257:b01%{}]:", "e".repeat(200)))),
+    ];
+    for (name, endpoints) in cases {
+        let p = qr(name.clone(), endpoints.clone());
+        let got = QrPayload::decode(&p.encode()).unwrap_or_else(|e| panic!("{e}: a name of {} characters, {} addresses", name.chars().count(), endpoints.len()));
+        assert_eq!((got.dpk, got.psk), (p.dpk, p.psk));
+        assert_eq!(got.name, name.chars().take(64).collect::<String>());
+        assert_eq!(got.endpoints, endpoints[..got.endpoints.len()], "the first ones, in order");
+        assert!(got.endpoints.len() <= 32);
+    }
     for bad in ["", "!!!", &b64(b"{}"), &b64(br#"{"v":2,"dpk":"","psk":""}"#), &b64(br#"{"v":1,"dpk":"AAAA","psk":"AAAA"}"#)] {
         assert_eq!(QrPayload::decode(bad).unwrap_err(), LinkError::Malformed, "{bad}");
     }

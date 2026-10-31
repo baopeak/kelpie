@@ -1128,12 +1128,12 @@ impl Mobile {
             codes.push(Code { psk, kind, at: Instant::now(), attempts: HashMap::new() });
         }
         let lan: Vec<String> = addrs.iter().map(listen::host).collect();
-        let payload = kelpie_link::QrPayload { dpk: key.public, psk, endpoints: lan.iter().map(|a| kelpie_link::Endpoint::lan(a)).collect(), name: listen::hostname() };
+        let endpoints = lan.iter().map(|a| kelpie_link::Endpoint::lan(a)).collect();
         // The secret travels in the fragment: browsers never send it in a request or a Referer.
         let preferred = self.config.lock().ip.clone();
         let host = preferred.and_then(|ip| ip.parse::<IpAddr>().ok()).map(|ip| listen::host(&SocketAddr::new(ip, port))).or_else(|| lan.first().cloned()).ok_or_else(|| anyhow!("no address to pair on"))?;
-        let link = format!("{}://{host}/#p={}", if tls { "https" } else { "http" }, payload.encode());
-        let svg = qrcode::QrCode::new(link.as_bytes())?
+        let (link, qr) = pair_link(if tls { "https" } else { "http" }, &host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints, name: listen::hostname() })?;
+        let svg = qr
             .render::<qrcode::render::svg::Color>()
             .min_dimensions(240, 240)
             .dark_color(qrcode::render::svg::Color("#141823"))
@@ -2230,6 +2230,21 @@ fn load_status(load: &Load) -> String {
     msg["type"] = json!("load.status");
     msg["server_ts"] = json!(now_millis());
     msg.to_string()
+}
+
+/// The pairing link and its QR code. A QR code holds about 2 KB, less than the payload may be: addresses that would not fit are left
+/// out, as a page knows the address it came from, so a computer with many of them can still pair. The secret stays in the fragment.
+fn pair_link(scheme: &str, host: &str, mut payload: kelpie_link::QrPayload) -> Result<(String, qrcode::QrCode)> {
+    loop {
+        let link = format!("{scheme}://{host}/#p={}", payload.encode());
+        match qrcode::QrCode::new(link.as_bytes()) {
+            Ok(qr) => return Ok((link, qr)),
+            Err(e) if payload.endpoints.is_empty() => return Err(e.into()),
+            Err(_) => {
+                payload.endpoints.pop();
+            }
+        }
+    }
 }
 
 /// What the phone is told about itself: what it may do on this connection, and whether the transport holds it below its record.
@@ -3709,6 +3724,21 @@ mod tests {
         let granted = (0..50).filter(|_| d.mobile.handshake_allowed(a)).count();
         assert!((5..=6).contains(&granted), "{granted}");
         assert!(d.mobile.handshake_budget.lock().tokens >= HANDSHAKES_PER_SECOND - 6.0 - 1.0);
+    }
+
+    /// However long the computer's name and however many addresses it has, the link it shows is one a client takes, and fits a QR code.
+    #[test]
+    fn the_pairing_link_always_fits_and_always_decodes() {
+        let many: Vec<kelpie_link::Endpoint> = (0..100).map(|i| kelpie_link::Endpoint::lan(&format!("[fd7a:115c:a1e0:ab12:4843:cd96:6257:{i:x}]:4817"))).collect();
+        for name in ["desk.local".to_string(), "sjc20-bp143_3e3a48ed-5ebb-42e0-a85f-fa71d2f6bd50-a1b2c3d4e5f6.local".repeat(3), "máy tính của tôi 😀".repeat(20)] {
+            for endpoints in [vec![], many[..1].to_vec(), many.clone()] {
+                let (link, _qr) = pair_link("https", "[fd7a:115c:a1e0:ab12:4843:cd96:6257:b01]:4817", kelpie_link::QrPayload { dpk: [1; 32], psk: [2; 32], endpoints: endpoints.clone(), name: name.clone() }).unwrap();
+                let got = kelpie_link::QrPayload::decode(link.split("#p=").nth(1).unwrap()).unwrap();
+                assert_eq!(got.name, name.chars().take(64).collect::<String>());
+                assert_eq!(got.endpoints, endpoints[..got.endpoints.len()], "the first ones, in order");
+                assert!(endpoints.len() < 2 || !got.endpoints.is_empty(), "as many as fit");
+            }
+        }
     }
 
     /// Sniffing a first message buys no place: its repeats are dropped before they could hold one, and count against the address.
