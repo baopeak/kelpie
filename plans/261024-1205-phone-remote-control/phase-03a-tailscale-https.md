@@ -10,7 +10,7 @@ dependencies: [3]
 # Phase 3a: Tailscale mode
 
 ## State of this phase — 2026-11-01
-Code, unit tests and an e2e run against a fake CLI are done on `phone/phase3a-tailscale`. The desktop half of the spike ran on the owner's real tailnet, after they enabled HTTPS. **The kill rule is not triggered: `tailscale serve` is the path.** Nothing has run on a real phone yet. In `scripts/e2e/mobile.py` the install step, the paste fallback and a secure origin typing have passed in the real app; its Settings checks for this mode (each state's instruction, the two-step dialog, restore, off) **have not run**, as the rerun was stopped for low memory before reaching them.
+Code, unit tests and an e2e run against a fake CLI are done on `phone/phase3a-tailscale`. The desktop half of the spike ran on the owner's real tailnet, after they enabled HTTPS. **The kill rule is not triggered: `tailscale serve` is the path.** Nothing has run on a real phone yet. `scripts/e2e/mobile.py` covers the install step, the paste fallback, a secure origin typing and this mode's Settings in the real app.
 
 ### Verified on the real tailnet (Tailscale 1.98.10, Windows 10, 2026-11-01)
 An isolated debug daemon using the real CLI, a Python client on the same machine standing in for the phone, through `https://<fqdn>:8443`. Its traffic comes from this machine's own Tailscale address, so it took the tailnet path but no phone's network.
@@ -21,7 +21,7 @@ An isolated debug daemon using the real CLI, a Python client on the same machine
 | **Certificate** | Let's Encrypt, TLS 1.3, validated by the system's trust store. `serve --bg` returns at once; the certificate comes on the **first request, which took 38.13 s**. Later requests take about 0.1 s. Settings says so at Step 1. |
 | **WebSocket through serve** | Passes: upgrade and handshake 0.70 s, pairing completed, a session ran, and the socket still carried a message after 25 s idle. |
 | **`Host`** | Forwarded as `<fqdn>:8443`: `same_origin` passes with the page's `Origin`, and another site's `Origin` gets 403 through serve. |
-| **`X-Forwarded-For`** | Serve **replaces** it. The client sent `100.99.99.99` and the daemon saw the machine's real Tailscale address, so a phone cannot choose its limiter bucket. The shared bucket stays as the fallback. |
+| **`X-Forwarded-For`** | Serve **replaces** it. The client sent `100.99.99.99` and the daemon saw the machine's real Tailscale address, so a phone cannot choose its limiter bucket through serve. A program on this machine connecting to the port directly can, within a budget for the whole listener: see Resilience. The shared bucket stays as the fallback. |
 | **Serve entry's JSON** | `{"TCP":{"8443":{"HTTPS":true}},"Web":{"<fqdn>:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:<port>"}}}}}`, exactly what `parse_serve` and its fixtures expect. Nothing served prints `{}`. |
 | **Off** | `serve --https=8443 off` restored `{}` both runs, compared with what was first read. |
 | **Daemon killed behind the entry** | Serve answers **502** in 0.08 s with an empty body, and the entry is unchanged. A new daemon takes it up in about a second with no serve command, and the page answers again. |
@@ -42,7 +42,7 @@ Each still fails closed or falls back as described. Only a person with real phon
 | **macOS** | Same CLI at its fixed path | Refusal, or `DENIED` shown. |
 | **Certificate auto-renewal** | tailscaled renews; this one runs to 2027-01-29 | HTTPS lapses. Tailscale's to fix; kill rule if it does not. |
 | **`serve --bg` on a tailnet where Serve is not enabled** | Fails or blocks | A block is killed at 5 s and reads as `NOT_PUBLISHED`. Not seen: this tailnet allowed it. |
-| **`serve --https=8443 off` after a MagicDNS rename** | Removes the entry under the old name | The re-read still finds ours: `left_behind`, with a Remove button that may not help. Remove it by hand. |
+| **A MagicDNS rename** | Serve keeps entries by name, so the new name gets no answer and `off` may not find the old entry. Not tried: renaming the machine was ruled out, and no other way settles it | Such an entry is `renamed`: no origin is advertised and Restore publishes under the new name. If `off` cannot find the old one, Settings keeps saying so and it must be removed by hand. If serve does answer the new name, Restore is an extra click and nothing worse. |
 
 ### Choices the spec left open
 - **Phone access off ends the mode.** `mobile.disable`, `revoke_all` and `reset` set it off and remove the entry. `mobile.enable` is open to the plain user token, and the plan's criteria say such a program cannot enable Tailscale mode; keeping the mode across a disable would let it.
@@ -87,8 +87,10 @@ Plain LAN and manual cert/key fields (`mobile-settings.tsx`) keep working. Devic
 
 ## Resilience requirements
 - tailscaled down or logged out while on: state shown, retried on `listen::changed` and on opening Settings, never in a tight loop. Sessions unaffected.
-- Daemon crash leaves the serve entry behind: harmless 502 from tailscaled; re-checked at start; toggle-off still removes it. An isolated test daemon never issues `serve` (see Tests).
+- Daemon crash leaves the serve entry behind: a 502 from tailscaled **while nobody holds the port**; re-checked at start; toggle-off still removes it. An isolated test daemon never issues `serve` (see Tests).
+- **That is not harmless on a machine with more than one OS user:** during that window another local user can bind the port and answer at the phone's trusted origin, read the phone's key from IndexedDB and later use it. Same-user programs are out of scope (`auth.rs`). Open, and the owner's decision: see `docs/architecture.md`, "Limit: a machine with more than one OS user". A program on this machine can also name any address through the listener: no session, within a budget for the whole listener, and it can lock out an address it names for a minute. Accepted as local denial of service.
 - Serve entry removed by hand: detected on the next check, shown, one-click restore.
+- An entry Tailscale will not remove when the mode ends: kept in the store, shown even with phone access off, removed the next time Tailscale is looked at or phone access or the daemon starts.
 - MagicDNS rename changes the origin: `addrs` tells the phone, which offers re-pairing.
 - The loopback listener follows the same `Generation` stop as the others. Load levels and heartbeats unchanged.
 

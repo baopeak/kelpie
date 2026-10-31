@@ -958,13 +958,16 @@ certificate. **Step 2: Pair** shows the pairing code: open Kelpie from the
 Home Screen, press *Scan the code* (or paste the link, if the camera cannot be used), and type the six digits on
 the computer. A browser keeps its pairing per address, so a phone paired over plain HTTP stays paired there, read-only, and must
 be paired again to type over Tailscale. If the phone says *Turn on Tailscale*, it is not on your tailnet (an iPhone allows one
-VPN at a time); the app still opens and shows what it last saw.
+VPN at a time); the app still opens and shows what it last saw. While this is on, links in notifications open at the Tailscale address, so a phone paired only over plain HTTP
+cannot use them.
 
-What to know: **your computer's name goes into public certificate logs** when Tailscale gets its certificate, and that
+What to know: **use this only on a computer with one user account.** The Tailscale entry stays while Kelpie is not running, so another user account on the same computer
+could take its place and answer your phone at the trusted address. **Your computer's name goes into public certificate logs** when Tailscale gets its certificate, and that
 cannot be undone. Tailscale sees which devices connect and when, not what they say, which is end-to-end encrypted
 inside the connection. [Tailnet Lock](https://tailscale.com/kb/1226/tailnet-lock) protects you from a device key handed out without your approval. The free
 Tailscale plan is for non-commercial use. Turning phone access off, the kill switch and a reset all end this mode and
-remove the entry; turning phone access on again does not bring it back until you turn it on and confirm.
+remove the entry; turning phone access on again does not bring it back until you turn it on and confirm. If Tailscale is stopped at that moment, Settings says the entry is
+still there and removes it once Tailscale answers.
 
 The phone lists every session grouped by *Needs you / Working / Idle / Stopped*, buzzes when one
 starts needing you, shows a session's screen and — if you allow that device to type — sends replies
