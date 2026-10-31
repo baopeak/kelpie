@@ -962,12 +962,13 @@ VPN at a time); the app still opens and shows what it last saw. While this is on
 cannot use them.
 
 What to know: **use this only on a computer with one user account.** The Tailscale entry stays while Kelpie is not running, so another user account on the same computer
-could take its place and answer your phone at the trusted address. **Your computer's name goes into public certificate logs** when Tailscale gets its certificate, and that
+could take its place, answer your phone at the trusted address, read this phone's Kelpie key and later use it. A program on your computer, or a device on your tailnet, can also keep
+phones from connecting for as long as it keeps trying, with no key and no access to anything. **Your computer's name goes into public certificate logs** when Tailscale gets its certificate, and that
 cannot be undone. Tailscale sees which devices connect and when, not what they say, which is end-to-end encrypted
 inside the connection. [Tailnet Lock](https://tailscale.com/kb/1226/tailnet-lock) protects you from a device key handed out without your approval. The free
 Tailscale plan is for non-commercial use. Turning phone access off, the kill switch and a reset all end this mode and
 remove the entry; turning phone access on again does not bring it back until you turn it on and confirm. If Tailscale is stopped at that moment, Settings says the entry is
-still there and removes it once Tailscale answers.
+still there. Kelpie tries again when you open Settings → Mobile or press *Check again*, and when it next starts; nothing runs in the background to retry while phone access is off.
 
 The phone lists every session grouped by *Needs you / Working / Idle / Stopped*, buzzes when one
 starts needing you, shows a session's screen and — if you allow that device to type — sends replies
