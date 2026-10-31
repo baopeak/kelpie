@@ -252,6 +252,180 @@ fn undoing_turn_two_keeps_turn_three() {
     assert_eq!(records(&cp, "s1").last().unwrap().paths, ["a.txt"]);
 }
 
+fn stamp_index(repo: &Path, time: std::time::SystemTime) {
+    let index = g(repo, &["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+    std::fs::File::options().write(true).open(index).unwrap().set_modified(time).unwrap();
+}
+
+/// A file's time, with the index stamped as written in a later second, as in any repository that
+/// has settled: git only compares contents for files as new as the index, and trusts this one's stat
+/// data from here on, however quickly the test got here.
+fn settled_time(repo: &Path, name: &str) -> std::time::SystemTime {
+    let time = std::fs::metadata(repo.join(name)).unwrap().modified().unwrap();
+    stamp_index(repo, time + AGES);
+    time
+}
+
+/// Far enough from the fixture's files for them to count as one moment.
+const AGES: Duration = Duration::from_secs(60);
+
+/// Edits files with the same number of bytes while git still compares contents, because the index is
+/// as new as they are; the function returned then moves the index's time on, after which only reading
+/// the files can tell.
+fn edit_within_the_second(repo: &Path, edits: &[(&str, &str)]) -> impl Fn() {
+    let time = std::fs::metadata(repo.join(edits[0].0)).unwrap().modified().unwrap();
+    stamp_index(repo, time - AGES);
+    for (name, text) in edits {
+        let cached = std::fs::metadata(repo.join(name)).unwrap().modified().unwrap();
+        write_at(repo, name, text, cached);
+    }
+    let repo = repo.to_path_buf();
+    move || stamp_index(&repo, time + AGES)
+}
+
+#[test]
+fn a_second_passing_before_the_undo_does_not_make_it_skip_the_file() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    let second_passes = edit_within_the_second(&repo, &[("b.txt", "turn two\n")]);
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert_eq!(item(&plan_of(&cp, "s1", 1), "b.txt")["action"], "restore");
+    second_passes();
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "b.txt"), "b.txt v0\n");
+}
+
+#[test]
+fn a_second_passing_before_the_undo_does_not_lift_its_refusal() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    strict(&cp);
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    let second_passes = edit_within_the_second(&repo, &[("a.txt", "turn one\n"), ("b.txt", "user fix\n")]);
+    cp.run_job(&job("s1", &repo, Kind::Turn, 300, 400)).unwrap();
+    cp.run_job(&job("s1", &repo, Kind::Start, 300, 300)).unwrap();
+    assert!(plan_of(&cp, "s1", 1).iter().all(|i| i["state"] == "modified"));
+    second_passes();
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], false);
+    assert_eq!(read(&repo, "b.txt"), "user fix\n");
+}
+
+#[test]
+fn a_second_passing_between_turns_does_not_put_an_older_file_into_the_next_turn() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    sleep_to_next_second();
+    write(&repo, "x.txt", "one\n");
+    g(&repo, &["add", "x.txt"]);
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "x.txt", "two\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    sleep_to_next_second();
+    write(&repo, "b.txt", "turn two\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 30, 40)).unwrap();
+    assert_eq!(records(&cp, "s1").last().unwrap().paths, ["b.txt"], "only turn two's file");
+}
+
+#[test]
+fn only_a_copy_of_the_index_that_trusts_nothing_changes_its_time() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    let top = find_top(&repo).unwrap();
+    let handle = cp.repo(&top, &repo_key(&top)).unwrap();
+    let time = std::fs::metadata(&handle.index).unwrap().modified().unwrap() - AGES;
+    stamp_index(&repo, time);
+    let tmp = cp.tmp_index("s1");
+    copy_index(&handle, &tmp, StatCache::Trusted).unwrap();
+    assert_eq!(std::fs::metadata(&tmp).unwrap().modified().unwrap(), time, "made later, it would lose git's protection");
+    copy_index(&handle, &tmp, StatCache::Distrusted).unwrap();
+    assert!(std::fs::metadata(&tmp).unwrap().modified().unwrap() < std::time::UNIX_EPOCH + Duration::from_secs(60));
+    assert_eq!(std::fs::read(&tmp).unwrap(), std::fs::read(&handle.index).unwrap());
+}
+
+/// Rewrites a file and puts its modification time back: with the same size, git's stat cache cannot
+/// tell (always on Windows, elsewhere as long as the change time stays in the same second), so a
+/// snapshot does not see it either. An undo must.
+fn write_at(repo: &Path, name: &str, text: &str, time: std::time::SystemTime) {
+    write(repo, name, text);
+    std::fs::File::options().write(true).open(repo.join(name)).unwrap().set_modified(time).unwrap();
+}
+
+#[test]
+fn a_same_size_edit_after_the_turn_is_never_overwritten_by_undo() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    let cached = settled_time(&repo, "b.txt");
+    write(&repo, "b.txt", "turn one\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    // The second turn puts the committed text back, so the file looks like the index again...
+    write_at(&repo, "b.txt", "b.txt v0\n", cached);
+    cp.run_job(&job("s1", &repo, Kind::Turn, 30, 40)).unwrap();
+    // ...and a person's edit that leaves size and time alone must not pass for that text.
+    write_at(&repo, "b.txt", "user fix\n", cached);
+    let refused = undo(&cp, "s1", 2, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, "b.txt"), "user fix\n", "the person's edit survives");
+    assert_eq!(refused["applied"], false, "{refused}");
+    assert_eq!(item(&plan_of(&cp, "s1", 2), "b.txt")["state"], "modified");
+    // A person who says so still gets the undo.
+    let done = undo(&cp, "s1", 2, None, &["b.txt".to_string()], &IDLE).unwrap();
+    assert_eq!(done["applied"], true, "{done}");
+    assert_eq!(read(&repo, "b.txt"), "turn one\n");
+}
+
+fn sleep_to_next_second() {
+    let into = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_millis();
+    std::thread::sleep(Duration::from_millis(u64::from(1000 - into)));
+}
+
+/// Where git keeps only whole seconds of a file's times, an edit in the second the index was written
+/// is protected by nothing but the index file's own timestamp, and a copy of the index must not
+/// lose that protection when it is made a second later.
+#[test]
+fn a_same_size_edit_in_the_second_of_the_index_is_seen_after_that_second() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    sleep_to_next_second();
+    write(&repo, "x.txt", "one\n");
+    g(&repo, &["add", "x.txt"]);
+    write(&repo, "x.txt", "two\n");
+    sleep_to_next_second();
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let n = records(&cp, "s1").last().unwrap().n;
+    assert_eq!(cp.blob("s1", n, "x.txt", false, false).unwrap()["text"], "two\n");
+    assert_eq!(read(&repo, "x.txt"), "two\n");
+}
+
+#[test]
+fn a_file_outside_the_sparse_checkout_does_not_count_as_removed() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    g(&repo, &["update-index", "--skip-worktree", "d.txt"]);
+    std::fs::remove_file(repo.join("d.txt")).unwrap();
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "a.txt", "edited\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let recs = records(&cp, "s1");
+    assert_eq!(recs[1].paths, ["a.txt"]);
+    assert_eq!(cp.blob("s1", recs[1].n, "d.txt", false, false).unwrap()["text"], "d.txt v0\n", "still part of the snapshot");
+}
+
+#[test]
+fn a_file_with_converted_line_endings_is_not_a_change_of_every_snapshot() {
+    let repo = fixture();
+    // As a checkout with `core.autocrlf` leaves it: CRLF in the folder, LF in the repository.
+    g(&repo, &["config", "core.autocrlf", "true"]);
+    write(&repo, "a.txt", "a.txt v0\r\n");
+    g(&repo, &["-c", "core.autocrlf=true", "add", "a.txt"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert_eq!(records(&cp, "s1").len(), 1, "nothing changed, nothing recorded");
+    assert_eq!(g(&repo, &["rev-parse", &format!("{}:a.txt", records(&cp, "s1")[0].commit)]), g(&repo, &["rev-parse", "HEAD:a.txt"]));
+}
+
 #[test]
 fn a_file_changed_since_the_turn_needs_its_own_confirmation() {
     let repo = fixture();
@@ -507,33 +681,44 @@ fn restored_paths_must_stay_inside_the_folder() {
 fn snapshot_cost() {
     let files: usize = std::env::var("KELPIE_CP_FILES").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
     let runs: usize = std::env::var("KELPIE_CP_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-    let repo = scratch().join("big");
-    std::fs::create_dir_all(&repo).unwrap();
-    g(&repo, &["init", "-q", "-b", "main"]);
-    g(&repo, &["config", "core.autocrlf", "false"]);
-    for i in 0..files {
-        write(&repo, &format!("src/m{}/f{i}.rs", i % 200), &format!("// file {i}\nfn f{i}() -> usize {{ {i} }}\n").repeat(8));
+    // How big the files are (each repeat is about 40 bytes): a snapshot reads all of them.
+    let repeats: usize = std::env::var("KELPIE_CP_REPEATS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    // A repository to reuse, so two builds can be compared on the same files.
+    let reused = std::env::var("KELPIE_CP_REPO").ok().map(PathBuf::from);
+    let repo = reused.clone().unwrap_or_else(|| scratch().join("big"));
+    if !repo.join(".git").exists() {
+        std::fs::create_dir_all(&repo).unwrap();
+        g(&repo, &["init", "-q", "-b", "main"]);
+        g(&repo, &["config", "core.autocrlf", "false"]);
+        for i in 0..files {
+            write(&repo, &format!("src/m{}/f{i}.rs", i % 200), &format!("// file {i}\nfn f{i}() -> usize {{ {i} }}\n").repeat(repeats));
+        }
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "big"]);
     }
-    g(&repo, &["add", "-A"]);
-    g(&repo, &["commit", "-qm", "big"]);
     let (cp, _) = store(&scratch());
+    // Its own session: the refs of an earlier run in a reused repository are not this one's.
+    let sid = format!("bench{}", std::process::id());
     let t = Instant::now();
-    cp.run_job(&job("bench", &repo, Kind::Baseline, 1, 1)).unwrap();
+    cp.run_job(&job(&sid, &repo, Kind::Baseline, 1, 1)).unwrap();
     println!("files {files}: baseline {} ms", t.elapsed().as_millis());
     let size = |repo: &Path| g(repo, &["count-objects", "-v"]).lines().filter(|l| l.starts_with("size:") || l.starts_with("size-pack:")).map(|l| l.split(':').nth(1).unwrap().trim().parse::<u64>().unwrap_or(0)).sum::<u64>();
     let before = size(&repo);
     // Is git's CPU time counted past the Git for Windows launcher? (cpu should be most of the wall time)
     let top = find_top(&repo).unwrap();
     let handle = cp.repo(&top, &repo_key(&top)).unwrap();
-    take_cpu();
-    let t = Instant::now();
-    working_tree(&handle, &cp.tmp_index("probe")).unwrap();
-    println!("add -A + write-tree: wall {} ms, cpu counted {} ms", t.elapsed().as_millis(), take_cpu().as_millis());
+    for (name, cache) in [("trusting the stat cache", StatCache::Trusted), ("reading every file", StatCache::Distrusted)] {
+        take_cpu();
+        let t = Instant::now();
+        working_tree(&handle, &cp.tmp_index("probe"), cache).unwrap();
+        println!("add -A + write-tree, {name}: wall {} ms, cpu counted {} ms", t.elapsed().as_millis(), take_cpu().as_millis());
+    }
     let (mut changed, mut quiet, mut started) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut changed_cpu, mut quiet_cpu) = (Vec::new(), Vec::new());
     for i in 0..runs {
         // The look at the start of the turn (nothing changed between turns).
         let t = Instant::now();
-        cp.run_job(&job("bench", &repo, Kind::Start, 10 + i as u64, 10 + i as u64)).unwrap();
+        cp.run_job(&job(&sid, &repo, Kind::Start, 10 + i as u64, 10 + i as u64)).unwrap();
         started.push(t.elapsed().as_millis());
         // A turn that touches three files and adds one, then one that changes nothing.
         for k in 0..3 {
@@ -541,11 +726,13 @@ fn snapshot_cost() {
         }
         write(&repo, &format!("src/new{i}.rs"), "fn new() {}\n");
         let t = Instant::now();
-        cp.run_job(&job("bench", &repo, Kind::Turn, 10 + i as u64, 11 + i as u64)).unwrap();
+        cp.run_job(&job(&sid, &repo, Kind::Turn, 10 + i as u64, 11 + i as u64)).unwrap();
         changed.push(t.elapsed().as_millis());
+        changed_cpu.push(cp.last_timing.lock().1.as_millis());
         let t = Instant::now();
-        cp.run_job(&job("bench", &repo, Kind::Turn, 10 + i as u64, 11 + i as u64)).unwrap();
+        cp.run_job(&job(&sid, &repo, Kind::Turn, 10 + i as u64, 11 + i as u64)).unwrap();
         quiet.push(t.elapsed().as_millis());
+        quiet_cpu.push(cp.last_timing.lock().1.as_millis());
     }
     let pct = |v: &mut Vec<u128>, p: f64| {
         v.sort();
@@ -554,9 +741,14 @@ fn snapshot_cost() {
     println!("changed turn: p50 {} ms, p95 {} ms, max {} ms", pct(&mut changed.clone(), 0.5), pct(&mut changed.clone(), 0.95), changed.iter().max().unwrap());
     println!("unchanged turn: p50 {} ms, p95 {} ms, max {} ms", pct(&mut quiet.clone(), 0.5), pct(&mut quiet.clone(), 0.95), quiet.iter().max().unwrap());
     println!("turn start look: p50 {} ms, p95 {} ms, max {} ms", pct(&mut started.clone(), 0.5), pct(&mut started.clone(), 0.95), started.iter().max().unwrap());
+    println!("git cpu: changed p50 {} ms, max {} ms; unchanged p50 {} ms, max {} ms", pct(&mut changed_cpu.clone(), 0.5), changed_cpu.iter().max().unwrap(), pct(&mut quiet_cpu.clone(), 0.5), quiet_cpu.iter().max().unwrap());
+    println!("switched off: {}", cp.status()["disabled"]);
+    let t = Instant::now();
+    cp.undo_plan(&sid, records(&cp, &sid).last().unwrap().n, &IDLE, &names).unwrap();
+    println!("undo plan: {} ms", t.elapsed().as_millis());
     let grown = size(&repo).saturating_sub(before);
     println!("git object growth over {runs} turns: {grown} KiB ({} KiB per 100 turns)", grown * 100 / runs as u64);
-    if std::env::var("KELPIE_CP_KEEP").is_err() {
+    if reused.is_none() && std::env::var("KELPIE_CP_KEEP").is_err() {
         let _ = std::fs::remove_dir_all(repo.parent().unwrap());
     }
 }

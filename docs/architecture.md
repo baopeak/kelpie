@@ -943,9 +943,13 @@ connect, and an older daemon without API 10 never sees it and the app hides ever
   stale index lock there is removed first) is filled with `add -A --ignore-errors`, written as a tree,
   committed with `commit-tree -p HEAD` (git resolves HEAD; none in a repository without a commit) and
   stored as `refs/kelpie/<session>/<n>` (`update-ref` with an all-zero old value: a number is never
-  written twice). The user's HEAD, branch, files and the index file are never written by a snapshot
-  (undo's `git restore` takes the index lock for a moment, as any git command does; one retry when the
-  user's own git holds it). Every git call runs with `GIT_LITERAL_PATHSPECS=1`, `GIT_OPTIONAL_LOCKS=0`
+  written twice). The copy is given the real index's modification time. Git reads a file whose size and
+  times match its entry only if the file is as new as the index file, so where git compares whole seconds
+  that time is all that shows a same-size edit in the second of the entry; a copy stamped later would hide
+  it (a Linux copy gets a new time unless it is set; a Windows one keeps it). A same-size edit that also keeps its modification time is **not** seen by a
+  snapshot, as it is not by `git status`: reading every file would cost too much here (numbers below),
+  and undo does read them. The user's HEAD, branch, files and the index file are never written by a
+  snapshot or an undo. Every git call runs with `GIT_LITERAL_PATHSPECS=1`, `GIT_OPTIONAL_LOCKS=0`
   and `core.hooksPath` pointing at an empty folder: the repository's `reference-transaction`,
   `post-checkout` and other hook scripts never run for these calls. Files another program holds open are
   skipped and listed in the record (`unreadable`); paths outside a sparse checkout do not fail it. Git
@@ -991,8 +995,12 @@ connect, and an older daemon without API 10 never sees it and the app hides ever
   snapshot, was written before the turn's start (file mtime) or removed before it (its folder's mtime);
   else *clean*. Because every
   session's snapshot holds the others' concurrent edits, files in a shared folder are often shared. `undo` changes nothing and returns
-  `needs_confirmation` unless every shared or modified file is named in `confirm`. Restores are `git restore
-  --source=<base> --worktree` with literal pathspecs from stdin; deletes remove only paths that pass `safe_rel`
+  `needs_confirmation` unless every shared or modified file is named in `confirm`. The plan's look at the
+  folder and the restore both use a copy of the index stamped older than any file, so git reads the files
+  instead of trusting its stat cache: a same-size edit cannot pass for the state the turn left, and a file
+  that only looks like its index entry is still written. This cost is not counted towards auto-off. Restores
+  are `git restore --source=<base> --worktree` with literal pathspecs from stdin, on that copy, so the real
+  index's lock is not involved; deletes remove only paths that pass `safe_rel`
   and are not behind a link, then folders they leave empty. A file already equal to its state before the turn
   is skipped, so an undo can be repeated. The result is recorded as its own `undo` step. Restores follow the
   user's git settings (CRLF with `core.autocrlf`): a file can come back with other line endings, and the dialog
@@ -1017,6 +1025,15 @@ repository growth about 870 KiB per 100 turns. After the second review a detecti
 turn's start (p50 133 ms / p95 145 ms on 10k files, like an unchanged snapshot) and the later measurement reads
 baseline 0.34 s, changed turn p50 0.33 s / p95 0.35 s, unchanged p50 0.14 s: a turn now costs about 0.46 s of git
 work. Most of the time is git walking 10k files and starting processes; it still does not meet the 150 ms budget for a changed turn, hence the default.
+
+Reading every file instead of trusting the stat cache was measured for snapshots and rejected (debug test binary,
+same bench, `KELPIE_CP_REPO` reuses one repository, `KELPIE_CP_REPEATS` sets the file size; Windows 10, 10k files,
+3.3 MB). Trusting it: unchanged turn p50 153-160 ms, git CPU 156-203 ms; changed turn p50 357-392 ms, git CPU
+265-296 ms. Reading every file: unchanged turn p50 1004 ms, git CPU 1000 ms; changed turn p50 1232 ms, git CPU
+1156 ms, and two such snapshots switched the repository off. The kept design is as cheap as before, also on 10k files
+of 208 MB (unchanged p50 157 ms, changed p50 363 ms). An undo reads them: `undo_plan` took about 1.2 s on 3.3 MB and
+2.0 s on 208 MB, on its own thread and outside the auto-off count.
+
 A 100,000-file repository was not measured (building the fixture did not finish in 90 minutes); expect several seconds per snapshot there, so such a repository switches itself off after two.
 
 ## App-side services (Rust core)

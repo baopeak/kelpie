@@ -3,8 +3,9 @@
 //! A session gets one baseline snapshot when it starts; afterwards one snapshot when a turn ends
 //! (turn N = end N-1 → end N), so no start hook is needed and no start race exists. A snapshot
 //! never touches the user's index, HEAD, branch or files: a copy of `.git/index` (which keeps
-//! git's stat cache) is filled with `add -A`, written as a tree, committed with `commit-tree -p
-//! HEAD` and stored under `refs/kelpie/<session>/<n>`. Every git call is literal-pathspec only.
+//! git's stat cache and the index's time) is filled with `add -A`, written as a tree, committed with
+//! `commit-tree -p HEAD` and stored under `refs/kelpie/<session>/<n>`. Every git call is
+//! literal-pathspec only.
 //!
 //! Records live in `<data_dir>/checkpoints/<session>.json`. Snapshots of one repository run one
 //! after another on a worker thread; a repository whose snapshots take over a second twice in a
@@ -12,7 +13,8 @@
 //!
 //! Undo restores the files one turn changed, never silently over somebody else's work: it needs
 //! the owning session idle, and a file another session touched in an overlapping window, or that
-//! changed since the turn, is only restored when the caller confirms that file.
+//! changed since the turn, is only restored when the caller confirms that file. What it compares and
+//! restores is read from the files themselves, never taken from the stat cache.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -392,19 +394,45 @@ impl Repo {
     }
 }
 
-/// A tree with the working folder's files (tracked, changed and untracked, not ignored), made
-/// in a copy of the index so the real one is never opened for writing.
-fn working_tree(repo: &Repo, tmp_index: &Path) -> Result<(String, Vec<String>)> {
+/// What git may believe in a copy of the index. Git takes a file whose size and times match its index
+/// entry as unchanged, unless the file is as new as the index file itself (then it reads the contents).
+/// The copy's own time therefore decides how much git reads.
+#[derive(Clone, Copy)]
+enum StatCache {
+    /// The real index's time: git's protection for an edit in the second of its entry, which a copy
+    /// stamped later would lose. A same-size edit that also keeps its modification time goes unseen,
+    /// as it does in `git status`. Costs what git costs anyway, so every snapshot can afford it.
+    Trusted,
+    /// Older than any file: git reads every file it looks at, several times the CPU, enough on 10k files
+    /// to switch a repository's snapshots off. For an undo, which only runs when somebody asks.
+    Distrusted,
+}
+
+fn copy_index(repo: &Repo, tmp_index: &Path, cache: StatCache) -> Result<()> {
     if let Some(parent) = tmp_index.parent() {
         std::fs::create_dir_all(parent)?;
     }
     // A lock left by a git process that was killed would block this session for good.
     let _ = std::fs::remove_file(tmp_index.with_extension("index.lock"));
     if repo.index.exists() {
+        let stamp = match cache {
+            // Read before the copy: an index replaced in between leaves an older time, so more is read.
+            StatCache::Trusted => std::fs::metadata(&repo.index).and_then(|m| m.modified()).context("read the index's time")?,
+            // Second 0 would mean "time unknown" to git, which then trusts everything.
+            StatCache::Distrusted => std::time::UNIX_EPOCH + Duration::from_secs(1),
+        };
         std::fs::copy(&repo.index, tmp_index).context("copy index")?;
+        std::fs::File::options().write(true).open(tmp_index).and_then(|f| f.set_modified(stamp)).context("stamp the index copy")?;
     } else {
         let _ = std::fs::remove_file(tmp_index);
     }
+    Ok(())
+}
+
+/// A tree with the working folder's files (tracked, changed and untracked, not ignored), made
+/// in a copy of the index so the real one is never opened for writing.
+fn working_tree(repo: &Repo, tmp_index: &Path, cache: StatCache) -> Result<(String, Vec<String>)> {
+    copy_index(repo, tmp_index, cache)?;
     let result = (|| {
         // `--ignore-errors`: a file another program holds open must not cost the whole snapshot;
         // git then exits 1 (also for paths outside a sparse checkout) after writing the index.
@@ -537,7 +565,7 @@ struct Snap {
 
 /// Snapshots the working folder unless its tree equals `prev_tree`.
 fn snapshot(repo: &Repo, tmp_index: &Path, sid: &str, n: u32, prev_tree: Option<&str>) -> Result<Option<Snap>> {
-    let (tree, unreadable) = working_tree(repo, tmp_index)?;
+    let (tree, unreadable) = working_tree(repo, tmp_index, StatCache::Trusted)?;
     if prev_tree == Some(tree.as_str()) {
         return Ok(None);
     }
@@ -853,7 +881,7 @@ impl Checkpoints {
         let tmp = self.tmp_index(&job.sid);
         let t = Instant::now();
         take_cpu();
-        let looked = working_tree(repo, &tmp);
+        let looked = working_tree(repo, &tmp, StatCache::Trusted);
         let (wall, cpu) = (t.elapsed(), take_cpu());
         self.note_duration(key, top, wall, cpu);
         let start = match looked.and_then(|(tree, _)| if tree == prev.tree { Ok(None) } else { diff_changes(repo, &prev.tree, &tree).map(Some) }) {
@@ -1146,8 +1174,9 @@ impl Checkpoints {
         }
         let base = rec.base.clone().ok_or_else(|| anyhow!("no earlier snapshot to restore"))?;
         let changes = diff_changes(repo, &base, &rec.commit)?;
-        // What the folder holds now, against what the turn left: a difference is a later change.
-        let (now, _) = working_tree(repo, &self.tmp_index(&log.session))?;
+        // What the folder holds now, against what the turn left: a difference is a later change. Read
+        // for real, whatever the stat cache says: this decides what an undo may overwrite.
+        let (now, _) = working_tree(repo, &self.tmp_index(&log.session), StatCache::Distrusted)?;
         let drift: HashSet<String> = diff_changes(repo, &rec.tree, &now)?.into_iter().map(|c| c.path).collect();
         // And what already equals the state before the turn (an earlier undo put it back).
         let undone_already: HashSet<String> = {
@@ -1280,16 +1309,14 @@ impl Checkpoints {
                 input.push(0);
             }
             let source = format!("--source={base}");
-            // `--worktree` alone: the index is not part of the restore. git still takes its lock
-            // for a moment, so one retry when the user's own git command holds it.
-            let args = ["restore", &source, "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"];
-            if let Err(e) = git_raw(&repo.top, None, &args, Some(input.clone())) {
-                if !e.to_string().contains("index.lock") {
-                    return Err(e);
-                }
-                std::thread::sleep(Duration::from_millis(400));
-                git_raw(&repo.top, None, &args, Some(input))?;
-            }
+            // A file git takes as equal to its index entry is not written, so the restore too runs on
+            // a copy that trusts no stat data (and never waits for the user's own git to let go of
+            // the real index's lock). `--worktree` alone: the copy's contents do not change either.
+            let tmp = self.tmp_index(sid);
+            copy_index(&repo, &tmp, StatCache::Distrusted)?;
+            let restored = git_raw(&repo.top, Some(&tmp), &["restore", &source, "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"], Some(input));
+            let _ = std::fs::remove_file(&tmp);
+            restored?;
         }
         for p in &delete {
             let file = repo.top.join(p);
