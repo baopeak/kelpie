@@ -2735,7 +2735,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2773,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie-link"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64 0.22.1",
  "blake2",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie-proto"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "fs2",
@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie-stt"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "bzip2 0.5.2",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "kelpied"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
