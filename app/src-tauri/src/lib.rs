@@ -367,7 +367,7 @@ mod bookmarks_tests {
             json!({ "id": "b", "projectId": "p", "sessionId": "s1", "anchor": "1" }),
             json!({ "id": "c", "projectId": "p", "sessionId": "s2", "conversationId": "c1", "anchor": "1" }),
         ] {
-            assert_eq!(bookmarks_change(&dir, Some(same), None).unwrap().items, [first.clone()]);
+            assert_eq!(bookmarks_change(&dir, Some(same), None).unwrap().items, std::slice::from_ref(&first));
         }
         assert_eq!(std::fs::read(&path).unwrap(), bytes, "nothing to write");
 
