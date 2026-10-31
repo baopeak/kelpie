@@ -50,7 +50,7 @@ export interface MobileStatus {
   /** Phones not seen for this many days are removed (0: never). */
   dormant_days: number;
   /** Tailscale mode, as the daemon holds it (absent from a daemon older than `PHONE_API`). `origin`: `<name>:8443` while phones can use it. */
-  tailscale?: { on: boolean; origin: string | null };
+  tailscale?: { on: boolean; origin: string | null; to_remove?: boolean };
   /** This window is the verified Kelpie app: it may approve phones and raise what they may do. */
   app: boolean;
 }
@@ -87,7 +87,7 @@ function tailscaleInstruction(s: TailscaleStatus): string {
         case "missing":
           return t("The entry in Tailscale Serve was removed, so phones cannot reach this computer through it. Restore it to go on.");
         case "left_behind":
-          return t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Remove it.");
+          return t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere, and Tailscale would not remove it. Try Remove.");
         case "port_busy":
           return t("Another program took the local port Tailscale Serve forwards to, so Kelpie removed its entry. Restore it to use another port.");
         case "taken":
@@ -121,7 +121,7 @@ export function MobileSettings() {
   // The two steps of pairing over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
   const [guideStep, setGuideStep] = createSignal<1 | 2 | null>(null);
   // Only while phone access is on and this page is open; looked at again when what the daemon holds changes, or when asked.
-  const tailscaleKey = () => (store.connected() && store.daemonApi() >= PHONE_API && status()?.enabled ? `${status()!.tailscale?.on}|${status()!.tailscale?.origin}` : null);
+  const tailscaleKey = () => (store.connected() && store.daemonApi() >= PHONE_API && (status()?.enabled || status()?.tailscale?.to_remove) ? `${status()!.tailscale?.on}|${status()!.tailscale?.origin}|${status()!.tailscale?.to_remove}` : null);
   const [tailscale, { refetch: checkTailscale }] = createResource(tailscaleKey, () => daemon<TailscaleStatus>("mobile.tailscale_status").catch(() => null));
   onMount(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -245,6 +245,9 @@ export function MobileSettings() {
             <Show when={tailscale()}>
               <div class="muted-inline" data-tailscale-state={tailscale()!.state} data-tailscale-serve={tailscale()!.serve}>{tailscaleInstruction(tailscale()!)}</div>
             </Show>
+            <Show when={s()!.tailscale?.to_remove}>
+              <div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
+            </Show>
             <Show when={!s()!.app}>
               <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot change this.")}</div>
             </Show>
@@ -311,6 +314,12 @@ export function MobileSettings() {
               </div>
             </div>
           </Show>
+        </SettingRow>
+      </Show>
+      <Show when={!s()?.enabled && s()?.tailscale?.to_remove}>
+        <SettingRow id="mobile-tailscale" wide>
+          <div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
+          <button class="btn" data-tailscale-check disabled={tailscale.loading} onClick={() => void checkTailscale()}>{t("Check again")}</button>
         </SettingRow>
       </Show>
       <Show when={s()}>

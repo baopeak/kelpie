@@ -45,7 +45,7 @@ pub const PORT_TAKEN: &str = "Port 8443 of Tailscale Serve is used by something 
 pub const NOT_READABLE: &str = "Kelpie could not read what Tailscale Serve is doing, so it changed nothing. Update Tailscale and try again.";
 pub const DENIED: &str = "Tailscale did not let Kelpie publish this computer. On Linux, allow your user once with `sudo tailscale set --operator=$USER`; then try again.";
 pub const NOT_PUBLISHED: &str = "Tailscale did not publish this computer. Check that HTTPS certificates and Serve are allowed for your tailnet, then try again.";
-pub const NOT_REMOVED: &str = "Kelpie stopped answering through Tailscale, but its entry in Tailscale Serve could not be removed. Start Tailscale and press Remove in Settings → Mobile.";
+pub const NOT_REMOVED: &str = "Kelpie stopped answering through Tailscale, but its entry in Tailscale Serve could not be removed yet. Start Tailscale: Kelpie removes it when you press Check again in Settings → Mobile, and when Kelpie next starts.";
 const LISTEN_FAILED: &str = "Kelpie could not open the local port Tailscale Serve forwards to. Try again in a moment.";
 pub const NOT_ON: &str = "turn mobile access on first";
 pub const ENDED_MEANWHILE: &str = "Phone access was turned off or changed while this was being done, so Tailscale publishes nothing. Turn this on again if you still want it.";
@@ -282,6 +282,8 @@ pub fn detect(cli: &dyn Cli) -> Detected {
 pub fn read_entry(cli: &dyn Cli, known: Option<u16>) -> Entry {
     match cli.run(&["serve", "status", "--json"]) {
         Ran::Done { ok: true, stdout, .. } => parse_serve(&stdout, known),
+        // Uninstalled: there is nothing to serve anything, and nothing to wait for.
+        Ran::Missing => Entry::Free,
         _ => Entry::Unreadable,
     }
 }
@@ -367,13 +369,25 @@ pub async fn status(daemon: Arc<Daemon>) -> Result<Value> {
     let m = &daemon.mobile;
     // One look at a time: a window that asks again does not start another child.
     let _one = m.tailscale_check.lock().await;
-    let known = m.config.lock().tailscale_port;
-    let (detected, entry) = off_runtime(m, move |cli| {
+    // With the mode off this may remove an entry or forget its port, which must not cross a change under way.
+    let _change = if m.config.lock().tailscale { None } else { Some(m.tailscale_change.lock().await) };
+    let (known, to_remove) = {
+        let c = m.config.lock();
+        (c.tailscale_port, c.tailscale_remove)
+    };
+    let (detected, entry, removed) = off_runtime(m, move |cli| {
         let detected = detect(cli);
-        let entry = matches!(detected, Detected::Ready { .. }).then(|| read_entry(cli, known));
-        (detected, entry)
+        let ready = matches!(detected, Detected::Ready { .. });
+        let removed = (ready && to_remove).then(|| remove_ours(cli, known).is_ok());
+        let entry = ready.then(|| read_entry(cli, known));
+        (detected, entry, removed)
     })
     .await?;
+    if let Some(removed) = removed {
+        m.removal_done(removed);
+    } else if known.is_some() && !m.config.lock().tailscale && matches!(entry, Some(Entry::Free | Entry::Taken)) {
+        m.removal_done(true);
+    }
     let origin = match (&detected, entry) {
         (Detected::Ready { fqdn }, Some(Entry::Ours(_))) if m.config.lock().tailscale && m.loopback_port().is_some() => Some(format!("{fqdn}:{HTTPS_PORT}")),
         _ => None,
@@ -408,30 +422,42 @@ pub async fn check_can_turn_on(daemon: &Arc<Daemon>) -> Result<u64> {
     }
 }
 
+/// Why the loopback listener could not be opened.
+enum Listen {
+    /// The server stopped or started again meanwhile: nothing is wrong with the port.
+    NoServer,
+    PortTaken,
+}
+
+impl Listen {
+    fn why(&self) -> anyhow::Error {
+        anyhow!(match self {
+            Listen::NoServer => NOT_ON,
+            Listen::PortTaken => LISTEN_FAILED,
+        })
+    }
+}
+
 /// Opens the loopback listener if it is not open. Returns its port. `any_port`: when the port this store remembers is taken, another will
 /// do (only when turning the mode on: the entry is written right after).
-async fn listen_loopback(daemon: &Arc<Daemon>, any_port: bool) -> Result<u16> {
+async fn listen_loopback(daemon: &Arc<Daemon>, any_port: bool) -> Result<u16, Listen> {
     let m = &daemon.mobile;
     let (app, all) = {
         let running = m.running.lock();
-        let r = running.as_ref().ok_or_else(|| anyhow!(NOT_ON))?;
+        let r = running.as_ref().ok_or(Listen::NoServer)?;
         if let Some(l) = &r.loopback {
             return Ok(l.port);
         }
         (r.app.clone(), r.stop.clone())
     };
     let saved = m.config.lock().tailscale_port;
-    let listener = bind(saved, any_port).await?;
-    let port = listener.local_addr()?.port();
+    let listener = bind(saved, any_port).await.map_err(|_| Listen::PortTaken)?;
+    let port = listener.local_addr().map_err(|_| Listen::PortTaken)?.port();
     let own = Arc::new(Generation::new());
     {
         let mut running = m.running.lock();
-        let Some(r) = running.as_mut().filter(|r| Arc::ptr_eq(&r.stop, &all) && r.loopback.is_none()) else { bail!(NOT_ON) };
+        let Some(r) = running.as_mut().filter(|r| Arc::ptr_eq(&r.stop, &all) && r.loopback.is_none()) else { return Err(Listen::NoServer) };
         r.loopback = Some(LoopbackListener { port, stop: own.clone() });
-    }
-    if saved != Some(port) {
-        m.config.lock().tailscale_port = Some(port);
-        m.keep();
     }
     // Its connections have a stop of their own: turning the mode off cuts the phones that came through it, not the others.
     tokio::spawn(serve_listener(listener, app.layer(Extension(own.clone())), None, all, own.clone(), true));
@@ -491,7 +517,8 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
     let known = m.config.lock().tailscale_port;
     let was_listening = m.loopback_port().is_some();
     let run = m.running.lock().as_ref().map(|r| r.stop.clone()).ok_or_else(|| anyhow!(NOT_ON))?;
-    let port = listen_loopback(&daemon, true).await?;
+    let port = listen_loopback(&daemon, true).await.map_err(|e| e.why())?;
+    let me = daemon.clone();
     let done = off_runtime(m, move |cli| -> Result<String, &'static str> {
         let Detected::Ready { fqdn } = detect(cli) else { return Err(NOT_READY) };
         match read_entry(cli, known) {
@@ -501,12 +528,18 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
             Entry::Taken => return Err(PORT_TAKEN),
             Entry::Unreadable => return Err(NOT_READABLE),
         }
-        publish(cli, port)?;
+        // No entry of ours is there now. From here on one may be, whatever the command says.
+        me.mobile.remember_port(port);
         // What Tailscale holds now, not what it said it would do.
-        match read_entry(cli, Some(port)) {
-            Entry::Ours(at) if at == port => Ok(fqdn),
+        let published = publish(cli, port).and_then(|()| match read_entry(cli, Some(port)) {
+            Entry::Ours(at) if at == port => Ok(()),
             _ => Err(NOT_PUBLISHED),
+        });
+        if let Err(why) = published {
+            me.mobile.removal_done(remove_ours(cli, Some(port)).is_ok());
+            return Err(why);
         }
+        Ok(fqdn)
     })
     .await?;
     let fqdn = match done {
@@ -525,12 +558,15 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
         let holds = c.enabled && same_run && m.tailscale_ended.load(Ordering::SeqCst) == asked_at;
         if holds {
             c.tailscale = true;
+            c.tailscale_remove = false;
         }
         holds
     };
     if !committed {
         m.stop_loopback();
-        if off_runtime(m, move |cli| remove_ours(cli, Some(port))).await?.is_err() {
+        let removed = off_runtime(m, move |cli| remove_ours(cli, Some(port))).await?;
+        m.removal_done(removed.is_ok());
+        if removed.is_err() {
             m.audit("-", "tailscale_off", "ended while turning on, and the entry in Tailscale Serve could not be removed");
         }
         bail!(ENDED_MEANWHILE);
@@ -560,6 +596,7 @@ pub async fn turn_off(daemon: Arc<Daemon>) -> Result<Value> {
     let change = m.tailscale_change.lock().await;
     let known = m.config.lock().tailscale_port;
     let removed = off_runtime(m, move |cli| remove_ours(cli, known)).await?;
+    m.removal_done(removed.is_ok());
     drop(change);
     daemon.broadcast("mobile.updated", json!({}));
     m.unsaved(super::NOT_SAVED_OFF)?;
@@ -572,29 +609,44 @@ pub async fn turn_off(daemon: Arc<Daemon>) -> Result<Value> {
 /// to them, so it goes.
 pub async fn resume(daemon: Arc<Daemon>) {
     let m = &daemon.mobile;
-    if let Err(e) = listen_loopback(&daemon, false).await {
-        tracing::warn!("phone access: tailscale: {e:#}");
-        let known = m.config.lock().tailscale_port;
-        let cli = m.tailscale_cli.lock().clone();
-        let _ = tokio::task::spawn_blocking(move || remove_ours(cli.as_ref(), known)).await;
+    match listen_loopback(&daemon, false).await {
+        Ok(_) | Err(Listen::NoServer) => {}
+        Err(Listen::PortTaken) => {
+            tracing::warn!("phone access: tailscale: {LISTEN_FAILED}");
+            let change = m.tailscale_change.lock().await;
+            let known = m.config.lock().tailscale_port;
+            if let Ok(removed) = off_runtime(m, move |cli| remove_ours(cli, known)).await {
+                m.config.lock().tailscale_remove = removed.is_err();
+                m.keep();
+            }
+            drop(change);
+        }
     }
     if let Err(e) = status(daemon.clone()).await {
         tracing::debug!("phone access: tailscale: {e:#}");
     }
 }
 
-/// After phone access was turned off, by whatever means: the mode ended with it (`Mobile::disable`), so the entry goes too. Runs on a thread
-/// of its own: a CLI that hangs holds up nothing that takes access away.
+/// Removes an entry that is still to go: after phone access was turned off, by whatever means (the mode ended with it, `Mobile::disable`), and each
+/// time phone access or the daemon starts. If Tailscale will not do it, that stays in the store and is said in the status. Runs on a thread of its own: a
+/// CLI that hangs holds up nothing that takes access away. No timer retries it: with phone access off nothing runs.
 pub fn remove_after_off(daemon: &Arc<Daemon>) {
-    if !daemon.mobile.serve_to_remove.swap(false, Ordering::SeqCst) {
+    if !daemon.mobile.config.lock().tailscale_remove {
         return;
     }
     let me = daemon.clone();
     let spawned = std::thread::Builder::new().name("kelpie-tailscale".into()).spawn(move || {
         let _change = me.mobile.tailscale_change.blocking_lock();
-        let known = me.mobile.config.lock().tailscale_port;
+        let (known, still) = {
+            let c = me.mobile.config.lock();
+            (c.tailscale_port, c.tailscale_remove)
+        };
+        if !still {
+            return;
+        }
         let cli = me.mobile.tailscale_cli.lock().clone();
         let removed = remove_ours(cli.as_ref(), known);
+        me.mobile.removal_done(removed.is_ok());
         me.mobile.audit("-", "tailscale_off", if removed.is_ok() { "no longer published" } else { "no longer answering, and the entry in Tailscale Serve could not be removed" });
         me.broadcast("mobile.updated", json!({}));
     });
@@ -616,6 +668,12 @@ pub mod fake {
         pub calls: Mutex<Vec<String>>,
         /// What `serve --bg` answers when it should fail.
         pub publish_fails: Mutex<Option<String>>,
+        /// `serve --https=8443 off` fails.
+        pub off_fails: Mutex<bool>,
+        /// `serve status` fails, as with Tailscale stopped.
+        pub serve_down: Mutex<bool>,
+        /// `serve --bg` runs out of its time, having written the entry.
+        pub publish_times_out: Mutex<bool>,
         /// Holds `serve --bg` up: says it got there on the first, and goes on when the second says so.
         pub publish_holds: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     }
@@ -624,7 +682,7 @@ pub mod fake {
 
     impl Fake {
         pub fn ready() -> Fake {
-            Fake { status: Mutex::new(READY.into()), serve: Mutex::new("{}".into()), calls: Mutex::new(Vec::new()), publish_fails: Mutex::new(None), publish_holds: Mutex::new(None) }
+            Fake { status: Mutex::new(READY.into()), serve: Mutex::new("{}".into()), calls: Mutex::new(Vec::new()), publish_fails: Mutex::new(None), off_fails: Mutex::new(false), serve_down: Mutex::new(false), publish_times_out: Mutex::new(false), publish_holds: Mutex::new(None) }
         }
 
         pub fn entry(port: u16) -> String {
@@ -644,8 +702,16 @@ pub mod fake {
             let answer = |s: String| Ran::Done { ok: true, stdout: s, stderr: String::new() };
             match call.as_str() {
                 "status --json" => answer(self.status.lock().clone()),
-                "serve status --json" => answer(self.serve.lock().clone()),
+                "serve status --json" => {
+                    if *self.serve_down.lock() {
+                        return Ran::Done { ok: false, stdout: String::new(), stderr: "failed to connect to local Tailscale service".into() };
+                    }
+                    answer(self.serve.lock().clone())
+                }
                 "serve --https=8443 off" => {
+                    if *self.off_fails.lock() {
+                        return Ran::Done { ok: false, stdout: String::new(), stderr: "no".into() };
+                    }
                     *self.serve.lock() = "{}".into();
                     answer(String::new())
                 }
@@ -659,6 +725,9 @@ pub mod fake {
                     }
                     let port = call.rsplit(':').next().and_then(|p| p.parse().ok()).expect("a serve command with a port");
                     *self.serve.lock() = Fake::entry(port);
+                    if *self.publish_times_out.lock() {
+                        return Ran::TimedOut;
+                    }
                     answer(String::new())
                 }
             }

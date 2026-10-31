@@ -72,7 +72,6 @@
   "Kelpie could not understand what Tailscale says. Update Tailscale, then check again.": "Kelpie không hiểu được phản hồi của Tailscale. Hãy cập nhật Tailscale rồi kiểm tra lại.",
   "Phones with Tailscale on reach this computer at {origin}, from anywhere.": "Điện thoại đang bật Tailscale kết nối tới máy tính này tại {origin}, từ bất cứ đâu.",
   "The entry in Tailscale Serve was removed, so phones cannot reach this computer through it. Restore it to go on.": "Mục trong Tailscale Serve đã bị gỡ nên điện thoại không kết nối được qua đó. Hãy khôi phục để tiếp tục.",
-  "An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Remove it.": "Vẫn còn một mục của Kelpie trong Tailscale Serve nhưng không dẫn đến đâu. Hãy gỡ nó.",
   "Another program took the local port Tailscale Serve forwards to, so Kelpie removed its entry. Restore it to use another port.": "Một chương trình khác đã chiếm cổng cục bộ mà Tailscale Serve chuyển tiếp tới, nên Kelpie đã gỡ mục của mình. Hãy khôi phục để dùng cổng khác.",
   "Port 8443 of Tailscale Serve is used by something else. Kelpie will not change it: free that port, then check again.": "Cổng 8443 của Tailscale Serve đang được dùng cho việc khác. Kelpie sẽ không thay đổi nó: hãy giải phóng cổng đó rồi kiểm tra lại.",
   "Kelpie could not read what Tailscale Serve is doing. Update Tailscale, then check again.": "Kelpie không đọc được trạng thái của Tailscale Serve. Hãy cập nhật Tailscale rồi kiểm tra lại.",
@@ -89,5 +88,7 @@
   "Copy the link, to paste it on the phone": "Sao chép liên kết để dán trên điện thoại",
   "Turn on Tailscale on your phone and scan this with its camera. The page shows how to install Kelpie on the phone; then open it from the Home Screen.": "Bật Tailscale trên điện thoại và quét mã này bằng camera. Trang sẽ hướng dẫn cài Kelpie lên điện thoại; sau đó mở Kelpie từ Màn hình chính.",
   "Installed: Step 2": "Đã cài: Bước 2",
-  "This code holds no secret. The very first visit can take up to a minute while Tailscale gets its certificate.": "Mã này không chứa bí mật nào. Lần truy cập đầu tiên có thể mất đến một phút trong lúc Tailscale lấy chứng chỉ."
+  "This code holds no secret. The very first visit can take up to a minute while Tailscale gets its certificate.": "Mã này không chứa bí mật nào. Lần truy cập đầu tiên có thể mất đến một phút trong lúc Tailscale lấy chứng chỉ.",
+  "An entry of Kelpie's is still in Tailscale Serve, leading nowhere, and Tailscale would not remove it. Try Remove.": "Vẫn còn một mục của Kelpie trong Tailscale Serve nhưng không dẫn đến đâu, và Tailscale không chịu gỡ. Hãy thử Gỡ.",
+  "An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.": "Vẫn còn một mục của Kelpie trong Tailscale Serve nhưng không dẫn đến đâu. Kelpie sẽ gỡ nó ngay khi Tailscale phản hồi: hãy khởi động Tailscale rồi kiểm tra lại."
 }

@@ -110,6 +110,9 @@ pub struct Store {
     /// The loopback port our serve entry forwards to, which is how the entry is known for ours.
     #[serde(default)]
     pub tailscale_port: Option<u16>,
+    /// Our serve entry is still to be removed: Tailscale would not do it when the mode ended.
+    #[serde(default)]
+    pub tailscale_remove: bool,
 }
 
 pub const DEFAULT_DORMANT_DAYS: u32 = 90;
@@ -160,7 +163,9 @@ fn broken(path: &Path, bytes: &[u8], why: String) -> Loaded {
         Ok(()) => tracing::warn!("{why}; a copy is at {}; phone access stays off until it is reset", backup.display()),
         Err(e) => tracing::warn!("{why}; copying it aside failed ({e}); phone access stays off until it is reset"),
     }
-    Loaded { store: Store { version: VERSION, ..Default::default() }, broken: Some(why), fresh: false }
+    // Nothing of it is used but this: a serve entry outlives the file, and a reset can only remove it knowing it for ours.
+    let tailscale_port = serde_json::from_slice::<serde_json::Value>(bytes).ok().and_then(|v| v.get("tailscale_port")?.as_u64()).and_then(|p| u16::try_from(p).ok());
+    Loaded { store: Store { version: VERSION, tailscale_port, ..Default::default() }, broken: Some(why), fresh: false }
 }
 
 /// The settings of the token-based file, and its devices as names to pair again. The file itself is left as it is.
@@ -319,6 +324,21 @@ mod tests {
         assert_eq!(l.store.legacy.len(), 1);
         assert_eq!(l.store.legacy[0].name, "Old phone");
         assert_eq!(std::fs::read(d.join(LEGACY_FILE)).unwrap(), old);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_used_still_says_which_serve_entry_is_ours() {
+        let d = dir("port");
+        std::fs::write(d.join(FILE), br#"{"version":3,"enabled":true,"tailscale":true,"tailscale_port":5000}"#).unwrap();
+        let l = load(&d);
+        assert!(l.broken.is_some());
+        assert_eq!(l.store.tailscale_port, Some(5000));
+        assert!(!l.store.enabled && !l.store.tailscale, "nothing else of it counts");
+        let _ = std::fs::remove_dir_all(&d);
+        let d = dir("garbage-port");
+        std::fs::write(d.join(FILE), b"{not json").unwrap();
+        assert_eq!(load(&d).store.tailscale_port, None);
         let _ = std::fs::remove_dir_all(&d);
     }
 

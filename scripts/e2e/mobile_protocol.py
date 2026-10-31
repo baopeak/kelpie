@@ -954,7 +954,7 @@ async def security(d):
     entry = lambda port: json.dumps({"TCP": {"8443": {"HTTPS": True}}, "Web": {origin: {"Handlers": {"/": {"Proxy": f"http://127.0.0.1:{port}"}}}}})
     d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
     check("nothing has asked Tailscale anything yet", not ts_calls(), ts_calls())
-    check("…and the mode is off", d.call("mobile.status")["tailscale"] == {"on": False, "origin": None}, d.call("mobile.status")["tailscale"])
+    check("…and the mode is off", d.call("mobile.status")["tailscale"] == {"on": False, "origin": None, "to_remove": False}, d.call("mobile.status")["tailscale"])
     for status, state in (('{"BackendState":"Stopped"}', "stopped"), ('{"BackendState":"NeedsLogin"}', "needs_login"), ('{"BackendState":"Running","CertDomains":null}', "https_off"), ("not json", "unreadable")):
         fake(status=status)
         told = d.call("mobile.tailscale_status")
@@ -1026,7 +1026,7 @@ async def security(d):
     d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
     time.sleep(0.5)
     status = d.call("mobile.status")["tailscale"]
-    check("turning it on again publishes nothing", status == {"on": False, "origin": None} and len(ts_changes()) == count, status)
+    check("turning it on again publishes nothing", status == {"on": False, "origin": None, "to_remove": False} and len(ts_changes()) == count, status)
 
 
 # Tailscale for this run: a script, never the real one.
