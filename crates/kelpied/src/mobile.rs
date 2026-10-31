@@ -5912,7 +5912,7 @@ mod tests {
         assert_eq!(publish(&d).await, port);
         assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry(port));
         // A MagicDNS rename: serve keeps its entry under the old name, so the new one gets no answer. Phones are not told an address that does not
-        // answer; restoring publishes under the new name, and then they hear of it.
+        // answer; restoring publishes under the new name, beside the old entry the CLI cannot take off, and then they hear of it.
         let seq = d.mobile.addrs.borrow().seq;
         let old = fake.serve.lock().clone();
         *fake.status.lock() = tailscale::fake::READY.replace("desk.", "newname.");
@@ -5923,8 +5923,21 @@ mod tests {
         d.presence.inject(|_| Ok(()));
         let told = ask_app(&d, &tx, &mut replies, 103, "mobile.set_tailscale", json!({"on": true})).await;
         assert_eq!((told["result"]["serve"].as_str(), told["result"]["origin"].as_str()), (Some("ours"), Some("newname.tail1234.ts.net:8443")), "{told}");
-        assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry_named("newname.tail1234.ts.net", port));
+        assert!(fake.serve.lock().contains("newname.tail1234.ts.net:8443") && *fake.serve.lock() != old, "{}", fake.serve.lock());
+        assert!(fake.serve.lock().contains("desk.tail1234.ts.net:8443"), "the old entry stays: `off` acts on the name of now");
         assert!(d.mobile.addrs.borrow().seq > seq, "phones hear of it");
+        // Turning off then takes the new one and cannot take the old. Kelpie still knows that entry for its own, says so, and does not call it someone else's.
+        let off = ask_app(&d, &tx, &mut replies, 103, "mobile.set_tailscale", json!({"on": false})).await;
+        assert_eq!(off["error"]["message"].as_str(), Some(tailscale::NOT_REMOVED), "{off}");
+        assert_eq!(d.mobile.config.lock().tailscale_port, Some(port), "not forgotten while an entry of ours is there");
+        assert_eq!(d.mobile.status(true)["tailscale"]["to_remove"], true);
+        let told = tailscale::status(d.clone()).await.unwrap();
+        assert_eq!(told["serve"], "left_behind", "{told}");
+        assert!(fake.serve.lock().contains("desk.tail1234.ts.net:8443"));
+        // It may be turned on again, with the entry it knows beside the new one.
+        d.presence.inject(|_| Ok(()));
+        let again = ask_app(&d, &tx, &mut replies, 103, "mobile.set_tailscale", json!({"on": true})).await;
+        assert_eq!(again["result"]["serve"], "ours", "{again}");
     }
 
     #[tokio::test]
@@ -6321,6 +6334,30 @@ mod tests {
         tailscale::resume(d.clone()).await;
         assert_eq!(fake.changes(), changes);
         assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry(port));
+    }
+
+    /// After a rename with the old port held by someone, Restore would put a second entry on a second port, which nothing could tell for ours: it refuses, and leaves
+    /// things as they were rather than an entry nobody owns.
+    #[tokio::test]
+    async fn restoring_after_a_rename_never_makes_two_entries_on_two_ports() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let port = publish(&d).await;
+        d.mobile.stop_loopback();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let held = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        *fake.status.lock() = tailscale::fake::READY.replace("desk.", "newname.");
+        let before = fake.serve.lock().clone();
+        let (tx, mut replies) = app_client(&d, 104);
+        d.presence.inject(|_| Ok(()));
+        let told = ask_app(&d, &tx, &mut replies, 104, "mobile.set_tailscale", json!({"on": true})).await;
+        assert_eq!(told["error"]["message"].as_str(), Some(tailscale::NOT_PUBLISHED), "{told}");
+        assert_eq!(*fake.serve.lock(), before, "nothing was added");
+        assert_eq!(d.mobile.config.lock().tailscale_port, Some(port), "the entry that is there stays the one it knows");
+        assert_eq!(tailscale::status(d.clone()).await.unwrap()["serve"], "renamed");
+        drop(held);
     }
 
     /// The mode's listener does not depend on the address of this network: a laptop away from home is what the mode is for.

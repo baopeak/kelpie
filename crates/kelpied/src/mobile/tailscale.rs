@@ -45,7 +45,7 @@ pub const PORT_TAKEN: &str = "Port 8443 of Tailscale Serve is used by something 
 pub const NOT_READABLE: &str = "Kelpie could not read what Tailscale Serve is doing, so it changed nothing. Update Tailscale and try again.";
 pub const DENIED: &str = "Tailscale did not let Kelpie publish this computer. On Linux, allow your user once with `sudo tailscale set --operator=$USER`; then try again.";
 pub const NOT_PUBLISHED: &str = "Tailscale did not publish this computer. Check that HTTPS certificates and Serve are allowed for your tailnet, then try again.";
-pub const NOT_REMOVED: &str = "Kelpie stopped answering through Tailscale, but its entry in Tailscale Serve could not be removed yet. Start Tailscale: Kelpie removes it when you press Check again in Settings → Mobile, and when Kelpie next starts.";
+pub const NOT_REMOVED: &str = "Kelpie stopped answering through Tailscale, but its entry in Tailscale Serve is still there. If Tailscale is stopped, start it: Kelpie tries again when you press Check again in Settings → Mobile, and when Kelpie next starts.";
 const LISTEN_FAILED: &str = "Kelpie could not open the local port Tailscale Serve forwards to. Try again in a moment.";
 pub const NOT_ON: &str = "turn mobile access on first";
 pub const ENDED_MEANWHILE: &str = "Phone access was turned off or changed while this was being done, so Tailscale publishes nothing. Turn this on again if you still want it.";
@@ -328,12 +328,19 @@ fn unpublish(cli: &dyn Cli) -> Result<(), &'static str> {
     }
 }
 
-/// Removes our entry if it is there; anything else on the port stays as it is. Err when ours could not be removed or cannot be told apart.
+/// Removes our entry if it is there; anything else on the port stays as it is. Err when ours could not be removed or cannot be told apart. The command saying yes
+/// is not enough: it acts on this machine's name now, and an entry under its old name can stay. Until the port is free again the entry is still ours to account for.
 pub fn remove_ours(cli: &dyn Cli, known: Option<u16>) -> Result<(), &'static str> {
     match read_entry(cli, known, None) {
         Entry::Free | Entry::Taken => Ok(()),
         Entry::Unreadable => Err(NOT_REMOVED),
-        Entry::Ours(_) | Entry::Renamed(_) => unpublish(cli),
+        Entry::Ours(_) | Entry::Renamed(_) => {
+            unpublish(cli)?;
+            match read_entry(cli, known, None) {
+                Entry::Free => Ok(()),
+                _ => Err(NOT_REMOVED),
+            }
+        }
     }
 }
 
@@ -543,8 +550,14 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
         match read_entry(cli, known, Some(&fqdn)) {
             Entry::Ours(at) if at == port => return Ok(fqdn),
             Entry::Ours(_) => unpublish(cli).map_err(|_| NOT_PUBLISHED)?,
-            // Under the old name the CLI may not find it to take it off. It leads nowhere, and publishing under the new name does not wait for it.
-            Entry::Renamed(_) => drop(unpublish(cli)),
+            // Under the old name the CLI may not find it to take it off. It leads nowhere, and publishing under the new name does not wait for it, but it
+            // must be on this port: two entries on two ports could not be told for ours, by this or by the next look.
+            Entry::Renamed(at) => {
+                let _ = unpublish(cli);
+                if at != port && !matches!(read_entry(cli, known, Some(&fqdn)), Entry::Free) {
+                    return Err(NOT_PUBLISHED);
+                }
+            }
             Entry::Free => {}
             Entry::Taken => return Err(PORT_TAKEN),
             Entry::Unreadable => return Err(NOT_READABLE),
@@ -717,6 +730,27 @@ pub mod fake {
             format!(r#"{{"TCP":{{"8443":{{"HTTPS":true}}}},"Web":{{"{name}:8443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:{port}"}}}}}}}}}}"#)
         }
 
+        /// Adds an entry under this machine's name now, beside what is there, as serve keeps its entries by name.
+        fn add_entry(&self, port: u16) {
+            let mut doc: serde_json::Value = serde_json::from_str(&self.serve.lock()).unwrap_or_else(|_| serde_json::json!({}));
+            doc["TCP"]["8443"]["HTTPS"] = true.into();
+            doc["Web"][format!("{}:8443", self.name_now())] = serde_json::json!({"Handlers": {"/": {"Proxy": format!("http://127.0.0.1:{port}")}}});
+            *self.serve.lock() = doc.to_string();
+        }
+
+        /// Takes off the entry under this machine's name now, and no other. False when there is none.
+        fn take_off_entry(&self) -> bool {
+            let mut doc: serde_json::Value = serde_json::from_str(&self.serve.lock()).unwrap_or_else(|_| serde_json::json!({}));
+            let key = format!("{}:8443", self.name_now());
+            let Some(web) = doc.get_mut("Web").and_then(serde_json::Value::as_object_mut) else { return false };
+            if web.remove(&key).is_none() {
+                return false;
+            }
+            let last = web.is_empty();
+            *self.serve.lock() = if last { "{}".to_string() } else { doc.to_string() };
+            true
+        }
+
         fn name_now(&self) -> String {
             serde_json::from_str::<serde_json::Value>(&self.status.lock()).ok().and_then(|v| v["CertDomains"][0].as_str().map(str::to_string)).unwrap_or_default()
         }
@@ -741,10 +775,9 @@ pub mod fake {
                     answer(self.serve.lock().clone())
                 }
                 "serve --https=8443 off" => {
-                    if *self.off_fails.lock() || !self.serve.lock().contains(&format!("{}:8443", self.name_now())) {
+                    if *self.off_fails.lock() || !self.take_off_entry() {
                         return Ran::Done { ok: false, stdout: String::new(), stderr: "no".into() };
                     }
-                    *self.serve.lock() = "{}".into();
                     answer(String::new())
                 }
                 _ => {
@@ -756,7 +789,7 @@ pub mod fake {
                         return Ran::Done { ok: false, stdout: String::new(), stderr: said };
                     }
                     let port = call.rsplit(':').next().and_then(|p| p.parse().ok()).expect("a serve command with a port");
-                    *self.serve.lock() = Fake::entry_named(&self.name_now(), port);
+                    self.add_entry(port);
                     if *self.publish_times_out.lock() {
                         return Ran::TimedOut;
                     }
@@ -849,6 +882,13 @@ mod tests {
         assert!(remove_ours(&cli, Some(5000)).is_ok());
         assert_eq!(cli.changes(), ["serve --https=8443 off"]);
         assert_eq!(*cli.serve.lock(), "{}");
+
+        // The command says yes and an entry of ours is still there, under a name it no longer acts on: that is not gone.
+        let cli = fake::Fake::ready();
+        *cli.serve.lock() = r#"{"TCP":{"8443":{"HTTPS":true}},"Web":{"desk.tail1234.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:5000"}}},"old.tail1234.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:5000"}}}}}"#.into();
+        assert_eq!(remove_ours(&cli, Some(5000)), Err(NOT_REMOVED));
+        assert_eq!(cli.changes(), ["serve --https=8443 off"]);
+        assert!(cli.serve.lock().contains("old.tail1234.ts.net:8443") && !cli.serve.lock().contains("desk.tail1234.ts.net:8443"));
 
         let cli = fake::Fake::ready();
         *cli.serve.lock() = fake::Fake::entry(3000);

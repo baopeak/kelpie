@@ -87,7 +87,7 @@ function tailscaleInstruction(s: TailscaleStatus): string {
         case "missing":
           return t("The entry in Tailscale Serve was removed, so phones cannot reach this computer through it. Restore it to go on.");
         case "left_behind":
-          return t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere, and Tailscale would not remove it. Try Remove.");
+          return t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere, and Tailscale would not remove it. Try Remove. If it stays, it may be under a name this computer had before: remove it with Tailscale's own tools.");
         case "port_busy":
           return t("Another program took the local port Tailscale Serve forwards to, and Kelpie could not remove its entry, so a phone that opens this address may reach that program. Do not open Kelpie on your phones until this is gone: stop that program, or press Restore to use another port.");
         case "not_listening":
