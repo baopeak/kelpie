@@ -2,7 +2,7 @@
 // one-time QR code and end-to-end encryption (kelpie-link); the person approves it here by typing the six digits the phone
 // shows, and the daemon then asks the OS to verify them (Windows Hello or the password). Raising what a phone may do, resetting
 // phone access and keeping unused phones longer ask for that verification too (`mobileSecure`); what the prompt says is the daemon's.
-import { For, Show, createResource, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
 import { PHONE_API } from "../../lib/attention";
@@ -127,6 +127,13 @@ export function MobileSettings() {
   // Only while phone access is on and this page is open; looked at again when what the daemon holds changes, or when asked.
   const tailscaleKey = () => (store.connected() && store.daemonApi() >= PHONE_API && (status()?.enabled || status()?.tailscale?.to_remove) ? `${status()!.tailscale?.on}|${status()!.tailscale?.origin}|${status()!.tailscale?.to_remove}` : null);
   const [tailscale, { refetch: checkTailscale }] = createResource(tailscaleKey, () => daemon<TailscaleStatus>("mobile.tailscale_status").catch(() => null));
+  // The two steps are about the origin: with it gone they end, and do not come back unasked when it returns.
+  createEffect(() => {
+    if (guideStep() && !tailscale.loading && !tailscale()?.origin) {
+      setGuideStep(null);
+      setQr(null);
+    }
+  });
   onMount(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     const un = onEvent<{ event: string }>("daemon-event", (m) => {
@@ -162,12 +169,20 @@ export function MobileSettings() {
     await run(async () => {
       // The plain pairing, whatever Tailscale is doing: its own address, and its own pairing.
       const r = await daemon<{ url: string; qr: string; expires_in: number; tls: boolean }>("mobile.pair_start", { plain: true });
+      setGuideStep(null);
       setQr({ ...r, until: Date.now() + r.expires_in * 1000 });
     });
   };
   const pairOverTailscale = () =>
     run(async () => {
       const r = await daemon<{ url: string; qr: string; expires_in: number; tls: boolean; tailscale: boolean }>("mobile.pair_start", {});
+      // The origin went while this was asked for: a code for this network's address is one the installed app refuses.
+      if (!r.tailscale) {
+        setQr(null);
+        setGuideStep(null);
+        await checkTailscale();
+        throw new Error(t("Tailscale is not publishing this computer right now, so no code was shown. See what Settings says, then try again."));
+      }
       setQr({ ...r, until: Date.now() + r.expires_in * 1000 });
       setGuideStep(2);
     });
