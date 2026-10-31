@@ -4,9 +4,11 @@ import { createClaudeAdapter } from "../../src/chat/claude-adapter";
 import { Composer, looksLikePasswordPrompt, SendLatch, unsentRest } from "../../src/lib/composer-core";
 import { throttled } from "./cache";
 import { ChatFeed } from "./chat-feed";
-import { answerNotice, NOTICE_SHOWN_MS, NoticeBoard, noticeFor } from "./notice";
+import { answerNotice, keyResultText, lastingText, NOTICE_SHOWN_MS, NoticeBoard, noticeFor, refusalText } from "./notice";
 import { forgetHistory, history } from "./history";
 import { promptKey } from "./screen-sync";
+
+vi.mock("./i18n", () => ({ t: (s: string) => s }));
 
 const INIT = JSON.stringify({ type: "system", subtype: "init", session_id: "s", model: "m", permissionMode: "default" });
 const line = (text: string) => JSON.stringify({ type: "user", message: { role: "user", content: text } });
@@ -85,6 +87,22 @@ describe("a card for the next prompt starts afresh", () => {
     expect(promptKey(menu, 100)).not.toBe(promptKey(menu, 250));
     expect(promptKey(menu, 100)).not.toBe(promptKey({ ...menu, question: "Another?" }, 100));
     expect(promptKey(menu, null)).not.toBe(promptKey({ ...menu, keys: ["y", "n"] }, null));
+  });
+});
+
+describe("what a refused key or text says", () => {
+  it("a choice that lasts is told in the phone's own line, on every route", () => {
+    expect(refusalText({ code: "one_shot", message: "in English" })).toBe(lastingText());
+    expect(refusalText({ code: "other", message: "as it came" })).toBe("as it came");
+    expect(refusalText({ message: "as it came" })).toBe("as it came");
+  });
+
+  it("a key says what happened to it: not sent only when it was not", () => {
+    expect(keyResultText({ ok: true })).toBeNull();
+    expect(keyResultText({ ok: false, reason: "offline" })).toBe("Offline: the key was not sent.");
+    expect(keyResultText({ ok: false, reason: "unknown" })).toBe("Not sure the key arrived. Check the screen.");
+    expect(keyResultText({ ok: false, reason: "error", message: "refused" })).toBe("refused");
+    expect(keyResultText({ ok: false, reason: "error" })).toBeNull();
   });
 });
 

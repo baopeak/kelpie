@@ -147,9 +147,6 @@ struct Held {
 struct Slot {
     /// The connection following it; another taking over ends the first's task.
     owner: u64,
-    /// The last frame number given out. Numbers are never reused, so a phone that holds a frame
-    /// from before a reconnect cannot mistake it for another.
-    counter: u64,
     /// The last frame the phone confirmed holding; frames follow it. None: it holds nothing known.
     acked: Option<Held>,
     /// Frames sent after it and not confirmed, oldest first.
@@ -203,6 +200,9 @@ struct Feed {
 const TYPING_BOOST_MS: u64 = 3000;
 
 pub struct Views {
+    /// The last frame number given out, for all of this daemon's phones and sessions. A slot comes and goes (a hidden page lets go of
+    /// its session), and a number is never reused, so a phone that holds a frame from before cannot mistake it for another.
+    last_rev: AtomicU64,
     slots: Mutex<HashMap<(String, String), Slot>>,
     feeds: Mutex<HashMap<String, Arc<Feed>>>,
     load: Arc<Load>,
@@ -216,7 +216,7 @@ impl Default for Views {
 
 impl Views {
     pub fn new(load: Arc<Load>) -> Views {
-        Views { slots: Mutex::new(HashMap::new()), feeds: Mutex::new(HashMap::new()), load }
+        Views { last_rev: AtomicU64::new(0), slots: Mutex::new(HashMap::new()), feeds: Mutex::new(HashMap::new()), load }
     }
 
     /// A connection starts following `session` for `device`. `have` is the frame the phone says it
@@ -233,7 +233,7 @@ impl Views {
     pub fn open_as(&self, device: &str, session: &str, conn: u64, have: Option<u64>, legacy: bool) -> Arc<Notify> {
         let mut slots = self.slots.lock();
         let now = Instant::now();
-        let slot = slots.entry((device.to_string(), session.to_string())).or_insert_with(|| Slot { owner: conn, counter: 0, acked: None, flying: VecDeque::new(), left: None, used: now, wake: Arc::new(Notify::new()), legacy });
+        let slot = slots.entry((device.to_string(), session.to_string())).or_insert_with(|| Slot { owner: conn, acked: None, flying: VecDeque::new(), left: None, used: now, wake: Arc::new(Notify::new()), legacy });
         if have.is_none_or(|h| slot.acked.as_ref().is_none_or(|a| a.rev != h)) {
             slot.acked = None;
         }
@@ -412,8 +412,7 @@ impl Views {
         for &i in &sent {
             rows[i] = lines[i].clone();
         }
-        slot.counter += 1;
-        let rev = slot.counter;
+        let rev = self.last_rev.fetch_add(1, Ordering::Relaxed) + 1;
         let frame = Frame {
             kind: "screen", id: session, rev, base, shift,
             rows: sent.iter().map(|&i| (i, &*lines[i])).collect(),
@@ -617,6 +616,32 @@ mod tests {
         let screen: Vec<&str> = vec![long.as_str(); MAX_HEIGHT];
         let frame = frame(&views, "d", "s", 1, &screen).unwrap();
         assert!(frame.to_string().len() < 64 * 1024, "{}", frame.to_string().len());
+    }
+
+    /// Two windows of one phone. One holds a confirmed frame; the other hides and shows, which lets go of the session and takes it up
+    /// again. When the first comes back naming its frame it must not be taken for the second's: that would build on a screen it
+    /// does not hold, and those rows would stay wrong until they changed.
+    #[test]
+    fn a_frame_number_outlives_its_slot_so_another_window_is_not_mistaken_for_it() {
+        let views = Views::default();
+        views.open("phone", "s1", 1, None);
+        let a = frame(&views, "phone", "s1", 1, &["what window A saw"]).unwrap()["rev"].as_u64().unwrap();
+        views.ack("phone", "s1", 1, a);
+        // Window B takes over, is hidden, and shows again: the slot goes and comes.
+        views.open("phone", "s1", 2, None);
+        views.close("phone", "s1", 2);
+        views.open("phone", "s1", 2, None);
+        let b = frame(&views, "phone", "s1", 2, &["what window B saw"]).unwrap()["rev"].as_u64().unwrap();
+        assert!(b > a, "{b} after {a}");
+        views.ack("phone", "s1", 2, b);
+        // Window A comes back with what it holds: not what was confirmed last, so it is sent the whole screen.
+        views.open("phone", "s1", 3, Some(a));
+        let back = frame(&views, "phone", "s1", 3, &["what window B saw"]).unwrap();
+        assert_eq!(back["base"], Value::Null, "{back}");
+        assert_eq!(back["rows"], json!([[0, "what window B saw"]]));
+        // Another phone or session never shares a number either.
+        views.open("tablet", "s2", 4, None);
+        assert!(frame(&views, "tablet", "s2", 4, &["x"]).unwrap()["rev"].as_u64().unwrap() > back["rev"].as_u64().unwrap());
     }
 
     #[test]

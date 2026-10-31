@@ -3,7 +3,7 @@
 // connected; one that may not have arrived is retried once by the link, and after that the person decides.
 import { createSignal, For, onCleanup, Show } from "solid-js";
 import { answeredBeforeText } from "../../src/chat/chat-model";
-import { noticeFor } from "./notice";
+import { lastingText, noticeFor, refusalText } from "./notice";
 import { answerPrompt, connected, showNotice } from "./phone-state";
 import type { Prompt } from "./screen-sync";
 import { t } from "./i18n";
@@ -32,7 +32,7 @@ export function PromptCard(props: { id: string; prompt: Prompt; waitingSince: nu
       return setPhase("stale");
     }
     if (o.t === "error") {
-      setText(o.message);
+      setText(refusalText(o));
       return setPhase("error");
     }
     if (o.t === "offline") {
@@ -45,7 +45,7 @@ export function PromptCard(props: { id: string; prompt: Prompt; waitingSince: nu
     <div class="prompt" data-prompt>
       <Show when={props.prompt.question}><div class="q">{props.prompt.question}</div></Show>
       <div class="actions">
-        <For each={props.prompt.keys}>
+        <For each={props.prompt.keys.filter((k) => !props.prompt.lasting?.includes(k))}>
           {(k) => (
             <button class="btn primary key-answer" disabled={!props.canType || !connected() || phase() === "sending" || phase() === "sent"} onClick={() => pick(k)}>
               {k}
@@ -53,6 +53,7 @@ export function PromptCard(props: { id: string; prompt: Prompt; waitingSince: nu
           )}
         </For>
       </div>
+      <Show when={props.prompt.lasting?.length}><div class="muted" data-lasting-hidden>{lastingText()}</div></Show>
       <Show when={phase() === "sending"}><div class="muted" role="status">{t("Sending…")}</div></Show>
       <Show when={phase() === "sent"}><div class="muted" role="status">{t("Sent")}</div></Show>
       <Show when={phase() === "stale"}><div class="muted stale" role="status">{text()}</div></Show>

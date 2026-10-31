@@ -130,6 +130,7 @@ fn copy_runtime(installed: &Path, root: &Path, version: &str) -> std::io::Result
     for slot in SLOTS {
         let dir = root.join(slot);
         if std::fs::read_to_string(dir.join(BUILD_FILE)).is_ok_and(|b| b == build) && dir.join(exe_name).is_file() {
+            name_source(&dir, src);
             return Ok(dir.join(exe_name));
         }
     }
@@ -165,8 +166,21 @@ fn fill_slot(dir: &Path, src: &Path, exe_name: &std::ffi::OsStr, build: &str) ->
     if !copied {
         return Err(std::io::Error::other("daemon binary missing"));
     }
+    name_source(dir, src);
     std::fs::write(dir.join(BUILD_FILE), build)?;
     Ok(exe)
+}
+
+/// Tells the daemon in a slot where the app is installed: only that app's executable may ask for phone-access decisions
+/// (`peer_identity.rs` in kelpied, `SLOT_SOURCE`).
+fn name_source(dir: &Path, src: &Path) {
+    let file = dir.join("source.txt");
+    let text = src.to_string_lossy();
+    if std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_ref()) {
+        if let Err(e) = std::fs::write(&file, text.as_bytes()) {
+            tracing::warn!("daemon slot: cannot name the app's folder ({e}); phone pairing will not be available");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -192,6 +206,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("a").join("conpty.dll")).unwrap(), "dll");
         assert!(root.join("a").join("OpenConsole.exe").is_file());
         assert!(!root.join("a").join("Kelpie.exe").exists(), "only the daemon's files");
+        assert_eq!(std::fs::read_to_string(root.join("a").join("source.txt")).unwrap(), base.join("install").to_string_lossy(), "the app's folder, for the daemon's trust in it");
         // Same build: the same copy.
         assert_eq!(copy_runtime(&base.join("install").join("kelpied.exe"), &root, "0.1.5").unwrap(), exe);
         // A new build while slot a is in use (held open here, as a running program is): slot b.

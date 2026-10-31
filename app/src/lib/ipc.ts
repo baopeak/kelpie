@@ -1,10 +1,18 @@
 // Typed wrappers around the Tauri commands in app/src-tauri/src.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { locale } from "./i18n";
 import type { AttachReply, BranchInfo, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, SessionInfo, SessionUsage, UsageReport, UsageTotals } from "./types";
 
 export const daemon = <T = unknown>(method: string, params: object = {}) =>
   invoke<T>("daemon_call", { method, params });
+
+/** A phone-access decision (approve a phone, raise what one may do, reset phone access, keep unused phones longer). The daemon
+ *  accepts these only from the verified app and asks the operating system to verify the person (Windows Hello or the OS
+ *  password) before one that raises access takes effect. What that prompt says is the daemon's own text; `lang` only picks its
+ *  language. `daemon()` refuses the first three. */
+export const mobileSecure = <T = unknown>(method: "mobile.approve" | "mobile.set_permission" | "mobile.reset" | "mobile.set_options", params: object) =>
+  invoke<T>("mobile_secure_call", { method, params: { ...params, lang: locale() } });
 
 export const listSessions = () => daemon<SessionInfo[]>("session.list");
 

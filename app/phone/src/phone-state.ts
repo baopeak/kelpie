@@ -9,26 +9,32 @@ import { keyAnswer } from "../../src/lib/attention";
 import { adapterFor } from "./chat-adapters";
 import { ChatFeed } from "./chat-feed";
 import { ChatSender, type PendingSend, type SendResult as ChatSendResult } from "./chat-send";
-import { NOTICE_SHOWN_MS, NoticeBoard, type Notice } from "./notice";
+import { NOTICE_SHOWN_MS, NoticeBoard, refusalText, type Notice } from "./notice";
 import { clearCache, loadList, loadScreen, saveList, saveScreen } from "./cache";
 import { canAct, dataAge, deriveConn, type ConnState } from "./conn-state";
-import { browserEnv, Link, type ChatMsg, type ChatQueueMsg, type ChatResolved, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
+import { browserEnv, Link, linkCodec, type ChatMsg, type ChatQueueMsg, type ChatResolved, type DeviceInfo, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
+import { pair, type PairSocket } from "./pair";
+import { currentPairing, forgetPairing, loadPairing, savePairing, seemsPaired } from "./pairing-store";
 import { emptyView, ScreenSync, type Prompt, type ScreenFrame, type ScreenView } from "./screen-sync";
 import { forgetHistory } from "./history";
 import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
 import { labelOf } from "./inbox-order";
-import { loadToken, store, TOKEN_KEY, wipeTypedText } from "./storage";
+import { hadOldToken, store, wipeTypedText } from "./storage";
 import { t } from "./i18n";
 
 // ---------- signals the views read ----------
 
-const [paired, setPaired] = createSignal(!!loadToken());
+const [paired, setPaired] = createSignal(seemsPaired());
 export { paired };
 export const [pairing, setPairing] = createSignal<string | null>(null);
 export const [notPairedMessage, setNotPairedMessage] = createSignal<string | null>(null);
 export const [sessions, setSessions] = createSignal<SessionRow[]>([]);
 export const [projects, setProjects] = createSignal<Record<string, string>>({});
-export const [device, setDevice] = createSignal<{ name: string; can_write: boolean } | null>(null);
+export const [device, setDevice] = createSignal<DeviceInfo | null>(null);
+/** While pairing: the six digits to type on the computer, and this phone's key fingerprint to check there. */
+export const [pairShown, setPairShown] = createSignal<{ digits: string; key: string } | null>(null);
+/** Another device was paired, changed or removed on the computer: said for a few seconds. */
+export const [deviceNews, setDeviceNews] = createSignal<string | null>(null);
 export const [openId, setOpenId] = createSignal<string | null>(null);
 export const [screen, setScreen] = createSignal<ScreenView>(emptyView());
 export const [chat, setChat] = createSignal<ChatController | null>(null);
@@ -71,9 +77,24 @@ const senders = new Map<string, ChatSender>();
 let wantSession: string | null = null;
 let listSaved = 0;
 
-const link = new Link(browserEnv(), loadToken, {
+/** The page's origin is plain HTTP and not Tailscale: anyone on the network could have swapped this page, so it may only read. */
+export function plainHttpOrigin(): boolean {
+  if (location.protocol !== "http:") return false;
+  const host = location.hostname;
+  const v4 = host.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  const tailscale = (v4 && +v4[1] === 100 && +v4[2] >= 64 && +v4[2] < 128) || host.endsWith(".ts.net") || /^\[?fd7a:115c:a1e0:/i.test(host);
+  const local = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+  return !tailscale && !local;
+}
+
+const link = new Link(browserEnv(), () => {
+  const p = currentPairing();
+  return p ? linkCodec(p) : null;
+}, {
   changed: () => recompute(),
   hello(h: Hello, epochChanged: boolean) {
+    // What the computer made of this page's first message: visible on the page, since its traffic is sealed (scripts/e2e/mobile.py).
+    document.documentElement.dataset.servedLegacy = String(h.hb?.legacy ?? false);
     batch(() => {
       setDevice(h.device);
       setSessions(h.sessions);
@@ -128,8 +149,18 @@ const link = new Link(browserEnv(), loadToken, {
     senders.get(m.id)?.snapshot(view);
   },
   chatResync() {},
+  addrs(m) {
+    // Kept for a client that can dial another address (a page's origin cannot change; the native app's can).
+    const p = currentPairing();
+    if (p && m.seq > p.addrsSeq) void savePairing({ ...p, endpoints: [...m.list.map((a) => ({ t: "lan", a })), ...p.endpoints.filter((e) => e.t !== "lan")], addrsSeq: m.seq });
+  },
+  deviceChanged(m) {
+    const name = m.name;
+    setDeviceNews(m.change === "added" ? t("A new device was paired with this computer: {name}.", { name }) : m.change === "removed" ? t("A device was removed from this computer: {name}.", { name }) : t("What {name} may do was changed on this computer.", { name }));
+    setTimeout(() => setDeviceNews(null), 8000);
+  },
   unpaired() {
-    store.del(TOKEN_KEY);
+    void forgetPairing();
     void clearCache();
     wipeTypedText();
     forgetHistory();
@@ -350,7 +381,7 @@ export async function sendText(id: string, text: string, force = false): Promise
   if (!connected()) return { ok: false, reason: "offline" };
   const o = await link.input(id, text, force);
   if (o.t === "ack") return { ok: true, entered: o.entered !== false };
-  if (o.t === "error") return { ok: false, reason: o.code === "prompt" ? "prompt" : "error", message: o.message };
+  if (o.t === "error") return { ok: false, reason: o.code === "prompt" ? "prompt" : "error", message: refusalText(o) };
   return { ok: false, reason: o.t };
 }
 
@@ -358,7 +389,7 @@ export async function sendKey(id: string, key: string): Promise<SendResult> {
   if (!connected()) return { ok: false, reason: "offline" };
   const o = await link.key(id, key);
   if (o.t === "ack") return { ok: true, entered: true };
-  if (o.t === "error") return { ok: false, reason: "error", message: o.message };
+  if (o.t === "error") return { ok: false, reason: "error", message: refusalText(o) };
   return { ok: false, reason: o.t };
 }
 
@@ -407,26 +438,25 @@ export function resumeChat() {
 
 // ---------- pairing and start ----------
 
+/** Pairs this phone with the computer the QR code's link came from. Null when paired; otherwise what to tell the person. */
 export async function pairDevice(code: string, name: string): Promise<string | null> {
-  try {
-    const r = await fetch("/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, name: name.trim() || t("Phone") }) });
-    const body = (await r.json().catch(() => ({}))) as { token?: string; error?: string };
-    if (!r.ok || !body.token) return body.error || `HTTP ${r.status}`;
-    store.set(TOKEN_KEY, body.token);
-    setNotPairedMessage(null);
-    setPairing(null);
-    setPaired(true);
-    link.start();
-    return null;
-  } catch (e) {
-    return String((e as Error)?.message ?? e);
-  }
+  setPairShown(null);
+  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/link`;
+  const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }));
+  setPairShown(null);
+  if (!r.ok) return r.message;
+  const kept = await savePairing(r.pairing);
+  setNotPairedMessage(kept ? null : t("This browser would not keep the pairing: it lasts until this page is closed."));
+  setPairing(null);
+  setPaired(true);
+  link.start();
+  return null;
 }
 
 /** Forgets this device's pairing (the computer still lists it until it is removed there). */
 export function forgetDevice() {
   link.stop();
-  store.del(TOKEN_KEY);
+  void forgetPairing();
   void clearCache();
   wipeTypedText();
   forgetHistory();
@@ -512,9 +542,17 @@ export function startApp() {
     if (id && sessions().some((s) => s.id === id)) openSession(id, false);
     else closeSession();
   });
+  // A phone paired with a token by an earlier version: the computer no longer takes those.
+  if (hadOldToken()) setNotPairedMessage(t("This device was paired before end-to-end encryption. Pair it again from Kelpie → Settings → Mobile."));
   // The list as this browser last saw it, at once, until the connection says anything. (A page opened from a
   // pairing link connects only once that pairing is approved.)
-  if (loadToken() && !code) {
+  void loadPairing().then((p) => {
+    if (code) return;
+    if (!p) {
+      setPaired(false);
+      return;
+    }
+    setPaired(true);
     void loadList().then((c) => {
       if (c && !link.facts.ready && !sessions().length) {
         batch(() => {
@@ -526,6 +564,6 @@ export function startApp() {
       }
     });
     link.start();
-  }
+  });
   recompute();
 }

@@ -386,7 +386,7 @@ export function createAcpAdapter(ctx: AdapterContext): Adapter {
         ctx.upsert({
           kind: "permission", id, title: tc.title ? t("Allow: {title}?", { title: String(tc.title) }) : t("Allow this action?"),
           detail: summarize(tc.rawInput ?? "", 600),
-          options: (m.params?.options ?? []).map((o: any) => ({ id: o.optionId, label: o.name, tone: String(o.kind).startsWith("allow") ? "allow" : "deny" })),
+          options: (m.params?.options ?? []).map((o: any) => ({ id: o.optionId, label: o.name, tone: String(o.kind).startsWith("allow") ? "allow" : "deny", lasting: String(o.kind).endsWith("_always") })),
         });
         return;
       }

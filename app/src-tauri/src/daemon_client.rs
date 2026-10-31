@@ -23,6 +23,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 const FLUSH_DELAY: Duration = Duration::from_millis(4);
+/// How long a phone-access decision may wait for the person at the OS prompt.
+const VERIFICATION_WAIT_S: u64 = 300;
 
 struct View {
     channel: Channel<InvokeResponseBody>,
@@ -230,7 +232,14 @@ impl DaemonClient {
     async fn request_with_id(&self, id: u64, method: &str, params: Value, pending: impl FnOnce(oneshot::Sender<Result<Value, String>>) -> Pending) -> Result<Value> {
         let (tx, rx) = oneshot::channel();
         // A one-shot agent answer may take as long as its own timeout (daemon default 180 s).
-        let wait = if method == "agent.run" { params.get("timeout_s").and_then(Value::as_u64).unwrap_or(180).clamp(5, 900) + 15 } else { 30 };
+        let wait = if method == "agent.run" {
+            params.get("timeout_s").and_then(Value::as_u64).unwrap_or(180).clamp(5, 900) + 15
+        } else if crate::user_presence::SECURE_CALLS.contains(&method) {
+            // The daemon's verification prompt stays up until the person answers it.
+            VERIFICATION_WAIT_S
+        } else {
+            30
+        };
         self.pending.lock().insert(id, pending(tx));
         if let Err(e) = self.send_frame(&Frame::json(&json!({"id": id, "method": method, "params": params}))) {
             self.pending.lock().remove(&id);

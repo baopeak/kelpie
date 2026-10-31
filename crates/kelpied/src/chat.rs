@@ -122,6 +122,8 @@ struct Inner {
 struct Pending {
     id: Value,
     method: String,
+    /// The options of this request that hold for it alone (ACP `allow_once`, `reject_once`): the only ones a phone can pick.
+    once: Vec<String>,
 }
 
 impl Inner {
@@ -256,6 +258,8 @@ impl<V: Clone> Recent<V> {
 pub enum NotAnswered {
     /// The line is not exactly the answer to a request the agent is waiting on.
     NotAnAnswer,
+    /// The answer would make a rule that outlasts the request: a phone cannot.
+    Lasting,
     /// The request was answered, by this one.
     AlreadyAnswered(Resolution),
 }
@@ -322,6 +326,7 @@ struct Ask {
     key: String,
     id: Value,
     method: String,
+    once: Vec<String>,
 }
 
 /// The request a line makes *to the person*: Claude's `control_request` asking leave to use a tool
@@ -336,11 +341,47 @@ fn ask_of(line: &str) -> Option<Ask> {
     if v.get("type").and_then(Value::as_str) == Some("control_request") {
         let subtype = v.pointer("/request/subtype").and_then(Value::as_str)?;
         let id = v.get("request_id").filter(|id| id.is_string() && matches!(subtype, "can_use_tool" | "elicitation"))?;
-        return Some(Ask { key: format!("control:{}", id.as_str()?), id: id.clone(), method: subtype.to_string() });
+        return Some(Ask { key: format!("control:{}", id.as_str()?), id: id.clone(), method: subtype.to_string(), once: Vec::new() });
     }
     let method = v.get("method")?.as_str()?;
     let id = v.get("id")?;
-    asks_the_user(method).then(|| id_key(id).map(|k| Ask { key: format!("rpc:{k}"), id: id.clone(), method: method.to_string() })).flatten()
+    let once = v.pointer("/params/options").and_then(Value::as_array).map(|options| options.iter().filter(|o| matches!(o["kind"].as_str(), Some("allow_once" | "reject_once"))).filter_map(|o| o["optionId"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    asks_the_user(method).then(|| id_key(id).map(|k| Ask { key: format!("rpc:{k}"), id: id.clone(), method: method.to_string(), once })).flatten()
+}
+
+/// Whether an answer holds for this one request and makes no rule that outlasts it. A phone's approvals are one-shot, so this is
+/// a list of what is known to be one-shot for each kind of request (what the app's adapters write), and anything else is the
+/// computer's to decide: a new field or a new decision word of an agent is refused until it is known. `once` are the
+/// request's own one-time options.
+fn answer_is_one_shot(method: &str, once: &[String], answer: &Value) -> bool {
+    // An error reply refuses the request as such and grants nothing.
+    let Some(body) = answer.pointer("/response/response").or_else(|| answer.get("result")) else {
+        return answer.get("error").is_some() || answer.pointer("/response/error").is_some();
+    };
+    let only = |keys: &[&str]| body.as_object().is_some_and(|o| o.keys().all(|k| keys.contains(&k.as_str())));
+    let word = |key: &str, words: &[&str]| body.get(key).and_then(Value::as_str).is_some_and(|w| words.contains(&w));
+    let decided = |words: &[&str]| only(&["decision"]) && word("decision", words);
+    const CODEX: &[&str] = &["accept", "decline", "cancel"];
+    match method {
+        "can_use_tool" => only(&["behavior", "updatedInput", "message"]) && word("behavior", &["allow", "deny"]),
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => decided(CODEX),
+        "execCommandApproval" | "applyPatchApproval" => decided(&["approved", "denied", "abort"]),
+        // Its own answer says how long it holds; only this turn is one-shot.
+        "item/permissions/requestApproval" => decided(CODEX) || (only(&["permissions", "scope"]) && word("scope", &["turn"])),
+        "session/request_permission" => {
+            let outcome = &body["outcome"];
+            let keys = |keys: &[&str]| outcome.as_object().is_some_and(|o| o.keys().all(|k| keys.contains(&k.as_str())));
+            only(&["outcome"])
+                && match outcome["outcome"].as_str() {
+                    Some("cancelled") => keys(&["outcome"]),
+                    Some("selected") => keys(&["outcome", "optionId"]) && outcome["optionId"].as_str().is_some_and(|o| once.iter().any(|x| x == o)),
+                    _ => false,
+                }
+        }
+        m if m.ends_with("requestUserInput") => only(&["answers"]),
+        m if m.contains("elicitation") => only(&["action", "content"]) && word("action", &["accept", "decline", "cancel"]),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -632,8 +673,8 @@ impl ChatSession {
         if title.is_some() {
             g.title = title;
         }
-        if let Some(Ask { key, id, method }) = ask {
-            g.pending.insert(key, Pending { id, method });
+        if let Some(Ask { key, id, method, once }) = ask {
+            g.pending.insert(key, Pending { id, method, once });
         }
         self.append(&mut g, line);
         g.activity.on_output(now);
@@ -1400,8 +1441,11 @@ impl ChatSession {
         if let Some(resolution) = g.answered.get(&key) {
             return Err(NotAnswered::AlreadyAnswered(resolution));
         }
-        if g.pending.get(&key).is_none() {
+        let Some(pending) = g.pending.get(&key) else {
             return Err(NotAnswered::NotAnAnswer);
+        };
+        if !answer_is_one_shot(&pending.method, &pending.once, &clean) {
+            return Err(NotAnswered::Lasting);
         }
         let who = Self::resolve(&mut g, self.handle, &self.spec.lock().id, key, request_id.clone(), by);
         g.activity.last_input = Some(Instant::now());
@@ -1854,12 +1898,78 @@ mod tests {
         }
         assert!(stdin.try_recv().is_err(), "nothing reached the agent");
         // The question to the person next to them is answerable.
-        assert_eq!(answer(&c, &json!(1), &json!({"jsonrpc": "2.0", "id": 1, "result": {}}).to_string()), Ok(()));
+        assert_eq!(answer(&c, &json!(1), &json!({"jsonrpc": "2.0", "id": 1, "result": {"outcome": {"outcome": "cancelled"}}}).to_string()), Ok(()));
         // The desktop's own answers to any request still count for first-wins.
         c.input(format!("{}\n", json!({"jsonrpc": "2.0", "id": 2, "result": {"content": "x"}})).into_bytes());
         assert!(stdin.try_recv().is_ok(), "the phone's answer");
         assert!(stdin.try_recv().is_ok(), "the desktop's");
         assert!(stdin.try_recv().is_err());
+    }
+
+    /// What a phone may send: the shapes the app's adapters write for one time (`app/src/chat/`), and nothing else.
+    #[test]
+    fn only_answers_known_to_hold_for_one_request_pass() {
+        let once = ["yes".to_string(), "no".to_string()];
+        let check = |method: &str, answer: Value| answer_is_one_shot(method, &once, &answer);
+        let claude = |response: Value| json!({"type": "control_response", "response": {"subtype": "success", "request_id": "r", "response": response}});
+        let rpc = |result: Value| json!({"jsonrpc": "2.0", "id": 1, "result": result});
+        // What the adapters write for one time.
+        for good in [
+            ("can_use_tool", claude(json!({"behavior": "allow", "updatedInput": {"command": "ls"}}))),
+            ("can_use_tool", claude(json!({"behavior": "allow", "updatedInput": {"answers": {"q": "a"}}}))),
+            ("can_use_tool", claude(json!({"behavior": "deny", "message": "no"}))),
+            ("can_use_tool", json!({"type": "control_response", "response": {"subtype": "error", "request_id": "r", "error": "no"}})),
+            ("elicitation", claude(json!({"action": "accept", "content": {"colour": "red"}}))),
+            ("item/commandExecution/requestApproval", rpc(json!({"decision": "accept"}))),
+            ("item/commandExecution/requestApproval", rpc(json!({"decision": "decline"}))),
+            ("item/fileChange/requestApproval", rpc(json!({"decision": "cancel"}))),
+            ("item/permissions/requestApproval", rpc(json!({"decision": "accept"}))),
+            ("item/permissions/requestApproval", rpc(json!({"permissions": {"network": true}, "scope": "turn"}))),
+            ("execCommandApproval", rpc(json!({"decision": "approved"}))),
+            ("applyPatchApproval", rpc(json!({"decision": "denied"}))),
+            ("item/tool/requestUserInput", rpc(json!({"answers": {"q": {"answers": ["a"]}}}))),
+            ("session/request_permission", rpc(json!({"outcome": {"outcome": "selected", "optionId": "yes"}}))),
+            ("session/request_permission", rpc(json!({"outcome": {"outcome": "selected", "optionId": "no"}}))),
+            ("session/request_permission", rpc(json!({"outcome": {"outcome": "cancelled"}}))),
+            ("elicitation/create", rpc(json!({"action": "accept", "content": {"a": 1}}))),
+            ("elicitation/create", rpc(json!({"action": "decline"}))),
+            ("mcpServer/elicitation/request", rpc(json!({"action": "cancel"}))),
+            ("session/request_permission", json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "no"}})),
+        ] {
+            assert!(check(good.0, good.1.clone()), "{} {}", good.0, good.1);
+        }
+        // What lasts, what could, and what is not known.
+        for bad in [
+            ("can_use_tool", claude(json!({"behavior": "allow", "updatedInput": {}, "updatedPermissions": [{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}))),
+            ("can_use_tool", claude(json!({"behavior": "allow", "updatedInput": {}, "somethingNew": true}))),
+            ("can_use_tool", claude(json!({"behavior": "always"}))),
+            ("item/commandExecution/requestApproval", rpc(json!({"decision": "acceptForSession"}))),
+            ("item/commandExecution/requestApproval", rpc(json!({"decision": {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["git"]}}}))),
+            ("item/commandExecution/requestApproval", rpc(json!({"decision": "accept", "scope": "session"}))),
+            ("item/fileChange/requestApproval", rpc(json!({"decision": "acceptForSession"}))),
+            ("item/permissions/requestApproval", rpc(json!({"permissions": {"network": true}, "scope": "session"}))),
+            ("item/permissions/requestApproval", rpc(json!({"permissions": {"network": true}}))),
+            ("execCommandApproval", rpc(json!({"decision": "approved_for_session"}))),
+            ("applyPatchApproval", rpc(json!({"decision": "approved_execpolicy_amendment"}))),
+            ("item/tool/requestUserInput", rpc(json!({"answers": {}, "remember": true}))),
+            ("session/request_permission", rpc(json!({"outcome": {"outcome": "selected", "optionId": "yes-all"}}))),
+            ("session/request_permission", rpc(json!({"outcome": {"outcome": "selected", "optionId": "no-all"}}))),
+            ("session/request_permission", rpc(json!({"outcome": {"outcome": "selected", "optionId": "yes", "extra": 1}}))),
+            ("session/request_permission", rpc(json!({"outcome": {"outcome": "selected", "optionId": "yes"}, "_meta": {}}))),
+            ("session/request_permission", rpc(json!({}))),
+            ("mcpServer/elicitation/request", rpc(json!({"action": "accept", "content": {}, "_meta": {"persist": true}}))),
+            ("elicitation/create", rpc(json!({"action": "always"}))),
+            ("item/somethingNew/requestApproval", rpc(json!({"decision": "accept"}))),
+            ("whatever", rpc(json!({"decision": "accept"}))),
+            ("whatever", json!({"jsonrpc": "2.0", "id": 1})),
+        ] {
+            assert!(!check(bad.0, bad.1.clone()), "{} {}", bad.0, bad.1);
+        }
+        // Which of a request's options hold once is its own to say, `reject_always` lasting as much as `allow_always`.
+        let asked = ask_of(&json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"options": [
+            {"optionId": "a", "kind": "allow_once"}, {"optionId": "b", "kind": "allow_always"}, {"optionId": "c", "kind": "reject_once"}, {"optionId": "d", "kind": "reject_always"}, {"optionId": "e", "kind": "new"},
+        ]}}).to_string()).unwrap();
+        assert_eq!(asked.once, ["a", "c"]);
     }
 
     #[test]

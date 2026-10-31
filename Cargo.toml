@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/kelpie-proto", "crates/kelpied", "crates/kelpie-stt", "app/src-tauri"]
+members = ["crates/kelpie-proto", "crates/kelpie-link", "crates/kelpied", "crates/kelpie-stt", "app/src-tauri"]
 # The speech helper downloads and links a large native library: built on request
 # (`cargo build --release -p kelpie-stt`, scripts/build-release.sh), not by every `cargo build`.
-default-members = ["crates/kelpie-proto", "crates/kelpied", "app/src-tauri"]
+default-members = ["crates/kelpie-proto", "crates/kelpie-link", "crates/kelpied", "app/src-tauri"]
 
 [workspace.package]
 version = "0.1.10"

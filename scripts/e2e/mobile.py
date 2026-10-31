@@ -4,13 +4,18 @@
 
 Start tauri-driver with KELPIE_LOAD_FORCE=L0:calm (and the isolated KELPIE_ENDPOINT / KELPIE_DATA_DIR): the
 functional checks here must not depend on how busy the host is. How the page behaves under load is
-mobile_resilience.py's and stress.py's job. The script checks that the pin is in effect.
+mobile_resilience.py's and stress.py's job. The script checks that the pin is in effect. Use debug builds of the app and
+the daemon, side by side, with KELPIE_TEST_USER_PRESENCE=approve in tauri-driver's environment: the daemon the app starts
+inherits it, the one this script starts gets it from here, and it answers the operating system's verification instead of
+a prompt (a release build has no such path). The script refuses to go on against a daemon that does not say it is in effect, so
+nothing here can raise a real prompt.
 
 The server is bound to 127.0.0.1 (no firewall prompt on the test machine). The phone is
 headless Edge with mobile emulation, driven through msedgedriver on port 9515.
 
 Covers: off by default; turning it on (status, URL); security headers and the embedded phone client
-(SolidJS, app/phone); pairing with a QR link, approval on the desktop, the device list; the phone's
+(SolidJS, app/phone); pairing with a QR link, typing the phone's code on the desktop, the device list, nothing readable on the wire, no CSP
+violation; the phone's
 inbox (a session that needs you comes first), a session's screen, typing and quick keys reaching the
 terminal, a prompt answered with one tap, a chat permission answered from the phone (the agent gets
 exactly one answer), a message sent to a chat from the phone (the desktop shows the phone's chip, then the
@@ -20,8 +25,11 @@ noticed on the desktop outside the chat pane), a `#s=` deep link, the page comin
 server went away; a read-only device cannot type; a socket from another origin is refused; unpairing
 disconnects the phone; turning it off stops the server; after the computer restarted, what waited is shown
 as lost with its text in the stopped chat, also after a reload, until discarded; a used or wrong pairing
-code is refused, too many attempts are rate limited (last, so the limiter cannot refuse a pairing above).
+code gets no answer, too many unknown phones are rate limited and the desktop says so, the kill switch and the audit list
+(last, so the limiter cannot refuse a pairing above).
 """
+import asyncio
+import base64
 import http.client
 import json
 import os
@@ -33,6 +41,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(__file__))
+import phone_support as ps  # noqa: E402
 from smoke_support import Run, daemon, default_app, real_data_dir, restart_daemon  # noqa: E402
 
 shots, scratch = sys.argv[1], sys.argv[2]
@@ -51,7 +60,7 @@ def isolated_env():
     if not data or os.path.normcase(os.path.normpath(data)) == real:
         raise SystemExit("mobile.py stops a daemon: set KELPIE_DATA_DIR to an isolated folder in its own environment (not the real Kelpie folder). Refusing.")
     keep = {k: v for k, v in os.environ.items() if k in ("PATH", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOME", "KELPIE_LOAD_FORCE", "KELPIE_E2E")}
-    return {**keep, "KELPIE_ENDPOINT": endpoint, "KELPIE_DATA_DIR": data}
+    return {**keep, "KELPIE_ENDPOINT": endpoint, "KELPIE_DATA_DIR": data, "KELPIE_TEST_USER_PRESENCE": "approve"}
 
 
 def check_daemon(d, env):
@@ -64,6 +73,15 @@ def check_daemon(d, env):
     if not (endpoint_ok and data_ok):
         REFUSED.append(True)
         raise SystemExit(f"the app's daemon is not this run's isolated daemon (endpoint {info.get('endpoint')}, data {info.get('data_dir')}): not stopping it. Start tauri-driver with the same KELPIE_ENDPOINT and KELPIE_DATA_DIR.")
+
+
+def check_no_real_prompt(d):
+    """The daemon says verification is answered by the test seam: approving below cannot raise a real prompt."""
+    seam = daemon(d, "daemon.info").get("test_user_presence")
+    print(f"verification seam: {seam}", flush=True)
+    if seam != "approve":
+        REFUSED.append(True)
+        raise SystemExit(f"the daemon would raise a real verification prompt (test seam: {seam!r}): use a debug build, with KELPIE_TEST_USER_PRESENCE=approve in tauri-driver's environment.")
 
 
 REFUSED = []  # set when the app's daemon is not the isolated one: the run ends with an error, not with "0 failed"
@@ -80,7 +98,8 @@ class Phone:
         self.proc = subprocess.Popen([edgedriver, "--port=9515"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)
         # The performance log carries the page's WebSocket frames (what it sends and what it is sent).
-        caps = {"capabilities": {"alwaysMatch": {"browserName": "MicrosoftEdge", "ms:loggingPrefs": {"performance": "ALL"}, "ms:perfLoggingPrefs": {"enableNetwork": True}, "ms:edgeOptions": {
+        # The browser log has what the page's console has, from the moment it loads: content security policy violations too.
+        caps = {"capabilities": {"alwaysMatch": {"browserName": "MicrosoftEdge", "ms:loggingPrefs": {"performance": "ALL", "browser": "ALL"}, "ms:perfLoggingPrefs": {"enableNetwork": True}, "ms:edgeOptions": {
             "args": ["--headless=new", "--window-size=412,900", "--no-first-run", f"--user-data-dir={os.path.join(scratch, 'phone-profile')}"],
             "mobileEmulation": {"deviceMetrics": {"width": 412, "height": 900, "pixelRatio": 2.0}, "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"},
         }}}}
@@ -100,16 +119,23 @@ class Phone:
         self.req("POST", f"/session/{self.sid}/url", {"url": url})
 
     def socket_frames(self, method):
-        """The page's WebSocket frames of `method` (`Network.webSocketFrameSent` or `...Received`) read so far, as JSON."""
+        """The page's WebSocket frames of `method` (`Network.webSocketFrameSent` or `...Received`) read so far, as
+        (opcode, bytes): what anyone on the network could see."""
         for entry in self.req("POST", f"/session/{self.sid}/log", {"type": "performance"}):
             message = json.loads(entry["message"])["message"]
             kind = message.get("method", "")
             if kind.startswith("Network.webSocketFrame"):  # every frame read is kept, whichever method is asked for
-                try:
-                    self.frames.setdefault(kind, []).append(json.loads(message["params"]["response"]["payloadData"]))
-                except (KeyError, ValueError):
-                    pass  # binary or not JSON: not a control message
+                response = message["params"].get("response") or {}
+                opcode, payload = response.get("opcode"), response.get("payloadData", "")
+                self.frames.setdefault(kind, []).append((opcode, base64.b64decode(payload) if opcode == 2 else payload.encode()))
         return self.frames.get(method, [])
+
+    def csp_violations(self):
+        """Every content security policy violation in the browser's log since this was last asked, but for those another page
+        is named for: the log also has the browser's own new tab page, which it opens before the page is navigated to. A
+        violation need not name the page (`security 2 Loading the script ...`), so only another page's name leaves one out."""
+        lines = [e.get("message", "") for e in self.req("POST", f"/session/{self.sid}/log", {"type": "browser"})]
+        return [line for line in lines if "Content Security Policy" in line and (line.startswith(f"http://127.0.0.1:{PORT}/") or not line.startswith(("http://", "https://")))]
 
     def js(self, script, *args):
         return self.req("POST", f"/session/{self.sid}/execute/sync", {"script": script, "args": list(args)})
@@ -124,7 +150,6 @@ class Phone:
         return None
 
     def shot(self, path):
-        import base64
         open(path, "wb").write(base64.b64decode(self.req("GET", f"/session/{self.sid}/screenshot")))
 
     def quit(self):
@@ -143,13 +168,19 @@ def http_get(url, headers=None):
     return r.status, dict(r.getheaders()), body
 
 
-def post_pair(base, code):
-    r = urllib.request.Request(base + "pair", data=json.dumps({"code": code, "name": "probe"}).encode(), method="POST", headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(r, timeout=10) as resp:
-            return resp.status
-    except urllib.error.HTTPError as e:
-        return e.code
+def pairing_answered(base, link):
+    """Whether the daemon answers a pairing handshake made from `link`."""
+    return asyncio.run(ps.PairAttempt(base, link, "probe").start()).session is not None
+
+
+def stranger_refusal(base, dpk):
+    """The close code a phone gets that the daemon does not know."""
+    async def attempt():
+        stranger = ps.Phone(base, ps.Device(*ps.ln.keypair(), dpk, "stranger"))
+        await stranger.open()
+        await stranger.close()
+        return stranger.closed
+    return asyncio.run(attempt())
 
 
 import urllib.parse  # noqa: E402
@@ -173,6 +204,11 @@ LIVE = "return document.querySelector('.conn')?.dataset.state === 'live'"
 STATE = "return document.querySelector('.conn')?.dataset.state"
 
 
+def type_code(digits):
+    """Types the phone's six digits into the approval dialog on the desktop."""
+    d.js("const i = document.querySelector('.mobile-approve-code'); i.value = arguments[0]; i.dispatchEvent(new Event('input', {bubbles: true}));", digits)
+
+
 def js_await(expr, *args):
     return d.js_async(f"const done = arguments[arguments.length-1]; Promise.resolve().then(() => {expr}).then(v => done(v === undefined ? null : v), e => done({{err: String(e)}}));", *args)
 
@@ -188,6 +224,7 @@ try:
     before = daemon(d, "daemon.info")["pid"]
     restart_daemon(d, kelpied, kill=True, env=ISOLATED)
     check_daemon(d, ISOLATED)
+    check_no_real_prompt(d)
     run.check("every run starts with a daemon of its own", daemon(d, "daemon.info")["pid"] != before)
     d.set_window_size(1480, 920)
     d._req("POST", d.s("/timeouts"), {"script": 120000})
@@ -218,9 +255,13 @@ try:
     run.shot("01-mobile-settings")
 
     # ---------- pairing ----------
+    run.check("the settings know this window is the verified app", daemon(d, "mobile.status").get("app") is True)
+    refused = d.invoke("daemon_call", {"method": "mobile.reset", "params": {}})
+    run.check("the webview cannot reach an app-only decision through the plain call", "err" in refused, str(refused)[:120])
+    d.js("window.confirm = () => true")
     d.js("document.querySelector('[data-setting=\"mobile-pair\"] .btn.primary').click()")
     link = d.wait("return document.querySelector('.mobile-qr-code')?.dataset.link", 10)
-    run.check("Pair a phone shows a QR code with a one-time link", bool(link) and "#p=" in link and d.js("return !!document.querySelector('.mobile-qr-code svg')"), str(link))
+    run.check("Pair a phone shows a QR code with a one-time link", bool(link) and "#p=" in link and d.js("return !!document.querySelector('.mobile-qr-code svg')"))  # never the link in the log: it holds the pairing secret
     run.shot("02-mobile-qr")
     phone = Phone()
     phone.go(link)
@@ -230,18 +271,35 @@ try:
     phone.js("document.querySelector('.card .btn.primary').click()")
     run.check("Kelpie asks to approve the phone", bool(d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Test phone'))", 15)))
     run.shot("03-approve")
-    d.js("[...document.querySelectorAll('.mobile-approve .btn.primary')].find(b => b.textContent.includes('typing')).click()")
+    digits = phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15)
+    run.check("the phone shows six digits to type on the computer", bool(re.fullmatch(r"\d{6}", digits or "")))
+    phone_key = phone.js("return document.querySelector('[data-pair-key]')?.textContent ?? ''")
+    details = d.js("return document.querySelector('.mobile-approve')?.textContent ?? ''")
+    run.check("the dialog shows the phone's key, the same one the phone shows", bool(phone_key) and phone_key in details, f"{phone_key!r} in {details[:200]!r}")
+    run.check("…asks whether a QR code was just scanned, and where the request came from", "scan a QR" in details and "127.0.0.1" in details, details[:300])
+    run.check("…and offers what the phone asked for first (reading)", d.js("return document.querySelector('.mobile-approve [data-allow=read]').classList.contains('primary')"))
+    type_code("000000" if digits != "000000" else "111111")
+    d.js("document.querySelector('.mobile-approve [data-allow=write]').click()")
+    run.check("a wrong code is refused, and the request stays", bool(d.wait("return document.querySelector('.mobile-approve .form-note.error')?.textContent", 10)) and not daemon(d, "mobile.status")["devices"])
+    type_code(digits)
+    d.js("document.querySelector('.mobile-approve [data-allow=write]').click()")
     run.check("approved phone connects and lists sessions", bool(phone.wait(LIVE, 20)))
-    # The served page itself: it sends caps [ack, hb] with its auth (token not printed), and the daemon's
-    # hello does not put it in the legacy mode.
+    # The served page itself: every frame is binary, and nothing readable is in any of them.
     sent, got = phone.socket_frames("Network.webSocketFrameSent"), phone.socket_frames("Network.webSocketFrameReceived")
-    auth = [m for m in sent if "token" in m]
-    run.check("the page's auth says it acknowledges frames and answers heartbeats (caps ack, hb)", any(sorted(m.get("caps") or []) == ["ack", "hb"] for m in auth), f"{len(sent)} frames sent, auth caps {[m.get('caps') for m in auth]}")
-    hello = [m for m in got if m.get("type") == "hello"]
-    run.check("the daemon's hello is not legacy (hello.hb.legacy false)", any((m.get("hb") or {}).get("legacy") is False for m in hello), f"{len(got)} frames received, hello {len(hello)}")
+    frames = sent + got
+    run.check("the page's traffic is binary frames only", len(sent) >= 2 and len(got) >= 2 and all(op == 2 for op, _ in frames), f"{len(sent)} sent, {len(got)} received, opcodes {sorted({op for op, _ in frames}, key=str)}")
+    readable = [word for word in (b'"type"', b'"caps"', b"Test phone", b"daemon_epoch", b"hello") if any(word in data for _, data in frames)]
+    run.check("the captured bytes hold no plaintext", not readable, str(readable))
+    violations = phone.csp_violations()
+    run.check("no content security policy violation from the page's load on, through pairing", not violations, str(violations)[:300])
+    # The check can see one: a script from elsewhere is refused and shows in the same log.
+    phone.js("const s = document.createElement('script'); s.src = 'http://127.0.0.2:9/nothing.js'; document.head.appendChild(s);")
+    time.sleep(0.5)
+    run.check("…and that log would show one", bool(phone.csp_violations()))
+    run.check("the page says it acknowledges frames and answers heartbeats: the daemon does not serve it as a legacy page", phone.js("return document.documentElement.dataset.servedLegacy") == "false", str(phone.js("return document.documentElement.dataset.servedLegacy ?? null")))
     devs = daemon(d, "mobile.status")["devices"]
     run.check("the device is listed with typing allowed", len(devs) == 1 and devs[0]["name"] == "Test phone" and devs[0]["can_write"], str(devs))
-    run.check("the used pairing code is refused afterwards", post_pair(base, link.split("#p=")[1]) == 403)
+    run.check("the used pairing code gets no answer afterwards", not pairing_answered(base, link))
 
     # ---------- sessions on the phone ----------
     info = js_await(f"{S}.newSession(arguments[0], 'shell', {{ name: 'phone-shell' }})", pid)
@@ -270,8 +328,12 @@ try:
     stopped_mark = "Control-C" if os.name == "nt" else "^C"
     stopped = wait(lambda: stopped_mark in daemon(d, "session.read", {"handle": handle, "lines": 40})["text"].split("ping")[-1], 15)
     run.check("quick keys (Ctrl+C) reach the terminal: the running command stops", bool(stopped), str(phone.js("return document.querySelector('.notice')?.textContent ?? null")))
+    # The mark comes before the shell is back, and what is typed between the two is dropped too: wait for its prompt.
+    if os.name == "nt":
+        wait(lambda: daemon(d, "session.read", {"handle": handle, "lines": 40})["text"].split(stopped_mark)[-1].strip().endswith(">"), 15)
     daemon(d, "session.input", {"handle": handle, "data": "echo after-ctrl-c\r"})
-    run.check("…and the shell takes the next command", bool(wait(lambda: "after-ctrl-c" in daemon(d, "session.read", {"handle": handle, "lines": 40})["text"].split("ping")[-1], 15)))
+    took_next = wait(lambda: "after-ctrl-c" in daemon(d, "session.read", {"handle": handle, "lines": 40})["text"].split("ping")[-1], 15)
+    run.check("…and the shell takes the next command", bool(took_next), "" if took_next else repr(daemon(d, "session.read", {"handle": handle, "lines": 12})["text"][-400:]))
 
     # ---------- inbox, prompt tap ----------
     menu = os.path.join(scratch, "phone_menu.py")
@@ -314,15 +376,16 @@ for n in (1, 2, 3):
         return bool(wait(lambda: text in daemon(d, "session.read", {"handle": handle2, "lines": 60})["text"], 15))
 
     keys = card(1)
-    run.check("the prompt card offers the prompt's own keys", keys == ["1", "2", "3"], str(keys))
+    # Not "2" ("Yes, and don't ask again"): a choice that lasts is the computer's to make, and the phone hides it.
+    run.check("the prompt card offers the prompt's own keys", keys == ["1", "3"], str(keys))
     phone.shot(os.path.join(shots, "07-phone-prompt.png"))
     tap("1")
     run.check("one tap on the card answers the prompt", screen_has("ANSWERED1=1"))
     # The next menu comes at once: its card must start afresh, not stay on the last one's "Sent".
     keys2 = card(2)
-    run.check("a prompt right after another gets a fresh card with live buttons", keys2 == ["1", "2", "3"], str(keys2))
-    tap("2")
-    run.check("one tap answers the second prompt too", screen_has("ANSWERED2=2"))
+    run.check("a prompt right after another gets a fresh card with live buttons", keys2 == ["1", "3"], str(keys2))
+    tap("3")
+    run.check("one tap answers the second prompt too", screen_has("ANSWERED2=3"))
     # The third: the desktop answers first, while the phone's page is busy and has not heard of it: the phone's tap
     # is late, and the page then hears of the answer (the card goes) before the reply to its tap. A page that is kept
     # busy with a loop for a second queues what arrives, in the order it arrived.
@@ -387,7 +450,6 @@ for n in (1, 2, 3):
     run.check("the phone shows the agent's reply", bool(phone.wait("return document.querySelector('.chat-log')?.textContent.includes('thanks')", 15)))
 
     # ---------- chat: a message sent from the phone ----------
-    import phone_support as ps
     turn_agent, turn_trace, turn_hold = ps.write_turn_agent(scratch)
     for f in (turn_trace, turn_hold):
         if os.path.exists(f):
@@ -422,9 +484,7 @@ for n in (1, 2, 3):
         phone.js("document.querySelector('.chat-composer .send-row .btn.primary').click()")
         if not phone.wait("return document.querySelector('.chat-composer textarea')?.value === ''", 15):
             state = phone.js("const b = document.querySelector('.chat-composer .send-row .btn.primary'); return {notice: document.querySelector('.chat-composer .notice')?.textContent ?? null, disabled: b?.disabled, conn: document.querySelector('.conn')?.dataset.state, box: document.querySelector('.chat-composer textarea')?.value}")
-            sent = [(f.get("cid"), f.get("text"), f.get("req")) for f in phone.socket_frames("Network.webSocketFrameSent") if f.get("type") == "chat_send"]
-            got = [(f.get("type"), f.get("code"), f.get("result"), f.get("req")) for f in phone.socket_frames("Network.webSocketFrameReceived") if f.get("re") or f.get("req") or f.get("type") in ("ack", "error")][-12:]
-            print(f"NOTE the send of {text!r} did not empty the box (Send was {'ready' if ready else 'not ready'}): {state}; chat_send frames sent: {sent}; last replies: {got}", flush=True)
+            print(f"NOTE the send of {text!r} did not empty the box (Send was {'ready' if ready else 'not ready'}): {state}", flush=True)
 
     sendchat = daemon(d, "session.create", {"kind": "claude", "cwd": proj, "chat_argv": [sys.executable, "-u", turn_agent, turn_trace, turn_hold], "name": "phone-send", "project_id": pid})
     d.js(f"const s = {S}; s.setSessions(arguments[0].id, arguments[0]); s.placePane(arguments[1], {{ id: 'send-pane', kind: 'chat', sessionId: arguments[0].id }}, 'tab');", sendchat, pid)
@@ -575,7 +635,8 @@ for n in (1, 2, 3):
     phone.wait("return !!document.querySelector('.card .btn.primary')")
     phone.js("document.querySelector('.card input').value = 'Reader'; document.querySelector('.card .btn.primary').click()")
     d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Reader'))", 15)
-    d.js("[...document.querySelectorAll('.mobile-approve .btn')].find(b => b.textContent === 'Allow reading').click()")
+    type_code(phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15))
+    d.js("document.querySelector('.mobile-approve [data-allow=read]').click()")
     phone.wait(LIVE, 20)
     phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-shell'))", 15)
     phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-shell')).click()")
@@ -589,7 +650,7 @@ for n in (1, 2, 3):
     phone.js("document.querySelector('header .icon').click()")
     phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-shell'))", 15)
     phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-shell')).click()")
-    status, _, _ = http_get(base + "ws", {"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13", "Origin": "http://evil.example"})
+    status, _, _ = http_get(base + "link", {"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13", "Origin": "http://evil.example"})
     run.check("a socket from another site is refused", status == 403, str(status))
     # The bad pairing codes are tried last (after the restart scenario, which pairs a phone): the limiter would refuse that pairing.
 
@@ -610,17 +671,17 @@ for n in (1, 2, 3):
     daemon(d, "session.close", {"handle": handle})
 
     # ---------- after the computer restarted: what waited is shown as lost, with its text ----------
-    class _Calls:
-        """What phone_support.pair needs of the daemon: `call`."""
-
-        def call(self, method, params=None):
-            return daemon(d, method, params or {})
-
     daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT})
-    lost_token, _lost_id = ps.pair(_Calls(), base, "Restart phone", True)
+    d.wait("const b = document.querySelector('[data-setting=\"mobile-pair\"] .btn.primary'); return !!b && !b.disabled", 15)
+    d.js("document.querySelector('[data-setting=\"mobile-pair\"] .btn.primary').click()")
+    phone.go(d.wait("return document.querySelector('.mobile-qr-code')?.dataset.link", 10))
+    phone.wait("return !!document.querySelector('.card .btn.primary')")
+    phone.js("document.querySelector('.card input').value = 'Restart phone'; document.querySelector('.card .btn.primary').click()")
+    d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Restart phone'))", 15)
+    type_code(phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15))
+    d.js("document.querySelector('.mobile-approve [data-allow=write]').click()")
+    phone.wait(LIVE, 20)
     lost_chat = daemon(d, "session.create", {"kind": "claude", "cwd": proj, "chat_argv": [sys.executable, "-u", turn_agent, turn_trace, turn_hold], "name": "phone-lost", "project_id": pid})
-    phone.go(base)
-    phone.js("localStorage.setItem('kelpie-token', arguments[0])", lost_token)
     phone.go("about:blank")
     phone.go(base)
     phone.wait(LIVE, 30)
@@ -666,13 +727,26 @@ for n in (1, 2, 3):
     run.check("…for good: nothing of it is kept on the phone", not phone.js("return Object.keys(localStorage).some(k => k.startsWith('kelpie-draft:chat-pending:'))"))
     hold(False)
     # Last, so the limiter does not refuse a pairing this script still needs.
-    run.check("a wrong pairing code is refused", post_pair(base, "0" * 64) == 403)
-    for _ in range(10):
-        post_pair(base, "1" * 64)
-    run.check("repeated bad codes are rate limited", post_pair(base, "2" * 64) == 429)
-    for dev in daemon(d, "mobile.status")["devices"]:
-        daemon(d, "mobile.revoke", {"id": dev["id"]})
-    daemon(d, "mobile.disable")
+    dpk, _ = ps.pair_secrets(link)
+    made_up = base + "#p=" + ps.ln.b64(json.dumps({"v": 1, "dpk": ps.ln.b64(dpk), "psk": ps.ln.b64(os.urandom(32))}).encode())
+    run.check("a wrong pairing code gets no answer", not pairing_answered(base, made_up))
+    run.check("a phone the daemon does not know is told so", stranger_refusal(base, dpk) == 4401)
+    refusals = [stranger_refusal(base, dpk) for _ in range(12)]
+    run.check("repeated unknown phones are rate limited", refusals[-1] == 4429, str(refusals))
+    run.check("…and the desktop says so", bool(d.wait("return [...document.querySelectorAll('.toast')].some(t => t.textContent.includes('Too many failed'))", 15)))
+
+    # ---------- settings: how long a silent phone stays, what phones did, the kill switch ----------
+    d.js(f"{S}.openSettings('mobile')")
+    d.wait("return !!document.querySelector('[data-dormant]')", 10)
+    run.check("phones not seen for 90 days are removed by default", d.js("return document.querySelector('[data-dormant]').value") == "90")
+    d.js("const s = document.querySelector('[data-dormant]'); s.value = '30'; s.dispatchEvent(new Event('change', {bubbles: true}));")
+    run.check("…and that can be changed", bool(wait(lambda: daemon(d, "mobile.status").get("dormant_days") == 30, 10)))
+    d.js("const a = document.querySelector('[data-audit]'); a.open = true;")
+    run.check("the list of what phones did shows entries, with an intact log", bool(d.wait("return document.querySelectorAll('[data-audit-entry]').length > 0 && !document.querySelector('[data-audit-broken]')", 10)))
+    run.shot("20-mobile-audit")
+    d.js("document.querySelector('[data-revoke-all]').click()")
+    run.check("the kill switch turns phone access off and removes every phone", bool(wait(lambda: (lambda s: not s["running"] and not s["devices"])(daemon(d, "mobile.status")), 10)))
+    run.check("…and the phone hears it at once", bool(phone.wait("return document.querySelector('.card')?.textContent.includes('no longer paired')", 15)))
 except Exception:
     import traceback
     traceback.print_exc()
@@ -680,6 +754,7 @@ except Exception:
 finally:
     if phone:
         phone.quit()
+    ps.forget_secrets(ISOLATED["KELPIE_ENDPOINT"])
     if REFUSED:
         run.d.quit()
         sys.exit(2)

@@ -3,7 +3,7 @@ import { backoffMs, canAct, dataAge, deriveConn, LagMeter, RESTARTED_SHOWN_MS, t
 
 const NOW = 10_000_000;
 const facts = (over: Partial<ConnFacts> = {}): ConnFacts => ({
-  online: true, ready: true, connecting: false, attempt: 0, nextAt: null, reach: "reachable", lastLiveAt: NOW, replaced: false, unpaired: false,
+  online: true, ready: true, connecting: false, attempt: 0, nextAt: null, reach: "reachable", lastLiveAt: NOW, replaced: false, unpaired: false, notPairedHere: null,
   outdated: false, restartedAt: 0, rttMs: null, rttAt: 0, probeSince: null, lagMs: 0, lagAt: 0, resyncing: false, load: { level: 0, reasons: [] }, route: "direct", ...over,
 });
 
@@ -15,6 +15,7 @@ describe("deriveConn", () => {
   it("no network beats everything but the device being removed", () => {
     expect(deriveConn(facts({ ready: false, online: false, attempt: 3 }), NOW).kind).toBe("no_network");
     expect(deriveConn(facts({ ready: false, online: false, unpaired: true }), NOW).kind).toBe("unpaired");
+    expect(deriveConn(facts({ ready: false, notPairedHere: "unknown" }), NOW)).toEqual({ kind: "not_paired_here", why: "unknown" });
   });
 
   it("separates 'your connection is slow' from 'the computer is busy'", () => {

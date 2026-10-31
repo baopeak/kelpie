@@ -88,6 +88,29 @@ anything but `daemon.info` answers:
 - the **user token**, written at start to `<data base>/Kelpie/auth/<endpoint>.token` (owner-only,
   new per daemon run, keyed by endpoint so a dev app and dev daemon agree): the app, `kelpied`
   outside a session, `scripts/kelpie-call.py`. Full access; raw Input frames are accepted from it only.
+- the **verified app** (`Role::App`): the user token, `client: "app"`, *and* the connection's peer process runs the Kelpie
+  app's executable (`crates/kelpied/src/peer_identity.rs`: `kelpie` next to the daemon, or in the folder named by a runtime slot's
+  `source.txt`; on macOS a path check only, no code-signature check, a known weakening to fix or accept before macOS ships). Only
+  it may ask for the phone decisions `mobile.approve`, `mobile.set_permission`, `mobile.set_write`, `mobile.reset`
+  (`auth::APP_ONLY`), and for a `mobile.set_options` that keeps unused phones longer. Those that raise access take effect only
+  after **the daemon itself** asked the operating system to verify the person (`crates/kelpied/src/user_presence.rs`: Windows
+  Hello, else the Windows password prompt checked with `LogonUserW` and required to be this user's account; macOS Touch ID or the
+  login password). That is the gate. Declining a phone and lowering a permission ask nobody; `mobile.reset` always asks. What
+  the prompt says is built by the daemon from its own records, with a phone's name in quotes; a caller supplies no text. The
+  prompt runs on a thread of its own (`Daemon::after_verifying`), the request is answered when it ends, one prompt at a time, for at
+  most 280 s: then the caller gets an error, Hello and macOS's prompt are cancelled, a password dialog (which cannot be) is ignored, and whatever it says
+  later can no longer do anything. While such a dialog is still up a new prompt is refused ("close the earlier dialog first"), so a person
+  never faces a stack of them (should no such dialog exist, a thread that never ended, the message says to restart the daemon; a prompt up past 10 minutes is an audit line, `verify_stuck`). Each refused or failed verification is an audit line (`verify_failed`, with what it was about);
+  three within 5 minutes, or three left unanswered within 20, stop new prompts for 5 minutes (`verify_paused`), in memory only, so a
+  restart of the daemon ends the pause. What the daemon tells the person is English, translated by the app (`locales/vi/backend.json`).
+  Prompts are written in English and Vietnamese in the daemon's own table (`Prompt::text`); the app sends a language code, nothing else
+  of the text. **Open:** whether Windows Hello's face recognition passes with no deliberate act has not been tried; if it does, a
+  person looking at the screen would approve whatever is asked. In the
+  app `mobile_secure_call` lets the daemon's dialog come to the front (`AllowSetForegroundWindow`) and passes the window as a
+  hint for parenting it, which the daemon checks (`IsWindow`); `daemon_call` refuses the app-only methods. A debug build also
+  trusts `KELPIE_TRUSTED_APP` and answers verifications from `KELPIE_TEST_USER_PRESENCE` (both read by the daemon); a release build has
+  neither path, and unit tests answer through an injected decision and refuse when there is none, so they cannot raise a real
+  prompt. `mobile.revoke_all` only removes access, so the plain user token may call it with no verification.
 - a **session token** (`KELPIE_SESSION_ID` + `KELPIE_SESSION_TOKEN`, derived from a per-daemon
   secret, set in each session's environment with `KELPIE_SESSION_ENDPOINT`): `kelpied` inside a
   session of that daemon (against another endpoint it uses that daemon's user token). The scripting
@@ -103,7 +126,15 @@ anything but `daemon.info` answers:
   token inside a session.
 
 Programs run as the same OS user and could read the user token if not sandboxed: this scopes
-what agents do through Kelpie by default; it is not a boundary against deliberate same-user code.
+what agents do through Kelpie by default; it is not a boundary against deliberate same-user code. For phone access the gate is the
+OS verification in the daemon. `Role::App` is a speed bump in front of it: writing a file where `peer_identity` looks and running
+it defeats the role, and all that gains is the right to raise a prompt with the daemon's text, which the person can refuse.
+The verification stops a program that asks the daemon, and nothing more: deliberate same-user code can go around it without
+raising a prompt or leaving an audit line. **The file route:** a program of this user can read `mobile-device-key` from the OS
+credential store (it has no access control within the user), write a correctly sealed `write` record into `mobile.v2.json`, and
+have the daemon restart with the user token, which then loads that record. `dormant_days` in the same file is outside any MAC, so
+it can simply be edited. It can also replace `kelpied.exe` on disk (the daemon's runtime slot and the install folder are the
+user's to write). These are accepted: the OS gives one user's programs no boundary between them.
 
 Broadcast events are scoped before they enter a client's outgoing queue. Anonymous and
 claimed connections receive none; restricted sessions receive their own session lifecycle
@@ -126,10 +157,10 @@ Frames (`crates/kelpie-proto`): `u32 LE length | u8 kind | payload`
 | 2 Output | daemon → app | `u32 handle \| u64 seq \| bytes` (`seq` = stream offset after the bytes) |
 | 3 Input | app → daemon | `u32 handle \| bytes` |
 
-RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `chat.send|write_turn|queue_op` (API 21: the chat's message queue, below), `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|set_write|set_projects`, `mobile.load` (API 17: the machine-load level, lag percentiles; `{reset: true}` restarts the percentiles), and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
+RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `chat.send|write_turn|queue_op` (API 21: the chat's message queue, below), `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|revoke_all|set_permission|set_write|set_options|audit|reset|set_projects` (API 22 for `revoke_all`, `set_permission`, `set_options`, `audit`, `reset`), `mobile.load` (API 17: the machine-load level, lag percentiles; `{reset: true}` restarts the percentiles), and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
 `daemon.info` reports an `api` feature level (`kelpie_proto::API_LEVEL`); an app built for a
 higher level offers to restart an older daemon still running from a previous version.
-Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request`, `daemon.unresponsive` (API 17: `{seconds}`, the event loop has been silent for 30 s; sent by the watchdog, delivered when the loop runs again), `chat.resolved` (API 17: `{handle, id, request_id, by, dropped, answered_by, at}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), `chat.queue` and `chat.turn_ready` (API 21: the chat's message queue and the offer of its next message to the window that queued it; see "Chat mode"), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
+Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request` (API 22 adds `fingerprint`, `want`, `address`), `mobile.device_changed` and `mobile.lockout` (API 22: a phone was added, changed or removed; too many failed attempts, `{reason, address?}`), `daemon.unresponsive` (API 17: `{seconds}`, the event loop has been silent for 30 s; sent by the watchdog, delivered when the loop runs again), `chat.resolved` (API 17: `{handle, id, request_id, by, dropped, answered_by, at}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), `chat.queue` and `chat.turn_ready` (API 21: the chat's message queue and the offer of its next message to the window that queued it; see "Chat mode"), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
 
 ## Session threading (daemon)
 
@@ -294,8 +325,8 @@ a stopped terminal session and restarts it on the same conversation (undone if t
 ## Phone protocol (v2)
 
 The phone page is a client of the daemon's phone server (`mobile.rs`), not of the RPC pipe: a connection
-(`/ws`, JSON text messages, first message `{token}`) is registered as a daemon client through an adapter
-and may use only the verbs below. `session.update`, `session.attach`, closing, phone settings and the
+(`/link`, kelpie-link binary messages carrying the JSON messages below; see "Phone link") is registered as a daemon client
+through an adapter and may use only the verbs below. `session.update`, `session.attach`, closing, phone settings and the
 other admin methods are not verbs, so naming them reaches nothing.
 
 The internal adapter is explicitly registered as a trusted user client; the phone itself
@@ -303,7 +334,9 @@ still has only the closed verb table below. Each server generation owns a sticky
 signal shared by the listener, accepted HTTP/TLS connections and upgraded WebSockets,
 including authentication. Disabling access revokes current permissions and cancels that
 generation's connections; enabling it again cannot revive an old socket. Paired device
-records remain available for a new connection.
+records remain available for a new connection, and a phone that was connected keeps its pairing and connects again when it can.
+Turning access off is therefore not how to cut a phone off: `mobile.enable` stays open to any holder of the user token (audited,
+`phone_access_on`), and every paired phone then has its access back with no prompt. `mobile.revoke` and `mobile.revoke_all` remove it.
 
 - **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `hb`, `ack`, `sub`, `unsub`, `chat_sub` need
   *read*; `input`, `key`, `answer`, `chat_answer`, `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume` need *write*;
@@ -330,7 +363,8 @@ records remain available for a new connection.
   last rows of the render), replace the rows named. `base` is the frame it follows (`null`: the whole
   view). `base` is the last frame the phone *acknowledged* (`ack {id, rev}`), not the last one sent, and
   the frame says everything that changed since it; a phone keeps the screens from `base` on and drops
-  older ones when a frame names a later `base`. At most 4 frames / 128 KiB wait for an acknowledgement per
+  older ones when a frame names a later `base` (a whole frame lets nothing go: the daemon may have heard only an earlier
+  acknowledgement; at most 8 screens are held, the first to arrive going first, twice what the daemon may send past what it has heard). At most 4 frames / 128 KiB wait for an acknowledgement per
   (device, session): then nothing is sent until one arrives, and what goes next is the latest state, after
   the acknowledged frame. Until the first acknowledgement frames are whole. A frame is reserved a place in the
   connection's bulk lane (4) before the state is read, so a slow socket gets the latest state, never a
@@ -344,10 +378,11 @@ records remain available for a new connection.
   per device, 8 devices and 16 MiB together (least recently used first), drops everything nobody follows when L3 is caused by memory (not when it is CPU or lag),
   and forgets after 5 minutes; this is what makes a relay↔direct
   migration or a flaky connection cheap. A device has one connection: a newer one closes the older with
-  4409 (the page then waits until it is looked at again). Close codes: 4401 the device was removed (the
-  page forgets its token); 4408 connect again, the device stays paired (its permission changed, or the
-  connection fell behind the daemon's events and may have missed a removal, which the next connect finds
-  out); 4409 replaced. A close frame that cannot leave within 5 s is given up on. Rows are compared by text.
+  4409 (the page then waits until it is looked at again). Close codes: 4401 the device was removed, always after the sealed
+  message `{type: "revoked"}` (see "Phone link": only that message makes a phone forget its pairing); 4408 connect again, the device stays
+  paired (its permission changed, phone access was turned off, the connection fell behind the daemon's events and may have
+  missed a removal, which the next connect finds out, or it has been up for 24 h); 4409 replaced. A close frame that cannot leave
+  within 5 s is given up on. Rows are compared by text.
 - **Typing and answering** share one path with the desktop's quick answer (`Session::answer`,
   `Session::type_message`): text goes through `typed_text` (control characters and with them a
   `\x1b[201~` paste break-out are dropped), several lines are one bracketed paste when the program asked
@@ -379,7 +414,8 @@ records remain available for a new connection.
   log). Messages: `chat {id, mode: reset|delta|more|live, seq, lines}` (chunks of about 64 KiB, each
   saying where it ends; a longer line goes alone), `chat_resolved {id, request_id, by, dropped}`,
   `chat_resync {id}` (the daemon stopped feeding a phone that fell behind: ask again).
-  `chat_answer {id, request_id, line}` answers a question the agent put to the person and nobody has
+  (A line too long for one phone message once it is JSON-escaped, 1 MiB, arrives as a `kelpie_stderr` notice at the same place in
+  the log.) `chat_answer {id, request_id, line}` answers a question the agent put to the person and nobody has
   answered: the daemon tracks only those from its output (Claude `control_request` `can_use_tool` and
   `elicitation`; JSON-RPC approvals, `requestUserInput`, `session/request_permission`, elicitation) and
   never the requests the client answers (hook callbacks, MCP messages, `fs/*`, `terminal/*`, tool calls). It
@@ -404,8 +440,89 @@ records remain available for a new connection.
   `chat_queue {id, items: [{qid, cid, by, mine, kind, text}], paused, held, in_flight, dropped?}`: the whole state each time, once
   after `chat_sub` and on every change. Revoking a device, or taking its write permission away, drops what it has waiting
   (`dropped` with the reason `revoked`); a turn already written runs on.
-- **Pairing** (`POST /pair`): failed attempts are counted per source address (10 a minute); at L2/L3 a
-  handshake within 1 s / 5 s of the last is refused (503) without spending its code.
+- **One-shot approvals**: a phone's answer holds for this one request. For a chat the daemon keeps a list of the answer shapes
+  known to be one-shot for each kind of request (`chat::answer_is_one_shot`: Claude's allow or deny, Codex's `accept`, `decline`,
+  `cancel` or a permission grant for this `turn`, ACP's `allow_once` and `reject_once`, a form's answers) and refuses anything else as
+  `one_shot`, so a new field or decision word of an agent is the computer's until it is known. A terminal menu's lasting choice is
+  refused by key, by the item's letter or exact text (`Prompt::lasting`, from the whole label in `choices.rs`, wrapped lines included),
+  and while one is on screen `answer` takes only `esc`, a listed key that does not last, or Enter on a marker known to be on one (`Prompt::plain_answer`).
+  The lines above a menu count too: the yes of `Always allow this tool?` or of a question of trust lasts. A question that names
+  permission is one on its own; a tool's line, going on with something, or an action in a plainly asked question (not one whose choices
+  carry descriptions) need a word of consent as well. There, whatever is not plainly once or no counts as
+  lasting; on any other question only the words that last do, so an agent's own `Yes` / `No` question stays answerable. The phone
+  hides those options. This is a convenience on what a person sees, not a boundary, and recognition is best effort (a table of real labels pins it, `choices::real_labels`): a term in a description with no word that lasts, a scope named only in the question (`Allow this for this project?`), a wrap at a capital, or a new agent's wording can still leave a button. **Residual:** a phone
+  with *write* can still type in a terminal, so it could reach such a choice with arrow keys and Enter, press `shift-tab` (one key
+  that changes Claude Code's permission mode for the session), or run `/permissions`.
+  Typing is a shell; the daemon does not try to judge it.
+
+### Phone link
+
+`crates/kelpie-link` is the end-to-end protocol, sans I/O: Noise `IKpsk1` to pair and `IK` to reconnect (25519, ChaChaPoly,
+BLAKE2s; `snow` with RustCrypto backends, no `ring`, which CI checks). The phone's half is hand-written on noble
+(`app/phone/src/noise.ts`) because `crypto.subtle` does not exist on a plain `http://` page; `scripts/e2e/link_noise.py` is a
+third implementation for the tests, and all three are checked against the crate's vectors and the published cacophony ones.
+
+- **Wire** (`GET /link`, `mobile/link.rs`): binary WebSocket messages, no compression (a `permessage-deflate` offer is declined),
+  `TCP_NODELAY`. The first message is `version, mode, mac1 (16 bytes), Noise message 1`; the reply is Noise message 2, and carries
+  nothing. After that, each message is a sealed chunk with a flags byte (a JSON message may span several; at most 1 MiB).
+  Implicit counters, no reorder window: a message that does not decrypt ends the connection. Keys are rekeyed every 2^16 messages
+  each way by counting, and a connection handshakes again after 24 h (4408); there is no time-based rekey, an accepted decision: a
+  reconnect is a fresh handshake anyway, and a handshake every 30 minutes would interrupt screens for little gain. Every reconnect
+  is a new session. A message too long to seal is reported in the daemon's log and dropped, and the session carries on.
+  Frame numbers are per daemon run and never reused, however often a slot comes and goes.
+- **What a first message costs**: a connection counts against 16 handshakes pending, 4 of them from one address (this machine has
+  no such share), from its upgrade until its first valid sealed frame or 5 s, and carries one handshake. When all 16 are taken the
+  oldest that has sent no valid first message gives way to the newcomer, and a phone in the middle of its handshake is never let go. A first
+  message seen in the last 2 minutes (256 kept, by hash) is dropped before it could hold a place: a phone's is new every time, since
+  it carries a fresh ephemeral key, so a repeat is someone replaying what they saw on plain HTTP. What holds a place for nothing counts as a
+  failed attempt of its address: saying nothing until those 5 s are up, being let go having said nothing, a repeat, or passing the check
+  and never sending a sealed frame. If every place is held by connections past the check, a newcomer is turned away. An address may also make
+  only 5 upgrades a second (bursts of 20, refused with 429 before any task
+  exists) and take only 5 of the machine's handshakes a second. Several addresses together can still deny service on a LAN, and that leaves a
+  trace: a flood that goes on (20 refused or let go in a minute, the budget running out among them) is an audit line (`flood`) at most every 5 minutes. This machine has no share of any of
+  these, which must be judged again when a proxy on loopback arrives, since every phone behind it would look local. `mac1` (keyed from the desktop's public key, or the pairing secret) is checked
+  before any Diffie-Hellman; only then does it take one of 20 handshakes a second. What fails these is dropped with no reply, no
+  close code, no event and no count, so a wrong or spent pairing code gets silence. A first message can be a replay, so **nothing
+  happens until the phone's first valid sealed frame**.
+- **Pairing**: the QR link holds the desktop's public key, a one-time secret and the endpoints (`#p=`, never sent in a request).
+  A code answers 5 first messages per address and is spent at the first sealed frame (`{type: "pair", name, want}`), so a replay cannot
+  burn it. The desktop then gets `mobile.pair_request`; the phone shows six digits derived from the handshake hash
+  (`HKDF(h, "kelpie-sas")`) and its key's fingerprint. The person types the digits into the verified app; a wrong code is refused at
+  once with no prompt and three of them decline the request. With the right one the daemon asks the OS to verify the person and, when
+  that passes and the request is still there, adds the device; a failed verification leaves the request waiting until it times out.
+  The phone hears `paired`, `declined` or `timeout` over the encrypted channel, then connects
+  again as a device. Close codes before a session: 4403 a mac-valid first message that fails Noise, 4429 too many failures from
+  the address (10 a minute: mac-valid failures and what holds a place for nothing, as listed under "What a first message costs"; `mobile.lockout`) or reconnects of the device (5 in 10 s), 4503 busy (at L2/L3 a pairing
+  handshake within 1 s / 5 s of the last, without spending its code), 4401 this computer does not know the key, 4402 it knows the key
+  and cannot confirm the record now (not counted as a failure).
+- **Reconnect**: the phone's static key must be a paired device's, and its first sealed frame is `{caps}`.
+- **Being removed**: WebSocket close frames are not authenticated, so a phone forgets its pairing (and its key, cache and drafts) only on
+  the sealed `{type: "revoked"}` inside a session. A 4401 in a session with no such message means connect again. A 4401 or 4402 before a
+  session shows "not paired here" with a Forget button and keeps the key; the phone asks again once a minute and whenever the page is
+  looked at, so a forged answer or a passing failure on the computer costs nothing. A phone removed while it was away sees that state
+  and is forgotten by the person. After `mobile.reset` the desktop has a new key, so an old phone's first message fails its `mac1` and
+  is dropped with no code at all: after 3 such closes in a row while the computer's page still answers, the phone shows the same state
+  with "phone access may have been reset, or something on this network is interfering" (a guess, so the key stays; it asks again once a minute).
+- **Device store** (`mobile/store.rs`, `mobile.v2.json`): each device is its Noise public key, name, permission and kind, MAC'd
+  with a key from the OS credential store, which also holds the desktop's link key. A record whose MAC fails is `unverified`: it
+  gets no access and must be paired again. This defends against file tampering only: same-user code can read the keyring. A key is
+  made only when the credential store says it has none (`kelpie_proto::secret_read`): a read that fails or a value that is no key is an error,
+  and nothing is written over it. While the key cannot be read records are `unchecked`, with no access and no conclusion, and are
+  verified again when it can be (when the app looks and when such a phone connects). A file that
+  cannot be read is copied aside and never overwritten; phone access stays off until `mobile.reset`. A change that cannot be written
+  (a full disk) holds in memory and is tried again every 10 s; a removal or turning off says so ("removed for now, it will come back after a
+  restart unless this is fixed", in `mobile.status`'s `error`, audit line `save_failed`), and so does lowering a permission, until it could be written. Phones paired with a token
+  before this are listed as `legacy` and must be paired again. Devices not seen for `dormant_days` (default 90, 0 never) are removed;
+  lengthening that needs the verified app and the person, shortening it does not.
+- **Permissions**: `read` < `write` < `control`, capped by the transport: a browser page may type only over HTTPS, from a Tailscale
+  address or from this machine, because a plain `http://` page can be swapped by someone on the network. Until a native app exists
+  `mobile.pair_start` makes browser pairings only.
+- **Kill switch and audit**: `mobile.revoke_all` turns phone access off, removes every device and stops their connections. What phones
+  did is in a hash-chained log (`mobile/audit.rs`, `mobile.audit`, `intact` says whether the chain holds; a line cut short by a failed
+  write is skipped, nothing the chain covers is lost with it): the verb, device and time; of typed
+  text only its length and a truncated SHA-256, so very short text is guessable by the local user who owns the file.
+- **On the phone**: the key sits raw in IndexedDB, not as a non-extractable WebCrypto key: the Noise state machine is synchronous and
+  a plain `http://` page has no WebCrypto. App lock is a separate phase.
 
 ### Bad networks and busy machines
 
@@ -415,7 +532,7 @@ records remain available for a new connection.
   `SO_KEEPALIVE` (30 s / 10 s / 3) is the backstop. A deadline only counts if the daemon's own timer was on time
   in that window; a gap of more than two ticks (stall, sleep) starts the clocks again (at most for 10 minutes
   without hearing the phone). At L2+ the times double (40 s / 90 s).
-- **Legacy pages**: the first message is `{token, caps}`; a page that does not list both `ack` and `hb`
+- **Legacy pages**: the first sealed message is `{caps}`; a page that does not list both `ack` and `hb`
   (one opened before this protocol and still running its old script) is served as before: each frame counts as
   acknowledged when sent, so no window holds it back, and no silence is held against it (the OS keep-alive and
   the write timeout still end a dead connection). `hello.hb.legacy` says which. Reloading the page ends it.
@@ -462,10 +579,10 @@ stays the desktop's. `crates/kelpied/build.rs` embeds `dist-phone` as `PHONE_ASS
 a placeholder page; with `KELPIE_REQUIRE_PHONE=1` (`scripts/build-release.sh`, `ci.yml`, `release.yml`) the build script
 fails instead, and the release workflow greps the daemon for the placeholder's marker. `pnpm build:phone` must run before any
 `cargo build/test -p kelpied`. `scripts/check-phone-guard.sh` proves the guard. The bundle may not import `@tauri-apps/*`
-or `lib/ipc` (the build fails), is about 45 KB gzip, and carries only the Vietnamese strings its code uses
+or `lib/ipc` (the build fails), is about 68 KB gzip (page, script and style, with the Noise code; 81 KB with the agent adapters it loads when needed and the service worker), and carries only the Vietnamese strings its code uses
 (`app/phone/vite-dictionary.ts`, from `app/src/locales/vi/*.json`; the phone's own are in `phone.json`).
 
-- **One boundary**: `app/phone/src/link.ts` is the only file that knows the wire (today the JSON WebSocket above). It declares
+- **One boundary**: `app/phone/src/link.ts` is the only file that knows the wire (kelpie-link, above; pairing is `pair.ts`). It declares
   `caps: ["ack","hb"]` in its first message, answers and sends heartbeats (it asks after 15 s of silence and drops the socket if
   3 s pass without a word), reconnects with full-jitter backoff (first retry within 200 ms, then 1 s doubling to 30 s) and at once
   on `visibilitychange`, `online` and a failed probe (at most every 2 s), resumes with `sub {have_rev}` / `chat_sub {since_seq}`,
@@ -1345,7 +1462,7 @@ task's run status is the Runs engine's.
 | Browser panes | `app/src-tauri/src/browser.rs`, `browser_picker.js` | Tauri child webviews positioned over the pane (hidden while an overlay covers them). Design mode injects a picker; picks travel through a cancelled navigation to a sentinel URL, are redacted and size-capped, and the element screenshot uses the WebView2 DevTools protocol (end-to-end tests also send trusted page input through it, `browser_test_input`, dev / e2e builds only). |
 | Remote (SSH) | `app/src-tauri/src/remote.rs`, `agents.rs` `build_remote_launch` | The system OpenSSH client (on Windows `System32\OpenSSH`, never a Git Bash one from PATH): sessions run `ssh -t host` with a login shell, inside `tmux new-session -A` when available; files, search and git run as remote commands with quoted arguments. Commands never prompt: secrets come from askpass, anything else fails. |
 | SSH hosts | `app/src-tauri/src/ssh_hosts.rs`, `crates/kelpied/src/askpass.rs`, `app/src/components/hosts-page.tsx` | Saved hosts and forward rules in `<data>/ssh/hosts.json`, rendered into `<data>/ssh/config` (one `Host` per saved host, then `Match all` + `Include` of the user's config) that every Kelpie `ssh` / `scp` reads with `-F`. Passwords and key passphrases live in the OS keyring (service `Kelpie (<endpoint>)`); ssh gets them through `SSH_ASKPASS=kelpied` + `SSH_ASKPASS_REQUIRE=force` + `KELPIE_ASKPASS=<host id>` — `kelpied` answers password / passphrase prompts and declines host-key questions, which the page settles with `ssh-keyscan` fingerprints first. Connecting to a host opens a remote project on it. Port forwards are `ssh -N` children of the app (stopped with it; auto-start rules restart on launch); transfers are `scp -r -p` (SFTP). Keys, agent and known hosts go through `ssh-keygen` / `ssh-add` and the known_hosts file. `KELPIE_SSH_DIR` replaces `~/.ssh` for the tests. |
-| Phone server | `crates/kelpied/src/mobile.rs`, `crates/kelpied/mobile/` | axum on a chosen address (default port 4817), optional rustls (ring). Pairing: a one-time code shown as a QR (2 min) and approved in the app; device tokens are stored as SHA-256 and compared in constant time; Origin checks, CSP, pairing attempts limited per source address; revoking closes the device's sockets. Protocol v2 (verbs, state sync, answers, chat): `mobile/verbs.rs`, `mobile/sync.rs`, `mobile/lanes.rs`, machine load in `load.rs`, and "Phone protocol (v2)". |
+| Phone server | `crates/kelpied/src/mobile.rs`, `crates/kelpied/mobile/` | axum on a chosen address (default port 4817), optional rustls (ring). Pairing: a one-time secret shown as a QR (2 min), then the phone's six digits typed into the verified app (see "Phone link"); devices are Noise public keys in a MAC'd store; Origin checks, CSP, failed attempts limited per source address; revoking closes the device's sockets. Protocol v2 (verbs, state sync, answers, chat): `mobile/verbs.rs`, `mobile/sync.rs`, `mobile/lanes.rs`, machine load in `load.rs`, and "Phone protocol (v2)". |
 | Plugins | `app/src-tauri/src/plugins.rs`, `lib/plugins.ts` | Declarative manifests (see [plugins.md](plugins.md)); approval bound to the manifest SHA-256; agents are sent to the daemon (`agent.set_custom`, kept in `custom-agents.json`). |
 | Agent setup | `app/src-tauri/src/agent_config.rs` (+ `agent_config/`), `lib/agent-setup.ts`, `components/agent-setup.tsx` | MCP servers, instruction files and skills of the agents, from their own files: Claude `~/.claude.json` / `.mcp.json`, Codex `config.toml`, Gemini `settings.json`, OpenCode `opencode.json(c)`, Cursor `.cursor/mcp.json`. One neutral `McpServer` with a codec per agent; reads happen only when the page opens. **One writer per file**: JSON and JSONC through a syntax tree (`jsonc-parser`: comments, order, indentation and unknown keys survive), TOML through `toml_edit` — the same writer `accounts.rs` uses to keep a Codex login in a file, so an MCP server copied into `config.toml` survives an account re-seed. **Trust**: a server found in a repository is `project` scope (untrusted); copying it to a user-level file needs an explicit confirmation, enforced by the app on apply, of everything it would run (argv per element, working folder, every env / header entry as the repository wrote it; relative paths are made absolute inside the project); none of its environment is carried unless opted in, and no reference to the user's variables is invented for it. A user's own environment and header values never reach the webview (names only), never a project file (they become `${VAR}`-style references in the destination's syntax, rewritten inside values too; Codex uses `env_vars`, `env_http_headers`, `bearer_token_env_var`), and are masked in every diff by position in the parsed tree. Project-scope paths (and `AGENTS.md` / `CLAUDE.md` / `GEMINI.md`, `.gemini/settings.json`, `.claude/settings.local.json`) are refused when a link or junction leads out of the project. **Writes** (one apply at a time): preview (a token over the files as read and as they would become, refused when stale) → per file, with Claude's own lock (`~/.claude.json.lock`, `mkdir`, stale after 10 s) held for `~/.claude.json`: compare with the previewed text → backup (`<data>/agent-config-backups`, private, newest 20 per file) → unique private temp file in the same folder (owner-only on unix, fsync) renamed over the target, retried and then refused, never rewritten in place → read back and parse. A write that is Kelpie's own and broken is put back (with the earlier files of the edit), but only while the file still holds what Kelpie wrote; a file another program saved since is left as it is and reported. The ACP registry (`agent_registry_fetch`) is one https GET per click (size- and time-capped); an entry becomes a custom agent (`npx` / `uvx`, an exact version; tags, ranges and URL or git specs are replaced by the registry's version or refused) that is stored in the settings and sent to the daemon with the plugin agents (`agent.set_custom`, the user's capability); it has no terminal interface, so the app starts it as a chat only. For tests only (`KELPIE_E2E`): `KELPIE_AGENT_CONFIG_HOME` replaces the user's home for every lookup (without it an end-to-end run cannot write), `KELPIE_ACP_REGISTRY_URL` moves the registry (plain http to 127.0.0.1 / localhost only), and a marker file `agent-setup-corrupt-next` corrupts the next write. |
 | Voice | `crates/kelpie-stt`, `app/src-tauri/src/voice.rs`, `lib/voice.ts` | A separate helper process: sherpa-onnx (static, offline) with a Vietnamese zipformer or Whisper; `cpal` microphone capture mixed to mono; JSON lines over stdin/stdout; models downloaded on request and verified by pinned SHA-256. Kept out of the app and daemon so the native engine can never take them down. |

@@ -31,8 +31,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import net_fault_proxy as nfp  # noqa: E402
@@ -104,9 +102,17 @@ def ticker_of(text):
 
 
 async def connect(base, token, sid=None, old=None, **kw):
-    """A phone on `base`; it carries on from what `old` (a connection that ended) had acknowledged for `sid`."""
-    phone = ps.Phone(base, token, **kw)
-    await phone.open()
+    """A phone on `base`; it carries on from what `old` (a connection that ended) had acknowledged for `sid`. A known device may
+    handshake 5 times in 10 s (4429 after that, and the page tries again later): this waits for the daemon to let it in."""
+    for attempt in range(20):
+        phone = ps.Phone(base, token, **kw)
+        try:
+            await phone.open()
+            break
+        except ConnectionError:
+            if phone.closed != 4429 or attempt == 19:
+                raise
+            await asyncio.sleep(1)
     if old is not None:
         phone.resume_from(old)
     if sid:
@@ -304,6 +310,8 @@ async def main(d):
         first = await q.ask(type="chat_send", id=chat["id"], cid="lost-send", text="into the void")
         check("the retry on a new connection lands", first["type"] == "ack" and first["result"] == "ok", first)
         again = await q.ask(type="chat_send", id=chat["id"], cid="lost-send", text="into the void")
+        # The agent is a process of its own: on a busy machine it reads what it was written later than a fixed pause.
+        await ps.async_wait_for(arrived, 20)
         await asyncio.sleep(1)
         check("a second retry is a duplicate and the agent got one turn", again["result"] == "dup" and arrived() == ["into the void"], (again, arrived()))
         await q.close()
@@ -395,7 +403,8 @@ async def main(d):
     alice = await connect(BASE, alice_token, menu)
     w = await alice.wait(lambda m: m["type"] == "screen" and m["id"] == menu and m["prompt"] and m["waiting_since"], 30)
     since = w["waiting_since"]
-    first = await alice.ask(type="answer", id=menu, waiting_since=since, text="2")
+    # One time: "2" here is "Yes, and don't ask again", which only the computer may choose (`one_shot`).
+    first = await alice.ask(type="answer", id=menu, waiting_since=since, text="1")
     bob = await connect(BASE, bob_token, menu)
     second = await bob.ask(type="answer", id=menu, waiting_since=since, text="1")
     check("another device's late answer is stale and names who answered and when",
@@ -449,29 +458,16 @@ async def loaded(d, level):
     ack = await p.ask(type="input", id=printer, text="x", enter=False, force=True)
     check(f"{level}: typing is never shed", ack["type"] == "ack", ack)
     # Pairing is paced: the second handshake within the gap is refused without spending its code.
-    def post(code, out):
-        req = urllib.request.Request(BASE + "pair", data=('{"code": "%s", "name": "Pace"}' % code).encode(), method="POST", headers={"Content-Type": "application/json"})
-        try:
-            urllib.request.urlopen(req, timeout=30).read()
-            out.append(200)
-        except urllib.error.HTTPError as e:
-            out.append(e.code)
-        except Exception:  # noqa: BLE001
-            out.append(0)
-    codes = []
-    for _ in range(2):
-        link = d.call("mobile.pair_start")["url"]
-        codes.append(link.split("#p=")[1])
-    first, second = [], []
-    t1 = threading.Thread(target=post, args=(codes[1], first), daemon=True)
-    t1.start()
+    links = [d.call("mobile.pair_start")["url"] for _ in range(2)]
+    first = await ps.PairAttempt(BASE, links[1], "Pace").start()
     await asyncio.sleep(0.4)
-    post(codes[1], second)
-    check(f"{level}: a second pairing handshake within {1 if want == 2 else 5} s is refused as busy", second == [503], (first, second))
+    second = await ps.PairAttempt(BASE, links[0], "Pace too").start()
+    check(f"{level}: a second pairing handshake within {1 if want == 2 else 5} s is refused as busy", second.closed == 4503, (first.closed, second.closed, second.silent))
     pending = d.call("mobile.status")["pending"]
     for item in pending:
         d.call("mobile.approve", {"id": item["id"], "allow": False})
-    t1.join(10)
+    if first.session:
+        await first.outcome(10)
     if want == 2 and not QUICK:
         # The heartbeat is twice as patient: nothing for 40 s, then the first.
         await asyncio.sleep(1.2)  # pairing is paced at L2

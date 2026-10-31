@@ -422,7 +422,7 @@ export function createCodexAdapter(ctx: AdapterContext): Adapter {
             detail: [p.reason, files, command && p.cwd ? t("in {dir}", { dir: String(p.cwd) }) : null].filter(Boolean).join("\n") || (command || diff ? undefined : m.method),
             options: [
               { id: "accept", label: t("Allow"), tone: "allow" },
-              { id: "acceptForSession", label: t("Allow for session"), tone: "allow" },
+              { id: "acceptForSession", label: t("Allow for session"), tone: "allow", lasting: true },
               { id: "decline", label: t("Decline"), tone: "deny" },
             ],
           });

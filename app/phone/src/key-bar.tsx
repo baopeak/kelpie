@@ -1,6 +1,7 @@
 // The keys a phone keyboard lacks. Ctrl is sticky for one key: arm it, then type a letter in the reply box
 // and Ctrl+that letter is sent instead of the letter. Hidden for chat sessions.
 import { createSignal, For } from "solid-js";
+import { keyResultText } from "./notice";
 import { connected, sendKey } from "./phone-state";
 import { t } from "./i18n";
 
@@ -29,8 +30,7 @@ const KEYS: { label: string; key: string; title?: string }[] = [
 export function KeyBar(props: { id: string; onResult: (message: string | null) => void }) {
   const press = async (key: string) => {
     setCtrlArmed(false);
-    const r = await sendKey(props.id, key);
-    props.onResult(r.ok ? null : r.reason === "offline" ? t("Offline: the key was not sent.") : r.reason === "unknown" ? t("Not sure the key arrived. Check the screen.") : r.message ?? null);
+    props.onResult(keyResultText(await sendKey(props.id, key)));
   };
   return (
     <div class="keys" role="toolbar" aria-label={t("Keys")}>

@@ -116,7 +116,7 @@ function PermissionCard(props: { item: Permission }) {
           <input class="field" placeholder={t("Tell the agent what to do instead (sent with Deny)…")} value={message()} disabled={!enabled()} onInput={(e) => setMessage(e.currentTarget.value)} />
         </Show>
         <div class="actions">
-          <For each={p().options}>
+          <For each={p().options.filter((o) => !o.lasting)}>
             {(o) => (
               <Show when={!p().retry}>
                 <button class="btn" classList={{ primary: o.tone === "allow" && !p().ask?.length, danger: o.tone === "deny" }} disabled={!enabled()} onClick={() => answer(o)}>
@@ -125,6 +125,7 @@ function PermissionCard(props: { item: Permission }) {
               </Show>
             )}
           </For>
+          <Show when={p().options.some((o) => o.lasting)}><div class="muted" data-lasting-hidden>{t("A choice that lasts (\"always\", \"don't ask again\") can only be made on the computer.")}</div></Show>
           <Show when={p().retry}>
             <button class="btn primary" disabled={!enabled()} onClick={() => ctrl().retryAnswer(p().id)}>{t("Send again: {answer}", { answer: p().retry! })}</button>
           </Show>

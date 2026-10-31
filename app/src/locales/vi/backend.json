@@ -158,5 +158,19 @@
   "the transcript could not be opened": "không mở được bản ghi",
   "choose a file other than the transcript": "hãy chọn một tệp khác với tệp bản ghi",
   "the account folder is on another computer": "thư mục tài khoản nằm trên máy khác",
-  "could not create a temporary file beside the target": "không tạo được tệp tạm bên cạnh tệp đích"
+  "could not create a temporary file beside the target": "không tạo được tệp tạm bên cạnh tệp đích",
+  "Kelpie is already asking you to verify: answer that prompt first.": "Kelpie đang yêu cầu bạn xác minh: hãy trả lời yêu cầu đó trước.",
+  "An earlier verification dialog is still open: close the earlier dialog first. If there is no such dialog, restart Kelpie's background service.": "Một hộp thoại xác minh trước đó vẫn đang mở: hãy đóng hộp thoại đó trước. Nếu không có hộp thoại nào như vậy, hãy khởi động lại dịch vụ nền của Kelpie.",
+  "The verification was not answered in time.": "Yêu cầu xác minh không được trả lời kịp.",
+  "The verification failed: please try again.": "Xác minh không thành công: hãy thử lại.",
+  "You refused or did not answer the last 3 verifications, so Kelpie will not ask again for a few minutes. If you did not start them, turn off phone access and revoke all (that needs no verification).": "Bạn đã từ chối hoặc không trả lời 3 lần xác minh gần nhất, nên Kelpie sẽ không hỏi lại trong vài phút. Nếu không phải bạn khởi tạo, hãy tắt truy cập từ điện thoại và thu hồi tất cả (việc này không cần xác minh).",
+  "Verification was cancelled.": "Đã hủy xác minh.",
+  "That is not the password of the account signed in to this computer.": "Đó không phải mật khẩu của tài khoản đang đăng nhập trên máy tính này.",
+  "That is not the account signed in to this computer.": "Đó không phải tài khoản đang đăng nhập trên máy tính này.",
+  "Windows would not sign that account in here, so it could not confirm you. Set up Windows Hello or check the account.": "Windows không cho tài khoản đó đăng nhập tại đây nên không thể xác nhận bạn. Hãy thiết lập Windows Hello hoặc kiểm tra tài khoản.",
+  "Windows could not check what was entered: please try again.": "Windows không kiểm tra được thông tin vừa nhập: hãy thử lại.",
+  "Windows could not verify you": "Windows không xác minh được bạn",
+  "Removed for now, but this could not be saved: it will come back after a restart unless this is fixed.": "Đã gỡ tạm thời, nhưng không lưu được: thiết bị sẽ quay lại sau khi khởi động lại nếu lỗi này chưa được khắc phục.",
+  "Changed for now, but this could not be saved: the phone will have its old permission after a restart unless this is fixed.": "Đã đổi tạm thời, nhưng không lưu được: điện thoại sẽ có lại quyền cũ sau khi khởi động lại nếu lỗi này chưa được khắc phục.",
+  "Turned off for now, but this could not be saved: it will come back on after a restart unless this is fixed.": "Đã tắt tạm thời, nhưng không lưu được: truy cập sẽ bật lại sau khi khởi động lại nếu lỗi này chưa được khắc phục."
 }

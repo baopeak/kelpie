@@ -28,6 +28,7 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
     agent (fake_acp_agent.py) shows the prompt through `kelpie_sent`, and a stop cancels its permission.
 """
 import asyncio
+import hashlib
 import json
 import os
 import struct
@@ -35,6 +36,10 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
+
+import websockets
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import phone_support as ps  # noqa: E402
@@ -71,7 +76,7 @@ open(CHAT_AGENT, "w", encoding="utf-8").write(
     "import json, sys\n"
     "log = sys.argv[1]\n"
     "def out(m):\n    sys.stdout.write(json.dumps(m) + '\\n'); sys.stdout.flush()\n"
-    "out({'jsonrpc': '2.0', 'id': 7, 'method': 'session/request_permission', 'params': {'toolCall': {'title': 'Run ls'}}})\n"
+    "out({'jsonrpc': '2.0', 'id': 7, 'method': 'session/request_permission', 'params': {'toolCall': {'title': 'Run ls'}, 'options': [{'optionId': 'allow', 'kind': 'allow_once'}, {'optionId': 'always', 'kind': 'allow_always'}]}})\n"
     "for line in sys.stdin:\n"
     "    open(log, 'a', encoding='utf-8').write(line)\n"
     "    m = json.loads(line)\n"
@@ -365,6 +370,8 @@ async def main(d):
     since = waiting["waiting_since"]
     refused = await phone.ask(type="input", id=m1["id"], text="hello", enter=True)
     check("typing a message is refused while the menu shows", refused["type"] == "error" and refused["code"] == "prompt", refused)
+    lasting = await phone.ask(type="answer", id=m1["id"], waiting_since=since, text="2", enter=True)
+    check("a menu's choice that lasts (\"don't ask again\") is refused on a phone", lasting["type"] == "error" and lasting["code"] == "one_shot", lasting)
     a1, a2 = await asyncio.gather(
         phone.ask(type="answer", id=m1["id"], waiting_since=since, text="1", enter=True),
         phone.ask(type="answer", id=m1["id"], waiting_since=since, text="1", enter=True),
@@ -375,7 +382,7 @@ async def main(d):
     check("a double tap: one answer lands, the other is a duplicate", acks == ["ack", "error"] and lost["code"] == "dup" and lost["result"] == "dup" and won["result"] == "ok", (a1, a2))
     got = ps.wait_for(lambda: "ANSWERED=1" in read(d, m1["id"])["text"], 20)
     check("the menu answer reaches the program, once", bool(got) and read(d, m1["id"])["text"].count("ANSWERED=") == 1)
-    late = await phone.ask(type="answer", id=m1["id"], waiting_since=since, text="2")
+    late = await phone.ask(type="answer", id=m1["id"], waiting_since=since, text="3")
     check("an answer to a prompt this device answered is a duplicate, even later", late["type"] == "error" and late["code"] == "dup", late)
     await phone.ask(type="unsub", id=m1["id"])
 
@@ -436,6 +443,8 @@ async def main(d):
     seq_after_reset = max(m["seq"] for m in phone.log[mark:] if m["type"] == "chat")
     desk = Watcher(c1["handle"])
     answer_line = '{"jsonrpc":"2.0","id":7,"result":{"outcome":{"outcome":"selected","optionId":"allow"}}}'
+    lasting = await phone.ask(type="chat_answer", id=c1["id"], request_id=7, line=answer_line.replace('"allow"', '"always"'))
+    check("an answer that lasts is refused on a phone (one_shot), and the agent hears nothing", lasting["type"] == "error" and lasting["code"] == "one_shot" and not agent_log(), lasting)
     r = await phone.ask(type="chat_answer", id=c1["id"], request_id=7, line=answer_line)
     check("the phone answers the permission", r["type"] == "ack", r)
     ps.wait_for(lambda: len(agent_log()) >= 1, 10)
@@ -751,7 +760,155 @@ async def main(d):
     check("a write by id lands in the right session after handles moved", typed["type"] == "ack" and landed and not any("by-id-15" in read(d, o)["text"] for o in others), typed)
     stale = await phone.ask(type="input", id=a["id"], text="x", epoch=epoch)
     check("a request from the old epoch is refused", stale["type"] == "error" and stale["code"] == "epoch", stale)
+    check("nothing readable passes on the wire", not any(word in bytes(phone.wire) for word in (b'"type"', b'"screen"', b"daemon_epoch", b"sessions")), bytes(phone.wire[:80]))
     await phone.close()
+    await security(d)
+
+
+def refused(conn, method, params=None):
+    """The daemon's refusal of `method` on `conn`, or None when it was carried out."""
+    try:
+        conn.call(method, params or {})
+        return None
+    except SystemExit as e:  # kelpie-call's way of reporting an error
+        return str(e)
+
+
+async def security(d):
+    """What a phone's access rests on: only the verified app decides, a code proves the phone, a revoked or reset phone is out."""
+    plain = ps.kc.Conn()  # a program holding the user token, not the app
+
+    # ---------- the old ways in are gone ----------
+    try:
+        async with websockets.connect(BASE.replace("http", "ws") + "ws", open_timeout=5):
+            old_socket = True
+    except Exception:  # noqa: BLE001
+        old_socket = False
+    check("the token socket /ws is gone", not old_socket)
+    try:
+        urllib.request.urlopen(urllib.request.Request(BASE + "pair", data=b"{}", method="POST"), timeout=5)
+        old_pair = 200
+    except urllib.error.HTTPError as e:
+        old_pair = e.code
+    check("POST /pair is gone", old_pair in (404, 405), old_pair)
+
+    # ---------- who may decide ----------
+    link = d.call("mobile.pair_start")["url"]
+    asking = await ps.PairAttempt(BASE, link, "Asking", "write").start()
+    request = ps.pending_request(d, "Asking")
+    shown = hashlib.sha256(asking.pub).hexdigest()[:16].upper()
+    check("the request carries the phone's key fingerprint and what it wants", request["fingerprint"].replace(" ", "") == shown and request["want"] == "write", request)
+    code = asking.code()
+    answer = {"id": request["id"], "allow": True, "code": code, "permission": "write"}
+    check("the user token cannot approve a phone, even with the right code", "app" in (refused(plain, "mobile.approve", answer) or ""), refused(plain, "mobile.status"))
+    check("…and the request still waits", any(p["id"] == request["id"] for p in d.call("mobile.status")["pending"]))
+    wrong = "000000" if code != "000000" else "111111"
+    bad = [refused(d, "mobile.approve", {**answer, "code": wrong}) for _ in range(3)]
+    check("a wrong typed code is refused", all(bad), bad)
+    check("the third wrong code declines the request", not d.call("mobile.status")["pending"] and (await asking.outcome(10) or {}).get("type") == "declined")
+    check("…and the right code no longer brings it back", bool(refused(d, "mobile.approve", answer)))
+    check("no device was added by any of that", not [x for x in d.call("mobile.status")["devices"] if x["name"] == "Asking"])
+    again = await ps.PairAttempt(BASE, link, "Replay").start()
+    check("a spent pairing code gets no answer at all", again.session is None and again.silent, (again.closed, again.silent))
+    made_up = BASE + "#p=" + ps.ln.b64(json.dumps({"v": 1, "dpk": ps.ln.b64(asking.dpk), "psk": ps.ln.b64(os.urandom(32))}).encode())
+    guess = await ps.PairAttempt(BASE, made_up, "Guess").start()
+    check("a made-up pairing code gets no answer at all", guess.session is None and guess.silent, (guess.closed, guess.silent))
+
+    # ---------- raising access, removing it ----------
+    device, device_id = ps.pair(d, BASE, "Keyholder", False)
+    check("the user token cannot raise what a phone may do", bool(refused(plain, "mobile.set_permission", {"id": device_id, "permission": "write"})))
+    check("…nor reset phone access", bool(refused(plain, "mobile.reset")))
+    online = ps.Phone(BASE, device)
+    hello = await online.open()
+    check("a read device stays a read device", hello["device"]["can_write"] is False, hello["device"])
+    check("the kill switch needs no verification: it only removes access", refused(plain, "mobile.revoke_all") is None)
+    await asyncio.sleep(1)
+    status = d.call("mobile.status")
+    check("the kill switch disconnects the phone and forgets every device", online.closed == 4401 and not status["devices"], (online.closed, status["devices"]))
+    check("…and it is told so in a sealed message, not only a close code anyone could send", any(m["type"] == "revoked" for m in online.log), [m["type"] for m in online.log][-5:])
+    check("…and turns phone access off", not status["enabled"] and not status["running"], status["enabled"])
+    actions = [e["action"] for e in d.call("mobile.audit", {"limit": 50})["entries"]]
+    log = d.call("mobile.audit", {"limit": 50})
+    check("the audit log has it, and its chain holds", "revoke_all" in actions and log["intact"], actions[:8])
+
+    d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    gone = ps.Phone(BASE, device)
+    check("a phone removed by the kill switch cannot come back", await gone.open() is None and gone.closed == 4401, gone.closed)
+    await gone.close()
+    device2, _ = ps.pair(d, BASE, "Second life", True)
+    online = ps.Phone(BASE, device2)
+    await online.open()
+    d.call("mobile.reset")
+    await asyncio.sleep(1)
+    check("reset turns phone access off", not d.call("mobile.status")["running"])
+    check("…and tells a connected phone it was removed", online.closed == 4401 and any(m["type"] == "revoked" for m in online.log), online.closed)
+    await online.close()
+    d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    stale = ps.Phone(BASE, device2)
+    check("after a reset the desktop has a new key: the old pairing cannot connect", await stale.open() is None, stale.closed)
+    await stale.close()
+    device3, _ = ps.pair(d, BASE, "Third life", True)
+    check("a phone pairs again after a reset, with the new key", device3.dpk != device2.dpk)
+    fresh = ps.Phone(BASE, device3)
+    check("…and connects", (await fresh.open())["device"]["can_write"] is True)
+
+    # ---------- turning phone access off is not removing a phone ----------
+    d.call("mobile.disable")
+    await asyncio.sleep(1)
+    check("turning phone access off ends the connection and says nothing of the pairing", fresh.closed not in (None, 4401) and not any(m["type"] == "revoked" for m in fresh.log), fresh.closed)
+    check("…and the device stays listed", any(x["name"] == "Third life" for x in d.call("mobile.status")["devices"]))
+    await fresh.close()
+    d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    fresh = ps.Phone(BASE, device3)
+    check("…so it connects again once it is back on", (await fresh.open() or {}).get("device", {}).get("can_write") is True, fresh.closed)
+    await fresh.close()
+
+    # ---------- what keeps phones longer ----------
+    plain = ps.kc.Conn()
+    days = d.call("mobile.status")["dormant_days"]
+    check("the user token may shorten how long unused phones stay", refused(plain, "mobile.set_options", {"dormant_days": days - 1}) is None)
+    check("…but not lengthen it", "app" in (refused(plain, "mobile.set_options", {"dormant_days": days + 30}) or ""))
+    check("…nor keep them for ever", "app" in (refused(plain, "mobile.set_options", {"dormant_days": 0}) or ""))
+    check("…which left the setting as it was", d.call("mobile.status")["dormant_days"] == days - 1)
+
+    # ---------- the person says no ----------
+    low, low_id = ps.pair(d, BASE, "Stays low", False)
+    d.env = {**(d.env or {}), "KELPIE_TEST_USER_PRESENCE": "deny"}
+    d.restart()
+    check("this daemon answers every verification with no", d.call("daemon.info").get("test_user_presence") == "deny")
+    link = d.call("mobile.pair_start")["url"]
+    asking = await ps.PairAttempt(BASE, link, "Not verified", "write").start()
+    request = ps.pending_request(d, "Not verified")
+    answer = {"id": request["id"], "allow": True, "code": asking.code(), "permission": "write"}
+    no = refused(d, "mobile.approve", answer)
+    check("the right code and a failed verification is an error", "cancelled" in (no or ""), no)
+    status = d.call("mobile.status")
+    check("…and no device is added", not [x for x in status["devices"] if x["name"] == "Not verified"], status["devices"])
+    check("…and the request waits for another try", any(p["id"] == request["id"] for p in status["pending"]))
+    no = refused(d, "mobile.approve", {"id": request["id"], "allow": False})
+    check("declining asks nobody", no is None, no)
+    check("…and the phone hears it", (await asking.outcome(10) or {}).get("type") == "declined")
+    for method, params in (("mobile.set_permission", {"id": low_id, "permission": "write"}), ("mobile.set_write", {"id": low_id, "permission": "write"})):
+        no = refused(d, method, params)
+        check(f"{method} {params} needs the person, and they said no", "cancelled" in (no or ""), no)
+    log = d.call("mobile.audit", {"limit": 50})["entries"]
+    failed = [e for e in log if e["action"] == "verify_failed"]
+    check("each refused verification is in the audit log, with what it was about", len(failed) == 3 and "Stays low" in failed[0]["summary"] and "cancelled" in failed[0]["summary"], [e["summary"][:60] for e in failed])
+    check("…and the third stopped the prompts for a while", any(e["action"] == "verify_paused" for e in log))
+    no = refused(d, "mobile.set_write", {"id": low_id, "can_write": True})
+    check("a fourth is not asked at all, and says why", "will not ask again" in (no or ""), no)
+    no = refused(d, "mobile.set_permission", {"id": low_id, "permission": "read"})
+    check("no change at all asks nobody, even now", no is None, no)
+    check("…so the phone may still only read", next(x for x in d.call("mobile.status")["devices"] if x["id"] == low_id)["permission"] == "read")
+    d.restart()
+    no = refused(d, "mobile.reset")
+    check("a reset needs the person, and they said no", "cancelled" in (no or ""), no)
+    check("…so nothing was reset", any(x["id"] == low_id for x in d.call("mobile.status")["devices"]) and d.call("mobile.status")["running"])
+    no = refused(d, "mobile.set_options", {"dormant_days": 0})
+    check("keeping unused phones for ever needs the person, and they said no", "cancelled" in (no or ""), no)
+    d.env = {k: v for k, v in d.env.items() if k != "KELPIE_TEST_USER_PRESENCE"}
+    d.restart()
+    check("the next daemon answers yes again", d.call("daemon.info").get("test_user_presence") == "approve")
 
 
 # Pinned calm: the timings below are the calm ones, whatever else this machine is doing.

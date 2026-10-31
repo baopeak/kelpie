@@ -3,11 +3,32 @@
 //! `session.update`, `session.attach`, closing, phone settings and the other admin methods cannot
 //! be reached by naming them.
 
-/// What a paired device may do, least first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// What a paired device may do, least first. `Control` (screen takeover) is the native app's only; no verb needs it yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Permission {
     Read,
     Write,
+    Control,
+}
+
+impl Permission {
+    pub fn name(self) -> &'static str {
+        match self {
+            Permission::Read => "read",
+            Permission::Write => "write",
+            Permission::Control => "control",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Permission> {
+        Some(match s {
+            "read" => Permission::Read,
+            "write" => Permission::Write,
+            "control" => Permission::Control,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

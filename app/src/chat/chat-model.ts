@@ -41,7 +41,7 @@ export type ChatItem =
   | { kind: "thinking"; id: string; text: string; streaming?: boolean; group?: string; at?: number; doneAt?: number }
   | { kind: "tool"; id: string; name: string; summary: string; input?: unknown; output?: string; status: "running" | "done" | "error"; diff?: { path: string; text: string }[]; category?: ToolCategory; at?: number }
   | {
-      kind: "permission"; id: string; title: string; detail?: string; options: { id: string; label: string; tone?: "allow" | "deny" }[]; resolved?: string; at?: number;
+      kind: "permission"; id: string; title: string; detail?: string; options: { id: string; label: string; tone?: "allow" | "deny"; lasting?: boolean }[]; resolved?: string; at?: number;
       /** Shown in the card: the command to run, the edit to make, the plan to approve. */
       command?: string; diff?: { path: string; text: string }[]; plan?: string;
       /** Questions answered in the card instead of with options. */

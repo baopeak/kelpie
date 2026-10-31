@@ -4,7 +4,7 @@ import { createSignal, For, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
 import { Inbox } from "./inbox";
 import { localeSetting, setLocale, t, type LocaleSetting } from "./i18n";
-import { closeSession, conn, connected, device, forgetDevice, link, lastLiveAt, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, sessions } from "./phone-state";
+import { closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, sessions } from "./phone-state";
 import { labelOf, needsCount } from "./inbox-order";
 import { SessionView } from "./session-view";
 import { setTheme, theme, type ThemeSetting } from "./theme";
@@ -23,7 +23,7 @@ function Pairing() {
   const [busy, setBusy] = createSignal(false);
   const go = async () => {
     setBusy(true);
-    setStatus(t("Waiting for approval on your computer…"));
+    setStatus(t("Connecting to your computer…"));
     const error = await pairDevice(pairing()!, nameBox.value);
     if (error) {
       setStatus(error);
@@ -34,11 +34,19 @@ function Pairing() {
     <div class="card">
       <h2>{pairing() ? t("Pair this device") : t("Not paired")}</h2>
       <Show when={pairing()} fallback={<p class="muted">{notPairedMessage() ?? t("In Kelpie on your computer open Settings → Mobile → Pair a phone, and scan the QR code with this device.")}</p>}>
-        <p class="muted">{t("Name this device, then approve it in Kelpie on your computer.")}</p>
-        <input class="field" ref={nameBox} value={guessName()} maxlength="40" />
-        <p />
-        <button class="btn primary" disabled={busy()} onClick={go}>{t("Pair this device")}</button>
-        <p class="muted" role="status">{status()}</p>
+        <Show when={pairShown()} fallback={
+          <>
+            <p class="muted">{t("Name this device. Your computer then asks you to type a code this phone shows.")}</p>
+            <input class="field" ref={nameBox} value={guessName()} maxlength="40" />
+            <p />
+            <button class="btn primary" disabled={busy()} onClick={go}>{t("Pair this device")}</button>
+            <p class="muted" role="status">{status()}</p>
+          </>
+        }>
+          <p>{t("Type this code into Kelpie on your computer:")}</p>
+          <p class="pair-code" data-pair-code>{pairShown()!.digits}</p>
+          <p class="muted">{t("This device's key, which your computer shows too:")} <span class="pair-key" data-pair-key>{pairShown()!.key}</span></p>
+        </Show>
       </Show>
     </div>
   );
@@ -68,8 +76,23 @@ function StateBanner() {
       <div class={`banner ${info().tone}`} role="status" data-banner={conn().kind} onClick={() => conn().kind === "replaced" && link.kick()}>
         <b>{info().label}</b> {info().detail}
         <Show when={!connected() && asOf()}><div class="asof">{asOf()}</div></Show>
+        <Show when={conn().kind === "not_paired_here"}>
+          <div class="actions"><button class="btn danger" data-forget onClick={() => { if (confirm(t("Forget this pairing on this device?"))) forgetDevice(); }}>{t("Forget this device")}</button></div>
+        </Show>
       </div>
     </Show>
+  );
+}
+
+/** Why this page may only read, and news about the computer's other devices. */
+function SecurityBanner() {
+  return (
+    <>
+      <Show when={plainHttpOrigin() || device()?.capped}>
+        <div class="banner warn" role="status" data-banner="plain-http">{t("Plain HTTP: someone on this network could swap this page, so it can only read here. Open it over HTTPS or Tailscale to type.")}</div>
+      </Show>
+      <Show when={deviceNews()}><div class="banner" role="status" data-banner="device-news">{deviceNews()}</div></Show>
+    </>
   );
 }
 
@@ -123,6 +146,7 @@ export function App() {
         <Show when={paired()}><ConnIndicator onClick={() => setSheet(true)} /></Show>
       </header>
       <StateBanner />
+      <SecurityBanner />
       <main id="view">
         <Show when={paired()} fallback={<Pairing />}>
           <Show when={openId()} keyed fallback={<Inbox />}>{(id) => <SessionView id={id} />}</Show>
