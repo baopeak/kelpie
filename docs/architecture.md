@@ -61,6 +61,7 @@ the dev scripts and tests).
 | Daemon endpoint | named pipe `\\.\pipe\kelpie-<user>-v1` | `kelpied-v1.sock` (0600) in the data folder | same as macOS |
 | Daemon runs from | a copy in `<data>/daemon/a` or `b` (release builds) | the app bundle | the install (`/usr/bin`, .deb) or, from an AppImage (whose mount ends with the app), a copy in `<data>/daemon/a`, rewritten for each new build (a running daemon keeps its unlinked file; `b` only when `a` cannot be written). The daemon, and every program the app starts (editors, `xdg-open`, git, ssh, user commands), gets the app's environment without the AppImage runtime and GTK hook variables (`daemon_runtime::clean_env`), so sessions and those programs never see the mount |
 | Session processes | Job Object per session, sideloaded ConPTY | process groups, `killpg` | same as macOS |
+| Verifying the person (phone access) | Windows Hello, else the password prompt; text is Kelpie's | Touch ID or the login password; text is Kelpie's | polkit (`pkcheck`); text is polkit's own. Refused with no polkit or no agent. Not yet run on a real desktop |
 | Agent PATH | PATH + PATHEXT, npm shims unwrapped | login shell: `$SHELL -l -c 'exec …'` | same as macOS; without `SHELL`, the account's shell from the user database, else `/bin/sh` |
 | Keep awake | `SetThreadExecutionState` | `caffeinate -i -w <daemon pid>` | `systemd-inhibit --what=idle:sleep --mode=block sleep infinity` (whichever lock a desktop's automatic suspend honours; a menu suspend waits, the lid follows logind's `LidSwitchIgnoreInhibited`), `PR_SET_PDEATHSIG` ties it to the daemon; none without systemd (logged, also when logind refuses later) |
 | Secrets (`keyring`) | Credential Manager | Keychain | Secret Service over D-Bus (`sync-secret-service`, `crypto-rust`); no service = an error naming what to install, never a fallback |
@@ -95,7 +96,12 @@ anything but `daemon.info` answers:
   (`auth::APP_ONLY`), and for a `mobile.set_options` that keeps unused phones longer. Those that raise access take effect only
   after **the daemon itself** asked the operating system to verify the person (`crates/kelpied/src/user_presence.rs`: Windows
   Hello, else the Windows password prompt checked with `LogonUserW` and required to be this user's account; macOS Touch ID or the
-  login password). That is the gate. Declining a phone and lowering a permission ask nobody; `mobile.reset` always asks. What
+  login password; Linux polkit, by running `pkcheck --action-id org.freedesktop.policykit.exec --process <own pid>
+  --allow-user-interaction`, which runs nothing as root). That is the gate. **On Linux polkit's agent shows polkit's own generic text, not the daemon's: it
+  cannot say which phone this is about.** The app's approval dialog names the device, its key and what it asks for before the
+  prompt comes up, so that is what the person reads. That action's default asks for an administrator's password, so an account that is
+  not an administrator cannot pass, and a distribution's polkit rules can change what it asks. With no polkit, or no agent to ask through
+  (a headless login), it is refused with a message saying what to do; past the time limit `pkcheck` is ended. This has not yet run on a real Linux desktop. Declining a phone and lowering a permission ask nobody; `mobile.reset` always asks. What
   the prompt says is built by the daemon from its own records, with a phone's name in quotes; a caller supplies no text. The
   prompt runs on a thread of its own (`Daemon::after_verifying`), the request is answered when it ends, one prompt at a time, for at
   most 280 s: then the caller gets an error, Hello and macOS's prompt are cancelled, a password dialog (which cannot be) is ignored, and whatever it says
@@ -107,7 +113,10 @@ anything but `daemon.info` answers:
   of the text. **Open:** whether Windows Hello's face recognition passes with no deliberate act has not been tried; if it does, a
   person looking at the screen would approve whatever is asked. In the
   app `mobile_secure_call` lets the daemon's dialog come to the front (`AllowSetForegroundWindow`) and passes the window as a
-  hint for parenting it, which the daemon checks (`IsWindow`); `daemon_call` refuses the app-only methods. A debug build also
+  hint for parenting it, which the daemon checks (`IsWindow`). **On Windows the app's window is locked while the dialog is up,** as a window
+  behind its dialog is: it takes no click or key, while requests and sessions keep going. The app enables it again as soon as the call
+  ends, however it ends (an answer, an error, the time limit, or the daemon going away, which ends the call at once), so it is never left
+  locked. `daemon_call` refuses the app-only methods. A debug build also
   trusts `KELPIE_TRUSTED_APP` and answers verifications from `KELPIE_TEST_USER_PRESENCE` (both read by the daemon); a release build has
   neither path, and unit tests answer through an injected decision and refuse when there is none, so they cannot raise a real
   prompt. `mobile.revoke_all` only removes access, so the plain user token may call it with no verification.
@@ -381,7 +390,9 @@ Turning access off is therefore not how to cut a phone off: `mobile.enable` stay
   4409 (the page then waits until it is looked at again). Close codes: 4401 the device was removed, always after the sealed
   message `{type: "revoked"}` (see "Phone link": only that message makes a phone forget its pairing); 4408 connect again, the device stays
   paired (its permission changed, phone access was turned off, the connection fell behind the daemon's events and may have
-  missed a removal, which the next connect finds out, or it has been up for 24 h); 4409 replaced. A close frame that cannot leave
+  missed a removal, which the next connect finds out, or it has been up for 24 h); 4409 replaced, also when the same key was paired
+again: the record is one per key, and the browser that paired again uses the key it holds for that computer, so nothing still using the old
+record (another tab) is told to forget a pairing that stands. A close frame that cannot leave
   within 5 s is given up on. Rows are compared by text.
 - **Typing and answering** share one path with the desktop's quick answer (`Session::answer`,
   `Session::type_message`): text goes through `typed_text` (control characters and with them a
@@ -664,8 +675,7 @@ still open, also a card a replay showed, since the agent is waiting on it; one a
 left alone. `ChatController` applies the line ahead of the adapter
 (`Adapter.describeAnswer` puts it in the card's words) and it never reaches an agent: a replayed
 answer only changes what a card shows. An older daemon writes none, and its cards say what they
-did; an older app's adapters ignore the type. Level 20 skips 18 and 19, which belong to the phone
-work on other branches. Claude 2.1.314 shrinks a picture before it echoes it (a 4 MB picture came
+did; an older app's adapters ignore the type. Levels 18 and 19 are unused. Claude 2.1.314 shrinks a picture before it echoes it (a 4 MB picture came
 back in a 680 KB line), so a replay usually shows the picture from the log. As a safety net, a line
 over 2 MiB (`PICTURE_LINE_MAX`) loses the bytes of the pictures in
 the person's message before it is logged or sent to anyone attached, because one 5 MB picture would
@@ -772,6 +782,10 @@ pane, which a tab or project switch unmounts. When the connection is gone it is 
 as `declined`, and a `{"type":"kelpie_unsent",...}` line in the chat log keeps the note for whoever looks next (the daemon's
 `client_gone`). If the daemon does not take the lines (`busy`, `switching`,
 `too_late`) the window undoes what building them did: the pending bubble, `busy` and the adapter's own state (`Adapter.snapshot`).
+Lines over 16 MiB cannot go, whoever builds them: `chat.write_turn` answers `too_large` and the message leaves the queue with that reason, so everyone is told
+and what waits behind it moves on. A window whose own connection refused the lines (over the frame limit) says so with `{lines: null,
+too_large: true}`, and any other failure is a final `null`. Both `chat.queue`'s `dropped` and `kelpie_unsent` carry the names of the pictures (`images`), so a note
+keeps them after a reload.
 The window's `chat.send {handle, cid, text, rich, images?}` answers `{qid, state, ahead}` or `{refused, message}`.
 `chat.queue_op {handle, op, qid?}` is `cancel` (any queued message, whoever's; an offered or written one is `too_late`), `front`
 ("send now"; `interrupt: true` when the adapter's interrupt follows and must not pause the queue), `take` (the window puts the message
@@ -804,8 +818,6 @@ Every message that starts a turn is logged as `{"type":"kelpie_sent","qid","cid"
 Claude and Codex echo their own, and the line only names the sender. It is display-only: history replay never sends a command to an
 agent. With no window attached the daemon also answers an ACP agent's request for the client (`fs/*`, `terminal/*`) with `-32601`, so a
 turn cannot hang on it. The queue is in memory and dies with the daemon run, by design. Below API 21 the window keeps its own queue.
-
-
 
 ## Composer
 

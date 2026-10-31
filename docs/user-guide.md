@@ -929,7 +929,14 @@ port 4817; choose a private or Tailscale address — never every interface; HTTP
 certificate, e.g. from `tailscale cert`). **Pair a browser on this network** shows a QR code valid
 for two minutes; scan it, name the phone, and type the six digits it shows into Kelpie. Windows then
 asks you to confirm with Windows Hello or your password (Touch ID or your password on a Mac). Read
-that prompt: it names the phone and what it would be allowed to do. Raising what a phone may do,
+that prompt: it names the phone and what it would be allowed to do. While it is up Kelpie's window
+does not respond; your sessions keep running, and the window comes back as soon as the prompt ends. On
+Linux the confirmation comes from polkit, your desktop's password prompt, and it asks for an
+administrator's password. **Its text is generic and does not say which phone this is about**, so read
+Kelpie's own dialog before it: that one names the phone, its key and what it asks for. Without polkit or
+an authentication agent (a headless login) Kelpie refuses and says what to do. Scanning a new code on a phone
+that is already paired to this computer replaces its old entry in the list; if you cancel, the old
+pairing keeps working. Raising what a phone may do,
 resetting phone access and keeping unused phones paired for longer ask the same way; declining a phone,
 lowering a permission and removing a phone do not. If you refuse three prompts in a few minutes,
 or leave three unanswered in 20, Kelpie stops asking for five minutes: if you did not start them, use

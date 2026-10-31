@@ -1734,7 +1734,7 @@ impl Daemon {
                 self.mobile.unsaved(crate::mobile::NOT_SAVED_REMOVED)?;
                 json!(true)
             }
-            // `mobile.set_write {id, can_write}` is the API-18 name, kept for one release. One reading of the parameters decides
+            // `mobile.set_write {id, can_write}` is the name from before API 22, kept for one release. One reading of the parameters decides
             // both whether this raises access and what is applied: lowering takes effect at once, raising after the person verified.
             "mobile.set_permission" | "mobile.set_write" => {
                 let device = param(&params, "id")?.as_str().unwrap_or_default().to_string();

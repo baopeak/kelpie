@@ -4,7 +4,7 @@
 //!   record carries an HMAC-SHA256 over what it grants, keyed by a secret in the OS credential store: a record edited in the
 //!   file (a raised permission, a swapped key) no longer verifies and is refused until it is paired again. `last_seen` is
 //!   not covered (it changes on every connection and grants nothing).
-//! - The file of the token-based phone access (`mobile.json`, API ≤ 18) is read once, for its settings and the names of its
+//! - The file of the token-based phone access (`mobile.json`, API ≤ 21) is read once, for its settings and the names of its
 //!   devices, which are listed as "pair again" (their tokens mean nothing to kelpie-link). It is never written: an older
 //!   Kelpie started after this one finds it as it left it.
 //! - A file that cannot be read, or one from a newer Kelpie, is copied aside and left alone: phone access stays off and

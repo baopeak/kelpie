@@ -11,6 +11,8 @@ dependencies: [2]
 
 > **Addendum 2026-10-30.** Absorbed during implementation: SAS from the handshake hash with 3 tries, remote-forbidden operations (one-shot approvals), audit log, kill switch, dormant-device expiry, noble JS crypto (`app/phone/src/noise.ts`) instead of the wasm build. Path D later changes lines below: relay tokens are no longer native-only (phase 4), `control` for the PWA awaits the user (phase 7), and `src/client.rs` is deferred with the native app. Phase 3 itself stays as implemented; those changes land in 3a, 3c and 4. API 22.
 
+> **Manual results 2026-10-31, real prompt.** Confirmed on Windows 10 with a real iPhone: the Windows Hello PIN path. Hello takes the app's window across processes, comes to the front, shows the right text; Cancel adds nothing and leaves the audit line; the right PIN pairs. **Still not run:** the password dialog, Hello Face, Microsoft or PIN-only accounts on the password fallback, macOS, Linux. **Linux uses polkit (`pkcheck`, owner's decision) and needs a run on a real Linux desktop before release**: the agent's text, a user-service daemon finding the session's agent, a non-administrator account, and ending `pkcheck` at the time limit taking the dialog away have only been reasoned about.
+
 ## Overview
 One Rust crate that pairs a phone by QR and carries every phone message end-to-end encrypted (Noise), independent of the pipe.
 Device approval and permission upgrades require **user presence in the Kelpie app**, not just an RPC, because any same-user program can read
