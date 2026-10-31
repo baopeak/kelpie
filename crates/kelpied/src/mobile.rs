@@ -3712,10 +3712,23 @@ mod tests {
         let mut replies = 0;
         for _ in 0..12 {
             let mut replay = network.websocket().await;
-            ws_send(&mut replay.tcp, 2, &first).await.unwrap();
-            replies += usize::from(ws_recv(&mut replay.tcp).await.is_some());
+            // Once the address is locked out the daemon has closed by now, and this write may be refused.
+            let _ = ws_send(&mut replay.tcp, 2, &first).await;
+            // A reply is a binary frame. This is closed with 4429 once the address is locked out, which is no reply: where the write above
+            // resets the connection (Windows) that close never arrives, and elsewhere it does.
+            match ws_recv(&mut replay.tcp).await {
+                Some((2, _)) => replies += 1,
+                Some((8, body)) => assert_eq!(body.get(..2), Some(&link::TOO_MANY.to_be_bytes()[..]), "a close says why"),
+                Some(other) => panic!("unexpected frame {other:?}"),
+                None => {}
+            }
         }
         assert_eq!(replies, 1, "only the first time");
+        // The first, which never finished its handshake, and each replay count against the address: it is locked out by now, and
+        // whoever connects from it hears so before saying anything.
+        let mut locked_out = network.websocket().await;
+        let (opcode, body) = ws_recv(&mut locked_out.tcp).await.expect("told");
+        assert_eq!((opcode, body.get(..2)), (8, Some(&link::TOO_MANY.to_be_bytes()[..])));
         let other: IpAddr = "192.168.1.30".parse().unwrap();
         assert!(d.mobile.handshake_allowed(other), "another address is not held up");
         // At once, by the clock: one address gets its share and no more, and what it leaves is the others'.
