@@ -133,6 +133,8 @@ struct Running {
     loopback: Option<LoopbackListener>,
     /// `<name>:8443` while Tailscale publishes this computer: the name, our entry and the listener all hold.
     ts_origin: Option<String>,
+    /// The port our entry forwards to could not be had, and the entry could not be removed either: Tailscale may be leading phones to another program.
+    loopback_lost: bool,
 }
 
 struct LoopbackListener {
@@ -1475,12 +1477,11 @@ pub async fn enable(daemon: Arc<Daemon>, params: Value) -> Result<Value> {
         m.audit("-", "phone_access_on", "turned on");
     }
     tailscale::remove_after_off(&daemon);
-    match start(daemon.clone()).await {
-        Ok(_) => *m.last_error.lock() = None,
-        Err(e) => {
-            *m.last_error.lock() = Some(format!("{e:#}"));
-            return Err(e);
-        }
+    // Before it starts: with Tailscale mode on it can go on with no address of this network, and says so.
+    *m.last_error.lock() = None;
+    if let Err(e) = start(daemon.clone()).await {
+        *m.last_error.lock() = Some(format!("{e:#}"));
+        return Err(e);
     }
     Ok(m.status(false))
 }
@@ -1501,7 +1502,17 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
         let c = daemon.mobile.config.lock();
         (c.ip.clone(), c.port.unwrap_or(DEFAULT_PORT), c.cert.clone(), c.key.clone())
     };
-    let ips = listen::wanted(ip.as_deref())?;
+    // With Tailscale mode on, no address here is no reason to stop: a laptop away from home has none, and that is what the mode is for.
+    let keep_going = daemon.mobile.config.lock().tailscale;
+    let mut no_network = None;
+    let ips = match listen::wanted(ip.as_deref()) {
+        Ok(ips) => ips,
+        Err(e) if keep_going => {
+            no_network = Some(e);
+            Vec::new()
+        }
+        Err(e) => return Err(e),
+    };
     // The key is made before anything listens: a credential store that will not keep it is reported now.
     daemon.mobile.link_key()?;
     let tls = match (cert, key) {
@@ -1511,7 +1522,11 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
     let listeners = Arc::new(listen::Listeners::default());
     let (fresh, _, error) = listeners.rebind(&ips, port).await;
     if fresh.is_empty() {
-        return Err(error.unwrap_or_else(|| anyhow!("nothing to listen on")));
+        let why = error.or(no_network).unwrap_or_else(|| anyhow!("nothing to listen on"));
+        if !keep_going {
+            return Err(why);
+        }
+        *daemon.mobile.last_error.lock() = Some(format!("{why:#}"));
     }
     let stop = Arc::new(Generation::new());
     let routes = Router::new().route("/link", get(link_socket)).fallback(page).with_state(daemon.clone());
@@ -1522,7 +1537,7 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
             listeners.stop_all();
             bail!("mobile access was disabled while starting");
         }
-        if let Some(old) = daemon.mobile.running.lock().replace(Running { tls: tls.is_some(), port, listeners: listeners.clone(), stop: stop.clone(), app: routes, loopback: None, ts_origin: None }) {
+        if let Some(old) = daemon.mobile.running.lock().replace(Running { tls: tls.is_some(), port, listeners: listeners.clone(), stop: stop.clone(), app: routes, loopback: None, ts_origin: None, loopback_lost: false }) {
             old.listeners.stop_all();
             old.stop.cancel();
         }
@@ -1583,6 +1598,9 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
                 }
                 if changed {
                     tracing::info!("phone access now on {:?}", listeners.addrs());
+                    if !listeners.addrs().is_empty() {
+                        *d.mobile.last_error.lock() = None;
+                    }
                     advertise(&d.mobile, &listeners);
                     d.broadcast("mobile.updated", json!({}));
                 }
@@ -6266,6 +6284,73 @@ mod tests {
         tailscale::resume(d.clone()).await;
         assert_eq!(fake.changes(), changes);
         assert_eq!(*fake.serve.lock(), tailscale::fake::Fake::entry(port));
+    }
+
+    /// The mode's listener does not depend on the address of this network: a laptop away from home is what the mode is for.
+    #[tokio::test]
+    async fn with_the_mode_on_no_listener_here_does_not_stop_the_one_for_tailscale() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let port = publish(&d).await;
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = held.local_addr().unwrap().port();
+        let on = enable(d.clone(), json!({"ip": "127.0.0.1", "port": busy})).await.expect("it starts");
+        assert!(on["running"].as_bool().unwrap() && on["addresses"].as_array().unwrap().is_empty(), "{on}");
+        assert!(on["error"].as_str().is_some_and(|e| e.contains("listen on")), "the person is told: {on}");
+        for _ in 0..500 {
+            if d.mobile.tailscale_origin().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(d.mobile.loopback_port(), Some(port));
+        assert_eq!(d.mobile.running_url().unwrap(), format!("https://{ORIGIN}/"));
+        assert!(d.mobile.pair_start(false).unwrap()["url"].as_str().unwrap().starts_with(&format!("https://{ORIGIN}/#p=")));
+        // With the mode off it is the error it always was.
+        let (tx, mut replies) = app_client(&d, 102);
+        ask_app(&d, &tx, &mut replies, 102, "mobile.set_tailscale", json!({"on": false})).await;
+        assert!(enable(d.clone(), json!({"ip": "127.0.0.1", "port": busy})).await.is_err());
+        drop(held);
+    }
+
+    /// Each reason for no listener behind our entry is told apart: only one of them leads phones to someone else.
+    #[tokio::test]
+    async fn no_listener_behind_our_entry_says_why() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let port = publish(&d).await;
+        // Phone access did not start: nobody took anything, and the entry is there.
+        if let Some(r) = d.mobile.running.lock().take() {
+            r.listeners.stop_all();
+            r.stop.cancel();
+        }
+        let told = tailscale::status(d.clone()).await.unwrap();
+        assert_eq!((told["serve"].as_str(), told["origin"].is_null()), (Some("not_listening"), true), "{told}");
+        // Someone took the port and Tailscale would not let the entry go: the one case to warn of.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let held = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        *fake.off_fails.lock() = true;
+        network.restart().await;
+        let mut told = Value::Null;
+        for _ in 0..500 {
+            told = tailscale::status(d.clone()).await.unwrap();
+            if told["serve"] == "port_busy" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!((told["serve"].as_str(), told["origin"].is_null()), (Some("port_busy"), true), "{told}");
+        assert_eq!(d.mobile.status(true)["tailscale"]["to_remove"], true);
+        // Tailscale lets go: the entry is removed, and Settings offers to publish again.
+        *fake.off_fails.lock() = false;
+        let told = tailscale::status(d.clone()).await.unwrap();
+        assert_eq!(told["serve"], "missing", "{told}");
+        assert_eq!(*fake.serve.lock(), "{}");
+        drop(held);
     }
 
     /// A plain pairing secret while the mode is on.

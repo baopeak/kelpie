@@ -343,16 +343,19 @@ fn install_qr(origin: &str) -> Option<String> {
 }
 
 /// What Settings says about it: `state` is `Detected::name`, `serve` one of `off`, `ours`, `missing` (the mode is on and the entry is gone),
-/// `left_behind` (the mode is off and our entry could not be removed), `port_busy` (the mode is on and our loopback port is someone else's),
+/// `left_behind` (the mode is off and our entry could not be removed), `port_busy` (the mode is on, another program holds our loopback port, and the entry
+/// could not be removed, so phones may be reaching that program), `not_listening` (the mode is on and our listener is not up, with no such program),
 /// `taken`, `unknown`.
 fn described(m: &Mobile, detected: &Detected, entry: Option<Entry>) -> Value {
     let on = m.config.lock().tailscale;
     let origin = m.tailscale_origin();
+    let lost = m.running.lock().as_ref().is_some_and(|r| r.loopback_lost);
     let serve = match (entry, on, m.loopback_port().is_some()) {
         (Some(Entry::Free), false, _) => "off",
         (Some(Entry::Free), true, _) => "missing",
         (Some(Entry::Ours(_)), false, _) => "left_behind",
-        (Some(Entry::Ours(_)), true, false) => "port_busy",
+        (Some(Entry::Ours(_)), true, false) if lost => "port_busy",
+        (Some(Entry::Ours(_)), true, false) => "not_listening",
         (Some(Entry::Ours(_)), true, true) => "ours",
         (Some(Entry::Taken), ..) => "taken",
         (Some(Entry::Unreadable) | None, ..) => "unknown",
@@ -385,6 +388,11 @@ pub async fn status(daemon: Arc<Daemon>) -> Result<Value> {
     .await?;
     if let Some(removed) = removed {
         m.removal_done(removed);
+        if removed {
+            if let Some(r) = m.running.lock().as_mut() {
+                r.loopback_lost = false;
+            }
+        }
     } else if known.is_some() && !m.config.lock().tailscale && matches!(entry, Some(Entry::Free | Entry::Taken)) {
         m.removal_done(true);
     }
@@ -616,6 +624,9 @@ pub async fn resume(daemon: Arc<Daemon>) {
             let change = m.tailscale_change.lock().await;
             let known = m.config.lock().tailscale_port;
             if let Ok(removed) = off_runtime(m, move |cli| remove_ours(cli, known)).await {
+                if let Some(r) = m.running.lock().as_mut() {
+                    r.loopback_lost = removed.is_err();
+                }
                 m.config.lock().tailscale_remove = removed.is_err();
                 m.keep();
             }

@@ -60,8 +60,8 @@ interface TailscaleStatus {
   on: boolean;
   state: "not_installed" | "stopped" | "needs_login" | "https_off" | "unreadable" | "ready";
   fqdn: string | null;
-  /** `off` nothing of ours; `ours` published; `missing` the mode is on and the entry was removed; `left_behind` the mode is off and the entry could not be removed; `port_busy` our local port is someone else's; `taken` port 8443 is used by something else; `unknown` it could not be read. */
-  serve: "off" | "ours" | "missing" | "left_behind" | "port_busy" | "taken" | "unknown";
+  /** `off` nothing of ours; `ours` published; `missing` the mode is on and the entry was removed; `left_behind` the mode is off and the entry could not be removed; `port_busy` another program holds our local port and the entry could not be removed; `not_listening` the mode is on and Kelpie's listener is not up; `taken` port 8443 is used by something else; `unknown` it could not be read. */
+  serve: "off" | "ours" | "missing" | "left_behind" | "port_busy" | "not_listening" | "taken" | "unknown";
   origin: string | null;
   /** A QR code of the page's address, with no secret. */
   install_qr: string | null;
@@ -89,7 +89,9 @@ function tailscaleInstruction(s: TailscaleStatus): string {
         case "left_behind":
           return t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere, and Tailscale would not remove it. Try Remove.");
         case "port_busy":
-          return t("Another program took the local port Tailscale Serve forwards to, so Kelpie removed its entry. Restore it to use another port.");
+          return t("Another program took the local port Tailscale Serve forwards to, and Kelpie could not remove its entry, so a phone that opens this address may reach that program. Do not open Kelpie on your phones until this is gone: stop that program, or press Restore to use another port.");
+        case "not_listening":
+          return t("Phone access is not running, so phones get no answer through Tailscale. Fix what is shown above, then turn phone access off and on, and this on again.");
         case "taken":
           return t("Port 8443 of Tailscale Serve is used by something else. Kelpie will not change it: free that port, then check again.");
         case "unknown":
@@ -235,7 +237,7 @@ export function MobileSettings() {
             <div class="inline-fields" style={{ "align-items": "center" }}>
               <Toggle on={!!s()!.tailscale?.on} onChange={(on) => void setTailscaleMode(on)} />
               <button class="btn" data-tailscale-check disabled={tailscale.loading} onClick={() => void checkTailscale()}>{t("Check again")}</button>
-              <Show when={tailscale()?.serve === "missing" || tailscale()?.serve === "port_busy"}>
+              <Show when={s()!.running && (tailscale()?.serve === "missing" || tailscale()?.serve === "port_busy")}>
                 <button class="btn primary" data-tailscale-restore disabled={busy()} onClick={() => void setTailscaleMode(true)}>{t("Restore")}</button>
               </Show>
               <Show when={tailscale()?.serve === "left_behind"}>
