@@ -92,7 +92,7 @@ anything but `daemon.info` answers:
 - the **verified app** (`Role::App`): the user token, `client: "app"`, *and* the connection's peer process runs the Kelpie
   app's executable (`crates/kelpied/src/peer_identity.rs`: `kelpie` next to the daemon, or in the folder named by a runtime slot's
   `source.txt`, which an AppImage rewrites at every start because its mount moves while the daemon lives; on macOS a path check only, no code-signature check, a known weakening to fix or accept before macOS ships). Only
-  it may ask for the phone decisions `mobile.approve`, `mobile.set_permission`, `mobile.set_write`, `mobile.reset`
+  it may ask for the phone decisions `mobile.approve`, `mobile.set_permission`, `mobile.set_write`, `mobile.reset`, `mobile.set_tailscale`
   (`auth::APP_ONLY`), and for a `mobile.set_options` that keeps unused phones longer. Those that raise access take effect only
   after **the daemon itself** asked the operating system to verify the person (`crates/kelpied/src/user_presence.rs`: Windows
   Hello, else the Windows password prompt checked with `LogonUserW` and required to be this user's account; macOS Touch ID or the
@@ -491,7 +491,7 @@ third implementation for the tests, and all three are checked against the crate'
   only 5 upgrades a second (bursts of 20, refused with 429 before any task
   exists) and take only 5 of the machine's handshakes a second. Several addresses together can still deny service on a LAN, and that leaves a
   trace: a flood that goes on (20 refused or let go in a minute, the budget running out among them) is an audit line (`flood`) at most every 5 minutes. This machine has no share of any of
-  these, which must be judged again when a proxy on loopback arrives, since every phone behind it would look local. `mac1` (keyed from the desktop's public key, or the pairing secret) is checked
+  these; what comes through Tailscale Serve never counts as this machine (see "Tailscale mode"). `mac1` (keyed from the desktop's public key, or the pairing secret) is checked
   before any Diffie-Hellman; only then does it take one of 20 handshakes a second. What fails these is dropped with no reply, no
   close code, no event and no count, so a wrong or spent pairing code gets silence. A first message can be a replay, so **nothing
   happens until the phone's first valid sealed frame**.
@@ -525,9 +525,31 @@ third implementation for the tests, and all three are checked against the crate'
   restart unless this is fixed", in `mobile.status`'s `error`, audit line `save_failed`), and so does lowering a permission, until it could be written. Phones paired with a token
   before this are listed as `legacy` and must be paired again. Devices not seen for `dormant_days` (default 90, 0 never) are removed;
   lengthening that needs the verified app and the person, shortening it does not.
-- **Permissions**: `read` < `write` < `control`, capped by the transport: a browser page may type only over HTTPS, from a Tailscale
+- **Permissions**: `read` < `write` < `control`, capped by the transport: a browser page may type only over HTTPS (Tailscale Serve's included), from a Tailscale
   address or from this machine, because a plain `http://` page can be swapped by someone on the network. Until a native app exists
   `mobile.pair_start` makes browser pairings only.
+- **Tailscale mode** (`mobile/tailscale.rs`, off by default): `tailscale serve --bg --https=8443 http://127.0.0.1:<port>` publishes the
+  page at `https://<fqdn>:8443` to the person's own tailnet, and forwards to one loopback listener that exists only while the mode is on and
+  follows the same `Generation` stop as the others, with its own for what came through it, so turning it off cuts those phones and no
+  others. The port is fixed because the origin holds what the phone stores. `listen::wanted` still never binds loopback.
+  - `mobile.tailscale_status` runs `tailscale status --json` and `serve status --json` and answers `state` (`not_installed`, `stopped`, `needs_login`,
+    `https_off`, `unreadable`, `ready`) and `serve` (`off`, `ours`, `missing`, `left_behind`, `port_busy`, `taken`, `unknown`). The CLI runs off the runtime, 5 s at most,
+    killed past that, and only when asked or while the mode is on and the machine's addresses change: no polling. Output that cannot be read is a
+    state of its own, and nothing is changed on it. A failed command's own words are never passed on.
+  - `mobile.set_tailscale {on}` is in `auth::APP_ONLY`. On is checked with no prompt, then verified (`Prompt::Tailscale`), then checked again; off asks nobody.
+  - **Never clobbers**: only one handler `/` proxying to `http://127.0.0.1:<the port the store remembers>`, not open to the internet, is ours. Off removes only that, with `tailscale
+    serve --https=8443 off`. `serve reset` is never used. A daemon that starts again only looks: it republishes nothing, so an entry removed by hand stays removed, is
+    reported as `missing`, and comes back through the verified path. If its port has been taken by another program it removes its entry, which would lead there.
+  - **`mobile.disable`, `mobile.revoke_all` and `mobile.reset` end the mode and remove the entry.** So `mobile.enable`, which any holder of the user token may call,
+    never publishes anything.
+  - **Limits**: on this listener alone, `Peer` takes the client from the last value of `X-Forwarded-For`, and only a Tailscale address (serve replaces whatever a client sent; seen on 1.98). Missing, garbled or any other
+    address falls into one shared bucket, `listen::BEHIND_SERVE`, which is not loopback, so nothing through serve has this machine's exemption. The header means nothing on any other listener.
+  - **Transport**: this listener's `Peer` counts as HTTPS for `transport_cap`. `same_origin` relies on serve forwarding `Host` as `<fqdn>:8443`, which it does; if that changed, the page would get a 403, never access.
+  - **QR and addresses**: `mobile.pair_start` uses the origin and puts `{t: "ts", a: "<fqdn>:8443"}` first in `ep`, so it is the last to be left out of a code too small; `{plain: true}` asks for this
+    network's own address, the separate pairing. `running_url` prefers the origin, so `#s=` links open away from home. `addrs` carries `endpoints`, with `list` kept for pages from before. A page's socket is always to its own origin: from HTTPS a browser cannot dial `ws://<LAN IP>`, and the certificate does not match a LAN IP.
+  - **`secure_origin`** on a device record says it paired from a page on an HTTPS origin. It is what the relay and `control` will rest on, so it has a tag of its own (`secure_mac`), a second one so that a record still verifies for an older daemon, which ignores both and drops them when it saves. Setting the flag in the file makes the record `unverified`.
+  - **The phone**: on HTTPS and not installed it shows how to install, because iOS keeps a tab's storage apart from the installed app's. In the app the code comes from the camera (`qr-scan.ts`: `BarcodeDetector`, else `qr-decode.ts`, loaded only then) or a pasted link; plain `http://` is unchanged. A `*.ts.net` name failing at once reads as `no_tailnet` ("Turn on Tailscale"), distinct from a computer that does not answer; a 5xx from serve is no sign-in page, and the service worker answers with the kept shell.
+  - Test seam: `KELPIE_TAILSCALE_BIN`, only with `KELPIE_E2E`; with `KELPIE_E2E` and no such variable there is no Tailscale. `serve --bg` returns at once and the certificate comes on the first request (38 s when measured), which stays with tailscaled. What real phones may yet change is in the phase file (`plans/261024-1205-phone-remote-control/phase-03a-tailscale-https.md`).
 - **Kill switch and audit**: `mobile.revoke_all` turns phone access off, removes every device and stops their connections. What phones
   did is in a hash-chained log (`mobile/audit.rs`, `mobile.audit`, `intact` says whether the chain holds; a line cut short by a failed
   write is skipped, nothing the chain covers is lost with it): the verb, device and time; of typed

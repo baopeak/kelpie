@@ -1,13 +1,55 @@
 ---
 phase: 3a
 title: "Tailscale mode: detection, HTTPS origin, guided PWA install"
-status: pending
+status: in-progress
 priority: P1
 effort: "4d"
 dependencies: [3]
 ---
 
 # Phase 3a: Tailscale mode
+
+## State of this phase — 2026-11-01
+Code, unit tests and an e2e run against a fake CLI are done on `phone/phase3a-tailscale`. The desktop half of the spike ran on the owner's real tailnet, after they enabled HTTPS. **The kill rule is not triggered: `tailscale serve` is the path.** Nothing has run on a real phone yet. In `scripts/e2e/mobile.py` the install step, the paste fallback and a secure origin typing have passed in the real app; its Settings checks for this mode (each state's instruction, the two-step dialog, restore, off) **have not run**, as the rerun was stopped for low memory before reaching them.
+
+### Verified on the real tailnet (Tailscale 1.98.10, Windows 10, 2026-11-01)
+An isolated debug daemon using the real CLI, a Python client on the same machine standing in for the phone, through `https://<fqdn>:8443`. Its traffic comes from this machine's own Tailscale address, so it took the tailnet path but no phone's network.
+
+| Question | Result |
+|---|---|
+| **Serve from a normal-user daemon on Windows** | Allowed, no elevation. `mobile.set_tailscale {on}` took 2.16 s in all, within the 5 s limit per CLI call. |
+| **Certificate** | Let's Encrypt, TLS 1.3, validated by the system's trust store. `serve --bg` returns at once; the certificate comes on the **first request, which took 38.13 s**. Later requests take about 0.1 s. Settings says so at Step 1. |
+| **WebSocket through serve** | Passes: upgrade and handshake 0.70 s, pairing completed, a session ran, and the socket still carried a message after 25 s idle. |
+| **`Host`** | Forwarded as `<fqdn>:8443`: `same_origin` passes with the page's `Origin`, and another site's `Origin` gets 403 through serve. |
+| **`X-Forwarded-For`** | Serve **replaces** it. The client sent `100.99.99.99` and the daemon saw the machine's real Tailscale address, so a phone cannot choose its limiter bucket. The shared bucket stays as the fallback. |
+| **Serve entry's JSON** | `{"TCP":{"8443":{"HTTPS":true}},"Web":{"<fqdn>:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:<port>"}}}}}`, exactly what `parse_serve` and its fixtures expect. Nothing served prints `{}`. |
+| **Off** | `serve --https=8443 off` restored `{}` both runs, compared with what was first read. |
+| **Daemon killed behind the entry** | Serve answers **502** in 0.08 s with an empty body, and the entry is unchanged. A new daemon takes it up in about a second with no serve command, and the page answers again. |
+| **Entry removed by hand** | Told as `missing`, not put back; the verified call restores the same entry on the same port. |
+| **Does `serve status` hang?** | **Not reproduced**: 0.04 to 0.68 s over about 25 calls. A coordinator's pipeline had not returned after 45 s just after HTTPS was enabled, cause unknown. If it does hang, each call is killed at 5 s (`a_program_past_its_time_is_killed_and_holds_nothing_up`); the person then reads "could not read what Tailscale Serve is doing", and turning on changes nothing. |
+
+### Not yet verified
+Each still fails closed or falls back as described. Only a person with real phones can settle the first group.
+
+| Unverified | Code assumes | If wrong |
+|---|---|---|
+| **All of the above from a real phone, over 4G** | Same as from this machine | See the Success Criteria below. |
+| **iOS storage, tab vs installed** | Separate, so install comes first | If shared, the install step is needless but harmless. |
+| **Camera in standalone on iOS** | `getUserMedia` works | Falls to paste, which is always offered. |
+| **`qr-decode.ts` on a real camera** | Synthetic frames only: noise, tilt, shadow, glare. Reads a 69-module code up to a tilt of about 0.12, and fails at some angles past 0.15 | Paste. Tune `binarize` and the finder tolerance. |
+| **Off-tailnet tell** (`no_tailnet`: a `*.ts.net` name failing within 1.5 s) | The name does not resolve with Tailscale off; a computer that is off makes the phone wait | The label is wrong the other way; the text covers both. Does not change what the phone may do. |
+| **`isSecureContext`, install prompt, icons on real phones** | As documented | See the Success Criteria below. |
+| **macOS** | Same CLI at its fixed path | Refusal, or `DENIED` shown. |
+| **Certificate auto-renewal** | tailscaled renews; this one runs to 2027-01-29 | HTTPS lapses. Tailscale's to fix; kill rule if it does not. |
+| **`serve --bg` on a tailnet where Serve is not enabled** | Fails or blocks | A block is killed at 5 s and reads as `NOT_PUBLISHED`. Not seen: this tailnet allowed it. |
+| **`serve --https=8443 off` after a MagicDNS rename** | Removes the entry under the old name | The re-read still finds ours: `left_behind`, with a Remove button that may not help. Remove it by hand. |
+
+### Choices the spec left open
+- **Phone access off ends the mode.** `mobile.disable`, `revoke_all` and `reset` set it off and remove the entry. `mobile.enable` is open to the plain user token, and the plan's criteria say such a program cannot enable Tailscale mode; keeping the mode across a disable would let it.
+- **A daemon that starts again never republishes**, so a by-hand removal holds until the person restores it. If its loopback port was taken, it removes its entry, which would lead to that program.
+- **`X-Forwarded-For` counts only when it is a Tailscale address**, and the rightmost value. Serve replaces it, so this guards only against that changing.
+- **`secure_origin` has a second tag** rather than a field in the first MAC, so that the record still verifies for an older daemon (the rollback note below) and setting it in the file does not.
+- **The scanner is a decoder of our own**, loaded only without `BarcodeDetector` (4.0 KB gzip): jsQR is about 60 KB gzip unminified against a limit of 15.
 
 ## Overview
 Gives the phone client a trusted HTTPS origin that works away from home, which Web Push (3b) and WebAuthn (3c) both need: Kelpie detects Tailscale, publishes the phone page at `https://<machine>.<tailnet>.ts.net:8443` with `tailscale serve`, and puts that address in the QR. Plain LAN stays as it is. Off by default. No Kelpie server, no account of ours.
