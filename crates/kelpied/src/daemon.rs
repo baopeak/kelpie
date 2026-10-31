@@ -95,6 +95,8 @@ pub struct Daemon {
     auto_rt: automation::Runtime,
     runs: Mutex<Runs>,
     pub mobile: crate::mobile::Mobile,
+    /// The OS verification of the person (one prompt at a time).
+    pub presence: crate::user_presence::Presence,
     awake: Awake,
     awake_mode: Mutex<awake::Mode>,
     /// Sessions no view shows run below normal CPU priority (`daemon.set_priority`).
@@ -210,7 +212,8 @@ impl Daemon {
                 automations: Mutex::new(Automations::load(&data_dir)),
                 auto_rt: automation::Runtime::new(),
                 runs: Mutex::new(Runs::load(&data_dir)),
-                mobile: crate::mobile::Mobile::load(&data_dir),
+                mobile: crate::mobile::Mobile::load(&data_dir, secrets.clone()),
+                presence: crate::user_presence::Presence::default(),
                 awake: Awake::new(),
                 awake_mode: Mutex::new(awake::Mode::Off),
                 prioritize: AtomicBool::new(true),
@@ -369,7 +372,7 @@ impl Daemon {
             .clone()
             .into_iter()
             .filter(|(_, role)| match role {
-                crate::auth::Role::User => true,
+                crate::auth::Role::User | crate::auth::Role::App => true,
                 crate::auth::Role::Session(sid) => self.session_policy(sid).is_some_and(|(_, cwd)| notes::worktree_key(&cwd) == key),
                 _ => false,
             })
@@ -532,6 +535,58 @@ impl Daemon {
             };
             let _ = tx.send(json_out(&reply));
         })?;
+        Ok(())
+    }
+
+    /// Whether this connection proved it is the Kelpie app (`auth`).
+    fn is_verified_app(&self, client: u64) -> bool {
+        self.client_roles.lock().get(&client) == Some(&crate::auth::Role::App)
+    }
+
+    /// Runs `then` once the person passed the OS verification, and answers request `id` on `tx`. The prompt runs on its own thread,
+    /// so the caller's other requests keep flowing meanwhile. Nothing is shown to a caller that is not the verified app, and
+    /// `then` runs only after the OS said yes; what the prompt says is the daemon's, in the language `lang` names. A verification
+    /// that fails leaves a line in the audit log; whatever happens, even a panic, the request is answered and the screen is free.
+    fn after_verifying(self: &Arc<Self>, client: u64, tx: &ClientTx, id: &Value, params: &Value, prompt: crate::user_presence::Prompt, then: impl FnOnce(&Arc<Daemon>) -> Result<Value> + Send + 'static) -> Result<()> {
+        if !self.is_verified_app(client) {
+            bail!("this needs the Kelpie app: phone access is decided in Kelpie → Settings → Mobile");
+        }
+        let turn = self.presence.begin().map_err(|e| anyhow!(e))?;
+        let window = params.get("window").and_then(Value::as_i64);
+        let lang = crate::user_presence::Lang::from_code(params.get("lang").and_then(Value::as_str));
+        let (me, tx, id) = (self.clone(), tx.clone(), id.clone());
+        std::thread::Builder::new().name("kelpie-verify".into()).spawn(move || {
+            use crate::user_presence::Lang;
+            let verified = me.presence.verify(window, &prompt.text(lang));
+            // Noted before the turn is given up: nobody can ask in the gap after the refusal that stops the prompts.
+            match &verified {
+                Ok(()) => me.presence.passed(),
+                Err(why) => {
+                    me.mobile.audit("-", "verify_failed", &format!("{} {}", prompt.text(Lang::En), why.message));
+                    if me.presence.refused(why) {
+                        me.mobile.audit("-", "verify_paused", "too many refused or unanswered verifications: no new prompts for a while");
+                    }
+                }
+            }
+            drop(turn);
+            let done = verified.map_err(|e| anyhow!(e.message)).and_then(|()| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| then(&me))).unwrap_or_else(|_| Err(anyhow!("that could not be finished: an internal error"))));
+            let reply = match done {
+                Ok(v) => json!({"id": id, "result": v}),
+                Err(e) => json!({"id": id, "error": {"message": format!("{e:#}")}}),
+            };
+            let _ = tx.send(json_out(&reply));
+        })?;
+        Ok(())
+    }
+
+    /// Sets what a device may do and tells everyone: its waiting messages go when it may no longer write.
+    fn apply_permission(&self, device: &str, permission: crate::mobile::Permission) -> Result<()> {
+        let event = self.mobile.set_permission(device, permission)?;
+        if permission < crate::mobile::Permission::Write {
+            self.drop_device_queues(device, "revoked");
+        }
+        self.broadcast("mobile.device_changed", event.json());
+        self.broadcast("mobile.updated", json!({}));
         Ok(())
     }
 
@@ -816,6 +871,10 @@ impl Daemon {
         self.notifier.drop_client(id);
         for entry in self.sessions.read().values() {
             entry.detach(id);
+            // A window that is gone cannot build what it queued.
+            if let Entry::Chat(c) = entry {
+                c.client_gone(id);
+            }
         }
     }
 
@@ -871,6 +930,14 @@ impl Daemon {
     #[cfg(test)]
     pub(crate) fn remove_for_test(&self, handle: u32) {
         self.sessions.write().remove(&handle);
+    }
+
+    /// Drops the chat messages a phone has waiting (it was revoked, or may no longer write).
+    pub fn drop_device_queues(&self, device: &str, reason: &'static str) {
+        let chats: Vec<Arc<ChatSession>> = self.sessions.read().values().filter_map(|e| if let Entry::Chat(c) = e { Some(c.clone()) } else { None }).collect();
+        for c in chats {
+            c.drop_device(device, reason);
+        }
     }
 
     pub fn entry(&self, handle: u32) -> Result<Entry> {
@@ -1345,6 +1412,20 @@ impl Daemon {
             if now.duration_since(last_schedule) >= Duration::from_secs(10) {
                 last_schedule = now;
                 self.update_awake();
+                // A phone-access change that could not be saved is tried again, while the server may be off.
+                if self.mobile.save_pending() && self.mobile.claim_retry() {
+                    let me = self.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let saved = me.mobile.retry_save();
+                        me.mobile.retry_ended();
+                        if saved {
+                            me.broadcast("mobile.updated", json!({}));
+                        }
+                    });
+                }
+                if self.presence.newly_stuck() {
+                    self.mobile.audit("-", "verify_stuck", "a verification prompt has been up for over 10 minutes; no new one can be asked until it ends");
+                }
                 // Each on its own thread: a run that takes a while never holds up the ticker.
                 self.run_due_automations();
                 self.poll_commits(false);
@@ -1449,6 +1530,7 @@ impl Daemon {
                 "api": kelpie_proto::API_LEVEL,
                 "security": kelpie_proto::DAEMON_SECURITY_LEVEL,
                 "pid": std::process::id(),
+                "test_user_presence": crate::user_presence::test_seam(),
                 // Where it runs from: a copy outside the install folder survives updates.
                 "exe": self.exe,
                 "data_dir": self.data_dir,
@@ -1579,7 +1661,7 @@ impl Daemon {
                 write_atomic(&self.data_dir.join("custom-agents.json"), &serde_json::to_vec_pretty(&defs)?)?;
                 json!(true)
             }
-            "mobile.status" => self.mobile.status(),
+            "mobile.status" => self.mobile.status(self.client_roles.lock().get(&client) == Some(&crate::auth::Role::App)),
             "mobile.load" => {
                 if params.get("reset").and_then(Value::as_bool) == Some(true) {
                     self.mobile.load.reset_lags();
@@ -1600,25 +1682,131 @@ impl Daemon {
                 return Ok(None);
             }
             "mobile.disable" => {
+                if self.mobile.is_on() {
+                    self.mobile.audit("-", "phone_access_off", "turned off");
+                }
                 self.mobile.disable();
+                // Nobody is let in any more: what phones had waiting is not written.
+                for e in self.sessions.read().values() {
+                    if let Entry::Chat(c) = e {
+                        c.drop_phones("revoked");
+                    }
+                }
                 self.broadcast("mobile.updated", json!({}));
+                self.mobile.unsaved(crate::mobile::NOT_SAVED_OFF)?;
                 json!(true)
             }
             "mobile.pair_start" => self.mobile.pair_start()?,
+            // The verified app only (`auth::APP_ONLY`). Declining needs nothing more. Allowing is checked first, with no prompt
+            // (a wrong code counts, and is answered at once), then the person verifies, and only then is the device added.
             "mobile.approve" => {
-                let v = self.mobile.approve(&params)?;
-                self.broadcast("mobile.updated", json!({}));
-                v
+                if params.get("allow").and_then(Value::as_bool) != Some(true) {
+                    self.mobile.decline(&params)?;
+                    self.broadcast("mobile.updated", json!({}));
+                    return Ok(Some(json!(false)));
+                }
+                let checked = self.mobile.check_approval(&params);
+                if self.mobile.take_lockout() {
+                    self.broadcast("mobile.lockout", json!({"reason": "sas"}));
+                    self.broadcast("mobile.updated", json!({}));
+                }
+                let checked = checked?;
+                let prompt = checked.prompt();
+                self.after_verifying(client, tx, id, &params, prompt, move |me| {
+                    let approved = me.mobile.commit_approval(&checked)?;
+                    for old in &approved.replaced {
+                        me.drop_device_queues(old, "revoked");
+                    }
+                    me.broadcast("mobile.device_changed", approved.event.json());
+                    me.broadcast("mobile.updated", json!({}));
+                    Ok(approved.reply)
+                })?;
+                return Ok(None);
             }
             "mobile.revoke" => {
-                let v = self.mobile.revoke(param(&params, "id")?.as_str().unwrap_or_default())?;
+                // The permission goes first, then what the device has waiting: a message that was being queued as this runs finds
+                // the permission gone (`enqueue_if`), or is dropped here. A turn already written runs on.
+                let id = param(&params, "id")?.as_str().unwrap_or_default();
+                let event = self.mobile.revoke(id)?;
+                self.drop_device_queues(id, "revoked");
+                self.broadcast("mobile.device_changed", event.json());
                 self.broadcast("mobile.updated", json!({}));
-                v
+                self.mobile.unsaved(crate::mobile::NOT_SAVED_REMOVED)?;
+                json!(true)
             }
-            "mobile.set_write" => {
-                let v = self.mobile.set_write(param(&params, "id")?.as_str().unwrap_or_default(), params.get("can_write").and_then(Value::as_bool).unwrap_or(false))?;
+            // `mobile.set_write {id, can_write}` is the name from before API 22, kept for one release. One reading of the parameters decides
+            // both whether this raises access and what is applied: lowering takes effect at once, raising after the person verified.
+            "mobile.set_permission" | "mobile.set_write" => {
+                let device = param(&params, "id")?.as_str().unwrap_or_default().to_string();
+                let permission = crate::mobile::requested_permission(&params)?;
+                let Some(prompt) = self.mobile.raise_prompt(&device, permission)? else {
+                    self.apply_permission(&device, permission)?;
+                    self.mobile.unsaved(crate::mobile::NOT_SAVED_LOWERED)?;
+                    return Ok(Some(json!(true)));
+                };
+                self.after_verifying(client, tx, id, &params, prompt, move |me| {
+                    me.apply_permission(&device, permission)?;
+                    Ok(json!(true))
+                })?;
+                return Ok(None);
+            }
+            // The kill switch: phone access off and every device removed, online or not. It only takes access away: any
+            // connection of the user may ask, with no verification.
+            "mobile.revoke_all" => {
+                let events = self.mobile.revoke_all();
+                for e in self.sessions.read().values() {
+                    if let Entry::Chat(c) = e {
+                        c.drop_phones("revoked");
+                    }
+                }
+                for event in events {
+                    self.broadcast("mobile.device_changed", event.json());
+                }
                 self.broadcast("mobile.updated", json!({}));
-                v
+                self.mobile.unsaved(crate::mobile::NOT_SAVED_REMOVED)?;
+                json!(true)
+            }
+            // Keeping unused phones longer (or for ever) weakens phone access: the verified app and the person only.
+            "mobile.set_options" => {
+                let days = crate::mobile::requested_dormant_days(&params)?;
+                match days.and_then(|days| self.mobile.dormant_prompt(days)) {
+                    Some(prompt) => {
+                        if !self.is_verified_app(client) {
+                            bail!("{method} that keeps unused phones longer needs the Kelpie app: change it in Kelpie → Settings → Mobile");
+                        }
+                        self.after_verifying(client, tx, id, &params, prompt, move |me| {
+                            let v = me.mobile.set_options(days);
+                            me.broadcast("mobile.updated", json!({}));
+                            Ok(v)
+                        })?;
+                        return Ok(None);
+                    }
+                    None => {
+                        let v = self.mobile.set_options(days);
+                        self.broadcast("mobile.updated", json!({}));
+                        v
+                    }
+                }
+            }
+            // What phones did: newest first, and whether the log's hash chain holds.
+            "mobile.audit" => self.mobile.audit_entries(params.get("limit").and_then(Value::as_u64).unwrap_or(200) as usize),
+            // Forget every phone, make new keys, turn phone access off (also the way out of an unreadable store file). Always verified.
+            "mobile.reset" => {
+                self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::Reset, |me| {
+                    let events = me.mobile.reset();
+                    for e in me.sessions.read().values() {
+                        if let Entry::Chat(c) = e {
+                            c.drop_phones("revoked");
+                        }
+                    }
+                    for event in events {
+                        me.broadcast("mobile.device_changed", event.json());
+                    }
+                    me.broadcast("mobile.updated", json!({}));
+                    me.mobile.unsaved(crate::mobile::NOT_SAVED_REMOVED)?;
+                    Ok(json!(true))
+                })?;
+                return Ok(None);
             }
             "mobile.set_projects" => {
                 self.mobile.set_projects(&params);
@@ -1765,6 +1953,11 @@ impl Daemon {
                 }
                 Entry::Chat(_) => bail!("session.read is for terminal sessions"),
             },
+            // The turn queue (`chat.rs`): the desktop's messages go through it with a phone's.
+            m @ ("chat.send" | "chat.write_turn" | "chat.queue_op") => {
+                let Entry::Chat(c) = self.entry(handle_of(&params)?)? else { bail!("{m} is for chat sessions") };
+                c.queue_rpc(client, m, &params)?
+            }
             "chat.close_stdin" => {
                 if let Entry::Chat(c) = self.entry(handle_of(&params)?)? {
                     c.close_stdin();
@@ -1857,6 +2050,30 @@ fn create_task_worktree(run: &runs::Run, task: &runs::Task) -> Result<TaskWorktr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A panic after the prompt, or in it, is still an answer to the caller, and the next prompt may come up.
+    #[tokio::test]
+    async fn a_panic_around_the_prompt_still_answers_and_frees_the_screen() {
+        use crate::user_presence::Prompt;
+        let (d, dir) = test_daemon("presence-panic");
+        d.set_client_role(5, &crate::auth::Role::App);
+        let (tx, mut rx) = crate::session::client_channel();
+        d.presence.inject(|_| Ok(()));
+        d.after_verifying(5, &tx, &json!(1), &json!({}), Prompt::Reset, |_| panic!("the action fell over")).unwrap();
+        let o = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("a reply").expect("a reply");
+        let first: Value = serde_json::from_slice(&o.data[5..]).unwrap();
+        assert_eq!(first["id"], 1);
+        assert!(first["error"]["message"].as_str().unwrap().contains("internal error"), "{first}");
+        d.presence.inject(|_| panic!("the prompt fell over"));
+        d.after_verifying(5, &tx, &json!(2), &json!({}), Prompt::Reset, |_| Ok(json!("never"))).unwrap();
+        let o = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("a reply").expect("a reply");
+        let second: Value = serde_json::from_slice(&o.data[5..]).unwrap();
+        assert_eq!(second["id"], 2);
+        assert!(second["error"]["message"].is_string(), "{second}");
+        assert!(rx.try_recv().is_err(), "one answer each");
+        assert!(d.presence.begin().is_ok(), "the screen is free");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn test_daemon(name: &str) -> (Arc<Daemon>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("kelpie-{name}-{}", uuid::Uuid::new_v4()));

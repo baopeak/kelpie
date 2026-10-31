@@ -1,13 +1,17 @@
 ---
 phase: 3
 title: "kelpie-link: E2E pairing, trusted approval, device store v2"
-status: pending
+status: in-progress
 priority: P1
 effort: "6d"
 dependencies: [2]
 ---
 
 # Phase 3: kelpie-link
+
+> **Addendum 2026-10-30.** Absorbed during implementation: SAS from the handshake hash with 3 tries, remote-forbidden operations (one-shot approvals), audit log, kill switch, dormant-device expiry, noble JS crypto (`app/phone/src/noise.ts`) instead of the wasm build. Path D later changes lines below: relay tokens are no longer native-only (phase 4), `control` for the PWA awaits the user (phase 7), and `src/client.rs` is deferred with the native app. Phase 3 itself stays as implemented; those changes land in 3a, 3c and 4. API 22.
+
+> **Manual results 2026-10-31, real prompt.** Confirmed on Windows 10 with a real iPhone: the Windows Hello PIN path. Hello takes the app's window across processes, comes to the front, shows the right text; Cancel adds nothing and leaves the audit line; the right PIN pairs. **Still not run:** the password dialog, Hello Face, Microsoft or PIN-only accounts on the password fallback, macOS, Linux. **Linux uses polkit (`pkcheck`, owner's decision) and is released untested on a real Linux desktop, stated in the release notes (owner's decision 2026-10-31)**: the agent's text, a user-service daemon finding the session's agent, a non-administrator account, and ending `pkcheck` at the time limit taking the dialog away have only been reasoned about.
 
 ## Overview
 One Rust crate that pairs a phone by QR and carries every phone message end-to-end encrypted (Noise), independent of the pipe.
@@ -32,7 +36,7 @@ the user token (`docs/architecture.md:72`, `auth.rs:19-21`). Replaces bearer tok
     Effective permission is capped by the transport, enforced by the daemon per connection: a PWA link over TLS or from a Tailscale address (100.64.0.0/10, fd7a:115c:a1e0::/48) may use `write`;
     a PWA link over plain `http://` from any other address is capped at `read` (the page could have been swapped). Native-app links are not capped.
   - Framing: one WS binary message = one Noise transport message (≤ 65 535 B); app messages chunked to ≤ 1 MiB; JSON body = phase-1 protocol; rekey every 2^16 messages or 30 min.
-  - `client_id` dedupe per **device** across connections (answers 10 min, input/key 60 s — see Resilience requirements), cleared on `daemon_epoch` change. [RT-8]
+  - `client_id` dedupe per **device** across connections (answers and `chat_send` 10 min, input/key 60 s — see Resilience requirements), cleared on `daemon_epoch` change. [RT-8]
   - **Live permission checks**: every received message checks the device's current record by key; `broadcast::RecvError::Lagged` ⇒ re-check all; revoke/downgrade synchronously
     stops that device's control grants (phase 7/8 hooks) before closing sockets. [RT-12]
   - **Listeners**: bind `/link` on every `usable()` address (private + Tailscale, never 0.0.0.0) and rebind on interface change (`if-addrs`); QR lists bound addresses. [RT-15]
@@ -49,7 +53,7 @@ the user token (`docs/architecture.md:72`, `auth.rs:19-21`). Replaces bearer tok
 - **Address advertisement**: after every handshake and on every rebind (debounced 2 s) the daemon sends `addrs {seq, list, hostname}` (Tailscale MagicDNS name if present, else `<host>.local`), also over the relay; the phone stores the last-known set. Desktop network-change detection: `NotifyIpInterfaceChange` (Windows) / `SCDynamicStore` or a 5 s `if-addrs` poll (macOS) triggers rebind. Test: change the daemon's IP while the phone is on the relay ⇒ phone dials the new address ≤ 5 s.
 - PWA limit: its origin is the old IP after a DHCP change; the browser-pairing QR uses the hostname when available; docs recommend a DHCP reservation or Tailscale; the native app is the recovery path.
 - The phase-1 writer's priority path (heartbeat, replies, revoke; there is no separate control lane), heartbeat and lag-aware liveness run **inside** the Noise channel; `grant_alive: Arc<AtomicBool>` is checked per input event in every control path (independent of the async scheduler) so revoke stops input < 1 s even at L3.
-- Dedupe windows: `answer`/`chat_answer` 10 min per device, `input`/`key` 60 s (a phone offline for minutes then reconnecting must not double-answer). 100 fuzzed disconnect/replay trials ⇒ 0 duplicates.
+- Dedupe windows: `answer`/`chat_answer`/`chat_send` 10 min per device (`chat_send` is deduped by its `cid`: a retry gets `dup` with the message's real state, never a second message; the link retries it once within 60 s, never into another daemon epoch), `input`/`key` 60 s (a phone offline for minutes then reconnecting must not double-answer). 100 fuzzed disconnect/replay trials ⇒ 0 duplicates.
 
 ## Architecture
 ```
@@ -81,12 +85,12 @@ crates/kelpie-link/
 - Downgrade test: previous release daemon starts with `mobile.v2.json` present and old `mobile.json` intact.
 
 ## Perf gate
-- Crypto overhead ≤ 5 % CPU vs phase 2 workload.
+- Crypto overhead ≤ 5 % CPU vs phase 2 workload. **Met:** 0.1 to 1.3 points by cycle counter against the daemon before encryption, seal alone about 0.37 ([measurements](../reports/debugger-261031-0750-phone-link-cpu.md)). `mobile_perf.py`'s total of 5 points for eight phones is not met, at about 10, most of it older than this phase; to be reduced separately before merge (user decision 2026-10-31).
 
 ## Success Criteria
-- [ ] Pairing = scan + type a 6-digit code + OS verification on the desktop.
-- [ ] No program holding only the user token can add a device or raise permissions.
-- [ ] All phone traffic encrypted on any pipe; revoke cuts access (and control) at once.
+- [ ] Pairing = scan + type a 6-digit code + OS verification on the desktop. Built and tested through a seam; the real OS prompt has never run, and that blocks merge.
+- [x] No program holding only the user token can add a device or raise permissions through the daemon. Accepted and documented residual: a same-user program can read the keyring and write a sealed record, or replace the daemon's files.
+- [x] All phone traffic encrypted on any pipe; revoke cuts access (and control) at once.
 
 ## Risk Assessment
 - `snow` 0.10 unaudited; signal: RUSTSEC advisory; response: pin, review IK/IKpsk1 paths, alternative crate behind the same API.

@@ -28,6 +28,7 @@ mod sys_stats;
 mod updater;
 mod usage;
 mod usage_report;
+mod user_presence;
 mod watcher;
 mod worktree_files;
 
@@ -41,6 +42,10 @@ use tauri::{Manager, State};
 
 #[tauri::command]
 async fn daemon_call(client: State<'_, Arc<DaemonClient>>, method: String, params: Value) -> CmdResult<Value> {
+    // Phone-access decisions go through mobile_secure_call, the one path that lets the daemon's prompt come up in front.
+    if user_presence::APP_ONLY.contains(&method.as_str()) {
+        return Err(format!("{method} must go through mobile_secure_call"));
+    }
     client.call(&method, params).await.map_err(|e| e.to_string())
 }
 
@@ -517,6 +522,7 @@ pub fn run() {
         .setup(|app| {
             fs_ops::sweep_temp();
             let index = Arc::new(search::FileIndex::default());
+            daemon_runtime::name_app_folder(&daemon_client::daemon_exe());
             app.manage(DaemonClient::start(app.handle().clone()));
             app.manage(watcher::Watchers::new(app.handle().clone(), index.clone()));
             app.manage(index);
@@ -527,6 +533,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             daemon_call,
+            user_presence::mobile_secure_call,
             term_attach,
             term_detach,
             term_input,

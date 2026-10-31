@@ -714,7 +714,13 @@ mod tests {
             }
             start.wait();
             loop {
-                let bytes = std::fs::read(&path).unwrap();
+                let bytes = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    // Windows can refuse to open a file in the very moment it is replaced. That is "not now", not torn content, and this
+                    // test hammers the moment on purpose. Any other error is a failure.
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => continue,
+                    Err(e) => panic!("reading the hook settings: {e}"),
+                };
                 if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
                     incomplete = true;
                     break;

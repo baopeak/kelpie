@@ -926,17 +926,51 @@ default) turns it off for that host. Kelpie's sessions are named `kelpie-…` on
 
 Settings → Mobile turns on a small web app for your phone on your network (off by default;
 port 4817; choose a private or Tailscale address — never every interface; HTTPS with your own
-certificate, e.g. from `tailscale cert`). **Pair a phone** shows a QR code valid for two
-minutes; scan it, name the phone and approve it on the computer. The phone lists every session
-grouped by *Needs you / Working / Idle / Stopped*, buzzes when one starts needing you, shows a
-session's screen and — if you allow that device to type — sends replies and keys (Enter, Esc,
-Ctrl+C, arrows, y / n, 1–3). The list and the screen update as soon as something changes. A reply typed
-while a menu or permission prompt is waiting is refused (answer with the keys instead). Unpairing a
-device disconnects it at once.
+certificate, e.g. from `tailscale cert`). **Pair a browser on this network** shows a QR code valid
+for two minutes; scan it, name the phone, and type the six digits it shows into Kelpie. Windows then
+asks you to confirm with Windows Hello or your password (Touch ID or your password on a Mac). Read
+that prompt: it names the phone and what it would be allowed to do. While it is up Kelpie's window
+does not respond; your sessions keep running, and the window comes back as soon as the prompt ends. On
+Linux the confirmation comes from polkit, your desktop's password prompt, and it asks for an
+administrator's password. **Its text is generic and does not say which phone this is about**, so read
+Kelpie's own dialog before it: that one names the phone, its key and what it asks for. Without polkit or
+an authentication agent (a headless login) Kelpie refuses and says what to do. Scanning a new code on a phone
+that is already paired to this computer replaces its old entry in the list; if you cancel, the old
+pairing keeps working. Raising what a phone may do,
+resetting phone access and keeping unused phones paired for longer ask the same way; declining a phone,
+lowering a permission and removing a phone do not. If you refuse three prompts in a few minutes,
+or leave three unanswered in 20, Kelpie stops asking for five minutes: if you did not start them, use
+*Turn off phone access and revoke all*. A prompt you leave open for nearly five minutes stops counting, and
+while its dialog is still on screen Kelpie asks you to close it before showing another.
+
+The phone lists every session grouped by *Needs you / Working / Idle / Stopped*, buzzes when one
+starts needing you, shows a session's screen and — if you allow that device to type — sends replies
+and keys (Enter, Esc, Ctrl+C, arrows, y / n, 1–3). A browser connected over plain HTTP outside
+Tailscale can only read, because someone on the network could swap the page. The list and the screen
+update as soon as something changes. A reply typed while a menu or permission prompt is waiting is
+refused (answer with the keys instead). The phone offers no button for a choice that lasts ("always",
+"don't ask again"); a device allowed to type can still reach one with the arrow keys, Shift+Tab or a
+command, so allow typing only on phones you would trust at your keyboard. Recognising such a choice is best
+effort: a new agent's wording may still get a button, or an ordinary option lose one. Unpairing a device
+disconnects it at once.
+
+**"Not paired here" on the phone** means the computer did not recognise this phone, or keeps not
+answering it. It may have been removed there, phone access may have been reset, something on the
+network may be interfering, or the answer may not have come from your computer. The phone keeps its pairing and tries again by itself. If it was
+removed on purpose, tap *Forget this device*, then pair again. A phone only forgets its pairing by
+itself when your computer tells it so over the encrypted connection. *Turn off phone access and
+revoke all* removes every phone.
+
+Kelpie's check stops a program that merely holds your account's Kelpie token from adding a phone. It
+does not stop a program determined to get around it: your account's programs can read the keys in
+the credential store and change Kelpie's files, including the list of phones.
 
 Turning Mobile off also closes existing phone connections, not just the listening port.
 Paired devices stay saved, but must reconnect after access is enabled again; an old connection
-cannot keep reading or answering prompts across that switch.
+cannot keep reading or answering prompts across that switch. Turning it off is not how to cut off a
+phone: any program holding your account's Kelpie token can turn it back on, which is recorded in
+*What phones did*, and every paired phone then has its access back. To cut a phone off, use *Unpair*,
+or *Turn off phone access and revoke all* for every phone.
 
 ### Voice dictation
 

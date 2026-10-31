@@ -1,13 +1,15 @@
 ---
 phase: 5
-title: "Native mobile shell (Tauri 2 iOS/Android)"
+title: "DEFERRED: Native mobile shell (Tauri 2 iOS/Android)"
 status: pending
-priority: P1
-effort: "6d"
+priority: P3
+effort: "7d (deferred, not in the total)"
 dependencies: [3, 4]
 ---
 
 # Phase 5: Native mobile shell
+
+> **DEFERRED, no phase commitment (user decision 2026-10-30).** Path D ships the PWA first. A native store app returns only if real use and demand justify it, possibly with iroh as its transport after a hands-on spike. Content below is kept as reference and was written for the old relay + native plan; before reuse, re-check it against D3, D5, D9 and the relay's `kelpie-link` wiring. Things other phases used to take from here have moved: the race is in `link.ts` (phase 4), the WebRTC spike targets browsers (phase 8), Web Push replaces APNs/FCM (3b).
 
 ## Overview
 A store-signed Kelpie phone app that bundles the phase-2 client (trust root for relay mode, D5), runs `kelpie-link` (incl. its `client`

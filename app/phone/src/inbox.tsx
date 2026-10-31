@@ -1,9 +1,50 @@
 // The inbox: every session across projects, grouped by what it needs from you, the longest waiting first.
-import { For, Show } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 import { msg, t } from "./i18n";
 import { groupSessions, labelOf, whereOf, type GroupKey } from "./inbox-order";
-import { now, openSession, paintedFrom, projects, sessions } from "./phone-state";
+import { discardNotSent, notSent, now, openSession, paintedFrom, projects, sessions } from "./phone-state";
 import { waitedFor } from "../../src/lib/attention";
+
+/** Messages this phone sent to chats that are gone from the computer's list (closed, or resumed as a new session) and that were
+ *  never sent: their text, to copy and send again, until the person lets them go. */
+function NotSent() {
+  const [notice, setNotice] = createSignal<string | null>(null);
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setNotice(t("Copied"));
+    } catch {
+      setNotice(t("Could not copy: select the text and copy it."));
+    }
+  };
+  return (
+    <Show when={notSent().length}>
+      <section class="not-sent" data-group="not-sent">
+        <div class="group">{t("Not sent")} · {notSent().reduce((n, c) => n + c.items.length, 0)}</div>
+        <p class="muted not-sent-hint">{t("From chats that are no longer running here (closed, or resumed as a new chat). Copy the text to send it again.")}</p>
+        <For each={notSent()}>
+          {(c) => (
+            <div class="chips kept-chips" data-chat={c.chat}>
+              <div class="muted">{c.name ?? t("A chat that was closed")}</div>
+              <For each={c.items}>
+                {(p) => (
+                  <div class="chip warn" role="status">
+                    {/* Its fate is unknown: it may have reached the agent, so say so before anyone sends it twice. */}
+                    <Show when={p.state === "unknown"}><span class="muted">{t("Not sure it was sent")}</span></Show>
+                    <span class="chip-text">{p.text}</span>
+                    <button class="link-btn" onClick={() => void copy(p.text)}>{t("Copy")}</button>
+                    <button class="link-btn" onClick={() => discardNotSent(c.chat, p.cid)}>{t("Discard")}</button>
+                  </div>
+                )}
+              </For>
+            </div>
+          )}
+        </For>
+        <Show when={notice()}><div class="notice" role="status">{notice()}</div></Show>
+      </section>
+    </Show>
+  );
+}
 
 const TITLES: Record<GroupKey, string> = {
   needs: msg("Needs you"),
@@ -37,6 +78,7 @@ export function Inbox() {
           </section>
         )}
       </For>
+      <NotSent />
     </div>
   );
 }

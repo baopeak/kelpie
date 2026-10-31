@@ -493,7 +493,7 @@ export function permissionItem(id: string, tool: string, input: any): Extract<Ch
     return {
       kind: "permission", id, title: t("Ready to code?"), plan: String(input.plan ?? ""), feedback: true,
       options: [
-        { id: "plan-accept-edits", label: t("Yes, and accept edits"), tone: "allow" },
+        { id: "plan-accept-edits", label: t("Yes, and accept edits"), tone: "allow", lasting: true },
         { id: "allow", label: t("Yes, ask before edits"), tone: "allow" },
         { id: "deny", label: t("Keep planning"), tone: "deny" },
       ],
@@ -506,7 +506,7 @@ export function permissionItem(id: string, tool: string, input: any): Extract<Ch
     detail: command || diff ? (typeof input.description === "string" ? input.description : undefined) : summarize(input, 600),
     options: [
       { id: "allow", label: t("Allow"), tone: "allow" },
-      { id: "allow-session", label: t("Allow for session"), tone: "allow" },
+      { id: "allow-session", label: t("Allow for session"), tone: "allow", lasting: true },
       { id: "deny", label: t("Deny"), tone: "deny" },
     ],
   };

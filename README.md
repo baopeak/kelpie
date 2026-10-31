@@ -233,7 +233,7 @@ Read the [architecture](docs/architecture.md) for ownership, transport and recov
 ## Your tools, your data, your decisions
 
 - **Local workspace state.** Sessions, layouts and settings are stored on your machine. Kelpie has no telemetry. Your agent CLIs still contact their model providers under their own accounts and policies.
-- **Explicit connections.** Remote hosts, issue trackers, notification providers and optional phone access require configuration. Phone access is off by default; it is not a public cloud service.
+- **Explicit connections.** Remote hosts, issue trackers, notification providers and optional phone access require configuration. Phone access is off by default; it is not a public cloud service. What a paired phone sees and sends is end-to-end encrypted, each phone is approved on the computer by typing a code it shows and passing the operating system's own check (Windows Hello or your password, Touch ID on macOS), and there is no Kelpie account.
 - **Credentials are not all alike.** Supported integration secrets use the OS credential store, but environment variables you enter in agent settings are stored as plain text. Do not put secrets into project files for a demo.
 - **Review remains yours.** Worktree setup, finishing checks and agent permissions have approval controls. Kelpie organizes the workflow; it does not make an agent's output trustworthy by itself.
 

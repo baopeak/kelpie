@@ -1,0 +1,18 @@
+[package]
+name = "kelpie-link"
+version.workspace = true
+edition.workspace = true
+description = "End-to-end encrypted link between Kelpie and a phone (Noise IKpsk1 pairing, IK reconnect), sans I/O"
+
+[dependencies]
+# RustCrypto backends only (no `ring`, no aws-lc / NASM): X25519, ChaCha20-Poly1305, BLAKE2s, OS randomness.
+snow = { version = "=0.10.0", default-features = false, features = ["use-getrandom", "use-curve25519", "use-chacha20poly1305", "use-blake2"] }
+blake2 = { version = "0.10", default-features = false }
+getrandom = "0.3"
+hmac = "0.12"
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+hex = "0.4"

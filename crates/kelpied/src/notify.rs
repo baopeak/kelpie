@@ -44,6 +44,8 @@ const SECRET_KEYS: [&str; 4] = [K_TOPIC, K_NTFY_TOKEN, K_TELEGRAM_TOKEN, K_WEBHO
 /// Where channel secrets are kept.
 pub trait SecretStore: Send + Sync {
     fn get(&self, key: &str) -> Option<String>;
+    /// `get` that tells "there is none" (`Ok(None)`) from "it could not be read" (`Err`).
+    fn read(&self, key: &str) -> Result<Option<String>>;
     fn set(&self, key: &str, value: &str) -> Result<()>;
     fn delete(&self, key: &str) -> Result<()>;
 }
@@ -55,6 +57,9 @@ pub struct Keyring;
 impl SecretStore for Keyring {
     fn get(&self, key: &str) -> Option<String> {
         kelpie_proto::secret_get(key)
+    }
+    fn read(&self, key: &str) -> Result<Option<String>> {
+        kelpie_proto::secret_read(key).map_err(|e| anyhow!("credential store: {e}"))
     }
     fn set(&self, key: &str, value: &str) -> Result<()> {
         kelpie_proto::secret_set(key, value).map_err(|e| anyhow!("credential store: {e}"))
@@ -996,6 +1001,9 @@ impl Memory {
 impl SecretStore for Memory {
     fn get(&self, key: &str) -> Option<String> {
         self.0.lock().get(key).cloned()
+    }
+    fn read(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.get(key))
     }
     fn set(&self, key: &str, value: &str) -> Result<()> {
         self.0.lock().insert(key.into(), value.into());

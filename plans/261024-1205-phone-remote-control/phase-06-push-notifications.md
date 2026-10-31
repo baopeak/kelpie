@@ -1,13 +1,17 @@
 ---
 phase: 6
-title: "Push notifications"
+title: "DEFERRED: Native push (APNs/FCM gateway), sealed details, lost-contact"
 status: pending
-priority: P1
-effort: "4d"
+priority: P3
+effort: "3d (deferred, not in the total)"
 dependencies: [3, 5]
 ---
 
-# Phase 6: Push notifications
+# Phase 6: Native push
+
+> **REWORKED AND DEFERRED (user decision 2026-10-30).** Push is now Web Push sent by `kelpied`: see [phase 3b](phase-03b-web-push.md). **Moved to 3b**: the `notify.rs` delivery refactor, the durable outbox, overload rules. **Superseded**: "Web Push is not built" and RT-14's dropping of Web Push (SSRF kept as a 3b requirement). **Deferred here, with the native app (phase 5)**: APNs/FCM gateway, `relay/src/push.ts`, NSE sealed details, and the 2026-10-25 lost-contact push. If this returns, gateway secrets live in a separate Worker and account, not in the relay data path (phase 4). The text below is kept as reference.
+>
+> **Lost-contact needs a user decision**: a dead desktop cannot send Web Push, so that 2026-10-25 decision has no delivery path now (open question in the plan).
 
 ## Overview
 Reach a locked phone when a session needs the user, with no session content readable by Apple, Google or the relay.

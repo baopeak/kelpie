@@ -33,6 +33,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -102,7 +103,39 @@ P = "window.__kelpie.plugins"
 OPEN_PERM = "[...document.querySelectorAll('.perm')].filter(p => p.querySelector('.actions .btn'))"
 ITEMS = ("c.state.items.map(i => ({kind: i.kind, text: i.text || '', name: i.name || '', status: i.status || '', "
          "output: i.output || '', resolved: i.resolved || ''}))")
-TL = []  # status changes of the session under watch, in order
+TL = []  # status changes of the session under watch, in order (from the daemon's events: see StatusEvents)
+WATCH = {"sid": None}  # the session whose status changes go into TL
+
+
+class StatusEvents(threading.Thread):
+    """The daemon's own account of every status change of the watched session: `session.updated`, which it broadcasts to every
+    client from its 250 ms tick whenever the status changes, read on a connection of its own. The timeline used to be sampled
+    by polling `session.list` between WebDriver calls; on a busy host one round of that took longer than the fake agent's
+    0.8 s of work before it asks for a permission, so the first `working` was missed although the daemon reported it."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.conn = kc.Conn()
+        self.start()
+
+    def run(self):
+        try:
+            while True:
+                kind, body = self.conn.frame()
+                if kind != 1:
+                    continue
+                e = json.loads(body)
+                p = e.get("params") or {}
+                if e.get("event") == "session.updated" and p.get("id") == WATCH["sid"] and p.get("status") and (not TL or TL[-1] != p["status"]):
+                    TL.append(p["status"])
+        except Exception:  # noqa: BLE001  the daemon went away at the end of the run
+            pass
+
+
+def watch_status(sid):
+    """From now on, TL is the status timeline of `sid`, as the daemon reports it."""
+    WATCH["sid"] = sid
+    TL.clear()
 
 
 def until(fn, timeout=30, interval=0.25):
@@ -147,6 +180,7 @@ def read_lines(path):
 
 def scenario(run, c):
     d = run.d
+    StatusEvents()
 
     def info(sid):
         return next((s for s in c.call("session.list") if s["id"] == sid), {})
@@ -158,12 +192,9 @@ def scenario(run, c):
         return [s for s in c.call("session.list") if s["kind"] == kind]
 
     def track(sid, fn, timeout=30):
-        """Waits for `fn` (returns its value), recording each status change of the session on the way."""
+        """Waits for `fn` (returns its value). The session's status changes on the way are recorded by `StatusEvents`."""
         end = time.time() + timeout
         while time.time() < end:
-            st = status(sid)
-            if st and (not TL or TL[-1] != st):
-                TL.append(st)
             v = fn()
             if v:
                 return v
@@ -260,7 +291,7 @@ def scenario(run, c):
     run.shot("02-chat-open")
 
     # ---------- 2. a full tool-using turn ----------
-    TL.clear()
+    watch_status(sid)
     send("Read notes.txt and report back")
     run.check("the tool card 'Read notes.txt' appears", track(sid, lambda: d.js("return [...document.querySelectorAll('.trow.tool')].some(t => t.innerText.includes('notes.txt'))"), 30))
     run.check("the thought is kept as a thinking item", any(i["kind"] == "thinking" and "Thinking about it." in i["text"] for i in items(sid)), str([i["kind"] for i in items(sid)]))
@@ -328,7 +359,7 @@ def scenario(run, c):
     replayed = until(lambda: any(i["kind"] == "user" and "Read notes.txt and report back" in i["text"] for i in items(sid)) and any("You said: teal" in r for r in replies()), 30)
     run.check("the replay brings back the conversation", bool(replayed), str([(i["kind"], i["text"][:40]) for i in items(sid)][:8]))
     run.check("the replayed user prompts match the original ones", [i["text"] for i in items(sid) if i["kind"] == "user"] == before_user, str([i["text"] for i in items(sid) if i["kind"] == "user"]))
-    TL.clear()
+    watch_status(sid)
     run.check("after the replay the session is idle, not working", track(sid, lambda: status(sid) == "idle", 15), str(TL))
     run.check("it stays idle after the replay (5 s)", stays(sid, "idle", 5), str(status(sid)))
     run.shot("07-resumed")

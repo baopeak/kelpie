@@ -7,8 +7,14 @@ import type { SessionInfo } from "./types";
 /** Daemon API level that brings `waiting_since`, prompts in `session.read` and `session.answer`. */
 export const ANSWER_API = 7;
 
-/** Daemon API level of the phone protocol as it is now: state sync by session id, acknowledged frames, heartbeats, answer results, `load.status`, `chat.resolved`. The one place that names it. */
-export const PHONE_API = 17;
+/** Daemon API level of the phone protocol as it is now: state sync by session id, acknowledged frames, heartbeats, answer results, `load.status`, `chat.resolved`, sending chat messages from the phone, and kelpie-link (end-to-end encrypted pairing by key, `mobile.set_permission`, `mobile.reset`, decisions only from the verified app). The one place that names it. */
+export const PHONE_API = 22;
+
+/** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
+export const CHAT_QUEUE_API = 21;
+
+/** Whether a daemon at level `api` owns the queue. A lower level has no `chat.send`, however close the number. */
+export const daemonOwnsQueue = (api: number) => api >= CHAT_QUEUE_API;
 
 /** Live sessions waiting on the user, the longest wait first (unknown start times last). */
 export function waitingSessions(sessions: SessionInfo[]): SessionInfo[] {

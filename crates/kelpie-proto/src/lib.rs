@@ -29,11 +29,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// session's processes and their ports and stops them; an older daemon has no such methods, so the app offers them only at 16. 17: the phone protocol (`mobile.rs`: acknowledged
 /// screen frames, heartbeats, answer results, `load.status`, `chat.resolved` with its `by`); an older phone server speaks the old protocol, so the app and the phone page rely on it only at 17.
 /// 20: a chat's replay log keeps the answers to the agent's questions (`kelpie_answer` lines); an older daemon writes none and its cards show what they did, an older app ignores the lines.
-pub const API_LEVEL: u32 = 20;
+/// 21: chat messages go through a queue the daemon owns (`chat.send`, `chat.write_turn`, `chat.queue_op`, the `chat.queue` and `chat.turn_ready` events; a phone's `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume`); an older daemon has none of it, so the app keeps its own queue below 21 and the phone composes only at 21.
+/// 22: phone access is kelpie-link (end-to-end encrypted Noise pairing and reconnects on `/link`; `/ws`, `/pair` and device tokens are gone), device store v2 (`mobile.v2.json`), `mobile.set_permission` (`mobile.set_write` kept as an alias for one release), `mobile.reset`, `mobile.device_changed`, and phone-access decisions only from the verified app (`Role::App`).
+pub const API_LEVEL: u32 = 22;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.
-pub const DAEMON_SECURITY_LEVEL: u32 = 1;
+/// 2: phone access without device tokens (kelpie-link); a daemon at 1 still serves token-paired phones in plain JSON.
+pub const DAEMON_SECURITY_LEVEL: u32 = 2;
 pub const KIND_JSON: u8 = 1;
 pub const KIND_OUTPUT: u8 = 2;
 pub const KIND_INPUT: u8 = 3;
@@ -293,6 +296,27 @@ fn secret_get_moving(service: &str, legacy: &str, key: &str) -> Option<String> {
         let _ = keyring::Entry::new(legacy, key).and_then(|e| e.delete_credential());
     }
     Some(value)
+}
+
+/// [`secret_get`] for a caller that must tell "there is none" from "it could not be read": a key that protects other data
+/// is made only when the store says it has none, never because a read failed.
+pub fn secret_read(key: &str) -> keyring::Result<Option<String>> {
+    let read = |service: &str| match keyring::Entry::new(service, key)?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e),
+    };
+    match read(&keyring_service())? {
+        Some(value) => Ok(Some(value)),
+        None => {
+            // Moved as `secret_get` moves it. A move that fails leaves the old copy, which is read next time.
+            let Some(value) = read(&keyring_service_named(LEGACY_NAME))? else { return Ok(None) };
+            if keyring::Entry::new(&keyring_service(), key).and_then(|e| e.set_password(&value)).is_ok() {
+                let _ = keyring::Entry::new(&keyring_service_named(LEGACY_NAME), key).and_then(|e| e.delete_credential());
+            }
+            Ok(Some(value))
+        }
+    }
 }
 
 /// Saves a secret in the OS credential store. The error says what to fix (on Linux: start a

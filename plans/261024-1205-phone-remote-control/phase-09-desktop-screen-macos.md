@@ -3,11 +3,13 @@ phase: 9
 title: "Desktop / window screen control — macOS"
 status: pending
 priority: P2
-effort: "5d"
+effort: "6d"
 dependencies: [7, 8]
 ---
 
 # Phase 9: Desktop / window screen control — macOS
+
+> **Updated 2026-10-30 (path D).** Inherits phase 8's transport: Tailscale from the installed PWA; relay-mode screen, TURN and native app deferred. Same "`control` for the PWA" decision as phases 7 and 8. No new boundary expected; if one appears, take the next free API level.
 
 ## Overview
 macOS backends for `kelpie-screen` behind the phase-8 signaling, transport, safety, grant lifetime and phone UI. Browser-pane takeover on macOS

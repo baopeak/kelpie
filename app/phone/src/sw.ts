@@ -52,8 +52,8 @@ sw.addEventListener("fetch", (e) => {
   const req = e.request;
   const url = new URL(req.url);
   if (req.method !== "GET" || url.origin !== sw.location.origin) return;
-  // Not ours to keep: the pairing request, the reachability probe (it must see the network), the socket.
-  if (url.pathname === "/ws" || url.pathname === "/pair" || url.pathname === "/manifest.webmanifest") return;
+  // Not ours to keep: the reachability probe (it must see the network), the socket.
+  if (url.pathname === "/link" || url.pathname === "/manifest.webmanifest") return;
   if (req.mode === "navigate") {
     e.respondWith(
       withTimeout(fetch(req), NAVIGATION_WAIT_MS).catch(async () => (await caches.open(CACHE).then((c) => c.match("/"))) ?? fetch(req)),

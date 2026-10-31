@@ -1,6 +1,7 @@
 // A short message about the open session that must outlive the thing it is about: "Already answered on the
 // desktop 2 min ago" arrives after the prompt card was already removed by the next screen frame. It stays
 // at least 5 s (here 8) or until the person dismisses it.
+import { t } from "./i18n";
 
 export const NOTICE_SHOWN_MS = 8000;
 
@@ -29,6 +30,19 @@ export class NoticeBoard {
     const n = this.current;
     return n && n.session === session && now - n.at < NOTICE_SHOWN_MS ? n : null;
   }
+}
+
+export const lastingText = () => t("A choice that lasts (\"always\", \"don't ask again\") can only be made on the computer.");
+
+/** A refusal in the person's words. The daemon's are English; its refusal of a choice that lasts has a translated line here. */
+export const refusalText = (o: { code?: string; message: string }) => (o.code === "one_shot" ? lastingText() : o.message);
+
+/** What to say about a key press that did not go out, null when it did. */
+export function keyResultText(r: { ok: true } | { ok: false; reason: string; message?: string }): string | null {
+  if (r.ok) return null;
+  if (r.reason === "offline") return t("Offline: the key was not sent.");
+  if (r.reason === "unknown") return t("Not sure the key arrived. Check the screen.");
+  return r.message ?? null;
 }
 
 /** The notice an answer's reply calls for, as data: none while the card that asked is still on screen and shows the

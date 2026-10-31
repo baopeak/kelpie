@@ -27,8 +27,13 @@ pub async fn serve(daemon: Arc<Daemon>, endpoint: Endpoint) -> Result<()> {
                         let daemon = daemon.clone();
                         tokio::spawn(async move {
                             use interprocess::local_socket::traits::tokio::Stream as _;
+                            // Who is at the other end, for the App role (`peer_identity`).
+                            #[cfg(not(target_os = "macos"))]
+                            let peer = crate::peer_identity::peer_pid(&stream);
                             let (rx, tx) = stream.split();
-                            client(daemon, tokio::io::BufReader::with_capacity(64 * 1024, rx), tx).await;
+                            #[cfg(target_os = "macos")]
+                            let peer = crate::peer_identity::peer_pid_of(&rx);
+                            client(daemon, tokio::io::BufReader::with_capacity(64 * 1024, rx), tx, peer).await;
                         });
                     }
                     Err(e) => {
@@ -45,7 +50,7 @@ pub async fn serve(daemon: Arc<Daemon>, endpoint: Endpoint) -> Result<()> {
     }
 }
 
-async fn client<R, W>(daemon: Arc<Daemon>, mut rx: R, mut tx: W)
+async fn client<R, W>(daemon: Arc<Daemon>, mut rx: R, mut tx: W, peer: Option<u32>)
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -126,7 +131,7 @@ where
         };
         match frame {
             // Raw keystrokes come from the app's terminal views only.
-            Frame::Input { handle, data } if role == Role::User => {
+            Frame::Input { handle, data } if role.is_user() => {
                 if let Ok(entry) = daemon.entry(handle) {
                     entry.input(data);
                 }
@@ -145,23 +150,27 @@ where
                 let denied = if method == "auth" {
                     match auth::authenticate(&daemon, req.get("params").unwrap_or(&Value::Null)) {
                         Ok(r) => {
+                            // The Kelpie app says so; scripts using the user's token do not, and a connection that
+                            // authenticates again as anything else is no longer the app.
+                            let says_app = r == Role::User && req.pointer("/params/client").and_then(Value::as_str) == Some("app");
+                            // It is the App only if its process really is the installed app (`peer_identity`).
+                            let r = if r == Role::User { auth::user_role(says_app, peer) } else { r };
                             let who = match &r {
                                 Role::Session(id) | Role::Claimed(id) => json!({"session_id": id}),
+                                Role::App => json!({"user": true, "app": true}),
                                 _ => json!({"user": true}),
                             };
                             role = r;
                             daemon.set_client_role(id, &role);
-                            // The Kelpie app says so; scripts using the user's token do not, and a connection that
-                            // authenticates again as anything else is no longer the app.
-                            daemon.mark_app(id, role == Role::User && req.pointer("/params/client").and_then(Value::as_str) == Some("app"));
+                            daemon.mark_app(id, says_app);
                             let _ = out_tx.send(json_out(&json!({"id": req_id, "result": who})));
                             continue;
                         }
                         Err(e) => Some(e),
                     }
-                } else if role == Role::User {
-                    // The app's requests: no lookup, no copy.
-                    None
+                } else if role.is_user() {
+                    // The app's requests: no lookup, no copy; the bare user token cannot make the app-only decisions.
+                    auth::user_may(&role, &method).err()
                 } else {
                     let mut params = req.get_mut("params").map(std::mem::take).unwrap_or(Value::Null);
                     let checked = auth::authorize(&daemon, &role, &method, &mut params);

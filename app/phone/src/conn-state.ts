@@ -28,8 +28,11 @@ export interface ConnFacts {
   lastLiveAt: number;
   /** Another window of this device took the connection. */
   replaced: boolean;
-  /** The device was removed on the computer. */
+  /** The computer said, inside the session, that this device was removed. */
   unpaired: boolean;
+  /** Before any session the computer answered that it does not know this device, or cannot confirm its pairing now, or keeps not
+   *  answering it at all. That is no proof of anything (anyone on the path can do it), so the key stays until the person forgets it. */
+  notPairedHere: NotPairedHere | null;
   /** The daemon is older than this client needs. */
   outdated: boolean;
   /** The daemon has restarted since this page last saw it (set for a few seconds after the hello). */
@@ -50,6 +53,10 @@ export interface ConnFacts {
   route: "direct" | "relay";
 }
 
+/** `reset`: the computer's server answers and it has said nothing to this device's handshakes, which is what a computer with new
+ *  pairing keys does. */
+export type NotPairedHere = "unknown" | "unconfirmed" | "reset";
+
 export type ConnState =
   | { kind: "connecting" }
   | { kind: "live" }
@@ -63,6 +70,7 @@ export type ConnState =
   | { kind: "busy"; level: number; reasons: string[] }
   | { kind: "replaced" }
   | { kind: "unpaired" }
+  | { kind: "not_paired_here"; why: NotPairedHere }
   | { kind: "outdated" };
 
 export const SLOW_RTT_MS = 800;
@@ -75,6 +83,7 @@ export const RESTARTED_SHOWN_MS = 6000;
 
 export function deriveConn(f: ConnFacts, now: number): ConnState {
   if (f.unpaired) return { kind: "unpaired" };
+  if (f.notPairedHere) return { kind: "not_paired_here", why: f.notPairedHere };
   if (f.outdated) return { kind: "outdated" };
   if (f.replaced) return { kind: "replaced" };
   if (f.ready) {

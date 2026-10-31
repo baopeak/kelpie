@@ -114,6 +114,10 @@ pub struct SessionInfo {
     /// Wall-clock ms since it has been waiting on the user (`status == waiting`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_since: Option<u64>,
+    /// A chat's next message waits for the desktop window that queued it (one only that window can build, such as a picture),
+    /// and everything behind it waits too. The app says so outside the chat pane, which may be closed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub waits_for_window: bool,
 }
 
 /// How long after typed text its Enter follows (the desktop waits the same: `typeInto`).
@@ -1029,6 +1033,12 @@ impl Session {
         self.inner.lock().vt.text_tail(lines)
     }
 
+    /// Whether `key` chooses, on the prompt shown now, something that outlasts it (`Prompt::lasting`).
+    pub fn choice_lasts(&self, key: &str) -> bool {
+        // Where a prompt tells `a` from `A`, each is its own choice; otherwise a key is the same whichever way it is typed.
+        self.inner.lock().screen_prompt.as_ref().is_some_and(|p| p.lasting.iter().any(|k| k == key) || (!p.keys.iter().any(|k| k == key) && p.lasting.iter().any(|k| k.eq_ignore_ascii_case(key))))
+    }
+
     /// The prompt on screen the session waits on, if any (`choices::detect`).
     pub fn screen_prompt(&self) -> Option<crate::choices::Prompt> {
         self.inner.lock().screen_prompt.clone()
@@ -1137,6 +1147,7 @@ impl Session {
             last_activity: g.last_activity,
             interrupted: g.interrupted,
             waiting_since: g.waiting_since,
+            waits_for_window: false,
         }
     }
 
@@ -1337,7 +1348,12 @@ pub(crate) mod fake {
 
     /// A menu is on screen, waiting for a key.
     pub fn show_prompt(session: &Session) {
-        session.inner.lock().screen_prompt = Some(crate::choices::Prompt { keys: vec!["1".into(), "2".into()], question: None, line: false });
+        session.inner.lock().screen_prompt = Some(crate::choices::Prompt { keys: vec!["1".into(), "2".into()], question: None, line: false, lasting: Vec::new(), selected: None });
+    }
+
+    /// A menu is on screen where `key` chooses something that outlasts it.
+    pub fn show_lasting_prompt(session: &Session, key: &str) {
+        session.inner.lock().screen_prompt = Some(crate::choices::Prompt { keys: vec!["1".into(), "2".into(), "3".into()], question: None, line: false, lasting: vec![key.into()], selected: None });
     }
 
     /// The agent reports a permission request; returns the wait's `waiting_since`.

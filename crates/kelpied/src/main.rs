@@ -32,6 +32,7 @@ mod mobile;
 mod notes;
 mod notify;
 mod oneshot;
+mod peer_identity;
 mod persist;
 mod ports;
 mod proc_tree;
@@ -42,6 +43,7 @@ mod scheduled_input;
 mod server;
 mod session;
 mod status;
+mod user_presence;
 mod vt;
 
 use std::path::PathBuf;

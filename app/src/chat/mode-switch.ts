@@ -15,6 +15,7 @@ import { createAcpAdapter } from "./acp-adapter";
 import { CORE_AGENTS, acpArgv } from "../lib/agents";
 import { type AgentSettings, claudeSettingsFrom, withSettings } from "./agent-settings";
 import { agentLatestSession, claudeTranscript, createSession, daemon, sendInput } from "../lib/ipc";
+import { daemonOwnsQueue } from "../lib/attention";
 import { store, type PaneTarget } from "../lib/store";
 import { disposeView } from "../lib/terminal-host";
 import { uid } from "../lib/platform";
@@ -97,7 +98,7 @@ export function getController(s: SessionInfo): ChatController {
   if (c) return c;
   const make = (ctx: AdapterContext): Adapter =>
     s.kind === "claude" ? createClaudeAdapter(ctx) : s.kind === "codex" ? createCodexAdapter(ctx) : createAcpAdapter(ctx);
-  c = new ChatController(s.id, s.cwd, s.agent_session_id, make, { transport: desktopTransport() });
+  c = new ChatController(s.id, s.cwd, s.agent_session_id, make, { transport: desktopTransport(), daemonQueue: () => daemonOwnsQueue(store.daemonApi()) });
   if (s.kind === "claude" && s.agent_session_id) {
     const resumeId = s.agent_session_id;
     const createdAt = s.created_at;
@@ -220,11 +221,15 @@ async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane, comman
   let conv = ctrl?.state.conversationId ?? c.agent_session_id;
   if (conv === "latest") conv = null;
   const stopped = await stopProcess(c, async () => {
+    // The daemon's queue stops taking and writing messages before the interrupt, so no turn slips in between the
+    // interrupt and the end of stdin. (An older daemon has no queue: the call fails and nothing is lost.)
+    await daemon("chat.queue_op", { handle: c.handle, op: "hold" }).catch(() => {});
     ctrl?.interrupt();
     await sleep(200);
     await daemon("chat.close_stdin", { handle: c.handle }).catch(() => {});
   });
   if (!stopped) {
+    await daemon("chat.queue_op", { handle: c.handle, op: "hold", held: false }).catch(() => {});
     store.notify(t("The chat process did not stop; not starting a second writer."));
     return;
   }

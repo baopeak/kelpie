@@ -60,6 +60,11 @@ export function describeConn(s: ConnState): { label: string; detail: string; ton
       return { label: t("Open in another window"), detail: t("This device is connected in another window. Tap to use it here."), tone: "idle" };
     case "unpaired":
       return { label: t("Not paired"), detail: t("This device is no longer paired."), tone: "bad" };
+    case "not_paired_here":
+      if (s.why === "reset") return { label: t("Not paired here"), detail: t("This computer answers but not to this device: phone access may have been reset on it, or something on this network is interfering. Pair it again from Kelpie → Settings → Mobile, or forget the pairing here. The device keeps its key until you do."), tone: "bad" };
+      return s.why === "unknown"
+        ? { label: t("Not paired here"), detail: t("This computer does not know this device: it may have been removed there. Pair it again from Kelpie → Settings → Mobile, or forget the pairing here. The device keeps its key until you do."), tone: "bad" }
+        : { label: t("Pairing not confirmed"), detail: t("This computer knows this device but cannot confirm its pairing right now. It will try again; the device keeps its key."), tone: "warn" };
     case "outdated":
       return { label: t("Update Kelpie"), detail: t("Kelpie on your computer is older than this app needs. Update it, then reload."), tone: "bad" };
   }

@@ -310,7 +310,7 @@ async def gate(args):
         short = left_by is not None and left_by["reason"] == ["memory"] and (left_by["memory_free"] or 100) < 15
         if fell is None and short:
             print(f"  (still {left_by['level']} after 60 s only because host memory is {left_by['memory_free']:.0f} % free)", flush=True)
-        check("…and is L0 within 25 s of it stopping", (fell is not None and fell <= 25) or short, fell)
+        check("…and is L0 within 25 s of it stopping", (fell is not None and fell <= 25) or short, fell if fell is not None else left_by)
         for p in phones:
             await p.close()
         d.call("mobile.disable")

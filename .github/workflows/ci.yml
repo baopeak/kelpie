@@ -2,6 +2,7 @@ name: ci
 
 on:
   push:
+    branches: [master]
   pull_request:
 
 jobs:
@@ -48,7 +49,14 @@ jobs:
         shell: bash
         env:
           KELPIE_REQUIRE_PHONE: "1"
-        run: cargo test -p kelpie-proto -p kelpied -p kelpie -p kelpie-stt
+        run: cargo test -p kelpie-proto -p kelpie-link -p kelpied -p kelpie -p kelpie-stt
+      - name: The phone link's crypto stays free of ring
+        shell: bash
+        run: |
+          if cargo tree -p kelpie-link -e normal | grep -E '\bring v'; then
+            echo "kelpie-link must not depend on ring"
+            exit 1
+          fi
       - name: A daemon cannot be built without the phone client when it is required
         shell: bash
         run: scripts/check-phone-guard.sh
@@ -122,9 +130,11 @@ jobs:
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/deb/*.deb
           if-no-files-found: ignore
+          retention-days: 3
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
         with:
           name: linux-smoke
           path: smoke/
           if-no-files-found: ignore
+          retention-days: 3

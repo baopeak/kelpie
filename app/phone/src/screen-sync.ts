@@ -9,6 +9,8 @@ export interface Prompt {
   question?: string | null;
   /** Answered by typing a line: the key needs Enter after it. */
   line: boolean;
+  /** Keys whose choice outlasts this prompt: the computer's to make, not a phone's. */
+  lasting?: string[];
 }
 
 /** What the daemon sends about a followed terminal session (`type: "screen"`). */
@@ -44,6 +46,10 @@ export function promptKey(prompt: Prompt, waitingSince: number | null): string {
 
 export const ACK_EVERY_FRAMES = 2;
 export const ACK_AFTER_MS = 250;
+/** Screens held for one session. The daemon sends at most 4 frames past what it has heard acknowledged (`WINDOW_FRAMES` in
+ *  `mobile/sync.rs`), and builds only on one of those, so twice that is never reached by a well-behaved daemon: this is the bound,
+ *  whatever a frame says. Rows are shared between screens, so a screen costs little more than its changed rows. */
+export const HELD_FRAMES = 8;
 
 export const emptyView = (): ScreenView => ({ rows: [], cursor: null, prompt: null, waitingSince: null, title: null });
 
@@ -89,7 +95,8 @@ export class ScreenSync {
     this.cancelAck();
     const kept = this.acked !== null ? this.held.get(this.acked) : undefined;
     if (kept) {
-      this.view = { ...this.view, rows: kept.rows };
+      // All of it: the prompt and the title of a later frame are not what this screen says, and the daemon says `same` if the rows are.
+      this.view = kept;
       this.rev = this.acked;
     } else {
       this.reset();
@@ -109,12 +116,14 @@ export class ScreenSync {
     next.length = m.height;
     for (let i = 0; i < next.length; i++) if (next[i] === undefined) next[i] = "";
     for (const [i, text] of m.rows) if (i < next.length) next[i] = text;
-    // The daemon builds on `base` from now on: older screens are not needed. A whole frame says
-    // nothing about what the daemon builds on (an acknowledgement may be on its way).
-    const keep = m.base === null ? this.acked ?? 0 : m.base;
-    for (const k of [...this.held.keys()]) if (k < keep) this.held.delete(k);
+    // The daemon builds on `base` from now on: older screens are not needed. A whole frame says nothing about what it builds on:
+    // it may have heard only an earlier acknowledgement, so nothing is let go for one, beyond the bound.
+    if (m.base !== null) for (const k of [...this.held.keys()]) if (k < m.base) this.held.delete(k);
     const view: ScreenView = { rows: next, cursor: m.cursor, prompt: m.prompt, waitingSince: m.waiting_since, title: m.title };
+    this.held.delete(m.rev);
     this.held.set(m.rev, view);
+    // The first to arrive goes first.
+    while (this.held.size > HELD_FRAMES) this.held.delete(this.held.keys().next().value!);
     this.view = view;
     this.rev = m.rev;
     if (++this.unacked >= ACK_EVERY_FRAMES) this.ackNow();

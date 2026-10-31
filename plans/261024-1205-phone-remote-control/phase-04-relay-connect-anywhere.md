@@ -1,98 +1,119 @@
 ---
 phase: 4
-title: "Relay: connect from anywhere"
+title: "Relay: one Cloudflare relay, connect from anywhere"
 status: pending
 priority: P1
-effort: "4d"
-dependencies: [3]
+effort: "6d"
+dependencies: [3, 3a, 3c, 4a]
 ---
 
 # Phase 4: Relay — connect from anywhere
 
 ## Overview
-An opt-in, untrusted relay so the phone reaches the desktop from any network with no setup and no account. The desktop dials out;
-the relay forwards opaque `kelpie-link` frames. One TypeScript implementation runs on Cloudflare Workers + Durable Objects (hosted default)
-and on open-source `workerd` (self-host). The client side (connect race, migration) is written once in Rust (`kelpie-link` feature `client`) and used by the native app (phase 5) and tests.
+An opt-in, untrusted relay so the installed phone app reaches the desktop when Tailscale is off or blocked. **One** relay on Cloudflare Workers + Durable Objects, personal use first (user decision 2026-10-30; a public service is a later, separate decision). The desktop dials out; the relay forwards opaque `kelpie-link` frames. Same TypeScript runs on `workerd`, so self-host stays possible. Noise stays end to end: the relay stores no content and cannot read it, on Cloudflare or anywhere else; it sees IPs, timing and sizes.
+
+Not two relays: Tailscale stays in the race as the fallback (and LAN on a plain `http://` page, see the limit below). The pairing record holds a **list** with one relay entry, so adding one later is config only.
+
+Client is the installed PWA (native app deferred, phase 5), so the race lives in `app/phone/src/link.ts`. `kelpie-link::client` (Rust) is deferred with the native app.
 
 ## Requirements
 - Functional
-  - **Room**: random `room_key` (32 B, keyring); `room_id = H(room_key)` — random, not derived from `dpk`, carried in the QR; relay stores only `room_id` and `H(room_key)`.
-    Unused rooms expire after 90 days; room creation rate-limited per IP. [RT-15]
-  - **Phone admission**: desktop pushes an allow-list of `H(device_relay_token)`; tokens issued over `kelpie-link` after pairing (native devices only — PWA devices never get one, phase 3).
-    Pairing via relay: desktop registers `H(pair_token)` (TTL 120 s, single use), `pair_token = HKDF(psk, "kelpie-relay-pair")`.
-  - **Pairing independent of the LAN listener**: with the relay on, `pair_start` works even when no LAN address binds (today it bails, `mobile.rs:192-193`). [RT-15]
+  - **Room**: random `room_key` (32 B, keyring); ticket = random room id + HMAC, checked in the Worker **before any DO call** (< 0.1 ms). Relay stores only `room_id` and `H(room_key)`. Unused rooms expire after 90 days. [RT-15]
+  - **Registration (personal use)**: creating a room needs an operator key (`wrangler secret`, pasted once in Settings). Strangers cannot create rooms, which is also the first billing guard.
+  - **Placement**: no `apac` hint and no `locationHint`; the desktop's own first `get()` places the object (`apac` lands in Japan/Korea ~39 %, `apac-se` cannot be forced [T]). A DO is pinned for life, so if the desktop's measured relay RTT stays above the threshold from phase 4a for 24 h, it offers to **re-create the room**; the new room id reaches phones as an `addrs` update inside Noise, and the old room is dropped.
+  - **Pairing record**: `Endpoint {t:"relay", a:"wss://…", r:"<room>"}` (`kelpie-link/src/lib.rs:209`); one entry; clients skip unknown kinds.
+  - **Phone admission**: desktop pushes an allow-list of `H(device_relay_token)`; tokens issued over `kelpie-link` after pairing, **expire in 30 days, rotated inside Noise**. Issued to native devices and to PWA devices with `secure_origin` (3a). Plain-`http://` devices never get one. Pairing via relay: desktop registers `H(pair_token)` (TTL 120 s, single use), `pair_token = HKDF(psk, "kelpie-relay-pair")`.
+  - **Desktop admission**: signature with the room key, not a bearer value [synthesis: should].
+  - **`Origin`** (synthesis said reject it; a browser client always sends one, so refined): desktop path rejects any `Origin`; phone path accepts only the origin the desktop registered for the room, and only with a valid token. Non-WS requests refused. **No HTML served.**
+  - **The relay never serves code** (D5 as amended): the phone page comes only from the daemon, over Tailscale HTTPS; the installed app's kept shell (`sw.ts`) opens off the tailnet and dials the relay. So first install needs Tailscale. The hosted-PWA option for non-Tailscale users belongs to the going-public decision (open question).
+  - **CSP**: `secure_headers` (`mobile.rs`) is static with `connect-src 'self'`; becomes per-config, adding exactly the relay origin while the relay is on.
+  - **Effective permission over relay**: `transport_cap` (`mobile.rs`) reads `peer.tls`/loopback/Tailscale, none of which apply to a slot: a slot's cap = `Write` when the record is `secure_origin` (`Control` per the phase 7 rule), else refused.
+  - **Pairing independent of the LAN listener**: with the relay on, `pair_start` works when no LAN address binds. [RT-15]
   - **Forwarding**: binary frames ≤ 64 KiB; slot id per phone socket; ≤ 8 phones per room; `desktop_offline` frame; nothing queued or stored.
-  - **Limits**: per-room 4 MB/s burst and 20 GB/month soft cap for session traffic; browser-takeover frames (phase 7) have their own 200 MB/h budget outside the room cap; violations close with explained codes.
-  - **Relay admission requires `caps`**: the relay path admits only clients whose first message declares `caps` ack+hb. The daemon's legacy mode (pages from before acknowledged frames: no ack window, no heartbeat deadline) is for the LAN and PWA only, because it has no application-level liveness and a relay keeps its own TCP connection alive, so a dead legacy client would never be noticed.
-  - **Revoke while offline**: pending allow-list removals persisted on the desktop and applied first on relay reconnect. [RT-12]
-  - **Logging**: counters and error codes only; no payloads; no persisted IPs (Cloudflare edge logs documented).
-  - **Daemon**: outbound WSS only when "Connect from anywhere" is on (user presence required, phase 3); jittered backoff 1 s → 60 s; each slot feeds the same link handler as `/link`.
-  - **Client** (`kelpie-link::client`): LAN addresses (QR + last known + `addrs` updates) first, relay after a 250 ms stagger (details in Resilience requirements); first completed IK handshake wins; on relay, re-probe LAN on interface change and migrate
-    (new handshake on direct, rebind subscriptions with per-device resume, then close relay socket). Control grants re-bind to the new connection only after the same device's handshake succeeds. [RT-12]
-  - Settings → Mobile: toggle, relay URL (default / custom), "What the relay can see" (ciphertext, IPs, timing, sizes, room id), status.
-- Non-functional: ≤ 30 ms median added in-region; zero cost when off; Worker CPU ≤ 1 ms per frame.
+  - **Limits**: per-room 4 MB/s burst, **~2 GB/month** soft cap (lowered from 20 GB; confirm after 4a); **per-socket message cap** (close above ~200 msg/s); violations close with explained codes.
+  - **Relay admission requires `caps`** ack + hb: the daemon's legacy mode has no application-level liveness, and a relay keeps its own TCP alive, so a dead legacy client would never be noticed.
+  - **Revoke**: the daemon's allow-list is authoritative; a revoke kills live sessions on all carriers; while offline, removals are persisted on the desktop and applied first on reconnect. [RT-12]
+  - **Logging**: counters and error codes only; no payloads; no persisted IPs (Cloudflare edge logs documented); 24 h hashed-IP abuse state on unauthenticated paths only.
+  - **Limits by credential**: per-credential limits; IP limits only on unauthenticated paths, because CGNAT makes per-IP limits unfair.
+  - **Daemon** (`relay.rs`): outbound WSS only when the relay row is on (user presence, in `APP_ONLY`); jittered backoff 1 s → 60 s; `TCP_NODELAY`; each slot feeds the same link handler as `/link`.
+  - **Daemon handshake budget**: global 20/s, 5/s per slot, 16 pending, silent drop, no side effects before the first valid initiator frame. mac1 prefilter already in `kelpie-link` (`prefilter`, `lib.rs:186`), run on every slot's first message before any Diffie-Hellman.
+  - **Traffic shape**: pad control and chat frames to size buckets. No compression (CRIME-style risk; ciphertext does not compress), no permessage-deflate. Raw-terminal chaff (20 ms tick, ~10 ms added latency, ~7 KB/s while typing) only as an off-by-default switch.
+  - **Crypto hygiene already in place, kept**: implicit-counter nonces fail closed, `v` in the prologue, no downgrade retry, counter rekey. Add a full re-handshake daily.
+  - **Client race** (`link.ts`): candidates from the pairing record, `ts` first, relay after a 250 ms stagger, earlier attempts kept, first completed IK handshake wins. On relay, re-probe direct on interface-change triggers; migrate (new handshake, rebind subscriptions with per-device resume, then close the relay socket). Control grants re-bind only after the same device's handshake. [RT-12]
+  - **Limit**: an HTTPS page cannot dial `ws://<LAN IP>` (mixed content), so the installed app's direct path is `ts`. A plain `http://` page keeps its same-origin LAN socket; it is a separate read-only pairing.
+  - Settings → Mobile: 3d row, relay URL (default / custom), operator key, "What the relay can see" (ciphertext, IPs, timing, sizes, room id), status, re-create room.
+- Non-functional: **no added-latency promise**; the earlier "≤ 30 ms in-region" claim is removed (no DO in Vietnam; desktop-to-HKG alone was 47–68 ms [M]). Targets come from phase 4a. Foreground-to-live p50 < 1.2 s, p95 < 3 s (to verify). Zero cost when off. Worker CPU ≤ 1 ms per frame.
 
 ## Resilience requirements — unstable networks and host overload
-<!-- Updated: 2026-10-25 - resilience research -->
-- **Relay signals**: `desktop_offline` / `desktop_online`, `peer_reset` to the surviving side when either socket drops, a distinct **restart** close code (code deploys drop every DO socket) on which clients add 0–10 s jitter; desktop sockets carry a generation counter — a new desktop socket replaces the old one (last wins) even before the old one is noticed dead.
-- **Keepalive**: relay↔desktop and relay↔phone edge ping/pong every 20 s via DO `setWebSocketAutoResponse` (no wake, no duration billing); end-to-end liveness of the desktop comes from the phase-1 `hb` inside Noise plus `desktop_offline`. Desktop declares the relay dead after 45 s (90 s at L2+, lag-aware). Perf gate changes from "≤ 1 keepalive / 30 s" to **≤ 1 per 20 s per socket**.
-- **Backoff and triggers** (desktop → relay): full-jitter 1 s → 60 s, reset to attempt 0 on a network-change event (debounced 2 s) and after 30 s stable. Test: kill/restart `workerd` 20× with 8 phones ⇒ all reconnect ≤ 15 s, ≤ 3 attempts per client per 10 s.
-- **Connect race refined**: LAN candidates first, relay after 250 ms (happy-eyeballs stagger) instead of a flat 1.5 s LAN timeout; skip RFC1918 candidates that are not on-link when the phone is on cellular (Tailscale 100.64/10 always eligible); "probe LAN every 30 s" replaced by interface-change triggers (+30 s only on Wi-Fi with an unknown subnet); direct → relay fallback immediate, relay → direct only after direct has been stable 10 s (no flapping).
-- **Budgets survive eviction**: rate and byte counters (20 GB/month, takeover budget) persisted to DO storage, batched every 5 s or 1 MB.
-- `relay unreachable` reported distinctly from `computer offline`; direct retried every 30 s while the relay is down; room created with `locationHint` from the desktop; "≤ 30 ms added in-region" stated as in-region only.
-- **Lost-contact lease** for phase 6 (user decision 2026-10-25): instead of an on/off bit, the desktop holds a lease on its room only while ≥ 1 session is Working/Waiting **and** ≥ 1 device opted in; the lease is renewed by the existing 20 s heartbeat (no extra traffic) and carries one sealed blob per opted-in device (encrypted to that device's key — the relay forwards it unread). On desktop socket loss the room's Durable Object sets `storage.setAlarm(now + 90 s)` (works on `workerd`); desktop back before it fires ⇒ alarm cancelled. A `going_to_sleep` frame sent on OS suspend (`PBT_APMSUSPEND` / `NSWorkspaceWillSleepNotification`) marks the loss as sleep. Relay learns only *when* a lease exists (documented); default off.
-- Settings → Mobile suggests the existing keep-awake mode "while agents are working" when phone access is turned on (no new keep-awake behaviour — user decision 2026-10-25).
-- Host overload: relay pairing admission follows the phase-1 load level; overloaded desktop answers new screen/takeover requests with `host_busy` (retry-after 10 s).
-- Tests with the TCP fault proxy (phase 1 harness): blackhole 10/30/90 s, half-open, RST storm, NAT rebinding (proxy restart on a new port), relay deploy.
+<!-- Updated: 2026-10-25 - resilience research; 2026-10-30 - single Cloudflare relay -->
+- **Relay signals**: `desktop_offline` / `desktop_online` (treated as hints, a relay can forge them), `peer_reset` to the surviving side when either socket drops, a distinct **restart** close code on which clients add 0–10 s jitter; desktop sockets carry a generation counter, new replaces old (last wins).
+- **Deploy drops are accepted and limited**: every deploy, runtime update and eviction restart drops sockets [D]. Mitigations: resume from phase 1, rare deploys, DO class in its own script so a routine router deploy leaves it alone (**unverified; phase 4a answers it**), Tailscale stays in the race.
+- **Keepalive**: relay↔desktop and relay↔phone edge ping/pong every 20 s via `setWebSocketAutoResponse` (no wake, no duration billing); may relax to 30 s when stable; end-to-end liveness from the phase-1 `hb` inside Noise, sent only while a phone is attached, so an idle desktop-only room costs ~0. Desktop declares the relay dead after 45 s (90 s at L2+, lag-aware).
+- **Backoff and triggers** (desktop → relay): full-jitter 1 s → 60 s, reset on a network-change event (debounced 2 s) and after 30 s stable. Test: kill/restart `workerd` 20× with 8 phones ⇒ all reconnect ≤ 15 s, ≤ 3 attempts per client per 10 s.
+- **Race refined**: direct candidates first, relay after 250 ms; Tailscale always eligible; direct → relay fallback immediate, relay → direct only after direct has been stable 10 s (no flapping).
+- **Kept shell opens at once**: `sw.ts` today waits 2.5 s for the network on navigation; for a paired installed app, serve the kept shell first and update behind it, or foreground-to-live cannot meet the target off the tailnet.
+- **Budgets survive eviction**: counters persisted to DO storage on message arrival, batched every 5 s or 1 MB, never by a timer.
+- `relay unreachable` reported distinctly from `computer offline`; direct retried every 30 s while the relay is down.
+- **Deferred, pending the lost-contact decision** (open question): the 2026-10-25 lease + DO alarm. It needs a push from the relay when the desktop is gone, and Web Push is sent by `kelpied` only. Design kept in phase 6.
+- Settings → Mobile suggests the existing keep-awake mode "while agents are working" when phone access is on (no new behaviour; user decision 2026-10-25).
+- Host overload: relay pairing admission follows the phase-1 load level; overloaded desktop answers new takeover requests with `host_busy`.
+- Tests with the TCP fault proxy (phase 1 harness): blackhole 10/30/90 s, half-open, RST storm, NAT rebinding, relay deploy.
 
 ## Deployment & operations
-<!-- Updated: 2026-10-25 - user approved hosted + self-host deployment design -->
-- **One codebase, two targets**: `relay/` (TypeScript Worker + Durable Object). Hosted on Cloudflare via `wrangler`; self-host via `workerd` in a Docker image (`ghcr.io/baopeak/kelpie-relay`, persistent volume for DO storage, TLS by Caddy/Let's Encrypt in front). Same protocol version, same tests.
-- **Environments**: `staging` and `production` Workers on separate routes (`relay-staging.<domain>`, `relay.<domain>`); the desktop default points at production; dev builds and e2e use a local `workerd`.
-- **Secrets**: APNs `.p8` + key id + team id, FCM service account, TURN key — only via `wrangler secret put` per environment (and env vars for self-host); never in the repo or CI logs.
-- **CI/CD** (`.github/workflows/relay.yml`): on PR — typecheck + vitest (`@cloudflare/vitest-pool-workers`) + `workerd` smoke; on tag `relay-v*` — deploy staging → automated smoke (pair a test client through the relay, send 100 frames, revoke) → deploy production. Docker image built and pushed on the same tag.
-- **Deploys drop every socket** (DO restart): clients reconnect with 0–10 s jitter (restart close code); protocol `v` field keeps old and new clients compatible across a deploy; deploys scheduled off-peak; rollback = `wrangler rollback` to the previous version.
-- **Monitoring**: Workers Analytics + `/v1/health`; counters only (rooms, sockets, frames, bytes, error codes) — no IPs, no payloads; alerts on error-rate and bandwidth spikes (abuse) and on push-gateway failures.
-- **Abuse limits**: room creation per IP, idle rooms expire after 90 days, per-room 4 MB/s and 20 GB/month, frames ≤ 64 KiB, ≤ 8 phones/room, budget counters persisted.
-- **Cost model** (verify against current Cloudflare pricing at go-live): Workers Paid ≈ 5 USD/month covers hundreds of users (≈ 13 k billed requests/user/month, mostly heartbeats; WebSocket messages billed 20:1); no egress fees on Workers; TURN 1 000 GB/month free then 0.05 USD/GB; APNs/FCM free; domain ≈ 10 USD/year.
-- **Self-host limits** documented in `docs/relay-self-host.md`: store-app push must still use the hosted gateway (APNs/FCM keys belong to the Kelpie app) or be turned off; TURN via own `coturn` optional.
-- **Maintainer go-live checklist** (manual, blocks production only — staging and local work proceed without it): domain, Cloudflare account + Workers Paid, Apple Developer (APNs key), Firebase project (FCM), secrets set, DNS routes.
+<!-- Updated: 2026-10-25 - hosted + self-host design; 2026-10-30 - one relay, personal use first -->
+- **One codebase, two targets**: `relay/` (TypeScript Worker + DO). Hosted on Cloudflare via `wrangler`; self-host via `workerd` in a Docker image (`ghcr.io/baopeak/kelpie-relay`, persistent volume, TLS by Caddy/Let's Encrypt in front). Same protocol version, same tests.
+- **Environments**: `staging` and `production` Workers on separate routes; dev builds and e2e use a local `workerd`.
+- **Hibernation guard** (a defeated hibernation costs ~$4/room-month against about $0.06): `acceptWebSocket` only, no plain `accept()`; no `setInterval`/`setTimeout`; **no per-socket timers, no looping alarms**. Enforced by a source-grep test and by an assertion that the DO hibernates ≤ ~15 s after the last event with 8 idle sockets.
+- **Billing guards** (no hard spend cap exists): own Cloudflare account, Workers Paid, **budget alert + runbook** (what to do at each threshold: tighten caps, disable registration, `wrangler rollback`), custom domain, WAF rule, per-socket message cap, ticket check before any DO, registration key. Alerts at 50 % of the expected monthly figure.
+- **Secrets**: only via `wrangler secret put` per environment (env vars for self-host); never in the repo or CI logs. **Push and TURN secrets are not in the relay data path**: if APNs/FCM or TURN credentials ever exist, they live in separate Workers and separate accounts (deferred, phases 6, 8).
+- **CI/CD** (`.github/workflows/relay.yml`): on PR, typecheck + vitest (`@cloudflare/vitest-pool-workers`) + `workerd` smoke; on tag `relay-v*`, deploy staging → automated smoke (pair a test client through the relay, send 100 frames, revoke) → deploy production. Docker image on the same tag. Deploys are rare, off-peak; rollback = `wrangler rollback`. Protocol `v` keeps clients compatible across a deploy.
+- **Monitoring**: Workers Analytics + `/v1/health`; counters only; alerts on error rate and bandwidth spikes.
+- **Cost model** [E, confirm in 4a]: ~$6/month at 100 users, ~$19 at 1 k, ~$188 at 10 k with hibernation holding. Personal use stays near the $5 minimum.
+- **Public abuse contact and self-host doc** kept; legal notes (no monitoring duty, conduit) live in the going-public decision, not in this phase. `docs/relay-self-host.md`.
+- **Maintainer go-live checklist** (blocks production only): domain, Cloudflare account + Workers Paid, budget alert, secrets, DNS routes. No Apple or Firebase accounts (deferred).
+- **Published**: protocol spec and test vectors in `docs/`.
 
 ## Architecture
 ```
 relay/
-  src/worker.ts   // /v1/desktop, /v1/phone, /v1/health (+ /v1/push phase 6, /v1/turn phase 8)
-  src/room.ts     // Durable Object per room, WebSocket Hibernation, allow-lists, limits
+  src/worker.ts   // /v1/desktop, /v1/phone, /v1/health; ticket check before any DO call; no HTML
+  src/room.ts     // Durable Object per room, WebSocket Hibernation, allow-lists, limits; own script if 4a says it helps
   wrangler.toml · workerd/ (config.capnp + Dockerfile) · test/ (vitest + @cloudflare/vitest-pool-workers)
 ```
 - Daemon `crates/kelpied/src/relay.rs`: `tokio-tungstenite` without default features + rustls **ring** provider + webpki roots (no aws-lc/NASM).
-- PWA stays LAN/Tailscale (no service worker on `http://`, origin unreachable away from home); the relay never serves code.
 
 ## Related Code Files
-- Create: `relay/**`, `.github/workflows/relay.yml`, `relay/Dockerfile`, `crates/kelpied/src/relay.rs`, `crates/kelpie-link/src/client.rs`, `docs/relay-self-host.md`
-- Modify: `crates/kelpied/Cargo.toml`, `crates/kelpie-link/Cargo.toml` (feature `client`), `crates/kelpied/src/mobile.rs`, `crates/kelpied/src/daemon.rs` (`mobile.set_relay`, `API_LEVEL`), `app/src/components/settings/mobile-settings.tsx`, locales, `README.md`, `docs/architecture.md`, `.github/workflows/ci.yml`
+- Create: `relay/**` (beyond the 4a skeleton), `.github/workflows/relay.yml`, `relay/Dockerfile`, `crates/kelpied/src/relay.rs`, `docs/relay-self-host.md`, `docs/link-protocol.md`
+- Modify: `crates/kelpied/Cargo.toml`, `crates/kelpied/src/mobile.rs`, `mobile/link.rs`, `mobile/store.rs`, `crates/kelpied/src/auth.rs`, `crates/kelpied/src/daemon.rs` (`mobile.set_relay`), `crates/kelpie-proto/src/lib.rs` (`API_LEVEL` 27), `app/phone/src/link.ts`, `app/phone/src/pairing-store.ts`, `app/phone/src/sw.ts`, `app/phone/src/conn-state.ts`, `app/src/components/settings/mobile-settings.tsx`, locales, `README.md`, `docs/architecture.md`, `.github/workflows/ci.yml`
 
 ## Implementation Steps
-1. Relay Worker + DO: admission, forwarding, limits, expiry; vitest.
+1. Extend the 4a skeleton: admission, signature, tokens, limits, expiry, padding-agnostic forwarding; vitest; hibernation and billing guards.
 2. `workerd` self-host config + Dockerfile + doc.
-3. Daemon relay client, slots, allow-list sync incl. persisted removals, pairing without LAN bind.
-4. `kelpie-link::client` connect race + migration; test harness client.
-5. Settings UI + explainer; hosted deploy (maintainer, open question 1).
+3. Daemon relay client, slots, handshake budget, allow-list sync incl. persisted removals, pairing without LAN bind, slot cap, room re-creation.
+4. `link.ts` race + migration; pairing record list; dynamic CSP; shell-first in `sw.ts`.
+5. Padding, optional chaff, daily re-handshake, token rotation.
+6. Settings row + explainer; maintainer deploy; spec and vectors.
 
 ## Tests
-- Relay vitest: wrong `room_key`, unknown device token, expired/reused pair token, oversize frame, caps, takeover budget separate, desktop_offline, hibernation resume, room expiry.
-- `cargo test`: backoff; persisted removals applied first; relay off ⇒ no socket; client race picks first handshake; migration keeps subscriptions; control grant not re-bound before handshake.
-- e2e with local `workerd`: Rust test client pairs over relay only (LAN bind failing), sessions work, revoke while relay socket down is enforced on reconnect, LAN appears ⇒ migration; relay capture has no plaintext.
+- Relay vitest: forged ticket rejected before DO; wrong `room_key`; unknown or expired device token; expired/reused pair token; oversize frame; caps; message cap; foreign `Origin`; HTML/non-WS refused; desktop_offline; hibernation resume; room expiry; source-grep: no timers.
+- `cargo test`: backoff; persisted removals applied first; relay off ⇒ no socket; handshake budget drops silently; no side effect before a valid first frame; garbage msg1 costs no DH; `http://`-paired device refused on a slot; control grant not re-bound before handshake; `Role::User` refused on `mobile.set_relay`.
+- `pnpm exec vitest run`: race picks first handshake; migration keeps subscriptions; no flapping; unknown endpoint kinds skipped.
+- e2e with local `workerd` (isolated `KELPIE_ENDPOINT`): page pairs and works over the relay with direct blocked, revoke while the relay socket is down is enforced on reconnect, direct appears ⇒ migration; relay capture has no plaintext.
 
 ## Perf gate
-- Off: zero outbound connections. On, idle: ≤ 1 keepalive per 20 s per socket (carrier NAT idle timeouts can be 30 s).
+Off: zero outbound connections. On, idle: ≤ 1 keepalive per 20 s per socket; hibernation assertion above.
 
 ## Success Criteria
-- [ ] Test client on a different network reaches a desktop behind NAT with only the QR (native app UX lands in phase 5).
-- [ ] Relay operator sees no content; revoke enforced at the relay even if it happened offline.
+- [ ] Installed app with Tailscale off reaches a desktop behind NAT with only the relay, on all three carriers measured in 4a.
+- [ ] Relay outage: with Tailscale on, sessions continue without user action.
+- [ ] Relay operator sees no content; a forged ticket costs no DO call; revoke enforced even if it happened offline.
 - [ ] Self-host doc reproduces the relay with one command.
+- [ ] Personal monthly bill matches the 4a projection; budget alert tested once.
 
 ## Risk Assessment
-- DO limits/pricing change; response: same code on a `workerd` VPS.
+- DO limits or pricing change; response: same code on `workerd`.
+- Hibernation silently defeated; signal: GB-s analytics; response: source-grep test, budget alert, runbook.
+- DO incidents (several in HKG/SIN in 2026 [T]); accepted; response: Tailscale in the race, `relay unreachable` state.
 - `tokio-tungstenite` features pull aws-lc; signal: NASM error; response: explicit ring provider (as `mobile.rs` does).
-- Relay abuse as a tunnel; signal: rooms near caps; response: tighter caps, admission only with recent pairing.
+- Relay abuse as a tunnel; response: registration key, caps; tighter admission if it goes public.
+- **Rollback**: relay row off (no socket); revert the daemon commit; `wrangler rollback`; pairing records ignore an unused relay entry.

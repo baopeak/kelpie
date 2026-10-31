@@ -374,6 +374,13 @@ function createAppStore() {
         // A phone (or the other window) answered the agent's request first.
         window.dispatchEvent(new CustomEvent("kelpie:chat-resolved", { detail: p }));
         break;
+      // The daemon's queue of messages for a chat, and its offer of the next one to this window.
+      case "chat.queue":
+        window.dispatchEvent(new CustomEvent("kelpie:chat-queue", { detail: p }));
+        break;
+      case "chat.turn_ready":
+        window.dispatchEvent(new CustomEvent("kelpie:chat-turn-ready", { detail: p }));
+        break;
       case "meta.updated": {
         const m = p as WorkspaceMeta;
         setMeta(metaKey(m.path), m.comment || m.status ? reconcile(m) : undefined!);

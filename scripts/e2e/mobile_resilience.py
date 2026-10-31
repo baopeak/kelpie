@@ -20,6 +20,8 @@ Windows (PowerShell sessions, ConPTY). Takes about six minutes; `--quick` skips 
 7. A loaded computer (the load level pinned by KELPIE_LOAD_FORCE): L2 and L3 shed frame rate and size, pause
    background sessions at L3, tell the phone (`load.status`, `level` in frames), stretch the heartbeat
    (40 s / 90 s at L2) and pace pairing.
+8. A message sent to a chat whose reply was lost (or that never got there): retried under the same `cid` on a new
+   connection it is a duplicate (or lands once), and the agent never gets a second turn.
 """
 import asyncio
 import os
@@ -29,8 +31,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import net_fault_proxy as nfp  # noqa: E402
@@ -102,9 +102,17 @@ def ticker_of(text):
 
 
 async def connect(base, token, sid=None, old=None, **kw):
-    """A phone on `base`; it carries on from what `old` (a connection that ended) had acknowledged for `sid`."""
-    phone = ps.Phone(base, token, **kw)
-    await phone.open()
+    """A phone on `base`; it carries on from what `old` (a connection that ended) had acknowledged for `sid`. A known device may
+    handshake 5 times in 10 s (4429 after that, and the page tries again later): this waits for the daemon to let it in."""
+    for attempt in range(20):
+        phone = ps.Phone(base, token, **kw)
+        try:
+            await phone.open()
+            break
+        except ConnectionError:
+            if phone.closed != 4429 or attempt == 19:
+                raise
+            await asyncio.sleep(1)
     if old is not None:
         phone.resume_from(old)
     if sid:
@@ -114,7 +122,7 @@ async def connect(base, token, sid=None, old=None, **kw):
 
 async def main(d):
     d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
-    devices = {name: ps.pair(d, BASE, name, True) for name in ("Silent", "Half", "Latent", "Legacy", "B10", "B30", "B90", "Kill", "Slow", "Alice", "Bob")}
+    devices = {name: ps.pair(d, BASE, name, True) for name in ("Silent", "Half", "Latent", "Legacy", "B10", "B30", "B90", "Kill", "Slow", "Alice", "Bob", "ChatA", "ChatB")}
     ticker = custom(d, "ticker", TICKER)
     await ps.async_wait_for(lambda: "T=0000" in read(d, ticker), 60)
 
@@ -249,8 +257,68 @@ async def main(d):
         await q.close()
         await p.close()
 
+    def new_turn_chat(name):
+        # A chat whose agent takes one turn at a time and traces what it is given (phone_support.TURN_AGENT_SOURCE).
+        folder = os.path.join(work, name)
+        os.makedirs(folder, exist_ok=True)
+        agent, trace, hold = ps.write_turn_agent(folder)
+        chat = d.call("session.create", {"kind": "claude", "cwd": work, "chat_argv": [sys.executable, "-u", agent, trace, hold], "name": name})
+        ps.wait_for(lambda: info(d, chat["id"]).get("alive"), 20)
+        arrived = lambda: [t[len("ARRIVE "):] for t in (open(trace, encoding="utf-8").read().splitlines() if os.path.exists(trace) else []) if t.startswith("ARRIVE ")]  # noqa: E731
+        return chat, arrived
+
+    async def chat_reply_lost():
+        # A message reached the daemon but its reply did not: the phone cannot tell, retries under the same cid on a new
+        # connection, and is told it is a duplicate; the agent was given the message once.
+        token, _ = devices["ChatA"]
+        chat, arrived = new_turn_chat("send-reply-lost")
+        px, base = await proxy()
+        p = await connect(base, token)
+        await p.ask(type="chat_sub", id=chat["id"])
+        px.stall("down", 300)
+        await p.send(type="chat_send", id=chat["id"], cid="lost-reply", text="hello once", req="c1")
+        await ps.async_wait_for(lambda: arrived() == ["hello once"], 15)
+        check("a chat message whose reply is lost has reached the agent", arrived() == ["hello once"], arrived())
+        px.kill_all()
+        await px.stop()
+        q = await connect(BASE, token)
+        mark = q.mark()
+        await q.ask(type="chat_sub", id=chat["id"])
+        seen = await q.wait(lambda m: m["type"] == "chat" and m["id"] == chat["id"] and any('"kelpie_sent"' in line and "lost-reply" in line for line in m["lines"]), 10, mark)
+        check("the log shows the phone it was sent, even though the reply was lost", seen is not None)
+        retry = await q.ask(type="chat_send", id=chat["id"], cid="lost-reply", text="hello once")
+        check("its retry is a duplicate that says it was sent", retry["type"] == "ack" and retry["result"] == "dup" and retry["state"] == "sent", retry)
+        await asyncio.sleep(1)
+        check("…and the agent was given one turn", arrived() == ["hello once"], arrived())
+        await q.close()
+        await p.close()
+
+    async def chat_send_in_blackhole():
+        # A message sent into a blackhole never gets there: the retry on a new connection lands once.
+        token, _ = devices["ChatB"]
+        chat, arrived = new_turn_chat("send-blackhole")
+        px, base = await proxy()
+        p = await connect(base, token)
+        await p.ask(type="chat_sub", id=chat["id"])
+        px.blackhole(300)
+        await p.send(type="chat_send", id=chat["id"], cid="lost-send", text="into the void", req="c1")
+        await asyncio.sleep(1.5)
+        check("a chat message sent into a blackhole has not reached the agent", arrived() == [], arrived())
+        px.kill_all()
+        await px.stop()
+        q = await connect(BASE, token)
+        first = await q.ask(type="chat_send", id=chat["id"], cid="lost-send", text="into the void")
+        check("the retry on a new connection lands", first["type"] == "ack" and first["result"] == "ok", first)
+        again = await q.ask(type="chat_send", id=chat["id"], cid="lost-send", text="into the void")
+        # The agent is a process of its own: on a busy machine it reads what it was written later than a fixed pause.
+        await ps.async_wait_for(arrived, 20)
+        await asyncio.sleep(1)
+        check("a second retry is a duplicate and the agent got one turn", again["result"] == "dup" and arrived() == ["into the void"], (again, arrived()))
+        await q.close()
+        await p.close()
+
     quick_note = " (quick: 90 s blackhole skipped)" if QUICK else ""
-    jobs = [old_page(), latent(), blackhole("B10", 10, False), blackhole("B30", 30, False), lost_answer_in_blackhole(), reply_lost()]
+    jobs = [old_page(), latent(), blackhole("B10", 10, False), blackhole("B30", 30, False), lost_answer_in_blackhole(), reply_lost(), chat_reply_lost(), chat_send_in_blackhole()]
     if not QUICK:
         jobs += [silent(), half_open(), blackhole("B90", 90, True)]
     for outcome in await asyncio.gather(*jobs, return_exceptions=True):
@@ -335,7 +403,8 @@ async def main(d):
     alice = await connect(BASE, alice_token, menu)
     w = await alice.wait(lambda m: m["type"] == "screen" and m["id"] == menu and m["prompt"] and m["waiting_since"], 30)
     since = w["waiting_since"]
-    first = await alice.ask(type="answer", id=menu, waiting_since=since, text="2")
+    # One time: "2" here is "Yes, and don't ask again", which only the computer may choose (`one_shot`).
+    first = await alice.ask(type="answer", id=menu, waiting_since=since, text="1")
     bob = await connect(BASE, bob_token, menu)
     second = await bob.ask(type="answer", id=menu, waiting_since=since, text="1")
     check("another device's late answer is stale and names who answered and when",
@@ -389,29 +458,16 @@ async def loaded(d, level):
     ack = await p.ask(type="input", id=printer, text="x", enter=False, force=True)
     check(f"{level}: typing is never shed", ack["type"] == "ack", ack)
     # Pairing is paced: the second handshake within the gap is refused without spending its code.
-    def post(code, out):
-        req = urllib.request.Request(BASE + "pair", data=('{"code": "%s", "name": "Pace"}' % code).encode(), method="POST", headers={"Content-Type": "application/json"})
-        try:
-            urllib.request.urlopen(req, timeout=30).read()
-            out.append(200)
-        except urllib.error.HTTPError as e:
-            out.append(e.code)
-        except Exception:  # noqa: BLE001
-            out.append(0)
-    codes = []
-    for _ in range(2):
-        link = d.call("mobile.pair_start")["url"]
-        codes.append(link.split("#p=")[1])
-    first, second = [], []
-    t1 = threading.Thread(target=post, args=(codes[1], first), daemon=True)
-    t1.start()
+    links = [d.call("mobile.pair_start")["url"] for _ in range(2)]
+    first = await ps.PairAttempt(BASE, links[1], "Pace").start()
     await asyncio.sleep(0.4)
-    post(codes[1], second)
-    check(f"{level}: a second pairing handshake within {1 if want == 2 else 5} s is refused as busy", second == [503], (first, second))
+    second = await ps.PairAttempt(BASE, links[0], "Pace too").start()
+    check(f"{level}: a second pairing handshake within {1 if want == 2 else 5} s is refused as busy", second.closed == 4503, (first.closed, second.closed, second.silent))
     pending = d.call("mobile.status")["pending"]
     for item in pending:
         d.call("mobile.approve", {"id": item["id"], "allow": False})
-    t1.join(10)
+    if first.session:
+        await first.outcome(10)
     if want == 2 and not QUICK:
         # The heartbeat is twice as patient: nothing for 40 s, then the first.
         await asyncio.sleep(1.2)  # pairing is paced at L2

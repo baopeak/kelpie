@@ -12,7 +12,7 @@ export const defaultSettings: Settings = {
   rightPanelWidth: 300,
   sidebarWidth: 232,
   sidebarCollapsed: false,
-  notifications: true,
+  notifications: false,
   shortcutHints: true,
   projectFilter: "all",
   projectSort: "manual",

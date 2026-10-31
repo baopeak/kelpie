@@ -16,9 +16,16 @@
 //!   from the programs they run, hooks included): hook reports for that session only, which is
 //!   all a forged id could do before tokens existed.
 //!
+//! - **App** (the user token, `client: "app"`, *and* the connection's peer process runs the installed
+//!   Kelpie app, `peer_identity`): everything a User may, plus the phone-access decisions in
+//!   [`APP_ONLY`] (approving a phone, raising its permission, resetting phone access). The role only
+//!   decides who may ask: what raises access takes effect once the person passed the OS verification
+//!   the daemon runs itself (`user_presence`).
+//!
 //! Programs run as the same OS user and can read the user token if they are not sandboxed:
 //! this scopes what agents do through Kelpie by default, it is not a boundary against
-//! deliberate same-user code.
+//! deliberate same-user code. The App role is a speed bump for such code (writing a file and running
+//! it defeats it, and buys only a prompt with the daemon's text); the OS verification is the gate.
 
 use std::sync::OnceLock;
 
@@ -32,8 +39,38 @@ use crate::daemon::Daemon;
 pub enum Role {
     Anonymous,
     User,
+    /// The user, through the verified Kelpie app (see `peer_identity`).
+    App,
     Session(String),
     Claimed(String),
+}
+
+impl Role {
+    /// The user's own connection: the app (verified or not) and the user's scripts.
+    pub fn is_user(&self) -> bool {
+        matches!(self, Role::User | Role::App)
+    }
+}
+
+/// Decisions about phone access that only the verified app may ask for (the daemon then verifies the person): a program that
+/// holds the user token cannot add a phone or raise what one may do, nor raise the prompt that would.
+pub const APP_ONLY: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset"];
+
+/// The role an `auth` with the user token gets: App when it says it is the app and its peer process is the installed app.
+pub fn user_role(says_app: bool, peer: Option<u32>) -> Role {
+    if says_app && peer.is_some_and(crate::peer_identity::is_trusted_app) {
+        Role::App
+    } else {
+        Role::User
+    }
+}
+
+/// Whether the user's connection `role` may call `method` (`Role::User` cannot make the app-only decisions).
+pub fn user_may(role: &Role, method: &str) -> Result<()> {
+    if *role == Role::User && APP_ONLY.contains(&method) {
+        bail!("{method} needs the Kelpie app: approve phones and change what they may do in Kelpie → Settings → Mobile");
+    }
+    Ok(())
 }
 
 /// Per-daemon secret session tokens are derived from; a new daemon invalidates old tokens
@@ -99,7 +136,8 @@ const CLAIMED: &[&str] = &["daemon.info", "hook.report"];
 /// The method part of the policy: may a caller with this much reach call `method` at all?
 fn allowed(role: &Role, scripting: bool, method: &str) -> bool {
     match role {
-        Role::User => true,
+        Role::App => true,
+        Role::User => !APP_ONLY.contains(&method),
         Role::Anonymous => method == "daemon.info",
         Role::Claimed(_) => CLAIMED.contains(&method),
         Role::Session(_) => (if scripting { SCRIPTING } else { OWN }).contains(&method),
@@ -264,7 +302,7 @@ pub(crate) enum EventVisibility {
 pub(crate) fn event_visibility(d: &Daemon, role: &Role, event: &str, params: &Value, closed_session: Option<&str>) -> EventVisibility {
     use EventVisibility::{Full, Hidden, WithoutEnv};
     let id = match role {
-        Role::User => return Full,
+        Role::User | Role::App => return Full,
         Role::Session(id) => id,
         Role::Anonymous | Role::Claimed(_) => return Hidden,
     };
@@ -429,9 +467,26 @@ mod tests {
         let user = Role::User;
         let s = Role::Session("s".into());
         let claimed = Role::Claimed("s".into());
-        let admin = ["agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys", "process.list", "process.ports", "process.port_owner", "process.kill", "process.kill_children"];
+        let admin = ["chat.send", "chat.write_turn", "chat.queue_op", "chat.close_stdin", "agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys", "process.list", "process.ports", "process.port_owner", "process.kill", "process.kill_children"];
+        // Phone-access decisions: the verified app only, never the bare user token or a session.
+        for m in APP_ONLY {
+            assert!(allowed(&Role::App, false, m), "app: {m}");
+            assert!(!allowed(&user, false, m), "user token alone: {m}");
+            assert!(user_may(&user, m).is_err(), "user token alone: {m}");
+            assert!(user_may(&Role::App, m).is_ok(), "app: {m}");
+            assert!(!allowed(&s, true, m) && !allowed(&claimed, true, m) && !allowed(&Role::Anonymous, false, m), "{m}");
+        }
+        for m in ["mobile.status", "mobile.enable", "mobile.disable", "mobile.pair_start", "mobile.revoke", "session.list"] {
+            assert!(allowed(&user, false, m) && user_may(&user, m).is_ok(), "user: {m}");
+            assert!(allowed(&Role::App, false, m), "app: {m}");
+        }
+        assert!(Role::App.is_user() && Role::User.is_user() && !s.is_user() && !Role::Anonymous.is_user());
+        // A connection that only says it is the app, or whose peer is unknown, is the user.
+        assert_eq!(user_role(true, None), Role::User);
+        assert_eq!(user_role(false, Some(std::process::id())), Role::User);
+        assert_eq!(user_role(true, Some(std::process::id())), if crate::peer_identity::is_trusted_app(std::process::id()) { Role::App } else { Role::User });
         for m in admin {
-            assert!(allowed(&user, false, m), "user: {m}");
+            assert!(allowed(&user, false, m) || APP_ONLY.contains(&m), "user: {m}");
             assert!(!allowed(&s, true, m), "scripting session: {m}");
             assert!(!allowed(&s, false, m), "own-only session: {m}");
             assert!(!allowed(&claimed, true, m), "claimed: {m}");

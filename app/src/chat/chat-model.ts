@@ -4,6 +4,7 @@ import { batch, createSignal } from "solid-js";
 import { createStore, produce, type SetStoreFunction } from "solid-js/store";
 import { t } from "../lib/i18n";
 import { type AgentRun, stopRunning } from "./agent-runs";
+import { type QueueView } from "./chat-queue";
 import type { AnswerOutcome, ChatTransport } from "./transport";
 
 /** What a tool call does, for its row and for folding runs of reads and searches. */
@@ -35,12 +36,12 @@ export interface PlanEntry {
 
 /** `at` / `doneAt`: when the item appeared / finished, live only (a replayed log has no times). */
 export type ChatItem =
-  | { kind: "user"; id: string; text: string; images?: UserImage[]; pending?: boolean; at?: number }
+  | { kind: "user"; id: string; text: string; images?: UserImage[]; pending?: boolean; at?: number; /** The device that sent it, when not the desktop. */ from?: string }
   | { kind: "assistant"; id: string; text: string; streaming?: boolean; group?: string; at?: number }
   | { kind: "thinking"; id: string; text: string; streaming?: boolean; group?: string; at?: number; doneAt?: number }
   | { kind: "tool"; id: string; name: string; summary: string; input?: unknown; output?: string; status: "running" | "done" | "error"; diff?: { path: string; text: string }[]; category?: ToolCategory; at?: number }
   | {
-      kind: "permission"; id: string; title: string; detail?: string; options: { id: string; label: string; tone?: "allow" | "deny" }[]; resolved?: string; at?: number;
+      kind: "permission"; id: string; title: string; detail?: string; options: { id: string; label: string; tone?: "allow" | "deny"; lasting?: boolean }[]; resolved?: string; at?: number;
       /** Shown in the card: the command to run, the edit to make, the plan to approve. */
       command?: string; diff?: { path: string; text: string }[]; plan?: string;
       /** Questions answered in the card instead of with options. */
@@ -93,6 +94,12 @@ export function withImageNames(text: string, images?: ChatImage[]): string {
   return text ? `${text}\n${names}` : names;
 }
 
+/** The same when the log or the daemon's queue names the pictures. */
+function withNames(text: string, names: unknown): string {
+  const pictures = Array.isArray(names) ? names.map((n) => `[${String(n)}]`).join(" ") : "";
+  return text && pictures ? `${text}\n${pictures}` : text || pictures;
+}
+
 /** The pictures of a message sent from here, as the transcript keeps them: by path, without their bytes. */
 export function sentImages(images?: ChatImage[]): UserImage[] | undefined {
   return images?.length ? images.map((i) => ({ name: fileName(i.path), mime: i.mime, path: i.path })) : undefined;
@@ -113,6 +120,12 @@ export interface QueuedMessage {
   text: string;
   typed: boolean;
   images?: ChatImage[];
+  /** With the daemon's queue: the message's id there (`cid`), and the phone that queued it when it was not this window. */
+  cid?: string;
+  from?: string;
+  mine?: boolean;
+  /** Waits at the head for the desktop window that queued it (a picture only that window can build). */
+  needsWindow?: boolean;
 }
 
 /** Work the agent runs alongside its turn (a background shell, a subagent), from its task events;
@@ -200,6 +213,11 @@ export interface Adapter {
   takesPictures?(): boolean;
   /** Text that runs as a command rather than going to the agent as a message: no pictures go with it. */
   isCommand?(text: string, typed: boolean): boolean;
+  /** The agent never echoes a prompt as it is sent (ACP): the transcript shows it from the daemon's `kelpie_sent` line. */
+  showsSent?: boolean;
+  /** Notes the adapter's own state before it builds a queued message's lines; the function returned puts it back (the daemon
+   *  did not take the lines). Only what the adapter keeps for itself: the controller restores items and `busy`. */
+  snapshot?(): () => void;
 }
 
 export interface AdapterContext {
@@ -226,6 +244,11 @@ export interface AdapterContext {
   replaying: () => boolean;
   /** A watcher shows no pictures: the bytes a log has for one are not kept, only its name. */
   namesOnly?: boolean;
+  /** Messages go through the daemon's queue: the log carries each one as it is sent (`kelpie_sent`), so an adapter
+   *  that would show its own copy of a prompt leaves it to the log. */
+  daemonQueue?: () => boolean;
+  /** Puts a message the agent refused back at the front of the queue. */
+  requeue?: (text: string) => void;
 }
 
 export function emptyChatState(conversationId: string | null = null): ChatState {
@@ -269,7 +292,7 @@ export class ChatController {
   private resolved = new Map<string, { label: string; answered?: CardAnswer; fromLog?: boolean; own?: boolean }>();
   private started = false;
   private flushing = false;
-  private queued = 0;
+  private queuedCount = 0;
   /** When the log or transcript being replayed says its next line came (unix ms). */
   private clock: number | null = null;
   private loadingHistory = false;
@@ -280,6 +303,30 @@ export class ChatController {
    *  sends a queued message and never changes the session; it only shows the log and passes on the
    *  person's answers to the agent's questions. */
   readonly observer: boolean;
+  /** Whether messages go through the daemon's queue (the daemon is new enough). */
+  private readonly daemonQueueOn: () => boolean;
+  /** Told when the log shows a message sent through the daemon. */
+  private readonly onSent: ((msg: { cid: string; qid: string; by: string; name: string }) => void) | undefined;
+  /** Told when the log shows a message that left the daemon's queue unsent (`kelpie_unsent`): `cancelledBy` says whether the
+   *  desktop or a phone cancelled it. Also from a replayed log: a phone that was offline learns it from there. */
+  private readonly onUnsent: ((msg: { cid: string; reason: string; cancelledBy?: "desktop" | "phone" }) => void) | undefined;
+  /** Messages this window queued with the daemon, by `cid`: their text, pictures and whether the user typed them,
+   *  until the daemon has written, cancelled or dropped them. */
+  private mine = new Map<string, { text: string; typed: boolean; images?: ChatImage[] }>();
+  /** The pictures of messages this window queued, by `cid`, as the transcript keeps them: the log line that shows them can
+   *  come after the daemon's word that the message left the queue, and comes again on a replay. */
+  private sentPictures = new Map<string, UserImage[]>();
+  /** The `cid`s the daemon's queue listed last time. */
+  private listed = new Set<string>();
+  /** While the adapter builds a queued message: the lines it writes, which go to the daemon instead of the agent. */
+  private capture: string[] | null = null;
+  /** The log has been replayed since the last attach: lines the adapter builds now are not for a past turn. */
+  private live = false;
+  /** A queue state came from the daemon. */
+  private mirrored = false;
+  private unsent = 0;
+  /** Messages a phone sent whose echo has not come yet: the echo is labelled with the sender. */
+  private sentFrom: { text: string; name: string }[] = [];
   /** Set while the person's own answer is being written (`respond`): the only write an observer lets
    *  through. `false` outside it; a promise once the answer was passed on. */
   private answering: Promise<AnswerOutcome> | null | false = false;
@@ -297,9 +344,18 @@ export class ChatController {
   /** Counts the times ids and positions were forgotten: a reply that was waited for across one belongs to nothing now. */
   private generation = 0;
 
-  constructor(readonly sessionId: string, readonly cwd: string, readonly resumeId: string | null, makeAdapter: (ctx: AdapterContext) => Adapter, opts: { transport?: ChatTransport; observer?: boolean } = {}) {
+  constructor(
+    readonly sessionId: string,
+    readonly cwd: string,
+    readonly resumeId: string | null,
+    makeAdapter: (ctx: AdapterContext) => Adapter,
+    opts: { transport?: ChatTransport; observer?: boolean; daemonQueue?: () => boolean; onSent?: ChatController["onSent"]; onUnsent?: ChatController["onUnsent"] } = {},
+  ) {
     this.transport = opts.transport ?? {};
     this.observer = opts.observer ?? false;
+    this.daemonQueueOn = opts.daemonQueue ?? (() => false);
+    this.onSent = opts.onSent;
+    this.onUnsent = opts.onUnsent;
     const [state, set] = createStore<ChatState>(emptyChatState(resumeId));
     this.state = state;
     // Any state change may start or end a turn: note when work starts, send the next queued message.
@@ -346,7 +402,22 @@ export class ChatController {
       resumeId: this.resumeId,
       replaying: () => this.isReplaying,
       namesOnly: this.observer,
+      daemonQueue: () => this.queued(),
+      requeue: (text) => this.requeue(text),
     };
+  }
+
+  /** Messages go through the daemon's queue (one writer for the conversation), not this controller's own. */
+  private queued(): boolean {
+    // Once the daemon has told this view its queue it is on the daemon path for good: a blip in the connection, or a daemon
+    // level not read yet, must not make the view flush the mirrored queue itself (a second writer, and a second copy of
+    // whatever is at its head).
+    return !this.observer && !!this.transport.enqueue && (this.mirrored || this.daemonQueueOn());
+  }
+
+  /** The queue is the daemon's: this view only mirrors it and passes on what the person does to it. */
+  private daemonSide(): boolean {
+    return this.queued() || (this.observer && !!this.transport.queueOp);
   }
 
   /** A line from an adapter to the agent. An observer lets one kind through: the answer the person
@@ -354,6 +425,10 @@ export class ChatController {
    *  writes by itself (handshakes, replies to the agent's own requests, interrupts) is dropped. */
   private write(obj: unknown) {
     if (this.isReplaying) return;
+    if (this.capture) {
+      this.capture.push(JSON.stringify(obj));
+      return;
+    }
     if (!this.observer) {
       this.transport.send?.(JSON.stringify(obj) + "\n");
       return;
@@ -398,10 +473,17 @@ export class ChatController {
         item = { ...item, retry: same ? saved!.label : undefined, answerError: error, answering: this.inFlight.has(item.id) ? true : undefined };
       }
     }
+    // The echo of a message a phone sent says who sent it.
+    if (item.kind === "user" && !item.from && this.sentFrom.length) {
+      const echoed = item.text.trim();
+      const at = this.sentFrom.findIndex((s) => s.text.trim() === echoed);
+      if (at >= 0) item = { ...item, from: this.sentFrom.splice(at, 1)[0].name };
+    }
     const i = this.index.get(item.id);
     if (i != null) {
       const prev = this.state.items[i];
       item = { ...item, at: prev.at ?? item.at } as ChatItem;
+      if (item.kind === "user" && prev.kind === "user" && prev.from && !item.from) item.from = prev.from;
       if (item.kind === "thinking" && prev.kind === "thinking") item.doneAt = prev.doneAt;
       // A store merge keeps what it is not told to drop: a request under a reused id is not answered yet.
       if (item.kind === "permission") item = { ...item, resolved: item.resolved, answered: item.answered };
@@ -426,6 +508,7 @@ export class ChatController {
   private resetState() {
     this.index.clear();
     this.buffer = "";
+    this.sentFrom = [];
     this.set({ items: [], busy: false, ready: false, status: null, plan: null, usage: null, tasks: [], agentRuns: [] });
     this.adapter.reset();
   }
@@ -455,6 +538,24 @@ export class ChatController {
         this.applyLoggedAnswer(msg);
         continue;
       }
+      if (msg?.type === "kelpie_sent") {
+        this.noteSent(msg);
+        continue;
+      }
+      if (msg?.type === "kelpie_unsent") {
+        // A message the daemon gave up on (no window could prepare it) or that another device cancelled; the line keeps the
+        // note for a pane that was closed when it happened. The same id as the live note makes the two one.
+        if (typeof msg.text !== "string") continue;
+        if (msg.reason === "cancelled") {
+          // As live: only this window's own message, cancelled from somewhere else, is news here.
+          if (!this.observer && msg.by === "desktop") this.unsentItem([{ text: withNames(msg.text, msg.images) }], `cancelled:${String(msg.cancelled_by?.name ?? "")}`, `unsent-${String(msg.qid)}`);
+        } else {
+          this.unsentItem([{ text: withNames(msg.text, msg.images) }], this.whyUnsent(String(msg.reason ?? "")), `unsent-${String(msg.qid)}`);
+        }
+        const by = msg.cancelled_by?.id;
+        this.onUnsent?.({ cid: String(msg.cid), reason: String(msg.reason ?? ""), cancelledBy: by === undefined ? undefined : by === "desktop" ? "desktop" : "phone" });
+        continue;
+      }
       if (msg?.type === "kelpie_exit") {
         this.set({ exited: true, busy: false, tasks: [] });
         this.set("agentRuns", produce((runs: AgentRun[]) => stopRunning(runs, this.now() ?? undefined)));
@@ -463,8 +564,9 @@ export class ChatController {
         // Nothing will finish what was still arriving.
         for (const it of this.state.items) if ((it as { streaming?: boolean }).streaming) this.patch(it.id, (i: any) => (i.streaming = false));
         this.upsert({ kind: "system", id: `exit-${Date.now()}`, text: t("Agent process exited (code {code}).", { code: String(msg.code) }), tone: "info" });
-        // Nothing can take them now: show what was not sent rather than keep dead chips.
-        if (this.state.queue.length) {
+        // Nothing can take them now: show what was not sent rather than keep dead chips. (With the daemon's
+        // queue, the daemon says what it dropped.)
+        if (this.state.queue.length && !this.mirrored) {
           this.upsert({ kind: "system", id: `unsent-${Date.now()}`, text: t("Not sent:\n{messages}", { messages: this.state.queue.map((q) => withImageNames(q.text, q.images)).join("\n") }), tone: "info" });
           this.set("queue", []);
         }
@@ -487,6 +589,7 @@ export class ChatController {
   async attach(handle: number) {
     if (this.observer || !this.transport.attach) return;
     const gen = ++this.attachGen;
+    this.live = false;
     const early: Uint8Array[] = [];
     let applied = false;
     const snapshot = await this.transport.attach(handle, (data) => {
@@ -512,6 +615,7 @@ export class ChatController {
     this.isReplaying = false;
     applied = true;
     for (const chunk of early) this.feed(chunk);
+    this.live = true;
     this.set("ready", true);
     if (!this.started && !this.state.exited) {
       this.started = true;
@@ -521,6 +625,7 @@ export class ChatController {
 
   detach() {
     this.attachGen++;
+    this.live = false;
     this.transport.detach?.();
   }
 
@@ -555,9 +660,16 @@ export class ChatController {
     if ((!text.trim() && !images?.length) || this.state.exited) return;
     // White space beside a picture is no text: it would show as an empty bubble.
     if (!text.trim()) text = "";
+    if (this.queued()) {
+      // A message that starts no turn (a picker command, a terminal-only one) runs at once; every other one waits its
+      // turn in the daemon's queue, behind whatever a phone sent before it.
+      if (this.adapter.immediate?.(text, typed)) this.adapter.send(text, typed, images);
+      else this.enqueueNew(text, typed, images);
+      return;
+    }
     // Not attached yet: a re-attach replays the log and would wipe what is sent now.
     if ((this.state.busy || this.state.queue.length || !this.state.ready) && !this.adapter.immediate?.(text, typed)) {
-      this.set("queue", (q) => [...q, { id: `q-${++this.queued}`, text, typed, images }]);
+      this.set("queue", (q) => [...q, { id: `q-${++this.queuedCount}`, text, typed, images }]);
       this.set("queuePaused", false);
       return;
     }
@@ -567,7 +679,7 @@ export class ChatController {
   /** Sends the next queued message once the agent is idle — a microtask later, as this runs
    *  inside the adapter's own state change, which must finish first. */
   private flushQueue() {
-    if (this.observer || this.flushing || !this.state.queue.length) return;
+    if (this.observer || this.queued() || this.flushing || !this.state.queue.length) return;
     this.flushing = true;
     queueMicrotask(() => {
       this.flushing = false;
@@ -593,6 +705,8 @@ export class ChatController {
   }
 
   unqueue(id: string) {
+    // The chip goes when the daemon says the message is out of its queue.
+    if (this.daemonSide()) return void this.transport.queueOp?.("cancel", id).catch(() => {});
     this.set("queue", (q) => q.filter((m) => m.id !== id));
   }
 
@@ -600,6 +714,7 @@ export class ChatController {
   sendNow(id: string) {
     const m = this.state.queue.find((x) => x.id === id);
     if (!m || this.state.exited || !this.state.ready) return;
+    if (this.queued()) return void this.sendNowQueued(m);
     // A command (`/compact`, `!ls`) starts something of its own: it never rides in a turn.
     const command = /^[/!]/.test(m.text.trim());
     if (!this.state.busy) {
@@ -615,13 +730,204 @@ export class ChatController {
   }
 
   resumeQueue() {
+    if (this.daemonSide()) return void this.transport.queueOp?.("resume").catch(() => {});
     this.set("queuePaused", false);
   }
 
   interrupt() {
-    // Stopping means "wait": queued messages stay until the user sends again.
-    if (this.state.queue.length) this.set("queuePaused", true);
+    // A phone's adapter never writes: it asks the daemon to stop the turn.
+    if (this.observer) return void this.transport.stop?.().catch(() => {});
+    // Stopping means "wait": queued messages stay until the user sends again. (With the daemon's queue it sees the
+    // interrupt line go by and holds the queue itself.)
+    if (!this.queued() && this.state.queue.length) this.set("queuePaused", true);
     this.adapter.interrupt();
+  }
+
+  // ---------- the daemon's queue ----------
+
+  /** Queues a message with the daemon under a new `cid`. `front`: it goes next (a refused steer). */
+  private enqueueNew(text: string, typed: boolean, images?: ChatImage[], front = false) {
+    const cid = newCid();
+    this.mine.set(cid, { text, typed, images });
+    this.keepPictures(cid, images);
+    const names = (images ?? []).map((i) => i.path.split(/[\\/]/).pop() ?? "");
+    const failed = (why: string) => {
+      this.mine.delete(cid);
+      this.sentPictures.delete(cid);
+      this.unsentItem([{ text: withImageNames(text, images) }], why);
+    };
+    this.transport.enqueue!(cid, text, !!images?.length, names).then(
+      (r) => {
+        if ("refused" in r) failed(r.message);
+        else if (front) void this.transport.queueOp?.("front", r.qid).catch(() => {});
+      },
+      (e) => failed(String(e?.message ?? e)),
+    );
+  }
+
+  private keepPictures(cid: string, images?: ChatImage[]) {
+    const shown = sentImages(images);
+    if (!shown) return;
+    this.sentPictures.set(cid, shown);
+    if (this.sentPictures.size > 50) this.sentPictures.delete(this.sentPictures.keys().next().value!);
+  }
+
+  private requeue(text: string) {
+    if (this.queued()) this.enqueueNew(text, false, undefined, true);
+    else this.set("queue", (q) => [{ id: `q-steer-${++this.queuedCount}`, text, typed: false }, ...q]);
+  }
+
+  /** "Send now" with the daemon's queue: the same three branches, with the queue changes made there. */
+  private async sendNowQueued(m: QueuedMessage) {
+    const noop = () => {};
+    const own = m.cid ? this.mine.get(m.cid) : undefined;
+    if (!this.state.busy) return void this.transport.queueOp!("front", m.id).catch(noop);
+    // A command (`/compact`, `!ls`) starts something of its own: it never rides in a turn. Another device's message is not
+    // here to steer with.
+    const command = /^[/!]/.test(m.text.trim());
+    if (own && !command && !own.images?.length && this.adapter.steer) {
+      try {
+        await this.transport.queueOp!("take", m.id);
+      } catch {
+        return; // it went out meanwhile
+      }
+      if (m.cid) this.mine.delete(m.cid);
+      if (!this.adapter.steer(own.text)) this.enqueueNew(own.text, own.typed, undefined, true);
+      return;
+    }
+    await this.transport.queueOp!("front", m.id, { interrupt: true }).catch(noop);
+    this.adapter.interrupt();
+  }
+
+  /** The daemon offers the head of its queue: this window builds the message's lines as it would have sent them and gives
+   *  them back (`chat.write_turn`); it declines when it cannot (replaying, not attached, a message it does not know). */
+  turnReady(qid: string, cid: string) {
+    // `retry`: not now (replaying, loading, not attached yet): the daemon asks again. Otherwise this window does not have it.
+    const decline = (retry: boolean) => void this.transport.writeTurn?.(qid, null, false, retry).catch(() => {});
+    const own = this.mine.get(cid);
+    if (this.observer || !this.transport.writeTurn || !own || this.state.exited) return decline(false);
+    if (!this.live || this.isReplaying || this.loadingHistory || !this.state.ready) return decline(true);
+    const lines: string[] = [];
+    const wasBusy = this.state.busy;
+    const had = new Set(this.state.items.map((i) => i.id));
+    // The adapter changes its own state as it builds the lines (a pending bubble, busy, a new conversation): what is undone if the
+    // daemon does not take them.
+    const restore = this.adapter.snapshot?.();
+    this.capture = lines;
+    try {
+      this.adapter.send(own.text, own.typed, own.images);
+    } catch (e) {
+      // Building it failed, and would fail the same way again: a final no, so the daemon lets it go (with a "Not sent" note)
+      // instead of asking every second and holding up what waits behind it.
+      console.warn("chat adapter error", e);
+      this.capture = null;
+      this.rollback(new Set(this.state.items.map((i) => i.id).filter((id) => !had.has(id))), wasBusy, restore, true);
+      return decline(false);
+    }
+    this.capture = null;
+    const turn = this.state.busy && !wasBusy;
+    const added = new Set(this.state.items.map((i) => i.id).filter((id) => !had.has(id)));
+    this.transport.writeTurn(qid, lines, turn).then(
+      () => this.mine.delete(cid),
+      (e) => {
+        const why = String(e);
+        console.warn("the daemon did not take the message", why);
+        // `busy`: another turn started meanwhile, which is why it is busy; the rest is as if nothing had been built.
+        this.rollback(added, wasBusy, restore, !/busy/.test(why));
+        // Those it asks again about. Anything else would only fail again each time it is offered, and hold up what waits behind it: a
+        // final no, sent after the rollback above, as the daemon offers the next message when it gets it. Too large, by its limit or
+        // the connection's: it is told why, and the note comes with its word.
+        if (!/too_late|busy|switching/.test(why)) void this.transport.writeTurn?.(qid, null, false, false, /too.large/i.test(why)).catch(() => {});
+      },
+    );
+  }
+
+  /** Undoes what building a message's lines did to the view: the items it added, `busy`, and the adapter's own state. */
+  private rollback(added: Set<string>, wasBusy: boolean, restore: (() => void) | undefined, busy: boolean) {
+    restore?.();
+    const gone = [...added].filter((id) => this.index.has(id));
+    if (gone.length) {
+      this.set("items", (items) => items.filter((i) => !added.has(i.id)));
+      this.index.clear();
+      this.state.items.forEach((it, i) => this.index.set(it.id, i));
+    }
+    if (busy && this.state.busy !== wasBusy) this.set("busy", wasBusy);
+  }
+
+  /** The daemon's queue as it stands (`chat.queue` on the desktop, `chat_queue` on a phone). */
+  applyQueue(view: QueueView) {
+    this.mirrored = true;
+    const items: QueuedMessage[] = view.items.map((i) => {
+      const own = this.mine.get(i.cid);
+      return { id: i.qid, cid: i.cid, text: own?.text ?? i.text, typed: own?.typed ?? false, images: own?.images, from: i.from, mine: i.mine, needsWindow: i.needsWindow };
+    });
+    this.set("queue", items);
+    this.set("queuePaused", view.paused);
+    // A message that was listed and is not any more is out of the queue (written, cancelled or dropped).
+    const now = new Set(view.items.map((i) => i.cid));
+    for (const cid of this.listed) if (!now.has(cid)) this.mine.delete(cid);
+    this.listed = now;
+    if (view.dropped.length) {
+      // This window has the whole text (and the pictures' names) of its own; the daemon only the start of any.
+      for (const d of view.dropped) {
+        const own = this.mine.get(d.cid);
+        const text = own ? withImageNames(own.text, own.images) : withNames(d.text, d.images);
+        this.mine.delete(d.cid);
+        if (d.reason === "cancelled") {
+          // A phone's own chips tell it; this window tells about its own message, when it was not this window that cancelled it.
+          if (this.observer || d.cancelledBy !== "phone" || !d.mine) continue;
+          this.unsentItem([{ text }], `cancelled:${d.cancelledByName ?? ""}`, `unsent-${d.qid}`);
+          continue;
+        }
+        this.unsentItem([{ text }], this.whyUnsent(d.reason), `unsent-${d.qid}`);
+      }
+    }
+  }
+
+  /** What `unsentItem` says for the daemon's reason. */
+  private whyUnsent(reason: string): string {
+    if (reason === "needs_window" || reason === "declined") return this.observer ? "computer" : "window";
+    return reason === "revoked" || reason === "too_large" ? reason : "";
+  }
+
+  /** "Not sent: …" in the transcript. `why`: a short reason, or `window` / `revoked` / `too_large` / `cancelled:{device}` for the daemon's.
+   *  `id` makes a note shown twice (the event, and the log line that outlives it) one note. */
+  private unsentItem(messages: { text: string }[], why: string, id?: string) {
+    const list = messages.map((m) => m.text).join("\n");
+    const text =
+      why === "window" ? t("Not sent (this window could not prepare it):\n{messages}", { messages: list })
+      : why === "computer" ? t("Not sent (the computer could not prepare it):\n{messages}", { messages: list })
+      : why === "revoked" ? t("Not sent (the phone lost access):\n{messages}", { messages: list })
+      : why === "too_large" ? t("Not sent (too large to send to the agent):\n{messages}", { messages: list })
+      : why.startsWith("cancelled:") ? t("Not sent (cancelled from {device}):\n{messages}", { device: why.slice(10) || t("a phone"), messages: list })
+      : why ? t("Not sent ({reason}):\n{messages}", { reason: why, messages: list })
+      : t("Not sent:\n{messages}", { messages: list });
+    this.upsert({ kind: "system", id: id ?? `unsent-${Date.now()}-${++this.unsent}`, text, tone: "info" });
+  }
+
+  /** A message the daemon wrote (`kelpie_sent`). Agents that do not echo a prompt (ACP) have it shown from here; for the
+   *  others the echo is labelled with the sender when it comes. */
+  private noteSent(msg: any) {
+    if (typeof msg.text !== "string") return;
+    const name = msg.by === "desktop" ? undefined : String(msg.name ?? "") || undefined;
+    if (this.adapter.showsSent) {
+      const id = `sent-${String(msg.qid)}`;
+      if (this.observer) {
+        // A watcher shows no pictures: their names, under the text.
+        this.upsert({ kind: "user", id, text: withNames(msg.text, msg.images), from: name });
+      } else {
+        // As an adapter's `send` records them: this window's own by path (another device's `cid` says nothing about those), and what
+        // it no longer has by name.
+        const own = msg.by === "desktop" ? this.sentPictures.get(String(msg.cid)) : undefined;
+        const named: string[] = Array.isArray(msg.images) ? msg.images.map(String) : [];
+        this.upsert({ kind: "user", id, text: msg.text, images: own ?? (named.length ? named.map((n) => ({ name: n })) : undefined), from: name });
+      }
+    } else if (name) {
+      this.sentFrom.push({ text: msg.text, name });
+      if (this.sentFrom.length > 50) this.sentFrom.shift();
+    }
+    // Also from a replayed log: it only clears the sender's own chip, which may have been waiting on a lost reply.
+    this.onSent?.({ cid: String(msg.cid), qid: String(msg.qid), by: String(msg.by), name: String(msg.name ?? "") });
   }
 
   setSetting(id: string, value: string) {
@@ -757,6 +1063,9 @@ export class ChatController {
    *  for retries and the memory of answered cards are dropped, so a new request that reuses an id is
    *  answered as itself. */
   forgetSentAnswers() {
+    this.mine.clear();
+    this.sentPictures.clear();
+    this.listed.clear();
     this.unsettled.clear();
     this.resolved.clear();
     this.inFlight.clear();
@@ -820,6 +1129,11 @@ export class ChatController {
       }
     });
   }
+}
+
+/** A random id for a message queued with the daemon (at most 64 characters). */
+function newCid(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 /** What a permission card asks, as one string: two cards with the same id that ask different things are different requests. */

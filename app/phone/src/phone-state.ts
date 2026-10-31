@@ -3,31 +3,45 @@
 // here and never touch the link directly.
 import { batch, createSignal } from "solid-js";
 import { ChatController } from "../../src/chat/chat-model";
-import type { AnswerOutcome, ChatTransport } from "../../src/chat/transport";
+import { fromPhoneMessage } from "../../src/chat/chat-queue";
+import type { AnswerOutcome, ChatTransport, SendOutcome } from "../../src/chat/transport";
 import { keyAnswer } from "../../src/lib/attention";
 import { adapterFor } from "./chat-adapters";
 import { ChatFeed } from "./chat-feed";
-import { NOTICE_SHOWN_MS, NoticeBoard, type Notice } from "./notice";
+import { ChatSender, type PendingSend, type SendResult as ChatSendResult } from "./chat-send";
+import { NOTICE_SHOWN_MS, NoticeBoard, refusalText, type Notice } from "./notice";
 import { clearCache, loadList, loadScreen, saveList, saveScreen } from "./cache";
 import { canAct, dataAge, deriveConn, type ConnState } from "./conn-state";
-import { browserEnv, Link, type ChatMsg, type ChatResolved, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
+import { browserEnv, Link, linkCodec, type ChatMsg, type ChatQueueMsg, type ChatResolved, type DeviceInfo, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
+import { pair, type PairSocket } from "./pair";
+import { currentPairing, forgetPairing, loadPairing, savePairing, seemsPaired } from "./pairing-store";
 import { emptyView, ScreenSync, type Prompt, type ScreenFrame, type ScreenView } from "./screen-sync";
 import { forgetHistory } from "./history";
-import { loadToken, store, TOKEN_KEY, wipeTypedText } from "./storage";
+import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
+import { labelOf } from "./inbox-order";
+import { hadOldToken, store, wipeTypedText } from "./storage";
 import { t } from "./i18n";
 
 // ---------- signals the views read ----------
 
-const [paired, setPaired] = createSignal(!!loadToken());
+const [paired, setPaired] = createSignal(seemsPaired());
 export { paired };
 export const [pairing, setPairing] = createSignal<string | null>(null);
 export const [notPairedMessage, setNotPairedMessage] = createSignal<string | null>(null);
 export const [sessions, setSessions] = createSignal<SessionRow[]>([]);
 export const [projects, setProjects] = createSignal<Record<string, string>>({});
-export const [device, setDevice] = createSignal<{ name: string; can_write: boolean } | null>(null);
+export const [device, setDevice] = createSignal<DeviceInfo | null>(null);
+/** While pairing: the six digits to type on the computer, and this phone's key fingerprint to check there. */
+export const [pairShown, setPairShown] = createSignal<{ digits: string; key: string } | null>(null);
+/** Another device was paired, changed or removed on the computer: said for a few seconds. */
+export const [deviceNews, setDeviceNews] = createSignal<string | null>(null);
 export const [openId, setOpenId] = createSignal<string | null>(null);
 export const [screen, setScreen] = createSignal<ScreenView>(emptyView());
 export const [chat, setChat] = createSignal<ChatController | null>(null);
+/** The messages of the open chat that are on their way (see chat-send.ts). */
+export const [chatPending, setChatPending] = createSignal<readonly PendingSend[]>([]);
+/** The person pressed Stop and the agent has not stopped yet. */
+export const [stopping, setStopping] = createSignal(false);
 /** When the list on screen was saved by an earlier visit: set until the connection says anything. */
 export const [paintedFrom, setPaintedFrom] = createSignal<number | null>(null);
 export const [conn, setConn] = createSignal<ConnState>({ kind: "connecting" });
@@ -58,12 +72,29 @@ export const connected = () => canAct(conn());
 
 const syncs = new Map<string, ScreenSync>();
 const chats = new ChatFeed();
+/** The sender of each chat the phone has sent to: its messages stay with it while the person looks at something else. */
+const senders = new Map<string, ChatSender>();
 let wantSession: string | null = null;
 let listSaved = 0;
 
-const link = new Link(browserEnv(), loadToken, {
+/** The page's origin is plain HTTP and not Tailscale: anyone on the network could have swapped this page, so it may only read. */
+export function plainHttpOrigin(): boolean {
+  if (location.protocol !== "http:") return false;
+  const host = location.hostname;
+  const v4 = host.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  const tailscale = (v4 && +v4[1] === 100 && +v4[2] >= 64 && +v4[2] < 128) || host.endsWith(".ts.net") || /^\[?fd7a:115c:a1e0:/i.test(host);
+  const local = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+  return !tailscale && !local;
+}
+
+const link = new Link(browserEnv(), () => {
+  const p = currentPairing();
+  return p ? linkCodec(p) : null;
+}, {
   changed: () => recompute(),
   hello(h: Hello, epochChanged: boolean) {
+    // What the computer made of this page's first message: visible on the page, since its traffic is sealed (scripts/e2e/mobile.py).
+    document.documentElement.dataset.servedLegacy = String(h.hb?.legacy ?? false);
     batch(() => {
       setDevice(h.device);
       setSessions(h.sessions);
@@ -73,12 +104,16 @@ const link = new Link(browserEnv(), loadToken, {
         // A computer that restarted has other positions and numbers: start from nothing.
         for (const s of syncs.values()) s.reset();
         chats.forgetPositions();
+        // The queue and every id in it died with the old run: what waited there is shown as lost, not sent again.
+        for (const s of senders.values()) s.epochChanged();
       } else {
         for (const s of syncs.values()) s.resume();
       }
       const open = openId();
       if (open) setScreen(syncs.get(open)?.view ?? emptyView());
     });
+    forgetGoneChats(h.sessions.map((s) => s.id));
+    refreshNotSent();
     persistList();
     const wanted = wantSession && h.sessions.find((s) => s.id === wantSession);
     wantSession = null;
@@ -93,6 +128,8 @@ const link = new Link(browserEnv(), loadToken, {
     });
     // A buzz when something starts needing you.
     if (m.sessions.some((s) => s.alive && s.status === "waiting" && before.get(s.id) !== "waiting")) navigator.vibrate?.(200);
+    forgetGoneChats(m.sessions.map((s) => s.id));
+    refreshNotSent();
     persistList();
     if (openId() && !m.sessions.some((s) => s.id === openId())) closeSession();
   },
@@ -106,12 +143,27 @@ const link = new Link(browserEnv(), loadToken, {
   chatResolved(m: ChatResolved) {
     chats.controller(m.id)?.resolvedElsewhere(m.request_id, !!m.dropped, { answeredBy: m.answered_by ?? (m.by === "desktop" ? "desktop" : undefined), at: m.at });
   },
+  chatQueue(m: ChatQueueMsg) {
+    const view = fromPhoneMessage(m);
+    chats.controller(m.id)?.applyQueue(view);
+    senders.get(m.id)?.snapshot(view);
+  },
   chatResync() {},
+  addrs(m) {
+    // Kept for a client that can dial another address (a page's origin cannot change; the native app's can).
+    const p = currentPairing();
+    if (p && m.seq > p.addrsSeq) void savePairing({ ...p, endpoints: [...m.list.map((a) => ({ t: "lan", a })), ...p.endpoints.filter((e) => e.t !== "lan")], addrsSeq: m.seq });
+  },
+  deviceChanged(m) {
+    const name = m.name;
+    tellDeviceNews(m.change === "added" ? t("A new device was paired with this computer: {name}.", { name }) : m.change === "removed" || m.change === "replaced" ? t("A device was removed from this computer: {name}.", { name }) : t("What {name} may do was changed on this computer.", { name }));
+  },
   unpaired() {
-    store.del(TOKEN_KEY);
+    void forgetPairing();
     void clearCache();
     wipeTypedText();
     forgetHistory();
+    forgetSenders();
     batch(() => {
       setPaired(false);
       setNotPairedMessage(t("This device is no longer paired. Pair it again from Kelpie → Settings → Mobile."));
@@ -124,6 +176,11 @@ const link = new Link(browserEnv(), loadToken, {
 });
 
 export { link };
+
+function tellDeviceNews(text: string) {
+  setDeviceNews(text);
+  setTimeout(() => setDeviceNews(null), 8000);
+}
 
 function recompute() {
   const at = Date.now();
@@ -206,20 +263,85 @@ async function openChat(row: SessionRow) {
   if (!ctrl) {
     const make = await adapterFor(row.kind);
     if (openId() !== id) return;
-    ctrl = new ChatController(id, row.cwd, null, make, { transport: chatTransport(id), observer: true });
+    ctrl = new ChatController(id, row.cwd, null, make, {
+      transport: chatTransport(id),
+      observer: true,
+      onSent: (m) => senders.get(id)?.sentSeen(m.cid),
+      // Also from the log replayed after a reconnect: a message cancelled on the desktop while this phone was offline.
+      onUnsent: (m) => senders.get(id)?.unsentSeen(m.cid, m.reason, m.cancelledBy),
+    });
     chats.open(id, ctrl);
   }
+  watchSender(id, row.kind);
+  setStopping(false);
   setChat(ctrl);
   link.follow(id, "chat");
 }
 
-/** The phone's way to a chat: it can only pass on the person's answer to a question the agent asked. */
+/** The sender of chat `id`, made when the phone first looks at it; the views read its messages through `chatPending`. */
+function watchSender(id: string, kind: string) {
+  let sender = senders.get(id);
+  if (!sender) {
+    sender = new ChatSender(
+      {
+        send: async (cid, text) => sendOutcome(await link.chatSend(id, cid, text)),
+        cancel: async (qid) => {
+          const o = await link.chatCancel(id, qid);
+          return o.t === "ack" ? "ok" : o.t === "error" && o.code === "too_late" ? "too_late" : "failed";
+        },
+        connected,
+        now: () => Date.now(),
+        newCid: () => globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`,
+        // What the person still has to decide about outlives a reload (kept-messages.ts); what could not be kept says so.
+        save: (kept) => {
+          const row = sessions().find((s) => s.id === id);
+          return saveKept(id, kept, row ? labelOf(row) : undefined);
+        },
+      },
+      kind,
+      () => chats.controller(id)?.state.commands ?? [],
+      loadKept(id),
+    );
+    senders.set(id, sender);
+  }
+  const shown = sender;
+  setChatPending(shown.pending);
+  unwatchSender?.();
+  unwatchSender = shown.subscribe(() => setChatPending(shown.pending));
+}
+
+let unwatchSender: (() => void) | undefined;
+
+/** What the daemon said to a `chat_send`, as the sender reads it. */
+export function sendOutcome(o: Outcome): SendOutcome {
+  switch (o.t) {
+    case "ack":
+      if (o.result === "dup") return { result: "dup", qid: String(o.qid), state: (o.state ?? "queued") as "queued" };
+      return { result: "ok", qid: String(o.qid), state: o.state === "sent" ? "sent" : "queued", ahead: o.ahead ?? 0 };
+    case "error":
+      return { result: "refused", code: o.code, message: o.message };
+    case "offline":
+      return { result: "offline" };
+    default:
+      return { result: "unknown" };
+  }
+}
+
+/** The phone's way to a chat: it passes on the person's answers to the agent's questions and their messages (as text: the
+ *  daemon builds the turn), takes messages out of the queue and stops the turn. It never writes to the agent itself. */
 function chatTransport(id: string): ChatTransport {
   return {
     async answer(requestId, line): Promise<AnswerOutcome> {
       return chatOutcome(await link.chatAnswer(id, requestId, line));
     },
     deviceName: () => device()?.name,
+    async queueOp(op, qid) {
+      if (op === "cancel" && qid) await link.chatCancel(id, qid);
+      else if (op === "resume") await link.chatResume(id);
+    },
+    async stop() {
+      await link.chatStop(id);
+    },
   };
 }
 
@@ -263,7 +385,7 @@ export async function sendText(id: string, text: string, force = false): Promise
   if (!connected()) return { ok: false, reason: "offline" };
   const o = await link.input(id, text, force);
   if (o.t === "ack") return { ok: true, entered: o.entered !== false };
-  if (o.t === "error") return { ok: false, reason: o.code === "prompt" ? "prompt" : "error", message: o.message };
+  if (o.t === "error") return { ok: false, reason: o.code === "prompt" ? "prompt" : "error", message: refusalText(o) };
   return { ok: false, reason: o.t };
 }
 
@@ -271,7 +393,7 @@ export async function sendKey(id: string, key: string): Promise<SendResult> {
   if (!connected()) return { ok: false, reason: "offline" };
   const o = await link.key(id, key);
   if (o.t === "ack") return { ok: true, entered: true };
-  if (o.t === "error") return { ok: false, reason: "error", message: o.message };
+  if (o.t === "error") return { ok: false, reason: "error", message: refusalText(o) };
   return { ok: false, reason: o.t };
 }
 
@@ -284,34 +406,103 @@ export async function answerPrompt(id: string, waitingSince: number | null, prom
   return link.answer(id, waitingSince, body, a.enter);
 }
 
+/** Sends `text` to the open chat. */
+export async function sendChat(text: string): Promise<ChatSendResult> {
+  const id = openId();
+  const sender = id ? senders.get(id) : undefined;
+  if (!sender) return { accepted: false, reason: "offline" };
+  return sender.send(text);
+}
+
+export const retryChat = (cid: string) => senders.get(openId() ?? "")?.retry(cid);
+export const discardChat = (cid: string) => senders.get(openId() ?? "")?.discard(cid);
+/** The text of a message of this phone back for the box; it leaves the queue (`null`: it was too late). */
+export const takeChat = (cid: string) => senders.get(openId() ?? "")?.take(cid) ?? Promise.resolve(null);
+
+/** Removes a message of anyone's from the open chat's queue. */
+export async function cancelQueued(qid: string): Promise<void> {
+  const id = openId();
+  if (!id) return;
+  const o = await link.chatCancel(id, qid);
+  // Its own cancel is not news to it: the chip goes, without a "sent" or a "cancelled" in its place.
+  if (o.t === "ack") senders.get(id)?.forgetQueued(qid);
+}
+
+/** Stops the agent's turn in the open chat: "Stopping…" shows until it is idle. */
+export function stopChat() {
+  const ctrl = chat();
+  if (!ctrl) return;
+  setStopping(true);
+  ctrl.interrupt();
+}
+
+export function resumeChat() {
+  chat()?.resumeQueue();
+}
+
 // ---------- pairing and start ----------
 
+/** Pairs this phone with the computer the QR code's link came from. Null when paired; otherwise what to tell the person. */
 export async function pairDevice(code: string, name: string): Promise<string | null> {
-  try {
-    const r = await fetch("/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, name: name.trim() || t("Phone") }) });
-    const body = (await r.json().catch(() => ({}))) as { token?: string; error?: string };
-    if (!r.ok || !body.token) return body.error || `HTTP ${r.status}`;
-    store.set(TOKEN_KEY, body.token);
-    setNotPairedMessage(null);
+  setPairShown(null);
+  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/link`;
+  const held = await loadPairing();
+  const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }), held);
+  setPairShown(null);
+  if (!r.ok) {
+    if (!held) return r.message;
+    // Nothing changed for the pairing it holds: back to it, with what went wrong.
     setPairing(null);
     setPaired(true);
     link.start();
+    tellDeviceNews(r.message);
     return null;
-  } catch (e) {
-    return String((e as Error)?.message ?? e);
   }
+  const kept = await savePairing(r.pairing);
+  setNotPairedMessage(kept ? null : t("This browser would not keep the pairing: it lasts until this page is closed."));
+  setPairing(null);
+  setPaired(true);
+  link.start();
+  return null;
 }
 
 /** Forgets this device's pairing (the computer still lists it until it is removed there). */
 export function forgetDevice() {
   link.stop();
-  store.del(TOKEN_KEY);
+  void forgetPairing();
   void clearCache();
   wipeTypedText();
   forgetHistory();
+  forgetSenders();
   closeSession();
   setSessions([]);
   setPaired(false);
+}
+
+/** The kept messages of chats the computer no longer lists (closed, or resumed as a new session): shown in the inbox under
+ *  "Not sent", with their text, until the person lets them go (or a week after they last changed). */
+export const [notSent, setNotSent] = createSignal<GoneChat[]>([]);
+
+function refreshNotSent() {
+  setNotSent(goneChats(sessions().map((s) => s.id)));
+}
+
+/** Lets a message from the "Not sent" list go, from the sender that still holds it on this page as well. */
+export function discardNotSent(chat: string, cid: string) {
+  const sender = senders.get(chat);
+  if (sender?.pending.some((p) => p.cid === cid)) sender.discard(cid);
+  else discardKept(chat, cid);
+  refreshNotSent();
+}
+
+/** Nothing typed on this phone outlives its pairing: the messages on their way (and their kept copies, wiped with the drafts). */
+function forgetSenders() {
+  setNotSent([]);
+  unwatchSender?.();
+  unwatchSender = undefined;
+  for (const s of senders.values()) s.dispose();
+  senders.clear();
+  setChatPending([]);
 }
 
 function readHash() {
@@ -332,7 +523,11 @@ export function startApp() {
     setPairing(code);
     setPaired(false);
   }
-  const tick = () => !document.hidden && recompute();
+  const tick = () => {
+    if (document.hidden) return;
+    recompute();
+    for (const s of senders.values()) s.prune();
+  };
   setInterval(tick, 1000);
   window.addEventListener("online", () => link.setOnline(true));
   window.addEventListener("offline", () => link.setOnline(false));
@@ -360,9 +555,17 @@ export function startApp() {
     if (id && sessions().some((s) => s.id === id)) openSession(id, false);
     else closeSession();
   });
+  // A phone paired with a token by an earlier version: the computer no longer takes those.
+  if (hadOldToken()) setNotPairedMessage(t("This device was paired before end-to-end encryption. Pair it again from Kelpie → Settings → Mobile."));
   // The list as this browser last saw it, at once, until the connection says anything. (A page opened from a
   // pairing link connects only once that pairing is approved.)
-  if (loadToken() && !code) {
+  void loadPairing().then((p) => {
+    if (code) return;
+    if (!p) {
+      setPaired(false);
+      return;
+    }
+    setPaired(true);
     void loadList().then((c) => {
       if (c && !link.facts.ready && !sessions().length) {
         batch(() => {
@@ -374,6 +577,6 @@ export function startApp() {
       }
     });
     link.start();
-  }
+  });
   recompute();
 }

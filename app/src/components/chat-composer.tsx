@@ -261,6 +261,8 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
               <div class="queue-chip" title={withImageNames(m.text, m.images)}>
                 <Icon name="clock" size={11} />
                 <span class="queue-text">{withImageNames(m.text, m.images)}</span>
+                <Show when={m.from}><span class="msg-time">{t("from {device}", { device: m.from! })}</span></Show>
+                <Show when={m.needsWindow}><span class="msg-time" title={t("This message has a picture or a command that only the Kelpie window it was typed in can prepare. It waits there; remove it to let the others go.")}>{t("needs the desktop window")}</span></Show>
                 <button class="link-btn" title={t("Give it to the agent now, during its current turn")} onClick={() => ctrl.sendNow(m.id)}>{t("Send now")}</button>
                 <button class="icon-btn mini" title={t("Remove from the queue")} onClick={() => ctrl.unqueue(m.id)}><Icon name="close" size={11} /></button>
               </div>
