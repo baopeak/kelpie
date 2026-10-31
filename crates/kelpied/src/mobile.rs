@@ -85,6 +85,10 @@ const HANDSHAKES_PER_SECOND_PER_ADDRESS: f64 = 5.0;
 /// WebSocket upgrades one address may make: a second's worth, then this many a second.
 const UPGRADES_PER_SECOND_PER_ADDRESS: f64 = 5.0;
 const UPGRADE_BURST: f64 = 20.0;
+/// All upgrades through Tailscale Serve together, whatever address each one names: a program on this machine can name any, so this is what bounds it. Far above
+/// what the few phones of one person do, reconnecting at once included.
+const SERVE_UPGRADES_PER_SECOND: f64 = 20.0;
+const SERVE_UPGRADE_BURST: f64 = 40.0;
 /// So many connections given way or refused in a minute are a flood, which goes in the audit log once in `FLOOD_NOTE_GAP`.
 const FLOOD_EVENTS: u32 = 20;
 const FLOOD_NOTE_GAP: Duration = Duration::from_secs(300);
@@ -384,6 +388,8 @@ pub struct Mobile {
     handshake_budget: Mutex<SendBucket>,
     handshakes_by_address: Mutex<HashMap<IpAddr, SendBucket>>,
     upgrades_by_address: Mutex<HashMap<IpAddr, SendBucket>>,
+    /// Kept apart from the ones by address, which addresses that are made up can flush.
+    serve_upgrades: Mutex<HashMap<IpAddr, SendBucket>>,
     /// Connections given way or refused lately, and when that last went in the audit log.
     flood: Mutex<Flood>,
     /// The last save failed; what is in memory is ahead of the file (see `retry_save`).
@@ -504,6 +510,7 @@ impl Mobile {
             handshakes: Arc::default(),
             handshakes_by_address: Mutex::new(HashMap::new()),
             upgrades_by_address: Mutex::new(HashMap::new()),
+            serve_upgrades: Mutex::new(HashMap::new()),
             flood: Mutex::new(Flood { events: 0, since: Instant::now(), noted: None }),
             save_failed: AtomicBool::new(false),
             unsaved_text: Mutex::new(None),
@@ -726,6 +733,15 @@ impl Mobile {
             return true;
         }
         self.note_flood("an upgrade refused", ip);
+        false
+    }
+
+    /// Whether another upgrade may come through Tailscale Serve now, whoever it says it is.
+    fn serve_upgrade_allowed(&self) -> bool {
+        if take_token(&self.serve_upgrades, listen::BEHIND_SERVE, SERVE_UPGRADES_PER_SECOND, SERVE_UPGRADE_BURST) {
+            return true;
+        }
+        self.note_flood("an upgrade through Tailscale Serve refused", listen::BEHIND_SERVE);
         false
     }
 
@@ -1758,8 +1774,9 @@ async fn link_socket(State(daemon): State<Arc<Daemon>>, axum::Extension(generati
     if !same_origin(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let peer = peer.with_headers(&headers);
-    if !daemon.mobile.upgrade_allowed(peer.ip()) {
+    let ts_origin = daemon.mobile.tailscale_origin();
+    let peer = peer.with_headers(&headers, ts_origin.as_deref());
+    if (peer.through_serve && !daemon.mobile.serve_upgrade_allowed()) || !daemon.mobile.upgrade_allowed(peer.ip()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let browser = headers.contains_key(header::ORIGIN);
@@ -5690,25 +5707,31 @@ mod tests {
             ("an address last that is not one", "100.101.102.103, 127.0.0.1", listen::BEHIND_SERVE),
             ("garbage", "unknown", listen::BEHIND_SERVE),
         ] {
-            let p = serve.with_headers(&with(&[("x-forwarded-for", value)]));
+            let p = serve.with_headers(&with(&[("x-forwarded-for", value)]), Some("desk.tail1234.ts.net:8443"));
             assert_eq!(p.ip(), want, "{what}");
             assert!(!p.ip().is_loopback(), "{what}");
         }
-        assert_eq!(serve.with_headers(&with(&[])).ip(), listen::BEHIND_SERVE, "serve sent none: one bucket for all of it");
-        assert_eq!(serve.with_headers(&with(&[("x-forwarded-for", "100.1.1.1"), ("x-forwarded-for", "100.101.102.103")])).ip(), ts, "the last header");
+        assert_eq!(serve.with_headers(&with(&[]), Some("desk.tail1234.ts.net:8443")).ip(), listen::BEHIND_SERVE, "serve sent none: one bucket for all of it");
+        assert_eq!(serve.with_headers(&with(&[("x-forwarded-for", "100.1.1.1"), ("x-forwarded-for", "100.101.102.103")]), Some("desk.tail1234.ts.net:8443")).ip(), ts, "the last header");
         // Anywhere else the header is anyone's to send.
         for direct in [Peer::direct("192.168.1.9:5000".parse().unwrap(), false), Peer::direct("192.168.1.9:5000".parse().unwrap(), true), Peer::direct(loopback, false)] {
-            let p = direct.with_headers(&with(&[("x-forwarded-for", "100.101.102.103")]));
+            let p = direct.with_headers(&with(&[("x-forwarded-for", "100.101.102.103")]), Some("desk.tail1234.ts.net:8443"));
             assert_eq!(p.ip(), direct.addr.ip(), "{direct:?}");
         }
         // Secure for the transport, whoever it turns out to be, and only an HTTPS page is a secure origin.
         assert_eq!(transport_cap(Kind::Pwa, true, &serve), Permission::Write);
-        assert_eq!(transport_cap(Kind::Pwa, true, &serve.with_headers(&with(&[("x-forwarded-for", "8.8.8.8")]))), Permission::Write);
-        assert!(serve.with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")])).secure_origin);
-        assert!(!serve.with_headers(&with(&[("origin", "http://127.0.0.1:50000")])).secure_origin);
-        assert!(!serve.with_headers(&with(&[])).secure_origin, "no page at all");
-        assert!(!Peer::direct(loopback, false).with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")])).secure_origin, "plain HTTP cannot be an HTTPS page's");
-        assert!(Peer::direct("192.168.1.9:5000".parse().unwrap(), true).with_headers(&with(&[("origin", "https://192.168.1.9:5000")])).secure_origin, "a certificate of the person's own");
+        assert_eq!(transport_cap(Kind::Pwa, true, &serve.with_headers(&with(&[("x-forwarded-for", "8.8.8.8")]), Some("desk.tail1234.ts.net:8443"))), Permission::Write);
+        assert!(serve.with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
+        assert!(!serve.with_headers(&with(&[("origin", "https://x")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "any https page is not this computer's origin");
+        assert!(!serve.with_headers(&with(&[("origin", "http://desk.tail1234.ts.net:8443")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
+        assert!(!serve.with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443.evil.example")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
+        let unpublished = serve.with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")]), None);
+        assert!(!unpublished.secure_origin, "nothing is published now");
+        assert!(!serve.with_headers(&HeaderMap::new(), Some("desk.tail1234.ts.net:8443")).secure_origin);
+        assert!(!serve.with_headers(&with(&[("origin", "http://127.0.0.1:50000")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
+        assert!(!serve.with_headers(&with(&[]), Some("desk.tail1234.ts.net:8443")).secure_origin, "no page at all");
+        assert!(!Peer::direct(loopback, false).with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "plain HTTP cannot be an HTTPS page's");
+        assert!(Peer::direct("192.168.1.9:5000".parse().unwrap(), true).with_headers(&with(&[("origin", "https://192.168.1.9:5000")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "a certificate of the person's own");
         assert_eq!(listen::shown(listen::BEHIND_SERVE), "Tailscale");
     }
 
@@ -6359,6 +6382,56 @@ mod tests {
         assert_eq!(told["serve"], "missing", "{told}");
         assert_eq!(*fake.serve.lock(), "{}");
         drop(held);
+    }
+
+    /// A program on this machine can name any address through the loopback port. That gets it no session: all it can do is fill the bucket of the address it names
+    /// for a while, and how fast it can try is bounded whatever it names.
+    #[tokio::test]
+    async fn a_made_up_address_through_the_loopback_port_buys_a_lockout_and_no_session() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let port = publish(&d).await;
+        let phone_at = "X-Forwarded-For: 100.101.102.103\r\n";
+        for _ in 0..PAIR_FAILURES {
+            let mut made_up = through_serve(&d, port, kelpie_link::Keypair::generate().unwrap(), phone_at).await;
+            assert!(made_up.reconnect().await.is_none(), "a key nobody paired gets nothing, whatever it says");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let failures_at = |d: &Daemon, ip: &str| d.mobile.failures.lock().get(&ip.parse::<IpAddr>().unwrap()).map_or(0, VecDeque::len);
+        assert_eq!(failures_at(&d, "100.101.102.103"), PAIR_FAILURES, "counted against the address it named");
+        // That address is shut out for now: its own phone too.
+        let mut own = through_serve(&d, port, network.rig.phone.clone(), phone_at).await;
+        assert!(own.reconnect().await.is_none());
+        assert!(d.mobile.pairing_blocked("100.101.102.103".parse().unwrap()));
+        // From any other address it gets through, and once the minute is up from that one as well.
+        let mut elsewhere = through_serve(&d, port, network.rig.phone.clone(), "X-Forwarded-For: 100.101.102.104\r\n").await;
+        elsewhere.reconnect().await.expect("a paired key");
+        for t in d.mobile.failures.lock().get_mut(&"100.101.102.103".parse::<IpAddr>().unwrap()).unwrap().iter_mut() {
+            *t = Instant::now() - Duration::from_secs(61);
+        }
+        let mut own = through_serve(&d, port, network.rig.phone.clone(), phone_at).await;
+        own.reconnect().await.expect("the lockout does not outlast its minute");
+
+        // However many addresses it makes up, the listener as a whole has its budget, and a flood of made-up addresses cannot flush it.
+        for i in 0..(LIMITER_ADDRESSES + 5) {
+            d.mobile.upgrade_allowed(IpAddr::from([100, 64, (i / 256) as u8, (i % 256) as u8]));
+        }
+        let granted = (0..200).filter(|_| d.mobile.serve_upgrade_allowed()).count();
+        assert!((1..=(SERVE_UPGRADE_BURST as usize + 5)).contains(&granted), "{granted}");
+        use tokio::io::AsyncWriteExt;
+        let mut refused = false;
+        for i in 0..20 {
+            while d.mobile.serve_upgrade_allowed() {}
+            let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            tcp.write_all(format!("GET /link HTTP/1.1\r\nHost: {ORIGIN}\r\nX-Forwarded-For: 100.65.0.{i}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").as_bytes()).await.unwrap();
+            if http_head(&mut tcp).await.starts_with("HTTP/1.1 429") {
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "past the listener's budget a new address changes nothing");
     }
 
     /// A plain pairing secret while the mode is on.

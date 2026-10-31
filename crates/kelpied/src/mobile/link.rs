@@ -52,7 +52,8 @@ pub struct Peer {
     pub through_serve: bool,
     /// Who is calling through serve, from the header serve sets.
     pub client: Option<IpAddr>,
-    /// A page whose origin is HTTPS, on a listener that is.
+    /// A page whose origin is this computer's HTTPS origin. A program on this machine can claim it through the loopback listener, and then still needs the
+    /// pairing secret and the person, so it records how a person paired, and is no proof against that program.
     pub secure_origin: bool,
 }
 
@@ -77,13 +78,17 @@ impl Peer {
         }
     }
 
-    /// With what the upgrade's headers say. `X-Forwarded-For` counts on the loopback listener alone: anywhere else anyone can send it.
-    pub fn with_headers(mut self, headers: &HeaderMap) -> Peer {
+    /// With what the upgrade's headers say, `ts_origin` being the origin Tailscale publishes now. `X-Forwarded-For` counts on the loopback listener alone:
+    /// anywhere else anyone can send it. There it is as good as the programs on this machine, which can connect to that port and say what they like: that buys
+    /// them another limiter bucket, and no session.
+    pub fn with_headers(mut self, headers: &HeaderMap, ts_origin: Option<&str>) -> Peer {
+        let origin = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok());
         if self.through_serve {
             self.client = forwarded_client(headers);
+            self.secure_origin = ts_origin.is_some_and(|ts| origin.and_then(|o| o.strip_prefix("https://")) == Some(ts));
+        } else {
+            self.secure_origin = self.tls && origin.is_some_and(|o| o.starts_with("https://"));
         }
-        let https_page = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok()).is_some_and(|o| o.starts_with("https://"));
-        self.secure_origin = self.tls && https_page;
         self
     }
 }

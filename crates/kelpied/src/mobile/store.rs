@@ -61,7 +61,8 @@ pub struct Device {
     pub last_seen: u64,
     /// HMAC-SHA256 (hex) of the fields above but `last_seen`.
     pub mac: String,
-    /// It paired on an HTTPS origin, so a page swapped on the network cannot have done it. What later grants rest on (the relay, control).
+    /// It paired on an HTTPS origin, so a page swapped on the network cannot have done it. What later grants rest on (the relay, control). A program of this
+    /// user can get it too, with the pairing secret and the person's approval: it says what the person approved, not that no such program exists.
     #[serde(default)]
     pub secure_origin: bool,
     /// HMAC-SHA256 (hex) saying so, for a record with `secure_origin` only. A second tag, not a field of the first: a record paired here
