@@ -1,13 +1,15 @@
 ---
 phase: 3
 title: "kelpie-link: E2E pairing, trusted approval, device store v2"
-status: pending
+status: in-progress
 priority: P1
 effort: "6d"
 dependencies: [2]
 ---
 
 # Phase 3: kelpie-link
+
+> **Addendum 2026-10-30.** Absorbed during implementation: SAS from the handshake hash with 3 tries, remote-forbidden operations (one-shot approvals), audit log, kill switch, dormant-device expiry, noble JS crypto (`app/phone/src/noise.ts`) instead of the wasm build. Path D later changes lines below: relay tokens are no longer native-only (phase 4), `control` for the PWA awaits the user (phase 7), and `src/client.rs` is deferred with the native app. Phase 3 itself stays as implemented; those changes land in 3a, 3c and 4. API 22.
 
 ## Overview
 One Rust crate that pairs a phone by QR and carries every phone message end-to-end encrypted (Noise), independent of the pipe.
@@ -81,12 +83,12 @@ crates/kelpie-link/
 - Downgrade test: previous release daemon starts with `mobile.v2.json` present and old `mobile.json` intact.
 
 ## Perf gate
-- Crypto overhead ≤ 5 % CPU vs phase 2 workload.
+- Crypto overhead ≤ 5 % CPU vs phase 2 workload. **Met:** 0.1 to 1.3 points by cycle counter against the daemon before encryption, seal alone about 0.37 ([measurements](../reports/debugger-261031-0750-phone-link-cpu.md)). `mobile_perf.py`'s total of 5 points for eight phones is not met, at about 10, most of it older than this phase; to be reduced separately before merge (user decision 2026-10-31).
 
 ## Success Criteria
-- [ ] Pairing = scan + type a 6-digit code + OS verification on the desktop.
-- [ ] No program holding only the user token can add a device or raise permissions.
-- [ ] All phone traffic encrypted on any pipe; revoke cuts access (and control) at once.
+- [ ] Pairing = scan + type a 6-digit code + OS verification on the desktop. Built and tested through a seam; the real OS prompt has never run, and that blocks merge.
+- [x] No program holding only the user token can add a device or raise permissions through the daemon. Accepted and documented residual: a same-user program can read the keyring and write a sealed record, or replace the daemon's files.
+- [x] All phone traffic encrypted on any pipe; revoke cuts access (and control) at once.
 
 ## Risk Assessment
 - `snow` 0.10 unaudited; signal: RUSTSEC advisory; response: pin, review IK/IKpsk1 paths, alternative crate behind the same API.

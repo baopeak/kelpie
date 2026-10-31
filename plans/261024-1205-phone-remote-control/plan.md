@@ -1,10 +1,10 @@
 ---
 title: "Phone remote control: sessions anywhere, screen when needed"
-description: "Control every Kelpie session from a phone with zero networking setup and end-to-end encryption — LAN or anywhere, no account — plus browser-pane and desktop/IDE screen takeover."
+description: "Control every Kelpie session from a phone with end-to-end encryption: a PWA over Tailscale HTTPS with Web Push from the daemon and an app lock first, then one Cloudflare relay, plus browser-pane and desktop/IDE screen takeover."
 status: pending
 priority: P1
-effort: "~65d"
-tags: [mobile, remote, e2e, noise, relay, webrtc, screen, security]
+effort: "~74d + 7-day soak (deferred, outside the total: ~10d)"
+tags: [mobile, remote, e2e, noise, tailscale, web-push, webauthn, relay, webrtc, screen, security]
 created: 2026-10-24
 blockedBy: [261023-0048-multi-agent-ide-roadmap]
 blocks: []
@@ -15,8 +15,10 @@ blocks: []
 ## Overview
 Today the phone page (`crates/kelpied/mobile/app.js`, 258 lines) polls a session's text every 1.2 s, sends fixed keys, cannot answer chat
 sessions, ignores the daemon's prompt detection and stale-answer guard, and only works on one LAN/Tailscale IP. This plan turns the phone
-into a full Kelpie controller that **works anywhere with one QR scan, no account, no Tailscale**, keeps everything end-to-end encrypted, and
+into a full Kelpie controller that works anywhere with **no Kelpie account**, keeps everything end-to-end encrypted, and
 adds **screen takeover** when an agent is stuck on a login, a GUI or a dialog.
+
+**Path D (user decision 2026-10-30, see Validation Session 2):** first a PWA over Tailscale (detection, `*.ts.net` HTTPS in the QR, Web Push sent by `kelpied`, app lock, plain-language switches, Telegram options), then one Cloudflare relay. iroh and a native store app are deferred with no phase commitment. This replaces "zero setup, no Tailscale" as the first target.
 
 Blocked by roadmap [261023-0048 phase 12](../261023-0048-multi-agent-ide-roadmap/phase-12-notify-limits-redaction.md), in progress in this
 worktree (uncommitted `crates/kelpied/src/notify.rs`, `notify/`, `mobile.rs`). Start phase 1 only after roadmap phases 1–12 are all completed and committed (user decision 2026-10-25, replaces "right after phase 12"). Phase 2's composer core
@@ -33,13 +35,16 @@ Research (`plans/reports/`): [synthesis](../reports/research-261024-1832-phone-c
 [Windows host](../reports/researcher-261024-1820-windows-host-capture-input.md) ·
 [phone transport](../reports/researcher-261024-1820-mobile-client-transport.md) ·
 [takeover + macOS](../reports/researcher-261024-1820-takeover-patterns-macos.md) ·
-[screen spikes](../reports/researcher-261024-1820-screen-control-gaps-spike.md)
+[screen spikes](../reports/researcher-261024-1820-screen-control-gaps-spike.md) ·
+2026-10-30: [options synthesis](../reports/research-261030-1530-phone-remote-access-options-synthesis.md) ·
+[relay synthesis](../reports/research-261030-1600-relay-speed-reliability-security-synthesis.md) ·
+[re-plan report](../reports/planner-261030-1600-phone-path-d-replan.md)
 
 ## Brainstorm contract
 - **Outcome**: from a phone, anywhere, the user sees every session across agents (who needs them first), reads and answers terminal and chat
   sessions with one tap or a real keyboard (Telex/VNI safe), gets a push when one needs them, and can take over a browser pane or the
   desktop / an IDE window to type a password, pass 2FA or click a dialog.
-- **Constraints**: zero networking knowledge; no Kelpie account; nothing readable leaves the machine (relay sees ciphertext only); off by default;
+- **Constraints**: no Kelpie account; first target needs Tailscale on both ends (guided), every option a plain-language switch with safe defaults; nothing readable leaves the machine (relay sees ciphertext only; the opt-in Telegram approvals are the stated exception); off by default;
   daemon stays per-user and per-user-installed; MIT-compatible dependencies; EN + VI; Windows first, macOS parity; no work or sockets when off;
   e2e never touches the real daemon (`KELPIE_ENDPOINT` in the test's own process).
 - **Non-goals**: UAC secure desktop, lock/login screen, elevated windows (need a SYSTEM service — reported clearly instead); audio; file transfer; multi-user sharing; any Kelpie cloud storage.
@@ -47,78 +52,113 @@ Research (`plans/reports/`): [synthesis](../reports/research-261024-1832-phone-c
 ## Why this beats Orca
 Orca (v1.4.239, mobile 0.0.58 beta, Expo app): LAN `ws://` or `relay.onorca.dev` **with an Orca account on both ends**, NaCl app-layer encryption
 (forward secrecy unconfirmed), cloud push gateway, **no screen control**. Kelpie: no account (keys in the QR), Noise with forward secrecy, self-hostable
-relay, user-presence-gated approvals, one inbox across 23 agents, browser-pane and desktop/IDE takeover, and the PWA from the daemon itself on LAN (no store/version skew there).
+relay, daemon-enforced app lock, one inbox across 23 agents, browser-pane and desktop/IDE takeover, and the PWA from the daemon itself (no store/version skew).
 
-## Architecture decisions (final, after red team)
+## Architecture decisions (final, after red team; amended 2026-10-30)
 | # | Decision | Why |
 |---|---|---|
-| D1 | **One E2E protocol `kelpie-link`**: Noise `IKpsk1` pairing (psk checked in msg1), `IK` reconnect, via `snow` 0.10 (RustCrypto resolver, no ring), over any pipe (LAN WS, relay WS) | One crate for daemon, native app, wasm PWA; desktop verifies the QR secret before any prompt |
-| D2 | **Pair by QR keys, no accounts**; phone shows a 6-digit code the user **types** on the desktop; default QR is app-only (`kelpie://pair`); browser pairing is an explicit separate action | Beats account-based Orca/Claude Remote Control; a swapped `http://` page cannot ride the default path |
-| D3 | **Connect race** (Rust, `kelpie-link::client`): all bound LAN/Tailscale addresses ∥ relay; first IK handshake wins; migrate to direct | Zero setup without losing LAN latency; daemon binds every usable address, not one |
-| D4 | **Untrusted relay**, opt-in: one TS Worker + Durable Object, self-host on `workerd`; random `room_id`; sees ciphertext, IPs, timing, sizes, room id | Every zero-setup competitor needs a relay; no derivable room ids |
-| D5 | **Trust root = signed native app** for relay mode; PWA stays LAN/Tailscale, `write` only over TLS/Tailscale (plain `http://` capped at `read`), no relay token, no `control` | PWAs cannot be pinned on iOS; Isolated Web Apps are Chrome/ChromeOS-only |
+| D1 | **One E2E protocol `kelpie-link`**: Noise `IKpsk1` pairing (psk checked in msg1), `IK` reconnect, via `snow` 0.10 (RustCrypto resolver, no ring) in the daemon, JS on noble in the page, over any pipe (Tailscale HTTPS, LAN WS, relay WS) | One protocol for daemon and page; desktop verifies the QR secret before any prompt |
+| D2 | **Pair by QR keys, no accounts**; phone shows a 6-digit code the user **types** on the desktop. *Amended 2026-10-30*: with no native app, the default QR is the two-step install + pair for the `*.ts.net` origin (3a); plain-`http://` browser pairing stays an explicit separate action; `kelpie://pair` waits for the native app | Beats account-based Orca/Claude Remote Control; a swapped `http://` page cannot ride the default path |
+| D3 | **Connect race**. *Amended 2026-10-30*: in the PWA's `link.ts`, not Rust (`kelpie-link::client` deferred with native). Candidates from the pairing record: `ts`, then the single relay after 250 ms; first IK handshake wins; migrate to direct after 10 s stable. An HTTPS page cannot dial `ws://<LAN IP>` (mixed content), so a raw LAN address is only used by a plain-`http://` page, on its own origin | Reach without losing a direct path; Tailscale connects directly on the same Wi-Fi |
+| D4 | **Untrusted relay**, opt-in, *amended 2026-10-30*: **one** Cloudflare Workers + Durable Object relay, personal use first (public service a later decision); pairing record holds a list with one entry; no `apac` hint, the desktop's first `get()` places the object, room re-created if RTT stays high; hibernation and billing guards; hardening from relay synthesis section 3; push and TURN secrets not in the data path; same code self-hosts on `workerd`. Replaces the 2026-10-25 "hosted default" detail only where listed; validated on a real deployment first (4a). Sees ciphertext, IPs, timing, sizes, room id | Nothing to patch or keep alive, cost follows usage, DDoS absorbed; accepted: ~0–25 ms over a same-city VPS [E], drops on deploys and runtime updates, DO incidents |
+| D5 | **Trust root**, *amended 2026-10-30*: the page is served only by the daemon, over Tailscale HTTPS (daemon-origin PWA); the relay never serves code. A device with `secure_origin` may use the relay (frames only) and, **pending user confirmation before phase 7**, hold `control` once app-locked. Plain `http://` stays capped at `read`, no relay token, no `control`. Signed native app deferred | No code origin but the user's own machine; PWAs cannot be pinned on iOS |
 | D6 | **One phone client** (`app/phone`, own Vite config), chat adapters reused in **observer mode** over a narrow transport | No three UIs; phone never initializes or reconfigures an agent |
-| D7 | **Native shell = Tauri 2 mobile**, keys + biometric gate enforced in Rust | Shares Rust crates; Capacitor documented fallback |
+| D7 | **Native shell = Tauri 2 mobile**, keys + biometric gate enforced in Rust. **Deferred 2026-10-30**, no phase commitment; iroh only with it and only after a spike | Shares Rust crates; Capacitor documented fallback |
 | D8 | **Sessions travel as state**: line-diff frames by session id with per-device resume; first-wins answers for terminal and chat prompts | 4G bandwidth, Telex-safe input, no double answers |
-| D9 | **Push**: native app via relay push (own gateway credential; generic text + details sealed to the device, decrypted on the phone; lost-contact via relay lease + alarm); PWA users via existing ntfy deep links; no Web Push | No content to Apple/Google/relay; no HTTPS requirement; no duplicate channel |
-| D10 | **Screen, two tiers**: browser pane via WebView2 CDP screencast (Windows); desktop/window via app-spawned `kelpie-screen` (WGC/DXGI + MF H.264 + `str0m` WebRTC + `SendInput`; macOS SCK + VideoToolbox + `CGEventPost`). Desktop video never goes through the relay; browser-takeover frames may, at ≤ 2 fps within their own budget | P2P UDP for video; cheap takeover for logins |
+| D9 | **Push**, *amended 2026-10-30*: **Web Push sent directly by `kelpied`** (VAPID, RFC 8291, content-free alert + deep link) for HTTPS PWA devices; ntfy and Telegram stay optional channels; native APNs/FCM gateway, sealed details and the relay-lease lost-contact push deferred. Supersedes "no Web Push" and RT-14's disposition (SSRF guard kept) | No server of ours, no Apple/Google account; HTTPS comes from Tailscale (3a), so the old objection falls away |
+| D10 | **Screen, two tiers**: browser pane via WebView2 CDP screencast (Windows); desktop/window via app-spawned `kelpie-screen` (WGC/DXGI + MF H.264 + `str0m` WebRTC + `SendInput`; macOS SCK + VideoToolbox + `CGEventPost`). Desktop video never goes through the relay. *Amended 2026-10-30*: both tiers run over Tailscale from the installed PWA; relay-mode takeover and TURN deferred | P2P UDP for video; cheap takeover for logins |
 | D12 | **Built for flaky networks**: encrypted heartbeat 20 s / pong 8 s / dead 45 s (lag-aware), ack window with latest-state-only, `peer_reset` + IK re-handshake on any pipe drop, address advertisement after IP changes, no hidden offline queue (input disabled offline, answers retried once with first-wins), durable push outbox, WebRTC restart ladder | Carrier NAT idle timeouts 30–120 s; half-open sockets take minutes to fail; Noise transport desyncs on lost frames ([research](../reports/researcher-261025-1744-unstable-network-resilience.md)) |
 | D13 | **Built for a busy computer**: one `load.rs` level machine (L0–L3, hysteresis) fed by the daemon's own event-loop lag, sink queue age and encoder time; every phase sheds rate/size by level; input, answers, chat sends/cancels/stops/resumes (2b), revoke, stop and heartbeats are never shed; new screen sessions refused at L2+; EcoQoS opt-out, MMCSS for capture/encode, never HIGH/REALTIME | 5–20 agents with builds peg the CPU; a windowless daemon gets throttled ([research](../reports/researcher-261025-1744-cpu-overload-resilience.md)) |
 | D11 | **Trust boundary**: sensitive settings (approve, upgrade to write/control, always-allow, relay on, reset) need the verified Kelpie app process (`Role::App`) + OS user verification; per-device `read` < `write` < `control`; grants keyed to device + connection + provider and stopped on revoke | Same-user programs can read the user token (`docs/architecture.md:72`) |
 | D14 | **Daemon-owned chat turn queue (single writer)**: one bounded FIFO per chat in `kelpied`, written only when the agent is idle; phone `chat_send` (write) is text the daemon builds per dialect at write time; desktop entries are built by its adapter at dequeue (`chat.turn_ready` → `chat.write_turn`), plain text falls back to the daemon when the window is gone; every turn logged as `kelpie_sent`; `chat_send/cancel/stop/resume` never shed, `cid` dedupe 10 min | One writer per conversation, phone works with the window closed, phone stays an observer, rich desktop features stay in TS ([phase 2b](phase-02b-phone-chat-send.md), review W5) |
+| D15 | **Tailscale mode** (3a): daemon detects the CLI, publishes `https://<fqdn>:8443` with `tailscale serve` to a loopback listener, QR holds that origin; `tailscale cert` + the existing TLS listener is the fallback if the spike fails; fixed port because the origin holds keys, passkey and push subscription | Secure context with no server of ours; Web Push and WebAuthn both need it |
+| D16 | **App lock, not per-command step-up** (3c, user decision 2026-10-30): WebAuthn platform authenticator with UV, enforced by the daemon (locked connections get no session data); once unlocked, full rights for the granted permission; auto-lock on leaving and after a configurable idle time; daemon risk label + full command as information; "ask Face ID again for dangerous commands" off by default; pairing and approving stay on the desktop | Convenience the user chose; daemon check means a copied key alone reaches nothing |
+| D17 | **Plain `http://` LAN fallback**: *proposed, awaiting the user*: read-only until HTTPS, no PIN; switch to close reading too | A PIN typed into a swappable page protects little; `transport_cap` already enforces `read` |
+| D18 | **Every option a plain switch** (3d): what it does / trade-off / how safe, safe defaults; weakening needs `Role::App` + OS verification | User decision 2026-10-30 |
+| D19 | **Telegram** (3e): one-way alerts stay; alert + deep link default when on; opt-in low-risk approvals with a clear warning, outbound long polling, bound to `user_id` + `chat_id`, per-request nonce + expiry, one-shot, audited | User decision 2026-10-30; not E2E and no Face ID, so opt-in and `low` only |
 
 ```
-Phone (PWA on LAN | native app anywhere) ── one SolidJS client (app/phone)
+Phone: installed PWA from the daemon (app/phone), locked until WebAuthn passes
    │  kelpie-link (Noise) frames
-   ├── direct: ws(s)://<every usable LAN/Tailscale IP>:4817/link ─┐
-   └── relay:  wss://<relay>/v1/phone  (ciphertext only) ─────────┤
-                                                                  ▼
-          kelpied: verbs (read/write/control), devices v2, state-sync, chat observer + first-wins answers,
-                   notify destinations (ntfy, Telegram, webhook, relay push), takeover broker
-                     │ provider channel (Role::App, request/response)
-                     ▼
-          Kelpie app: browser panes (CDP screencast) · spawns kelpie-screen ══ WebRTC (UDP P2P/TURN) ══▶ phone
+   ├── Tailscale: wss://<fqdn>:8443/link (tailscale serve → 127.0.0.1) ─┐
+   ├── later, one relay: wss://<relay>/v1/phone (ciphertext only) ──────┤
+   └── plain http:// page on the LAN (own origin, read-only) ───────────┤
+                                                                        ▼
+          kelpied: lock, verbs (read/write/control), devices v2, state-sync, chat observer + first-wins answers, risk labels,
+                   notify destinations (Web Push, ntfy, Telegram, webhook), takeover broker
+                     │ provider channel (Role::App, request/response)      │ outbound: push services, Telegram getUpdates
+                     ▼                                                     ▼
+          Kelpie app: browser panes (CDP screencast) · spawns kelpie-screen ══ WebRTC over Tailscale ══▶ phone
 ```
+
+## Execution state — 2026-10-31
+- **On master** (ddf52cf, past v0.1.10, API 20 taken by chat view parity): phases 1 and 2.
+- **Committed locally, not pushed** (`phone/link-on-master`, on master, API 21): phase 2b. `CHAT_QUEUE_API` and `PHONE_API` moved with the levels.
+- **Committed locally, not pushed** (`phone/link-on-master`, stacked on 2b, API 22): phase 3. Merge is blocked by two things:
+  1. The real OS prompt has never run: [manual steps](../reports/fullstack-developer-261031-0100-phone-phase3-fixes-2.md), with [changes](../reports/fullstack-developer-261031-0550-phone-phase3-fixes-3.md) and [more](../reports/fullstack-developer-261031-0720-phone-phase3-fixes-4.md).
+  2. Eight phones following three printing sessions cost about 10 points of a core at L0 against the script's limit of 5. Encryption adds 0.1 to 1.3 of them, so this phase's own criterion is met; the rest predates it ([measurements](../reports/debugger-261031-0750-phone-link-cpu.md)). User decision 2026-10-31: commit first, reduce as a separate change before merge.
+- **Next, in order:** 3a → 3b → 3c → 3d → 3e → 4a → 4 → 7 → 8 → 9.
+- **Handoff:** [plans/handoffs/phone-remote-control-phase3-20261030-1550.md](../handoffs/phone-remote-control-phase3-20261030-1550.md).
 
 ## Phases
-| # | Phase | Priority | Effort | Depends on | Status |
-|---|---|---|---|---|---|
-| 1 | [Phone protocol v2: state-sync, prompts, safe answers](phase-01-phone-protocol-v2.md) (+ resilience addendum, second commit) | P1 | 4d + 3d | roadmap phase 12 | done |
-| 2 | [Phone client app (SolidJS, PWA)](phase-02-phone-client-app.md) | P1 | 7d | 1 | done |
-| 2b | [Send chat messages from the phone (single writer)](phase-02b-phone-chat-send.md) | P1 | 6d | 2 | done |
-| 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) | P1 | 7d | 2; 2b for chat-write verbs | pending |
-| 4 | [Relay: connect from anywhere](phase-04-relay-connect-anywhere.md) | P1 | 5d | 3 | pending |
-| 5 | [Native mobile shell (Tauri 2 iOS/Android)](phase-05-native-mobile-shell.md) | P1 | 7d | 3, 4 | pending |
-| 6 | [Push notifications](phase-06-push-notifications.md) | P1 | 5d | 3, 5, roadmap phase 12 | pending |
-| 7 | [Browser pane takeover + app provider channel](phase-07-browser-pane-takeover.md) | P2 | 5d | 3 (4 for relay mode) | pending |
-| 8 | [Desktop / window screen control — Windows](phase-08-desktop-screen-windows.md) | P2 | 10d | 3, 4, 5, 7 | pending |
-| 9 | [Desktop / window screen control — macOS](phase-09-desktop-screen-macos.md) | P2 | 6d | 7, 8 | pending |
+Numbers are stable names, not an order (no rename: other phases and reports refer to them; 2b set the precedent). **Execution order: 3 → 3a → 3b → 3c → 3d → 3e → 4a → 4 → 7 → 8 → 9.**
 
-Order: daily value (1–2, 2b), security foundation (3) before reach (4–6), screen last with spike gates (7–9). 2b follows 2 (same chat/phone files) and precedes 3 (both edit `mobile.rs`, `mobile/verbs.rs`). Phase 7 may run beside 4–6 but
-phases 4, 6, 7 and 8 all touch `crates/kelpied/src/mobile.rs` and `daemon.rs`: work them sequentially or with one owner of those files.
+| # | Phase | Priority | Effort | Depends on | API | Status |
+|---|---|---|---|---|---|---|
+| 1 | [Phone protocol v2: state-sync, prompts, safe answers](phase-01-phone-protocol-v2.md) (+ resilience addendum, second commit) | P1 | 4d + 3d | roadmap phase 12 | 17 | done |
+| 2 | [Phone client app (SolidJS, PWA)](phase-02-phone-client-app.md) | P1 | 7d | 1 | | done |
+| 2b | [Send chat messages from the phone (single writer)](phase-02b-phone-chat-send.md) | P1 | 6d | 2 | 21 | done |
+| 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) (+ 2026-10-30 extras) | P1 | 7d | 2; 2b for chat-write verbs | 22 | committed; merge blocked, see Execution state |
+| 3a | [Tailscale mode: detection, HTTPS origin, guided PWA install](phase-03a-tailscale-https.md) | P1 | 4d | 3 | 23 | pending |
+| 3b | [Web Push sent directly by kelpied](phase-03b-web-push.md) | P1 | 4d | 3a, roadmap phase 12 | 24 | pending |
+| 3c | [App lock (WebAuthn) and daemon risk labels](phase-03c-app-lock.md) | P1 | 6d | 3a | 25 + security level 3 | pending |
+| 3d | [Settings → Mobile: plain-language switches](phase-03d-mobile-settings-toggles.md) | P1 | 2d | 3a, 3b, 3c | none expected | pending |
+| 3e | [Telegram: alert + deep link, opt-in low-risk approvals](phase-03e-telegram-options.md) | P2 | 3d | 3b, 3c, 3d | 26 | pending |
+| 4a | [Relay validation on a real Cloudflare deployment](phase-04a-relay-cloudflare-validation.md) | P1 | 1d + 7-day soak | 3e | none | pending |
+| 4 | [Relay: one Cloudflare relay, connect from anywhere](phase-04-relay-connect-anywhere.md) | P1 | 6d | 3, 3a, 3c, 4a | 27 | pending |
+| 7 | [Browser pane takeover + app provider channel](phase-07-browser-pane-takeover.md) (over Tailscale; relay mode deferred) | P2 | 5d | 3, 3a, 3c | 28 | pending |
+| 8 | [Desktop / window screen control — Windows](phase-08-desktop-screen-windows.md) (over Tailscale; TURN deferred) | P2 | 10d | 3, 3a, 3c, 7 | 29 | pending |
+| 9 | [Desktop / window screen control — macOS](phase-09-desktop-screen-macos.md) | P2 | 6d | 7, 8 | none expected | pending |
+
+**Deferred, no phase commitment** (content kept; not in the total):
+
+| # | Phase | Priority | Effort | Returns when | Status |
+|---|---|---|---|---|---|
+| 5 | [Native mobile shell (Tauri 2 iOS/Android)](phase-05-native-mobile-shell.md) | P3 | 7d | Real use and demand justify a store app; iroh only after a hands-on spike | pending (deferred) |
+| 6 | [Native push: APNs/FCM gateway, sealed details, lost-contact](phase-06-push-notifications.md) | P3 | 3d | With phase 5; lost-contact on the user's decision | pending (deferred) |
+
+API levels are expected values: each phase takes the next free `API_LEVEL` at commit time (`kelpie-proto/src/lib.rs:34`, 22 today).
+
+Order: daily value (1–2, 2b), security foundation (3), Tailscale reach with its secure context (3a) because push and lock need it, push and lock, the switches once there is something to switch, Telegram last because it reuses risk labels and the switch row. Relay after all of that (user decision 2026-10-30), with validation first. Screen last with spike gates. Phases 3a–9 all touch `crates/kelpied/src/mobile.rs` and `daemon.rs`, and 3a–3e share `mobile-settings.tsx`: **strictly sequential, no parallel work** (matches the existing execution rule: one branch per phase off master). Only the 4a soak runs alongside other phases; it touches no product file.
 
 ## Security model (applies to every phase)
 - Off by default; no listener, outbound socket, timer or helper when off.
 - **Boundary stated honestly**: any same-user program can read the user token. Sensitive mobile settings therefore require `Role::App` (verified Kelpie process) + OS user verification;
   residual risk = code injection into the app process (same user), documented.
 - Devices = Noise static public keys in `mobile.v2.json` (MAC'd); desktop private key in the OS keyring; device add/permission change ⇒ desktop toast + notice to other phones.
-- Permissions: new device `read`; PWA `write` only over TLS/Tailscale, `read` over plain `http://`; `control` native only. Every message checked against the live record; revoke/downgrade stops control grants before closing sockets.
-- Phone verbs are a closed table; no generic daemon-method proxy; phone typing goes through `typed_text` and the agent's Enter delay.
-- Relay: no accounts, random room id, per-device relay tokens (hashes only), caps, no payload logging, persisted pending revocations; self-host documented.
-- Push payloads carry no session text; gateway sees push tokens + event timing (documented).
+- **App lock (2026-10-30)**: a connection is locked until a WebAuthn assertion passes at the daemon; locked means no session data. Once unlocked, the device has full rights for its permission; approvals show the daemon's risk label and the full command as information. Optional re-check off by default. Cache at rest on the phone is not encrypted (documented).
+- Permissions: new device `read`; PWA `write` only over TLS/Tailscale, `read` over plain `http://`. `control`: native only as decided 2026-10-24; with the native app deferred, proposed for app-locked `secure_origin` PWA devices, **to be confirmed before phase 7**. Every message checked against the live record; revoke/downgrade/lock stops control grants before closing sockets.
+- Phone verbs are a closed table; no generic daemon-method proxy; phone typing goes through `typed_text` and the agent's Enter delay. No settings verb: pairing, approving and settings stay on the desktop. Phone approvals are one-shot.
+- Relay: no accounts for phones, registration key for rooms while personal, ticket checked before any DO, per-device relay tokens (hashes only, 30 days), caps, no payload logging, persisted pending revocations; never serves code; self-host documented.
+- Web Push payloads carry no session text; push services see endpoint, size and timing. Endpoint host allow-list against SSRF.
+- Telegram approvals are the one path that shows command text to a third party and skip the lock: opt-in, `low` only, one-shot, bound, audited, stopped by the kill switch.
+- Tailscale sees metadata, and the machine name appears in public certificate logs (stated in Settings).
 - Screen control: user-presence confirmation per device, visible indicator, stop hotkey, idle auto-stop 10 min, audit start/stop (never keystrokes), revoke ⇒ input stops < 1 s.
 
 ## Success Criteria
-- [ ] Fresh phone + desktop, relay on: install app → scan QR → type code on desktop + OS verification → sessions in < 30 s on 4G, no account, no network settings.
-- [ ] Same on LAN via PWA (browser pairing); direct path preferred automatically when both exist.
-- [ ] Terminal prompt and chat permission answered with one tap; first answer wins across devices; Telex/VNI never sends mid-composition.
-- [ ] A program holding only the user token cannot add a device, raise permissions or enable the relay.
-- [ ] Needs-you push accepted by the gateway ≤ 2 s p95 (device delivery measured on real phones); payload has no session text; no push lost or duplicated across a desktop outage; PWA users notified via ntfy deep link.
+- [ ] Tailscale on both ends: toggle on → scan → install → scan → type the code on the desktop + OS verification → sessions on 4G, no Kelpie account.
+- [ ] Opening the app asks for Face ID/biometrics; without it the daemon gives out no session data; leaving the app re-locks; a network flap in the foreground does not.
+- [ ] Same on LAN via a plain `http://` browser pairing, read-only.
+- [ ] Terminal prompt and chat permission answered with one tap, label and full command shown; first answer wins across devices; Telex/VNI never sends mid-composition.
+- [ ] A program holding only the user token cannot add a device, raise permissions, enable Tailscale mode or the relay, weaken the lock or turn on Telegram approvals.
+- [ ] Needs-you Web Push accepted by the push service ≤ 2 s p95 (device delivery measured on real phones); payload has no session text; no push lost or duplicated across a desktop outage; 7-day iOS soak reported.
+- [ ] Every option is a switch in Settings → Mobile with its three plain lines, EN + VI, safe defaults.
+- [ ] Telegram: alert + deep link works; approvals only for the bound user, low-risk, once, before expiry.
 - [ ] Flaky network: Wi-Fi ↔ 4G handover ⇒ sessions back ≤ 3 s p95 and screen stream ≤ 5 s p95 without user action; 90 s blackhole ⇒ clean reconnect, cached view stays readable, no stale input executed, no duplicate answer (fault-proxy + netem matrix).
 - [ ] Busy computer: 30 min all-core stress, 20 sessions, 8 phones ⇒ 0 false disconnects, input echo p95 ≤ 300 ms, revoke < 1 s, quality reduced visibly (never a silent freeze).
-- [ ] Relay operator (logs + storage) cannot read any session content (test harness inspects relay traffic).
+- [ ] Relay: installed app works with Tailscale off on the carriers measured in 4a; relay outage with Tailscale on ⇒ sessions continue; operator (logs + storage) cannot read any session content (test harness inspects relay traffic); hibernation holds and the bill matches the projection.
 - [ ] Browser-pane OAuth/2FA login (popups included) completed from the phone on Windows.
-- [ ] Desktop/IDE window viewed and controlled: ≤ 150 ms p95 LAN, ≤ 250 ms direct P2P, ≤ 400 ms TURN on 4G; secure-desktop/elevated states reported.
+- [ ] Desktop/IDE window viewed and controlled over Tailscale: ≤ 150 ms p95 LAN, ≤ 250 ms direct P2P; secure-desktop/elevated states reported.
 - [ ] Feature off: no sockets, no helper, no measurable CPU (perf gate).
 - [ ] EN + VI; user guide, architecture, README privacy updated; e2e green on Windows and macOS CI.
 
@@ -211,3 +251,35 @@ Applied directly under the user's grant of full architectural authority. One sub
 ### Whole-Plan Consistency Sweep
 - Searched for `max \`write\``, "PWA max", "make it read-only", "Open questions": all updated to the transport-capped rule; open questions resolved into decisions + one maintainer action item.
 - Unresolved contradictions: none.
+
+### Session 2 — 2026-10-30
+**Trigger:** user chose how the phone reaches the desktop after reviewing the [options](../reports/research-261030-1530-phone-remote-access-options-synthesis.md) and [relay](../reports/research-261030-1600-relay-speed-reliability-security-synthesis.md) research. Recorded by the planner from the coordinator's brief; the wording is the coordinator's relay of the user's intent. Details: [re-plan report](../reports/planner-261030-1600-phone-path-d-replan.md).
+
+#### Decisions
+1. **Path D.** First a PWA over Tailscale: Kelpie detects Tailscale and puts the `*.ts.net` address in the QR; HTTPS from `tailscale serve`/`cert`; Web Push sent directly by `kelpied`; Home Screen install is a guided step. Then **one relay on Cloudflare Workers + Durable Objects**, personal use first, a public service a later decision, validated on a real deployment (about 1 day + a 7-day soak). The same day a Hong Kong VPS was chosen, then replaced by Cloudflare; earlier "spike Cloudflare vs iroh" and two-relay options are also dropped. iroh and a native store app are deferred with no phase commitment. APNs/FCM deferred with the native app.
+2. **Security model: app lock instead of per-command step-up.** WebAuthn platform authenticator, UV required, needs the Tailscale secure context. Once unlocked, full rights for the granted permission. Auto-lock on leaving and after a configurable idle time. Full command and daemon risk label shown as information. Optional "ask Face ID again for dangerous commands", off by default. Pairing and approving stay on the desktop. Plain-`http://` LAN needs a defined fallback (open).
+3. **Everything is a user-facing toggle with plain explanations.** Settings → Mobile: Tailscale mode, Web Push, app lock and timeout, dangerous re-check, Telegram, ntfy. Safe defaults.
+4. **Telegram.** One-way alerts stay; alert + deep link is the default when on; opt-in "approve low-risk requests" with a clear warning; outbound long polling, bound to `user_id` + `chat_id`, per-request nonce + expiry.
+
+#### Earlier decisions this changes
+| Earlier | Now | Status |
+|---|---|---|
+| Relay first (phase order 3 → 4–6), "no Tailscale" zero setup | Tailscale work first, relay after | User decision |
+| D9 "no Web Push", RT-14 | Web Push from `kelpied` | User decision |
+| D5 "trust root = signed native app", phase-5 store app | Daemon-origin PWA; native deferred | User decision; D5 detail derived |
+| 2026-10-24 Q3 "`control` native only" | Needed for phases 7–9 now the native app is deferred | **Derived, unconfirmed: ask the user** |
+| 2026-10-25 (3) lost-contact push via relay lease + alarm | No delivery path: a dead desktop cannot send Web Push | **Deferred, unconfirmed: ask the user** |
+| 2026-10-24 Q1 hosted + self-host, phase 4 "20 GB/month", "≤ 30 ms in-region" | One Cloudflare relay, personal first; ~2 GB/month; claim removed | User decision + synthesis |
+
+#### Open decision points (see the report)
+Plain-`http://` fallback · idle-timeout default and grace on leaving · `control` for the PWA · lost-contact push · `web-push` crate vs a RustCrypto module · first install needs Tailscale, so a hosted PWA waits for going public · 4a thresholds · relay domain and account.
+
+#### Action Items
+- [ ] Maintainer: Cloudflare account, Workers Paid, relay domain and budget alert before 4a. Apple and Firebase accounts no longer needed.
+- [ ] `ak plan`: Bash was unavailable when this was edited, so status cells were written by hand: new rows `pending`, phases 5 and 6 left `pending` under a Deferred heading, phase 3 not moved to in-progress. Run `ak plan reindex` and set statuses through the CLI.
+
+#### Impact on Phases
+- New: 3a, 3b, 3c, 3d, 3e, 4a. Reworked: 4 (keeps Cloudflare and `workerd`). Reworked and deferred: 6. Deferred: 5. Dependencies fixed: 7, 8, 9.
+
+### Whole-Plan Consistency Sweep — 2026-10-30
+See the report. Older red-team tables and validation answers above stay as history and are overridden by this session where the table says so.

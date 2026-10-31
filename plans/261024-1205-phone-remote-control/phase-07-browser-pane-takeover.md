@@ -3,32 +3,36 @@ phase: 7
 title: "Browser pane takeover (CDP screencast) + app provider channel"
 status: pending
 priority: P2
-effort: "4d"
-dependencies: [3]
+effort: "5d"
+dependencies: [3, 3a, 3c]
 ---
 
 # Phase 7: Browser pane takeover
 
+> **Updated 2026-10-30 (path D).** Runs over Tailscale HTTPS (or LAN HTTPS) from the installed PWA. **Relay-mode takeover is deferred**; the relay figures below stand as reference and do not gate this phase. API level: next free, expected 25.
+>
+> **`control` for the PWA**: `transport_cap` (`mobile.rs`) caps browsers at `write` and the desktop offers `control` to `app` devices only (`mobile-settings.tsx`), following the 2026-10-24 decision "`control` native only". With the native app deferred, this phase needs that amended: a PWA device with `secure_origin` (3a) and an enrolled app lock (3c) may hold `control`, granted on the desktop with presence. **Confirm with the user before starting** (open question in the plan).
+
 ## Overview
 The cheapest takeover for the most common blocker — a login, OAuth consent, 2FA or captcha in a Kelpie browser pane — with no OS capture
 permission: stream the pane with WebView2 `Page.startScreencast` and drive it with `Input.*`. Windows only (macOS uses phase 9 window capture of
-the Kelpie window). This phase also builds the **daemon → app provider channel** that phase 8 reuses. Relay mode needs phase 4.
+the Kelpie window). This phase also builds the **daemon → app provider channel** that phase 8 reuses.
 
 ## Requirements
 - Functional
   - **Provider channel** [RT-13]: the daemon has only fire-and-forget `broadcast` today (`daemon.rs:676-682`). Add request/response to the app: request id, 10 s timeout,
     pending map cleaned in `unregister_client`. Only a `Role::App` client (phase 3 peer verification) may register as provider; a second registration is refused and raises a desktop alert.
   - Phone lists controllable panes (title, host) per project; "Take over" from a session or attention card.
-  - Frames: JPEG, only on change, rate and quality set by the byte-budget ladder and flow control in "Resilience requirements" below (relay within the phase-4 takeover budget of 200 MB/h).
+  - Frames: JPEG, only on change, rate and quality set by the byte-budget ladder and flow control in "Resilience requirements" below. The phase-4 takeover budget (200 MB/h) applies only if relay-mode takeover returns (deferred).
   - Input: tap/drag → `Input.dispatchMouseEvent`, scroll → wheel, text → `Input.insertText`, keys → `Input.dispatchKeyEvent`; coordinates from frame metadata (`deviceScaleFactor`, `pageScaleFactor`).
   - **Reuse** the existing `devtools()` helper (`app/src-tauri/src/browser.rs:263-290`) and promote `test_input` (`:299-323`, debug-only today) behind a daemon-issued takeover id; add `add_DevToolsProtocolEventReceived` for frames. [RT-13]
   - **OAuth popups** [RT-13]: today denied and reopened in the same pane (`browser.rs:140-147`), breaking `window.opener`. Use `NewWindowResponse::Create` with a top-level `WebviewWindow`
     on the pane's WebView2 environment (tauri 2.12.4); pane + its popups form a **pane group** — the hold unit; overlay and indicator shown on popup windows too; popup close returns to opener.
-  - Permission `control`; first takeover per device needs desktop confirmation (user presence, phase 3); overlay "Controlled from <device> · Stop"; idle auto-stop 10 min; Stop from either side.
-  - **Holder lifetime** [RT-12]: holder keyed `(device key, link connection, provider client)`; released synchronously on revoke/downgrade, link close (unless re-bound after the same device's handshake, phase 4), provider disconnect.
+  - Permission `control`; first takeover per device needs desktop confirmation (user presence, phase 3); overlay "Controlled from <device> · Stop"; idle auto-stop 10 min; Stop from either side. App lock (3c): an auto-lock releases the hold like a revoke.
+  - **Holder lifetime** [RT-12]: holder keyed `(device key, link connection, provider client)`; released synchronously on revoke/downgrade, lock, link close (unless re-bound after the same device's handshake), provider disconnect.
   - Takeover input never logged or written to transcripts; any future session-facing browser RPC must refuse while a pane group is held (none exist today in `auth.rs`/`daemon.rs`).
   - Hidden pane: takeover brings the pane's tab to front for its duration if frames stop while hidden.
-- Non-functional: tap → visible change ≤ 150 ms p95 LAN, ≤ 400 ms via relay; no UI-thread jank.
+- Non-functional: tap → visible change ≤ 150 ms p95 LAN or direct Tailscale; no UI-thread jank. (≤ 400 ms via relay stands only if relay-mode takeover returns.)
 
 ## Resilience requirements — unstable networks and host overload
 <!-- Updated: 2026-10-25 - resilience research; supersedes the "≤ 2 fps q50" relay figure above -->
