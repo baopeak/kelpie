@@ -40,6 +40,7 @@
   "Not sent (this window could not prepare it):\n{messages}": "Chưa gửi (cửa sổ này không chuẩn bị được):\n{messages}",
   "Not sent (the computer could not prepare it):\n{messages}": "Chưa gửi (máy tính không chuẩn bị được):\n{messages}",
   "Not sent (the phone lost access):\n{messages}": "Chưa gửi (điện thoại đã mất quyền truy cập):\n{messages}",
+  "Not sent (too large to send to the agent):\n{messages}": "Chưa gửi (quá lớn để gửi cho agent):\n{messages}",
   "Not sent ({reason}):\n{messages}": "Chưa gửi ({reason}):\n{messages}",
   "from {device}": "từ {device}",
   "needs the desktop window": "cần cửa sổ trên máy tính",

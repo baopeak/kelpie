@@ -15,12 +15,14 @@ export interface QueueItem {
   needsWindow: boolean;
 }
 
-/** A message that left the queue without being sent: `reason` is `revoked`, `exited`, `closed`, `needs_window` or `cancelled`
- *  (by someone other than its sender: `cancelledBy` says whether that was the desktop or a phone). */
+/** A message that left the queue without being sent: `reason` is `revoked`, `exited`, `closed`, `needs_window`, `declined`, `too_large`
+ *  or `cancelled` (by someone other than its sender: `cancelledBy` says whether that was the desktop or a phone). */
 export interface DroppedItem {
   qid: string;
   cid: string;
   text: string;
+  /** The names of its pictures. */
+  images?: string[];
   reason: string;
   mine: boolean;
   cancelledBy?: "desktop" | "phone";
@@ -43,6 +45,7 @@ interface RawItem {
   qid?: string;
   cid?: string;
   text?: string;
+  images?: unknown;
   kind?: string;
   reason?: string;
   by?: { id?: string; name?: string } | string;
@@ -62,6 +65,8 @@ interface RawQueue {
 }
 
 const DESKTOP = "desktop";
+
+const names = (images: unknown): string[] => (Array.isArray(images) ? images.map(String) : []);
 
 function name(by: RawItem["by"]): string {
   return typeof by === "string" ? by : by?.name ?? "";
@@ -87,7 +92,7 @@ export function fromDaemonEvent(p: RawQueue): QueueView {
     inFlight: !!p.in_flight,
     dropped: (p.dropped ?? []).map((e) => {
       const i = item(e);
-      return { qid: i.qid, cid: i.cid, text: i.text, reason: String(e.reason ?? ""), mine: i.mine, ...canceller(e) };
+      return { qid: i.qid, cid: i.cid, text: i.text, images: names(e.images), reason: String(e.reason ?? ""), mine: i.mine, ...canceller(e) };
     }),
   };
 }
@@ -101,7 +106,7 @@ export function fromPhoneMessage(m: RawQueue): QueueView {
     paused: !!m.paused,
     held: !!m.held,
     inFlight: !!m.in_flight,
-    dropped: (m.dropped ?? []).map((e) => ({ qid: String(e.qid), cid: String(e.cid), text: String(e.text ?? ""), reason: String(e.reason ?? ""), mine: !!e.mine, ...canceller(e) })),
+    dropped: (m.dropped ?? []).map((e) => ({ qid: String(e.qid), cid: String(e.cid), text: String(e.text ?? ""), images: names(e.images), reason: String(e.reason ?? ""), mine: !!e.mine, ...canceller(e) })),
   };
 }
 

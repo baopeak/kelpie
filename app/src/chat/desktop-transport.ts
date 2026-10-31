@@ -27,12 +27,12 @@ export function desktopTransport(): ChatTransport {
       if (handle == null) throw new Error("not attached");
       return daemon<EnqueueResult>("chat.send", { handle, cid, text, rich, images });
     },
-    async writeTurn(qid, lines, turn, retry) {
+    async writeTurn(qid, lines, turn, retry, tooLarge) {
       if (handle == null) throw new Error("not attached");
       try {
-        await daemon("chat.write_turn", { handle, qid, lines, turn, ...(retry ? { retry: true } : {}) });
+        await daemon("chat.write_turn", { handle, qid, lines, turn, ...(retry ? { retry: true } : {}), ...(tooLarge ? { too_large: true } : {}) });
       } catch (e) {
-        // The daemon's reason: too_late, busy, switching.
+        // The daemon's reason: too_late, busy, switching, too_large.
         throw new Error(String(e).replace(/^Error:\s*/, ""));
       }
     },

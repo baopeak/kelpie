@@ -104,6 +104,8 @@ pub struct Dropped {
     pub cid: String,
     pub by: By,
     pub text: String,
+    /// File names of its pictures.
+    pub images: Vec<String>,
     pub reason: &'static str,
     /// Who took it out of the queue, when that was not the one who queued it (`reason` is `cancelled`).
     pub cancelled_by: Option<By>,
@@ -300,7 +302,7 @@ impl Queue {
         for entry in std::mem::take(&mut self.items) {
             if which(&entry) {
                 self.mark(&entry, State::Dropped, now);
-                dropped.push(Dropped { qid: entry.qid, cid: entry.cid, by: entry.by, text: entry.text, reason, cancelled_by: None });
+                dropped.push(Dropped { qid: entry.qid, cid: entry.cid, by: entry.by, text: entry.text, images: entry.images, reason, cancelled_by: None });
             } else {
                 kept.push_back(entry);
             }
@@ -353,7 +355,7 @@ impl Queue {
             v["dropped"] = json!(dropped
                 .iter()
                 .map(|d| {
-                    let mut v = json!({"qid": d.qid, "cid": d.cid, "by": {"id": d.by.id, "name": d.by.name}, "text": clip(&d.text, EVENT_TEXT), "reason": d.reason});
+                    let mut v = json!({"qid": d.qid, "cid": d.cid, "by": {"id": d.by.id, "name": d.by.name}, "text": clip(&d.text, EVENT_TEXT), "images": d.images, "reason": d.reason});
                     if let Some(c) = &d.cancelled_by {
                         v["cancelled_by"] = json!({"id": c.id, "name": c.name});
                     }
@@ -550,7 +552,7 @@ mod tests {
         let (mut q, now) = (Queue::new(), Instant::now());
         q.push(phone("p1", "a", "from the phone"), now, 5).unwrap();
         q.paused = true;
-        let dropped = vec![Dropped { qid: "q9".into(), cid: "z".into(), by: By::desktop(), text: "lost".into(), reason: "needs_window", cancelled_by: None }];
+        let dropped = vec![Dropped { qid: "q9".into(), cid: "z".into(), by: By::desktop(), text: "lost".into(), images: vec![], reason: "needs_window", cancelled_by: None }];
         let v = q.view(3, "chat-1", &dropped);
         assert_eq!((v["handle"].clone(), v["id"].clone(), v["paused"].clone(), v["in_flight"].clone()), (json!(3), json!("chat-1"), json!(true), json!(false)));
         assert_eq!((v["items"][0]["kind"].clone(), v["items"][0]["by"]["name"].clone()), (json!("phone"), json!("name-p1")));

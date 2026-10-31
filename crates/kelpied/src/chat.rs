@@ -36,6 +36,8 @@ const MAX_LINE: usize = 4 << 20;
 /// A line longer than this loses the bytes of a picture the person sent: one 5 MB picture would
 /// otherwise evict most of the log, or be over `MAX_LINE` and lost with its message's words.
 const PICTURE_LINE_MAX: usize = 2 << 20;
+/// The most a window may hand over for one message (`chat.write_turn`).
+const TURN_MAX: usize = 16 << 20;
 /// The longest `kelpie_answer` line: an answer that does not fit keeps only its verdict.
 const ANSWER_LINE_MAX: usize = 16 * 1024;
 /// What a phone that watches (rather than runs) the chat is sent when it starts or lost its place:
@@ -966,13 +968,13 @@ impl ChatSession {
     fn unsent(&self, g: &mut Inner, entry: Entry, reason: &'static str, cancelled_by: Option<By>) -> Dropped {
         let mut unsent = json!({
             "type": "kelpie_unsent", "qid": entry.qid, "cid": entry.cid, "by": kind(&entry.by), "name": entry.by.name,
-            "text": queue::clip(&entry.text, SENT_TEXT_MAX), "reason": reason,
+            "text": queue::clip(&entry.text, SENT_TEXT_MAX), "images": entry.images, "reason": reason,
         });
         if let Some(c) = &cancelled_by {
             unsent["cancelled_by"] = json!({"id": c.id, "name": c.name});
         }
         self.append(g, unsent.to_string());
-        Dropped { qid: entry.qid, cid: entry.cid, by: entry.by, text: entry.text, reason, cancelled_by }
+        Dropped { qid: entry.qid, cid: entry.cid, by: entry.by, text: entry.text, images: entry.images, reason, cancelled_by }
     }
 
     /// Logs a message (`kelpie_sent`, ahead of the write, so the log shows it whoever built the
@@ -1183,6 +1185,25 @@ impl ChatSession {
         Ok(())
     }
 
+    /// What the window built for the message it was offered is more than can be written, so it cannot go, whoever builds it: it
+    /// leaves the queue, the person is told (the log and the event, `too_large`) and what waits behind it moves on.
+    pub fn turn_too_large(&self, client: u64, qid: &str) -> Result<(), WriteRefused> {
+        let now = Instant::now();
+        let mut g = self.inner.lock();
+        let at = g
+            .q
+            .items
+            .iter()
+            .position(|e| e.qid == qid && e.offered.is_some() && matches!(e.origin, Origin::Desktop { client: c, .. } if c == client))
+            .ok_or(WriteRefused::TooLate)?;
+        let entry = g.q.items.remove(at).expect("found above");
+        g.q.mark(&entry, State::Dropped, now);
+        let mut dropped = vec![self.unsent(&mut g, entry, "too_large", None)];
+        dropped.extend(self.pump(&mut g, now));
+        self.announce(&mut g, &dropped);
+        Ok(())
+    }
+
     /// The connection of window `client` is gone (it was closed, or crashed): what it queued can no longer be built by it. Plain
     /// text is written by the daemon, the rest is dropped (and noted in the log).
     pub fn client_gone(&self, client: u64) {
@@ -1278,7 +1299,7 @@ impl ChatSession {
     }
 
     /// The desktop's queue methods: `chat.send {cid, text, rich, images?}`, `chat.write_turn
-    /// {qid, lines|null, turn}` and `chat.queue_op {op, qid?}` (`cancel`, `front`, `take`, `resume`,
+    /// {qid, lines|null, turn, retry?, too_large?}` and `chat.queue_op {op, qid?}` (`cancel`, `front`, `take`, `resume`,
     /// `hold`). A message that cannot be queued is answered `{refused, message}`, not an error: the
     /// window has the text and knows what to do with it.
     pub fn queue_rpc(&self, client: u64, method: &str, params: &Value) -> Result<Value> {
@@ -1303,22 +1324,34 @@ impl ChatSession {
                 let lines = match params.get("lines") {
                     Some(Value::Array(a)) => {
                         let lines: Vec<String> = a.iter().filter_map(Value::as_str).map(str::to_string).collect();
-                        anyhow::ensure!(lines.len() == a.len() && lines.len() <= 16 && lines.iter().map(String::len).sum::<usize>() <= 16 << 20, "lines must be a few strings");
+                        anyhow::ensure!(lines.len() == a.len() && lines.len() <= 16, "lines must be a few strings");
                         Some(lines)
                     }
                     _ => None,
                 };
+                let refusal = |e| {
+                    anyhow::anyhow!(match e {
+                        WriteRefused::TooLate => "too_late",
+                        WriteRefused::Busy => "busy",
+                        WriteRefused::Switching => "switching",
+                    })
+                };
+                if lines.as_ref().is_some_and(|l| l.iter().map(String::len).sum::<usize>() > TURN_MAX) {
+                    self.turn_too_large(client, qid).map_err(refusal)?;
+                    anyhow::bail!("too_large");
+                }
+                // The window could not even hand the lines over (over the frame limit).
+                if lines.is_none() && params.get("too_large").and_then(Value::as_bool) == Some(true) {
+                    self.turn_too_large(client, qid).map_err(refusal)?;
+                    return Ok(json!(true));
+                }
                 let turn = params.get("turn").and_then(Value::as_bool).unwrap_or(false);
                 let retry = params.get("retry").and_then(Value::as_bool).unwrap_or(false);
                 let done = match lines {
                     Some(_) => self.write_turn(client, qid, lines, turn),
                     None => self.decline_turn(client, qid, retry),
                 };
-                done.map_err(|e| anyhow::anyhow!(match e {
-                    WriteRefused::TooLate => "too_late",
-                    WriteRefused::Busy => "busy",
-                    WriteRefused::Switching => "switching",
-                }))?;
+                done.map_err(refusal)?;
                 Ok(json!(true))
             }
             "chat.queue_op" => {
@@ -2801,10 +2834,67 @@ mod tests {
         watch(&c, 3, &late, &json!("b"), None);
         let (_, lines) = attached(&mut lrx);
         let note = lines.iter().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|v| v["type"] == "kelpie_unsent").expect("a lasting note");
-        assert_eq!((note["text"].clone(), note["reason"].clone()), (json!("look"), json!("declined")));
+        assert_eq!((note["text"].clone(), note["reason"].clone(), note["images"].clone()), (json!("look"), json!("declined"), json!(["a.png"])), "its pictures are named too");
+        assert_eq!(dropped[0]["images"], json!(["a.png"]));
         // Coming back does not bring it back.
         c.attach(1, &window, &json!(2));
         assert!(received(&mut rx).iter().all(|e| e["event"] != "chat.turn_ready"));
+    }
+
+    /// Offers `pic` to window 1, with a phone's message behind it and the phone watching.
+    fn offered_with_a_message_behind(c: &ChatSession) -> (String, Feed, Feed, ClientTx, ClientTx) {
+        let ((window, mut rx), (phone, mut prx)) = (client(), client());
+        c.attach(1, &window, &json!(1));
+        c.ingest_line(json!({"type": "assistant", "message": {}}).to_string());
+        c.enqueue(from_desktop(1, "pic", "look", true)).unwrap();
+        c.enqueue(from_phone("p1", "after", "waits behind")).unwrap();
+        c.ingest_line(json!({"type": "result"}).to_string());
+        let qid = received(&mut rx).into_iter().find(|e| e["event"] == "chat.turn_ready").expect("offered")["params"]["qid"].as_str().unwrap().to_string();
+        watch(c, 2, &phone, &json!("a"), None);
+        received(&mut prx);
+        (qid, rx, prx, window, phone)
+    }
+
+    /// A message that cannot go, however often it is offered: it leaves, everyone is told, what waits behind it moves on, and the note lasts.
+    fn too_large_is_told_and_the_queue_moves(c: &ChatSession, stdin: &mut Stdin, prx: &mut Feed) {
+        assert_eq!(written_lines(stdin).iter().map(|l| text_of(l).to_string()).collect::<Vec<_>>(), ["waits behind"], "the queue goes on");
+        let dropped = queue_events(prx).into_iter().find_map(|e| e.get("dropped").cloned()).expect("told");
+        assert_eq!((dropped[0]["cid"].clone(), dropped[0]["reason"].clone(), dropped[0]["images"].clone()), (json!("pic"), json!("too_large"), json!(["a.png"])));
+        let (late, mut lrx) = client();
+        watch(c, 3, &late, &json!("b"), None);
+        let (_, lines) = attached(&mut lrx);
+        let note = lines.iter().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|v| v["type"] == "kelpie_unsent").expect("a lasting note");
+        assert_eq!((note["reason"].clone(), note["images"].clone()), (json!("too_large"), json!(["a.png"])));
+    }
+
+    #[test]
+    fn lines_over_the_limit_are_refused_and_the_message_leaves_the_queue() {
+        let (c, mut stdin) = live();
+        let (qid, mut rx, mut prx, _window, _phone) = offered_with_a_message_behind(&c);
+        let at_limit = "x".repeat(TURN_MAX + 1);
+        let refused = c.queue_rpc(1, "chat.write_turn", &json!({"qid": qid, "lines": [at_limit], "turn": true})).unwrap_err().to_string();
+        assert_eq!(refused, "too_large");
+        too_large_is_told_and_the_queue_moves(&c, &mut stdin, &mut prx);
+        assert!(received(&mut rx).iter().any(|e| e["event"] == "chat.queue" && e["params"]["dropped"][0]["reason"] == "too_large"), "the window hears it too");
+        // Asked again, there is nothing left of it.
+        assert_eq!(c.queue_rpc(1, "chat.write_turn", &json!({"qid": qid, "lines": ["small"], "turn": true})).unwrap_err().to_string(), "too_late");
+    }
+
+    #[test]
+    fn a_window_whose_connection_refused_the_lines_says_so_and_the_message_leaves_the_queue() {
+        let (c, mut stdin) = live();
+        let (qid, _rx, mut prx, _window, _phone) = offered_with_a_message_behind(&c);
+        assert_eq!(c.queue_rpc(1, "chat.write_turn", &json!({"qid": qid, "lines": null, "turn": false, "too_large": true})).unwrap(), json!(true));
+        too_large_is_told_and_the_queue_moves(&c, &mut stdin, &mut prx);
+    }
+
+    #[test]
+    fn only_what_was_offered_to_this_window_can_be_called_too_large() {
+        let (c, _stdin) = live();
+        let (qid, _rx, _prx, _window, _phone) = offered_with_a_message_behind(&c);
+        assert_eq!(c.turn_too_large(9, &qid), Err(WriteRefused::TooLate));
+        assert_eq!(c.turn_too_large(1, "no-such"), Err(WriteRefused::TooLate));
+        assert_eq!(texts(&c), ["look", "waits behind"]);
     }
 
     #[test]

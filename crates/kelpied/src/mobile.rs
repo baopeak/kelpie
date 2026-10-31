@@ -2565,7 +2565,7 @@ impl Translator {
 fn queue_message(p: &Value, device: &str) -> Value {
     let item = |e: &Value| {
         let text: String = e["text"].as_str().unwrap_or_default().chars().take(300).collect();
-        let mut v = json!({"qid": e["qid"], "cid": e["cid"], "by": e["by"]["name"], "mine": e["by"]["id"].as_str() == Some(device), "kind": e["kind"], "text": text, "reason": e["reason"], "needs_window": e["needs_window"]});
+        let mut v = json!({"qid": e["qid"], "cid": e["cid"], "by": e["by"]["name"], "mine": e["by"]["id"].as_str() == Some(device), "kind": e["kind"], "text": text, "images": e["images"], "reason": e["reason"], "needs_window": e["needs_window"]});
         // Who cancelled it, for the phone whose message it was: the computer, or another phone.
         if e["cancelled_by"].is_object() {
             v["cancelled_by"] = json!(if e["cancelled_by"]["id"] == "desktop" { "desktop" } else { "phone" });

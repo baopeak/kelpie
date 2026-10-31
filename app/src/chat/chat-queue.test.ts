@@ -11,7 +11,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 
 /** A controller over the daemon's queue: a transport that records what the window asks of the daemon. */
 function setup(make?: (ctx: AdapterContext) => Adapter, opts: { daemon?: boolean } = {}) {
-  const asked = { enqueue: [] as { cid: string; text: string; rich: boolean; images: string[] }[], write: [] as { qid: string; lines: string[] | null; turn: boolean; retry?: boolean }[], ops: [] as { op: string; qid?: string; opts?: object }[], sent: [] as string[] };
+  const asked = { enqueue: [] as { cid: string; text: string; rich: boolean; images: string[] }[], write: [] as { qid: string; lines: string[] | null; turn: boolean; retry?: boolean; tooLarge?: boolean }[], ops: [] as { op: string; qid?: string; opts?: object }[], sent: [] as string[] };
   /** What the daemon answers `chat.write_turn` with when it does not take the lines (null: it takes them). */
   const daemonSays = { error: null as string | null };
   const transport: ChatTransport = {
@@ -20,8 +20,8 @@ function setup(make?: (ctx: AdapterContext) => Adapter, opts: { daemon?: boolean
       asked.enqueue.push({ cid, text, rich, images });
       return { qid: `q${asked.enqueue.length}`, state: "queued", ahead: 0 };
     },
-    writeTurn: async (qid, lines, turn, retry) => {
-      asked.write.push({ qid, lines, turn, ...(retry ? { retry: true } : {}) });
+    writeTurn: async (qid, lines, turn, retry, tooLarge) => {
+      asked.write.push({ qid, lines, turn, ...(retry ? { retry: true } : {}), ...(tooLarge ? { tooLarge: true } : {}) });
       if (daemonSays.error && lines) throw new Error(daemonSays.error);
     },
     queueOp: async (op, qid, o) => void asked.ops.push({ op, qid, opts: o }),
@@ -216,6 +216,112 @@ describe("a window on the daemon's queue", () => {
   });
 });
 
+describe("a message too large to write", () => {
+  const pic = { mime: "image/png", data: "AA==", path: "/tmp/big.png" };
+  const noteOf = (c: ChatController) => c.state.items.find((i) => i.kind === "system") as { id: string; text: string } | undefined;
+
+  it("does not stay offered when the daemon says so: the bubble goes, and the note comes with its word", async () => {
+    const { ctrl, asked, daemonSays, feed } = setup((c) => createClaudeAdapter(c));
+    daemonSays.error = "too_large";
+    ctrl.send("look", true, [pic]);
+    await tick();
+    const { cid } = asked.enqueue[0];
+    ctrl.applyQueue(view([{ qid: "q1", cid, text: "look" }]));
+    ctrl.turnReady("q1", cid);
+    await tick();
+    await tick();
+    expect(ctrl.state.items.filter((i) => i.kind === "user"), "the pending bubble is gone").toHaveLength(0);
+    expect(ctrl.state.busy).toBe(false);
+    expect(asked.write.filter((w) => w.lines === null), "it already dealt with it: nothing more is asked").toEqual([]);
+    ctrl.applyQueue(fromDaemonEvent({ items: [], paused: false, held: false, in_flight: false, dropped: [{ qid: "q1", cid, by: { id: "desktop", name: "desktop" }, text: "look", images: ["big.png"], reason: "too_large" }] }));
+    expect(noteOf(ctrl)?.text).toBe("Not sent (too large to send to the agent):\nlook\n[big.png]");
+    // The log line that outlives it says the same, under the same id.
+    feed({ type: "kelpie_unsent", qid: "q1", cid, by: "desktop", name: "desktop", text: "look", images: ["big.png"], reason: "too_large" });
+    expect(ctrl.state.items.filter((i) => i.kind === "system")).toHaveLength(1);
+    expect(noteOf(ctrl)?.text).toBe("Not sent (too large to send to the agent):\nlook\n[big.png]");
+  });
+
+  it("tells the daemon when the connection refused it before it got there", async () => {
+    const { ctrl, asked, daemonSays } = setup((c) => createClaudeAdapter(c));
+    daemonSays.error = "too large to send to the daemon: 33 MiB, the limit is 32 MiB";
+    ctrl.send("look", true, [pic]);
+    await tick();
+    ctrl.turnReady("q1", asked.enqueue[0].cid);
+    await tick();
+    await tick();
+    expect(asked.write.at(-1)).toMatchObject({ qid: "q1", lines: null, turn: false, tooLarge: true });
+  });
+
+  it("gives a final no for any other failure, so what waits behind it moves on", async () => {
+    const { ctrl, asked, daemonSays } = setup((c) => createClaudeAdapter(c));
+    daemonSays.error = "lines must be a few strings";
+    ctrl.send("look", true, [pic]);
+    await tick();
+    ctrl.turnReady("q1", asked.enqueue[0].cid);
+    await tick();
+    await tick();
+    expect(asked.write.at(-1)).toMatchObject({ qid: "q1", lines: null, turn: false });
+    expect(asked.write.at(-1)).not.toHaveProperty("retry");
+    expect(asked.write.at(-1)?.tooLarge).toBeFalsy();
+  });
+
+  it.each(["too_late", "busy", "switching"])("leaves it to the daemon to ask again after %s", async (word) => {
+    const { ctrl, asked, daemonSays } = setup((c) => createClaudeAdapter(c));
+    daemonSays.error = word;
+    ctrl.send("look", true, [pic]);
+    await tick();
+    ctrl.turnReady("q1", asked.enqueue[0].cid);
+    await tick();
+    await tick();
+    expect(asked.write.filter((w) => w.lines === null)).toEqual([]);
+  });
+
+  it("is told on a phone too, as its own reason", () => {
+    const ctrl = new ChatController("s1", "/work", null, (c) => createClaudeAdapter(c), { observer: true, transport: { queueOp: async () => {} } });
+    ctrl.applyQueue(fromPhoneMessage({ items: [], paused: false, held: false, in_flight: false, dropped: [{ qid: "q1", cid: "c1", by: "desktop", kind: "desktop", text: "look", images: ["big.png"], reason: "too_large" }] }));
+    const note = () => ctrl.state.items.find((i) => i.kind === "system") as { text: string };
+    expect(note().text).toBe("Not sent (too large to send to the agent):\nlook\n[big.png]");
+    ctrl.applyLog("reset", [JSON.stringify({ type: "kelpie_unsent", qid: "q1", cid: "c1", by: "desktop", name: "desktop", text: "look", images: ["big.png"], reason: "too_large" })]);
+    expect(note().text).toBe("Not sent (too large to send to the agent):\nlook\n[big.png]");
+  });
+});
+
+describe("a note of what was not sent", () => {
+  const unsent = (reason: string, text: string, extra: object = {}) => ({ type: "kelpie_unsent", qid: "q1", cid: "c1", by: "desktop", name: "desktop", text, images: ["a.png"], reason, ...extra });
+  const noteOf = (c: ChatController) => (c.state.items.find((i) => i.kind === "system") as { text: string } | undefined)?.text;
+
+  it("keeps the names of the pictures, when the log line comes after the event and on a replay", async () => {
+    const { ctrl, asked, feed } = setup();
+    ctrl.send("", true, [{ mime: "image/png", data: "AA==", path: "/tmp/a.png" }]);
+    await tick();
+    const { cid } = asked.enqueue[0];
+    ctrl.applyQueue(view([{ qid: "q1", cid, text: "" }]));
+    ctrl.applyQueue(fromDaemonEvent({ items: [], paused: false, held: false, in_flight: false, dropped: [{ qid: "q1", cid, by: { id: "desktop", name: "desktop" }, text: "", images: ["a.png"], reason: "cancelled", cancelled_by: { id: "p1", name: "Pixel" } }] }));
+    expect(noteOf(ctrl)).toBe("Not sent (cancelled from Pixel):\n[a.png]");
+    feed(unsent("cancelled", "", { cid, cancelled_by: { id: "p1", name: "Pixel" } }));
+    expect(ctrl.state.items.filter((i) => i.kind === "system")).toHaveLength(1);
+    expect(noteOf(ctrl)).toBe("Not sent (cancelled from Pixel):\n[a.png]");
+  });
+
+  it.each(["needs_window", "declined"])("says the names after a reload (%s), under any text", (reason) => {
+    const { ctrl, feed } = setup();
+    feed(unsent(reason, "see this"));
+    expect(noteOf(ctrl)).toBe("Not sent (this window could not prepare it):\nsee this\n[a.png]");
+  });
+
+  it("reads an older log line, which names none", () => {
+    const { ctrl, feed } = setup();
+    feed({ type: "kelpie_unsent", qid: "q1", cid: "c1", by: "desktop", name: "desktop", text: "words", reason: "declined" });
+    expect(noteOf(ctrl)).toBe("Not sent (this window could not prepare it):\nwords");
+  });
+
+  it("names them from the daemon's word when this window does not have the message", () => {
+    const { ctrl } = setup();
+    ctrl.applyQueue(fromDaemonEvent({ items: [], paused: false, held: false, in_flight: false, dropped: [{ qid: "q1", cid: "gone", by: { id: "desktop", name: "desktop" }, text: "", images: ["a.png"], reason: "declined" }] }));
+    expect(noteOf(ctrl)).toBe("Not sent (this window could not prepare it):\n[a.png]");
+  });
+});
+
 describe("what the log says was sent", () => {
   it("shows an ACP prompt once, from the log, with nothing local ahead of it", async () => {
     const { ctrl, asked, feed } = setup((c) => createAcpAdapter(c));
@@ -266,6 +372,15 @@ describe("what the log says was sent", () => {
     late.feed(line(cid));
     expect(late.ctrl.state.items.filter((i) => i.kind === "user")).toHaveLength(1);
     expect(userOf(late.ctrl).images).toEqual(shown);
+  });
+
+  it("does not take another device's message for this window's, even under a cid it knows", async () => {
+    const { ctrl, asked, feed } = setup((c) => createAcpAdapter(c));
+    ctrl.send("mine", true, [{ mime: "image/png", data: "AA==", path: "/tmp/private.png" }]);
+    await tick();
+    feed({ type: "kelpie_sent", qid: "q9", cid: asked.enqueue[0].cid, by: "phone", name: "Pixel", text: "not mine", images: [] });
+    const user = ctrl.state.items.find((i) => i.kind === "user") as { images?: object[]; from?: string };
+    expect([user.images, user.from]).toEqual([undefined, "Pixel"]);
   });
 
   it("names the pictures of a message this window no longer knows", () => {

@@ -94,6 +94,12 @@ export function withImageNames(text: string, images?: ChatImage[]): string {
   return text ? `${text}\n${names}` : names;
 }
 
+/** The same when the log or the daemon's queue names the pictures. */
+function withNames(text: string, names: unknown): string {
+  const pictures = Array.isArray(names) ? names.map((n) => `[${String(n)}]`).join(" ") : "";
+  return text && pictures ? `${text}\n${pictures}` : text || pictures;
+}
+
 /** The pictures of a message sent from here, as the transcript keeps them: by path, without their bytes. */
 export function sentImages(images?: ChatImage[]): UserImage[] | undefined {
   return images?.length ? images.map((i) => ({ name: fileName(i.path), mime: i.mime, path: i.path })) : undefined;
@@ -542,9 +548,9 @@ export class ChatController {
         if (typeof msg.text !== "string") continue;
         if (msg.reason === "cancelled") {
           // As live: only this window's own message, cancelled from somewhere else, is news here.
-          if (!this.observer && msg.by === "desktop") this.unsentItem([{ text: msg.text }], `cancelled:${String(msg.cancelled_by?.name ?? "")}`, `unsent-${String(msg.qid)}`);
+          if (!this.observer && msg.by === "desktop") this.unsentItem([{ text: withNames(msg.text, msg.images) }], `cancelled:${String(msg.cancelled_by?.name ?? "")}`, `unsent-${String(msg.qid)}`);
         } else {
-          this.unsentItem([{ text: msg.text }], this.observer ? "computer" : "window", `unsent-${String(msg.qid)}`);
+          this.unsentItem([{ text: withNames(msg.text, msg.images) }], this.whyUnsent(String(msg.reason ?? "")), `unsent-${String(msg.qid)}`);
         }
         const by = msg.cancelled_by?.id;
         this.onUnsent?.({ cid: String(msg.cid), reason: String(msg.reason ?? ""), cancelledBy: by === undefined ? undefined : by === "desktop" ? "desktop" : "phone" });
@@ -824,9 +830,14 @@ export class ChatController {
     this.transport.writeTurn(qid, lines, turn).then(
       () => this.mine.delete(cid),
       (e) => {
-        console.warn("the daemon did not take the message", String(e));
+        const why = String(e);
+        console.warn("the daemon did not take the message", why);
         // `busy`: another turn started meanwhile, which is why it is busy; the rest is as if nothing had been built.
-        this.rollback(added, wasBusy, restore, !/busy/.test(String(e)));
+        this.rollback(added, wasBusy, restore, !/busy/.test(why));
+        // Those it asks again about, or that it already dealt with (the note comes with its word). Anything else would only fail
+        // again each time it is offered, and hold up what waits behind it: a final no. A message over the connection's own limit
+        // never reached the daemon, so it is told why.
+        if (!/too_late|busy|switching|too_large/.test(why)) void this.transport.writeTurn?.(qid, null, false, false, /too large/i.test(why)).catch(() => {});
       },
     );
   }
@@ -860,7 +871,7 @@ export class ChatController {
       // This window has the whole text (and the pictures' names) of its own; the daemon only the start of any.
       for (const d of view.dropped) {
         const own = this.mine.get(d.cid);
-        const text = own ? withImageNames(own.text, own.images) : d.text;
+        const text = own ? withImageNames(own.text, own.images) : withNames(d.text, d.images);
         this.mine.delete(d.cid);
         if (d.reason === "cancelled") {
           // A phone's own chips tell it; this window tells about its own message, when it was not this window that cancelled it.
@@ -868,13 +879,18 @@ export class ChatController {
           this.unsentItem([{ text }], `cancelled:${d.cancelledByName ?? ""}`, `unsent-${d.qid}`);
           continue;
         }
-        const why = d.reason === "needs_window" || d.reason === "declined" ? (this.observer ? "computer" : "window") : d.reason === "revoked" ? "revoked" : "";
-        this.unsentItem([{ text }], why, `unsent-${d.qid}`);
+        this.unsentItem([{ text }], this.whyUnsent(d.reason), `unsent-${d.qid}`);
       }
     }
   }
 
-  /** "Not sent: …" in the transcript. `why`: a short reason, or `window` / `revoked` / `cancelled:{device}` for the daemon's.
+  /** What `unsentItem` says for the daemon's reason. */
+  private whyUnsent(reason: string): string {
+    if (reason === "needs_window" || reason === "declined") return this.observer ? "computer" : "window";
+    return reason === "revoked" || reason === "too_large" ? reason : "";
+  }
+
+  /** "Not sent: …" in the transcript. `why`: a short reason, or `window` / `revoked` / `too_large` / `cancelled:{device}` for the daemon's.
    *  `id` makes a note shown twice (the event, and the log line that outlives it) one note. */
   private unsentItem(messages: { text: string }[], why: string, id?: string) {
     const list = messages.map((m) => m.text).join("\n");
@@ -882,6 +898,7 @@ export class ChatController {
       why === "window" ? t("Not sent (this window could not prepare it):\n{messages}", { messages: list })
       : why === "computer" ? t("Not sent (the computer could not prepare it):\n{messages}", { messages: list })
       : why === "revoked" ? t("Not sent (the phone lost access):\n{messages}", { messages: list })
+      : why === "too_large" ? t("Not sent (too large to send to the agent):\n{messages}", { messages: list })
       : why.startsWith("cancelled:") ? t("Not sent (cancelled from {device}):\n{messages}", { device: why.slice(10) || t("a phone"), messages: list })
       : why ? t("Not sent ({reason}):\n{messages}", { reason: why, messages: list })
       : t("Not sent:\n{messages}", { messages: list });
@@ -894,16 +911,16 @@ export class ChatController {
     if (typeof msg.text !== "string") return;
     const name = msg.by === "desktop" ? undefined : String(msg.name ?? "") || undefined;
     if (this.adapter.showsSent) {
-      const named: string[] = Array.isArray(msg.images) ? msg.images.map(String) : [];
       const id = `sent-${String(msg.qid)}`;
       if (this.observer) {
         // A watcher shows no pictures: their names, under the text.
-        const pictures = named.map((n) => `[${n}]`).join(" ");
-        this.upsert({ kind: "user", id, text: msg.text && pictures ? `${msg.text}\n${pictures}` : msg.text || pictures, from: name });
+        this.upsert({ kind: "user", id, text: withNames(msg.text, msg.images), from: name });
       } else {
-        // As an adapter's `send` records them: this window's own by path, and what it no longer has by name.
-        const images = this.sentPictures.get(String(msg.cid)) ?? (named.length ? named.map((n) => ({ name: n })) : undefined);
-        this.upsert({ kind: "user", id, text: msg.text, images, from: name });
+        // As an adapter's `send` records them: this window's own by path (another device's `cid` says nothing about those), and what
+        // it no longer has by name.
+        const own = msg.by === "desktop" ? this.sentPictures.get(String(msg.cid)) : undefined;
+        const named: string[] = Array.isArray(msg.images) ? msg.images.map(String) : [];
+        this.upsert({ kind: "user", id, text: msg.text, images: own ?? (named.length ? named.map((n) => ({ name: n })) : undefined), from: name });
       }
     } else if (name) {
       this.sentFrom.push({ text: msg.text, name });
