@@ -35,6 +35,7 @@ def load_call():
 
 
 kc = None
+MADE = set()  # the endpoints isolate() made here
 
 
 def isolate(tag):
@@ -45,8 +46,24 @@ def isolate(tag):
         os.environ.pop(k, None)
     global kc
     kc = load_call()
+    MADE.add(os.environ["KELPIE_ENDPOINT"])
     atexit.register(forget_secrets, os.environ["KELPIE_ENDPOINT"])
+    atexit.register(forget_token, os.environ["KELPIE_ENDPOINT"])
     return os.environ["KELPIE_DATA_DIR"]
+
+
+def forget_token(endpoint):
+    """Deletes the token file a test daemon wrote for `endpoint`, which goes in the real Kelpie folder's `auth` whatever the data folder
+    is. Only an endpoint isolate() made here, and only that exact name."""
+    if endpoint not in MADE or os.environ.get("KELPIE_ENDPOINT") != endpoint:
+        raise ValueError(f"not an endpoint of this run: {endpoint!r}")
+    path = kc.token_path()
+    if os.path.basename(path) != endpoint + ".token":
+        raise ValueError(f"not this endpoint's token: {path!r}")
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
 
 
 def forget_secrets(endpoint):

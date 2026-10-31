@@ -36,7 +36,7 @@ def endpoint():
     return r"\\.\pipe" + "\\" + key if os.name == "nt" else key
 
 
-def user_token():
+def token_path():
     """kelpie_proto::auth_token_path: <data base>/Kelpie/auth/<endpoint key>.token."""
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP", ".")
@@ -45,8 +45,12 @@ def user_token():
     else:
         base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
     key = "".join(c if (c.isascii() and c.isalnum()) or c in "-_" else "_" for c in endpoint_key())
+    return os.path.join(base, "Kelpie", "auth", key + ".token")
+
+
+def user_token():
     try:
-        with open(os.path.join(base, "Kelpie", "auth", key + ".token"), encoding="utf-8") as f:
+        with open(token_path(), encoding="utf-8") as f:
             return f.read().strip() or None
     except OSError:
         return None
