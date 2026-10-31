@@ -84,6 +84,7 @@ export class Room extends DurableObject<RoomEnv> {
   /** Which start of this object answered: a new `boot` means it was evicted in between. */
   private info(): string {
     return JSON.stringify({
+      id: this.ctx.id.toString(),
       boot: this.boot,
       uptime_ms: Date.now() - this.bootedAt,
       sockets: this.ctx.getWebSockets().length,

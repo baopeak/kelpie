@@ -326,6 +326,8 @@ async def measure_hibernation(args, relay):
 
     results = {}
     previous = await ask_json(sockets[0], "info")
+    began = utc_now()
+    object_id = previous["id"]
     for gap_s in args.idle_gaps:
         rows = []
         for _ in range(args.repeats):
@@ -355,7 +357,14 @@ async def measure_hibernation(args, relay):
         }
     for ws in sockets:
         await ws.close()
-    return {"measure": "hibernation", "at": utc_now(), "sockets": args.sockets, "results": results}
+    return {
+        "measure": "hibernation",
+        "began": began,
+        "ended": utc_now(),
+        "object_id": object_id,
+        "sockets": args.sockets,
+        "results": results,
+    }
 
 
 async def flood_one_room(relay, count, rate):
@@ -829,7 +838,7 @@ query($account: String!, $since: Time!, $until: Time!) {
     periodic: durableObjectsPeriodicGroups(
       filter: {datetimeMinute_geq: $since, datetimeMinute_leq: $until}, limit: 10000
     ) {
-      dimensions { coloCode }
+      dimensions { coloCode objectId }
       sum {
         activeTime cpuTime duration subrequests
         inboundWebsocketMsgCount outboundWebsocketMsgCount

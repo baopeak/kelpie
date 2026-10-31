@@ -218,6 +218,7 @@ describe("hibernation", () => {
     desktop.ws.send("info");
     const before = JSON.parse((await desktop.next()) as string);
     expect(before).toMatchObject({ sockets: 2, version: "test" });
+    expect(before.id).toBe(relayEnv.ROOM.idFromName(room).toString());
 
     await evictDurableObject(relayEnv.ROOM.get(relayEnv.ROOM.idFromName(room)));
 
