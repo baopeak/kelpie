@@ -5,6 +5,7 @@
 import { createEffect, createSignal, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { t } from "./i18n";
 import { store } from "./store";
 import type { SessionInfo } from "./types";
 
@@ -18,6 +19,8 @@ export interface UpdateInfo {
 /** First check after start (the app settles first), then every 6 hours. */
 export const CHECK_DELAY_MS = 30_000;
 export const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
+/** How long the notice of a new release stays up; the status bar keeps offering it afterwards. */
+const ANNOUNCE_MS = 20_000;
 
 /** The release to offer: a newer one the user did not choose to skip. */
 export function offered(info: UpdateInfo | null, skipped?: string): UpdateInfo | null {
@@ -45,11 +48,26 @@ const [progress, setProgress] = createSignal<{ downloaded?: number; total?: numb
 const [whenIdle, setWhenIdle] = createSignal(false);
 export { available, progress, whenIdle };
 
+/** Says once per release that it is out: the status bar's offer is easy to miss. A manual check opens the dialog itself, so it
+ *  only counts as said. */
+function announce(offer: UpdateInfo | null, manual: boolean) {
+  if (!offer || offer.version === store.state.settings.announcedUpdate) return;
+  store.setSettings({ announcedUpdate: offer.version });
+  if (manual) return;
+  store.notify(
+    t("Kelpie {version} is available", { version: offer.version }),
+    { label: t("Update {version}", { version: offer.version }), run: () => store.setOverlay("update") },
+    ANNOUNCE_MS,
+  );
+}
+
 /** Asks for a newer release. A manual check also offers a skipped version and reports errors. */
 export async function checkForUpdate(manual = false): Promise<UpdateInfo | null> {
   try {
     const info = await invoke<UpdateInfo | null>("update_check");
-    setAvailable(offered(info, manual ? undefined : store.state.settings.skippedUpdate));
+    const offer = offered(info, manual ? undefined : store.state.settings.skippedUpdate);
+    setAvailable(offer);
+    announce(offer, manual);
     return info;
   } catch (e) {
     if (manual) throw e;
