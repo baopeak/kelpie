@@ -6542,7 +6542,7 @@ mod tests {
             *t = Instant::now() - Duration::from_secs(61);
         }
         let mut own = through_serve(&d, port, network.rig.phone.clone(), phone_at).await;
-        own.reconnect().await.expect("the lockout does not outlast its minute");
+        own.reconnect().await.expect("a lockout ends a minute after its failures stop; a program that keeps failing keeps it going");
 
         // Spent, the listener's budget stays spent through a flood of made-up addresses, which empties the table of those.
         while d.mobile.serve_upgrade_allowed() {}
