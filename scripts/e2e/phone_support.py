@@ -283,7 +283,7 @@ def write_fake_tailscale(folder):
             "open(log, 'a', encoding='utf-8').write(args + '\\n')\n"
             "state = json.load(open(state_file, encoding='utf-8'))\n"
             "if args == 'status --json':\n    print(state['status'])\n"
-            "elif args == 'serve status --json':\n    print(state['serve'])\n"
+            "elif args == 'serve status --json':\n    sys.exit(1) if state.get('serve_down') else print(state['serve'])\n"
             "elif args == 'serve --https=8443 off':\n    state['serve'] = '{}'\n"
             "elif args.startswith('serve --bg --https=8443 http://127.0.0.1:'):\n"
             "    port = args.rsplit(':', 1)[1]\n"

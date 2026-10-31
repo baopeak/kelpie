@@ -418,7 +418,8 @@ pub async fn status(daemon: Arc<Daemon>) -> Result<Value> {
         (Detected::Ready { fqdn }, Some(Entry::Ours(_))) if m.config.lock().tailscale && m.loopback_port().is_some() => Some(format!("{fqdn}:{HTTPS_PORT}")),
         _ => None,
     };
-    if m.set_tailscale_origin(origin) {
+    // A removal done just now changes what the window shows, also with phone access off, when no origin is there to change.
+    if m.set_tailscale_origin(origin) || removed == Some(true) {
         daemon.broadcast("mobile.updated", json!({}));
     }
     Ok(described(m, &detected, entry))

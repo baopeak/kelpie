@@ -264,7 +264,7 @@ export function MobileSettings() {
             <Show when={tailscale()}>
               <div class="muted-inline" data-tailscale-state={tailscale()!.state} data-tailscale-serve={tailscale()!.serve}>{tailscaleInstruction(tailscale()!)}</div>
             </Show>
-            <Show when={s()!.tailscale?.to_remove}>
+            <Show when={s()!.tailscale?.to_remove && !["left_behind", "port_busy"].includes(tailscale()?.serve ?? "")}>
               <div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
             </Show>
             <Show when={!s()!.app}>
@@ -337,7 +337,9 @@ export function MobileSettings() {
       </Show>
       <Show when={!s()?.enabled && s()?.tailscale?.to_remove}>
         <SettingRow id="mobile-tailscale" wide>
-          <div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
+          <Show when={tailscale()} fallback={<div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>}>
+            <div class="form-note warn-note" data-tailscale-to-remove data-tailscale-serve={tailscale()!.serve}>{tailscale()!.state === "ready" ? tailscaleInstruction(tailscale()!) : t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
+          </Show>
           <button class="btn" data-tailscale-check disabled={tailscale.loading} onClick={() => void checkTailscale()}>{t("Check again")}</button>
         </SettingRow>
       </Show>

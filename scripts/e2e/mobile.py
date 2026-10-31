@@ -850,6 +850,17 @@ for n in (1, 2, 3):
     run.check("turning it off removes the entry", d.wait(f"return {ts_serve[7:]} === 'off'", 20) is True and json.load(open(FAKE_TS[1], encoding="utf-8"))["serve"] == "{}")
     calls = ps.fake_tailscale_calls(FAKE_TS[2])
     run.check("…and only ever by the command that removes ours", not [c for c in calls if "reset" in c or "funnel" in c] and calls.count("serve --https=8443 off") == 1, str([c for c in calls if not c.endswith("--json")]))
+    # Phone access off with Tailscale down: the entry stays, Settings says so with phone access off, and Check again clears it once Tailscale answers.
+    d.js("document.querySelector('[data-setting=\"mobile-tailscale\"] .switch').click()")
+    d.wait(f"return {ts_serve[7:]} === 'ours'", 20)
+    ps.fake_tailscale_says(FAKE_TS[1], serve_down=True)
+    daemon(d, "mobile.disable")
+    run.check("phone access off with Tailscale down: Settings says the entry is still there", bool(d.wait("return !!document.querySelector('[data-tailscale-to-remove]')", 20)))
+    run.check("…and the daemon has kept it", daemon(d, "mobile.status")["tailscale"]["to_remove"] is True and json.load(open(FAKE_TS[1], encoding="utf-8"))["serve"] != "{}")
+    ps.fake_tailscale_says(FAKE_TS[1], serve_down=False)
+    d.js("document.querySelector('[data-tailscale-check]').click()")
+    run.check("…and once Tailscale answers, Check again removes it and the note goes", d.wait("return !document.querySelector('[data-tailscale-to-remove]')", 20) is True and json.load(open(FAKE_TS[1], encoding="utf-8"))["serve"] == "{}")
+    daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT})
     d.js(f"{S}.closeSettings?.()")
 
     # Last, so the limiter does not refuse a pairing this script still needs.

@@ -6212,11 +6212,26 @@ mod tests {
         assert_eq!(d.mobile.status(true)["tailscale"]["to_remove"], true, "shown");
         assert!(store::load(&d.mobile.dir).store.tailscale_remove, "and kept through a restart");
         assert_ne!(*fake.serve.lock(), "{}");
-        // Tailscale is back. Asking with phone access still off is enough, and starts no timer of its own.
+        // Tailscale is back. Asking with phone access still off is enough, and starts no timer of its own. The window hears of it: it is what clears its banner.
         *fake.serve_down.lock() = false;
+        let (tx, mut events) = crate::session::client_channel();
+        d.register_client(105, tx);
+        d.set_client_role(105, &crate::auth::Role::App);
         assert_eq!(tailscale::status(d.clone()).await.unwrap()["serve"], "off");
         assert_eq!(*fake.serve.lock(), "{}");
         assert!(!store::load(&d.mobile.dir).store.tailscale_remove);
+        let mut told = false;
+        while let Ok(o) = events.try_recv() {
+            told |= String::from_utf8_lossy(&o.data).contains("mobile.updated");
+        }
+        assert!(told, "the window is told");
+        // Looking again changes nothing, and says nothing.
+        assert_eq!(tailscale::status(d.clone()).await.unwrap()["serve"], "off");
+        let mut again = false;
+        while let Ok(o) = events.try_recv() {
+            again |= String::from_utf8_lossy(&o.data).contains("mobile.updated");
+        }
+        assert!(!again, "no event loop with a window that refetches on it");
     }
 
     #[tokio::test]
