@@ -1730,11 +1730,12 @@ impl Daemon {
                     if !on {
                         return answer(tailscale::turn_off(me).await);
                     }
-                    if let Err(e) = tailscale::check_can_turn_on(&me).await {
-                        return answer(Err(e));
-                    }
+                    let asked_at = match tailscale::check_can_turn_on(&me).await {
+                        Ok(at) => at,
+                        Err(e) => return answer(Err(e)),
+                    };
                     let runtime = tokio::runtime::Handle::current();
-                    let asked = me.after_verifying(client, &tx, &id, &params, crate::user_presence::Prompt::Tailscale, move |me| runtime.block_on(tailscale::turn_on(me.clone())));
+                    let asked = me.after_verifying(client, &tx, &id, &params, crate::user_presence::Prompt::Tailscale, move |me| runtime.block_on(tailscale::turn_on(me.clone(), asked_at)));
                     if let Err(e) = asked {
                         answer(Err(e));
                     }

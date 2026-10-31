@@ -183,5 +183,6 @@
   "Tailscale did not let Kelpie publish this computer. On Linux, allow your user once with `sudo tailscale set --operator=$USER`; then try again.": "Tailscale không cho Kelpie công bố máy tính này. Trên Linux, hãy cho phép người dùng của bạn một lần bằng `sudo tailscale set --operator=$USER` rồi thử lại.",
   "Tailscale did not publish this computer. Check that HTTPS certificates and Serve are allowed for your tailnet, then try again.": "Tailscale chưa công bố máy tính này. Hãy kiểm tra chứng chỉ HTTPS và Serve đã được cho phép trên tailnet của bạn rồi thử lại.",
   "Kelpie stopped answering through Tailscale, but its entry in Tailscale Serve could not be removed. Start Tailscale and press Remove in Settings → Mobile.": "Kelpie đã ngừng phản hồi qua Tailscale, nhưng không gỡ được mục của nó trong Tailscale Serve. Hãy khởi động Tailscale rồi bấm Gỡ trong Cài đặt → Điện thoại.",
-  "Kelpie could not open the local port Tailscale Serve forwards to. Try again in a moment.": "Kelpie không mở được cổng cục bộ mà Tailscale Serve chuyển tiếp tới. Hãy thử lại sau giây lát."
+  "Kelpie could not open the local port Tailscale Serve forwards to. Try again in a moment.": "Kelpie không mở được cổng cục bộ mà Tailscale Serve chuyển tiếp tới. Hãy thử lại sau giây lát.",
+  "Phone access was turned off or changed while this was being done, so Tailscale publishes nothing. Turn this on again if you still want it.": "Truy cập từ điện thoại đã bị tắt hoặc thay đổi trong lúc đang làm việc này, nên Tailscale không công bố gì. Hãy bật lại mục này nếu bạn vẫn muốn."
 }

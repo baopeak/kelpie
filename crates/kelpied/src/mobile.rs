@@ -29,7 +29,7 @@ mod verbs;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -402,6 +402,10 @@ pub struct Mobile {
     tailscale_check: tokio::sync::Mutex<()>,
     /// Phone access went off with the mode on: our serve entry is still to go.
     serve_to_remove: AtomicBool,
+    /// How many times the mode was ended. A turn-on started before the last of them must not finish (see `tailscale::turn_on`).
+    tailscale_ended: AtomicU64,
+    /// Held while Tailscale's serve configuration is being changed: one change at a time.
+    tailscale_change: tokio::sync::Mutex<()>,
     /// A test on the only address it can bind holds this machine to the limits for an address.
     #[cfg(test)]
     loopback_is_remote: AtomicBool,
@@ -514,6 +518,8 @@ impl Mobile {
             tailscale_cli: Mutex::new(Arc::new(tailscale::Absent)),
             tailscale_check: tokio::sync::Mutex::new(()),
             serve_to_remove: AtomicBool::new(false),
+            tailscale_ended: AtomicU64::new(0),
+            tailscale_change: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             loopback_is_remote: AtomicBool::new(false),
         };
@@ -1342,6 +1348,8 @@ impl Mobile {
         {
             let mut c = self.config.lock();
             c.enabled = false;
+            // Under the same lock as a turn-on's last step: either it sees this and does not finish, or the mode was on here and goes.
+            self.tailscale_ended.fetch_add(1, Ordering::SeqCst);
             if std::mem::replace(&mut c.tailscale, false) {
                 self.serve_to_remove.store(true, Ordering::SeqCst);
             }
@@ -5983,6 +5991,86 @@ mod tests {
             tcp.write_all(format!("GET /link HTTP/1.1\r\nHost: {ORIGIN}\r\nOrigin: https://evil.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").as_bytes()).await.unwrap();
             assert!(http_head(&mut tcp).await.starts_with("HTTP/1.1 403"));
         }
+    }
+
+    /// Whatever takes access away while `serve --bg` is under way wins: the mode does not come on, the entry goes, and turning phone access
+    /// on again with the plain token brings nothing back.
+    #[tokio::test]
+    async fn what_takes_access_away_wins_over_a_turn_on_under_way() {
+        for method in ["mobile.revoke_all", "mobile.disable", "mobile.reset", "mobile.set_tailscale"] {
+            let mut network = NetworkRig::new().await;
+            let fake = Arc::new(tailscale::fake::Fake::ready());
+            on_tailscale(&mut network, &fake).await;
+            let d = network.rig.daemon.clone();
+            let (tx, mut replies) = app_client(&d, 96);
+            d.presence.inject(|_| Ok(()));
+            let (reached_tx, reached) = std::sync::mpsc::channel();
+            let (go, held) = std::sync::mpsc::channel();
+            *fake.publish_holds.lock() = Some((reached_tx, held));
+            assert_eq!(d.dispatch(96, &tx, &json!("on"), "mobile.set_tailscale", json!({"on": true})).unwrap(), None);
+            for _ in 0..1000 {
+                if reached.try_recv().is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // While the CLI is publishing, as the person would press it.
+            let answered = d.dispatch(96, &tx, &json!("away"), method, json!({"on": false})).unwrap();
+            let mut told = Vec::new();
+            // A reset has a verification of its own: only once that has passed has it taken anything away.
+            if method == "mobile.reset" {
+                told.push(later_reply(&mut replies).await);
+                assert_eq!((&told[0]["id"], &told[0]["result"]), (&json!("away"), &json!(true)), "{method}: {told:?}");
+            }
+            go.send(()).unwrap();
+            told.push(later_reply(&mut replies).await);
+            if answered.is_none() && method != "mobile.reset" {
+                told.push(later_reply(&mut replies).await);
+            }
+            let on = told.iter().find(|r| r["id"] == "on").expect("the turn-on is answered");
+            assert!(on["error"].is_object(), "{method}: it says it did not happen: {on}");
+            for _ in 0..500 {
+                if *fake.serve.lock() == "{}" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(!d.mobile.config.lock().tailscale, "{method}: the mode is off");
+            assert_eq!(*fake.serve.lock(), "{}", "{method}: the entry is gone");
+            assert_eq!(d.mobile.loopback_port(), None, "{method}: nothing listens for serve");
+            let published = fake.changes().iter().filter(|c| c.starts_with("serve --bg")).count();
+            network.restart().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(d.mobile.tailscale_origin(), None, "{method}: the plain token brings nothing back");
+            assert_eq!(fake.changes().iter().filter(|c| c.starts_with("serve --bg")).count(), published, "{method}");
+        }
+    }
+
+    /// The same for a kill switch pressed while the person is at the prompt: passing it afterwards publishes nothing.
+    #[tokio::test]
+    async fn the_kill_switch_during_the_prompt_leaves_nothing_to_publish_even_if_access_is_back_on() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let (tx, mut replies) = app_client(&d, 97);
+        let (go, said) = held_prompt(&d, Ok(()));
+        assert_eq!(d.dispatch(97, &tx, &json!("on"), "mobile.set_tailscale", json!({"on": true})).unwrap(), None);
+        for _ in 0..1000 {
+            if !said.lock().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!said.lock().is_empty(), "the prompt came up");
+        d.dispatch(97, &tx, &json!("kill"), "mobile.revoke_all", json!({})).unwrap();
+        network.restart().await;
+        go.send(()).unwrap();
+        let on = later_reply(&mut replies).await;
+        assert!(on["error"].is_object(), "{on}");
+        assert!(!d.mobile.config.lock().tailscale);
+        assert!(fake.changes().iter().all(|c| !c.starts_with("serve --bg")), "{:?}", fake.changes());
+        assert_eq!(d.mobile.tailscale_origin(), None);
     }
 
     /// A plain pairing secret while the mode is on.

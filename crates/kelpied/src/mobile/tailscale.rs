@@ -48,6 +48,7 @@ pub const NOT_PUBLISHED: &str = "Tailscale did not publish this computer. Check 
 pub const NOT_REMOVED: &str = "Kelpie stopped answering through Tailscale, but its entry in Tailscale Serve could not be removed. Start Tailscale and press Remove in Settings → Mobile.";
 const LISTEN_FAILED: &str = "Kelpie could not open the local port Tailscale Serve forwards to. Try again in a moment.";
 pub const NOT_ON: &str = "turn mobile access on first";
+pub const ENDED_MEANWHILE: &str = "Phone access was turned off or changed while this was being done, so Tailscale publishes nothing. Turn this on again if you still want it.";
 
 // ---------- what Tailscale says ----------
 
@@ -383,12 +384,14 @@ pub async fn status(daemon: Arc<Daemon>) -> Result<Value> {
     Ok(described(m, &detected, entry))
 }
 
-/// Everything about turning it on that can be told with no prompt.
-pub async fn check_can_turn_on(daemon: &Arc<Daemon>) -> Result<()> {
+/// Everything about turning it on that can be told with no prompt. What it returns goes to `turn_on`: what the person is asked holds only
+/// while nothing took access away.
+pub async fn check_can_turn_on(daemon: &Arc<Daemon>) -> Result<u64> {
     let m = &daemon.mobile;
     if m.running.lock().is_none() {
         bail!(NOT_ON);
     }
+    let asked_at = m.tailscale_ended.load(Ordering::SeqCst);
     let known = m.config.lock().tailscale_port;
     let refusal = off_runtime(m, move |cli| match detect(cli) {
         Detected::Ready { .. } => match read_entry(cli, known) {
@@ -401,7 +404,7 @@ pub async fn check_can_turn_on(daemon: &Arc<Daemon>) -> Result<()> {
     .await?;
     match refusal {
         Some(why) => bail!(why),
-        None => Ok(()),
+        None => Ok(asked_at),
     }
 }
 
@@ -477,11 +480,17 @@ async fn follow_addresses(daemon: std::sync::Weak<Daemon>, stop: Arc<Generation>
     }
 }
 
-/// Publishes this computer, once the person verified. Everything is checked again: the prompt can take a long time.
-pub async fn turn_on(daemon: Arc<Daemon>) -> Result<Value> {
+/// Publishes this computer, once the person verified. Everything is checked again: the prompt can take a long time. What takes access away
+/// never waits for this: it only leaves word, and the last step below finds it, under the lock it was left under, and undoes what was done.
+pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
     let m = &daemon.mobile;
+    let change = m.tailscale_change.lock().await;
+    if m.tailscale_ended.load(Ordering::SeqCst) != asked_at {
+        bail!(ENDED_MEANWHILE);
+    }
     let known = m.config.lock().tailscale_port;
     let was_listening = m.loopback_port().is_some();
+    let run = m.running.lock().as_ref().map(|r| r.stop.clone()).ok_or_else(|| anyhow!(NOT_ON))?;
     let port = listen_loopback(&daemon, true).await?;
     let done = off_runtime(m, move |cli| -> Result<String, &'static str> {
         let Detected::Ready { fqdn } = detect(cli) else { return Err(NOT_READY) };
@@ -509,25 +518,49 @@ pub async fn turn_on(daemon: Arc<Daemon>) -> Result<Value> {
             bail!(why);
         }
     };
-    m.config.lock().tailscale = true;
+    // The last step, under the lock what takes access away holds: this server, still on, with nothing ended since the person was asked.
+    let committed = {
+        let mut c = m.config.lock();
+        let same_run = m.running.lock().as_ref().is_some_and(|r| Arc::ptr_eq(&r.stop, &run));
+        let holds = c.enabled && same_run && m.tailscale_ended.load(Ordering::SeqCst) == asked_at;
+        if holds {
+            c.tailscale = true;
+        }
+        holds
+    };
+    if !committed {
+        m.stop_loopback();
+        if off_runtime(m, move |cli| remove_ours(cli, Some(port))).await?.is_err() {
+            m.audit("-", "tailscale_off", "ended while turning on, and the entry in Tailscale Serve could not be removed");
+        }
+        bail!(ENDED_MEANWHILE);
+    }
     m.keep();
     m.audit("-", "tailscale_on", &format!("published as {fqdn}:{HTTPS_PORT}"));
     m.set_tailscale_origin(Some(format!("{fqdn}:{HTTPS_PORT}")));
     daemon.broadcast("mobile.updated", json!({}));
+    drop(change);
     status(daemon.clone()).await
 }
 
 /// Turns the mode off, or removes an entry left behind by an earlier turn. Access through Tailscale ends first, whatever Tailscale then says.
 pub async fn turn_off(daemon: Arc<Daemon>) -> Result<Value> {
     let m = &daemon.mobile;
-    let was_on = std::mem::replace(&mut m.config.lock().tailscale, false);
+    let was_on = {
+        let mut c = m.config.lock();
+        m.tailscale_ended.fetch_add(1, Ordering::SeqCst);
+        std::mem::replace(&mut c.tailscale, false)
+    };
     m.stop_loopback();
     m.keep();
     if was_on {
         m.audit("-", "tailscale_off", "no longer published");
     }
+    // Access has ended by now. The entry waits for a change under way: it may be writing one.
+    let change = m.tailscale_change.lock().await;
     let known = m.config.lock().tailscale_port;
     let removed = off_runtime(m, move |cli| remove_ours(cli, known)).await?;
+    drop(change);
     daemon.broadcast("mobile.updated", json!({}));
     m.unsaved(super::NOT_SAVED_OFF)?;
     removed.map_err(|why| anyhow!(why))?;
@@ -558,6 +591,7 @@ pub fn remove_after_off(daemon: &Arc<Daemon>) {
     }
     let me = daemon.clone();
     let spawned = std::thread::Builder::new().name("kelpie-tailscale".into()).spawn(move || {
+        let _change = me.mobile.tailscale_change.blocking_lock();
         let known = me.mobile.config.lock().tailscale_port;
         let cli = me.mobile.tailscale_cli.lock().clone();
         let removed = remove_ours(cli.as_ref(), known);
@@ -582,13 +616,15 @@ pub mod fake {
         pub calls: Mutex<Vec<String>>,
         /// What `serve --bg` answers when it should fail.
         pub publish_fails: Mutex<Option<String>>,
+        /// Holds `serve --bg` up: says it got there on the first, and goes on when the second says so.
+        pub publish_holds: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     }
 
     pub const READY: &str = r#"{"Version":"1.98.10","BackendState":"Running","Self":{"DNSName":"desk.tail1234.ts.net."},"CertDomains":["desk.tail1234.ts.net"],"Peer":{},"User":{}}"#;
 
     impl Fake {
         pub fn ready() -> Fake {
-            Fake { status: Mutex::new(READY.into()), serve: Mutex::new("{}".into()), calls: Mutex::new(Vec::new()), publish_fails: Mutex::new(None) }
+            Fake { status: Mutex::new(READY.into()), serve: Mutex::new("{}".into()), calls: Mutex::new(Vec::new()), publish_fails: Mutex::new(None), publish_holds: Mutex::new(None) }
         }
 
         pub fn entry(port: u16) -> String {
@@ -614,6 +650,10 @@ pub mod fake {
                     answer(String::new())
                 }
                 _ => {
+                    if let Some((reached, go)) = self.publish_holds.lock().take() {
+                        let _ = reached.send(());
+                        let _ = go.recv_timeout(std::time::Duration::from_secs(10));
+                    }
                     if let Some(said) = self.publish_fails.lock().clone() {
                         return Ran::Done { ok: false, stdout: String::new(), stderr: said };
                     }
