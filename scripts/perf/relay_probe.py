@@ -589,6 +589,7 @@ class Soak:
         self.log = log
         self.net = NetworkCheck()
         self.last_wake = 0.0  # monotonic time the machine last came back from sleep
+        self.wall, self.awake = time.time(), awake_seconds()
         self.up = set()
         self.pings = 0
         self.pongs = 0
@@ -597,19 +598,22 @@ class Soak:
     def after_sleep(self):
         return self.last_wake > 0 and time.monotonic() - self.last_wake < AFTER_SLEEP_GRACE_S
 
+    def check_sleep(self):
+        """Also called on every drop, because a socket can notice the wake before the next tick."""
+        now_wall, now_awake = time.time(), awake_seconds()
+        gap = now_wall - self.wall
+        slept = gap - (now_awake - self.awake)
+        if slept > SLEEP_MIN_S:
+            self.last_wake = time.monotonic()
+            self.log.write("sleep", slept_s=round(slept, 1))
+        elif gap > STALL_MIN_S:
+            self.log.write("stall", gap_s=round(gap, 1))
+        self.wall, self.awake = now_wall, now_awake
+
     async def watch_sleep(self):
-        wall, awake = time.time(), awake_seconds()
         while not self.stopping:
             await asyncio.sleep(SLEEP_TICK_S)
-            now_wall, now_awake = time.time(), awake_seconds()
-            gap = now_wall - wall
-            slept = gap - (now_awake - awake)
-            if slept > SLEEP_MIN_S:
-                self.last_wake = time.monotonic()
-                self.log.write("sleep", slept_s=round(slept, 1))
-            elif gap > STALL_MIN_S:
-                self.log.write("stall", gap_s=round(gap, 1))
-            wall, awake = now_wall, now_awake
+            self.check_sleep()
 
     async def hourly(self):
         while not self.stopping:
@@ -656,6 +660,7 @@ class Soak:
                 code, reason, clean, by = 1006, repr(error)[:120], False, "os_error"
                 ws.transport.abort()
             self.up.discard(index)
+            self.check_sleep()
             down_since = time.monotonic()
             held_s = down_since - opened
             self.log.write(
@@ -783,7 +788,14 @@ def soak_summary(log_dir):
 
     start = next((e for e in events if e["event"] == "start"), events[0])
     sockets = start.get("sockets", 20)
-    wall_s = at(events[-1]) - at(start)
+    # A restart appends to the same log; the time between runs was not measured.
+    wall_s = 0.0
+    run_began = at(events[0])
+    for previous, event in zip(events, events[1:]):
+        if event["event"] == "start":
+            wall_s += at(previous) - run_began
+            run_began = at(event)
+    wall_s += at(events[-1]) - run_began
     slept_s = sum(e["slept_s"] for e in events if e["event"] == "sleep")
     awake_s = max(0.0, wall_s - slept_s)
     socket_days = sockets * awake_s / 86400
@@ -810,6 +822,7 @@ def soak_summary(log_dir):
         "by": dict(collections.Counter(e["by"] for e in drops)),
         "reconnect_outage_ms": spread(outages),
         "first_frame_ms": spread([e["first_frame_ms"] for e in opens]),
+        "runs": sum(e["event"] == "start" for e in events),
         "stalls": sum(e["event"] == "stall" for e in events),
         "sleeps": sum(e["event"] == "sleep" for e in events),
         "log_capped": any(e["event"] == "log_capped" for e in events),
@@ -830,9 +843,9 @@ query($account: String!, $since: Time!, $until: Time!) {
       sum { requests errors subrequests cpuTimeUs }
     }
     invocations: durableObjectsInvocationsAdaptiveGroups(
-      filter: {datetime_geq: $since, datetime_leq: $until}, limit: 100
+      filter: {datetime_geq: $since, datetime_leq: $until}, limit: 5000
     ) {
-      dimensions { scriptName status type }
+      dimensions { objectId status type }
       sum { requests errors wallTime }
     }
     periodic: durableObjectsPeriodicGroups(
