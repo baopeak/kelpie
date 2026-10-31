@@ -736,6 +736,12 @@ impl Mobile {
         false
     }
 
+    /// Whether this connection may start a WebSocket now.
+    fn upgrade_admitted(&self, peer: &Peer) -> bool {
+        // Its own address first: what that refuses must cost the others nothing.
+        self.upgrade_allowed(peer.ip()) && (!peer.through_serve || self.serve_upgrade_allowed())
+    }
+
     /// Whether another upgrade may come through Tailscale Serve now, whoever it says it is.
     fn serve_upgrade_allowed(&self) -> bool {
         if take_token(&self.serve_upgrades, listen::BEHIND_SERVE, SERVE_UPGRADES_PER_SECOND, SERVE_UPGRADE_BURST) {
@@ -1776,7 +1782,7 @@ async fn link_socket(State(daemon): State<Arc<Daemon>>, axum::Extension(generati
     }
     let ts_origin = daemon.mobile.tailscale_origin();
     let peer = peer.with_headers(&headers, ts_origin.as_deref());
-    if (peer.through_serve && !daemon.mobile.serve_upgrade_allowed()) || !daemon.mobile.upgrade_allowed(peer.ip()) {
+    if !daemon.mobile.upgrade_admitted(&peer) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let browser = headers.contains_key(header::ORIGIN);
@@ -6414,12 +6420,15 @@ mod tests {
         let mut own = through_serve(&d, port, network.rig.phone.clone(), phone_at).await;
         own.reconnect().await.expect("the lockout does not outlast its minute");
 
-        // However many addresses it makes up, the listener as a whole has its budget, and a flood of made-up addresses cannot flush it.
+        // Spent, the listener's budget stays spent through a flood of made-up addresses, which empties the table of those.
+        while d.mobile.serve_upgrade_allowed() {}
+        let began = Instant::now();
         for i in 0..(LIMITER_ADDRESSES + 5) {
             d.mobile.upgrade_allowed(IpAddr::from([100, 64, (i / 256) as u8, (i % 256) as u8]));
         }
-        let granted = (0..200).filter(|_| d.mobile.serve_upgrade_allowed()).count();
-        assert!((1..=(SERVE_UPGRADE_BURST as usize + 5)).contains(&granted), "{granted}");
+        let granted = (0..200).filter(|_| d.mobile.serve_upgrade_allowed()).count() as f64;
+        // What it earned back in that time, and no fresh budget of 40.
+        assert!(granted <= began.elapsed().as_secs_f64() * SERVE_UPGRADES_PER_SECOND + 1.0, "{granted} in {:?}", began.elapsed());
         use tokio::io::AsyncWriteExt;
         let mut refused = false;
         for i in 0..20 {
@@ -6432,6 +6441,29 @@ mod tests {
             }
         }
         assert!(refused, "past the listener's budget a new address changes nothing");
+    }
+
+    /// One address over its own limit spends nothing of what the other phones share: real serve gives a tailnet device one address, so it cannot empty the budget.
+    #[tokio::test]
+    async fn an_upgrade_refused_for_its_address_costs_the_others_nothing() {
+        let network = NetworkRig::new().await;
+        let m = &network.rig.daemon.mobile;
+        let peer = |ip: &str| Peer::behind_serve("127.0.0.1:50000".parse().unwrap()).with_headers(&{
+            let mut h = HeaderMap::new();
+            h.insert("x-forwarded-for", ip.parse().unwrap());
+            h
+        }, None);
+        let noisy = peer("100.101.102.103");
+        let let_in = (0..500).filter(|_| m.upgrade_admitted(&noisy)).count();
+        assert!(let_in <= UPGRADE_BURST as usize + 2, "held to its address's limit: {let_in}");
+        let spent = (0..100).filter(|_| m.serve_upgrade_allowed()).count();
+        assert!(spent as f64 >= SERVE_UPGRADE_BURST - let_in as f64 - 1.0, "the refused ones took nothing: {spent} left after {let_in} let in");
+        // And a phone at another address is let in, while the noisy one keeps being refused.
+        for _ in 0..50 {
+            m.upgrade_admitted(&noisy);
+        }
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(m.upgrade_admitted(&peer("100.101.102.104")), "a token earned back goes to the phone");
     }
 
     /// A plain pairing secret while the mode is on.
