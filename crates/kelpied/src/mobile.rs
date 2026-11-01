@@ -7242,7 +7242,7 @@ mod tests {
         assert_eq!(m.config.lock().devices[0].push.as_ref().unwrap().origin.as_deref(), Some(here.as_str()));
         let held = m.config.lock().devices[0].push.clone();
         for bad in [format!("https://{}", network.addr), format!("http://{}:1", network.addr.ip()), "https://evil.example".to_string(), "http://192.168.1.5:4817".to_string(), format!("{here}/"), format!("{here}/x")] {
-            let refused = m.push_subscribe("phone", &subscribe(&bad)).map(|_| ()).err().expect("refused");
+            let Err(refused) = m.push_subscribe("phone", &subscribe(&bad)) else { panic!("taken: {bad}") };
             assert_eq!(refused.code, "bad_origin", "{bad}");
             assert!(!refused.message.contains(&bad));
         }
