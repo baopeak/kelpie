@@ -26,12 +26,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::http::{header, HeaderMap};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
 use super::lanes::SLOW_AFTER;
 use super::store::Kind;
-use super::{Generation, HandshakeSlot, KeyLookup, CLOSE_TIMEOUT, CODE_TTL, NOT_PAIRED, RECONNECT, UNCONFIRMED};
+use super::{listen, Generation, HandshakeSlot, KeyLookup, CLOSE_TIMEOUT, CODE_TTL, NOT_PAIRED, RECONNECT, UNCONFIRMED};
 use crate::session::now_millis as now;
 use crate::daemon::Daemon;
 
@@ -45,13 +46,60 @@ pub const BUSY: u16 = 4503;
 #[derive(Clone, Copy, Debug)]
 pub struct Peer {
     pub addr: SocketAddr,
+    /// The phone reached us over HTTPS: this listener's own, or Tailscale Serve's in front of the loopback listener.
     pub tls: bool,
+    /// Accepted by the loopback listener Tailscale Serve forwards to.
+    pub through_serve: bool,
+    /// Who is calling through serve, from the header serve sets.
+    pub client: Option<IpAddr>,
+    /// A page whose origin is this computer's HTTPS origin. A program on this machine can claim it through the loopback listener, and then still needs the
+    /// pairing secret and the person, so it records how a person paired, and is no proof against that program.
+    pub secure_origin: bool,
 }
 
 impl Peer {
-    pub fn ip(&self) -> IpAddr {
-        self.addr.ip().to_canonical()
+    /// A connection accepted directly from the network (`tls`: by a listener with a certificate).
+    pub fn direct(addr: SocketAddr, tls: bool) -> Peer {
+        Peer { addr, tls, through_serve: false, client: None, secure_origin: false }
     }
+
+    /// A connection accepted by the loopback listener behind Tailscale Serve.
+    pub fn behind_serve(addr: SocketAddr) -> Peer {
+        Peer { addr, tls: true, through_serve: true, client: None, secure_origin: false }
+    }
+
+    /// The address the limits and the desktop go by. Never this machine for what comes through serve: every phone behind it
+    /// would look local and be held to no limit. Serve's traffic with no word of who sent it shares one bucket.
+    pub fn ip(&self) -> IpAddr {
+        if self.through_serve {
+            self.client.unwrap_or(listen::BEHIND_SERVE)
+        } else {
+            self.addr.ip().to_canonical()
+        }
+    }
+
+    /// With what the upgrade's headers say, `ts_origin` being the origin Tailscale publishes now. `X-Forwarded-For` counts on the loopback listener alone:
+    /// anywhere else anyone can send it. There it is as good as the programs on this machine, which can connect to that port and say what they like: that buys
+    /// them another limiter bucket, and no session.
+    pub fn with_headers(mut self, headers: &HeaderMap, ts_origin: Option<&str>) -> Peer {
+        let origin = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok());
+        if self.through_serve {
+            self.client = forwarded_client(headers);
+            self.secure_origin = ts_origin.is_some_and(|ts| origin.and_then(|o| o.strip_prefix("https://")) == Some(ts));
+        } else {
+            self.secure_origin = self.tls && origin.is_some_and(|o| o.starts_with("https://"));
+        }
+        self
+    }
+}
+
+/// The address serve put in `X-Forwarded-For`: the last one, nearest to us, and only a Tailscale address, which is all a tailnet peer
+/// can be. Should serve ever pass on what a phone sent, the worst a phone can do is pick another tailnet address, not pass for this machine.
+fn forwarded_client(headers: &HeaderMap) -> Option<IpAddr> {
+    let last = headers.get_all("x-forwarded-for").iter().next_back()?.to_str().ok()?;
+    let ip: IpAddr = last.rsplit(',').next()?.trim().parse().ok()?;
+    let ip = ip.to_canonical();
+    listen::tailscale(ip).then_some(ip)
 }
 
 /// A WebSocket with an established kelpie-link session.
@@ -214,8 +262,9 @@ pub fn held_silently(daemon: &Daemon, ip: IpAddr) {
 /// A failed pairing or handshake from `ip`; the desktop hears when the address is locked out.
 fn failed(daemon: &Daemon, ip: IpAddr) {
     if daemon.mobile.pairing_failed(ip) {
-        daemon.broadcast("mobile.lockout", json!({"reason": "attempts", "address": ip.to_string()}));
-        daemon.mobile.audit("-", "lockout", &format!("too many failed attempts from {ip}"));
+        let who = listen::shown(ip);
+        daemon.broadcast("mobile.lockout", json!({"reason": "attempts", "address": who}));
+        daemon.mobile.audit("-", "lockout", &format!("too many failed attempts from {who}"));
     }
 }
 
@@ -269,8 +318,8 @@ async fn pair(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Generation
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     let fingerprint = super::fingerprint(&remote);
-    m.add_pending(&id, &name, kind, remote, wire.session.pair_code(), want, peer.ip(), tx);
-    daemon.broadcast("mobile.pair_request", json!({"id": id, "name": name, "kind": kind.name(), "fingerprint": fingerprint, "want": want.name(), "address": peer.ip().to_string()}));
+    m.add_pending(&id, &name, kind, remote, wire.session.pair_code(), want, peer.ip(), peer.secure_origin, tx);
+    daemon.broadcast("mobile.pair_request", json!({"id": id, "name": name, "kind": kind.name(), "fingerprint": fingerprint, "want": want.name(), "address": listen::shown(peer.ip())}));
     // The person types the phone's code on the desktop. Meanwhile the phone may only wait (or go away).
     let decision = tokio::select! {
         biased;

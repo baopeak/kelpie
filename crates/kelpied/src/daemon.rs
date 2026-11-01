@@ -184,6 +184,14 @@ fn handle_of(params: &Value) -> Result<u32> {
     param(params, "handle")?.as_u64().map(|h| h as u32).ok_or_else(|| anyhow!("bad handle"))
 }
 
+/// The reply to a request answered later.
+fn rpc_answer(id: &Value, result: Result<Value>) -> Value {
+    match result {
+        Ok(v) => json!({"id": id, "result": v}),
+        Err(e) => json!({"id": id, "error": {"message": format!("{e:#}")}}),
+    }
+}
+
 impl Daemon {
     pub fn new(data_dir: PathBuf, exe: PathBuf) -> Arc<Daemon> {
         Self::with_secrets(data_dir, exe, Arc::new(notify::Keyring))
@@ -1686,6 +1694,7 @@ impl Daemon {
                     self.mobile.audit("-", "phone_access_off", "turned off");
                 }
                 self.mobile.disable();
+                crate::mobile::tailscale::remove_after_off(self);
                 // Nobody is let in any more: what phones had waiting is not written.
                 for e in self.sessions.read().values() {
                     if let Entry::Chat(c) = e {
@@ -1696,7 +1705,43 @@ impl Daemon {
                 self.mobile.unsaved(crate::mobile::NOT_SAVED_OFF)?;
                 json!(true)
             }
-            "mobile.pair_start" => self.mobile.pair_start()?,
+            "mobile.pair_start" => self.mobile.pair_start(params.get("plain").and_then(Value::as_bool) == Some(true))?,
+            // Runs the Tailscale CLI, so never on this thread. Only when someone asks: Settings → Mobile, open.
+            "mobile.tailscale_status" => {
+                let (me, tx, id) = (self.clone(), tx.clone(), id.clone());
+                tokio::spawn(async move {
+                    let _ = tx.send(json_out(&rpc_answer(&id, crate::mobile::tailscale::status(me).await)));
+                });
+                return Ok(None);
+            }
+            // The verified app only (`auth::APP_ONLY`). Turning it off takes access away and asks nobody. Turning it on is checked first, with
+            // no prompt (a port someone else uses, Tailscale not ready), then the person verifies, and only then is anything published.
+            "mobile.set_tailscale" => {
+                if !self.is_verified_app(client) {
+                    bail!("this needs the Kelpie app: phone access is decided in Kelpie → Settings → Mobile");
+                }
+                let on = param(&params, "on")?.as_bool().ok_or_else(|| anyhow!("on must be true or false"))?;
+                let (me, tx, id) = (self.clone(), tx.clone(), id.clone());
+                tokio::spawn(async move {
+                    use crate::mobile::tailscale;
+                    let answer = |r: Result<Value>| {
+                        let _ = tx.send(json_out(&rpc_answer(&id, r)));
+                    };
+                    if !on {
+                        return answer(tailscale::turn_off(me).await);
+                    }
+                    let asked_at = match tailscale::check_can_turn_on(&me).await {
+                        Ok(at) => at,
+                        Err(e) => return answer(Err(e)),
+                    };
+                    let runtime = tokio::runtime::Handle::current();
+                    let asked = me.after_verifying(client, &tx, &id, &params, crate::user_presence::Prompt::Tailscale, move |me| runtime.block_on(tailscale::turn_on(me.clone(), asked_at)));
+                    if let Err(e) = asked {
+                        answer(Err(e));
+                    }
+                });
+                return Ok(None);
+            }
             // The verified app only (`auth::APP_ONLY`). Declining needs nothing more. Allowing is checked first, with no prompt
             // (a wrong code counts, and is answered at once), then the person verifies, and only then is the device added.
             "mobile.approve" => {
@@ -1754,6 +1799,7 @@ impl Daemon {
             // connection of the user may ask, with no verification.
             "mobile.revoke_all" => {
                 let events = self.mobile.revoke_all();
+                crate::mobile::tailscale::remove_after_off(self);
                 for e in self.sessions.read().values() {
                     if let Entry::Chat(c) = e {
                         c.drop_phones("revoked");
@@ -1794,6 +1840,7 @@ impl Daemon {
             "mobile.reset" => {
                 self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::Reset, |me| {
                     let events = me.mobile.reset();
+                    crate::mobile::tailscale::remove_after_off(me);
                     for e in me.sessions.read().values() {
                         if let Entry::Chat(c) = e {
                             c.drop_phones("revoked");

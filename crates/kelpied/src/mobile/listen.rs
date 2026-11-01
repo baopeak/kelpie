@@ -19,6 +19,18 @@ const POLL: Duration = Duration::from_secs(5);
 /// Changes come in bursts (an adapter going down and up): act once they settle.
 const SETTLE: Duration = Duration::from_secs(2);
 
+/// The one address the limits know for what comes through Tailscale Serve with no word of who sent it. Nothing can really call from it, and it is not loopback.
+pub const BEHIND_SERVE: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+
+/// An address as the person reads it.
+pub fn shown(ip: IpAddr) -> String {
+    if ip == BEHIND_SERVE {
+        "Tailscale".into()
+    } else {
+        ip.to_string()
+    }
+}
+
 /// Tailscale's IPv4 range, 100.64.0.0/10.
 pub fn tailscale_v4(ip: Ipv4Addr) -> bool {
     let o = ip.octets();

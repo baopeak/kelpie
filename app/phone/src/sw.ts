@@ -21,6 +21,8 @@ interface Scope {
 declare const __PRECACHE__: string[];
 declare const __VERSION__: string;
 
+export {};
+
 const sw = self as unknown as Scope;
 const CACHE = `kelpie-phone-${__VERSION__}`;
 /** How long a page request waits for the computer before the kept shell is used instead. */
@@ -56,7 +58,13 @@ sw.addEventListener("fetch", (e) => {
   if (url.pathname === "/link" || url.pathname === "/manifest.webmanifest") return;
   if (req.mode === "navigate") {
     e.respondWith(
-      withTimeout(fetch(req), NAVIGATION_WAIT_MS).catch(async () => (await caches.open(CACHE).then((c) => c.match("/"))) ?? fetch(req)),
+      // A 5xx is Tailscale answering for a computer whose Kelpie does not: the kept shell says that better than its error page.
+      withTimeout(fetch(req), NAVIGATION_WAIT_MS)
+        .then((r) => {
+          if (r.status >= 500) throw new Error("no answer");
+          return r;
+        })
+        .catch(async () => (await caches.open(CACHE).then((c) => c.match("/"))) ?? fetch(req)),
     );
     return;
   }

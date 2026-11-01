@@ -109,7 +109,7 @@ Numbers are stable names, not an order (no rename: other phases and reports refe
 | 2 | [Phone client app (SolidJS, PWA)](phase-02-phone-client-app.md) | P1 | 7d | 1 | | done |
 | 2b | [Send chat messages from the phone (single writer)](phase-02b-phone-chat-send.md) | P1 | 6d | 2 | 21 | done |
 | 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) (+ 2026-10-30 extras) | P1 | 7d | 2; 2b for chat-write verbs | 22 | committed; merge blocked, see Execution state |
-| 3a | [Tailscale mode: detection, HTTPS origin, guided PWA install](phase-03a-tailscale-https.md) | P1 | 4d | 3 | 23 | pending |
+| 3a | [Tailscale mode: detection, HTTPS origin, guided PWA install](phase-03a-tailscale-https.md) | P1 | 4d | 3 | 23 | code on `phone/phase3a-tailscale`; desktop half verified on a real tailnet, real phones pending |
 | 3b | [Web Push sent directly by kelpied](phase-03b-web-push.md) | P1 | 4d | 3a, roadmap phase 12 | 24 | pending |
 | 3c | [App lock (WebAuthn) and daemon risk labels](phase-03c-app-lock.md) | P1 | 6d | 3a | 25 + security level 3 | pending |
 | 3d | [Settings → Mobile: plain-language switches](phase-03d-mobile-settings-toggles.md) | P1 | 2d | 3a, 3b, 3c | none expected | pending |

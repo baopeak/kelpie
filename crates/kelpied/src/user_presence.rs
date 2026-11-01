@@ -98,6 +98,7 @@ pub struct Unverified {
 pub enum Prompt {
     Pair { name: String, key: String, permission: Permission },
     Raise { name: String, permission: Permission },
+    Tailscale,
     Reset,
     /// Keep unused phones paired for this many days (0: for ever).
     KeepUnused { days: u32 },
@@ -136,6 +137,8 @@ impl Prompt {
             (Prompt::Pair { name, key, permission }, Lang::Vi) => format!("Kelpie: cho phép điện thoại {} (khóa {key}) {} trên máy tính này.", quoted(name), may(*permission)),
             (Prompt::Raise { name, permission }, Lang::En) => format!("Kelpie: allow the phone {} to {} on this computer.", quoted(name), may(*permission)),
             (Prompt::Raise { name, permission }, Lang::Vi) => format!("Kelpie: cho phép điện thoại {} {} trên máy tính này.", quoted(name), may(*permission)),
+            (Prompt::Tailscale, Lang::En) => "Kelpie: publish the phone page of this computer on your Tailscale network, so that paired phones can reach it there.".to_string(),
+            (Prompt::Tailscale, Lang::Vi) => "Kelpie: công bố trang điện thoại của máy tính này trên mạng Tailscale của bạn, để các điện thoại đã ghép đôi kết nối được qua đó.".to_string(),
             (Prompt::Reset, Lang::En) => "Kelpie: reset phone access. Every paired phone is removed and the pairing keys are replaced.".to_string(),
             (Prompt::Reset, Lang::Vi) => "Kelpie: đặt lại truy cập từ điện thoại. Mọi điện thoại đã ghép đôi sẽ bị gỡ và các khóa ghép đôi được thay mới.".to_string(),
             (Prompt::KeepUnused { days: 0 }, Lang::En) => "Kelpie: keep phones that are not used paired for ever.".to_string(),
@@ -940,6 +943,7 @@ mod tests {
         let prompts = [
             Prompt::Pair { name: "Pixel".into(), key: "AAAA BBBB".into(), permission: Permission::Write },
             Prompt::Raise { name: "Pixel".into(), permission: Permission::Control },
+            Prompt::Tailscale,
             Prompt::Reset,
             Prompt::KeepUnused { days: 0 },
             Prompt::KeepUnused { days: 120 },
@@ -956,7 +960,7 @@ mod tests {
             assert!(text.contains("\u{201C}Pixel\u{201D}") && text.contains("AAAA BBBB"), "the name in its quotes and the key stay: {text}");
         }
         assert!(en.contains("type into them") && vi.contains("gõ"));
-        assert!(prompts[4].text(Lang::Vi).contains("120") && prompts[4].text(Lang::En).contains("120"));
+        assert!(prompts[5].text(Lang::Vi).contains("120") && prompts[5].text(Lang::En).contains("120"));
         for (code, lang) in [(Some("vi"), Lang::Vi), (Some("VI"), Lang::Vi), (Some("vi-VN"), Lang::Vi), (Some("en"), Lang::En), (Some("fr"), Lang::En), (Some("vietnam"), Lang::En), (Some(""), Lang::En), (None, Lang::En)] {
             assert_eq!(Lang::from_code(code), lang, "{code:?}");
         }

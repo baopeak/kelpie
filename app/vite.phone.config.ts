@@ -31,7 +31,7 @@ function serviceWorker(): Plugin {
     name: "phone-service-worker",
     generateBundle(_, bundle) {
       const files = Object.keys(bundle).filter((f) => f !== "sw.js" && !f.endsWith(".map")).map((f) => `/${f}`);
-      const shell = ["/", "/icon.svg", ...files.filter((f) => f !== "/index.html")];
+      const shell = ["/", "/icon.svg", "/icon-192.png", ...files.filter((f) => f !== "/index.html")];
       const version = createHash("sha256").update(shell.join("\n")).digest("hex").slice(0, 10);
       const sw = bundle["sw.js"];
       if (sw?.type !== "chunk") throw new Error("the service worker entry was not built");

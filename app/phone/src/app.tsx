@@ -4,7 +4,8 @@ import { createSignal, For, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
 import { Inbox } from "./inbox";
 import { localeSetting, setLocale, t, type LocaleSetting } from "./i18n";
-import { closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, sessions } from "./phone-state";
+import { closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, sessions, setPairing } from "./phone-state";
+import { InstallGuide, ScanCode, screenNow } from "./install-guide";
 import { labelOf, needsCount } from "./inbox-order";
 import { SessionView } from "./session-view";
 import { setTheme, theme, type ThemeSetting } from "./theme";
@@ -15,6 +16,18 @@ function guessName(): string {
   if (/iPad/.test(ua)) return "iPad";
   if (/Android/.test(ua)) return t("Android phone");
   return t("Browser");
+}
+
+/** What a page that is not paired shows: installing first on a secure origin, then the code, then naming this device. */
+function NotPaired() {
+  const screen = () => screenNow(paired(), !!pairing());
+  return (
+    <Show when={screen() !== "install"} fallback={<InstallGuide />}>
+      <Show when={screen() !== "scan"} fallback={<ScanCode done={setPairing} message={notPairedMessage()} />}>
+        <Pairing />
+      </Show>
+    </Show>
+  );
 }
 
 function Pairing() {
@@ -91,6 +104,12 @@ function SecurityBanner() {
       <Show when={plainHttpOrigin() || device()?.capped}>
         <div class="banner warn" role="status" data-banner="plain-http">{t("Plain HTTP: someone on this network could swap this page, so it can only read here. Open it over HTTPS or Tailscale to type.")}</div>
       </Show>
+      <Show when={movedHost()}>
+        <div class="banner" role="status" data-banner="moved">
+          {t("This computer can be reached at {host}. A browser keeps its pairing per address, so this device must be paired again there.", { host: movedHost()! })}
+          <div class="actions"><a class="btn" href={`https://${movedHost()}/`}>{t("Open it")}</a></div>
+        </div>
+      </Show>
       <Show when={deviceNews()}><div class="banner" role="status" data-banner="device-news">{deviceNews()}</div></Show>
     </>
   );
@@ -148,7 +167,7 @@ export function App() {
       <StateBanner />
       <SecurityBanner />
       <main id="view">
-        <Show when={paired()} fallback={<Pairing />}>
+        <Show when={paired()} fallback={<NotPaired />}>
           <Show when={openId()} keyed fallback={<Inbox />}>{(id) => <SessionView id={id} />}</Show>
         </Show>
       </main>

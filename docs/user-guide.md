@@ -926,7 +926,7 @@ default) turns it off for that host. Kelpie's sessions are named `kelpie-…` on
 
 Settings → Mobile turns on a small web app for your phone on your network (off by default;
 port 4817; choose a private or Tailscale address — never every interface; HTTPS with your own
-certificate, e.g. from `tailscale cert`). **Pair a browser on this network** shows a QR code valid
+certificate, e.g. from `tailscale cert`, or from Tailscale itself as described below). **Pair a browser on this network** shows a QR code valid
 for two minutes; scan it, name the phone, and type the six digits it shows into Kelpie. Windows then
 asks you to confirm with Windows Hello or your password (Touch ID or your password on a Mac). Read
 that prompt: it names the phone and what it would be allowed to do. While it is up Kelpie's window
@@ -942,6 +942,33 @@ lowering a permission and removing a phone do not. If you refuse three prompts i
 or leave three unanswered in 20, Kelpie stops asking for five minutes: if you did not start them, use
 *Turn off phone access and revoke all*. A prompt you leave open for nearly five minutes stops counting, and
 while its dialog is still on screen Kelpie asks you to close it before showing another.
+
+**Reaching this computer from anywhere, with Tailscale.** If you use [Tailscale](https://tailscale.com) on
+both the computer and the phone, turn on *Reach this computer with Tailscale* in Settings → Mobile. Kelpie then
+publishes the phone page at `https://<machine>.<tailnet>.ts.net:8443` with `tailscale serve`, which only your
+own Tailscale devices can reach: there is no Kelpie server and no Kelpie account. It asks you to confirm first, as above. Settings says
+exactly what to do if Tailscale is missing, stopped, not signed in, or your tailnet has no HTTPS certificates
+(turn on MagicDNS and HTTPS in the DNS page of the Tailscale admin console). If something else already uses port 8443
+of `tailscale serve`, Kelpie says so and leaves it alone; turning this off removes only Kelpie's own entry.
+
+Pairing then takes two steps. *Pair a phone over Tailscale* shows **Step 1: Install**, a code with no secret: scan
+it with the phone's camera and install the app from the page that opens (Share → Add to Home Screen on an
+iPhone, the Install button or the browser's menu on Android). The very first visit can take up to a minute while Tailscale gets its
+certificate. **Step 2: Pair** shows the pairing code: open Kelpie from the
+Home Screen, press *Scan the code* (or paste the link, if the camera cannot be used), and type the six digits on
+the computer. A browser keeps its pairing per address, so a phone paired over plain HTTP stays paired there, read-only, and must
+be paired again to type over Tailscale. If the phone says *Turn on Tailscale*, it failed to reach this address at once. Tailscale being off on the phone is the likely reason (an iPhone allows one
+VPN at a time), but it may also show when this mode or phone access is off on the computer, so check both; the app still opens and shows what it last saw. While this is on, links in notifications open at the Tailscale address, so a phone paired only over plain HTTP
+cannot use them.
+
+What to know: **use this only on a computer with one user account.** The Tailscale entry stays while Kelpie is not running, so another user account on the same computer
+could take its place, answer your phone at the trusted address, read this phone's Kelpie key and later use it. A program on your computer, or a device on your tailnet, can also keep
+phones from connecting for as long as it keeps trying, with no key and no access to anything. **Your computer's name goes into public certificate logs** when Tailscale gets its certificate, and that
+cannot be undone. Tailscale sees which devices connect and when, not what they say, which is end-to-end encrypted
+inside the connection. [Tailnet Lock](https://tailscale.com/kb/1226/tailnet-lock) protects you from a device key handed out without your approval. The free
+Tailscale plan is for non-commercial use. Turning phone access off, the kill switch and a reset all end this mode and
+remove the entry; turning phone access on again does not bring it back until you turn it on and confirm. If Tailscale is stopped at that moment, Settings says the entry is
+still there. Kelpie tries again when you open Settings → Mobile or press *Check again*, and when it next starts; nothing runs in the background to retry while phone access is off.
 
 The phone lists every session grouped by *Needs you / Working / Idle / Stopped*, buzzes when one
 starts needing you, shows a session's screen and — if you allow that device to type — sends replies
@@ -959,7 +986,9 @@ answering it. It may have been removed there, phone access may have been reset, 
 network may be interfering, or the answer may not have come from your computer. The phone keeps its pairing and tries again by itself. If it was
 removed on purpose, tap *Forget this device*, then pair again. A phone only forgets its pairing by
 itself when your computer tells it so over the encrypted connection. *Turn off phone access and
-revoke all* removes every phone.
+revoke all* removes every phone and cuts access at once, connected or not. A phone connected at that moment
+is told, and wipes its key and everything it kept. One that is not connected cannot be told: its key no longer opens anything, but it
+keeps what it already shows, for anyone who can open the app on it, until you tap *Forget this device* there. Once phone access is back on it says *Not paired here*.
 
 Kelpie's check stops a program that merely holds your account's Kelpie token from adding a phone. It
 does not stop a program determined to get around it: your account's programs can read the keys in

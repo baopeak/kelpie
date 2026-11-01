@@ -1,13 +1,59 @@
 ---
 phase: 3a
 title: "Tailscale mode: detection, HTTPS origin, guided PWA install"
-status: pending
+status: in-progress
 priority: P1
 effort: "4d"
 dependencies: [3]
 ---
 
 # Phase 3a: Tailscale mode
+
+## State of this phase — 2026-11-01
+Code, unit tests and an e2e run against a fake CLI are done on `phone/phase3a-tailscale`. The desktop half of the spike ran on the owner's real tailnet, after they enabled HTTPS. **The kill rule is not triggered: `tailscale serve` is the path.** Nothing has run on a real phone yet. `scripts/e2e/mobile.py` covers the install step, the paste fallback, a secure origin typing and this mode's Settings in the real app.
+
+### Verified on the real tailnet (Tailscale 1.98.10, Windows 10, 2026-11-01)
+An isolated debug daemon using the real CLI, a Python client on the same machine standing in for the phone, through `https://<fqdn>:8443`. Its traffic comes from this machine's own Tailscale address, so it took the tailnet path but no phone's network.
+
+| Question | Result |
+|---|---|
+| **Serve from a normal-user daemon on Windows** | Allowed, no elevation. `mobile.set_tailscale {on}` took 2.16 s in all, within the 5 s limit per CLI call. |
+| **Certificate** | Let's Encrypt, TLS 1.3, validated by the system's trust store. `serve --bg` returns at once; the certificate comes on the **first request, which took 38.13 s**. Later requests take about 0.1 s. Settings says so at Step 1. |
+| **WebSocket through serve** | Passes: upgrade and handshake 0.70 s, pairing completed, a session ran, and the socket still carried a message after 25 s idle. |
+| **`Host`** | Forwarded as `<fqdn>:8443`: `same_origin` passes with the page's `Origin`, and another site's `Origin` gets 403 through serve. |
+| **`X-Forwarded-For`** | Serve **replaces** it. The client sent `100.99.99.99` and the daemon saw the machine's real Tailscale address, so a phone cannot choose its limiter bucket through serve. A program on this machine connecting to the port directly can, within a budget for the whole listener: see Resilience. The shared bucket stays as the fallback. |
+| **Serve entry's JSON** | `{"TCP":{"8443":{"HTTPS":true}},"Web":{"<fqdn>:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:<port>"}}}}}`, exactly what `parse_serve` and its fixtures expect. Nothing served prints `{}`. |
+| **Off** | `serve --https=8443 off` restored `{}` both runs, compared with what was first read. |
+| **Daemon killed behind the entry** | Serve answers **502** in 0.08 s with an empty body, and the entry is unchanged. A new daemon takes it up in about a second with no serve command, and the page answers again. |
+| **Entry removed by hand** | Told as `missing`, not put back; the verified call restores the same entry on the same port. |
+| **Does `serve status` hang?** | **Not reproduced**: 0.04 to 0.68 s over about 25 calls. A coordinator's pipeline had not returned after 45 s just after HTTPS was enabled, cause unknown. If it does hang, each call is killed at 5 s (`a_program_past_its_time_is_killed_and_holds_nothing_up`); the person then reads "could not read what Tailscale Serve is doing", and turning on changes nothing. |
+
+### Not yet verified
+Each still fails closed or falls back as described. Only a person with real phones can settle the first group.
+
+| Unverified | Code assumes | If wrong |
+|---|---|---|
+| **All of the above from a real phone, over 4G** | Same as from this machine | See the Success Criteria below. |
+| **iOS storage, tab vs installed** | Separate, so install comes first | If shared, the install step is needless but harmless. |
+| **Camera in standalone on iOS** | `getUserMedia` works | Falls to paste, which is always offered. |
+| **`qr-decode.ts` on a real camera** | Synthetic frames only: noise, tilt, shadow, glare. Reads a 69-module code up to a tilt of about 0.12, and fails at some angles past 0.15 | Paste. Tune `binarize` and the finder tolerance. |
+| **Off-tailnet tell** (`no_tailnet`: a `*.ts.net` name failing within 1.5 s) | The name does not resolve with Tailscale off; a computer that is off makes the phone wait | The label is wrong the other way; the text covers both. Does not change what the phone may do. |
+| **`isSecureContext`, install prompt, icons on real phones** | As documented | See the Success Criteria below. |
+| **macOS** | Same CLI at its fixed path | Refusal, or `DENIED` shown. |
+| **Certificate auto-renewal** | tailscaled renews; this one runs to 2027-01-29 | HTTPS lapses. Tailscale's to fix; kill rule if it does not. |
+| **`serve --bg` on a tailnet where Serve is not enabled** | Fails or blocks | A block is killed at 5 s and reads as `NOT_PUBLISHED`. Not seen: this tailnet allowed it. |
+| **A MagicDNS rename** | Serve keeps entries by name, so the new name gets no answer and `off` may not find the old entry. Not tried: renaming the machine was ruled out, and no other way settles it | Such an entry is `renamed`: no origin is advertised and Restore publishes under the new name. If `off` cannot find the old one it stays beside the new: Settings reports `left_behind`, Kelpie keeps its port and keeps trying, and it must be removed with Tailscale's own tools. If serve does answer the new name, Restore is an extra click and nothing worse. |
+
+### Owner's decisions, 2026-11-01
+- **Turning phone access off ends Tailscale mode and removes the entry, and turning it back on needs verification again:** accepted as built.
+- **A machine with more than one OS user:** this machine has one OS user, the owner, so no further guard is needed. The limit stays documented as it is (`docs/architecture.md`, "Limit: a machine with more than one OS user").
+
+### Choices the spec left open
+- **Phone access off ends the mode.** `mobile.disable`, `revoke_all` and `reset` set it off and remove the entry. `mobile.enable` is open to the plain user token, and the plan's criteria say such a program cannot enable Tailscale mode; keeping the mode across a disable would let it.
+- **A daemon that starts again never republishes**, so a by-hand removal holds until the person restores it. If its loopback port was taken, it removes its entry, which would lead to that program.
+- **`X-Forwarded-For` counts only when it is a Tailscale address**, and the rightmost value. Serve replaces it, so this guards only against that changing.
+- **`secure_origin` has a second tag** rather than a field in the first MAC, so that the record still verifies for an older daemon (the rollback note below) and setting it in the file does not.
+- **The scanner is a decoder of our own**, loaded only without `BarcodeDetector` (4.0 KB gzip): jsQR is about 60 KB gzip unminified against a limit of 15.
 
 ## Overview
 Gives the phone client a trusted HTTPS origin that works away from home, which Web Push (3b) and WebAuthn (3c) both need: Kelpie detects Tailscale, publishes the phone page at `https://<machine>.<tailnet>.ts.net:8443` with `tailscale serve`, and puts that address in the QR. Plain LAN stays as it is. Off by default. No Kelpie server, no account of ours.
@@ -45,8 +91,10 @@ Plain LAN and manual cert/key fields (`mobile-settings.tsx`) keep working. Devic
 
 ## Resilience requirements
 - tailscaled down or logged out while on: state shown, retried on `listen::changed` and on opening Settings, never in a tight loop. Sessions unaffected.
-- Daemon crash leaves the serve entry behind: harmless 502 from tailscaled; re-checked at start; toggle-off still removes it. An isolated test daemon never issues `serve` (see Tests).
+- Daemon crash leaves the serve entry behind: a 502 from tailscaled **while nobody holds the port**; re-checked at start; toggle-off still removes it. An isolated test daemon never issues `serve` (see Tests).
+- **That is not harmless on a machine with more than one OS user:** during that window another local user can bind the port and answer at the phone's trusted origin, read the phone's key from IndexedDB and later use it. Same-user programs are out of scope (`auth.rs`). Accepted by the owner, documented, with no further guard: see `docs/architecture.md`, "Limit: a machine with more than one OS user". A program on this machine can also name any address through the listener. It gets no session, but for as long as it runs it can keep phones from connecting: by keeping the listener's budget spent, by holding the four handshake places of a phone's address, or by renewing that address's lockout about every 6 s. Several tailnet devices together can spend the budget too; one cannot. Accepted for now since none of it gives access; "same-user code is out of scope" covers only same-user code, so for another OS user this falls under the same decision. Several tailnet devices together were not decided separately.
 - Serve entry removed by hand: detected on the next check, shown, one-click restore.
+- An entry Tailscale will not remove when the mode ends: kept in the store, shown even with phone access off, removed the next time Tailscale is looked at or phone access or the daemon starts.
 - MagicDNS rename changes the origin: `addrs` tells the phone, which offers re-pairing.
 - The loopback listener follows the same `Generation` stop as the others. Load levels and heartbeats unchanged.
 
