@@ -903,6 +903,16 @@ for n in (1, 2, 3):
         run.check("…opened with the browser's keys it holds no text of the session and links to it", b"alert-secret-name" not in plain and note.get("title") == "Kelpie" and note.get("navigate", "").endswith(f"#s={shell_alert['id']}&a=1"), plain.decode()[:200])
         run.check("…and on the wire it is ciphertext", taken is not None and b"alert-secret-name" not in taken["body"] and b"navigate" not in taken["body"])
         delivered = False
+        # What the worker does with it, from inside: whether the push reached its handler, and what became of `showNotification`.
+        sw_cdp = Cdp(phone.debugger, "service_worker", origin) if registration is not None else None
+        if sw_cdp:
+            sw_cdp.call("Runtime.evaluate", {"expression": """(() => {
+                const seen = (self.__seen = {pushes: 0, shown: [], failed: []});
+                self.addEventListener("push", () => void seen.pushes++);
+                const real = self.registration.showNotification.bind(self.registration);
+                self.registration.showNotification = (title, options) => real(title, options).then(() => void seen.shown.push({title, tag: options.tag}), (e) => { seen.failed.push(String(e)); throw e; });
+            })()"""})
+        worker_saw = lambda: json.loads(sw_cdp.call("Runtime.evaluate", {"expression": "JSON.stringify(self.__seen ?? null)", "returnByValue": True})["result"]["value"] or "null")  # noqa: E731
         if registration is not None:
             try:
                 page_cdp.call("ServiceWorker.deliverPushMessage", {"origin": origin, "registrationId": registration, "data": plain.decode()})
@@ -913,6 +923,9 @@ for n in (1, 2, 3):
         def shown():
             got = phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": shown_js, "args": []})
             return got if isinstance(got, list) and got else None
+        # The browser reconciles `getNotifications` with what it has on display, so it is looked at once the worker says it has shown one.
+        settled = wait(lambda: (s := worker_saw()) and (s["shown"] or s["failed"]) and s, 10) if delivered and sw_cdp else None
+        run.check("the push reaches the worker's handler, and `showNotification` succeeds", bool(settled) and settled["pushes"] == 1 and len(settled["shown"]) == 1 and not settled["failed"], str(settled or (worker_saw() if sw_cdp else None)))
         notes = wait(shown, 10) if delivered else None
         if delivered and not notes:
             page_cdp.call("Runtime.evaluate", {"expression": "1"})  # what the browser said of its workers meanwhile is read with this
@@ -922,22 +935,21 @@ for n in (1, 2, 3):
             print(f"note: no notification from registration {registration} of {workers}; versions {versions[-6:]}; permission {phone.js('return Notification.permission')}; getNotifications says {raw}", flush=True)
             # Which of the two was lost: the push, or the notification? The check below still fails.
             page_cdp.call("ServiceWorker.deliverPushMessage", {"origin": origin, "registrationId": registration, "data": plain.decode()})
-            print(f"note: a second push of the same shows: {wait(shown, 10)}", flush=True)
+            print(f"note: a second push of the same shows: {wait(shown, 10)}; the worker saw {worker_saw()}", flush=True)
         run.check("the worker shows it: the sentence, its tag, its link", bool(notes) and notes[0]["title"] == "Kelpie" and notes[0]["tag"] == note.get("tag") and notes[0]["body"] == note.get("body") and notes[0]["navigate"] == note.get("navigate"), str(notes))
         run.check("…and an icon that needs no request to the computer", bool(notes) and notes[0]["icon"].startswith("data:image/png;base64,"), str(notes)[:200])
-        sw_page = None
         if notes:
             # A person's tap cannot be made through DevTools: the event is dispatched in the worker, on the notification it shows, and the rest is the worker's own code.
             hook_alert("Stop")
             wait(lambda: next((x for x in daemon(d, "session.list") if x["id"] == shell_alert["id"]), {}).get("status") != "waiting", 15)
             phone.wait("return ![...document.querySelectorAll('.row')].some((r) => r.textContent.includes('alert-secret-name') && r.classList.contains('waiting'))", 10)
-            sw_page = Cdp(phone.debugger, "service_worker", origin)
-            sw_page.call("Runtime.evaluate", {"expression": "self.registration.getNotifications().then((ns) => { const e = new ExtendableEvent('notificationclick'); e.notification = ns[0]; self.dispatchEvent(e); })", "awaitPromise": True})
+            sw_cdp.call("Runtime.evaluate", {"expression": "self.registration.getNotifications().then((ns) => { const e = new ExtendableEvent('notificationclick'); e.notification = ns[0]; self.dispatchEvent(e); })", "awaitPromise": True})
             run.check("a tap on it opens the session in the running app", bool(phone.wait("return !!document.querySelector('.session')", 15)))
             handled = phone.wait("return document.body.textContent.includes('Already handled') && document.body.textContent.match(/Already handled[^.]*\\./)[0]", 10)
             run.check("…and says when what it was about has been dealt with", bool(handled), str(handled))
-            sw_page.close()
             phone.js("document.querySelector('#top .icon')?.click()")
+        if sw_cdp:
+            sw_cdp.close()
         daemon(d, "session.close", {"handle": shell_alert["handle"]})
         phone.js("document.querySelector('.conn').click()")
         phone.wait("return !!document.querySelector('[data-alerts-off]')", 10)
