@@ -796,6 +796,20 @@ async fn a_stale_cancel_does_not_fail_the_next_wip_commit() {
     assert!(wip(&f, &["x.txt"]).await.commit.is_some());
 }
 
+/// Killing a git that was just started can leave its `index.lock` behind, in the way of the next
+/// git in that worktree. A folder git cannot start in tells whether a start was attempted.
+#[tokio::test]
+async fn a_standing_cancel_starts_no_git_at_all() {
+    let f = fixture("standing-cancel");
+    let gone = f.base.join("no-such-folder");
+    finish_cancel(wt_path(&f));
+    let key = cancel_key(&wt_path(&f));
+    for _ in 0..64 {
+        assert_eq!(run_signed(&gone, &["--version"], &[], &key).await.err().as_deref(), Some("cancelled"));
+    }
+    finish_reset(wt_path(&f));
+}
+
 #[tokio::test]
 async fn a_cancel_pressed_while_signing_waits_changes_nothing() {
     let f = fixture("cancel-sign");
