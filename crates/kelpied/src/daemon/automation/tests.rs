@@ -16,8 +16,12 @@ fn events(rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::session::Outgoing
     out
 }
 
-fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
-    let until = Instant::now() + Duration::from_secs(20);
+fn wait_for(what: &str, cond: impl FnMut() -> bool) {
+    wait_for_within(Duration::from_secs(20), what, cond);
+}
+
+fn wait_for_within(limit: Duration, what: &str, mut cond: impl FnMut() -> bool) {
+    let until = Instant::now() + limit;
     while !cond() {
         assert!(Instant::now() < until, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(25));
@@ -522,7 +526,9 @@ fn a_real_batch_file_and_a_real_powershell_script_get_hostile_file_names_literal
     }
     daemon.automation_event(Event { files: vec![hostile.into()], ..Event::new(EventKind::File, &root) });
     for id in ["cmd", "ps"] {
-        wait_for(&format!("{id} to finish"), || note_of(&daemon, id).0.as_deref().is_some_and(|n| n.contains("finished")));
+        // A real powershell.exe: on a busy machine it alone can take over 10 s to start (measured), with the whole test suite beside it.
+        // This is only how long the wait may last: it ends as soon as the command has finished.
+        wait_for_within(Duration::from_secs(90), &format!("{id} to finish"), || note_of(&daemon, id).0.as_deref().is_some_and(|n| n.contains("finished")));
         assert_eq!(note_of(&daemon, id).1, None, "{id}");
     }
     let read = |name: &str| std::fs::read_to_string(work.join(name)).unwrap_or_default();
