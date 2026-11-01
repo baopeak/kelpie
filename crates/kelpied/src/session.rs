@@ -1365,6 +1365,8 @@ fn report_len(b: &[u8]) -> Option<usize> {
         }
         // A colour or title reply: up to BEL or ST.
         b']' => b.iter().position(|c| *c == 7).map(|p| p + 1).or_else(|| b.windows(2).position(|w| w == b"\x1b\\").map(|p| p + 2)),
+        // A reply to XTVERSION or DECRQSS: up to ST. Alt+Shift+P alone has none, so it is typing.
+        b'P' => b.windows(2).position(|w| w == b"\x1b\\").map(|p| p + 2),
         _ => None,
     }
 }

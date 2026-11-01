@@ -1034,6 +1034,11 @@ async fn the_refusal_holds_whatever_the_screen_and_the_status_say() {
     r.term.tick(Instant::now() + Duration::from_secs(121));
     assert_eq!(code(&enter(&mut r).await), Some("recheck"), "past the time a report holds");
     assert!(r.typed.writes().is_empty());
+    // What a desktop terminal answers by itself is nobody answering the dialog.
+    for reply in [&b"\x1b[?62c"[..], b"\x1bP>|kelpie 1\x1b\\", b"\x1b]10;rgb:ffff/ffff/ffff\x07"] {
+        r.term.input(reply.to_vec());
+        assert_eq!(code(&enter(&mut r).await), Some("recheck"), "{reply:?}");
+    }
 }
 
 /// Esc on a dangerous prompt, then telling the agent what to do instead, is what a person does next.
