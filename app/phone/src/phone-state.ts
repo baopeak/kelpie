@@ -21,8 +21,9 @@ import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneC
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
 import { screenNow } from "./install-guide";
-import { afterFailedPairing, movedTo } from "./install-state";
-import { t } from "./i18n";
+import { afterFailedPairing, movedTo, platformOf } from "./install-state";
+import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
+import { locale, t } from "./i18n";
 
 // ---------- signals the views read ----------
 
@@ -79,6 +80,8 @@ const chats = new ChatFeed();
 /** The sender of each chat the phone has sent to: its messages stay with it while the person looks at something else. */
 const senders = new Map<string, ChatSender>();
 let wantSession: string | null = null;
+/** The session asked for came from an alert about someone waiting: what it finds when it opens is worth saying. */
+let wantFromAlert = false;
 let listSaved = 0;
 
 /** The page's origin is plain HTTP and not Tailscale: anyone on the network could have swapped this page, so it may only read. */
@@ -119,8 +122,12 @@ const link = new Link(browserEnv(), () => {
     forgetGoneChats(h.sessions.map((s) => s.id));
     refreshNotSent();
     persistList();
-    const wanted = wantSession && h.sessions.find((s) => s.id === wantSession);
+    void alerts.recheck(h.push);
+    const asked = wantSession;
     wantSession = null;
+    const wanted = asked && h.sessions.find((s) => s.id === asked);
+    if (asked && wantFromAlert) tellHandled(asked);
+    wantFromAlert = false;
     if (wanted) openSession(wanted.id);
     else if (openId() && !h.sessions.some((s) => s.id === openId())) closeSession();
   },
@@ -166,6 +173,7 @@ const link = new Link(browserEnv(), () => {
     tellDeviceNews(m.change === "added" ? t("A new device was paired with this computer: {name}.", { name }) : m.change === "removed" || m.change === "replaced" ? t("A device was removed from this computer: {name}.", { name }) : t("What {name} may do was changed on this computer.", { name }));
   },
   unpaired() {
+    void alerts.forget();
     void forgetPairing();
     void clearCache();
     wipeTypedText();
@@ -183,6 +191,44 @@ const link = new Link(browserEnv(), () => {
 });
 
 export { link };
+
+// ---------- alerts ----------
+
+export const [alertsState, setAlertsState] = createSignal<AlertsState>("off");
+export const [alertsError, setAlertsError] = createSignal<string | null>(null);
+const alerts = new Alerts(
+  browserAlerts(
+    { lang: () => locale(), ask: (m) => link.request(m, { write: false }) },
+    { ios: platformOf(navigator.userAgent, navigator.maxTouchPoints ?? 0) === "ios", installed: () => matchMedia("(display-mode: standalone)").matches || (navigator as Navigator & { standalone?: boolean }).standalone === true, store },
+  ),
+  () => {
+    setAlertsState(alerts.state);
+    setAlertsError(alerts.error);
+  },
+);
+export const turnAlertsOn = () => alerts.turnOn();
+export const turnAlertsOff = () => alerts.turnOff();
+export const testAlert = () => alerts.test();
+
+/** A tap on an alert about someone waiting, against what the computer says now. The session opens either way, if it is still there. */
+function tellHandled(id: string) {
+  const row = sessions().find((s) => s.id === id);
+  if (!row) tellDeviceNews(t("That session is gone."));
+  else if (row.status !== "waiting") showNotice(id, t("Already handled: this session no longer waits for you."));
+}
+
+/** A running app, told by the service worker what a tap on an alert opens. */
+function openFromAlert(navigate: string) {
+  const { session, waited } = readAlertLink(new URL(navigate, location.href).hash);
+  if (!session) return;
+  if (!connected()) {
+    wantSession = session;
+    wantFromAlert = waited;
+    return;
+  }
+  if (sessions().some((s) => s.id === session)) openSession(session);
+  if (waited) tellHandled(session);
+}
 
 function tellDeviceNews(text: string) {
   setDeviceNews(text);
@@ -480,6 +526,7 @@ export async function pairDevice(code: string, name: string): Promise<string | n
 
 /** Forgets this device's pairing (the computer still lists it until it is removed there). */
 export function forgetDevice() {
+  void alerts.forget();
   link.stop();
   void forgetPairing();
   void clearCache();
@@ -521,6 +568,7 @@ function readHash() {
   const params = new URLSearchParams(location.hash.slice(1));
   const code = params.get("p");
   const want = params.get("s");
+  wantFromAlert = readAlertLink(location.hash).waited;
   // Neither stays in the address bar: a code is single use, and a session link carries no token.
   if (code || want) history.replaceState(null, "", location.pathname);
   return { code, want };
@@ -528,6 +576,7 @@ function readHash() {
 
 export function startApp() {
   store.del("kelpie-history"); // an earlier build kept sent text here
+  void alerts.recheck(null); // Says at once if this page cannot have them; the look itself waits for the computer's hello.
   const { code, want } = readHash();
   wantSession = want;
   if (code) {
@@ -541,6 +590,9 @@ export function startApp() {
     for (const s of senders.values()) s.prune();
   };
   setInterval(tick, 1000);
+  navigator.serviceWorker?.addEventListener("message", (e: MessageEvent) => {
+    if (e.data?.type === "kelpie-open" && typeof e.data.navigate === "string") openFromAlert(e.data.navigate);
+  });
   window.addEventListener("online", () => link.setOnline(true));
   window.addEventListener("offline", () => link.setOnline(false));
   window.addEventListener("pageshow", (e) => e.persisted && link.kick());

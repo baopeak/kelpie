@@ -26,7 +26,9 @@ export interface PushSecrets {
 export interface PushState {
   config: PushConfig;
   secrets: PushSecrets;
-  status?: Partial<Record<"ntfy" | "telegram" | "webhook", { ok_at: number | null; error: string | null }>>;
+  status?: Partial<Record<"ntfy" | "telegram" | "webhook" | "webpush", { ok_at: number | null; error: string | null }>>;
+  /** Phones with alerts on, which they turn on themselves: how many, and nothing about where they are reached (absent below `PHONE_API`). */
+  webpush?: { devices: number };
   /** Messages not sent because they queued up behind a server that did not answer. */
   dropped?: number;
 }
@@ -54,8 +56,8 @@ export function pushProblems(cfg: PushConfig, secrets: PushSecrets): string[] {
   return out;
 }
 
-export function pushSummary(cfg: PushConfig, secrets: PushSecrets): string {
-  const channels = [cfg.ntfy.enabled && "ntfy", cfg.telegram.enabled && "Telegram", cfg.webhook.enabled && t("a webhook")].filter(Boolean) as string[];
+export function pushSummary(cfg: PushConfig, secrets: PushSecrets, phones = 0): string {
+  const channels = [phones > 0 && (phones === 1 ? t("1 phone") : t("{n} phones", { n: phones })), cfg.ntfy.enabled && "ntfy", cfg.telegram.enabled && "Telegram", cfg.webhook.enabled && t("a webhook")].filter(Boolean) as string[];
   if (!channels.length) return t("Nothing is sent off this computer.");
   const events = Object.values(cfg.events).some(Boolean) ? "" : " " + t("No event is selected, so nothing will be sent.");
   return [t("Sending to {channels}.", { channels: channels.join(", ") }) + events, ...pushProblems(cfg, secrets)].join(" ");

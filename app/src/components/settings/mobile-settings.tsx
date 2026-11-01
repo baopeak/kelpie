@@ -24,6 +24,8 @@ export interface MobileDevice {
   last_seen: number;
   /** It paired on an HTTPS origin. */
   secure_origin?: boolean;
+  /** It turned alerts on (absent below `PHONE_API`). */
+  push?: boolean;
   /** `unverified`: its record was changed outside Kelpie (or the key that checks it is gone): it must be paired again.
    *  `unchecked`: the key that checks it cannot be read right now; nothing is concluded, and it is checked again when it can be. */
   state: "ok" | "unverified" | "unchecked";
@@ -353,7 +355,7 @@ export function MobileSettings() {
                 <div class="saved-layout" data-device={d.id} data-state={d.state}>
                   <Icon name="server" size={16} />
                   <div class="saved-layout-main">
-                    <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}</span></div>
+                    <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show></span></div>
                     <div class="muted-inline" style={{ "font-size": "11.5px" }}>
                       {d.state === "unverified"
                         ? t("Its record was changed outside Kelpie: pair it again.")

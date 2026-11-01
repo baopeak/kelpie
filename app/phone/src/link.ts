@@ -67,6 +67,8 @@ export interface Hello {
   load: LoadStatus;
   server_ts: number;
   hb?: { idle_s: number; pong_s: number; dead_s: number; legacy: boolean };
+  /** Alerts, where this connection may have them (absent over plain HTTP, and from a computer below `PHONE_API`). */
+  push?: { vapid: string | null; subscribed: boolean };
 }
 
 export interface SessionsMsg {
@@ -114,8 +116,8 @@ export interface ReplyError {
 
 /** What became of a request: the daemon's reply, or why there was none. */
 export type Outcome =
-  /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number }
+  /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with. */
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -835,7 +837,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid });
     }
     this.h.changed();
     return true;
