@@ -72,6 +72,14 @@ them. Motion has to stay light, because Kelpie must cost almost nothing while ag
 - Settings → Appearance: **Kip, the mascot** (off: no Kip and no timers at all) and **Kip
   animations** (Always / Follow system / Off; Follow system honours the OS's animation setting).
 
+**Load bars** (`app/src/components/load-bar.tsx`): a view, panel or dialog that is reading or
+waiting on work shows a 2 px bar in the working hue along its top edge (under the toolbar in a
+browser pane), so slow work reads as running, not frozen. It sweeps when the length is unknown and
+fills when it is known (update download). It is the one looping motion allowed, and only because
+it is bounded: it exists only while the work runs, appears after 300 ms (quick work never shows
+it), animates `transform` only, and pauses while the window is hidden or another app has the
+focus. Reduced motion slows it rather than stopping it, like the working spinner.
+
 ## Voice
 
 Clear, short and warm, like a teammate: say what happened and what to do next.

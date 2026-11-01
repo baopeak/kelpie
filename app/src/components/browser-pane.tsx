@@ -13,6 +13,7 @@ import {
   type Annotation, type Rect,
 } from "../lib/browser";
 import { Icon } from "./icons";
+import { LoadBar } from "./load-bar";
 import type { Pane, Project, Tab } from "../lib/types";
 import { t, errorText } from "../lib/i18n";
 
@@ -24,6 +25,9 @@ export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; foc
   const [address, setAddress] = createSignal(props.pane.url ?? "");
   const [opened, setOpened] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  // A page is loading from its navigation until it finishes. Blocked schemes (file:, app
+  // schemes) never load, so they do not start the bar (the same list as browser.rs).
+  const [loading, setLoading] = createSignal(false);
   let host!: HTMLDivElement;
   let addressInput!: HTMLInputElement;
 
@@ -38,8 +42,12 @@ export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; foc
   };
 
   const unsubscribe = onBrowserEvent(label, (e) => {
-    if (e.kind === "nav" && e.url) setAddress(e.url);
+    if (e.kind === "nav" && e.url) {
+      setAddress(e.url);
+      setLoading(/^(https?|about|data|blob):/i.test(e.url));
+    }
     if (e.kind === "load" && e.url) {
+      setLoading(false);
       setAddress(e.url);
       remember(e.url);
       // Design mode survives navigation.
@@ -61,6 +69,7 @@ export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; foc
         setAddress(url);
       } else setAddress(await browserNavigate(label, url));
     } catch (e) {
+      setLoading(false);
       setError(String(e));
     }
   };
@@ -134,6 +143,7 @@ export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; foc
         <button class="icon-btn" title={t("Back")} disabled={!opened()} onClick={() => void browserGo(label, -1)}><Icon name="back" size={14} /></button>
         <button class="icon-btn" title={t("Forward")} disabled={!opened()} onClick={() => void browserGo(label, 1)}><Icon name="forward" size={14} /></button>
         <button class="icon-btn" title={t("Reload")} disabled={!opened()} onClick={() => void browserGo(label, 0)}><Icon name="refresh" size={14} /></button>
+        <LoadBar when={loading()} edge="bottom" />
         <form class="browser-address" onSubmit={(e) => { e.preventDefault(); void go(address()); }}>
           <input ref={addressInput} value={address()} placeholder={t("Address, e.g. localhost:5173")} spellcheck={false} onInput={(e) => setAddress(e.currentTarget.value)} onFocus={(e) => e.currentTarget.select()} />
         </form>

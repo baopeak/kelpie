@@ -8,6 +8,7 @@ import { CLAUDE_INSTALL, agentFolder, checkHost, connectHost, hostById, hostTarg
 import { remoteAddUser, type AddedUser, type HostCheck } from "../lib/remote";
 import { Icon } from "./icons";
 import { t, errorText } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 
 /** POSIX shell single quoting, for commands typed into a terminal on the host. */
 const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -164,6 +165,7 @@ function Guide(props: { host: SshHost; dialog: RootUserDialog }) {
 
   return (
     <Frame title={t("Set up a regular user on {host}", { host: props.host.label })} class="root-user-guide" onClose={() => closeRootUserDialog()}>
+      <LoadBar when={busy()} />
       <p class="root-user-text">{t("Claude Code runs in Yolo mode only as a regular user. Kelpie creates one with root's SSH keys, adds it as a saved host and checks that it works. Your root host stays as it is, for admin work.")}</p>
 
       <section class="root-user-step" data-step="create">

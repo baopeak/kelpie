@@ -7,6 +7,7 @@ import { prLabel, pullRequests } from "../lib/pull-requests";
 import { gitlabDefaultBranch, gitlabMrCreate } from "../lib/integrations";
 import { isMac } from "../lib/platform";
 import { Icon } from "./icons";
+import { LoadBar } from "./load-bar";
 import type { GitFile, Project } from "../lib/types";
 import { t } from "../lib/i18n";
 import { confirmDialog } from "../lib/confirm-dialog";
@@ -147,6 +148,7 @@ export function GitPanel(props: { project: Project }) {
 
   return (
     <Show when={st()?.is_repo !== false} fallback={<div class="muted">{t("Not a git repository.")}</div>}>
+      <LoadBar when={busy() || repo.loading} />
       <div class="git-head">
         <div class="branch">
           <Icon name="git" size={14} />
@@ -311,6 +313,7 @@ function PullRequestRow(props: { project: Project; pr: import("../lib/ipc").Pull
         <Show when={props.hasRemote && props.branch}>
           <Show when={props.open} fallback={<button class="btn" onClick={() => void openForm()}><Icon name="pr" size={14} /> {t("Create {noun}…", { noun: noun() })}</button>}>
             <div class="pr-form">
+              <LoadBar when={busy()} />
               <div style={{ display: "flex", gap: "6px", "align-items": "center" }}>
                 <span class="muted" style={{ padding: 0 }}>{props.branch} →</span>
                 <input class="text-input" style={{ flex: 1 }} value={base()} onInput={(e) => setBase(e.currentTarget.value)} placeholder={t("base branch")} />

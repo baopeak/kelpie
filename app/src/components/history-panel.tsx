@@ -18,6 +18,7 @@ export const historyAccountLabel = (it: HistoryItem) => (isAccountAgent(it.agent
 import { Icon, KindGlyph } from "./icons";
 import type { HistoryItem, Project } from "../lib/types";
 import { formatDate, t } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 
 type Scope = "folder" | "project" | "all";
 const PAGE = 150;
@@ -145,6 +146,7 @@ export function HistoryPanel(props: { project: Project }) {
 
   return (
     <div class="history">
+      <LoadBar when={!items() && !loadError()} />
       <div class="explorer-tools">
         <input class="text-input" placeholder={t("Search conversations")} value={query()} onInput={(e) => { setQuery(e.currentTarget.value); setLimit(PAGE); }}
           onKeyDown={(e) => e.key === "Escape" && setQuery("")} />

@@ -7,6 +7,7 @@ import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
 import { PHONE_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
+import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
 import { SettingRow, Toggle } from "./setting-row";
 import { confirmDialog } from "../../lib/confirm-dialog";
@@ -216,6 +217,7 @@ export function MobileSettings() {
   const hasAccess = () => !!s() && (s()!.enabled || s()!.devices.length > 0 || (s()!.legacy ?? []).length > 0);
   return (
     <>
+      <LoadBar when={busy()} />
       <SettingRow id="mobile-access">
         <Toggle on={!!s()?.enabled} onChange={(on) => void (on ? enable() : run(() => daemon("mobile.disable")))} />
       </SettingRow>

@@ -9,6 +9,7 @@ import { checkPrompt, conflictPrompt, defaultMessage, diffChecks, loadChecksPlan
 import type { FinishStrategy } from "../lib/ipc";
 import type { Project } from "../lib/types";
 import { t } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 import "./review.css";
 
 const STRATEGIES: { id: FinishStrategy; label: () => string; hint: () => string }[] = [
@@ -180,6 +181,7 @@ export default function FinishDialog() {
   return (
     <div class="overlay" onPointerDown={(e) => e.target === e.currentTarget && !step() && close()}>
       <div class="modal finish-dialog" onKeyDown={(e) => e.key === "Escape" && !step() && close()}>
+        <LoadBar when={step() || seen.loading || plan.loading} />
         <Show when={target()} fallback={<p>{liveWt() && !baseOf(liveWt()!) ? t("The repository has no current branch to merge into; switch it to a branch first.") : t("This worktree is not available.")}</p>}>
           <h2>{t("Finish {name}", { name: wt()!.name })}</h2>
           <span class="muted-inline">{branch() ? t("{branch} → {base}", { branch: branch()!, base: base()! }) : seen() ? t("Detached HEAD") : t("Reading the worktree…")}</span>

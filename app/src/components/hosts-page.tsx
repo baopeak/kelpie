@@ -17,6 +17,7 @@ import {
   saveForward, saveHost, saveVault, setSecret, transfer, trustHost, vault, type HostKeys, type SshForward, type SshHost,
 } from "../lib/ssh-hosts";
 import { Icon } from "./icons";
+import { LoadBar } from "./load-bar";
 import { t, errorText } from "../lib/i18n";
 import { relTimeShort } from "../lib/platform";
 import type { DirEntry } from "../lib/types";
@@ -284,6 +285,7 @@ function HostDetail(props: { host: SshHost; onEdit: () => void }) {
   const hasClaude = () => agents().includes("claude");
   return (
     <div class="run-detail host-detail" data-host-detail={h().alias}>
+      <LoadBar when={busy()} />
       <div class="run-detail-head">
         <div style={{ flex: 1, "min-width": 0 }}>
           <h3><OsBadge os={h().os} size={24} /><span class="host-dot" style={{ background: h().color || "transparent" }} />{h().label}</h3>
@@ -594,11 +596,13 @@ function FileBrowser(props: { host: SshHost; onHostKey: () => void }) {
   const [busy, setBusy] = createSignal<string | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   const [ask, setAsk] = createSignal<Ask | null>(null);
+  const [listing, setListing] = createSignal(false);
   let box!: HTMLDivElement;
   const rel = (p: string) => p.replace(/^\/+/, "");
   const join = (name: string) => `${path().replace(/\/+$/, "")}/${name}`;
   const load = async (p: string) => {
     setError(null);
+    setListing(true);
     try {
       // `~`: the login folder, from the host check.
       const abs = p === "~" ? (await checkHost(props.host)).home : p;
@@ -608,6 +612,8 @@ function FileBrowser(props: { host: SshHost; onHostKey: () => void }) {
     } catch (e) {
       if (isHostKeyError(e)) props.onHostKey();
       setError(errText(e));
+    } finally {
+      setListing(false);
     }
   };
   onMount(() => void load(path()));
@@ -659,6 +665,7 @@ function FileBrowser(props: { host: SshHost; onHostKey: () => void }) {
   const fmt = (n: number) => (n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(1)} KB` : n < 1 << 30 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${(n / (1 << 30)).toFixed(1)} GB`);
   return (
     <div class="sftp" ref={box} data-sftp>
+      <LoadBar when={listing() || busy()} />
       <div class="inline-fields">
         <button class="icon-btn" title={t("Parent folder")} onClick={() => void load(path().replace(/\/[^/]*\/?$/, "") || "/")}><Icon name="up" size={14} /></button>
         <input class="text-input mono" style={{ flex: 1, width: "auto" }} value={path()} onKeyDown={(e) => e.key === "Enter" && void load(e.currentTarget.value.trim() || "/")} />
@@ -727,6 +734,7 @@ function ForwardRow(props: { f: SshForward; onEdit?: () => void }) {
   };
   return (
     <div class="forward-row" data-forward={props.f.id}>
+      <LoadBar when={busy()} />
       <span class={`fw-state ${st()?.running ? "on" : st()?.error ? "err" : ""}`} />
       <div style={{ flex: 1, "min-width": 0 }}>
         <div>{props.f.label || describe()}</div>

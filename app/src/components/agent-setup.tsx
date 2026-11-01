@@ -16,6 +16,7 @@ import {
 import { Toggle } from "./settings/setting-row";
 import { Icon } from "./icons";
 import "./agent-setup.css";
+import { LoadBar } from "./load-bar";
 
 type Tab = "mcp" | "instructions" | "skills" | "find";
 
@@ -144,12 +145,16 @@ export default function AgentSetup() {
   const [message, setMessage] = createSignal<{ text: string; error?: boolean } | null>(null);
   const [backups, setBackups] = createSignal<BackupInfo[] | null>(null);
 
+  const [loading, setLoading] = createSignal(false);
   const load = async () => {
     setLoadError(null);
+    setLoading(true);
     try {
       setData(await agentSetupOverview(project()?.path ?? null));
     } catch (e) {
       setLoadError(errorText(e));
+    } finally {
+      setLoading(false);
     }
   };
   // Read once, when the page opens.
@@ -567,6 +572,7 @@ export default function AgentSetup() {
 
   return (
     <div class="as-page" data-agent-setup>
+      <LoadBar when={loading() || pending()?.busy} />
       <div class="as-tabs" role="tablist">
         <For each={TABS}>
           {(x) => <button class={`as-tab${tab() === x.id ? " on" : ""}`} role="tab" aria-selected={tab() === x.id} data-tab={x.id} onClick={() => setTab(x.id)}>{x.label()}</button>}

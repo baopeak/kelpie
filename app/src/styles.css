@@ -20,6 +20,8 @@
   --accent-strong: #f08a55;
   --working: #18a999;
   --on-working: #141823;
+  /* Load bars (load-bar.tsx): the work-in-progress hue, so "running" reads the same everywhere. */
+  --progress: var(--working);
   --waiting: #f5b53f;
   --idle: #3fae6a;
   --exited: #5c6370;
@@ -414,7 +416,7 @@ input, textarea, select { font: inherit; color: var(--text); }
 .panel-tabs .ptab { flex: none; white-space: nowrap; padding: 5px 10px; border-radius: 6px; cursor: pointer; color: var(--text-dim); font-size: 12px; border: 0; background: transparent; }
 .panel-tabs .ptab.active { background: var(--bg-active); color: var(--text); }
 .panel-tabs .spacer { flex: 1; }
-.panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 
 /* file tree (virtualized) */
 .tree { flex: 1; overflow: auto; position: relative; outline: none; }
@@ -524,7 +526,7 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .chip { font-size: 10.5px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border-strong); color: var(--text-dim); }
 .chip.project-chip { border-color: var(--kc); color: color-mix(in oklab, var(--kc) var(--tint-mix), var(--text)); }
 
-.modal { width: min(620px, 94vw); background: var(--bg-elev-2); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: 0 30px 80px rgb(var(--shadow-rgb) / calc(.6 * var(--shadow-k))); padding: 20px 22px; display: flex; flex-direction: column; gap: 14px; max-height: 80vh; overflow: auto; }
+.modal { position: relative; width: min(620px, 94vw); background: var(--bg-elev-2); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: 0 30px 80px rgb(var(--shadow-rgb) / calc(.6 * var(--shadow-k))); padding: 20px 22px; display: flex; flex-direction: column; gap: 14px; max-height: 80vh; overflow: auto; }
 .modal h2 { margin: 0; font-size: 16px; }
 .form-row { display: grid; grid-template-columns: 170px 1fr; gap: 12px; align-items: center; }
 .form-row label { color: var(--text-dim); }
@@ -1269,7 +1271,7 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 
 /* ---------- browser pane ---------- */
 .browser-pane { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--term-bg); }
-.browser-bar { flex: none; display: flex; align-items: center; gap: 3px; padding: 4px 6px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+.browser-bar { position: relative; flex: none; display: flex; align-items: center; gap: 3px; padding: 4px 6px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
 .browser-bar .icon-btn { width: 26px; height: 26px; }
 .browser-bar .icon-btn.active { color: var(--accent); background: var(--bg-active); }
 .browser-address { flex: 1; min-width: 0; }

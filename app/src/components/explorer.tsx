@@ -9,18 +9,24 @@ import { SearchPanel } from "./search-panel";
 import { Icon } from "./icons";
 import type { Project } from "../lib/types";
 import { t } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 
 export function Explorer(props: { project: Project }) {
   const mode = () => (store.workspace(props.project.id).rightPanel === "search" ? "contents" : "names");
   const [filter, setFilter] = createSignal("");
   const [hits, setHits] = createSignal<QuickOpenHit[]>([]);
+  const [finding, setFinding] = createSignal(false);
   let api: FileTreeApi | undefined;
   let seq = 0;
 
   createEffect(on(filter, (q) => {
     const mine = ++seq;
+    setFinding(!!q.trim());
     if (!q.trim()) return setHits([]);
-    void quickOpen(props.project.path, q, 200).then((h) => mine === seq && setHits(h)).catch(() => mine === seq && setHits([]));
+    void quickOpen(props.project.path, q, 200)
+      .then((h) => mine === seq && setHits(h))
+      .catch(() => mine === seq && setHits([]))
+      .finally(() => mine === seq && setFinding(false));
   }));
 
   const deco = createMemo(() => gitState.decorations());
@@ -28,6 +34,7 @@ export function Explorer(props: { project: Project }) {
 
   return (
     <div class="explorer">
+      <LoadBar when={finding()} />
       <div class="explorer-head">
         <span class="explorer-title" title={props.project.path}>{props.project.name}</span>
         <button class="icon-btn" title={t("Collapse all")} onClick={() => api?.collapseAll()}><Icon name="minus" size={14} /></button>

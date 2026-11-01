@@ -8,6 +8,7 @@ import { gitRefs } from "../lib/ipc";
 import { normPath } from "../lib/platform";
 import { KeyHints } from "./key-hints";
 import { t, errorText } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 
 const [repoId, setRepoId] = createSignal<string | null>(null);
 const [initialBranch, setInitialBranch] = createSignal<string | null>(null);
@@ -108,6 +109,7 @@ export function WorktreeDialog() {
         if (e.key === "Escape" && !busy()) store.setOverlay(null);
         if (e.key === "Enter" && !(e.target as HTMLElement).matches("textarea, input[type=checkbox]")) void create();
       }}>
+        <LoadBar when={busy() || refs.loading || config.loading} />
         <h2>{existingMode ? t("Open {branch} in a new worktree of {name}", { branch: branch(), name: repo()?.name ?? "" }) : repo()?.name ? t("New worktree of {name}", { name: repo()!.name }) : t("New worktree")}</h2>
         <div class="form-row">
           <label>{t("Branch")}</label>

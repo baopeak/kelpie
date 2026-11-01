@@ -14,6 +14,7 @@ import {
 import { Icon } from "./icons";
 import type { Project, SessionInfo } from "../lib/types";
 import "./turn-timeline.css";
+import { LoadBar } from "./load-bar";
 
 const filesText = (n: number) => (n === 1 ? t("{n} file", { n }) : t("{n} files", { n }));
 
@@ -88,6 +89,7 @@ export default function TurnTimeline(props: { project: Project }) {
 
   return (
     <div class="turns">
+      <LoadBar when={turns.loading} />
       <div class="explorer-tools">
         <Show when={sessions().length} fallback={<div class="muted">{t("No agent sessions in this project yet")}</div>}>
           <select class="text-input" value={session()?.id} onChange={(e) => setChoice(e.currentTarget.value)} title={t("Session")}>
@@ -198,6 +200,7 @@ function TurnRow(props: { project: Project; session: SessionInfo; rec: TurnRecor
         </div>
       </div>
       <Show when={open()}>
+        <LoadBar when={files.loading} />
         <div class="turn-files">
           <Show when={files()} fallback={<div class="muted">{files.loading ? t("Loading…") : t("Nothing to show")}</div>}>
             {(f) => (
@@ -241,6 +244,7 @@ function OwnersList(props: { project: Project; session: SessionInfo; version: nu
   });
   return (
     <>
+      <LoadBar when={owners.loading} />
       <div class="explorer-tools"><input class="text-input" placeholder={t("Filter files")} value={query()} onInput={(e) => setQuery(e.currentTarget.value)} /></div>
       <For each={rows()} fallback={<div class="muted">{owners.loading ? t("Loading…") : t("No files touched by agents yet")}</div>}>
         {(row) => (
@@ -333,6 +337,7 @@ export function UndoDialog(props: { sessionId: string; sessionName: string; n: n
     <div class="overlay" onPointerDown={(e) => e.target === e.currentTarget && !busy() && props.onClose(false)}>
       {/* Focused on open, so keys reach the dialog and not the composer or pane behind it. */}
       <div class="modal turn-undo" tabIndex={-1} ref={(el) => queueMicrotask(() => el.focus())} onKeyDown={(e) => e.key === "Escape" && !busy() && props.onClose(false)}>
+        <LoadBar when={(!plan() && !error()) || busy()} />
         <h2>{t("Undo turn #{n} of {name}?", { n: props.n, name: props.sessionName })}</h2>
         <span class="muted-inline">{t("These files go back to how they were before the turn. Your index, branch and other files are not touched.")}</span>
         <span class="muted-inline">{t("Files come back with the line endings your git settings give them, which can differ from before.")}</span>
