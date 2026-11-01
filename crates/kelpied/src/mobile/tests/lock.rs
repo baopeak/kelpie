@@ -718,7 +718,15 @@ async fn a_command_built_to_be_slow_holds_nothing_up() {
         let (counted, watched) = (labels.clone(), term.clone());
         risk::LABELLING.with(|probe| {
             *probe.borrow_mut() = Some(Box::new(move || {
-                assert!(!crate::session::fake::lock_is_held(&watched), "a label is worked out with the session's lock let go");
+                // Held by this thread it stays held however long this looks. Another thread's hold soon ends.
+                let let_go = (0..200).any(|_| {
+                    let free = !crate::session::fake::lock_is_held(&watched);
+                    if !free {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    free
+                });
+                assert!(let_go, "a label is worked out with the session's lock let go");
                 counted.set(counted.get() + 1);
             }));
         });
@@ -1015,6 +1023,8 @@ async fn the_refusal_holds_whatever_the_screen_and_the_status_say() {
     let said = refused["message"].as_str().unwrap();
     assert!(said.contains("computer") && said.contains("Esc"), "a card may not be showing: {said}");
     // A subagent or a parallel tool reports, which ends the reported wait.
+    crate::session::fake::wait_on_user(&r.term);
+    assert!(r.term.info().waiting_since.is_some());
     r.daemon.hook(&hook("PreToolUse", "Bash", "ls")).unwrap();
     r.daemon.hook(&hook("PostToolUse", "Bash", "ls")).unwrap();
     assert_eq!(code(&enter(&mut r).await), Some("recheck"), "another tool's report");
@@ -1048,7 +1058,7 @@ async fn once_the_only_request_has_been_typed_at_the_phone_can_type_again() {
     // The computer's keys count too: the person is answering there.
     r.term.input(b"n".to_vec());
     assert_ne!(code(&enter(&mut r).await), Some("recheck"), "after typing on the computer");
-    // Answered on the card with its passkey, it is settled the same way.
+    // The next turn's request starts over.
     r.daemon.hook(&bare_hook("Stop", json!({}))).unwrap();
     r.daemon.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
     assert_eq!(code(&enter(&mut r).await), Some("recheck"), "a new turn's request");
