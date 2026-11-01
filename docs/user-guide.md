@@ -542,7 +542,7 @@ and the topic are kept in the system credential store, never in a file, and are 
 A service that does not answer costs only itself: each destination has its own queue. Kelpie tries again for
 up to 10 minutes (a message that says a session waits for you, for as long as it still does) and drops what you
 have answered meanwhile. A server that takes a message and never answers may have acted on it, so ntfy, Telegram and a webhook
-get such a message twice at most. After a real outage several messages arrive as one ("3 sessions need you, and 2 more updates"). What is still to be
+get such a message twice at most. So does a webhook that answers with a server error other than 502 or 503, since a flow can act before it fails, also when a session keeps waiting. No connection, no name, no certificate, 502 and 503 mean nothing arrived, and those keep being tried. Under load a phone's alerts about things that wait for nobody may arrive as one; ntfy, Telegram and a webhook keep each message as it is. After a real outage several messages arrive as one ("3 sessions need you, and 2 more updates"). What is still to be
 sent stays in `notify-outbox` in the data folder and goes out after the daemon restarts, if it is still true: a session that came back no longer waiting is not told. Text for ntfy, Telegram and a webhook
 is kept there until it is sent, and a phone's entries hold no text.
 

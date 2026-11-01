@@ -14,6 +14,8 @@ dependencies: [3a, "roadmap phase 12"]
 
 **Sending one real push to a real iPhone and Android from step 1 is not done:** no person with phones was at hand, and the rule for this run is that nothing goes to a real push service. What a person still needs to check is in [the report](../reports/fullstack-developer-261101-0920-phone-phase3b.md).
 
+**Decisions after the reviews, 2026-11-01** (for the owner, keeping master's behaviour for existing users): a webhook's 5xx other than 502 and 503 is tried twice at most, which narrows "retry on 5xx" under Resilience, since a flow can act before it fails. Under load only a phone's alerts coalesce: a channel keeps each message with its title, text and link, which narrows "other events coalesce" for channels. A later alert of the same kind for a session replaces the last in silence: left as it is.
+
 ## Overview
 Reach a locked phone when a session needs the user. The daemon signs with its own VAPID key and POSTs an RFC 8291-encrypted, content-free alert with a deep link to the phone's push service. No server of ours, no Apple or Google account. Replaces the "no Web Push" position in old phase 6 and RT-14 (user decision 2026-10-30). Includes the `notify.rs` delivery refactor and durable outbox moved from phase 6.
 
