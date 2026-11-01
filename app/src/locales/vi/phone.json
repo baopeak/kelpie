@@ -172,10 +172,7 @@
   "Kelpie opens only after Face ID, a fingerprint or your phone's passcode. They stay on this phone: your computer only checks the signature.": "Kelpie chỉ mở sau khi xác thực bằng Face ID, vân tay hoặc mật mã của điện thoại. Chúng nằm lại trên điện thoại này: máy tính chỉ kiểm tra chữ ký.",
   "Kelpie is locked": "Kelpie đang khóa",
   "Verify that it is you to see your sessions.": "Hãy xác thực để xem các phiên của bạn.",
-  "Reading over plain HTTP is off": "Đã tắt việc đọc qua HTTP thường",
-  "This computer does not allow reading on a page without HTTPS. Open Kelpie through Tailscale, or change this in Kelpie → Settings → Mobile.": "Máy tính này không cho đọc trên trang không có HTTPS. Hãy mở Kelpie qua Tailscale, hoặc đổi trong Kelpie → Cài đặt → Điện thoại.",
   "A passkey needs a name": "Khóa truy cập cần một tên miền",
-  "This address is a number, and a passkey needs a name. Open Kelpie through Tailscale.": "Địa chỉ này là một dãy số, còn khóa truy cập cần một tên miền. Hãy mở Kelpie qua Tailscale.",
   "Reset this phone's lock": "Đặt lại khóa của điện thoại này",
   "Your computer cannot check this phone's passkey. Press \"Reset this phone's lock\" in Kelpie → Settings → Mobile on the computer, then set up a new one here.": "Máy tính không kiểm tra được khóa truy cập của điện thoại này. Hãy bấm \"Đặt lại khóa của điện thoại này\" trong Kelpie → Cài đặt → Điện thoại trên máy tính, rồi thiết lập khóa mới tại đây.",
   "Reaching your computer. It decides when this opens.": "Đang kết nối tới máy tính. Máy tính quyết định khi nào ứng dụng mở.",
@@ -194,5 +191,9 @@
   "Not verified. It stays locked: try again when you are ready.": "Chưa xác thực nên vẫn khóa: hãy thử lại khi bạn sẵn sàng.",
   "This address cannot use a passkey. Open Kelpie through Tailscale.": "Địa chỉ này không dùng được khóa truy cập. Hãy mở Kelpie qua Tailscale.",
   "This device has no screen lock or passkey that Kelpie can use. Set up Face ID, a fingerprint or a passcode, then try again.": "Thiết bị này không có khóa màn hình hay khóa truy cập để Kelpie dùng. Hãy thiết lập Face ID, vân tay hoặc mật mã rồi thử lại.",
-  "That did not work. Try again.": "Không thành công. Hãy thử lại."
+  "That did not work. Try again.": "Không thành công. Hãy thử lại.",
+  "Reading without a passkey is off": "Đã tắt việc đọc khi không có khóa truy cập",
+  "This computer does not allow reading on a page that cannot have a passkey. Open Kelpie through Tailscale, or change this in Kelpie → Settings → Mobile.": "Máy tính này không cho đọc trên trang không thể có khóa truy cập. Hãy mở Kelpie qua Tailscale, hoặc đổi trong Kelpie → Cài đặt → Điện thoại.",
+  "This phone was paired at an address that is a number, and a passkey needs a name. Pair it again from Kelpie → Settings → Mobile, or turn the app lock off there.": "Điện thoại này được ghép đôi ở một địa chỉ dạng số, còn khóa truy cập cần một tên miền. Hãy ghép đôi lại từ Kelpie → Cài đặt → Điện thoại, hoặc tắt khóa ứng dụng ở đó.",
+  "This address is a number, and a passkey needs a name, so this device can only read here. To type, pair it through Tailscale or at a name.": "Địa chỉ này là một dãy số, còn khóa truy cập cần một tên miền, nên thiết bị này chỉ đọc được ở đây. Để gõ, hãy ghép đôi qua Tailscale hoặc ở một tên miền."
 }

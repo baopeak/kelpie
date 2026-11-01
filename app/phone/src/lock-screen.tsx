@@ -11,9 +11,9 @@ function words(face: string): { title: string; text: string } {
     case "unlock":
       return { title: t("Kelpie is locked"), text: t("Verify that it is you to see your sessions.") };
     case "closed":
-      return { title: t("Reading over plain HTTP is off"), text: t("This computer does not allow reading on a page without HTTPS. Open Kelpie through Tailscale, or change this in Kelpie → Settings → Mobile.") };
+      return { title: t("Reading without a passkey is off"), text: t("This computer does not allow reading on a page that cannot have a passkey. Open Kelpie through Tailscale, or change this in Kelpie → Settings → Mobile.") };
     case "no_name":
-      return { title: t("A passkey needs a name"), text: t("This address is a number, and a passkey needs a name. Open Kelpie through Tailscale.") };
+      return { title: t("A passkey needs a name"), text: t("This phone was paired at an address that is a number, and a passkey needs a name. Pair it again from Kelpie → Settings → Mobile, or turn the app lock off there.") };
     case "broken":
       return { title: t("Reset this phone's lock"), text: t("Your computer cannot check this phone's passkey. Press \"Reset this phone's lock\" in Kelpie → Settings → Mobile on the computer, then set up a new one here.") };
     default:

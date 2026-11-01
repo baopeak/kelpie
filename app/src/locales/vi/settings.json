@@ -387,11 +387,12 @@
   "Ask again for dangerous commands": "Hỏi lại với lệnh nguy hiểm",
   "Approving a request Kelpie labels dangerous needs Face ID again, on top of the app lock. It covers the approval buttons only: typing in a terminal from the phone cannot be judged and is not covered.": "Phê duyệt yêu cầu mà Kelpie gắn nhãn nguy hiểm cần Face ID thêm một lần, ngoài khóa ứng dụng. Việc này chỉ áp dụng cho các nút phê duyệt: gõ trực tiếp vào terminal từ điện thoại không thể đánh giá nên không được bao gồm.",
   "Allow reading over plain HTTP": "Cho phép đọc qua HTTP thường",
-  "A page without HTTPS cannot have a passkey, so it may only read, without any lock. Turn this off to close that too. A phone paired over Tailscale or HTTPS is not affected.": "Trang không có HTTPS không thể có khóa truy cập, nên chỉ được đọc và không có khóa nào. Tắt mục này để đóng luôn việc đó. Điện thoại ghép đôi qua Tailscale hoặc HTTPS không bị ảnh hưởng.",
   "Lock after": "Khóa sau",
   "{n} min idle": "{n} phút không dùng",
   "app lock set up": "đã thiết lập khóa ứng dụng",
   "may set up a new passkey": "được thiết lập khóa truy cập mới",
   "Reset this phone's lock": "Đặt lại khóa của điện thoại này",
-  "Phone “{name}” set up its app lock. If that was not you, unpair it.": "Điện thoại “{name}” đã thiết lập khóa ứng dụng. Nếu không phải bạn, hãy bỏ ghép đôi."
+  "Phone “{name}” set up its app lock. If that was not you, unpair it.": "Điện thoại “{name}” đã thiết lập khóa ứng dụng. Nếu không phải bạn, hãy bỏ ghép đôi.",
+  "A page without HTTPS, or at an address that is a number, cannot have a passkey, so it may only read, without any lock. Turn this off to close that too. A phone paired at a name over Tailscale or HTTPS is not affected.": "Trang không có HTTPS, hoặc ở địa chỉ dạng số, không thể có khóa truy cập, nên chỉ được đọc và không có khóa nào. Tắt mục này để đóng luôn việc đó. Điện thoại ghép đôi ở một tên miền qua Tailscale hoặc HTTPS không bị ảnh hưởng.",
+  "This address is a number, and a passkey needs a name, so a phone paired here can only read while the app lock is on.": "Địa chỉ này là một dãy số, còn khóa truy cập cần một tên miền, nên điện thoại ghép đôi ở đây chỉ đọc được khi khóa ứng dụng đang bật."
 }

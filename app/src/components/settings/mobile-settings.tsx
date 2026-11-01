@@ -134,7 +134,7 @@ export function MobileSettings() {
   const [status, { refetch }] = createResource(() => store.connected(), () => mobileStatus().catch(() => null));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  const [qr, setQr] = createSignal<{ url: string; qr: string; until: number; tls: boolean; tailscale?: boolean } | null>(null);
+  const [qr, setQr] = createSignal<{ url: string; qr: string; until: number; tls: boolean; tailscale?: boolean; passkey?: boolean } | null>(null);
   const [now, setNow] = createSignal(Date.now());
   // The two steps of pairing over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
   const [guideStep, setGuideStep] = createSignal<1 | 2 | null>(null);
@@ -182,7 +182,7 @@ export function MobileSettings() {
     if (!ok) return;
     await run(async () => {
       // The plain pairing, whatever Tailscale is doing: its own address, and its own pairing.
-      const r = await daemon<{ url: string; qr: string; expires_in: number; tls: boolean }>("mobile.pair_start", { plain: true });
+      const r = await daemon<{ url: string; qr: string; expires_in: number; tls: boolean; passkey?: boolean }>("mobile.pair_start", { plain: true });
       setGuideStep(null);
       setQr({ ...r, until: Date.now() + r.expires_in * 1000 });
     });
@@ -371,6 +371,7 @@ export function MobileSettings() {
                 <div>{t("Scan with the phone's camera. The phone then shows six digits: type them here when Kelpie asks.")}</div>
                 <div class="muted-inline">{t("The code works once and expires in {n} s.", { n: Math.max(0, Math.round((qr()!.until - now()) / 1000)) })}</div>
                 <Show when={!qr()!.tls}><div class="form-note warn-note">{t("Plain HTTP: a browser paired this way can only read, unless it connects over Tailscale.")}</div></Show>
+                <Show when={qr()!.tls && qr()!.passkey === false}><div class="form-note warn-note" data-pair-no-passkey>{t("This address is a number, and a passkey needs a name, so a phone paired here can only read while the app lock is on.")}</div></Show>
                 <div class="mono mobile-qr-url">{qr()!.url.split("#")[0]}</div>
                 <button class="btn" onClick={() => setQr(null)}>{t("Cancel")}</button>
               </div>
