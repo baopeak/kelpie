@@ -2,8 +2,8 @@
 //! server of ours. `tailscale serve` terminates HTTPS and forwards to one loopback listener of this daemon, which exists only
 //! while the mode is on and stops with the same `Generation` as the others.
 //!
-//! - **Off by default.** The CLI runs only while the mode is on or when asked (`mobile.tailscale_status`, Settings → Mobile open):
-//!   no polling, no child and no listener otherwise. Each call runs off the runtime, is limited to 5 s and is killed past it.
+//! - **Off by default.** The CLI runs only while the mode is on, when asked (`mobile.tailscale_status`, Settings → Mobile open), or when phone access
+//!   or the daemon starts with an entry still to remove: no polling, no child and no listener otherwise. Each call runs off the runtime, is limited to 5 s and is killed past it.
 //! - **The CLI's output is not trusted to stay as it is** (Tailscale documents its format as subject to change): what cannot be
 //!   read is a state of its own, and nothing is changed on the strength of it.
 //! - **Never clobbers.** `serve status --json` is read first: port 8443 used by anything but our own entry is refused. Off removes
@@ -389,15 +389,17 @@ pub async fn status(daemon: Arc<Daemon>) -> Result<Value> {
     let m = &daemon.mobile;
     // One look at a time: a window that asks again does not start another child.
     let _one = m.tailscale_check.lock().await;
-    // With the mode off, or an entry still to go, this may remove an entry or forget its port, which must not cross a change under way.
+    // With the mode off, or an entry still to go, this may remove an entry or forget its port, which must not cross a change under way. A look that does not hold
+    // the lock does neither, whatever it comes to find: the mode can go off and on again behind it, and the next look sees to it.
     let quiet = {
         let c = m.config.lock();
         c.tailscale && !c.tailscale_remove
     };
-    let _change = if quiet { None } else { Some(m.tailscale_change.lock().await) };
+    let change = if quiet { None } else { Some(m.tailscale_change.lock().await) };
+    let may_change = change.is_some();
     let (known, to_remove) = {
         let c = m.config.lock();
-        (c.tailscale_port, c.tailscale_remove)
+        (c.tailscale_port, c.tailscale_remove && may_change)
     };
     let (detected, entry, removed) = off_runtime(m, move |cli| {
         let detected = detect(cli);
@@ -415,7 +417,7 @@ pub async fn status(daemon: Arc<Daemon>) -> Result<Value> {
                 r.loopback_lost = false;
             }
         }
-    } else if known.is_some() && !m.config.lock().tailscale && matches!(entry, Some(Entry::Free | Entry::Taken)) {
+    } else if may_change && known.is_some() && !m.config.lock().tailscale && matches!(entry, Some(Entry::Free | Entry::Taken)) {
         m.removal_done(true);
     }
     let origin = match (&detected, entry) {
@@ -455,7 +457,7 @@ pub async fn check_can_turn_on(daemon: &Arc<Daemon>) -> Result<u64> {
 
 /// Why the loopback listener could not be opened.
 enum Listen {
-    /// The server stopped or started again meanwhile: nothing is wrong with the port.
+    /// The server stopped or started again meanwhile, or the mode went off: nothing is wrong with the port.
     NoServer,
     PortTaken,
 }
@@ -486,8 +488,11 @@ async fn listen_loopback(daemon: &Arc<Daemon>, any_port: bool) -> Result<u16, Li
     let port = listener.local_addr().map_err(|_| Listen::PortTaken)?.port();
     let own = Arc::new(Generation::new());
     {
+        // Coming back on its old port is only for a mode that is on: turning it off stops what is open, under this order of locks, and would not find this one later.
+        // A turn-on opens it with the mode still off, and its last step answers for it.
+        let c = m.config.lock();
         let mut running = m.running.lock();
-        let Some(r) = running.as_mut().filter(|r| Arc::ptr_eq(&r.stop, &all) && r.loopback.is_none()) else { return Err(Listen::NoServer) };
+        let Some(r) = running.as_mut().filter(|r| (any_port || c.tailscale) && Arc::ptr_eq(&r.stop, &all) && r.loopback.is_none()) else { return Err(Listen::NoServer) };
         r.loopback = Some(LoopbackListener { port, stop: own.clone() });
     }
     // Its connections have a stop of their own: turning the mode off cuts the phones that came through it, not the others.
@@ -584,7 +589,8 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
     let fqdn = match done {
         Ok(fqdn) => fqdn,
         Err(why) => {
-            if !was_listening {
+            // With the mode off nothing else stops it: turning off may have passed just before this one opened.
+            if !was_listening || !m.config.lock().tailscale {
                 m.stop_loopback();
             }
             bail!(why);
@@ -599,6 +605,7 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
         match this_run {
             Some(r) if c.enabled && m.tailscale_ended.load(Ordering::SeqCst) == asked_at => {
                 c.tailscale = true;
+                c.tailscale_port = Some(port);
                 c.tailscale_remove = false;
                 r.ts_origin = Some(format!("{fqdn}:{HTTPS_PORT}"));
                 Some(r.listeners.clone())
@@ -610,8 +617,9 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
         m.stop_loopback();
         let removed = off_runtime(m, move |cli| remove_ours(cli, Some(port))).await?;
         m.removal_done(removed.is_ok());
-        if removed.is_err() {
+        if let Err(why) = removed {
             m.audit("-", "tailscale_off", "ended while turning on, and the entry in Tailscale Serve could not be removed");
+            bail!(why);
         }
         bail!(ENDED_MEANWHILE);
     };
@@ -730,13 +738,15 @@ pub mod fake {
         pub publish_times_out: Mutex<bool>,
         /// Holds `serve --bg` up: says it got there on the first, and goes on when the second says so.
         pub publish_holds: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+        /// The same for `status --json`, the start of a look at Tailscale.
+        pub look_holds: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     }
 
     pub const READY: &str = r#"{"Version":"1.98.10","BackendState":"Running","Self":{"DNSName":"desk.tail1234.ts.net."},"CertDomains":["desk.tail1234.ts.net"],"Peer":{},"User":{}}"#;
 
     impl Fake {
         pub fn ready() -> Fake {
-            Fake { status: Mutex::new(READY.into()), serve: Mutex::new("{}".into()), calls: Mutex::new(Vec::new()), publish_fails: Mutex::new(None), off_fails: Mutex::new(false), serve_down: Mutex::new(false), publish_times_out: Mutex::new(false), publish_holds: Mutex::new(None) }
+            Fake { status: Mutex::new(READY.into()), serve: Mutex::new("{}".into()), calls: Mutex::new(Vec::new()), publish_fails: Mutex::new(None), off_fails: Mutex::new(false), serve_down: Mutex::new(false), publish_times_out: Mutex::new(false), publish_holds: Mutex::new(None), look_holds: Mutex::new(None) }
         }
 
         pub fn entry(port: u16) -> String {
@@ -778,13 +788,24 @@ pub mod fake {
         }
     }
 
+    /// Long past any stall of the machine: a test that fails on the way drops its sender, which lets this go at once.
+    const HELD_AT_MOST: std::time::Duration = std::time::Duration::from_secs(60);
+
     impl Cli for Fake {
         fn run(&self, args: &[&str]) -> Ran {
             let call = args.join(" ");
             self.calls.lock().push(call.clone());
             let answer = |s: String| Ran::Done { ok: true, stdout: s, stderr: String::new() };
             match call.as_str() {
-                "status --json" => answer(self.status.lock().clone()),
+                "status --json" => {
+                    // Taken first: the lock must not be held through the wait, when another look goes on past this one.
+                    let held = self.look_holds.lock().take();
+                    if let Some((reached, go)) = held {
+                        let _ = reached.send(());
+                        let _ = go.recv_timeout(HELD_AT_MOST);
+                    }
+                    answer(self.status.lock().clone())
+                }
                 "serve status --json" => {
                     if *self.serve_down.lock() {
                         return Ran::Done { ok: false, stdout: String::new(), stderr: "failed to connect to local Tailscale service".into() };
@@ -800,7 +821,7 @@ pub mod fake {
                 _ => {
                     if let Some((reached, go)) = self.publish_holds.lock().take() {
                         let _ = reached.send(());
-                        let _ = go.recv_timeout(std::time::Duration::from_secs(10));
+                        let _ = go.recv_timeout(HELD_AT_MOST);
                     }
                     if let Some(said) = self.publish_fails.lock().clone() {
                         return Ran::Done { ok: false, stdout: String::new(), stderr: said };

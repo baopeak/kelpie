@@ -1176,11 +1176,14 @@ impl Mobile {
         self.running.lock().as_ref().and_then(|r| r.loopback.as_ref().map(|l| l.port))
     }
 
-    /// Sets the origin phones are told; true when that changed something.
+    /// Sets the origin phones are told; true when that changed something. With the mode off there is none: a look that read it as on can get here after turning off
+    /// has cleared the origin, and nothing would clear it again.
     fn set_tailscale_origin(&self, origin: Option<String>) -> bool {
         let listeners = {
+            let c = self.config.lock();
             let mut running = self.running.lock();
             let Some(r) = running.as_mut() else { return false };
+            let origin = origin.filter(|_| c.tailscale);
             if r.ts_origin == origin {
                 return false;
             }
@@ -6087,6 +6090,28 @@ mod tests {
         }
     }
 
+    /// Whether a hold of the fake was reached in good time.
+    async fn hold_reached(reached: &std::sync::mpsc::Receiver<()>) -> bool {
+        for _ in 0..1000 {
+            if reached.try_recv().is_ok() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// Starts turning the mode on, as the verified app with the person agreeing, and stops it inside `serve --bg`. The sender lets it go on.
+    async fn turn_on_held_at_publish(d: &Arc<Daemon>, fake: &tailscale::fake::Fake, tx: &ClientTx, client: u64, what: &str) -> std::sync::mpsc::Sender<()> {
+        d.presence.inject(|_| Ok(()));
+        let (reached_tx, reached) = std::sync::mpsc::channel();
+        let (go, held) = std::sync::mpsc::channel();
+        *fake.publish_holds.lock() = Some((reached_tx, held));
+        assert_eq!(d.dispatch(client, tx, &json!("on"), "mobile.set_tailscale", json!({"on": true})).unwrap(), None);
+        assert!(hold_reached(&reached).await, "{what}: the race needs the publish under way");
+        go
+    }
+
     /// Whatever takes access away while `serve --bg` is under way wins: the mode does not come on, the entry goes, and turning phone access
     /// on again with the plain token brings nothing back.
     #[tokio::test]
@@ -6097,17 +6122,7 @@ mod tests {
             on_tailscale(&mut network, &fake).await;
             let d = network.rig.daemon.clone();
             let (tx, mut replies) = app_client(&d, 96);
-            d.presence.inject(|_| Ok(()));
-            let (reached_tx, reached) = std::sync::mpsc::channel();
-            let (go, held) = std::sync::mpsc::channel();
-            *fake.publish_holds.lock() = Some((reached_tx, held));
-            assert_eq!(d.dispatch(96, &tx, &json!("on"), "mobile.set_tailscale", json!({"on": true})).unwrap(), None);
-            for _ in 0..1000 {
-                if reached.try_recv().is_ok() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            let go = turn_on_held_at_publish(&d, &fake, &tx, 96, method).await;
             // While the CLI is publishing, as the person would press it.
             let answered = d.dispatch(96, &tx, &json!("away"), method, json!({"on": false})).unwrap();
             let mut told = Vec::new();
@@ -6130,7 +6145,7 @@ mod tests {
                 told.push(later_reply(&mut replies).await);
             }
             let on = told.iter().find(|r| r["id"] == "on").expect("the turn-on is answered");
-            assert!(on["error"].is_object(), "{method}: it says it did not happen: {on}");
+            assert_eq!(on["error"]["message"].as_str(), Some(tailscale::ENDED_MEANWHILE), "{method}: it says it did not happen: {on}");
             for _ in 0..500 {
                 if *fake.serve.lock() == "{}" {
                     break;
@@ -6141,11 +6156,162 @@ mod tests {
             assert_eq!(*fake.serve.lock(), "{}", "{method}: the entry is gone");
             assert_eq!(d.mobile.loopback_port(), None, "{method}: nothing listens for serve");
             let published = fake.changes().iter().filter(|c| c.starts_with("serve --bg")).count();
+            assert_eq!(published, 1, "{method}");
             network.restart().await;
             tokio::time::sleep(Duration::from_millis(50)).await;
             assert_eq!(d.mobile.tailscale_origin(), None, "{method}: the plain token brings nothing back");
             assert_eq!(fake.changes().iter().filter(|c| c.starts_with("serve --bg")).count(), published, "{method}");
         }
+    }
+
+    /// The same race, not steered: the publish is let go and access is taken away with no wait, so the turn-on may finish first or not. Either reply is fair; the end is one.
+    #[tokio::test]
+    async fn what_takes_access_away_ends_the_same_whichever_way_the_race_falls() {
+        for method in ["mobile.revoke_all", "mobile.disable", "mobile.reset", "mobile.set_tailscale"] {
+            let mut network = NetworkRig::new().await;
+            let fake = Arc::new(tailscale::fake::Fake::ready());
+            on_tailscale(&mut network, &fake).await;
+            let d = network.rig.daemon.clone();
+            let (tx, mut replies) = app_client(&d, 96);
+            let go = turn_on_held_at_publish(&d, &fake, &tx, 96, method).await;
+            go.send(()).unwrap();
+            let answered = d.dispatch(96, &tx, &json!("away"), method, json!({"on": false})).unwrap();
+            for _ in 0..(if answered.is_some() { 1 } else { 2 }) {
+                later_reply(&mut replies).await;
+            }
+            for _ in 0..500 {
+                if *fake.serve.lock() == "{}" && d.mobile.loopback_port().is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(!d.mobile.config.lock().tailscale, "{method}: the mode is off");
+            assert_eq!(*fake.serve.lock(), "{}", "{method}: the entry is gone");
+            assert_eq!(d.mobile.loopback_port(), None, "{method}: nothing listens for serve");
+            assert_eq!(d.mobile.tailscale_origin(), None, "{method}: no address is handed out");
+        }
+    }
+
+    /// A turn-on that lost, and whose entry would not go, does not say that Tailscale publishes nothing.
+    #[tokio::test]
+    async fn a_turn_on_that_lost_says_so_when_its_entry_could_not_be_removed() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let (tx, mut replies) = app_client(&d, 107);
+        let go = turn_on_held_at_publish(&d, &fake, &tx, 107, "turning on").await;
+        *fake.off_fails.lock() = true;
+        assert!(d.dispatch(107, &tx, &json!("away"), "mobile.disable", json!({})).unwrap().is_some());
+        go.send(()).unwrap();
+        let on = later_reply(&mut replies).await;
+        assert_eq!(on["error"]["message"].as_str(), Some(tailscale::NOT_REMOVED), "{on}");
+        assert_ne!(*fake.serve.lock(), "{}", "as it says");
+        assert_eq!(d.mobile.status(true)["tailscale"]["to_remove"], true);
+    }
+
+    /// A look at Tailscale that began with the mode on can come back in the middle of turning it off and on again, having read the port free. It holds no lock against
+    /// that turn-on, so what it read does not count: Kelpie goes on knowing its entry, and the entry being written stays to account for.
+    #[tokio::test]
+    async fn a_slow_look_at_tailscale_does_not_make_a_turn_on_forget_its_port() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        publish(&d).await;
+        let (reached_tx, reached) = std::sync::mpsc::channel();
+        let (let_look_go, look_held) = std::sync::mpsc::channel();
+        *fake.look_holds.lock() = Some((reached_tx, look_held));
+        let looking = tokio::spawn(tailscale::status(d.clone()));
+        assert!(hold_reached(&reached).await, "the look is under way");
+        let (tx, mut replies) = app_client(&d, 108);
+        assert_eq!(d.dispatch(108, &tx, &json!("off"), "mobile.set_tailscale", json!({"on": false})).unwrap(), None);
+        for _ in 0..500 {
+            if d.mobile.config.lock().tailscale_port.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(*fake.serve.lock(), "{}", "turned off");
+        assert_eq!(d.mobile.config.lock().tailscale_port, None, "and forgotten");
+        let go = turn_on_held_at_publish(&d, &fake, &tx, 108, "turning on again").await;
+        let port = d.mobile.config.lock().tailscale_port.expect("known from before the entry is written");
+        let_look_go.send(()).unwrap();
+        looking.await.unwrap().unwrap();
+        assert_eq!(d.mobile.config.lock().tailscale_port, Some(port), "the look forgets nothing");
+        assert!(store::load(&d.mobile.dir).store.tailscale_remove, "and leaves the entry being written to account for");
+        go.send(()).unwrap();
+        let mut told = vec![later_reply(&mut replies).await, later_reply(&mut replies).await];
+        told.retain(|r| r["id"] == "on");
+        assert_eq!(told[0]["result"]["serve"], "ours", "{told:?}");
+        let c = d.mobile.config.lock();
+        assert!(c.tailscale && !c.tailscale_remove);
+        assert_eq!(c.tailscale_port, Some(port));
+    }
+
+    /// A listener still being reopened when the mode goes off finds that out, and does not come up behind it: nothing would stop it.
+    #[tokio::test]
+    async fn a_listener_being_reopened_stays_closed_once_the_mode_is_off() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let port = publish(&d).await;
+        d.mobile.stop_loopback();
+        // Someone holds the port for now, so that reopening goes on trying for it.
+        let mut held = None;
+        for _ in 0..200 {
+            held = std::net::TcpListener::bind(("127.0.0.1", port)).ok();
+            if held.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(held.is_some(), "the stopped listener lets go of its port");
+        let resuming = tokio::spawn(tailscale::resume(d.clone()));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tailscale::turn_off(d.clone()).await.unwrap();
+        drop(held);
+        resuming.await.unwrap();
+        assert_eq!(d.mobile.loopback_port(), None);
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err(), "nothing listens");
+    }
+
+    /// A look that read the mode as on can reach this after it went off, and turning off has already cleared the origin: none is set again.
+    #[tokio::test]
+    async fn no_origin_is_set_with_the_mode_off() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        assert!(!d.mobile.set_tailscale_origin(Some(ORIGIN.to_string())), "nothing changed");
+        assert_eq!(d.mobile.tailscale_origin(), None);
+        assert_eq!(d.mobile.pair_start(false).unwrap()["tailscale"], false);
+    }
+
+    /// A phone that came through serve is told it was removed like any other, inside its session, and the entry goes.
+    #[tokio::test]
+    async fn a_phone_connected_through_serve_hears_the_kill_switch() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let port = publish(&d).await;
+        let mut phone = through_serve(&d, port, network.rig.phone.clone(), "X-Forwarded-For: 100.101.102.103\r\n").await;
+        phone.reconnect().await.expect("a paired key");
+        phone_send(&mut phone, json!({"caps": ["ack", "hb"]})).await.unwrap();
+        assert_eq!(phone_recv(&mut phone).await.unwrap()["type"], "hello");
+        let (tx, _rx) = crate::session::client_channel();
+        d.dispatch(1, &tx, &json!(1), "mobile.revoke_all", json!({})).unwrap();
+        told_revoked(&mut phone).await;
+        for _ in 0..500 {
+            if *fake.serve.lock() == "{}" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(*fake.serve.lock(), "{}", "the entry is gone");
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err(), "nothing listens");
     }
 
     /// The same for a kill switch pressed while the person is at the prompt: passing it afterwards publishes nothing.
