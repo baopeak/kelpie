@@ -4,9 +4,10 @@
 import { createEffect, createSignal, For, Match, Show, Switch } from "solid-js";
 import type { ChatItem } from "../../src/chat/chat-model";
 import { describeTool } from "../../src/chat/tool-view";
+import { CommandBlock } from "./command-block";
 import { t } from "./i18n";
 import { ChatComposer, PendingChips } from "./composer";
-import { canType, chat, chatPending, connected, device } from "./phone-state";
+import { canType, chat, chatPending, connected, device, openId, requestInfoFor } from "./phone-state";
 import type { SessionRow } from "./link";
 
 type Permission = Extract<ChatItem, { kind: "permission" }>;
@@ -61,6 +62,9 @@ function PermissionCard(props: { item: Permission }) {
   const p = () => props.item;
   const [message, setMessage] = createSignal("");
   const [picked, setPicked] = createSignal<Record<string, string[]>>({});
+  // What the daemon said of this request: its label, and the command as it holds it. A long one is read to its end before it can be approved.
+  const info = () => requestInfoFor(openId() ?? "", String(p().id));
+  const [seen, setSeen] = createSignal(true);
   const open = () => !p().resolved && !p().answering;
   const enabled = () => open() && canType() && connected();
   const answer = (o: { id: string; label: string; tone?: string }) =>
@@ -78,9 +82,10 @@ function PermissionCard(props: { item: Permission }) {
   const complete = () => (p().ask ?? []).every((q) => answers()[q.question]);
   return (
     <div class="perm" classList={{ resolved: !!p().resolved }} data-perm={p().id}>
+      <Show when={!p().resolved}><CommandBlock command={info()?.command || p().command} risk={info()?.risk} onSeen={setSeen} /></Show>
       <div class="q">{p().title}</div>
       <Show when={p().detail}><div class="muted">{p().detail}</div></Show>
-      <Show when={p().command}><pre class="code">{p().command}</pre></Show>
+      <Show when={p().resolved && p().command}><pre class="code">{p().command}</pre></Show>
       <Show when={p().diff?.length}>
         <For each={p().diff}>{(d) => <details><summary>{d.path.split(/[\\/]/).pop()}</summary><pre class="code">{d.text.split("\n").slice(0, 60).join("\n")}</pre></details>}</For>
       </Show>
@@ -119,7 +124,7 @@ function PermissionCard(props: { item: Permission }) {
           <For each={p().options.filter((o) => !o.lasting)}>
             {(o) => (
               <Show when={!p().retry}>
-                <button class="btn" classList={{ primary: o.tone === "allow" && !p().ask?.length, danger: o.tone === "deny" }} disabled={!enabled()} onClick={() => answer(o)}>
+                <button class="btn" classList={{ primary: o.tone === "allow" && !p().ask?.length, danger: o.tone === "deny" }} disabled={!enabled() || (o.tone !== "deny" && !seen())} onClick={() => answer(o)}>
                   {o.label}
                 </button>
               </Show>

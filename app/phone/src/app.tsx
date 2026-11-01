@@ -4,7 +4,8 @@ import { createSignal, For, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
 import { Inbox } from "./inbox";
 import { localeSetting, setLocale, t, type LocaleSetting } from "./i18n";
-import { alertsError, alertsState, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, sessions, setPairing, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
+import { alertsError, alertsState, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, sessions, setPairing, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
+import { LockCover, LockScreen, RecheckSheet } from "./lock-screen";
 import { InstallGuide, ScanCode, screenNow } from "./install-guide";
 import { labelOf, needsCount } from "./inbox-order";
 import { SessionView } from "./session-view";
@@ -110,7 +111,7 @@ function SecurityBanner() {
           <div class="actions"><a class="btn" href={`https://${movedHost()}/`}>{t("Open it")}</a></div>
         </div>
       </Show>
-      <Show when={deviceNews()}><div class="banner" role="status" data-banner="device-news">{deviceNews()}</div></Show>
+      <Show when={deviceNews() && lockShown().clear}><div class="banner" role="status" data-banner="device-news">{deviceNews()}</div></Show>
     </>
   );
 }
@@ -166,7 +167,7 @@ function Sheet(props: { onClose: () => void }) {
         <h2>{info().label}</h2>
         <p class="muted">{info().detail}</p>
         <Show when={device()}><p class="muted">{t("This device: {name}", { name: device()!.name })} · {device()!.can_write ? t("can type") : t("read only")}</p></Show>
-        <Show when={device()}><AlertsRow /></Show>
+        <Show when={device() && lockShown().clear}><AlertsRow /></Show>
         <label class="row-setting">{t("Language")}
           <select class="field" value={localeSetting()} onChange={(e) => setLocale(e.currentTarget.value as LocaleSetting)}>
             <option value="auto">{t("Automatic")}</option>
@@ -191,17 +192,19 @@ function Sheet(props: { onClose: () => void }) {
 
 export function App() {
   const [sheet, setSheet] = createSignal(false);
+  // Behind the lock nothing says what is there: not a session's name, not how many need the person.
+  const open = () => !paired() || lockShown().clear;
   const title = () => {
     const id = openId();
-    const s = id ? sessions().find((x) => x.id === id) : undefined;
+    const s = id && open() ? sessions().find((x) => x.id === id) : undefined;
     return s ? labelOf(s) : "Kelpie";
   };
-  const badge = () => needsCount(sessions());
+  const badge = () => (open() ? needsCount(sessions()) : 0);
   const back = () => (history.state?.s ? history.back() : closeSession());
   return (
     <>
       <header id="top">
-        <Show when={openId()}>
+        <Show when={openId() && open()}>
           <button class="icon" aria-label={t("Back")} onClick={back}>‹</button>
         </Show>
         <h1>{title()}</h1>
@@ -212,10 +215,14 @@ export function App() {
       <SecurityBanner />
       <main id="view">
         <Show when={paired()} fallback={<NotPaired />}>
-          <Show when={openId()} keyed fallback={<Inbox />}>{(id) => <SessionView id={id} />}</Show>
+          <Show when={lockShown().clear} fallback={<LockScreen />}>
+            <Show when={openId()} keyed fallback={<Inbox />}>{(id) => <SessionView id={id} />}</Show>
+          </Show>
         </Show>
       </main>
       <Show when={sheet()}><Sheet onClose={() => setSheet(false)} /></Show>
+      <RecheckSheet />
+      <LockCover />
     </>
   );
 }

@@ -5,7 +5,7 @@
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
-import { TAILSCALE_API } from "../../lib/attention";
+import { LOCK_API, TAILSCALE_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
@@ -26,6 +26,10 @@ export interface MobileDevice {
   secure_origin?: boolean;
   /** It turned alerts on (absent below `PHONE_API`). */
   push?: boolean;
+  /** Its passkey is on record, it may set up a new one now, it is unlocked now (absent below `LOCK_API`). */
+  passkey?: boolean;
+  lock_reset?: boolean;
+  unlocked?: boolean;
   /** `unverified`: its record was changed outside Kelpie (or the key that checks it is gone): it must be paired again.
    *  `unchecked`: the key that checks it cannot be read right now; nothing is concluded, and it is checked again when it can be. */
   state: "ok" | "unverified" | "unchecked";
@@ -54,6 +58,8 @@ export interface MobileStatus {
   dormant_days: number;
   /** Tailscale mode, as the daemon holds it (absent from a daemon older than `TAILSCALE_API`). `origin`: `<name>:8443` while phones can use it. */
   tailscale?: { on: boolean; origin: string | null; to_remove?: boolean };
+  /** The phones' app lock, as the daemon applies it (absent below `LOCK_API`). */
+  lock?: { on: boolean; idle_s: number; recheck: boolean; plain_read: boolean };
   /** This window is the verified Kelpie app: it may approve phones and raise what they may do. */
   app: boolean;
 }
@@ -120,6 +126,7 @@ interface MobileAudit {
 }
 
 const DORMANT_DAYS = [30, 90, 180, 0];
+const IDLE_SECONDS = [60, 300, 900, 1800, 3600];
 
 const errText = (e: unknown) => String(e).replace(/^Error: /, "");
 
@@ -202,6 +209,9 @@ export function MobileSettings() {
       await mobileSecure("mobile.set_tailscale", { on });
       await checkTailscale();
     });
+  // What takes protection away asks the person, and is back to what holds now if they did not verify: the status did not change, so nothing else redraws it.
+  const setLock = (patch: Partial<NonNullable<MobileStatus["lock"]>>) => run(() => mobileSecure("mobile.set_lock", patch));
+  const resetLock = (d: MobileDevice) => run(() => mobileSecure("mobile.reset_lock", { id: d.id }));
   const setPermission = (d: MobileDevice, permission: MobilePermission) =>
     run(() => mobileSecure("mobile.set_permission", { id: d.id, permission }));
   const reset = async () => {
@@ -323,6 +333,31 @@ export function MobileSettings() {
             </div>
           </div>
         </Show>
+        <Show when={store.daemonApi() >= LOCK_API && s()!.lock}>
+          <SettingRow id="mobile-lock" wide>
+            <div class="inline-fields" style={{ "align-items": "center" }}>
+              <Toggle on={!!s()!.lock!.on} onChange={(on) => void setLock({ on })} />
+              <span>{t("Lock after")}</span>
+              <select class="text-input" data-lock-idle value={s()!.lock!.idle_s} disabled={busy() || !s()!.lock!.on} onChange={(e) => {
+                const select = e.currentTarget;
+                void setLock({ idle_s: +select.value }).then(() => { select.value = String(s()?.lock?.idle_s ?? select.value); });
+              }}>
+                <For each={IDLE_SECONDS}>{(n) => <option value={n}>{t("{n} min idle", { n: n / 60 })}</option>}</For>
+              </select>
+            </div>
+            <Show when={!s()!.app}>
+              <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot change this.")}</div>
+            </Show>
+          </SettingRow>
+          <Show when={s()!.lock!.on}>
+            <SettingRow id="mobile-lock-recheck">
+              <Toggle on={!!s()!.lock!.recheck} onChange={(recheck) => void setLock({ recheck })} />
+            </SettingRow>
+            <SettingRow id="mobile-lock-plain">
+              <Toggle on={!!s()!.lock!.plain_read} onChange={(plain_read) => void setLock({ plain_read })} />
+            </SettingRow>
+          </Show>
+        </Show>
         <SettingRow id="mobile-pair" wide>
           <Show when={!s()!.app}>
             <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot approve phones or raise what they may do.")}</div>
@@ -359,7 +394,7 @@ export function MobileSettings() {
                 <div class="saved-layout" data-device={d.id} data-state={d.state}>
                   <Icon name="server" size={16} />
                   <div class="saved-layout-main">
-                    <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show></span></div>
+                    <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show><Show when={d.passkey}> · {t("app lock set up")}</Show><Show when={d.lock_reset}> · {t("may set up a new passkey")}</Show></span></div>
                     <div class="muted-inline" style={{ "font-size": "11.5px" }}>
                       {d.state === "unverified"
                         ? t("Its record was changed outside Kelpie: pair it again.")
@@ -374,6 +409,9 @@ export function MobileSettings() {
                       <option value="write">{t("May type")}</option>
                       <Show when={d.kind === "app"}><option value="control">{t("May take control")}</option></Show>
                     </select>
+                  </Show>
+                  <Show when={d.state === "ok" && d.secure_origin && store.daemonApi() >= LOCK_API}>
+                    <button class="btn" data-reset-lock disabled={busy() || !!d.lock_reset} onClick={() => void resetLock(d)}>{t("Reset this phone's lock")}</button>
                   </Show>
                   <button class="btn" onClick={async () => (await confirmDialog(t("Unpair “{name}”? It is disconnected at once.", { name: d.name }))) && void run(() => daemon("mobile.revoke", { id: d.id }))}>{t("Unpair")}</button>
                 </div>
@@ -459,6 +497,7 @@ export function MobileApprovals() {
       if (m.event === "mobile.device_changed") {
         const p = m.params as { name: string; change: string; permission: MobilePermission | null };
         const what = p.permission === "control" ? t("may take control") : p.permission === "write" ? t("may type") : t("may read");
+        if (p.change === "lock_enrolled") return store.notify(t("Phone “{name}” set up its app lock. If that was not you, unpair it.", { name: p.name }), undefined, 10000);
         store.notify(p.change === "added" ? t("Phone “{name}” was paired ({what}).", { name: p.name, what }) : p.change === "removed" ? t("Phone “{name}” was removed.", { name: p.name }) : t("Phone “{name}” now {what}.", { name: p.name, what }), undefined, 6000);
       }
     });

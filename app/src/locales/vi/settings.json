@@ -381,5 +381,17 @@
   "Kip animations": "Hiệu ứng của Kip",
   "Small, light animations when agents work, need you or finish. Follow system: only when the operating system's animation effects are on.": "Hiệu ứng nhỏ, nhẹ khi agent làm việc, cần bạn hoặc xong việc. Theo hệ thống: chỉ chạy khi hiệu ứng hoạt ảnh của hệ điều hành đang bật.",
   "Follow system": "Theo hệ thống",
-  "Agent names and logos are trademarks of their owners, shown only to identify the tools Kelpie launches. Kelpie is not affiliated with or endorsed by them.": "Tên và logo của các agent là thương hiệu của chủ sở hữu, chỉ dùng để nhận biết công cụ mà Kelpie khởi chạy. Kelpie không liên kết với và không được các bên này bảo trợ."
+  "Agent names and logos are trademarks of their owners, shown only to identify the tools Kelpie launches. Kelpie is not affiliated with or endorsed by them.": "Tên và logo của các agent là thương hiệu của chủ sở hữu, chỉ dùng để nhận biết công cụ mà Kelpie khởi chạy. Kelpie không liên kết với và không được các bên này bảo trợ.",
+  "Lock Kelpie on phones": "Khóa Kelpie trên điện thoại",
+  "A phone paired over HTTPS shows nothing until Face ID, a fingerprint or its passcode has passed, and your computer checks that, so a copied phone key reaches nothing. It locks again when you leave the app and after the idle time here. Turning it off or lengthening the time asks you to verify.": "Điện thoại ghép đôi qua HTTPS sẽ không hiện gì cho đến khi xác thực xong bằng Face ID, vân tay hoặc mật mã, và máy tính kiểm tra điều đó, nên khóa điện thoại bị sao chép không truy cập được gì. Ứng dụng khóa lại khi bạn rời đi và sau thời gian rảnh đặt ở đây. Tắt hoặc kéo dài thời gian sẽ yêu cầu bạn xác thực.",
+  "Ask again for dangerous commands": "Hỏi lại với lệnh nguy hiểm",
+  "Approving a request Kelpie labels dangerous needs Face ID again, on top of the app lock. It covers the approval buttons only: typing in a terminal from the phone cannot be judged and is not covered.": "Phê duyệt yêu cầu mà Kelpie gắn nhãn nguy hiểm cần Face ID thêm một lần, ngoài khóa ứng dụng. Việc này chỉ áp dụng cho các nút phê duyệt: gõ trực tiếp vào terminal từ điện thoại không thể đánh giá nên không được bao gồm.",
+  "Allow reading over plain HTTP": "Cho phép đọc qua HTTP thường",
+  "A page without HTTPS cannot have a passkey, so it may only read, without any lock. Turn this off to close that too. A phone paired over Tailscale or HTTPS is not affected.": "Trang không có HTTPS không thể có khóa truy cập, nên chỉ được đọc và không có khóa nào. Tắt mục này để đóng luôn việc đó. Điện thoại ghép đôi qua Tailscale hoặc HTTPS không bị ảnh hưởng.",
+  "Lock after": "Khóa sau",
+  "{n} min idle": "{n} phút không dùng",
+  "app lock set up": "đã thiết lập khóa ứng dụng",
+  "may set up a new passkey": "được thiết lập khóa truy cập mới",
+  "Reset this phone's lock": "Đặt lại khóa của điện thoại này",
+  "Phone “{name}” set up its app lock. If that was not you, unpair it.": "Điện thoại “{name}” đã thiết lập khóa ứng dụng. Nếu không phải bạn, hãy bỏ ghép đôi."
 }

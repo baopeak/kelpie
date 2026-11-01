@@ -12,7 +12,8 @@ import { ChatSender, type PendingSend, type SendResult as ChatSendResult } from 
 import { NOTICE_SHOWN_MS, NoticeBoard, refusalText, type Notice } from "./notice";
 import { clearCache, loadList, loadScreen, saveList, saveScreen } from "./cache";
 import { canAct, dataAge, deriveConn, type ConnState } from "./conn-state";
-import { browserEnv, Link, linkCodec, type ChatMsg, type ChatQueueMsg, type ChatResolved, type DeviceInfo, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
+import { browserEnv, Link, linkCodec, type ChatMsg, type ChatQueueMsg, type ChatRequestInfo, type ChatResolved, type DeviceInfo, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
+import { browserCredentials, LockModel, type LockInfo, type Proof } from "./lock";
 import { pair, type PairSocket } from "./pair";
 import { currentPairing, forgetPairing, loadPairing, savePairing, seemsPaired } from "./pairing-store";
 import { emptyView, ScreenSync, type Prompt, type ScreenFrame, type ScreenView } from "./screen-sync";
@@ -94,12 +95,64 @@ export function plainHttpOrigin(): boolean {
   return !tailscale && !local;
 }
 
+/** How the app lock stands, for the views: whether what is behind it may be shown, and the state of its screen. */
+export const [lockShown, setLockShown] = createSignal<{ clear: boolean; face: string; asking: boolean; error: string | null; covered: boolean }>({ clear: false, face: "unknown", asking: false, error: null, covered: false });
+
+const lock = new LockModel({
+  credentials: browserCredentials(),
+  ask: (m) => link.lockAsk(m),
+  lockNow: () => link.lockNow(),
+  touch: () => link.lockTouch(),
+  connected: () => link.ready,
+  now: () => Date.now(),
+  store,
+}, () => setLockShown({ clear: lock.clear(), face: lock.face, asking: lock.asking, error: lock.error, covered: lock.covered }));
+export const lockGo = () => lock.go();
+setLockShown({ clear: lock.clear(), face: lock.face, asking: false, error: null, covered: false });
+
+/** What the daemon said of each open request of the chats followed (by chat and request id). */
+export const [requestInfo, setRequestInfo] = createSignal<Record<string, ChatRequestInfo>>({});
+const infoKey = (chat: string, request: string | number) => `${chat}|${request}`;
+
+/** What the daemon said of a card's request. An adapter names a card after the request in its own way: `approval-7`, `perm-7`, or the id as it is. */
+export function requestInfoFor(chatId: string, cardId: string): ChatRequestInfo | undefined {
+  return requestInfo()[infoKey(chatId, cardId)] ?? requestInfo()[infoKey(chatId, cardId.replace(/^(approval|perm)-/, ""))];
+}
+
+/** A dangerous approval the computer wants the passkey for: shown as a sheet, whose button is the gesture a ceremony needs. */
+export const [recheckAsked, setRecheckAsked] = createSignal<{ command: string; go(): void; cancel(): void; error: string | null } | null>(null);
+
+/** Asks the person to confirm with the passkey that `command` is what they approve. Null: they did not. */
+function askRecheck(request: string, command: string): Promise<Proof | null> {
+  return new Promise((resolve) => {
+    const done = (p: Proof | null) => {
+      setRecheckAsked(null);
+      resolve(p);
+    };
+    const go = () => {
+      void lock.recheck(request, command).then((p) => {
+        if (p) done(p);
+        else setRecheckAsked((cur) => cur && { ...cur, error: lock.error });
+      });
+    };
+    setRecheckAsked({ command, go, cancel: () => done(null), error: null });
+  });
+}
+
 const link = new Link(browserEnv(), () => {
   const p = currentPairing();
   return p ? linkCodec(p) : null;
 }, {
   changed: () => recompute(),
+  locked(info: LockInfo) {
+    lock.told(info);
+  },
+  chatRequestInfo(m: ChatRequestInfo) {
+    setRequestInfo((cur) => ({ ...cur, [infoKey(m.id, m.request_id)]: m }));
+  },
   hello(h: Hello, epochChanged: boolean) {
+    lock.sawServerClock(h.server_ts);
+    lock.told(h.lock ?? { state: "none" });
     // What the computer made of this page's first message: visible on the page, since its traffic is sealed (scripts/e2e/mobile.py).
     document.documentElement.dataset.servedLegacy = String(h.hb?.legacy ?? false);
     batch(() => {
@@ -153,6 +206,10 @@ const link = new Link(browserEnv(), () => {
   },
   chatResolved(m: ChatResolved) {
     chats.controller(m.id)?.resolvedElsewhere(m.request_id, !!m.dropped, { answeredBy: m.answered_by ?? (m.by === "desktop" ? "desktop" : undefined), at: m.at });
+    setRequestInfo((cur) => {
+      const { [infoKey(m.id, m.request_id)]: _gone, ...rest } = cur;
+      return rest;
+    });
   },
   chatQueue(m: ChatQueueMsg) {
     const view = fromPhoneMessage(m);
@@ -173,6 +230,7 @@ const link = new Link(browserEnv(), () => {
     tellDeviceNews(m.change === "added" ? t("A new device was paired with this computer: {name}.", { name }) : m.change === "removed" || m.change === "replaced" ? t("A device was removed from this computer: {name}.", { name }) : t("What {name} may do was changed on this computer.", { name }));
   },
   unpaired() {
+    lock.forget();
     void alerts.forget();
     void forgetPairing();
     void clearCache();
@@ -389,7 +447,12 @@ export function sendOutcome(o: Outcome): SendOutcome {
 function chatTransport(id: string): ChatTransport {
   return {
     async answer(requestId, line): Promise<AnswerOutcome> {
-      return chatOutcome(await link.chatAnswer(id, requestId, line));
+      const first = await link.chatAnswer(id, requestId, line);
+      if (first.t !== "error" || first.code !== "recheck") return chatOutcome(first);
+      // Asked by the computer: what the person confirms is what the card shows, and the signature is over that.
+      const proof = await askRecheck(String(requestId), requestInfo()[infoKey(id, requestId)]?.command ?? "");
+      if (!proof) return { result: "refused", message: t("Not confirmed, so nothing was sent.") };
+      return chatOutcome(await link.chatAnswer(id, requestId, line, proof));
     },
     deviceName: () => device()?.name,
     async queueOp(op, qid) {
@@ -460,7 +523,11 @@ export async function answerPrompt(id: string, waitingSince: number | null, prom
   const a = keyAnswer(prompt, key);
   // The daemon types text; only these two are keys.
   const body = a.data === "esc" || a.data === "enter" ? { key: a.data } : { text: a.data };
-  return link.answer(id, waitingSince, body, a.enter);
+  const first = await link.answer(id, waitingSince, body, a.enter);
+  if (first.t !== "error" || first.code !== "recheck") return first;
+  const proof = await askRecheck(String(waitingSince ?? 0), screen().wait?.command ?? "");
+  if (!proof) return { t: "error", code: "not_confirmed", message: t("Not confirmed, so nothing was sent.") };
+  return link.answer(id, waitingSince, body, a.enter, proof);
 }
 
 /** Sends `text` to the open chat. */
@@ -530,6 +597,7 @@ export async function pairDevice(code: string, name: string): Promise<string | n
 
 /** Forgets this device's pairing (the computer still lists it until it is removed there). */
 export function forgetDevice() {
+  lock.forget();
   void alerts.forget();
   link.stop();
   void forgetPairing();
@@ -591,6 +659,7 @@ export function startApp() {
   const tick = () => {
     if (document.hidden) return;
     recompute();
+    lock.tick();
     for (const s of senders.values()) s.prune();
   };
   setInterval(tick, 1000);
@@ -600,7 +669,12 @@ export function startApp() {
   window.addEventListener("online", () => link.setOnline(true));
   window.addEventListener("offline", () => link.setOnline(false));
   window.addEventListener("pageshow", (e) => e.persisted && link.kick());
+  // What counts as the person being there, for the computer's idle time.
+  for (const type of ["pointerdown", "keydown"]) document.addEventListener(type, () => lock.touched(), { passive: true, capture: true });
   document.addEventListener("visibilitychange", () => {
+    // First: the system may take its picture of the app for the switcher at any moment from here.
+    if (document.hidden) lock.left();
+    else lock.back();
     link.setHidden(document.hidden);
     // Nothing goes out from a hidden page, not even a late acknowledgement.
     if (document.hidden) for (const s of syncs.values()) s.dispose();
@@ -635,8 +709,9 @@ export function startApp() {
     }
     setPaired(true);
     setMovedHost(movedTo(p.endpoints, location.host));
+    // Nothing kept is painted while the lock may be on: the computer says, and until it has, the lock screen stands.
     void loadList().then((c) => {
-      if (c && !link.facts.ready && !sessions().length) {
+      if (c && lock.clear() && !link.facts.ready && !sessions().length) {
         batch(() => {
           setSessions(c.sessions);
           setProjects(c.projects);

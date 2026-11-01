@@ -3,6 +3,8 @@
 // connected; one that may not have arrived is retried once by the link, and after that the person decides.
 import { createSignal, For, onCleanup, Show } from "solid-js";
 import { answeredBeforeText } from "../../src/chat/chat-model";
+import { CommandBlock } from "./command-block";
+import type { WaitInfo } from "./command-text";
 import { lastingText, noticeFor, refusalText } from "./notice";
 import { answerPrompt, connected, showNotice } from "./phone-state";
 import type { Prompt } from "./screen-sync";
@@ -10,8 +12,10 @@ import { t } from "./i18n";
 
 type Phase = "ready" | "sending" | "sent" | "stale" | "unknown" | "error";
 
-export function PromptCard(props: { id: string; prompt: Prompt; waitingSince: number | null; canType: boolean }) {
+export function PromptCard(props: { id: string; prompt: Prompt; waitingSince: number | null; canType: boolean; wait?: WaitInfo | null }) {
   const [phase, setPhase] = createSignal<Phase>("ready");
+  // A long command is read to its end before anything can be chosen.
+  const [seen, setSeen] = createSignal(true);
   const [text, setText] = createSignal("");
   const [lastKey, setLastKey] = createSignal("");
   // The next screen frame can remove this card before the reply to a late tap arrives. Then, and only then, the
@@ -43,11 +47,12 @@ export function PromptCard(props: { id: string; prompt: Prompt; waitingSince: nu
   };
   return (
     <div class="prompt" data-prompt>
+      <CommandBlock command={props.wait?.command} risk={props.wait?.risk} onSeen={setSeen} />
       <Show when={props.prompt.question}><div class="q">{props.prompt.question}</div></Show>
       <div class="actions">
         <For each={props.prompt.keys.filter((k) => !props.prompt.lasting?.includes(k))}>
           {(k) => (
-            <button class="btn primary key-answer" disabled={!props.canType || !connected() || phase() === "sending" || phase() === "sent"} onClick={() => pick(k)}>
+            <button class="btn primary key-answer" disabled={!props.canType || !connected() || !seen() || phase() === "sending" || phase() === "sent"} onClick={() => pick(k)}>
               {k}
             </button>
           )}

@@ -4,6 +4,8 @@
 // from the last one it acknowledged on, acknowledges every 2nd frame or within 250 ms, and carries
 // on from the acknowledged one after a reconnect (`sub {have_rev}`).
 
+import type { WaitInfo } from "./command-text";
+
 export interface Prompt {
   keys: string[];
   question?: string | null;
@@ -24,6 +26,8 @@ export interface ScreenFrame {
   height: number;
   cursor: [number, number] | null;
   prompt: Prompt | null;
+  /** What the daemon says about the prompt or the wait: its label and the command. */
+  wait?: WaitInfo;
   waiting_since: number | null;
   title: string | null;
   server_ts: number;
@@ -36,6 +40,8 @@ export interface ScreenView {
   cursor: [number, number] | null;
   prompt: Prompt | null;
   waitingSince: number | null;
+  /** The daemon's label and the command, while a prompt or a wait is up. */
+  wait?: WaitInfo | null;
   title: string | null;
 }
 
@@ -119,7 +125,7 @@ export class ScreenSync {
     // The daemon builds on `base` from now on: older screens are not needed. A whole frame says nothing about what it builds on:
     // it may have heard only an earlier acknowledgement, so nothing is let go for one, beyond the bound.
     if (m.base !== null) for (const k of [...this.held.keys()]) if (k < m.base) this.held.delete(k);
-    const view: ScreenView = { rows: next, cursor: m.cursor, prompt: m.prompt, waitingSince: m.waiting_since, title: m.title };
+    const view: ScreenView = { rows: next, cursor: m.cursor, prompt: m.prompt, waitingSince: m.waiting_since, title: m.title, wait: m.wait ?? null };
     this.held.delete(m.rev);
     this.held.set(m.rev, view);
     // The first to arrive goes first.

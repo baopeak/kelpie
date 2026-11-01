@@ -49,7 +49,7 @@ export function SessionView(props: { id: string }) {
             <Show when={waiting() && screen().prompt} fallback={<Show when={waiting()}><div class="needs">{t("This agent is waiting for you.")}</div></Show>}>
               {/* Keyed by the question: the next prompt gets a fresh card, not the last one's "Sent". */}
               <Show when={promptKey(screen().prompt!, screen().waitingSince ?? s().waiting_since)} keyed>
-                {(_key) => <PromptCard id={props.id} prompt={screen().prompt!} waitingSince={screen().waitingSince ?? s().waiting_since} canType={canType()} />}
+                {(_key) => <PromptCard id={props.id} prompt={screen().prompt!} waitingSince={screen().waitingSince ?? s().waiting_since} canType={canType()} wait={screen().wait} />}
               </Show>
             </Show>
             <TerminalText rows={screen().rows.length ? screen().rows : ["…"]} dim={stale()} />

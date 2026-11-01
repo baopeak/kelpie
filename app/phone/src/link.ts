@@ -9,6 +9,8 @@
 // is retried once under the same `cid` (the daemon lets the first answer win and recognises a repeat).
 import { PHONE_API } from "../../src/lib/attention";
 import { backoffMs, LagMeter, reachFromAnswer, whyNoAnswer, type ConnFacts, type Reach } from "./conn-state";
+import type { Risk } from "./command-text";
+import type { LockInfo } from "./lock";
 import { Initiator, MODE_RECONNECT, type Endpoint, type Session } from "./noise";
 import type { Pairing } from "./pairing-store";
 import type { ScreenFrame } from "./screen-sync";
@@ -69,6 +71,9 @@ export interface Hello {
   hb?: { idle_s: number; pong_s: number; dead_s: number; legacy: boolean };
   /** Alerts, where this connection may have them (absent over plain HTTP, and from a computer below `PHONE_API`). */
   push?: { vapid: string | null; subscribed: boolean };
+  /** The computer holds this phone locked: the rest says nothing of any session. */
+  locked?: boolean;
+  lock?: LockInfo;
 }
 
 export interface SessionsMsg {
@@ -104,6 +109,14 @@ export interface ChatResolved {
   at?: number;
 }
 
+/** What the daemon makes of a chat's request: its label and the command, for the card. */
+export interface ChatRequestInfo {
+  id: string;
+  request_id: string | number;
+  command: string;
+  risk: Risk;
+}
+
 export interface ReplyError {
   code: string;
   reason?: string | null;
@@ -117,7 +130,7 @@ export interface ReplyError {
 /** What became of a request: the daemon's reply, or why there was none. */
 export type Outcome =
   /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string }
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; lock?: LockInfo }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -132,6 +145,9 @@ export interface LinkHandlers {
   frame(m: ScreenFrame): void;
   chat(m: ChatMsg): void;
   chatResolved(m: ChatResolved): void;
+  chatRequestInfo?(m: ChatRequestInfo): void;
+  /** The computer locked this phone, or how its lock stands changed while it is locked. */
+  locked?(lock: LockInfo): void;
   chatQueue?(m: ChatQueueMsg): void;
   chatResync(id: string): void;
   /** The computer's addresses (after a handshake, and when they change). */
@@ -324,6 +340,8 @@ export class Link {
 
   /** This connection opened and sent the phone's first message. */
   private sentFirst = false;
+  /** The computer holds this phone locked: nothing is followed until it says otherwise, and what is wanted waits. */
+  private lockedNow = false;
   private noReplyCloses = 0;
 
   /** `codec` makes the framing for one connection; null while this phone is not paired. */
@@ -434,7 +452,7 @@ export class Link {
   }
 
   private subscribe(id: string, w: Wanted) {
-    if (!this.facts.ready || this.hideSubs) return;
+    if (!this.facts.ready || this.hideSubs || this.lockedNow) return;
     if (w.kind === "term") {
       void this.request({ type: "sub", id, height: 200, have_rev: this.h.haveRev(id), focus: true }, { write: false }).then((o) => o.t === "error" && this.settled(id));
       return;
@@ -515,12 +533,12 @@ export class Link {
   }
 
   /** Answers the prompt a terminal session waits on (`waiting_since` names which one). */
-  answer(id: string, waitingSince: number | null, answer: { key: string } | { text: string }, enter: boolean) {
-    return this.request({ type: "answer", id, waiting_since: waitingSince, ...answer, enter }, { retry: true });
+  answer(id: string, waitingSince: number | null, answer: { key: string } | { text: string }, enter: boolean, recheck?: Record<string, unknown>) {
+    return this.request({ type: "answer", id, waiting_since: waitingSince, ...answer, enter, ...(recheck ? { recheck } : {}) }, { retry: true });
   }
 
-  chatAnswer(id: string, requestId: string | number, line: string) {
-    return this.request({ type: "chat_answer", id, request_id: requestId, line }, { retry: true });
+  chatAnswer(id: string, requestId: string | number, line: string, recheck?: Record<string, unknown>) {
+    return this.request({ type: "chat_answer", id, request_id: requestId, line, ...(recheck ? { recheck } : {}) }, { retry: true });
   }
 
   /** Sends a message to a chat. `cid` names it: if the connection drops with it in flight it is sent once more, with the
@@ -539,6 +557,20 @@ export class Link {
 
   chatResume(id: string) {
     return this.request({ type: "chat_resume", id });
+  }
+
+  /** A passkey ceremony's message (`lock_challenge`, `lock_enrol`, `lock_unlock`): what it says is the reply. */
+  lockAsk(msg: Record<string, unknown>) {
+    return this.request(msg, { write: false });
+  }
+
+  /** The person left the app. No reply is waited for: the page is on its way out. */
+  lockNow() {
+    this.post({ type: "lock_now" });
+  }
+
+  lockTouch() {
+    this.post({ type: "lock_touch" });
   }
 
   // ---------- socket ----------
@@ -756,6 +788,13 @@ export class Link {
       case "chat_resolved":
         this.h.chatResolved(m as ChatResolved);
         break;
+      case "chat_request_info":
+        this.h.chatRequestInfo?.(m as ChatRequestInfo);
+        break;
+      case "locked":
+        this.lockedNow = true;
+        this.h.locked?.(m.lock as LockInfo);
+        break;
       case "chat_queue":
         this.h.chatQueue?.(m as ChatQueueMsg);
         break;
@@ -778,8 +817,6 @@ export class Link {
   private onHello(hello: Hello) {
     this.clearTimer("hello");
     const now = this.env.now();
-    const epochChanged = this.epoch !== null && this.epoch !== hello.daemon_epoch;
-    this.epoch = hello.daemon_epoch;
     this.device = hello.device;
     this.facts.ready = true;
     this.facts.connecting = false;
@@ -791,6 +828,16 @@ export class Link {
     this.readyAt = now;
     this.awaiting.clear();
     this.clearResyncTimer();
+    // Locked, it says nothing of any session. What depends on the computer's run waits for the hello that does: that is the one that finds a restart.
+    this.lockedNow = !!hello.locked;
+    if (hello.locked) {
+      this.facts.resyncing = false;
+      this.armTick();
+      this.h.locked?.(hello.lock ?? { state: "unlock" });
+      return this.h.changed();
+    }
+    const epochChanged = this.epoch !== null && this.epoch !== hello.daemon_epoch;
+    this.epoch = hello.daemon_epoch;
     if (epochChanged) this.facts.restartedAt = now;
     this.armTick();
     // The hello comes first; then the subscriptions pick up where the phone is.
@@ -837,7 +884,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, lock: m.lock });
     }
     this.h.changed();
     return true;
