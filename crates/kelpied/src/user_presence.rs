@@ -102,6 +102,10 @@ pub enum Prompt {
     Reset,
     /// Keep unused phones paired for this many days (0: for ever).
     KeepUnused { days: u32 },
+    /// Make the phones' app lock weaker.
+    WeakenLock,
+    /// Let this phone set up a new passkey.
+    ResetLock { name: String },
 }
 
 /// The languages the daemon's prompts are written in.
@@ -145,6 +149,10 @@ impl Prompt {
             (Prompt::KeepUnused { days: 0 }, Lang::Vi) => "Kelpie: giữ ghép đôi mãi mãi các điện thoại không được dùng.".to_string(),
             (Prompt::KeepUnused { days }, Lang::En) => format!("Kelpie: keep phones that are not used paired for {days} days."),
             (Prompt::KeepUnused { days }, Lang::Vi) => format!("Kelpie: giữ ghép đôi {days} ngày các điện thoại không được dùng."),
+            (Prompt::WeakenLock, Lang::En) => "Kelpie: make the app lock on your phones weaker.".to_string(),
+            (Prompt::WeakenLock, Lang::Vi) => "Kelpie: nới lỏng khóa ứng dụng trên điện thoại của bạn.".to_string(),
+            (Prompt::ResetLock { name }, Lang::En) => format!("Kelpie: let the phone {} set up a new passkey for its app lock, for the next 5 minutes.", quoted(name)),
+            (Prompt::ResetLock { name }, Lang::Vi) => format!("Kelpie: cho phép điện thoại {} thiết lập khóa truy cập mới cho khóa ứng dụng, trong 5 phút tới.", quoted(name)),
         }
     }
 }
@@ -947,6 +955,8 @@ mod tests {
             Prompt::Reset,
             Prompt::KeepUnused { days: 0 },
             Prompt::KeepUnused { days: 120 },
+            Prompt::WeakenLock,
+            Prompt::ResetLock { name: "Pixel".into() },
         ];
         for p in &prompts {
             let (en, vi) = (p.text(Lang::En), p.text(Lang::Vi));

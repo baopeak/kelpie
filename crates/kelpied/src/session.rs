@@ -185,6 +185,8 @@ pub struct ScreenView {
     pub prompt: Option<crate::choices::Prompt>,
     pub waiting_since: Option<u64>,
     pub title: Option<String>,
+    /// While a prompt or a wait is up: what a card says about it.
+    pub wait: Option<crate::mobile::risk::WaitInfo>,
 }
 
 /// Where a client's messages from the daemon wait. The app and the CLI have an unbounded queue; a
@@ -356,6 +358,8 @@ struct Inner {
     /// The wait on the user that `waiting_since` names has been answered (typed into): a hook
     /// keeps saying `waiting` until its next report, and nothing may answer the same wait twice.
     answered_wait: bool,
+    /// What a hook says the wait is about (`set_wait_request`).
+    wait_request: Option<crate::mobile::risk::Request>,
     /// The last waits answered, newest last (see `RESOLVED_KEPT`), by their `waiting_since`.
     resolved: VecDeque<(u64, Resolution)>,
     /// Who answered the wait that is open now (kept as long as it is, past the ring's ten minutes).
@@ -433,6 +437,7 @@ impl Session {
                 last_output: None,
                 interrupted: false,
                 answered_wait: false,
+                wait_request: None,
                 resolved: VecDeque::new(),
                 answered_now: None,
                 typing_by: None,
@@ -1003,6 +1008,7 @@ impl Session {
             g.answered_wait = false;
             g.answered_now = None;
             g.waiting_since = None;
+            g.wait_request = None;
         }
     }
 
@@ -1013,15 +1019,33 @@ impl Session {
 
     /// What a remote view shows right now, taken in one go under the lock.
     pub fn screen_view(&self, height: usize) -> ScreenView {
+        let worktree = self.spec.lock().cwd.clone();
         let g = self.inner.lock();
         let tail = g.vt.tail_lines(height);
+        let waiting = g.screen_prompt.is_some() || g.waiting_since.is_some();
         ScreenView {
             lines: tail.lines,
             cursor: tail.cursor,
             prompt: g.screen_prompt.clone(),
             waiting_since: g.waiting_since,
             title: g.vt.title().map(str::to_string),
+            wait: waiting.then(|| crate::mobile::risk::WaitInfo::of(g.wait_request.as_ref(), &worktree)),
         }
+    }
+
+    /// What a hook says this session's wait is about. It holds until the wait ends.
+    pub fn set_wait_request(&self, request: crate::mobile::risk::Request) {
+        let mut g = self.inner.lock();
+        g.wait_request = Some(request);
+        self.wake.send_replace(g.seq);
+    }
+
+    /// The command of the wait this session is in, when the daemon's label calls it dangerous.
+    pub fn dangerous_wait(&self) -> Option<String> {
+        let worktree = self.spec.lock().cwd.clone();
+        let g = self.inner.lock();
+        let request = g.wait_request.as_ref()?;
+        (crate::mobile::risk::label(request, &worktree).level == crate::mobile::risk::Level::Dangerous).then(|| request.shown.clone())
     }
 
     pub fn screen_text(&self) -> String {
@@ -1169,6 +1193,7 @@ impl Session {
         if status != Status::Waiting {
             g.answered_wait = false;
             g.answered_now = None;
+            g.wait_request = None;
         }
         // A remote view shows the prompt and the wait too, which change without any output.
         if before.is_some_and(|b| b != (g.waiting_since, g.screen_prompt.clone())) {
