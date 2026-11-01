@@ -74,7 +74,6 @@ export interface Hello {
   /** The computer holds this phone locked: the rest says nothing of any session. */
   locked?: boolean;
   lock?: LockInfo;
-  resume?: string;
 }
 
 export interface SessionsMsg {
