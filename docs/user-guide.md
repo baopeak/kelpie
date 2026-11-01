@@ -111,7 +111,7 @@ features earlier (running sessions stop for a moment; agents that can resume con
    that only works in the terminal UI shows *Run it in the terminal*, which switches back and runs
    it there.
    - The transcript reads like the terminal UI: each tool call is one line (*Read app.ts · lines
-     75-80*, *Edit main.rs +3 −1*, *Bash* with its command and output), runs of reads and searches
+     75-80*, *Edit main.rs +3 −1*, *Bash* with what it is doing; click a row for its command and output, which open by themselves when it fails), runs of reads and searches
      fold into *Explored 4 files, 2 searches*, and thinking folds into *Thought for 6s*. After a
      turn, *N files changed* lists each file with its line counts; click one to open its changes.
    - Every prompt and reply shows its date and time in the top right corner (hover for the full
