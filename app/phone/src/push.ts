@@ -45,6 +45,8 @@ export interface AlertsEnv {
   wanted(): boolean;
   setWanted(on: boolean): void;
   lang(): string;
+  /** Where this page is: where this phone's pairing is, and so where its alerts must lead. */
+  origin(): string;
   ask(msg: Record<string, unknown>): Promise<Outcome>;
 }
 
@@ -78,7 +80,7 @@ export class Alerts {
   }
 
   private async register(sub: HeldSubscription): Promise<string | null> {
-    return errorOf(await this.env.ask({ type: "push_sub", endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth, lang: this.env.lang() }));
+    return errorOf(await this.env.ask({ type: "push_sub", endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth, lang: this.env.lang(), origin: this.env.origin() }));
   }
 
   /** A new subscription with this browser and the computer. */
@@ -203,6 +205,7 @@ async function registration(): Promise<ServiceWorkerRegistration> {
 export function browserAlerts(env: Pick<AlertsEnv, "lang" | "ask">, page: { ios: boolean; installed: () => boolean; store: { get(k: string): string | null; set(k: string, v: string): void; del(k: string): void } }): AlertsEnv {
   return {
     ...env,
+    origin: () => location.origin,
     facts: () => ({
       secure: window.isSecureContext,
       supported: "serviceWorker" in navigator && "PushManager" in window && "Notification" in window,

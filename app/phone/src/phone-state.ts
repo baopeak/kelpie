@@ -220,7 +220,11 @@ function tellHandled(id: string) {
 /** A running app, told by the service worker what a tap on an alert opens. */
 function openFromAlert(navigate: string) {
   const { session, waited } = readAlertLink(new URL(navigate, location.href).hash);
-  if (!session) return;
+  if (session) openWanted(session, waited);
+}
+
+/** A session asked for by a link, on a running app. What came through a system's own tap on an alert arrives the same way. */
+function openWanted(session: string, waited: boolean) {
   if (!connected()) {
     wantSession = session;
     wantFromAlert = waited;
@@ -603,10 +607,10 @@ export function startApp() {
     if (!document.hidden) recompute();
   });
   window.addEventListener("hashchange", () => {
+    const waited = readAlertLink(location.hash).waited;
     const next = readHash();
     if (next.want) {
-      const s = sessions().find((x) => x.id === next.want);
-      if (s) openSession(s.id);
+      openWanted(next.want, waited);
     } else if (next.code) {
       link.stop();
       closeSession();

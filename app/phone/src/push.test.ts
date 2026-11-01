@@ -41,6 +41,7 @@ function rig(over: { facts?: Partial<AlertsFacts>; held?: ReturnType<typeof sub>
       state.wanted = on;
     },
     lang: () => "vi",
+    origin: () => "https://desk.tail1234.ts.net:8443",
     ask: async (m) => {
       asked.push(m);
       const scripted = over.answers?.[String(m.type)];
@@ -79,7 +80,7 @@ describe("turning alerts on", () => {
     await r.alerts.turnOn();
     expect(r.alerts.state).toBe("on");
     expect(r.state.wanted).toBe(true);
-    expect(r.sent("push_sub")).toEqual([{ type: "push_sub", endpoint: "https://fcm.googleapis.com/fcm/send/new1", p256dh: "p", auth: "s", lang: "vi" }]);
+    expect(r.sent("push_sub")).toEqual([{ type: "push_sub", endpoint: "https://fcm.googleapis.com/fcm/send/new1", p256dh: "p", auth: "s", lang: "vi", origin: "https://desk.tail1234.ts.net:8443" }]);
   });
 
   it("stops at a no, and tells a no from no answer", async () => {
