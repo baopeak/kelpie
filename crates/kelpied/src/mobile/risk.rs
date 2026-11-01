@@ -56,6 +56,8 @@ pub struct Request {
 /// More sub-commands than a person reads on a phone, and a good way to bury one of them.
 const MAX_SUBCOMMANDS: usize = 16;
 const MAX_LABELLED: usize = 64 * 1024;
+/// How far commands inside commands are followed. A real one stops at two or three, and each level is a call on the stack.
+const MAX_NESTED: u8 = 4;
 
 /// A tool's kind, named for what it does whichever agent calls it.
 #[derive(PartialEq, Clone, Copy)]
@@ -137,7 +139,8 @@ pub fn command_text(value: &serde_json::Value) -> Option<String> {
 }
 
 fn quoted_word(word: &str) -> String {
-    let plain = !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | ',' | '@' | '%' | '+' | '\\'));
+    // Not one that ends in a backslash: read back, that would escape the space after it and run into the next word.
+    let plain = !word.is_empty() && !word.ends_with('\\') && word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | ',' | '@' | '%' | '+' | '\\'));
     if plain {
         word.to_string()
     } else {
@@ -177,17 +180,28 @@ impl WaitInfo {
     }
 }
 
-fn worse(a: Level, b: Level) -> Level {
-    let rank = |l: Level| match l {
+fn rank(level: Level) -> u8 {
+    match level {
         Level::Low => 0,
         Level::Medium => 1,
         Level::Unknown => 2,
         Level::Dangerous => 3,
-    };
+    }
+}
+
+fn worse(a: Level, b: Level) -> Level {
     if rank(a) >= rank(b) {
         a
     } else {
         b
+    }
+}
+
+/// Holds a list of open requests to `cap` by letting the mildest go, the oldest of them first: the worst of what is open is what a card says, so what goes must never lower it.
+pub fn keep_worst(requests: &mut Vec<Request>, worktree: &str, cap: usize) {
+    while requests.len() > cap {
+        let Some(mildest) = requests.iter().enumerate().min_by_key(|(_, r)| rank(label(r, worktree).level)).map(|(at, _)| at) else { return };
+        requests.remove(mildest);
     }
 }
 
@@ -272,10 +286,15 @@ impl Paths<'_> {
     }
 }
 
-/// Names a file holds keys or passwords by. Matched on a whole name in a path, wherever it is.
+/// Names a file holds keys or passwords by. Matched on a whole name in a path, wherever it is, git's `HEAD:.env` included. A backslash is a folder's on one system and nothing at all
+/// before a letter on another (`.en\\v`), so the word is read both ways.
 fn secret_path(path: &str) -> bool {
-    let lower = path.replace('\\', "/").to_ascii_lowercase();
-    lower.split('/').any(|name| {
+    let lower = path.to_ascii_lowercase();
+    secret_name_in(&lower.replace('\\', "/")) || secret_name_in(&lower.replace('\\', ""))
+}
+
+fn secret_name_in(path: &str) -> bool {
+    path.split(['/', ':']).any(|name| {
         matches!(name, ".ssh" | ".aws" | ".gnupg" | ".netrc" | ".npmrc" | ".pypirc" | ".git-credentials" | ".kube" | "credentials" | "credentials.json" | ".docker" | "secrets" | "secrets.json" | "secrets.yaml" | "secrets.yml")
             || name == ".env"
             || name.starts_with(".env.") && !matches!(name, ".env.example" | ".env.sample" | ".env.template")
@@ -320,10 +339,12 @@ struct Simple {
 }
 
 /// Splits as a shell would, far enough to name programs and paths. False when it cannot: quotes left open, or something that runs a command of its own inside this one. What is inside
-/// `(...)`, `{...}`, `$(...)` or backticks comes out as commands of its own, so a delete in a PowerShell script block or a subshell is read like any other.
+/// `(...)`, `{...}`, `$(...)` or backticks comes out as commands of its own, so a delete in a PowerShell script block or a subshell is read like any other. What runs inside a double-quoted
+/// word or a `${...}` is in the word, so it comes back on its own, as text for the caller to read as a command.
 #[allow(unused_assignments)] // the state a word or a command leaves behind goes unread after the last of them
-fn split(command: &str) -> (Vec<Simple>, bool) {
+fn split(command: &str) -> (Vec<Simple>, bool, Vec<String>) {
     let mut out = Vec::new();
+    let mut inner = Vec::new();
     let mut readable = true;
     let mut current = Simple { words: Vec::new(), piped: false, writes_to: Vec::new(), expands: false };
     let mut word = String::new();
@@ -362,11 +383,22 @@ fn split(command: &str) -> (Vec<Simple>, bool) {
             if c == q {
                 quote = None;
             } else {
-                if q == '"' && (c == '`' || (c == '$' && chars.peek() == Some(&'('))) {
-                    readable = false;
-                }
                 word_expands |= q == '"' && c == '$';
-                word.push(c);
+                if q == '"' && c == '`' {
+                    readable = false;
+                    // One that is never closed is PowerShell's escape, and what follows the quote is still to be read.
+                    if chars.clone().any(|n| n == '`') {
+                        inner.push(take_until_closed(&mut chars, '`', '`'));
+                    } else {
+                        word.push(c);
+                    }
+                } else if q == '"' && c == '$' && chars.peek() == Some(&'(') {
+                    readable = false;
+                    chars.next();
+                    inner.push(take_until_closed(&mut chars, '(', ')'));
+                } else {
+                    word.push(c);
+                }
             }
             continue;
         }
@@ -384,17 +416,18 @@ fn split(command: &str) -> (Vec<Simple>, bool) {
                 chars.next();
                 end_command!(false);
             }
-            // A variable by its whole name, which is one word.
+            // A variable by its whole name, which is one word, and what its default would run.
             '$' if chars.peek() == Some(&'{') => {
                 word_expands = true;
                 started = true;
-                word.push(c);
-                for n in chars.by_ref() {
-                    word.push(n);
-                    if n == '}' {
-                        break;
-                    }
-                }
+                chars.next();
+                let body = take_until_closed(&mut chars, '{', '}');
+                let runs = substitutions_in(&body);
+                readable &= runs.is_empty();
+                inner.extend(runs);
+                word.push_str("${");
+                word.push_str(&body);
+                word.push('}');
             }
             '$' | '*' | '?' | '[' => {
                 word_expands = true;
@@ -434,6 +467,13 @@ fn split(command: &str) -> (Vec<Simple>, bool) {
                 }
                 end_command!(false);
             }
+            // What is read from comes next as a word like any other: the file is named all the same.
+            '<' => {
+                end_word!();
+                while chars.peek() == Some(&'<') {
+                    chars.next();
+                }
+            }
             '>' => {
                 end_word!();
                 if matches!(chars.peek(), Some('>' | '|')) {
@@ -464,7 +504,40 @@ fn split(command: &str) -> (Vec<Simple>, bool) {
         readable = false;
     }
     end_command!(false);
-    (out, readable)
+    (out, readable, inner)
+}
+
+/// What follows up to where `open` is closed, the closing character gone. It ends with the text when it is never closed, which leaves the rest to be read as a command too.
+fn take_until_closed(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, open: char, close: char) -> String {
+    let mut text = String::new();
+    let mut depth = 1usize;
+    for c in chars.by_ref() {
+        if c == close {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        } else if c == open {
+            depth += 1;
+        }
+        text.push(c);
+    }
+    text
+}
+
+/// The commands `$(...)` and backticks would run, in text that is otherwise not a command.
+fn substitutions_in(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '`' {
+            found.push(take_until_closed(&mut chars, '`', '`'));
+        } else if c == '$' && chars.peek() == Some(&'(') {
+            chars.next();
+            found.push(take_until_closed(&mut chars, '(', ')'));
+        }
+    }
+    found
 }
 
 /// Characters that make what is shown differ from what runs: controls, bidi and zero-width marks.
@@ -507,9 +580,15 @@ const SUDO: &[&str] = &["sudo", "doas", "runas", "pkexec", "su", "gsudo"];
 /// Words that only run the word after them.
 const WRAPPERS: &[&str] = &["env", "time", "nice", "nohup", "command", "exec", "busybox", "timeout", "start", "ionice", "stdbuf", "caffeinate"];
 
+/// Whether `arg` is one of these long options, as GNU programs take them: whole, with `=value`, or cut to any start of its name. An abbreviation other options share counts as well, which errs high.
+fn is_long_option(arg: &str, names: &[&str]) -> bool {
+    let name = arg.split('=').next().unwrap_or(arg);
+    name.len() > 2 && name.starts_with("--") && names.iter().any(|n| n.starts_with(name))
+}
+
 /// Whether these words make a program of `READ_ONLY` run something or write a file, which is then no longer a reader.
 fn reader_does_more(program: &str, args: &[String]) -> bool {
-    let long = |names: &[&str]| args.iter().any(|a| names.iter().any(|n| a.as_str() == *n || a.strip_prefix(*n).is_some_and(|rest| rest.starts_with('='))));
+    let long = |names: &[&str]| args.iter().any(|a| is_long_option(a, names));
     let short = |letter: char| args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a[1..].contains(letter));
     let operands = || args.iter().filter(|a| !a.starts_with('-')).count();
     match program {
@@ -525,36 +604,65 @@ fn reader_does_more(program: &str, args: &[String]) -> bool {
     }
 }
 
-/// The script a shell is told to run on its command line, as one piece: `sh -c` takes one word, and `cmd /c` and PowerShell's `-Command` all that follow.
+/// The script a shell is told to run on its command line, as one piece: `sh -c` takes one word, and `cmd /c` and PowerShell's `-Command` all that follow. The flag says so only ahead of the
+/// shell's first operand: in `bash evil.sh -c ls` it is `evil.sh` that runs, and the rest is its arguments.
 fn inline_script(program: &str, args: &[String]) -> Option<String> {
-    let runs = |flag: &str| {
-        let flag = flag.to_ascii_lowercase();
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        let flag = arg.to_ascii_lowercase();
         match program {
-            "cmd" => matches!(flag.as_str(), "/c" | "/k"),
-            "pwsh" | "powershell" => matches!(flag.as_str(), "-c" | "-command"),
-            _ => flag.starts_with('-') && !flag.starts_with("--") && flag.contains('c'),
+            "cmd" => {
+                if matches!(flag.as_str(), "/c" | "/k") {
+                    return Some(args[at + 1..].join(" ")).filter(|s| !s.is_empty());
+                }
+                if !flag.starts_with('/') {
+                    return None;
+                }
+                at += 1;
+            }
+            "pwsh" | "powershell" => {
+                if matches!(flag.as_str(), "-c" | "-command") {
+                    return Some(args[at + 1..].join(" ")).filter(|s| !s.is_empty());
+                }
+                if !flag.starts_with('-') || matches!(flag.as_str(), "-f" | "-file" | "-e" | "-ec" | "-encodedcommand") {
+                    return None;
+                }
+                at += if matches!(flag.as_str(), "-executionpolicy" | "-exec" | "-ep" | "-ex" | "-workingdirectory" | "-wd" | "-windowstyle" | "-w" | "-inputformat" | "-if" | "-outputformat" | "-of" | "-configurationname" | "-psconsolefile" | "-version") { 2 } else { 1 };
+            }
+            _ => {
+                if flag == "--" || !(flag.starts_with('-') || flag.starts_with('+')) {
+                    return None;
+                }
+                if !flag.starts_with("--") && flag.starts_with('-') && flag.contains('c') {
+                    return args.get(at + 1).cloned();
+                }
+                at += if matches!(flag.as_str(), "-o" | "+o" | "--rcfile" | "--init-file") { 2 } else { 1 };
+            }
         }
-    };
-    let at = args.iter().position(|a| runs(a))?;
-    match program {
-        "cmd" | "pwsh" | "powershell" => Some(args[at + 1..].join(" ")).filter(|s| !s.is_empty()),
-        _ => args.get(at + 1).cloned(),
     }
+    None
 }
 
-/// Whether a command names a variable by what it holds. The words of the name are what give it away, wherever it is used.
+/// Whether a command names a variable by what it holds: `$NAME`, `${NAME}`, `$env:NAME` or `%NAME%`. The words of the name are what give it away, wherever it is used.
 fn names_a_secret_variable(command: &str) -> bool {
-    command.split('$').skip(1).any(|rest| {
-        let rest = rest.strip_prefix('{').or_else(|| rest.strip_prefix("env:")).unwrap_or(rest);
-        let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect::<String>().to_ascii_uppercase();
+    let secret = |name: &str| {
+        let name = name.to_ascii_uppercase();
         ["SECRET", "TOKEN", "PASSWORD", "PASSWD", "API_KEY", "APIKEY", "PRIVATE_KEY", "CREDENTIAL"].iter().any(|word| name.contains(word))
-    })
+    };
+    let name_chars = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let after_dollar = command.split('$').skip(1).any(|rest| {
+        let rest = rest.strip_prefix('{').or_else(|| rest.strip_prefix("env:")).unwrap_or(rest);
+        secret(&rest.chars().take_while(|c| name_chars(*c)).collect::<String>())
+    });
+    // What is between two percent signs, when it could be a name.
+    after_dollar || command.split('%').skip(1).any(|between| !between.is_empty() && between.chars().all(name_chars) && secret(between))
 }
 
-/// A program named by a path is not the program of that name, unless the path is where the system keeps its own.
+/// A program named by a path is not the program of that name, unless the path is where the system keeps its own, and `..` has been taken out first: `/usr/../tmp/x/ls` is not there.
 fn named_from_elsewhere(word: &str) -> bool {
-    let path = word.replace('\\', "/").to_ascii_lowercase();
-    path.contains('/') && !["/bin/", "/sbin/", "/usr/", "/opt/homebrew/", "c:/windows/", "c:/program files/", "c:/program files (x86)/"].iter().any(|place| path.starts_with(place))
+    let slashed = word.replace('\\', "/");
+    let path = normal(&slashed).to_ascii_lowercase();
+    slashed.contains('/') && !["/bin/", "/sbin/", "/usr/", "/opt/homebrew/", "c:/windows/", "c:/program files/", "c:/program files (x86)/"].iter().any(|place| path.starts_with(place))
 }
 
 /// The words a program runs of its own arguments, once its own flags are off them. `takes_value` are its flags that have a word after them.
@@ -569,20 +677,24 @@ fn inner_command(words: &[String], takes_value: &[&str]) -> Simple {
 fn has_flag(args: &[String], long: &[&str], short: char) -> bool {
     args.iter().any(|a| {
         let lower = a.to_ascii_lowercase();
-        long.contains(&lower.as_str()) || (a.starts_with('-') && !a.starts_with("--") && a[1..].contains(short))
+        long.contains(&lower.as_str()) || is_long_option(&lower, long) || (a.starts_with('-') && !a.starts_with("--") && a[1..].contains(short))
     })
 }
 
 fn git_rule(args: &[String], found: &mut Found) -> bool {
-    // `-c core.pager=...` or `--exec-path` ahead of the subcommand can make it run anything, and `-C` puts it somewhere else.
-    if args.first().is_some_and(|a| a.starts_with('-')) {
-        found.unknown = true;
-        return false;
+    // What comes ahead of the subcommand. `-c core.pager=...` or `--exec-path` can make it run anything, and `-C` puts it somewhere else, so those are not read through; the subcommand still counts.
+    let mut at = 0;
+    while let Some(flag) = args.get(at).map(String::as_str).filter(|a| a.starts_with('-')) {
+        let name = flag.split('=').next().unwrap_or(flag);
+        if !matches!(name, "--no-pager" | "-P" | "--paginate" | "-p" | "--no-optional-locks" | "--no-advice" | "--no-replace-objects" | "--literal-pathspecs") {
+            found.unknown = true;
+        }
+        at += if matches!(flag, "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" | "--config-env" | "--super-prefix") { 2 } else { 1 };
     }
-    let sub = args.iter().find(|a| !a.starts_with('-')).map(String::as_str).unwrap_or_default();
-    let rest: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a != sub).collect();
+    let sub = args.get(at).map(String::as_str).unwrap_or_default();
+    let rest: Vec<&str> = args.iter().skip(at + 1).map(String::as_str).filter(|a| *a != sub).collect();
     match sub {
-        "status" | "log" | "diff" | "show" | "rev-parse" | "ls-files" | "blame" | "shortlog" | "describe" | "ls-tree" | "cat-file" | "merge-base" => !rest.iter().any(|a| a.starts_with("--output") || matches!(*a, "--ext-diff" | "--textconv")),
+        "status" | "log" | "diff" | "show" | "rev-parse" | "ls-files" | "blame" | "shortlog" | "describe" | "ls-tree" | "cat-file" | "merge-base" => !rest.iter().any(|a| is_long_option(a, &["--output", "--ext-diff", "--textconv"])),
         // It lists the log of where HEAD has been, and `expire` and `delete` are what git's own recovery rests on.
         "reflog" => match rest.first().copied() {
             None | Some("show") => true,
@@ -596,7 +708,13 @@ fn git_rule(args: &[String], found: &mut Found) -> bool {
         },
         "branch" | "tag" => rest.iter().all(|a| matches!(*a, "-a" | "-r" | "-v" | "-vv" | "--list" | "-l" | "--show-current")),
         "remote" => rest.iter().all(|a| *a == "-v"),
-        "config" => rest.iter().all(|a| a.starts_with('-') && matches!(*a, "--get" | "--list" | "-l")) || rest.contains(&"--get"),
+        "config" => {
+            let reads = rest.iter().all(|a| a.starts_with('-') && matches!(*a, "--get" | "--list" | "-l")) || rest.contains(&"--get");
+            if !reads {
+                found.tag(Tag::EditsConfig);
+            }
+            reads
+        }
         "stash" => rest.first().is_some_and(|a| matches!(*a, "list" | "show")),
         "push" => {
             found.tag(Tag::GitPush);
@@ -612,7 +730,7 @@ fn git_rule(args: &[String], found: &mut Found) -> bool {
             found.severe_delete = true;
             false
         }
-        "reset" | "checkout" | "restore" if rest.iter().any(|a| matches!(*a, "--hard" | "--" | "-f" | "--force")) => {
+        "reset" | "checkout" | "restore" if rest.iter().any(|a| matches!(*a, "--" | "-f") || is_long_option(a, &["--hard", "--force"])) => {
             found.tag(Tag::Delete);
             found.severe_delete = true;
             false
@@ -639,6 +757,10 @@ fn path_like(word: &str) -> bool {
 }
 
 fn read_shell(command: &str, at: &Paths, found: &mut Found, depth: u8) {
+    if depth > MAX_NESTED {
+        found.unknown = true;
+        return;
+    }
     if command.len() > MAX_LABELLED || hides_something(command) {
         found.unknown = true;
     }
@@ -649,13 +771,16 @@ fn read_shell(command: &str, at: &Paths, found: &mut Found, depth: u8) {
     if names_a_secret_variable(command) {
         found.tag(Tag::SecretAccess);
     }
-    let (commands, readable) = split(&command[..floor_char_boundary(command, MAX_LABELLED)]);
+    let (commands, readable, inner) = split(&command[..floor_char_boundary(command, MAX_LABELLED)]);
     if !readable || commands.is_empty() || commands.len() > MAX_SUBCOMMANDS {
         found.unknown = true;
     }
     let mut cwd_moved = false;
     for simple in &commands {
         read_simple(simple, at, found, depth, &mut cwd_moved);
+    }
+    for inside in &inner {
+        read_shell(inside, at, found, depth + 1);
     }
 }
 
@@ -746,6 +871,10 @@ fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_mo
         if value.starts_with('-') {
             continue;
         }
+        // PowerShell's drive for the environment, as a file: it lists what is in it, or reads one.
+        if value.get(..4).is_some_and(|drive| drive.eq_ignore_ascii_case("env:")) && !says_text {
+            found.tag(Tag::SecretAccess);
+        }
         // After a `cd` nothing here knows where relative paths lead: they say nothing, and absolute ones still do.
         if path_like(value) && (absolute(value) || !*cwd_moved) && !at.inside(value) {
             found.tag(Tag::OutsideWorktree);
@@ -800,12 +929,9 @@ fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_mo
     match program.as_str() {
         "git" if !read_only => {
             found.changes = true;
-            if args.first().is_some_and(|a| a == "config") {
-                found.tag(Tag::EditsConfig);
-            }
             return;
         }
-        "printenv" | "get-childitem-env" | "cmdkey" | "security" | "vault" | "op" => {
+        "printenv" | "cmdkey" | "security" | "vault" | "op" => {
             found.tag(Tag::SecretAccess);
             return;
         }
@@ -859,7 +985,7 @@ mod tests {
 
     #[test]
     fn what_is_read_only_and_known_is_low() {
-        for command in ["ls -la", "git status", "git log --oneline -5", "git diff HEAD~1", "cat src/main.rs", "grep -rn foo src", "pwd", "find . -name '*.rs'", "cat README.md | head -5", "git branch --show-current", "ls && pwd", "Get-Content src/main.rs", "echo hi > /dev/null", "ls 2>&1", "/usr/bin/ls -la", "find . \\( -name a -o -name b \\)", "grep -rn credentials src", "echo secrets.json", "git diff .github/workflows/ci.yml", "Get-Content x 2>$null", "git reflog", "git reflog show", "git reflog -5", "sort a.txt", "uniq a.txt", "rg foo src"] {
+        for command in ["ls -la", "git status", "git log --oneline -5", "git diff HEAD~1", "cat src/main.rs", "grep -rn foo src", "pwd", "find . -name '*.rs'", "cat README.md | head -5", "git branch --show-current", "ls && pwd", "Get-Content src/main.rs", "echo hi > /dev/null", "ls 2>&1", "/usr/bin/ls -la", "find . \\( -name a -o -name b \\)", "grep -rn credentials src", "echo secrets.json", "git diff .github/workflows/ci.yml", "Get-Content x 2>$null", "git reflog", "git reflog show", "git reflog -5", "sort a.txt", "uniq a.txt", "rg foo src", "git --no-pager log", "git --no-pager log --oneline -5", "/usr/bin/../bin/ls", "cat < notes.txt", "git show HEAD:README.md"] {
             assert_eq!(shell(command), Label { level: Level::Low, tags: Vec::new() }, "{command}");
         }
         assert_eq!(tool("Read", "C:/work/proj/src/main.rs").level, Level::Low);
@@ -967,12 +1093,83 @@ mod tests {
             ("./cat notes.txt", Level::Unknown, &[]),
             ("/tmp/x/ls", Level::Unknown, &[]),
             (";", Level::Unknown, &[]),
+            // Options ahead of git's subcommand: it is read through them, and what can change what git runs stays unknown.
+            ("git --no-pager push --force", Level::Dangerous, &[Tag::Network, Tag::GitPush]),
+            ("git --no-pager reset --hard", Level::Dangerous, &[Tag::Delete]),
+            ("git --no-pager config core.hooksPath x", Level::Dangerous, &[Tag::EditsConfig]),
+            ("git -c user.name=x push", Level::Dangerous, &[Tag::Network, Tag::GitPush]),
+            ("git -C repo push origin main", Level::Dangerous, &[Tag::Network, Tag::GitPush]),
+            ("git -C repo clean -fdx", Level::Dangerous, &[Tag::Delete]),
+            ("git -C sub status", Level::Unknown, &[]),
+            ("git --git-dir=x status", Level::Unknown, &[]),
+            // Which word a shell runs.
+            ("bash evil.sh -c ls", Level::Unknown, &[]),
+            ("pwsh ./evil.ps1 -c ls", Level::Unknown, &[]),
+            ("bash -o pipefail -c 'rm -rf build'", Level::Dangerous, &[Tag::Delete]),
+            // Long options cut short, as GNU programs take them.
+            ("sort --out=.git/config evil.txt", Level::Dangerous, &[Tag::EditsConfig]),
+            ("sort --compress-prog=./x a.txt", Level::Unknown, &[]),
+            ("git log --out=.git/config", Level::Dangerous, &[Tag::EditsConfig]),
+            ("git reset --har", Level::Dangerous, &[Tag::Delete]),
+            ("rm --rec build", Level::Dangerous, &[Tag::Delete]),
+            // Out of the system's folders by `..`.
+            ("/usr/../tmp/x/ls", Level::Unknown, &[]),
+            ("C:\\Windows\\..\\Users\\me\\cat.exe", Level::Unknown, &[]),
+            // Secrets through the forms they take.
+            ("cat <.env", Level::Dangerous, &[Tag::SecretAccess]),
+            ("head <secrets.json", Level::Dangerous, &[Tag::SecretAccess]),
+            ("git show HEAD:.env", Level::Dangerous, &[Tag::SecretAccess]),
+            ("git cat-file -p HEAD:secrets.json", Level::Dangerous, &[Tag::SecretAccess]),
+            ("Get-ChildItem env:", Level::Dangerous, &[Tag::SecretAccess]),
+            ("gci env:", Level::Dangerous, &[Tag::SecretAccess]),
+            ("Get-Content env:API_KEY", Level::Dangerous, &[Tag::SecretAccess]),
+            ("echo %GITHUB_TOKEN%", Level::Dangerous, &[Tag::SecretAccess]),
+            ("cat .en\\v", Level::Dangerous, &[Tag::SecretAccess]),
+            ("cat se\\crets.json", Level::Dangerous, &[Tag::SecretAccess]),
+            // What runs inside double quotes and expansions.
+            ("echo \"$(rm -rf build)\"", Level::Dangerous, &[Tag::Delete]),
+            ("echo \"`rm -rf build`\"", Level::Dangerous, &[Tag::Delete]),
+            ("git commit -m \"$(git push)\"", Level::Dangerous, &[Tag::Network, Tag::GitPush]),
+            ("echo ${X:-$(rm -rf build)}", Level::Dangerous, &[Tag::Delete]),
+            ("echo ${X:-`rm -rf build`}", Level::Dangerous, &[Tag::Delete]),
+            ("echo \"${X:-$(rm -rf build)}\"", Level::Dangerous, &[Tag::Delete]),
+            ("echo \"$(ls)\"", Level::Unknown, &[]),
+            ("echo \"a`nb\"; rm -rf build", Level::Dangerous, &[Tag::Delete]),
+            ("echo ${X:-fallback}", Level::Medium, &[]),
         ];
         for (command, level, tags) in cases {
             let got = shell(command);
             assert_eq!((got.level, got.tags.as_slice()), (*level, *tags), "{command:?}");
             assert_ne!(got.level, Level::Low, "{command:?}");
         }
+    }
+
+    #[test]
+    fn commands_inside_commands_are_followed_only_so_far_and_never_read_as_low() {
+        let deep = format!("{}rm -rf build{}", "echo \"$(".repeat(200), ")\"".repeat(200));
+        assert_ne!(shell(&deep).level, Level::Low);
+        let unclosed = "echo \"$(rm -rf build";
+        assert_eq!(shell(unclosed).level, Level::Dangerous, "a quote left open hides nothing");
+    }
+
+    #[test]
+    fn a_full_list_of_open_requests_never_lets_go_of_what_makes_the_label_what_it_is() {
+        let request = |command: &str| from_tool("Bash", &serde_json::json!({"command": command}), Some(TREE));
+        let mut first_is_worst = vec![request("rm -rf build")];
+        first_is_worst.extend((0..5).map(|i| request(&format!("ls a{i}"))));
+        keep_worst(&mut first_is_worst, TREE, 3);
+        assert_eq!(first_is_worst.len(), 3);
+        assert_eq!(WaitInfo::of(&first_is_worst, TREE).risk.level, Level::Dangerous, "the oldest is not what goes");
+        let mut last_is_worst: Vec<Request> = (0..5).map(|i| request(&format!("ls a{i}"))).collect();
+        last_is_worst.push(request("git push"));
+        keep_worst(&mut last_is_worst, TREE, 3);
+        assert_eq!((last_is_worst.len(), WaitInfo::of(&last_is_worst, TREE).risk.level), (3, Level::Dangerous), "nor the newest");
+        let mut unknown_stays = vec![request("ls"), request("frobnicate"), request("pwd")];
+        keep_worst(&mut unknown_stays, TREE, 1);
+        assert_eq!(WaitInfo::of(&unknown_stays, TREE).risk.level, Level::Unknown);
+        let mut all_dangerous: Vec<Request> = (0..5).map(|i| request(&format!("git push r{i}"))).collect();
+        keep_worst(&mut all_dangerous, TREE, 2);
+        assert_eq!((all_dangerous.len(), WaitInfo::of(&all_dangerous, TREE).risk.level), (2, Level::Dangerous));
     }
 
     /// A word is what the agent said it was: reading an argument array as one line must not move what is inside a word into the words after it.
@@ -994,6 +1191,9 @@ mod tests {
         assert_eq!(words(&["ls", "-la"]).level, Level::Low);
         assert_eq!(words(&["echo", "a; rm -rf build"]).level, Level::Low, "no shell reads this: it is one word to echo");
         assert_eq!(words(&["powershell", "-EncodedCommand", "cgBtAA=="]).level, Level::Unknown, "what cannot be read");
+        assert_eq!(words(&["rm", "build\\", "-rf"]).level, Level::Dangerous, "a word that ends in a backslash does not run into the next");
+        assert_eq!(command_text(&serde_json::json!(["rm", "build\\", "-rf"])).as_deref(), Some("rm 'build\\' -rf"));
+        assert_eq!(command_text(&serde_json::json!(["type", "C:\\Windows\\win.ini"])).as_deref(), Some("type C:\\Windows\\win.ini"), "one with a backslash inside stays as it is");
         assert_eq!(command_text(&serde_json::json!(["bash", "-lc", "rm -rf 'a b'"])).as_deref(), Some("bash -lc 'rm -rf '\\''a b'\\'''"), "what is shown runs as it reads");
         assert_eq!(command_text(&serde_json::json!(["git", "status"])).as_deref(), Some("git status"));
         assert_eq!(command_text(&serde_json::json!(["ls", 7])), None, "not words");
