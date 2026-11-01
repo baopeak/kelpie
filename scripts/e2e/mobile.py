@@ -914,6 +914,12 @@ for n in (1, 2, 3):
             got = phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": shown_js, "args": []})
             return got if isinstance(got, list) and got else None
         notes = wait(shown, 10) if delivered else None
+        if delivered and not notes:
+            page_cdp.call("Runtime.evaluate", {"expression": "1"})  # what the browser said of its workers meanwhile is read with this
+            workers = [(r["registrationId"], r["scopeURL"], r["isDeleted"]) for e in page_cdp.events if e.get("method") == "ServiceWorker.workerRegistrationUpdated" for r in e["params"]["registrations"]]
+            versions = [(v.get("registrationId"), v.get("runningStatus"), v.get("status")) for e in page_cdp.events if e.get("method") == "ServiceWorker.workerVersionUpdated" for v in e["params"]["versions"]]
+            raw = phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": shown_js, "args": []})
+            print(f"note: no notification from registration {registration} of {workers}; versions {versions[-6:]}; permission {phone.js('return Notification.permission')}; getNotifications says {raw}", flush=True)
         run.check("the worker shows it: the sentence, its tag, its link", bool(notes) and notes[0]["title"] == "Kelpie" and notes[0]["tag"] == note.get("tag") and notes[0]["body"] == note.get("body") and notes[0]["navigate"] == note.get("navigate"), str(notes))
         sw_page = None
         if notes:
