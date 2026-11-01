@@ -1,13 +1,26 @@
 ---
 phase: 3c
 title: "App lock (WebAuthn) and daemon risk labels"
-status: pending
+status: in-progress
 priority: P1
 effort: "6d"
 dependencies: [3a]
 ---
 
 # Phase 3c: App lock and risk labels
+
+## State of this phase, 2026-11-01
+Code, daemon tests with real signatures, and e2e with real WebAuthn ceremonies through a virtual authenticator in Blink are on `phone/phase3c-app-lock`. **Step 1, the spike on real phones, has not run, and so neither has its kill rule:** no person with phones was at hand, and this run was told to go as far as can be emulated. WebKit has run none of this, so it may yet trigger the kill rule; what a person must check, and what differs on WebKit, is in [the report](../reports/fullstack-developer-261101-1800-phone-phase3c.md). Until they do it stays *not yet verified*.
+
+### Choices the spec left open
+- **Idle time default: 5 minutes,** with 1, 5, 15, 30 and 60 on offer. **No grace on leaving.** Both are for the owner to change: see the report.
+- **Plain `http://`, D17 as proposed:** read-only, no PIN, closed by a switch, on by default. Still the owner's to confirm. It also covers a plain `http://` page on a Tailscale address: such a page has no secure context either, so while the lock is on it may read and no more, though `transport_cap` lets it type with the lock off.
+- **A plain connection from this machine itself is not locked** (`LockPath::Local`): nothing stands between but this user's own programs, and the e2e scripts' plain pages and protocol clients are such connections.
+- **A counter that does not grow is refused unless it stays 0,** which is the WebAuthn rule and a little stricter than "a decrease refuses".
+- **The unlock is a button.** A tap on it starts the ceremony: iOS may refuse a ceremony with no tap, and a refused one costs the person more than a tap does. The re-check is a second tap on a sheet for the same reason. A real iPhone may show that one tap can go.
+- **The settings carry their own tag** (`LockOptions.mac`): a program that edits the file must not be able to turn the lock off, which is this plan's own criterion.
+- **`hello` keeps `sessions: []` and `projects: {}` while locked**, empty rather than absent: a shell cached from before the lock then gets a list with nothing in it and `locked` refusals, and not a page that fails to start. It cannot be made to reload, having no code for that. The next load gets the new shell, as the worker's install takes over at once.
+- **Files beyond the list:** `mobile/lock.rs` (the lock's own logic, out of a file of 7,000 lines), `mobile/tests/lock.rs`, `app/phone/src/command-text.ts` and `command-block.tsx` (the card shared by terminal and chat).
 
 ## Overview
 User decision 2026-10-30: lock the app, not each command. Opening the phone app requires biometric/device verification (WebAuthn platform authenticator, `userVerification: "required"`). Once unlocked the device has full rights for its granted permission. It re-locks on leaving the app and after a configurable idle time. The daemon still shows the full command and a daemon-computed risk label, as information only. An optional "ask Face ID again for dangerous commands" toggle is off by default. Pairing and approving devices stay on the desktop.

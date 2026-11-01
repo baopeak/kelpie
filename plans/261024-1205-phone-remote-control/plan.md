@@ -111,7 +111,7 @@ Numbers are stable names, not an order (no rename: other phases and reports refe
 | 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) (+ 2026-10-30 extras) | P1 | 7d | 2; 2b for chat-write verbs | 22 | committed; merge blocked, see Execution state |
 | 3a | [Tailscale mode: detection, HTTPS origin, guided PWA install](phase-03a-tailscale-https.md) | P1 | 4d | 3 | 23 | code on `phone/phase3a-tailscale`; desktop half verified on a real tailnet, real phones pending |
 | 3b | [Web Push sent directly by kelpied](phase-03b-web-push.md) | P1 | 4d | 3a, roadmap phase 12 | 24 | code on `phone/phase3b-web-push`, on a local stand-in for a push service; real phones pending |
-| 3c | [App lock (WebAuthn) and daemon risk labels](phase-03c-app-lock.md) | P1 | 6d | 3a | 25 + security level 3 | pending |
+| 3c | [App lock (WebAuthn) and daemon risk labels](phase-03c-app-lock.md) | P1 | 6d | 3a | 25 + security level 3 | code on `phone/phase3c-app-lock`, on a virtual authenticator in Blink; the spike and its kill rule on real phones pending |
 | 3d | [Settings → Mobile: plain-language switches](phase-03d-mobile-settings-toggles.md) | P1 | 2d | 3a, 3b, 3c | none expected | pending |
 | 3e | [Telegram: alert + deep link, opt-in low-risk approvals](phase-03e-telegram-options.md) | P2 | 3d | 3b, 3c, 3d | 26 | pending |
 | 4a | [Relay validation on a real Cloudflare deployment](phase-04a-relay-cloudflare-validation.md) (run ahead of the order at the owner's request, Free plan on `*.workers.dev`, see the phase) | P1 | 1d + 7-day soak | 3e | none | in-progress |
