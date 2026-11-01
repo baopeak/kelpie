@@ -28,7 +28,7 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
     agent (fake_acp_agent.py) shows the prompt through `kelpie_sent`, and a stop cancels its permission.
 11. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, a script here: never the real Tailscale): each state is told, a port used by
     something else is refused and left as it was, publishing runs the one command and off removes only our entry, a page through the
-    loopback listener pairs as a secure origin with its address from `X-Forwarded-For`, and the plain user token can change none of it.
+    loopback listener pairs as a secure origin with its address from `X-Forwarded-For`, and the plain user token can change none of it. Such a phone is locked at the daemon until a passkey's signature passes (software keys, real signatures): every verb but the lock's own refused, a forged or unverified assertion and a used challenge refused, a reconnect inside the window not asked again.
 12. Alerts, with no window open, against a local stand-in for a push service that the daemon really POSTs to (`KELPIE_PUSH_TEST_BASE`): the closed list refuses
     what is no push service; a test alert and a needs-you event are signed, encrypted, content-free when opened with the browser's keys, and accepted within 2 s; one call per
     destination; 503 and 429 retried as asked, a session answered meanwhile not told; a hanging ntfy does not delay Web Push; a timeout is said with no address; 404 and 410 end
@@ -1154,6 +1154,58 @@ async def security(d):
     listed = next((x for x in d.call("mobile.status")["devices"] if x["name"] == "Over Tailscale"), {})
     check("…as a secure origin", listed.get("secure_origin") is True and listed.get("permission") == "write", listed)
     check("a phone paired on the plain address is not one", all(x.get("secure_origin") is False for x in d.call("mobile.status")["devices"] if x["name"] != "Over Tailscale"))
+
+    # ---------- the app lock, at the daemon: the Noise key of a phone that paired on a secure origin, and no passkey ----------
+    copied = ps.Device(asking.priv, asking.pub, asking.dpk, listed.get("id"))
+    held = dict(host="127.0.0.1", port=port, additional_headers={"X-Forwarded-For": "100.101.102.103"})
+    locked = ps.Phone(f"http://{origin}/", copied, origin=f"https://{origin}", **held)
+    hello = await locked.open()
+    check("a secure origin's phone starts locked, with a passkey to set up", hello.get("locked") is True and hello["lock"]["state"] == "enrol" and hello["lock"]["rp_id"] == fqdn, hello.get("lock"))
+    check("…and its hello says nothing of any session or project", hello["sessions"] == [] and hello["projects"] == {} and hello["rev"] == 0 and hello.get("push") is None, hello)
+    for name in ("list", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_test"):
+        reply = await locked.ask(type=name, id="nothing", text="x", key="enter")
+        check(f"…{name} is refused while locked", (reply or {}).get("code") == "locked", reply)
+    check("…while a heartbeat and the lock's own verbs pass", (await locked.ask(type="hb", n=1))["type"] == "hb" and (await locked.ask(type="lock_challenge"))["lock"]["state"] == "enrol")
+    passkey = ps.SoftPasskey(f"https://{origin}")
+    challenge = (await locked.ask(type="lock_challenge"))["lock"]["challenge"]
+    mark = locked.mark()
+    reply = await locked.ask(type="lock_enrol", **passkey.create(challenge))
+    check("a passkey is set up with a real ceremony's fields", (reply or {}).get("result") == "ok", reply)
+    opened = await locked.wait(lambda m: m["type"] == "hello", 10, mark)
+    check("…and it opens, with a new hello", (opened or {}).get("locked") is False and opened["lock"]["state"] == "open", opened)
+    listed = next(x for x in d.call("mobile.status")["devices"] if x["name"] == "Over Tailscale")
+    check("Settings has it, and has it unlocked", listed.get("passkey") is True and listed.get("unlocked") is True, listed)
+    mark = locked.mark()
+    await locked.send(type="lock_now")
+    told = await locked.wait(lambda m: m["type"] == "locked", 5, mark)
+    check("leaving locks it at once", (told or {}).get("lock", {}).get("state") == "unlock" and bool(told["lock"].get("challenge")), told)
+    check("…and reading is refused again", (await locked.ask(type="list"))["code"] == "locked")
+    await locked.close()
+
+    thief = ps.Phone(f"http://{origin}/", copied, origin=f"https://{origin}", **held)
+    hello = await thief.open()
+    check("the same key on a new connection is locked, and asked for that passkey", hello.get("locked") is True and hello["lock"]["state"] == "unlock" and hello["lock"]["cred_id"] == ps.b64url(passkey.id), hello.get("lock"))
+    forged = await thief.ask(type="lock_unlock", **ps.SoftPasskey(f"https://{origin}").get(hello["lock"]["challenge"]))
+    check("another passkey does not open it", (forged or {}).get("code") == "lock_refused", forged)
+    used = await thief.ask(type="lock_unlock", **passkey.get(hello["lock"]["challenge"]))
+    check("…and that challenge was its one go", (used or {}).get("code") == "challenge", used)
+    fresh = (await thief.ask(type="lock_challenge"))["lock"]["challenge"]
+    unverified = await thief.ask(type="lock_unlock", **passkey.get(fresh, flags=0x01))
+    check("nor does the right passkey with no user verification", (unverified or {}).get("code") == "lock_refused", unverified)
+    replaced = await thief.ask(type="lock_enrol", **ps.SoftPasskey(f"https://{origin}").create((await thief.ask(type="lock_challenge"))["lock"]["challenge"]))
+    check("nor can a new passkey take its place: that needs the desktop", (replaced or {}).get("code") == "needs_desktop", replaced)
+    good = await thief.ask(type="lock_unlock", **passkey.get((await thief.ask(type="lock_challenge"))["lock"]["challenge"]))
+    check("the passkey itself does", (good or {}).get("result") == "ok", good)
+    opened = await thief.wait(lambda m: m["type"] == "hello" and m.get("locked") is False, 10)
+    check("…with the sessions", opened is not None and isinstance(opened["sessions"], list), opened)
+    await thief.close()
+    flap = ps.Phone(f"http://{origin}/", copied, origin=f"https://{origin}", **held)
+    hello = await flap.open()
+    check("a reconnect inside the window asks nothing: a flap of the network", hello.get("locked") is False and hello["lock"]["state"] == "open", hello.get("lock"))
+    await flap.send(type="lock_now")
+    await flap.close()
+    d.call("mobile.revoke", {"id": listed["id"]})
+
     # Removed by hand: told, and not put back behind the person's back.
     fake(serve="{}")
     before = ts_changes()
