@@ -5,7 +5,7 @@
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
-import { PHONE_API } from "../../lib/attention";
+import { TAILSCALE_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
@@ -52,7 +52,7 @@ export interface MobileStatus {
   pending: { id: string; name: string; kind: "app" | "pwa"; fingerprint: string; want: MobilePermission; address: string }[];
   /** Phones not seen for this many days are removed (0: never). */
   dormant_days: number;
-  /** Tailscale mode, as the daemon holds it (absent from a daemon older than `PHONE_API`). `origin`: `<name>:8443` while phones can use it. */
+  /** Tailscale mode, as the daemon holds it (absent from a daemon older than `TAILSCALE_API`). `origin`: `<name>:8443` while phones can use it. */
   tailscale?: { on: boolean; origin: string | null; to_remove?: boolean };
   /** This window is the verified Kelpie app: it may approve phones and raise what they may do. */
   app: boolean;
@@ -128,7 +128,7 @@ export function MobileSettings() {
   // The two steps of pairing over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
   const [guideStep, setGuideStep] = createSignal<1 | 2 | null>(null);
   // Only while phone access is on and this page is open; looked at again when what the daemon holds changes, or when asked.
-  const tailscaleKey = () => (store.connected() && store.daemonApi() >= PHONE_API && (status()?.enabled || status()?.tailscale?.to_remove) ? `${status()!.tailscale?.on}|${status()!.tailscale?.origin}|${status()!.tailscale?.to_remove}` : null);
+  const tailscaleKey = () => (store.connected() && store.daemonApi() >= TAILSCALE_API && (status()?.enabled || status()?.tailscale?.to_remove) ? `${status()!.tailscale?.on}|${status()!.tailscale?.origin}|${status()!.tailscale?.to_remove}` : null);
   const [tailscale, { refetch: checkTailscale }] = createResource(tailscaleKey, () => daemon<TailscaleStatus>("mobile.tailscale_status").catch(() => null));
   // The two steps are about the origin: with it gone they end, and do not come back unasked when it returns.
   createEffect(() => {
@@ -253,7 +253,7 @@ export function MobileSettings() {
             <input class="text-input mono" placeholder={t("private key (.key / .pem)")} value={s()!.key ?? ""} onChange={(e) => void enable({ key: e.currentTarget.value })} />
           </div>
         </SettingRow>
-        <Show when={store.daemonApi() >= PHONE_API}>
+        <Show when={store.daemonApi() >= TAILSCALE_API}>
           <SettingRow id="mobile-tailscale" wide>
             <div class="inline-fields" style={{ "align-items": "center" }}>
               <Toggle on={!!s()!.tailscale?.on} onChange={(on) => void setTailscaleMode(on)} />
