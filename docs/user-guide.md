@@ -957,8 +957,8 @@ iPhone, the Install button or the browser's menu on Android). The very first vis
 certificate. **Step 2: Pair** shows the pairing code: open Kelpie from the
 Home Screen, press *Scan the code* (or paste the link, if the camera cannot be used), and type the six digits on
 the computer. A browser keeps its pairing per address, so a phone paired over plain HTTP stays paired there, read-only, and must
-be paired again to type over Tailscale. If the phone says *Turn on Tailscale*, it is not on your tailnet (an iPhone allows one
-VPN at a time); the app still opens and shows what it last saw. While this is on, links in notifications open at the Tailscale address, so a phone paired only over plain HTTP
+be paired again to type over Tailscale. If the phone says *Turn on Tailscale*, it failed to reach this address at once. Tailscale being off on the phone is the likely reason (an iPhone allows one
+VPN at a time), but it may also show when this mode or phone access is off on the computer, so check both; the app still opens and shows what it last saw. While this is on, links in notifications open at the Tailscale address, so a phone paired only over plain HTTP
 cannot use them.
 
 What to know: **use this only on a computer with one user account.** The Tailscale entry stays while Kelpie is not running, so another user account on the same computer
@@ -986,7 +986,9 @@ answering it. It may have been removed there, phone access may have been reset, 
 network may be interfering, or the answer may not have come from your computer. The phone keeps its pairing and tries again by itself. If it was
 removed on purpose, tap *Forget this device*, then pair again. A phone only forgets its pairing by
 itself when your computer tells it so over the encrypted connection. *Turn off phone access and
-revoke all* removes every phone.
+revoke all* removes every phone and cuts access at once, connected or not. A phone connected at that moment
+is told, and wipes its key and everything it kept. One that is not connected cannot be told: its key no longer opens anything, but it
+keeps what it already shows, for anyone who can open the app on it, until you tap *Forget this device* there. Once phone access is back on it says *Not paired here*.
 
 Kelpie's check stops a program that merely holds your account's Kelpie token from adding a phone. It
 does not stop a program determined to get around it: your account's programs can read the keys in
