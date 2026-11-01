@@ -862,6 +862,8 @@ for n in (1, 2, 3):
     d.js("document.querySelector('[data-tailscale-check]').click()")
     run.check("…and once Tailscale answers, Check again removes it and the note goes", d.wait("return !document.querySelector('[data-tailscale-to-remove]')", 20) is True and json.load(open(FAKE_TS[1], encoding="utf-8"))["serve"] == "{}")
     daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    # Turning access off cut the phone. It must be back before the limiter below, which would keep it out, and the kill switch, which only a connected phone can hear.
+    phone.wait(LIVE, 30)
     d.js(f"{S}.closeSettings?.()")
 
     # Last, so the limiter does not refuse a pairing this script still needs.
