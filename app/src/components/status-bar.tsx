@@ -53,7 +53,7 @@ export function StatusBar() {
   };
 
   return (
-    <div class="statusbar">
+    <div class="statusbar" data-hints>
       <span class="item" title={store.connected() ? t("Session daemon connected") : t("Session daemon not connected")}>
         <span class={`conn${store.connected() ? " on" : ""}`} />
         {store.connected() ? "kelpied" : t("kelpied offline")}

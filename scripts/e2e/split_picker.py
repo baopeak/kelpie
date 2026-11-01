@@ -169,7 +169,7 @@ try:
     run.check("Esc closes the empty pane", wait(lambda: empty_panes() == 0) is not None and len(pane_ids(base)) == 1)
     run.check("closing the picker starts no session", len(sessions()) == n0)
 
-    d.js("document.querySelector('.pane-tools button[title=\"Split down\"]').click()")
+    d.js("document.querySelector('.pane-tools button[title^=\"Split down\"]').click()")
     wait(lambda: empty_panes() == 1)
     root = tab_of(base)["root"]
     run.check("pane toolbar Split down puts the empty pane below", empty_panes() == 1 and root["type"] == "split" and root["dir"] == "col", str(root.get("dir")))

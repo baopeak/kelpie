@@ -153,6 +153,8 @@
 :root[data-density="compact"] .session-row { padding: 2px 8px; }
 :root[data-density="compact"] .session-text .model { display: none; }
 :root[data-density="compact"] .tabbar { height: 32px; }
+:root[data-density="compact"] .pane-header { height: 30px; }
+:root[data-density="compact"] .pane-header .icon-btn { width: 24px; height: 24px; }
 :root[data-density="compact"] .history-row { padding: 3px 12px; }
 :root[data-density="compact"] .list-row { padding: 2px 12px; }
 :root[data-density="compact"] .panel-tabs { height: 32px; }
@@ -366,9 +368,10 @@ input, textarea, select { font: inherit; color: var(--text); }
 .multi .pane-header { background: color-mix(in srgb, var(--pane-color) 5%, var(--bg-elev)); box-shadow: inset 0 2px 0 color-mix(in srgb, var(--pane-color) 30%, transparent); transition: background .15s, color .15s; }
 .multi .pane.focused .pane-header { background: color-mix(in srgb, var(--pane-color) 13%, var(--bg-elev)); box-shadow: inset 0 2px 0 var(--pane-color); color: var(--text); }
 .multi .pane.focused .pane-header .title { font-weight: 600; }
-.pane-header { height: 28px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 10px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+.pane-header { height: 34px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 10px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); background: var(--bg-elev); }
 .pane-header .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pane-header .icon-btn { width: 22px; height: 22px; }
+/* Pane buttons are read at a glance on large screens: 28 px targets, 16 px icons. */
+.pane-header .icon-btn { width: 28px; height: 28px; border-radius: 6px; }
 .pane-body { flex: 1; position: relative; min-height: 0; }
 .term-wrap { position: absolute; inset: 0; padding: 8px 4px 4px 12px; background: var(--terminal-bg, var(--term-bg)); }
 .term-host { width: 100%; height: 100%; }
@@ -855,7 +858,7 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 /* ---------- pane tools ---------- */
 .pane-tools { position: absolute; top: 6px; right: 10px; z-index: 8; display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgba(22,26,35,.92); border: 1px solid var(--border-strong); opacity: 0; transition: opacity .12s; pointer-events: none; }
 .pane:hover > .pane-tools { opacity: 1; pointer-events: auto; }
-.pane-tools .icon-btn { width: 24px; height: 24px; }
+.pane-tools .icon-btn { width: 28px; height: 28px; }
 
 /* ---------- sidebar (rich) ---------- */
 .search-btn { margin: 0 10px 6px; height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text-faint); cursor: pointer; }
@@ -1005,6 +1008,12 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .kelpie-config { display: flex; flex-direction: column; gap: 6px; }
 .kelpie-config-body { max-height: 140px; overflow: auto; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); font-size: 12px; color: var(--text-dim); user-select: text; }
 /* ---------- tips ---------- */
+/* Hover hints (hover-hints.tsx): what an icon button does, and its shortcut, a moment after hovering. */
+.hover-hint { position: fixed; z-index: 70; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; max-width: 320px; padding: 5px 9px; border-radius: 7px; background: var(--bg-elev-2); border: 1px solid var(--border-strong); box-shadow: 0 8px 24px rgb(var(--shadow-rgb) / calc(.35 * var(--shadow-k))); color: var(--text); font-size: 12px; line-height: 1.35; white-space: pre-line; pointer-events: none; animation: hint-in .12s ease-out; }
+.hover-hint.above { transform: translate(-50%, -100%); }
+.hover-hint kbd { flex: none; font: 11px var(--font-mono); color: var(--text-dim); background: var(--bg); border: 1px solid var(--border-strong); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+@keyframes hint-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .hover-hint { animation: none; } }
 .tip { position: fixed; z-index: 60; width: 280px; background: var(--bg-elev-2); border: 1px solid var(--accent); border-radius: 10px; padding: 12px 14px; box-shadow: 0 14px 40px rgb(var(--shadow-rgb) / calc(.45 * var(--shadow-k))); display: flex; flex-direction: column; gap: 6px; }
 .tip-title { font-weight: 600; color: var(--text); }
 .tip-text { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; }

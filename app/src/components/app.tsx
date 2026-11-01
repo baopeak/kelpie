@@ -12,6 +12,7 @@ import { Palette } from "./palette";
 import { Dashboard } from "./dashboard";
 import { SettingsPage } from "./settings/settings-page";
 import { Tips } from "./tips";
+import { HoverHints } from "./hover-hints";
 import { setEditorTheme } from "../lib/codemirror";
 import { WorktreeDialog } from "./worktree-dialog";
 import { NewSessionMenu } from "./new-session-menu";
@@ -192,6 +193,7 @@ export function App() {
       <LayoutMenuHost />
       <MobileApprovals />
       <Tips />
+      <HoverHints />
       <Show when={store.toast()}>
         {(t) => (
           <div class="toast">
