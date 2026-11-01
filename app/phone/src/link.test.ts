@@ -189,16 +189,26 @@ describe("Link handshake", () => {
     expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"] });
   });
 
-  it("says the window's secret first on every connection while it holds one, and not once it has let it go", () => {
+  it("says the window's secret first on every connection while it holds one, and not once it has let it go", async () => {
     const r = rig();
+    const reconnect = async () => {
+      const before = r.sockets.length;
+      r.last().die();
+      for (let waited = 0; r.sockets.length === before && waited < 120; waited++) {
+        await Promise.resolve();
+        r.advance(1000);
+      }
+      expect(r.sockets.length).toBeGreaterThan(before);
+      r.last().open();
+    };
     r.link.setResume("the-secret");
     r.link.start();
     r.last().open();
     expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"], resume: "the-secret" });
+    await reconnect();
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"], resume: "the-secret" });
     r.link.setResume(null);
-    r.last().close(1006);
-    r.link.start();
-    r.last().open();
+    await reconnect();
     expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"] });
   });
 
