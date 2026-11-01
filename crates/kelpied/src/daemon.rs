@@ -18,6 +18,7 @@ use crate::chat::ChatSession;
 use crate::checkpoints::{self, Checkpoints};
 use crate::meta::MetaStore;
 use crate::notes::{self, Note, NoteStore};
+use crate::notify::destinations::{Destinations, Host};
 use crate::notify::{self, Notifier, Raised};
 use crate::status::Status;
 use crate::persist::{write_atomic, SavedSession, Store};
@@ -28,6 +29,35 @@ use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, tu
 
 mod automation;
 mod process;
+
+/// What delivery of alerts asks of the daemon, from the destinations' own threads.
+struct NotifyHost(std::sync::Weak<Daemon>);
+
+impl Host for NotifyHost {
+    /// A daemon on its way down cannot say: what is on disk is looked at again by the next.
+    fn still_waiting(&self, session: &str, wait: Option<u64>) -> bool {
+        let Some(d) = self.0.upgrade() else { return true };
+        d.by_id(session).is_some_and(|e| {
+            let info = e.info();
+            info.status == Status::Waiting && (wait.is_none() || info.waiting_since == wait)
+        })
+    }
+
+    fn load_level(&self) -> crate::load::Level {
+        self.0.upgrade().map_or(crate::load::Level::L0, |d| d.mobile.load.level())
+    }
+
+    fn phone_url(&self) -> Option<String> {
+        self.0.upgrade()?.mobile.running_url()
+    }
+
+    fn subscription_gone(&self, device: &str) {
+        if let Some(d) = self.0.upgrade() {
+            d.mobile.push_gone(device);
+            d.broadcast("mobile.updated", json!({}));
+        }
+    }
+}
 
 #[derive(Clone)]
 pub enum Entry {
@@ -209,6 +239,8 @@ impl Daemon {
                     d.broadcast(event, params);
                 }
             });
+            // Shared by the two that decide about alerts: phone access says who has them on, the notifier what is sent.
+            let destinations = Destinations::new(&data_dir, secrets.clone(), Arc::new(NotifyHost(weak.clone())));
             Daemon {
                 sessions: RwLock::new(BTreeMap::new()),
                 next_handle: AtomicU32::new(1),
@@ -220,7 +252,7 @@ impl Daemon {
                 automations: Mutex::new(Automations::load(&data_dir)),
                 auto_rt: automation::Runtime::new(),
                 runs: Mutex::new(Runs::load(&data_dir)),
-                mobile: crate::mobile::Mobile::load(&data_dir, secrets.clone()),
+                mobile: crate::mobile::Mobile::load_with(&data_dir, secrets.clone(), destinations.clone()),
                 presence: crate::user_presence::Presence::default(),
                 awake: Awake::new(),
                 awake_mode: Mutex::new(awake::Mode::Off),
@@ -228,7 +260,7 @@ impl Daemon {
                 agents_control_others: AtomicBool::new(load_policy(&data_dir)),
                 checkpoints: Arc::new(Checkpoints::new(&data_dir, emit)),
                 deliver_review: Mutex::new(HashMap::new()),
-                notifier: Notifier::new(&data_dir, secrets),
+                notifier: Notifier::with_destinations(&data_dir, secrets, destinations),
                 scheduled: ScheduledInputs::open(&data_dir),
                 procs: crate::procs::Procs::default(),
                 me: weak,

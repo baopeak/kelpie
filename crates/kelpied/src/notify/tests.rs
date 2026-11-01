@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc;
 
 use super::*;
 use crate::session::SessionSpec;
@@ -190,7 +191,7 @@ fn with_no_channel_nothing_is_started() {
     let ev = n.observe(&info(1, Status::Waiting, false, true), now + Duration::from_secs(60)).unwrap();
     assert!(!n.active());
     assert!(!n.wants_push(&ev, now), "no channel: no message");
-    assert!(n.worker.lock().is_none(), "no worker thread (and so no socket) until a message is sent");
+    assert!(!n.started(), "no worker thread (and so no socket) until a message is sent");
     assert!(n.limiter.lock().last.is_empty(), "the rate limiter is untouched");
     assert!(secrets.0.lock().is_empty(), "nothing was written to the credential store");
     assert!(!dir.join("notify.json").exists(), "nor to disk");

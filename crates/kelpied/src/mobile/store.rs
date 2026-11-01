@@ -48,6 +48,20 @@ impl Kind {
     }
 }
 
+/// Where this phone gets its alerts: what its browser gave when it subscribed. Its secret (`auth`) is in the credential store.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PushSub {
+    pub endpoint: String,
+    pub p256dh: String,
+    /// The language of its alerts.
+    pub lang: String,
+    #[serde(default)]
+    pub created_at: u64,
+    /// HMAC-SHA256 (hex) over this record's `mac` and the fields above: an address edited in the file sends nothing.
+    #[serde(default)]
+    pub mac: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Device {
     pub id: String,
@@ -69,6 +83,9 @@ pub struct Device {
     /// still verifies for an older Kelpie, which ignores both, and setting the flag in the file does not verify anywhere.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub secure_mac: String,
+    /// Alerts on this phone, with its own tag: a record paired here still verifies for an older Kelpie, which ignores this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<PushSub>,
     /// Set when the record was loaded or made here and its MACs checked out.
     #[serde(skip)]
     pub verified: bool,
@@ -207,6 +224,21 @@ fn secure_input(d: &Device) -> Vec<u8> {
     out
 }
 
+/// What a subscription's `mac` covers: this record and no other, and what it was told to do.
+fn push_input(d: &Device, p: &PushSub) -> Vec<u8> {
+    let mut out = b"kelpie-device-push/1".to_vec();
+    for field in [d.mac.as_str(), p.endpoint.as_str(), p.p256dh.as_str(), p.lang.as_str()] {
+        out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
+/// Whether the record's subscription is as it was sealed with `key`.
+pub fn push_holds(d: &Device, key: &[u8; 32]) -> bool {
+    d.push.as_ref().is_some_and(|p| tag_holds(key, &push_input(d, p), &p.mac))
+}
+
 fn tag(key: &[u8; 32], input: &[u8]) -> String {
     let mut m = HmacSha256::new_from_slice(key).expect("any key length");
     m.update(input);
@@ -223,6 +255,9 @@ fn tag_holds(key: &[u8; 32], input: &[u8], hex_tag: &str) -> bool {
 pub fn seal(d: &mut Device, key: &[u8; 32]) {
     d.mac = tag(key, &mac_input(d));
     d.secure_mac = if d.secure_origin { tag(key, &secure_input(d)) } else { String::new() };
+    if let Some(mac) = d.push.as_ref().map(|p| tag(key, &push_input(d, p))) {
+        d.push.as_mut().expect("just read").mac = mac;
+    }
     d.verified = true;
 }
 
@@ -249,7 +284,7 @@ mod tests {
     }
 
     fn device(key: &[u8; 32]) -> Device {
-        let mut d = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), verified: false };
+        let mut d = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), push: None, verified: false };
         seal(&mut d, key);
         d
     }
@@ -309,6 +344,38 @@ mod tests {
         let old: Device = serde_json::from_str(&format!(r#"{{"id":"d1","name":"Phone","pk":"AAAA","permission":"read","kind":"pwa","created_at":7,"last_seen":0,"mac":"{}"}}"#, plain.mac)).unwrap();
         assert!(!old.secure_origin);
         assert!(verify(&old, &key));
+    }
+
+    #[test]
+    fn a_subscription_edited_in_the_file_is_not_used_and_the_record_still_holds() {
+        let key = [3u8; 32];
+        let plain = device(&key);
+        let mut on = plain.clone();
+        on.push = Some(PushSub { endpoint: "https://fcm.googleapis.com/fcm/send/a".into(), p256dh: "k".into(), lang: "en".into(), created_at: 1, mac: String::new() });
+        assert!(!push_holds(&on, &key), "not sealed yet");
+        seal(&mut on, &key);
+        assert!(push_holds(&on, &key));
+        assert!(verify(&on, &key));
+        assert_eq!(on.mac, plain.mac, "what an older Kelpie checks has not changed");
+        assert!(!push_holds(&on, &[4u8; 32]), "another key");
+        let mut edited = on.clone();
+        edited.push.as_mut().unwrap().endpoint = "https://fcm.googleapis.com/fcm/send/mine".into();
+        assert!(!push_holds(&edited, &key), "a changed address");
+        assert!(verify(&edited, &key), "the pairing is not what was tampered with");
+        let mut other = device(&key);
+        other.id = "d2".into();
+        seal(&mut other, &key);
+        other.push = on.push.clone();
+        assert!(!push_holds(&other, &key), "another record's subscription");
+        let mut raised = on.clone();
+        raised.permission = Permission::Write;
+        seal(&mut raised, &key);
+        assert!(push_holds(&raised, &key), "a permission change keeps it");
+        // A record from before the field, and one written with it, read back.
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("push"));
+        let back: Device = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert_eq!(back.push, on.push);
     }
 
     #[test]
