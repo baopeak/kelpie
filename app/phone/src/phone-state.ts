@@ -282,9 +282,10 @@ function openFromAlert(navigate: string) {
   if (session) openWanted(session, waited);
 }
 
-/** A session asked for by a link, on a running app. What came through a system's own tap on an alert arrives the same way. */
+/** A session asked for by a link, on a running app. What came through a system's own tap on an alert arrives the same way. A locked hello counts as connected, and says nothing of any
+ *  session, so while locked the list here is whatever it was before: the hello that unlocks opens it, and judges it from what is true then. */
 function openWanted(session: string, waited: boolean) {
-  if (!connected()) {
+  if (!connected() || !lock.clear()) {
     wantSession = session;
     wantFromAlert = waited;
     return;
