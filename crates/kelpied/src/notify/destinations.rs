@@ -43,6 +43,8 @@ pub enum Dest {
 }
 
 const CHANNELS: [Channel; 3] = [Channel::Ntfy, Channel::Telegram, Channel::Webhook];
+/// A second send of a message that may have arrived waits at least this: what a channel always waited, so that a blip passes.
+const SECOND_SEND_AFTER: Duration = Duration::from_secs(3);
 
 /// What delivery asks of the daemon around it.
 pub trait Host: Send + Sync {
@@ -349,11 +351,11 @@ impl Alert {
                 Alert { wording: Wording::Kind(kind), link: e.session.clone().map(|s| (s, kind.waits())), about, high: kind.urgent() }
             }
             // A summary is its own too: one from a second outage must not take the place of one not read yet. The same on every try of it.
-            Attempt::Together { ids, need_you, updates, .. } => Alert {
+            Attempt::Together { ids, need_you, updates, urgent, .. } => Alert {
                 wording: wording_of(*need_you, *updates),
                 link: None,
                 about: format!("summary|{}", ids.first().map_or("", String::as_str)),
-                high: *need_you > 0,
+                high: *urgent,
             },
         }
     }
@@ -416,7 +418,7 @@ impl Shared {
                 let c = self.config.lock().clone();
                 let payload = match attempt {
                     Attempt::One(e) => Payload { id: Some(e.id.clone()), ..e.payload.clone().ok_or("nothing to say")? },
-                    Attempt::Together { ids, need_you, updates, latest } => together_payload(ids, *need_you, *updates, *latest),
+                    Attempt::Together { ids, need_you, updates, urgent, latest } => together_payload(ids, *need_you, *updates, *urgent, *latest),
                 };
                 deliver(self.secrets.as_ref(), &c, *ch, &payload, &telegram_base())
             }
@@ -495,9 +497,15 @@ fn wording_of(need_you: usize, updates: usize) -> Wording {
     }
 }
 
-/// The message for a channel that stands for several: `status` is `needs_you` when someone waits, else `summary`.
-fn together_payload(ids: &[String], need_you: usize, updates: usize, latest: u64) -> Payload {
-    let status = if need_you > 0 { "needs_you" } else { "summary" };
+/// The message for a channel that stands for several: `status` is `needs_you` when someone waits, `failed` when something in it failed, else `summary`.
+fn together_payload(ids: &[String], need_you: usize, updates: usize, urgent: bool, latest: u64) -> Payload {
+    let status = if need_you > 0 {
+        "needs_you"
+    } else if urgent {
+        "failed"
+    } else {
+        "summary"
+    };
     Payload { status: status.into(), project: None, session: None, summary: web_push::sentence(wording_of(need_you, updates), "en"), duration_s: None, id: ids.first().cloned(), screen: None, link: None, at: latest }
 }
 
@@ -575,8 +583,8 @@ fn run(dest: Dest, rx: mpsc::Receiver<Entry>, shared: Arc<Shared>, retired: Arc<
                 return;
             }
             // A channel's receiver acts on each send, so one that may have arrived is not repeated without end. A phone's repeats take each other's place, under one `Topic` and `tag`.
-            Err(f) if f.unsure && matches!(dest, Dest::Channel(_)) => {
-                let lost = outbox.unsure(&attempt, now_millis(), f.retry_after, &mut dice);
+            Err(f) if matches!(dest, Dest::Channel(_)) && (f.unsure || (dest == Dest::Channel(Channel::Webhook) && f.webhook_may_have_acted())) => {
+                let lost = outbox.unsure(&attempt, now_millis(), f.retry_after.or(Some(SECOND_SEND_AFTER)), &mut dice);
                 shared.dropped.fetch_add(lost, Ordering::Relaxed);
             }
             Err(f) if f.retryable() => outbox.failed(now_millis(), f.retry_after, &mut dice),

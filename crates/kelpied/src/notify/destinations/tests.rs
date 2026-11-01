@@ -16,6 +16,8 @@ enum Answer {
     Hang,
     /// An answer, late.
     After(u64, u16),
+    /// The request is had, and the connection is closed with no answer: the receiver may have acted on it.
+    Close,
 }
 
 #[derive(Clone, Debug)]
@@ -36,7 +38,14 @@ struct PushService {
 
 impl PushService {
     fn start(script: &[Answer]) -> PushService {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        Self::serving(TcpListener::bind("127.0.0.1:0").unwrap(), script)
+    }
+
+    fn start_at(addr: std::net::SocketAddr) -> PushService {
+        Self::serving(TcpListener::bind(addr).unwrap(), &[])
+    }
+
+    fn serving(listener: TcpListener, script: &[Answer]) -> PushService {
         let service = PushService { base: format!("http://{}", listener.local_addr().unwrap()), requests: Arc::default(), script: Arc::new(Mutex::new(script.iter().cloned().collect())) };
         let s = service.clone();
         std::thread::spawn(move || {
@@ -81,6 +90,7 @@ impl PushService {
                 std::thread::sleep(Duration::from_secs(30));
                 return;
             }
+            Answer::Close => return,
             Answer::After(ms, s) => {
                 std::thread::sleep(Duration::from_millis(ms));
                 (s, String::new())
@@ -631,7 +641,7 @@ fn a_kind_never_takes_the_place_of_another() {
     }
     // The same thing again is the same alert: a repeat replaces it.
     assert_eq!(of(Kind::Finished), of(Kind::Finished));
-    let summary = |id: &str| Alert::of(&Attempt::Together { ids: vec![id.into()], need_you: 2, updates: 0, latest: 0 }).about;
+    let summary = |id: &str| Alert::of(&Attempt::Together { ids: vec![id.into()], need_you: 2, updates: 0, urgent: true, latest: 0 }).about;
     assert_ne!(summary("one"), summary("two"), "a second outage's does not replace a first not read yet");
     assert_eq!(summary("one"), summary("one"), "tries of one do");
     let first = Alert::test().about;
@@ -806,6 +816,177 @@ fn a_channel_says_the_summary_too_after_an_outage() {
     assert_eq!(body["event"]["status"], "needs_you");
     assert!(body["event"]["id"].is_string());
     assert_eq!(got[3].path, "/hook");
+}
+
+/// A webhook's flow may act and then answer 500; master tried it twice, and so does this.
+#[test]
+fn a_webhook_answering_a_server_error_gets_a_message_twice_at_most() {
+    for status in [500, 504] {
+        let (r, service) = (rig(), PushService::start(&[Answer::Status(status), Answer::Status(status), Answer::Status(status)]));
+        let mut c = r.notifier.config();
+        c.webhook.enabled = true;
+        r.notifier.update(Some(c), &serde_json::json!({"webhook_url": format!("{}/hook", service.base)})).unwrap();
+        r.notifier.send(&waiting("still-waiting"), &Context::default());
+        let got = service.wait_for(2, Duration::from_secs(8));
+        assert!(got[1].at.duration_since(got[0].at) >= Duration::from_millis(2900), "{:?}", got[1].at.duration_since(got[0].at));
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(service.count(), 2, "{status}: the session still waits, and that buys no third");
+        assert_eq!(r.notifier.describe(false)["dropped"], 1);
+    }
+}
+
+/// 502 and 503 say the flow was not reached, and an outage is what the retries are for.
+#[test]
+fn a_webhook_behind_something_that_says_it_is_not_there_keeps_being_tried() {
+    let (r, service) = (rig(), PushService::start(&[Answer::Status(502), Answer::Status(503), Answer::Status(502)]));
+    let mut c = r.notifier.config();
+    c.webhook.enabled = true;
+    r.notifier.update(Some(c), &serde_json::json!({"webhook_url": format!("{}/hook", service.base)})).unwrap();
+    r.notifier.send(&waiting("s1"), &Context::default());
+    service.wait_for(4, Duration::from_secs(12));
+    assert_eq!(r.notifier.describe(false)["dropped"], 0);
+}
+
+/// ntfy and Telegram do not act and then answer 500: for them it is an outage like any other.
+#[test]
+fn ntfy_answering_a_server_error_keeps_being_tried() {
+    let (r, service) = (rig(), PushService::start(&[Answer::Status(500), Answer::Status(500), Answer::Status(500)]));
+    let mut c = r.notifier.config();
+    c.ntfy.enabled = true;
+    c.ntfy.server = service.base.clone();
+    r.notifier.update(Some(c), &Value::Null).unwrap();
+    r.notifier.send(&waiting("s1"), &Context::default());
+    service.wait_for(4, Duration::from_secs(12));
+    assert_eq!(r.notifier.describe(false)["dropped"], 0);
+}
+
+/// Cut off with the request delivered: twice at most, the second after what a channel always waited, so that a blip passes.
+#[test]
+fn a_connection_cut_after_the_request_is_tried_once_more_after_three_seconds() {
+    let (r, service) = (rig(), PushService::start(&[Answer::Close]));
+    let mut c = r.notifier.config();
+    c.ntfy.enabled = true;
+    c.ntfy.server = service.base.clone();
+    r.notifier.update(Some(c), &Value::Null).unwrap();
+    r.notifier.send(&waiting("s1"), &Context::default());
+    let got = service.wait_for(2, Duration::from_secs(8));
+    assert!(got[1].at.duration_since(got[0].at) >= Duration::from_millis(2900), "{:?}", got[1].at.duration_since(got[0].at));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(service.count(), 2);
+    assert_eq!(r.notifier.describe(false)["dropped"], 0);
+    assert!(!r.outbox(&Dest::Channel(Channel::Ntfy)).exists(), "delivered on the second");
+}
+
+fn ntfy_at(r: &Rig, server: &str) {
+    let mut c = r.notifier.config();
+    c.ntfy.enabled = true;
+    c.ntfy.server = server.into();
+    r.notifier.update(Some(c), &Value::Null).unwrap();
+}
+
+/// Nothing listens for a moment, and then something does: refused sends nothing, however often, and the message gets there.
+#[test]
+fn a_blip_where_nothing_was_there_reaches_the_receiver_after_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let r = rig();
+    ntfy_at(&r, &format!("http://{addr}"));
+    r.notifier.send(&waiting("s1"), &Context::default());
+    // Through more tries than a cap on what may have arrived would allow.
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(r.notifier.describe(false)["status"]["ntfy"]["error"], "connection failed");
+    assert_eq!(r.notifier.describe(false)["dropped"], 0, "still to go");
+    let service = PushService::start_at(addr);
+    let got = service.wait_for(1, Duration::from_secs(16));
+    assert_eq!(got.len(), 1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(service.count(), 1, "once");
+}
+
+/// A TLS handshake that fails has delivered nothing: an `https` address at a server that speaks none.
+#[test]
+fn a_tls_failure_sent_nothing_and_keeps_being_tried() {
+    let service = PushService::start(&[]);
+    let r = rig();
+    ntfy_at(&r, &service.base.replace("http://", "https://"));
+    r.notifier.send(&waiting("s1"), &Context::default());
+    let start = Instant::now();
+    while r.notifier.describe(false)["status"]["ntfy"]["error"].is_null() && start.elapsed() < Duration::from_secs(8) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_secs(5));
+    assert_eq!(r.notifier.describe(false)["dropped"], 0, "past two tries");
+    assert_eq!(service.count(), 0, "and none of them was a request");
+    assert!(r.outbox(&Dest::Channel(Channel::Ntfy)).exists());
+}
+
+/// A name that does not resolve: `.invalid` never does.
+#[test]
+fn a_name_that_does_not_resolve_keeps_being_tried() {
+    let r = rig();
+    ntfy_at(&r, "http://kelpie-test-name.invalid");
+    r.notifier.send(&waiting("s1"), &Context::default());
+    let start = Instant::now();
+    while r.notifier.describe(false)["status"]["ntfy"]["error"].is_null() && start.elapsed() < Duration::from_secs(12) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(!r.notifier.describe(false)["status"]["ntfy"]["error"].is_null());
+    assert_eq!(r.notifier.describe(false)["dropped"], 0);
+    assert!(r.outbox(&Dest::Channel(Channel::Ntfy)).exists());
+}
+
+/// A channel's messages keep their title, text and link at any load, as they always did; only a phone's are gathered.
+#[test]
+fn at_a_busy_load_a_channel_keeps_each_message_as_it_is() {
+    let service = PushService::start(&[]);
+    let r = rig();
+    ntfy_at(&r, &service.base);
+    *r.host.level.lock() = Level::L2;
+    let telling_of = |title: &str| Context { project: Some("Proj".into()), title: Some(title.into()), phone_url: Some("http://192.168.1.5:4817/".into()), ..Default::default() };
+    let start = Instant::now();
+    r.notifier.send(&Raised { session: Some("a".into()), ..Raised::bare(Kind::Finished) }, &telling_of("first"));
+    r.notifier.send(&Raised { session: Some("b".into()), ..Raised::bare(Kind::Finished) }, &telling_of("second"));
+    let got = service.wait_for(2, Duration::from_secs(2));
+    assert!(start.elapsed() < Duration::from_secs(2), "not held: {:?}", start.elapsed());
+    let bodies: Vec<Value> = got.iter().map(|g| serde_json::from_slice(&g.body).unwrap()).collect();
+    assert_eq!((bodies[0]["message"].as_str(), bodies[0]["click"].as_str()), (Some("first: Finished"), Some("http://192.168.1.5:4817/#s=a")));
+    assert_eq!((bodies[1]["message"].as_str(), bodies[1]["click"].as_str()), (Some("second: Finished"), Some("http://192.168.1.5:4817/#s=b")));
+    assert_eq!(bodies[0]["title"], "Kelpie · Proj");
+}
+
+#[test]
+fn what_failed_is_not_told_as_an_ordinary_update_after_an_outage() {
+    let attempt = Attempt::Together { ids: vec!["e".into()], need_you: 0, updates: 2, urgent: true, latest: 0 };
+    assert!(Alert::of(&attempt).high);
+    assert_eq!(together_payload(&["e".into()], 0, 2, true, 0).status, "failed");
+    assert_eq!(together_payload(&["e".into()], 0, 2, false, 0).status, "summary");
+    assert_eq!(together_payload(&["e".into()], 1, 2, true, 0).status, "needs_you");
+}
+
+#[test]
+fn a_failed_read_of_a_channels_secret_is_tried_again_and_loses_nothing() {
+    struct Locked;
+    impl SecretStore for Locked {
+        fn get(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn read(&self, _: &str) -> anyhow::Result<Option<String>> {
+            anyhow::bail!("locked")
+        }
+        fn set(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+    let payload = crate::notify::build_payload(&waiting("s1"), &Context::default(), false);
+    for ch in [Channel::Ntfy, Channel::Telegram, Channel::Webhook] {
+        let f = deliver(&Locked, &Config::default(), ch, &payload, "http://127.0.0.1:1").unwrap_err();
+        assert!(f.retryable(), "{ch:?}: {}", f.reason);
+    }
 }
 
 #[test]

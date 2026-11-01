@@ -589,6 +589,11 @@ impl Failure {
         Failure { again: true, ..Failure::from(reason.into().as_str()) }
     }
 
+    /// A webhook's flow can act and then fail a later step, and answer 500 for it. 502 and 503 say the flow was not reached.
+    fn webhook_may_have_acted(&self) -> bool {
+        matches!(self.status, Some(500..=599)) && !matches!(self.status, Some(502 | 503))
+    }
+
     /// 404 and 410 are how a push service says a subscription ended.
     fn subscription_over(&self) -> bool {
         matches!(self.status, Some(404 | 410))
@@ -614,9 +619,33 @@ fn post_json(url: &str, headers: &[(&str, &str)], body: &Value) -> std::result::
     post(url, headers, "application/json", body.to_string().as_bytes())
 }
 
+/// What became of a request that got no answer. Only a request that may have reached the receiver is `unsure`: one that failed on its way there (no such name, no route, no
+/// connection, no TLS) sent nothing, and may be tried again as long as what it says is still so. Connecting has a time of its own, so that a timeout says which side of that line it fell on.
+fn failure_of(e: ureq::Error) -> Failure {
+    use std::io::ErrorKind as Io;
+    match e {
+        ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => "timed out".into(),
+        ureq::Error::Timeout(_) => Failure::unsure("timed out"),
+        ureq::Error::HostNotFound => "host not found".into(),
+        ureq::Error::ConnectionFailed => "connection failed".into(),
+        ureq::Error::Tls(_) | ureq::Error::Rustls(_) => "network error".into(),
+        ureq::Error::Io(e) => match e.kind() {
+            Io::ConnectionRefused => "connection failed".into(),
+            // Cut off, maybe after the receiver had the whole request.
+            Io::ConnectionReset | Io::ConnectionAborted | Io::BrokenPipe | Io::UnexpectedEof => Failure::unsure("connection failed"),
+            Io::TimedOut | Io::WouldBlock => Failure::unsure("timed out"),
+            // A name that does not resolve, a network or host out of reach: all before anything was sent.
+            _ => "network error".into(),
+        },
+        _ => Failure::unsure("network error"),
+    }
+}
+
 fn post(url: &str, headers: &[(&str, &str)], content_type: &str, body: &[u8]) -> std::result::Result<(), Failure> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10)))
+        .timeout_resolve(Some(Duration::from_secs(5)))
+        .timeout_connect(Some(Duration::from_secs(5)))
         .http_status_as_error(false)
         .max_redirects(0)
         .build()
@@ -632,13 +661,7 @@ fn post(url: &str, headers: &[(&str, &str)], content_type: &str, body: &[u8]) ->
             let asked = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| retry_after(v, now_millis()));
             Err(Failure { status: Some(status), retry_after: asked, ..Failure::from(format!("HTTP {status}").as_str()) })
         }
-        Err(ureq::Error::Timeout(_)) => Err(Failure::unsure("timed out")),
-        Err(ureq::Error::HostNotFound) => Err("host not found".into()),
-        Err(ureq::Error::ConnectionFailed) => Err("connection failed".into()),
-        Err(ureq::Error::Io(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => Err("connection failed".into()),
-        // Cut off, maybe after the receiver had the whole request.
-        Err(ureq::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => Err(Failure::unsure("connection failed")),
-        Err(_) => Err(Failure::unsure("network error")),
+        Err(e) => Err(failure_of(e)),
     }
 }
 
@@ -868,6 +891,7 @@ impl Notifier {
     pub fn send(&self, ev: &Raised, ctx: &Context) {
         let c = self.config.lock().clone();
         let payload = build_payload(ev, ctx, c.include_screen);
+        // Only a phone's entries wait to be gathered: a channel's message keeps its title, text and link, whatever the load.
         let hold = if ev.kind.urgent() {
             0
         } else {
@@ -877,7 +901,7 @@ impl Notifier {
                 _ => DIGEST_MS,
             }
         };
-        let entry = |payload: Option<Payload>| outbox::Entry {
+        let entry = |payload: Option<Payload>, hold: u64| outbox::Entry {
             id: uuid::Uuid::new_v4().to_string(),
             kind: ev.kind.code().to_string(),
             session: ev.session.clone(),
@@ -890,11 +914,11 @@ impl Notifier {
         };
         for ch in [Channel::Ntfy, Channel::Telegram, Channel::Webhook] {
             if channel_on(&c, ch) {
-                self.destinations.enqueue(destinations::Dest::Channel(ch), entry(Some(payload.clone())));
+                self.destinations.enqueue(destinations::Dest::Channel(ch), entry(Some(payload.clone()), 0));
             }
         }
         for device in self.destinations.device_ids() {
-            self.destinations.enqueue(destinations::Dest::Device(device), entry(None));
+            self.destinations.enqueue(destinations::Dest::Device(device), entry(None, hold));
         }
     }
 
@@ -1028,21 +1052,26 @@ fn record(status: &Mutex<HashMap<&'static str, ChannelStatus>>, ch: Channel, res
     }
 }
 
+/// A channel's secret. A read that failed is no answer: what waits to be sent stays, where "there is none" would end it.
+fn secret(secrets: &dyn SecretStore, key: &str) -> std::result::Result<Option<String>, Failure> {
+    secrets.read(key).map_err(|_| Failure::again("the credential store did not answer"))
+}
+
 /// Sends `p` through one channel. Errors say what failed, never where.
 fn deliver(secrets: &dyn SecretStore, c: &Config, ch: Channel, p: &Payload, telegram: &str) -> std::result::Result<(), Failure> {
     match ch {
         Channel::Ntfy => {
-            let topic = secrets.get(K_TOPIC).ok_or("no topic")?;
+            let topic = secret(secrets, K_TOPIC)?.ok_or("no topic")?;
             let mut body = json!({"topic": topic, "title": p.title(), "message": p.text(), "priority": if matches!(p.status.as_str(), "needs_you" | "failed" | "approval") { 4 } else { 3 }});
             if let Some(link) = &p.link {
                 body["click"] = json!(link);
             }
-            let bearer = secrets.get(K_NTFY_TOKEN).map(|t| format!("Bearer {t}"));
+            let bearer = secret(secrets, K_NTFY_TOKEN)?.map(|t| format!("Bearer {t}"));
             let headers: Vec<(&str, &str)> = bearer.iter().map(|b| ("Authorization", b.as_str())).collect();
             post_json(c.ntfy.server.trim_end_matches('/'), &headers, &body)
         }
         Channel::Telegram => {
-            let token = secrets.get(K_TELEGRAM_TOKEN).ok_or("no bot token")?;
+            let token = secret(secrets, K_TELEGRAM_TOKEN)?.ok_or("no bot token")?;
             if c.telegram.chat_id.is_empty() {
                 return Err("no chat id".into());
             }
@@ -1054,7 +1083,7 @@ fn deliver(secrets: &dyn SecretStore, c: &Config, ch: Channel, p: &Payload, tele
             post_json(&url, &[], &json!({"chat_id": c.telegram.chat_id, "text": text, "disable_web_page_preview": true}))
         }
         Channel::Webhook => {
-            let url = secrets.get(K_WEBHOOK).ok_or("no address")?;
+            let url = secret(secrets, K_WEBHOOK)?.ok_or("no address")?;
             post_json(&url, &[], &json!({"source": "kelpie", "title": p.title(), "text": p.text(), "event": p}))
         }
         // Each phone has a message of its own (`destinations`).

@@ -635,16 +635,18 @@ fn the_cost_cap_has_its_own_allowance_next_to_the_turns_own_message() {
 
 #[test]
 fn a_backed_up_queue_drops_messages_and_says_so() {
-    // A server that takes the connection and never answers holds the sending thread for its timeout.
+    // A server that takes the connection and never answers holds the sending thread for its timeout. Once it is held there, the queue is all there is.
     let hung = TcpListener::bind("127.0.0.1:0").unwrap();
     let (n, _, _dir) = configured(&format!("http://{}", hung.local_addr().unwrap()));
     let ctx = Context::default();
+    n.send(&Raised { session: Some("first".into()), ..Raised::bare(Kind::Waiting) }, &ctx);
+    let (held, _) = hung.accept().unwrap();
     for i in 0..(QUEUE + 20) {
         n.send(&Raised { session: Some(format!("s{i}")), ..Raised::bare(Kind::Waiting) }, &ctx);
     }
     let dropped = n.describe(false)["dropped"].as_u64().unwrap();
     assert!(dropped >= 19, "{dropped} dropped of {}", QUEUE + 20);
-    drop(hung);
+    drop((held, hung));
 }
 
 #[test]
@@ -697,4 +699,59 @@ fn without_a_system_clock_the_windows_own_activity_decides_whether_the_person_is
     // Where the system tells, it decides.
     assert!(!n.idle_at(Some(Duration::from_secs(1)), now));
     assert!(n.idle_at(Some(IDLE_AFTER), now));
+}
+
+// ---------- what a failed request means ----------
+
+fn failure(e: ureq::Error) -> Failure {
+    super::failure_of(e)
+}
+
+/// Only what may have reached the receiver counts as such. All the rest sent nothing.
+#[test]
+fn a_failure_on_the_way_there_sent_nothing_and_one_after_it_may_have_arrived() {
+    use std::io::{Error as Io, ErrorKind as K};
+    for (e, reason) in [
+        (ureq::Error::Timeout(ureq::Timeout::Resolve), "timed out"),
+        (ureq::Error::Timeout(ureq::Timeout::Connect), "timed out"),
+        (ureq::Error::HostNotFound, "host not found"),
+        (ureq::Error::ConnectionFailed, "connection failed"),
+        (ureq::Error::Tls("no"), "network error"),
+        (ureq::Error::Io(Io::from(K::ConnectionRefused)), "connection failed"),
+        (ureq::Error::Io(Io::from(K::HostUnreachable)), "network error"),
+        (ureq::Error::Io(Io::from(K::NetworkUnreachable)), "network error"),
+        (ureq::Error::Io(Io::other("no such host is known")), "network error"),
+    ] {
+        let f = failure(e);
+        assert_eq!(f.reason, reason);
+        assert!(!f.unsure, "{reason}: nothing was sent");
+        assert!(f.retryable(), "{reason}");
+    }
+    for (e, reason) in [
+        (ureq::Error::Timeout(ureq::Timeout::Global), "timed out"),
+        (ureq::Error::Timeout(ureq::Timeout::SendRequest), "timed out"),
+        (ureq::Error::Timeout(ureq::Timeout::SendBody), "timed out"),
+        (ureq::Error::Timeout(ureq::Timeout::RecvResponse), "timed out"),
+        (ureq::Error::Io(Io::from(K::ConnectionReset)), "connection failed"),
+        (ureq::Error::Io(Io::from(K::ConnectionAborted)), "connection failed"),
+        (ureq::Error::Io(Io::from(K::BrokenPipe)), "connection failed"),
+        (ureq::Error::Io(Io::from(K::UnexpectedEof)), "connection failed"),
+        (ureq::Error::Io(Io::from(K::TimedOut)), "timed out"),
+    ] {
+        let f = failure(e);
+        assert_eq!(f.reason, reason);
+        assert!(f.unsure, "{reason}: it may have arrived");
+        assert!(f.retryable(), "{reason}");
+    }
+}
+
+#[test]
+fn only_a_webhooks_server_errors_past_a_gateway_say_it_may_have_acted() {
+    let answered = |status: u16| Failure { status: Some(status), ..Failure::from(format!("HTTP {status}").as_str()) };
+    for acted in [500, 501, 504, 599] {
+        assert!(answered(acted).webhook_may_have_acted(), "{acted}");
+    }
+    for not_reached in [200, 400, 429, 502, 503] {
+        assert!(!answered(not_reached).webhook_may_have_acted(), "{not_reached}");
+    }
 }

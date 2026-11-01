@@ -83,8 +83,8 @@ impl Entry {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Attempt {
     One(Box<Entry>),
-    /// Several as one: `need_you` sessions someone waits on, and `updates` other things.
-    Together { ids: Vec<String>, need_you: usize, updates: usize, latest: u64 },
+    /// Several as one: `need_you` sessions someone waits on, and `updates` other things. `urgent`: some of it would have gone as such alone (`Kind::urgent`).
+    Together { ids: Vec<String>, need_you: usize, updates: usize, urgent: bool, latest: u64 },
 }
 
 #[derive(Debug, PartialEq)]
@@ -201,10 +201,7 @@ impl Outbox {
             keep
         });
         if self.entries.len() != before {
-            if self.entries.is_empty() {
-                self.failures = 0;
-                self.next_at = 0;
-            }
+            self.if_empty_start_over();
             self.save();
         }
         lost
@@ -241,6 +238,7 @@ impl Outbox {
                 ids: together.iter().map(|e| e.id.clone()).collect(),
                 need_you: waiting.len(),
                 updates,
+                urgent: together.iter().any(|e| e.urgent()),
                 latest: together.iter().map(|e| e.at).max().unwrap_or(now),
             });
         }
@@ -267,8 +265,17 @@ impl Outbox {
     pub fn refused(&mut self, attempt: &Attempt) -> u64 {
         let before = self.entries.len();
         self.forget(attempt);
+        self.if_empty_start_over();
         self.save();
         (before - self.entries.len()) as u64
+    }
+
+    /// With nothing left, failures are about nothing: the next message is not held to them.
+    fn if_empty_start_over(&mut self) {
+        if self.entries.is_empty() {
+            self.failures = 0;
+            self.next_at = 0;
+        }
     }
 
     /// It did not go out and may later. `dice(n)` is a number below `n`.
@@ -295,6 +302,8 @@ impl Outbox {
         self.entries.retain(|e| e.unsure < MAX_UNSURE);
         let lost = (before - self.entries.len()) as u64;
         self.failed(now, retry_after, dice);
+        self.if_empty_start_over();
+        self.save();
         lost
     }
 
@@ -581,6 +590,28 @@ mod tests {
             o.failed(now, None, &mut slowest);
         }
         assert_eq!(o.entries.len(), 1);
+    }
+
+    #[test]
+    fn failures_do_not_outlast_what_they_were_about() {
+        let mut o = Outbox::open(&scratch("restart-count"));
+        o.add(entry("a", Kind::Waiting, 0));
+        for now in [0, 1] {
+            let Pick::Go(a) = o.pick(o.next_at.max(now)) else { panic!("due") };
+            o.unsure(&a, now, None, &mut slowest);
+        }
+        assert!(o.is_empty());
+        assert_eq!((o.failures, o.next_at), (0, 0), "gone with it");
+        o.add(entry("b", Kind::Waiting, 5));
+        o.add(entry("c", Kind::Waiting, 5));
+        assert!(matches!(o.pick(6), Pick::Go(Attempt::One(_))), "a day later: on its own, at once");
+        let Pick::Go(a) = o.pick(6) else { panic!("due") };
+        o.failed(6, None, &mut slowest);
+        o.failed(6, None, &mut slowest);
+        o.failed(6, None, &mut slowest);
+        o.sent(&Attempt::One(Box::new(entry("c", Kind::Waiting, 5))));
+        o.refused(&a);
+        assert_eq!((o.failures, o.next_at), (0, 0));
     }
 
     #[test]
