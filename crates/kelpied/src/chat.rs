@@ -1534,13 +1534,23 @@ impl ChatSession {
         }
     }
 
-    /// The command behind an approval of request `request_id`, when `line` approves it and the daemon's label calls it dangerous. Anything else needs no second look here: `answer` still judges the line.
+    /// The command behind an approval of request `request_id`, when `line` approves it and the daemon's label calls it dangerous. An approval that rewrites what the agent asked for is judged by
+    /// what would then run, and an assertion has to be over that. Anything else needs no second look here: `answer` still judges the line.
     pub fn dangerous_approval(&self, request_id: &Value, line: &str) -> Option<String> {
+        use crate::mobile::risk::{from_tool, label, Level};
         let (key, clean) = exact_answer(line.trim(), request_id)?;
         let worktree = self.spec.lock().cwd.clone();
         let pending = self.inner.lock().pending.get(&key)?;
-        let dangerous = crate::mobile::risk::label(&pending.request, &worktree).level == crate::mobile::risk::Level::Dangerous;
-        (dangerous && answer_approves(&pending.allows, &clean)).then_some(pending.request.shown)
+        if !answer_approves(&pending.allows, &clean) {
+            return None;
+        }
+        let rewritten = clean.pointer("/response/response/updatedInput").filter(|input| !input.is_null()).map(|input| from_tool(pending.request.tool.as_deref().unwrap_or_default(), input, pending.request.cwd.as_deref()));
+        if let Some(rewritten) = rewritten.filter(|r| (&r.command, &r.paths) != (&pending.request.command, &pending.request.paths)) {
+            if label(&rewritten, &worktree).level == Level::Dangerous {
+                return Some(rewritten.shown);
+            }
+        }
+        (label(&pending.request, &worktree).level == Level::Dangerous).then_some(pending.request.shown)
     }
 
     pub fn detach(&self, client: u64) {

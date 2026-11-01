@@ -24,6 +24,7 @@ fn secure(d: &Daemon) {
 fn lock_rig() -> Rig {
     let mut r = rig();
     secure(&r.daemon);
+    r.daemon.mobile.reset_lock("phone");
     r.conn.lock_path = LockPath::Passkey;
     r.conn.secure_page = Some(ORIGIN.to_string());
     r.conn.locked = true;
@@ -106,6 +107,7 @@ async fn a_copied_key_on_a_real_socket_reaches_nothing_and_the_passkey_opens_it(
     let mut owner = Authenticator::new(ORIGIN);
     let held = network.rig.daemon.clone();
     let m = &held.mobile;
+    m.reset_lock("phone");
     let c = m.lock_info("phone", "enrol", Some(ORIGIN))["challenge"].as_str().map(|c| B64.decode(c).unwrap()).unwrap();
     m.lock_enrol("phone", &enrol_message(&owner, &c), Some(ORIGIN)).map_err(|r| r.code).unwrap();
     m.lock_now("phone");
@@ -146,17 +148,18 @@ async fn a_copied_key_on_a_real_socket_reaches_nothing_and_the_passkey_opens_it(
     let mut good = unlock_message(&mut owner, &c);
     good["req"] = json!("good");
     phone_send(&mut thief, good).await.unwrap();
-    assert_eq!(phone_recv(&mut thief).await.unwrap()["result"], "ok");
+    let opened = phone_recv(&mut thief).await.unwrap();
+    assert_eq!(opened["result"], "ok");
     let fresh = phone_recv(&mut thief).await.unwrap();
     assert_eq!((fresh["type"].as_str(), fresh["locked"].as_bool(), fresh["lock"]["state"].as_str()), (Some("hello"), Some(false), Some("open")));
     assert_eq!(fresh["sessions"].as_array().unwrap().len(), 2);
     assert_eq!(fresh["device"]["can_write"], true);
 
-    // Going away and back inside the window asks nothing: a flap of the network.
+    // Going away and back inside the window, holding its secret, asks nothing: a flap of the network.
     drop(thief);
     let mut back = network.socket_as(keys.clone(), false).await;
     back.reconnect().await.unwrap();
-    phone_send(&mut back, json!({"caps": ["ack", "hb"]})).await.unwrap();
+    phone_send(&mut back, json!({"caps": ["ack", "hb"], "resume": opened["resume"]})).await.unwrap();
     let hello = phone_recv(&mut back).await.unwrap();
     assert_eq!((hello["locked"].as_bool(), hello["sessions"].as_array().unwrap().len()), (Some(false), 2));
     assert_eq!(phone_recv(&mut back).await.unwrap()["type"], "addrs");
@@ -180,6 +183,108 @@ async fn a_copied_key_on_a_real_socket_reaches_nothing_and_the_passkey_opens_it(
     assert_eq!(phone_recv(&mut late).await.unwrap()["locked"], true);
 }
 
+/// Over a real socket. The owner unlocks, then a program with the same Noise key connects inside that window: it is locked, reads nothing and cannot keep the window open. Only the page holding
+/// the window's secret comes back with nothing asked.
+#[tokio::test]
+async fn a_copied_key_cannot_enter_or_keep_a_window_the_owner_opened() {
+    let network = NetworkRig::new().await;
+    secure(&network.rig.daemon);
+    let keys = network.rig.phone.clone();
+    let held = network.rig.daemon.clone();
+    let m = &held.mobile;
+    m.reset_lock("phone");
+    let owner = Authenticator::new(ORIGIN);
+    let c = m.lock_info("phone", "enrol", Some(ORIGIN))["challenge"].as_str().map(|c| B64.decode(c).unwrap()).unwrap();
+    let resume = m.lock_enrol("phone", &enrol_message(&owner, &c), Some(ORIGIN)).map_err(|r| r.code).unwrap();
+    assert!(m.is_unlocked("phone"));
+    let opened_until = m.window_ends("phone").unwrap();
+
+    for said in [json!({"caps": ["ack", "hb"]}), json!({"caps": ["ack", "hb"], "resume": "a-guess"})] {
+        let mut thief = network.socket_as(keys.clone(), false).await;
+        thief.reconnect().await.unwrap();
+        phone_send(&mut thief, said).await.unwrap();
+        let hello = phone_recv(&mut thief).await.unwrap();
+        assert_eq!((hello["locked"].as_bool(), hello["lock"]["state"].as_str(), hello["sessions"].clone()), (Some(true), Some("unlock"), json!([])), "the window is open, and it is not this page's");
+        assert_eq!(phone_recv(&mut thief).await.unwrap()["type"], "addrs");
+        phone_send(&mut thief, json!({"type": "list", "req": 1})).await.unwrap();
+        assert_eq!(phone_recv(&mut thief).await.unwrap()["code"], "locked");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        phone_send(&mut thief, json!({"type": "lock_touch", "req": 2})).await.unwrap();
+        assert_eq!(phone_recv(&mut thief).await.unwrap()["type"], "ack");
+        assert_eq!(m.window_ends("phone"), Some(opened_until), "it cannot keep the window open");
+        assert!(m.is_unlocked("phone"), "nor has it closed it for the owner");
+    }
+
+    let mut back = network.socket_as(keys, false).await;
+    back.reconnect().await.unwrap();
+    phone_send(&mut back, json!({"caps": ["ack", "hb"], "resume": resume})).await.unwrap();
+    let hello = phone_recv(&mut back).await.unwrap();
+    assert_eq!((hello["locked"].as_bool(), hello["sessions"].as_array().unwrap().len()), (Some(false), 2), "the page that holds it asks nothing");
+    assert_eq!(phone_recv(&mut back).await.unwrap()["type"], "addrs");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    phone_send(&mut back, json!({"type": "lock_touch", "req": 1})).await.unwrap();
+    assert_eq!(phone_recv(&mut back).await.unwrap()["type"], "ack");
+    assert!(m.window_ends("phone").unwrap() > opened_until, "and its touch moves the end");
+}
+
+/// A new ceremony's secret ends what an older page held.
+#[tokio::test]
+async fn an_unlock_replaces_the_secret_of_the_window_before() {
+    let (mut r, mut a) = enrolled().await;
+    let before = r.conn.resume.clone();
+    assert!(before.is_some());
+    assert_eq!(code(&r.ask_write(json!({"type": "list"})).await), None);
+    r.daemon.mobile.lock_now("phone");
+    assert_eq!(unlock(&mut r, &mut a).await["result"], "ok");
+    assert_ne!(r.conn.resume, before);
+    r.conn.resume = before;
+    assert_eq!(code(&r.ask_write(json!({"type": "list"})).await), Some("locked"));
+}
+
+/// A key copied at any time before the first passkey used to be able to set up its own. Now the first takes the computer's window too.
+#[tokio::test]
+async fn a_passkey_always_takes_the_computers_window_the_first_one_too() {
+    let mut r = rig();
+    secure(&r.daemon);
+    r.conn.lock_path = LockPath::Passkey;
+    r.conn.secure_page = Some(ORIGIN.to_string());
+    r.conn.lock_told = "";
+    let held = r.daemon.clone();
+    let m = &held.mobile;
+    let device = device_of(&r);
+    let told = r.conn.lock_change(&device, Permission::Write).await.expect("told");
+    assert_eq!(told["lock"]["state"], "desktop", "no passkey, and no window: {told}");
+    assert!(told["lock"].get("challenge").is_none(), "nothing to answer");
+    let a = Authenticator::new(ORIGIN);
+    assert_eq!(code(&r.ask_write(enrol_message(&a, &[1; 32])).await), Some("needs_desktop"));
+    assert!(device_of(&r).lock.is_none());
+    // The computer's button: the phone hears, and it can.
+    m.reset_lock("phone");
+    let told = r.conn.lock_change(&device, Permission::Write).await.expect("told");
+    assert_eq!(told["lock"]["state"], "enrol");
+    let c = challenge(&mut r).await;
+    assert_eq!(r.ask_write(enrol_message(&a, &c)).await["result"], "ok");
+}
+
+/// The person has just verified at the computer, so a phone they approved at a name may set up its passkey. One that can have none is given no window.
+#[tokio::test]
+async fn approving_a_phone_at_a_name_opens_the_window_for_its_passkey() {
+    let r = rig();
+    let m = &r.daemon.mobile;
+    let pair = |id: &str, pk: u8, secure_origin: bool| {
+        let (reply, answered) = tokio::sync::oneshot::channel();
+        m.add_pending(id, id, Kind::Pwa, [pk; 32], "123456".into(), Permission::Write, "100.101.102.103".parse().unwrap(), secure_origin, reply);
+        let approved = m.approve(&json!({"id": id, "code": "123456", "permission": "write"})).unwrap();
+        drop(answered);
+        approved.reply["id"].as_str().unwrap().to_string()
+    };
+    let at_a_name = pair("named", 41, true);
+    assert_eq!(m.lock_state(&at_a_name, LockPath::Passkey, Gate::Locked, Some(ORIGIN)), "enrol");
+    assert_eq!(m.lock_facts(&at_a_name).0, true);
+    let plain = pair("plain", 42, false);
+    assert_eq!(m.lock_facts(&plain).0, false);
+}
+
 #[tokio::test]
 async fn the_idle_time_stops_what_it_follows_and_controls_and_a_touch_moves_it() {
     let (mut r, mut a) = enrolled().await;
@@ -195,7 +300,7 @@ async fn the_idle_time_stops_what_it_follows_and_controls_and_a_touch_moves_it()
 
     // A touch moves the end of the window; on a locked phone it does nothing.
     m.expire_window("phone");
-    m.lock_touch("phone");
+    m.lock_touch("phone", r.conn.resume.as_deref());
     assert!(!m.is_unlocked("phone"), "a touch never unlocks");
 
     let told = r.conn.lock_change(&device, Permission::Write).await.expect("told");
@@ -210,7 +315,7 @@ async fn the_idle_time_stops_what_it_follows_and_controls_and_a_touch_moves_it()
     let hello = r.conn.lock_change(&device, Permission::Write).await.expect("a new hello");
     assert_eq!((hello["type"].as_str(), hello["locked"].as_bool()), (Some("hello"), Some(false)));
     assert!(hello["sessions"].as_array().is_some_and(|s| s.len() == 2));
-    m.lock_touch("phone");
+    m.lock_touch("phone", r.conn.resume.as_deref());
     assert!(m.is_unlocked("phone"));
 
     // With no connection to notice, the sweep stops what it controls.
@@ -479,7 +584,7 @@ async fn a_phone_paired_at_a_number_reads_and_is_not_held_at_the_lock() {
     let mut off = m.lock_options();
     off.on = false;
     m.set_lock(off).unwrap();
-    assert_eq!(m.lock_gate("phone", LockPath::Passkey), Gate::Open);
+    assert_eq!(m.lock_gate("phone", LockPath::Passkey, None), Gate::Open);
 }
 
 #[tokio::test]
@@ -706,10 +811,10 @@ async fn a_device_that_never_saw_a_secure_origin_may_read_at_most_over_the_netwo
     let m = &held.mobile;
     let device = device_of(&r);
     // From this machine over plain HTTP: as it would be with no lock.
-    assert_eq!(m.lock_gate("phone", LockPath::Local), Gate::Open);
+    assert_eq!(m.lock_gate("phone", LockPath::Local, None), Gate::Open);
     // Over the network: a write permission counts for reading only, though the transport would allow it.
     r.conn.lock_path = LockPath::Plain;
-    assert_eq!(m.lock_gate("phone", LockPath::Plain), Gate::ReadOnly);
+    assert_eq!(m.lock_gate("phone", LockPath::Plain, None), Gate::ReadOnly);
     let hello = r.conn.hello(&device, Permission::Write).await;
     assert_eq!((hello["locked"].as_bool(), hello["lock"]["state"].as_str(), hello["device"]["can_write"].as_bool(), hello["device"]["capped"].as_bool()), (Some(false), Some("read_only"), Some(false), Some(true)));
     assert!(hello["lock"].get("challenge").is_none());
@@ -827,8 +932,79 @@ async fn with_the_recheck_on_a_dangerous_approval_needs_a_fresh_assertion_over_w
     assert!(r.typed.writes().is_empty());
     assert_eq!(r.ask_write(type_it(Some(proof(&mut a, &since.to_string(), command, soon)))).await["result"], "ok");
     assert_eq!(r.typed.writes(), vec![b"1".to_vec()]);
-    // Raw typing cannot be classified: what the switch's text says.
-    assert_ne!(code(&r.ask_write(json!({"type": "input", "id": "t1", "text": "y", "force": true})).await), Some("recheck"));
+}
+
+/// Raw typing cannot be classified, and Enter on a menu approves what is highlighted. So while a dangerous request is up, only what is known not to approve goes through.
+#[tokio::test]
+async fn with_the_recheck_on_typing_cannot_approve_what_is_dangerous() {
+    let (mut r, _a) = enrolled().await;
+    let held = r.daemon.clone();
+    let m = &held.mobile;
+    let mut on = m.lock_options();
+    on.recheck = true;
+    m.set_lock(on).unwrap();
+    r.daemon.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
+    crate::session::fake::wait_on_user(&r.term);
+    for refused in [json!({"type": "input", "id": "t1", "text": "1", "force": true}), json!({"type": "key", "id": "t1", "key": "enter"}), json!({"type": "key", "id": "t1", "key": "y"}), json!({"type": "key", "id": "t1", "key": "1"})] {
+        let reply = r.ask_write(refused.clone()).await;
+        assert_eq!(code(&reply), Some("recheck"), "{refused}: {reply}");
+    }
+    assert!(r.typed.writes().is_empty(), "nothing reached the terminal");
+    for key in ["esc", "ctrl-c"] {
+        let reply = r.ask_write(json!({"type": "key", "id": "t1", "key": key})).await;
+        assert_ne!(code(&reply), Some("recheck"), "{key}: {reply}");
+    }
+    assert_eq!(r.typed.writes(), vec![b"\x1b".to_vec(), b"\x03".to_vec()]);
+    // The request settled, typing is as it was.
+    r.daemon.hook(&hook("PostToolUse", "Bash", "rm -rf build")).unwrap();
+    crate::session::fake::wait_on_user(&r.term);
+    assert_ne!(code(&r.ask_write(json!({"type": "key", "id": "t1", "key": "enter"})).await), Some("recheck"));
+    // And what is not dangerous was never held up, however it is labelled.
+    r.daemon.hook(&hook("PermissionRequest", "Bash", "frobnicate")).unwrap();
+    crate::session::fake::wait_on_user(&r.term);
+    assert_ne!(code(&r.ask_write(json!({"type": "key", "id": "t1", "key": "enter"})).await), Some("recheck"), "`unknown` asks for nothing");
+    // A connection with no passkey to give, and the switch off, are as they were.
+    r.daemon.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
+    crate::session::fake::wait_on_user(&r.term);
+    r.conn.lock_path = LockPath::Local;
+    assert_ne!(code(&r.ask_write(json!({"type": "key", "id": "t1", "key": "enter"})).await), Some("recheck"));
+    r.conn.lock_path = LockPath::Passkey;
+    let mut off = m.lock_options();
+    off.recheck = false;
+    m.set_lock(off).unwrap();
+    assert_ne!(code(&r.ask_write(json!({"type": "key", "id": "t1", "key": "enter"})).await), Some("recheck"));
+}
+
+/// A modified page could approve a harmless request with a rewritten command. What would then run is what is judged, and an assertion has to be over it.
+#[tokio::test]
+async fn an_approval_that_rewrites_a_command_is_judged_by_what_would_run() {
+    let (mut r, mut a) = enrolled().await;
+    let held = r.daemon.clone();
+    let m = &held.mobile;
+    let mut on = m.lock_options();
+    on.recheck = true;
+    m.set_lock(on).unwrap();
+    let approve = |id: &str, command: &str, proof: Option<Value>| {
+        let line = json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": {"behavior": "allow", "updatedInput": {"command": command}}}}).to_string();
+        let mut v = json!({"type": "chat_answer", "id": "c1", "request_id": id, "line": line});
+        if let Some(p) = proof {
+            v["recheck"] = p;
+        }
+        v
+    };
+    r.chat.ingest_for_test(permission_request("r1", "ls"));
+    let soon = now_millis() + 60_000;
+    assert_eq!(code(&r.ask_write(approve("r1", "rm -rf build", None)).await), Some("recheck"));
+    assert_eq!(code(&r.ask_write(approve("r1", "rm -rf build", Some(proof(&mut a, "r1", "ls", soon)))).await), Some("lock_refused"), "an assertion over what the card showed is not over this");
+    assert_eq!(r.ask_write(approve("r1", "rm -rf build", Some(proof(&mut a, "r1", "rm -rf build", soon)))).await["result"], "ok");
+    // The same command said back is no rewrite, and a harmless rewrite asks for nothing.
+    r.chat.ingest_for_test(permission_request("r2", "ls"));
+    assert_eq!(r.ask_write(approve("r2", "ls", None)).await["result"], "ok");
+    r.chat.ingest_for_test(permission_request("r3", "ls"));
+    assert_eq!(r.ask_write(approve("r3", "pwd", None)).await["result"], "ok");
+    // A dangerous request stays that, whatever it is rewritten to.
+    r.chat.ingest_for_test(permission_request("r4", "rm -rf build"));
+    assert_eq!(code(&r.ask_write(approve("r4", "ls", None)).await), Some("recheck"));
 }
 
 #[tokio::test]
@@ -859,7 +1035,7 @@ async fn the_check_on_every_message_costs_next_to_nothing_and_none_of_it_with_th
     let began = Instant::now();
     const ROUNDS: u32 = 100_000;
     for _ in 0..ROUNDS {
-        let gate = m.lock_gate("phone", LockPath::Passkey);
+        let gate = m.lock_gate("phone", LockPath::Passkey, r.conn.resume.as_deref());
         std::hint::black_box(m.lock_state("phone", LockPath::Passkey, gate, None));
     }
     let each = began.elapsed() / ROUNDS;

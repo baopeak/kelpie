@@ -5,10 +5,11 @@
 //!   shape of a connection is the caller's to choose, so it decides nothing here. A device that never saw a secure origin can have no passkey: over the network it may
 //!   read at most, while `plain_read` allows that. A plain connection from this machine has no network to be stolen on, and a program that can make it is out of
 //!   scope anyway (`auth.rs`): it is as it would be with no lock.
-//! - **The window** is in memory, per device, and gone at a restart: a Wi-Fi to 4G flap inside it asks nothing, and every expiry is checked against the clock at each message, so
-//!   a sweep that runs late lets nothing through. Nothing runs for a device that is not unlocked.
-//! - **A stolen key cannot enrol its own passkey** over one that exists: that takes the desktop (`reset_lock`, the verified app and the person, 5 minutes). A device with no passkey
-//!   yet can enrol, which is the first open after pairing. That leaves a key stolen between pairing and the first open, stated in `docs/architecture.md`.
+//! - **The window** is in memory, per device, and gone at a restart. It belongs to the page that opened it: a random secret comes back with the ceremony's reply, the page keeps it in a
+//!   variable, and a connection without it is locked even while the window is open, and cannot keep it open. A Wi-Fi to 4G flap inside it asks nothing, a reload asks again, and every
+//!   expiry is checked against the clock at each message, so a sweep that runs late lets nothing through. Nothing runs for a device that is not unlocked.
+//! - **A stolen key cannot enrol its own passkey** on its own: setting one up always takes a window the desktop opened. Approving the pairing opens it, and so does `reset_lock`, each with
+//!   the person verified, for 5 minutes. That leaves a key stolen in the minutes after approval, stated in `docs/architecture.md`.
 //! - **What cannot be read never unlocks.** A passkey that does not verify, or a key that cannot be read, leaves the phone locked, and settings that cannot be believed are tighter than anything the person could have set.
 
 use std::collections::{HashMap, VecDeque};
@@ -21,12 +22,12 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use super::store::{self, Device, LockCredential, LockOptions};
-use super::{refuse, webauthn, DeviceEvent, Mobile, Peer, Refusal};
+use super::{refuse, same, webauthn, DeviceEvent, Mobile, Peer, Refusal};
 use crate::session::now_millis;
 
 /// How long a challenge may wait for the person.
 const CHALLENGE_TTL: Duration = Duration::from_secs(60);
-/// How long "Reset this phone's lock" lets the phone set up a new passkey.
+/// How long approving a phone, or "Reset this phone's lock", lets it set up a passkey.
 const RESET_WINDOW: Duration = Duration::from_secs(300);
 /// Ceremonies a device may fail in a minute. A signature cannot be guessed: this keeps a stolen key from having the daemon check them all day, and from filling the audit log.
 const FAILURES_PER_MINUTE: usize = 10;
@@ -52,16 +53,22 @@ pub enum Gate {
     Locked,
 }
 
+/// An unlocked device: until when, and the secret that says a connection is the page that unlocked it.
+struct Window {
+    until: Instant,
+    resume: String,
+}
+
 /// The app lock's memory, none of which outlives this daemon.
 #[derive(Default)]
 pub struct LockMemory {
     /// How the lock is set, as `check_lock_options` last found it.
     options: Mutex<LockOptions>,
-    /// Until when each unlocked device stays so. Absent: locked.
-    unlocked: Mutex<HashMap<String, Instant>>,
+    /// Each unlocked device's window. Absent: locked.
+    unlocked: Mutex<HashMap<String, Window>>,
     /// The one challenge each device may answer, and when it was given.
     challenges: Mutex<HashMap<String, ([u8; 32], Instant)>>,
-    /// Until when a device may replace its passkey.
+    /// Until when a device may set up a passkey.
     resets: Mutex<HashMap<String, Instant>>,
     failures: Mutex<HashMap<String, VecDeque<Instant>>>,
 }
@@ -127,8 +134,8 @@ impl Mobile {
         }
     }
 
-    /// The check on every message: what `device` may do on a connection of this path, as things are at this moment.
-    pub(super) fn lock_gate(&self, device: &str, path: LockPath) -> Gate {
+    /// The check on every message: what `device` may do on a connection of this path that holds `resume`, as things are at this moment.
+    pub(super) fn lock_gate(&self, device: &str, path: LockPath, resume: Option<&str>) -> Gate {
         let (on, plain_read) = {
             let o = self.lock_memory.options.lock();
             (o.on, o.plain_read)
@@ -141,7 +148,7 @@ impl Mobile {
             LockPath::Plain if plain_read => Gate::ReadOnly,
             LockPath::Plain => Gate::Locked,
             LockPath::Passkey => {
-                if self.lock_memory.unlocked.lock().get(device).is_some_and(|until| *until > Instant::now()) {
+                if self.lock_memory.unlocked.lock().get(device).is_some_and(|w| w.until > Instant::now() && resume.is_some_and(|r| same(r, &w.resume))) {
                     Gate::Open
                 } else {
                     Gate::Locked
@@ -151,7 +158,8 @@ impl Mobile {
     }
 
     /// How the phone is told its lock stands: `none` no lock applies to it, `open` unlocked, `read_only` it may read and no more, `closed` reading over plain HTTP is off,
-    /// `unlock` its passkey is asked for, `enrol` it may set one up, `no_name` this address can have no passkey, `broken` its passkey does not verify (the desktop can reset it).
+    /// `unlock` its passkey is asked for, `enrol` it may set one up, `desktop` it may once the computer's button is pressed, `no_name` this address can have no passkey, `broken` its passkey
+    /// does not verify (the desktop can reset it).
     pub(super) fn lock_state(&self, device: &str, path: LockPath, gate: Gate, page: Option<&str>) -> &'static str {
         match gate {
             Gate::ReadOnly => "read_only",
@@ -163,9 +171,13 @@ impl Mobile {
                 let key = *self.mac_key.lock();
                 let c = self.config.lock();
                 let Some(d) = c.devices.iter().find(|d| d.id == device) else { return "closed" };
-                let may_set_up = d.lock.is_none() || self.lock_memory.resets.lock().get(device).is_some_and(|until| *until > Instant::now());
-                if may_set_up {
-                    return if page.and_then(webauthn::rp_id).is_some() { "enrol" } else { "no_name" };
+                let may_set_up = self.lock_memory.resets.lock().get(device).is_some_and(|until| *until > Instant::now());
+                if may_set_up || d.lock.is_none() {
+                    return match (page.and_then(webauthn::rp_id).is_some(), may_set_up) {
+                        (false, _) => "no_name",
+                        (true, true) => "enrol",
+                        (true, false) => "desktop",
+                    };
                 }
                 if key.is_some_and(|key| store::lock_holds(d, &key)) {
                     "unlock"
@@ -201,9 +213,7 @@ impl Mobile {
     }
 
     fn new_challenge(&self, device: &str) -> [u8; 32] {
-        let mut challenge = [0u8; 32];
-        challenge[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        challenge[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        let challenge = random_32();
         self.lock_memory.challenges.lock().insert(device.to_string(), (challenge, Instant::now()));
         challenge
     }
@@ -231,13 +241,16 @@ impl Mobile {
         refuse("lock_refused", "The computer did not accept that. Try again.")
     }
 
-    fn open_window(&self, device: &str) {
+    /// Opens the window, and gives the secret only its page will hold. A new window's secret ends what any older connection held.
+    fn open_window(&self, device: &str) -> String {
         let idle = Duration::from_secs(u64::from(self.lock_memory.options.lock().idle_s));
-        self.lock_memory.unlocked.lock().insert(device.to_string(), Instant::now() + idle);
+        let resume = B64.encode(random_32());
+        self.lock_memory.unlocked.lock().insert(device.to_string(), Window { until: Instant::now() + idle, resume: resume.clone() });
+        resume
     }
 
-    /// Takes a new passkey for `device`, whose page is at `page`. Blocking: it saves the store, and what cannot be saved is not taken: a restart would find the device with no passkey, free to enrol again.
-    pub(super) fn lock_enrol(&self, device: &str, req: &Value, page: Option<&str>) -> Result<(), Refusal> {
+    /// Takes a new passkey for `device`, whose page is at `page`, and gives the new window's secret. Blocking: it saves the store, and what cannot be saved is not taken.
+    pub(super) fn lock_enrol(&self, device: &str, req: &Value, page: Option<&str>) -> Result<String, Refusal> {
         if !self.lock_memory.options.lock().on {
             return Err(refuse("lock_off", "The app lock is off on this computer."));
         }
@@ -248,10 +261,10 @@ impl Mobile {
             if !d.secure_origin {
                 return Err(refuse("insecure", "This device was paired over plain HTTP: pair it again over HTTPS to use a passkey."));
             }
-            d.lock.is_none() || self.lock_memory.resets.lock().get(device).is_some_and(|until| *until > Instant::now())
+            self.lock_memory.resets.lock().get(device).is_some_and(|until| *until > Instant::now())
         };
         if !allowed {
-            return Err(refuse("needs_desktop", "This phone has a passkey already. To set up another, press \"Reset this phone's lock\" in Kelpie on the computer."));
+            return Err(refuse("needs_desktop", "To set up a passkey on this phone, press \"Reset this phone's lock\" in Kelpie on the computer."));
         }
         if !self.lock_attempt_allowed(device) {
             return Err(refuse("too_many", "Too many tries: wait a minute."));
@@ -290,9 +303,9 @@ impl Mobile {
         }
         self.lock_memory.resets.lock().remove(device);
         self.lock_memory.failures.lock().remove(device);
-        self.open_window(device);
+        let resume = self.open_window(device);
         self.audit.add(device, "lock_enrol", &name);
-        Ok(())
+        Ok(resume)
     }
 
     /// Checks an assertion against the device's passkey, with its record and counter as they are; the new count, not yet kept.
@@ -334,8 +347,8 @@ impl Mobile {
         }
     }
 
-    /// An assertion that unlocks `device`. Blocking: a counter that moved is saved.
-    pub(super) fn lock_unlock(&self, device: &str, req: &Value) -> Result<(), Refusal> {
+    /// An assertion that unlocks `device`, and the new window's secret. Blocking: a counter that moved is saved.
+    pub(super) fn lock_unlock(&self, device: &str, req: &Value) -> Result<String, Refusal> {
         if !self.lock_attempt_allowed(device) {
             return Err(refuse("too_many", "Too many tries: wait a minute."));
         }
@@ -343,9 +356,9 @@ impl Mobile {
         let count = self.check_passkey(device, req, &challenge)?;
         self.keep_count(device, count);
         self.lock_memory.failures.lock().remove(device);
-        self.open_window(device);
+        let resume = self.open_window(device);
         self.audit.add(device, "unlock", "");
-        Ok(())
+        Ok(resume)
     }
 
     /// Whether dangerous approvals ask for the passkey again.
@@ -382,13 +395,18 @@ impl Mobile {
         self.tell_lock(device);
     }
 
-    /// The person did something: the idle time starts over, if the phone is unlocked at all. A touch never unlocks.
-    pub(super) fn lock_touch(&self, device: &str) {
+    /// The person did something: the idle time starts over, if the phone is unlocked at all and this is the page that unlocked it. A touch never unlocks, and a copied key cannot keep a window open.
+    pub(super) fn lock_touch(&self, device: &str, resume: Option<&str>) {
         let idle = Duration::from_secs(u64::from(self.lock_memory.options.lock().idle_s));
         let now = Instant::now();
-        if let Some(until) = self.lock_memory.unlocked.lock().get_mut(device).filter(|u| **u > now) {
-            *until = now + idle;
+        if let Some(window) = self.lock_memory.unlocked.lock().get_mut(device).filter(|w| w.until > now && resume.is_some_and(|r| same(r, &w.resume))) {
+            window.until = now + idle;
         }
+    }
+
+    /// Approving a phone at a secure origin: the person is at the computer and has just verified, so it may set up its passkey for a while.
+    pub(super) fn may_set_up_passkey(&self, device: &str) {
+        self.lock_memory.resets.lock().insert(device.to_string(), Instant::now() + RESET_WINDOW);
     }
 
     fn tell_lock(&self, device: &str) {
@@ -403,8 +421,8 @@ impl Mobile {
             if unlocked.is_empty() {
                 return;
             }
-            let gone = unlocked.iter().filter(|(_, until)| **until <= now).map(|(id, _)| id.clone()).collect();
-            unlocked.retain(|_, until| *until > now);
+            let gone = unlocked.iter().filter(|(_, w)| w.until <= now).map(|(id, _)| id.clone()).collect();
+            unlocked.retain(|_, w| w.until > now);
             gone
         };
         for device in expired {
@@ -449,8 +467,8 @@ impl Mobile {
             if !next.on {
                 unlocked.clear();
             }
-            for until in unlocked.values_mut() {
-                *until = (*until).min(longest);
+            for window in unlocked.values_mut() {
+                window.until = window.until.min(longest);
             }
         }
         self.keep();
@@ -471,30 +489,41 @@ impl Mobile {
         Ok(crate::user_presence::Prompt::ResetLock { name: d.name.clone() })
     }
 
-    /// Opens the window in which this phone may set up a new passkey. It stays locked meanwhile, and the old passkey counts until a new one replaces it.
+    /// Opens the window in which this phone may set up a passkey. It stays locked meanwhile, and an old passkey counts until a new one replaces it.
     pub fn reset_lock(&self, id: &str) {
         self.lock_memory.resets.lock().insert(id.to_string(), Instant::now() + RESET_WINDOW);
         self.lock_memory.failures.lock().remove(id);
         self.lock_memory.unlocked.lock().remove(id);
         self.stop_grants(id);
-        self.audit.add(id, "lock_reset", "the phone may set up a new passkey for 5 minutes");
+        self.audit.add(id, "lock_reset", "the phone may set up a passkey for 5 minutes");
         self.tell_lock(id);
     }
 
     /// For `mobile.status`: whether a device's window to set up a passkey is open, and whether it is unlocked now.
     pub(super) fn lock_facts(&self, id: &str) -> (bool, bool) {
         let now = Instant::now();
-        (self.lock_memory.resets.lock().get(id).is_some_and(|u| *u > now), self.lock_memory.unlocked.lock().get(id).is_some_and(|u| *u > now))
+        (self.lock_memory.resets.lock().get(id).is_some_and(|u| *u > now), self.lock_memory.unlocked.lock().get(id).is_some_and(|w| w.until > now))
     }
+}
+
+fn random_32() -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    bytes[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    bytes
 }
 
 /// What a test winds back, and looks at.
 #[cfg(test)]
 impl Mobile {
     pub(super) fn expire_window(&self, device: &str) {
-        if let Some(until) = self.lock_memory.unlocked.lock().get_mut(device) {
-            *until = Instant::now() - Duration::from_millis(1);
+        if let Some(window) = self.lock_memory.unlocked.lock().get_mut(device) {
+            window.until = Instant::now() - Duration::from_millis(1);
         }
+    }
+
+    pub(super) fn window_ends(&self, device: &str) -> Option<Instant> {
+        self.lock_memory.unlocked.lock().get(device).map(|w| w.until)
     }
 
     pub(super) fn age_challenge(&self, device: &str) {
@@ -512,7 +541,7 @@ impl Mobile {
         self.lock_memory.unlocked.lock().contains_key(device)
     }
 
-    pub(super) fn open_window_for_test(&self, device: &str) {
-        self.open_window(device);
+    pub(super) fn open_window_for_test(&self, device: &str) -> String {
+        self.open_window(device)
     }
 }

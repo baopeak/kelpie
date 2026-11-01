@@ -1091,6 +1091,15 @@ impl Session {
         (info.risk.level == crate::mobile::risk::Level::Dangerous).then(|| info.command.unwrap_or_default())
     }
 
+    /// Whether the session waits on the person now, with a dangerous request open: what is typed could then be its answer.
+    pub fn waits_on_danger(&self) -> bool {
+        let waiting = {
+            let g = self.inner.lock();
+            g.screen_prompt.is_some() || g.waiting_since.is_some()
+        };
+        waiting && self.dangerous_wait().is_some()
+    }
+
     pub fn screen_text(&self) -> String {
         self.inner.lock().vt.screen_text()
     }

@@ -1504,6 +1504,9 @@ impl Mobile {
             c.devices.push(device.clone());
             old
         };
+        if device.secure_origin {
+            self.may_set_up_passkey(&device.id);
+        }
         self.keep();
         self.publish_push();
         let replaced_ids = replaced.iter().map(|(id, _)| id.clone()).collect();
@@ -2183,6 +2186,8 @@ struct Conn {
     lock_path: LockPath,
     /// This page's origin when it is a secure one: where a passkey can be set up from.
     secure_page: Option<String>,
+    /// The secret of the window this page opened (`lock`), if it says it holds one.
+    resume: Option<String>,
     /// The phone was last told it is locked: nothing about a session goes out.
     locked: bool,
     /// How its lock stands, as it was last told.
@@ -2211,7 +2216,7 @@ impl Conn {
         let name = req["type"].as_str()?;
         let tag = req.get("req").filter(|r| r.is_string() || r.is_number()).cloned();
         // The lock comes before all else a request is checked for, its dedupe and the verbs that do not pass through `run`. Read from the clock, so it holds from the moment a window ends.
-        let gate = self.daemon.mobile.lock_gate(&self.device, self.lock_path);
+        let gate = self.daemon.mobile.lock_gate(&self.device, self.lock_path, self.resume.as_deref());
         if gate == Gate::Locked && Verb::parse(name).is_some_and(|v| !v.passes_lock()) {
             return Some(json!({"type": "error", "req": tag, "code": "locked", "reason": null, "message": "Kelpie is locked on this phone."}));
         }
@@ -2476,6 +2481,7 @@ impl Conn {
                 if text.len() > MAX_TYPED {
                     return Err(refuse("too_long", "too long"));
                 }
+                self.typing_allowed(&session, None)?;
                 if session.choice_lasts(text.trim()) {
                     return Err(refuse("one_shot", ONE_SHOT));
                 }
@@ -2497,6 +2503,7 @@ impl Conn {
                 let (id, session) = self.terminal(req)?;
                 self.daemon.mobile.views.boost(&id);
                 let bytes = req["key"].as_str().and_then(verbs::key_bytes).ok_or_else(|| refuse("bad_request", "unknown key"))?;
+                self.typing_allowed(&session, req["key"].as_str())?;
                 if req["key"].as_str().is_some_and(|k| session.choice_lasts(k)) {
                     return Err(refuse("one_shot", ONE_SHOT));
                 }
@@ -2609,29 +2616,31 @@ impl Conn {
             Verb::PushTest => return Err(refuse("bad_request", "not here")),
             Verb::LockChallenge => {
                 let m = &self.daemon.mobile;
-                let gate = m.lock_gate(&self.device, self.lock_path);
+                let gate = m.lock_gate(&self.device, self.lock_path, self.resume.as_deref());
                 let state = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
                 return Ok(Some(json!({"type": "ack", "result": "ok", "lock": m.lock_info(&self.device, state, self.secure_page.as_deref())})));
             }
             Verb::LockEnrol => {
                 let (daemon, device, req, page) = (self.daemon.clone(), self.device.clone(), req.clone(), self.secure_page.clone());
                 let told = daemon.clone();
-                tokio::task::spawn_blocking(move || daemon.mobile.lock_enrol(&device, &req, page.as_deref())).await.map_err(|_| refuse("not_kept", "That did not finish."))??;
+                let resume = tokio::task::spawn_blocking(move || daemon.mobile.lock_enrol(&device, &req, page.as_deref())).await.map_err(|_| refuse("not_kept", "That did not finish."))??;
                 told.broadcast("mobile.device_changed", json!({"id": self.device, "name": self.name, "change": "lock_enrolled", "permission": null}));
                 told.broadcast("mobile.updated", json!({}));
-                return Ok(Some(json!({"type": "ack", "result": "ok"})));
+                self.resume = Some(resume.clone());
+                return Ok(Some(json!({"type": "ack", "result": "ok", "resume": resume})));
             }
             Verb::LockUnlock => {
                 let (daemon, device, req) = (self.daemon.clone(), self.device.clone(), req.clone());
-                tokio::task::spawn_blocking(move || daemon.mobile.lock_unlock(&device, &req)).await.map_err(|_| refuse("not_kept", "That did not finish."))??;
-                return Ok(Some(json!({"type": "ack", "result": "ok"})));
+                let resume = tokio::task::spawn_blocking(move || daemon.mobile.lock_unlock(&device, &req)).await.map_err(|_| refuse("not_kept", "That did not finish."))??;
+                self.resume = Some(resume.clone());
+                return Ok(Some(json!({"type": "ack", "result": "ok", "resume": resume})));
             }
             Verb::LockNow => {
                 if self.lock_path == LockPath::Passkey {
                     self.daemon.mobile.lock_now(&self.device);
                 }
             }
-            Verb::LockTouch => self.daemon.mobile.lock_touch(&self.device),
+            Verb::LockTouch => self.daemon.mobile.lock_touch(&self.device, self.resume.as_deref()),
             Verb::ChatAnswer => {
                 let (_, chat) = self.chat(req)?;
                 let request_id = req.get("request_id").filter(|r| r.is_string() || r.is_number()).ok_or_else(|| refuse("bad_request", "missing request_id"))?;
@@ -2671,7 +2680,7 @@ impl Conn {
     async fn hello(&mut self, device: &Device, record: Permission) -> Value {
         let daemon = self.daemon.clone();
         let m = &daemon.mobile;
-        let gate = m.lock_gate(&self.device, self.lock_path);
+        let gate = m.lock_gate(&self.device, self.lock_path, self.resume.as_deref());
         self.locked = gate == Gate::Locked;
         self.lock_told = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
         let cap = if gate == Gate::ReadOnly { self.cap.min(Permission::Read) } else { self.cap };
@@ -2703,7 +2712,7 @@ impl Conn {
     async fn lock_change(&mut self, device: &Device, record: Permission) -> Option<Value> {
         let daemon = self.daemon.clone();
         let m = &daemon.mobile;
-        let gate = m.lock_gate(&self.device, self.lock_path);
+        let gate = m.lock_gate(&self.device, self.lock_path, self.resume.as_deref());
         let state = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
         if state == self.lock_told {
             return None;
@@ -2718,6 +2727,15 @@ impl Conn {
             self.lock_down();
         }
         Some(json!({"type": "locked", "lock": m.lock_info(&self.device, state, self.secure_page.as_deref()), "server_ts": now_millis()}))
+    }
+
+    /// With the re-check on, what is typed while a dangerous request is up could be its approval, with no passkey and with the end of the command unread. So only what is known not to approve
+    /// goes through: Esc and Ctrl+C. The card asks for the passkey. Only a connection the passkey is asked of: others have none to give.
+    fn typing_allowed(&self, session: &crate::session::Session, key: Option<&str>) -> Result<(), Refusal> {
+        if self.lock_path == LockPath::Passkey && !matches!(key, Some("esc" | "ctrl-c")) && self.daemon.mobile.recheck_on() && session.waits_on_danger() {
+            return Err(refuse("recheck", "This request is marked dangerous: answer it on its card, which asks for your passkey."));
+        }
+        Ok(())
     }
 
     /// A dangerous approval carries its own assertion, or is refused as `recheck`. Only a connection the passkey is asked of: others have none to give.
@@ -2757,7 +2775,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     let mut conn = Conn {
         daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(),
         followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(), chat_at: HashMap::new(), waiting, overflowed,
-        cap, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, lock_path, secure_page, locked: false, lock_told: "", _phone: Some(daemon.mobile.load.phone()),
+        cap, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, lock_path, secure_page, resume: first["resume"].as_str().filter(|r| r.len() <= 64).map(str::to_string), locked: false, lock_told: "", _phone: Some(daemon.mobile.load.phone()),
     };
     // The device's older connection, if any, is told it was replaced.
     let replaced = Arc::new(Notify::new());
@@ -3352,7 +3370,7 @@ mod tests {
         let (out_tx, out) = mpsc::channel(16);
         let conn = Conn {
             daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
-            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, locked: false, lock_told: "none", _phone: None,
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", _phone: None,
         };
         Rig { daemon, conn, out, term, typed, chat, phone }
     }
@@ -5015,7 +5033,7 @@ mod tests {
         let (out, _out_rx) = mpsc::channel(16);
         Conn {
             daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
-            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, locked: false, lock_told: "none", _phone: None,
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", _phone: None,
         }
     }
 
