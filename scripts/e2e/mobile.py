@@ -30,7 +30,7 @@ as lost with its text in the stopped chat, also after a reload, until discarded;
 code gets no answer, too many unknown phones are rate limited and the desktop says so, the kill switch and the audit list
 (last, so the limiter cannot refuse a pairing above). On an HTTPS origin (a certificate of this run's own, at `localhost` on 127.0.0.1, which the phone's browser
 is told to accept; needs Python's `cryptography`): the install step, no camera falling back to pasting the link, a pairing that is a secure origin. The app lock on it, with real WebAuthn ceremonies through CDP's virtual authenticator (`WebAuthn.addVirtualAuthenticator`, Blink's and not WebKit's, and no person's face): set up, a copied key refused at the daemon, hide locks, a network flap asks nothing, the idle time locks, the dangerous re-check, the reset, a restart. Then it may
-type. Alerts on a real service worker (`KELPIE_PUSH_TEST_BASE` in tauri-driver's environment, a port this script serves as a stand-in for a push service, which the daemon really POSTs to): the sheet's button, a test alert
+type. The link the daemon really gives there, at 127.0.0.1, unrewritten: a phone paired from it reads, with no lock in its way, since a passkey needs a name. Alerts on a real service worker (`KELPIE_PUSH_TEST_BASE` in tauri-driver's environment, a port this script serves as a stand-in for a push service, which the daemon really POSTs to): the sheet's button, a test alert
 and a needs-you event taken from the stand-in, opened with the browser's keys and handed to the worker through CDP's `ServiceWorker.deliverPushMessage`, which shows the notification; a tap on it, as a synthetic `notificationclick` in the worker. The browser's own `pushManager.subscribe` is replaced in the page, since it would reach a real push service, which tests never do. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, never the real one): each state's instruction, the two-step dialog, off.
 """
 import asyncio
@@ -981,6 +981,28 @@ for n in (1, 2, 3):
     check_daemon(d, ISOLATED)
     run.check("after the computer restarted the phone is locked, and shows the lock rather than an error", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 90) == "unlock", str(phone.js("return document.querySelector('.conn')?.dataset.state")))
     webauthn.close()
+
+    # The link as the daemon makes it, not rewritten: on a certificate listener it is at the address it listens on, a number, where no passkey can be. The phone must read there, and not wait at a lock nothing can open.
+    numbered = daemon(d, "mobile.pair_start")
+    run.check("the daemon's own link on a certificate listener is at the number it listens on, and says no passkey can be had there", numbered["url"].startswith(f"https://127.0.0.1:{PORT}/#p=") and numbered["tls"] is True and numbered["passkey"] is False, str(numbered["passkey"]))
+    number_shell = daemon(d, "session.create", {"kind": "shell", "cwd": proj, "name": "number-shell", "project_id": pid})
+    phone.go("about:blank")
+    phone.go(numbered["url"])
+    phone.wait("return !!document.querySelector('.card input.field')", 20)
+    phone.js("document.querySelector('.card input').value = 'Number phone'; document.querySelector('.card .btn.primary').click()")
+    d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Number phone'))", 15)
+    type_code(phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15))
+    d.js("[...document.querySelectorAll('.mobile-approve')].find(a => a.textContent.includes('Number phone')).querySelector('[data-allow=write]').click()")
+    run.check("it pairs and connects", bool(phone.wait(LIVE, 30)))
+    number_device = next((x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Number phone"), {})
+    run.check("…and is not recorded as a page that could have a passkey", number_device.get("secure_origin") is False, str(number_device))
+    run.check("…so it reads, with no lock in its way", bool(phone.wait("return !document.querySelector('[data-lock-screen]') && [...document.querySelectorAll('.row')].some(r => r.textContent.includes('number-shell'))", 20)), str(phone.js("return document.querySelector('main')?.textContent")))
+    run.check("…says why it may only read", bool(phone.wait("return !!document.querySelector('[data-banner=no-passkey]')", 10)))
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('number-shell')).click()")
+    run.check("…and has no way to type", bool(phone.wait("return !!document.querySelector('.readonly') && !document.querySelector('.send textarea')", 15)))
+    phone.shot(os.path.join(shots, "29-phone-at-a-number.png"))
+    daemon(d, "mobile.revoke", {"id": number_device["id"]})
+    daemon(d, "session.close", {"handle": number_shell["handle"]})
     daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT, "cert": "", "key": ""})
     d.js(f"{S}.closeSettings?.()")
     phone.go("about:blank")
