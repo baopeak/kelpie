@@ -72,7 +72,7 @@ impl Entry {
 /// What one attempt is to send.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Attempt {
-    One(Entry),
+    One(Box<Entry>),
     /// Several as one: `sessions` different things are behind `ids`.
     Together { ids: Vec<String>, sessions: usize, needs_you: bool, latest: u64 },
 }
@@ -231,7 +231,7 @@ impl Outbox {
             });
         }
         let first = ready.iter().find(|e| e.urgent()).or(ready.first()).expect("not empty");
-        Pick::Go(Attempt::One((*first).clone()))
+        Pick::Go(Attempt::One(Box::new((*first).clone())))
     }
 
     fn forget(&mut self, attempt: &Attempt) {
