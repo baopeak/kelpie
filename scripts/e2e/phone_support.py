@@ -10,6 +10,7 @@ phone keys live in the OS credential store under the run's own endpoint name, an
 """
 import asyncio
 import atexit
+import base64
 import ctypes
 import importlib.util
 import json
@@ -19,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import websockets
 
@@ -72,7 +74,7 @@ def forget_secrets(endpoint):
     if not endpoint or endpoint.startswith("kelpie-" + os.environ.get("USERNAME", os.environ.get("USER", "")) + "-v"):
         raise ValueError(f"not a test endpoint: {endpoint!r}")
     service = f"Kelpie ({endpoint})"
-    for key in ("mobile-link-key", "mobile-device-key"):
+    for key in ("mobile-link-key", "mobile-device-key", "mobile-push-vapid", "notify-ntfy-topic"):
         if os.name == "nt":
             ctypes.windll.advapi32.CredDeleteW(f"{key}.{service}", 1, 0)  # CRED_TYPE_GENERIC
         else:
@@ -145,6 +147,99 @@ class Daemon:
     @property
     def pid(self):
         return self.proc.pid
+
+
+class FakePushService:
+    """A local server in a push service's place, which the daemon really POSTs to (`KELPIE_PUSH_TEST_BASE`, honoured only with `KELPIE_E2E`). It keeps
+    every request and answers 201 unless told otherwise for a path: `answer(path, 503)`, `answer(path, (429, {"Retry-After": "1"}))`, `answer(path, ("hang", 12))`.
+    Nothing here reaches a real push service."""
+
+    def __init__(self, port=0):
+        self.lock = threading.Lock()
+        self.requests = []
+        self.script = {}
+        me = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                with me.lock:
+                    me.requests.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": raw, "at": time.time()})
+                    planned = me.script.get(self.path, [])
+                    answer = planned.pop(0) if planned else 201
+                if isinstance(answer, tuple) and answer[0] == "hang":
+                    time.sleep(answer[1])
+                    self.close_connection = True
+                    return
+                status, headers = answer if isinstance(answer, tuple) else (answer, {})
+                self.send_response(status)
+                for k, v in headers.items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):  # addresses and paths are not logged
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.server.daemon_threads = True
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def answer(self, path, *answers):
+        with self.lock:
+            self.script.setdefault(path, []).extend(answers)
+
+    def at(self, path):
+        with self.lock:
+            return [r for r in self.requests if r["path"] == path]
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def b64url(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def unb64url(text):
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def browser_subscription(base, path):
+    """What a browser holds for a push subscription: its key pair and secret, at an address of the stand-in service."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    public = key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    return {"key": key, "endpoint": base + path, "p256dh": b64url(public), "auth": b64url(os.urandom(16))}
+
+
+def open_alert(body, sub):
+    """Decrypts what the daemon sent as the browser would (RFC 8291): the plain bytes of the alert."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    salt, record_size, id_len = body[:16], int.from_bytes(body[16:20], "big"), body[20]
+    as_public, sealed = body[21:21 + id_len], body[21 + id_len:]
+    if record_size != 4096 or len(sealed) > record_size:
+        raise ValueError(f"not one record of 4096: {record_size}")
+    shared = sub["key"].exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), as_public))
+    ua_public = sub["key"].public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    def hkdf(salt, ikm, info, n):
+        return HKDF(hashes.SHA256(), n, salt, info).derive(ikm)
+    ikm = hkdf(unb64url(sub["auth"]), shared, b"WebPush: info\0" + ua_public + as_public, 32)
+    cek, nonce = hkdf(salt, ikm, b"Content-Encoding: aes128gcm\0", 16), hkdf(salt, ikm, b"Content-Encoding: nonce\0", 12)
+    plain = AESGCM(cek).decrypt(nonce, sealed, None)
+    if plain[-1] != 2:
+        raise ValueError("not the last record")
+    return plain[:-1]
 
 
 class Device:
