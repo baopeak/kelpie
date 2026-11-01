@@ -58,6 +58,9 @@ const MAX_SUBCOMMANDS: usize = 16;
 const MAX_LABELLED: usize = 64 * 1024;
 /// How far commands inside commands are followed. A real one stops at two or three, and each level is a call on the stack.
 const MAX_NESTED: u8 = 4;
+/// How much reading one label may do, in bytes read and a little for each word. A real command comes nowhere near it. One built to make the reading explode stops here, and is `unknown`.
+const MAX_WORK: usize = 8 * MAX_LABELLED;
+const WORD_WORK: usize = 8;
 
 /// A tool's kind, named for what it does whichever agent calls it.
 #[derive(PartialEq, Clone, Copy)]
@@ -197,12 +200,9 @@ fn worse(a: Level, b: Level) -> Level {
     }
 }
 
-/// Holds a list of open requests to `cap` by letting the mildest go, the oldest of them first: the worst of what is open is what a card says, so what goes must never lower it.
-pub fn keep_worst(requests: &mut Vec<Request>, worktree: &str, cap: usize) {
-    while requests.len() > cap {
-        let Some(mildest) = requests.iter().enumerate().min_by_key(|(_, r)| rank(label(r, worktree).level)).map(|(at, _)| at) else { return };
-        requests.remove(mildest);
-    }
+/// Which open request a full list lets go of: the mildest, the oldest of them first. The worst of what is open is what a card says, so what goes must never lower it.
+pub fn mildest(requests: &[Request], worktree: &str) -> Option<usize> {
+    requests.iter().enumerate().min_by_key(|(_, r)| rank(label(r, worktree).level)).map(|(at, _)| at)
 }
 
 /// Label for an approval the daemon knows nothing of what it would do: a terminal menu no hook has spoken for.
@@ -217,9 +217,21 @@ struct Found {
     /// A program that is more than reading, and not known for trouble. An edit tool inside the worktree is not one: `low` allows it.
     changes: bool,
     severe_delete: bool,
+    spent: usize,
 }
 
 impl Found {
+    /// Counts `work` against `MAX_WORK`. False once that is gone, and then what was not read makes the label `unknown`.
+    fn spend(&mut self, work: usize) -> bool {
+        self.spent = self.spent.saturating_add(work);
+        self.unknown |= self.spent_all();
+        !self.spent_all()
+    }
+
+    fn spent_all(&self) -> bool {
+        self.spent > MAX_WORK
+    }
+
     fn tag(&mut self, tag: Tag) {
         if !self.tags.contains(&tag) {
             self.tags.push(tag);
@@ -334,23 +346,27 @@ struct Simple {
     piped: bool,
     /// Where `>` and `>>` send its output.
     writes_to: Vec<String>,
+    /// What `<` gives it to read.
+    reads_from: Vec<String>,
     /// A word the shell works out for itself: a variable or a glob, outside the quotes that would keep it as it is.
     expands: bool,
 }
 
 /// Splits as a shell would, far enough to name programs and paths. False when it cannot: quotes left open, or something that runs a command of its own inside this one. What is inside
 /// `(...)`, `{...}`, `$(...)` or backticks comes out as commands of its own, so a delete in a PowerShell script block or a subshell is read like any other. What runs inside a double-quoted
-/// word or a `${...}` is in the word, so it comes back on its own, as text for the caller to read as a command.
+/// word or a `${...}` is in the word, so it comes back on its own, as text for the caller to read as a command. `escapes` says whether a backslash inside double quotes escapes `"`, `\`, `$`
+/// and a backtick, as a POSIX shell has it, or is a plain character, as PowerShell and cmd have it.
 #[allow(unused_assignments)] // the state a word or a command leaves behind goes unread after the last of them
-fn split(command: &str) -> (Vec<Simple>, bool, Vec<String>) {
+fn split(command: &str, escapes: bool) -> (Vec<Simple>, bool, Vec<String>) {
     let mut out = Vec::new();
     let mut inner = Vec::new();
     let mut readable = true;
-    let mut current = Simple { words: Vec::new(), piped: false, writes_to: Vec::new(), expands: false };
+    let mut current = Simple { words: Vec::new(), piped: false, writes_to: Vec::new(), reads_from: Vec::new(), expands: false };
     let mut word = String::new();
     let mut started = false;
     let mut word_expands = false;
     let mut next_is_target = false;
+    let mut next_is_source = false;
     let mut quote: Option<char> = None;
     let mut chars = command.chars().peekable();
     macro_rules! end_word {
@@ -359,6 +375,9 @@ fn split(command: &str) -> (Vec<Simple>, bool, Vec<String>) {
                 if next_is_target {
                     current.writes_to.push(std::mem::take(&mut word));
                     next_is_target = false;
+                } else if next_is_source {
+                    current.reads_from.push(std::mem::take(&mut word));
+                    next_is_source = false;
                 } else {
                     current.words.push(std::mem::take(&mut word));
                     current.expands |= word_expands;
@@ -372,8 +391,9 @@ fn split(command: &str) -> (Vec<Simple>, bool, Vec<String>) {
         ($piped:expr) => {
             end_word!();
             next_is_target = false;
-            let done = std::mem::replace(&mut current, Simple { words: Vec::new(), piped: $piped, writes_to: Vec::new(), expands: false });
-            if !done.words.is_empty() || !done.writes_to.is_empty() {
+            next_is_source = false;
+            let done = std::mem::replace(&mut current, Simple { words: Vec::new(), piped: $piped, writes_to: Vec::new(), reads_from: Vec::new(), expands: false });
+            if !done.words.is_empty() || !done.writes_to.is_empty() || !done.reads_from.is_empty() {
                 out.push(done);
             }
         };
@@ -382,12 +402,17 @@ fn split(command: &str) -> (Vec<Simple>, bool, Vec<String>) {
         if let Some(q) = quote {
             if c == q {
                 quote = None;
+            } else if q == '"' && c == '\\' && escapes && matches!(chars.peek(), Some('"' | '\\' | '$' | '`' | '\n')) {
+                let escaped = chars.next().expect("just peeked");
+                if escaped != '\n' {
+                    word.push(escaped);
+                }
             } else {
                 word_expands |= q == '"' && c == '$';
                 if q == '"' && c == '`' {
                     readable = false;
-                    // One that is never closed is PowerShell's escape, and what follows the quote is still to be read.
-                    if chars.clone().any(|n| n == '`') {
+                    // One with no partner in this string is PowerShell's escape, and what follows the quote is still to be read.
+                    if closed_inside_quote(chars.clone(), escapes) {
                         inner.push(take_until_closed(&mut chars, '`', '`'));
                     } else {
                         word.push(c);
@@ -444,7 +469,17 @@ fn split(command: &str) -> (Vec<Simple>, bool, Vec<String>) {
                 readable = false;
                 end_command!(false);
             }
-            '\\' if chars.peek().is_some_and(|n| matches!(n, '"' | '\'' | ' ' | '\n' | ';' | '&' | '|' | '(' | ')' | '{' | '}' | '$' | '`' | '*' | '?' | '[' | '>' | '<')) => {
+            // A line continued: no character, and no word started.
+            '\\' if matches!(chars.peek(), Some('\n' | '\r')) => {
+                if chars.peek() == Some(&'\r') {
+                    chars.next();
+                }
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            // A backslash before anything else stays as it is, for a Windows path.
+            '\\' if chars.peek().is_some_and(|n| matches!(n, '\\' | '"' | '\'' | ' ' | ';' | '&' | '|' | '(' | ')' | '{' | '}' | '$' | '`' | '*' | '?' | '[' | '>' | '<')) => {
                 word.push(chars.next().expect("just peeked"));
                 started = true;
             }
@@ -467,10 +502,18 @@ fn split(command: &str) -> (Vec<Simple>, bool, Vec<String>) {
                 }
                 end_command!(false);
             }
-            // What is read from comes next as a word like any other: the file is named all the same.
+            // What comes next is the file it reads. After `<<` it is a word like any other, and PowerShell's `<#` can close with more on the line, which is not read here.
             '<' => {
                 end_word!();
+                readable &= chars.peek() != Some(&'#');
+                next_is_source = chars.peek() != Some(&'<');
                 while chars.peek() == Some(&'<') {
+                    chars.next();
+                }
+            }
+            // A comment, where a word could start: `a#b` is one word. PowerShell also ends a line at a carriage return.
+            '#' if !started => {
+                while chars.peek().is_some_and(|n| !matches!(n, '\n' | '\r')) {
                     chars.next();
                 }
             }
@@ -492,7 +535,10 @@ fn split(command: &str) -> (Vec<Simple>, bool, Vec<String>) {
                 } else {
                     next_is_target = true;
                 }
-                current.words.retain(|w| !matches!(w.as_str(), "1" | "2"));
+                // The number that said which stream is the word just ended.
+                if current.words.last().is_some_and(|w| matches!(w.as_str(), "1" | "2")) {
+                    current.words.pop();
+                }
             }
             _ => {
                 word.push(c);
@@ -505,6 +551,21 @@ fn split(command: &str) -> (Vec<Simple>, bool, Vec<String>) {
     }
     end_command!(false);
     (out, readable, inner)
+}
+
+/// Whether a backtick's partner comes before the double quote that closes its string.
+fn closed_inside_quote(mut rest: std::iter::Peekable<std::str::Chars<'_>>, escapes: bool) -> bool {
+    while let Some(c) = rest.next() {
+        match c {
+            '`' => return true,
+            '"' => return false,
+            '\\' if escapes => {
+                rest.next();
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// What follows up to where `open` is closed, the closing character gone. It ends with the text when it is never closed, which leaves the rest to be read as a command too.
@@ -590,7 +651,7 @@ fn is_long_option(arg: &str, names: &[&str]) -> bool {
 fn reader_does_more(program: &str, args: &[String]) -> bool {
     let long = |names: &[&str]| args.iter().any(|a| is_long_option(a, names));
     let short = |letter: char| args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a[1..].contains(letter));
-    let operands = || args.iter().filter(|a| !a.starts_with('-')).count();
+    let operands = || args.iter().filter(|a| !a.starts_with('-') || a.as_str() == "-").count();
     match program {
         "rg" => long(&["--pre", "--hostname-bin"]),
         "ag" => long(&["--pager"]),
@@ -630,13 +691,14 @@ fn inline_script(program: &str, args: &[String]) -> Option<String> {
                 at += if matches!(flag.as_str(), "-executionpolicy" | "-exec" | "-ep" | "-ex" | "-workingdirectory" | "-wd" | "-windowstyle" | "-w" | "-inputformat" | "-if" | "-outputformat" | "-of" | "-configurationname" | "-psconsolefile" | "-version") { 2 } else { 1 };
             }
             _ => {
-                if flag == "--" || !(flag.starts_with('-') || flag.starts_with('+')) {
+                // Case counts here: `-C` is another flag. What a start-up file runs is not read.
+                if arg == "--" || !(arg.starts_with('-') || arg.starts_with('+')) || matches!(arg.as_str(), "--rcfile" | "--init-file") {
                     return None;
                 }
-                if !flag.starts_with("--") && flag.starts_with('-') && flag.contains('c') {
+                if !arg.starts_with("--") && arg.starts_with('-') && arg.contains('c') {
                     return args.get(at + 1).cloned();
                 }
-                at += if matches!(flag.as_str(), "-o" | "+o" | "--rcfile" | "--init-file") { 2 } else { 1 };
+                at += if matches!(arg.as_str(), "-o" | "+o" | "-O" | "+O") { 2 } else { 1 };
             }
         }
     }
@@ -651,18 +713,23 @@ fn names_a_secret_variable(command: &str) -> bool {
     };
     let name_chars = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let after_dollar = command.split('$').skip(1).any(|rest| {
-        let rest = rest.strip_prefix('{').or_else(|| rest.strip_prefix("env:")).unwrap_or(rest);
+        let rest = rest.strip_prefix('{').unwrap_or(rest);
+        let rest = rest.get(4..).filter(|_| rest.get(..4).is_some_and(|drive| drive.eq_ignore_ascii_case("env:"))).unwrap_or(rest);
         secret(&rest.chars().take_while(|c| name_chars(*c)).collect::<String>())
     });
-    // What is between two percent signs, when it could be a name.
-    after_dollar || command.split('%').skip(1).any(|between| !between.is_empty() && between.chars().all(name_chars) && secret(between))
+    // What is between two percent signs, when it could be a name, and `%NAME:~0,5%` is a piece of one.
+    after_dollar || command.split('%').skip(1).any(|between| {
+        let name = between.split(':').next().unwrap_or(between);
+        !name.is_empty() && name.chars().all(name_chars) && secret(name)
+    })
 }
 
-/// A program named by a path is not the program of that name, unless the path is where the system keeps its own, and `..` has been taken out first: `/usr/../tmp/x/ls` is not there.
+/// A program named by a path is not the program of that name, unless the path is where the system keeps its programs, and `..` has been taken out first: `/usr/../tmp/x/ls` is not there, and
+/// nor is `C:\Windows\Temp`, which anyone can write to.
 fn named_from_elsewhere(word: &str) -> bool {
     let slashed = word.replace('\\', "/");
     let path = normal(&slashed).to_ascii_lowercase();
-    slashed.contains('/') && !["/bin/", "/sbin/", "/usr/", "/opt/homebrew/", "c:/windows/", "c:/program files/", "c:/program files (x86)/"].iter().any(|place| path.starts_with(place))
+    slashed.contains('/') && !["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/local/bin/", "/opt/homebrew/bin/", "c:/windows/system32/", "c:/program files/", "c:/program files (x86)/"].iter().any(|place| path.starts_with(place))
 }
 
 /// The words a program runs of its own arguments, once its own flags are off them. `takes_value` are its flags that have a word after them.
@@ -671,7 +738,7 @@ fn inner_command(words: &[String], takes_value: &[&str]) -> Simple {
     while let Some(flag) = rest.first().filter(|w| w.starts_with('-')) {
         rest = &rest[if takes_value.contains(&flag.as_str()) { 2.min(rest.len()) } else { 1 }..];
     }
-    Simple { words: rest.to_vec(), piped: false, writes_to: Vec::new(), expands: false }
+    Simple { words: rest.to_vec(), piped: false, writes_to: Vec::new(), reads_from: Vec::new(), expands: false }
 }
 
 fn has_flag(args: &[String], long: &[&str], short: char) -> bool {
@@ -693,8 +760,8 @@ fn git_rule(args: &[String], found: &mut Found) -> bool {
     }
     let sub = args.get(at).map(String::as_str).unwrap_or_default();
     let rest: Vec<&str> = args.iter().skip(at + 1).map(String::as_str).filter(|a| *a != sub).collect();
-    match sub {
-        "status" | "log" | "diff" | "show" | "rev-parse" | "ls-files" | "blame" | "shortlog" | "describe" | "ls-tree" | "cat-file" | "merge-base" => !rest.iter().any(|a| is_long_option(a, &["--output", "--ext-diff", "--textconv"])),
+    let reads = match sub {
+        "status" | "log" | "diff" | "show" | "rev-parse" | "ls-files" | "blame" | "shortlog" | "describe" | "ls-tree" | "cat-file" | "merge-base" => true,
         // It lists the log of where HEAD has been, and `expire` and `delete` are what git's own recovery rests on.
         "reflog" => match rest.first().copied() {
             None | Some("show") => true,
@@ -736,7 +803,9 @@ fn git_rule(args: &[String], found: &mut Found) -> bool {
             false
         }
         _ => false,
-    }
+    };
+    // These write or run something, under whichever subcommand takes log and diff options.
+    reads && !rest.iter().any(|a| is_long_option(a, &["--output", "--ext-diff", "--textconv"]))
 }
 
 fn install_rule(program: &str, args: &[String]) -> bool {
@@ -757,7 +826,7 @@ fn path_like(word: &str) -> bool {
 }
 
 fn read_shell(command: &str, at: &Paths, found: &mut Found, depth: u8) {
-    if depth > MAX_NESTED {
+    if !found.spend(command.len().min(MAX_LABELLED)) || depth > MAX_NESTED {
         found.unknown = true;
         return;
     }
@@ -771,15 +840,26 @@ fn read_shell(command: &str, at: &Paths, found: &mut Found, depth: u8) {
     if names_a_secret_variable(command) {
         found.tag(Tag::SecretAccess);
     }
-    let (commands, readable, inner) = split(&command[..floor_char_boundary(command, MAX_LABELLED)]);
+    let text = &command[..floor_char_boundary(command, MAX_LABELLED)];
+    let (commands, readable, inner) = split(text, true);
     if !readable || commands.is_empty() || commands.len() > MAX_SUBCOMMANDS {
         found.unknown = true;
     }
+    read_split(&commands, &inner, at, found, depth);
+    // Shells differ over a backslash inside double quotes, and which shell this is cannot be told from here. So it is read the other way as well, and what that finds counts too: a quote it
+    // leaves open is no news, since the first reading is what says whether the text could be read.
+    if ["\\\"", "\\$", "\\`"].iter().any(|escape| text.contains(escape)) {
+        let (commands, _, inner) = split(text, false);
+        read_split(&commands, &inner, at, found, depth);
+    }
+}
+
+fn read_split(commands: &[Simple], inner: &[String], at: &Paths, found: &mut Found, depth: u8) {
     let mut cwd_moved = false;
-    for simple in &commands {
+    for simple in commands {
         read_simple(simple, at, found, depth, &mut cwd_moved);
     }
-    for inside in &inner {
+    for inside in inner {
         read_shell(inside, at, found, depth + 1);
     }
 }
@@ -789,6 +869,11 @@ fn floor_char_boundary(text: &str, at: usize) -> usize {
 }
 
 fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_moved: &mut bool) {
+    let work = simple.words.iter().chain(&simple.writes_to).chain(&simple.reads_from).map(|word| word.len() + WORD_WORK).sum::<usize>() + WORD_WORK;
+    if !found.spend(work) || depth > MAX_NESTED {
+        found.unknown = true;
+        return;
+    }
     // Variables set for the one command: some of them change what it loads.
     let mut words: &[String] = &simple.words;
     while let Some(first) = words.first() {
@@ -850,6 +935,14 @@ fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_mo
             found.tag(Tag::EditsConfig);
         }
     }
+    for source in &simple.reads_from {
+        if path_like(source) && (absolute(source) || !*cwd_moved) && !at.inside(source) {
+            found.tag(Tag::OutsideWorktree);
+        }
+        if secret_path(source) {
+            found.tag(Tag::SecretAccess);
+        }
+    }
     let Some(first) = words.first() else { return };
     let program = program_of(first);
     let args = &words[1..];
@@ -863,11 +956,18 @@ fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_mo
     };
     // Words that are text rather than files: what is echoed, and what a search looks for.
     let says_text = matches!(program.as_str(), "echo" | "printf" | "write-output" | "write-host");
-    let pattern = matches!(program.as_str(), "grep" | "egrep" | "fgrep" | "rg" | "ag" | "select-string").then(|| args.iter().position(|a| !a.starts_with('-'))).flatten();
+    // A file a search reads its patterns from is a file, and PowerShell's named parameters each have their own value, so the first such word need not be the pattern.
+    let pattern = match program.as_str() {
+        "select-string" => args.iter().position(|a| a.eq_ignore_ascii_case("-pattern")).map(|at| at + 1).or_else(|| (0..args.len()).find(|&i| !args[i].starts_with('-') && (i == 0 || !args[i - 1].starts_with('-')))),
+        "grep" | "egrep" | "fgrep" | "rg" | "ag" if !args.iter().any(|a| is_long_option(a, &["--file"]) || (a.starts_with('-') && !a.starts_with("--") && a.ends_with('f'))) => args.iter().position(|a| !a.starts_with('-')),
+        _ => None,
+    };
     for (i, arg) in args.iter().enumerate() {
         // The value of `--flag=value`, or of `-xvalue` when it names a path.
         let value = arg.split_once('=').filter(|_| arg.starts_with('-')).map_or(arg.as_str(), |(_, v)| v);
         let value = arg.get(2..).filter(|rest| arg.starts_with('-') && !arg.starts_with("--") && path_like(rest)).unwrap_or(value);
+        // PowerShell's `-Name:value`.
+        let value = arg.strip_prefix('-').and_then(|named| named.split_once(':')).filter(|(name, _)| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic())).map_or(value, |(_, v)| v);
         if value.starts_with('-') {
             continue;
         }
@@ -902,14 +1002,18 @@ fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_mo
     if is_shell(&program) {
         // `bash -c '...'`: what it runs is what counts, one level down. Anything else a shell does here is not read.
         match inline_script(&program, args) {
-            Some(inner) if depth == 0 => read_shell(&inner, at, found, 1),
-            _ => found.unknown = true,
+            Some(inner) => {
+                // What is read here as a comment is not one to cmd.
+                found.unknown |= program == "cmd" && inner.contains('#');
+                read_shell(&inner, at, found, depth + 1)
+            }
+            None => found.unknown = true,
         }
         return;
     }
     if DELETES.contains(&program.as_str()) {
         found.tag(Tag::Delete);
-        if has_flag(args, &["-recurse", "--recursive", "-force", "--force", "/s"], 'r') || has_flag(args, &[], 'f') || found.tags.contains(&Tag::OutsideWorktree) {
+        if has_flag(args, &["-recurse", "--recursive", "-force", "--force", "/s"], 'r') || has_flag(args, &[], 'R') || has_flag(args, &[], 'f') || found.tags.contains(&Tag::OutsideWorktree) {
             found.severe_delete = true;
         }
         return;
@@ -938,7 +1042,7 @@ fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_mo
         // These run what they are given: it is read as what it is, and how often or on what is not.
         "xargs" | "parallel" | "watch" => {
             found.unknown = true;
-            read_simple(&inner_command(args, &["-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a", "-j"]), at, found, depth, cwd_moved);
+            read_simple(&inner_command(args, &["-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a", "-j"]), at, found, depth + 1, cwd_moved);
             return;
         }
         _ => {}
@@ -951,9 +1055,13 @@ fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_mo
         }
         for (i, arg) in args.iter().enumerate() {
             if matches!(arg.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+                // Each reads all that follows it, and so each later one again.
+                if found.spent_all() {
+                    return;
+                }
                 let rest = &args[i + 1..];
                 let end = rest.iter().position(|w| matches!(w.as_str(), ";" | "+")).unwrap_or(rest.len());
-                read_simple(&inner_command(&rest[..end], &[]), at, found, depth, cwd_moved);
+                read_simple(&inner_command(&rest[..end], &[]), at, found, depth + 1, cwd_moved);
             }
         }
     }
@@ -985,7 +1093,7 @@ mod tests {
 
     #[test]
     fn what_is_read_only_and_known_is_low() {
-        for command in ["ls -la", "git status", "git log --oneline -5", "git diff HEAD~1", "cat src/main.rs", "grep -rn foo src", "pwd", "find . -name '*.rs'", "cat README.md | head -5", "git branch --show-current", "ls && pwd", "Get-Content src/main.rs", "echo hi > /dev/null", "ls 2>&1", "/usr/bin/ls -la", "find . \\( -name a -o -name b \\)", "grep -rn credentials src", "echo secrets.json", "git diff .github/workflows/ci.yml", "Get-Content x 2>$null", "git reflog", "git reflog show", "git reflog -5", "sort a.txt", "uniq a.txt", "rg foo src", "git --no-pager log", "git --no-pager log --oneline -5", "/usr/bin/../bin/ls", "cat < notes.txt", "git show HEAD:README.md"] {
+        for command in ["ls -la", "git status", "git log --oneline -5", "git diff HEAD~1", "cat src/main.rs", "grep -rn foo src", "pwd", "find . -name '*.rs'", "cat README.md | head -5", "git branch --show-current", "ls && pwd", "Get-Content src/main.rs", "echo hi > /dev/null", "ls 2>&1", "/usr/bin/ls -la", "find . \\( -name a -o -name b \\)", "grep -rn credentials src", "echo secrets.json", "git diff .github/workflows/ci.yml", "Get-Content x 2>$null", "git reflog", "git reflog show", "git reflog -5", "sort a.txt", "uniq a.txt", "rg foo src", "git --no-pager log", "git --no-pager log --oneline -5", "/usr/bin/../bin/ls", "cat < notes.txt", "git show HEAD:README.md", "ls # a comment", "echo \"say \\\"hi\\\"\"", "grep .env README.md", "Select-String foo src", "Select-String -Pattern .env -Path src", "git log --format=#%h"] {
             assert_eq!(shell(command), Label { level: Level::Low, tags: Vec::new() }, "{command}");
         }
         assert_eq!(tool("Read", "C:/work/proj/src/main.rs").level, Level::Low);
@@ -1136,39 +1244,109 @@ mod tests {
             ("echo \"$(ls)\"", Level::Unknown, &[]),
             ("echo \"a`nb\"; rm -rf build", Level::Dangerous, &[Tag::Delete]),
             ("echo ${X:-fallback}", Level::Medium, &[]),
+            // A backslash that escapes a backslash, and one that escapes a quote.
+            ("echo a\\\\; rm -rf x", Level::Dangerous, &[Tag::Delete]),
+            ("echo x\\\\>.git/config", Level::Dangerous, &[Tag::EditsConfig]),
+            ("cat x\\\\|sh", Level::Dangerous, &[Tag::PipeToShell]),
+            ("echo \"a\\\"\" ; rm -rf x ; echo \\\"", Level::Dangerous, &[Tag::Delete]),
+            ("git commit -m \"fix \\\"x\\\"\" && git push", Level::Dangerous, &[Tag::Network, Tag::GitPush]),
+            // Where a backslash is no escape, as in PowerShell, the quote does close.
+            ("Write-Host \"C:\\a\\\"; Remove-Item -Recurse -Force build; Write-Host \"C:\\c\\\"", Level::Dangerous, &[Tag::Delete, Tag::OutsideWorktree]),
+            ("echo \"\\$(rm -rf build)\"", Level::Dangerous, &[Tag::Delete, Tag::OutsideWorktree]),
+            // Comments.
+            ("ls # don't\nrm -rf build # won't", Level::Dangerous, &[Tag::Delete]),
+            ("# don't touch src\nrm -rf build\n# that's it", Level::Dangerous, &[Tag::Delete]),
+            ("rm -rf build # this is safe", Level::Dangerous, &[Tag::Delete]),
+            ("ls <# a #> ; frobnicate", Level::Unknown, &[]),
+            ("cmd /c \"echo # & rm -rf build\"", Level::Unknown, &[Tag::OutsideWorktree]),
+            // A backtick is a substitution only with its partner in the same string.
+            ("Write-Host \"a`n\"; Remove-Item -Recurse -Force build; Write-Host \"b`n\"", Level::Dangerous, &[Tag::Delete]),
+            ("echo \"a\\`b\"; git push; echo \"c\\`d\"", Level::Dangerous, &[Tag::Network, Tag::GitPush]),
+            // What is run by what runs things, as far down as it is read.
+            ("ls | xargs sh -c 'rm -rf build'", Level::Dangerous, &[Tag::Delete]),
+            ("find . -exec sh -c 'rm -rf build' \\;", Level::Dangerous, &[Tag::Delete]),
+            ("bash -c \"bash -c 'rm -rf build'\"", Level::Dangerous, &[Tag::Delete]),
+            // Named parameters, and files a search or a reader is pointed at another way.
+            ("Select-String -Path .env -Pattern x", Level::Dangerous, &[Tag::SecretAccess]),
+            ("Get-Content -Path:.env", Level::Dangerous, &[Tag::SecretAccess]),
+            ("gci -Path:env:", Level::Dangerous, &[Tag::SecretAccess]),
+            ("grep <.env foo", Level::Dangerous, &[Tag::SecretAccess]),
+            ("grep -f .env x", Level::Dangerous, &[Tag::SecretAccess]),
+            ("uniq - .git/hooks/pre-commit", Level::Dangerous, &[Tag::EditsConfig]),
+            ("git reflog --output=.git/config", Level::Dangerous, &[Tag::EditsConfig]),
+            ("git reflog show --output=x", Level::Medium, &[]),
+            ("git stash list --output=x", Level::Medium, &[]),
+            ("git stash show --output=x", Level::Medium, &[]),
+            // Writable folders under the system's, and a shell's other ways in.
+            ("C:\\Windows\\Temp\\ls.exe x", Level::Unknown, &[]),
+            ("/usr/tmp/ls x", Level::Unknown, &[]),
+            ("bash --rcfile evil.sh -i -c ls", Level::Unknown, &[]),
+            ("bash -C cat", Level::Unknown, &[]),
+            // Forms that read as less than they are.
+            ("echo $Env:API_KEY", Level::Dangerous, &[Tag::SecretAccess]),
+            ("echo $ENV:API_KEY", Level::Dangerous, &[Tag::SecretAccess]),
+            ("echo ${env:API_KEY}", Level::Dangerous, &[Tag::SecretAccess]),
+            ("echo %TOKEN:~0,5%", Level::Dangerous, &[Tag::SecretAccess]),
+            ("git \\\npush origin main", Level::Dangerous, &[Tag::Network, Tag::GitPush]),
+            ("git \\\r\npush origin main", Level::Dangerous, &[Tag::Network, Tag::GitPush]),
+            ("rm -R build", Level::Dangerous, &[Tag::Delete]),
         ];
-        for (command, level, tags) in cases {
-            let got = shell(command);
-            assert_eq!((got.level, got.tags.as_slice()), (*level, *tags), "{command:?}");
-            assert_ne!(got.level, Level::Low, "{command:?}");
-        }
+        let wrong: Vec<String> = cases
+            .iter()
+            .filter_map(|(command, level, tags)| {
+                let got = shell(command);
+                ((got.level, got.tags.as_slice()) != (*level, *tags) || got.level == Level::Low).then(|| format!("{command:?}: {:?} {:?}, not {level:?} {tags:?}", got.level, got.tags))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
     }
 
     #[test]
     fn commands_inside_commands_are_followed_only_so_far_and_never_read_as_low() {
-        let deep = format!("{}rm -rf build{}", "echo \"$(".repeat(200), ")\"".repeat(200));
-        assert_ne!(shell(&deep).level, Level::Low);
+        let nested = |levels: usize| format!("{}rm -rf build{}", "echo \"$(".repeat(levels), ")\"".repeat(levels));
+        let furthest = usize::from(MAX_NESTED);
+        assert_eq!(shell(&nested(furthest)).level, Level::Dangerous, "as far down as it reads");
+        assert_eq!(shell(&nested(furthest + 1)), unknown(), "and one further it says it did not");
+        assert_eq!(shell(&nested(200)), unknown());
         let unclosed = "echo \"$(rm -rf build";
         assert_eq!(shell(unclosed).level, Level::Dangerous, "a quote left open hides nothing");
+    }
+
+    /// A stack the size of a daemon's worker, and a limit far beyond what this takes: a label that hangs, or overflows the stack, fails here.
+    #[test]
+    fn a_command_built_to_make_the_reading_explode_ends_soon_and_is_not_low() {
+        let inputs = ["find . -exec ".repeat(40), "find -exec ".repeat(5900), "xargs ".repeat(10900), format!("{}{}", "a ".repeat(16000), "> x ".repeat(8000))];
+        for command in inputs {
+            let start: String = command.chars().take(20).collect();
+            let (done, result) = std::sync::mpsc::channel();
+            std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(move || done.send(shell(&command))).unwrap();
+            let label = result.recv_timeout(std::time::Duration::from_secs(10)).unwrap_or_else(|_| panic!("{start}... took too long"));
+            assert_eq!(label.level, Level::Unknown, "{start}...");
+        }
     }
 
     #[test]
     fn a_full_list_of_open_requests_never_lets_go_of_what_makes_the_label_what_it_is() {
         let request = |command: &str| from_tool("Bash", &serde_json::json!({"command": command}), Some(TREE));
+        let keep_worst = |requests: &mut Vec<Request>, cap: usize| {
+            while requests.len() > cap {
+                requests.remove(mildest(requests, TREE).unwrap());
+            }
+        };
         let mut first_is_worst = vec![request("rm -rf build")];
         first_is_worst.extend((0..5).map(|i| request(&format!("ls a{i}"))));
-        keep_worst(&mut first_is_worst, TREE, 3);
+        keep_worst(&mut first_is_worst, 3);
         assert_eq!(first_is_worst.len(), 3);
         assert_eq!(WaitInfo::of(&first_is_worst, TREE).risk.level, Level::Dangerous, "the oldest is not what goes");
         let mut last_is_worst: Vec<Request> = (0..5).map(|i| request(&format!("ls a{i}"))).collect();
         last_is_worst.push(request("git push"));
-        keep_worst(&mut last_is_worst, TREE, 3);
+        keep_worst(&mut last_is_worst, 3);
         assert_eq!((last_is_worst.len(), WaitInfo::of(&last_is_worst, TREE).risk.level), (3, Level::Dangerous), "nor the newest");
         let mut unknown_stays = vec![request("ls"), request("frobnicate"), request("pwd")];
-        keep_worst(&mut unknown_stays, TREE, 1);
+        keep_worst(&mut unknown_stays, 1);
         assert_eq!(WaitInfo::of(&unknown_stays, TREE).risk.level, Level::Unknown);
         let mut all_dangerous: Vec<Request> = (0..5).map(|i| request(&format!("git push r{i}"))).collect();
-        keep_worst(&mut all_dangerous, TREE, 2);
+        keep_worst(&mut all_dangerous, 2);
         assert_eq!((all_dangerous.len(), WaitInfo::of(&all_dangerous, TREE).risk.level), (2, Level::Dangerous));
     }
 

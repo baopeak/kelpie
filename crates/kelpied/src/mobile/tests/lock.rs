@@ -599,6 +599,21 @@ async fn the_same_request_twice_is_two_until_each_has_run() {
     assert_eq!(r.term.dangerous_wait(), None);
 }
 
+/// Built to make reading it explode. It reaches the card, and past the list's limit, and what comes of it is a label that says it was not read, soon.
+#[tokio::test]
+async fn a_command_built_to_be_slow_holds_nothing_up() {
+    let r = rig();
+    let began = std::time::Instant::now();
+    r.daemon.hook(&hook("PermissionRequest", "Bash", &"find . -exec ".repeat(40))).unwrap();
+    for i in 0..16 {
+        r.daemon.hook(&hook("PermissionRequest", "Bash", &format!("{}{i}", "xargs ".repeat(10900)))).unwrap();
+    }
+    crate::session::fake::wait_on_user(&r.term);
+    assert_eq!(r.term.screen_view(10).wait.unwrap().risk.level, risk::Level::Unknown);
+    assert_eq!(r.term.dangerous_wait(), None);
+    assert!(began.elapsed() < std::time::Duration::from_secs(30), "{:?}", began.elapsed());
+}
+
 #[tokio::test]
 async fn a_full_list_of_requests_keeps_the_dangerous_one_whenever_it_came() {
     let r = rig();

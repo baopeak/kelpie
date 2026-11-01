@@ -189,7 +189,7 @@ pub struct ScreenView {
     pub wait: Option<crate::mobile::risk::WaitInfo>,
 }
 
-/// Requests a wait is said to be about at once, far beyond what an agent asks in parallel. Past this the mildest goes (`risk::keep_worst`).
+/// Requests a wait is said to be about at once, far beyond what an agent asks in parallel. Past this the mildest goes (`risk::mildest`).
 const WAIT_REQUESTS_KEPT: usize = 16;
 
 /// Where a client's messages from the daemon wait. The app and the CLI have an unbounded queue; a
@@ -776,7 +776,8 @@ impl Session {
         };
         let typed = self.answer_bytes(waiting_since, bytes, by)?;
         // An answer leaves the open requests as they are. It does not say which it answered, and it may be for a dialog no hook spoke of: taking one off could take the label off the next
-        // dialog on screen. A tool that ran is taken off by its own hook, and one refused by the end of the turn, so a card may say more than it must, never less.
+        // dialog on screen. A tool that ran is taken off by its own hook, and one refused by the end of the turn. So a card may say more than it must, and says less only when the turn's end
+        // is reported while a background agent's dialog is still open, which clears the list.
         if enter {
             self.enter_later(typed);
         }
@@ -1025,20 +1026,25 @@ impl Session {
         self.wake.subscribe()
     }
 
-    /// What a remote view shows right now, taken in one go under the lock.
+    /// What a remote view shows right now, taken in one go under the lock. Labels are worked out after it is let go: reading a command is not to hold up the session, its reader or the ticker.
     pub fn screen_view(&self, height: usize) -> ScreenView {
         let worktree = self.spec.lock().cwd.clone();
-        let g = self.inner.lock();
-        let tail = g.vt.tail_lines(height);
-        let waiting = g.screen_prompt.is_some() || g.waiting_since.is_some();
-        ScreenView {
-            lines: tail.lines,
-            cursor: tail.cursor,
-            prompt: g.screen_prompt.clone(),
-            waiting_since: g.waiting_since,
-            title: g.vt.title().map(str::to_string),
-            wait: waiting.then(|| crate::mobile::risk::WaitInfo::of(&g.wait_requests, &worktree)),
-        }
+        let (mut view, open) = {
+            let g = self.inner.lock();
+            let tail = g.vt.tail_lines(height);
+            let waiting = g.screen_prompt.is_some() || g.waiting_since.is_some();
+            let view = ScreenView {
+                lines: tail.lines,
+                cursor: tail.cursor,
+                prompt: g.screen_prompt.clone(),
+                waiting_since: g.waiting_since,
+                title: g.vt.title().map(str::to_string),
+                wait: None,
+            };
+            (view, waiting.then(|| g.wait_requests.clone()))
+        };
+        view.wait = open.map(|open| crate::mobile::risk::WaitInfo::of(&open, &worktree));
+        view
     }
 
     /// Keeps track of what this session's wait is about, from its hooks. Each request stays until that tool has run or failed, or the turn is over (`set_hook_status`): a wait can outlast other
@@ -1053,7 +1059,18 @@ impl Session {
         match (event, request) {
             ("PermissionRequest", Some(request)) => {
                 g.wait_requests.push(request);
-                crate::mobile::risk::keep_worst(&mut g.wait_requests, &cwd, WAIT_REQUESTS_KEPT);
+                // Which goes takes reading them all, and that is not done under the lock.
+                if g.wait_requests.len() > WAIT_REQUESTS_KEPT {
+                    let open = g.wait_requests.clone();
+                    drop(g);
+                    let mildest = crate::mobile::risk::mildest(&open, &cwd);
+                    g = self.inner.lock();
+                    if g.wait_requests.len() > WAIT_REQUESTS_KEPT {
+                        if let Some(at) = mildest.and_then(|at| g.wait_requests.iter().position(|still| *still == open[at])) {
+                            g.wait_requests.remove(at);
+                        }
+                    }
+                }
             }
             ("PostToolUse" | "PostToolUseFailure", Some(request)) => {
                 let Some(at) = g.wait_requests.iter().position(|open| *open == request) else { return };
@@ -1069,8 +1086,8 @@ impl Session {
     /// What must be approved in this wait, when the daemon's label on any of it says dangerous: what the card shows, which is what an assertion is over.
     pub fn dangerous_wait(&self) -> Option<String> {
         let worktree = self.spec.lock().cwd.clone();
-        let g = self.inner.lock();
-        let info = crate::mobile::risk::WaitInfo::of(&g.wait_requests, &worktree);
+        let open = self.inner.lock().wait_requests.clone();
+        let info = crate::mobile::risk::WaitInfo::of(&open, &worktree);
         (info.risk.level == crate::mobile::risk::Level::Dangerous).then(|| info.command.unwrap_or_default())
     }
 
