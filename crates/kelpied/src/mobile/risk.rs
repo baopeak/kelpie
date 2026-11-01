@@ -355,9 +355,9 @@ struct Simple {
 /// Splits as a shell would, far enough to name programs and paths. False when it cannot: quotes left open, or something that runs a command of its own inside this one. What is inside
 /// `(...)`, `{...}`, `$(...)` or backticks comes out as commands of its own, so a delete in a PowerShell script block or a subshell is read like any other. What runs inside a double-quoted
 /// word or a `${...}` is in the word, so it comes back on its own, as text for the caller to read as a command. `escapes` says whether a backslash inside double quotes escapes `"`, `\`, `$`
-/// and a backtick, as a POSIX shell has it, or is a plain character, as PowerShell and cmd have it.
+/// and a backtick, as a POSIX shell has it, or is a plain character, as PowerShell and cmd have it. `comments` says whether `#` starts one, which it does not for cmd.
 #[allow(unused_assignments)] // the state a word or a command leaves behind goes unread after the last of them
-fn split(command: &str, escapes: bool) -> (Vec<Simple>, bool, Vec<String>) {
+fn split(command: &str, escapes: bool, comments: bool) -> (Vec<Simple>, bool, Vec<String>) {
     let mut out = Vec::new();
     let mut inner = Vec::new();
     let mut readable = true;
@@ -454,6 +454,13 @@ fn split(command: &str, escapes: bool) -> (Vec<Simple>, bool, Vec<String>) {
                 word.push_str(&body);
                 word.push('}');
             }
+            // `$'...'` has an escape for its own quote, so where it ends is not read here, and what follows could be anything.
+            '$' if chars.peek() == Some(&'\'') => {
+                readable = false;
+                word_expands = true;
+                word.push(c);
+                started = true;
+            }
             '$' | '*' | '?' | '[' => {
                 word_expands = true;
                 word.push(c);
@@ -502,17 +509,21 @@ fn split(command: &str, escapes: bool) -> (Vec<Simple>, bool, Vec<String>) {
                 }
                 end_command!(false);
             }
-            // What comes next is the file it reads. After `<<` it is a word like any other, and PowerShell's `<#` can close with more on the line, which is not read here.
+            // What comes next is the file it reads. After `<<` it is a word like any other, and PowerShell's `<#` can close with more on the line, which is not read here. Nor is a heredoc's body
+            // told from commands here, where a quote in it could hide what follows. `<<<` has no body: its word is all of it.
             '<' => {
                 end_word!();
                 readable &= chars.peek() != Some(&'#');
                 next_is_source = chars.peek() != Some(&'<');
+                let mut more = 0;
                 while chars.peek() == Some(&'<') {
                     chars.next();
+                    more += 1;
                 }
+                readable &= more != 1;
             }
             // A comment, where a word could start: `a#b` is one word. PowerShell also ends a line at a carriage return.
-            '#' if !started => {
+            '#' if !started && comments => {
                 while chars.peek().is_some_and(|n| !matches!(n, '\n' | '\r')) {
                     chars.next();
                 }
@@ -826,6 +837,10 @@ fn path_like(word: &str) -> bool {
 }
 
 fn read_shell(command: &str, at: &Paths, found: &mut Found, depth: u8) {
+    read_script(command, at, found, depth, true);
+}
+
+fn read_script(command: &str, at: &Paths, found: &mut Found, depth: u8, comments: bool) {
     if !found.spend(command.len().min(MAX_LABELLED)) || depth > MAX_NESTED {
         found.unknown = true;
         return;
@@ -841,7 +856,7 @@ fn read_shell(command: &str, at: &Paths, found: &mut Found, depth: u8) {
         found.tag(Tag::SecretAccess);
     }
     let text = &command[..floor_char_boundary(command, MAX_LABELLED)];
-    let (commands, readable, inner) = split(text, true);
+    let (commands, readable, inner) = split(text, true, comments);
     if !readable || commands.is_empty() || commands.len() > MAX_SUBCOMMANDS {
         found.unknown = true;
     }
@@ -849,7 +864,7 @@ fn read_shell(command: &str, at: &Paths, found: &mut Found, depth: u8) {
     // Shells differ over a backslash inside double quotes, and which shell this is cannot be told from here. So it is read the other way as well, and what that finds counts too: a quote it
     // leaves open is no news, since the first reading is what says whether the text could be read.
     if ["\\\"", "\\$", "\\`"].iter().any(|escape| text.contains(escape)) {
-        let (commands, _, inner) = split(text, false);
+        let (commands, _, inner) = split(text, false, comments);
         read_split(&commands, &inner, at, found, depth);
     }
 }
@@ -959,7 +974,9 @@ fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_mo
     // A file a search reads its patterns from is a file, and PowerShell's named parameters each have their own value, so the first such word need not be the pattern.
     let pattern = match program.as_str() {
         "select-string" => args.iter().position(|a| a.eq_ignore_ascii_case("-pattern")).map(|at| at + 1).or_else(|| (0..args.len()).find(|&i| !args[i].starts_with('-') && (i == 0 || !args[i - 1].starts_with('-')))),
-        "grep" | "egrep" | "fgrep" | "rg" | "ag" if !args.iter().any(|a| is_long_option(a, &["--file"]) || (a.starts_with('-') && !a.starts_with("--") && a.ends_with('f'))) => args.iter().position(|a| !a.starts_with('-')),
+        // `ag -f` is "follow", and `ag` has no file of patterns.
+        "ag" => args.iter().position(|a| !a.starts_with('-')),
+        "grep" | "egrep" | "fgrep" | "rg" if !args.iter().any(|a| is_long_option(a, &["--file"]) || (a.starts_with('-') && !a.starts_with("--") && a.ends_with('f'))) => args.iter().position(|a| !a.starts_with('-')),
         _ => None,
     };
     for (i, arg) in args.iter().enumerate() {
@@ -1002,11 +1019,7 @@ fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_mo
     if is_shell(&program) {
         // `bash -c '...'`: what it runs is what counts, one level down. Anything else a shell does here is not read.
         match inline_script(&program, args) {
-            Some(inner) => {
-                // What is read here as a comment is not one to cmd.
-                found.unknown |= program == "cmd" && inner.contains('#');
-                read_shell(&inner, at, found, depth + 1)
-            }
+            Some(inner) => read_script(&inner, at, found, depth + 1, program != "cmd"),
             None => found.unknown = true,
         }
         return;
@@ -1093,7 +1106,7 @@ mod tests {
 
     #[test]
     fn what_is_read_only_and_known_is_low() {
-        for command in ["ls -la", "git status", "git log --oneline -5", "git diff HEAD~1", "cat src/main.rs", "grep -rn foo src", "pwd", "find . -name '*.rs'", "cat README.md | head -5", "git branch --show-current", "ls && pwd", "Get-Content src/main.rs", "echo hi > /dev/null", "ls 2>&1", "/usr/bin/ls -la", "find . \\( -name a -o -name b \\)", "grep -rn credentials src", "echo secrets.json", "git diff .github/workflows/ci.yml", "Get-Content x 2>$null", "git reflog", "git reflog show", "git reflog -5", "sort a.txt", "uniq a.txt", "rg foo src", "git --no-pager log", "git --no-pager log --oneline -5", "/usr/bin/../bin/ls", "cat < notes.txt", "git show HEAD:README.md", "ls # a comment", "echo \"say \\\"hi\\\"\"", "grep .env README.md", "Select-String foo src", "Select-String -Pattern .env -Path src", "git log --format=#%h"] {
+        for command in ["ls -la", "git status", "git log --oneline -5", "git diff HEAD~1", "cat src/main.rs", "grep -rn foo src", "pwd", "find . -name '*.rs'", "cat README.md | head -5", "git branch --show-current", "ls && pwd", "Get-Content src/main.rs", "echo hi > /dev/null", "ls 2>&1", "/usr/bin/ls -la", "find . \\( -name a -o -name b \\)", "grep -rn credentials src", "echo secrets.json", "git diff .github/workflows/ci.yml", "Get-Content x 2>$null", "git reflog", "git reflog show", "git reflog -5", "sort a.txt", "uniq a.txt", "rg foo src", "git --no-pager log", "git --no-pager log --oneline -5", "/usr/bin/../bin/ls", "cat < notes.txt", "git show HEAD:README.md", "ls # a comment", "echo \"say \\\"hi\\\"\"", "grep .env README.md", "Select-String foo src", "Select-String -Pattern .env -Path src", "git log --format=#%h", "cat <<< hello", "ag -f credentials src"] {
             assert_eq!(shell(command), Label { level: Level::Low, tags: Vec::new() }, "{command}");
         }
         assert_eq!(tool("Read", "C:/work/proj/src/main.rs").level, Level::Low);
@@ -1258,7 +1271,13 @@ mod tests {
             ("# don't touch src\nrm -rf build\n# that's it", Level::Dangerous, &[Tag::Delete]),
             ("rm -rf build # this is safe", Level::Dangerous, &[Tag::Delete]),
             ("ls <# a #> ; frobnicate", Level::Unknown, &[]),
-            ("cmd /c \"echo # & rm -rf build\"", Level::Unknown, &[Tag::OutsideWorktree]),
+            // `#` is no comment to cmd, so what follows it runs.
+            ("cmd /c \"echo # & rm -rf build\"", Level::Dangerous, &[Tag::Delete, Tag::OutsideWorktree]),
+            // A heredoc's body opening a quote, and `$'...'` with its own escape: neither can hide what follows as `low`.
+            ("cat <<EOF\necho '\nEOF\nrm -rf build\n#'", Level::Unknown, &[]),
+            ("cat <<EOF\nhello\nEOF", Level::Unknown, &[]),
+            ("cat <<EOF\nhello\nEOF\nrm -rf build", Level::Dangerous, &[Tag::Delete]),
+            ("echo $'\\'' ; rm -rf build #'", Level::Unknown, &[]),
             // A backtick is a substitution only with its partner in the same string.
             ("Write-Host \"a`n\"; Remove-Item -Recurse -Force build; Write-Host \"b`n\"", Level::Dangerous, &[Tag::Delete]),
             ("echo \"a\\`b\"; git push; echo \"c\\`d\"", Level::Dangerous, &[Tag::Network, Tag::GitPush]),
