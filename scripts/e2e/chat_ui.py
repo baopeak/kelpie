@@ -73,12 +73,12 @@ try:
     state(sid, "c.setSetting('mode', 'default')")
     wait_state(sid, "c.state.settings.find(x => x.id === 'model')?.value === 'haiku'", 30)
 
-    # A turn that reads and asks to edit; a second message queued while it works.
+    # A turn that reads and asks to edit; a second message given to it while it works.
     type_message("Read notes.txt, then use the Edit tool to change the word beta to BETA. Keep your replies very short.")
     run.check("busy line with elapsed time", wait_dom("document.querySelector('.chat .typing .elapsed')?.textContent", 30))
     type_message("When you are done, reply with only the word finished.")
-    run.check("a message sent while busy waits in the queue", wait_state(sid, "c.state.queue.length === 1", 10) and wait_dom("document.querySelector('.queue-chip')", 5))
-    run.shot("chat-ui-queue")
+    run.check("a message sent while busy goes into the running turn", wait_state(sid, "c.state.queue.length === 0 && c.state.items.some(i => i.kind === 'user' && /only the word finished/.test(i.text))", 10))
+    run.shot("chat-ui-steer")
     # Approve what comes before the edit (a read outside the trusted folders) with key 1.
     OPEN = "[...document.querySelectorAll('.perm')].filter(p => p.querySelector('.actions .btn'))"
     diff = []

@@ -4,7 +4,7 @@
 import { For, Show, createMemo, createSignal } from "solid-js";
 import { projectRelative } from "../chat/chat-links";
 import { type ChatController, type ChatItem, matchAnswer } from "../chat/chat-model";
-import { type ToolView, basename, describeTool, diffStats, stripProjectRoot } from "../chat/tool-view";
+import { type ToolView, basename, describeTool, diffStats, opensByDefault, stripProjectRoot } from "../chat/tool-view";
 import { store } from "../lib/store";
 import type { Project } from "../lib/types";
 import { CopyButton } from "./chat-copy";
@@ -75,9 +75,8 @@ export function ToolRow(props: { item: Tool; project: Project; nested?: boolean;
     const s = diffStats(d.text);
     return { adds: acc.adds + s.adds, dels: acc.dels + s.dels };
   }, { adds: 0, dels: 0 }));
-  // Edits and commands show their content; reads, searches and the rest only when asked.
   const [open, setOpen] = createSignal<boolean | null>(null);
-  const isOpen = () => open() ?? (view().category === "edit" || view().category === "command" || props.item.status === "error" || (!!props.noAskCards && props.item.name === "AskUserQuestion" && !!props.item.output));
+  const isOpen = () => open() ?? opensByDefault(props.item, view(), !!props.noAskCards);
   const hasBody = () => !!(props.item.diff?.length || view().command || props.item.output || props.item.input);
   // Reads and searches name project files, so they show them relative to it.
   const target = () => (view().category === "read" || view().category === "search" ? stripProjectRoot(view().target, props.project.path) : view().target);

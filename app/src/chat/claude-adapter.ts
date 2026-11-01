@@ -229,6 +229,8 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
   let tuiOnly = new Set<string>();
   /** The conversation was just cleared: its empty `result` is no turn to show. */
   let cleared = false;
+  /** How many messages given to the running turn had not been read when a turn last ended (null: none given). */
+  let steersUnread: number | null = null;
 
   const control = (request: Record<string, unknown>, id = `kelpie-req-${++requestSeq}`) =>
     ctx.write({ type: "control_request", request_id: id, request });
@@ -259,6 +261,7 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
       blocks = new Map();
       partialJson = new Map();
       cleared = false;
+      steersUnread = null;
     },
     start() {
       ctx.set("status", null);
@@ -396,7 +399,13 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
           if (main?.[1]?.contextWindow || m.total_cost_usd != null) {
             ctx.set("usage", { used: ctx.state.usage?.used ?? 0, size: main?.[1]?.contextWindow ?? ctx.state.usage?.size ?? null, cost: m.total_cost_usd ?? ctx.state.usage?.cost });
           }
-          ctx.set({ busy: false, status: null });
+          // A message the turn ended without reading: Claude runs it next by itself, a moment after this result. Still working
+          // until then, unless it did not read one last time either: an echo that never comes must not leave it working for ever.
+          let unread = 0;
+          if (steersUnread != null) for (const i of ctx.state.items) if (i.kind === "user" && i.pending) unread++;
+          const runsNext = unread > 0 && (steersUnread === Infinity || unread < steersUnread!);
+          steersUnread = runsNext ? unread : null;
+          ctx.set({ busy: runsNext, status: null });
           ctx.upsert({
             kind: "result",
             id: `result-${m.uuid ?? ctx.state.items.length}`,
@@ -416,14 +425,16 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
       }
       const shown = sentImages(images);
       images?.forEach((image, i) => live.sent.set(sentKey(image.mime, image.data.length), shown![i]));
-      ctx.upsert({ kind: "user", id: `local-${Date.now()}`, text, images: shown, pending: true });
+      ctx.upsert({ kind: "user", id: `local-${Date.now()}-${++requestSeq}`, text, images: shown, pending: true });
       ctx.set("busy", true);
       const pictures = (images ?? []).map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } }));
       ctx.write({ type: "user", message: { role: "user", content: [...pictures, ...(text.trim() ? [{ type: "text", text }] : [])] } });
     },
-    // The CLI takes a message mid-turn and reads it at its next step.
+    // The CLI takes a message mid-turn and reads it when the running tools finish, echoing it then (it stays pending until
+    // that echo). If the turn ends first, it runs it as a turn of its own.
     steer(text) {
       this.send(text);
+      steersUnread = Infinity;
       return true;
     },
     immediate(text) {

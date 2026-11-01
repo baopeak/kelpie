@@ -218,6 +218,53 @@ pub async fn browser_close(app: AppHandle, state: tauri::State<'_, Browsers>, la
     }
 }
 
+/// What a local port serves when it serves a web page.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct WebPage {
+    title: Option<String>,
+}
+
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+const PROBE_MAX_BYTES: u64 = 64 * 1024;
+
+/// The text of the first `<title>` of a page, on one line.
+fn page_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let start = open + lower[open..].find('>')? + 1;
+    let end = start + lower[start..].find("</title")?;
+    let title = html[start..end].split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty()).then(|| title.chars().take(80).collect())
+}
+
+/// A page answered with HTML, or a redirect (usually to a login or a start page). Anything else on the port (a 404, a
+/// JSON API, a program that does not speak HTTP) is not something to show a person.
+fn probe_page(host: &str, port: u16) -> Option<WebPage> {
+    use std::io::Read as _;
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(PROBE_TIMEOUT)).max_redirects(0).http_status_as_error(false).proxy(None).build().into();
+    let mut resp = agent.get(format!("http://{host}:{port}/")).header("Accept", "text/html").call().ok()?;
+    let status = resp.status().as_u16();
+    if (300..400).contains(&status) {
+        return resp.headers().contains_key("location").then_some(WebPage { title: None });
+    }
+    let html = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| v.to_ascii_lowercase().starts_with("text/html"));
+    if !(200..300).contains(&status) || !html {
+        return None;
+    }
+    let mut body = Vec::new();
+    let _ = resp.body_mut().as_reader().take(PROBE_MAX_BYTES).read_to_end(&mut body);
+    Some(WebPage { title: page_title(&String::from_utf8_lossy(&body)) })
+}
+
+/// Whether a port on this computer serves a web page; other hosts are never asked.
+#[tauri::command]
+pub async fn browser_probe(host: String, port: u16) -> CmdResult<Option<WebPage>> {
+    if !matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]") {
+        return Ok(None);
+    }
+    tauri::async_runtime::spawn_blocking(move || probe_page(&host, port)).await.map_err(err)
+}
+
 /// A PNG of the page (or of `clip`, in CSS pixels of the visible page), saved under the data
 /// dir so an agent can open it. Returns `{path, data}` (`data` = base64 PNG).
 #[tauri::command]
@@ -349,5 +396,59 @@ mod tests {
         assert!(decode_report(&u, "other").is_none());
         assert!(decode_report(&Url::parse("http://example.com/#n1.x").unwrap(), "n1").is_none());
         assert_ne!(new_nonce(), new_nonce());
+    }
+
+    /// A one-shot server on a free local port that answers with `response`.
+    fn serve(response: &'static str) -> u16 {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = c.read(&mut buf);
+                let _ = c.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_page_with_html_counts_and_brings_its_title() {
+        let port = serve("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 44\r\nConnection: close\r\n\r\n<html><title>\n  My  Studio </title></html>  ");
+        assert_eq!(probe_page("127.0.0.1", port), Some(WebPage { title: Some("My Studio".into()) }));
+    }
+
+    #[test]
+    fn a_redirect_counts_as_a_page_without_a_title() {
+        let port = serve("HTTP/1.1 302 Found\r\nLocation: /login\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        assert_eq!(probe_page("127.0.0.1", port), Some(WebPage { title: None }));
+    }
+
+    #[test]
+    fn what_is_not_a_page_does_not_count() {
+        for response in [
+            "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            "this program does not speak HTTP\r\n",
+        ] {
+            assert_eq!(probe_page("127.0.0.1", serve(response)), None, "{response}");
+        }
+    }
+
+    #[test]
+    fn a_closed_port_does_not_count() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert_eq!(probe_page("127.0.0.1", port), None);
+    }
+
+    #[test]
+    fn titles_are_read_whatever_their_case_and_length() {
+        assert_eq!(page_title("<HTML><TITLE lang=en>Hi</TITLE>").as_deref(), Some("Hi"));
+        assert_eq!(page_title("<title></title>"), None);
+        assert_eq!(page_title("<p>no title</p>"), None);
+        assert_eq!(page_title(&format!("<title>{}</title>", "é".repeat(200))).map(|t| t.chars().count()), Some(80));
     }
 }

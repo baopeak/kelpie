@@ -49,6 +49,9 @@ export function TerminalSettings() {
       <SettingRow id="localhost-browser">
         <Toggle on={s().localhostInBrowser !== false} onChange={(on) => store.setSettings({ localhostInBrowser: on })} />
       </SettingRow>
+      <SettingRow id="agent-web-tabs">
+        <Toggle on={s().agentWebTabs !== false} onChange={(on) => store.setSettings({ agentWebTabs: on })} />
+      </SettingRow>
     </>
   );
 }

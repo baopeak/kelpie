@@ -104,20 +104,22 @@ export function getController(s: SessionInfo): ChatController {
     const createdAt = s.created_at;
     // History from before chat mode comes from Claude's own transcript; turns made in chat
     // mode are replayed from the daemon log, so only take lines older than this process.
-    c.loadHistory = async (ctx) => {
+    c.loadHistory = async () => {
       const lines = await claudeTranscript(resumeId, s.cwd, sessionHome(s)).catch(() => []);
-      c!.seed(claudeSettingsFrom(lines));
-      const live = { msgId: null as string | null };
-      // In one go, as a replay: what watches the whole list would otherwise run for every line.
-      batch(() => {
-        for (const line of lines) {
-          let m: any;
-          try { m = JSON.parse(line); } catch { continue; }
-          if (m.timestamp && Date.parse(m.timestamp) >= createdAt) break;
-          if (m.type === "user" || m.type === "assistant") applyClaudeMessage(ctx, m, live, true);
-        }
-      });
-      if (ctx.state.items.length) ctx.upsert({ kind: "system", id: "history-mark", text: t("↑ earlier in this conversation · continued in chat view ↓"), tone: "info" });
+      return (ctx) => {
+        c!.seed(claudeSettingsFrom(lines));
+        const live = { msgId: null as string | null };
+        // In one go, as a replay: what watches the whole list would otherwise run for every line.
+        batch(() => {
+          for (const line of lines) {
+            let m: any;
+            try { m = JSON.parse(line); } catch { continue; }
+            if (m.timestamp && Date.parse(m.timestamp) >= createdAt) break;
+            if (m.type === "user" || m.type === "assistant") applyClaudeMessage(ctx, m, live, true);
+          }
+        });
+        if (ctx.state.items.length) ctx.upsert({ kind: "system", id: "history-mark", text: t("↑ earlier in this conversation · continued in chat view ↓"), tone: "info" });
+      };
     };
   }
   controllers.set(s.id, c);

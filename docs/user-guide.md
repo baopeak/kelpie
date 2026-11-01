@@ -111,7 +111,7 @@ features earlier (running sessions stop for a moment; agents that can resume con
    that only works in the terminal UI shows *Run it in the terminal*, which switches back and runs
    it there.
    - The transcript reads like the terminal UI: each tool call is one line (*Read app.ts · lines
-     75-80*, *Edit main.rs +3 −1*, *Bash* with its command and output), runs of reads and searches
+     75-80*, *Edit main.rs +3 −1*, *Bash* with what it is doing; click a row for its command and output, which open by themselves when it fails), runs of reads and searches
      fold into *Explored 4 files, 2 searches*, and thinking folds into *Thought for 6s*. After a
      turn, *N files changed* lists each file with its line counts; click one to open its changes.
    - Every prompt and reply shows its date and time in the top right corner (hover for the full
@@ -141,9 +141,13 @@ features earlier (running sessions stop for a moment; agents that can resume con
      subagents as a tree with their status, time and tokens (Claude; Codex lists its agents without
      tokens, and ACP has no such thing to list). Click one for its prompt, what it did and its answer,
      and *Show in chat* for its row. `Esc` steps back, and never stops the agent.
-   - Messages sent while the agent works wait above the message field and go when its turn ends.
-     *Send now* gives one to the agent during its turn (Codex and Claude; for other agents it stops
-     the turn first); stopping the agent holds the queue until you send again.
+   - A message sent while Claude or Codex works goes into the running turn, as in their terminal: it
+     shows faded until the agent reads it at its next step, and the agent decides what to do with
+     it. To change course at once, stop the agent first (`Esc`). A command (`/`, `!`), a message
+     with a picture, a message for any other agent, and one sent while others wait, waits above the
+     message field and goes when the turn ends. *Send now* gives such a message to the agent during
+     its turn, or stops the turn first where it cannot go in; stopping the agent holds these until
+     you send again.
    - The agent's task list (Claude's todos, Codex and OMP plans) stays pinned above the message
      field. The ring next to the pickers shows how full the context is (hover for tokens and cost;
      click to compact).
@@ -773,13 +777,15 @@ pane*, `Ctrl/⌘+click` on a dev-server address in a terminal opens it next to t
 
 ### Processes, ports and preview
 
-When a program in a session listens on a port (a dev server, `python -m http.server 8000`…), a
-`:8000` chip appears on the session's tab and its sidebar row. Click it to open the address in a
-browser pane; right-click for *Open preview beside* (split next to the focused pane), *Open in a
-browser tab* or *Copy address*. Chips of a session that is not on screen are dimmed: they show the
-ports as of when it was last on screen. The **Processes** tab of the right panel (palette:
-*Processes and Ports*) lists what each running session of the project runs, as a tree with PID,
-memory, CPU and ports. **Kill** stops a program and what it started. **Kill children** stops what a
+When an agent on screen starts a web page (a dev server, a studio, a dashboard), the page gets a tab
+of its own in the background and a short message says so: the agent stays in view and keeps the
+keyboard, and the highlighted tab is one click away. Only a port that answers with a page counts;
+one that answers *Not Found* or is not a website gets no tab. A tab you never opened goes when the
+page stops, and a page you closed does not come back until the app restarts. Turn this off with
+Settings → Terminal → *Open an agent's web pages in a tab*. Servers you start yourself in a shell
+get no tab. The **Processes** tab of the right panel (palette: *Processes and Ports*) lists what
+each running session of the project runs, as a tree with PID, memory, CPU and ports. Click a port
+to show it in a browser tab, the one already on it if there is one. **Kill** stops a program and what it started. **Kill children** stops what a
 session started while the session itself keeps running; in an agent session the agent also keeps
 the programs it runs directly (its MCP servers, the shell it runs a tool in), and what those started
 (a dev server a tool ran) is stopped. Any of them can still be stopped on its own with **Kill**. Both

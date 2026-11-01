@@ -41,6 +41,13 @@ PAGE1 = """<!doctype html><html><head><title>Kelpie Test Shop</title>
 <a id="popup" href="/page2?from=popup&access_token=SECRET123" target="_blank">Open in new window</a>
 <input id="pw" type="password" value="hunter2" style="position:absolute;left:60px;top:260px"></main></body></html>"""
 PAGE2 = "<!doctype html><html><head><title>Second Page</title></head><body><h1 id=h>Page two</h1></body></html>"
+# Tells the site whether the page is really on screen: the page itself is out of the test's reach,
+# and Kelpie's own state says what it asked for, not what happened.
+PAGE_WATCHED = """<!doctype html><html><head><title>Watched</title><script>
+const report = () => fetch('/report' + location.pathname + '?' + document.visibilityState);
+document.addEventListener('visibilitychange', report); report();
+</script></head><body>Watched page</body></html>"""
+on_screen = {}  # page path -> its last reported visibilityState
 
 
 class Site(BaseHTTPRequestHandler):
@@ -48,7 +55,10 @@ class Site(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        body = (PAGE2 if self.path.startswith("/page2") else PAGE1).encode()
+        if self.path.startswith("/report/"):
+            path, _, seen = self.path[len("/report"):].partition("?")
+            on_screen[path] = seen
+        body = (PAGE2 if self.path.startswith("/page2") else PAGE_WATCHED if self.path.startswith("/watched") else PAGE1).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -228,6 +238,33 @@ try:
     js_await(f"{S}.closePane({S}.state.activeProject, {S}.activeTab({S}.state.activeProject)?.id, arguments[0])", p["id"])
     run.check("closing the pane closes its webview", bool(wait(lambda: "err" in d.invoke("browser_info", {"label": label}), 10)))
     run.check("closing the pane forgets its marks", d.js(f"return !{B}.browserState[arguments[0]]", p["id"]))
+
+    # ---------- a page never stays above a tab it no longer belongs to ----------
+    # It is a native window over the whole app, and creating it takes around half a second: leaving
+    # its tab meanwhile must still hide it, or the page covers the tab now shown.
+    js_await(f"{S}.newSession(arguments[0], 'shell')", pid)
+    term_tab = wait(lambda: d.js(f"return {S}.activeTab(arguments[0])?.id", pid), 10)
+
+    def stays_hidden(path):
+        if not wait(lambda: on_screen.get(path) == "hidden", 10):
+            return False
+        time.sleep(1.5)
+        return on_screen.get(path) == "hidden"
+
+    def browser_tab_of(path):
+        return d.js(f"return {S}.workspace(arguments[0]).tabs.find(t => window.__kelpie.layout.allPanes(t.root).some(p => (p.url ?? '').endsWith(arguments[1])))?.id ?? null", pid, path)
+
+    for delay in (0, 50, 200, 500):
+        path = f"/watched/left-{delay}"
+        d.js(f"{B}.openBrowser(arguments[0], 'tab', arguments[1]); setTimeout(() => {S}.selectTab(arguments[1], arguments[2]), arguments[3]);", BASE + path, pid, term_tab, delay)
+        run.check(f"tab left {delay} ms after opening a page: the page is hidden", stays_hidden(path), str(on_screen.get(path)))
+    path = "/watched/left-0"
+    tab = browser_tab_of(path)
+    d.js(f"{S}.selectTab(arguments[0], arguments[1])", pid, tab)
+    run.check("back on its tab, the page is shown again", bool(wait(lambda: on_screen.get(path) == "visible", 10)), str(on_screen.get(path)))
+
+    js_await(f"new Promise((done) => {{ let i = 0; const step = () => {{ {S}.selectTab(arguments[0], i % 2 ? arguments[2] : arguments[1]); ++i < 41 ? setTimeout(step, 40) : done(); }}; step(); }})", pid, term_tab, tab)
+    run.check("quick switching that ends on another tab leaves the page hidden", d.js(f"return {S}.activeTab(arguments[0])?.id === arguments[1]", pid, term_tab) and stays_hidden(path), str(on_screen.get(path)))
 except Exception:
     import traceback
     traceback.print_exc()

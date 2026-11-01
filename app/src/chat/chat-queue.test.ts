@@ -208,9 +208,9 @@ describe("a window on the daemon's queue", () => {
   it("tells an older daemon from a new one: below the queue's API the window keeps its own queue", () => {
     const { ctrl, asked, calls } = setup(undefined, { daemon: false });
     ctrl.send("one");
-    ctrl.send("two");
+    ctrl.send("/two");
     expect(calls).toEqual(["send one"]);
-    expect(ctrl.state.queue.map((q) => q.text)).toEqual(["two"]);
+    expect(ctrl.state.queue.map((q) => q.text)).toEqual(["/two"]);
     expect(asked.enqueue).toEqual([]);
     expect(asked.sent).toHaveLength(1);
   });

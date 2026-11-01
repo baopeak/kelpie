@@ -6,10 +6,11 @@ const sessions: Record<string, { id: string; alive: boolean; project_id: string 
 const calls: { method: string; params: any }[] = [];
 const answer = { children: 0 };
 let clock = Date.now();
+const { focusPane, openBrowser, browserPaneOnPort } = vi.hoisted(() => ({ focusPane: vi.fn(), openBrowser: vi.fn(), browserPaneOnPort: vi.fn() }));
 
 vi.stubGlobal("document", { hidden: false });
 vi.mock("./store", () => ({
-  store: { sessions, connected: () => true, daemonApi: () => 16, isSessionVisible: (id: string) => visible.has(id), state: { activeProject: null } },
+  store: { sessions, connected: () => true, daemonApi: () => 16, isSessionVisible: (id: string) => visible.has(id), state: { activeProject: "p" }, focusPane },
 }));
 vi.mock("./ipc", () => ({
   daemon: vi.fn(async (method: string, params: any) => {
@@ -17,11 +18,11 @@ vi.mock("./ipc", () => ({
     return { sessions: Object.fromEntries((params.sessions as string[]).map((id) => [id, { children: answer.children, ports: answer.children ? [{ port: 5173, host: "localhost", addr: "127.0.0.1" }] : [] }])) };
   }),
 }));
-vi.mock("./browser", () => ({ openBrowser: vi.fn() }));
+vi.mock("./browser", () => ({ openBrowser, browserPaneOnPort }));
 vi.mock("./terminal-host", () => ({ onTerminalOutput: vi.fn() }));
 vi.mock("./i18n", () => ({ errorText: (s: string) => s, t: (s: string, v?: Record<string, string>) => s.replace(/\{(\w+)\}/g, (_: string, k: string) => v?.[k] ?? "") }));
 
-const { chips, noteOutput, killSummary, formatBytes, uniquePorts } = await import("./processes");
+const { sessionPorts, noteOutput, killSummary, formatBytes, uniquePorts, openPort } = await import("./processes");
 const { rows, subtree } = await import("./process-tree");
 
 const p = (pid: number, ppid: number | null, name = `p${pid}`): ProcInfo => ({ pid, ppid, name, start_time: 1, exe: null, mem: 0, cpu: 0, ports: [] });
@@ -55,7 +56,7 @@ describe("looking for ports", () => {
     // Nothing runs under it: no timer of its own keeps looking.
     await vi.advanceTimersByTimeAsync(60_000);
     expect(calls).toHaveLength(1);
-    expect(chips.a?.children).toBe(0);
+    expect(sessionPorts.a?.children).toBe(0);
   });
 
   it("keeps looking every few seconds while programs run, shows the port, and stops when they are gone", async () => {
@@ -63,7 +64,7 @@ describe("looking for ports", () => {
     answer.children = 1;
     noteOutput("a");
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(chips.a?.ports.map((x) => x.port)).toEqual([5173]);
+    expect(sessionPorts.a?.ports.map((x) => x.port)).toEqual([5173]);
     await vi.advanceTimersByTimeAsync(9_000);
     expect(calls.length).toBeGreaterThanOrEqual(3);
     answer.children = 0;
@@ -71,27 +72,27 @@ describe("looking for ports", () => {
     const seen = calls.length;
     await vi.advanceTimersByTimeAsync(30_000);
     expect(calls).toHaveLength(seen);
-    expect(chips.a?.ports).toEqual([]);
+    expect(sessionPorts.a?.ports).toEqual([]);
   });
 
-  it("marks the chips of a session that left the screen as stale, and fresh again once it is looked at", async () => {
+  it("marks the ports of a session that left the screen as stale, and fresh again once it is looked at", async () => {
     visible.add("a");
     answer.children = 1;
     noteOutput("a");
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(chips.a?.stale).toBeFalsy();
+    expect(sessionPorts.a?.stale).toBeFalsy();
     visible.delete("a");
     visible.add("b");
     noteOutput("b");
     await vi.advanceTimersByTimeAsync(3_000);
     expect(calls.at(-1)?.params).toEqual({ sessions: ["b"] });
-    expect(chips.a?.stale).toBe(true);
-    expect(chips.a?.ports.map((x) => x.port)).toEqual([5173]);
-    expect(chips.b?.stale).toBeFalsy();
+    expect(sessionPorts.a?.stale).toBe(true);
+    expect(sessionPorts.a?.ports.map((x) => x.port)).toEqual([5173]);
+    expect(sessionPorts.b?.stale).toBeFalsy();
     visible.add("a");
     noteOutput("a");
     await vi.advanceTimersByTimeAsync(3_000);
-    expect(chips.a?.stale).toBeFalsy();
+    expect(sessionPorts.a?.stale).toBeFalsy();
     // Nothing runs any more: the looks stop.
     answer.children = 0;
     await vi.advanceTimersByTimeAsync(4_000);
@@ -99,6 +100,23 @@ describe("looking for ports", () => {
 });
 
 describe("ports", () => {
+  const web = { port: 5173, host: "localhost", addr: "127.0.0.1" };
+
+  it("opens a port in a new tab when none shows it", () => {
+    openBrowser.mockClear();
+    browserPaneOnPort.mockReturnValue(null);
+    openPort(web, "a");
+    expect(openBrowser).toHaveBeenCalledWith("http://localhost:5173/", "tab", "p");
+  });
+
+  it("goes to the tab already on a port rather than opening another", () => {
+    openBrowser.mockClear();
+    browserPaneOnPort.mockReturnValue({ tabId: "t", paneId: "q" });
+    openPort(web, "a");
+    expect(openBrowser).not.toHaveBeenCalled();
+    expect(focusPane).toHaveBeenCalledWith("p", "t", "q");
+  });
+
   it("shows a port held on both address families once", () => {
     const port = (n: number, addr: string) => ({ port: n, host: "localhost", addr });
     expect(uniquePorts([port(5173, "127.0.0.1"), port(5173, "::1"), port(8000, "0.0.0.0")]).map((x) => x.port)).toEqual([5173, 8000]);

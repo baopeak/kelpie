@@ -258,17 +258,20 @@ export function emptyChatState(conversationId: string | null = null): ChatState 
   };
 }
 
+/** Enough of the end of what was fed to tell a log that carries on from it from one that does not. */
+const FED_TAIL_BYTES = 256;
+
 /** One mount's attaches. A controller outlives its mounts and `ready` with it: while this mount's attach
- *  is on its way, `state` is still what the last mount left, about to be reset. `whole`: the transcript
+ *  is on its way, `state` is still what the last mount left, about to be brought up to date. `whole`: the transcript
  *  is what this mount's newest attach brought. */
 export function mountAttach(ctrl: ChatController) {
   const [attached, setAttached] = createSignal(false);
   let newest = 0;
   return {
-    attach(handle: number) {
+    attach(handle: number, rebuild = false) {
       const mine = ++newest;
       setAttached(false);
-      void ctrl.attach(handle).then(() => {
+      void ctrl.attach(handle, rebuild).then(() => {
         if (mine === newest) setAttached(true);
       });
     },
@@ -297,7 +300,12 @@ export class ChatController {
   private clock: number | null = null;
   private loadingHistory = false;
   /** Renders the agent's own transcript (history from before chat mode) ahead of the log. */
-  loadHistory: ((ctx: AdapterContext) => Promise<void>) | null = null;
+  /** Reads what came before this log; what it returns then applies it, at once. Reading can take seconds. */
+  loadHistory: (() => Promise<(ctx: AdapterContext) => void>) | null = null;
+  /** Where what has been fed ends in the daemon's log (see `ChatTransport.logEnd`); null until a whole log was. */
+  private fedEnd: number | null = null;
+  /** The last bytes fed: they must come right before what is taken as new. */
+  private fedTail = new Uint8Array(0);
   readonly transport: ChatTransport;
   /** A watcher (the phone): it never starts or configures the agent, never answers on its own, never
    *  sends a queued message and never changes the session; it only shows the log and passes on the
@@ -509,12 +517,34 @@ export class ChatController {
     this.index.clear();
     this.buffer = "";
     this.sentFrom = [];
+    this.fedEnd = null;
+    this.fedTail = new Uint8Array(0);
     this.set({ items: [], busy: false, ready: false, status: null, plan: null, usage: null, tasks: [], agentRuns: [] });
     this.adapter.reset();
   }
 
   private feed(bytes: Uint8Array) {
+    if (this.fedEnd != null) this.fedEnd += bytes.length;
+    const keep = Math.min(FED_TAIL_BYTES, this.fedTail.length + bytes.length);
+    const tail = new Uint8Array(keep);
+    const fromNew = Math.min(keep, bytes.length);
+    tail.set(this.fedTail.subarray(this.fedTail.length - (keep - fromNew)));
+    tail.set(bytes.subarray(bytes.length - fromNew), keep - fromNew);
+    this.fedTail = tail;
     this.feedText(this.decoder.decode(bytes, { stream: true }));
+  }
+
+  /** What `log` holds beyond what has been fed, when it carries straight on from it; null when the transcript has to be
+   *  rebuilt (the session's log started over, or was trimmed past where this left off). */
+  private unseen(log: Uint8Array): Uint8Array | null {
+    const end = this.transport.logEnd?.() ?? null;
+    if (end == null || this.fedEnd == null) return null;
+    const fresh = end - this.fedEnd;
+    const start = log.length - fresh;
+    const tailAt = start - this.fedTail.length;
+    if (fresh < 0 || tailAt < 0) return null;
+    for (let i = 0; i < this.fedTail.length; i++) if (log[tailAt + i] !== this.fedTail[i]) return null;
+    return log.subarray(start);
   }
 
   private feedText(text: string) {
@@ -586,7 +616,8 @@ export class ChatController {
     }
   }
 
-  async attach(handle: number) {
+  /** `rebuild`: what was fed cannot be trusted (the daemon dropped output on its way here). */
+  async attach(handle: number, rebuild = false) {
     if (this.observer || !this.transport.attach) return;
     const gen = ++this.attachGen;
     this.live = false;
@@ -601,18 +632,32 @@ export class ChatController {
       return null;
     });
     if (!snapshot || gen !== this.attachGen) return;
-    this.resetState();
-    this.clock = null;
-    this.loadingHistory = true;
-    if (this.loadHistory) await this.loadHistory(this.context()).catch(() => {});
-    this.loadingHistory = false;
-    if (gen !== this.attachGen) return;
-    this.clock = null;
-    this.isReplaying = true;
-    // As one update: what watches the transcript settles once, on the whole log, and not per line. The
-    // state itself changes as before, line by line; and nothing could paint in between either way.
-    batch(() => this.feed(snapshot));
-    this.isReplaying = false;
+    const fresh = rebuild ? null : this.unseen(snapshot);
+    if (fresh) {
+      // Coming back to a chat this window already has: only what was printed meanwhile. It is still a replay.
+      this.clock = null;
+      this.isReplaying = true;
+      batch(() => this.feed(fresh));
+      this.isReplaying = false;
+    } else {
+      // Read first: what is on screen stays there until its replacement is ready.
+      const applyHistory = this.loadHistory ? await this.loadHistory().catch(() => null) : null;
+      if (gen !== this.attachGen) return;
+      // As one update: what watches the transcript settles once, on the whole log, and not per line. The
+      // state itself changes as before, line by line; and nothing could paint in between either way.
+      batch(() => {
+        this.resetState();
+        this.clock = null;
+        this.loadingHistory = true;
+        applyHistory?.(this.context());
+        this.loadingHistory = false;
+        this.clock = null;
+        this.isReplaying = true;
+        this.feed(snapshot);
+      });
+      this.isReplaying = false;
+      this.fedEnd = this.transport.logEnd?.() ?? null;
+    }
     applied = true;
     for (const chunk of early) this.feed(chunk);
     this.live = true;
@@ -654,12 +699,25 @@ export class ChatController {
     if (!this.state.ready) this.set("ready", true);
   }
 
-  /** Sends now, or queues while the agent works (or while earlier queued messages wait). */
+  /** Whether this agent can be told something during its turn. */
+  get canSteer() {
+    return !!this.adapter.steer;
+  }
+
+  /** A message that can go into the running turn: a command starts something of its own, and a steer carries text only. */
+  private steerable(text: string, images?: ChatImage[]) {
+    return this.canSteer && this.live && this.state.ready && this.state.busy && !this.state.queue.length && !images?.length && !/^[/!]/.test(text.trim());
+  }
+
+  /** Into the running turn when it can go there; else sends now, or queues while the agent works (or while earlier queued messages wait). */
   send(text: string, typed = false, images?: ChatImage[]) {
     if (this.observer) return;
     if ((!text.trim() && !images?.length) || this.state.exited) return;
     // White space beside a picture is no text: it would show as an empty bubble.
     if (!text.trim()) text = "";
+    // As in the agent's own terminal: what is said while it works reaches it at its next step, and it sorts out what to do.
+    // What is already waiting goes first, so that messages stay in order.
+    if (this.steerable(text, images) && this.adapter.steer!(text)) return;
     if (this.queued()) {
       // A message that starts no turn (a picker command, a terminal-only one) runs at once; every other one waits its
       // turn in the daemon's queue, behind whatever a phone sent before it.
