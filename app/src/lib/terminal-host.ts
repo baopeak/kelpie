@@ -23,6 +23,7 @@ import { isMac } from "./platform";
 import { terminalThemeFor } from "./theme";
 import { typedText } from "./typed-text";
 import { osc52Text } from "./osc52";
+import { deviceQueryGate } from "./device-query-gate";
 import type { Settings } from "./types";
 
 /** A session's own terminal theme id (its host's), over the app's; set by lib/ssh-hosts.ts. */
@@ -122,6 +123,11 @@ export class TermView {
       if (text != null && this.suppressReplies === 0 && this.term.element?.contains(document.activeElement)) void writeText(text);
       return true;
     });
+    // Returning true keeps xterm from answering; false lets it answer as usual. These also run on
+    // replayed output, whose queries the daemon already answered: a live copy of them is a repeat too.
+    const deviceQueries = deviceQueryGate();
+    this.term.parser.registerCsiHandler({ final: "c" }, () => deviceQueries.primaryRepeats());
+    this.term.parser.registerCsiHandler({ prefix: ">", final: "c" }, () => deviceQueries.secondaryRepeats());
     this.term.attachCustomKeyEventHandler((e) => this.onKey(e));
     this.term.textarea?.addEventListener("focus", () => (this.focused = true));
     this.term.onScroll(() => this.updateScroll());
