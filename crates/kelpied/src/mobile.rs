@@ -6116,6 +6116,14 @@ mod tests {
                 told.push(later_reply(&mut replies).await);
                 assert_eq!((&told[0]["id"], &told[0]["result"]), (&json!("away"), &json!(true)), "{method}: {told:?}");
             }
+            // Turning the mode off is only started by the call: the race is lost or won by what has taken effect when the publish comes back.
+            for _ in 0..1000 {
+                if d.mobile.tailscale_ended.load(Ordering::SeqCst) > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(d.mobile.tailscale_ended.load(Ordering::SeqCst) > 0, "{method}: it has taken access away by now");
             go.send(()).unwrap();
             told.push(later_reply(&mut replies).await);
             if answered.is_none() && method != "mobile.reset" {
