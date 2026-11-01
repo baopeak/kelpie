@@ -84,7 +84,7 @@ fn tool_kind(tool: &str) -> ToolKind {
     }
 }
 
-/// What a test runs whenever a label is begun on its thread.
+// What a test runs whenever a label is begun on its thread.
 #[cfg(test)]
 thread_local! {
     pub(crate) static LABELLING: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };

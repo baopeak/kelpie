@@ -280,9 +280,9 @@ async fn approving_a_phone_at_a_name_opens_the_window_for_its_passkey() {
     };
     let at_a_name = pair("named", 41, true);
     assert_eq!(m.lock_state(&at_a_name, LockPath::Passkey, Gate::Locked, Some(ORIGIN)), "enrol");
-    assert_eq!(m.lock_facts(&at_a_name).0, true);
+    assert!(m.lock_facts(&at_a_name).0);
     let plain = pair("plain", 42, false);
-    assert_eq!(m.lock_facts(&plain).0, false);
+    assert!(!m.lock_facts(&plain).0);
 }
 
 #[tokio::test]
