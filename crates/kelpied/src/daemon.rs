@@ -1225,12 +1225,7 @@ impl Daemon {
             }
         }
         // What a hook says is about to run is what an approval card labels.
-        if event == "PermissionRequest" {
-            if let Some(tool) = payload.get("tool_name").and_then(Value::as_str) {
-                let cwd = session.spec.lock().cwd.clone();
-                session.set_wait_request(crate::mobile::risk::from_tool(tool, payload.get("tool_input").unwrap_or(&Value::Null), Some(&cwd)));
-            }
-        }
+        session.request_hook(event, &payload);
         if let Some(status) = hook_event_status(agent, event, &payload) {
             session.set_hook_status(status, hook_event_failed(event));
             if hook_event_limited(event, &payload) {

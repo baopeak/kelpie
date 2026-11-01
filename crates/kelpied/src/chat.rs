@@ -371,15 +371,11 @@ fn ask_of(line: &str) -> Option<Ask> {
 /// What a JSON-RPC agent's request asks for. Codex names its command (a string or its words) and directory; ACP names a kind of tool with its raw input. A title and a reason are the agent's own
 /// words, and stay out of this: a request with nothing else to go by is labelled unknown.
 fn rpc_request(method: &str, params: &Value) -> crate::mobile::risk::Request {
-    use crate::mobile::risk::{from_tool, shown_text, Request};
+    use crate::mobile::risk::{command_text, from_tool, shown_text, Request};
     let cwd = params["cwd"].as_str().map(str::to_string);
     match method {
         "item/commandExecution/requestApproval" | "execCommandApproval" => {
-            let command = match &params["command"] {
-                Value::String(s) => Some(s.clone()),
-                Value::Array(words) => Some(words.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")),
-                _ => None,
-            };
+            let command = command_text(&params["command"]);
             Request { tool: Some("exec".into()), shown: shown_text(command.clone().unwrap_or_default()), command, paths: Vec::new(), cwd }
         }
         "applyPatchApproval" => {
@@ -1992,6 +1988,9 @@ mod tests {
         assert_eq!((v2.shown.as_str(), label(&v2, "C:/p").level), ("sudo ls", Level::Dangerous));
         let words = of(json!({"jsonrpc": "2.0", "id": 8, "method": "execCommandApproval", "params": {"command": ["ls", "-la"], "cwd": "C:/p"}}));
         assert_eq!((words.shown.as_str(), label(&words, "C:/p").level), ("ls -la", Level::Low));
+        // Its words stay words: what a shell is told to run is read as the script it is.
+        let scripted = of(json!({"jsonrpc": "2.0", "id": 8, "method": "item/commandExecution/requestApproval", "params": {"command": ["bash", "-lc", "find . -delete"], "cwd": "C:/p"}}));
+        assert_eq!((scripted.shown.as_str(), label(&scripted, "C:/p").level), ("bash -lc 'find . -delete'", Level::Dangerous));
         let elsewhere = of(json!({"jsonrpc": "2.0", "id": 8, "method": "execCommandApproval", "params": {"command": ["ls"], "cwd": "D:/other"}}));
         assert_eq!(label(&elsewhere, "C:/p").level, Level::Medium);
         let patch = of(json!({"jsonrpc": "2.0", "id": 9, "method": "applyPatchApproval", "params": {"fileChanges": {"C:/p/.github/workflows/ci.yml": {}}}}));

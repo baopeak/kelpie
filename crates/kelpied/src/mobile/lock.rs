@@ -9,7 +9,7 @@
 //!   a sweep that runs late lets nothing through. Nothing runs for a device that is not unlocked.
 //! - **A stolen key cannot enrol its own passkey** over one that exists: that takes the desktop (`reset_lock`, the verified app and the person, 5 minutes). A device with no passkey
 //!   yet can enrol, which is the first open after pairing. That leaves a key stolen between pairing and the first open, stated in `docs/architecture.md`.
-//! - **What cannot be read never unlocks.** Settings or a passkey that do not verify, or a key that cannot be read, leave the phone locked.
+//! - **What cannot be read never unlocks.** A passkey that does not verify, or a key that cannot be read, leaves the phone locked, and settings that cannot be believed are tighter than anything the person could have set.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -55,7 +55,7 @@ pub enum Gate {
 /// The app lock's memory, none of which outlives this daemon.
 #[derive(Default)]
 pub struct LockMemory {
-    /// How the lock is set, once it has been checked. Until then, and whenever it cannot be: the strictest.
+    /// How the lock is set, as `check_lock_options` last found it.
     options: Mutex<LockOptions>,
     /// Until when each unlocked device stays so. Absent: locked.
     unlocked: Mutex<HashMap<String, Instant>>,
@@ -90,19 +90,25 @@ fn field(req: &Value, name: &str, limit: usize) -> Result<Vec<u8>, Refusal> {
 }
 
 impl Mobile {
-    /// Reads how the lock is set from the store, if the tag says it is as it was saved: anything else is the strictest.
+    /// Reads how the lock is set from the store, if the tag says it is as it was saved. A store from before the lock has the defaults. Anything else is tighter than whatever the person chose:
+    /// settings that do not verify, a key that cannot be read, or settings gone while a passkey is on record, since they are written with the first one.
     pub(super) fn check_lock_options(&self) {
-        let saved = self.config.lock().lock.clone();
-        let checked = match saved {
-            None => LockOptions::default(),
+        let (saved, passkey) = {
+            let c = self.config.lock();
+            (c.lock.clone(), c.devices.iter().any(|d| d.lock.is_some()))
+        };
+        let believed = match saved {
+            None if !passkey => Some(LockOptions::default()),
+            None => None,
             Some(o) => match self.mac_key(false) {
-                Ok(Some(key)) if store::options_hold(&o, &key) => o,
-                _ => {
-                    tracing::warn!("phone access: the app lock's settings do not verify now: the strictest apply");
-                    LockOptions::default()
-                }
+                Ok(Some(key)) if store::options_hold(&o, &key) => Some(o),
+                _ => None,
             },
         };
+        let checked = believed.unwrap_or_else(|| {
+            tracing::warn!("phone access: the app lock's settings cannot be believed now: the tightest apply");
+            LockOptions::tightest()
+        });
         *self.lock_memory.options.lock() = checked;
     }
 
@@ -260,16 +266,24 @@ impl Mobile {
             Ok(Some(key)) => key,
             _ => return Err(refuse("not_kept", "This computer's credential store would not give the key that seals the passkey.")),
         };
-        let (name, previous) = {
+        // The settings go in with the first passkey: from now on, none in the file is an edit.
+        let mut settings = self.lock_options();
+        store::seal_options(&mut settings, &key);
+        let (name, previous, previous_settings) = {
             let mut c = self.config.lock();
             let d = c.devices.iter_mut().find(|d| d.id == device).ok_or_else(|| refuse("not_paired", "This device is no longer paired."))?;
             let previous = d.lock.replace(LockCredential { cred_id: B64.encode(&cred_id), spki: B64.encode(&spki), origin: origin.to_string(), sign_count, created_at: now_millis(), mac: String::new() });
             store::seal_lock(d, &key);
-            (d.name.clone(), previous)
+            let name = d.name.clone();
+            let previous_settings = c.lock.clone();
+            c.lock.get_or_insert(settings);
+            (name, previous, previous_settings)
         };
         if let Err(e) = self.save() {
             tracing::warn!("phone access: {e:#}");
-            if let Some(d) = self.config.lock().devices.iter_mut().find(|d| d.id == device) {
+            let mut c = self.config.lock();
+            c.lock = previous_settings;
+            if let Some(d) = c.devices.iter_mut().find(|d| d.id == device) {
                 d.lock = previous;
             }
             return Err(refuse("not_kept", "The passkey could not be saved on the computer: try again."));

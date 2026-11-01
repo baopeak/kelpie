@@ -83,7 +83,8 @@ pub struct LockCredential {
     pub mac: String,
 }
 
-/// How the app lock is set. Absent from a file, or not verifying: the strictest, `LockOptions::default`. A program of this user can edit the file, and must not weaken the lock by doing it.
+/// How the app lock is set. A program of this user can edit the file, and must not weaken the lock by doing it: what does not verify, or has gone once a passkey is on record, is
+/// `LockOptions::tightest`, tighter than anything the person could have set. Only a store from before the lock has `LockOptions::default`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LockOptions {
     pub on: bool,
@@ -107,6 +108,11 @@ impl Default for LockOptions {
 }
 
 impl LockOptions {
+    /// What applies when the settings cannot be believed: no choice of the person's is stricter, so going to this from anything weakens nothing.
+    pub fn tightest() -> LockOptions {
+        LockOptions { on: true, idle_s: IDLE_CHOICES[0], recheck: true, plain_read: false, mac: String::new() }
+    }
+
     /// Whether going from `self` to `next` takes any protection away: that needs the person.
     pub fn weakened_by(&self, next: &LockOptions) -> bool {
         (self.on && !next.on) || next.idle_s > self.idle_s || (self.recheck && !next.recheck) || (!self.plain_read && next.plain_read)
@@ -185,7 +191,7 @@ pub struct Store {
     /// Our serve entry is still to be removed: Tailscale would not do it when the mode ended.
     #[serde(default)]
     pub tailscale_remove: bool,
-    /// How the app lock is set (`None`: as `LockOptions::default`, which is every store from before there was a lock).
+    /// How the app lock is set. `None`: a store from before there was a lock, as `LockOptions::default`. It is written when the first passkey is, so with a passkey on record `None` means it was removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock: Option<LockOptions>,
 }
@@ -523,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn lock_settings_edited_in_the_file_do_not_hold_and_a_store_from_before_means_the_strictest() {
+    fn lock_settings_edited_in_the_file_do_not_hold_and_a_store_from_before_has_the_defaults() {
         let key = [3u8; 32];
         let mut o = LockOptions { on: false, idle_s: 3600, recheck: false, plain_read: true, mac: String::new() };
         assert!(!options_hold(&o, &key), "not sealed");
@@ -538,6 +544,21 @@ mod tests {
         let store: Store = serde_json::from_str(r#"{"version":2,"enabled":true}"#).unwrap();
         assert!(store.lock.is_none());
         assert!(LockOptions::default().on && !LockOptions::default().recheck && LockOptions::default().plain_read);
+    }
+
+    #[test]
+    fn nothing_the_person_can_set_is_stricter_than_what_applies_when_the_settings_cannot_be_believed() {
+        for on in [true, false] {
+            for recheck in [true, false] {
+                for plain_read in [true, false] {
+                    for idle_s in IDLE_CHOICES {
+                        let chosen = LockOptions { on, idle_s, recheck, plain_read, mac: String::new() };
+                        assert!(!chosen.weakened_by(&LockOptions::tightest()), "{chosen:?}");
+                    }
+                }
+            }
+        }
+        assert!(LockOptions::tightest().weakened_by(&LockOptions::default()), "the defaults are not it");
     }
 
     #[test]

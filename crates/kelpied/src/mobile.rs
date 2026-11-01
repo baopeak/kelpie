@@ -1437,8 +1437,11 @@ impl Mobile {
             None => preferred.and_then(|ip| ip.parse::<IpAddr>().ok()).filter(|ip| addrs.iter().any(|a| a.ip() == *ip)).map(|ip| listen::host(&SocketAddr::new(ip, port))).or_else(|| lan.first().cloned()).ok_or_else(|| anyhow!("no address to pair on"))?,
         };
         let secure = tls || ts.is_some();
-        let (link, qr) = pair_link(if secure { "https" } else { "http" }, &host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints, name: listen::hostname() })?;
-        Ok(json!({"url": link, "qr": qr_svg(&qr), "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": secure, "tailscale": ts.is_some()}))
+        let scheme = if secure { "https" } else { "http" };
+        let (link, qr) = pair_link(scheme, &host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints, name: listen::hostname() })?;
+        // Whether a phone that pairs at this link can have a passkey, and so type while the lock is on.
+        let passkey = webauthn::rp_id(&format!("{scheme}://{host}")).is_some();
+        Ok(json!({"url": link, "qr": qr_svg(&qr), "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": secure, "tailscale": ts.is_some(), "passkey": passkey}))
     }
 
     /// The person says no to a pairing request (no verification: it adds nothing).
@@ -6180,7 +6183,8 @@ mod tests {
         assert!(!serve.clone().with_headers(&with(&[("origin", "http://127.0.0.1:50000")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
         assert!(!serve.clone().with_headers(&with(&[]), Some("desk.tail1234.ts.net:8443")).secure_origin, "no page at all");
         assert!(!Peer::direct(loopback, false).with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "plain HTTP cannot be an HTTPS page's");
-        assert!(Peer::direct("192.168.1.9:5000".parse().unwrap(), true).with_headers(&with(&[("origin", "https://192.168.1.9:5000")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "a certificate of the person's own");
+        assert!(Peer::direct("192.168.1.9:5000".parse().unwrap(), true).with_headers(&with(&[("origin", "https://desk.example:5000")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "a certificate of the person's own");
+        assert!(!Peer::direct("192.168.1.9:5000".parse().unwrap(), true).with_headers(&with(&[("origin", "https://192.168.1.9:5000")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "at a number there can be no passkey");
         assert_eq!(listen::shown(listen::BEHIND_SERVE), "Tailscale");
     }
 
