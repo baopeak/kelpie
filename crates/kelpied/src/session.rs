@@ -1459,6 +1459,10 @@ pub(crate) mod fake {
         session.tick(now);
     }
 
+    pub fn lock_is_held(session: &Session) -> bool {
+        session.inner.is_locked()
+    }
+
     /// The agent reports a permission request; returns the wait's `waiting_since`.
     pub fn wait_on_user(session: &Session) -> u64 {
         let now = Instant::now();

@@ -704,19 +704,36 @@ async fn the_same_request_twice_is_two_until_each_has_run() {
     assert_eq!(r.term.dangerous_wait(), None);
 }
 
-/// Built to make reading it explode. It reaches the card, and past the list's limit, and what comes of it is a label that says it was not read, soon.
+/// Built to make reading it explode. It reaches the card, and past the list's limit, and what comes of it is a label that says it was not read, soon, with the session's lock let go all the while.
+/// On a thread of its own, so that a label that hangs fails the limit here instead of holding up the test.
 #[tokio::test]
 async fn a_command_built_to_be_slow_holds_nothing_up() {
     let r = rig();
-    let began = std::time::Instant::now();
-    r.daemon.hook(&hook("PermissionRequest", "Bash", &"find . -exec ".repeat(40))).unwrap();
-    for i in 0..16 {
-        r.daemon.hook(&hook("PermissionRequest", "Bash", &format!("{}{i}", "xargs ".repeat(10900)))).unwrap();
-    }
-    crate::session::fake::wait_on_user(&r.term);
-    assert_eq!(r.term.screen_view(10).wait.unwrap().risk.level, risk::Level::Unknown);
-    assert_eq!(r.term.dangerous_wait(), None);
-    assert!(began.elapsed() < std::time::Duration::from_secs(30), "{:?}", began.elapsed());
+    let (daemon, term) = (r.daemon.clone(), r.term.clone());
+    let runtime = tokio::runtime::Handle::current();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _inside = runtime.enter();
+        let labels = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let (counted, watched) = (labels.clone(), term.clone());
+        risk::LABELLING.with(|probe| {
+            *probe.borrow_mut() = Some(Box::new(move || {
+                assert!(!crate::session::fake::lock_is_held(&watched), "a label is worked out with the session's lock let go");
+                counted.set(counted.get() + 1);
+            }));
+        });
+        daemon.hook(&hook("PermissionRequest", "Bash", &"find . -exec ".repeat(40))).unwrap();
+        for i in 0..16 {
+            daemon.hook(&hook("PermissionRequest", "Bash", &format!("{}{i}", "xargs ".repeat(10900)))).unwrap();
+        }
+        crate::session::fake::wait_on_user(&term);
+        let level = term.screen_view(10).wait.unwrap().risk.level;
+        let dangerous = term.dangerous_wait();
+        let _ = done.send((level, dangerous, labels.get()));
+    });
+    let (level, dangerous, labels) = tokio::time::timeout(Duration::from_secs(60), finished).await.expect("a label took far too long").expect("a label was worked out under the lock, or panicked");
+    assert_eq!((level, dangerous), (risk::Level::Unknown, None));
+    assert!(labels > 16, "the list was read, past its limit too: {labels}");
 }
 
 #[tokio::test]

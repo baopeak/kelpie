@@ -84,7 +84,19 @@ fn tool_kind(tool: &str) -> ToolKind {
     }
 }
 
+/// What a test runs whenever a label is begun on its thread.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LABELLING: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub fn label(request: &Request, worktree: &str) -> Label {
+    #[cfg(test)]
+    LABELLING.with(|probe| {
+        if let Some(probe) = &*probe.borrow() {
+            probe();
+        }
+    });
     let mut found = Found::default();
     let where_runs = Paths { cwd: request.cwd.as_deref().unwrap_or(worktree), worktree };
     if request.cwd.as_deref().is_some_and(|cwd| !where_runs.inside(cwd)) {
