@@ -22,6 +22,9 @@ open:  IK handshake → hello {locked: true, challenge} (no sessions, no project
 leave: visibilitychange hidden → verb lock_now; idle expiry on the daemon → `locked` → follows stopped, grants stopped
 ```
 
+## Note from the Web Push phase
+`push_info`, `push_sub`, `push_unsub` and `push_test` must be refused while locked. `push_test` does not pass through `Conn::run`: `Conn::reply` hands it to `push_test` first, so a gate placed in `run` would miss it.
+
 ## Requirements
 - Functional
   - **Verification** (`mobile/webauthn.rs`, ES256 only, `p256` crate; `webauthn-rs` not used, it brings OpenSSL [U]): RP ID hash = SHA-256(fqdn); flags UP and UV set; `clientDataJSON.type`, `challenge` (single use, 60 s), `origin` exact; signature over authData ‖ SHA-256(clientData); sign count may stay 0, a decrease refuses. Enrol takes `getPublicKey()` SPKI, attestation `none`, so no CBOR parser.
