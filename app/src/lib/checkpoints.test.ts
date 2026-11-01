@@ -1,5 +1,58 @@
 import { describe, expect, it } from "vitest";
-import { artifactKind, markdownBlocks, sourceNote, turnStats, turnsByMessage, visibleTurns, type TurnList, type TurnRecord } from "./checkpoints";
+import { artifactKind, attemptUndo, markdownBlocks, safelyTicked, sourceNote, turnStats, turnsByMessage, visibleTurns, type PlanItem, type TurnList, type TurnRecord, type UndoPlan } from "./checkpoints";
+
+describe("attemptUndo", () => {
+  const item = (path: string, state: PlanItem["state"], action: PlanItem["action"] = "restore"): PlanItem => ({ path, action, state, with: [], reason: null });
+  const planOf = (...items: PlanItem[]): UndoPlan => ({ items, owner_working: false, n: 1 });
+
+  it("sends the ticked files and confirms the risky ones", async () => {
+    const calls: [string[], string[]][] = [];
+    const undo = async (paths: string[], confirm: string[]) => {
+      calls.push([paths, confirm]);
+      return { applied: true, files: paths };
+    };
+    const r = await attemptUndo({ plan: async () => planOf(), undo }, [item("a", "clean"), item("b", "modified"), item("c", "clean")], new Set(["a", "b"]));
+    expect(r.kind).toBe("applied");
+    expect(calls).toEqual([[["a", "b"], ["b"]]]);
+  });
+
+  it("drops a ticked confirmation when the undo is refused, so one more press cannot overwrite the save", async () => {
+    const confirmed: string[][] = [];
+    const undo = async (_paths: string[], confirm: string[]) => {
+      confirmed.push(confirm);
+      return { applied: false };
+    };
+    // The person had ticked `saved`; a save during the undo got it refused, and it is still risky.
+    const fresh = planOf(item("saved", "modified"), item("other", "clean"), item("done", "clean", "skip"));
+    const api = { plan: async () => fresh, undo };
+    const first = await attemptUndo(api, [item("saved", "modified"), item("other", "clean")], new Set(["saved", "other"]));
+    if (first.kind === "applied") throw new Error("it was refused");
+    expect(first.kind).toBe("refused");
+    expect(first.plan).toBe(fresh);
+    expect([...first.picked]).toEqual(["other"]);
+    await attemptUndo(api, first.plan!.items, first.picked);
+    expect(confirmed).toEqual([["saved"], []]);
+  });
+
+  it("reports a failure with the plan as it is now, finished files no longer ticked", async () => {
+    const fresh = planOf(item("put-back", "clean", "skip"), item("held", "clean"));
+    const r = await attemptUndo({ plan: async () => fresh, undo: async () => Promise.reject(new Error("git restore: held")) }, [item("put-back", "clean"), item("held", "clean")], new Set(["put-back", "held"]));
+    if (r.kind !== "failed") throw new Error("it failed");
+    expect(String(r.error)).toContain("git restore: held");
+    expect([...r.picked]).toEqual(["held"]);
+  });
+
+  it("keeps nothing ticked when the plan cannot be read again", async () => {
+    const r = await attemptUndo({ plan: async () => Promise.reject(new Error("gone")), undo: async () => ({ applied: false }) }, [item("a", "modified")], new Set(["a"]));
+    if (r.kind === "applied") throw new Error("it was refused");
+    expect(r.plan).toBeNull();
+    expect(r.picked.size).toBe(0);
+  });
+
+  it("ticks only what is safe to begin with", () => {
+    expect([...safelyTicked(planOf(item("a", "clean"), item("b", "modified"), item("c", "shared"), item("d", "clean", "skip")))]).toEqual(["a"]);
+  });
+});
 
 const rec = (n: number, extra: Partial<TurnRecord> = {}): TurnRecord => ({
   n, kind: n === 0 ? "baseline" : "turn", at: n * 10, started: n * 10 - 5, source: "hook", approximate: false,
