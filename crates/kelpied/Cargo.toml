@@ -46,6 +46,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 # The processes of a session on macOS and Linux: names, memory, CPU, parents (procs.rs; Windows reads its own
 # table). The same build as the memory meter of the app.
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+# Web Push, signed and encrypted by the daemon itself (notify/web_push.rs). The `web-push` crate needs OpenSSL through `ece`, which Windows builds here stay free of.
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "std"] }
+hkdf = "0.12"
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 # The password typed into the verification prompt does not outlive the check (user_presence.rs).
 zeroize = "1"
 

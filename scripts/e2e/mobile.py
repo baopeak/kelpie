@@ -30,7 +30,8 @@ as lost with its text in the stopped chat, also after a reload, until discarded;
 code gets no answer, too many unknown phones are rate limited and the desktop says so, the kill switch and the audit list
 (last, so the limiter cannot refuse a pairing above). On an HTTPS origin (a certificate of this run's own, on 127.0.0.1, which the phone's browser
 is told to accept; needs Python's `cryptography`): the install step, no camera falling back to pasting the link, a pairing that is a secure origin and may
-type. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, never the real one): each state's instruction, the two-step dialog, off.
+type. Alerts on a real service worker (`KELPIE_PUSH_TEST_BASE` in tauri-driver's environment, a port this script serves as a stand-in for a push service, which the daemon really POSTs to): the sheet's button, a test alert
+and a needs-you event taken from the stand-in, opened with the browser's keys and handed to the worker through CDP's `ServiceWorker.deliverPushMessage`, which shows the notification; a tap on it, as a synthetic `notificationclick` in the worker. The browser's own `pushManager.subscribe` is replaced in the page, since it would reach a real push service, which tests never do. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, never the real one): each state's instruction, the two-step dialog, off.
 """
 import asyncio
 import base64
@@ -64,7 +65,7 @@ def isolated_env():
         raise SystemExit(f"mobile.py stops a daemon: set KELPIE_ENDPOINT to an isolated name in its own environment (got {endpoint or 'nothing'}{', the default' if default else ''}). Refusing.")
     if not data or os.path.normcase(os.path.normpath(data)) == real:
         raise SystemExit("mobile.py stops a daemon: set KELPIE_DATA_DIR to an isolated folder in its own environment (not the real Kelpie folder). Refusing.")
-    keep = {k: v for k, v in os.environ.items() if k in ("PATH", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOME", "KELPIE_LOAD_FORCE", "KELPIE_E2E")}
+    keep = {k: v for k, v in os.environ.items() if k in ("PATH", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOME", "KELPIE_LOAD_FORCE", "KELPIE_E2E", "KELPIE_PUSH_TEST_BASE")}
     # The daemon this script starts has only a fake for Tailscale: `KELPIE_E2E` with `KELPIE_TAILSCALE_BIN`.
     return {**keep, "KELPIE_ENDPOINT": endpoint, "KELPIE_DATA_DIR": data, "KELPIE_TEST_USER_PRESENCE": "approve", "KELPIE_E2E": "1", "KELPIE_TAILSCALE_BIN": FAKE_TS[0]}
 
@@ -121,13 +122,15 @@ ISOLATED = isolated_env()
 edgedriver = sys.argv[sys.argv.index("--edgedriver") + 1] if "--edgedriver" in sys.argv else os.environ.get("KELPIE_EDGEDRIVER", r"D:\Works\edgedriver\msedgedriver.exe")
 S = "window.__kelpie.store"
 PORT = int(os.environ.get("KELPIE_E2E_MOBILE_PORT", "48170"))
+# Where this phone's msedgedriver listens: another run's may hold the usual port.
+PHONE_DRIVER = int(os.environ.get("KELPIE_E2E_PHONE_DRIVER_PORT", "9515"))
 
 
 class Phone:
     """A minimal W3C WebDriver client for msedgedriver (Edge with mobile emulation)."""
 
     def __init__(self):
-        self.proc = subprocess.Popen([edgedriver, "--port=9515"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.proc = subprocess.Popen([edgedriver, f"--port={PHONE_DRIVER}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)
         # The performance log carries the page's WebSocket frames (what it sends and what it is sent).
         # The browser log has what the page's console has, from the moment it loads: content security policy violations too.
@@ -135,12 +138,14 @@ class Phone:
             "args": ["--headless=new", "--window-size=412,900", "--no-first-run", f"--user-data-dir={tempfile.mkdtemp(prefix='phone-profile-', dir=scratch)}"],  # a phone of its own each run: what an earlier run paired is not this one's
             "mobileEmulation": {"deviceMetrics": {"width": 412, "height": 900, "pixelRatio": 2.0}, "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"},
         }}}}
-        self.sid = self.req("POST", "/session", caps)["sessionId"]
+        made = self.req("POST", "/session", caps)
+        self.sid = made["sessionId"]
+        self.debugger = made.get("capabilities", {}).get("ms:edgeOptions", {}).get("debuggerAddress")
         self.frames = {}  # the performance log is read once: what was read is kept here
 
     def req(self, method, path, body=None):
         data = json.dumps(body).encode() if body is not None else None
-        r = urllib.request.Request("http://127.0.0.1:9515" + path, data=data, method=method, headers={"Content-Type": "application/json"})
+        r = urllib.request.Request(f"http://127.0.0.1:{PHONE_DRIVER}" + path, data=data, method=method, headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(r, timeout=60) as resp:
                 return json.loads(resp.read() or b"{}").get("value", {})
@@ -189,6 +194,38 @@ class Phone:
             self.req("DELETE", f"/session/{self.sid}")
         finally:
             self.proc.kill()
+
+
+class Cdp:
+    """One DevTools target of the phone's browser (`page` or `service_worker`), over its own socket."""
+
+    def __init__(self, debugger, kind, url_start):
+        from websockets.sync.client import connect
+
+        with urllib.request.urlopen(f"http://{debugger}/json/list", timeout=10) as resp:
+            listed = json.loads(resp.read())
+        target = next((t for t in listed if t["type"] == kind and t["url"].startswith(url_start)), None)
+        if not target:
+            raise RuntimeError(f"no {kind} at {url_start}: {[(t['type'], t['url'][:60]) for t in listed]}")
+        self.ws = connect(target["webSocketDebuggerUrl"], max_size=None, open_timeout=10)
+        self.n = 0
+        self.events = []
+
+    def call(self, method, params=None, timeout=15):
+        self.n += 1
+        self.ws.send(json.dumps({"id": self.n, "method": method, "params": params or {}}))
+        end = time.time() + timeout
+        while time.time() < end:
+            m = json.loads(self.ws.recv(timeout=max(0.1, end - time.time())))
+            if m.get("id") == self.n:
+                if "error" in m:
+                    raise RuntimeError(f"{method}: {m['error']}")
+                return m.get("result", {})
+            self.events.append(m)
+        raise TimeoutError(method)
+
+    def close(self):
+        self.ws.close()
 
 
 def http_get(url, headers=None):
@@ -814,6 +851,130 @@ for n in (1, 2, 3):
     phone.go(base)
     phone.wait(LIVE, 30)
 
+    # ---------- alerts: a real service worker, a stand-in for the push service, nothing sent to a real one ----------
+    push_base = os.environ.get("KELPIE_PUSH_TEST_BASE", "")
+    run.check("tauri-driver has this script's stand-in for a push service in its environment", push_base.startswith("http://127.0.0.1:"), "set KELPIE_PUSH_TEST_BASE to http://127.0.0.1:<free port>")
+    if push_base.startswith("http://127.0.0.1:"):
+        origin = base.rstrip("/")
+        push = ps.FakePushService(int(push_base.rsplit(":", 1)[1]))
+        sub = ps.browser_subscription(push.base, "/push/page")
+        # Everything up to the browser's own push service is real; that one call is replaced, as it would reach Apple, Google, Mozilla or Microsoft.
+        phone.js("""
+            const [endpoint, p256dh, auth] = arguments;
+            const bytes = (t) => Uint8Array.from(atob(t.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)).buffer;
+            let held = null;
+            const make = (options) => (held = { endpoint, options, getKey: (name) => bytes(name === "p256dh" ? p256dh : auth), unsubscribe: async () => { held = null; window.__unsubscribed = (window.__unsubscribed || 0) + 1; return true; } });
+            PushManager.prototype.subscribe = async function (options) { window.__subscribeKey = options.applicationServerKey; return make({ applicationServerKey: options.applicationServerKey.buffer ?? options.applicationServerKey }); };
+            PushManager.prototype.getSubscription = async function () { return held; };
+        """, sub["endpoint"], sub["p256dh"], sub["auth"])
+        page_cdp = Cdp(phone.debugger, "page", origin)
+        phone.req("POST", f"/session/{phone.sid}/permissions", {"descriptor": {"name": "notifications"}, "state": "granted"})
+        run.check("the app's service worker runs here", bool(phone.wait("return navigator.serviceWorker.ready.then(() => true) && !!navigator.serviceWorker.controller || navigator.serviceWorker.getRegistration().then((r) => !!r)", 20)))
+        phone.js("document.querySelector('.conn').click()")
+        run.check("the sheet offers alerts on a page that can have them", phone.wait("return document.querySelector('[data-alerts]')?.dataset.alerts", 15) == "off" and bool(phone.js("return !!document.querySelector('[data-alerts-on]')")), str(phone.js("return document.querySelector('[data-alerts]')?.dataset.alerts")))
+        phone.js("document.querySelector('[data-alerts-on]').click()")
+        run.check("turning alerts on subscribes", phone.wait("return document.querySelector('[data-alerts]')?.dataset.alerts === 'on'", 20) is True, str(phone.js("return document.querySelector('.alerts-row')?.textContent")))
+        alert_device = next((x for x in daemon(d, "mobile.status")["devices"] if x.get("push")), None)
+        run.check("…and the computer has it, for this phone", bool(alert_device), str(daemon(d, "mobile.status")["devices"]))
+        run.check("…and Settings counts it", daemon(d, "notify.get")["webpush"]["devices"] == 1)
+        phone.js("document.querySelector('[data-alerts-test]').click()")
+        run.check("a test alert reaches the stand-in", wait(lambda: len(push.at("/push/page")) >= 1, 15) is True, str(len(push.at("/push/page"))))
+        run.check("…and the sheet says it went", "Sent" in (phone.wait("return document.querySelector('[data-alerts-tested]')?.textContent?.includes('Sent') && document.querySelector('[data-alerts-tested]').textContent", 15) or ""))
+        phone.js("[...document.querySelectorAll('.sheet .btn')].find((b) => b.textContent === 'Close').click()")
+
+        # What the service would hand the browser goes to the real worker, which shows it.
+        page_cdp.call("ServiceWorker.enable")
+        time.sleep(1)
+        page_cdp.call("Runtime.evaluate", {"expression": "1"})  # what came meanwhile is read with its answer
+        # The https page of the step above has a worker of its own: this origin's is the one.
+        registration = next((r["registrationId"] for e in page_cdp.events if e.get("method") == "ServiceWorker.workerRegistrationUpdated" for r in e["params"]["registrations"] if r["scopeURL"].startswith(origin) and not r["isDeleted"]), None)
+        run.check("the worker's registration is known to DevTools", registration is not None, str([e.get("method") for e in page_cdp.events][:8]))
+        shell_alert = daemon(d, "session.create", {"kind": "shell", "cwd": proj, "name": "alert-secret-name", "project_id": pid})
+        wait(lambda: next((x for x in daemon(d, "session.list") if x["id"] == shell_alert["id"]), {}).get("status") == "idle", 60)
+        hook_alert = lambda event: daemon(d, "hook.report", {"session_id": shell_alert["id"], "agent": "claude", "payload": {"hook_event_name": event}})  # noqa: E731
+        hook_alert("UserPromptSubmit")
+        wait(lambda: next((x for x in daemon(d, "session.list") if x["id"] == shell_alert["id"]), {}).get("status") == "working", 15)
+        before = len(push.at("/push/page"))
+        hook_alert("PermissionRequest")
+        run.check("a needs-you event reaches the stand-in", wait(lambda: len(push.at("/push/page")) > before, 15) is True)
+        taken = push.at("/push/page")[before] if len(push.at("/push/page")) > before else None
+        plain = ps.open_alert(taken["body"], sub) if taken else b"{}"
+        note = json.loads(plain).get("notification", {})
+        run.check("…opened with the browser's keys it holds no text of the session and links to it", b"alert-secret-name" not in plain and note.get("title") == "Kelpie" and note.get("navigate", "").endswith(f"#s={shell_alert['id']}&a=1"), plain.decode()[:200])
+        run.check("…and on the wire it is ciphertext", taken is not None and b"alert-secret-name" not in taken["body"] and b"navigate" not in taken["body"])
+        shown_js = "const done = arguments[0]; navigator.serviceWorker.getRegistration().then((r) => r.getNotifications()).then((n) => done(n.map((x) => ({title: x.title, body: x.body, tag: x.tag, icon: x.icon, navigate: x.data && x.data.navigate}))), (e) => done({err: String(e)}));"
+        def shown():
+            got = phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": shown_js, "args": []})
+            return got if isinstance(got, list) and got else None
+        # A cold worker first, as on a real phone: stopped, with nothing attached to it, and only then a push. What follows attaches to it, and could no longer show this.
+        if registration is not None:
+            page_cdp.call("ServiceWorker.stopAllWorkers")
+            def worker_stopped():
+                page_cdp.call("Runtime.evaluate", {"expression": "1"})  # what the browser said of its workers meanwhile is read with this
+                states = [v.get("runningStatus") for e in page_cdp.events if e.get("method") == "ServiceWorker.workerVersionUpdated" for v in e["params"]["versions"] if v.get("registrationId") == registration]
+                return bool(states) and states[-1] == "stopped"
+            run.check("the worker is stopped, as a phone's is between alerts", wait(worker_stopped, 10) is True)
+            cold = json.loads(plain)
+            cold["notification"]["tag"] = "cold-start"
+            page_cdp.call("ServiceWorker.deliverPushMessage", {"origin": origin, "registrationId": registration, "data": json.dumps(cold)})
+            # The browser reconciles `getNotifications` with what it has on display: a read at the very moment of showing may find nothing.
+            time.sleep(1)
+            cold_shown = wait(lambda: (n := shown()) and [x for x in n if x["tag"] == "cold-start"], 20)
+            run.check("a push starts a stopped worker, which shows it", bool(cold_shown) and cold_shown[0]["body"] == note.get("body"), str(cold_shown))
+            phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": "const done = arguments[0]; navigator.serviceWorker.getRegistration().then((r) => r.getNotifications()).then((n) => { n.forEach((x) => x.close()); done(true); }, () => done(false));", "args": []})
+        delivered = False
+        # What the worker does with it, from inside: whether the push reached its handler, and what became of `showNotification`.
+        sw_cdp = Cdp(phone.debugger, "service_worker", origin) if registration is not None else None
+        if sw_cdp:
+            sw_cdp.call("Runtime.evaluate", {"expression": """(() => {
+                const seen = (self.__seen = {pushes: 0, shown: [], failed: []});
+                self.addEventListener("push", () => void seen.pushes++);
+                const real = self.registration.showNotification.bind(self.registration);
+                self.registration.showNotification = (title, options) => real(title, options).then(() => void seen.shown.push({title, tag: options.tag}), (e) => { seen.failed.push(String(e)); throw e; });
+            })()"""})
+        worker_saw = lambda: json.loads(sw_cdp.call("Runtime.evaluate", {"expression": "JSON.stringify(self.__seen ?? null)", "returnByValue": True})["result"]["value"] or "null")  # noqa: E731
+        if registration is not None:
+            try:
+                page_cdp.call("ServiceWorker.deliverPushMessage", {"origin": origin, "registrationId": registration, "data": plain.decode()})
+                delivered = True
+            except RuntimeError as e:
+                print(f"note: ServiceWorker.deliverPushMessage did not work here: {e}", flush=True)
+        # The browser reconciles `getNotifications` with what it has on display, so it is looked at once the worker says it has shown one.
+        settled = wait(lambda: (s := worker_saw()) and (s["shown"] or s["failed"]) and s, 10) if delivered and sw_cdp else None
+        run.check("the push reaches the worker's handler, and `showNotification` succeeds", bool(settled) and settled["pushes"] == 1 and len(settled["shown"]) == 1 and not settled["failed"], str(settled or (worker_saw() if sw_cdp else None)))
+        notes = wait(shown, 10) if delivered else None
+        if delivered and not notes:
+            page_cdp.call("Runtime.evaluate", {"expression": "1"})  # what the browser said of its workers meanwhile is read with this
+            workers = [(r["registrationId"], r["scopeURL"], r["isDeleted"]) for e in page_cdp.events if e.get("method") == "ServiceWorker.workerRegistrationUpdated" for r in e["params"]["registrations"]]
+            versions = [(v.get("registrationId"), v.get("runningStatus"), v.get("status")) for e in page_cdp.events if e.get("method") == "ServiceWorker.workerVersionUpdated" for v in e["params"]["versions"]]
+            raw = phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": shown_js, "args": []})
+            print(f"note: no notification from registration {registration} of {workers}; versions {versions[-6:]}; permission {phone.js('return Notification.permission')}; getNotifications says {raw}", flush=True)
+            # Which of the two was lost: the push, or the notification? The check below still fails.
+            page_cdp.call("ServiceWorker.deliverPushMessage", {"origin": origin, "registrationId": registration, "data": plain.decode()})
+            print(f"note: a second push of the same shows: {wait(shown, 10)}; the worker saw {worker_saw()}", flush=True)
+        run.check("the worker shows it: the sentence, its tag, its link", bool(notes) and notes[0]["title"] == "Kelpie" and notes[0]["tag"] == note.get("tag") and notes[0]["body"] == note.get("body") and notes[0]["navigate"] == note.get("navigate"), str(notes))
+        run.check("…and an icon that needs no request to the computer", bool(notes) and notes[0]["icon"].startswith("data:image/png;base64,"), str(notes)[:200])
+        if notes:
+            # A person's tap cannot be made through DevTools: the event is dispatched in the worker, on the notification it shows, and the rest is the worker's own code.
+            hook_alert("Stop")
+            wait(lambda: next((x for x in daemon(d, "session.list") if x["id"] == shell_alert["id"]), {}).get("status") != "waiting", 15)
+            phone.wait("return ![...document.querySelectorAll('.row')].some((r) => r.textContent.includes('alert-secret-name') && r.classList.contains('waiting'))", 10)
+            sw_cdp.call("Runtime.evaluate", {"expression": "self.registration.getNotifications().then((ns) => { const e = new ExtendableEvent('notificationclick'); e.notification = ns[0]; self.dispatchEvent(e); })", "awaitPromise": True})
+            run.check("a tap on it opens the session in the running app", bool(phone.wait("return !!document.querySelector('.session')", 15)))
+            handled = phone.wait("return document.body.textContent.includes('Already handled') && document.body.textContent.match(/Already handled[^.]*\\./)[0]", 10)
+            run.check("…and says when what it was about has been dealt with", bool(handled), str(handled))
+            phone.js("document.querySelector('#top .icon')?.click()")
+        if sw_cdp:
+            sw_cdp.close()
+        daemon(d, "session.close", {"handle": shell_alert["handle"]})
+        phone.js("document.querySelector('.conn').click()")
+        phone.wait("return !!document.querySelector('[data-alerts-off]')", 10)
+        phone.js("document.querySelector('[data-alerts-off]').click()")
+        run.check("turning alerts off ends it on both sides", wait(lambda: daemon(d, "notify.get")["webpush"]["devices"] == 0, 10) is True and phone.wait("return document.querySelector('[data-alerts]')?.dataset.alerts === 'off'", 10) is True)
+        phone.js("[...document.querySelectorAll('.sheet .btn')].find((b) => b.textContent === 'Close').click()")
+        page_cdp.close()
+        push.stop()
+
     # ---------- Tailscale mode, against a fake CLI: what Settings says, the two steps, off ----------
     run.check("tauri-driver has this script's fake Tailscale in its environment, so the daemon the app starts does too", os.environ.get("KELPIE_TAILSCALE_BIN") == FAKE_TS[0], f"KELPIE_TAILSCALE_BIN must be {FAKE_TS[0]}")
     d.js(f"{S}.openSettings('mobile')")
@@ -832,7 +993,15 @@ for n in (1, 2, 3):
     run.check("the price is stated: the name in public certificate logs", "certificate logs" in d.js("return document.querySelector('[data-tailscale-privacy]')?.textContent ?? ''"))
     run.shot("22-tailscale-ready")
     d.js("document.querySelector('[data-setting=\"mobile-tailscale\"] .switch').click()")
-    run.check("turning it on publishes it", d.wait(f"return {ts_serve[7:]} === 'ours'", 20) is True, str(ps.fake_tailscale_calls(FAKE_TS[2])[-3:]))
+    try:
+        published = d.wait(f"return {ts_serve[7:]} === 'ours'", 20) is True
+    except TimeoutError:
+        published = False
+    # What it is about, if it did not: the steps go on only when it did.
+    said = "" if published else f"; Settings says {d.js('return [...document.querySelectorAll(`.form-note.error, [data-setting=mobile-tailscale] .muted-inline`)].map((e) => e.textContent)')}; the daemon says {daemon(d, 'mobile.status').get('tailscale')}"
+    run.check("turning it on publishes it", published, str(ps.fake_tailscale_calls(FAKE_TS[2])[-6:]) + said)
+    if not published:
+        raise TimeoutError("Tailscale mode did not turn on")
     run.check("…and says where", ps.FAKE_TAILNET_NAME in d.js(ts_text))
     d.wait("return !!document.querySelector('[data-tailscale-pair]')", 10)
     d.js("document.querySelector('[data-tailscale-pair]').click()")

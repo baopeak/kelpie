@@ -249,6 +249,7 @@ fn serve() -> Result<()> {
     let result = rt.block_on(async {
         tokio::spawn(daemon.clone().ticker());
         tokio::spawn(mobile::autostart(daemon.clone()));
+        daemon.notifier.resume();
         server::serve(daemon.clone(), kelpie_proto::endpoint()).await
     });
     // Stop the ticker before the final save so the two never persist concurrently.

@@ -43,7 +43,7 @@ pub const BAD_CODE: u16 = 4403;
 pub const TOO_MANY: u16 = 4429;
 pub const BUSY: u16 = 4503;
 /// The phone's connection details, from the listener that accepted it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Peer {
     pub addr: SocketAddr,
     /// The phone reached us over HTTPS: this listener's own, or Tailscale Serve's in front of the loopback listener.
@@ -55,17 +55,19 @@ pub struct Peer {
     /// A page whose origin is this computer's HTTPS origin. A program on this machine can claim it through the loopback listener, and then still needs the
     /// pairing secret and the person, so it records how a person paired, and is no proof against that program.
     pub secure_origin: bool,
+    /// The `Origin` of the upgrade: where the browser says the page is. The route has already checked it against `Host`, and on a TLS listener the browser has checked the certificate for that name. Only this device's own alerts go by it.
+    pub origin: Option<String>,
 }
 
 impl Peer {
     /// A connection accepted directly from the network (`tls`: by a listener with a certificate).
     pub fn direct(addr: SocketAddr, tls: bool) -> Peer {
-        Peer { addr, tls, through_serve: false, client: None, secure_origin: false }
+        Peer { addr, tls, through_serve: false, client: None, secure_origin: false, origin: None }
     }
 
     /// A connection accepted by the loopback listener behind Tailscale Serve.
     pub fn behind_serve(addr: SocketAddr) -> Peer {
-        Peer { addr, tls: true, through_serve: true, client: None, secure_origin: false }
+        Peer { addr, tls: true, through_serve: true, client: None, secure_origin: false, origin: None }
     }
 
     /// The address the limits and the desktop go by. Never this machine for what comes through serve: every phone behind it
@@ -83,6 +85,7 @@ impl Peer {
     /// them another limiter bucket, and no session.
     pub fn with_headers(mut self, headers: &HeaderMap, ts_origin: Option<&str>) -> Peer {
         let origin = headers.get(header::ORIGIN).and_then(|o| o.to_str().ok());
+        self.origin = origin.map(str::to_string);
         if self.through_serve {
             self.client = forwarded_client(headers);
             self.secure_origin = ts_origin.is_some_and(|ts| origin.and_then(|o| o.strip_prefix("https://")) == Some(ts));

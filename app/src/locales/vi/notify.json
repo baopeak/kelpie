@@ -83,5 +83,13 @@
   "a webhook": "một webhook",
   "Nothing is sent off this computer.": "Không có gì được gửi ra khỏi máy này.",
   "No event is selected, so nothing will be sent.": "Chưa chọn sự kiện nào nên sẽ không gửi gì.",
-  "Sending to {channels}.": "Đang gửi tới {channels}."
+  "Sending to {channels}.": "Đang gửi tới {channels}.",
+  "1 phone": "1 điện thoại",
+  "{n} phones": "{n} điện thoại",
+  "Phones with alerts on: {n}": "Số điện thoại đang bật cảnh báo: {n}",
+  "No phone has alerts on. Turn them on in the phone app, from its connection sheet: it needs phone access over HTTPS or Tailscale.": "Chưa có điện thoại nào bật cảnh báo. Hãy bật trong ứng dụng trên điện thoại, ở bảng kết nối: cần truy cập qua HTTPS hoặc Tailscale.",
+  "A computer that is asleep sends nothing: no alert can reach you until it wakes. Keep computer awake (Settings → Agents) keeps it up while agents work.": "Máy tính đang ngủ thì không gửi được gì: không cảnh báo nào đến được bạn cho đến khi máy thức. Giữ máy luôn thức (Cài đặt → Agent) giữ máy thức khi agent đang làm.",
+  "Alerts on your phone": "Cảnh báo trên điện thoại",
+  "The computer sends a phone that turned alerts on a short message with no session text, through that phone's own push service. No account, no server of ours.": "Máy tính gửi cho điện thoại đã bật cảnh báo một thông báo ngắn không chứa nội dung phiên, qua dịch vụ đẩy của chính điện thoại đó. Không cần tài khoản, không qua máy chủ nào của chúng tôi.",
+  "alerts on": "đang bật cảnh báo"
 }

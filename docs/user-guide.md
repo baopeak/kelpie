@@ -512,8 +512,18 @@ list keeps everything either way.
 #### On your phone, with the window closed
 
 Settings → Notifications → *Off this computer* sends the same events from the session daemon,
-which keeps running when you close the window. Nothing is sent until you switch a channel on.
+which keeps running when you close the window. Nothing is sent until you switch a channel on or a phone
+turns its alerts on. A computer that is asleep sends nothing; *Keep computer awake* (Settings → Agents)
+keeps it up while agents work.
 
+- **Alerts on the phone app**: on a phone paired over HTTPS or Tailscale, open the connection sheet (tap
+  the connection indicator) and press *Turn on alerts*. On an iPhone the app must be installed to the Home
+  Screen first. *Send a test alert* checks it. The computer signs and encrypts each alert itself and hands it
+  to the phone's own push service (Apple's, Google's, Mozilla's or Microsoft's); no account is needed and no
+  server of ours is involved. An alert says only "A session needs you" or the like, in the phone's language,
+  and opens the session when tapped; no project, session or command text is in it. Plain `http://` pages
+  cannot get alerts: the browser does not offer them there, and the sheet says so. Removing the phone in
+  Settings → Mobile ends its alerts.
 - **ntfy**: switch it on, install the ntfy app and subscribe to the topic Kelpie shows (*Show topic*).
   The topic is 128 random bits only you know; use *New topic* if you shared it by accident. An
   access token is optional, and the server can be your own.
@@ -528,6 +538,13 @@ with credentials masked; the end of the terminal screen is added only if you swi
 the computer, through the server you chose). With phone access on, the message links to the session in
 the phone app; the link holds no pairing code, so it opens only on a phone that is already paired. Tokens
 and the topic are kept in the system credential store, never in a file, and are never shown again.
+
+A service that does not answer costs only itself: each destination has its own queue. Kelpie tries again for
+up to 10 minutes (a message that says a session waits for you, for as long as it still does) and drops what you
+have answered meanwhile. A server that takes a message and never answers may have acted on it, so ntfy, Telegram and a webhook
+get such a message twice at most. So does a webhook that answers with a server error other than 502 or 503, since a flow can act before it fails, also when a session keeps waiting. No connection, no name, no certificate, 502 and 503 mean nothing arrived, and those keep being tried. Under load a phone's alerts about things that wait for nobody may arrive as one; ntfy, Telegram and a webhook keep each message as it is. After a real outage several messages arrive as one ("3 sessions need you, and 2 more updates"). What is still to be
+sent stays in `notify-outbox` in the data folder and goes out after the daemon restarts, if it is still true: a session that came back no longer waiting is not told. Text for ntfy, Telegram and a webhook
+is kept there until it is sent, and a phone's entries hold no text.
 
 #### When an agent hits the usage limit
 

@@ -11,7 +11,7 @@ import { SettingRow, Toggle } from "./setting-row";
 import { emptyPushConfig, pushSummary, type PushConfig, type PushState } from "../../lib/push-config";
 import "./push-settings.css";
 
-type Channel = "ntfy" | "telegram" | "webhook";
+type Channel = "ntfy" | "telegram" | "webhook" | "webpush";
 
 /** A secret field: nothing is ever read back, only "set" or "not set". */
 function SecretField(props: { set: boolean; placeholder: string; onSave: (value: string | null) => void }) {
@@ -98,6 +98,13 @@ export default function PushSettings() {
       <div class="form-note">{t("Also tell your phone, with Kelpie's window closed. The session daemon sends these; nothing is sent until you switch a channel on.")}</div>
       <Show when={error()}><div class="form-note error">{error()}</div></Show>
 
+      <SettingRow id="push-webpush" wide aside={<button class="btn mini" data-webpush-test disabled={!state()?.webpush?.devices} onClick={() => void test("webpush")}>{t("Send a test")}</button>}>
+        <div class="push-block">
+          <div class="form-note" data-webpush-count>{state()?.webpush?.devices ? t("Phones with alerts on: {n}", { n: state()!.webpush!.devices }) : t("No phone has alerts on. Turn them on in the phone app, from its connection sheet: it needs phone access over HTTPS or Tailscale.")}</div>
+          <Show when={tested().webpush ?? status("webpush")?.error}><div class="form-note">{tested().webpush ?? status("webpush")?.error}</div></Show>
+        </div>
+      </SettingRow>
+
       <SettingRow id="push-ntfy" wide aside={<Toggle on={cfg().ntfy.enabled} onChange={(on) => edit((c) => (c.ntfy.enabled = on))} />}>
         <Show when={cfg().ntfy.enabled}>
           <div class="push-block">
@@ -178,7 +185,8 @@ export default function PushSettings() {
       <SettingRow id="push-link" wide aside={<Toggle on={cfg().phone_link} onChange={(on) => edit((c) => (c.phone_link = on))} />}>
         <div class="form-note">{t("With phone access on, the link holds this computer's address on your network (no code, no token), and goes to the server you chose.")}</div>
       </SettingRow>
-      <div class="push-summary">{pushSummary(cfg(), secrets())}</div>
+      <div class="push-summary">{pushSummary(cfg(), secrets(), state()?.webpush?.devices ?? 0)}</div>
+      <div class="form-note" data-sleep-note>{t("A computer that is asleep sends nothing: no alert can reach you until it wakes. Keep computer awake (Settings → Agents) keeps it up while agents work.")}</div>
       <Show when={state()?.dropped}><div class="form-note warn-note">{t("{n} messages were not sent: the server did not answer in time and they queued up.", { n: state()!.dropped! })}</div></Show>
     </Show>
   );

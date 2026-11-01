@@ -4,7 +4,7 @@ import { createSignal, For, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
 import { Inbox } from "./inbox";
 import { localeSetting, setLocale, t, type LocaleSetting } from "./i18n";
-import { closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, sessions, setPairing } from "./phone-state";
+import { alertsError, alertsState, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, sessions, setPairing, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
 import { InstallGuide, ScanCode, screenNow } from "./install-guide";
 import { labelOf, needsCount } from "./inbox-order";
 import { SessionView } from "./session-view";
@@ -115,6 +115,49 @@ function SecurityBanner() {
   );
 }
 
+/** Alerts on this phone, with the computer's own push: what state they are in and the one thing to do next. */
+function AlertsRow() {
+  const [tested, setTested] = createSignal<string | null>(null);
+  const test = async () => {
+    setTested(t("Sending…"));
+    const failed = await testAlert();
+    setTested(failed ? t("Failed: {error}", { error: failed }) : t("Sent: it should show on this phone in a moment."));
+  };
+  const why = () => {
+    switch (alertsState()) {
+      case "plain_http":
+        return t("Alerts need HTTPS, which a plain http:// page does not have. Open Kelpie through Tailscale, or use ntfy from Kelpie → Settings → Notifications.");
+      case "install_first":
+        return t("On an iPhone, alerts only work in the installed app: add Kelpie to the Home Screen and open it from there.");
+      case "no_support":
+        return t("This browser cannot receive alerts. ntfy or Telegram work instead: Kelpie → Settings → Notifications.");
+      case "blocked":
+        return t("Alerts are blocked for this app. Allow notifications for it in this phone's settings, then come back.");
+      case "failed":
+        return t("Alerts could not be turned on: {error}", { error: alertsError() ?? "" });
+      case "on":
+        return t("Alerts are on. They say only that a session needs you, and tapping one opens it.");
+      default:
+        return t("Get an alert on this phone when a session needs you, with the app closed and the phone locked. This computer has to be awake to send it.");
+    }
+  };
+  return (
+    <div class="alerts-row" data-alerts={alertsState()}>
+      <h2>{t("Alerts")}</h2>
+      <p class="muted">{why()}</p>
+      <div class="actions">
+        <Show when={["off", "failed"].includes(alertsState())}><button class="btn primary" data-alerts-on onClick={() => void turnAlertsOn()}>{t("Turn on alerts")}</button></Show>
+        <Show when={alertsState() === "asking"}><button class="btn" disabled>{t("Asking…")}</button></Show>
+        <Show when={alertsState() === "on"}>
+          <button class="btn" data-alerts-test onClick={() => void test()}>{t("Send a test alert")}</button>
+          <button class="btn" data-alerts-off onClick={() => void turnAlertsOff()}>{t("Turn off alerts")}</button>
+        </Show>
+      </div>
+      <Show when={tested()}><p class="muted" role="status" data-alerts-tested>{tested()}</p></Show>
+    </div>
+  );
+}
+
 function Sheet(props: { onClose: () => void }) {
   const info = () => describeConn(conn());
   return (
@@ -123,6 +166,7 @@ function Sheet(props: { onClose: () => void }) {
         <h2>{info().label}</h2>
         <p class="muted">{info().detail}</p>
         <Show when={device()}><p class="muted">{t("This device: {name}", { name: device()!.name })} · {device()!.can_write ? t("can type") : t("read only")}</p></Show>
+        <Show when={device()}><AlertsRow /></Show>
         <label class="row-setting">{t("Language")}
           <select class="field" value={localeSetting()} onChange={(e) => setLocale(e.currentTarget.value as LocaleSetting)}>
             <option value="auto">{t("Automatic")}</option>

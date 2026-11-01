@@ -1,17 +1,22 @@
-//! One source of "something needs you" events, and the channels that carry them off the
-//! computer (ntfy, Telegram, a webhook).
+//! One source of "something needs you" events, and the destinations that carry them off the
+//! computer: the channels (ntfy, Telegram, a webhook) and each phone with alerts on (Web Push).
 //!
 //! The daemon classifies session status changes ([`classify`]); the app shows the same events in
-//! its inbox and as desktop notifications (`notify.event`), and the channels send them to a phone.
-//! Nothing here runs unless a channel is switched on: no thread, no socket, no timer. Secrets
-//! (topic, tokens, webhook address) live in the OS credential store through [`SecretStore`];
+//! its inbox and as desktop notifications (`notify.event`), and the destinations send them to a phone,
+//! each on its own thread with its own outbox (`destinations`, `outbox`).
+//! Nothing here runs with no destination: no thread, no socket, no timer. Secrets
+//! (topic, tokens, webhook address, signing key, subscription secrets) live in the OS credential store through [`SecretStore`];
 //! `notify.json` holds only what is safe to read. Text leaving the computer passes
-//! `kelpie_proto::redact`, request addresses are never logged and are not part of any error text.
+//! `kelpie_proto::redact`, a phone's alert holds no text from a session at all (`web_push`), request addresses are never logged and are not part of any error text.
+
+pub mod destinations;
+pub mod outbox;
+pub mod web_push;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
@@ -28,10 +33,11 @@ pub const RATE_WINDOW: Duration = Duration::from_secs(30);
 /// "Computer idle" for the away filter: no keyboard or mouse input for this long.
 const IDLE_AFTER: Duration = Duration::from_secs(300);
 const MAX_VISIBLE: usize = 256;
-/// Messages waiting for the sending thread; a full queue drops the newest, and a message that waited
-/// longer than `STALE` is dropped instead of sent late. Both are counted and shown in the settings.
+/// Messages waiting for a destination's thread; a full queue drops the newest. Dropped ones are counted and shown in the settings.
 const QUEUE: usize = 32;
-const STALE: Duration = Duration::from_secs(300);
+/// How long what can wait waits when the machine is busy, so that several leave as one (ms, at L1 and from L2 on).
+const COALESCE_MS: u64 = 1000;
+const DIGEST_MS: u64 = 5000;
 
 const K_TOPIC: &str = "notify-ntfy-topic";
 const K_NTFY_TOKEN: &str = "notify-ntfy-token";
@@ -206,6 +212,20 @@ pub enum Kind {
 }
 
 impl Kind {
+    pub fn parse(code: &str) -> Option<Kind> {
+        [Kind::Waiting, Kind::Finished, Kind::Error, Kind::Automation, Kind::Approval, Kind::Cost].into_iter().find(|k| k.code() == code)
+    }
+
+    /// The person is waited for. It is no less true for being old, and stops being true when they answer.
+    pub fn waits(self) -> bool {
+        matches!(self, Kind::Waiting | Kind::Approval)
+    }
+
+    /// Never held back, however busy the machine is.
+    pub fn urgent(self) -> bool {
+        matches!(self, Kind::Waiting | Kind::Error | Kind::Approval)
+    }
+
     pub fn code(self) -> &'static str {
         match self {
             Kind::Waiting => "waiting",
@@ -275,11 +295,15 @@ pub struct Raised {
     pub run: Option<(String, String)>,
     pub turn: Option<Duration>,
     pub at: u64,
+    /// Which wait of the session this is (`waiting_since`).
+    pub wait: Option<u64>,
+    /// The run and task whose approval this is, by id.
+    pub task: Option<(String, String)>,
 }
 
 impl Raised {
     pub(crate) fn bare(kind: Kind) -> Raised {
-        Raised { kind, session: None, project_id: None, alive: true, exit_code: None, detail: None, error: None, run: None, turn: None, at: now_millis() }
+        Raised { kind, session: None, project_id: None, alive: true, exit_code: None, detail: None, error: None, run: None, turn: None, at: now_millis(), wait: None, task: None }
     }
 
     pub fn automation(name: &str, session: Option<String>, error: Option<String>) -> Raised {
@@ -362,13 +386,16 @@ pub struct Context {
 }
 
 /// The message as every channel gets it. All text is redacted.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Payload {
-    pub status: &'static str,
+    pub status: String,
     pub project: Option<String>,
     pub session: Option<String>,
     pub summary: String,
     pub duration_s: Option<u64>,
+    /// The same for every try of one message, so that a receiver can tell a repeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -422,11 +449,12 @@ pub fn build_payload(ev: &Raised, ctx: &Context, include_screen: bool) -> Payloa
     // Names and titles come from the program in the session (its terminal title): one plain line.
     let line = |s: &str| redact(&s.chars().map(|c| if c.is_control() { ' ' } else { c }).take(200).collect::<String>());
     Payload {
-        status: ev.kind.status(),
+        status: ev.kind.status().to_string(),
         project: ctx.project.as_deref().map(line),
         session: session.map(line),
         summary: line(&summary(ev)),
         duration_s: ev.turn.map(|d| d.as_secs()),
+        id: None,
         screen,
         link,
         at: ev.at,
@@ -473,6 +501,8 @@ pub enum Channel {
     Ntfy,
     Telegram,
     Webhook,
+    /// Every phone with alerts on: one destination each, one line in the status list.
+    WebPush,
 }
 
 impl Channel {
@@ -481,6 +511,7 @@ impl Channel {
             "ntfy" => Some(Channel::Ntfy),
             "telegram" => Some(Channel::Telegram),
             "webhook" => Some(Channel::Webhook),
+            "webpush" => Some(Channel::WebPush),
             _ => None,
         }
     }
@@ -490,6 +521,7 @@ impl Channel {
             Channel::Ntfy => "ntfy",
             Channel::Telegram => "telegram",
             Channel::Webhook => "webhook",
+            Channel::WebPush => "webpush",
         }
     }
 }
@@ -502,21 +534,119 @@ pub fn telegram_base() -> String {
 }
 
 fn telegram_base_for(test_run: bool, over: Option<&str>) -> String {
+    test_base_for(test_run, over).unwrap_or_else(|| "https://api.telegram.org".into())
+}
+
+/// An address tests may use instead of the real one: a loopback one, and only in a test run.
+fn test_base_for(test_run: bool, over: Option<&str>) -> Option<String> {
     let loopback = |u: &str| {
         let rest = u.strip_prefix("http://").unwrap_or("");
         let host = rest.split(['/', ':']).next().unwrap_or("");
         matches!(host, "127.0.0.1" | "localhost") && !rest.contains('@')
     };
-    match over {
-        Some(u) if test_run && loopback(u) => u.trim_end_matches('/').to_string(),
-        _ => "https://api.telegram.org".into(),
-    }
+    over.filter(|u| test_run && loopback(u)).map(|u| u.trim_end_matches('/').to_string())
+}
+
+/// What a test run's local stand-in for a push service answers at (`KELPIE_PUSH_TEST_BASE`), with the same two conditions. It adds to the
+/// list of push services and takes nothing from it: outside a test run no address but the listed ones is ever sent to.
+pub fn push_test_base() -> Option<String> {
+    test_base_for(std::env::var("KELPIE_E2E").is_ok(), std::env::var("KELPIE_PUSH_TEST_BASE").ok().as_deref())
 }
 
 /// Why a send failed, without the address it went to.
-fn post_json(url: &str, headers: &[(&str, &str)], body: &Value) -> std::result::Result<(), String> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Failure {
+    pub reason: String,
+    status: Option<u16>,
+    /// What the service asked for.
+    retry_after: Option<Duration>,
+    /// The subscription is over: nothing more will reach this phone through it.
+    over: bool,
+    /// Worth trying again, whatever the reason says.
+    again: bool,
+    /// It ended without a word after it may have reached the receiver, which may have acted on it.
+    unsure: bool,
+    /// The address a subscription that is over was at: a newer one of the device is not what ended.
+    over_endpoint: Option<String>,
+}
+
+impl From<&str> for Failure {
+    fn from(reason: &str) -> Failure {
+        Failure { reason: reason.into(), status: None, retry_after: None, over: false, again: false, unsure: false, over_endpoint: None }
+    }
+}
+
+impl Failure {
+    fn gone(reason: impl Into<String>) -> Failure {
+        Failure { over: true, ..Failure::from(reason.into().as_str()) }
+    }
+
+    fn unsure(reason: &str) -> Failure {
+        Failure { unsure: true, ..Failure::from(reason) }
+    }
+
+    fn again(reason: impl Into<String>) -> Failure {
+        Failure { again: true, ..Failure::from(reason.into().as_str()) }
+    }
+
+    /// A webhook's flow can act and then fail a later step, and answer 500 for it. 502 and 503 say the flow was not reached.
+    fn webhook_may_have_acted(&self) -> bool {
+        matches!(self.status, Some(500..=599)) && !matches!(self.status, Some(502 | 503))
+    }
+
+    /// 404 and 410 are how a push service says a subscription ended.
+    fn subscription_over(&self) -> bool {
+        matches!(self.status, Some(404 | 410))
+    }
+
+    /// Transient: network errors, 5xx, 429. No other 4xx: the same request would get the same answer.
+    fn retryable(&self) -> bool {
+        self.again || retryable(&self.reason)
+    }
+}
+
+/// `Retry-After`: seconds or a date.
+fn retry_after(value: &str, now_ms: u64) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(value).ok()?.timestamp_millis();
+    Some(Duration::from_millis(u64::try_from(at).ok()?.saturating_sub(now_ms)))
+}
+
+fn post_json(url: &str, headers: &[(&str, &str)], body: &Value) -> std::result::Result<(), Failure> {
+    post(url, headers, "application/json", body.to_string().as_bytes())
+}
+
+/// What became of a request that got no answer. Only a request that may have reached the receiver is `unsure`: one that failed on its way there (no such name, no route, no
+/// connection, no TLS) sent nothing, and may be tried again as long as what it says is still so. Connecting has a time of its own, so that a timeout says which side of that line it fell on.
+fn failure_of(e: ureq::Error) -> Failure {
+    use std::io::ErrorKind as Io;
+    match e {
+        ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => "timed out".into(),
+        ureq::Error::Timeout(_) => Failure::unsure("timed out"),
+        ureq::Error::HostNotFound => "host not found".into(),
+        // A proxy that would not connect: only the CONNECT line went, and to the proxy.
+        ureq::Error::ConnectionFailed | ureq::Error::ConnectProxyFailed(_) => "connection failed".into(),
+        ureq::Error::Tls(_) | ureq::Error::Rustls(_) => "network error".into(),
+        ureq::Error::Io(e) => match e.kind() {
+            Io::ConnectionRefused => "connection failed".into(),
+            // Cut off, maybe after the receiver had the whole request.
+            Io::ConnectionReset | Io::ConnectionAborted | Io::BrokenPipe | Io::UnexpectedEof => Failure::unsure("connection failed"),
+            Io::TimedOut | Io::WouldBlock => Failure::unsure("timed out"),
+            // A name that does not resolve, a network or host out of reach: all before anything was sent.
+            _ => "network error".into(),
+        },
+        _ => Failure::unsure("network error"),
+    }
+}
+
+fn post(url: &str, headers: &[(&str, &str)], content_type: &str, body: &[u8]) -> std::result::Result<(), Failure> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10)))
+        .timeout_resolve(Some(Duration::from_secs(5)))
+        .timeout_connect(Some(Duration::from_secs(5)))
         .http_status_as_error(false)
         .max_redirects(0)
         .build()
@@ -525,21 +655,20 @@ fn post_json(url: &str, headers: &[(&str, &str)], body: &Value) -> std::result::
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
-    let text = body.to_string();
-    match req.content_type("application/json").send(text.as_str()) {
+    match req.content_type(content_type).send(body) {
         Ok(resp) if resp.status().is_success() => Ok(()),
-        Ok(resp) => Err(format!("HTTP {}", resp.status().as_u16())),
-        Err(ureq::Error::Timeout(_)) => Err("timed out".into()),
-        Err(ureq::Error::HostNotFound) => Err("host not found".into()),
-        Err(ureq::Error::ConnectionFailed) => Err("connection failed".into()),
-        Err(ureq::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => Err("connection failed".into()),
-        Err(_) => Err("network error".into()),
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let asked = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| retry_after(v, now_millis()));
+            Err(Failure { status: Some(status), retry_after: asked, ..Failure::from(format!("HTTP {status}").as_str()) })
+        }
+        Err(e) => Err(failure_of(e)),
     }
 }
 
 /// Transient: worth one more try.
 fn retryable(reason: &str) -> bool {
-    matches!(reason, "timed out" | "connection failed" | "network error" | "HTTP 429") || reason.starts_with("HTTP 5")
+    matches!(reason, "timed out" | "connection failed" | "host not found" | "network error" | "HTTP 429") || reason.starts_with("HTTP 5")
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
@@ -548,9 +677,6 @@ pub struct ChannelStatus {
     pub error: Option<String>,
 }
 
-enum Job {
-    Send(Payload, Instant),
-}
 
 // ---------- the notifier ----------
 
@@ -573,9 +699,9 @@ pub struct Notifier {
     waiting_tasks: Mutex<HashSet<(String, String)>>,
     limiter: Mutex<RateLimiter>,
     status: Arc<Mutex<HashMap<&'static str, ChannelStatus>>>,
-    /// The sending thread's queue; none until the first message.
-    worker: Mutex<Option<mpsc::SyncSender<Job>>>,
-    /// Messages not sent because the queue was full or they waited too long.
+    /// Every place a message can go, and the threads that take it there.
+    destinations: Arc<destinations::Destinations>,
+    /// Messages not sent because a queue was full or they waited too long.
     dropped: Arc<AtomicU64>,
     /// Test hook: how long the computer has been idle.
     #[cfg(test)]
@@ -583,21 +709,38 @@ pub struct Notifier {
 }
 
 impl Notifier {
+    #[cfg(test)]
     pub fn new(data_dir: &std::path::Path, secrets: Arc<dyn SecretStore>) -> Notifier {
+        let destinations = destinations::Destinations::new(data_dir, secrets.clone(), Arc::new(destinations::NoHost));
+        Notifier::with_destinations(data_dir, secrets, destinations)
+    }
+
+    /// `destinations` is shared with phone access, which says who has alerts on.
+    pub fn with_destinations(data_dir: &std::path::Path, secrets: Arc<dyn SecretStore>, destinations: Arc<destinations::Destinations>) -> Notifier {
         let path = data_dir.join("notify.json");
-        let config: Config = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        // A file that is not there is no channel on. One that cannot be read says nothing, and what the channels had to send stays until it can.
+        let read = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<Config>(&bytes).ok(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Config::default()),
+            Err(_) => None,
+        };
+        destinations.set_config_known(read.is_some());
+        let loaded = read.unwrap_or_default();
+        let config = destinations.config();
+        let active = AtomicBool::new(loaded.any_enabled());
+        *config.lock() = loaded;
         Notifier {
             path,
             secrets,
-            active: AtomicBool::new(config.any_enabled()),
-            config: Arc::new(Mutex::new(config)),
+            active,
+            config,
             ui: Mutex::new(HashMap::new()),
             seen: Mutex::new(HashMap::new()),
             waiting_tasks: Mutex::new(HashSet::new()),
             limiter: Mutex::new(RateLimiter::new(RATE_WINDOW)),
-            status: Arc::new(Mutex::new(HashMap::new())),
-            worker: Mutex::new(None),
-            dropped: Arc::new(AtomicU64::new(0)),
+            status: destinations.status(),
+            dropped: destinations.dropped(),
+            destinations,
             #[cfg(test)]
             idle: Mutex::new(None),
         }
@@ -683,6 +826,7 @@ impl Notifier {
             alive: info.alive,
             exit_code: info.exit_code,
             turn,
+            wait: info.waiting_since,
             ..Raised::bare(kind)
         })
     }
@@ -695,8 +839,8 @@ impl Notifier {
             let key = (run_id.to_string(), id.clone());
             if !waiting {
                 set.remove(&key);
-            } else if set.insert(key) {
-                out.push(Raised::approval(run, title, project_id.map(str::to_string)));
+            } else if set.insert(key.clone()) {
+                out.push(Raised { task: Some(key), ..Raised::approval(run, title, project_id.map(str::to_string)) });
             }
         }
         out
@@ -713,9 +857,14 @@ impl Notifier {
         self.config.lock().clone()
     }
 
-    /// A channel is on (cheap; the common case is no).
+    /// A channel is on or a phone has alerts on (cheap; the common case is no).
     pub fn active(&self) -> bool {
-        self.active.load(Ordering::Relaxed)
+        self.active.load(Ordering::Relaxed) || self.destinations.device_count() > 0
+    }
+
+    /// What a run before this one left to send, if its destinations are still there.
+    pub fn resume(&self) {
+        self.destinations.resume();
     }
 
     /// Whether the event leaves the computer, counting it against the rate limit when it does.
@@ -738,67 +887,59 @@ impl Notifier {
         self.limiter.lock().allow(&ev.key(), now)
     }
 
-    /// Queues the message for every channel that is on. The first one starts the sending thread.
-    /// A full queue drops the message (counted, shown in the settings, logged).
+    /// Hands the message to every destination, on this thread, which nothing here makes wait: writing it down and sending it are the
+    /// destinations' own threads' work. When the machine is busy, what wants nobody's answer waits a moment to leave with others.
     pub fn send(&self, ev: &Raised, ctx: &Context) {
-        let payload = build_payload(ev, ctx, self.config.lock().include_screen);
-        let mut worker = self.worker.lock();
-        if worker.is_none() {
-            let (tx, rx) = mpsc::sync_channel::<Job>(QUEUE);
-            let (secrets, status, config, dropped) = (self.secrets.clone(), self.status.clone(), self.config.clone(), self.dropped.clone());
-            let spawned = std::thread::Builder::new().name("kelpie-notify".into()).spawn(move || {
-                while let Ok(Job::Send(p, queued)) = rx.recv() {
-                    if queued.elapsed() > STALE {
-                        dropped.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
-                    let c = config.lock().clone();
-                    for ch in [Channel::Ntfy, Channel::Telegram, Channel::Webhook] {
-                        if !channel_on(&c, ch) {
-                            continue;
-                        }
-                        let mut result = deliver(secrets.as_ref(), &c, ch, &p, &telegram_base());
-                        if result.as_ref().is_err_and(|e| retryable(e)) {
-                            std::thread::sleep(Duration::from_secs(3));
-                            result = deliver(secrets.as_ref(), &c, ch, &p, &telegram_base());
-                        }
-                        record(&status, ch, &result);
-                    }
-                }
-            });
-            match spawned {
-                Ok(_) => *worker = Some(tx),
-                Err(e) => {
-                    // Nothing is stored: the next message tries again.
-                    tracing::warn!("notify worker: {e}");
-                    self.dropped.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
+        let c = self.config.lock().clone();
+        let payload = build_payload(ev, ctx, c.include_screen);
+        // Only a phone's entries wait to be gathered: a channel's message keeps its title, text and link, whatever the load.
+        let hold = if ev.kind.urgent() {
+            0
+        } else {
+            match self.destinations.host().load_level() {
+                crate::load::Level::L0 => 0,
+                crate::load::Level::L1 => COALESCE_MS,
+                _ => DIGEST_MS,
+            }
+        };
+        let entry = |payload: Option<Payload>, hold: u64| outbox::Entry {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: ev.kind.code().to_string(),
+            session: ev.session.clone(),
+            wait: ev.wait,
+            task: ev.task.clone(),
+            at: ev.at,
+            hold_until: if hold > 0 { ev.at + hold } else { 0 },
+            payload,
+            unsure: 0,
+        };
+        for ch in [Channel::Ntfy, Channel::Telegram, Channel::Webhook] {
+            if channel_on(&c, ch) {
+                self.destinations.enqueue(destinations::Dest::Channel(ch), entry(Some(payload.clone()), 0));
             }
         }
-        if let Some(tx) = &*worker {
-            if tx.try_send(Job::Send(payload, Instant::now())).is_err() {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("notify: the queue is full, a message was dropped");
-            }
+        for device in self.destinations.device_ids() {
+            self.destinations.enqueue(destinations::Dest::Device(device), entry(None, hold));
         }
     }
 
-    /// Whether a message was ever queued (the worker thread exists).
+    /// Whether a message was ever queued (a destination's thread exists).
     #[cfg(test)]
     pub fn started(&self) -> bool {
-        self.worker.lock().is_some()
+        self.destinations.started()
     }
 
     /// Sends a test message to one channel now, on the caller's thread.
     pub fn test(&self, ch: Channel) -> std::result::Result<(), String> {
         self.test_via(ch, &telegram_base())
     }
-
     fn test_via(&self, ch: Channel, telegram: &str) -> std::result::Result<(), String> {
+        if ch == Channel::WebPush {
+            return self.destinations.test_devices();
+        }
         let ev = Raised { detail: Some("Test notification".into()), ..Raised::bare(Kind::Automation) };
         let payload = Payload { summary: "Your Kelpie notifications work".into(), ..build_payload(&ev, &Context::default(), false) };
-        let result = deliver(self.secrets.as_ref(), &self.config(), ch, &payload, telegram);
+        let result = deliver(self.secrets.as_ref(), &self.config(), ch, &payload, telegram).map_err(|f| f.reason);
         record(&self.status, ch, &result);
         result
     }
@@ -818,6 +959,8 @@ impl Notifier {
             "config": self.config(),
             "secrets": {"ntfy_topic": set(K_TOPIC), "ntfy_token": set(K_NTFY_TOKEN), "telegram_token": set(K_TELEGRAM_TOKEN), "webhook_url": set(K_WEBHOOK)},
             "status": status,
+            // How many phones have alerts on: nothing about where they are reached.
+            "webpush": {"devices": self.destinations.device_count()},
             "windows": windows,
             "dropped": self.dropped.load(Ordering::Relaxed),
         });
@@ -864,7 +1007,9 @@ impl Notifier {
             }
             write_atomic(&self.path, &serde_json::to_vec_pretty(&c)?)?;
             self.active.store(c.any_enabled(), Ordering::Relaxed);
-            *self.config.lock() = c;
+            // In this order: a thread ending because its channel went looks at the configuration, and must find it off.
+            *self.config.lock() = c.clone();
+            self.destinations.channels_changed(&c);
         }
         Ok(())
     }
@@ -881,6 +1026,7 @@ impl Notifier {
         for key in SECRET_KEYS {
             self.secrets.delete(key)?;
         }
+        self.destinations.remove_leftovers();
         self.update(Some(Config::default()), &Value::Null)
     }
 }
@@ -890,6 +1036,8 @@ fn channel_on(c: &Config, ch: Channel) -> bool {
         Channel::Ntfy => c.ntfy.enabled,
         Channel::Telegram => c.telegram.enabled,
         Channel::Webhook => c.webhook.enabled,
+        // Whether a phone has alerts on is not in the configuration.
+        Channel::WebPush => false,
     }
 }
 
@@ -905,21 +1053,26 @@ fn record(status: &Mutex<HashMap<&'static str, ChannelStatus>>, ch: Channel, res
     }
 }
 
+/// A channel's secret. A read that failed is no answer: what waits to be sent stays, where "there is none" would end it.
+fn secret(secrets: &dyn SecretStore, key: &str) -> std::result::Result<Option<String>, Failure> {
+    secrets.read(key).map_err(|_| Failure::again("the credential store did not answer"))
+}
+
 /// Sends `p` through one channel. Errors say what failed, never where.
-fn deliver(secrets: &dyn SecretStore, c: &Config, ch: Channel, p: &Payload, telegram: &str) -> std::result::Result<(), String> {
+fn deliver(secrets: &dyn SecretStore, c: &Config, ch: Channel, p: &Payload, telegram: &str) -> std::result::Result<(), Failure> {
     match ch {
         Channel::Ntfy => {
-            let topic = secrets.get(K_TOPIC).ok_or("no topic")?;
-            let mut body = json!({"topic": topic, "title": p.title(), "message": p.text(), "priority": if matches!(p.status, "needs_you" | "failed" | "approval") { 4 } else { 3 }});
+            let topic = secret(secrets, K_TOPIC)?.ok_or("no topic")?;
+            let mut body = json!({"topic": topic, "title": p.title(), "message": p.text(), "priority": if matches!(p.status.as_str(), "needs_you" | "failed" | "approval") { 4 } else { 3 }});
             if let Some(link) = &p.link {
                 body["click"] = json!(link);
             }
-            let bearer = secrets.get(K_NTFY_TOKEN).map(|t| format!("Bearer {t}"));
+            let bearer = secret(secrets, K_NTFY_TOKEN)?.map(|t| format!("Bearer {t}"));
             let headers: Vec<(&str, &str)> = bearer.iter().map(|b| ("Authorization", b.as_str())).collect();
             post_json(c.ntfy.server.trim_end_matches('/'), &headers, &body)
         }
         Channel::Telegram => {
-            let token = secrets.get(K_TELEGRAM_TOKEN).ok_or("no bot token")?;
+            let token = secret(secrets, K_TELEGRAM_TOKEN)?.ok_or("no bot token")?;
             if c.telegram.chat_id.is_empty() {
                 return Err("no chat id".into());
             }
@@ -931,9 +1084,11 @@ fn deliver(secrets: &dyn SecretStore, c: &Config, ch: Channel, p: &Payload, tele
             post_json(&url, &[], &json!({"chat_id": c.telegram.chat_id, "text": text, "disable_web_page_preview": true}))
         }
         Channel::Webhook => {
-            let url = secrets.get(K_WEBHOOK).ok_or("no address")?;
+            let url = secret(secrets, K_WEBHOOK)?.ok_or("no address")?;
             post_json(&url, &[], &json!({"source": "kelpie", "title": p.title(), "text": p.text(), "event": p}))
         }
+        // Each phone has a message of its own (`destinations`).
+        Channel::WebPush => Err("not a channel".into()),
     }
 }
 

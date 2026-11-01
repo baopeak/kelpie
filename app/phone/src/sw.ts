@@ -3,6 +3,10 @@
 // anything the daemon says about sessions: that lives in the page's own cache and is marked as old.
 // Registered only on secure origins (main.tsx). The build fills in the file list and a version that changes
 // with the files.
+//
+// It also shows alerts where the system does not do it by itself (iOS 18.4 reads the same payload natively): one notification per
+// `tag`, so a repeat takes the place of the last. An alert has no text from a session, only a fixed sentence and a link to open. This
+// file stands alone in the build: a classic worker cannot import or export anything.
 interface FetchEvent extends Event {
   request: Request;
   respondWith(response: Promise<Response>): void;
@@ -10,11 +14,25 @@ interface FetchEvent extends Event {
 interface ExtendableEvent extends Event {
   waitUntil(promise: Promise<unknown>): void;
 }
+interface PushEvent extends ExtendableEvent {
+  data: { json(): unknown } | null;
+}
+interface ClickEvent extends ExtendableEvent {
+  notification: { data?: { navigate?: unknown }; close(): void };
+}
+interface WindowClient {
+  url: string;
+  focus(): Promise<unknown>;
+  postMessage(message: unknown): void;
+}
 interface Scope {
-  addEventListener(type: "install" | "activate", listener: (e: ExtendableEvent) => void): void;
+  addEventListener(type: "install" | "activate" | "pushsubscriptionchange", listener: (e: ExtendableEvent) => void): void;
   addEventListener(type: "fetch", listener: (e: FetchEvent) => void): void;
+  addEventListener(type: "push", listener: (e: PushEvent) => void): void;
+  addEventListener(type: "notificationclick", listener: (e: ClickEvent) => void): void;
   skipWaiting(): Promise<void>;
-  clients: { claim(): Promise<void> };
+  clients: { claim(): Promise<void>; matchAll(options: { type: "window"; includeUncontrolled: boolean }): Promise<WindowClient[]>; openWindow(url: string): Promise<unknown> };
+  registration: { showNotification(title: string, options: { body?: string; tag?: string; icon?: string; data?: unknown }): Promise<void> };
   location: Location;
 }
 
@@ -27,6 +45,11 @@ const sw = self as unknown as Scope;
 const CACHE = `kelpie-phone-${__VERSION__}`;
 /** How long a page request waits for the computer before the kept shell is used instead. */
 const NAVIGATION_WAIT_MS = 2500;
+/** Where the worker leaves word for the page, which reads it the next time it opens (push.ts). */
+const PUSH_FLAGS = "kelpie-push-flags";
+const RESUBSCRIBE_MARK = "/resubscribe";
+/** The app's icon, 72 px, in this file. A worker's own requests do not pass through its `fetch` handler, so a path here would go to the computer, which the phone may not be able to reach: the alert would wait for it. */
+const ALERT_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAMAAABiM0N1AAAAYFBMVEWdVDPrkF4WGyhWNCnx5Nf0so9fVlZ4RTGUcV0oT1gXqpnwx62alpMcK0Hqc1lNPUC8hGBndIHBXC0dhH4TFyMqMULqdDv1qHD9yan+9ejtd0zQaTcsKDIjLUDlbTT9snVGl2y/AAAAIHRSTlP//////////////////////////////////////////3Fe9GAAAAL1SURBVHja7ZbpctsgEIABcciVrKStQRfI7/+W3QUJX+Cg2NMfne5MZFjBp71YQk5vEvIf9B90I1X11abUigRoNl+YScxcAmKzeU4ixsyszCJjVJ6j4HWRRfhFY7JxqvAtKQflSJ5TCFJmwsU2xbH4Zkp5nkq/oQLjkCBZjJ+gpioFDSIdUc8ZSkF2mYZBTMtjJIhZJjEM02KLQFBIsLqhDyTg0Aa+kSqj5FnzoGG4JyEH9SLldBJEAghJ1XXoAgdApBgUdtyQIgdiXQpSG6ihsTChEDE+AaQKQdUGgooh9sSsZScLZooNVO0DAWYmhMxQPLMfrKhykDVT08D6xdzJAl9omil5elIgLKR+esB41CTSZZTu2XM4tmmZkmWUBhHzVMjfB1VzdOPGpyBzVQxSYQftexpRE87CUJ2K0x84574/0w10PbPFZ+25RaVnzV7CQm9idJnZwuYf01P9unBmFXNQ2Pxj8ismZdwL5fyzXvK+ZW7adfXIo3mKybEla8iK7/4NJA9VNA9mllzM2wdiTJkF/IE/hbNdoOgaGMFsJ3wPEqJj7BTNm/cF25B6GKMMNXl22jKgCWURCOCtlC3HkVi8uhhUraAOOJyPLQNpcTSKbgVVpTctgrqOB58kg8x74V3nQaU3bfBt6Uck8ZFrzdchXXKe5Xo2tmfhd8OjrreRWDLJzzU2D6LeHD421jb4CzC6ZP+ZS4KY8knD3EsrbdvCA8M0+LQpVgyS0Hug+9CGc0i+4FxAAXDe0KCXSZB+FGyGXj610/qgrYUHDD9X9fkzsekRxOqN058lAwrAHDyYvOhrthN0vSGnz4KcjOt76W70kXStz4JgB+3PIBBVV6LPgiCssgaR7m69c0Gv3RfBdnHFEQ9qYrlD/VHr5yBHDEl+rEhuQWb+OL4OggneFu4NIIeXD3kDSB8/kHR8GXT88GFyNoj7Lmj1zLlDkF0pvMtaiPWPIAf7bdCa/d+vgbRWmzPBsxeCvQ32x1oT/Sb5h0F/ALdqkPw7JUSOAAAAAElFTkSuQmCC";
 
 sw.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(__PRECACHE__)).then(() => sw.skipWaiting()));
@@ -49,6 +72,47 @@ const withTimeout = (p: Promise<Response>, ms: number) =>
       (e) => (clearTimeout(timer), reject(e)),
     );
   });
+
+/** What a tap opens: a page of this app, whatever the message says, since only this origin holds the pairing. */
+function openTarget(navigate: unknown): string {
+  const home = sw.location.origin + "/";
+  if (typeof navigate !== "string") return home;
+  try {
+    return new URL(navigate).origin === sw.location.origin ? navigate : home;
+  } catch {
+    return home;
+  }
+}
+
+sw.addEventListener("push", (e) => {
+  let alert: { title?: unknown; body?: unknown; tag?: unknown; navigate?: unknown } = {};
+  try {
+    alert = (e.data?.json() as { notification?: typeof alert })?.notification ?? {};
+  } catch {
+    /* A browser must show something for every push: it shows the name alone. */
+  }
+  const text = (v: unknown) => (typeof v === "string" ? v : undefined);
+  e.waitUntil(sw.registration.showNotification(text(alert.title) ?? "Kelpie", { body: text(alert.body), tag: text(alert.tag), icon: ALERT_ICON, data: { navigate: alert.navigate } }));
+});
+
+sw.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const target = openTarget(e.notification.data?.navigate);
+  e.waitUntil(
+    sw.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (open) => {
+      const mine = open.find((c) => new URL(c.url).origin === sw.location.origin);
+      if (!mine) return sw.clients.openWindow(target);
+      // A running app stays as it is and is told what to open (a fragment alone would not reload it anyway).
+      mine.postMessage({ type: "kelpie-open", navigate: target });
+      return mine.focus();
+    }),
+  );
+});
+
+// The browser ended or replaced the subscription, maybe with the app closed and the computer out of reach: the app renews it when it next opens.
+sw.addEventListener("pushsubscriptionchange", (e) => {
+  e.waitUntil(caches.open(PUSH_FLAGS).then((c) => c.put(RESUBSCRIBE_MARK, new Response("1"))));
+});
 
 sw.addEventListener("fetch", (e) => {
   const req = e.request;

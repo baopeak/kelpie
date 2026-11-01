@@ -138,5 +138,20 @@
   "Stop the camera": "Tắt camera",
   "Scan the code": "Quét mã",
   "Or paste the pairing link:": "Hoặc dán liên kết ghép đôi:",
-  "Use this link": "Dùng liên kết này"
+  "Use this link": "Dùng liên kết này",
+  "Alerts": "Cảnh báo",
+  "Turn on alerts": "Bật cảnh báo",
+  "Turn off alerts": "Tắt cảnh báo",
+  "Send a test alert": "Gửi cảnh báo thử",
+  "Asking…": "Đang hỏi…",
+  "Sent: it should show on this phone in a moment.": "Đã gửi: cảnh báo sẽ hiện trên điện thoại này trong giây lát.",
+  "Alerts need HTTPS, which a plain http:// page does not have. Open Kelpie through Tailscale, or use ntfy from Kelpie → Settings → Notifications.": "Cảnh báo cần HTTPS, mà trang http:// thông thường không có. Hãy mở Kelpie qua Tailscale, hoặc dùng ntfy trong Kelpie → Cài đặt → Thông báo.",
+  "On an iPhone, alerts only work in the installed app: add Kelpie to the Home Screen and open it from there.": "Trên iPhone, cảnh báo chỉ hoạt động trong ứng dụng đã cài: hãy thêm Kelpie vào Màn hình chính rồi mở từ đó.",
+  "This browser cannot receive alerts. ntfy or Telegram work instead: Kelpie → Settings → Notifications.": "Trình duyệt này không nhận được cảnh báo. Có thể dùng ntfy hoặc Telegram thay thế: Kelpie → Cài đặt → Thông báo.",
+  "Alerts are blocked for this app. Allow notifications for it in this phone's settings, then come back.": "Cảnh báo đang bị chặn với ứng dụng này. Hãy cho phép thông báo trong cài đặt của điện thoại rồi quay lại.",
+  "Alerts could not be turned on: {error}": "Không bật được cảnh báo: {error}",
+  "Alerts are on. They say only that a session needs you, and tapping one opens it.": "Cảnh báo đang bật. Cảnh báo chỉ cho biết có phiên cần bạn, chạm vào sẽ mở phiên đó.",
+  "Get an alert on this phone when a session needs you, with the app closed and the phone locked. This computer has to be awake to send it.": "Nhận cảnh báo trên điện thoại này khi có phiên cần bạn, kể cả khi đã đóng ứng dụng và khóa máy. Máy tính này phải đang thức thì mới gửi được.",
+  "That session is gone.": "Phiên đó không còn nữa.",
+  "Already handled: this session no longer waits for you.": "Đã được xử lý: phiên này không còn chờ bạn nữa."
 }

@@ -4,6 +4,13 @@ import { emptyPushConfig, pushProblems, pushSummary, type PushSecrets } from "./
 const none: PushSecrets = { ntfy_topic: false, ntfy_token: false, telegram_token: false, webhook_url: false };
 
 describe("pushSummary", () => {
+  it("counts the phones with alerts on", () => {
+    expect(pushSummary(emptyPushConfig(), none, 1)).toBe("Sending to 1 phone.");
+    const c = emptyPushConfig();
+    c.ntfy.enabled = true;
+    expect(pushSummary(c, none, 2)).toBe("Sending to 2 phones, ntfy.");
+  });
+
   it("says nothing is sent until a channel is on", () => {
     expect(pushSummary(emptyPushConfig(), none)).toBe("Nothing is sent off this computer.");
   });

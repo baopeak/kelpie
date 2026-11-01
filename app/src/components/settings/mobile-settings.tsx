@@ -5,7 +5,7 @@
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
-import { PHONE_API } from "../../lib/attention";
+import { TAILSCALE_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
@@ -24,6 +24,8 @@ export interface MobileDevice {
   last_seen: number;
   /** It paired on an HTTPS origin. */
   secure_origin?: boolean;
+  /** It turned alerts on (absent below `PHONE_API`). */
+  push?: boolean;
   /** `unverified`: its record was changed outside Kelpie (or the key that checks it is gone): it must be paired again.
    *  `unchecked`: the key that checks it cannot be read right now; nothing is concluded, and it is checked again when it can be. */
   state: "ok" | "unverified" | "unchecked";
@@ -50,7 +52,7 @@ export interface MobileStatus {
   pending: { id: string; name: string; kind: "app" | "pwa"; fingerprint: string; want: MobilePermission; address: string }[];
   /** Phones not seen for this many days are removed (0: never). */
   dormant_days: number;
-  /** Tailscale mode, as the daemon holds it (absent from a daemon older than `PHONE_API`). `origin`: `<name>:8443` while phones can use it. */
+  /** Tailscale mode, as the daemon holds it (absent from a daemon older than `TAILSCALE_API`). `origin`: `<name>:8443` while phones can use it. */
   tailscale?: { on: boolean; origin: string | null; to_remove?: boolean };
   /** This window is the verified Kelpie app: it may approve phones and raise what they may do. */
   app: boolean;
@@ -59,10 +61,10 @@ export interface MobileStatus {
 /** What Tailscale says now (`mobile.tailscale_status`, which runs its CLI: asked for only while this page is open). */
 interface TailscaleStatus {
   on: boolean;
-  state: "not_installed" | "stopped" | "needs_login" | "https_off" | "unreadable" | "ready";
+  state: "not_installed" | "stopped" | "needs_login" | "https_off" | "unreadable" | "no_answer" | "ready";
   fqdn: string | null;
-  /** `off` nothing of ours; `ours` published; `missing` the mode is on and the entry was removed; `left_behind` the mode is off and the entry could not be removed; `port_busy` another program holds our local port and the entry could not be removed; `not_listening` the mode is on and Kelpie's listener is not up; `renamed` the entry is under this machine's old Tailscale name; `taken` port 8443 is used by something else; `unknown` it could not be read. */
-  serve: "off" | "ours" | "missing" | "left_behind" | "port_busy" | "not_listening" | "renamed" | "taken" | "unknown";
+  /** `off` nothing of ours; `ours` published; `missing` the mode is on and the entry was removed; `left_behind` the mode is off and the entry could not be removed; `port_busy` another program holds our local port and the entry could not be removed; `not_listening` the mode is on and Kelpie's listener is not up; `renamed` the entry is under this machine's old Tailscale name; `taken` port 8443 is used by something else; `unknown` it could not be read; `no_answer` it did not answer in time. */
+  serve: "off" | "ours" | "missing" | "left_behind" | "port_busy" | "not_listening" | "renamed" | "taken" | "unknown" | "no_answer";
   origin: string | null;
   /** A QR code of the page's address, with no secret. */
   install_qr: string | null;
@@ -81,6 +83,8 @@ function tailscaleInstruction(s: TailscaleStatus): string {
       return t("Your tailnet does not have HTTPS certificates turned on. Turn on MagicDNS and HTTPS in the DNS page of the Tailscale admin console, then check again.");
     case "unreadable":
       return t("Kelpie could not understand what Tailscale says. Update Tailscale, then check again.");
+    case "no_answer":
+      return t("Tailscale did not answer in time, and this computer may be busy. Check again in a moment.");
     case "ready":
       switch (s.serve) {
         case "ours":
@@ -99,6 +103,8 @@ function tailscaleInstruction(s: TailscaleStatus): string {
           return t("Port 8443 of Tailscale Serve is used by something else. Kelpie will not change it: free that port, then check again.");
         case "unknown":
           return t("Kelpie could not read what Tailscale Serve is doing. Update Tailscale, then check again.");
+        case "no_answer":
+          return t("Tailscale did not answer in time, and this computer may be busy. Check again in a moment.");
         case "off":
           return t("Tailscale is ready. Turn this on to reach this computer from anywhere with Tailscale on.");
       }
@@ -126,7 +132,7 @@ export function MobileSettings() {
   // The two steps of pairing over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
   const [guideStep, setGuideStep] = createSignal<1 | 2 | null>(null);
   // Only while phone access is on and this page is open; looked at again when what the daemon holds changes, or when asked.
-  const tailscaleKey = () => (store.connected() && store.daemonApi() >= PHONE_API && (status()?.enabled || status()?.tailscale?.to_remove) ? `${status()!.tailscale?.on}|${status()!.tailscale?.origin}|${status()!.tailscale?.to_remove}` : null);
+  const tailscaleKey = () => (store.connected() && store.daemonApi() >= TAILSCALE_API && (status()?.enabled || status()?.tailscale?.to_remove) ? `${status()!.tailscale?.on}|${status()!.tailscale?.origin}|${status()!.tailscale?.to_remove}` : null);
   const [tailscale, { refetch: checkTailscale }] = createResource(tailscaleKey, () => daemon<TailscaleStatus>("mobile.tailscale_status").catch(() => null));
   // The two steps are about the origin: with it gone they end, and do not come back unasked when it returns.
   createEffect(() => {
@@ -251,7 +257,7 @@ export function MobileSettings() {
             <input class="text-input mono" placeholder={t("private key (.key / .pem)")} value={s()!.key ?? ""} onChange={(e) => void enable({ key: e.currentTarget.value })} />
           </div>
         </SettingRow>
-        <Show when={store.daemonApi() >= PHONE_API}>
+        <Show when={store.daemonApi() >= TAILSCALE_API}>
           <SettingRow id="mobile-tailscale" wide>
             <div class="inline-fields" style={{ "align-items": "center" }}>
               <Toggle on={!!s()!.tailscale?.on} onChange={(on) => void setTailscaleMode(on)} />
@@ -353,7 +359,7 @@ export function MobileSettings() {
                 <div class="saved-layout" data-device={d.id} data-state={d.state}>
                   <Icon name="server" size={16} />
                   <div class="saved-layout-main">
-                    <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}</span></div>
+                    <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show></span></div>
                     <div class="muted-inline" style={{ "font-size": "11.5px" }}>
                       {d.state === "unverified"
                         ? t("Its record was changed outside Kelpie: pair it again.")

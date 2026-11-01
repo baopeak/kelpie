@@ -29,6 +29,10 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
 11. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, a script here: never the real Tailscale): each state is told, a port used by
     something else is refused and left as it was, publishing runs the one command and off removes only our entry, a page through the
     loopback listener pairs as a secure origin with its address from `X-Forwarded-For`, and the plain user token can change none of it.
+12. Alerts, with no window open, against a local stand-in for a push service that the daemon really POSTs to (`KELPIE_PUSH_TEST_BASE`): the closed list refuses
+    what is no push service; a test alert and a needs-you event are signed, encrypted, content-free when opened with the browser's keys, and accepted within 2 s; one call per
+    destination; 503 and 429 retried as asked, a session answered meanwhile not told; a hanging ntfy does not delay Web Push; a timeout is said with no address; 404 and 410 end
+    the subscription; a revoke ends it. No real push service is contacted.
 """
 import asyncio
 import hashlib
@@ -936,6 +940,158 @@ async def security(d):
     d.restart()
     check("the next daemon answers yes again", d.call("daemon.info").get("test_user_presence") == "approve")
 
+    # ---------- alerts: the daemon really sends, to a local stand-in for a push service, with no window open ----------
+    d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    alert_key, alert_id = ps.pair(d, BASE, "Alerts", False)
+    # As a browser connects: with where the page is.
+    alerts = ps.Phone(BASE, alert_key, origin=BASE.rstrip("/"))
+    hello = await alerts.open() or {}
+    check("a page that may have alerts hears of them in its hello, even one that may only read", isinstance(hello.get("push"), dict) and hello["push"]["subscribed"] is False, hello.get("push"))
+    info_reply = await alerts.ask(type="push_info")
+    vapid = (info_reply or {}).get("vapid")
+    check("push_info gives the computer's signing key, public half", vapid and len(ps.unb64url(vapid)) == 65, info_reply)
+    sub = ps.browser_subscription(PUSH.base, "/push/alerts")
+    subscribe = {"type": "push_sub", "endpoint": sub["endpoint"], "p256dh": sub["p256dh"], "auth": sub["auth"], "lang": "vi", "origin": BASE.rstrip("/")}
+    for bad in ("https://192.168.1.1/x", "https://169.254.169.254/latest/meta-data", "http://fcm.googleapis.com/x", "https://evil.example/x", "https://fcm.googleapis.com:8443/x", PUSH.base + "-no/x", "http://127.0.0.1:1/x"):
+        got = await alerts.ask(**{**subscribe, "endpoint": bad}) or {}
+        check(f"an address that is no push service is refused and not said back: {bad}", got.get("code") == "bad_endpoint" and bad not in json.dumps(got), got)
+    for bad in ("https://evil.example", "http://192.168.1.5:4817", BASE.replace("http:", "https:").rstrip("/"), BASE):
+        got = await alerts.ask(**{**subscribe, "origin": bad}) or {}
+        check(f"an origin other than this connection's is refused and not said back: {bad}", got.get("code") == "bad_origin" and bad not in json.dumps(got), got)
+    no_page = ps.Phone(BASE, alert_key)
+    await no_page.open()
+    got = await no_page.ask(**subscribe) or {}
+    check("…and one named by a connection that came with no origin", got.get("code") == "bad_origin", got)
+    await no_page.close()
+    alerts = ps.Phone(BASE, alert_key, origin=BASE.rstrip("/"))
+    await alerts.open()
+    check("…and nothing was kept", d.call("notify.get")["webpush"]["devices"] == 0)
+    got = await alerts.ask(**subscribe) or {}
+    check("a subscription at the stand-in is taken", got.get("result") == "ok", got)
+    told = d.call("notify.get")
+    listed = next(x for x in d.call("mobile.status")["devices"] if x["id"] == alert_id)
+    check("the desktop hears how many, and whether, and not where", told["webpush"]["devices"] == 1 and listed["push"] is True and PUSH.base not in json.dumps(told) and PUSH.base not in json.dumps(listed), told["webpush"])
+    stored = open(os.path.join(os.environ["KELPIE_DATA_DIR"], "mobile.v2.json"), encoding="utf-8").read()
+    check("the device record holds the address and not the secret", sub["endpoint"] in stored and sub["auth"] not in stored)
+
+    got = await alerts.ask(timeout=15, type="push_test") or {}
+    check("a test alert is taken by the service", got.get("type") == "ack" and got.get("result") == "ok", got)
+    sent = PUSH.at("/push/alerts")
+    check("…one request", len(sent) == 1, len(sent))
+    first = sent[0] if sent else {"headers": {}, "body": b""}
+    head = first["headers"]
+    token = (head.get("authorization") or "").removeprefix("vapid t=").split(", k=")[0]
+    claims = json.loads(ps.unb64url(token.split(".")[1])) if token.count(".") == 2 else {}
+    check("…signed for the service's own origin, for less than a day, by no person's name", claims.get("aud") == PUSH.base and claims.get("exp", 0) <= time.time() + 86400 and "@" not in json.dumps(claims) and head["authorization"].endswith(", k=" + vapid), claims)
+    check("…with the headers a push service reads", head.get("ttl") == "600" and head.get("content-encoding") == "aes128gcm" and head.get("urgency") == "high" and 0 < len(head.get("topic", "")) <= 32, head)
+    alert = json.loads(ps.open_alert(first["body"], sub))
+    check("…what opens with the browser's keys is the Declarative Web Push form, in the phone's language", alert.get("web_push") == 8030 and alert["notification"]["title"] == "Kelpie" and "này" in alert["notification"]["body"], alert)
+    got = await alerts.ask(type="push_test") or {}
+    check("another test right after is refused", got.get("code") == "rate_limited", got)
+
+    d.call("notify.set", {"config": {"ntfy": {"enabled": True, "server": PUSH.base + "/ntfy"}, "events": {"done": False}}})
+    async def needs_you(name):
+        s = shell(d, name)
+        hook = lambda event: d.call("hook.report", {"session_id": s["id"], "agent": "claude", "payload": {"hook_event_name": event}})  # noqa: E731
+        hook("UserPromptSubmit")
+        await ps.async_wait_for(lambda: info(d, s["id"]).get("status") == "working", 10)
+        at = time.time()
+        hook("PermissionRequest")
+        return s, hook, at
+
+    secret_name = "alert-name-from-a-session"
+    s, hook, at = await needs_you(secret_name)
+    arrived = await ps.async_wait_for(lambda: len(PUSH.at("/push/alerts")) >= 2 and len(PUSH.at("/ntfy")) >= 1, 15)
+    check("a needs-you event with no window open: the phone's service and ntfy each get it", bool(arrived), (len(PUSH.at("/push/alerts")), len(PUSH.at("/ntfy"))))
+    pushed = PUSH.at("/push/alerts")[1]
+    print(f"needs-you to push service accepted: {pushed['at'] - at:.3f} s", flush=True)
+    check("…within two seconds", pushed["at"] - at <= 2, pushed["at"] - at)
+    check("…what the service holds is ciphertext", secret_name.encode() not in pushed["body"] and b"Kelpie" not in pushed["body"] and b"navigate" not in pushed["body"])
+    alert = json.loads(ps.open_alert(pushed["body"], sub))
+    note = alert["notification"]
+    check("…and the alert has a fixed sentence and a link, no text of the session", note["body"] == "Một phiên đang cần bạn" and secret_name not in json.dumps(alert) and work not in json.dumps(alert), alert)
+    check("…with a link to the session that says someone was waited for", note["navigate"] == f"{BASE}#s={s['id']}&a=1", note["navigate"])
+    check("…and ntfy's message is what it was", secret_name in PUSH.at("/ntfy")[0]["body"].decode())
+    time.sleep(2)
+    check("exactly one call per destination", len(PUSH.at("/push/alerts")) == 2 and len(PUSH.at("/ntfy")) == 1, (len(PUSH.at("/push/alerts")), len(PUSH.at("/ntfy"))))
+    d.call("session.close", {"handle": info(d, s["id"])["handle"]})
+
+    # Down when it happens, and answered before the next try: nothing more is sent.
+    PUSH.answer("/push/alerts", (503, {"Retry-After": "6"}))
+    before = len(PUSH.at("/push/alerts"))
+    s, hook, _ = await needs_you("alert-answered")
+    await ps.async_wait_for(lambda: len(PUSH.at("/push/alerts")) > before, 15)
+    hook("Stop")
+    await asyncio.sleep(9)
+    check("a session answered while its service was down is not told again", len(PUSH.at("/push/alerts")) == before + 1, len(PUSH.at("/push/alerts")) - before)
+    d.call("session.close", {"handle": info(d, s["id"])["handle"]})
+
+    # 429 asks for a wait, which is kept to; one delivery follows.
+    PUSH.answer("/push/alerts", (429, {"Retry-After": "2"}))
+    before = len(PUSH.at("/push/alerts"))
+    s, _, _ = await needs_you("alert-429")
+    await ps.async_wait_for(lambda: len(PUSH.at("/push/alerts")) >= before + 2, 15)
+    tries = PUSH.at("/push/alerts")[before:]
+    check("a 429 is tried again no sooner than it asked", len(tries) == 2 and tries[1]["at"] - tries[0]["at"] >= 1.9, [round(t["at"] - tries[0]["at"], 2) for t in tries])
+    await asyncio.sleep(1.5)
+    check("…and that is the end of it", len(PUSH.at("/push/alerts")) == before + 2)
+    check("the status list says it went", d.call("notify.get")["status"].get("webpush", {}).get("error") is None)
+    d.call("session.close", {"handle": info(d, s["id"])["handle"]})
+
+    # A service that hangs costs the others nothing, and it says so, without an address.
+    PUSH.answer("/ntfy", ("hang", 12), ("hang", 12), ("hang", 12))
+    before, ntfy_before = len(PUSH.at("/push/alerts")), len(PUSH.at("/ntfy"))
+    dropped_before = d.call("notify.get")["dropped"]
+    s, _, at = await needs_you("alert-slow-ntfy")
+    await ps.async_wait_for(lambda: len(PUSH.at("/push/alerts")) > before, 5)
+    took = PUSH.at("/push/alerts")[before]["at"] - at if len(PUSH.at("/push/alerts")) > before else None
+    print(f"needs-you with ntfy hanging: {took} s", flush=True)
+    check("slow ntfy does not delay Web Push", took is not None and took <= 2, took)
+    await asyncio.sleep(34)
+    check("a channel that takes the request and never answers gets it twice at most, however long the session waits", len(PUSH.at("/ntfy")) - ntfy_before == 2, len(PUSH.at("/ntfy")) - ntfy_before)
+    check("…and what was given up is counted", d.call("notify.get")["dropped"] == dropped_before + 1, d.call("notify.get")["dropped"])
+    d.call("session.close", {"handle": info(d, s["id"])["handle"]})
+    d.call("notify.set", {"config": {"ntfy": {"enabled": False, "server": PUSH.base + "/ntfy"}, "events": {"done": False}}})
+
+    PUSH.answer("/push/alerts", ("hang", 12))
+    before = len(PUSH.at("/push/alerts"))
+    s, _, _ = await needs_you("alert-timeout")
+    error = await ps.async_wait_for(lambda: d.call("notify.get")["status"].get("webpush", {}).get("error"), 14)
+    check("a service that never answers times out, said with no address", error == "timed out", error)
+    retried = await ps.async_wait_for(lambda: len(PUSH.at("/push/alerts")) >= before + 2, 10)
+    check("…and is tried again", bool(retried), len(PUSH.at("/push/alerts")) - before)
+    d.call("session.close", {"handle": info(d, s["id"])["handle"]})
+
+    # A subscription the service says is over: gone, with no second try, and the phone hears when it next connects.
+    for status in (410, 404):
+        PUSH.answer("/push/alerts", status)
+        before = len(PUSH.at("/push/alerts"))
+        s, _, _ = await needs_you(f"alert-{status}")
+        over = await ps.async_wait_for(lambda: not next(x for x in d.call("mobile.status")["devices"] if x["id"] == alert_id)["push"], 15)
+        check(f"a {status} ends the subscription", bool(over) and d.call("notify.get")["webpush"]["devices"] == 0)
+        await asyncio.sleep(2)
+        check("…with no second try", len(PUSH.at("/push/alerts")) == before + 1, len(PUSH.at("/push/alerts")) - before)
+        d.call("session.close", {"handle": info(d, s["id"])["handle"]})
+        await alerts.close()
+        alerts = ps.Phone(BASE, alert_key, origin=BASE.rstrip("/"))
+        hello = await alerts.open() or {}
+        check("…and the next hello says so, for the phone to subscribe again", hello.get("push", {}).get("subscribed") is False, hello.get("push"))
+        got = await alerts.ask(**subscribe) or {}
+        check("…which it can", got.get("result") == "ok", got)
+    check("the audit log has it, with no address", any(e["action"] == "push_gone" for e in d.call("mobile.audit", {"limit": 50})["entries"]) and PUSH.base not in json.dumps(d.call("mobile.audit", {"limit": 50})))
+
+    # Taking the phone away ends its alerts at once.
+    d.call("mobile.revoke", {"id": alert_id})
+    check("a revoke ends the subscription with it", d.call("notify.get")["webpush"]["devices"] == 0)
+    before = len(PUSH.at("/push/alerts"))
+    s, _, _ = await needs_you("alert-after-revoke")
+    await asyncio.sleep(2)
+    check("…so nothing more is sent", len(PUSH.at("/push/alerts")) == before, len(PUSH.at("/push/alerts")) - before)
+    d.call("session.close", {"handle": info(d, s["id"])["handle"]})
+    check("the outbox folder holds nothing of it", not any(n.startswith("device-") for n in (os.listdir(os.path.join(os.environ["KELPIE_DATA_DIR"], "notify-outbox")) if os.path.isdir(os.path.join(os.environ["KELPIE_DATA_DIR"], "notify-outbox")) else [])))
+    await alerts.close()
+    d.call("notify.clear")
+
     # ---------- Tailscale mode, against a fake CLI ----------
     def fake(**state):
         ps.fake_tailscale_says(TS_STATE, **state)
@@ -1033,7 +1189,8 @@ async def security(d):
 TS_BIN, TS_STATE, TS_LOG = ps.write_fake_tailscale(work)
 
 # Pinned calm: the timings below are the calm ones, whatever else this machine is doing.
-d = ps.Daemon(exe, env={"KELPIE_LOAD_FORCE": "L0:calm", "KELPIE_E2E": "1", "KELPIE_TAILSCALE_BIN": TS_BIN}).start()
+PUSH = ps.FakePushService()
+d = ps.Daemon(exe, env={"KELPIE_LOAD_FORCE": "L0:calm", "KELPIE_E2E": "1", "KELPIE_TAILSCALE_BIN": TS_BIN, "KELPIE_PUSH_TEST_BASE": PUSH.base}).start()
 try:
     asyncio.run(main(d))
 except Exception:

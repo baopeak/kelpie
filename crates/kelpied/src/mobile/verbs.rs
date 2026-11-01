@@ -59,6 +59,13 @@ pub enum Verb {
     ChatStop,
     /// End the wait a stop asked for.
     ChatResume,
+    /// What this phone needs to subscribe to alerts: the key the computer signs with.
+    PushInfo,
+    /// This phone's subscription: the computer sends alerts to it from now on.
+    PushSub,
+    PushUnsub,
+    /// A test alert to this phone.
+    PushTest,
 }
 
 impl Verb {
@@ -78,13 +85,17 @@ impl Verb {
             "chat_cancel" => Verb::ChatCancel,
             "chat_stop" => Verb::ChatStop,
             "chat_resume" => Verb::ChatResume,
+            "push_info" => Verb::PushInfo,
+            "push_sub" => Verb::PushSub,
+            "push_unsub" => Verb::PushUnsub,
+            "push_test" => Verb::PushTest,
             _ => return None,
         })
     }
 
     pub fn needs(self) -> Permission {
         match self {
-            Verb::List | Verb::Hb | Verb::Ack | Verb::Sub | Verb::Unsub | Verb::ChatSub => Permission::Read,
+            Verb::List | Verb::Hb | Verb::Ack | Verb::Sub | Verb::Unsub | Verb::ChatSub | Verb::PushInfo | Verb::PushSub | Verb::PushUnsub | Verb::PushTest => Permission::Read,
             Verb::Input | Verb::Key | Verb::Answer | Verb::ChatAnswer | Verb::ChatSend | Verb::ChatCancel | Verb::ChatStop | Verb::ChatResume => Permission::Write,
         }
     }
@@ -130,21 +141,21 @@ pub fn key_bytes(key: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const ALL: [Verb; 14] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume];
+    const ALL: [Verb; 18] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushTest];
 
     #[test]
     fn the_table_is_closed_and_every_verb_has_its_permission() {
-        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume"];
+        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_test"];
         for (name, verb) in names.iter().zip(ALL) {
             assert_eq!(Verb::parse(name), Some(verb), "{name}");
         }
-        let reads = ["list", "hb", "ack", "sub", "unsub", "chat_sub"];
+        let reads = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "push_info", "push_sub", "push_unsub", "push_test"];
         for (name, verb) in names.iter().zip(ALL) {
             let expected = if reads.contains(name) { Permission::Read } else { Permission::Write };
             assert_eq!(verb.needs(), expected, "{name}");
         }
         // The daemon's own methods, admin ones above all, are not verbs, whatever they are named.
-        for other in ["chat.send", "chat.queue_op", "chat.write_turn", "chat_queue", "chat_write", "session.update", "session.attach", "session.answer", "session.input", "session.close", "mobile.approve", "mobile.revoke", "daemon.shutdown", "read", "auth", "", "LIST", "list "] {
+        for other in ["chat.send", "chat.queue_op", "chat.write_turn", "chat_queue", "chat_write", "session.update", "session.attach", "session.answer", "session.input", "session.close", "mobile.approve", "mobile.revoke", "daemon.shutdown", "notify.test", "notify.set", "push.sub", "push", "read", "auth", "", "LIST", "list "] {
             assert_eq!(Verb::parse(other), None, "{other:?}");
         }
     }
@@ -153,7 +164,7 @@ mod tests {
     fn write_verbs_need_more_than_a_read_only_device_has() {
         let read_only = Permission::Read;
         let reachable: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() <= read_only).collect();
-        assert_eq!(reachable, [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub]);
+        assert_eq!(reachable, [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushTest]);
         assert!(ALL.into_iter().all(|v| v.needs() <= Permission::Write));
     }
 

@@ -73,6 +73,7 @@
   "Phones with Tailscale on reach this computer at {origin}, from anywhere.": "Điện thoại đang bật Tailscale kết nối tới máy tính này tại {origin}, từ bất cứ đâu.",
   "The entry in Tailscale Serve was removed, so phones cannot reach this computer through it. Restore it to go on.": "Mục trong Tailscale Serve đã bị gỡ nên điện thoại không kết nối được qua đó. Hãy khôi phục để tiếp tục.",
   "Port 8443 of Tailscale Serve is used by something else. Kelpie will not change it: free that port, then check again.": "Cổng 8443 của Tailscale Serve đang được dùng cho việc khác. Kelpie sẽ không thay đổi nó: hãy giải phóng cổng đó rồi kiểm tra lại.",
+  "Tailscale did not answer in time, and this computer may be busy. Check again in a moment.": "Tailscale không trả lời kịp, có thể máy tính này đang bận. Hãy kiểm tra lại sau giây lát.",
   "Kelpie could not read what Tailscale Serve is doing. Update Tailscale, then check again.": "Kelpie không đọc được trạng thái của Tailscale Serve. Hãy cập nhật Tailscale rồi kiểm tra lại.",
   "Tailscale is ready. Turn this on to reach this computer from anywhere with Tailscale on.": "Tailscale đã sẵn sàng. Hãy bật mục này để kết nối tới máy tính này từ bất cứ đâu khi đang bật Tailscale.",
   "This window is not the installed Kelpie app, so it cannot change this.": "Cửa sổ này không phải ứng dụng Kelpie đã cài nên không thể thay đổi mục này.",
