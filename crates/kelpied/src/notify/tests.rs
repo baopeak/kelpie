@@ -716,6 +716,7 @@ fn a_failure_on_the_way_there_sent_nothing_and_one_after_it_may_have_arrived() {
         (ureq::Error::Timeout(ureq::Timeout::Connect), "timed out"),
         (ureq::Error::HostNotFound, "host not found"),
         (ureq::Error::ConnectionFailed, "connection failed"),
+        (ureq::Error::ConnectProxyFailed("502".into()), "connection failed"),
         (ureq::Error::Tls("no"), "network error"),
         (ureq::Error::Io(Io::from(K::ConnectionRefused)), "connection failed"),
         (ureq::Error::Io(Io::from(K::HostUnreachable)), "network error"),

@@ -627,7 +627,8 @@ fn failure_of(e: ureq::Error) -> Failure {
         ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => "timed out".into(),
         ureq::Error::Timeout(_) => Failure::unsure("timed out"),
         ureq::Error::HostNotFound => "host not found".into(),
-        ureq::Error::ConnectionFailed => "connection failed".into(),
+        // A proxy that would not connect: only the CONNECT line went, and to the proxy.
+        ureq::Error::ConnectionFailed | ureq::Error::ConnectProxyFailed(_) => "connection failed".into(),
         ureq::Error::Tls(_) | ureq::Error::Rustls(_) => "network error".into(),
         ureq::Error::Io(e) => match e.kind() {
             Io::ConnectionRefused => "connection failed".into(),

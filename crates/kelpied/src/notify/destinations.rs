@@ -584,7 +584,7 @@ fn run(dest: Dest, rx: mpsc::Receiver<Entry>, shared: Arc<Shared>, retired: Arc<
             }
             // A channel's receiver acts on each send, so one that may have arrived is not repeated without end. A phone's repeats take each other's place, under one `Topic` and `tag`.
             Err(f) if matches!(dest, Dest::Channel(_)) && (f.unsure || (dest == Dest::Channel(Channel::Webhook) && f.webhook_may_have_acted())) => {
-                let lost = outbox.unsure(&attempt, now_millis(), f.retry_after.or(Some(SECOND_SEND_AFTER)), &mut dice);
+                let lost = outbox.unsure(&attempt, now_millis(), Some(f.retry_after.unwrap_or_default().max(SECOND_SEND_AFTER)), &mut dice);
                 shared.dropped.fetch_add(lost, Ordering::Relaxed);
             }
             Err(f) if f.retryable() => outbox.failed(now_millis(), f.retry_after, &mut dice),

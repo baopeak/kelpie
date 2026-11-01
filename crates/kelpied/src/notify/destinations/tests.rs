@@ -835,6 +835,18 @@ fn a_webhook_answering_a_server_error_gets_a_message_twice_at_most() {
     }
 }
 
+/// A service asking for less than the wait a second send always had does not shorten it.
+#[test]
+fn a_short_retry_after_does_not_shorten_the_wait_before_a_second_send() {
+    let (r, service) = (rig(), PushService::start(&[Answer::RetryAfter(500, "0")]));
+    let mut c = r.notifier.config();
+    c.webhook.enabled = true;
+    r.notifier.update(Some(c), &serde_json::json!({"webhook_url": format!("{}/hook", service.base)})).unwrap();
+    r.notifier.send(&waiting("s1"), &Context::default());
+    let got = service.wait_for(2, Duration::from_secs(8));
+    assert!(got[1].at.duration_since(got[0].at) >= Duration::from_millis(2900), "{:?}", got[1].at.duration_since(got[0].at));
+}
+
 /// 502 and 503 say the flow was not reached, and an outage is what the retries are for.
 #[test]
 fn a_webhook_behind_something_that_says_it_is_not_there_keeps_being_tried() {
