@@ -55,7 +55,16 @@ describe("an alert", () => {
   it("shows the fixed sentence, under its tag, and keeps the link for the tap", async () => {
     const w = await worker();
     await w.fire("push", alert({ title: "Kelpie", body: "A session needs you", tag: "t1", navigate: LINK }));
-    expect(w.shown).toEqual([{ title: "Kelpie", options: { body: "A session needs you", tag: "t1", icon: "/icon-192.png", data: { navigate: LINK } } }]);
+    expect(w.shown).toEqual([{ title: "Kelpie", options: { body: "A session needs you", tag: "t1", icon: expect.stringMatching(/^data:image\/png;base64,/), data: { navigate: LINK } } }]);
+  });
+
+  it("shows it with no request to anything: the phone may not reach the computer", async () => {
+    const w = await worker();
+    const network = vi.fn(() => Promise.reject(new TypeError("no network")));
+    vi.stubGlobal("fetch", network);
+    await w.fire("push", alert({ title: "Kelpie", body: "A session needs you", tag: "t1", navigate: LINK }));
+    expect(w.shown).toHaveLength(1);
+    expect(network).not.toHaveBeenCalled();
   });
 
   it("shows something for a message it cannot read: a browser punishes a push with nothing shown", async () => {

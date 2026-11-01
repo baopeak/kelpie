@@ -48,6 +48,8 @@ const NAVIGATION_WAIT_MS = 2500;
 /** Where the worker leaves word for the page, which reads it the next time it opens (push.ts). */
 const PUSH_FLAGS = "kelpie-push-flags";
 const RESUBSCRIBE_MARK = "/resubscribe";
+/** The app's icon, 72 px, in this file. A worker's own requests do not pass through its `fetch` handler, so a path here would go to the computer, which the phone may not be able to reach: the alert would wait for it. */
+const ALERT_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAMAAABiM0N1AAAAYFBMVEWdVDPrkF4WGyhWNCnx5Nf0so9fVlZ4RTGUcV0oT1gXqpnwx62alpMcK0Hqc1lNPUC8hGBndIHBXC0dhH4TFyMqMULqdDv1qHD9yan+9ejtd0zQaTcsKDIjLUDlbTT9snVGl2y/AAAAIHRSTlP//////////////////////////////////////////3Fe9GAAAAL1SURBVHja7ZbpctsgEIABcciVrKStQRfI7/+W3QUJX+Cg2NMfne5MZFjBp71YQk5vEvIf9B90I1X11abUigRoNl+YScxcAmKzeU4ixsyszCJjVJ6j4HWRRfhFY7JxqvAtKQflSJ5TCFJmwsU2xbH4Zkp5nkq/oQLjkCBZjJ+gpioFDSIdUc8ZSkF2mYZBTMtjJIhZJjEM02KLQFBIsLqhDyTg0Aa+kSqj5FnzoGG4JyEH9SLldBJEAghJ1XXoAgdApBgUdtyQIgdiXQpSG6ihsTChEDE+AaQKQdUGgooh9sSsZScLZooNVO0DAWYmhMxQPLMfrKhykDVT08D6xdzJAl9omil5elIgLKR+esB41CTSZZTu2XM4tmmZkmWUBhHzVMjfB1VzdOPGpyBzVQxSYQftexpRE87CUJ2K0x84574/0w10PbPFZ+25RaVnzV7CQm9idJnZwuYf01P9unBmFXNQ2Pxj8ismZdwL5fyzXvK+ZW7adfXIo3mKybEla8iK7/4NJA9VNA9mllzM2wdiTJkF/IE/hbNdoOgaGMFsJ3wPEqJj7BTNm/cF25B6GKMMNXl22jKgCWURCOCtlC3HkVi8uhhUraAOOJyPLQNpcTSKbgVVpTctgrqOB58kg8x74V3nQaU3bfBt6Uck8ZFrzdchXXKe5Xo2tmfhd8OjrreRWDLJzzU2D6LeHD421jb4CzC6ZP+ZS4KY8knD3EsrbdvCA8M0+LQpVgyS0Hug+9CGc0i+4FxAAXDe0KCXSZB+FGyGXj610/qgrYUHDD9X9fkzsekRxOqN058lAwrAHDyYvOhrthN0vSGnz4KcjOt76W70kXStz4JgB+3PIBBVV6LPgiCssgaR7m69c0Gv3RfBdnHFEQ9qYrlD/VHr5yBHDEl+rEhuQWb+OL4OggneFu4NIIeXD3kDSB8/kHR8GXT88GFyNoj7Lmj1zLlDkF0pvMtaiPWPIAf7bdCa/d+vgbRWmzPBsxeCvQ32x1oT/Sb5h0F/ALdqkPw7JUSOAAAAAElFTkSuQmCC";
 
 sw.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(__PRECACHE__)).then(() => sw.skipWaiting()));
@@ -90,7 +92,7 @@ sw.addEventListener("push", (e) => {
     /* A browser must show something for every push: it shows the name alone. */
   }
   const text = (v: unknown) => (typeof v === "string" ? v : undefined);
-  e.waitUntil(sw.registration.showNotification(text(alert.title) ?? "Kelpie", { body: text(alert.body), tag: text(alert.tag), icon: "/icon-192.png", data: { navigate: alert.navigate } }));
+  e.waitUntil(sw.registration.showNotification(text(alert.title) ?? "Kelpie", { body: text(alert.body), tag: text(alert.tag), icon: ALERT_ICON, data: { navigate: alert.navigate } }));
 });
 
 sw.addEventListener("notificationclick", (e) => {
