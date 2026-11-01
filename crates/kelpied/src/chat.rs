@@ -1517,7 +1517,7 @@ impl ChatSession {
             let spec = self.spec.lock();
             (spec.id.clone(), spec.cwd.clone())
         };
-        for (_, pending) in g.pending.items.iter() {
+        for pending in g.pending.items.values() {
             let _ = tx.send(json_out(&request_info(&session, &worktree, pending)));
         }
         Ok(())

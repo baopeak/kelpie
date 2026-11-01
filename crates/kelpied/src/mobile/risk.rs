@@ -524,8 +524,7 @@ fn read_simple(simple: &Simple, at: &Paths, found: &mut Found, depth: u8, cwd_mo
         words = &words[1..];
     }
     // Who runs it: the word that matters comes after.
-    loop {
-        let Some(first) = words.first() else { break };
+    while let Some(first) = words.first() {
         let program = program_of(first);
         if SUDO.contains(&program.as_str()) {
             found.tag(Tag::Sudo);
