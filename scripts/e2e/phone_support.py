@@ -485,14 +485,15 @@ class Phone:
     second frame, or 250 ms after the first one not acknowledged) and answers the daemon's heartbeats.
     `auto_ack` and `auto_hb` switch those off for tests of what a silent phone gets."""
 
-    def __init__(self, base, device, auto_ack=True, auto_hb=True, caps=True, origin=None, **connect):
-        """`origin`: as a page connects, with where it is. `connect`: what else `websockets.connect` is told (another `host` and `port` to reach `base` through, `ssl`, headers)."""
+    def __init__(self, base, device, auto_ack=True, auto_hb=True, caps=True, origin=None, resume=None, **connect):
+        """`origin`: as a page connects, with where it is. `resume`: the secret of a window the app lock opened, as the page that opened it says it. `connect`: what else `websockets.connect` is told (another `host` and `port` to reach `base` through, `ssl`, headers)."""
         self.url = link_url(base)
         self.device = device
         self.origin = origin
         self.connect = connect
         self.auto_ack, self.auto_hb = auto_ack, auto_hb
         self.caps = ["ack", "hb"] if caps else None  # None: a page from before frames were acknowledged
+        self.resume = resume
         self.log = []
         self.lines = {}
         self.rev = {}
@@ -520,7 +521,7 @@ class Phone:
             self.closed = e.rcvd.code if e.rcvd else 1006
             return None
         self.session, _ = init.finish(reply)
-        await self.send(**({"caps": self.caps} if self.caps else {}))
+        await self.send(**({"caps": self.caps} if self.caps else {}), **({"resume": self.resume} if self.resume else {}))
         self.reader = asyncio.ensure_future(self._read())
         self.acker = asyncio.ensure_future(self._flush_acks())
         await self.wait(lambda m: m["type"] == "hello", 10)

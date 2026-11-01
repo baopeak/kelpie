@@ -865,26 +865,46 @@ for n in (1, 2, 3):
     insecure_context.check_hostname = False
     insecure_context.verify_mode = ssl_module.CERT_NONE
 
-    async def copied_key_is_refused():
+    async def paired_by_a_program(name):
         link_for = on_name(daemon(d, "mobile.pair_start")["url"])
-        attempt = ps.PairAttempt(secure, link_for, "Copied key", "write", origin=secure.rstrip("/"), ssl=insecure_context)
+        attempt = ps.PairAttempt(secure, link_for, name, "write", origin=secure.rstrip("/"), ssl=insecure_context)
         await attempt.start()
         loop = asyncio.get_running_loop()
 
         def approve():
-            d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Copied key'))", 15)
+            d.wait(f"return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('{name}'))", 15)
             type_code(attempt.code())
-            d.js("[...document.querySelectorAll('.mobile-approve')].find(a => a.textContent.includes('Copied key')).querySelector('[data-allow=write]').click()")
+            d.js(f"[...document.querySelectorAll('.mobile-approve')].find(a => a.textContent.includes('{name}')).querySelector('[data-allow=write]').click()")
 
         await loop.run_in_executor(None, approve)
         await attempt.outcome(20)
+        device = next(x for x in daemon(d, "mobile.status")["devices"] if x["name"] == name)
+        return ps.Device(attempt.priv, attempt.pub, attempt.dpk, device["id"])
+
+    async def copied_key_is_refused():
+        keys = await paired_by_a_program("Copied key")
         device = next(x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Copied key")
-        thief = ps.Phone(secure, ps.Device(attempt.priv, attempt.pub, attempt.dpk, device["id"]), origin=secure.rstrip("/"), ssl=insecure_context)
+        as_page = dict(origin=secure.rstrip("/"), ssl=insecure_context)
+        thief = ps.Phone(secure, keys, **as_page)
         hello = await thief.open()
         run.check("a copied key with no passkey gets a locked hello from the daemon, with no session in it", hello.get("locked") is True and hello["sessions"] == [] and hello["projects"] == {}, str(hello.get("lock")))
         replies = [await thief.ask(type=name, id=typed_here["id"], text="x") for name in ("list", "sub", "input", "chat_sub", "push_info", "push_test")]
         run.check("…and reading, typing and alerts are each refused by the daemon", all((r or {}).get("code") == "locked" for r in replies), str(replies))
+        # Approving it opened the way for its passkey. The owner sets one up; then a program with the same key, while that window is open.
+        owner = ps.SoftPasskey(secure.rstrip("/"))
+        opened = await thief.ask(type="lock_enrol", **owner.create((await thief.ask(type="lock_challenge"))["lock"]["challenge"]))
+        run.check("just after approval a passkey can be set up, and its window comes with a secret", (opened or {}).get("result") == "ok" and bool(opened.get("resume")), str((opened or {}).get("code")))
         await thief.close()
+        copy = ps.Phone(secure, keys, **as_page)
+        hello = await copy.open()
+        window_open = next(x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Copied key").get("unlocked")
+        run.check("the same key without the secret is locked while the owner's window is open, with no session", window_open is True and hello.get("locked") is True and hello["lock"]["state"] == "unlock" and hello["sessions"] == [], str(hello.get("lock")))
+        run.check("…and is refused by the daemon", (await copy.ask(type="list"))["code"] == "locked")
+        await copy.close()
+        flap = ps.Phone(secure, keys, resume=opened["resume"], **as_page)
+        hello = await flap.open()
+        run.check("the page holding the secret comes back from a flap with nothing asked", hello.get("locked") is False and hello["lock"]["state"] == "open", str(hello.get("lock")))
+        await flap.close()
         daemon(d, "mobile.revoke", {"id": device["id"]})
 
     asyncio.run(copied_key_is_refused())
@@ -907,6 +927,12 @@ for n in (1, 2, 3):
     phone.wait("return document.querySelector('.conn')?.dataset.state !== 'live'", 10)
     phone.js("window.dispatchEvent(new Event('online'))")
     run.check("a network flap in the foreground comes back open, asking nothing", bool(phone.wait(LIVE, 30)) and bool(phone.wait(open_js, 15)) and passkeys()[0]["signCount"] == signs)
+
+    # A reload has lost the window's secret, which was only in the page's memory, so it asks again, though the window is still open at the computer.
+    phone.go(secure)
+    run.check("a reload asks again, while the window is still open at the computer", bool(phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen === 'unlock'", 20)) and lock_device().get("unlocked") is True and not phone.js("return !!document.querySelector('.row')"), str(lock_device()))
+    phone.js("document.querySelector('[data-lock-go]').click()")
+    run.check("…and the passkey opens it", bool(phone.wait(open_js, 20)) and passkeys()[0]["signCount"] > signs, str(phone.js(lock_error)))
 
     # The idle time, at its shortest. Setting it shorter needs nobody; nothing touches the phone meanwhile.
     d.js(f"{S}.openSettings('mobile')")
@@ -976,11 +1002,40 @@ for n in (1, 2, 3):
     phone.js("document.querySelector('.send .btn.primary').click()")
     run.check("a secure origin may type", bool(wait(lambda: "secure-42" in daemon(d, "session.read", {"handle": typed_here["handle"], "lines": 40})["text"], 20)))
     daemon(d, "session.close", {"handle": typed_here["handle"]})
+    # A phone paired, with no passkey yet, when the computer restarts: the way approval opened is gone with it.
+    no_window = asyncio.run(paired_by_a_program("No window"))
     # A restart: the window is memory, so every phone is locked, and the phone shows the lock and not an error.
     restart_daemon(d, kelpied, kill=True, env=ISOLATED)
     check_daemon(d, ISOLATED)
     run.check("after the computer restarted the phone is locked, and shows the lock rather than an error", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 90) == "unlock", str(phone.js("return document.querySelector('.conn')?.dataset.state")))
     webauthn.close()
+
+    async def passkey_takes_the_computers_window():
+        as_page = dict(origin=secure.rstrip("/"), ssl=insecure_context)
+        waiting = ps.Phone(secure, no_window, **as_page)
+        hello = await waiting.open()
+        run.check("with no window from the computer a phone is told to press the button there, and has no challenge to answer", hello.get("locked") is True and hello["lock"]["state"] == "desktop" and "challenge" not in hello["lock"], str(hello.get("lock")))
+        passkey = ps.SoftPasskey(secure.rstrip("/"))
+        refused = await waiting.ask(type="lock_enrol", **passkey.create("AAAA"))
+        run.check("…and the daemon refuses a passkey from it", (refused or {}).get("code") == "needs_desktop", str(refused))
+        mark = waiting.mark()
+        loop = asyncio.get_running_loop()
+
+        def press():
+            d.js(f"{S}.openSettings('mobile')")
+            d.wait(f"return !!document.querySelector('[data-device=\"{no_window.id}\"] [data-reset-lock]')", 15)
+            d.js(f"document.querySelector('[data-device=\"{no_window.id}\"] [data-reset-lock]').click()")
+
+        await loop.run_in_executor(None, press)
+        told = await waiting.wait(lambda m: m["type"] == "locked" and m["lock"]["state"] == "enrol", 15, mark)
+        run.check("the computer's button lets that phone set one up, and only then", told is not None and bool(told["lock"].get("challenge")), str(told))
+        reply = await waiting.ask(type="lock_enrol", **passkey.create(told["lock"]["challenge"]))
+        run.check("…which opens it", (reply or {}).get("result") == "ok", str((reply or {}).get("code")))
+        await waiting.close()
+        daemon(d, "mobile.revoke", {"id": no_window.id})
+
+    asyncio.run(passkey_takes_the_computers_window())
+    d.js(f"{S}.closeSettings?.()")
 
     # The link as the daemon makes it, not rewritten: on a certificate listener it is at the address it listens on, a number, where no passkey can be. The phone must read there, and not wait at a lock nothing can open.
     numbered = daemon(d, "mobile.pair_start")

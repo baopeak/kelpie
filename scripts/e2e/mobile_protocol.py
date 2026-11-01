@@ -28,7 +28,7 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
     agent (fake_acp_agent.py) shows the prompt through `kelpie_sent`, and a stop cancels its permission.
 11. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, a script here: never the real Tailscale): each state is told, a port used by
     something else is refused and left as it was, publishing runs the one command and off removes only our entry, a page through the
-    loopback listener pairs as a secure origin with its address from `X-Forwarded-For`, and the plain user token can change none of it. Such a phone is locked at the daemon until a passkey's signature passes (software keys, real signatures): every verb but the lock's own refused, a forged or unverified assertion and a used challenge refused, a reconnect inside the window not asked again.
+    loopback listener pairs as a secure origin with its address from `X-Forwarded-For`, and the plain user token can change none of it. Such a phone is locked at the daemon until a passkey's signature passes (software keys, real signatures): every verb but the lock's own refused, a forged or unverified assertion and a used challenge refused, a reconnect inside the window not asked again if it holds the window's secret, and locked if it does not.
 12. Alerts, with no window open, against a local stand-in for a push service that the daemon really POSTs to (`KELPIE_PUSH_TEST_BASE`): the closed list refuses
     what is no push service; a test alert and a needs-you event are signed, encrypted, content-free when opened with the browser's keys, and accepted within 2 s; one call per
     destination; 503 and 429 retried as asked, a session answered meanwhile not told; a hanging ntfy does not delay Web Push; a timeout is said with no address; 404 and 410 end
@@ -1199,9 +1199,15 @@ async def security(d):
     opened = await thief.wait(lambda m: m["type"] == "hello" and m.get("locked") is False, 10)
     check("…with the sessions", opened is not None and isinstance(opened["sessions"], list), opened)
     await thief.close()
-    flap = ps.Phone(f"http://{origin}/", copied, origin=f"https://{origin}", **held)
+    copy = ps.Phone(f"http://{origin}/", copied, origin=f"https://{origin}", **held)
+    hello = await copy.open()
+    still = next(x for x in d.call("mobile.status")["devices"] if x["name"] == "Over Tailscale")
+    check("the same key without the window's secret is locked while that window is open", hello.get("locked") is True and hello["lock"]["state"] == "unlock" and hello["sessions"] == [] and still.get("unlocked") is True, hello.get("lock"))
+    check("…and reads nothing", (await copy.ask(type="list"))["code"] == "locked")
+    await copy.close()
+    flap = ps.Phone(f"http://{origin}/", copied, origin=f"https://{origin}", resume=good["resume"], **held)
     hello = await flap.open()
-    check("a reconnect inside the window asks nothing: a flap of the network", hello.get("locked") is False and hello["lock"]["state"] == "open", hello.get("lock"))
+    check("a reconnect inside the window with its secret asks nothing: a flap of the network", hello.get("locked") is False and hello["lock"]["state"] == "open", hello.get("lock"))
     await flap.send(type="lock_now")
     await flap.close()
     d.call("mobile.revoke", {"id": listed["id"]})
