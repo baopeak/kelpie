@@ -90,6 +90,7 @@ function rig(opts: { random?: number; token?: string | null; codec?: () => Codec
     chatResolved: () => {},
     chatQueue: (m) => void queues.push(m),
     chatResync: (id) => log.push(`resync ${id}`),
+    locked: (lock) => log.push(`locked ${lock.state}`),
     unpaired: () => log.push("unpaired"),
     haveRev: (id) => have[id] ?? null,
     chatSince: () => null,
@@ -116,11 +117,98 @@ function rig(opts: { random?: number; token?: string | null; codec?: () => Codec
   return { link, env, sockets, last, advance, connect, log, frames, queues, setOnline: (v: boolean) => (online = v), setReach: (r: typeof reach) => (reach = r), setHave: (h: typeof have) => (have = h), now: () => t };
 }
 
+describe("while the computer holds the phone locked", () => {
+  const LOCKED = { locked: true, lock: { state: "unlock", challenge: "c" } };
+
+  it("a locked hello goes to the lock and nowhere else, and asks for no session", () => {
+    const r = rig();
+    r.link.start();
+    r.link.follow("s1", "term");
+    r.connect(LOCKED);
+    expect(r.log).toEqual(["locked unlock"]);
+    expect(r.link.ready).toBe(true);
+    expect(r.last().types()).not.toContain("sub");
+  });
+
+  it("what is wanted waits for the hello that opens it, and picks up there", () => {
+    const r = rig();
+    r.link.start();
+    r.link.follow("s1", "term");
+    r.connect(LOCKED);
+    r.link.follow("s2", "chat");
+    expect(r.last().types()).toEqual(["auth"]);
+    r.last().say({ type: "hello", ...hello() });
+    expect(r.log).toEqual(["locked unlock", "hello e1"]);
+    expect(r.last().types()).toEqual(expect.arrayContaining(["sub", "chat_sub"]));
+  });
+
+  it("being locked in a session stops what it asks for from then on, and leaving it again is a hello", () => {
+    const r = rig();
+    r.link.start();
+    r.connect();
+    r.last().say({ type: "locked", lock: { state: "unlock" } });
+    expect(r.log).toEqual(["hello e1", "locked unlock"]);
+    r.link.follow("s1", "term");
+    expect(r.last().types()).not.toContain("sub");
+    r.last().say({ type: "hello", ...hello() });
+    expect(r.last().types()).toContain("sub");
+  });
+
+  it("a restart found while locked still counts as one, on the hello that opens it", () => {
+    const r = rig();
+    r.link.start();
+    r.connect();
+    r.last().die();
+    r.advance(2000);
+    r.connect({ ...LOCKED, daemon_epoch: "e2" });
+    expect(r.log[r.log.length - 1]).toBe("locked unlock");
+    r.last().say({ type: "hello", ...hello({ daemon_epoch: "e2" }) });
+    expect(r.log[r.log.length - 1]).toBe("hello e2 changed");
+  });
+
+  it("a page asks, and hears: the lock's own requests carry no write id, and the reply brings the challenge", async () => {
+    const r = rig();
+    r.link.start();
+    r.connect(LOCKED);
+    const asked = r.link.lockAsk({ type: "lock_challenge" });
+    const sent = r.last().sent[r.last().sent.length - 1];
+    expect([sent.cid, sent.epoch]).toEqual([undefined, undefined]);
+    r.last().say({ type: "ack", req: sent.req, lock: { state: "unlock", challenge: "new" } });
+    expect(await asked).toMatchObject({ t: "ack", lock: { challenge: "new" } });
+    r.link.lockNow();
+    r.link.lockTouch();
+    expect(r.last().types().slice(-2)).toEqual(["lock_now", "lock_touch"]);
+  });
+});
+
 describe("Link handshake", () => {
   it("declares ack and hb in its first message, so it is never served as a legacy page", () => {
     const r = rig();
     r.link.start();
     r.last().open();
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"] });
+  });
+
+  it("says the window's secret first on every connection while it holds one, and not once it has let it go", async () => {
+    const r = rig();
+    const reconnect = async () => {
+      const before = r.sockets.length;
+      r.last().die();
+      for (let waited = 0; r.sockets.length === before && waited < 120; waited++) {
+        await Promise.resolve();
+        r.advance(1000);
+      }
+      expect(r.sockets.length).toBeGreaterThan(before);
+      r.last().open();
+    };
+    r.link.setResume("the-secret");
+    r.link.start();
+    r.last().open();
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"], resume: "the-secret" });
+    await reconnect();
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"], resume: "the-secret" });
+    r.link.setResume(null);
+    await reconnect();
     expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"] });
   });
 

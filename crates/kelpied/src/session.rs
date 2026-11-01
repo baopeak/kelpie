@@ -185,7 +185,12 @@ pub struct ScreenView {
     pub prompt: Option<crate::choices::Prompt>,
     pub waiting_since: Option<u64>,
     pub title: Option<String>,
+    /// While a prompt or a wait is up: what a card says about it.
+    pub wait: Option<crate::mobile::risk::WaitInfo>,
 }
+
+/// Requests a wait is said to be about at once, far beyond what an agent asks in parallel. Past this the mildest goes (`risk::mildest`).
+const WAIT_REQUESTS_KEPT: usize = 16;
 
 /// Where a client's messages from the daemon wait. The app and the CLI have an unbounded queue; a
 /// phone has a bounded one (`bounded_client_channel`): when it is full the message is dropped and
@@ -356,6 +361,11 @@ struct Inner {
     /// The wait on the user that `waiting_since` names has been answered (typed into): a hook
     /// keeps saying `waiting` until its next report, and nothing may answer the same wait twice.
     answered_wait: bool,
+    /// The requests the agent's hooks say are open, oldest first (`request_hook`).
+    wait_requests: Vec<crate::mobile::risk::Request>,
+    /// Counts what was typed into the terminal, and what the count was when the list above last changed by a request coming or going (`typing_may_approve_danger`).
+    typed_count: u64,
+    typed_when_requests_changed: u64,
     /// The last waits answered, newest last (see `RESOLVED_KEPT`), by their `waiting_since`.
     resolved: VecDeque<(u64, Resolution)>,
     /// Who answered the wait that is open now (kept as long as it is, past the ring's ten minutes).
@@ -433,6 +443,9 @@ impl Session {
                 last_output: None,
                 interrupted: false,
                 answered_wait: false,
+                wait_requests: Vec::new(),
+                typed_count: 0,
+                typed_when_requests_changed: 0,
                 resolved: VecDeque::new(),
                 answered_now: None,
                 typing_by: None,
@@ -673,6 +686,7 @@ impl Session {
         // for the usage-limit timer; a click can still answer a prompt.
         if !is_terminal_report(&bytes) {
             let now = Instant::now();
+            g.typed_count += 1;
             g.activity.last_typed = Some(now);
             // Keys that answer a permission prompt or a question go to that dialog, not to the prompt line.
             if !matches!(g.activity.hook, Some((Status::Waiting, _))) {
@@ -767,6 +781,9 @@ impl Session {
             Answer::Text(text) => typed_text(text).into_bytes(),
         };
         let typed = self.answer_bytes(waiting_since, bytes, by)?;
+        // An answer leaves the open requests as they are. It does not say which it answered, and it may be for a dialog no hook spoke of: taking one off could take the label off the next
+        // dialog on screen. A tool that ran is taken off by its own hook, and one refused by the end of the turn. So a card may say more than it must, and says less only when the turn's end
+        // is reported while a background agent's dialog is still open, which clears the list.
         if enter {
             self.enter_later(typed);
         }
@@ -1004,6 +1021,10 @@ impl Session {
             g.answered_now = None;
             g.waiting_since = None;
         }
+        // The turn is over, and so is whatever it asked. Another tool's work is not that: it says nothing of a dialog still open.
+        if status == Status::Idle {
+            g.wait_requests.clear();
+        }
     }
 
     /// A receiver that fires when the screen, the prompt or the wait may have changed.
@@ -1011,17 +1032,85 @@ impl Session {
         self.wake.subscribe()
     }
 
-    /// What a remote view shows right now, taken in one go under the lock.
+    /// What a remote view shows right now, taken in one go under the lock. Labels are worked out after it is let go: reading a command is not to hold up the session, its reader or the ticker.
     pub fn screen_view(&self, height: usize) -> ScreenView {
-        let g = self.inner.lock();
-        let tail = g.vt.tail_lines(height);
-        ScreenView {
-            lines: tail.lines,
-            cursor: tail.cursor,
-            prompt: g.screen_prompt.clone(),
-            waiting_since: g.waiting_since,
-            title: g.vt.title().map(str::to_string),
+        let worktree = self.spec.lock().cwd.clone();
+        let (mut view, open) = {
+            let g = self.inner.lock();
+            let tail = g.vt.tail_lines(height);
+            let waiting = g.screen_prompt.is_some() || g.waiting_since.is_some();
+            let view = ScreenView {
+                lines: tail.lines,
+                cursor: tail.cursor,
+                prompt: g.screen_prompt.clone(),
+                waiting_since: g.waiting_since,
+                title: g.vt.title().map(str::to_string),
+                wait: None,
+            };
+            (view, waiting.then(|| g.wait_requests.clone()))
+        };
+        view.wait = open.map(|open| crate::mobile::risk::WaitInfo::of(&open, &worktree));
+        view
+    }
+
+    /// Keeps track of what this session's wait is about, from its hooks. Each request stays until that tool has run or failed, or the turn is over (`set_hook_status`): a wait can outlast other
+    /// tools' events, a long silence and the answer to another dialog, and two requests can be open at once, the same one twice as well. What a card says is about all of them (`WaitInfo::of`).
+    pub fn request_hook(&self, event: &str, payload: &Value) {
+        if !matches!(event, "PermissionRequest" | "PostToolUse" | "PostToolUseFailure" | "UserPromptSubmit") {
+            return;
         }
+        let cwd = self.spec.lock().cwd.clone();
+        let request = payload.get("tool_name").and_then(Value::as_str).map(|tool| crate::mobile::risk::from_tool(tool, payload.get("tool_input").unwrap_or(&Value::Null), Some(&cwd)));
+        let mut g = self.inner.lock();
+        match (event, request) {
+            ("PermissionRequest", Some(request)) => {
+                g.wait_requests.push(request);
+                g.typed_when_requests_changed = g.typed_count;
+                // Which goes takes reading them all, and that is not done under the lock.
+                if g.wait_requests.len() > WAIT_REQUESTS_KEPT {
+                    let open = g.wait_requests.clone();
+                    drop(g);
+                    let mildest = crate::mobile::risk::mildest(&open, &cwd);
+                    g = self.inner.lock();
+                    if g.wait_requests.len() > WAIT_REQUESTS_KEPT {
+                        if let Some(at) = mildest.and_then(|at| g.wait_requests.iter().position(|still| *still == open[at])) {
+                            g.wait_requests.remove(at);
+                        }
+                    }
+                }
+            }
+            ("PostToolUse" | "PostToolUseFailure", Some(request)) => {
+                let Some(at) = g.wait_requests.iter().position(|open| *open == request) else { return };
+                g.wait_requests.remove(at);
+                // The next dialog may be up now, and nobody has typed at that one.
+                g.typed_when_requests_changed = g.typed_count;
+            }
+            // A new turn: nothing from the one before is still being asked.
+            ("UserPromptSubmit", _) => g.wait_requests.clear(),
+            _ => return,
+        }
+        self.wake.send_replace(g.seq);
+    }
+
+    /// What must be approved in this wait, when the daemon's label on any of it says dangerous: what the card shows, which is what an assertion is over.
+    pub fn dangerous_wait(&self) -> Option<String> {
+        let worktree = self.spec.lock().cwd.clone();
+        let open = self.inner.lock().wait_requests.clone();
+        let info = crate::mobile::risk::WaitInfo::of(&open, &worktree);
+        (info.risk.level == crate::mobile::risk::Level::Dangerous).then(|| info.command.unwrap_or_default())
+    }
+
+    /// Whether what is typed now could be the answer to a dangerous request. The screen and the status cannot say: a busy agent never goes quiet for a prompt to be found, and another tool's
+    /// report ends a reported wait while the dialog stays up. So it counts as yes while a dangerous request is open, unless the only one open has been typed at since it came. Then Esc, a card's
+    /// answer or the computer's keys have settled that dialog, and its entry only lasts until the turn ends. A key refused for this writes nothing, so it cannot lift this itself.
+    pub fn typing_may_approve_danger(&self) -> bool {
+        {
+            let g = self.inner.lock();
+            if g.wait_requests.len() == 1 && g.typed_count > g.typed_when_requests_changed {
+                return false;
+            }
+        }
+        self.dangerous_wait().is_some()
     }
 
     pub fn screen_text(&self) -> String {
@@ -1170,6 +1259,9 @@ impl Session {
             g.answered_wait = false;
             g.answered_now = None;
         }
+        if status == Status::Exited {
+            g.wait_requests.clear();
+        }
         // A remote view shows the prompt and the wait too, which change without any output.
         if before.is_some_and(|b| b != (g.waiting_since, g.screen_prompt.clone())) {
             self.wake.send_replace(g.seq);
@@ -1273,6 +1365,8 @@ fn report_len(b: &[u8]) -> Option<usize> {
         }
         // A colour or title reply: up to BEL or ST.
         b']' => b.iter().position(|c| *c == 7).map(|p| p + 1).or_else(|| b.windows(2).position(|w| w == b"\x1b\\").map(|p| p + 2)),
+        // A reply to XTVERSION or DECRQSS: up to ST. Alt+Shift+P alone has none, so it is typing.
+        b'P' => b.windows(2).position(|w| w == b"\x1b\\").map(|p| p + 2),
         _ => None,
     }
 }
@@ -1354,6 +1448,21 @@ pub(crate) mod fake {
     /// A menu is on screen where `key` chooses something that outlasts it.
     pub fn show_lasting_prompt(session: &Session, key: &str) {
         session.inner.lock().screen_prompt = Some(crate::choices::Prompt { keys: vec!["1".into(), "2".into(), "3".into()], question: None, line: false, lasting: vec![key.into()], selected: None });
+    }
+
+    /// The wait was reported long ago and the screen has printed since, so its status now goes by the output.
+    pub fn wait_went_stale(session: &Session) {
+        let now = Instant::now();
+        {
+            let mut g = session.inner.lock();
+            g.activity.hook = Some((Status::Waiting, now.checked_sub(Duration::from_secs(600)).unwrap_or(now)));
+            g.activity.on_output(now);
+        }
+        session.tick(now);
+    }
+
+    pub fn lock_is_held(session: &Session) -> bool {
+        session.inner.is_locked()
     }
 
     /// The agent reports a permission request; returns the wait's `waiting_since`.

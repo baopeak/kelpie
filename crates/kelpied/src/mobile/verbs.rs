@@ -66,6 +66,16 @@ pub enum Verb {
     PushUnsub,
     /// A test alert to this phone.
     PushTest,
+    /// A fresh challenge for a passkey ceremony (the last one may have expired on the screen).
+    LockChallenge,
+    /// A new passkey for this phone.
+    LockEnrol,
+    /// A passkey's assertion: this phone may go on.
+    LockUnlock,
+    /// The person left the app: it locks now.
+    LockNow,
+    /// The person did something, at most every 30 s: the idle time starts over.
+    LockTouch,
 }
 
 impl Verb {
@@ -89,15 +99,25 @@ impl Verb {
             "push_sub" => Verb::PushSub,
             "push_unsub" => Verb::PushUnsub,
             "push_test" => Verb::PushTest,
+            "lock_challenge" => Verb::LockChallenge,
+            "lock_enrol" => Verb::LockEnrol,
+            "lock_unlock" => Verb::LockUnlock,
+            "lock_now" => Verb::LockNow,
+            "lock_touch" => Verb::LockTouch,
             _ => return None,
         })
     }
 
     pub fn needs(self) -> Permission {
         match self {
-            Verb::List | Verb::Hb | Verb::Ack | Verb::Sub | Verb::Unsub | Verb::ChatSub | Verb::PushInfo | Verb::PushSub | Verb::PushUnsub | Verb::PushTest => Permission::Read,
+            Verb::List | Verb::Hb | Verb::Ack | Verb::Sub | Verb::Unsub | Verb::ChatSub | Verb::PushInfo | Verb::PushSub | Verb::PushUnsub | Verb::PushTest | Verb::LockChallenge | Verb::LockEnrol | Verb::LockUnlock | Verb::LockNow | Verb::LockTouch => Permission::Read,
             Verb::Input | Verb::Key | Verb::Answer | Verb::ChatAnswer | Verb::ChatSend | Verb::ChatCancel | Verb::ChatStop | Verb::ChatResume => Permission::Write,
         }
+    }
+
+    /// What may pass while the phone is locked: keeping the connection up, and getting out of the lock. Nothing here says anything about a session.
+    pub fn passes_lock(self) -> bool {
+        matches!(self, Verb::Hb | Verb::Ack | Verb::LockChallenge | Verb::LockEnrol | Verb::LockUnlock | Verb::LockNow | Verb::LockTouch)
     }
 }
 
@@ -141,15 +161,15 @@ pub fn key_bytes(key: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const ALL: [Verb; 18] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushTest];
+    const ALL: [Verb; 23] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch];
 
     #[test]
     fn the_table_is_closed_and_every_verb_has_its_permission() {
-        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_test"];
+        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch"];
         for (name, verb) in names.iter().zip(ALL) {
             assert_eq!(Verb::parse(name), Some(verb), "{name}");
         }
-        let reads = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "push_info", "push_sub", "push_unsub", "push_test"];
+        let reads = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "push_info", "push_sub", "push_unsub", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch"];
         for (name, verb) in names.iter().zip(ALL) {
             let expected = if reads.contains(name) { Permission::Read } else { Permission::Write };
             assert_eq!(verb.needs(), expected, "{name}");
@@ -164,8 +184,17 @@ mod tests {
     fn write_verbs_need_more_than_a_read_only_device_has() {
         let read_only = Permission::Read;
         let reachable: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() <= read_only).collect();
-        assert_eq!(reachable, [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushTest]);
+        assert_eq!(reachable, [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch]);
         assert!(ALL.into_iter().all(|v| v.needs() <= Permission::Write));
+    }
+
+    #[test]
+    fn only_keeping_the_connection_up_and_getting_out_of_the_lock_pass_it() {
+        let passing: Vec<Verb> = ALL.into_iter().filter(|v| v.passes_lock()).collect();
+        assert_eq!(passing, [Verb::Hb, Verb::Ack, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch]);
+        for alerts in [Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushTest] {
+            assert!(!alerts.passes_lock(), "{alerts:?}");
+        }
     }
 
     #[test]

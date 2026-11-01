@@ -33,12 +33,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// 22: phone access is kelpie-link (end-to-end encrypted Noise pairing and reconnects on `/link`; `/ws`, `/pair` and device tokens are gone), device store v2 (`mobile.v2.json`), `mobile.set_permission` (`mobile.set_write` kept as an alias for one release), `mobile.reset`, `mobile.device_changed`, and phone-access decisions only from the verified app (`Role::App`).
 /// 23: Tailscale mode (`mobile.tailscale_status`, `mobile.set_tailscale`, the verified app only to change it; `mobile.pair_start {plain}`; a `ts` endpoint in the QR code and `endpoints` beside `list` in `addrs`; `secure_origin` on a device); an older daemon has none of it, so the app offers it only at 23.
 /// 24: Web Push sent by the daemon itself (the phone's `push_info`, `push_sub`, `push_unsub`, `push_test`, `push` in its `hello`; `webpush` in `notify.get` and `notify.test`; `push` on a device in `mobile.status`); an older daemon has none of it, so the phone page offers alerts only at 24.
-pub const API_LEVEL: u32 = 24;
+/// 25: the app lock (the phone's `lock_challenge`, `lock_enrol`, `lock_unlock`, `lock_now`, `lock_touch`, `locked` and `locked: true` in its `hello`, the `resume` secret on the ack of an unlock or enrolment and in its first sealed frame, the `desktop` state and `needs_desktop` refusal for a phone with no window to set up a passkey, and `recheck` refusing `input` and `key` during a dangerous request; `mobile.set_lock` and `mobile.reset_lock` from the verified app; `lock` in `mobile.status`) and the daemon's risk labels (`wait` on a screen frame, `chat_request_info`); an older daemon has none of it, so the app offers the lock's settings only at 25 and the phone page counts it as out of date below it.
+pub const API_LEVEL: u32 = 25;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.
 /// 2: phone access without device tokens (kelpie-link); a daemon at 1 still serves token-paired phones in plain JSON.
-pub const DAEMON_SECURITY_LEVEL: u32 = 2;
+/// 3: the app lock: a copied phone key alone reaches nothing. A daemon at 2 has no lock.
+pub const DAEMON_SECURITY_LEVEL: u32 = 3;
 pub const KIND_JSON: u8 = 1;
 pub const KIND_OUTPUT: u8 = 2;
 pub const KIND_INPUT: u8 = 3;

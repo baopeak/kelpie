@@ -28,9 +28,9 @@ server went away; a read-only device cannot type; a socket from another origin i
 disconnects the phone; turning it off stops the server; after the computer restarted, what waited is shown
 as lost with its text in the stopped chat, also after a reload, until discarded; a used or wrong pairing
 code gets no answer, too many unknown phones are rate limited and the desktop says so, the kill switch and the audit list
-(last, so the limiter cannot refuse a pairing above). On an HTTPS origin (a certificate of this run's own, on 127.0.0.1, which the phone's browser
-is told to accept; needs Python's `cryptography`): the install step, no camera falling back to pasting the link, a pairing that is a secure origin and may
-type. Alerts on a real service worker (`KELPIE_PUSH_TEST_BASE` in tauri-driver's environment, a port this script serves as a stand-in for a push service, which the daemon really POSTs to): the sheet's button, a test alert
+(last, so the limiter cannot refuse a pairing above). On an HTTPS origin (a certificate of this run's own, at `localhost` on 127.0.0.1, which the phone's browser
+is told to accept; needs Python's `cryptography`): the install step, no camera falling back to pasting the link, a pairing that is a secure origin. The app lock on it, with real WebAuthn ceremonies through CDP's virtual authenticator (`WebAuthn.addVirtualAuthenticator`, Blink's and not WebKit's, and no person's face): set up, a copied key refused at the daemon, hide locks, a network flap asks nothing, the idle time locks, the dangerous re-check, the reset, a restart. Then it may
+type. The link the daemon really gives there, at 127.0.0.1, unrewritten: a phone paired from it reads, with no lock in its way, since a passkey needs a name. Alerts on a real service worker (`KELPIE_PUSH_TEST_BASE` in tauri-driver's environment, a port this script serves as a stand-in for a push service, which the daemon really POSTs to): the sheet's button, a test alert
 and a needs-you event taken from the stand-in, opened with the browser's keys and handed to the worker through CDP's `ServiceWorker.deliverPushMessage`, which shows the notification; a tap on it, as a synthetic `notificationclick` in the worker. The browser's own `pushManager.subscribe` is replaced in the page, since it would reach a real push service, which tests never do. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, never the real one): each state's instruction, the two-step dialog, off.
 """
 import asyncio
@@ -92,7 +92,7 @@ def check_no_real_prompt(d):
 
 
 def certificate_for_loopback(folder):
-    """A certificate for 127.0.0.1 and its key, made for this run: (certificate file, key file)."""
+    """A certificate for localhost and 127.0.0.1 and its key, made for this run: (certificate file, key file). A passkey needs a name, so the page is opened at `localhost`."""
     import datetime
     import ipaddress
 
@@ -102,11 +102,11 @@ def certificate_for_loopback(folder):
     from cryptography.x509.oid import NameOID
 
     key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(x509.random_serial_number())
             .not_valid_before(now - datetime.timedelta(minutes=5)).not_valid_after(now + datetime.timedelta(days=1))
-            .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False).sign(key, hashes.SHA256()))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False).sign(key, hashes.SHA256()))
     cert_file, key_file = os.path.join(folder, "loopback.crt"), os.path.join(folder, "loopback.key")
     with open(cert_file, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
@@ -801,7 +801,9 @@ for n in (1, 2, 3):
     # ---------- a secure origin: the install step, no camera, the pasted link, typing ----------
     cert_file, key_file = certificate_for_loopback(scratch)
     daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT, "cert": cert_file, "key": key_file})
-    secure = f"https://127.0.0.1:{PORT}/"
+    secure = f"https://localhost:{PORT}/"
+    # The daemon names the address it listens on. A passkey needs a name, so this run's page is at `localhost`, on the same listener.
+    on_name = lambda url: url.replace(f"https://127.0.0.1:{PORT}/", secure)  # noqa: E731
     phone.go("about:blank")
     phone.go(secure)
     run.check("in a browser on a secure origin, installing comes first", phone.wait("return document.querySelector('[data-install]')?.dataset.install", 20) == "android")
@@ -818,15 +820,15 @@ for n in (1, 2, 3):
     run.check("something else pasted is refused", "not a Kelpie pairing code" in (phone.wait("return document.querySelector('[data-scan-problem]')?.textContent.includes('not a Kelpie') && document.querySelector('[data-scan-problem]').textContent", 10) or ""))
     # A pairing that fails in the installed app must not leave it with a spent code and no way to bring a new one.
     made = daemon(d, "mobile.pair_start")
-    phone.js(phone_paste, made["url"])
+    phone.js(phone_paste, on_name(made["url"]))
     phone.wait("return !!document.querySelector('.card input.field') && !document.querySelector('[data-scan]')", 10)
     phone.js("document.querySelector('.card input').value = 'Turned down'; document.querySelector('.card .btn.primary').click()")
     d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Turned down'))", 15)
     d.js("document.querySelector('.mobile-approve .footer .btn').click()")
     run.check("a pairing turned down leads back to the scanner, saying so", bool(phone.wait("return !!document.querySelector('[data-scan]') && document.querySelector('[data-scan]').textContent.includes('Declined')", 15)))
     made = daemon(d, "mobile.pair_start")
-    run.check("the link is for the secure origin", made["url"].startswith(secure + "#p=") and made["tls"] is True)
-    phone.js(phone_paste, made["url"])
+    run.check("the link is for the secure origin", made["url"].startswith(f"https://127.0.0.1:{PORT}/#p=") and made["tls"] is True)
+    phone.js(phone_paste, on_name(made["url"]))
     phone.wait("return !!document.querySelector('.card input.field') && !document.querySelector('[data-scan]')", 10)
     phone.js("document.querySelector('.card input').value = 'Secure phone'; document.querySelector('.card .btn.primary').click()")
     d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Secure phone'))", 15)
@@ -838,6 +840,171 @@ for n in (1, 2, 3):
     run.check("the phone paired over plain HTTP is not one", all(x["secure_origin"] is False for x in daemon(d, "mobile.status")["devices"] if x["name"] != "Secure phone"))
     run.check("…and nothing says this page may only read", not phone.js("return !!document.querySelector('[data-banner=plain-http]')"))
     typed_here = daemon(d, "session.create", {"kind": "shell", "cwd": proj, "name": "secure-shell", "project_id": pid})
+
+    # ---------- the app lock: a real ceremony in this browser, a virtual authenticator in place of a person's face, and the computer checking every signature ----------
+    run.check("a secure origin stops at the lock, with a passkey to set up", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 15) == "enrol", str(phone.js("return document.querySelector('main')?.textContent")))
+    run.check("…and nothing of any session on the page", not phone.js("return !!document.querySelector('.row') || document.body.textContent.includes('secure-shell')"))
+    phone.shot(os.path.join(shots, "25-phone-lock-enrol.png"))
+    webauthn = Cdp(phone.debugger, "page", f"https://localhost:{PORT}")
+    webauthn.call("WebAuthn.enable", {"enableUI": False})
+    authenticator = webauthn.call("WebAuthn.addVirtualAuthenticator", {"options": {"protocol": "ctap2", "transport": "internal", "hasResidentKey": True, "hasUserVerification": True, "isUserVerified": True, "automaticPresenceSimulation": True}})["authenticatorId"]
+    passkeys = lambda: webauthn.call("WebAuthn.getCredentials", {"authenticatorId": authenticator})["credentials"]  # noqa: E731
+    lock_device = lambda: next((x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Secure phone"), {})  # noqa: E731
+    lock_error = "return document.querySelector('[data-lock-error]')?.textContent ?? null"
+    open_js = "return !document.querySelector('[data-lock-screen]') && [...document.querySelectorAll('.row')].some(r => r.textContent.includes('secure-shell'))"
+    phone.js("document.querySelector('[data-lock-go]').click()")
+    opened = phone.wait(open_js, 20)
+    run.check("a real WebAuthn ceremony sets it up, the computer checks it, and the sessions come", bool(opened), str(phone.js(lock_error)))
+    run.check("…one passkey in the authenticator, on record at the computer, and it is unlocked", len(passkeys()) == 1 and lock_device().get("passkey") is True and lock_device().get("unlocked") is True, str(lock_device()))
+    run.check("…and the desktop heard of it", bool(d.wait("return [...document.querySelectorAll('.toast')].some(t => t.textContent.includes('set up its app lock'))", 10)))
+
+    # A program with a phone's Noise key and none of its passkey, saying it is the same page: at the daemon, not the page.
+    import ssl as ssl_module
+
+    insecure_context = ssl_module.create_default_context()
+    insecure_context.check_hostname = False
+    insecure_context.verify_mode = ssl_module.CERT_NONE
+
+    async def paired_by_a_program(name):
+        link_for = on_name(daemon(d, "mobile.pair_start")["url"])
+        attempt = ps.PairAttempt(secure, link_for, name, "write", origin=secure.rstrip("/"), ssl=insecure_context)
+        await attempt.start()
+        loop = asyncio.get_running_loop()
+
+        def approve():
+            d.wait(f"return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('{name}'))", 15)
+            type_code(attempt.code())
+            d.js(f"[...document.querySelectorAll('.mobile-approve')].find(a => a.textContent.includes('{name}')).querySelector('[data-allow=write]').click()")
+
+        await loop.run_in_executor(None, approve)
+        await attempt.outcome(20)
+        device = next(x for x in daemon(d, "mobile.status")["devices"] if x["name"] == name)
+        return ps.Device(attempt.priv, attempt.pub, attempt.dpk, device["id"])
+
+    async def copied_key_is_refused():
+        keys = await paired_by_a_program("Copied key")
+        device = next(x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Copied key")
+        as_page = dict(origin=secure.rstrip("/"), ssl=insecure_context)
+        thief = ps.Phone(secure, keys, **as_page)
+        hello = await thief.open()
+        run.check("a copied key with no passkey gets a locked hello from the daemon, with no session in it", hello.get("locked") is True and hello["sessions"] == [] and hello["projects"] == {}, str(hello.get("lock")))
+        replies = [await thief.ask(type=name, id=typed_here["id"], text="x") for name in ("list", "sub", "input", "chat_sub", "push_info", "push_test")]
+        run.check("…and reading, typing and alerts are each refused by the daemon", all((r or {}).get("code") == "locked" for r in replies), str(replies))
+        # Approving it opened the way for its passkey. The owner sets one up; then a program with the same key, while that window is open.
+        owner = ps.SoftPasskey(secure.rstrip("/"))
+        opened = await thief.ask(type="lock_enrol", **owner.create((await thief.ask(type="lock_challenge"))["lock"]["challenge"]))
+        run.check("just after approval a passkey can be set up, and its window comes with a secret", (opened or {}).get("result") == "ok" and bool(opened.get("resume")), str((opened or {}).get("code")))
+        await thief.close()
+        copy = ps.Phone(secure, keys, **as_page)
+        hello = await copy.open()
+        window_open = next(x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Copied key").get("unlocked")
+        run.check("the same key without the secret is locked while the owner's window is open, with no session", window_open is True and hello.get("locked") is True and hello["lock"]["state"] == "unlock" and hello["sessions"] == [], str(hello.get("lock")))
+        run.check("…and is refused by the daemon", (await copy.ask(type="list"))["code"] == "locked")
+        await copy.close()
+        flap = ps.Phone(secure, keys, resume=opened["resume"], **as_page)
+        hello = await flap.open()
+        run.check("the page holding the secret comes back from a flap with nothing asked", hello.get("locked") is False and hello["lock"]["state"] == "open", str(hello.get("lock")))
+        await flap.close()
+        daemon(d, "mobile.revoke", {"id": device["id"]})
+
+    asyncio.run(copied_key_is_refused())
+
+    # Leaving: `document.hidden` is set by hand, since a headless browser has no app switcher. All that follows it is the page's and the computer's.
+    set_hidden = "Object.defineProperty(document, 'hidden', {value: arguments[0], configurable: true}); Object.defineProperty(document, 'visibilityState', {value: arguments[0] ? 'hidden' : 'visible', configurable: true}); document.dispatchEvent(new Event('visibilitychange'));"
+    phone.js(set_hidden, True)
+    run.check("hiding the page puts an opaque cover up at once", bool(phone.js("return !!document.querySelector('[data-lock-cover]')")))
+    run.check("…and the computer locks it", bool(wait(lambda: lock_device().get("unlocked") is False, 10)), str(lock_device()))
+    phone.js(set_hidden, False)
+    run.check("coming back shows the lock, and no session", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 15) == "unlock" and not phone.js("return !!document.querySelector('.row') || document.title.startsWith('(')"))
+    phone.shot(os.path.join(shots, "26-phone-lock.png"))
+    signs = passkeys()[0]["signCount"]
+    phone.js("document.querySelector('[data-lock-go]').click()")
+    run.check("the passkey opens it again, with a signature the computer counted", bool(phone.wait(open_js, 20)) and passkeys()[0]["signCount"] > signs, str(phone.js(lock_error)))
+
+    # A network flap in the foreground: the connection goes and comes, and nothing asks.
+    signs = passkeys()[0]["signCount"]
+    phone.js("window.dispatchEvent(new Event('offline'))")
+    phone.wait("return document.querySelector('.conn')?.dataset.state !== 'live'", 10)
+    phone.js("window.dispatchEvent(new Event('online'))")
+    run.check("a network flap in the foreground comes back open, asking nothing", bool(phone.wait(LIVE, 30)) and bool(phone.wait(open_js, 15)) and passkeys()[0]["signCount"] == signs)
+
+    # A reload has lost the window's secret, which was only in the page's memory, so it asks again. Navigating away also hides the page, which sends `lock_now`, so whether the window is still open at
+    # the computer depends on that frame getting out. The program with a copied key above is what shows a window held open without the secret is refused.
+    phone.go(secure)
+    run.check("a reload asks again", bool(phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen === 'unlock'", 20)) and not phone.js("return !!document.querySelector('.row')"), str(lock_device()))
+    phone.js("document.querySelector('[data-lock-go]').click()")
+    run.check("…and the passkey opens it", bool(phone.wait(open_js, 20)) and passkeys()[0]["signCount"] > signs, str(phone.js(lock_error)))
+
+    # The idle time, at its shortest. Setting it shorter needs nobody; nothing touches the phone meanwhile.
+    d.js(f"{S}.openSettings('mobile')")
+    d.wait("return !!document.querySelector('[data-lock-idle]')", 15)
+    run.shot("27-mobile-lock-settings")
+    set_idle = "const s = document.querySelector('[data-lock-idle]'); s.value = arguments[0]; s.dispatchEvent(new Event('change', {bubbles: true}));"
+    d.js(set_idle, "60")
+    run.check("the idle time can be shortened from Settings", bool(wait(lambda: daemon(d, "mobile.status")["lock"]["idle_s"] == 60, 10)), str(daemon(d, "mobile.status")["lock"]))
+    run.check("the idle time locks a phone nobody touches", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 80) == "unlock" and lock_device().get("unlocked") is False, str(lock_device()))
+    phone.js("document.querySelector('[data-lock-go]').click()")
+    run.check("…and it opens again", bool(phone.wait(open_js, 20)), str(phone.js(lock_error)))
+    d.js(set_idle, "300")
+    run.check("lengthening it passes the person's verification (the test's stand-in here)", bool(wait(lambda: daemon(d, "mobile.status")["lock"]["idle_s"] == 300, 15)))
+
+    # A dangerous approval: the label, the full command with what hides written out, and with the switch on a fresh assertion.
+    danger_log = os.path.join(scratch, "phone_danger_agent.log")
+    danger_agent = os.path.join(scratch, "phone_danger_agent.py")
+    if os.path.exists(danger_log):
+        os.remove(danger_log)
+    open(danger_agent, "w", encoding="utf-8").write(
+        "import json, sys\n"
+        "log = sys.argv[1]\n"
+        "def out(m):\n    sys.stdout.write(json.dumps(m) + '\\n'); sys.stdout.flush()\n"
+        "out({'type': 'control_request', 'request_id': 'danger-1', 'request': {'subtype': 'can_use_tool', 'tool_name': 'Bash', 'input': {'command': 'rm -rf build \\u202etxt.evil', 'description': 'A harmless cleanup'}}})\n"
+        "for line in sys.stdin:\n"
+        "    open(log, 'a', encoding='utf-8').write(line)\n"
+        "    if json.loads(line).get('type') == 'control_response':\n"
+        "        out({'type': 'control_request', 'request_id': 'plain-1', 'request': {'subtype': 'can_use_tool', 'tool_name': 'Bash', 'input': {'command': 'ls'}}})\n")
+    d.js("document.querySelector('[data-setting=\"mobile-lock-recheck\"] .switch').click()")
+    run.check("the re-check can be turned on from Settings", bool(wait(lambda: daemon(d, "mobile.status")["lock"]["recheck"] is True, 10)))
+    # A tap on an alert while locked. The session came up after the page locked, so the list the page still holds has never heard of it: what it says and opens must come from the hello that unlocks.
+    phone.js(set_hidden, True)
+    wait(lambda: lock_device().get("unlocked") is False, 10)
+    phone.js(set_hidden, False)
+    phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen === 'unlock'", 15)
+    danger = daemon(d, "session.create", {"kind": "claude", "cwd": proj, "chat_argv": [sys.executable, "-u", danger_agent, danger_log], "name": "phone-danger", "project_id": pid})
+    run.check("the agent waits, with the phone locked", bool(wait(lambda: next((x for x in daemon(d, "session.list") if x["id"] == danger["id"]), {}).get("status") == "waiting", 20)))
+    phone.js("location.hash = arguments[0]", f"#s={danger['id']}&a=1")
+    wrong_news = "return ['That session is gone', 'Already handled'].filter(n => document.body.textContent.includes(n))"
+    time.sleep(1)
+    run.check("a tap on its alert while locked says nothing yet, and stays at the lock", phone.js(wrong_news) == [] and phone.js("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen") == "unlock", str(phone.js(wrong_news)))
+    phone.js("document.querySelector('[data-lock-go]').click()")
+    run.check("…and unlocking opens that session, with no word that it is gone or handled", bool(phone.wait("return !!document.querySelector('.perm [data-risk]')", 20)) and phone.js(wrong_news) == [], str(phone.js(wrong_news)))
+    risk = phone.wait("return document.querySelector('.perm [data-risk]')?.dataset.risk === 'dangerous' && [...document.querySelectorAll('.perm [data-risk-tag]')].map(t => t.dataset.riskTag)", 20)
+    run.check("the card leads with the daemon's label, whatever the agent's description says", bool(risk) and "delete" in risk, str(phone.js("return document.querySelector('.perm')?.textContent")))
+    shown = phone.js("return document.querySelector('.perm [data-command]')?.textContent ?? ''")
+    run.check("…and the full command, what hides written out", shown == "rm -rf build \\u{202E}txt.evil", repr(shown))
+    run.check("…before the agent's own words", phone.js("const c = document.querySelector('.perm'); return c.firstElementChild.matches('[data-command-block]')") is True)
+    phone.shot(os.path.join(shots, "28-phone-risk-card.png"))
+    signs = passkeys()[0]["signCount"]
+    phone.js("[...document.querySelectorAll('.perm .btn')].find(b => b.textContent.trim() === 'Allow').click()")
+    run.check("approving it asks again, because the computer refused it without", bool(phone.wait("return !!document.querySelector('[data-recheck]')", 15)))
+    run.check("…and the agent has been given nothing", not os.path.exists(danger_log))
+    phone.js("document.querySelector('[data-recheck-go]').click()")
+    danger_answers = lambda: [json.loads(x) for x in open(danger_log, encoding="utf-8").read().splitlines() if x.strip()] if os.path.exists(danger_log) else []  # noqa: E731
+    wait(lambda: danger_answers(), 15)
+    run.check("a fresh assertion over that command lets the one answer through", len(danger_answers()) == 1 and danger_answers()[0]["response"]["response"]["behavior"] == "allow" and passkeys()[0]["signCount"] > signs, str(danger_answers()))
+    plain_card = phone.wait("return [...document.querySelectorAll('.perm')].find(p => p.dataset.perm === 'plain-1' && p.querySelector('[data-risk=low]'))?.textContent ?? null", 20)
+    run.check("what is not dangerous is labelled too, and asks nothing more", bool(plain_card), str(plain_card))
+    d.js("document.querySelector('[data-setting=\"mobile-lock-recheck\"] .switch').click()")
+    run.check("turning it off passes the person's verification", bool(wait(lambda: daemon(d, "mobile.status")["lock"]["recheck"] is False, 15)))
+    daemon(d, "session.close", {"handle": danger["handle"]})
+    phone.wait("return !document.querySelector('.perm')", 15)
+
+    # A passkey gone: the desktop opens the way, and only for this phone.
+    run.check("Settings offers to reset this phone's lock", bool(d.wait("return !!document.querySelector('[data-reset-lock]')", 15)))
+    d.js("document.querySelector('[data-reset-lock]').click()")
+    run.check("the reset locks the phone and lets it set up a new passkey", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 15) == "enrol", str(lock_device()))
+    phone.js("document.querySelector('[data-lock-go]').click()")
+    run.check("…which opens it", bool(phone.wait(open_js, 20)) and lock_device().get("lock_reset") is False, str(phone.js(lock_error)))
+    d.js(f"{S}.closeSettings?.()")
     phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('secure-shell'))", 20)
     phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('secure-shell')).click()")
     phone.wait("return !!document.querySelector('.send textarea')", 15)
@@ -846,7 +1013,66 @@ for n in (1, 2, 3):
     phone.js("document.querySelector('.send .btn.primary').click()")
     run.check("a secure origin may type", bool(wait(lambda: "secure-42" in daemon(d, "session.read", {"handle": typed_here["handle"], "lines": 40})["text"], 20)))
     daemon(d, "session.close", {"handle": typed_here["handle"]})
+    # A phone paired, with no passkey yet, when the computer restarts: the way approval opened is gone with it.
+    no_window = asyncio.run(paired_by_a_program("No window"))
+    # A restart: the window is memory, so every phone is locked, and the phone shows the lock and not an error.
+    restart_daemon(d, kelpied, kill=True, env=ISOLATED)
+    check_daemon(d, ISOLATED)
+    run.check("after the computer restarted the phone is locked, and shows the lock rather than an error", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 90) == "unlock", str(phone.js("return document.querySelector('.conn')?.dataset.state")))
+    webauthn.close()
+
+    async def passkey_takes_the_computers_window():
+        as_page = dict(origin=secure.rstrip("/"), ssl=insecure_context)
+        waiting = ps.Phone(secure, no_window, **as_page)
+        hello = await waiting.open()
+        run.check("with no window from the computer a phone is told to press the button there, and has no challenge to answer", hello.get("locked") is True and hello["lock"]["state"] == "desktop" and "challenge" not in hello["lock"], str(hello.get("lock")))
+        passkey = ps.SoftPasskey(secure.rstrip("/"))
+        refused = await waiting.ask(type="lock_enrol", **passkey.create("AAAA"))
+        run.check("…and the daemon refuses a passkey from it", (refused or {}).get("code") == "needs_desktop", str(refused))
+        mark = waiting.mark()
+        loop = asyncio.get_running_loop()
+
+        def press():
+            d.js(f"{S}.openSettings('mobile')")
+            d.wait(f"return !!document.querySelector('[data-device=\"{no_window.id}\"] [data-reset-lock]')", 15)
+            d.js(f"document.querySelector('[data-device=\"{no_window.id}\"] [data-reset-lock]').click()")
+
+        await loop.run_in_executor(None, press)
+        told = await waiting.wait(lambda m: m["type"] == "locked" and m["lock"]["state"] == "enrol", 15, mark)
+        run.check("the computer's button lets that phone set one up, and only then", told is not None and bool(told["lock"].get("challenge")), str(told))
+        reply = await waiting.ask(type="lock_enrol", **passkey.create(told["lock"]["challenge"]))
+        run.check("…which opens it", (reply or {}).get("result") == "ok", str((reply or {}).get("code")))
+        await waiting.close()
+        daemon(d, "mobile.revoke", {"id": no_window.id})
+
+    asyncio.run(passkey_takes_the_computers_window())
+    d.js(f"{S}.closeSettings?.()")
+
+    # The link as the daemon makes it, not rewritten: on a certificate listener it is at the address it listens on, a number, where no passkey can be. The phone must read there, and not wait at a lock nothing can open.
+    numbered = daemon(d, "mobile.pair_start")
+    run.check("the daemon's own link on a certificate listener is at the number it listens on, and says no passkey can be had there", numbered["url"].startswith(f"https://127.0.0.1:{PORT}/#p=") and numbered["tls"] is True and numbered["passkey"] is False, str(numbered["passkey"]))
+    number_shell = daemon(d, "session.create", {"kind": "shell", "cwd": proj, "name": "number-shell", "project_id": pid})
+    phone.go("about:blank")
+    phone.go(numbered["url"])
+    phone.wait("return !!document.querySelector('.card input.field')", 20)
+    phone.js("document.querySelector('.card input').value = 'Number phone'; document.querySelector('.card .btn.primary').click()")
+    d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Number phone'))", 15)
+    type_code(phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15))
+    d.js("[...document.querySelectorAll('.mobile-approve')].find(a => a.textContent.includes('Number phone')).querySelector('[data-allow=write]').click()")
+    run.check("it pairs and connects", bool(phone.wait(LIVE, 30)))
+    number_device = next((x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Number phone"), {})
+    run.check("…and is not recorded as a page that could have a passkey", number_device.get("secure_origin") is False, str(number_device))
+    run.check("…so it reads, with no lock in its way", bool(phone.wait("return !document.querySelector('[data-lock-screen]') && [...document.querySelectorAll('.row')].some(r => r.textContent.includes('number-shell'))", 20)), str(phone.js("return document.querySelector('main')?.textContent")))
+    run.check("…says why it may only read", bool(phone.wait("return !!document.querySelector('[data-banner=no-passkey]')", 10)))
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('number-shell')).click()")
+    run.check("…and has no way to type", bool(phone.wait("return !!document.querySelector('.readonly') && !document.querySelector('.send textarea')", 15)))
+    number_footer = phone.js("return document.querySelector('.readonly')?.textContent ?? ''")
+    run.check("…and is not sent to Settings for what Settings cannot change", "Settings" not in number_footer and "pair it" in number_footer, number_footer)
+    phone.shot(os.path.join(shots, "29-phone-at-a-number.png"))
+    daemon(d, "mobile.revoke", {"id": number_device["id"]})
+    daemon(d, "session.close", {"handle": number_shell["handle"]})
     daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT, "cert": "", "key": ""})
+    d.js(f"{S}.closeSettings?.()")
     phone.go("about:blank")
     phone.go(base)
     phone.wait(LIVE, 30)

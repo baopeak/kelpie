@@ -1,13 +1,14 @@
 // One open session: a terminal's text with the prompt card, reply box and key bar; or a chat. What the
 // person may do depends on the device's permission and on whether the connection is up.
 import { createMemo, createSignal, Show } from "solid-js";
+import { CommandBlock } from "./command-block";
 import { ChatView } from "./chat-view";
 import { ago, clock } from "./conn-text";
 import { Composer } from "./composer";
 import { KeyBar } from "./key-bar";
 import { PromptCard } from "./prompt-card";
 import { TerminalText } from "./terminal-text";
-import { canType, connected, dataState, dismissNotice, lastLiveAt, notice as sessionNotice, now, paintedFrom, screen, sessions } from "./phone-state";
+import { canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, paintedFrom, screen, sessions } from "./phone-state";
 import { promptKey } from "./screen-sync";
 import { t } from "./i18n";
 
@@ -46,10 +47,10 @@ export function SessionView(props: { id: string }) {
                 </div>
               )}
             </Show>
-            <Show when={waiting() && screen().prompt} fallback={<Show when={waiting()}><div class="needs">{t("This agent is waiting for you.")}</div></Show>}>
+            <Show when={waiting() && screen().prompt} fallback={<Show when={waiting()}><div class="needs">{t("This agent is waiting for you.")}</div><Show when={screen().wait?.command}><CommandBlock command={screen().wait?.command} risk={screen().wait?.risk} /></Show></Show>}>
               {/* Keyed by the question: the next prompt gets a fresh card, not the last one's "Sent". */}
               <Show when={promptKey(screen().prompt!, screen().waitingSince ?? s().waiting_since)} keyed>
-                {(_key) => <PromptCard id={props.id} prompt={screen().prompt!} waitingSince={screen().waitingSince ?? s().waiting_since} canType={canType()} />}
+                {(_key) => <PromptCard id={props.id} prompt={screen().prompt!} waitingSince={screen().waitingSince ?? s().waiting_since} canType={canType()} wait={screen().wait} />}
               </Show>
             </Show>
             <TerminalText rows={screen().rows.length ? screen().rows : ["…"]} dim={stale()} />
@@ -57,7 +58,7 @@ export function SessionView(props: { id: string }) {
               when={canType() && s().alive}
               fallback={
                 <div class="readonly">
-                  {!s().alive ? t("This session has stopped.") : t("This device can only read. To type, allow it in Kelpie → Settings → Mobile, or use the Kelpie app or Tailscale/HTTPS.")}
+                  {!s().alive ? t("This session has stopped.") : device()?.capped ? t("This device can only read at this address. To type, pair it through Tailscale or at an HTTPS name.") : t("This device can only read. To type, allow it in Kelpie → Settings → Mobile, or use the Kelpie app or Tailscale/HTTPS.")}
                 </div>
               }
             >

@@ -14,17 +14,21 @@
 //! the `kelpie-link` crate), whatever carries it; a device pairs with a single-use secret in a QR code (2
 //! minutes) and only after the person types, in the Kelpie app, the code the phone shows and passes the OS
 //! verification the daemon runs (`user_presence`); each device is a public key in a MAC'd record (`store`), `read` until raised, revocable; a
-//! page in a browser may type only over HTTPS or Tailscale; and HTTPS is used when a certificate is
-//! configured (e.g. from `tailscale cert`), or by Tailscale Serve in front of one loopback listener (`tailscale`).
+//! page in a browser may type only over HTTPS or Tailscale; HTTPS is used when a certificate is
+//! configured (e.g. from `tailscale cert`), or by Tailscale Serve in front of one loopback listener (`tailscale`); and a phone that
+//! paired on a secure origin reaches nothing until its passkey passes, here and not in the page (`lock`).
 
 mod audit;
 mod lanes;
 mod link;
 mod listen;
+mod lock;
+pub mod risk;
 mod store;
 mod sync;
 pub mod tailscale;
 mod verbs;
+mod webauthn;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
@@ -54,6 +58,7 @@ use crate::persist::write_atomic;
 use crate::session::{bounded_client_channel, next_client_id, now_millis, Answer, AnswerError, By, ClientTx, Outgoing, Resolution};
 use lanes::{Beat, Liveness, SLOW_AFTER};
 use link::{Opened, Peer, Wire};
+use lock::{Gate, LockMemory, LockPath};
 use store::{Device, Kind, Store};
 pub use verbs::Permission;
 use verbs::Verb;
@@ -424,6 +429,8 @@ pub struct Mobile {
     tailscale_ended: AtomicU64,
     /// Held while Tailscale's serve configuration is being changed: one change at a time.
     tailscale_change: tokio::sync::Mutex<()>,
+    /// The app lock's windows, challenges and settings as checked (`lock`).
+    lock_memory: LockMemory,
     /// A test on the only address it can bind holds this machine to the limits for an address.
     #[cfg(test)]
     loopback_is_remote: AtomicBool,
@@ -547,6 +554,7 @@ impl Mobile {
             tailscale_check: tokio::sync::Mutex::new(()),
             tailscale_ended: AtomicU64::new(0),
             tailscale_change: tokio::sync::Mutex::new(()),
+            lock_memory: LockMemory::default(),
             #[cfg(test)]
             loopback_is_remote: AtomicBool::new(false),
         };
@@ -562,6 +570,7 @@ impl Mobile {
     /// checks them cannot be read now nothing is concluded: they stay unchecked, and are looked at again when it can be
     /// (called when the app looks and when such a phone connects).
     fn verify_devices(&self) {
+        self.check_lock_options();
         if self.config.lock().devices.iter().all(|d| d.verified) {
             *self.key_unreadable.lock() = false;
             return;
@@ -916,6 +925,7 @@ impl Mobile {
     pub fn status(&self, app: bool) -> Value {
         self.verify_devices();
         let key_unreadable = *self.key_unreadable.lock();
+        let options = self.lock_options();
         let c = self.config.lock();
         let running = self.running.lock();
         let now = Instant::now();
@@ -936,15 +946,20 @@ impl Mobile {
             "cert": c.cert,
             "key": c.key,
             "ips": listen::addresses().into_iter().map(|(ip, name)| json!({"ip": ip.to_string(), "name": name})).collect::<Vec<_>>(),
-            "devices": c.devices.iter().map(|d| json!({
-                "id": d.id, "name": d.name, "permission": d.permission.name(), "kind": d.kind.name(), "can_write": d.permission >= Permission::Write,
-                "created_at": d.created_at, "last_seen": d.last_seen, "secure_origin": d.secure_origin, "push": d.push.is_some(), "state": if d.verified { "ok" } else if key_unreadable { "unchecked" } else { "unverified" },
-            })).collect::<Vec<_>>(),
+            "devices": c.devices.iter().map(|d| {
+                let (lock_reset, unlocked) = self.lock_facts(&d.id);
+                json!({
+                    "id": d.id, "name": d.name, "permission": d.permission.name(), "kind": d.kind.name(), "can_write": d.permission >= Permission::Write,
+                    "created_at": d.created_at, "last_seen": d.last_seen, "secure_origin": d.secure_origin, "push": d.push.is_some(), "state": if d.verified { "ok" } else if key_unreadable { "unchecked" } else { "unverified" },
+                    "passkey": d.lock.is_some(), "lock_reset": lock_reset, "unlocked": unlocked,
+                })
+            }).collect::<Vec<_>>(),
             "legacy": c.legacy.iter().map(|d| json!({"id": d.id, "name": d.name, "created_at": d.created_at})).collect::<Vec<_>>(),
             "pairing_expires_in": code,
             "pending": self.pending.lock().iter().map(|(id, p)| json!({"id": id, "name": p.name, "kind": p.kind.name(), "fingerprint": fingerprint(&p.pk), "want": p.want.name(), "address": listen::shown(p.address)})).collect::<Vec<_>>(),
             "dormant_days": c.dormant_days.unwrap_or(store::DEFAULT_DORMANT_DAYS),
             "tailscale": {"on": c.tailscale, "origin": running.as_ref().and_then(|r| r.ts_origin.clone()), "to_remove": c.tailscale_remove},
+            "lock": {"on": options.on, "idle_s": options.idle_s, "recheck": options.recheck, "plain_read": options.plain_read},
             "app": app,
         })
     }
@@ -1042,6 +1057,7 @@ impl Mobile {
             .into_iter()
             .map(|(id, name)| {
                 self.stop_grants(&id);
+                self.forget_lock(&id);
                 self.forget_push_secret(&id);
                 self.audit.add(&id, "expired", &format!("{name}: unused for too long"));
                 let event = DeviceEvent { id, name, change: "removed", permission: None };
@@ -1290,7 +1306,7 @@ impl Mobile {
     /// A paired device as `approve` makes one (its record sealed with this store's key).
     fn add_test_device(&self, id: &str, name: &str, pk: [u8; 32], permission: Permission, kind: Kind) {
         let key = self.mac_key(true).expect("a readable store").expect("a key");
-        let mut d = Device { id: id.into(), name: name.into(), pk: kelpie_link::b64(&pk), permission, kind, created_at: 1, last_seen: now_millis(), mac: String::new(), secure_origin: false, secure_mac: String::new(), push: None, verified: false };
+        let mut d = Device { id: id.into(), name: name.into(), pk: kelpie_link::b64(&pk), permission, kind, created_at: 1, last_seen: now_millis(), mac: String::new(), secure_origin: false, secure_mac: String::new(), push: None, lock: None, verified: false };
         store::seal(&mut d, &key);
         self.config.lock().devices.push(d);
     }
@@ -1421,8 +1437,11 @@ impl Mobile {
             None => preferred.and_then(|ip| ip.parse::<IpAddr>().ok()).filter(|ip| addrs.iter().any(|a| a.ip() == *ip)).map(|ip| listen::host(&SocketAddr::new(ip, port))).or_else(|| lan.first().cloned()).ok_or_else(|| anyhow!("no address to pair on"))?,
         };
         let secure = tls || ts.is_some();
-        let (link, qr) = pair_link(if secure { "https" } else { "http" }, &host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints, name: listen::hostname() })?;
-        Ok(json!({"url": link, "qr": qr_svg(&qr), "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": secure, "tailscale": ts.is_some()}))
+        let scheme = if secure { "https" } else { "http" };
+        let (link, qr) = pair_link(scheme, &host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints, name: listen::hostname() })?;
+        // Whether a phone that pairs at this link can have a passkey, and so type while the lock is on.
+        let passkey = webauthn::rp_id(&format!("{scheme}://{host}")).is_some();
+        Ok(json!({"url": link, "qr": qr_svg(&qr), "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": secure, "tailscale": ts.is_some(), "passkey": passkey}))
     }
 
     /// The person says no to a pairing request (no verification: it adds nothing).
@@ -1475,7 +1494,7 @@ impl Mobile {
                 bail!("the credential store did not give the device key ({why}): phone access cannot pair devices on this computer");
             }
         };
-        let mut device = Device { id: uuid::Uuid::new_v4().to_string(), name: p.name.clone(), pk: kelpie_link::b64(&p.pk), permission: wanted, kind: p.kind, created_at: now_millis(), last_seen: now_millis(), mac: String::new(), secure_origin: p.secure_origin, secure_mac: String::new(), push: None, verified: false };
+        let mut device = Device { id: uuid::Uuid::new_v4().to_string(), name: p.name.clone(), pk: kelpie_link::b64(&p.pk), permission: wanted, kind: p.kind, created_at: now_millis(), last_seen: now_millis(), mac: String::new(), secure_origin: p.secure_origin, secure_mac: String::new(), push: None, lock: None, verified: false };
         store::seal(&mut device, &key);
         let replaced: Vec<(String, String)> = {
             let mut c = self.config.lock();
@@ -1485,11 +1504,15 @@ impl Mobile {
             c.devices.push(device.clone());
             old
         };
+        if device.secure_origin {
+            self.may_set_up_passkey(&device.id);
+        }
         self.keep();
         self.publish_push();
         let replaced_ids = replaced.iter().map(|(id, _)| id.clone()).collect();
         for (id, name) in replaced {
             self.stop_grants(&id);
+            self.forget_lock(&id);
             self.forget_push_secret(&id);
             let _ = self.revoked.send(DeviceEvent { id, name, change: "replaced", permission: None });
         }
@@ -1513,6 +1536,7 @@ impl Mobile {
     /// Removes a device (or the name of one paired before kelpie-link). Whatever it controls stops first.
     pub fn revoke(&self, id: &str) -> Result<DeviceEvent> {
         self.stop_grants(id);
+        self.forget_lock(id);
         let removed = {
             let mut c = self.config.lock();
             let device = c.devices.iter().position(|d| d.id == id).map(|i| c.devices.remove(i).name);
@@ -1562,6 +1586,7 @@ impl Mobile {
     /// user token and must not publish anything. The serve entry goes in `tailscale::remove_after_off`, which the caller starts.
     pub fn disable(&self) {
         self.stop_all_grants();
+        self.forget_all_locks();
         {
             let mut c = self.config.lock();
             c.enabled = false;
@@ -1637,7 +1662,10 @@ impl Mobile {
             c.version = store::VERSION;
             // Whatever the mode was, and even from a file that could not be used: an entry of ours goes too.
             c.tailscale_remove = c.tailscale_remove || c.tailscale_port.is_some();
+            // Sealed with the key that just went: back to the strictest.
+            c.lock = None;
         }
+        self.check_lock_options();
         *self.broken.lock() = None;
         self.keep();
         self.audit.add("-", "reset", "phone access reset: devices forgotten, new keys");
@@ -2029,10 +2057,21 @@ enum OnEvent {
     Tell(Value),
     /// The receiver fell behind and may have missed something about this device: look at its record again.
     Recheck,
+    /// How this device's lock stands may have changed.
+    Lock,
+    /// Nothing for this connection.
+    Nothing,
 }
 
 fn on_event(event: Result<DeviceEvent, broadcast::error::RecvError>, device: &str) -> OnEvent {
     match event {
+        Ok(e) if e.change == "lock" => {
+            if e.id == device {
+                OnEvent::Lock
+            } else {
+                OnEvent::Nothing
+            }
+        }
         Ok(e) if e.id == device => {
             if e.change == "removed" {
                 OnEvent::Close(NOT_PAIRED, "revoked")
@@ -2143,6 +2182,16 @@ struct Conn {
     page_origin: Option<String>,
     /// The phone does not acknowledge frames or answer heartbeats (see `acknowledges`).
     legacy: bool,
+    /// Which lock this connection goes by.
+    lock_path: LockPath,
+    /// This page's origin when it is a secure one: where a passkey can be set up from.
+    secure_page: Option<String>,
+    /// The secret of the window this page opened (`lock`), if it says it holds one.
+    resume: Option<String>,
+    /// The phone was last told it is locked: nothing about a session goes out.
+    locked: bool,
+    /// How its lock stands, as it was last told.
+    lock_told: &'static str,
     _phone: Option<crate::load::PhoneGuard>,
 }
 
@@ -2150,6 +2199,9 @@ impl Conn {
     /// The session list and project names as they are now, with the next `rev`, when they differ
     /// from what this phone has (or `force`).
     fn publish(&mut self, force: bool) -> Option<Value> {
+        if self.locked {
+            return None;
+        }
         let now = (sessions(&self.daemon), json!(self.daemon.mobile.projects.lock().clone()));
         if !force && self.list.as_ref() == Some(&now) {
             return None;
@@ -2163,6 +2215,12 @@ impl Conn {
     async fn handle(&mut self, granted: Permission, req: &Value) -> Option<Value> {
         let name = req["type"].as_str()?;
         let tag = req.get("req").filter(|r| r.is_string() || r.is_number()).cloned();
+        // The lock comes before all else a request is checked for, its dedupe and the verbs that do not pass through `run`. Read from the clock, so it holds from the moment a window ends.
+        let gate = self.daemon.mobile.lock_gate(&self.device, self.lock_path, self.resume.as_deref());
+        if gate == Gate::Locked && Verb::parse(name).is_some_and(|v| !v.passes_lock()) {
+            return Some(json!({"type": "error", "req": tag, "code": "locked", "reason": null, "message": "Kelpie is locked on this phone."}));
+        }
+        let granted = if gate == Gate::ReadOnly { granted.min(Permission::Read) } else { granted };
         // Typing and answers may carry a `cid`: a repeat of one (a retry after a lost reply, over this or another connection
         // of the device) gets the first reply again, marked `dup`, and is not carried out twice. The daemon run's memory
         // only: a phone that sees `daemon_epoch` change starts over anyway.
@@ -2335,6 +2393,10 @@ impl Conn {
     async fn run(&mut self, granted: Permission, name: &str, req: &Value) -> Result<Option<Value>, Refusal> {
         let verb = Verb::parse(name).ok_or_else(|| refuse("unknown_verb", format!("unknown request {name:?}")))?;
         if verb.needs() > granted {
+            // What its record allows is another matter from what this connection does: Settings cannot help when it is the address that holds it back.
+            if self.daemon.mobile.permission(&self.device).is_some_and(|record| verb.needs() <= record) {
+                return Err(refuse("read_only", "This device can only read at this address. To type, pair it through Tailscale or at an HTTPS name."));
+            }
             return Err(refuse("read_only", "This device may read but not type. Allow it in Kelpie → Settings → Mobile."));
         }
         // A phone that names the daemon run it talked to: after a restart its ids and positions mean nothing.
@@ -2419,6 +2481,7 @@ impl Conn {
                 if text.len() > MAX_TYPED {
                     return Err(refuse("too_long", "too long"));
                 }
+                self.typing_allowed(&session, None)?;
                 if session.choice_lasts(text.trim()) {
                     return Err(refuse("one_shot", ONE_SHOT));
                 }
@@ -2440,6 +2503,7 @@ impl Conn {
                 let (id, session) = self.terminal(req)?;
                 self.daemon.mobile.views.boost(&id);
                 let bytes = req["key"].as_str().and_then(verbs::key_bytes).ok_or_else(|| refuse("bad_request", "unknown key"))?;
+                self.typing_allowed(&session, req["key"].as_str())?;
                 if req["key"].as_str().is_some_and(|k| session.choice_lasts(k)) {
                     return Err(refuse("one_shot", ONE_SHOT));
                 }
@@ -2458,6 +2522,12 @@ impl Conn {
                 // What is typed goes in as it is, so on a prompt with a lasting choice only its plain choices are let through.
                 if session.screen_prompt().is_some_and(|p| !p.plain_answer(req["key"].as_str(), req["text"].as_str())) {
                     return Err(refuse("one_shot", ONE_SHOT));
+                }
+                // A dangerous approval needs the passkey again, if the person asked for that. Esc is the one answer known to refuse: a key of a menu cannot be told apart, so any other asks.
+                if self.lock_path == LockPath::Passkey && self.daemon.mobile.recheck_on() && req["key"].as_str() != Some("esc") {
+                    if let Some(command) = session.dangerous_wait() {
+                        self.check_recheck(req, req["waiting_since"].as_u64().unwrap_or_default().to_string(), command).await?;
+                    }
                 }
                 let by = By { id: self.device.clone(), name: self.name.clone() };
                 session.answer_by(req["waiting_since"].as_u64(), answer, enter, by).map_err(|e| answer_refusal(&self.device, e))?;
@@ -2544,16 +2614,134 @@ impl Conn {
             }
             // Handled by `reply`, which sends what it comes to when it is known.
             Verb::PushTest => return Err(refuse("bad_request", "not here")),
+            Verb::LockChallenge => {
+                let m = &self.daemon.mobile;
+                let gate = m.lock_gate(&self.device, self.lock_path, self.resume.as_deref());
+                let state = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
+                return Ok(Some(json!({"type": "ack", "result": "ok", "lock": m.lock_info(&self.device, state, self.secure_page.as_deref())})));
+            }
+            Verb::LockEnrol => {
+                let (daemon, device, req, page) = (self.daemon.clone(), self.device.clone(), req.clone(), self.secure_page.clone());
+                let told = daemon.clone();
+                let resume = tokio::task::spawn_blocking(move || daemon.mobile.lock_enrol(&device, &req, page.as_deref())).await.map_err(|_| refuse("not_kept", "That did not finish."))??;
+                told.broadcast("mobile.device_changed", json!({"id": self.device, "name": self.name, "change": "lock_enrolled", "permission": null}));
+                told.broadcast("mobile.updated", json!({}));
+                self.resume = Some(resume.clone());
+                return Ok(Some(json!({"type": "ack", "result": "ok", "resume": resume})));
+            }
+            Verb::LockUnlock => {
+                let (daemon, device, req) = (self.daemon.clone(), self.device.clone(), req.clone());
+                let resume = tokio::task::spawn_blocking(move || daemon.mobile.lock_unlock(&device, &req)).await.map_err(|_| refuse("not_kept", "That did not finish."))??;
+                self.resume = Some(resume.clone());
+                return Ok(Some(json!({"type": "ack", "result": "ok", "resume": resume})));
+            }
+            Verb::LockNow => {
+                if self.lock_path == LockPath::Passkey {
+                    self.daemon.mobile.lock_now(&self.device);
+                }
+            }
+            Verb::LockTouch => self.daemon.mobile.lock_touch(&self.device, self.resume.as_deref()),
             Verb::ChatAnswer => {
                 let (_, chat) = self.chat(req)?;
                 let request_id = req.get("request_id").filter(|r| r.is_string() || r.is_number()).ok_or_else(|| refuse("bad_request", "missing request_id"))?;
                 let line = req["line"].as_str().filter(|l| l.len() <= MAX_ANSWER_LINE).ok_or_else(|| refuse("bad_request", "missing or too long line"))?;
+                // A dangerous approval needs the passkey again, if the person asked for that. A refusal never does.
+                if self.lock_path == LockPath::Passkey && self.daemon.mobile.recheck_on() {
+                    if let Some(command) = chat.dangerous_approval(request_id, line) {
+                        let request = request_id.as_str().map_or_else(|| request_id.to_string(), str::to_string);
+                        self.check_recheck(req, request, command).await?;
+                    }
+                }
                 let by = By { id: self.device.clone(), name: self.name.clone() };
                 chat.answer(request_id, line, by).map_err(|e| chat_answer_refusal(&self.device, e))?;
                 return Ok(Some(json!({"type": "ack", "result": "ok"})));
             }
         }
         Ok(None)
+    }
+
+    /// The phone was locked: nothing it followed or watched goes on. What it had confirmed stays for a while (`sync`), in this daemon's memory only, so that it picks up where it was.
+    fn lock_down(&mut self) {
+        for (_, followed) in self.followed.drain() {
+            followed.task.abort();
+        }
+        self.daemon.mobile.views.leave(&self.device, self.id);
+        for id in self.watched.drain() {
+            if let Some(Entry::Chat(c)) = self.daemon.by_id(&id) {
+                c.detach(self.id);
+            }
+        }
+        self.owed.clear();
+        self.chat_at.clear();
+        self.list = None;
+    }
+
+    /// The first thing a phone hears, or the next once it was unlocked. Locked, it says nothing of any session or project.
+    async fn hello(&mut self, device: &Device, record: Permission) -> Value {
+        let daemon = self.daemon.clone();
+        let m = &daemon.mobile;
+        let gate = m.lock_gate(&self.device, self.lock_path, self.resume.as_deref());
+        self.locked = gate == Gate::Locked;
+        self.lock_told = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
+        let cap = if gate == Gate::ReadOnly { self.cap.min(Permission::Read) } else { self.cap };
+        let first = self.publish(true);
+        // Only where it can be used (`Conn::secure_transport`). Read each time, off this task: until there is a key it asks the credential store, which can be slow.
+        let push = if !self.locked && self.cap >= Permission::Write {
+            let (asker, id) = (daemon.clone(), device.id.clone());
+            tokio::task::spawn_blocking(move || asker.mobile.push_facts(&id)).await.ok()
+        } else {
+            None
+        };
+        let (rev, listed, projects) = match first {
+            Some(first) => (first["rev"].clone(), first["sessions"].clone(), first["projects"].clone()),
+            None => (json!(0), json!([]), json!({})),
+        };
+        json!({
+            "type": "hello", "v": 2, "api": kelpie_proto::API_LEVEL, "daemon_epoch": m.epoch, "rev": rev,
+            "device": device_hello(device, record, cap),
+            "push": push,
+            "locked": self.locked,
+            "lock": m.lock_info(&self.device, self.lock_told, self.secure_page.as_deref()),
+            "sessions": listed, "projects": projects,
+            "load": m.load.status().json(), "server_ts": now_millis(),
+            "hb": {"idle_s": 20, "pong_s": 8, "dead_s": 45, "legacy": self.legacy, "ack_frames": sync::WINDOW_FRAMES, "ack_bytes": sync::WINDOW_BYTES, "ack_every_frames": 2, "ack_every_ms": 250},
+        })
+    }
+
+    /// What the phone must hear because how its lock stands has changed, if it has. Locking stops what it controls and all it was sent; unlocking is a new hello.
+    async fn lock_change(&mut self, device: &Device, record: Permission) -> Option<Value> {
+        let daemon = self.daemon.clone();
+        let m = &daemon.mobile;
+        let gate = m.lock_gate(&self.device, self.lock_path, self.resume.as_deref());
+        let state = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
+        if state == self.lock_told {
+            return None;
+        }
+        if gate != Gate::Locked {
+            return Some(self.hello(device, record).await);
+        }
+        self.lock_told = state;
+        if !self.locked {
+            self.locked = true;
+            m.stop_grants(&self.device);
+            self.lock_down();
+        }
+        Some(json!({"type": "locked", "lock": m.lock_info(&self.device, state, self.secure_page.as_deref()), "server_ts": now_millis()}))
+    }
+
+    /// With the re-check on, what is typed while a dangerous request is open could be its approval, with no passkey and with the end of the command unread. So only what is known not to approve
+    /// goes through: Esc and Ctrl+C. A card may not be showing, so this does not send the person to one alone. Only a connection the passkey is asked of: others have none to give.
+    fn typing_allowed(&self, session: &crate::session::Session, key: Option<&str>) -> Result<(), Refusal> {
+        if self.lock_path == LockPath::Passkey && !matches!(key, Some("esc" | "ctrl-c")) && self.daemon.mobile.recheck_on() && session.typing_may_approve_danger() {
+            return Err(refuse("recheck", "This request is marked dangerous, so typing here could approve it with no passkey. Answer it on the computer, or on its card if one is showing. Esc and Ctrl+C still work."));
+        }
+        Ok(())
+    }
+
+    /// A dangerous approval carries its own assertion, or is refused as `recheck`. Only a connection the passkey is asked of: others have none to give.
+    async fn check_recheck(&self, req: &Value, request: String, command: String) -> Result<(), Refusal> {
+        let (daemon, device, proof) = (self.daemon.clone(), self.device.clone(), req["recheck"].clone());
+        tokio::task::spawn_blocking(move || daemon.mobile.lock_recheck(&device, &proof, &request, &command)).await.map_err(|_| refuse("not_kept", "That did not finish."))?
     }
 
     fn end(&mut self) {
@@ -2571,6 +2759,8 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     daemon.mobile.seen(&device.id);
     let legacy = !acknowledges(Some(&first));
     let cap = transport_cap(device.kind, browser, &peer);
+    let lock_path = daemon.mobile.lock_path(&device, &peer);
+    let secure_page = peer.origin.clone().filter(|_| peer.secure_origin);
     // The daemon's events reach the phone through an adapter: a connection is a client like the app,
     // with a queue that has a limit.
     let id = next_client_id();
@@ -2585,7 +2775,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     let mut conn = Conn {
         daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(),
         followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(), chat_at: HashMap::new(), waiting, overflowed,
-        cap, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, _phone: Some(daemon.mobile.load.phone()),
+        cap, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, lock_path, secure_page, resume: first["resume"].as_str().filter(|r| r.len() <= 64).map(str::to_string), locked: false, lock_told: "", _phone: Some(daemon.mobile.load.phone()),
     };
     // The device's older connection, if any, is told it was replaced.
     let replaced = Arc::new(Notify::new());
@@ -2710,22 +2900,7 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
         no_access(wire, m, device).await;
         return;
     };
-    let first = conn.publish(true).expect("forced");
-    // Only where it can be used (`Conn::secure_transport`). Read each time, off this task: until there is a key it asks the credential store, which can be slow.
-    let push = if conn.cap >= Permission::Write {
-        let (asker, id) = (daemon.clone(), device.id.clone());
-        tokio::task::spawn_blocking(move || asker.mobile.push_facts(&id)).await.ok()
-    } else {
-        None
-    };
-    let hello = json!({
-        "type": "hello", "v": 2, "api": kelpie_proto::API_LEVEL, "daemon_epoch": m.epoch, "rev": first["rev"],
-        "device": device_hello(device, record, conn.cap),
-        "push": push,
-        "sessions": first["sessions"], "projects": first["projects"],
-        "load": load.status().json(), "server_ts": now_millis(),
-        "hb": {"idle_s": 20, "pong_s": 8, "dead_s": 45, "legacy": conn.legacy, "ack_frames": sync::WINDOW_FRAMES, "ack_bytes": sync::WINDOW_BYTES, "ack_every_frames": 2, "ack_every_ms": 250},
-    });
+    let hello = conn.hello(device, record).await;
     if !wire.send(&hello.to_string()).await {
         return;
     }
@@ -2752,12 +2927,13 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                         wire.close(code, reason).await;
                         return;
                     }
+                    // Who else is paired is not for a locked phone.
                     OnEvent::Tell(msg) => {
-                        if !wire.send(&msg.to_string()).await {
+                        if !conn.locked && !wire.send(&msg.to_string()).await {
                             return;
                         }
                     }
-                    // Something may have been missed: the record decides.
+                    // Something may have been missed: the record decides, and how the lock stands is looked at below.
                     OnEvent::Recheck => match conn.daemon.mobile.permission(&device.id) {
                         None => {
                             no_access(wire, m, device).await;
@@ -2769,6 +2945,12 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                         }
                         Some(_) => {}
                     },
+                    OnEvent::Lock | OnEvent::Nothing => {}
+                }
+                if let Some(told) = conn.lock_change(device, record).await {
+                    if !wire.send(&told.to_string()).await {
+                        return;
+                    }
                 }
             }
             _ = wires.slow.notified() => {
@@ -2788,6 +2970,12 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                 if began.elapsed() >= REHANDSHAKE_AFTER {
                     wire.close(RECONNECT, "rehandshake").await;
                     return;
+                }
+                // A window that ran out: this connection hears within a tick, whatever the sweep has got to.
+                if let Some(told) = conn.lock_change(device, record).await {
+                    if !wire.send(&told.to_string()).await {
+                        return;
+                    }
                 }
                 let level = load.level();
                 let beat = live.tick(Instant::now(), level.patience(), |since| load.healthy_since(since));
@@ -2862,9 +3050,16 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                         return;
                     }
                 }
+                // What it asked for may have locked or unlocked it, and it hears that after the reply.
+                if let Some(told) = conn.lock_change(device, record).await {
+                    if !wire.send(&told.to_string()).await {
+                        return;
+                    }
+                }
             }
+            // What was on its way when the phone was locked goes no further.
             Some(msg) = wires.bulk_rx.recv() => {
-                if !wire.send(&msg).await {
+                if !conn.locked && !wire.send(&msg).await {
                     return;
                 }
             }
@@ -2991,6 +3186,9 @@ impl Translator {
                 if is("chat.queue") {
                     return parse().map(|v| vec![queue_message(&v["params"], &self.device)]).unwrap_or_default();
                 }
+                if is("chat.request_info") {
+                    return parse().map(|v| vec![json!({"type": "chat_request_info", "id": v["params"]["id"], "request_id": v["params"]["request_id"], "command": v["params"]["command"], "risk": v["params"]["risk"]})]).unwrap_or_default();
+                }
                 if is("session.resync") {
                     let handle = parse().and_then(|v| v["params"]["handle"].as_u64()).and_then(|h| u32::try_from(h).ok());
                     return handle.and_then(|h| self.session_of(daemon, h)).map(|id| vec![json!({"type": "chat_resync", "id": id})]).unwrap_or_default();
@@ -3077,6 +3275,8 @@ fn chat_messages(id: &str, mode: &str, seq: u64, data: &[u8]) -> Vec<Value> {
 mod tests {
     use super::*;
 
+    mod lock;
+
     #[test]
     fn comparisons_and_hex() {
         assert!(same("abc", "abc"));
@@ -3100,7 +3300,7 @@ mod tests {
         assert_eq!(transport_cap(Kind::Pwa, false, &at("192.168.1.9:5000", true)), Permission::Write, "a page paired as one stays one");
         assert_eq!(transport_cap(Kind::Pwa, true, &at("127.0.0.1:5000", false)), Permission::Write, "no network between: nothing to swap the page");
         // What the phone hears.
-        let mut d = Device { push: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), verified: true };
+        let mut d = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), verified: true };
         let capped = device_hello(&d, d.permission, Permission::Read);
         assert_eq!((capped["permission"].as_str(), capped["can_write"].as_bool(), capped["capped"].as_bool()), (Some("read"), Some(false), Some(true)));
         d.permission = Permission::Read;
@@ -3170,7 +3370,7 @@ mod tests {
         let (out_tx, out) = mpsc::channel(16);
         let conn = Conn {
             daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
-            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, _phone: None,
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", _phone: None,
         };
         Rig { daemon, conn, out, term, typed, chat, phone }
     }
@@ -4833,7 +5033,7 @@ mod tests {
         let (out, _out_rx) = mpsc::channel(16);
         Conn {
             daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
-            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, _phone: None,
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", _phone: None,
         }
     }
 
@@ -6005,7 +6205,8 @@ mod tests {
         assert!(!serve.clone().with_headers(&with(&[("origin", "http://127.0.0.1:50000")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
         assert!(!serve.clone().with_headers(&with(&[]), Some("desk.tail1234.ts.net:8443")).secure_origin, "no page at all");
         assert!(!Peer::direct(loopback, false).with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "plain HTTP cannot be an HTTPS page's");
-        assert!(Peer::direct("192.168.1.9:5000".parse().unwrap(), true).with_headers(&with(&[("origin", "https://192.168.1.9:5000")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "a certificate of the person's own");
+        assert!(Peer::direct("192.168.1.9:5000".parse().unwrap(), true).with_headers(&with(&[("origin", "https://desk.example:5000")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "a certificate of the person's own");
+        assert!(!Peer::direct("192.168.1.9:5000".parse().unwrap(), true).with_headers(&with(&[("origin", "https://192.168.1.9:5000")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "at a number there can be no passkey");
         assert_eq!(listen::shown(listen::BEHIND_SERVE), "Tailscale");
     }
 

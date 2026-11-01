@@ -4,7 +4,7 @@ import { App } from "./app";
 import { locale } from "./i18n";
 import { watchInstall } from "./install-guide";
 import { needsCount } from "./inbox-order";
-import { sessions, startApp } from "./phone-state";
+import { lockShown, paired, sessions, startApp } from "./phone-state";
 import { applyTheme } from "./theme";
 import "./phone.css";
 
@@ -18,7 +18,8 @@ render(() => {
     document.documentElement.lang = locale();
   });
   createEffect(() => {
-    const n = needsCount(sessions());
+    // Nothing on a home screen or in a tab says how many need the person while it is locked.
+    const n = !paired() || lockShown().clear ? needsCount(sessions()) : 0;
     document.title = n ? `(${n}) Kelpie` : "Kelpie";
     const nav = navigator as Navigator & { setAppBadge?: (n?: number) => Promise<void>; clearAppBadge?: () => Promise<void> };
     void (n ? nav.setAppBadge?.(n) : nav.clearAppBadge?.())?.catch(() => {});

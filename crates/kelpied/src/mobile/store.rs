@@ -65,6 +65,60 @@ pub struct PushSub {
     pub mac: String,
 }
 
+/// A phone's passkey as the daemon keeps it (`webauthn`): public, and only ever used to check a signature.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LockCredential {
+    /// base64url, as the browser names it.
+    pub cred_id: String,
+    /// The public key as an SPKI, base64url.
+    pub spki: String,
+    /// The page's origin when it was enrolled: every assertion must come from there, and the RP ID is its name.
+    pub origin: String,
+    #[serde(default)]
+    pub sign_count: u32,
+    #[serde(default)]
+    pub created_at: u64,
+    /// HMAC-SHA256 (hex) over the phone's identity and the fields above: a key swapped in the file unlocks nothing, and no more does a counter wound back.
+    #[serde(default)]
+    pub mac: String,
+}
+
+/// How the app lock is set. A program of this user can edit the file, and must not weaken the lock by doing it: what does not verify, or has gone once a passkey is on record, is
+/// `LockOptions::tightest`, tighter than anything the person could have set. Only a store from before the lock has `LockOptions::default`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LockOptions {
+    pub on: bool,
+    /// Seconds without the person doing anything before the phone locks again.
+    pub idle_s: u32,
+    /// A dangerous approval asks for the passkey again.
+    pub recheck: bool,
+    /// A page over plain HTTP, which can have no passkey, may read.
+    pub plain_read: bool,
+    #[serde(default)]
+    pub mac: String,
+}
+
+pub const DEFAULT_IDLE_S: u32 = 300;
+pub const IDLE_CHOICES: [u32; 5] = [60, 300, 900, 1800, 3600];
+
+impl Default for LockOptions {
+    fn default() -> Self {
+        LockOptions { on: true, idle_s: DEFAULT_IDLE_S, recheck: false, plain_read: true, mac: String::new() }
+    }
+}
+
+impl LockOptions {
+    /// What applies when the settings cannot be believed: no choice of the person's is stricter, so going to this from anything weakens nothing.
+    pub fn tightest() -> LockOptions {
+        LockOptions { on: true, idle_s: IDLE_CHOICES[0], recheck: true, plain_read: false, mac: String::new() }
+    }
+
+    /// Whether going from `self` to `next` takes any protection away: that needs the person.
+    pub fn weakened_by(&self, next: &LockOptions) -> bool {
+        (self.on && !next.on) || next.idle_s > self.idle_s || (self.recheck && !next.recheck) || (!self.plain_read && next.plain_read)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Device {
     pub id: String,
@@ -89,6 +143,9 @@ pub struct Device {
     /// Alerts on this phone, with its own tag: a record paired here still verifies for an older Kelpie, which ignores this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push: Option<PushSub>,
+    /// The passkey that unlocks this phone, with its own tag: a record paired here still verifies for an older Kelpie, which ignores this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<LockCredential>,
     /// Set when the record was loaded or made here and its MACs checked out.
     #[serde(skip)]
     pub verified: bool,
@@ -134,6 +191,9 @@ pub struct Store {
     /// Our serve entry is still to be removed: Tailscale would not do it when the mode ended.
     #[serde(default)]
     pub tailscale_remove: bool,
+    /// How the app lock is set. `None`: a store from before there was a lock, as `LockOptions::default`. It is written when the first passkey is, so with a passkey on record `None` means it was removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<LockOptions>,
 }
 
 pub const DEFAULT_DORMANT_DAYS: u32 = 90;
@@ -238,6 +298,40 @@ fn push_input(d: &Device, p: &PushSub) -> Vec<u8> {
     out
 }
 
+/// What a passkey's `mac` covers. The phone's identity, not its record's `mac`: a raised permission re-seals the record, and that must not bless a credential edited in the file.
+fn lock_input(d: &Device, l: &LockCredential) -> Vec<u8> {
+    let mut out = b"kelpie-device-lock/1".to_vec();
+    for field in [d.id.as_str(), d.pk.as_str(), l.cred_id.as_str(), l.spki.as_str(), l.origin.as_str(), &l.sign_count.to_string()] {
+        out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
+/// Seals the record's passkey with its counter as it is now.
+pub fn seal_lock(d: &mut Device, key: &[u8; 32]) {
+    if let Some(mac) = d.lock.as_ref().map(|l| tag(key, &lock_input(d, l))) {
+        d.lock.as_mut().expect("just read").mac = mac;
+    }
+}
+
+/// Whether the record's passkey is as it was sealed with `key`.
+pub fn lock_holds(d: &Device, key: &[u8; 32]) -> bool {
+    d.lock.as_ref().is_some_and(|l| tag_holds(key, &lock_input(d, l), &l.mac))
+}
+
+fn options_input(o: &LockOptions) -> Vec<u8> {
+    format!("kelpie-lock-options/1|{}|{}|{}|{}", o.on, o.idle_s, o.recheck, o.plain_read).into_bytes()
+}
+
+pub fn seal_options(o: &mut LockOptions, key: &[u8; 32]) {
+    o.mac = tag(key, &options_input(o));
+}
+
+pub fn options_hold(o: &LockOptions, key: &[u8; 32]) -> bool {
+    tag_holds(key, &options_input(o), &o.mac)
+}
+
 /// Whether the record's subscription is as it was sealed with `key`.
 pub fn push_holds(d: &Device, key: &[u8; 32]) -> bool {
     d.push.as_ref().is_some_and(|p| tag_holds(key, &push_input(d, p), &p.mac))
@@ -288,7 +382,7 @@ mod tests {
     }
 
     fn device(key: &[u8; 32]) -> Device {
-        let mut d = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), push: None, verified: false };
+        let mut d = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), push: None, lock: None, verified: false };
         seal(&mut d, key);
         d
     }
@@ -392,6 +486,91 @@ mod tests {
         assert!(!json.contains("push"));
         let back: Device = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
         assert_eq!(back.push, on.push);
+    }
+
+    #[test]
+    fn a_passkey_edited_in_the_file_unlocks_nothing_and_the_record_still_holds() {
+        let key = [3u8; 32];
+        let plain = device(&key);
+        let mut on = plain.clone();
+        on.lock = Some(LockCredential { cred_id: "c".into(), spki: "s".into(), origin: "https://desk.example".into(), sign_count: 4, created_at: 1, mac: String::new() });
+        assert!(!lock_holds(&on, &key), "not sealed yet");
+        seal_lock(&mut on, &key);
+        assert!(lock_holds(&on, &key));
+        assert!(verify(&on, &key));
+        assert_eq!(on.mac, plain.mac, "what an older Kelpie checks has not changed");
+        assert!(!lock_holds(&on, &[4u8; 32]), "another key");
+        let edits: [fn(&mut LockCredential); 4] = [|l| l.spki = "mine".into(), |l| l.cred_id = "mine".into(), |l| l.origin = "https://evil.example".into(), |l| l.sign_count = 0];
+        for edit in edits {
+            let mut edited = on.clone();
+            edit(edited.lock.as_mut().unwrap());
+            assert!(!lock_holds(&edited, &key));
+            assert!(verify(&edited, &key), "the pairing is not what was tampered with");
+        }
+        let mut other = device(&key);
+        other.id = "d2".into();
+        seal(&mut other, &key);
+        other.lock = on.lock.clone();
+        assert!(!lock_holds(&other, &key), "another record's passkey");
+        // Raising a permission re-seals the record, and does not bless what was edited in the file.
+        let mut tampered = on.clone();
+        tampered.lock.as_mut().unwrap().spki = "mine".into();
+        tampered.permission = Permission::Write;
+        seal(&mut tampered, &key);
+        assert!(!lock_holds(&tampered, &key));
+        let mut raised = on.clone();
+        raised.permission = Permission::Write;
+        seal(&mut raised, &key);
+        assert!(lock_holds(&raised, &key), "a permission change keeps a passkey that holds");
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("lock"));
+        let back: Device = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert_eq!(back.lock, on.lock);
+    }
+
+    #[test]
+    fn lock_settings_edited_in_the_file_do_not_hold_and_a_store_from_before_has_the_defaults() {
+        let key = [3u8; 32];
+        let mut o = LockOptions { on: false, idle_s: 3600, recheck: false, plain_read: true, mac: String::new() };
+        assert!(!options_hold(&o, &key), "not sealed");
+        seal_options(&mut o, &key);
+        assert!(options_hold(&o, &key));
+        assert!(!options_hold(&o, &[4u8; 32]));
+        let mut strict = LockOptions::default();
+        seal_options(&mut strict, &key);
+        let mut turned_off = strict.clone();
+        turned_off.on = false;
+        assert!(!options_hold(&turned_off, &key), "the switch flipped in the file");
+        let store: Store = serde_json::from_str(r#"{"version":2,"enabled":true}"#).unwrap();
+        assert!(store.lock.is_none());
+        assert!(LockOptions::default().on && !LockOptions::default().recheck && LockOptions::default().plain_read);
+    }
+
+    #[test]
+    fn nothing_the_person_can_set_is_stricter_than_what_applies_when_the_settings_cannot_be_believed() {
+        for on in [true, false] {
+            for recheck in [true, false] {
+                for plain_read in [true, false] {
+                    for idle_s in IDLE_CHOICES {
+                        let chosen = LockOptions { on, idle_s, recheck, plain_read, mac: String::new() };
+                        assert!(!chosen.weakened_by(&LockOptions::tightest()), "{chosen:?}");
+                    }
+                }
+            }
+        }
+        assert!(LockOptions::tightest().weakened_by(&LockOptions::default()), "the defaults are not it");
+    }
+
+    #[test]
+    fn what_takes_protection_away_is_told_from_what_adds_it() {
+        let base = LockOptions { on: true, idle_s: 300, recheck: true, plain_read: false, mac: String::new() };
+        for (weaker, why) in [(LockOptions { on: false, ..base.clone() }, "off"), (LockOptions { idle_s: 900, ..base.clone() }, "longer"), (LockOptions { recheck: false, ..base.clone() }, "no re-check"), (LockOptions { plain_read: true, ..base.clone() }, "reading over plain HTTP")] {
+            assert!(base.weakened_by(&weaker), "{why}");
+        }
+        assert!(!base.weakened_by(&base));
+        assert!(!base.weakened_by(&LockOptions { idle_s: 60, ..base.clone() }));
+        let off = LockOptions { on: false, idle_s: 3600, recheck: false, plain_read: true, mac: String::new() };
+        assert!(!off.weakened_by(&LockOptions { on: true, ..off.clone() }));
     }
 
     #[test]

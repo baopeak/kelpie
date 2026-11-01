@@ -11,7 +11,7 @@ export const daemon = <T = unknown>(method: string, params: object = {}) =>
  *  accepts these only from the verified app and asks the operating system to verify the person (Windows Hello or the OS
  *  password) before one that raises access takes effect. What that prompt says is the daemon's own text; `lang` only picks its
  *  language. `daemon()` refuses the first three. */
-export const mobileSecure = <T = unknown>(method: "mobile.approve" | "mobile.set_permission" | "mobile.reset" | "mobile.set_options" | "mobile.set_tailscale", params: object) =>
+export const mobileSecure = <T = unknown>(method: "mobile.approve" | "mobile.set_permission" | "mobile.reset" | "mobile.set_options" | "mobile.set_tailscale" | "mobile.set_lock" | "mobile.reset_lock", params: object) =>
   invoke<T>("mobile_secure_call", { method, params: { ...params, lang: locale() } });
 
 export const listSessions = () => daemon<SessionInfo[]>("session.list");

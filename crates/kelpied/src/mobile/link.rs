@@ -32,7 +32,7 @@ use tokio::sync::oneshot;
 
 use super::lanes::SLOW_AFTER;
 use super::store::Kind;
-use super::{listen, Generation, HandshakeSlot, KeyLookup, CLOSE_TIMEOUT, CODE_TTL, NOT_PAIRED, RECONNECT, UNCONFIRMED};
+use super::{listen, webauthn, Generation, HandshakeSlot, KeyLookup, CLOSE_TIMEOUT, CODE_TTL, NOT_PAIRED, RECONNECT, UNCONFIRMED};
 use crate::session::now_millis as now;
 use crate::daemon::Daemon;
 
@@ -52,8 +52,9 @@ pub struct Peer {
     pub through_serve: bool,
     /// Who is calling through serve, from the header serve sets.
     pub client: Option<IpAddr>,
-    /// A page whose origin is this computer's HTTPS origin. A program on this machine can claim it through the loopback listener, and then still needs the
-    /// pairing secret and the person, so it records how a person paired, and is no proof against that program.
+    /// A page whose origin is this computer's HTTPS origin, at a name: a page at a number is not, as it can never have a passkey, and a record that says it was would hold that phone at
+    /// the lock for good. A program on this machine can claim it through the loopback listener, and then still needs the pairing secret and the person, so it records how a person
+    /// paired, and is no proof against that program.
     pub secure_origin: bool,
     /// The `Origin` of the upgrade: where the browser says the page is. The route has already checked it against `Host`, and on a TLS listener the browser has checked the certificate for that name. Only this device's own alerts go by it.
     pub origin: Option<String>,
@@ -90,7 +91,7 @@ impl Peer {
             self.client = forwarded_client(headers);
             self.secure_origin = ts_origin.is_some_and(|ts| origin.and_then(|o| o.strip_prefix("https://")) == Some(ts));
         } else {
-            self.secure_origin = self.tls && origin.is_some_and(|o| o.starts_with("https://"));
+            self.secure_origin = self.tls && origin.and_then(webauthn::rp_id).is_some();
         }
         self
     }

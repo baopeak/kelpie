@@ -21,6 +21,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::{mpsc, watch, Notify};
 
+use super::risk::WaitInfo;
 use crate::choices::Prompt;
 use crate::load::{Level, Load};
 use crate::session::{now_millis, ScreenView, Session};
@@ -110,6 +111,7 @@ pub struct Snapshot {
     prompt: Option<Prompt>,
     waiting_since: Option<u64>,
     title: Option<String>,
+    wait: Option<WaitInfo>,
 }
 
 impl Snapshot {
@@ -120,6 +122,7 @@ impl Snapshot {
             prompt: view.prompt,
             waiting_since: view.waiting_since,
             title: view.title.map(|t| t.chars().take(MAX_TITLE_CHARS).collect()),
+            wait: view.wait,
         }
     }
 }
@@ -132,6 +135,7 @@ struct Extras {
     prompt: Option<Prompt>,
     waiting_since: Option<u64>,
     title: Option<String>,
+    wait: Option<WaitInfo>,
 }
 
 /// The screen a phone holds after a frame: its number and what it says.
@@ -374,6 +378,7 @@ impl Views {
             prompt: snapshot.prompt.clone(),
             waiting_since: snapshot.waiting_since,
             title: snapshot.title.clone(),
+            wait: snapshot.wait.clone(),
         };
         let mut slots = self.slots.lock();
         let slot = slots.get_mut(&(device.to_string(), session.to_string())).filter(|s| s.owner == conn).ok_or(Lost)?;
@@ -417,7 +422,7 @@ impl Views {
             kind: "screen", id: session, rev, base, shift,
             rows: sent.iter().map(|&i| (i, &*lines[i])).collect(),
             height: extras.height, cursor: extras.cursor, prompt: &extras.prompt,
-            waiting_since: extras.waiting_since, title: &extras.title,
+            waiting_since: extras.waiting_since, title: &extras.title, wait: extras.wait.as_ref(),
             server_ts: now_millis(), level: level.number(),
         };
         let text = serde_json::to_string(&frame).expect("a frame is plain data");
@@ -446,6 +451,9 @@ struct Frame<'a> {
     prompt: &'a Option<Prompt>,
     waiting_since: Option<u64>,
     title: &'a Option<String>,
+    /// The daemon's label and the command, for the card over a prompt or a wait.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wait: Option<&'a WaitInfo>,
     /// When the daemon made it, and the load level then: the phone can show how old what it sees is.
     server_ts: u64,
     level: u8,
@@ -562,7 +570,7 @@ mod tests {
     }
 
     fn view(lines: &[&str]) -> ScreenView {
-        ScreenView { lines: lines.iter().map(|l| l.to_string()).collect(), cursor: None, prompt: None, waiting_since: None, title: None }
+        ScreenView { lines: lines.iter().map(|l| l.to_string()).collect(), cursor: None, prompt: None, waiting_since: None, title: None, wait: None }
     }
 
     fn snapshot(lines: &[&str]) -> Snapshot {

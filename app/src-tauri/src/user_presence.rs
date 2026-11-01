@@ -17,10 +17,10 @@ use crate::daemon_client::DaemonClient;
 use crate::fs_ops::CmdResult;
 
 /// The daemon's app-only methods (`auth::APP_ONLY` in kelpied): `daemon_call` refuses them.
-pub const APP_ONLY: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale"];
+pub const APP_ONLY: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale", "mobile.set_lock", "mobile.reset_lock"];
 
 /// What may raise the daemon's verification prompt: the app-only methods, and the one setting whose raising is app-only.
-pub const SECURE_CALLS: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale", "mobile.set_options"];
+pub const SECURE_CALLS: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale", "mobile.set_lock", "mobile.reset_lock", "mobile.set_options"];
 
 /// Sends a phone-access decision. The window handle is only a hint for parenting the dialog; the daemon checks it.
 #[tauri::command]
@@ -79,6 +79,6 @@ mod tests {
     #[test]
     fn every_app_only_method_goes_through_the_secure_call() {
         assert!(APP_ONLY.iter().all(|m| SECURE_CALLS.contains(m)));
-        assert_eq!(APP_ONLY, ["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale"]);
+        assert_eq!(APP_ONLY, ["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale", "mobile.set_lock", "mobile.reset_lock"]);
     }
 }

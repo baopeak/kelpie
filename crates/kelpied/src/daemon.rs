@@ -1224,6 +1224,8 @@ impl Daemon {
                 self.meta_dirty.store(true, Ordering::Relaxed);
             }
         }
+        // What a hook says is about to run is what an approval card labels.
+        session.request_hook(event, &payload);
         if let Some(status) = hook_event_status(agent, event, &payload) {
             session.set_hook_status(status, hook_event_failed(event));
             if hook_event_limited(event, &payload) {
@@ -1452,6 +1454,7 @@ impl Daemon {
             if now.duration_since(last_run_tick) >= Duration::from_secs(1) {
                 last_run_tick = now;
                 self.run_tick();
+                self.mobile.lock_sweep();
             }
             for item in self.scheduled.take_due(now_millis()) {
                 self.fire_scheduled(item);
@@ -1872,6 +1875,35 @@ impl Daemon {
                         v
                     }
                 }
+            }
+            // The verified app only (`auth::APP_ONLY`). What takes protection away needs the person; what adds it does not.
+            "mobile.set_lock" => {
+                if !self.is_verified_app(client) {
+                    bail!("this needs the Kelpie app: phone access is decided in Kelpie → Settings → Mobile");
+                }
+                let next = self.mobile.requested_lock(&params)?;
+                if self.mobile.lock_options().weakened_by(&next) {
+                    self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::WeakenLock, move |me| {
+                        let v = me.mobile.set_lock(next)?;
+                        me.broadcast("mobile.updated", json!({}));
+                        Ok(v)
+                    })?;
+                    return Ok(None);
+                }
+                let v = self.mobile.set_lock(next)?;
+                self.broadcast("mobile.updated", json!({}));
+                v
+            }
+            // Lets a phone set up a new passkey for five minutes: the one way past a passkey that exists, so a stolen phone key cannot.
+            "mobile.reset_lock" => {
+                let device = param(&params, "id")?.as_str().unwrap_or_default().to_string();
+                let prompt = self.mobile.reset_lock_prompt(&device)?;
+                self.after_verifying(client, tx, id, &params, prompt, move |me| {
+                    me.mobile.reset_lock(&device);
+                    me.broadcast("mobile.updated", json!({}));
+                    Ok(json!(true))
+                })?;
+                return Ok(None);
             }
             // What phones did: newest first, and whether the log's hash chain holds.
             "mobile.audit" => self.mobile.audit_entries(params.get("limit").and_then(Value::as_u64).unwrap_or(200) as usize),
