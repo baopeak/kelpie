@@ -1361,7 +1361,7 @@ task's run status is the Runs engine's.
   session id the new process is the root, never a child, and the reported PID is always in the keep set; what
   the previous run left is remembered as orphans. Ports: Windows `GetExtendedTcpTable` (listeners, both
   families), Linux `/proc/net/tcp*` with socket inodes, macOS one `lsof` for all the PIDs of a look. Nothing
-  scans by itself: `process.ports` (the chips) is asked by the app for the visible sessions, once when they
+  scans by itself: `process.ports` (for an agent's web pages: `lib/agent-web-pages.ts`, which sends `browser_probe` a port once per session to learn whether it answers with a page) is asked by the app for the visible sessions, once when they
   appear, ~0.8 s after their terminal prints (at most every 2 s), and every 3 s only while the last look found
   children; on macOS it runs `lsof` only when some session has children or orphans or is a custom session (whose
   own process is often the server), elsewhere whenever a session has a process. `process.list` while the Processes panel is open (every 2 s). `daemon.info.process_scans`

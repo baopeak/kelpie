@@ -10,9 +10,8 @@ import { SplitView, paneDrag, startTabDrag } from "./split-view";
 import { StatusDot } from "./sidebar";
 import { Launcher } from "./welcome";
 import { openLayoutMenu } from "./layout-menu";
-import { browserState, openBrowser } from "../lib/browser";
+import { browserState, freshPages, openBrowser } from "../lib/browser";
 import { HostChip } from "./host-target";
-import { PortChips } from "./port-chips";
 import { projectTarget, sessionTarget } from "../lib/remote";
 import { kindInfo } from "../lib/agents";
 import type { Pane, Project, Tab } from "../lib/types";
@@ -54,14 +53,13 @@ function TabTitle(props: { tab: Tab; project: Project }) {
   };
   return (
     <>
-      <Show when={session()} fallback={<Icon name={focus()?.kind === "diff" ? "git" : "files"} size={14} />}>
+      <Show when={session()} fallback={<Icon name={focus()?.kind === "diff" ? "git" : focus()?.kind === "browser" ? "globe" : "files"} size={14} />}>
         {(s) => <StatusDot s={s()} />}
       </Show>
       <Show when={session()}>{(s) => <KindGlyph kind={s().kind} size={14} />}</Show>
       <Show when={host()}>{(tg) => <HostChip target={tg()} />}</Show>
       <Show when={props.tab.broadcast}><span class="badge broadcast-badge" title={t("Broadcast input is on")}>⇶</span></Show>
       <span class="title">{props.tab.name ?? paneTitle(focus())}</span>
-      <Show when={session() && !session()!.remote}><PortChips id={session()!.id} max={2} /></Show>
       <Show when={session()}>{(s) => <ContextRing s={s()} size={12} />}</Show>
       <Show when={panes().length > 1}>
         <span class="tab-panes">
@@ -108,7 +106,7 @@ export function WorkspaceView(props: { project: Project }) {
           <For each={ws().tabs}>
             {(tab) => (
               <div
-                class={`tab${active()?.id === tab.id ? " active" : ""}${paneDrag()?.toTab === tab.id ? " drop-target" : ""}${paneDrag()?.tabId === tab.id && !paneDrag()?.paneId ? " dragging" : ""}`}
+                class={`tab${active()?.id === tab.id ? " active" : ""}${paneDrag()?.toTab === tab.id ? " drop-target" : ""}${paneDrag()?.tabId === tab.id && !paneDrag()?.paneId ? " dragging" : ""}${allPanes(tab.root).some((p) => freshPages().has(p.id)) ? " fresh" : ""}`}
                 data-tab-id={tab.id}
                 title={t("Drag to reorder, or onto a pane edge to merge")}
                 onPointerDown={(e) => renaming() !== tab.id && startTabDrag(e, props.project, tab)}

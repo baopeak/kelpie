@@ -3,7 +3,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createStore, produce } from "solid-js/store";
+import { createRoot, createSignal } from "solid-js";
 import { store } from "./store";
+import { allPanes } from "./layout";
 import { uid } from "./platform";
 
 export interface Rect { x: number; y: number; width: number; height: number }
@@ -52,15 +54,45 @@ export function closeBrowser(paneId: string) {
   void browserClose(browserLabel(paneId));
   setBrowserState(produce((m) => delete m[paneId]));
 }
-export const browserOpen = (label: string, url: string, rect: Rect) => invoke<void>("browser_open", { label, url, rect });
+
+// Opening, showing, hiding and closing one webview run strictly in the order asked. Commands
+// otherwise run concurrently and creating a webview takes around half a second: a hide sent meanwhile
+// finds nothing to hide, or is overtaken by the open's show, and the page stays on screen above
+// whatever tab or project is shown now (it is native, so it paints over the whole app).
+const lifecycle = new Map<string, Promise<unknown>>();
+function inOrder<T>(label: string, run: () => Promise<T>): Promise<T> {
+  const result = (lifecycle.get(label) ?? Promise.resolve()).then(run);
+  const tail = result.catch(() => {});
+  lifecycle.set(label, tail);
+  void tail.then(() => {
+    if (lifecycle.get(label) === tail) lifecycle.delete(label);
+  });
+  return result;
+}
+
+export const browserOpen = (label: string, url: string, rect: Rect) => inOrder(label, () => invoke<void>("browser_open", { label, url, rect }));
 export const browserBounds = (label: string, rect: Rect) => invoke<void>("browser_bounds", { label, rect });
-export const browserVisible = (label: string, visible: boolean) => invoke<void>("browser_visible", { label, visible });
+export const browserVisible = (label: string, visible: boolean) => inOrder(label, () => invoke<void>("browser_visible", { label, visible }));
 export const browserNavigate = (label: string, url: string) => invoke<string>("browser_navigate", { label, url });
 export const browserGo = (label: string, delta: -1 | 0 | 1) => invoke<void>("browser_go", { label, delta });
 export const browserDesign = (label: string, on: boolean) => invoke<void>("browser_design", { label, on });
 export const browserDevtools = (label: string) => invoke<void>("browser_devtools", { label });
-export const browserClose = (label: string) => invoke<void>("browser_close", { label }).catch(() => {});
+export const browserClose = (label: string) => inOrder(label, () => invoke<void>("browser_close", { label })).catch(() => {});
 export const browserScreenshot = (label: string, clip?: Rect) => invoke<{ path: string; data: string }>("browser_screenshot", { label, clip });
+
+/** Whether a local port answers with a web page, and its title. */
+export const browserProbe = (host: string, port: number) => invoke<{ title: string | null } | null>("browser_probe", { host, port });
+
+/** Panes opened for the user that have not been looked at yet: their tabs stand out. */
+export const [freshPages, setFreshPages] = createRoot(() => createSignal<ReadonlySet<string>>(new Set()));
+export const markPageFresh = (paneId: string) => setFreshPages((s) => new Set(s).add(paneId));
+export const markPageSeen = (paneId: string) =>
+  setFreshPages((s) => {
+    if (!s.has(paneId)) return s;
+    const next = new Set(s);
+    next.delete(paneId);
+    return next;
+  });
 
 const handlers = new Map<string, (e: BrowserEvent) => void>();
 let listening = false;
@@ -88,6 +120,16 @@ export function isLocalUrl(uri: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The browser pane of a project that shows a local port, if any. */
+export function browserPaneOnPort(projectId: string, port: number): { tabId: string; paneId: string } | null {
+  for (const tab of store.workspace(projectId).tabs) {
+    for (const pane of allPanes(tab.root)) {
+      if (pane.kind === "browser" && pane.url && isLocalUrl(pane.url) && new URL(pane.url).port === String(port)) return { tabId: tab.id, paneId: pane.id };
+    }
+  }
+  return null;
 }
 
 /** Opens a browser pane in the active project: a new tab, or split next to the focused pane. */

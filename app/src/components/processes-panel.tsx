@@ -3,7 +3,7 @@
 // while the session itself keeps running (in an agent session, with the agent and what it runs
 // directly). Both ask first and name what would end. How a program is stopped depends on the system:
 // on Windows only a program with a window can be asked to close; a console program is ended at once.
-// Looks only while this panel is open (every 2 s); see lib/processes.ts for the chips.
+// Looks only while this panel is open (every 2 s); see lib/processes.ts for the looks behind an agent's web pages.
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { store, sessionLabel } from "../lib/store";
@@ -36,7 +36,7 @@ function Chips(props: { ports: Port[]; session: string }) {
   const unique = createMemo(() => uniquePorts(props.ports));
   return (
     <For each={unique()}>
-      {(p) => <button class="port-chip" data-port={p.port} title={`http://${p.host}:${p.port}/`} onClick={() => openPort(p, props.session, "tab")}>:{p.port}</button>}
+      {(p) => <button class="port-chip" data-port={p.port} title={`http://${p.host}:${p.port}/`} onClick={() => openPort(p, props.session)}>:{p.port}</button>}
     </For>
   );
 }
@@ -76,7 +76,7 @@ function SessionGroup(props: { s: SessionInfo; list: ProcessList | null; busy: S
         </Show>
       </header>
       <Show when={props.list} fallback={<div class="proc-empty">…</div>}>
-        <Show when={tree().length > 1 || (props.list?.orphans.length ?? 0) > 0} fallback={<div class="proc-empty">{t("Nothing is running under this session.")}</div>}>
+        <Show when={tree().length > 1 || (props.list?.root?.ports.length ?? 0) > 0 || (props.list?.orphans.length ?? 0) > 0} fallback={<div class="proc-empty">{t("Nothing is running under this session.")}</div>}>
           <For each={tree()}>{(r) => row(r)}</For>
           <Show when={props.list!.orphans.length}>
             <div class="proc-orphans" title={t("Still running, but no longer part of this session's processes")}>{t("Left the session")}</div>

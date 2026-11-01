@@ -153,7 +153,7 @@ Here, **ChatGPT web and OMP's CLI are separate panes in Kelpie**. ChatGPT is the
 
 ![ChatGPT web and a real OMP checkout review side by side in native browser and terminal panes](docs/screenshots/chatgpt.png)
 
-A dev server started in a session shows its port as a `:5173` chip on the tab; one click opens the preview in a browser pane, and the [Processes panel](docs/user-guide.md#processes-ports-and-preview) shows and stops what each session runs.
+A web page an agent starts gets a tab of its own in the background, and the [Processes panel](docs/user-guide.md#processes-ports-and-preview) shows and stops what each session runs.
 
 When the work grows beyond the local machine, Kelpie also offers [SSH projects and panes](docs/user-guide.md#remote-projects-ssh), [orchestration runs](docs/user-guide.md#orchestration-runs), [issue integrations](docs/user-guide.md#issue-trackers-and-gitlab) and opt-in [phone access](docs/user-guide.md#phone-access). These have their own setup and security boundaries; the local screenshot tour does not claim to have exercised them.
 

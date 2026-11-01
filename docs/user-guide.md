@@ -777,13 +777,15 @@ pane*, `Ctrl/⌘+click` on a dev-server address in a terminal opens it next to t
 
 ### Processes, ports and preview
 
-When a program in a session listens on a port (a dev server, `python -m http.server 8000`…), a
-`:8000` chip appears on the session's tab and its sidebar row. Click it to open the address in a
-browser pane; right-click for *Open preview beside* (split next to the focused pane), *Open in a
-browser tab* or *Copy address*. Chips of a session that is not on screen are dimmed: they show the
-ports as of when it was last on screen. The **Processes** tab of the right panel (palette:
-*Processes and Ports*) lists what each running session of the project runs, as a tree with PID,
-memory, CPU and ports. **Kill** stops a program and what it started. **Kill children** stops what a
+When an agent on screen starts a web page (a dev server, a studio, a dashboard), the page gets a tab
+of its own in the background and a short message says so: the agent stays in view and keeps the
+keyboard, and the highlighted tab is one click away. Only a port that answers with a page counts;
+one that answers *Not Found* or is not a website gets no tab. A tab you never opened goes when the
+page stops, and a page you closed does not come back until the app restarts. Turn this off with
+Settings → Terminal → *Open an agent's web pages in a tab*. Servers you start yourself in a shell
+get no tab. The **Processes** tab of the right panel (palette: *Processes and Ports*) lists what
+each running session of the project runs, as a tree with PID, memory, CPU and ports. Click a port
+to show it in a browser tab, the one already on it if there is one. **Kill** stops a program and what it started. **Kill children** stops what a
 session started while the session itself keeps running; in an agent session the agent also keeps
 the programs it runs directly (its MCP servers, the shell it runs a tool in), and what those started
 (a dev server a tool ran) is stopped. Any of them can still be stopped on its own with **Kill**. Both

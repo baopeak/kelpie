@@ -720,13 +720,14 @@ function createAppStore() {
     return ws?.tabs.find((t) => t.id === ws.activeTab) ?? ws?.tabs[0];
   };
 
-  function addTab(projectId: string, pane: Pane) {
+  /** `background`: the tab is added without being shown (the tab on screen stays, if there is one). */
+  function addTab(projectId: string, pane: Pane, opts: { background?: boolean } = {}) {
     ensureWorkspace(projectId);
     const tab: Tab = { id: uid(), root: leaf(pane), focus: pane.id };
     update((s) => {
       const ws = s.workspaces[projectId];
       ws.tabs.push(tab);
-      ws.activeTab = tab.id;
+      if (!opts.background || !ws.activeTab) ws.activeTab = tab.id;
     });
     return tab;
   }

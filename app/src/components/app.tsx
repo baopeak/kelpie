@@ -36,6 +36,7 @@ import { initReviewWatch } from "../lib/review-queue";
 import { setCovering } from "../lib/overlays";
 import { allViews, setLinkOpener } from "../lib/terminal-host";
 import { isLocalUrl, openBrowser } from "../lib/browser";
+import "../lib/agent-web-pages";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { daemonPalette, findTerminalTheme } from "../lib/terminal-themes";
 import { loadPlugins, syncPluginAgents } from "../lib/plugins";

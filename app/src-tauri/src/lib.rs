@@ -647,6 +647,7 @@ pub fn run() {
             browser::browser_design,
             browser::browser_devtools,
             browser::browser_close,
+            browser::browser_probe,
             browser::browser_info,
             remote::remote_configure,
             remote::remote_hosts,

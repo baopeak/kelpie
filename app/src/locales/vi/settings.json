@@ -96,6 +96,8 @@
   "Colour theme": "Theme màu",
   "Terminal colours; Default follows the app theme.": "Màu của terminal; Mặc định theo theme của ứng dụng.",
   "Open localhost links in a browser pane": "Mở liên kết localhost trong khung trình duyệt",
+  "Open an agent's web pages in a tab": "Mở trang web của agent trong một tab",
+  "When an agent starts a web page, it gets a tab in the background, marked until you look at it. Nothing covers the agent, and a tab you never opened goes when the page stops.": "Khi agent khởi động một trang web, trang đó có một tab chạy nền, được đánh dấu cho đến khi bạn xem. Không có gì che agent, và tab bạn chưa mở sẽ tự mất khi trang dừng.",
   "Ctrl/Cmd+click on a local dev-server address (localhost, 127.0.0.1) in a terminal opens it in a browser pane next to the terminal instead of your browser.": "Ctrl/Cmd+bấm vào địa chỉ dev server cục bộ (localhost, 127.0.0.1) trong terminal sẽ mở nó trong khung trình duyệt cạnh terminal thay vì trình duyệt của bạn.",
   "Floating terminal": "Terminal nổi",
   "A global terminal in your home folder, one shortcut away from any project.": "Một terminal chung trong thư mục home, chỉ cách một phím tắt từ mọi dự án.",

@@ -9,7 +9,7 @@ import { uid } from "../lib/platform";
 import { anyCovering } from "../lib/overlays";
 import { chooseAgentAndSend } from "../lib/send-to-agent";
 import {
-  annotationPrompt, browserBounds, browserDesign, browserDevtools, browserGo, browserLabel, browserNavigate, browserOpen, browserScreenshot, browserVisible, browserState as state, onBrowserEvent, setBrowserState as setState,
+  annotationPrompt, browserBounds, browserDesign, browserDevtools, browserGo, browserLabel, browserNavigate, browserOpen, browserScreenshot, browserVisible, browserState as state, markPageSeen, onBrowserEvent, setBrowserState as setState,
   type Annotation, type Rect,
 } from "../lib/browser";
 import { Icon } from "./icons";
@@ -18,6 +18,7 @@ import { t, errorText } from "../lib/i18n";
 
 export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; focused: boolean }) {
   const label = browserLabel(props.pane.id);
+  markPageSeen(props.pane.id);
   if (!state[props.pane.id]) setState(props.pane.id, { title: "", url: props.pane.url ?? "", design: false, notes: [] });
   const s = () => state[props.pane.id];
   const [address, setAddress] = createSignal(props.pane.url ?? "");

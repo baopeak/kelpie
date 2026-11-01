@@ -1,4 +1,4 @@
-"""GUI e2e for processes, ports and preview: the chip, the preview, the Processes panel, guarded kills.
+"""GUI e2e for processes, ports and preview: the Processes panel, the preview it opens, an agent's web pages, guarded kills.
 
     python -X utf8 scripts/e2e/processes.py <screenshot-dir> <scratch-dir> [app.exe]
 
@@ -10,17 +10,17 @@ anything talks to a daemon, so the user's own Kelpie is never reached. Every pro
 script started itself (servers it typed into its own sessions, a stranger it spawned to prove it survives).
 
 1. Idle: with a visible shell that has nothing under it and prints nothing, the daemon makes no scans.
-2. `python -m http.server <port>` typed in the shell: a `:<port>` chip on the tab and on the sidebar row
-   within 6 s; clicking it opens a browser pane on that port; "Open preview beside" splits.
-3. The Processes panel lists the tree with name, PID, RAM, CPU and the port; four more servers started from a
-   second shell, and the scan of both sessions with five servers running is measured (daemon `took_us`; held to
+2. `python -m http.server <port>` typed in the shell: the daemon reports the port, and tabs and session rows
+   carry no port chip, so a click on a tab always selects it.
+3. The Processes panel lists the tree with name, PID, RAM, CPU and the port; a click on a port opens a browser
+   tab on it. Four more servers started from a second shell, and the scan of both sessions with five servers running is measured (daemon `took_us`; held to
    5 ms for a release build, only reported for a `debug` one).
 4. Kill (confirmed, with a preview naming the program and the port) frees the port; the shell stays.
 5. "Kill children" on an agent session stops the server its tool shell started and keeps the agent process
    and what it runs directly (a helper, as an MCP server is). After the session is killed and restarted (same
    session id, a new process in a new job), the new process is the session's own: listed as the root, never a
    child, refused by Kill, and kept by Kill children, which still frees the new server's port. A custom session
-   whose own process is the server (`python -m http.server`, nothing under it) gets its chip too.
+   whose own process is the server (`python -m http.server`, nothing under it) has its port listed too.
 6. Guards: a stale identity (wrong start time, wrong program, a PID that is not in the tree, the session's
    own process) never stops anything; programs running in a session (token, no token, any shape of
    parameters) cannot list or stop processes.
@@ -207,7 +207,7 @@ def scenario(run, c):
     d._req("POST", d.s("/timeouts"), {"script": 120000})
     until(lambda: d.js(f"return {S}.daemonApi()") >= 16, 30)
     info_ = c.call("daemon.info")
-    run.check("the daemon is at API level 16 and counts its scans", info_["api"] == 16 and "process_scans" in info_, info_.get("api"))
+    run.check("the daemon has the process API and counts its scans", info_["api"] >= 16 and "process_scans" in info_, info_.get("api"))
     run.check("the app knows the process API", d.js(f"return {S}.daemonApi()") >= 16)
     d.js("window.__confirms = []; window.confirm = (m) => { window.__confirms.push(m); return true; };")
 
@@ -224,42 +224,15 @@ def scenario(run, c):
     run.check("a visible idle session with nothing under it makes no scans (10 s)", idle == 0, f"scans in 10 s: {idle}")
     run.check("…and the panel being closed adds none", not d.js("return !!document.querySelector('.proc-panel')"))
 
-    # 2. a server: the chip within 6 s
+    # 2. a server: nothing about it on the tab or the session row, where a stray click would open pages
     port = free_port()
-    t0 = time.time()
     type_in(c, shell, server_cmd(port))
-    seen = until(lambda: d.js("return !!document.querySelector('.tab.active .port-chip[data-port=\"%d\"]')" % port), 12, 0.1)
-    took = time.time() - t0
-    run.check("the :port chip is on the tab within 6 s", bool(seen) and took <= 6, f"{took:.2f} s")
-    run.check("…and on the sidebar row", bool(d.js("return !!document.querySelector('.session-row .port-chip[data-port=\"%d\"]')" % port)))
+    seen = until(lambda: any(p["port"] == port for p in c.call("process.ports", {"sessions": [sid]})["sessions"][sid]["ports"]), 12, 0.1)
+    run.check("the daemon reports the server's port", bool(seen))
     run.check("…and the port really listens", listening(port))
-    if not seen:
-        print("hidden:", d.js("return document.hidden"), "visible:", d.js(f"return {S}.isSessionVisible(arguments[0])", sid),
-              "daemon:", json.dumps(c.call("process.ports", {"sessions": [sid]}))[:300], "scans:", c.call("daemon.info")["process_scans"], flush=True)
-    run.shot("01-chip")
-
-    # preview: click opens a browser tab; the menu opens it beside
-    panes_before = d.js(f"return {S}.workspace({S}.activeProject().id).tabs.length")
-    d.js("document.querySelector('.tab.active .port-chip[data-port=\"%d\"]').click()" % port)
-    opened = until(lambda: d.js("return " + S + ".workspace(" + S + ".activeProject().id).tabs.some(t => JSON.stringify(t.root).includes('\"kind\":\"browser\"'))"), 10)
-    run.check("clicking the chip opens a browser pane", bool(opened))
-    url = d.js("return JSON.stringify(" + S + ".workspace(" + S + ".activeProject().id).tabs)")
-    run.check("…on that port", f"http://localhost:{port}/" in url, url[:200] if f"http://localhost:{port}/" not in url else "")
-    d.js(f"{S}.selectTab({S}.activeProject().id, {S}.workspace({S}.activeProject().id).tabs[0].id)")
-    until(lambda: d.js("return !!document.querySelector('.tab.active .port-chip[data-port=\"%d\"]')" % port), 8)
-    # Right-click and pick in one go, as a user does: the menu closes when the window loses focus (the browser
-    # pane just opened may take it), so it is opened again if it went away before the pick.
-    beside = (
-        "const chip = document.querySelector('.tab.active .port-chip[data-port=\"%d\"]'); if (!chip) return false;"
-        "chip.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: 200, clientY: 200}));"
-        "const item = [...document.querySelectorAll('.ctx-item')].find(e => e.textContent.includes('Open preview beside'));"
-        "if (!item) return false; item.click(); return true;"
-    ) % port
-    run.check("the chip's menu offers \"Open preview beside\"", bool(until(lambda: d.js(beside), 8)))
-    split = until(lambda: d.js("return " + S + ".activeTab(" + S + ".activeProject().id).root.type === 'split'"), 8)
-    run.check("\"Open preview beside\" splits next to the terminal", bool(split))
-    run.shot("02-preview")
-    d.js(f"{S}.selectTab({S}.activeProject().id, {S}.workspace({S}.activeProject().id).tabs[0].id)")
+    time.sleep(3)
+    run.check("no port chip on the tab or the session row", not d.js("return !!document.querySelector('.tab .port-chip, .session-row .port-chip')"))
+    run.shot("01-no-chip")
 
     # 3. the panel, and four more servers for the scan time, from a second shell (the first one's foreground
     # runs the server, so what is typed there now waits for it to end)
@@ -276,10 +249,27 @@ def scenario(run, c):
     run.check("…with a PID, memory and the ports", str(port) in text and ("MB" in text or "KB" in text), text[:200])
     run.check("every server's port is shown", all(f":{p_}" in text for p_ in [port] + extra))
     run.shot("03-panel")
+    overlaps = d.js("""return [...document.querySelectorAll('.proc-row')].filter(r => {
+      const port = r.querySelector('.port-chip'), kill = r.querySelector('.proc-act button');
+      return port && kill && port.getBoundingClientRect().right > kill.getBoundingClientRect().left;
+    }).length""")
+    run.check("a port never overlaps its Kill button", overlaps == 0, overlaps)
+    d.js("document.querySelector('.proc-row .port-chip[data-port=\"%d\"]').click()" % port)
+    opened = until(lambda: d.js("return " + S + ".workspace(" + S + ".activeProject().id).tabs.some(t => JSON.stringify(t.root).includes('\"kind\":\"browser\"'))"), 10)
+    run.check("clicking a port in the panel opens a browser pane", bool(opened))
+    tabs_now = d.js(f"return {S}.workspace({S}.activeProject().id).tabs.length")
+    d.js(f"{S}.selectTab({S}.activeProject().id, {S}.workspace({S}.activeProject().id).tabs[0].id)")
+    d.js("document.querySelector('.proc-row .port-chip[data-port=\"%d\"]').click()" % port)
+    time.sleep(1)
+    run.check("…and clicking it again shows the same tab", d.js(f"return {S}.workspace({S}.activeProject().id).tabs.length") == tabs_now and d.js(f"return JSON.stringify({S}.activeTab({S}.activeProject().id).root).includes('browser')"))
+    url = d.js("return JSON.stringify(" + S + ".workspace(" + S + ".activeProject().id).tabs)")
+    run.check("…on that port", f"http://localhost:{port}/" in url, url[:200] if f"http://localhost:{port}/" not in url else "")
+    run.shot("02-preview")
+    d.js(f"{S}.selectTab({S}.activeProject().id, {S}.workspace({S}.activeProject().id).tabs[0].id)")
     both = c.call("process.ports", {"sessions": [sid, sid2]})["sessions"]
     ports_seen = {p["port"] for s_ in (sid, sid2) for p in both[s_]["ports"]}
     run.check("process.ports names all five servers", ports_seen == set([port] + extra), ports_seen)
-    # Scan cost with five servers running: one look at both sessions, as the chips ask
+    # Scan cost with five servers running: one look at both sessions
     ts = [c.call("process.ports", {"sessions": [sid, sid2]})["took_us"] for _ in range(40)]
     ls = [processes(c, sid2)["took_us"] for _ in range(20)]
     med, p95 = statistics.median(ts), sorted(ts)[int(len(ts) * 0.95) - 1]
@@ -311,6 +301,16 @@ def scenario(run, c):
     until(lambda: listening(agent_port), 30)
     agent_root = until(lambda: (processes(c, ag["id"])["root"] or {}).get("pid"), 15)
     run.check("the agent session runs a server of its own", listening(agent_port) and bool(agent_root))
+    # A web page an agent starts: a tab of its own, in the background, standing out until it is looked at.
+    active_before = d.js(f"return {S}.activeTab({S}.activeProject().id)?.id")
+    page_tab = until(lambda: d.js(f"return {S}.workspace({S}.activeProject().id).tabs.find(t => JSON.stringify(t.root).includes(':' + arguments[0] + '/'))?.id ?? null", agent_port), 15)
+    run.check("the agent's web page gets a tab", bool(page_tab))
+    run.check("…in the background: the tab on screen stays", d.js(f"return {S}.activeTab({S}.activeProject().id)?.id") == active_before)
+    run.check("…and it stands out", bool(until(lambda: d.js("return !!document.querySelector('.tab.fresh[data-tab-id=\"' + arguments[0] + '\"]')", page_tab), 5)))
+    run.shot("04-agent-page-tab")
+    d.js(f"{S}.selectTab({S}.activeProject().id, arguments[0])", page_tab)
+    run.check("…until it has been looked at", bool(until(lambda: not d.js("return !!document.querySelector('.tab.fresh[data-tab-id=\"' + arguments[0] + '\"]')", page_tab), 5)))
+    d.js(f"{S}.selectTab({S}.activeProject().id, arguments[0])", active_before)
     d.js(f"{S}.showRightPanel('processes')")
     btn = "document.querySelector('[data-session=\"%s\"] [data-act=\"kill-children\"]')" % ag["id"]
     until(lambda: d.js("return !!" + btn), 15)
@@ -355,7 +355,7 @@ def scenario(run, c):
     time.sleep(1)
     run.check("…and keeps the new process, its helper and the session", alive(new_root) and bool(helper2) and alive(helper2) and info(c, ag["id"]).get("alive") is True, f"root {new_root}, helper {helper2}")
 
-    # 5c. a session that is itself the server (a custom command, nothing under it): its port has a chip too
+    # 5c. a session that is itself the server (a custom command, nothing under it): its port is listed too
     srv_port = free_port()
     srv = js_await(d, f"{S}.newSession(arguments[0], 'custom', {{args: arguments[1], name: 'server'}})", pid, [PY, "-m", "http.server", str(srv_port), "--bind", "127.0.0.1"])
     up = until(lambda: listening(srv_port), 30)
@@ -363,8 +363,9 @@ def scenario(run, c):
     srv_root = srv_list["root"] or {}
     run.check("a custom session runs the server as its own process", bool(up) and srv_root.get("name", "").lower().startswith("python") and srv_root.get("ports"), json.dumps(srv_root)[:200])
     t0 = time.time()
-    chip = until(lambda: d.js("return !!document.querySelector('.tab.active .port-chip[data-port=\"%d\"]')" % srv_port), 12, 0.1)
-    run.check("…and its :port chip is on its tab", bool(chip), f"{time.time() - t0:.2f} s after it listened")
+    d.js(f"{S}.showRightPanel('processes')")
+    chip = until(lambda: d.js("return !!document.querySelector('.proc-row .port-chip[data-port=\"%d\"]')" % srv_port), 12, 0.1)
+    run.check("…and the panel lists its port", bool(chip), f"{time.time() - t0:.2f} s after it listened")
 
     # 6. guards on the daemon
     list_ = processes(c, sid2)

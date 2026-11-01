@@ -262,6 +262,8 @@ export interface Settings {
   voice: { model: string | null; language: string; device: string | null };
   /** Ctrl/Cmd+click on a localhost link in a terminal opens it in a browser pane. */
   localhostInBrowser: boolean;
+  /** A web page an agent starts gets a tab in the background. */
+  agentWebTabs: boolean;
   /** Issue trackers and GitLab (tokens are in the OS credential store, not here). */
   integrations: { linear: boolean; jira: { url: string; email: string } | null; gitlabHosts: string[] };
 }
