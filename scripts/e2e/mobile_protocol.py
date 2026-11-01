@@ -950,10 +950,13 @@ async def security(d):
     vapid = (info_reply or {}).get("vapid")
     check("push_info gives the computer's signing key, public half", vapid and len(ps.unb64url(vapid)) == 65, info_reply)
     sub = ps.browser_subscription(PUSH.base, "/push/alerts")
-    subscribe = {"type": "push_sub", "endpoint": sub["endpoint"], "p256dh": sub["p256dh"], "auth": sub["auth"], "lang": "vi"}
+    subscribe = {"type": "push_sub", "endpoint": sub["endpoint"], "p256dh": sub["p256dh"], "auth": sub["auth"], "lang": "vi", "origin": BASE.rstrip("/")}
     for bad in ("https://192.168.1.1/x", "https://169.254.169.254/latest/meta-data", "http://fcm.googleapis.com/x", "https://evil.example/x", "https://fcm.googleapis.com:8443/x", PUSH.base + "-no/x", "http://127.0.0.1:1/x"):
         got = await alerts.ask(**{**subscribe, "endpoint": bad}) or {}
         check(f"an address that is no push service is refused and not said back: {bad}", got.get("code") == "bad_endpoint" and bad not in json.dumps(got), got)
+    for bad in ("https://evil.example", "http://192.168.1.5:4817", BASE.replace("http:", "https:").rstrip("/"), BASE):
+        got = await alerts.ask(**{**subscribe, "origin": bad}) or {}
+        check(f"a page's origin this computer does not answer at is refused and not said back: {bad}", got.get("code") == "bad_origin" and bad not in json.dumps(got), got)
     check("…and nothing was kept", d.call("notify.get")["webpush"]["devices"] == 0)
     got = await alerts.ask(**subscribe) or {}
     check("a subscription at the stand-in is taken", got.get("result") == "ok", got)
@@ -1028,13 +1031,17 @@ async def security(d):
     d.call("session.close", {"handle": info(d, s["id"])["handle"]})
 
     # A service that hangs costs the others nothing, and it says so, without an address.
-    PUSH.answer("/ntfy", ("hang", 12))
-    before = len(PUSH.at("/push/alerts"))
+    PUSH.answer("/ntfy", ("hang", 12), ("hang", 12), ("hang", 12))
+    before, ntfy_before = len(PUSH.at("/push/alerts")), len(PUSH.at("/ntfy"))
+    dropped_before = d.call("notify.get")["dropped"]
     s, _, at = await needs_you("alert-slow-ntfy")
     await ps.async_wait_for(lambda: len(PUSH.at("/push/alerts")) > before, 5)
     took = PUSH.at("/push/alerts")[before]["at"] - at if len(PUSH.at("/push/alerts")) > before else None
     print(f"needs-you with ntfy hanging: {took} s", flush=True)
     check("slow ntfy does not delay Web Push", took is not None and took <= 2, took)
+    await asyncio.sleep(34)
+    check("a channel that takes the request and never answers gets it twice at most, however long the session waits", len(PUSH.at("/ntfy")) - ntfy_before == 2, len(PUSH.at("/ntfy")) - ntfy_before)
+    check("…and what was given up is counted", d.call("notify.get")["dropped"] == dropped_before + 1, d.call("notify.get")["dropped"])
     d.call("session.close", {"handle": info(d, s["id"])["handle"]})
     d.call("notify.set", {"config": {"ntfy": {"enabled": False, "server": PUSH.base + "/ntfy"}, "events": {"done": False}}})
 

@@ -909,7 +909,7 @@ for n in (1, 2, 3):
                 delivered = True
             except RuntimeError as e:
                 print(f"note: ServiceWorker.deliverPushMessage did not work here: {e}", flush=True)
-        shown_js = "const done = arguments[0]; navigator.serviceWorker.getRegistration().then((r) => r.getNotifications()).then((n) => done(n.map((x) => ({title: x.title, body: x.body, tag: x.tag, navigate: x.data && x.data.navigate}))), (e) => done({err: String(e)}));"
+        shown_js = "const done = arguments[0]; navigator.serviceWorker.getRegistration().then((r) => r.getNotifications()).then((n) => done(n.map((x) => ({title: x.title, body: x.body, tag: x.tag, icon: x.icon, navigate: x.data && x.data.navigate}))), (e) => done({err: String(e)}));"
         def shown():
             got = phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": shown_js, "args": []})
             return got if isinstance(got, list) and got else None
@@ -920,7 +920,11 @@ for n in (1, 2, 3):
             versions = [(v.get("registrationId"), v.get("runningStatus"), v.get("status")) for e in page_cdp.events if e.get("method") == "ServiceWorker.workerVersionUpdated" for v in e["params"]["versions"]]
             raw = phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": shown_js, "args": []})
             print(f"note: no notification from registration {registration} of {workers}; versions {versions[-6:]}; permission {phone.js('return Notification.permission')}; getNotifications says {raw}", flush=True)
+            # Which of the two was lost: the push, or the notification? The check below still fails.
+            page_cdp.call("ServiceWorker.deliverPushMessage", {"origin": origin, "registrationId": registration, "data": plain.decode()})
+            print(f"note: a second push of the same shows: {wait(shown, 10)}", flush=True)
         run.check("the worker shows it: the sentence, its tag, its link", bool(notes) and notes[0]["title"] == "Kelpie" and notes[0]["tag"] == note.get("tag") and notes[0]["body"] == note.get("body") and notes[0]["navigate"] == note.get("navigate"), str(notes))
+        run.check("…and an icon that needs no request to the computer", bool(notes) and notes[0]["icon"].startswith("data:image/png;base64,"), str(notes)[:200])
         sw_page = None
         if notes:
             # A person's tap cannot be made through DevTools: the event is dispatched in the worker, on the notification it shows, and the rest is the worker's own code.
