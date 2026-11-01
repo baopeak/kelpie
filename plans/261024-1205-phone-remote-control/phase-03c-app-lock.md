@@ -20,6 +20,7 @@ Code, daemon tests with real signatures, and e2e with real WebAuthn ceremonies t
 - **The unlock is a button.** A tap on it starts the ceremony: iOS may refuse a ceremony with no tap, and a refused one costs the person more than a tap does. The re-check is a second tap on a sheet for the same reason. A real iPhone may show that one tap can go.
 - **The settings carry their own tag** (`LockOptions.mac`): a program that edits the file must not be able to turn the lock off, which is this plan's own criterion.
 - **`hello` keeps `sessions: []` and `projects: {}` while locked**, empty rather than absent: a shell cached from before the lock then gets a list with nothing in it and `locked` refusals, and not a page that fails to start. It cannot be made to reload, having no code for that. The next load gets the new shell, as the worker's install takes over at once.
+- **The window is the device's, as this phase says, so a copied key inside it gets in.** Stated in `docs/architecture.md`, and put to the owner in the report: a secret given at unlock and held in the page's memory alone would close it, and is more than this phase asks for.
 - **Files beyond the list:** `mobile/lock.rs` (the lock's own logic, out of a file of 7,000 lines), `mobile/tests/lock.rs`, `app/phone/src/command-text.ts` and `command-block.tsx` (the card shared by terminal and chat).
 
 ## Overview
