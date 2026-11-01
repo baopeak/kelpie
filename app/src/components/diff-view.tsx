@@ -12,6 +12,7 @@ import { openContextMenu } from "./context-menu";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { isMac } from "../lib/platform";
 import { Icon } from "./icons";
+import { LoadBar } from "./load-bar";
 import type { Project, ReviewNote } from "../lib/types";
 import { t } from "../lib/i18n";
 
@@ -94,6 +95,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
   const [info, setInfo] = createSignal<"" | "new" | "deleted">("");
   const [draft, setDraft] = createSignal<{ line: number; side: "new" | "old"; text: string; x: number; y: number } | null>(null);
   const [noteText, setNoteText] = createSignal("");
+  const [loading, setLoading] = createSignal(true);
   let destroy: (() => void) | null = null;
   let editors: { view: EditorView; side: "new" | "old" }[] = [];
 
@@ -139,6 +141,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
   };
 
   async function render() {
+    setLoading(true);
     try {
       const v = props.rev ? await turnVersions(props.rev, props.path) : await gitFileVersions(props.project.path, props.path, props.staged, props.base);
       const lang = await languageFor(props.path);
@@ -160,6 +163,8 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
       pushMarks();
     } catch (e) {
       store.notify(String(e));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -193,6 +198,7 @@ export function DiffView(props: { project: Project; path: string; staged: boolea
 
   return (
     <div class="viewer" ref={box}>
+      <LoadBar when={loading()} />
       <div class="viewer-bar">
         <span class="path">&lrm;{props.path}</span>
         <span style={{ color: "var(--text-faint)" }}>{props.rev ? t("Before ↔ after turn #{n}", { n: props.rev.n }) : props.base ? t("{base} ↔ working tree", { base: props.base }) : props.staged ? t("HEAD ↔ index") : t("HEAD ↔ working tree")}{info() ? ` · ${info() === "new" ? t("new file") : t("deleted")}` : ""}</span>

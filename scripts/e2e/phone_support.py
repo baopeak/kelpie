@@ -168,8 +168,9 @@ class PairAttempt:
     """One pairing connection from a QR link, as far as `start` takes it: the handshake and the first sealed message, which
     spends the code and asks the person. `closed` is the close code if the daemon refused, or `silent` when it never answered."""
 
-    def __init__(self, base, link, name, want="read", key=None):
-        self.url, self.name, self.want = link_url(base), name, want
+    def __init__(self, base, link, name, want="read", key=None, **connect):
+        """`connect`: what else `websockets.connect` is told (another `host` and `port` to reach `base` through, `origin`, headers)."""
+        self.url, self.name, self.want, self.connect = link_url(base), name, want, connect
         self.dpk, self.psk = pair_secrets(link)
         self.priv, self.pub = key or ln.keypair()
         self.session = None
@@ -177,7 +178,7 @@ class PairAttempt:
         self.silent = False
 
     async def start(self):
-        self.ws = await websockets.connect(self.url, max_size=None, open_timeout=10, ping_interval=None, compression=None)
+        self.ws = await websockets.connect(self.url, max_size=None, open_timeout=10, ping_interval=None, compression=None, **self.connect)
         init = ln.Initiator(ln.PAIR, self.priv, self.pub, self.dpk, self.psk)
         await self.ws.send(init.first)
         try:
@@ -258,6 +259,59 @@ def _pair_once(d, base, name, can_write):
     if told.get("type") != "paired":
         raise RuntimeError("pairing failed: " + str(told))
     return Device(attempt.priv, attempt.pub, attempt.dpk, told["device"]["id"]), told["device"]["id"]
+
+
+FAKE_TAILNET_NAME = "desk.tail1234.ts.net"
+FAKE_TAILSCALE_READY = json.dumps({"BackendState": "Running", "Self": {"DNSName": FAKE_TAILNET_NAME + "."}, "CertDomains": [FAKE_TAILNET_NAME]})
+
+
+def write_fake_tailscale(folder):
+    """A program that answers like the Tailscale CLI, from a file, and keeps a list of what it was asked. For a daemon started with
+    `KELPIE_E2E` and `KELPIE_TAILSCALE_BIN` set to the first of what this returns (program, state file, log), which then has no way to reach the
+    person's real Tailscale. It starts stopped, with nothing served; `fake_tailscale_says` changes that."""
+    state, log = os.path.join(folder, "fake-tailscale-state.json"), os.path.join(folder, "fake-tailscale-calls.log")
+    script = os.path.join(folder, "fake_tailscale.py")
+    program = os.path.join(folder, "fake-tailscale.cmd" if os.name == "nt" else "fake-tailscale")
+    with open(state, "w", encoding="utf-8") as f:
+        json.dump({"status": '{"BackendState":"Stopped"}', "serve": "{}"}, f)
+    open(log, "w", encoding="utf-8").close()
+    with open(script, "w", encoding="utf-8") as f:
+        f.write(
+            "import json, sys\n"
+            f"state_file, log = {state!r}, {log!r}\n"
+            "args = ' '.join(sys.argv[1:])\n"
+            "open(log, 'a', encoding='utf-8').write(args + '\\n')\n"
+            "state = json.load(open(state_file, encoding='utf-8'))\n"
+            "if args == 'status --json':\n    print(state['status'])\n"
+            "elif args == 'serve status --json':\n    sys.exit(1) if state.get('serve_down') else print(state['serve'])\n"
+            "elif args == 'serve --https=8443 off':\n    state['serve'] = '{}'\n"
+            "elif args.startswith('serve --bg --https=8443 http://127.0.0.1:'):\n"
+            "    port = args.rsplit(':', 1)[1]\n"
+            f"    state['serve'] = json.dumps({{'TCP': {{'8443': {{'HTTPS': True}}}}, 'Web': {{'{FAKE_TAILNET_NAME}:8443': {{'Handlers': {{'/': {{'Proxy': 'http://127.0.0.1:' + port}}}}}}}}}})\n"
+            "else:\n    sys.exit(3)\n"
+            "json.dump(state, open(state_file, 'w', encoding='utf-8'))\n")
+    with open(program, "w", encoding="utf-8") as f:
+        if os.name == "nt":
+            f.write(f'@"{sys.executable}" "{script}" %*\r\n')
+        else:
+            f.write(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+    if os.name != "nt":
+        os.chmod(program, 0o755)
+    return program, state, log
+
+
+def fake_tailscale_says(state_file, **state):
+    with open(state_file, encoding="utf-8") as f:
+        now = json.load(f)
+    with open(state_file, "w", encoding="utf-8") as f:
+        json.dump({**now, **state}, f)
+
+
+def fake_tailscale_calls(log):
+    if not os.path.exists(log):
+        return []
+    with open(log, encoding="utf-8") as f:
+        return f.read().splitlines()
 
 
 WIRE_KEPT = 1 << 18

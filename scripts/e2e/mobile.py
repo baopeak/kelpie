@@ -8,7 +8,9 @@ mobile_resilience.py's and stress.py's job. The script checks that the pin is in
 the daemon, side by side, with KELPIE_TEST_USER_PRESENCE=approve in tauri-driver's environment: the daemon the app starts
 inherits it, the one this script starts gets it from here, and it answers the operating system's verification instead of
 a prompt (a release build has no such path). The script refuses to go on against a daemon that does not say it is in effect, so
-nothing here can raise a real prompt.
+nothing here can raise a real prompt. The daemon the app starts also inherits `KELPIE_TAILSCALE_BIN`, so set that in tauri-driver's environment to
+`<scratch-dir>\\fake-tailscale.cmd` (`fake-tailscale` elsewhere), which this script writes: with `KELPIE_E2E` and no such variable the daemon has no Tailscale,
+and the Tailscale checks fail saying so. It never reaches the real one either way.
 
 The server is bound to 127.0.0.1 (no firewall prompt on the test machine). The phone is
 headless Edge with mobile emulation, driven through msedgedriver on port 9515.
@@ -26,7 +28,9 @@ server went away; a read-only device cannot type; a socket from another origin i
 disconnects the phone; turning it off stops the server; after the computer restarted, what waited is shown
 as lost with its text in the stopped chat, also after a reload, until discarded; a used or wrong pairing
 code gets no answer, too many unknown phones are rate limited and the desktop says so, the kill switch and the audit list
-(last, so the limiter cannot refuse a pairing above).
+(last, so the limiter cannot refuse a pairing above). On an HTTPS origin (a certificate of this run's own, on 127.0.0.1, which the phone's browser
+is told to accept; needs Python's `cryptography`): the install step, no camera falling back to pasting the link, a pairing that is a secure origin and may
+type. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, never the real one): each state's instruction, the two-step dialog, off.
 """
 import asyncio
 import base64
@@ -36,6 +40,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -60,7 +65,8 @@ def isolated_env():
     if not data or os.path.normcase(os.path.normpath(data)) == real:
         raise SystemExit("mobile.py stops a daemon: set KELPIE_DATA_DIR to an isolated folder in its own environment (not the real Kelpie folder). Refusing.")
     keep = {k: v for k, v in os.environ.items() if k in ("PATH", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOME", "KELPIE_LOAD_FORCE", "KELPIE_E2E")}
-    return {**keep, "KELPIE_ENDPOINT": endpoint, "KELPIE_DATA_DIR": data, "KELPIE_TEST_USER_PRESENCE": "approve"}
+    # The daemon this script starts has only a fake for Tailscale: `KELPIE_E2E` with `KELPIE_TAILSCALE_BIN`.
+    return {**keep, "KELPIE_ENDPOINT": endpoint, "KELPIE_DATA_DIR": data, "KELPIE_TEST_USER_PRESENCE": "approve", "KELPIE_E2E": "1", "KELPIE_TAILSCALE_BIN": FAKE_TS[0]}
 
 
 def check_daemon(d, env):
@@ -84,7 +90,33 @@ def check_no_real_prompt(d):
         raise SystemExit(f"the daemon would raise a real verification prompt (test seam: {seam!r}): use a debug build, with KELPIE_TEST_USER_PRESENCE=approve in tauri-driver's environment.")
 
 
+def certificate_for_loopback(folder):
+    """A certificate for 127.0.0.1 and its key, made for this run: (certificate file, key file)."""
+    import datetime
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(minutes=5)).not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False).sign(key, hashes.SHA256()))
+    cert_file, key_file = os.path.join(folder, "loopback.crt"), os.path.join(folder, "loopback.key")
+    with open(cert_file, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    with open(key_file, "wb") as f:
+        f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    return cert_file, key_file
+
+
 REFUSED = []  # set when the app's daemon is not the isolated one: the run ends with an error, not with "0 failed"
+os.makedirs(scratch, exist_ok=True)
+FAKE_TS = ps.write_fake_tailscale(scratch)
 ISOLATED = isolated_env()
 edgedriver = sys.argv[sys.argv.index("--edgedriver") + 1] if "--edgedriver" in sys.argv else os.environ.get("KELPIE_EDGEDRIVER", r"D:\Works\edgedriver\msedgedriver.exe")
 S = "window.__kelpie.store"
@@ -99,8 +131,8 @@ class Phone:
         time.sleep(1.5)
         # The performance log carries the page's WebSocket frames (what it sends and what it is sent).
         # The browser log has what the page's console has, from the moment it loads: content security policy violations too.
-        caps = {"capabilities": {"alwaysMatch": {"browserName": "MicrosoftEdge", "ms:loggingPrefs": {"performance": "ALL", "browser": "ALL"}, "ms:perfLoggingPrefs": {"enableNetwork": True}, "ms:edgeOptions": {
-            "args": ["--headless=new", "--window-size=412,900", "--no-first-run", f"--user-data-dir={os.path.join(scratch, 'phone-profile')}"],
+        caps = {"capabilities": {"alwaysMatch": {"browserName": "MicrosoftEdge", "acceptInsecureCerts": True, "ms:loggingPrefs": {"performance": "ALL", "browser": "ALL"}, "ms:perfLoggingPrefs": {"enableNetwork": True}, "ms:edgeOptions": {
+            "args": ["--headless=new", "--window-size=412,900", "--no-first-run", f"--user-data-dir={tempfile.mkdtemp(prefix='phone-profile-', dir=scratch)}"],  # a phone of its own each run: what an earlier run paired is not this one's
             "mobileEmulation": {"deviceMetrics": {"width": 412, "height": 900, "pixelRatio": 2.0}, "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"},
         }}}}
         self.sid = self.req("POST", "/session", caps)["sessionId"]
@@ -202,6 +234,8 @@ def wait(cond, timeout=20, interval=0.3):
 
 LIVE = "return document.querySelector('.conn')?.dataset.state === 'live'"
 STATE = "return document.querySelector('.conn')?.dataset.state"
+# Connected, with what a loaded machine may show for it (`canAct`, `conn-state.ts`).
+CONNECTED = "return ['live', 'busy', 'degraded'].includes(document.querySelector('.conn')?.dataset.state)"
 
 
 def type_code(digits):
@@ -726,6 +760,154 @@ for n in (1, 2, 3):
     run.check("Discard lets it go", bool(phone.wait("return !document.querySelector('.not-sent')", 15)))
     run.check("…for good: nothing of it is kept on the phone", not phone.js("return Object.keys(localStorage).some(k => k.startsWith('kelpie-draft:chat-pending:'))"))
     hold(False)
+
+    # ---------- a secure origin: the install step, no camera, the pasted link, typing ----------
+    cert_file, key_file = certificate_for_loopback(scratch)
+    daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT, "cert": cert_file, "key": key_file})
+    secure = f"https://127.0.0.1:{PORT}/"
+    phone.go("about:blank")
+    phone.go(secure)
+    run.check("in a browser on a secure origin, installing comes first", phone.wait("return document.querySelector('[data-install]')?.dataset.install", 20) == "android")
+    run.check("…on a page browsers trust as secure", phone.js("return window.isSecureContext") is True)
+    run.check("…with no way yet to send a code", not phone.js("return !!document.querySelector('[data-scan]')"))
+    phone.shot(os.path.join(shots, "21-phone-install.png"))
+    phone.js("document.querySelector('[data-stay-in-browser]').click()")
+    phone.wait("return !!document.querySelector('[data-scan]')", 10)
+    phone.js("document.querySelector('[data-scan-start]').click()")
+    run.check("no camera falls back to pasting the link, and says so", bool(phone.wait("return document.querySelector('[data-scan-problem]')?.textContent", 15)))
+    phone_paste = "const i = document.querySelector('[data-paste]'); i.value = arguments[0]; i.dispatchEvent(new Event('input', {bubbles: true})); document.querySelector('[data-paste-go]').click();"
+    phone.js("document.querySelector('[data-scan-problem]').dataset.was = '1'")
+    phone.js(phone_paste, "not a pairing link")
+    run.check("something else pasted is refused", "not a Kelpie pairing code" in (phone.wait("return document.querySelector('[data-scan-problem]')?.textContent.includes('not a Kelpie') && document.querySelector('[data-scan-problem]').textContent", 10) or ""))
+    # A pairing that fails in the installed app must not leave it with a spent code and no way to bring a new one.
+    made = daemon(d, "mobile.pair_start")
+    phone.js(phone_paste, made["url"])
+    phone.wait("return !!document.querySelector('.card input.field') && !document.querySelector('[data-scan]')", 10)
+    phone.js("document.querySelector('.card input').value = 'Turned down'; document.querySelector('.card .btn.primary').click()")
+    d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Turned down'))", 15)
+    d.js("document.querySelector('.mobile-approve .footer .btn').click()")
+    run.check("a pairing turned down leads back to the scanner, saying so", bool(phone.wait("return !!document.querySelector('[data-scan]') && document.querySelector('[data-scan]').textContent.includes('Declined')", 15)))
+    made = daemon(d, "mobile.pair_start")
+    run.check("the link is for the secure origin", made["url"].startswith(secure + "#p=") and made["tls"] is True)
+    phone.js(phone_paste, made["url"])
+    phone.wait("return !!document.querySelector('.card input.field') && !document.querySelector('[data-scan]')", 10)
+    phone.js("document.querySelector('.card input').value = 'Secure phone'; document.querySelector('.card .btn.primary').click()")
+    d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Secure phone'))", 15)
+    type_code(phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15))
+    d.js("[...document.querySelectorAll('.mobile-approve')].find(a => a.textContent.includes('Secure phone')).querySelector('[data-allow=write]').click()")
+    run.check("the pasted link pairs, and the phone connects", bool(phone.wait(LIVE, 30)))
+    listed = next((x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Secure phone"), {})
+    run.check("…as a secure origin", listed.get("secure_origin") is True and listed.get("can_write") is True, str(listed))
+    run.check("the phone paired over plain HTTP is not one", all(x["secure_origin"] is False for x in daemon(d, "mobile.status")["devices"] if x["name"] != "Secure phone"))
+    run.check("…and nothing says this page may only read", not phone.js("return !!document.querySelector('[data-banner=plain-http]')"))
+    typed_here = daemon(d, "session.create", {"kind": "shell", "cwd": proj, "name": "secure-shell", "project_id": pid})
+    phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('secure-shell'))", 20)
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('secure-shell')).click()")
+    phone.wait("return !!document.querySelector('.send textarea')", 15)
+    time.sleep(2.5)
+    phone.js("const t = document.querySelector('.send textarea'); t.value = 'echo secure-$((6*7))';")
+    phone.js("document.querySelector('.send .btn.primary').click()")
+    run.check("a secure origin may type", bool(wait(lambda: "secure-42" in daemon(d, "session.read", {"handle": typed_here["handle"], "lines": 40})["text"], 20)))
+    daemon(d, "session.close", {"handle": typed_here["handle"]})
+    daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT, "cert": "", "key": ""})
+    phone.go("about:blank")
+    phone.go(base)
+    phone.wait(LIVE, 30)
+
+    # ---------- Tailscale mode, against a fake CLI: what Settings says, the two steps, off ----------
+    run.check("tauri-driver has this script's fake Tailscale in its environment, so the daemon the app starts does too", os.environ.get("KELPIE_TAILSCALE_BIN") == FAKE_TS[0], f"KELPIE_TAILSCALE_BIN must be {FAKE_TS[0]}")
+    d.js(f"{S}.openSettings('mobile')")
+    d.wait("return !!document.querySelector('[data-tailscale-check]') && !document.querySelector('[data-tailscale-check]').disabled", 15)
+    ts_state = "return document.querySelector('[data-tailscale-state]')?.dataset.tailscaleState"
+    ts_serve = "return document.querySelector('[data-tailscale-serve]')?.dataset.tailscaleServe"
+    ts_text = "return document.querySelector('[data-tailscale-state]')?.textContent ?? ''"
+    for status, state, word in (('{"BackendState":"Stopped"}', "stopped", "Start it"), ('{"BackendState":"NeedsLogin"}', "needs_login", "Sign in"), ('{"BackendState":"Running","CertDomains":null}', "https_off", "MagicDNS"), ("not json", "unreadable", "Update Tailscale")):
+        ps.fake_tailscale_says(FAKE_TS[1], status=status)
+        d.js("document.querySelector('[data-tailscale-check]').click()")
+        shown = d.wait(f"return document.querySelector('[data-tailscale-state]')?.dataset.tailscaleState === {state!r} && document.querySelector('[data-tailscale-state]').textContent", 15)
+        run.check(f"{state}: one plain instruction", bool(shown) and word in shown, str(shown))
+    ps.fake_tailscale_says(FAKE_TS[1], status=ps.FAKE_TAILSCALE_READY)
+    d.js("document.querySelector('[data-tailscale-check]').click()")
+    run.check("ready: it says so", d.wait(f"return {ts_state[7:]} === 'ready' && {ts_serve[7:]} === 'off'", 15) is True)
+    run.check("the price is stated: the name in public certificate logs", "certificate logs" in d.js("return document.querySelector('[data-tailscale-privacy]')?.textContent ?? ''"))
+    run.shot("22-tailscale-ready")
+    d.js("document.querySelector('[data-setting=\"mobile-tailscale\"] .switch').click()")
+    run.check("turning it on publishes it", d.wait(f"return {ts_serve[7:]} === 'ours'", 20) is True, str(ps.fake_tailscale_calls(FAKE_TS[2])[-3:]))
+    run.check("…and says where", ps.FAKE_TAILNET_NAME in d.js(ts_text))
+    d.wait("return !!document.querySelector('[data-tailscale-pair]')", 10)
+    d.js("document.querySelector('[data-tailscale-pair]').click()")
+    install_link = d.wait("return document.querySelector('[data-tailscale-guide=\"1\"] [data-install-link]')?.dataset.installLink", 10)
+    run.check("Step 1 shows the page's address, with no secret", install_link == f"https://{ps.FAKE_TAILNET_NAME}:8443/" and d.js("return !!document.querySelector('[data-tailscale-guide=\"1\"] svg')"), str(install_link))
+    run.shot("23-tailscale-step-1")
+    d.js("document.querySelector('[data-guide-next]').click()")
+    link2 = d.wait("return document.querySelector('[data-tailscale-guide=\"2\"] .mobile-qr-code')?.dataset.link", 10)
+    run.check("Step 2 shows the pairing code, at that origin", bool(link2) and link2.startswith(f"https://{ps.FAKE_TAILNET_NAME}:8443/#p="))  # never the link in the log
+    run.shot("24-tailscale-step-2")
+    d.js("document.querySelector('[data-guide-close]').click()")
+    ps.fake_tailscale_says(FAKE_TS[1], serve="{}")
+    d.js("document.querySelector('[data-tailscale-check]').click()")
+    run.check("an entry removed by hand is told, with a way back", d.wait(f"return {ts_serve[7:]} === 'missing' && !!document.querySelector('[data-tailscale-restore]')", 15) is True)
+    d.js("document.querySelector('[data-tailscale-restore]').click()")
+    run.check("…which restores it", d.wait(f"return {ts_serve[7:]} === 'ours'", 20) is True)
+    d.js("document.querySelector('[data-setting=\"mobile-tailscale\"] .switch').click()")
+    run.check("turning it off removes the entry", d.wait(f"return {ts_serve[7:]} === 'off'", 20) is True and json.load(open(FAKE_TS[1], encoding="utf-8"))["serve"] == "{}")
+    calls = ps.fake_tailscale_calls(FAKE_TS[2])
+    run.check("…and only ever by the command that removes ours", not [c for c in calls if "reset" in c or "funnel" in c] and calls.count("serve --https=8443 off") == 1, str([c for c in calls if not c.endswith("--json")]))
+    # Phone access off with Tailscale down: the entry stays, Settings says so with phone access off, and Check again clears it once Tailscale answers.
+    d.js("document.querySelector('[data-setting=\"mobile-tailscale\"] .switch').click()")
+    d.wait(f"return {ts_serve[7:]} === 'ours'", 20)
+    ps.fake_tailscale_says(FAKE_TS[1], serve_down=True)
+    daemon(d, "mobile.disable")
+    run.check("phone access off with Tailscale down: Settings says the entry is still there", bool(d.wait("return !!document.querySelector('[data-tailscale-to-remove]')", 20)))
+    run.check("…and the daemon has kept it", daemon(d, "mobile.status")["tailscale"]["to_remove"] is True and json.load(open(FAKE_TS[1], encoding="utf-8"))["serve"] != "{}")
+    ps.fake_tailscale_says(FAKE_TS[1], serve_down=False)
+    d.js("document.querySelector('[data-tailscale-check]').click()")
+    run.check("…and once Tailscale answers, Check again removes it and the note goes", d.wait("return !document.querySelector('[data-tailscale-to-remove]')", 20) is True and json.load(open(FAKE_TS[1], encoding="utf-8"))["serve"] == "{}")
+    daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    # Turning access off cut the phone. It must be back before the limiter below, which would keep it out, and the kill switch, which only a connected phone can hear.
+    run.check("the phone comes back once phone access is on again", bool(phone.wait(CONNECTED, 30)), str(phone.js(STATE)))
+
+    # ---------- a page that is closed at the kill switch cannot hear it: access ends all the same, and what it kept stays until it is forgotten there ----------
+    missed_row = "return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('missed-shell'))"
+    missed = daemon(d, "session.create", {"kind": "shell", "cwd": proj, "name": "missed-shell", "project_id": pid})
+    phone.go("about:blank")
+    phone.go(base)  # the list the page keeps is saved as it connects
+    phone.wait(CONNECTED, 30)
+    phone.wait(missed_row, 20)
+    # A write waits 1.5 s (`cache.ts`), and leaving the page before that drops it.
+    list_saved = """if (!window.__askedList) { window.__askedList = true; const open = indexedDB.open('kelpie-phone');
+      open.onsuccess = () => { const got = open.result.transaction('kv').objectStore('kv').get('list');
+        got.onsuccess = () => { window.__listSaved = (got.result?.sessions ?? []).some(s => s.name === 'missed-shell'); window.__askedList = false; open.result.close(); }; }; }
+      return window.__listSaved === true"""
+    run.check("the page has saved the list that names the new session", bool(phone.wait(list_saved, 15)))
+    phone.go("about:blank")
+    daemon(d, "mobile.revoke_all")
+    daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    phone.go(base)
+    run.check("a page closed at the kill switch says Not paired here once access is back", bool(phone.wait("return document.querySelector('[data-banner=not_paired_here]')?.textContent.includes('Not paired here')", 30)), str(phone.js(STATE)))
+    run.check("…with no session, and the computer lists no phone", phone.js(STATE) == "not_paired_here" and not daemon(d, "mobile.status")["devices"], str(phone.js(STATE)))
+    run.check("…and keeps what it showed", bool(phone.wait(missed_row, 15)))
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('missed-shell')).click()")
+    phone.wait("return !!document.querySelector('.session')", 15)
+    phone.js("const t = document.querySelector('.send textarea'); if (t) t.value = 'echo missed-$((6*7))';")
+    phone.js("document.querySelector('.send .btn.primary')?.click()")
+    time.sleep(2)
+    run.check("…and it cannot act", phone.js("const b = document.querySelector('.send .btn.primary'); return !b || b.disabled") is True and "missed-42" not in daemon(d, "session.read", {"handle": missed["handle"], "lines": 40})["text"])
+    phone.js("window.confirm = () => true")
+    phone.js("document.querySelector('[data-forget]').click()")
+    run.check("Forget this device lets go of what it kept", bool(phone.wait("return !!document.querySelector('.card') && !document.querySelector('.row') && !document.querySelector('.conn')", 15)))
+    daemon(d, "session.close", {"handle": missed["handle"]})
+    made = daemon(d, "mobile.pair_start")
+    phone.go("about:blank")
+    phone.go(made["url"])
+    phone.wait("return !!document.querySelector('.card .btn.primary')")
+    phone.js("document.querySelector('.card input').value = 'Paired again'; document.querySelector('.card .btn.primary').click()")
+    d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Paired again'))", 15)
+    type_code(phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15))
+    d.js("[...document.querySelectorAll('.mobile-approve')].find(a => a.textContent.includes('Paired again')).querySelector('[data-allow=write]').click()")
+    run.check("…and pairing it again brings it back", bool(phone.wait(CONNECTED, 30)), str(phone.js(STATE)))
+    d.js(f"{S}.closeSettings?.()")
+
     # Last, so the limiter does not refuse a pairing this script still needs.
     dpk, _ = ps.pair_secrets(link)
     made_up = base + "#p=" + ps.ln.b64(json.dumps({"v": 1, "dpk": ps.ln.b64(dpk), "psk": ps.ln.b64(os.urandom(32))}).encode())

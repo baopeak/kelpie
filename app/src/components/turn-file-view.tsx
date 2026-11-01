@@ -14,6 +14,7 @@ import { CsvView, MermaidView, renderMermaidBlocks } from "./rich-viewers";
 import { Icon } from "./icons";
 import type { Project } from "../lib/types";
 import "./turn-timeline.css";
+import { LoadBar } from "./load-bar";
 
 export interface TurnRev {
   session: string;
@@ -37,6 +38,7 @@ export default function TurnFileView(props: { project: Project; path: string; re
 
   return (
     <div class="viewer">
+      <LoadBar when={blob.loading} />
       <div class="viewer-bar">
         <span class="path" title={props.path}>&lrm;{props.path}</span>
         <span style={{ color: "var(--text-faint)" }}>{t("End of turn #{n} · {name}", { n: props.rev.n, name: who() })}</span>

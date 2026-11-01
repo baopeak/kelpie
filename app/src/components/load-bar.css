@@ -1,0 +1,28 @@
+/* Load bar (load-bar.tsx): 2px along the container's edge, in the work-in-progress hue. It fades in
+   after --load-delay; the sweep is delayed too, so quick work schedules no frames at all. Only
+   `transform` and `opacity` animate (compositor work, no layout or paint per frame). */
+.load-bar {
+  --load-delay: 300ms;
+  position: absolute; inset: 0 0 auto 0; height: 2px; z-index: 12;
+  overflow: hidden; pointer-events: none; contain: strict;
+  background: color-mix(in srgb, var(--progress) 14%, transparent);
+  opacity: 0; animation: load-bar-in .2s ease-out var(--load-delay) forwards;
+}
+.load-bar.bottom { inset: auto 0 -1px 0; }
+.load-bar > span {
+  position: absolute; inset: 0 auto 0 0; width: 30%; will-change: transform;
+  background: linear-gradient(90deg, transparent, var(--progress) 35%, var(--progress) 65%, transparent);
+  transform: translateX(-100%);
+  animation: load-bar-sweep 1.4s cubic-bezier(.45, .05, .55, .95) var(--load-delay) infinite;
+}
+/* Known progress fills from the left; scaleX stays a compositor-only change. */
+.load-bar.known > span { width: 100%; background: var(--progress); transform-origin: left; animation: none; transition: transform .25s ease-out; }
+@keyframes load-bar-in { to { opacity: 1; } }
+/* 30% wide, so 333% of its own width carries it fully past the right edge. */
+@keyframes load-bar-sweep { from { transform: translateX(-100%); } to { transform: translateX(333%); } }
+/* Not looked at (window hidden or another app focused): hold still, no frames. */
+:root[data-unfocused] .load-bar > span { animation-play-state: paused; }
+/* Reduced motion keeps the sweep, slower: like the working spinner, a frozen bar reads as stuck. */
+@media (prefers-reduced-motion: reduce) {
+  .load-bar > span { animation-duration: 2.8s; }
+}

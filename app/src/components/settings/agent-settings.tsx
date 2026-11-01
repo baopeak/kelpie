@@ -3,6 +3,7 @@
 import { For, Show, createSignal } from "solid-js";
 import { store } from "../../lib/store";
 import { msg, t } from "../../lib/i18n";
+import { LoadBar } from "../load-bar";
 import { CORE_AGENTS, agentPresets, kindInfo, loadAgentPresets } from "../../lib/agents";
 import { KindGlyph } from "../icons";
 import { Choice, SettingRow, Toggle } from "./setting-row";
@@ -71,6 +72,7 @@ function AgentList() {
   };
   return (
     <div class="agent-list">
+      <LoadBar when={!rows().length} />
       <For each={rows()} fallback={<div class="muted">{t("Loading the agent list from the session daemon…")}</div>}>
         {(p) => (
           <div class={`agent-item${p.installed ? "" : " missing"}`}>

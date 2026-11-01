@@ -363,6 +363,7 @@
   "Remove from the queue": "Bỏ khỏi hàng đợi",
   "Press 1–{n} to answer, or type a message": "Nhấn 1–{n} để trả lời, hoặc gõ tin nhắn",
   "Queue another message… (it goes when {agent} finishes)": "Xếp thêm tin nhắn… (gửi khi {agent} xong)",
+  "Tell {agent} something… (it reads it at its next step)": "Nhắn cho {agent}… (agent sẽ đọc ở bước kế tiếp)",
   "Queue {key}": "Xếp hàng {key}",
   "Context: {used} of {size} tokens ({pct}%)": "Context: {used} / {size} token ({pct}%)",
   "Context: {used} tokens": "Context: {used} token",

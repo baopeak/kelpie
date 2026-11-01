@@ -55,6 +55,9 @@ const paths: Record<string, () => JSX.Element> = {
   note: () => <><path d="M3 3h10v7l-3 3H3z" /><path d="M10 13v-3h3M5.5 6h5M5.5 8.5h3" /></>,
   moon: () => <path d="M12.5 10A5 5 0 0 1 6 3.5 5 5 0 1 0 12.5 10z" />,
   external: () => <><path d="M9 3h4v4M13 3L7.5 8.5" /><path d="M11 9.5V13H3V5h3.5" /></>,
+  /** A desktop notification card (status bar switch); `notifyOff` crosses it out. */
+  notify: () => <><rect x="2.5" y="4" width="9" height="8.5" rx="1.5" /><circle cx="12" cy="4" r="2" /><path d="M5 7.5h3.5M5 10h2.5" /></>,
+  notifyOff: () => <><rect x="2.5" y="4" width="9" height="8.5" rx="1.5" /><path d="M5 7.5h3.5M5 10h2.5" /><path d="M2 2l12 12" /></>,
   float: () => <><rect x="2.5" y="3" width="11" height="10" rx="1.5" /><rect x="7.5" y="8" width="5" height="4" rx="1" /></>,
   clock: () => <><circle cx="8" cy="8" r="5.5" /><path d="M8 5v3.2l2 1.3" /></>,
   grid: () => <><rect x="2.5" y="3" width="11" height="10" rx="1.5" /><path d="M8 3v10M2.5 8h11" /></>,

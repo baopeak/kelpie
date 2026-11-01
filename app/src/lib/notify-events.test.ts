@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeCancelled, describeNotify, type NotifyEvent } from "./notify-events";
+import { createRepeatGuard, describeCancelled, describeNotify, worthPopup, type NotifyEvent } from "./notify-events";
 
 const ev = (extra: Partial<NotifyEvent> = {}): NotifyEvent => ({
   id: "e1", kind: "finished", session: "s1", project_id: "p1", alive: true, exit_code: null, detail: null, run: null, task: null, error: null, at: 1, ...extra,
@@ -45,5 +45,35 @@ describe("describeCancelled", () => {
     expect(describeCancelled("daemon", "x")?.body).toContain("daemon restarted");
     expect(describeCancelled("user", "x")).toBeNull();
     expect(describeCancelled("something else", "x")).toBeNull();
+  });
+});
+
+// Desktop popups: only what needs the user, and the same one at most once per window.
+describe("worthPopup", () => {
+  it("pops up for input, approvals, failures and the cost cap", () => {
+    for (const k of ["waiting", "error", "cost"] as const) expect(worthPopup(k, false)).toBe(true);
+  });
+
+  it("keeps a finished turn in the inbox unless asked for", () => {
+    expect(worthPopup("finished", false)).toBe(false);
+    expect(worthPopup("finished", true)).toBe(true);
+  });
+
+  it("never pops up for automation starts or worktree notes", () => {
+    expect(worthPopup("automation", true)).toBe(false);
+    expect(worthPopup("worktree", true)).toBe(false);
+  });
+});
+
+describe("createRepeatGuard", () => {
+  it("lets the same key through once per window", () => {
+    let now = 0;
+    const once = createRepeatGuard(60_000, () => now);
+    expect(once("Claude · Finished")).toBe(true);
+    now = 30_000;
+    expect(once("Claude · Finished")).toBe(false);
+    expect(once("Codex · Needs your input")).toBe(true);
+    now = 60_000;
+    expect(once("Claude · Finished")).toBe(true);
   });
 });

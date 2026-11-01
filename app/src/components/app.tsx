@@ -12,6 +12,7 @@ import { Palette } from "./palette";
 import { Dashboard } from "./dashboard";
 import { SettingsPage } from "./settings/settings-page";
 import { Tips } from "./tips";
+import { HoverHints } from "./hover-hints";
 import { setEditorTheme } from "../lib/codemirror";
 import { WorktreeDialog } from "./worktree-dialog";
 import { NewSessionMenu } from "./new-session-menu";
@@ -36,6 +37,7 @@ import { initReviewWatch } from "../lib/review-queue";
 import { setCovering } from "../lib/overlays";
 import { allViews, setLinkOpener } from "../lib/terminal-host";
 import { isLocalUrl, openBrowser } from "../lib/browser";
+import "../lib/agent-web-pages";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { daemonPalette, findTerminalTheme } from "../lib/terminal-themes";
 import { loadPlugins, syncPluginAgents } from "../lib/plugins";
@@ -191,6 +193,7 @@ export function App() {
       <LayoutMenuHost />
       <MobileApprovals />
       <Tips />
+      <HoverHints />
       <Show when={store.toast()}>
         {(t) => (
           <div class="toast">

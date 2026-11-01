@@ -4,6 +4,7 @@ import { searchText, type TextHit } from "../lib/ipc";
 import { Icon } from "./icons";
 import type { Project } from "../lib/types";
 import { t } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 
 /** Folder the next search is limited to ("Find in Folder" in the explorer); "" = whole project. */
 export const [searchFolder, setSearchFolder] = createSignal("");
@@ -46,6 +47,7 @@ export function SearchPanel(props: { project: Project }) {
 
   return (
     <>
+      <LoadBar when={busy()} />
       <div class="search-box">
         <input
           ref={input}

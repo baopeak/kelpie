@@ -7,7 +7,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as ipc from "./ipc";
 import { olderVersion } from "./version";
 import { ANSWER_API, nextWaiting, setAnswering } from "./attention";
-import { NOTIFY_API, describeNotify, type NotifyEvent } from "./notify-events";
+import { NOTIFY_API, createRepeatGuard, describeNotify, worthPopup, type NotifyEvent } from "./notify-events";
 import { t } from "./i18n";
 import { allPanes, autoGrid, buildGrid, cellCount, equalize, findPane, fromTemplate, insertBeside, leaf, migrateLayout, moveGutter, movePane, removePane, replacePane, splitPane, swapPanes, templateLeaves, toTemplate, type GridSpec, type Side } from "./layout";
 import { basename, isMac, normPath, uid } from "./platform";
@@ -284,9 +284,14 @@ function createAppStore() {
 
   const unreadInbox = () => (state.inbox ?? []).filter((i) => !i.read).length;
 
-  /** Desktop notification (plus the optional chime) when the window is not looking at it. */
-  async function desktopNotify(title: string, body: string) {
-    if (!state.settings.notifications) return;
+  /** The same popup at most once a minute. */
+  const popupOnce = createRepeatGuard(60_000);
+
+  /** Desktop notification (plus the optional chime) when the window is not looking at it, for what
+   *  is worth interrupting the user (worthPopup); everything still lands in the inbox. */
+  async function desktopNotify(title: string, body: string, kind: InboxItem["kind"]) {
+    if (!state.settings.notifications || !worthPopup(kind, state.settings.notifyFinished)) return;
+    if (!popupOnce(`${title}\n${body}`)) return;
     if (state.settings.notificationSound) chime();
     try {
       let ok = await isPermissionGranted();
@@ -318,7 +323,7 @@ function createAppStore() {
       ? next.alive ? t("Stopped with an error") : t("Exited with code {code}", { code: next.exit_code ?? "" })
       : kind === "waiting" ? t("Needs your input") : t("Finished");
     addInbox({ kind, title, body, sessionId: next.id, projectId: next.project_id ?? undefined });
-    await desktopNotify(title, body);
+    await desktopNotify(title, body, kind);
   }
 
   /** An event from the daemon's single source: the inbox entry and the desktop notification.
@@ -329,7 +334,7 @@ function createAppStore() {
     const project = state.projects.find((p) => p.id === projectId);
     const d = describeNotify(ev, { label: s ? sessionLabel(s) : undefined, host: s?.remote?.dest, projectName: project?.name });
     addInbox({ kind: d.kind, title: d.title, body: d.body, sessionId: ev.session ?? undefined, projectId });
-    void desktopNotify(d.title, d.body);
+    void desktopNotify(d.title, d.body, d.kind);
   }
 
   function onDaemonEvent(msg: { event: string; params: any }) {
@@ -397,7 +402,7 @@ function createAppStore() {
           const title = t("Automation · {name}", { name: p.name });
           const body = p.error ? t("Failed: {error}", { error: p.error }) : t("Started");
           addInbox({ kind: p.error ? "error" : "automation", title, body, sessionId: p.session_id ?? undefined, projectId: (p.session_id && sessions[p.session_id]?.project_id) || undefined });
-          void desktopNotify(title, body);
+          void desktopNotify(title, body, p.error ? "error" : "automation");
         }
         window.dispatchEvent(new CustomEvent("kelpie:automations"));
         break;
@@ -720,13 +725,14 @@ function createAppStore() {
     return ws?.tabs.find((t) => t.id === ws.activeTab) ?? ws?.tabs[0];
   };
 
-  function addTab(projectId: string, pane: Pane) {
+  /** `background`: the tab is added without being shown (the tab on screen stays, if there is one). */
+  function addTab(projectId: string, pane: Pane, opts: { background?: boolean } = {}) {
     ensureWorkspace(projectId);
     const tab: Tab = { id: uid(), root: leaf(pane), focus: pane.id };
     update((s) => {
       const ws = s.workspaces[projectId];
       ws.tabs.push(tab);
-      ws.activeTab = tab.id;
+      if (!opts.background || !ws.activeTab) ws.activeTab = tab.id;
     });
     return tab;
   }

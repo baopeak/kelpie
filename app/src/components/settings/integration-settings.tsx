@@ -5,6 +5,7 @@ import { For, Show, createResource, createSignal } from "solid-js";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { store } from "../../lib/store";
 import { t, errorText } from "../../lib/i18n";
+import { LoadBar } from "../load-bar";
 import { gitlabKey, gitlabUser, jiraKey, jiraMyself, linearViewer, secretClear, secretHas, secretSet } from "../../lib/integrations";
 import { Icon } from "../icons";
 import { SettingRow } from "./setting-row";
@@ -51,6 +52,7 @@ function TokenField(props: { secretKey: string; placeholder: string; check: () =
   };
   return (
     <div class="token-field">
+      <LoadBar when={busy()} />
       <div class="inline-fields">
         <input class="text-input" type="password" autocomplete="off" placeholder={has() ? t("•••••••• (saved — paste a new one to replace)") : props.placeholder} value={value()}
           onInput={(e) => setValue(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && void save()} />

@@ -21,6 +21,7 @@ import { RemoteSettings } from "./remote-settings";
 import { MobileSettings } from "./mobile-settings";
 import { PluginSettings } from "./plugin-settings";
 import { VoiceSettings } from "./voice-settings";
+import { LoadBar } from "../load-bar";
 
 // The setup page (diffs, registry, skills) loads when it is opened, not with the app.
 const AgentSetup = lazy(() => import("../agent-setup"));
@@ -29,7 +30,7 @@ const SECTIONS: Record<SettingsSection, () => JSX.Element> = {
   agents: AgentSettings,
   "agent-setup": () => (
     <SettingRow id="agent-setup" wide>
-      <Suspense fallback={<div class="muted-inline">{t("Loading…")}</div>}>
+      <Suspense fallback={<><div class="muted-inline">{t("Loading…")}</div><LoadBar when /></>}>
         <AgentSetup />
       </Suspense>
     </SettingRow>

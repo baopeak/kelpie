@@ -49,6 +49,9 @@ export function TerminalSettings() {
       <SettingRow id="localhost-browser">
         <Toggle on={s().localhostInBrowser !== false} onChange={(on) => store.setSettings({ localhostInBrowser: on })} />
       </SettingRow>
+      <SettingRow id="agent-web-tabs">
+        <Toggle on={s().agentWebTabs !== false} onChange={(on) => store.setSettings({ agentWebTabs: on })} />
+      </SettingRow>
     </>
   );
 }
@@ -90,6 +93,11 @@ export function NotificationSettings() {
       <SettingRow id="notifications">
         <Toggle on={s().notifications} onChange={(on) => store.setSettings({ notifications: on })} />
       </SettingRow>
+      <Show when={s().notifications}>
+        <SettingRow id="notify-finished">
+          <Toggle on={s().notifyFinished} onChange={(on) => store.setSettings({ notifyFinished: on })} />
+        </SettingRow>
+      </Show>
       <SettingRow id="notification-sound">
         <Toggle on={s().notificationSound} onChange={(on) => store.setSettings({ notificationSound: on })} />
       </SettingRow>

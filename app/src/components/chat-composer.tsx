@@ -303,7 +303,7 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
           placeholder={
             ctrl.state.exited ? t("Agent exited — switch to terminal to resume")
             : waiting() ? t("Press 1–{n} to answer, or type a message", { n: waiting()!.options.length })
-            : ctrl.state.busy ? t("Queue another message… (it goes when {agent} finishes)", { agent: props.agentLabel })
+            : ctrl.state.busy ? (ctrl.canSteer ? t("Tell {agent} something… (it reads it at its next step)", { agent: props.agentLabel }) : t("Queue another message… (it goes when {agent} finishes)", { agent: props.agentLabel }))
             : t("Message {agent}…  / commands, @ files", { agent: props.agentLabel })
           }
           value={draft()}
@@ -351,7 +351,7 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
             when={stops()}
             fallback={
               <button class="send-btn" disabled={(!draft().trim() && !pictures.images().length) || ctrl.state.exited} onClick={sendFromButton}
-                title={ctrl.state.busy ? t("Queue {key}", { key: sendKey }) : t("Send {key}", { key: sendKey })} aria-label={ctrl.state.busy ? t("Queue {key}", { key: sendKey }) : t("Send {key}", { key: sendKey })}>
+                title={ctrl.state.busy && !ctrl.canSteer ? t("Queue {key}", { key: sendKey }) : t("Send {key}", { key: sendKey })} aria-label={ctrl.state.busy && !ctrl.canSteer ? t("Queue {key}", { key: sendKey }) : t("Send {key}", { key: sendKey })}>
                 <Icon name="up" size={15} />
               </button>
             }

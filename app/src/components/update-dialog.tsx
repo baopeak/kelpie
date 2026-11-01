@@ -2,6 +2,7 @@
 import { Show, createResource, createSignal } from "solid-js";
 import { store } from "../lib/store";
 import { t } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 import { daemon } from "../lib/ipc";
 import { isWindows } from "../lib/platform";
 import { available, daemonSurvivesUpdate, installUpdate, installWhenIdle, progress, skipUpdate, whenIdle } from "../lib/updater";
@@ -30,6 +31,8 @@ export default function UpdateDialog() {
   return (
     <div class="overlay" onPointerDown={(e) => e.target === e.currentTarget && !busy() && close()}>
       <div class="modal update-dialog" onKeyDown={(e) => e.key === "Escape" && !busy() && close()}>
+        {/* Fills with the download once its size is known; sweeps while preparing. */}
+        <LoadBar when={busy()} value={percent() != null ? percent()! / 100 : null} label={t("Preparing the update…")} />
         <Show when={available()} fallback={<p>{t("Kelpie is up to date")}</p>}>
           {(u) => (
             <>

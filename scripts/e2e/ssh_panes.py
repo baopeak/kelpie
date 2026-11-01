@@ -324,7 +324,7 @@ try:
         tab = tab_with(pid_a, lambda t: remote_session_in(pid_a, t["id"]) is not None)
         panes = panes_of(pid_a, tab)
         run.check("the local pane and the remote pane share a tab", len(panes) >= 2 and remote_sid is not None)
-        d.js("document.querySelector('.pane.on-host .pane-header .icon-btn[title=\"Split right\"]').click()")
+        d.js("document.querySelector('.pane.on-host .pane-header .icon-btn[title^=\"Split right\"]').click()")
         wait(lambda: exists(".empty-pane"), 5)
         run.check("a split of the remote pane preselects its host", wait(lambda: exists(f'.empty-pane [data-run-on-host="{host_id}"].on'), 5))
         run.shot("07-split-preselects-host")

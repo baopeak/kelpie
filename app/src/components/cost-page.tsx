@@ -10,6 +10,7 @@ import { formatDate, formatNumber, t } from "../lib/i18n";
 import { formatCost, formatTokens } from "../lib/usage-format";
 import { folderName, groupRows, type Group, type GroupBy } from "../lib/usage-report";
 import { Icon } from "./icons";
+import { LoadBar } from "./load-bar";
 import type { UsageTotals } from "../lib/types";
 import "./cost-page.css";
 
@@ -106,6 +107,8 @@ export default function CostPage() {
         if (e.key === "Escape" && !e.defaultPrevented) close();
       }}
     >
+      {/* The first read, then the background pass still counting transcripts. */}
+      <LoadBar when={(!report() && !failed()) || (report()?.pending ?? 0) > 0} />
       <div class="board-head">
         <button class="settings-back" onClick={close} title={t("Back (Esc)")}><Icon name="back" size={14} /></button>
         <h2>{t("Usage & cost")}</h2>

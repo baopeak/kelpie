@@ -109,12 +109,12 @@ Numbers are stable names, not an order (no rename: other phases and reports refe
 | 2 | [Phone client app (SolidJS, PWA)](phase-02-phone-client-app.md) | P1 | 7d | 1 | | done |
 | 2b | [Send chat messages from the phone (single writer)](phase-02b-phone-chat-send.md) | P1 | 6d | 2 | 21 | done |
 | 3 | [kelpie-link: E2E pairing, trusted approval, device store v2](phase-03-kelpie-link-e2e.md) (+ 2026-10-30 extras) | P1 | 7d | 2; 2b for chat-write verbs | 22 | committed; merge blocked, see Execution state |
-| 3a | [Tailscale mode: detection, HTTPS origin, guided PWA install](phase-03a-tailscale-https.md) | P1 | 4d | 3 | 23 | pending |
+| 3a | [Tailscale mode: detection, HTTPS origin, guided PWA install](phase-03a-tailscale-https.md) | P1 | 4d | 3 | 23 | code on `phone/phase3a-tailscale`; desktop half verified on a real tailnet, real phones pending |
 | 3b | [Web Push sent directly by kelpied](phase-03b-web-push.md) | P1 | 4d | 3a, roadmap phase 12 | 24 | pending |
 | 3c | [App lock (WebAuthn) and daemon risk labels](phase-03c-app-lock.md) | P1 | 6d | 3a | 25 + security level 3 | pending |
 | 3d | [Settings → Mobile: plain-language switches](phase-03d-mobile-settings-toggles.md) | P1 | 2d | 3a, 3b, 3c | none expected | pending |
 | 3e | [Telegram: alert + deep link, opt-in low-risk approvals](phase-03e-telegram-options.md) | P2 | 3d | 3b, 3c, 3d | 26 | pending |
-| 4a | [Relay validation on a real Cloudflare deployment](phase-04a-relay-cloudflare-validation.md) | P1 | 1d + 7-day soak | 3e | none | pending |
+| 4a | [Relay validation on a real Cloudflare deployment](phase-04a-relay-cloudflare-validation.md) (run ahead of the order at the owner's request, Free plan on `*.workers.dev`, see the phase) | P1 | 1d + 7-day soak | 3e | none | in-progress |
 | 4 | [Relay: one Cloudflare relay, connect from anywhere](phase-04-relay-connect-anywhere.md) | P1 | 6d | 3, 3a, 3c, 4a | 27 | pending |
 | 7 | [Browser pane takeover + app provider channel](phase-07-browser-pane-takeover.md) (over Tailscale; relay mode deferred) | P2 | 5d | 3, 3a, 3c | 28 | pending |
 | 8 | [Desktop / window screen control — Windows](phase-08-desktop-screen-windows.md) (over Tailscale; TURN deferred) | P2 | 10d | 3, 3a, 3c, 7 | 29 | pending |
@@ -283,3 +283,14 @@ Plain-`http://` fallback · idle-timeout default and grace on leaving · `contro
 
 ### Whole-Plan Consistency Sweep — 2026-10-30
 See the report. Older red-team tables and validation answers above stay as history and are overridden by this session where the table says so.
+
+### Session 3 — 2026-10-31
+**Trigger:** the owner asked for the relay validation (4a) on their real Cloudflare account and supplied the token.
+
+#### Decisions
+1. **Free plan, not Workers Paid**, while there are no users; revisit when usage grows. Durable Objects use the SQLite backend.
+2. **`*.workers.dev` first, no custom domain.** No budget alert is needed, because the Free plan fails rather than bills. The WAF measure cannot run without a domain and is marked not run.
+3. **Cost threshold**: projected use stays within the Free limits (100,000 requests/day, 13,000 GB-s/day, incoming WebSocket messages count 20:1). Latency and disconnect thresholds are unchanged; a failed threshold goes to the owner, never an automatic design change.
+4. **No SIMs**: this PC's network only, with the carrier gap reported plainly and no estimates.
+
+These override phase 4a's setup and phase 4's billing guards and go-live checklist until usage grows. Phase 4 still has its text for the later paid setup; revisit it with the 4a results.

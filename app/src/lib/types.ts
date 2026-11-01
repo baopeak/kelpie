@@ -179,6 +179,8 @@ export interface Settings {
   sidebarWidth: number;
   sidebarCollapsed: boolean;
   notifications: boolean;
+  /** Also a desktop notification when a turn finishes (off: only when an agent needs you or fails). */
+  notifyFinished: boolean;
   /** Toast once per shortcut when Kelpie keeps a key from the focused terminal. */
   shortcutHints: boolean;
   projectFilter: "all" | "running" | "attention";
@@ -262,6 +264,8 @@ export interface Settings {
   voice: { model: string | null; language: string; device: string | null };
   /** Ctrl/Cmd+click on a localhost link in a terminal opens it in a browser pane. */
   localhostInBrowser: boolean;
+  /** A web page an agent starts gets a tab in the background. */
+  agentWebTabs: boolean;
   /** Issue trackers and GitLab (tokens are in the OS credential store, not here). */
   integrations: { linear: boolean; jira: { url: string; email: string } | null; gitlabHosts: string[] };
 }

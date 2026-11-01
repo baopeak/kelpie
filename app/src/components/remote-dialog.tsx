@@ -8,6 +8,7 @@ import { Icon } from "./icons";
 import { KeyHints } from "./key-hints";
 import { openHosts } from "./hosts-page";
 import { t, errorText } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 
 export function openRemoteDialog() {
   store.setOverlay("remote");
@@ -72,6 +73,7 @@ export function RemoteDialog() {
   return (
     <div class="overlay" onPointerDown={(e) => e.target === e.currentTarget && store.setOverlay(null)}>
       <div class="modal remote-dialog" onKeyDown={(e) => e.key === "Escape" && store.setOverlay(null)}>
+        <LoadBar when={checking() || hosts.loading} />
         <h2>{t("Add remote project")}</h2>
         <div class="form-row">
           <label>{t("SSH host")}</label>

@@ -204,7 +204,7 @@ pub fn prefilter(desktop: &[u8; KEY_LEN], first: &[u8], psks: &[[u8; KEY_LEN]]) 
 // ---------- the QR code ----------
 
 /// A way to reach the desktop, in a pairing record. A list of these, not one address: direct candidates and, later, relays.
-/// `t` says what it is (`lan` today, `a` being `ip:port`); a client skips kinds it does not know.
+/// `t` says what it is (`ts`, `a` being `<name>:<port>` of an HTTPS origin; `lan`, `a` being `ip:port`); a client skips kinds it does not know.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Endpoint {
     #[serde(rename = "t")]
@@ -220,6 +220,11 @@ impl Endpoint {
     /// A direct address (`ip:port`).
     pub fn lan(addr: &str) -> Endpoint {
         Endpoint { kind: "lan".into(), addr: addr.into(), room: None }
+    }
+
+    /// The computer's Tailscale HTTPS origin (`<name>:<port>`).
+    pub fn tailscale(addr: &str) -> Endpoint {
+        Endpoint { kind: "ts".into(), addr: addr.into(), room: None }
     }
 }
 

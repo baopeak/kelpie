@@ -3,12 +3,12 @@
 // they appear, again shortly after their terminal prints something (at most every 2 s, so a session
 // that keeps printing is looked at that often), and every few seconds for as long as the last look
 // found programs running under them. A session that is quiet and had nothing under it is not looked at
-// again until it prints something. A session that leaves the screen keeps its chips, marked stale.
+// again until it prints something. A session that leaves the screen keeps its ports, marked stale.
 import { createEffect, createMemo, createRoot } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { daemon } from "./ipc";
 import { store } from "./store";
-import { openBrowser } from "./browser";
+import { browserPaneOnPort, openBrowser } from "./browser";
 import { PROCESS_API } from "./process-api";
 import { onTerminalOutput } from "./terminal-host";
 import { errorText, t } from "./i18n";
@@ -70,19 +70,18 @@ export const portUrl = (p: Pick<Port, "host" | "port">) => `http://${p.host}:${p
 
 /** The ports held by a session's processes, as of the last look. `stale`: the session left the screen since, so it
  *  is no longer looked at and the ports may have closed. */
-export const [chips, setChips] = createStore<Record<string, { children: number; ports: Port[]; stale?: boolean }>>({});
+export const [sessionPorts, setSessionPorts] = createStore<Record<string, { children: number; ports: Port[]; stale?: boolean }>>({});
 
 /** One entry per port: a server that listens on both IPv4 and IPv6 is one port. */
 export const uniquePorts = (ports: Port[]): Port[] => ports.filter((p, i) => ports.findIndex((q) => q.port === p.port) === i);
 
-/** Opens a port in a browser pane: a tab, or split beside the focused pane. */
-export function openPort(p: Port, sessionId: string, where: "tab" | "right" = "tab") {
+/** Shows a port in a browser tab: the one already on it, or a new one. */
+export function openPort(p: Port, sessionId: string) {
   const projectId = store.sessions[sessionId]?.project_id ?? store.state.activeProject ?? undefined;
-  openBrowser(portUrl(p), where, projectId ?? undefined);
+  const open = projectId ? browserPaneOnPort(projectId, p.port) : null;
+  if (open) store.focusPane(projectId!, open.tabId, open.paneId);
+  else openBrowser(portUrl(p), "tab", projectId);
 }
-
-/** "node.exe (pid 4242)" for the tooltip of a port. */
-export const ownerLabel = (p: Port) => (p.name ? `${p.name} (pid ${p.pid})` : p.pid ? `pid ${p.pid}` : "");
 
 export function formatBytes(n: number): string {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
@@ -121,7 +120,7 @@ async function look() {
   lastLook = Date.now();
   try {
     const r = await daemon<{ sessions: Record<string, { children: number; ports: Port[] }> }>("process.ports", { sessions: ids });
-    setChips(
+    setSessionPorts(
       produce((m) => {
         for (const id of Object.keys(m)) {
           if (!store.sessions[id]?.alive) delete m[id];
@@ -134,7 +133,7 @@ async function look() {
         }
       }),
     );
-    if (ids.some((id) => chips[id]?.children)) wake(POLL_MS);
+    if (ids.some((id) => sessionPorts[id]?.children)) wake(POLL_MS);
   } catch {
     // The next output or tab switch looks again.
   }

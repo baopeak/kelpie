@@ -19,6 +19,9 @@ export interface ChatTransport {
   /** Follows the conversation's log: resolves with the log so far, and `onLive` gets what is printed from then on.
    *  Desktop only; a phone's log is pushed in through `ChatController.applyLog`. */
   attach?(handle: number, onLive: (bytes: Uint8Array) => void): Promise<Uint8Array | null>;
+  /** Where the log `attach` last resolved with ends, as an offset in everything the agent ever printed (the log itself
+   *  may have been trimmed). Without it, every attach rebuilds the transcript. */
+  logEnd?(): number | null;
   detach?(): void;
   /** Writes one JSON line (with its newline) to the agent's stdin. Desktop only. */
   send?(line: string): void;

@@ -153,7 +153,7 @@ Here, **ChatGPT web and OMP's CLI are separate panes in Kelpie**. ChatGPT is the
 
 ![ChatGPT web and a real OMP checkout review side by side in native browser and terminal panes](docs/screenshots/chatgpt.png)
 
-A dev server started in a session shows its port as a `:5173` chip on the tab; one click opens the preview in a browser pane, and the [Processes panel](docs/user-guide.md#processes-ports-and-preview) shows and stops what each session runs.
+A web page an agent starts gets a tab of its own in the background, and the [Processes panel](docs/user-guide.md#processes-ports-and-preview) shows and stops what each session runs.
 
 When the work grows beyond the local machine, Kelpie also offers [SSH projects and panes](docs/user-guide.md#remote-projects-ssh), [orchestration runs](docs/user-guide.md#orchestration-runs), [issue integrations](docs/user-guide.md#issue-trackers-and-gitlab) and opt-in [phone access](docs/user-guide.md#phone-access). These have their own setup and security boundaries; the local screenshot tour does not claim to have exercised them.
 
@@ -233,7 +233,7 @@ Read the [architecture](docs/architecture.md) for ownership, transport and recov
 ## Your tools, your data, your decisions
 
 - **Local workspace state.** Sessions, layouts and settings are stored on your machine. Kelpie has no telemetry. Your agent CLIs still contact their model providers under their own accounts and policies.
-- **Explicit connections.** Remote hosts, issue trackers, notification providers and optional phone access require configuration. Phone access is off by default; it is not a public cloud service. What a paired phone sees and sends is end-to-end encrypted, each phone is approved on the computer by typing a code it shows and passing the operating system's own check (Windows Hello or your password, Touch ID on macOS), and there is no Kelpie account.
+- **Explicit connections.** Remote hosts, issue trackers, notification providers and optional phone access require configuration. Phone access is off by default; it is not a public cloud service. What a paired phone sees and sends is end-to-end encrypted, each phone is approved on the computer by typing a code it shows and passing the operating system's own check (Windows Hello or your password, Touch ID on macOS), and there is no Kelpie account. With the optional Tailscale mode, which you turn on, your computer's name appears in public certificate logs and Tailscale sees connection metadata, not content.
 - **Credentials are not all alike.** Supported integration secrets use the OS credential store, but environment variables you enter in agent settings are stored as plain text. Do not put secrets into project files for a demo.
 - **Review remains yours.** Worktree setup, finishing checks and agent permissions have approval controls. Kelpie organizes the workflow; it does not make an agent's output trustworthy by itself.
 

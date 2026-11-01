@@ -31,7 +31,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// 20: a chat's replay log keeps the answers to the agent's questions (`kelpie_answer` lines); an older daemon writes none and its cards show what they did, an older app ignores the lines.
 /// 21: chat messages go through a queue the daemon owns (`chat.send`, `chat.write_turn`, `chat.queue_op`, the `chat.queue` and `chat.turn_ready` events; a phone's `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume`); an older daemon has none of it, so the app keeps its own queue below 21 and the phone composes only at 21.
 /// 22: phone access is kelpie-link (end-to-end encrypted Noise pairing and reconnects on `/link`; `/ws`, `/pair` and device tokens are gone), device store v2 (`mobile.v2.json`), `mobile.set_permission` (`mobile.set_write` kept as an alias for one release), `mobile.reset`, `mobile.device_changed`, and phone-access decisions only from the verified app (`Role::App`).
-pub const API_LEVEL: u32 = 22;
+/// 23: Tailscale mode (`mobile.tailscale_status`, `mobile.set_tailscale`, the verified app only to change it; `mobile.pair_start {plain}`; a `ts` endpoint in the QR code and `endpoints` beside `list` in `addrs`; `secure_origin` on a device); an older daemon has none of it, so the app offers it only at 23.
+pub const API_LEVEL: u32 = 23;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

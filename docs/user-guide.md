@@ -111,7 +111,7 @@ features earlier (running sessions stop for a moment; agents that can resume con
    that only works in the terminal UI shows *Run it in the terminal*, which switches back and runs
    it there.
    - The transcript reads like the terminal UI: each tool call is one line (*Read app.ts · lines
-     75-80*, *Edit main.rs +3 −1*, *Bash* with its command and output), runs of reads and searches
+     75-80*, *Edit main.rs +3 −1*, *Bash* with what it is doing; click a row for its command and output, which open by themselves when it fails), runs of reads and searches
      fold into *Explored 4 files, 2 searches*, and thinking folds into *Thought for 6s*. After a
      turn, *N files changed* lists each file with its line counts; click one to open its changes.
    - Every prompt and reply shows its date and time in the top right corner (hover for the full
@@ -141,9 +141,13 @@ features earlier (running sessions stop for a moment; agents that can resume con
      subagents as a tree with their status, time and tokens (Claude; Codex lists its agents without
      tokens, and ACP has no such thing to list). Click one for its prompt, what it did and its answer,
      and *Show in chat* for its row. `Esc` steps back, and never stops the agent.
-   - Messages sent while the agent works wait above the message field and go when its turn ends.
-     *Send now* gives one to the agent during its turn (Codex and Claude; for other agents it stops
-     the turn first); stopping the agent holds the queue until you send again.
+   - A message sent while Claude or Codex works goes into the running turn, as in their terminal: it
+     shows faded until the agent reads it at its next step, and the agent decides what to do with
+     it. To change course at once, stop the agent first (`Esc`). A command (`/`, `!`), a message
+     with a picture, a message for any other agent, and one sent while others wait, waits above the
+     message field and goes when the turn ends. *Send now* gives such a message to the agent during
+     its turn, or stops the turn first where it cannot go in; stopping the agent holds these until
+     you send again.
    - The agent's task list (Claude's todos, Codex and OMP plans) stays pinned above the message
      field. The ring next to the pickers shows how full the context is (hover for tokens and cost;
      click to compact).
@@ -423,8 +427,8 @@ kelpied worktree get
 The comment shows under the sidebar row and on its board card.
 
 When an agent exits, the pane offers **Restart** / **Resume** (agents resume their
-conversation). Desktop notifications fire when a session you are not looking at finishes or
-needs input.
+conversation). A desktop notification fires when a session you are not looking at needs input
+or fails (see Activity and notifications).
 
 ### Agents
 
@@ -495,9 +499,15 @@ the bottom. Settings → Terminal → *Scrollback* sets how many lines each term
 
 The bell in the status bar lists what happened while you looked elsewhere: agents that
 finished or need you, automation runs, new worktrees — with the agents working right now on
-top. Click an entry to jump there; right-click toggles read. Settings → Notifications can add
-a short chime to desktop notifications. A session you are looking at (the window has focus and
-shows it) raises nothing.
+top. Click an entry to jump there; right-click toggles read. A session you are looking at (the
+window has focus and shows it) raises nothing.
+
+Desktop notifications are kept for what needs you: an agent waiting for input, a run waiting
+for approval, a failure, the cost cap. Finished turns and automation starts stay in the bell's
+list; Settings → Notifications → **Also when a turn finishes** brings finished turns back, and
+can add a short chime. The same notification shows at most once a minute. The card icon next to
+the bell mutes desktop notifications (it reads *muted* in amber) and turns them on again; the
+list keeps everything either way.
 
 #### On your phone, with the window closed
 
@@ -773,13 +783,15 @@ pane*, `Ctrl/⌘+click` on a dev-server address in a terminal opens it next to t
 
 ### Processes, ports and preview
 
-When a program in a session listens on a port (a dev server, `python -m http.server 8000`…), a
-`:8000` chip appears on the session's tab and its sidebar row. Click it to open the address in a
-browser pane; right-click for *Open preview beside* (split next to the focused pane), *Open in a
-browser tab* or *Copy address*. Chips of a session that is not on screen are dimmed: they show the
-ports as of when it was last on screen. The **Processes** tab of the right panel (palette:
-*Processes and Ports*) lists what each running session of the project runs, as a tree with PID,
-memory, CPU and ports. **Kill** stops a program and what it started. **Kill children** stops what a
+When an agent on screen starts a web page (a dev server, a studio, a dashboard), the page gets a tab
+of its own in the background and a short message says so: the agent stays in view and keeps the
+keyboard, and the highlighted tab is one click away. Only a port that answers with a page counts;
+one that answers *Not Found* or is not a website gets no tab. A tab you never opened goes when the
+page stops, and a page you closed does not come back until the app restarts. Turn this off with
+Settings → Terminal → *Open an agent's web pages in a tab*. Servers you start yourself in a shell
+get no tab. The **Processes** tab of the right panel (palette: *Processes and Ports*) lists what
+each running session of the project runs, as a tree with PID, memory, CPU and ports. Click a port
+to show it in a browser tab, the one already on it if there is one. **Kill** stops a program and what it started. **Kill children** stops what a
 session started while the session itself keeps running; in an agent session the agent also keeps
 the programs it runs directly (its MCP servers, the shell it runs a tool in), and what those started
 (a dev server a tool ran) is stopped. Any of them can still be stopped on its own with **Kill**. Both
@@ -926,7 +938,7 @@ default) turns it off for that host. Kelpie's sessions are named `kelpie-…` on
 
 Settings → Mobile turns on a small web app for your phone on your network (off by default;
 port 4817; choose a private or Tailscale address — never every interface; HTTPS with your own
-certificate, e.g. from `tailscale cert`). **Pair a browser on this network** shows a QR code valid
+certificate, e.g. from `tailscale cert`, or from Tailscale itself as described below). **Pair a browser on this network** shows a QR code valid
 for two minutes; scan it, name the phone, and type the six digits it shows into Kelpie. Windows then
 asks you to confirm with Windows Hello or your password (Touch ID or your password on a Mac). Read
 that prompt: it names the phone and what it would be allowed to do. While it is up Kelpie's window
@@ -942,6 +954,33 @@ lowering a permission and removing a phone do not. If you refuse three prompts i
 or leave three unanswered in 20, Kelpie stops asking for five minutes: if you did not start them, use
 *Turn off phone access and revoke all*. A prompt you leave open for nearly five minutes stops counting, and
 while its dialog is still on screen Kelpie asks you to close it before showing another.
+
+**Reaching this computer from anywhere, with Tailscale.** If you use [Tailscale](https://tailscale.com) on
+both the computer and the phone, turn on *Reach this computer with Tailscale* in Settings → Mobile. Kelpie then
+publishes the phone page at `https://<machine>.<tailnet>.ts.net:8443` with `tailscale serve`, which only your
+own Tailscale devices can reach: there is no Kelpie server and no Kelpie account. It asks you to confirm first, as above. Settings says
+exactly what to do if Tailscale is missing, stopped, not signed in, or your tailnet has no HTTPS certificates
+(turn on MagicDNS and HTTPS in the DNS page of the Tailscale admin console). If something else already uses port 8443
+of `tailscale serve`, Kelpie says so and leaves it alone; turning this off removes only Kelpie's own entry.
+
+Pairing then takes two steps. *Pair a phone over Tailscale* shows **Step 1: Install**, a code with no secret: scan
+it with the phone's camera and install the app from the page that opens (Share → Add to Home Screen on an
+iPhone, the Install button or the browser's menu on Android). The very first visit can take up to a minute while Tailscale gets its
+certificate. **Step 2: Pair** shows the pairing code: open Kelpie from the
+Home Screen, press *Scan the code* (or paste the link, if the camera cannot be used), and type the six digits on
+the computer. A browser keeps its pairing per address, so a phone paired over plain HTTP stays paired there, read-only, and must
+be paired again to type over Tailscale. If the phone says *Turn on Tailscale*, it failed to reach this address at once. Tailscale being off on the phone is the likely reason (an iPhone allows one
+VPN at a time), but it may also show when this mode or phone access is off on the computer, so check both; the app still opens and shows what it last saw. While this is on, links in notifications open at the Tailscale address, so a phone paired only over plain HTTP
+cannot use them.
+
+What to know: **use this only on a computer with one user account.** The Tailscale entry stays while Kelpie is not running, so another user account on the same computer
+could take its place, answer your phone at the trusted address, read this phone's Kelpie key and later use it. A program on your computer, or a device on your tailnet, can also keep
+phones from connecting for as long as it keeps trying, with no key and no access to anything. **Your computer's name goes into public certificate logs** when Tailscale gets its certificate, and that
+cannot be undone. Tailscale sees which devices connect and when, not what they say, which is end-to-end encrypted
+inside the connection. [Tailnet Lock](https://tailscale.com/kb/1226/tailnet-lock) protects you from a device key handed out without your approval. The free
+Tailscale plan is for non-commercial use. Turning phone access off, the kill switch and a reset all end this mode and
+remove the entry; turning phone access on again does not bring it back until you turn it on and confirm. If Tailscale is stopped at that moment, Settings says the entry is
+still there. Kelpie tries again when you open Settings → Mobile or press *Check again*, and when it next starts; nothing runs in the background to retry while phone access is off.
 
 The phone lists every session grouped by *Needs you / Working / Idle / Stopped*, buzzes when one
 starts needing you, shows a session's screen and — if you allow that device to type — sends replies
@@ -959,7 +998,9 @@ answering it. It may have been removed there, phone access may have been reset, 
 network may be interfering, or the answer may not have come from your computer. The phone keeps its pairing and tries again by itself. If it was
 removed on purpose, tap *Forget this device*, then pair again. A phone only forgets its pairing by
 itself when your computer tells it so over the encrypted connection. *Turn off phone access and
-revoke all* removes every phone.
+revoke all* removes every phone and cuts access at once, connected or not. A phone connected at that moment
+is told, and wipes its key and everything it kept. One that is not connected cannot be told: its key no longer opens anything, but it
+keeps what it already shows, for anyone who can open the app on it, until you tap *Forget this device* there. Once phone access is back on it says *Not paired here*.
 
 Kelpie's check stops a program that merely holds your account's Kelpie token from adding a phone. It
 does not stop a program determined to get around it: your account's programs can read the keys in

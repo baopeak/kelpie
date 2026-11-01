@@ -16,6 +16,15 @@ Not two relays: Tailscale stays in the race as the fallback (and LAN on a plain 
 
 Client is the installed PWA (native app deferred, phase 5), so the race lives in `app/phone/src/link.ts`. `kelpie-link::client` (Rust) is deferred with the native app.
 
+## Measured in phase 4a (2026-11-01, this PC's network only, one night; no carrier, no soak result yet)
+Full tables: `plans/reports/fullstack-developer-261031-2150-phone-phase4a.md` (kept locally). Where these differ from the text below, these are the measured values; the design decisions they touch are still the owner's.
+- **Placement**: 20 of 20 new rooms landed in HKG, the same colo as the entry POP.
+- **Deploys**: the room class in its own script works. Router deploys dropped 0 of 40 sockets. A room-script deploy dropped no idle-room socket (45 of 45 stayed and ran the new code on their next event); active rooms dropped 5 of 5 each time, about 5 minutes after a default deferred deploy, or at once with `immediate`.
+- **Close code on a deploy**: clients saw **1006 with no close frame**, so a "distinct restart close code" cannot be sent for a code update.
+- **Hibernation**: with 8 idle sockets the object restarted after every idle gap of 10 s or more (15 of 15) and after none of 8 s or less (0 of 6); waking added no visible delay. Auto-responses did not appear as object requests.
+- **Ticket check**: 3,000 forged tickets at about 980/s made 0 Durable Object calls. Worker CPU was about 0.42 ms per forged request in total, against this phase's "< 0.1 ms" for the check alone, which was not measured separately.
+- **Plan**: the Free plan and `*.workers.dev` replace Workers Paid, the custom domain and the budget alert until usage grows (see phase 4a and plan.md, Session 3).
+
 ## Requirements
 - Functional
   - **Room**: random `room_key` (32 B, keyring); ticket = random room id + HMAC, checked in the Worker **before any DO call** (< 0.1 ms). Relay stores only `room_id` and `H(room_key)`. Unused rooms expire after 90 days. [RT-15]

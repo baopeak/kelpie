@@ -14,6 +14,7 @@ import { msg, t } from "../lib/i18n";
 import { confirmDialog } from "../lib/confirm-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openContextMenu } from "./context-menu";
+import { LoadBar } from "./load-bar";
 import { selectionSource } from "../lib/composer-state";
 import { sendSelectionToAgent } from "../lib/send-to-agent";
 
@@ -72,6 +73,7 @@ export function FileViewer(props: { project: Project; path: string; line?: numbe
 function ImageView(props: { project: Project; path: string }) {
   const [src, setSrc] = createSignal<string | null>(null);
   const [info, setInfo] = createSignal("");
+  const [loading, setLoading] = createSignal(true);
   onMount(async () => {
     try {
       const f = await readFile(props.project.path, props.path, 40 << 20, true);
@@ -79,10 +81,13 @@ function ImageView(props: { project: Project; path: string }) {
       setInfo(`${(f.size / 1024).toFixed(1)} KB`);
     } catch (e) {
       store.notify(String(e));
+    } finally {
+      setLoading(false);
     }
   });
   return (
     <div class="image-view" title={info()}>
+      <LoadBar when={loading()} />
       <Show when={src()}><img src={src()!} alt={props.path} /></Show>
     </div>
   );
@@ -90,11 +95,13 @@ function ImageView(props: { project: Project; path: string }) {
 
 function MarkdownView(props: { project: Project; path: string }) {
   const [html, setHtml] = createSignal("");
+  const [loading, setLoading] = createSignal(true);
   let el!: HTMLDivElement;
   const load = async () => {
     const f = await readFile(props.project.path, props.path, 4 << 20).catch(() => null);
     const raw = await marked.parse(f?.text ?? "", { gfm: true, async: true });
     setHtml(DOMPurify.sanitize(raw));
+    setLoading(false);
     if (el.querySelector("code.language-mermaid")) void renderMermaidBlocks(el);
   };
   onMount(() => {
@@ -113,7 +120,12 @@ function MarkdownView(props: { project: Project; path: string }) {
     const href = a.getAttribute("href") ?? "";
     if (/^https?:/i.test(href) && (isMac ? e.metaKey : e.ctrlKey)) void openUrl(href);
   };
-  return <div class="markdown" ref={el} innerHTML={html()} onClick={onClick} />;
+  return (
+    <>
+      <LoadBar when={loading()} />
+      <div class="markdown" ref={el} innerHTML={html()} onClick={onClick} />
+    </>
+  );
 }
 
 function TextEditor(props: { project: Project; path: string; line?: number; focused: boolean }) {
@@ -239,6 +251,7 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
 
   return (
     <>
+      <LoadBar when={!file() && !error()} />
       <Show when={dirty() || readOnly() || external()}>
         <div class="viewer-bar" style={{ "border-top": "0" }}>
           <Show when={dirty()}><span class="dirty">● {t("Unsaved — {key}+S to save", { key: isMac ? "⌘" : "Ctrl" })}</span></Show>

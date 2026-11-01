@@ -26,6 +26,9 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
     gone; a retry under the same `cid` makes no second message; either side cancels the other's; a stop
     pauses the queue until a resume; a revoked device's waiting messages are dropped; the limits; an ACP
     agent (fake_acp_agent.py) shows the prompt through `kelpie_sent`, and a stop cancels its permission.
+11. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, a script here: never the real Tailscale): each state is told, a port used by
+    something else is refused and left as it was, publishing runs the one command and off removes only our entry, a page through the
+    loopback listener pairs as a secure origin with its address from `X-Forwarded-For`, and the plain user token can change none of it.
 """
 import asyncio
 import hashlib
@@ -933,9 +936,104 @@ async def security(d):
     d.restart()
     check("the next daemon answers yes again", d.call("daemon.info").get("test_user_presence") == "approve")
 
+    # ---------- Tailscale mode, against a fake CLI ----------
+    def fake(**state):
+        ps.fake_tailscale_says(TS_STATE, **state)
+
+    def serve_now():
+        return json.load(open(TS_STATE, encoding="utf-8"))["serve"]
+
+    def ts_calls():
+        return ps.fake_tailscale_calls(TS_LOG)
+
+    def ts_changes():
+        return [c for c in ts_calls() if not c.endswith("--json")]
+
+    fqdn = ps.FAKE_TAILNET_NAME
+    origin = f"{fqdn}:8443"
+    entry = lambda port: json.dumps({"TCP": {"8443": {"HTTPS": True}}, "Web": {origin: {"Handlers": {"/": {"Proxy": f"http://127.0.0.1:{port}"}}}}})
+    d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    check("nothing has asked Tailscale anything yet", not ts_calls(), ts_calls())
+    check("…and the mode is off", d.call("mobile.status")["tailscale"] == {"on": False, "origin": None, "to_remove": False}, d.call("mobile.status")["tailscale"])
+    for status, state in (('{"BackendState":"Stopped"}', "stopped"), ('{"BackendState":"NeedsLogin"}', "needs_login"), ('{"BackendState":"Running","CertDomains":null}', "https_off"), ("not json", "unreadable")):
+        fake(status=status)
+        told = d.call("mobile.tailscale_status")
+        check(f"{state}: told as one state, with no raw output", told["state"] == state and told["origin"] is None, told)
+        no = refused(d, "mobile.set_tailscale", {"on": True})
+        check(f"{state}: turning it on is refused", "not ready" in (no or ""), no)
+    fake(status=ps.FAKE_TAILSCALE_READY)
+    check("ready", d.call("mobile.tailscale_status")["state"] == "ready")
+    fake(serve=entry(3000))
+    no = refused(d, "mobile.set_tailscale", {"on": True})
+    check("a port used by something else is refused", "used by something else" in (no or ""), no)
+    check("…and left as it was", serve_now() == entry(3000) and not ts_changes(), ts_changes())
+    fake(serve="{}")
+    got = refused(ps.kc.Conn(), "mobile.set_tailscale", {"on": True})
+    check("the plain user token cannot turn it on", "needs the Kelpie app" in (got or ""), got)
+    check("…and Tailscale was not touched", not ts_changes(), ts_changes())
+    told = d.call("mobile.set_tailscale", {"on": True})
+    check("the app turns it on, past the person's verification", told["origin"] == origin and told["serve"] == "ours" and bool(told["install_qr"]), {k: told[k] for k in ("origin", "serve")})
+    changes = ts_changes()
+    port = int(changes[0].rsplit(":", 1)[1]) if changes else 0
+    check("…with the one command the spec names", changes == [f"serve --bg --https=8443 http://127.0.0.1:{port}"], changes)
+    check("…on a loopback port of its own, not the LAN listener's", port not in (0, PORT))
+    check("…and it is in the audit log", any(e["action"] == "tailscale_on" for e in d.call("mobile.audit", {"limit": 20})["entries"]))
+    made = d.call("mobile.pair_start")
+    check("the pairing link opens at the origin", made["url"].startswith(f"https://{origin}/#p=") and made["tailscale"] is True)
+    payload = json.loads(ps.ln.unb64(made["url"].split("#p=")[1]))
+    check("…and the QR holds the origin first", payload["ep"][0] == {"t": "ts", "a": origin} and payload["ep"][1]["t"] == "lan", payload["ep"])
+    plain = d.call("mobile.pair_start", {"plain": True})
+    check("the plain pairing stays on this network's own address", plain["url"].startswith(f"http://127.0.0.1:{PORT}/#p=") and plain["tailscale"] is False)
+    page = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=10)
+    check("the page answers on the loopback listener, with its headers", page.status == 200 and "script-src 'self'" in page.headers.get("content-security-policy", ""))
+    # As serve would make it: its Host and the page's Origin, and who is calling.
+    through = dict(host="127.0.0.1", port=port, origin=f"https://{origin}", additional_headers={"X-Forwarded-For": "100.101.102.103"})
+    asking = await ps.PairAttempt(f"https://{origin}/".replace("https://", "http://"), made["url"], "Over Tailscale", "write", **through).start()
+    check("a page through the listener gets through its handshake", asking.session is not None, (asking.closed, asking.silent))
+    request = ps.pending_request(d, "Over Tailscale")
+    check("…and the desktop hears who it is, not this machine", request["address"] == "100.101.102.103", request["address"])
+    d.call("mobile.approve", {"id": request["id"], "allow": True, "code": asking.code(), "permission": "write"})
+    told = await asking.outcome(15)
+    check("…and it is paired", (told or {}).get("type") == "paired", told)
+    listed = next((x for x in d.call("mobile.status")["devices"] if x["name"] == "Over Tailscale"), {})
+    check("…as a secure origin", listed.get("secure_origin") is True and listed.get("permission") == "write", listed)
+    check("a phone paired on the plain address is not one", all(x.get("secure_origin") is False for x in d.call("mobile.status")["devices"] if x["name"] != "Over Tailscale"))
+    # Removed by hand: told, and not put back behind the person's back.
+    fake(serve="{}")
+    before = ts_changes()
+    told = d.call("mobile.tailscale_status")
+    check("an entry removed by hand is told, and is not put back", told["serve"] == "missing" and told["origin"] is None and ts_changes() == before, told)
+    told = d.call("mobile.set_tailscale", {"on": True})
+    check("…and one call restores it, on the same port", told["origin"] == origin and serve_now() == entry(port), told["serve"])
+    fake(serve=entry(port))
+    told = d.call("mobile.set_tailscale", {"on": False})
+    check("off asks nobody and says so", told["on"] is False and told["serve"] == "off", told)
+    check("…with the one command that removes only ours", ts_changes()[-1] == "serve --https=8443 off" and serve_now() == "{}", ts_changes())
+    check("…never a reset, never a funnel", not [c for c in ts_calls() if "reset" in c or "funnel" in c], ts_calls())
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=3)
+        gone = False
+    except OSError:
+        gone = True
+    check("…and nothing listens on that port", gone)
+    check("the listeners on the network go on", urllib.request.urlopen(BASE, timeout=10).status == 200)
+    # Phone access off ends the mode; on again publishes nothing.
+    d.call("mobile.set_tailscale", {"on": True})
+    d.call("mobile.disable")
+    ps.wait_for(lambda: serve_now() == "{}", 20)
+    check("turning phone access off ends the mode and removes the entry", serve_now() == "{}", serve_now())
+    count = len(ts_changes())
+    d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    time.sleep(0.5)
+    status = d.call("mobile.status")["tailscale"]
+    check("turning it on again publishes nothing", status == {"on": False, "origin": None, "to_remove": False} and len(ts_changes()) == count, status)
+
+
+# Tailscale for this run: a script, never the real one.
+TS_BIN, TS_STATE, TS_LOG = ps.write_fake_tailscale(work)
 
 # Pinned calm: the timings below are the calm ones, whatever else this machine is doing.
-d = ps.Daemon(exe, env={"KELPIE_LOAD_FORCE": "L0:calm"}).start()
+d = ps.Daemon(exe, env={"KELPIE_LOAD_FORCE": "L0:calm", "KELPIE_E2E": "1", "KELPIE_TAILSCALE_BIN": TS_BIN}).start()
 try:
     asyncio.run(main(d))
 except Exception:

@@ -53,6 +53,11 @@ main { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: 
 .btn.danger { color: var(--danger); }
 .btn.sel { outline: 2px solid var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+a.btn { display: inline-block; text-decoration: none; color: inherit; }
+.steps { margin: 8px 0; padding-left: 22px; }
+.steps li { margin: 6px 0; }
+.scan-view { display: none; width: 100%; max-height: 50vh; border-radius: 9px; background: #000; object-fit: cover; }
+.scan-view.on { display: block; }
 
 .group { padding: 14px 16px 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); }
 .row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); cursor: pointer; }

@@ -49,6 +49,12 @@ export function claudeCategory(name: string): ToolCategory {
   return "other";
 }
 
+/** Whether a tool's row starts open. Edits show what changed and a failure shows why; the rest, commands included, is
+ *  one line that opens when asked. `noAskCards`: a question's row stands in for its card, so it shows the answer. */
+export function opensByDefault(item: Tool, view: ToolView, noAskCards = false): boolean {
+  return view.category === "edit" || item.status === "error" || (noAskCards && item.name === "AskUserQuestion" && !!item.output);
+}
+
 export function describeTool(item: Tool): ToolView {
   const view = describe(item);
   // While a call streams in, only its summary (picked from the partial input) is known.

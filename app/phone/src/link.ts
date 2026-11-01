@@ -8,8 +8,8 @@
 // policy: nothing is queued, requests made while not connected are refused at once, and an answer whose reply was lost
 // is retried once under the same `cid` (the daemon lets the first answer win and recognises a repeat).
 import { PHONE_API } from "../../src/lib/attention";
-import { backoffMs, LagMeter, type ConnFacts, type Reach } from "./conn-state";
-import { Initiator, MODE_RECONNECT, type Session } from "./noise";
+import { backoffMs, LagMeter, reachFromAnswer, whyNoAnswer, type ConnFacts, type Reach } from "./conn-state";
+import { Initiator, MODE_RECONNECT, type Endpoint, type Session } from "./noise";
 import type { Pairing } from "./pairing-store";
 import type { ScreenFrame } from "./screen-sync";
 
@@ -49,6 +49,8 @@ export interface DeviceInfo {
 
 /** Where the computer listens, newest `seq` wins. */
 export interface AddrsMsg {
+  /** Every way to reach the computer, the Tailscale origin first (`list` holds the direct addresses alone). */
+  endpoints?: Endpoint[];
   seq: number;
   list: string[];
   hostname: string;
@@ -226,13 +228,13 @@ export function browserEnv(): Env {
     async reach() {
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), 3000);
+      const began = Date.now();
       try {
         // A file the service worker leaves alone, so that the answer comes from the network.
         const r = await fetch(`/manifest.webmanifest?probe=${Date.now()}`, { cache: "no-store", signal: abort.signal });
-        const type = r.headers.get("content-type") ?? "";
-        return r.ok && !r.redirected && type.includes("manifest+json") ? "reachable" : "portal";
+        return reachFromAnswer(r.status, r.redirected, r.headers.get("content-type") ?? "");
       } catch {
-        return "unreachable";
+        return whyNoAnswer(location.hostname, abort.signal.aborted, Date.now() - began);
       } finally {
         clearTimeout(timer);
       }

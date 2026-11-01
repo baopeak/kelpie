@@ -286,7 +286,7 @@ export class Session {
   }
 }
 
-/** A way to reach the computer (`t`: `lan` today, `a` being `ip:port`; a kind this client does not know is kept and skipped). */
+/** A way to reach the computer (`t`: `ts`, `a` being the `<name>:<port>` of its HTTPS origin; `lan`, `a` being `ip:port`; a kind this client does not know is kept and skipped). */
 export interface Endpoint {
   t: string;
   a: string;

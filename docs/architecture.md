@@ -92,7 +92,7 @@ anything but `daemon.info` answers:
 - the **verified app** (`Role::App`): the user token, `client: "app"`, *and* the connection's peer process runs the Kelpie
   app's executable (`crates/kelpied/src/peer_identity.rs`: `kelpie` next to the daemon, or in the folder named by a runtime slot's
   `source.txt`, which an AppImage rewrites at every start because its mount moves while the daemon lives; on macOS a path check only, no code-signature check, a known weakening to fix or accept before macOS ships). Only
-  it may ask for the phone decisions `mobile.approve`, `mobile.set_permission`, `mobile.set_write`, `mobile.reset`
+  it may ask for the phone decisions `mobile.approve`, `mobile.set_permission`, `mobile.set_write`, `mobile.reset`, `mobile.set_tailscale`
   (`auth::APP_ONLY`), and for a `mobile.set_options` that keeps unused phones longer. Those that raise access take effect only
   after **the daemon itself** asked the operating system to verify the person (`crates/kelpied/src/user_presence.rs`: Windows
   Hello, else the Windows password prompt checked with `LogonUserW` and required to be this user's account; macOS Touch ID or the
@@ -491,7 +491,7 @@ third implementation for the tests, and all three are checked against the crate'
   only 5 upgrades a second (bursts of 20, refused with 429 before any task
   exists) and take only 5 of the machine's handshakes a second. Several addresses together can still deny service on a LAN, and that leaves a
   trace: a flood that goes on (20 refused or let go in a minute, the budget running out among them) is an audit line (`flood`) at most every 5 minutes. This machine has no share of any of
-  these, which must be judged again when a proxy on loopback arrives, since every phone behind it would look local. `mac1` (keyed from the desktop's public key, or the pairing secret) is checked
+  these; what comes through Tailscale Serve never counts as this machine (see "Tailscale mode"). `mac1` (keyed from the desktop's public key, or the pairing secret) is checked
   before any Diffie-Hellman; only then does it take one of 20 handshakes a second. What fails these is dropped with no reply, no
   close code, no event and no count, so a wrong or spent pairing code gets silence. A first message can be a replay, so **nothing
   happens until the phone's first valid sealed frame**.
@@ -525,9 +525,35 @@ third implementation for the tests, and all three are checked against the crate'
   restart unless this is fixed", in `mobile.status`'s `error`, audit line `save_failed`), and so does lowering a permission, until it could be written. Phones paired with a token
   before this are listed as `legacy` and must be paired again. Devices not seen for `dormant_days` (default 90, 0 never) are removed;
   lengthening that needs the verified app and the person, shortening it does not.
-- **Permissions**: `read` < `write` < `control`, capped by the transport: a browser page may type only over HTTPS, from a Tailscale
+- **Permissions**: `read` < `write` < `control`, capped by the transport: a browser page may type only over HTTPS (Tailscale Serve's included), from a Tailscale
   address or from this machine, because a plain `http://` page can be swapped by someone on the network. Until a native app exists
   `mobile.pair_start` makes browser pairings only.
+- **Tailscale mode** (`mobile/tailscale.rs`, off by default): `tailscale serve --bg --https=8443 http://127.0.0.1:<port>` publishes the
+  page at `https://<fqdn>:8443` to the person's own tailnet, and forwards to one loopback listener that exists only while the mode is on and
+  follows the same `Generation` stop as the others, with its own for what came through it, so turning it off cuts those phones and no
+  others. The port is fixed because the origin holds what the phone stores. `listen::wanted` still never binds loopback.
+  - `mobile.tailscale_status` runs `tailscale status --json` and `serve status --json` and answers `state` (`not_installed`, `stopped`, `needs_login`,
+    `https_off`, `unreadable`, `ready`) and `serve` (`off`, `ours`, `missing`, `left_behind`, `port_busy`, `not_listening`, `renamed`, `taken`, `unknown`). The CLI runs off the runtime, 5 s at most,
+    killed past that, and only when asked, while the mode is on and the machine's addresses change, or when `mobile.enable` or a daemon start finds an entry still to go: no polling. Output that cannot be read is a
+    state of its own, and nothing is changed on it. A failed command's own words are never passed on.
+  - `mobile.set_tailscale {on}` is in `auth::APP_ONLY`. On is checked with no prompt, then verified (`Prompt::Tailscale`), then checked again; off asks nobody.
+  - **Never clobbers**: only one handler `/` proxying to `http://127.0.0.1:<the port the store remembers>`, not open to the internet, is ours. Off removes only that, with `tailscale
+    serve --https=8443 off`. `serve reset` is never used. A daemon that starts again only looks: it republishes nothing, so an entry removed by hand stays removed, is
+    reported as `missing`, and comes back through the verified path. If its port has been taken by another program it removes its entry, which would lead there.
+  - **`mobile.disable`, `mobile.revoke_all` and `mobile.reset` end the mode and remove the entry**, also when one of them comes while a turn-on is under way or at its prompt: it leaves word under the config lock and does not wait, and the turn-on's last step finds it and undoes what it wrote. So `mobile.enable`, which any holder of the user token may call,
+    never publishes anything. An entry Tailscale will not remove yet is kept in the store (`tailscale_remove`), shown in Settings even with phone access off, and removed the next time Tailscale is looked at or phone access or the daemon starts. No timer runs for it.
+  - **With the mode on the listener does not depend on this network's**: a busy port, a pinned address or no address at all are reported, and the server goes on.
+  - **A MagicDNS rename**: an entry under another name is `renamed`, not `ours`. No origin is advertised and Restore publishes under the new name. That tailscaled keeps entries by name, and that `serve --https=8443 off` acts only on the name of now, are inferred, not seen: a rename was not tried on the real tailnet. If so, Restore leaves the old entry beside the new one, and turning off takes only the new one. An entry counts as removed only once a second read finds the port free, so Kelpie then keeps its port, reports `left_behind` and keeps trying, and it must be removed with Tailscale's own tools. Restore refuses to put a second entry on a second port.
+  - **Limit: a machine with more than one OS user.** The serve entry outlives the daemon: `tailscaled` is a service, and it keeps forwarding to `127.0.0.1:<port>` after a crash, a logoff or a shutdown, or while the store cannot be read. While nothing of ours holds that port, **another local user can bind it and answer at the phone's trusted origin**, with Tailscale's valid certificate in front. The installed app's service worker accepts that answer, so that user's script runs at the origin and can read the phone's Noise key from IndexedDB, and with it later reach this daemon as that device, up to its permission. A 502 while nobody holds the port is the good case, not the only one. A daemon that starts and finds the port taken removes its entry, which closes the window if `off` works, and does not undo a key already read; if it fails, Settings warns that phones may be reaching that program (`port_busy`). A daemon that cannot get that far (a bad certificate, a credential store that will not answer) does not look. The window is also open while a removal is still pending after phone access went off. On a machine with one OS user this does not apply: same-user code is out of scope (`auth.rs`). Settings does not state this limit. Decided on 2026-11-01: the limit stays documented, with no further guard, for a machine with one OS user. If shared machines come into scope the ways out are removing the entry on a clean shutdown, or `tailscale cert` with a listener on the Tailscale address, where a squatter has no valid certificate.
+  - **Limits**: on this listener alone, `Peer` takes the client from the last value of `X-Forwarded-For`, and only a Tailscale address (serve replaces whatever a client sent; seen on 1.98). Missing, garbled or any other
+    address falls into one shared bucket, `listen::BEHIND_SERVE`, which is not loopback, so nothing through serve has this machine's exemption. The header means nothing on any other listener. All upgrades through serve also share a budget of 20 a second, bursts of 40, spent only on what the address's own limit lets through, so one real address, which is all serve gives a tailnet device, cannot empty it. Several devices together can.
+  - **The header is only as good as the programs on this machine**, which can connect to that port and say what they like. That gets no session: reconnecting takes a paired key, and pairing takes a live secret, the typed code and the OS prompt. The same is true of "From address" in the approval dialog. **What this comes to, without any key, for as long as the program runs: it can keep phones from connecting.** It can refuse every phone's new connection by keeping the budget spent, naming addresses it makes up (phones already connected stay). It can keep out one phone, whose Tailscale address is no secret, by holding that address's four handshake places (four connections every 5 s, with no lockout at all), or by renewing its lockout, which takes about one failure every 6 s: a lockout lasts a minute from the failures that made it, and they age out one by one. Past 1,024 addresses the table of failures starts over, which also wipes real lockouts. The desktop hears of a lockout, and of a flood only through an audit line every 5 minutes. This is accepted for now because nothing tells `tailscaled` from another program on that port and none of it gives access, but the reason differs by who it is: same-user code is out of scope (`auth.rs`), which does not cover another OS user, who can reach loopback too, or a tailnet device, which is not local at all. For another OS user that falls under the decision on the limit above. Several tailnet devices together were not decided separately.
+  - **Transport**: this listener's `Peer` counts as HTTPS for `transport_cap`. `same_origin` relies on serve forwarding `Host` as `<fqdn>:8443`, which it does; if that changed, the page would get a 403, never access.
+  - **QR and addresses**: `mobile.pair_start` uses the origin and puts `{t: "ts", a: "<fqdn>:8443"}` first in `ep`, so it is the last to be left out of a code too small; `{plain: true}` asks for this
+    network's own address, the separate pairing. `running_url` prefers the origin, so `#s=` links open away from home. `addrs` carries `endpoints`, with `list` kept for pages from before. A page's socket is always to its own origin: from HTTPS a browser cannot dial `ws://<LAN IP>`, and the certificate does not match a LAN IP.
+  - **`secure_origin`** on a device record says it paired from a page on an HTTPS origin: this computer's Tailscale origin as published at that moment, or a listener with a certificate of the person's own. A pairing that comes while Tailscale could not be read (no origin published at that moment) records false, and stays so until paired again. A program of this user can still produce it, with the pairing secret and the person's approval, by naming that origin on the loopback port; so it says what the person approved, not that no such program exists. It is what the relay and `control` will rest on, so it has a tag of its own (`secure_mac`), a second one so that a record still verifies for an older daemon, which ignores both and drops them when it saves. Setting the flag in the file makes the record `unverified`.
+  - **The phone**: at a Tailscale name and not installed it shows how to install, because iOS keeps a tab's storage apart from the installed app's; so does a page on a person's own certificate opened with no code, while a pairing link there pairs directly, as it did before this mode. In the app the code comes from the camera (`qr-scan.ts`: `BarcodeDetector`, else `qr-decode.ts`, loaded only then) or a pasted link; plain `http://` is unchanged. A `*.ts.net` name failing at once reads as `no_tailnet` ("Turn on Tailscale"), distinct from a computer that does not answer; a 5xx from serve is no sign-in page, and the service worker answers with the kept shell.
+  - Test seam: `KELPIE_TAILSCALE_BIN`, only with `KELPIE_E2E`; with `KELPIE_E2E` and no such variable there is no Tailscale. `serve --bg` returns at once and the certificate comes on the first request (38 s when measured), which stays with tailscaled. What real phones may yet change is in the phase file (`plans/261024-1205-phone-remote-control/phase-03a-tailscale-https.md`).
 - **Kill switch and audit**: `mobile.revoke_all` turns phone access off, removes every device and stops their connections. What phones
   did is in a hash-chained log (`mobile/audit.rs`, `mobile.audit`, `intact` says whether the chain holds; a line cut short by a failed
   write is skipped, nothing the chain covers is lost with it): the verb, device and time; of typed
@@ -721,7 +747,10 @@ the agent runs it in that conversation itself; a typed prompt (too long for a co
 for the program's first output before the quiet period counts. The daemon keeps the
 command/model/skill answers when it trims a chat's replay log. Streaming replies render
 finished markdown blocks once and only the open block as text; off-screen messages use
-`content-visibility: auto`.
+`content-visibility: auto`. A controller outlives its pane: coming back to a chat feeds only what the
+log holds beyond the offset already fed (`seq` of the attach reply, checked against the last bytes
+fed), still as a replay. It rebuilds when the log does not carry on from there or after
+`session.resync`, reading any history first and swapping in one update, so the old rows stay until then.
 
 Beyond the items, adapters fill shared state the UI renders the same way for every agent:
 
@@ -733,10 +762,12 @@ Beyond the items, adapters fill shared state the UI renders the same way for eve
 | tool category | tool name | `commandActions` (read / listFiles / search) | tool `kind` |
 
 `chat/tool-view.ts` turns a tool item into a row (verb, target, detail, IN/OUT) and diffs
-edit strings line by line. Below API 21 `ChatController` queues what is sent while the agent is busy and
-sends it when the turn ends (adapters set `busy = false` last); *Send now* uses the adapter's
-`steer` (Claude: written mid-turn, the CLI reads it at its next step; Codex: `turn/steer`,
-queued again if refused) or stops the turn; stopping holds the queue. From API 21 the queue is the daemon's, below. Approvals carry what they
+edit strings line by line. A message sent during a turn goes straight to the adapter's `steer` when it
+can (Claude: written mid-turn, the CLI reads and echoes it when the running tools finish, or, when the
+turn ends first, runs it as a turn of its own after a `result`, during which the adapter stays busy; Codex:
+`turn/steer`, queued again if refused): text only, no commands, and nothing else waiting. Below API 21
+`ChatController` queues the rest and sends it when the turn ends (adapters set `busy = false` last); *Send
+now* uses `steer` or stops the turn; stopping holds the queue. From API 21 the queue is the daemon's, below. Approvals carry what they
 are about (command, edit diff, plan) and Claude's `AskUserQuestion` / `ExitPlanMode` are
 answered in their card (`updatedInput.answers`, `updatedPermissions: setMode acceptEdits`).
 
@@ -943,9 +974,17 @@ connect, and an older daemon without API 10 never sees it and the app hides ever
   stale index lock there is removed first) is filled with `add -A --ignore-errors`, written as a tree,
   committed with `commit-tree -p HEAD` (git resolves HEAD; none in a repository without a commit) and
   stored as `refs/kelpie/<session>/<n>` (`update-ref` with an all-zero old value: a number is never
-  written twice). The user's HEAD, branch, files and the index file are never written by a snapshot
-  (undo's `git restore` takes the index lock for a moment, as any git command does; one retry when the
-  user's own git holds it). Every git call runs with `GIT_LITERAL_PATHSPECS=1`, `GIT_OPTIONAL_LOCKS=0`
+  written twice). The copy is given the real index's modification time. Git reads a file whose size and
+  times match its entry only if the file is as new as the index file, so where git compares whole seconds
+  that time is all that shows a same-size edit in the second of the entry; a copy stamped later would hide
+  it (a Linux copy gets a new time unless it is set; a Windows one keeps it). The time is read back: a
+  filesystem that does not keep it fails the snapshot rather than letting git trust the copy. A same-size
+  edit that also keeps its modification time is **not** seen by a snapshot, as it is not by `git status`
+  (on Linux and macOS a later change time usually gives it away): reading every file would cost too much
+  here (numbers below), and undo does read the turn's files. The user's HEAD, branch and index file are
+  never written by a snapshot or an undo; a snapshot does not write the user's files either. An undo writes
+  the turn's files, and to restore one it replaces what stands in its way: such a file or link where its folder
+  was, or a folder with other files where it was, is asked about first (see Undo). Every git call runs with `GIT_LITERAL_PATHSPECS=1`, `GIT_OPTIONAL_LOCKS=0`
   and `core.hooksPath` pointing at an empty folder: the repository's `reference-transaction`,
   `post-checkout` and other hook scripts never run for these calls. Files another program holds open are
   skipped and listed in the record (`unreadable`); paths outside a sparse checkout do not fail it. Git
@@ -987,13 +1026,30 @@ connect, and an older daemon without API 10 never sees it and the app hides ever
   or skip for links and submodules) with a state: *shared* when a stretch of another session overlaps and
   its record lists the file, or may list it (a gap window, a record with too many files or unreadable ones),
   or that session is working in the folder right now; *modified* when the folder no longer matches the end of
-  the turn, the file differed between turns (the look at the start), could not be read by this or the previous
-  snapshot, was written before the turn's start (file mtime) or removed before it (its folder's mtime);
-  else *clean*. Because every
+  the turn, the file differed between turns (the look at the start), could not be read by the plan itself, by this
+  or by the previous snapshot, was written before the turn's start (file mtime) or removed before it (its folder's mtime),
+  has a file or link in its folder's place, or sits where a folder now holds files the turn did not leave there;
+  else *clean*. A path inside a folder the turn made a submodule is skipped like the submodule: it is another repository's. Because every
   session's snapshot holds the others' concurrent edits, files in a shared folder are often shared. `undo` changes nothing and returns
-  `needs_confirmation` unless every shared or modified file is named in `confirm`. Restores are `git restore
-  --source=<base> --worktree` with literal pathspecs from stdin; deletes remove only paths that pass `safe_rel`
-  and are not behind a link, then folders they leave empty. A file already equal to its state before the turn
+  `needs_confirmation` unless every shared or modified file is named in `confirm`. The plan reads only the
+  turn's files, by name, into a temporary index filled from the turn's tree (`read-tree`, then `add -A` with
+  literal pathspecs from stdin, `-f` and `core.sparseCheckout=false`): it has no stat data or assume-unchanged
+  marks to trust, and leaves out neither a file the turn stopped tracking and ignored nor one outside a sparse
+  checkout, so a same-size edit cannot pass for the state the turn left, and nothing else in the folder is read.
+  A path outside a sparse checkout is read when it is present and counts as changed when it is absent, as a sparse
+  checkout leaves it, which asks more often than it must. This cost is not counted towards auto-off. Just before writing, `undo` compares each
+  file's size and modification time with what they were just before the read; a file saved since is reported in
+  `needs_confirmation` again, even if it was confirmed. That leaves the moment until `git` reaches the
+  file, and a same-size save that also keeps its time: the gap is much smaller, not gone. After any refusal or
+  error the dialog reads the plan again and keeps only the safe files ticked, so the next press does not carry a
+  tick made on the old plan. A confirmation still names a path, not a version: a file ticked in the dialog and saved
+  again while the dialog stays open, with no refusal in between, is overwritten. Deletes run first, so a case-only
+  rename or a file and folder that swapped places go back cleanly; they remove only paths that pass `safe_rel`
+  and are not behind a link, then folders they leave empty. Restores are `git restore --source=<base> --worktree`
+  with literal pathspecs from stdin, on a copy of the index stamped second 1 of 1970, so a file that only looks
+  like its index entry is still written and the real index's lock is not involved. The copy is made before anything
+  is written. If a write fails, what was done stays done, no `undo` step is recorded, and repeating the undo
+  finishes it. A file already equal to its state before the turn
   is skipped, so an undo can be repeated. The result is recorded as its own `undo` step. Restores follow the
   user's git settings (CRLF with `core.autocrlf`): a file can come back with other line endings, and the dialog
   says so.
@@ -1017,6 +1073,22 @@ repository growth about 870 KiB per 100 turns. After the second review a detecti
 turn's start (p50 133 ms / p95 145 ms on 10k files, like an unchanged snapshot) and the later measurement reads
 baseline 0.34 s, changed turn p50 0.33 s / p95 0.35 s, unchanged p50 0.14 s: a turn now costs about 0.46 s of git
 work. Most of the time is git walking 10k files and starting processes; it still does not meet the 150 ms budget for a changed turn, hence the default.
+
+Reading every file instead of trusting the stat cache was measured for snapshots and rejected (debug test binary,
+same bench, `KELPIE_CP_REPO` reuses one repository, `KELPIE_CP_REPEATS` sets the file size; Windows 10, 10k files,
+3.3 MB). Trusting it: unchanged turn p50 153-160 ms, git CPU 156-203 ms; changed turn p50 357-392 ms, git CPU
+265-296 ms. Reading every file: unchanged turn p50 1004 ms, git CPU 1000 ms; changed turn p50 1232 ms, git CPU
+1156 ms, and two such snapshots switched the repository off. The kept design is as cheap as before, also on 10k files
+of 208 MB (unchanged p50 157 ms, changed p50 363 ms). An undo reads only the turn's files: `undo_plan` of a four-file
+turn takes p50 411-433 ms on 3.3 MB and 402-410 ms on 208 MB (it took 1.14-1.18 s and 1.97 s reading the whole folder),
+on its own thread and outside the auto-off count, but under the repository's lock, so snapshots wait behind it. Turns
+with large files cost what reading those files costs, and turns with many files cost more per file: on a repository of
+10k small files, `git add` of the named paths took 150 ms for 100 paths, 1.17 s for 1,000 and 9.26 s for 10,000 (an
+unrestricted `add` on the same temporary index took about 5 s), and `git restore` 238 ms, 1.40 s and 12.7 s. On 30k
+files `add` took 226 ms for 100 paths; larger turns there were not measured. Matching paths costs roughly entries times
+paths, so a turn touching most of a much larger repository is slow to preview. No fallback to an unrestricted `add` is
+used: it reads the whole folder, and could not take `-f` without adding every ignored file.
+
 A 100,000-file repository was not measured (building the fixture did not finish in 90 minutes); expect several seconds per snapshot there, so such a repository switches itself off after two.
 
 ## App-side services (Rust core)
@@ -1356,7 +1428,7 @@ task's run status is the Runs engine's.
   session id the new process is the root, never a child, and the reported PID is always in the keep set; what
   the previous run left is remembered as orphans. Ports: Windows `GetExtendedTcpTable` (listeners, both
   families), Linux `/proc/net/tcp*` with socket inodes, macOS one `lsof` for all the PIDs of a look. Nothing
-  scans by itself: `process.ports` (the chips) is asked by the app for the visible sessions, once when they
+  scans by itself: `process.ports` (for an agent's web pages: `lib/agent-web-pages.ts`, which sends `browser_probe` a port once per session to learn whether it answers with a page) is asked by the app for the visible sessions, once when they
   appear, ~0.8 s after their terminal prints (at most every 2 s), and every 3 s only while the last look found
   children; on macOS it runs `lsof` only when some session has children or orphans or is a custom session (whose
   own process is often the server), elsewhere whenever a session has a process. `process.list` while the Processes panel is open (every 2 s). `daemon.info.process_scans`

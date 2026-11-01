@@ -553,6 +553,10 @@ pub struct WipResult {
 /// One `git` call that may wait for a passphrase or a hardware key (a signed commit): bounded by a
 /// timeout and by Cancel, and the process is killed when either happens.
 async fn run_signed(dir: &Path, args: &[&str], env: &[(&str, &str)], key: &str) -> CmdResult<GitOutput> {
+    // Not started only to be killed: a git killed that early can leave its `index.lock` behind.
+    if is_cancelled(key) {
+        return Err("cancelled".into());
+    }
     tokio::select! {
         r = tokio::time::timeout(SIGN_TIMEOUT, plumb_env(dir, args, env)) => r.unwrap_or_else(|_| Err("it took longer than two minutes (is a passphrase or a security key waiting?)".into())),
         _ = cancelled(key.to_string()) => Err("cancelled".into()),

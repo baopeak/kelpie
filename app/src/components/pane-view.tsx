@@ -55,25 +55,25 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
       <Show when={chatable()}>
         <Show
           when={props.pane.kind === "chat"}
-          fallback={<button class="icon-btn" title={t("Open in chat view")} onClick={() => void switchToChat(props.project, props.tab, props.pane)}><Icon name="chat" size={14} /></button>}
+          fallback={<button class="icon-btn" title={t("Open in chat view")} onClick={() => void switchToChat(props.project, props.tab, props.pane)}><Icon name="chat" size={16} /></button>}
         >
-          <button class="icon-btn" title={t("Back to terminal (TUI)")} onClick={() => void switchToTerminal(props.project, props.tab, props.pane)}><Icon name="terminal" size={14} /></button>
+          <button class="icon-btn" title={t("Back to terminal (TUI)")} onClick={() => void switchToTerminal(props.project, props.tab, props.pane)}><Icon name="terminal" size={16} /></button>
         </Show>
       </Show>
       <Show when={(props.pane.kind === "terminal" || props.pane.kind === "chat") && session()?.alive}>
-        <button class={`icon-btn${composing() ? " active" : ""}`} title={t("Compose") + commandHint("composer.open")} data-compose onClick={() => toggleComposer(session()!.id)}><Icon name="compose" size={13} /></button>
+        <button class={`icon-btn${composing() ? " active" : ""}`} title={t("Compose") + commandHint("composer.open")} data-compose onClick={() => toggleComposer(session()!.id)}><Icon name="compose" size={16} /></button>
       </Show>
       <Show when={props.pane.kind === "terminal" && session()?.alive}>
-        <MicButton sessionId={props.pane.sessionId} size={13} />
+        <MicButton sessionId={props.pane.sessionId} size={16} />
       </Show>
-      <button class="icon-btn" title={t("Split right")} onClick={() => split("right")}><Icon name="splitRight" size={13} /></button>
-      <button class="icon-btn" title={t("Split down")} onClick={() => split("down")}><Icon name="splitDown" size={13} /></button>
+      <button class="icon-btn" title={t("Split right") + commandHint("split.right")} onClick={() => split("right")}><Icon name="splitRight" size={16} /></button>
+      <button class="icon-btn" title={t("Split down") + commandHint("split.down")} onClick={() => split("down")}><Icon name="splitDown" size={16} /></button>
       <Show when={multi() || zoomedHere()}>
-        <button class={`icon-btn${zoomedHere() ? " active" : ""}`} title={zoomedHere() ? t("Restore layout") : t("Maximize pane")} onClick={() => store.toggleZoom(props.tab.id, props.pane.id)}>
-          <Icon name={zoomedHere() ? "minimize" : "maximize"} size={13} />
+        <button class={`icon-btn${zoomedHere() ? " active" : ""}`} title={(zoomedHere() ? t("Restore layout") : t("Maximize pane")) + commandHint("pane.zoom")} onClick={() => store.toggleZoom(props.tab.id, props.pane.id)}>
+          <Icon name={zoomedHere() ? "minimize" : "maximize"} size={16} />
         </button>
       </Show>
-      <button class="icon-btn" title={t("Close pane")} onClick={close}><Icon name="close" size={12} /></button>
+      <button class="icon-btn" title={t("Close pane") + commandHint("pane.close")} onClick={close}><Icon name="close" size={14} /></button>
     </>
   );
   /** The host this pane's session runs on, when it is not where the project is (a remote pane in
@@ -97,10 +97,10 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
       {/* Above the pane's opaque children (::before / ::after mark broadcast and focus). */}
       <Show when={hostColor()}><div class="pane-host-stripe" /></Show>
       <Show when={!hasHeader()}>
-        <div class="pane-tools">{tools()}</div>
+        <div class="pane-tools" data-hints>{tools()}</div>
       </Show>
       <Show when={hasHeader()}>
-        <div class="pane-header" onPointerDown={(e) => multi() && startPaneDrag(e, props.project, props.tab, props.pane.id)} title={multi() ? t("Drag to move or swap this pane, or onto a tab") : undefined}>
+        <div class="pane-header" data-hints onPointerDown={(e) => multi() && startPaneDrag(e, props.project, props.tab, props.pane.id)} title={multi() ? t("Drag to move or swap this pane, or onto a tab") : undefined}>
           <Show when={session()} fallback={<Icon name={props.pane.kind === "empty" ? "plus" : props.pane.kind === "browser" ? "globe" : "files"} size={13} />}>
             {(s) => <><StatusDot s={s()} /><KindGlyph kind={s().kind} size={14} /></>}
           </Show>

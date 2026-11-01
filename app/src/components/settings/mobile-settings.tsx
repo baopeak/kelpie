@@ -2,10 +2,12 @@
 // one-time QR code and end-to-end encryption (kelpie-link); the person approves it here by typing the six digits the phone
 // shows, and the daemon then asks the OS to verify them (Windows Hello or the password). Raising what a phone may do, resetting
 // phone access and keeping unused phones longer ask for that verification too (`mobileSecure`); what the prompt says is the daemon's.
-import { For, Show, createResource, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
+import { PHONE_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
+import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
 import { SettingRow, Toggle } from "./setting-row";
 import { confirmDialog } from "../../lib/confirm-dialog";
@@ -20,6 +22,8 @@ export interface MobileDevice {
   can_write: boolean;
   created_at: number;
   last_seen: number;
+  /** It paired on an HTTPS origin. */
+  secure_origin?: boolean;
   /** `unverified`: its record was changed outside Kelpie (or the key that checks it is gone): it must be paired again.
    *  `unchecked`: the key that checks it cannot be read right now; nothing is concluded, and it is checked again when it can be. */
   state: "ok" | "unverified" | "unchecked";
@@ -46,8 +50,59 @@ export interface MobileStatus {
   pending: { id: string; name: string; kind: "app" | "pwa"; fingerprint: string; want: MobilePermission; address: string }[];
   /** Phones not seen for this many days are removed (0: never). */
   dormant_days: number;
+  /** Tailscale mode, as the daemon holds it (absent from a daemon older than `PHONE_API`). `origin`: `<name>:8443` while phones can use it. */
+  tailscale?: { on: boolean; origin: string | null; to_remove?: boolean };
   /** This window is the verified Kelpie app: it may approve phones and raise what they may do. */
   app: boolean;
+}
+
+/** What Tailscale says now (`mobile.tailscale_status`, which runs its CLI: asked for only while this page is open). */
+interface TailscaleStatus {
+  on: boolean;
+  state: "not_installed" | "stopped" | "needs_login" | "https_off" | "unreadable" | "ready";
+  fqdn: string | null;
+  /** `off` nothing of ours; `ours` published; `missing` the mode is on and the entry was removed; `left_behind` the mode is off and the entry could not be removed; `port_busy` another program holds our local port and the entry could not be removed; `not_listening` the mode is on and Kelpie's listener is not up; `renamed` the entry is under this machine's old Tailscale name; `taken` port 8443 is used by something else; `unknown` it could not be read. */
+  serve: "off" | "ours" | "missing" | "left_behind" | "port_busy" | "not_listening" | "renamed" | "taken" | "unknown";
+  origin: string | null;
+  /** A QR code of the page's address, with no secret. */
+  install_qr: string | null;
+}
+
+/** The one thing to do about the state Tailscale is in. */
+function tailscaleInstruction(s: TailscaleStatus): string {
+  switch (s.state) {
+    case "not_installed":
+      return t("Tailscale is not installed on this computer. Install it from tailscale.com and sign in, on this computer and on your phone.");
+    case "stopped":
+      return t("Tailscale is not running on this computer. Start it, then check again.");
+    case "needs_login":
+      return t("Tailscale is not signed in on this computer. Sign in, then check again.");
+    case "https_off":
+      return t("Your tailnet does not have HTTPS certificates turned on. Turn on MagicDNS and HTTPS in the DNS page of the Tailscale admin console, then check again.");
+    case "unreadable":
+      return t("Kelpie could not understand what Tailscale says. Update Tailscale, then check again.");
+    case "ready":
+      switch (s.serve) {
+        case "ours":
+          return t("Phones with Tailscale on reach this computer at {origin}, from anywhere.", { origin: s.origin ?? "" });
+        case "missing":
+          return t("The entry in Tailscale Serve was removed, so phones cannot reach this computer through it. Restore it to go on.");
+        case "left_behind":
+          return t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere, and Tailscale would not remove it. Press Check again to try once more. If it stays, it may be under a name this computer had before: remove it with Tailscale's own tools.");
+        case "port_busy":
+          return t("Another program took the local port Tailscale Serve forwards to, and Kelpie could not remove its entry, so a phone that opens this address may reach that program. Do not open Kelpie on your phones until this is gone: stop that program, or press Restore to use another port.");
+        case "not_listening":
+          return t("Phone access is not running, so phones get no answer through Tailscale. Fix what is shown above, then turn phone access off and on, and this on again.");
+        case "renamed":
+          return t("This computer's Tailscale name changed, and the entry in Tailscale Serve is under the old one, so phones get no answer. Restore it under the new name. Phones must then be paired again: a browser keeps its pairing per address.");
+        case "taken":
+          return t("Port 8443 of Tailscale Serve is used by something else. Kelpie will not change it: free that port, then check again.");
+        case "unknown":
+          return t("Kelpie could not read what Tailscale Serve is doing. Update Tailscale, then check again.");
+        case "off":
+          return t("Tailscale is ready. Turn this on to reach this computer from anywhere with Tailscale on.");
+      }
+  }
 }
 
 export const mobileStatus = () => daemon<MobileStatus>("mobile.status");
@@ -66,13 +121,28 @@ export function MobileSettings() {
   const [status, { refetch }] = createResource(() => store.connected(), () => mobileStatus().catch(() => null));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  const [qr, setQr] = createSignal<{ url: string; qr: string; until: number; tls: boolean } | null>(null);
+  const [qr, setQr] = createSignal<{ url: string; qr: string; until: number; tls: boolean; tailscale?: boolean } | null>(null);
   const [now, setNow] = createSignal(Date.now());
+  // The two steps of pairing over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
+  const [guideStep, setGuideStep] = createSignal<1 | 2 | null>(null);
+  // Only while phone access is on and this page is open; looked at again when what the daemon holds changes, or when asked.
+  const tailscaleKey = () => (store.connected() && store.daemonApi() >= PHONE_API && (status()?.enabled || status()?.tailscale?.to_remove) ? `${status()!.tailscale?.on}|${status()!.tailscale?.origin}|${status()!.tailscale?.to_remove}` : null);
+  const [tailscale, { refetch: checkTailscale }] = createResource(tailscaleKey, () => daemon<TailscaleStatus>("mobile.tailscale_status").catch(() => null));
+  // The two steps are about the origin: with it gone they end, and do not come back unasked when it returns.
+  createEffect(() => {
+    if (guideStep() && !tailscale.loading && !tailscale()?.origin) {
+      setGuideStep(null);
+      setQr(null);
+    }
+  });
   onMount(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     const un = onEvent<{ event: string }>("daemon-event", (m) => {
       if (m.event === "mobile.updated" || m.event === "mobile.pair_request" || m.event === "mobile.device_changed") void refetch();
-      if (m.event === "mobile.device_changed") setQr(null);
+      if (m.event === "mobile.device_changed") {
+        setQr(null);
+        setGuideStep(null);
+      }
     });
     onCleanup(() => {
       clearInterval(timer);
@@ -98,10 +168,34 @@ export function MobileSettings() {
     );
     if (!ok) return;
     await run(async () => {
-      const r = await daemon<{ url: string; qr: string; expires_in: number; tls: boolean }>("mobile.pair_start", {});
+      // The plain pairing, whatever Tailscale is doing: its own address, and its own pairing.
+      const r = await daemon<{ url: string; qr: string; expires_in: number; tls: boolean }>("mobile.pair_start", { plain: true });
+      setGuideStep(null);
       setQr({ ...r, until: Date.now() + r.expires_in * 1000 });
     });
   };
+  const pairOverTailscale = () =>
+    run(async () => {
+      const r = await daemon<{ url: string; qr: string; expires_in: number; tls: boolean; tailscale: boolean }>("mobile.pair_start", {});
+      // The origin went while this was asked for: a code for this network's address is one the installed app refuses.
+      if (!r.tailscale) {
+        setQr(null);
+        setGuideStep(null);
+        await checkTailscale();
+        throw new Error(t("Tailscale is not publishing this computer right now, so no code was shown. See what Settings says, then try again."));
+      }
+      setQr({ ...r, until: Date.now() + r.expires_in * 1000 });
+      setGuideStep(2);
+    });
+  const closeGuide = () => {
+    setGuideStep(null);
+    setQr(null);
+  };
+  const setTailscaleMode = (on: boolean) =>
+    run(async () => {
+      await mobileSecure("mobile.set_tailscale", { on });
+      await checkTailscale();
+    });
   const setPermission = (d: MobileDevice, permission: MobilePermission) =>
     run(() => mobileSecure("mobile.set_permission", { id: d.id, permission }));
   const reset = async () => {
@@ -123,6 +217,7 @@ export function MobileSettings() {
   const hasAccess = () => !!s() && (s()!.enabled || s()!.devices.length > 0 || (s()!.legacy ?? []).length > 0);
   return (
     <>
+      <LoadBar when={busy()} />
       <SettingRow id="mobile-access">
         <Toggle on={!!s()?.enabled} onChange={(on) => void (on ? enable() : run(() => daemon("mobile.disable")))} />
       </SettingRow>
@@ -156,11 +251,77 @@ export function MobileSettings() {
             <input class="text-input mono" placeholder={t("private key (.key / .pem)")} value={s()!.key ?? ""} onChange={(e) => void enable({ key: e.currentTarget.value })} />
           </div>
         </SettingRow>
+        <Show when={store.daemonApi() >= PHONE_API}>
+          <SettingRow id="mobile-tailscale" wide>
+            <div class="inline-fields" style={{ "align-items": "center" }}>
+              <Toggle on={!!s()!.tailscale?.on} onChange={(on) => void setTailscaleMode(on)} />
+              <button class="btn" data-tailscale-check disabled={tailscale.loading} onClick={() => void checkTailscale()}>{t("Check again")}</button>
+              <Show when={s()!.running && (tailscale()?.serve === "missing" || tailscale()?.serve === "port_busy" || tailscale()?.serve === "renamed")}>
+                <button class="btn primary" data-tailscale-restore disabled={busy()} onClick={() => void setTailscaleMode(true)}>{t("Restore")}</button>
+              </Show>
+              <Show when={tailscale()?.serve === "left_behind"}>
+                <button class="btn primary" data-tailscale-remove disabled={busy()} onClick={() => void setTailscaleMode(false)}>{t("Remove")}</button>
+              </Show>
+            </div>
+            <Show when={tailscale()}>
+              <div class="muted-inline" data-tailscale-state={tailscale()!.state} data-tailscale-serve={tailscale()!.serve}>{tailscaleInstruction(tailscale()!)}</div>
+            </Show>
+            <Show when={s()!.tailscale?.to_remove && !["left_behind", "port_busy"].includes(tailscale()?.serve ?? "")}>
+              <div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
+            </Show>
+            <Show when={!s()!.app}>
+              <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot change this.")}</div>
+            </Show>
+            <div class="muted-inline" data-tailscale-privacy>{t("This computer's name goes into public certificate logs when Tailscale gets its certificate, and that cannot be undone. Tailscale sees which devices connect and when, not what they say. Tailnet Lock protects you from a key handed out without your approval. The free Tailscale plan is for non-commercial use.")}</div>
+            <Show when={tailscale()?.origin}>
+              <div class="muted-inline">{t("A phone paired over plain HTTP keeps working there, read-only. To type over Tailscale it must be paired again: a browser keeps its pairing per address.")}</div>
+              <button class="btn primary" data-tailscale-pair disabled={busy() || !s()!.running} onClick={() => setGuideStep(1)}><Icon name="plus" size={13} /> {t("Pair a phone over Tailscale")}</button>
+            </Show>
+          </SettingRow>
+        </Show>
+        <Show when={guideStep() && tailscale()?.origin}>
+          <div class="overlay" data-tailscale-guide={guideStep()}>
+            <div class="modal" style={{ width: "560px" }}>
+              <Show when={guideStep() === 1} fallback={
+                <>
+                  <h2>{t("Step 2: Pair")}</h2>
+                  <Show when={qr() && qr()!.until > now()} fallback={
+                    <>
+                      <div style={{ color: "var(--text-dim)" }}>{t("The code expired. Show a new one.")}</div>
+                      <button class="btn primary" disabled={busy()} onClick={() => void pairOverTailscale()}>{t("Show a new code")}</button>
+                    </>
+                  }>
+                    <div class="mobile-qr">
+                      <div class="mobile-qr-code" innerHTML={qr()!.qr} data-link={qr()!.url} />
+                      <div>
+                        <div>{t("In the installed Kelpie app press Scan the code, and point it at this. The app then shows six digits: type them here when Kelpie asks.")}</div>
+                        <div class="muted-inline">{t("The code works once and expires in {n} s.", { n: Math.max(0, Math.round((qr()!.until - now()) / 1000)) })}</div>
+                        <button class="btn" data-copy-pair-link onClick={() => void navigator.clipboard?.writeText(qr()!.url)}>{t("Copy the link, to paste it on the phone")}</button>
+                      </div>
+                    </div>
+                  </Show>
+                </>
+              }>
+                <h2>{t("Step 1: Install")}</h2>
+                <div class="mobile-qr">
+                  <div class="mobile-qr-code" innerHTML={tailscale()!.install_qr ?? ""} data-install-link={`https://${tailscale()!.origin}/`} />
+                  <div>
+                    <div>{t("Turn on Tailscale on your phone and scan this with its camera. The page shows how to install Kelpie on the phone; then open it from the Home Screen.")}</div>
+                    <div class="muted-inline">{t("This code holds no secret. The very first visit can take up to a minute while Tailscale gets its certificate.")}</div>
+                    <div class="mono mobile-qr-url">{`https://${tailscale()!.origin}/`}</div>
+                    <button class="btn primary" data-guide-next disabled={busy()} onClick={() => void pairOverTailscale()}>{t("Installed: Step 2")}</button>
+                  </div>
+                </div>
+              </Show>
+              <div class="footer"><span style={{ flex: 1 }} /><button class="btn" data-guide-close onClick={closeGuide}>{t("Close")}</button></div>
+            </div>
+          </div>
+        </Show>
         <SettingRow id="mobile-pair" wide>
           <Show when={!s()!.app}>
             <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot approve phones or raise what they may do.")}</div>
           </Show>
-          <Show when={qr() && qr()!.until > now()} fallback={
+          <Show when={qr() && !guideStep() && qr()!.until > now()} fallback={
             <button class="btn primary" disabled={!s()!.running || busy()} onClick={() => void pairBrowser()}><Icon name="plus" size={13} /> {t("Pair a browser on this network")}</button>
           }>
             <div class="mobile-qr">
@@ -174,6 +335,14 @@ export function MobileSettings() {
               </div>
             </div>
           </Show>
+        </SettingRow>
+      </Show>
+      <Show when={!s()?.enabled && s()?.tailscale?.to_remove}>
+        <SettingRow id="mobile-tailscale" wide>
+          <Show when={tailscale()} fallback={<div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>}>
+            <div class="form-note warn-note" data-tailscale-to-remove data-tailscale-serve={tailscale()!.serve}>{tailscale()!.state === "ready" ? tailscaleInstruction(tailscale()!) : t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
+          </Show>
+          <button class="btn" data-tailscale-check disabled={tailscale.loading} onClick={() => void checkTailscale()}>{t("Check again")}</button>
         </SettingRow>
       </Show>
       <Show when={s()}>

@@ -78,7 +78,7 @@ function reportOverCap(s: SessionInfo, cost: number, exact: boolean) {
   const title = t("{name} passed the cost cap", { name: sessionLabel(s) });
   const body = t("{cost} of {cap}", { cost: formatCost(cost, exact), cap: formatCost(cap, true) });
   store.addInbox({ kind: "cost", title, body, sessionId: s.id, projectId: s.project_id ?? undefined });
-  void store.desktopNotify(title, body);
+  void store.desktopNotify(title, body, "cost");
   // Only this window reads usage, so it tells the daemon, which carries it to the phone channels.
   if (store.daemonApi() >= NOTIFY_API) {
     const detail = `Passed the cost cap: ${formatCost(cost, exact)} of ${formatCost(cap, true)}`; // i18n-ignore: goes to the phone channels

@@ -10,6 +10,7 @@ import { NOTES_API } from "../lib/review-notes";
 import { KindGlyph } from "./icons";
 import { KeyHints } from "./key-hints";
 import { t } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 import "./review.css";
 
 export default function ReviewWithDialog() {
@@ -39,6 +40,7 @@ export default function ReviewWithDialog() {
         if (e.key === "Escape") close();
         if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void start();
       }}>
+        <LoadBar when={busy()} />
         <Show when={project()} fallback={<p>{t("This worktree is not available.")}</p>}>
           <h2>{t("Review {name} with…", { name: project()!.name })}</h2>
           <div class="launcher" style={{ "grid-template-columns": "repeat(auto-fill, minmax(92px, 1fr))" }}>

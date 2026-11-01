@@ -129,7 +129,7 @@ def native_case():
     run.check("Codex session started", wait(lambda: alive(sid), 20))
     time.sleep(2)  # let the TUI draw
     loc = pane_of(sid)
-    sel = f".pane[data-pane=\"{loc['paneId']}\"] button[title=\"Close pane\"]"
+    sel = f".pane[data-pane=\"{loc['paneId']}\"] button[title^=\"Close pane\"]"
 
     d.click(sel)
     dlg = wait(lambda: (lambda r: r if r.get("open") else None)(native(pid)), 10) or {}

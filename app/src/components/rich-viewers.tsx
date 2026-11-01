@@ -7,6 +7,7 @@ import { readFile } from "../lib/ipc";
 import { store } from "../lib/store";
 import type { Project } from "../lib/types";
 import { intlLocale, t } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 
 const MAX_ROWS = 5000;
 
@@ -48,9 +49,11 @@ export function CsvView(props: { project: Project; path: string; text?: string }
   const [rows, setRows] = createSignal<string[][]>([]);
   const [query, setQuery] = createSignal("");
   const [sort, setSort] = createSignal<{ col: number; desc: boolean } | null>(null);
+  const [loading, setLoading] = createSignal(true);
   onMount(async () => {
     const text = props.text ?? (await readFile(props.project.path, props.path, 20 << 20).catch((e) => (store.notify(String(e)), null)))?.text;
     setRows(parseDelimited(text ?? "", props.path.toLowerCase().endsWith(".tsv") ? "\t" : ","));
+    setLoading(false);
   });
   const header = () => rows()[0] ?? [];
   const body = createMemo(() => {
@@ -71,6 +74,7 @@ export function CsvView(props: { project: Project; path: string; text?: string }
   const clickHeader = (col: number) => setSort((s) => (s?.col === col ? (s.desc ? null : { col, desc: true }) : { col, desc: false }));
   return (
     <div class="table-view">
+      <LoadBar when={loading()} />
       <div class="table-tools">
         <input class="text-input" placeholder={t("Filter rows")} value={query()} onInput={(e) => setQuery(e.currentTarget.value)} />
         <span class="muted-inline">{t("{shown} of {total} rows", { shown: body().length, total: Math.max(0, rows().length - 1) })}{body().length > MAX_ROWS ? ` ${t("(first {n} shown)", { n: MAX_ROWS })}` : ""}</span>
@@ -95,6 +99,7 @@ export function CsvView(props: { project: Project; path: string; text?: string }
 
 export function PdfView(props: { project: Project; path: string }) {
   const [url, setUrl] = createSignal<string | null>(null);
+  const [loading, setLoading] = createSignal(true);
   onMount(async () => {
     try {
       const f = await readFile(props.project.path, props.path, 60 << 20, true);
@@ -104,11 +109,13 @@ export function PdfView(props: { project: Project; path: string }) {
       setUrl(URL.createObjectURL(new Blob([bytes], { type: "application/pdf" })));
     } catch (e) {
       store.notify(String(e));
+    } finally {
+      setLoading(false);
     }
   });
   onCleanup(() => url() && URL.revokeObjectURL(url()!));
   return (
-    <Show when={url()} fallback={<div class="muted">{t("Loading…")}</div>}>
+    <Show when={url()} fallback={<Show when={loading()}><div class="muted">{t("Loading…")}</div><LoadBar when /></Show>}>
       <iframe class="pdf-frame" src={url()!} title={props.path} />
     </Show>
   );
@@ -157,6 +164,7 @@ export function MermaidView(props: { project: Project; path: string; text?: stri
   });
   return (
     <div class="diagram-view" onWheel={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); setZoom((z) => Math.min(4, Math.max(0.25, z * (e.deltaY < 0 ? 1.1 : 0.9)))); } }}>
+      <LoadBar when={!svg() && !error()} />
       <Show when={!error()} fallback={<div class="muted">{error()}</div>}>
         <div class="diagram-tools">
           <button class="btn" onClick={() => setZoom((z) => Math.max(0.25, z / 1.2))}>−</button>
@@ -189,6 +197,7 @@ function Output(props: { o: NbOutput }) {
 
 export function NotebookView(props: { project: Project; path: string }) {
   const [cells, setCells] = createSignal<NbCell[]>([]);
+  const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal("");
   onMount(async () => {
     try {
@@ -196,10 +205,13 @@ export function NotebookView(props: { project: Project; path: string }) {
       setCells(JSON.parse(f.text ?? "{}").cells ?? []);
     } catch (e) {
       setError(t("Not a readable notebook: {error}", { error: String(e) }));
+    } finally {
+      setLoading(false);
     }
   });
   return (
     <div class="notebook">
+      <LoadBar when={loading()} />
       <Show when={error()}><div class="muted">{error()}</div></Show>
       <For each={cells()}>
         {(c) => (

@@ -95,7 +95,7 @@ try:
     d.wait("return !!document.querySelector('.pane .term-host .xterm')", 20)
     run.check("lone pane: no pane header", d.js("return document.querySelectorAll('.pane[data-pane] .pane-header').length") == 0)
     run.check("lone pane: hover toolbar has split / close",
-              d.js("return !!document.querySelector('.pane-tools button[title=\"Split right\"]') && !!document.querySelector('.pane-tools button[title=\"Close pane\"]')"))
+              d.js("return !!document.querySelector('.pane-tools button[title^=\"Split right\"]') && !!document.querySelector('.pane-tools button[title^=\"Close pane\"]')"))
     run.check("the tab names the pane", bool(d.js("return (document.querySelector('.tabs [data-tab-id] .title')?.textContent || '').trim()")))
     run.shot("01-lone-pane")
 

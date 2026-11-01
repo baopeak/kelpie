@@ -18,7 +18,7 @@
 //!
 //! - **App** (the user token, `client: "app"`, *and* the connection's peer process runs the installed
 //!   Kelpie app, `peer_identity`): everything a User may, plus the phone-access decisions in
-//!   [`APP_ONLY`] (approving a phone, raising its permission, resetting phone access). The role only
+//!   [`APP_ONLY`] (approving a phone, raising its permission, resetting phone access, Tailscale mode). The role only
 //!   decides who may ask: what raises access takes effect once the person passed the OS verification
 //!   the daemon runs itself (`user_presence`).
 //!
@@ -54,7 +54,7 @@ impl Role {
 
 /// Decisions about phone access that only the verified app may ask for (the daemon then verifies the person): a program that
 /// holds the user token cannot add a phone or raise what one may do, nor raise the prompt that would.
-pub const APP_ONLY: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset"];
+pub const APP_ONLY: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale"];
 
 /// The role an `auth` with the user token gets: App when it says it is the app and its peer process is the installed app.
 pub fn user_role(says_app: bool, peer: Option<u32>) -> Role {

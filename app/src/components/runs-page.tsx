@@ -6,6 +6,7 @@ import { store } from "../lib/store";
 import { kindInfo, launchableAgents } from "../lib/agents";
 import { relTimeShort } from "../lib/platform";
 import { formatRelative, t } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 import { STATUS_LABEL, broughtText, cancelRun, createRun, deleteRun, finishedTask, lanes, planTasks, runList, runsById, taskAction, type Run, type RunTask, type TaskDraft } from "../lib/runs";
 import { Icon, KindGlyph } from "./icons";
 import { confirmDialog } from "../lib/confirm-dialog";
@@ -190,6 +191,7 @@ function RunEditor(props: { onDone: (id?: string) => void }) {
   };
   return (
     <div class="run-editor">
+      <LoadBar when={planning() || bringing.loading} />
       <h3>{t("New run")}</h3>
       <div class="inline-fields">
         <label class="field" style={{ flex: 2 }}><span>{t("Name")}</span><input class="text-input" value={name()} placeholder={t("Add CSV export")} onInput={(e) => setName(e.currentTarget.value)} /></label>

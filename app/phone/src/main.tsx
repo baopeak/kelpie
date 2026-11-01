@@ -2,12 +2,14 @@ import { render } from "solid-js/web";
 import { createEffect } from "solid-js";
 import { App } from "./app";
 import { locale } from "./i18n";
+import { watchInstall } from "./install-guide";
 import { needsCount } from "./inbox-order";
 import { sessions, startApp } from "./phone-state";
 import { applyTheme } from "./theme";
 import "./phone.css";
 
 applyTheme();
+watchInstall();
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
 
 render(() => {

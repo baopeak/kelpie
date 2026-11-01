@@ -7,12 +7,16 @@ import type { ChatTransport } from "./transport";
 
 export function desktopTransport(): ChatTransport {
   let handle: number | null = null;
+  let logEnd: number | null = null;
   return {
     async attach(h, onLive) {
       handle = h;
+      logEnd = null;
       const reply = await attachTerminal(h, null, (_seq, data) => onLive(data));
+      logEnd = reply.seq;
       return b64ToBytes(reply.data);
     },
+    logEnd: () => logEnd,
     detach() {
       if (handle != null) void daemon("session.detach", { handle }).catch(() => {});
     },

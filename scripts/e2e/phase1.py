@@ -76,18 +76,18 @@ try:
     d.js("[...document.querySelectorAll('.seg button')].find(b => b.textContent === 'Names').click()")
 
     # Pane tools: split from the hover toolbar, then maximize and restore.
-    d.js("document.querySelector('.pane-tools button[title=\"Split right\"]').click()")
+    d.js("document.querySelector('.pane-tools button[title^=\"Split right\"]').click()")
     # The new pane asks what to run: key 1..9 picks; Terminal is the last launcher entry.
     d.wait("return !!document.querySelector('.empty-pane')", 10)
     d.js("[...document.querySelectorAll('.empty-pane-kind')].find(b => b.title === 'Terminal').click()")
     d.wait("return document.querySelectorAll('.pane .term-host .xterm').length === 2", 20)
     run.check("pane toolbar splits", True)
-    d.js("document.querySelector('.pane-header button[title=\"Maximize pane\"]').click()")
+    d.js("document.querySelector('.pane-header button[title^=\"Maximize pane\"]').click()")
     time.sleep(0.6)
     n = d.js("return document.querySelectorAll('.pane').length")
     run.check("maximize shows a single pane", n == 1, f"panes={n}")
     run.shot("p1-04-maximized")
-    d.js("document.querySelector('.pane-header button[title=\"Restore layout\"]').click()")
+    d.js("document.querySelector('.pane-header button[title^=\"Restore layout\"]').click()")
     time.sleep(0.6)
     run.check("restore brings the split back", d.js("return document.querySelectorAll('.pane').length") == 2)
     run.shot("p1-05-split-tools")

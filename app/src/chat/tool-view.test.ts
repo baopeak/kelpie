@@ -1,9 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { describeTool, diffStats, lineDiff, stripProjectRoot, unifiedFiles } from "./tool-view";
+import { describeTool, diffStats, lineDiff, opensByDefault, stripProjectRoot, unifiedFiles } from "./tool-view";
 import { type ChatItem, summarize } from "./chat-model";
 
 const tool = (name: string, input: unknown, extra: Partial<Extract<ChatItem, { kind: "tool" }>> = {}) =>
   ({ kind: "tool", id: "t", name, input, summary: "", status: "done", ...extra }) as Extract<ChatItem, { kind: "tool" }>;
+
+describe("which rows start open", () => {
+  const opens = (row: ReturnType<typeof tool>, noAskCards = false) => opensByDefault(row, describeTool(row), noAskCards);
+
+  it("folds a command, finished or running, to its one line", () => {
+    expect(opens(tool("Bash", { command: "ls", description: "List files" }, { output: "a\nb" }))).toBe(false);
+    expect(opens(tool("PowerShell", { command: "ls" }, { status: "running" }))).toBe(false);
+    expect(opens(tool("run", {}, { category: "command", output: "x" }))).toBe(false);
+  });
+
+  it("opens a command that failed: that is when its output matters", () => {
+    expect(opens(tool("Bash", { command: "false" }, { status: "error", output: "exit 1" }))).toBe(true);
+  });
+
+  it("opens an edit, and folds reads and searches", () => {
+    expect(opens(tool("Edit", { file_path: "/a.ts" }))).toBe(true);
+    expect(opens(tool("Read", { file_path: "/a.ts" }))).toBe(false);
+    expect(opens(tool("Grep", { pattern: "x" }))).toBe(false);
+  });
+
+  it("opens a question's row only where it stands in for its card", () => {
+    const row = tool("AskUserQuestion", { questions: [] }, { output: "Red" });
+    expect(opens(row)).toBe(false);
+    expect(opens(row, true)).toBe(true);
+  });
+});
 
 describe("a question's row", () => {
   it("names the questions; the agent's own text for the answers stays its output", () => {

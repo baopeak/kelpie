@@ -12,6 +12,7 @@ import { imageUrl } from "../chat/chat-images";
 import { type AgentRun, formatDuration, mergeRuns } from "../chat/agent-runs";
 import { mountAttach, type ChatItem, type UserImage } from "../chat/chat-model";
 import { fromDaemonEvent } from "../chat/chat-queue";
+import { followsLatest } from "../chat/follow-latest";
 import { PINNED_REACH, lastPromptBefore, pinnedPromptId, renderedPrompts } from "../chat/pinned-prompt";
 import { openTable, stableEnd } from "../chat/streaming-markdown";
 import { describeTool, diffStats, unifiedFiles } from "../chat/tool-view";
@@ -246,7 +247,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
   onMount(() => {
     createEffect(on(target, (handle) => handle != null && transcript.attach(handle)));
     // The daemon dropped us for falling behind: re-attach (full replay).
-    const onResync = (e: Event) => (e as CustomEvent).detail === props.sessionId && target() != null && transcript.attach(target()!);
+    const onResync = (e: Event) => (e as CustomEvent).detail === props.sessionId && target() != null && transcript.attach(target()!, true);
     window.addEventListener("kelpie:chat-resync", onResync);
     // A phone answered one of the agent's requests first.
     const onResolved = (e: Event) => {
@@ -318,19 +319,23 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
 
   // Keep pinned to the bottom while streaming unless the user scrolled up; then offer a way back.
   const [away, setAway] = createSignal(false);
+  let lastTop = 0;
   const syncStick = () => {
-    stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+    const top = scroller.scrollTop;
+    stick = followsLatest(stick, scroller.scrollHeight - top - scroller.clientHeight, top, lastTop);
+    lastTop = top;
     setAway(!stick);
   };
-  createEffect(() => {
-    const last = ctrl.state.items[ctrl.state.items.length - 1];
-    void (last && "text" in last ? (last as any).text : last);
-    void ctrl.state.items.length;
-    if (stick) queueMicrotask(() => {
-      if (!scroller) return;
-      scroller.scrollTop = scroller.scrollHeight;
+  // Sizes, not text: a tool's output, a row first painted at its real height and a composer growing
+  // all move the bottom without any text changing.
+  onMount(() => {
+    const follow = new ResizeObserver(() => {
+      if (stick) scroller.scrollTop = scroller.scrollHeight;
       schedulePinned();
     });
+    follow.observe(scroller);
+    follow.observe(scroller.firstElementChild!);
+    onCleanup(() => follow.disconnect());
   });
 
   /** A smooth scroll on its way to an item. Its first steps, still near the bottom, say nothing about
@@ -419,12 +424,6 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
     clearTimeout(flashTimer);
   });
 
-  /** A thumbnail came in: the rows below it moved, and the bottom with them. */
-  const onImageLoad = () => {
-    if (stick && !jump) scroller.scrollTop = scroller.scrollHeight;
-    schedulePinned();
-  };
-
   const toBottom = () => {
     stopJump();
     stick = true;
@@ -446,6 +445,13 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
     };
     bottomFrame = requestAnimationFrame(step);
   };
+  // A chat opens at its end, with what it already has and again once it is up to date. One scroll does not get there: rows
+  // not painted yet only estimate their height. A saved reply being shown decides the position itself.
+  const openAtEnd = () => {
+    if (stick && ctrl.state.items.length && bookmarks.pendingReveal()?.sessionId !== props.sessionId) toBottom();
+  };
+  onMount(openAtEnd);
+  createEffect(on(transcript.whole, (whole) => whole && openAtEnd()));
   // A saved reply asks to be shown: looked up once this mount has the whole transcript, whether this
   // chat was open already or was only just mounted for it.
   createEffect(() => {
@@ -535,6 +541,9 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
           <Show when={!showAll() && ctrl.state.items.length > RENDER_WINDOW}>
             <button class="btn chat-earlier" onClick={() => setShowAll(true)}>{t("Show {n} earlier items", { n: ctrl.state.items.length - RENDER_WINDOW })}</button>
           </Show>
+          <Show when={!ctrl.state.ready && ctrl.state.items.length === 0}>
+            <div class="muted" style={{ "text-align": "center" }} data-chat-loading>{t("Loading the conversation…")}</div>
+          </Show>
           <Show when={ctrl.state.ready && ctrl.state.items.length === 0}>
             <div class="muted" style={{ "text-align": "center" }}>
               {t("{agent} chat · {project}. Ask anything — tools, diffs and approvals appear inline.", { agent: meta().label, project: props.project.name })}
@@ -562,7 +571,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                             <Show when={u.from}><span class="msg-time">{t("from {device}", { device: u.from! })}</span></Show>
                             <Stamp at={u.at} />
                           </div>
-                          <Show when={u.images?.length}><UserImages images={u.images!} pending={u.pending} root={() => scroller} onLoad={onImageLoad} /></Show>
+                          <Show when={u.images?.length}><UserImages images={u.images!} pending={u.pending} root={() => scroller} onLoad={schedulePinned} /></Show>
                           <Show when={u.text}>
                             <div class="msg-user" style={{ opacity: u.pending ? 0.7 : 1 }}>
                               <For each={linkifyText(u.text)}>

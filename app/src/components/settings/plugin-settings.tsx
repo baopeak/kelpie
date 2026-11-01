@@ -5,6 +5,7 @@ import { For, Show, createSignal, onMount } from "solid-js";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealEntry } from "../../lib/ipc";
 import { msg, t, errorText } from "../../lib/i18n";
+import { LoadBar } from "../load-bar";
 import {
   loadPlugins, pluginApprove, pluginCreate, pluginDir, pluginInstallFolder, pluginInstallGit, pluginRemove, plugins,
   type PluginInfo, type PluginManifest,
@@ -107,6 +108,7 @@ export function PluginSettings() {
 
   return (
     <>
+      <LoadBar when={busy()} />
       <SettingRow id="plugins" wide>
         <div class="plugin-list">
           <Show when={plugins().length} fallback={<div class="muted-inline">{t("No plugins installed.")}</div>}>

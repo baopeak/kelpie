@@ -20,6 +20,8 @@
   --accent-strong: #f08a55;
   --working: #18a999;
   --on-working: #141823;
+  /* Load bars (load-bar.tsx): the work-in-progress hue, so "running" reads the same everywhere. */
+  --progress: var(--working);
   --waiting: #f5b53f;
   --idle: #3fae6a;
   --exited: #5c6370;
@@ -151,6 +153,8 @@
 :root[data-density="compact"] .session-row { padding: 2px 8px; }
 :root[data-density="compact"] .session-text .model { display: none; }
 :root[data-density="compact"] .tabbar { height: 32px; }
+:root[data-density="compact"] .pane-header { height: 30px; }
+:root[data-density="compact"] .pane-header .icon-btn { width: 24px; height: 24px; }
 :root[data-density="compact"] .history-row { padding: 3px 12px; }
 :root[data-density="compact"] .list-row { padding: 2px 12px; }
 :root[data-density="compact"] .panel-tabs { height: 32px; }
@@ -321,6 +325,8 @@ input, textarea, select { font: inherit; color: var(--text); }
 .tab:hover { background: var(--bg-hover); color: var(--text); }
 .tab.active { background: var(--term-bg); color: var(--text); border-color: var(--border); box-shadow: inset 0 2px 0 var(--accent); }
 .tab.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: var(--term-bg); }
+/* A page an agent opened that has not been looked at yet. */
+.tab.fresh { color: var(--text); background: var(--accent-soft); box-shadow: inset 0 2px 0 var(--accent); }
 .tab .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab .close { opacity: 0; width: 20px; height: 20px; }
 .tab:not(.active):not(:hover):not(:focus-within) .close { display: none; }
@@ -362,9 +368,10 @@ input, textarea, select { font: inherit; color: var(--text); }
 .multi .pane-header { background: color-mix(in srgb, var(--pane-color) 5%, var(--bg-elev)); box-shadow: inset 0 2px 0 color-mix(in srgb, var(--pane-color) 30%, transparent); transition: background .15s, color .15s; }
 .multi .pane.focused .pane-header { background: color-mix(in srgb, var(--pane-color) 13%, var(--bg-elev)); box-shadow: inset 0 2px 0 var(--pane-color); color: var(--text); }
 .multi .pane.focused .pane-header .title { font-weight: 600; }
-.pane-header { height: 28px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 10px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+.pane-header { height: 34px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 10px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); background: var(--bg-elev); }
 .pane-header .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pane-header .icon-btn { width: 22px; height: 22px; }
+/* Pane buttons are read at a glance on large screens: 28 px targets, 16 px icons. */
+.pane-header .icon-btn { width: 28px; height: 28px; border-radius: 6px; }
 .pane-body { flex: 1; position: relative; min-height: 0; }
 .term-wrap { position: absolute; inset: 0; padding: 8px 4px 4px 12px; background: var(--terminal-bg, var(--term-bg)); }
 .term-host { width: 100%; height: 100%; }
@@ -412,7 +419,7 @@ input, textarea, select { font: inherit; color: var(--text); }
 .panel-tabs .ptab { flex: none; white-space: nowrap; padding: 5px 10px; border-radius: 6px; cursor: pointer; color: var(--text-dim); font-size: 12px; border: 0; background: transparent; }
 .panel-tabs .ptab.active { background: var(--bg-active); color: var(--text); }
 .panel-tabs .spacer { flex: 1; }
-.panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 
 /* file tree (virtualized) */
 .tree { flex: 1; overflow: auto; position: relative; outline: none; }
@@ -522,7 +529,7 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .chip { font-size: 10.5px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border-strong); color: var(--text-dim); }
 .chip.project-chip { border-color: var(--kc); color: color-mix(in oklab, var(--kc) var(--tint-mix), var(--text)); }
 
-.modal { width: min(620px, 94vw); background: var(--bg-elev-2); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: 0 30px 80px rgb(var(--shadow-rgb) / calc(.6 * var(--shadow-k))); padding: 20px 22px; display: flex; flex-direction: column; gap: 14px; max-height: 80vh; overflow: auto; }
+.modal { position: relative; width: min(620px, 94vw); background: var(--bg-elev-2); border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: 0 30px 80px rgb(var(--shadow-rgb) / calc(.6 * var(--shadow-k))); padding: 20px 22px; display: flex; flex-direction: column; gap: 14px; max-height: 80vh; overflow: auto; }
 .modal h2 { margin: 0; font-size: 16px; }
 .form-row { display: grid; grid-template-columns: 170px 1fr; gap: 12px; align-items: center; }
 .form-row label { color: var(--text-dim); }
@@ -851,7 +858,7 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 /* ---------- pane tools ---------- */
 .pane-tools { position: absolute; top: 6px; right: 10px; z-index: 8; display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgba(22,26,35,.92); border: 1px solid var(--border-strong); opacity: 0; transition: opacity .12s; pointer-events: none; }
 .pane:hover > .pane-tools { opacity: 1; pointer-events: auto; }
-.pane-tools .icon-btn { width: 24px; height: 24px; }
+.pane-tools .icon-btn { width: 28px; height: 28px; }
 
 /* ---------- sidebar (rich) ---------- */
 .search-btn { margin: 0 10px 6px; height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text-faint); cursor: pointer; }
@@ -1001,6 +1008,12 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .kelpie-config { display: flex; flex-direction: column; gap: 6px; }
 .kelpie-config-body { max-height: 140px; overflow: auto; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); font-size: 12px; color: var(--text-dim); user-select: text; }
 /* ---------- tips ---------- */
+/* Hover hints (hover-hints.tsx): what an icon button does, and its shortcut, a moment after hovering. */
+.hover-hint { position: fixed; z-index: 70; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; max-width: 320px; padding: 5px 9px; border-radius: 7px; background: var(--bg-elev-2); border: 1px solid var(--border-strong); box-shadow: 0 8px 24px rgb(var(--shadow-rgb) / calc(.35 * var(--shadow-k))); color: var(--text); font-size: 12px; line-height: 1.35; white-space: pre-line; pointer-events: none; animation: hint-in .12s ease-out; }
+.hover-hint.above { transform: translate(-50%, -100%); }
+.hover-hint kbd { flex: none; font: 11px var(--font-mono); color: var(--text-dim); background: var(--bg); border: 1px solid var(--border-strong); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+@keyframes hint-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .hover-hint { animation: none; } }
 .tip { position: fixed; z-index: 60; width: 280px; background: var(--bg-elev-2); border: 1px solid var(--accent); border-radius: 10px; padding: 12px 14px; box-shadow: 0 14px 40px rgb(var(--shadow-rgb) / calc(.45 * var(--shadow-k))); display: flex; flex-direction: column; gap: 6px; }
 .tip-title { font-weight: 600; color: var(--text); }
 .tip-text { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; }
@@ -1013,6 +1026,8 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .link-btn.danger { color: var(--danger); }
 .check-label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-dim); white-space: nowrap; cursor: pointer; }
 .statusbar .item.on { color: var(--accent); }
+/* Muted desktop notifications stay noticeable, so the quiet is never a surprise. */
+.statusbar .item.muted { color: var(--waiting); }
 .statusbar .item .badge { margin-left: -2px; }
 
 /* Changes panel */
@@ -1267,7 +1282,7 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 
 /* ---------- browser pane ---------- */
 .browser-pane { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--term-bg); }
-.browser-bar { flex: none; display: flex; align-items: center; gap: 3px; padding: 4px 6px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+.browser-bar { position: relative; flex: none; display: flex; align-items: center; gap: 3px; padding: 4px 6px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
 .browser-bar .icon-btn { width: 26px; height: 26px; }
 .browser-bar .icon-btn.active { color: var(--accent); background: var(--bg-active); }
 .browser-address { flex: 1; min-width: 0; }
@@ -1437,15 +1452,11 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .drawer-foot { padding: 10px 14px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
 .drawer-foot .btn { flex: 1; justify-content: center; }
 
-/* Ports a session's programs listen on (chips on the tab and the sidebar row) and the Processes panel. */
-.port-chips { display: inline-flex; gap: 3px; align-items: center; flex: none; }
-.port-chip, .port-more { font: 10.5px/15px var(--font-mono); padding: 0 5px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg-elev-2); color: var(--accent-strong); cursor: pointer; white-space: nowrap; }
+/* The Processes panel and the ports its programs listen on. */
+.port-chip { font: 10.5px/15px var(--font-mono); padding: 0 5px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg-elev-2); color: var(--accent-strong); cursor: pointer; white-space: nowrap; }
 .port-chip:hover { background: var(--accent-soft); border-color: var(--accent); }
-.port-more { cursor: default; color: var(--text-dim); }
-.port-chips.stale { opacity: .55; }
-.port-chips.stale .port-chip { color: var(--text-dim); border-style: dashed; }
 .proc-panel { font-size: 12px; padding: 6px 8px 12px; overflow: auto; height: 100%; }
-.proc-head, .proc-row { display: grid; grid-template-columns: minmax(70px, 1fr) 46px 56px 38px minmax(0, auto) 40px; gap: 6px; align-items: center; padding: 2px 4px; }
+.proc-head, .proc-row { display: grid; grid-template-columns: minmax(0, 1fr) 38px 44px 30px 54px 30px; gap: 4px; align-items: center; padding: 2px 4px; }
 .proc-head { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }
 .proc-session { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
 .proc-session header { display: flex; align-items: center; gap: 6px; padding: 2px 4px; }

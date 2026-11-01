@@ -8,12 +8,13 @@ import { relTimeShort } from "../lib/platform";
 import { setCovering } from "../lib/overlays";
 import { errorText, t } from "../lib/i18n";
 import {
-  artifactKind, inProject, listTurns, projectPrefix, setTurnSnapshots, sourceNote, turnFiles, turnOwners, turnStats, undoPlan, undoTurn, visibleTurns,
+  artifactKind, attemptUndo, inProject, listTurns, projectPrefix, safelyTicked, setTurnSnapshots, sourceNote, turnFiles, turnOwners, turnStats, undoPlan, undoTurn, visibleTurns,
   type PlanItem, type TurnFile, type TurnRecord, type UndoPlan,
 } from "../lib/checkpoints";
 import { Icon } from "./icons";
 import type { Project, SessionInfo } from "../lib/types";
 import "./turn-timeline.css";
+import { LoadBar } from "./load-bar";
 
 const filesText = (n: number) => (n === 1 ? t("{n} file", { n }) : t("{n} files", { n }));
 
@@ -88,6 +89,7 @@ export default function TurnTimeline(props: { project: Project }) {
 
   return (
     <div class="turns">
+      <LoadBar when={turns.loading} />
       <div class="explorer-tools">
         <Show when={sessions().length} fallback={<div class="muted">{t("No agent sessions in this project yet")}</div>}>
           <select class="text-input" value={session()?.id} onChange={(e) => setChoice(e.currentTarget.value)} title={t("Session")}>
@@ -198,6 +200,7 @@ function TurnRow(props: { project: Project; session: SessionInfo; rec: TurnRecor
         </div>
       </div>
       <Show when={open()}>
+        <LoadBar when={files.loading} />
         <div class="turn-files">
           <Show when={files()} fallback={<div class="muted">{files.loading ? t("Loading…") : t("Nothing to show")}</div>}>
             {(f) => (
@@ -241,6 +244,7 @@ function OwnersList(props: { project: Project; session: SessionInfo; version: nu
   });
   return (
     <>
+      <LoadBar when={owners.loading} />
       <div class="explorer-tools"><input class="text-input" placeholder={t("Filter files")} value={query()} onInput={(e) => setQuery(e.currentTarget.value)} /></div>
       <For each={rows()} fallback={<div class="muted">{owners.loading ? t("Loading…") : t("No files touched by agents yet")}</div>}>
         {(row) => (
@@ -280,8 +284,7 @@ export function UndoDialog(props: { sessionId: string; sessionName: string; n: n
     try {
       const p = await undoPlan(props.sessionId, props.n);
       setPlan(p);
-      // The safe files start ticked; risky ones wait for a deliberate tick.
-      setPicked(new Set(p.items.filter((i) => i.action !== "skip" && i.state === "clean").map((i) => i.path)));
+      setPicked(safelyTicked(p));
     } catch (e) {
       setError(errorText(e));
     }
@@ -301,21 +304,16 @@ export function UndoDialog(props: { sessionId: string; sessionName: string; n: n
   const run = async () => {
     setBusy(true);
     setError(null);
-    try {
-      const paths = chosen().map((i) => i.path);
-      const confirm = chosen().filter(risky).map((i) => i.path);
-      const r = await undoTurn(props.sessionId, props.n, paths, confirm);
-      if (!r.applied) {
-        setError(t("Some files need a decision: reopen the preview."));
-        setBusy(false);
-        return;
-      }
-      store.notify(t("Undid turn #{n}: {files}", { n: props.n, files: filesText(r.files?.length ?? 0) }));
+    const r = await attemptUndo({ plan: () => undoPlan(props.sessionId, props.n), undo: (paths, confirm) => undoTurn(props.sessionId, props.n, paths, confirm) }, items(), picked());
+    if (r.kind === "applied") {
+      store.notify(t("Undid turn #{n}: {files}", { n: props.n, files: filesText(r.result.files?.length ?? 0) }));
       props.onClose(true);
-    } catch (e) {
-      setError(errorText(e));
-      setBusy(false);
+      return;
     }
+    if (r.plan) setPlan(r.plan);
+    setPicked(r.picked);
+    setError(r.kind === "refused" ? t("Some files changed: check the list again. Only the safe ones are ticked.") : t("The undo stopped: {error}. Files already put back show as done in the list.", { error: errorText(r.error) }));
+    setBusy(false);
   };
 
   const verb = (i: PlanItem) => (i.action === "delete" ? t("Delete") : i.action === "restore" ? t("Restore") : t("Skip"));
@@ -325,7 +323,9 @@ export function UndoDialog(props: { sessionId: string; sessionName: string; n: n
       const r = i.reason ?? "";
       if (r.startsWith("changed between")) return t("Changed between turns, before this turn started");
       if (r.startsWith("changed before")) return t("Changed before this turn started, not by it");
+      if (r.startsWith("could not be read just now")) return t("Could not be read just now: another program may hold it");
       if (r.startsWith("could not be read")) return t("Could not be read when a snapshot was taken");
+      if (r.startsWith("a file now stands")) return t("A file now stands where its folder was");
       if (r.startsWith("removed before")) return t("Removed before this turn started");
       return t("Changed since this turn");
     }
@@ -337,6 +337,7 @@ export function UndoDialog(props: { sessionId: string; sessionName: string; n: n
     <div class="overlay" onPointerDown={(e) => e.target === e.currentTarget && !busy() && props.onClose(false)}>
       {/* Focused on open, so keys reach the dialog and not the composer or pane behind it. */}
       <div class="modal turn-undo" tabIndex={-1} ref={(el) => queueMicrotask(() => el.focus())} onKeyDown={(e) => e.key === "Escape" && !busy() && props.onClose(false)}>
+        <LoadBar when={(!plan() && !error()) || busy()} />
         <h2>{t("Undo turn #{n} of {name}?", { n: props.n, name: props.sessionName })}</h2>
         <span class="muted-inline">{t("These files go back to how they were before the turn. Your index, branch and other files are not touched.")}</span>
         <span class="muted-inline">{t("Files come back with the line endings your git settings give them, which can differ from before.")}</span>

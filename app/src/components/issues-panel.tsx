@@ -14,6 +14,7 @@ import {
 } from "../lib/integrations";
 import type { Project } from "../lib/types";
 import { t, errorText } from "../lib/i18n";
+import { LoadBar } from "./load-bar";
 
 const LABEL: Record<IssueSource, string> = { linear: "Linear", jira: "Jira", gitlab: "GitLab" };
 
@@ -61,6 +62,7 @@ export function IssuesPanel(props: { project: Project }) {
 
   return (
     <div class="issues-panel">
+      <LoadBar when={issues.loading} />
       <Show
         when={sources().length}
         fallback={

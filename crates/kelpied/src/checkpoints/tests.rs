@@ -252,6 +252,561 @@ fn undoing_turn_two_keeps_turn_three() {
     assert_eq!(records(&cp, "s1").last().unwrap().paths, ["a.txt"]);
 }
 
+fn stamp_index(repo: &Path, time: std::time::SystemTime) {
+    let index = g(repo, &["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+    std::fs::File::options().write(true).open(index).unwrap().set_modified(time).unwrap();
+}
+
+/// A file's time, with the index stamped as written in a later second, as in any repository that
+/// has settled: git only compares contents for files as new as the index, and trusts this one's stat
+/// data from here on, however quickly the test got here.
+fn settled_time(repo: &Path, name: &str) -> std::time::SystemTime {
+    let time = std::fs::metadata(repo.join(name)).unwrap().modified().unwrap();
+    stamp_index(repo, time + AGES);
+    time
+}
+
+/// Far enough from the fixture's files for them to count as one moment.
+const AGES: Duration = Duration::from_secs(60);
+
+/// Edits files with the same number of bytes while git still compares contents, because the index is
+/// as new as they are; the function returned then moves the index's time on, after which only reading
+/// the files can tell.
+fn edit_within_the_second(repo: &Path, edits: &[(&str, &str)]) -> impl Fn() {
+    let time = std::fs::metadata(repo.join(edits[0].0)).unwrap().modified().unwrap();
+    stamp_index(repo, time - AGES);
+    for (name, text) in edits {
+        let cached = std::fs::metadata(repo.join(name)).unwrap().modified().unwrap();
+        write_at(repo, name, text, cached);
+    }
+    let repo = repo.to_path_buf();
+    move || stamp_index(&repo, time + AGES)
+}
+
+#[test]
+fn a_second_passing_before_the_undo_does_not_make_it_skip_the_file() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    let second_passes = edit_within_the_second(&repo, &[("b.txt", "turn two\n")]);
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert_eq!(item(&plan_of(&cp, "s1", 1), "b.txt")["action"], "restore");
+    second_passes();
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "b.txt"), "b.txt v0\n");
+}
+
+#[test]
+fn a_second_passing_before_the_undo_does_not_lift_its_refusal() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    strict(&cp);
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    let second_passes = edit_within_the_second(&repo, &[("a.txt", "turn one\n"), ("b.txt", "user fix\n")]);
+    cp.run_job(&job("s1", &repo, Kind::Turn, 300, 400)).unwrap();
+    cp.run_job(&job("s1", &repo, Kind::Start, 300, 300)).unwrap();
+    assert!(plan_of(&cp, "s1", 1).iter().all(|i| i["state"] == "modified"));
+    second_passes();
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], false);
+    assert_eq!(read(&repo, "b.txt"), "user fix\n");
+}
+
+#[test]
+fn a_second_passing_between_turns_does_not_put_an_older_file_into_the_next_turn() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    sleep_to_next_second();
+    write(&repo, "x.txt", "one\n");
+    g(&repo, &["add", "x.txt"]);
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "x.txt", "two\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    sleep_to_next_second();
+    write(&repo, "b.txt", "turn two\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 30, 40)).unwrap();
+    assert_eq!(records(&cp, "s1").last().unwrap().paths, ["b.txt"], "only turn two's file");
+}
+
+#[test]
+fn only_a_copy_of_the_index_that_trusts_nothing_changes_its_time() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    let top = find_top(&repo).unwrap();
+    let handle = cp.repo(&top, &repo_key(&top)).unwrap();
+    let time = std::fs::metadata(&handle.index).unwrap().modified().unwrap() - AGES;
+    stamp_index(&repo, time);
+    let tmp = cp.tmp_index("s1");
+    copy_index(&handle, &tmp, StatCache::Trusted).unwrap();
+    assert_eq!(std::fs::metadata(&tmp).unwrap().modified().unwrap(), time, "made later, it would lose git's protection");
+    copy_index(&handle, &tmp, StatCache::Distrusted).unwrap();
+    assert!(std::fs::metadata(&tmp).unwrap().modified().unwrap() < std::time::UNIX_EPOCH + Duration::from_secs(60));
+    assert_eq!(std::fs::read(&tmp).unwrap(), std::fs::read(&handle.index).unwrap());
+}
+
+/// Rewrites a file and puts its modification time back: with the same size, git's stat cache cannot
+/// tell (always on Windows, elsewhere as long as the change time stays in the same second), so a
+/// snapshot does not see it either. An undo must.
+fn write_at(repo: &Path, name: &str, text: &str, time: std::time::SystemTime) {
+    write(repo, name, text);
+    std::fs::File::options().write(true).open(repo.join(name)).unwrap().set_modified(time).unwrap();
+}
+
+#[test]
+fn a_same_size_edit_after_the_turn_is_never_overwritten_by_undo() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    let cached = settled_time(&repo, "b.txt");
+    // Another second, whatever the clock did: on a git that compares whole seconds a plain write here
+    // would still match its entry, and the turn would have no snapshot.
+    write_at(&repo, "b.txt", "turn one\n", cached + Duration::from_secs(2));
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    // The second turn puts the committed text back, so the file looks like the index again...
+    write_at(&repo, "b.txt", "b.txt v0\n", cached);
+    cp.run_job(&job("s1", &repo, Kind::Turn, 30, 40)).unwrap();
+    // ...and a person's edit that leaves size and time alone must not pass for that text.
+    write_at(&repo, "b.txt", "user fix\n", cached);
+    let refused = undo(&cp, "s1", 2, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, "b.txt"), "user fix\n", "the person's edit survives");
+    assert_eq!(refused["applied"], false, "{refused}");
+    assert_eq!(item(&plan_of(&cp, "s1", 2), "b.txt")["state"], "modified");
+    // A person who says so still gets the undo.
+    let done = undo(&cp, "s1", 2, None, &["b.txt".to_string()], &IDLE).unwrap();
+    assert_eq!(done["applied"], true, "{done}");
+    assert_eq!(read(&repo, "b.txt"), "turn one\n");
+}
+
+fn sleep_to_next_second() {
+    let into = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_millis();
+    std::thread::sleep(Duration::from_millis(u64::from(1000 - into)));
+}
+
+/// Where git keeps only whole seconds of a file's times, an edit in the second the index was written
+/// is protected by nothing but the index file's own timestamp, and a copy of the index must not
+/// lose that protection when it is made a second later.
+#[test]
+fn a_same_size_edit_in_the_second_of_the_index_is_seen_after_that_second() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    sleep_to_next_second();
+    write(&repo, "x.txt", "one\n");
+    g(&repo, &["add", "x.txt"]);
+    write(&repo, "x.txt", "two\n");
+    sleep_to_next_second();
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let n = records(&cp, "s1").last().unwrap().n;
+    assert_eq!(cp.blob("s1", n, "x.txt", false, false).unwrap()["text"], "two\n");
+    assert_eq!(read(&repo, "x.txt"), "two\n");
+}
+
+#[test]
+fn a_file_outside_the_sparse_checkout_does_not_count_as_removed() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    g(&repo, &["update-index", "--skip-worktree", "d.txt"]);
+    std::fs::remove_file(repo.join("d.txt")).unwrap();
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "a.txt", "edited\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let recs = records(&cp, "s1");
+    assert_eq!(recs[1].paths, ["a.txt"]);
+    assert_eq!(cp.blob("s1", recs[1].n, "d.txt", false, false).unwrap()["text"], "d.txt v0\n", "still part of the snapshot");
+}
+
+#[test]
+fn a_file_with_converted_line_endings_is_not_a_change_of_every_snapshot() {
+    let repo = fixture();
+    // As a checkout with `core.autocrlf` leaves it: CRLF in the folder, LF in the repository.
+    g(&repo, &["config", "core.autocrlf", "true"]);
+    write(&repo, "a.txt", "a.txt v0\r\n");
+    g(&repo, &["-c", "core.autocrlf=true", "add", "a.txt"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert_eq!(records(&cp, "s1").len(), 1, "nothing changed, nothing recorded");
+    assert_eq!(g(&repo, &["rev-parse", &format!("{}:a.txt", records(&cp, "s1")[0].commit)]), g(&repo, &["rev-parse", "HEAD:a.txt"]));
+    // And an undo, which reads the file for real, does not take the conversion for somebody's edit.
+    write(&repo, "a.txt", "turn one, a longer line\r\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 30, 40)).unwrap();
+    assert_eq!(item(&plan_of(&cp, "s1", 1), "a.txt")["state"], "clean");
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "a.txt"), "a.txt v0\r\n");
+}
+
+#[test]
+fn a_save_between_the_undos_read_and_its_writes_is_not_overwritten() {
+    // By its size, by its time alone (same size, another time), and in a file the turn added.
+    for (name, turn_text, same_size) in [("b.txt", "a turn's longer line\n", false), ("b.txt", "a turn's longer line\n", true), ("new.txt", "made by the turn\n", false)] {
+        let repo = fixture();
+        let (cp, _) = store(&scratch());
+        cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+        write(&repo, name, turn_text);
+        cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+        let saved = if same_size { turn_text.to_uppercase() } else { "a person's save\n".to_string() };
+        let (saved_in, file, text) = (repo.clone(), name.to_string(), saved.clone());
+        *cp.before_writing.lock() = Some(Box::new(move || {
+            let time = std::fs::metadata(saved_in.join(&file)).unwrap().modified().unwrap();
+            write_at(&saved_in, &file, &text, if same_size { time + Duration::from_secs(5) } else { time });
+        }));
+        let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+        assert_eq!(read(&repo, name), saved, "{name} survives");
+        assert_eq!(refused["applied"], false, "{refused}");
+        assert_eq!(refused["needs_confirmation"][0]["reason"], "changed while the undo was starting");
+        // The next attempt reads it again, and decides on what is there now.
+        assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], false);
+        assert_eq!(undo(&cp, "s1", 1, None, &[name.to_string()], &IDLE).unwrap()["applied"], true);
+    }
+}
+
+#[test]
+fn a_copy_of_the_index_fails_when_its_time_did_not_take() {
+    let asked = std::time::UNIX_EPOCH + Duration::from_secs(1);
+    assert!(stamp_held(asked, asked));
+    assert!(stamp_held(asked, std::time::UNIX_EPOCH + Duration::from_secs(315_532_800)), "a filesystem that starts in 1980 is old enough");
+    assert!(!stamp_held(asked, std::time::SystemTime::now()), "a filesystem that ignored it");
+    let recent = std::time::SystemTime::now() - AGES;
+    assert!(stamp_held(recent, recent + Duration::from_secs(2)), "rounded up by a coarse filesystem");
+    assert!(!stamp_held(recent, std::time::SystemTime::now()));
+
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "a.txt", "turn one, a longer line\n");
+    write(&repo, "new.txt", "made by the turn\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let top = find_top(&repo).unwrap();
+    let handle = cp.repo(&top, &repo_key(&top)).unwrap();
+    let tmp = cp.tmp_index("s1");
+    STAMP_IGNORED.with(|s| s.set(true));
+    assert!(copy_index(&handle, &tmp, StatCache::Distrusted).is_err());
+    assert!(!tmp.exists(), "no copy stays behind");
+    // An undo stops before it changes anything, the file it would delete included.
+    assert!(undo(&cp, "s1", 1, None, &[], &IDLE).is_err());
+    assert_eq!(read(&repo, "a.txt"), "turn one, a longer line\n");
+    assert_eq!(read(&repo, "new.txt"), "made by the turn\n");
+    // And a snapshot on an index whose time the copy did not get is not taken.
+    stamp_index(&repo, std::time::SystemTime::now() - AGES);
+    write(&repo, "a.txt", "turn two, another longer line\n");
+    assert!(cp.run_job(&job("s1", &repo, Kind::Turn, 30, 40)).is_err());
+    STAMP_IGNORED.with(|s| s.set(false));
+}
+
+#[test]
+fn a_file_the_turn_stopped_tracking_and_ignored_is_not_overwritten_by_undo() {
+    let repo = fixture();
+    write(&repo, ".env", "SECRET=old\n");
+    g(&repo, &["add", ".env"]);
+    g(&repo, &["commit", "-qm", "env"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    g(&repo, &["rm", "-q", "--cached", ".env"]);
+    write(&repo, ".gitignore", "*.log\n.env\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    // Left alone, it already is what it was before the turn.
+    assert_eq!(item(&plan_of(&cp, "s1", 1), ".env")["action"], "skip");
+    write(&repo, ".env", "SECRET=a person's new value\n");
+    assert_eq!(item(&plan_of(&cp, "s1", 1), ".env")["state"], "modified");
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, ".env"), "SECRET=a person's new value\n");
+    assert_eq!(refused["applied"], false, "{refused}");
+}
+
+#[test]
+fn a_file_standing_where_the_turns_deleted_folder_was_is_not_overwritten_by_undo() {
+    let repo = fixture();
+    write(&repo, "sub/a.txt", "a v0\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "sub"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    std::fs::remove_dir_all(repo.join("sub")).unwrap();
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    write(&repo, "sub", "a person's file\n");
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, "sub"), "a person's file\n");
+    assert_eq!(refused["applied"], false, "{refused}");
+    assert_eq!(refused["needs_confirmation"][0]["reason"], "a file now stands where its folder was");
+}
+
+#[test]
+fn a_persons_files_in_the_folder_that_replaced_a_file_are_not_lost_to_undo() {
+    let repo = fixture();
+    write(&repo, "foo", "a file\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "foo"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    std::fs::remove_file(repo.join("foo")).unwrap();
+    write(&repo, "foo/bar", "inside\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    write(&repo, "foo/ignored.log", "a person's log\n");
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, "foo/ignored.log"), "a person's log\n");
+    assert_eq!(read(&repo, "foo/bar"), "inside\n");
+    assert_eq!(refused["applied"], false, "{refused}");
+}
+
+#[test]
+fn a_file_and_a_folder_that_swapped_places_go_back_without_an_error() {
+    for (before, after) in [("foo", "foo/bar"), ("foo/bar", "foo")] {
+        let repo = fixture();
+        write(&repo, before, "before\n");
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "before"]);
+        let (cp, _) = store(&scratch());
+        cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+        std::fs::remove_dir_all(repo.join("foo")).or_else(|_| std::fs::remove_file(repo.join("foo"))).unwrap();
+        write(&repo, after, "after\n");
+        cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+        assert!(plan_of(&cp, "s1", 1).iter().all(|i| i["state"] == "clean"), "the turn's own swap is not a person's file");
+        assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+        assert_eq!(read(&repo, before), "before\n");
+    }
+}
+
+#[test]
+fn undoing_a_case_only_rename_brings_the_file_back_under_its_old_name() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    g(&repo, &["mv", "a.txt", "A.txt"]);
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    let names: Vec<String> = std::fs::read_dir(&repo).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.contains(&"a.txt".to_string()) && !names.contains(&"A.txt".to_string()), "{names:?}");
+    assert_eq!(read(&repo, "a.txt"), "a.txt v0\n");
+}
+
+#[test]
+fn a_folder_the_turn_made_a_submodule_does_not_stop_the_rest_of_the_undo() {
+    let repo = fixture();
+    write(&repo, "lib/x", "x v0\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "lib"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    g(&repo, &["rm", "-q", "-r", "--cached", "lib"]);
+    write(&repo, "lib/x", "x in another repository\n");
+    let lib = repo.join("lib");
+    g(&lib, &["init", "-q", "-b", "main"]);
+    g(&lib, &["add", "-A"]);
+    g(&lib, &["commit", "-qm", "inner"]);
+    write(&repo, "a.txt", "turn one, a longer line\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let items = plan_of(&cp, "s1", 1);
+    assert_eq!(item(&items, "lib")["action"], "skip");
+    assert_eq!(item(&items, "lib/x")["action"], "skip", "it is not this repository's to write");
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "a.txt"), "a.txt v0\n");
+    assert_eq!(read(&repo, "lib/x"), "x in another repository\n");
+}
+
+#[test]
+fn a_file_outside_the_sparse_checkout_is_read_by_undo() {
+    let repo = fixture();
+    write(&repo, "in/a.txt", "a v0\n");
+    write(&repo, "out/b.txt", "b v0\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "folders"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "out/b.txt", "the turn, a longer line\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "the turn"]);
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    g(&repo, &["sparse-checkout", "set", "in"]);
+    // Absent, as a sparse checkout leaves it: unknown, so asked about.
+    assert_eq!(read(&repo, "out/b.txt"), "<missing>");
+    assert_eq!(item(&plan_of(&cp, "s1", 1), "out/b.txt")["state"], "modified");
+    // Present with a person's text: not to be overwritten.
+    write(&repo, "out/b.txt", "a person's copy\n");
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, "out/b.txt"), "a person's copy\n");
+    assert_eq!(refused["applied"], false, "{refused}");
+}
+
+#[test]
+fn an_undo_works_in_a_repository_without_a_commit() {
+    let repo = scratch().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    g(&repo, &["init", "-q", "-b", "main"]);
+    g(&repo, &["config", "core.autocrlf", "false"]);
+    write(&repo, "a.txt", "a v0\n");
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "a.txt", "the turn, a longer line\n");
+    write(&repo, "new.txt", "made by the turn\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert!(plan_of(&cp, "s1", 1).iter().all(|i| i["state"] == "clean"));
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "a.txt"), "a v0\n");
+    assert_eq!(read(&repo, "new.txt"), "<missing>");
+}
+
+/// A symbolic link to a folder or a file, or false where this user may not make one (Windows without
+/// developer mode): what needs one is then not checked here.
+fn link_to(target: &str, link: &Path, folder: bool) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = folder;
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        if folder {
+            std::os::windows::fs::symlink_dir(target, link).is_ok()
+        } else {
+            std::os::windows::fs::symlink_file(target, link).is_ok()
+        }
+    }
+}
+
+#[test]
+fn a_link_the_turn_made_is_left_for_the_person_and_the_rest_goes_back() {
+    let repo = fixture();
+    g(&repo, &["config", "core.symlinks", "true"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    if !link_to("a.txt", &repo.join("made-link"), false) {
+        return;
+    }
+    write(&repo, "b.txt", "turn one, a longer line\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert_eq!(item(&plan_of(&cp, "s1", 1), "made-link")["action"], "skip");
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "b.txt"), "b.txt v0\n");
+    assert!(std::fs::symlink_metadata(repo.join("made-link")).is_ok(), "the link stays");
+}
+
+#[test]
+fn a_link_standing_where_the_turns_deleted_folder_was_is_not_followed_or_replaced() {
+    let repo = fixture();
+    g(&repo, &["config", "core.symlinks", "true"]);
+    write(&repo, "sub/a.txt", "a v0\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "sub"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    std::fs::remove_dir_all(repo.join("sub")).unwrap();
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let elsewhere = scratch();
+    std::fs::write(elsewhere.join("a.txt"), "elsewhere\n").unwrap();
+    if !link_to(&elsewhere.to_string_lossy(), &repo.join("sub"), true) {
+        return;
+    }
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(refused["applied"], false, "{refused}");
+    assert_eq!(std::fs::read_to_string(elsewhere.join("a.txt")).unwrap(), "elsewhere\n");
+    assert!(std::fs::symlink_metadata(repo.join("sub")).unwrap().file_type().is_symlink(), "the link stays");
+}
+
+#[test]
+fn an_undo_plan_reads_only_the_turns_files() {
+    let repo = fixture();
+    // A clean filter runs for every file git reads, and says which.
+    write(&repo, ".gitattributes", "*.txt filter=probe\n");
+    g(&repo, &["config", "filter.probe.clean", "sh -c 'echo \"$0\" >> filter.log; cat' %f"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "a.txt", "turn one, a longer line\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let _ = std::fs::remove_file(repo.join("filter.log"));
+    assert_eq!(item(&plan_of(&cp, "s1", 1), "a.txt")["state"], "clean");
+    // Which files, not how often: one `add` runs the filter once per file on Windows and twice on Linux and macOS.
+    let log = read(&repo, "filter.log");
+    let files: std::collections::BTreeSet<&str> = log.lines().collect();
+    assert_eq!(files.into_iter().collect::<Vec<_>>(), ["a.txt"]);
+}
+
+#[test]
+fn an_undo_works_while_another_file_is_in_conflict() {
+    let repo = fixture();
+    g(&repo, &["checkout", "-qb", "other"]);
+    write(&repo, "d.txt", "other side\n");
+    g(&repo, &["commit", "-qam", "other"]);
+    g(&repo, &["checkout", "-q", "main"]);
+    write(&repo, "d.txt", "this side\n");
+    g(&repo, &["commit", "-qam", "this"]);
+    // It stops with a conflict, which is the point: `g` would take that for a failure.
+    let _ = Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"]).arg(&repo).args(["merge", "other"]).output();
+    assert!(!g(&repo, &["ls-files", "-u"]).is_empty(), "the merge left a conflict");
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "a.txt", "turn one, a longer line\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "a.txt"), "a.txt v0\n");
+}
+
+#[test]
+fn files_gone_from_the_folder_do_not_stop_an_undo_plan() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    std::fs::remove_file(repo.join("d.txt")).unwrap();
+    write(&repo, "sub/new.txt", "new in the turn\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    // Gone from the folder and the turn's tree alike, and gone with a file in place of its folder.
+    std::fs::remove_dir_all(repo.join("sub")).unwrap();
+    write(&repo, "sub", "a file now\n");
+    let items = plan_of(&cp, "s1", 1);
+    assert_eq!((item(&items, "d.txt")["action"].as_str(), item(&items, "d.txt")["state"].as_str()), (Some("restore"), Some("clean")));
+    assert_eq!(item(&items, "sub/new.txt")["action"], "skip", "already as it was before the turn");
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "d.txt"), "d.txt v0\n");
+    assert_eq!(read(&repo, "sub"), "a file now\n");
+}
+
+#[test]
+fn a_lock_on_the_real_index_does_not_stop_an_undo() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "a.txt", "turn one, a longer line\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let lock = PathBuf::from(format!("{}.lock", g(&repo, &["rev-parse", "--path-format=absolute", "--git-path", "index"])));
+    std::fs::write(&lock, b"").unwrap();
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "a.txt"), "a.txt v0\n");
+    assert!(lock.exists(), "the user's git still holds it");
+}
+
+#[test]
+fn a_local_edit_under_assume_unchanged_is_not_overwritten_by_undo() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "b.txt", "turn one, a longer line\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    // The index holds what the turn left, and git is told not to look at the file again.
+    g(&repo, &["add", "b.txt"]);
+    g(&repo, &["update-index", "--assume-unchanged", "b.txt"]);
+    write(&repo, "b.txt", "a person's local setting\n");
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, "b.txt"), "a person's local setting\n");
+    assert_eq!(refused["applied"], false, "{refused}");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_file_that_cannot_be_read_now_does_not_pass_as_clean() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "a.txt", "turn one, a longer line\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    // What git would fall back on when it cannot read the file is what the turn left.
+    g(&repo, &["add", "a.txt"]);
+    let held = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(repo.join("a.txt")).unwrap();
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(refused["applied"], false, "{refused}");
+    assert_eq!(refused["needs_confirmation"][0]["reason"], "could not be read just now");
+    drop(held);
+    assert_eq!(read(&repo, "a.txt"), "turn one, a longer line\n");
+}
+
 #[test]
 fn a_file_changed_since_the_turn_needs_its_own_confirmation() {
     let repo = fixture();
@@ -507,18 +1062,26 @@ fn restored_paths_must_stay_inside_the_folder() {
 fn snapshot_cost() {
     let files: usize = std::env::var("KELPIE_CP_FILES").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
     let runs: usize = std::env::var("KELPIE_CP_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-    let repo = scratch().join("big");
-    std::fs::create_dir_all(&repo).unwrap();
-    g(&repo, &["init", "-q", "-b", "main"]);
-    g(&repo, &["config", "core.autocrlf", "false"]);
-    for i in 0..files {
-        write(&repo, &format!("src/m{}/f{i}.rs", i % 200), &format!("// file {i}\nfn f{i}() -> usize {{ {i} }}\n").repeat(8));
+    // How big the files are (each repeat is about 40 bytes): a snapshot reads all of them.
+    let repeats: usize = std::env::var("KELPIE_CP_REPEATS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    // A repository to reuse, so two builds can be compared on the same files.
+    let reused = std::env::var("KELPIE_CP_REPO").ok().map(PathBuf::from);
+    let repo = reused.clone().unwrap_or_else(|| scratch().join("big"));
+    if !repo.join(".git").exists() {
+        std::fs::create_dir_all(&repo).unwrap();
+        g(&repo, &["init", "-q", "-b", "main"]);
+        g(&repo, &["config", "core.autocrlf", "false"]);
+        for i in 0..files {
+            write(&repo, &format!("src/m{}/f{i}.rs", i % 200), &format!("// file {i}\nfn f{i}() -> usize {{ {i} }}\n").repeat(repeats));
+        }
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "big"]);
     }
-    g(&repo, &["add", "-A"]);
-    g(&repo, &["commit", "-qm", "big"]);
     let (cp, _) = store(&scratch());
+    // Its own session: the refs of an earlier run in a reused repository are not this one's.
+    let sid = format!("bench{}", std::process::id());
     let t = Instant::now();
-    cp.run_job(&job("bench", &repo, Kind::Baseline, 1, 1)).unwrap();
+    cp.run_job(&job(&sid, &repo, Kind::Baseline, 1, 1)).unwrap();
     println!("files {files}: baseline {} ms", t.elapsed().as_millis());
     let size = |repo: &Path| g(repo, &["count-objects", "-v"]).lines().filter(|l| l.starts_with("size:") || l.starts_with("size-pack:")).map(|l| l.split(':').nth(1).unwrap().trim().parse::<u64>().unwrap_or(0)).sum::<u64>();
     let before = size(&repo);
@@ -530,10 +1093,11 @@ fn snapshot_cost() {
     working_tree(&handle, &cp.tmp_index("probe")).unwrap();
     println!("add -A + write-tree: wall {} ms, cpu counted {} ms", t.elapsed().as_millis(), take_cpu().as_millis());
     let (mut changed, mut quiet, mut started) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut changed_cpu, mut quiet_cpu) = (Vec::new(), Vec::new());
     for i in 0..runs {
         // The look at the start of the turn (nothing changed between turns).
         let t = Instant::now();
-        cp.run_job(&job("bench", &repo, Kind::Start, 10 + i as u64, 10 + i as u64)).unwrap();
+        cp.run_job(&job(&sid, &repo, Kind::Start, 10 + i as u64, 10 + i as u64)).unwrap();
         started.push(t.elapsed().as_millis());
         // A turn that touches three files and adds one, then one that changes nothing.
         for k in 0..3 {
@@ -541,11 +1105,13 @@ fn snapshot_cost() {
         }
         write(&repo, &format!("src/new{i}.rs"), "fn new() {}\n");
         let t = Instant::now();
-        cp.run_job(&job("bench", &repo, Kind::Turn, 10 + i as u64, 11 + i as u64)).unwrap();
+        cp.run_job(&job(&sid, &repo, Kind::Turn, 10 + i as u64, 11 + i as u64)).unwrap();
         changed.push(t.elapsed().as_millis());
+        changed_cpu.push(cp.last_timing.lock().1.as_millis());
         let t = Instant::now();
-        cp.run_job(&job("bench", &repo, Kind::Turn, 10 + i as u64, 11 + i as u64)).unwrap();
+        cp.run_job(&job(&sid, &repo, Kind::Turn, 10 + i as u64, 11 + i as u64)).unwrap();
         quiet.push(t.elapsed().as_millis());
+        quiet_cpu.push(cp.last_timing.lock().1.as_millis());
     }
     let pct = |v: &mut Vec<u128>, p: f64| {
         v.sort();
@@ -554,9 +1120,20 @@ fn snapshot_cost() {
     println!("changed turn: p50 {} ms, p95 {} ms, max {} ms", pct(&mut changed.clone(), 0.5), pct(&mut changed.clone(), 0.95), changed.iter().max().unwrap());
     println!("unchanged turn: p50 {} ms, p95 {} ms, max {} ms", pct(&mut quiet.clone(), 0.5), pct(&mut quiet.clone(), 0.95), quiet.iter().max().unwrap());
     println!("turn start look: p50 {} ms, p95 {} ms, max {} ms", pct(&mut started.clone(), 0.5), pct(&mut started.clone(), 0.95), started.iter().max().unwrap());
+    println!("git cpu: changed p50 {} ms, max {} ms; unchanged p50 {} ms, max {} ms", pct(&mut changed_cpu.clone(), 0.5), changed_cpu.iter().max().unwrap(), pct(&mut quiet_cpu.clone(), 0.5), quiet_cpu.iter().max().unwrap());
+    println!("switched off: {}", cp.status()["disabled"]);
+    let last = records(&cp, &sid).last().unwrap().n;
+    let mut plans: Vec<u128> = (0..5)
+        .map(|_| {
+            let t = Instant::now();
+            cp.undo_plan(&sid, last, &IDLE, &names).unwrap();
+            t.elapsed().as_millis()
+        })
+        .collect();
+    println!("undo plan of a four-file turn: p50 {} ms, max {} ms", pct(&mut plans, 0.5), plans.iter().max().unwrap());
     let grown = size(&repo).saturating_sub(before);
     println!("git object growth over {runs} turns: {grown} KiB ({} KiB per 100 turns)", grown * 100 / runs as u64);
-    if std::env::var("KELPIE_CP_KEEP").is_err() {
+    if reused.is_none() && std::env::var("KELPIE_CP_KEEP").is_err() {
         let _ = std::fs::remove_dir_all(repo.parent().unwrap());
     }
 }
