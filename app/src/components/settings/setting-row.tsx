@@ -17,8 +17,9 @@ export function applySettings(patch: Partial<Settings>) {
 }
 
 /** `match` replaces the catalog match for rows whose content is searchable too. `aside` (usually the
- *  row's on/off switch) sits right of the label, as in a narrow row, with a wide row's body below. */
-export function SettingRow(props: { id: string; wide?: boolean; match?: (query: string) => boolean; aside?: JSX.Element; children?: JSX.Element }) {
+ *  row's on/off switch) sits right of the label, as in a narrow row, with a wide row's body below.
+ *  `lines` stands where the catalog's one-line description would. */
+export function SettingRow(props: { id: string; wide?: boolean; match?: (query: string) => boolean; aside?: JSX.Element; lines?: JSX.Element; children?: JSX.Element }) {
   const entry = catalogEntry(props.id)!;
   const aside = children(() => props.aside);
   const visible = () => !settingsQuery().trim() || (props.match ?? ((q: string) => entryMatches(entry, q)))(settingsQuery());
@@ -30,7 +31,7 @@ export function SettingRow(props: { id: string; wide?: boolean; match?: (query: 
       <div ref={el} class={`setting-row${props.wide ? " wide" : ""}${aside() ? " has-aside" : ""}${target() ? " target" : ""}`} data-setting={props.id}>
         <div class="setting-text">
           <div class="setting-label">{t(entry.label)}</div>
-          <div class="setting-desc">{t(entry.description)}</div>
+          {props.lines ?? <div class="setting-desc">{t(entry.description)}</div>}
         </div>
         <Show when={aside()}><div class="setting-aside">{aside()}</div></Show>
         <div class="setting-control">{props.children}</div>
@@ -39,9 +40,9 @@ export function SettingRow(props: { id: string; wide?: boolean; match?: (query: 
   );
 }
 
-export function Toggle(props: { on: boolean; onChange: (on: boolean) => void; label?: string }) {
+export function Toggle(props: { on: boolean; onChange: (on: boolean) => void; label?: string; disabled?: boolean }) {
   return (
-    <button class={`switch${props.on ? " on" : ""}`} role="switch" aria-checked={props.on} aria-label={props.label} onClick={() => props.onChange(!props.on)}>
+    <button class={`switch${props.on ? " on" : ""}`} role="switch" aria-checked={props.on} aria-label={props.label} disabled={props.disabled} onClick={() => props.onChange(!props.on)}>
       <span />
     </button>
   );

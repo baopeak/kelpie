@@ -945,6 +945,15 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .switch span { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-faint); transition: left .12s, background .12s; }
 .switch.on { background: var(--accent); border-color: var(--accent); }
 .switch.on span { left: 18px; background: #fff; }
+.switch:disabled { opacity: .5; cursor: not-allowed; }
+/* Settings → Mobile: an option's lines, the summary over them, and the group the older fields moved to. */
+.option-lines { display: grid; gap: 3px; margin: 4px 0 0; }
+.option-lines > div { display: grid; grid-template-columns: 92px minmax(0, 1fr); column-gap: 10px; }
+.option-lines dt { color: var(--text-dim); }
+.option-lines dd { margin: 0; }
+.mobile-summary { display: grid; gap: 4px; padding: 10px 12px; margin-bottom: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); font-size: 12.5px; color: var(--text-dim); }
+.option-advanced { margin-top: 14px; }
+.option-advanced > summary { cursor: pointer; padding: 6px 0; color: var(--text-dim); font-size: 13px; }
 .kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 14px; font-size: 12.5px; color: var(--text-dim); user-select: text; min-width: 0; }
 .kv span { overflow-wrap: anywhere; }
 .kv span:nth-child(odd) { color: var(--text-faint); }

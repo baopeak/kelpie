@@ -8,7 +8,7 @@ import { daemon } from "../../lib/ipc";
 import { confirmDialog } from "../../lib/confirm-dialog";
 import { errorText, t } from "../../lib/i18n";
 import { SettingRow, Toggle } from "./setting-row";
-import { emptyPushConfig, pushSummary, type PushConfig, type PushState } from "../../lib/push-config";
+import { emptyPushConfig, pushChanged, pushRevision, pushSummary, type PushConfig, type PushState } from "../../lib/push-config";
 import "./push-settings.css";
 
 type Channel = "ntfy" | "telegram" | "webhook" | "webpush";
@@ -40,7 +40,10 @@ export default function PushSettings() {
   // A plain signal, not a resource: reloading after each change must not flash the section.
   const [state, setState] = createSignal<PushState | null>(null);
   const refetch = () => daemon<PushState>("notify.get").then(setState, () => {});
-  createEffect(() => store.connected() && void refetch());
+  createEffect(() => {
+    pushRevision();
+    if (store.connected()) void refetch();
+  });
   const [error, setError] = createSignal<string | null>(null);
   const [topic, setTopic] = createSignal<string | null>(null);
   const [tested, setTested] = createSignal<Partial<Record<Channel, string>>>({});
@@ -59,7 +62,7 @@ export default function PushSettings() {
       } catch (e) {
         setError(errorText(e));
       }
-      if (--pending === 0) await refetch();
+      if (--pending === 0) pushChanged();
     });
     return chain;
   };
@@ -96,6 +99,7 @@ export default function PushSettings() {
     <Show when={state()}>
       <h3 class="settings-subhead">{t("Off this computer")}</h3>
       <div class="form-note">{t("Also tell your phone, with Kelpie's window closed. The session daemon sends these; nothing is sent until you switch a channel on.")}</div>
+      <button class="link-btn" data-open-mobile onClick={() => store.openSettings("mobile", "mobile-ntfy")}>{t("What each one costs and how safe it is: Settings → Mobile")}</button>
       <Show when={error()}><div class="form-note error">{error()}</div></Show>
 
       <SettingRow id="push-webpush" wide aside={<button class="btn mini" data-webpush-test disabled={!state()?.webpush?.devices} onClick={() => void test("webpush")}>{t("Send a test")}</button>}>

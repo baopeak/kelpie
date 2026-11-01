@@ -1,6 +1,12 @@
 // The shape of the daemon's notification settings (`notify.get`, crates/kelpied/src/notify.rs) and
 // the plain-language summary under the settings: what is on, and what is missing for it to work.
+import { createSignal } from "solid-js";
 import { t } from "./i18n";
+
+/** Goes up when a page of Settings saved these settings: the daemon sends no event for them, and search can show two such pages at once. */
+const [pushRevision, setPushRevision] = createSignal(0);
+export { pushRevision };
+export const pushChanged = () => setPushRevision((n) => n + 1);
 
 export interface PushConfig {
   ntfy: { enabled: boolean; server: string };
@@ -47,11 +53,17 @@ export function emptyPushConfig(): PushConfig {
   };
 }
 
-/** What a channel that is switched on still lacks to send anything. */
-export function pushProblems(cfg: PushConfig, secrets: PushSecrets): string[] {
+/** What Telegram, switched on, still lacks to send anything. */
+export function telegramProblems(cfg: PushConfig, secrets: PushSecrets): string[] {
   const out: string[] = [];
   if (cfg.telegram.enabled && !secrets.telegram_token) out.push(t("Telegram needs a bot token."));
   if (cfg.telegram.enabled && !cfg.telegram.chat_id) out.push(t("Telegram needs a chat id."));
+  return out;
+}
+
+/** What a channel that is switched on still lacks to send anything. */
+export function pushProblems(cfg: PushConfig, secrets: PushSecrets): string[] {
+  const out = telegramProblems(cfg, secrets);
   if (cfg.webhook.enabled && !secrets.webhook_url) out.push(t("The webhook needs an address."));
   return out;
 }

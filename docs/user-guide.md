@@ -973,8 +973,22 @@ pairing keeps working. Raising what a phone may do,
 resetting phone access and keeping unused phones paired for longer ask the same way; declining a phone,
 lowering a permission and removing a phone do not. If you refuse three prompts in a few minutes,
 or leave three unanswered in 20, Kelpie stops asking for five minutes: if you did not start them, use
-*Turn off phone access and revoke all*. A prompt you leave open for nearly five minutes stops counting, and
+*Turn off phone access and revoke all* (under **Advanced**). A prompt you leave open for nearly five minutes stops counting, and
 while its dialog is still on screen Kelpie asks you to close it before showing another.
+
+**How the page is laid out.** The top of Settings → Mobile says in a few lines how a phone reaches this computer now, whether the app lock is on, where alerts go and how many phones are paired. Below it is one row per option, each with the same lines: *What it does*, *Trade-off*, *How safe*, and *Which phones* where that differs. A row that cannot be changed right now says why and what to do first, and one that will ask you to verify says so. Your network address, port, certificate, the list of paired phones, resetting and *Turn off phone access and revoke all* are under **Advanced** at the bottom. *Show them* in the summary opens it, and so does a phone that must be paired again.
+
+| Option | Starts | Changing it asks you to verify |
+| --- | --- | --- |
+| *Reach this computer with Tailscale* | off | turning it on |
+| *Alerts on your phone* | off, until a phone turns them on | no. Each phone turns them on for itself, in the phone app, so here it only shows how many have |
+| *Lock Kelpie on phones* | on | turning it off |
+| *Lock after idle* | 5 minutes | a longer time |
+| *Ask again for dangerous commands* | off | turning it off |
+| *Allow reading over plain HTTP* | on | turning it on |
+| *ntfy*, *Telegram* | off | no |
+
+The *ntfy* and *Telegram* switches here are the same ones as in Settings → Notifications, which keeps their server, topic and tokens. *Allow reading over plain HTTP* only counts while the lock is on: with the lock off such a page reads anyway.
 
 **Reaching this computer from anywhere, with Tailscale.** If you use [Tailscale](https://tailscale.com) on
 both the computer and the phone, turn on *Reach this computer with Tailscale* in Settings → Mobile. Kelpie then
@@ -1041,7 +1055,7 @@ Paired devices stay saved, but must reconnect after access is enabled again; an 
 cannot keep reading or answering prompts across that switch. Turning it off is not how to cut off a
 phone: any program holding your account's Kelpie token can turn it back on, which is recorded in
 *What phones did*, and every paired phone then has its access back. To cut a phone off, use *Unpair*,
-or *Turn off phone access and revoke all* for every phone.
+or *Turn off phone access and revoke all* for every phone, both under **Advanced**.
 
 ### Voice dictation
 
