@@ -10,6 +10,8 @@ function words(face: string): { title: string; text: string } {
       return { title: t("Set up the app lock"), text: t("Kelpie opens only after Face ID, a fingerprint or your phone's passcode. They stay on this phone: your computer only checks the signature.") };
     case "unlock":
       return { title: t("Kelpie is locked"), text: t("Verify that it is you to see your sessions.") };
+    case "desktop":
+      return { title: t("Press the button on the computer"), text: t("Setting up the app lock starts on your computer, so a copied phone key cannot do it. Press \"Reset this phone's lock\" next to this phone in Kelpie → Settings → Mobile, then set it up here within five minutes.") };
     case "closed":
       return { title: t("Reading without a passkey is off"), text: t("This computer does not allow reading on a page that cannot have a passkey. Open Kelpie through Tailscale, or change this in Kelpie → Settings → Mobile.") };
     case "no_name":

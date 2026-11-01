@@ -74,6 +74,7 @@ export interface Hello {
   /** The computer holds this phone locked: the rest says nothing of any session. */
   locked?: boolean;
   lock?: LockInfo;
+  resume?: string;
 }
 
 export interface SessionsMsg {
@@ -130,7 +131,7 @@ export interface ReplyError {
 /** What became of a request: the daemon's reply, or why there was none. */
 export type Outcome =
   /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; lock?: LockInfo }
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; lock?: LockInfo; resume?: string }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -340,6 +341,8 @@ export class Link {
 
   /** This connection opened and sent the phone's first message. */
   private sentFirst = false;
+  /** The secret of the window this page opened. Never kept. */
+  private resume: string | null = null;
   /** The computer holds this phone locked: nothing is followed until it says otherwise, and what is wanted waits. */
   private lockedNow = false;
   private noReplyCloses = 0;
@@ -573,6 +576,11 @@ export class Link {
     this.post({ type: "lock_touch" });
   }
 
+  /** The secret of the window this page opened: said in the first message of every connection from now on. */
+  setResume(secret: string | null) {
+    this.resume = secret;
+  }
+
   // ---------- socket ----------
 
   private open() {
@@ -595,8 +603,8 @@ export class Link {
     }
     this.ws = ws;
     this.timers.connect = this.env.setTimeout(() => this.ws === ws && this.drop(1006), CONNECT_MS);
-    // `caps`: this client acknowledges frames and answers heartbeats; without both the daemon serves it as one that does not.
-    const greet = () => this.post({ caps: ["ack", "hb"] });
+    // `caps`: this client acknowledges frames and answers heartbeats; without both the daemon serves it as one that does not. `resume`: it is the page that unlocked, so a flap asks nothing.
+    const greet = () => this.post({ caps: ["ack", "hb"], ...(this.resume ? { resume: this.resume } : {}) });
     ws.onopen = () => {
       if (this.ws !== ws) return;
       this.clearTimer("connect");
@@ -884,7 +892,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, lock: m.lock });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, lock: m.lock, resume: m.resume });
     }
     this.h.changed();
     return true;

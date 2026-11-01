@@ -395,7 +395,7 @@ export function MobileSettings() {
                 <div class="saved-layout" data-device={d.id} data-state={d.state}>
                   <Icon name="server" size={16} />
                   <div class="saved-layout-main">
-                    <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show><Show when={d.passkey}> · {t("app lock set up")}</Show><Show when={d.lock_reset}> · {t("may set up a new passkey")}</Show></span></div>
+                    <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show><Show when={d.passkey}> · {t("app lock set up")}</Show><Show when={d.lock_reset}> · {t("may set up a passkey")}</Show></span></div>
                     <div class="muted-inline" style={{ "font-size": "11.5px" }}>
                       {d.state === "unverified"
                         ? t("Its record was changed outside Kelpie: pair it again.")

@@ -189,6 +189,19 @@ describe("Link handshake", () => {
     expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"] });
   });
 
+  it("says the window's secret first on every connection while it holds one, and not once it has let it go", () => {
+    const r = rig();
+    r.link.setResume("the-secret");
+    r.link.start();
+    r.last().open();
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"], resume: "the-secret" });
+    r.link.setResume(null);
+    r.last().close(1006);
+    r.link.start();
+    r.last().open();
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"] });
+  });
+
   it("over kelpie-link: every connection opens with a new first message, so the daemon never takes a retry for a replay", async () => {
     const desktop = keypair();
     const me = keypair();

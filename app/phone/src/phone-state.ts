@@ -103,6 +103,7 @@ const lock = new LockModel({
   ask: (m) => link.lockAsk(m),
   lockNow: () => link.lockNow(),
   touch: () => link.lockTouch(),
+  setResume: (secret) => link.setResume(secret),
   connected: () => link.ready,
   now: () => Date.now(),
   store,

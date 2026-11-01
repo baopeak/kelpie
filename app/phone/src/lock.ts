@@ -5,7 +5,7 @@ import type { Outcome } from "./link";
 import { t } from "./i18n";
 
 /** How the computer says the lock stands: `none` no lock applies here, `open` unlocked, `read_only` it may read and no more, `closed` reading over plain HTTP is off,
- *  `unlock` the passkey is asked for, `enrol` one may be set up, `no_name` this address can have none, `broken` the one on record does not verify. */
+ *  `unlock` the passkey is asked for, `enrol` one may be set up, `desktop` one may once the computer's button is pressed, `no_name` this address can have none, `broken` the one on record does not verify. */
 export interface LockInfo {
   state: string;
   challenge?: string;
@@ -18,7 +18,7 @@ export interface LockInfo {
 }
 
 /** `unknown`: the computer has not said yet, or the person left and it has not heard. */
-export type LockFace = "unknown" | "none" | "open" | "read_only" | "closed" | "unlock" | "enrol" | "no_name" | "broken";
+export type LockFace = "unknown" | "none" | "open" | "read_only" | "closed" | "unlock" | "enrol" | "desktop" | "no_name" | "broken";
 
 /** A dangerous approval's assertion, as the computer reads it. */
 export interface Proof extends Record<string, unknown> {
@@ -34,6 +34,8 @@ export interface LockEnv {
   ask(msg: Record<string, unknown>): Promise<Outcome>;
   lockNow(): void;
   touch(): void;
+  /** The window's secret, for the next connection to say it is this page. In memory only: a reload loses it and asks again, and nothing that is kept can hand it to a copied key. */
+  setResume(secret: string | null): void;
   connected(): boolean;
   now(): number;
   store: { get(key: string): string | null; set(key: string, value: string): void; del(key: string): void };
@@ -148,6 +150,7 @@ export class LockModel {
     }
     this.leftOpen = false;
     this.face = face;
+    if (face !== "open") this.env.setResume(null);
     if (face === "open" || face === "none" || face === "read_only") {
       this.covered = false;
       this.error = null;
@@ -163,6 +166,8 @@ export class LockModel {
     if (this.face === "open") {
       this.leftOpen = true;
       this.env.lockNow();
+      // Even if that never reaches the computer: coming back asks.
+      this.env.setResume(null);
     }
     this.changed();
   }
@@ -207,6 +212,7 @@ export class LockModel {
     try {
       const reply = this.face === "enrol" ? await this.enrol(rpId, fromB64(challenge), user, name) : await this.unlock(rpId, fromB64(challenge), credId);
       if (reply === null) return;
+      if (reply.t === "ack" && reply.resume) this.env.setResume(reply.resume);
       if (reply.t !== "ack") {
         this.error = reply.t === "error" ? reply.message : t("You are offline. It locks until the connection is back.");
         // The challenge went with the attempt, and the next try has a new one.
@@ -262,6 +268,7 @@ export class LockModel {
   /** The pairing is gone: so is what this page knew of its lock. */
   forget() {
     this.env.store.del(SEEN);
+    this.env.setResume(null);
     this.face = "unknown";
     this.info = { state: "unknown" };
     this.covered = false;

@@ -15,6 +15,7 @@ function rig(seen?: string) {
   const state = { connected: true, now: 1000, refusal: null as Outcome | null, denied: null as string | null, spki: new Uint8Array(91) as Uint8Array | null };
   const lockNow = vi.fn();
   const touch = vi.fn();
+  const setResume = vi.fn();
   const changed = vi.fn();
   const denied = () => {
     if (state.denied) {
@@ -36,16 +37,57 @@ function rig(seen?: string) {
     async ask(m) {
       asked.push(m);
       if (m.type === "lock_challenge") return { t: "ack", lock: { ...UNLOCK, challenge: toB64(new Uint8Array(32).fill(8)) } };
-      return state.refusal ?? { t: "ack" };
+      return state.refusal ?? { t: "ack", resume: "the-secret" };
     },
     lockNow,
     touch,
+    setResume,
     connected: () => state.connected,
     now: () => state.now,
     store: { get: (k) => kept.get(k) ?? null, set: (k, v) => void kept.set(k, v), del: (k) => void kept.delete(k) },
   };
-  return { lock: new LockModel(env, changed), asked, state, lockNow, touch, create, get, kept };
+  return { lock: new LockModel(env, changed), asked, state, lockNow, touch, setResume, create, get, kept };
 }
+
+describe("the window's secret", () => {
+  it("is handed on when a ceremony opens the phone, and never kept", async () => {
+    for (const info of [UNLOCK, ENROL]) {
+      const r = rig();
+      r.lock.told(info);
+      await r.lock.go();
+      expect(r.setResume).toHaveBeenLastCalledWith("the-secret");
+      expect([...r.kept.values()].join()).not.toContain("the-secret");
+    }
+  });
+
+  it("goes when the person leaves, even if the computer never hears", () => {
+    const r = rig();
+    r.lock.told({ state: "open" });
+    r.setResume.mockClear();
+    r.lock.left();
+    expect(r.setResume).toHaveBeenCalledWith(null);
+  });
+
+  it("goes when the computer says the phone is locked, stays while it is open, and goes with the pairing", () => {
+    const r = rig();
+    r.lock.told({ state: "open" });
+    expect(r.setResume).not.toHaveBeenCalled();
+    r.lock.told(UNLOCK);
+    expect(r.setResume).toHaveBeenCalledWith(null);
+    r.setResume.mockClear();
+    r.lock.forget();
+    expect(r.setResume).toHaveBeenCalledWith(null);
+  });
+
+  it("a refused ceremony gives none", async () => {
+    const r = rig();
+    r.lock.told(UNLOCK);
+    r.state.refusal = { t: "error", code: "lock_refused", reason: null, message: "no" };
+    r.setResume.mockClear();
+    await r.lock.go();
+    expect(r.setResume).not.toHaveBeenCalledWith("the-secret");
+  });
+});
 
 describe("before the computer has spoken", () => {
   it("shows the lock screen, and nothing kept is painted", () => {
@@ -81,7 +123,7 @@ describe("before the computer has spoken", () => {
 describe("what the computer says", () => {
   it("only none, open and read-only let anything through", () => {
     const { lock } = rig();
-    for (const [state, clear] of [["none", true], ["open", true], ["read_only", true], ["unlock", false], ["enrol", false], ["closed", false], ["no_name", false], ["broken", false]] as const) {
+    for (const [state, clear] of [["none", true], ["open", true], ["read_only", true], ["unlock", false], ["enrol", false], ["desktop", false], ["closed", false], ["no_name", false], ["broken", false]] as const) {
       lock.told({ state });
       expect([state, lock.clear()]).toEqual([state, clear]);
     }
