@@ -234,6 +234,8 @@ def wait(cond, timeout=20, interval=0.3):
 
 LIVE = "return document.querySelector('.conn')?.dataset.state === 'live'"
 STATE = "return document.querySelector('.conn')?.dataset.state"
+# Connected, with what a loaded machine may show for it (`canAct`, `conn-state.ts`).
+CONNECTED = "return ['live', 'busy', 'degraded'].includes(document.querySelector('.conn')?.dataset.state)"
 
 
 def type_code(digits):
@@ -863,7 +865,42 @@ for n in (1, 2, 3):
     run.check("…and once Tailscale answers, Check again removes it and the note goes", d.wait("return !document.querySelector('[data-tailscale-to-remove]')", 20) is True and json.load(open(FAKE_TS[1], encoding="utf-8"))["serve"] == "{}")
     daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT})
     # Turning access off cut the phone. It must be back before the limiter below, which would keep it out, and the kill switch, which only a connected phone can hear.
-    phone.wait(LIVE, 30)
+    run.check("the phone comes back once phone access is on again", bool(phone.wait(CONNECTED, 30)), str(phone.js(STATE)))
+
+    # ---------- a page that is closed at the kill switch cannot hear it: access ends all the same, and what it kept stays until it is forgotten there ----------
+    missed_row = "return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('missed-shell'))"
+    missed = daemon(d, "session.create", {"kind": "shell", "cwd": proj, "name": "missed-shell", "project_id": pid})
+    phone.go("about:blank")
+    phone.go(base)  # the list the page keeps is saved as it connects
+    phone.wait(CONNECTED, 30)
+    phone.wait(missed_row, 20)
+    time.sleep(1)
+    phone.go("about:blank")
+    daemon(d, "mobile.revoke_all")
+    daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT})
+    phone.go(base)
+    run.check("a page closed at the kill switch says Not paired here once access is back", bool(phone.wait("return document.querySelector('[data-banner=not_paired_here]')?.textContent.includes('Not paired here')", 30)), str(phone.js(STATE)))
+    run.check("…with no session, and the computer lists no phone", phone.js(STATE) == "not_paired_here" and not daemon(d, "mobile.status")["devices"], str(phone.js(STATE)))
+    run.check("…and keeps what it showed", bool(phone.wait(missed_row, 15)))
+    phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('missed-shell')).click()")
+    phone.wait("return !!document.querySelector('.session')", 15)
+    phone.js("const t = document.querySelector('.send textarea'); if (t) t.value = 'echo missed-$((6*7))';")
+    phone.js("document.querySelector('.send .btn.primary')?.click()")
+    time.sleep(2)
+    run.check("…and it cannot act", phone.js("const b = document.querySelector('.send .btn.primary'); return !b || b.disabled") is True and "missed-42" not in daemon(d, "session.read", {"handle": missed["handle"], "lines": 40})["text"])
+    phone.js("window.confirm = () => true")
+    phone.js("document.querySelector('[data-forget]').click()")
+    run.check("Forget this device lets go of what it kept", bool(phone.wait("return !!document.querySelector('.card') && !document.querySelector('.row') && !document.querySelector('.conn')", 15)))
+    daemon(d, "session.close", {"handle": missed["handle"]})
+    made = daemon(d, "mobile.pair_start")
+    phone.go("about:blank")
+    phone.go(made["url"])
+    phone.wait("return !!document.querySelector('.card .btn.primary')")
+    phone.js("document.querySelector('.card input').value = 'Paired again'; document.querySelector('.card .btn.primary').click()")
+    d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Paired again'))", 15)
+    type_code(phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15))
+    d.js("[...document.querySelectorAll('.mobile-approve')].find(a => a.textContent.includes('Paired again')).querySelector('[data-allow=write]').click()")
+    run.check("…and pairing it again brings it back", bool(phone.wait(CONNECTED, 30)), str(phone.js(STATE)))
     d.js(f"{S}.closeSettings?.()")
 
     # Last, so the limiter does not refuse a pairing this script still needs.
