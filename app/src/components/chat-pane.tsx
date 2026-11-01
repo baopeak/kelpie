@@ -12,6 +12,7 @@ import { imageUrl } from "../chat/chat-images";
 import { type AgentRun, formatDuration, mergeRuns } from "../chat/agent-runs";
 import { mountAttach, type ChatItem, type UserImage } from "../chat/chat-model";
 import { fromDaemonEvent } from "../chat/chat-queue";
+import { followsLatest } from "../chat/follow-latest";
 import { PINNED_REACH, lastPromptBefore, pinnedPromptId, renderedPrompts } from "../chat/pinned-prompt";
 import { openTable, stableEnd } from "../chat/streaming-markdown";
 import { describeTool, diffStats, unifiedFiles } from "../chat/tool-view";
@@ -318,19 +319,23 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
 
   // Keep pinned to the bottom while streaming unless the user scrolled up; then offer a way back.
   const [away, setAway] = createSignal(false);
+  let lastTop = 0;
   const syncStick = () => {
-    stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+    const top = scroller.scrollTop;
+    stick = followsLatest(stick, scroller.scrollHeight - top - scroller.clientHeight, top, lastTop);
+    lastTop = top;
     setAway(!stick);
   };
-  createEffect(() => {
-    const last = ctrl.state.items[ctrl.state.items.length - 1];
-    void (last && "text" in last ? (last as any).text : last);
-    void ctrl.state.items.length;
-    if (stick) queueMicrotask(() => {
-      if (!scroller) return;
-      scroller.scrollTop = scroller.scrollHeight;
+  // Sizes, not text: a tool's output, a row first painted at its real height and a composer growing
+  // all move the bottom without any text changing.
+  onMount(() => {
+    const follow = new ResizeObserver(() => {
+      if (stick) scroller.scrollTop = scroller.scrollHeight;
       schedulePinned();
     });
+    follow.observe(scroller);
+    follow.observe(scroller.firstElementChild!);
+    onCleanup(() => follow.disconnect());
   });
 
   /** A smooth scroll on its way to an item. Its first steps, still near the bottom, say nothing about
@@ -418,12 +423,6 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
     stopJump();
     clearTimeout(flashTimer);
   });
-
-  /** A thumbnail came in: the rows below it moved, and the bottom with them. */
-  const onImageLoad = () => {
-    if (stick && !jump) scroller.scrollTop = scroller.scrollHeight;
-    schedulePinned();
-  };
 
   const toBottom = () => {
     stopJump();
@@ -562,7 +561,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
                             <Show when={u.from}><span class="msg-time">{t("from {device}", { device: u.from! })}</span></Show>
                             <Stamp at={u.at} />
                           </div>
-                          <Show when={u.images?.length}><UserImages images={u.images!} pending={u.pending} root={() => scroller} onLoad={onImageLoad} /></Show>
+                          <Show when={u.images?.length}><UserImages images={u.images!} pending={u.pending} root={() => scroller} onLoad={schedulePinned} /></Show>
                           <Show when={u.text}>
                             <div class="msg-user" style={{ opacity: u.pending ? 0.7 : 1 }}>
                               <For each={linkifyText(u.text)}>
