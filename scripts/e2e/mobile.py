@@ -40,6 +40,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -131,7 +132,7 @@ class Phone:
         # The performance log carries the page's WebSocket frames (what it sends and what it is sent).
         # The browser log has what the page's console has, from the moment it loads: content security policy violations too.
         caps = {"capabilities": {"alwaysMatch": {"browserName": "MicrosoftEdge", "acceptInsecureCerts": True, "ms:loggingPrefs": {"performance": "ALL", "browser": "ALL"}, "ms:perfLoggingPrefs": {"enableNetwork": True}, "ms:edgeOptions": {
-            "args": ["--headless=new", "--window-size=412,900", "--no-first-run", f"--user-data-dir={os.path.join(scratch, 'phone-profile')}"],
+            "args": ["--headless=new", "--window-size=412,900", "--no-first-run", f"--user-data-dir={tempfile.mkdtemp(prefix='phone-profile-', dir=scratch)}"],  # a phone of its own each run: what an earlier run paired is not this one's
             "mobileEmulation": {"deviceMetrics": {"width": 412, "height": 900, "pixelRatio": 2.0}, "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"},
         }}}}
         self.sid = self.req("POST", "/session", caps)["sessionId"]
