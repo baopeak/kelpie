@@ -103,8 +103,8 @@ function SecurityBanner() {
   return (
     <>
       <Show when={plainHttpOrigin() || device()?.capped}>
-        <Show when={location.protocol === "https:"} fallback={<div class="banner warn" role="status" data-banner="plain-http">{t("Plain HTTP: someone on this network could swap this page, so it can only read here. Open it over HTTPS or Tailscale to type.")}</div>}>
-          <div class="banner warn" role="status" data-banner="no-passkey">{t("This address is a number, and a passkey needs a name, so this device can only read here. To type, pair it through Tailscale or at a name.")}</div>
+        <Show when={location.protocol === "https:"} fallback={<div class="banner warn" role="status" data-banner="plain-http">{t("Plain HTTP: someone on this network could swap this page, so it can only read here. To type, pair it again through Tailscale's HTTPS address.")}</div>}>
+          <div class="banner warn" role="status" data-banner="no-passkey">{t("This device has no passkey, so it can only read here. To type, pair it again through Tailscale or at an HTTPS name.")}</div>
         </Show>
       </Show>
       <Show when={movedHost()}>

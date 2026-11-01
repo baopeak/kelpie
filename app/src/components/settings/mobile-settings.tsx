@@ -258,7 +258,7 @@ export function MobileSettings() {
           </div>
           <For each={s()!.urls ?? []}>{(u) => <div class="mono mobile-url">{u}</div>}</For>
           <Show when={!s()!.tls}>
-            <div class="form-note warn-note">{t("Plain HTTP: what phones see and send is still end-to-end encrypted, but a browser page served this way could be swapped by someone on the network, so browsers connected over plain HTTP outside Tailscale can only read.")}</div>
+            <div class="form-note warn-note">{t("Plain HTTP: what phones see and send is still end-to-end encrypted, but a browser page served this way could be swapped by someone on the network, so browsers connected over plain HTTP can only read. With the app lock off, one on a Tailscale address can type.")}</div>
           </Show>
         </SettingRow>
         <SettingRow id="mobile-tls" wide>
@@ -370,7 +370,7 @@ export function MobileSettings() {
               <div>
                 <div>{t("Scan with the phone's camera. The phone then shows six digits: type them here when Kelpie asks.")}</div>
                 <div class="muted-inline">{t("The code works once and expires in {n} s.", { n: Math.max(0, Math.round((qr()!.until - now()) / 1000)) })}</div>
-                <Show when={!qr()!.tls}><div class="form-note warn-note">{t("Plain HTTP: a browser paired this way can only read, unless it connects over Tailscale.")}</div></Show>
+                <Show when={!qr()!.tls}><div class="form-note warn-note">{t("Plain HTTP: a browser paired this way can only read. With the app lock off, it can type over a Tailscale address.")}</div></Show>
                 <Show when={qr()!.tls && qr()!.passkey === false}><div class="form-note warn-note" data-pair-no-passkey>{t("This address is a number, and a passkey needs a name, so a phone paired here can only read while the app lock is on.")}</div></Show>
                 <div class="mono mobile-qr-url">{qr()!.url.split("#")[0]}</div>
                 <button class="btn" onClick={() => setQr(null)}>{t("Cancel")}</button>
