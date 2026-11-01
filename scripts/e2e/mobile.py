@@ -197,14 +197,14 @@ class Phone:
 
 
 class Cdp:
-    """One DevTools target of the phone's browser (`browser`, `page` or `service_worker`), over its own socket."""
+    """One DevTools target of the phone's browser (`page` or `service_worker`), over its own socket."""
 
-    def __init__(self, debugger, kind, url_start=""):
+    def __init__(self, debugger, kind, url_start):
         from websockets.sync.client import connect
 
-        with urllib.request.urlopen(f"http://{debugger}/json/{'version' if kind == 'browser' else 'list'}", timeout=10) as resp:
+        with urllib.request.urlopen(f"http://{debugger}/json/list", timeout=10) as resp:
             listed = json.loads(resp.read())
-        target = listed if kind == "browser" else next((t for t in listed if t["type"] == kind and t["url"].startswith(url_start)), None)
+        target = next((t for t in listed if t["type"] == kind and t["url"].startswith(url_start)), None)
         if not target:
             raise RuntimeError(f"no {kind} at {url_start}: {[(t['type'], t['url'][:60]) for t in listed]}")
         self.ws = connect(target["webSocketDebuggerUrl"], max_size=None, open_timeout=10)
@@ -868,9 +868,7 @@ for n in (1, 2, 3):
             PushManager.prototype.getSubscription = async function () { return held; };
         """, sub["endpoint"], sub["p256dh"], sub["auth"])
         page_cdp = Cdp(phone.debugger, "page", origin)
-        browser_cdp = Cdp(phone.debugger, "browser")
-        browser_cdp.call("Browser.grantPermissions", {"origin": origin, "permissions": ["notifications"]})
-        browser_cdp.close()
+        phone.req("POST", f"/session/{phone.sid}/permissions", {"descriptor": {"name": "notifications"}, "state": "granted"})
         run.check("the app's service worker runs here", bool(phone.wait("return navigator.serviceWorker.ready.then(() => true) && !!navigator.serviceWorker.controller || navigator.serviceWorker.getRegistration().then((r) => !!r)", 20)))
         phone.js("document.querySelector('.conn').click()")
         run.check("the sheet offers alerts on a page that can have them", phone.wait("return document.querySelector('[data-alerts]')?.dataset.alerts", 15) == "off" and bool(phone.js("return !!document.querySelector('[data-alerts-on]')")), str(phone.js("return document.querySelector('[data-alerts]')?.dataset.alerts")))
@@ -888,7 +886,8 @@ for n in (1, 2, 3):
         page_cdp.call("ServiceWorker.enable")
         time.sleep(1)
         page_cdp.call("Runtime.evaluate", {"expression": "1"})  # what came meanwhile is read with its answer
-        registration = next((e["params"]["registrations"][0]["registrationId"] for e in page_cdp.events if e.get("method") == "ServiceWorker.workerRegistrationUpdated" and e["params"]["registrations"]), None)
+        # The https page of the step above has a worker of its own: this origin's is the one.
+        registration = next((r["registrationId"] for e in page_cdp.events if e.get("method") == "ServiceWorker.workerRegistrationUpdated" for r in e["params"]["registrations"] if r["scopeURL"].startswith(origin) and not r["isDeleted"]), None)
         run.check("the worker's registration is known to DevTools", registration is not None, str([e.get("method") for e in page_cdp.events][:8]))
         shell_alert = daemon(d, "session.create", {"kind": "shell", "cwd": proj, "name": "alert-secret-name", "project_id": pid})
         wait(lambda: next((x for x in daemon(d, "session.list") if x["id"] == shell_alert["id"]), {}).get("status") == "idle", 60)
