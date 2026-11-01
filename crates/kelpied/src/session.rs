@@ -363,6 +363,9 @@ struct Inner {
     answered_wait: bool,
     /// The requests the agent's hooks say are open, oldest first (`request_hook`).
     wait_requests: Vec<crate::mobile::risk::Request>,
+    /// Counts what was typed into the terminal, and what the count was when the list above last changed by a request coming or going (`typing_may_approve_danger`).
+    typed_count: u64,
+    typed_when_requests_changed: u64,
     /// The last waits answered, newest last (see `RESOLVED_KEPT`), by their `waiting_since`.
     resolved: VecDeque<(u64, Resolution)>,
     /// Who answered the wait that is open now (kept as long as it is, past the ring's ten minutes).
@@ -441,6 +444,8 @@ impl Session {
                 interrupted: false,
                 answered_wait: false,
                 wait_requests: Vec::new(),
+                typed_count: 0,
+                typed_when_requests_changed: 0,
                 resolved: VecDeque::new(),
                 answered_now: None,
                 typing_by: None,
@@ -681,6 +686,7 @@ impl Session {
         // for the usage-limit timer; a click can still answer a prompt.
         if !is_terminal_report(&bytes) {
             let now = Instant::now();
+            g.typed_count += 1;
             g.activity.last_typed = Some(now);
             // Keys that answer a permission prompt or a question go to that dialog, not to the prompt line.
             if !matches!(g.activity.hook, Some((Status::Waiting, _))) {
@@ -1059,6 +1065,7 @@ impl Session {
         match (event, request) {
             ("PermissionRequest", Some(request)) => {
                 g.wait_requests.push(request);
+                g.typed_when_requests_changed = g.typed_count;
                 // Which goes takes reading them all, and that is not done under the lock.
                 if g.wait_requests.len() > WAIT_REQUESTS_KEPT {
                     let open = g.wait_requests.clone();
@@ -1075,6 +1082,8 @@ impl Session {
             ("PostToolUse" | "PostToolUseFailure", Some(request)) => {
                 let Some(at) = g.wait_requests.iter().position(|open| *open == request) else { return };
                 g.wait_requests.remove(at);
+                // The next dialog may be up now, and nobody has typed at that one.
+                g.typed_when_requests_changed = g.typed_count;
             }
             // A new turn: nothing from the one before is still being asked.
             ("UserPromptSubmit", _) => g.wait_requests.clear(),
@@ -1091,13 +1100,17 @@ impl Session {
         (info.risk.level == crate::mobile::risk::Level::Dangerous).then(|| info.command.unwrap_or_default())
     }
 
-    /// Whether the session waits on the person now, with a dangerous request open: what is typed could then be its answer.
-    pub fn waits_on_danger(&self) -> bool {
-        let waiting = {
+    /// Whether what is typed now could be the answer to a dangerous request. The screen and the status cannot say: a busy agent never goes quiet for a prompt to be found, and another tool's
+    /// report ends a reported wait while the dialog stays up. So it counts as yes while a dangerous request is open, unless the only one open has been typed at since it came. Then Esc, a card's
+    /// answer or the computer's keys have settled that dialog, and its entry only lasts until the turn ends. A key refused for this writes nothing, so it cannot lift this itself.
+    pub fn typing_may_approve_danger(&self) -> bool {
+        {
             let g = self.inner.lock();
-            g.screen_prompt.is_some() || g.waiting_since.is_some()
-        };
-        waiting && self.dangerous_wait().is_some()
+            if g.wait_requests.len() == 1 && g.typed_count > g.typed_when_requests_changed {
+                return false;
+            }
+        }
+        self.dangerous_wait().is_some()
     }
 
     pub fn screen_text(&self) -> String {

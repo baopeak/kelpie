@@ -2729,11 +2729,11 @@ impl Conn {
         Some(json!({"type": "locked", "lock": m.lock_info(&self.device, state, self.secure_page.as_deref()), "server_ts": now_millis()}))
     }
 
-    /// With the re-check on, what is typed while a dangerous request is up could be its approval, with no passkey and with the end of the command unread. So only what is known not to approve
-    /// goes through: Esc and Ctrl+C. The card asks for the passkey. Only a connection the passkey is asked of: others have none to give.
+    /// With the re-check on, what is typed while a dangerous request is open could be its approval, with no passkey and with the end of the command unread. So only what is known not to approve
+    /// goes through: Esc and Ctrl+C. A card may not be showing, so this does not send the person to one alone. Only a connection the passkey is asked of: others have none to give.
     fn typing_allowed(&self, session: &crate::session::Session, key: Option<&str>) -> Result<(), Refusal> {
-        if self.lock_path == LockPath::Passkey && !matches!(key, Some("esc" | "ctrl-c")) && self.daemon.mobile.recheck_on() && session.waits_on_danger() {
-            return Err(refuse("recheck", "This request is marked dangerous: answer it on its card, which asks for your passkey."));
+        if self.lock_path == LockPath::Passkey && !matches!(key, Some("esc" | "ctrl-c")) && self.daemon.mobile.recheck_on() && session.typing_may_approve_danger() {
+            return Err(refuse("recheck", "This request is marked dangerous, so typing here could approve it with no passkey. Answer it on the computer, or on its card if one is showing. Esc and Ctrl+C still work."));
         }
         Ok(())
     }

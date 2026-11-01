@@ -975,6 +975,68 @@ async fn with_the_recheck_on_typing_cannot_approve_what_is_dangerous() {
     assert_ne!(code(&r.ask_write(json!({"type": "key", "id": "t1", "key": "enter"})).await), Some("recheck"));
 }
 
+async fn with_a_dangerous_request_open() -> (Rig, Authenticator) {
+    let (r, a) = enrolled().await;
+    let mut on = r.daemon.mobile.lock_options();
+    on.recheck = true;
+    r.daemon.mobile.set_lock(on).unwrap();
+    r.daemon.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
+    (r, a)
+}
+
+async fn enter(r: &mut Rig) -> Value {
+    r.ask_write(json!({"type": "key", "id": "t1", "key": "enter"})).await
+}
+
+/// Neither the screen nor the agent's status says whether a dialog is up: a dialog stays while these are false, so none of them lifts the refusal.
+#[tokio::test]
+async fn the_refusal_holds_whatever_the_screen_and_the_status_say() {
+    let (mut r, _a) = with_a_dangerous_request_open().await;
+    // In the moment after the hook, before any tick has seen it.
+    let refused = enter(&mut r).await;
+    assert_eq!(code(&refused), Some("recheck"), "{refused}");
+    let said = refused["message"].as_str().unwrap();
+    assert!(said.contains("computer") && said.contains("Esc"), "a card may not be showing: {said}");
+    // A subagent or a parallel tool reports, which ends the reported wait.
+    r.daemon.hook(&hook("PreToolUse", "Bash", "ls")).unwrap();
+    r.daemon.hook(&hook("PostToolUse", "Bash", "ls")).unwrap();
+    assert_eq!(code(&enter(&mut r).await), Some("recheck"), "another tool's report");
+    assert_eq!(r.term.info().waiting_since, None, "what makes this the hard case");
+    // Much later, with the screen never quiet long enough for a prompt to be found.
+    crate::session::fake::wait_on_user(&r.term);
+    r.term.tick(Instant::now() + Duration::from_secs(121));
+    assert_eq!(code(&enter(&mut r).await), Some("recheck"), "past the time a report holds");
+    assert!(r.typed.writes().is_empty());
+}
+
+/// Esc on a dangerous prompt, then telling the agent what to do instead, is what a person does next.
+#[tokio::test]
+async fn once_the_only_request_has_been_typed_at_the_phone_can_type_again() {
+    let (mut r, _a) = with_a_dangerous_request_open().await;
+    // A refused key writes nothing, so asking again never lifts it.
+    for _ in 0..3 {
+        assert_eq!(code(&enter(&mut r).await), Some("recheck"));
+    }
+    assert_ne!(code(&r.ask_write(json!({"type": "key", "id": "t1", "key": "esc"})).await), Some("recheck"));
+    assert_ne!(code(&enter(&mut r).await), Some("recheck"), "after Esc");
+    assert_ne!(code(&r.ask_write(json!({"type": "input", "id": "t1", "text": "do this instead", "force": true})).await), Some("recheck"));
+    // A new request is a new dialog, and the old entry is still there with it.
+    r.daemon.hook(&hook("PermissionRequest", "Bash", "ls")).unwrap();
+    assert_eq!(code(&enter(&mut r).await), Some("recheck"), "the new one restores it");
+    assert_ne!(code(&r.ask_write(json!({"type": "key", "id": "t1", "key": "esc"})).await), Some("recheck"));
+    assert_eq!(code(&enter(&mut r).await), Some("recheck"), "with two open, Enter could approve the one queued behind");
+    // One of them settles: what is up now has not been typed at.
+    r.daemon.hook(&hook("PostToolUse", "Bash", "ls")).unwrap();
+    assert_eq!(code(&enter(&mut r).await), Some("recheck"));
+    // The computer's keys count too: the person is answering there.
+    r.term.input(b"n".to_vec());
+    assert_ne!(code(&enter(&mut r).await), Some("recheck"), "after typing on the computer");
+    // Answered on the card with its passkey, it is settled the same way.
+    r.daemon.hook(&bare_hook("Stop", json!({}))).unwrap();
+    r.daemon.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
+    assert_eq!(code(&enter(&mut r).await), Some("recheck"), "a new turn's request");
+}
+
 /// A modified page could approve a harmless request with a rewritten command. What would then run is what is judged, and an assertion has to be over it.
 #[tokio::test]
 async fn an_approval_that_rewrites_a_command_is_judged_by_what_would_run() {

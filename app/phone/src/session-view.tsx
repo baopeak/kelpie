@@ -1,6 +1,7 @@
 // One open session: a terminal's text with the prompt card, reply box and key bar; or a chat. What the
 // person may do depends on the device's permission and on whether the connection is up.
 import { createMemo, createSignal, Show } from "solid-js";
+import { CommandBlock } from "./command-block";
 import { ChatView } from "./chat-view";
 import { ago, clock } from "./conn-text";
 import { Composer } from "./composer";
@@ -46,7 +47,7 @@ export function SessionView(props: { id: string }) {
                 </div>
               )}
             </Show>
-            <Show when={waiting() && screen().prompt} fallback={<Show when={waiting()}><div class="needs">{t("This agent is waiting for you.")}</div></Show>}>
+            <Show when={waiting() && screen().prompt} fallback={<Show when={waiting()}><div class="needs">{t("This agent is waiting for you.")}</div><Show when={screen().wait?.command}><CommandBlock command={screen().wait?.command} risk={screen().wait?.risk} /></Show></Show>}>
               {/* Keyed by the question: the next prompt gets a fresh card, not the last one's "Sent". */}
               <Show when={promptKey(screen().prompt!, screen().waitingSince ?? s().waiting_since)} keyed>
                 {(_key) => <PromptCard id={props.id} prompt={screen().prompt!} waitingSince={screen().waitingSince ?? s().waiting_since} canType={canType()} wait={screen().wait} />}
