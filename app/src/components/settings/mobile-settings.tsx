@@ -61,10 +61,10 @@ export interface MobileStatus {
 /** What Tailscale says now (`mobile.tailscale_status`, which runs its CLI: asked for only while this page is open). */
 interface TailscaleStatus {
   on: boolean;
-  state: "not_installed" | "stopped" | "needs_login" | "https_off" | "unreadable" | "ready";
+  state: "not_installed" | "stopped" | "needs_login" | "https_off" | "unreadable" | "no_answer" | "ready";
   fqdn: string | null;
-  /** `off` nothing of ours; `ours` published; `missing` the mode is on and the entry was removed; `left_behind` the mode is off and the entry could not be removed; `port_busy` another program holds our local port and the entry could not be removed; `not_listening` the mode is on and Kelpie's listener is not up; `renamed` the entry is under this machine's old Tailscale name; `taken` port 8443 is used by something else; `unknown` it could not be read. */
-  serve: "off" | "ours" | "missing" | "left_behind" | "port_busy" | "not_listening" | "renamed" | "taken" | "unknown";
+  /** `off` nothing of ours; `ours` published; `missing` the mode is on and the entry was removed; `left_behind` the mode is off and the entry could not be removed; `port_busy` another program holds our local port and the entry could not be removed; `not_listening` the mode is on and Kelpie's listener is not up; `renamed` the entry is under this machine's old Tailscale name; `taken` port 8443 is used by something else; `unknown` it could not be read; `no_answer` it did not answer in time. */
+  serve: "off" | "ours" | "missing" | "left_behind" | "port_busy" | "not_listening" | "renamed" | "taken" | "unknown" | "no_answer";
   origin: string | null;
   /** A QR code of the page's address, with no secret. */
   install_qr: string | null;
@@ -83,6 +83,8 @@ function tailscaleInstruction(s: TailscaleStatus): string {
       return t("Your tailnet does not have HTTPS certificates turned on. Turn on MagicDNS and HTTPS in the DNS page of the Tailscale admin console, then check again.");
     case "unreadable":
       return t("Kelpie could not understand what Tailscale says. Update Tailscale, then check again.");
+    case "no_answer":
+      return t("Tailscale did not answer in time, and this computer may be busy. Check again in a moment.");
     case "ready":
       switch (s.serve) {
         case "ours":
@@ -101,6 +103,8 @@ function tailscaleInstruction(s: TailscaleStatus): string {
           return t("Port 8443 of Tailscale Serve is used by something else. Kelpie will not change it: free that port, then check again.");
         case "unknown":
           return t("Kelpie could not read what Tailscale Serve is doing. Update Tailscale, then check again.");
+        case "no_answer":
+          return t("Tailscale did not answer in time, and this computer may be busy. Check again in a moment.");
         case "off":
           return t("Tailscale is ready. Turn this on to reach this computer from anywhere with Tailscale on.");
       }

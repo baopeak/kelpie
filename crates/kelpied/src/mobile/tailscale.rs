@@ -39,6 +39,9 @@ pub const HTTPS_PORT: u16 = 8443;
 #[cfg_attr(test, allow(dead_code))]
 const CLI_TIMEOUT: Duration = Duration::from_secs(5);
 const OUTPUT_LIMIT: u64 = 16 << 20;
+/// How soon, and how many times, a daemon that just started looks again at a Tailscale that gave no answer in time.
+const LOOK_AGAIN: Duration = if cfg!(test) { Duration::from_millis(30) } else { Duration::from_secs(10) };
+const LOOKS: usize = 6;
 
 pub const NOT_READY: &str = "Tailscale is not ready on this computer: follow the instruction in Settings → Mobile.";
 pub const PORT_TAKEN: &str = "Port 8443 of Tailscale Serve is used by something else, and Kelpie left it alone. Free that port, then turn this on again.";
@@ -47,6 +50,7 @@ pub const DENIED: &str = "Tailscale did not let Kelpie publish this computer. On
 pub const NOT_PUBLISHED: &str = "Tailscale did not publish this computer. Check that HTTPS certificates and Serve are allowed for your tailnet, then try again.";
 pub const NOT_REMOVED: &str = "Kelpie stopped answering through Tailscale, but its entry in Tailscale Serve is still there. If Tailscale is stopped, start it: Kelpie tries again when you press Check again in Settings → Mobile, and when Kelpie next starts.";
 const LISTEN_FAILED: &str = "Kelpie could not open the local port Tailscale Serve forwards to. Try again in a moment.";
+pub const NO_ANSWER: &str = "Tailscale did not answer in time, and this computer may be busy. Nothing was published: try again in a moment.";
 pub const NOT_ON: &str = "turn mobile access on first";
 pub const ENDED_MEANWHILE: &str = "Phone access was turned off or changed while this was being done, so Tailscale publishes nothing. Turn this on again if you still want it.";
 
@@ -60,6 +64,8 @@ pub enum Detected {
     HttpsOff,
     /// It answered, in a way that cannot be understood.
     Unreadable,
+    /// It did not answer in time, twice: this says nothing about Tailscale, only that it or this computer is busy.
+    NoAnswer,
     Ready { fqdn: String },
 }
 
@@ -71,6 +77,7 @@ impl Detected {
             Detected::NeedsLogin => "needs_login",
             Detected::HttpsOff => "https_off",
             Detected::Unreadable => "unreadable",
+            Detected::NoAnswer => "no_answer",
             Detected::Ready { .. } => "ready",
         }
     }
@@ -113,6 +120,8 @@ pub enum Entry {
     /// Anything else: not ours to change.
     Taken,
     Unreadable,
+    /// It did not answer in time, twice.
+    NoAnswer,
 }
 
 /// The loopback port of a handler that is only a proxy to `http://127.0.0.1:<port>`.
@@ -278,20 +287,31 @@ fn run_bounded(program: &Path, args: &[&str], limit: Duration) -> Ran {
     }
 }
 
+/// A call that changes nothing, or can be made again with the same result, gets one more go when it runs out of time: on a busy computer one slow start of a program says
+/// nothing. Each go is killed at its limit, so the whole is bounded.
+fn with_one_retry(cli: &dyn Cli, args: &[&str]) -> Ran {
+    match cli.run(args) {
+        Ran::TimedOut => cli.run(args),
+        ran => ran,
+    }
+}
+
 pub fn detect(cli: &dyn Cli) -> Detected {
-    match cli.run(&["status", "--json"]) {
+    match with_one_retry(cli, &["status", "--json"]) {
         Ran::Missing => Detected::NotInstalled,
-        // No answer in time, or a refusal: the service is not running, which is what the CLI says when it cannot reach it.
-        Ran::TimedOut | Ran::Failed | Ran::Done { ok: false, .. } => Detected::Stopped,
+        Ran::TimedOut => Detected::NoAnswer,
+        // A refusal: the service is not running, which is what the CLI says when it cannot reach it.
+        Ran::Failed | Ran::Done { ok: false, .. } => Detected::Stopped,
         Ran::Done { ok: true, stdout, .. } => parse_status(&stdout),
     }
 }
 
 pub fn read_entry(cli: &dyn Cli, known: Option<u16>, name: Option<&str>) -> Entry {
-    match cli.run(&["serve", "status", "--json"]) {
+    match with_one_retry(cli, &["serve", "status", "--json"]) {
         Ran::Done { ok: true, stdout, .. } => parse_serve(&stdout, known, name),
         // Uninstalled: there is nothing to serve anything, and nothing to wait for.
         Ran::Missing => Entry::Free,
+        Ran::TimedOut => Entry::NoAnswer,
         _ => Entry::Unreadable,
     }
 }
@@ -307,6 +327,7 @@ fn serve_refusal(ran: &Ran) -> &'static str {
                 NOT_PUBLISHED
             }
         }
+        Ran::TimedOut => NO_ANSWER,
         _ => NOT_PUBLISHED,
     }
 }
@@ -314,7 +335,8 @@ fn serve_refusal(ran: &Ran) -> &'static str {
 fn publish(cli: &dyn Cli, port: u16) -> Result<(), &'static str> {
     let https = format!("--https={HTTPS_PORT}");
     let target = format!("http://127.0.0.1:{port}");
-    match cli.run(&["serve", "--bg", &https, &target]) {
+    // Asking for the same entry again changes nothing, whether the first go got there or not.
+    match with_one_retry(cli, &["serve", "--bg", &https, &target]) {
         Ran::Done { ok: true, .. } => Ok(()),
         other => Err(serve_refusal(&other)),
     }
@@ -333,7 +355,7 @@ fn unpublish(cli: &dyn Cli) -> Result<(), &'static str> {
 pub fn remove_ours(cli: &dyn Cli, known: Option<u16>) -> Result<(), &'static str> {
     match read_entry(cli, known, None) {
         Entry::Free | Entry::Taken => Ok(()),
-        Entry::Unreadable => Err(NOT_REMOVED),
+        Entry::Unreadable | Entry::NoAnswer => Err(NOT_REMOVED),
         Entry::Ours(_) | Entry::Renamed(_) => {
             unpublish(cli)?;
             match read_entry(cli, known, None) {
@@ -375,6 +397,7 @@ fn described(m: &Mobile, detected: &Detected, entry: Option<Entry>) -> Value {
         (Some(Entry::Renamed(_)), false, _) => "left_behind",
         (Some(Entry::Renamed(_)), true, _) => "renamed",
         (Some(Entry::Taken), ..) => "taken",
+        (Some(Entry::NoAnswer), ..) => "no_answer",
         (Some(Entry::Unreadable) | None, ..) => "unknown",
     };
     let fqdn = match detected {
@@ -420,12 +443,14 @@ pub async fn status(daemon: Arc<Daemon>) -> Result<Value> {
     } else if may_change && known.is_some() && !m.config.lock().tailscale && matches!(entry, Some(Entry::Free | Entry::Taken)) {
         m.removal_done(true);
     }
+    // No answer in time says nothing of whether the entry is there: phones are told what they were told, and the next look decides.
+    let no_answer = detected == Detected::NoAnswer || entry == Some(Entry::NoAnswer);
     let origin = match (&detected, entry) {
         (Detected::Ready { fqdn }, Some(Entry::Ours(_))) if m.config.lock().tailscale && m.loopback_port().is_some() => Some(format!("{fqdn}:{HTTPS_PORT}")),
         _ => None,
     };
     // A removal done just now changes what the window shows, also with phone access off, when no origin is there to change.
-    if m.set_tailscale_origin(origin) || removed == Some(true) {
+    if (!no_answer && m.set_tailscale_origin(origin)) || removed == Some(true) {
         daemon.broadcast("mobile.updated", json!({}));
     }
     Ok(described(m, &detected, entry))
@@ -445,7 +470,9 @@ pub async fn check_can_turn_on(daemon: &Arc<Daemon>) -> Result<u64> {
             Entry::Free | Entry::Ours(_) | Entry::Renamed(_) => None,
             Entry::Taken => Some(PORT_TAKEN),
             Entry::Unreadable => Some(NOT_READABLE),
+            Entry::NoAnswer => Some(NO_ANSWER),
         },
+        Detected::NoAnswer => Some(NO_ANSWER),
         _ => Some(NOT_READY),
     })
     .await?;
@@ -556,7 +583,11 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
     let port = listen_loopback(&daemon, true).await.map_err(|e| e.why())?;
     let me = daemon.clone();
     let done = off_runtime(m, move |cli| -> Result<String, &'static str> {
-        let Detected::Ready { fqdn } = detect(cli) else { return Err(NOT_READY) };
+        let fqdn = match detect(cli) {
+            Detected::Ready { fqdn } => fqdn,
+            Detected::NoAnswer => return Err(NO_ANSWER),
+            _ => return Err(NOT_READY),
+        };
         match read_entry(cli, known, Some(&fqdn)) {
             Entry::Ours(at) if at == port => return Ok(fqdn),
             Entry::Ours(_) => unpublish(cli).map_err(|_| NOT_PUBLISHED)?,
@@ -571,12 +602,14 @@ pub async fn turn_on(daemon: Arc<Daemon>, asked_at: u64) -> Result<Value> {
             Entry::Free => {}
             Entry::Taken => return Err(PORT_TAKEN),
             Entry::Unreadable => return Err(NOT_READABLE),
+            Entry::NoAnswer => return Err(NO_ANSWER),
         }
         // No entry of ours is there now. From here on one may be, whatever the command says.
         me.mobile.remember_port(port);
         // What Tailscale holds now, not what it said it would do.
         let published = publish(cli, port).and_then(|()| match read_entry(cli, Some(port), Some(&fqdn)) {
             Entry::Ours(at) if at == port => Ok(()),
+            Entry::NoAnswer => Err(NO_ANSWER),
             _ => Err(NOT_PUBLISHED),
         });
         if let Err(why) = published {
@@ -664,9 +697,28 @@ pub async fn resume(daemon: Arc<Daemon>) {
         Ok(_) | Err(Listen::NoServer) => {}
         Err(Listen::PortTaken) => after_failed_bind(&daemon).await,
     }
-    if let Err(e) = status(daemon.clone()).await {
-        tracing::debug!("phone access: tailscale: {e:#}");
+    match status(daemon.clone()).await {
+        Ok(said) if said["state"] == "no_answer" || said["serve"] == "no_answer" => look_again_soon(daemon),
+        Ok(_) => {}
+        Err(e) => tracing::debug!("phone access: tailscale: {e:#}"),
     }
+}
+
+/// With the mode on and no origin yet, phones with none on record wait for one, and with the window closed nothing else looks. So this does, a few times: it is one
+/// child at a time, ending as soon as Tailscale answers or the mode does.
+fn look_again_soon(daemon: Arc<Daemon>) {
+    tokio::spawn(async move {
+        for _ in 0..LOOKS {
+            tokio::time::sleep(LOOK_AGAIN).await;
+            if !daemon.mobile.config.lock().tailscale {
+                return;
+            }
+            match status(daemon.clone()).await {
+                Ok(said) if said["state"] == "no_answer" || said["serve"] == "no_answer" => {}
+                _ => return,
+            }
+        }
+    });
 }
 
 /// The port our entry forwards to could not be had. If someone else holds it the entry would lead to them, so it goes. If our own listener does, a start at the same
@@ -736,6 +788,10 @@ pub mod fake {
         pub serve_down: Mutex<bool>,
         /// `serve --bg` runs out of its time, having written the entry.
         pub publish_times_out: Mutex<bool>,
+        /// This many of the next reads (`status`, `serve status`) run out of their time.
+        pub reads_time_out: Mutex<usize>,
+        /// The same of `serve status` alone.
+        pub serve_reads_time_out: Mutex<usize>,
         /// Holds `serve --bg` up: says it got there on the first, and goes on when the second says so.
         pub publish_holds: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
         /// The same for `status --json`, the start of a look at Tailscale.
@@ -746,7 +802,7 @@ pub mod fake {
 
     impl Fake {
         pub fn ready() -> Fake {
-            Fake { status: Mutex::new(READY.into()), serve: Mutex::new("{}".into()), calls: Mutex::new(Vec::new()), publish_fails: Mutex::new(None), off_fails: Mutex::new(false), serve_down: Mutex::new(false), publish_times_out: Mutex::new(false), publish_holds: Mutex::new(None), look_holds: Mutex::new(None) }
+            Fake { status: Mutex::new(READY.into()), serve: Mutex::new("{}".into()), calls: Mutex::new(Vec::new()), publish_fails: Mutex::new(None), off_fails: Mutex::new(false), serve_down: Mutex::new(false), publish_times_out: Mutex::new(false), reads_time_out: Mutex::new(0), serve_reads_time_out: Mutex::new(0), publish_holds: Mutex::new(None), look_holds: Mutex::new(None) }
         }
 
         pub fn entry(port: u16) -> String {
@@ -796,6 +852,20 @@ pub mod fake {
             let call = args.join(" ");
             self.calls.lock().push(call.clone());
             let answer = |s: String| Ran::Done { ok: true, stdout: s, stderr: String::new() };
+            if call.ends_with("--json") {
+                let mut slow = self.reads_time_out.lock();
+                if *slow > 0 {
+                    *slow -= 1;
+                    return Ran::TimedOut;
+                }
+            }
+            if call == "serve status --json" {
+                let mut slow = self.serve_reads_time_out.lock();
+                if *slow > 0 {
+                    *slow -= 1;
+                    return Ran::TimedOut;
+                }
+            }
             match call.as_str() {
                 "status --json" => {
                     // Taken first: the lock must not be held through the wait, when another look goes on past this one.
@@ -874,11 +944,11 @@ mod tests {
             }
         }
         assert_eq!(detect(&Says(|| Ran::Missing)), Detected::NotInstalled);
-        assert_eq!(detect(&Says(|| Ran::TimedOut)), Detected::Stopped);
+        assert_eq!(detect(&Says(|| Ran::TimedOut)), Detected::NoAnswer, "slow is not stopped");
         assert_eq!(detect(&Says(|| Ran::Failed)), Detected::Stopped);
         assert_eq!(detect(&Says(|| Ran::Done { ok: false, stdout: String::new(), stderr: "failed to connect to local Tailscale service".into() })), Detected::Stopped);
         assert_eq!(detect(&Says(|| Ran::Done { ok: true, stdout: "gibberish".into(), stderr: String::new() })), Detected::Unreadable);
-        assert_eq!(read_entry(&Says(|| Ran::TimedOut), Some(1), None), Entry::Unreadable, "not knowing is not free");
+        assert_eq!(read_entry(&Says(|| Ran::TimedOut), Some(1), None), Entry::NoAnswer, "not knowing is not free");
     }
 
     #[test]
@@ -947,7 +1017,7 @@ mod tests {
         let enable = Ran::Done { ok: false, stdout: "Serve is not enabled on your tailnet. To enable, visit: https://login.tailscale.com/f/serve?node=SECRET".into(), stderr: String::new() };
         assert_eq!(serve_refusal(&enable), NOT_PUBLISHED);
         assert!(!serve_refusal(&enable).contains("SECRET"));
-        assert_eq!(serve_refusal(&Ran::TimedOut), NOT_PUBLISHED);
+        assert_eq!(serve_refusal(&Ran::TimedOut), NO_ANSWER, "and it does not send the person to their tailnet's settings");
     }
 
     #[test]
@@ -957,6 +1027,20 @@ mod tests {
         assert_eq!(program_for(true, None), None, "never the real one");
         assert_eq!(program_for(true, Some(OsString::new())), None);
         assert_ne!(program_for(false, fake()), Some(PathBuf::from(r"D:\fake\tailscale.cmd")), "the seam means nothing outside a test run");
+    }
+
+    #[test]
+    fn one_slow_start_of_the_program_says_nothing() {
+        let fake = fake::Fake::ready();
+        *fake.reads_time_out.lock() = 1;
+        assert!(matches!(detect(&fake), Detected::Ready { .. }));
+        *fake.reads_time_out.lock() = 1;
+        assert_eq!(read_entry(&fake, None, Some("desk.tail1234.ts.net")), Entry::Free);
+        *fake.reads_time_out.lock() = 2;
+        assert_eq!(detect(&fake), Detected::NoAnswer);
+        assert_eq!(fake.calls.lock().len(), 6, "each one more go, and no more than that");
+        *fake.reads_time_out.lock() = 2;
+        assert_eq!(read_entry(&fake, None, None), Entry::NoAnswer);
     }
 
     #[test]

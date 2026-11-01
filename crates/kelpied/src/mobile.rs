@@ -590,7 +590,7 @@ impl Mobile {
         let read = self.mac_key(false);
         let broken = self.broken.lock().is_some();
         // A store or a key that could not be read says nothing of who has alerts on: what they left to send stays until it can.
-        self.destinations.set_devices_known(read.is_ok() && !broken);
+        self.destinations.set_devices_known(read.is_ok() && !broken && !*self.key_unreadable.lock());
         let key = read.ok().flatten();
         let test_base = self.destinations.test_base();
         let targets: HashMap<String, Target> = {
@@ -609,8 +609,8 @@ impl Mobile {
     }
 
     /// Takes this phone's subscription from what its browser gave. The address is the phone's to name, so it is held to the closed
-    /// list, and no refusal says it back. The signing key is made here if there is none yet.
-    fn push_subscribe(&self, device: &str, req: &Value) -> std::result::Result<(), Refusal> {
+    /// list, and no refusal says it back. The signing key is made here if there is none yet. `connection_origin` is the `Origin` this connection came with.
+    fn push_subscribe(&self, device: &str, req: &Value, connection_origin: Option<&str>) -> std::result::Result<(), Refusal> {
         let text = |k: &str| req[k].as_str().filter(|s| !s.is_empty());
         let (Some(endpoint), Some(p256dh), Some(auth)) = (text("endpoint"), text("p256dh"), text("auth")) else {
             return Err(refuse("bad_request", "a subscription needs its address and keys"));
@@ -622,10 +622,11 @@ impl Mobile {
             return Err(refuse("bad_keys", "The browser gave keys Kelpie cannot use."));
         }
         let lang = if req["lang"].as_str() == Some("vi") { "vi" } else { "en" };
-        // A page from before this was sent has none, and is held to what it was. One it names must be where this computer answers.
+        // A page from before this was sent has none, and is held to what it was. One it names must be where this very connection's page is, so that its alerts can lead
+        // nowhere the phone did not come from. That is a name as well as a listed address: a certificate of the person's own is for a name. Only this device's own alerts use it.
         let origin = text("origin");
-        if origin.is_some_and(|o| !self.serves_origin(o)) {
-            return Err(refuse("bad_origin", "This computer does not answer at the address of this page."));
+        if origin.is_some_and(|o| Some(o) != connection_origin || !plain_origin(o)) {
+            return Err(refuse("bad_origin", "This is not the address this page is connected through."));
         }
         // The look at every open says it again: what the computer already has costs no write. The file is not taken at its word: one that does not verify is sent nothing, and is replaced here.
         let same = |p: &store::PushSub| p.endpoint == endpoint && p.p256dh == p256dh && p.lang == lang && p.origin.as_deref() == origin;
@@ -657,14 +658,6 @@ impl Mobile {
         self.keep();
         self.audit.add(device, "push_on", &name);
         Ok(())
-    }
-
-    /// Whether a page at `origin` (`scheme://host[:port]`) is one this computer serves now: its Tailscale origin, or a listener with the scheme it answers in.
-    fn serves_origin(&self, origin: &str) -> bool {
-        let running = self.running.lock();
-        let Some(r) = running.as_ref() else { return false };
-        let scheme = if r.tls { "https" } else { "http" };
-        r.ts_origin.as_ref().is_some_and(|ts| origin == format!("https://{ts}")) || r.listeners.addrs().iter().any(|a| origin == format!("{scheme}://{}", listen::host(a)))
     }
 
     /// Where an alert leads a phone whose own origin is not recorded. None while Tailscale mode is on and its origin is not back yet: a link to this network's address
@@ -1904,6 +1897,12 @@ fn tls_acceptor(cert: &str, key: &str) -> Result<tokio_rustls::TlsAcceptor> {
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
+/// `scheme://host[:port]` and nothing else: what goes in front of the link in an alert.
+fn plain_origin(origin: &str) -> bool {
+    let rest = origin.strip_prefix("https://").or_else(|| origin.strip_prefix("http://")).unwrap_or("");
+    !rest.is_empty() && origin.len() <= 300 && !rest.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '?' | '#' | '@' | '\\'))
+}
+
 /// The most a connection may do whatever its device's record says: a page in a browser (a device paired as one, or any
 /// connection whose upgrade carried a browser's `Origin`) may type only over HTTPS (its listener's own, or Tailscale Serve's) or from a
 /// Tailscale address (or from this machine itself, which no network sits between); over plain HTTP elsewhere the page could have been
@@ -2140,6 +2139,8 @@ struct Conn {
     cap: Permission,
     list: Option<(Value, Value)>,
     rev: u64,
+    /// The `Origin` this connection came with, if it is a page.
+    page_origin: Option<String>,
     /// The phone does not acknowledge frames or answer heartbeats (see `acknowledges`).
     legacy: bool,
     _phone: Option<crate::load::PhoneGuard>,
@@ -2524,8 +2525,8 @@ impl Conn {
             }
             Verb::PushSub => {
                 self.secure_transport()?;
-                let (daemon, device, req) = (self.daemon.clone(), self.device.clone(), req.clone());
-                tokio::task::spawn_blocking(move || daemon.mobile.push_subscribe(&device, &req)).await.map_err(|_| refuse("not_kept", "That did not finish."))??;
+                let (daemon, device, req, page) = (self.daemon.clone(), self.device.clone(), req.clone(), self.page_origin.clone());
+                tokio::task::spawn_blocking(move || daemon.mobile.push_subscribe(&device, &req, page.as_deref())).await.map_err(|_| refuse("not_kept", "That did not finish."))??;
                 return Ok(Some(json!({"type": "ack", "result": "ok"})));
             }
             Verb::PushUnsub => {
@@ -2584,7 +2585,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     let mut conn = Conn {
         daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(),
         followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(), chat_at: HashMap::new(), waiting, overflowed,
-        cap, list: None, rev: 0, legacy, _phone: Some(daemon.mobile.load.phone()),
+        cap, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, _phone: Some(daemon.mobile.load.phone()),
     };
     // The device's older connection, if any, is told it was replaced.
     let replaced = Arc::new(Notify::new());
@@ -3169,7 +3170,7 @@ mod tests {
         let (out_tx, out) = mpsc::channel(16);
         let conn = Conn {
             daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
-            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, legacy: false, _phone: None,
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, _phone: None,
         };
         Rig { daemon, conn, out, term, typed, chat, phone }
     }
@@ -4832,7 +4833,7 @@ mod tests {
         let (out, _out_rx) = mpsc::channel(16);
         Conn {
             daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
-            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, legacy: false, _phone: None,
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, _phone: None,
         }
     }
 
@@ -5980,29 +5981,29 @@ mod tests {
             ("an address last that is not one", "100.101.102.103, 127.0.0.1", listen::BEHIND_SERVE),
             ("garbage", "unknown", listen::BEHIND_SERVE),
         ] {
-            let p = serve.with_headers(&with(&[("x-forwarded-for", value)]), Some("desk.tail1234.ts.net:8443"));
+            let p = serve.clone().with_headers(&with(&[("x-forwarded-for", value)]), Some("desk.tail1234.ts.net:8443"));
             assert_eq!(p.ip(), want, "{what}");
             assert!(!p.ip().is_loopback(), "{what}");
         }
-        assert_eq!(serve.with_headers(&with(&[]), Some("desk.tail1234.ts.net:8443")).ip(), listen::BEHIND_SERVE, "serve sent none: one bucket for all of it");
-        assert_eq!(serve.with_headers(&with(&[("x-forwarded-for", "100.1.1.1"), ("x-forwarded-for", "100.101.102.103")]), Some("desk.tail1234.ts.net:8443")).ip(), ts, "the last header");
+        assert_eq!(serve.clone().with_headers(&with(&[]), Some("desk.tail1234.ts.net:8443")).ip(), listen::BEHIND_SERVE, "serve sent none: one bucket for all of it");
+        assert_eq!(serve.clone().with_headers(&with(&[("x-forwarded-for", "100.1.1.1"), ("x-forwarded-for", "100.101.102.103")]), Some("desk.tail1234.ts.net:8443")).ip(), ts, "the last header");
         // Anywhere else the header is anyone's to send.
         for direct in [Peer::direct("192.168.1.9:5000".parse().unwrap(), false), Peer::direct("192.168.1.9:5000".parse().unwrap(), true), Peer::direct(loopback, false)] {
-            let p = direct.with_headers(&with(&[("x-forwarded-for", "100.101.102.103")]), Some("desk.tail1234.ts.net:8443"));
+            let p = direct.clone().with_headers(&with(&[("x-forwarded-for", "100.101.102.103")]), Some("desk.tail1234.ts.net:8443"));
             assert_eq!(p.ip(), direct.addr.ip(), "{direct:?}");
         }
         // Secure for the transport, whoever it turns out to be, and only an HTTPS page is a secure origin.
         assert_eq!(transport_cap(Kind::Pwa, true, &serve), Permission::Write);
-        assert_eq!(transport_cap(Kind::Pwa, true, &serve.with_headers(&with(&[("x-forwarded-for", "8.8.8.8")]), Some("desk.tail1234.ts.net:8443"))), Permission::Write);
-        assert!(serve.with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
-        assert!(!serve.with_headers(&with(&[("origin", "https://x")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "any https page is not this computer's origin");
-        assert!(!serve.with_headers(&with(&[("origin", "http://desk.tail1234.ts.net:8443")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
-        assert!(!serve.with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443.evil.example")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
-        let unpublished = serve.with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")]), None);
+        assert_eq!(transport_cap(Kind::Pwa, true, &serve.clone().with_headers(&with(&[("x-forwarded-for", "8.8.8.8")]), Some("desk.tail1234.ts.net:8443"))), Permission::Write);
+        assert!(serve.clone().with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
+        assert!(!serve.clone().with_headers(&with(&[("origin", "https://x")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "any https page is not this computer's origin");
+        assert!(!serve.clone().with_headers(&with(&[("origin", "http://desk.tail1234.ts.net:8443")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
+        assert!(!serve.clone().with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443.evil.example")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
+        let unpublished = serve.clone().with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")]), None);
         assert!(!unpublished.secure_origin, "nothing is published now");
-        assert!(!serve.with_headers(&HeaderMap::new(), Some("desk.tail1234.ts.net:8443")).secure_origin);
-        assert!(!serve.with_headers(&with(&[("origin", "http://127.0.0.1:50000")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
-        assert!(!serve.with_headers(&with(&[]), Some("desk.tail1234.ts.net:8443")).secure_origin, "no page at all");
+        assert!(!serve.clone().with_headers(&HeaderMap::new(), Some("desk.tail1234.ts.net:8443")).secure_origin);
+        assert!(!serve.clone().with_headers(&with(&[("origin", "http://127.0.0.1:50000")]), Some("desk.tail1234.ts.net:8443")).secure_origin);
+        assert!(!serve.clone().with_headers(&with(&[]), Some("desk.tail1234.ts.net:8443")).secure_origin, "no page at all");
         assert!(!Peer::direct(loopback, false).with_headers(&with(&[("origin", "https://desk.tail1234.ts.net:8443")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "plain HTTP cannot be an HTTPS page's");
         assert!(Peer::direct("192.168.1.9:5000".parse().unwrap(), true).with_headers(&with(&[("origin", "https://192.168.1.9:5000")]), Some("desk.tail1234.ts.net:8443")).secure_origin, "a certificate of the person's own");
         assert_eq!(listen::shown(listen::BEHIND_SERVE), "Tailscale");
@@ -6804,6 +6805,62 @@ mod tests {
 
     /// Whatever happens while turning on, the entry stays one Kelpie can tell for its own.
     #[tokio::test]
+    async fn a_turn_on_gets_past_a_slow_answer_and_says_so_when_there_is_none() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        let (tx, mut replies) = app_client(&d, 111);
+        d.presence.inject(|_| Ok(()));
+        // No answer at all: it says that, and not to update Tailscale or look at the tailnet's settings.
+        *fake.reads_time_out.lock() = 2;
+        let on = ask_app(&d, &tx, &mut replies, 111, "mobile.set_tailscale", json!({"on": true})).await;
+        assert_eq!(on["error"]["message"].as_str(), Some(tailscale::NO_ANSWER), "{on}");
+        assert_eq!(*fake.serve.lock(), "{}");
+        assert!(!d.mobile.config.lock().tailscale);
+        // One slow call at each step: it is published all the same.
+        d.presence.inject(|_| Ok(()));
+        *fake.reads_time_out.lock() = 1;
+        let on = ask_app(&d, &tx, &mut replies, 111, "mobile.set_tailscale", json!({"on": true})).await;
+        assert_eq!(on["result"]["origin"], ORIGIN, "{on}");
+        assert_eq!(on["result"]["serve"], "ours");
+    }
+
+    #[tokio::test]
+    async fn no_answer_in_time_takes_nothing_from_a_phone_and_is_looked_at_again() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        let d = network.rig.daemon.clone();
+        publish(&d).await;
+        // Both calls of a look run out of their time: the origin stays, and it is said as what it is.
+        *fake.reads_time_out.lock() = 2;
+        let said = tailscale::status(d.clone()).await.unwrap();
+        assert_eq!((said["state"].as_str(), said["origin"].as_str()), (Some("no_answer"), Some(ORIGIN)), "{said}");
+        assert_eq!(d.mobile.tailscale_origin().as_deref(), Some(ORIGIN));
+        *fake.serve_reads_time_out.lock() = 2;
+        let said = tailscale::status(d.clone()).await.unwrap();
+        assert_eq!((said["state"].as_str(), said["serve"].as_str()), (Some("ready"), Some("no_answer")), "{said}");
+        assert_eq!(d.mobile.tailscale_origin().as_deref(), Some(ORIGIN));
+        // A Tailscale that says it is stopped is another matter.
+        *fake.status.lock() = r#"{"BackendState":"Stopped"}"#.into();
+        tailscale::status(d.clone()).await.unwrap();
+        assert_eq!(d.mobile.tailscale_origin(), None);
+        *fake.status.lock() = tailscale::fake::READY.into();
+        // A start with no answer: with no window to ask, it looks again by itself.
+        d.mobile.set_tailscale_origin(None);
+        *fake.reads_time_out.lock() = 2;
+        tailscale::resume(d.clone()).await;
+        assert_eq!(d.mobile.tailscale_origin(), None, "not yet");
+        let mut waited = 0;
+        while d.mobile.tailscale_origin().is_none() && waited < 100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            waited += 1;
+        }
+        assert_eq!(d.mobile.tailscale_origin().as_deref(), Some(ORIGIN));
+    }
+
+    #[tokio::test]
     async fn kelpie_never_loses_track_of_its_own_entry() {
         let mut network = NetworkRig::new().await;
         let fake = Arc::new(tailscale::fake::Fake::ready());
@@ -6814,7 +6871,7 @@ mod tests {
         // `serve --bg` runs out of its time, having written the entry: it is removed, not left behind for good.
         *fake.publish_times_out.lock() = true;
         let on = ask_app(&d, &tx, &mut replies, 101, "mobile.set_tailscale", json!({"on": true})).await;
-        assert_eq!(on["error"]["message"].as_str(), Some(tailscale::NOT_PUBLISHED), "{on}");
+        assert_eq!(on["error"]["message"].as_str(), Some(tailscale::NO_ANSWER), "{on}");
         assert_eq!(*fake.serve.lock(), "{}", "what the command left is ours and goes");
         assert_eq!(d.mobile.loopback_port(), None);
         *fake.publish_times_out.lock() = false;
@@ -7229,41 +7286,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_page_names_where_it_is_and_only_an_address_of_this_computer_counts() {
-        let network = NetworkRig::new().await;
-        let m = &network.rig.daemon.mobile;
-        let here = format!("http://{}", network.addr);
+    async fn a_page_names_where_it_is_and_only_where_this_connection_came_from_counts() {
+        let r = rig();
+        let m = &r.daemon.mobile;
+        // A certificate of the person's own is for a name, which is no address the computer lists.
+        let here = "https://desk.tail1234.ts.net:4817";
         let subscribe = |origin: &str| {
             let mut sub = subscription(ENDPOINT);
             sub["origin"] = json!(origin);
             sub
         };
-        assert!(m.push_subscribe("phone", &subscribe(&here)).is_ok());
-        assert_eq!(m.config.lock().devices[0].push.as_ref().unwrap().origin.as_deref(), Some(here.as_str()));
+        assert!(m.push_subscribe("phone", &subscribe(here), Some(here)).is_ok());
+        assert_eq!(m.config.lock().devices[0].push.as_ref().unwrap().origin.as_deref(), Some(here));
         let held = m.config.lock().devices[0].push.clone();
-        for bad in [format!("https://{}", network.addr), format!("http://{}:1", network.addr.ip()), "https://evil.example".to_string(), "http://192.168.1.5:4817".to_string(), format!("{here}/"), format!("{here}/x")] {
-            let Err(refused) = m.push_subscribe("phone", &subscribe(&bad)) else { panic!("taken: {bad}") };
+        for (bad, came_from) in [
+            ("https://evil.example", Some(here)),
+            ("http://desk.tail1234.ts.net:4817", Some(here)),
+            ("https://desk.tail1234.ts.net:4818", Some(here)),
+            ("https://desk.tail1234.ts.net:4817/", Some(here)),
+            ("https://desk.tail1234.ts.net:4817/x", Some(here)),
+            (here, None),
+            // Even from a connection that says so: what is no origin is no link's start.
+            ("https://a@b", Some("https://a@b")),
+            ("https://a/b", Some("https://a/b")),
+            ("javascript:alert(1)", Some("javascript:alert(1)")),
+        ] {
+            let Err(refused) = m.push_subscribe("phone", &subscribe(bad), came_from) else { panic!("taken: {bad}") };
             assert_eq!(refused.code, "bad_origin", "{bad}");
-            assert!(!refused.message.contains(&bad));
+            assert!(!refused.message.contains(bad));
         }
         assert_eq!(m.config.lock().devices[0].push, held, "and the one it had stays");
         // A page from before: what it names is nothing, and it is taken as before.
-        assert!(m.push_subscribe("phone", &subscription(ENDPOINT)).is_ok());
+        assert!(m.push_subscribe("phone", &subscription(ENDPOINT), Some(here)).is_ok());
+    }
+
+    #[test]
+    fn a_connection_keeps_the_origin_it_came_with() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, HeaderValue::from_static("https://desk.tail1234.ts.net:4817"));
+        let peer = Peer::direct("100.100.1.2:4817".parse().unwrap(), true).with_headers(&headers, None);
+        assert_eq!(peer.origin.as_deref(), Some("https://desk.tail1234.ts.net:4817"));
+        assert!(peer.secure_origin);
+        assert_eq!(Peer::direct("100.100.1.2:4817".parse().unwrap(), true).with_headers(&HeaderMap::new(), None).origin, None);
     }
 
     #[tokio::test]
-    async fn a_page_at_the_tailscale_origin_may_name_it_and_with_the_origin_gone_a_phone_with_none_waits() {
+    async fn with_the_tailscale_origin_gone_a_phone_with_none_on_record_waits() {
         let mut network = NetworkRig::new().await;
         let fake = Arc::new(tailscale::fake::Fake::ready());
         on_tailscale(&mut network, &fake).await;
         publish(&network.rig.daemon).await;
         let m = &network.rig.daemon.mobile;
         let origin = format!("https://{ORIGIN}");
-        assert!(m.serves_origin(&origin));
-        assert!(!m.serves_origin(&format!("http://{ORIGIN}")), "not in the scheme it does not answer in");
         assert_eq!(m.alert_url().as_deref(), Some(format!("{origin}/").as_str()));
         m.set_tailscale_origin(None);
-        assert!(!m.serves_origin(&origin));
         assert_eq!(m.alert_url(), None, "no link to this network's address in its place");
         assert!(m.running_url().is_some(), "what the channels' link uses is as it was");
     }
@@ -7310,7 +7386,7 @@ mod tests {
         let phone = kelpie_link::Keypair::generate().unwrap();
         m.add_test_device("d", "Phone", phone.public, Permission::Read, Kind::Pwa);
         m.config.lock().enabled = true;
-        m.push_subscribe("d", &subscription(ENDPOINT)).map_err(|r| r.message).unwrap();
+        m.push_subscribe("d", &subscription(ENDPOINT), None).map_err(|r| r.message).unwrap();
         assert_eq!(Mobile::load(&dir, secrets.clone()).destinations.device_ids(), ["d"], "as written, it holds");
         let path = store::path(&dir);
         let file = std::fs::read_to_string(&path).unwrap();
