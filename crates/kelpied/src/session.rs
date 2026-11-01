@@ -189,7 +189,7 @@ pub struct ScreenView {
     pub wait: Option<crate::mobile::risk::WaitInfo>,
 }
 
-/// Requests a wait is said to be about at once, far beyond what an agent asks in parallel. The oldest goes first.
+/// Requests a wait is said to be about at once, far beyond what an agent asks in parallel. Past this the mildest goes (`risk::keep_worst`).
 const WAIT_REQUESTS_KEPT: usize = 16;
 
 /// Where a client's messages from the daemon wait. The app and the CLI have an unbounded queue; a
@@ -775,14 +775,8 @@ impl Session {
             Answer::Text(text) => typed_text(text).into_bytes(),
         };
         let typed = self.answer_bytes(waiting_since, bytes, by)?;
-        // The dialog this answered was the oldest open: the agent asks in turn. If it was not, the next hook about a tool sets that right, and until then a card says more than it must, not less.
-        {
-            let mut g = self.inner.lock();
-            if !g.wait_requests.is_empty() {
-                g.wait_requests.remove(0);
-                self.wake.send_replace(g.seq);
-            }
-        }
+        // An answer leaves the open requests as they are. It does not say which it answered, and it may be for a dialog no hook spoke of: taking one off could take the label off the next
+        // dialog on screen. A tool that ran is taken off by its own hook, and one refused by the end of the turn, so a card may say more than it must, never less.
         if enter {
             self.enter_later(typed);
         }
@@ -1047,10 +1041,10 @@ impl Session {
         }
     }
 
-    /// Keeps track of what this session's wait is about, from its hooks. Each request stays until that tool has run, or its dialog was answered, or the turn is over (`set_hook_status`): a
-    /// wait can outlast other tools' events and a long silence, and two requests can be open at once. What a card says is about all of them (`WaitInfo::of`).
+    /// Keeps track of what this session's wait is about, from its hooks. Each request stays until that tool has run or failed, or the turn is over (`set_hook_status`): a wait can outlast other
+    /// tools' events, a long silence and the answer to another dialog, and two requests can be open at once, the same one twice as well. What a card says is about all of them (`WaitInfo::of`).
     pub fn request_hook(&self, event: &str, payload: &Value) {
-        if !matches!(event, "PermissionRequest" | "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" | "UserPromptSubmit") {
+        if !matches!(event, "PermissionRequest" | "PostToolUse" | "PostToolUseFailure" | "UserPromptSubmit") {
             return;
         }
         let cwd = self.spec.lock().cwd.clone();
@@ -1058,14 +1052,10 @@ impl Session {
         let mut g = self.inner.lock();
         match (event, request) {
             ("PermissionRequest", Some(request)) => {
-                if !g.wait_requests.contains(&request) {
-                    if g.wait_requests.len() >= WAIT_REQUESTS_KEPT {
-                        g.wait_requests.remove(0);
-                    }
-                    g.wait_requests.push(request);
-                }
+                g.wait_requests.push(request);
+                crate::mobile::risk::keep_worst(&mut g.wait_requests, &cwd, WAIT_REQUESTS_KEPT);
             }
-            ("PostToolUse" | "PostToolUseFailure" | "PermissionDenied", Some(request)) => {
+            ("PostToolUse" | "PostToolUseFailure", Some(request)) => {
                 let Some(at) = g.wait_requests.iter().position(|open| *open == request) else { return };
                 g.wait_requests.remove(at);
             }

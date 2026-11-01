@@ -538,6 +538,7 @@ fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path) -> Result<PathBu
         "UserPromptSubmit",
         "PreToolUse",
         "PostToolUse",
+        "PostToolUseFailure",
         "PermissionRequest",
         "Notification",
         "Stop",
@@ -689,6 +690,18 @@ mod tests {
         assert_eq!(pick_login_shell(None, None, true), "/bin/zsh");
         // The test runner's own account has a shell the user database reports.
         assert!(login_shell().starts_with('/'));
+    }
+
+    /// A request a card is about is taken off by these: without them it would stay on the card until the turn ends.
+    #[test]
+    fn claude_is_told_to_report_what_ends_a_request() {
+        let dir = std::env::temp_dir().join(format!("kelpie-hooks-events-{}", uuid::Uuid::new_v4()));
+        let path = write_claude_hook_settings(Path::new("/fixture/kelpied"), &dir).unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for event in ["PermissionRequest", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop"] {
+            assert!(settings["hooks"].get(event).is_some(), "{event}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

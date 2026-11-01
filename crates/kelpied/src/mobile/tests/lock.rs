@@ -463,6 +463,10 @@ async fn a_phone_paired_at_a_number_reads_and_is_not_held_at_the_lock() {
     let hello = r.conn.hello(&device, Permission::Write).await;
     assert_eq!((hello["locked"].as_bool(), hello["lock"]["state"].as_str(), hello["device"]["can_write"].as_bool()), (Some(false), Some("read_only"), Some(false)));
     assert_eq!(hello["sessions"].as_array().unwrap().len(), 2);
+    // Its record says it may type, so sending it to Settings would be no help: what stops it is where it is.
+    let refused = r.ask_write(json!({"type": "input", "id": "t1", "text": "hi"})).await;
+    assert_eq!(code(&refused), Some("read_only"));
+    assert!(!refused["message"].as_str().unwrap().contains("Settings"), "{refused}");
     // At a name it is what it was: a passkey is asked for.
     let mut named = HeaderMap::new();
     named.insert(header::ORIGIN, HeaderValue::from_static("https://desk.example:4817"));
@@ -510,9 +514,6 @@ async fn a_waits_label_stays_with_the_requests_it_is_about() {
     d.hook(&hook("PermissionRequest", "Bash", "ls")).unwrap();
     assert_eq!((level(), wait().command.as_deref().map(str::to_string)), (risk::Level::Dangerous, Some("rm -rf build\nls".to_string())));
     assert_eq!(r.term.dangerous_wait().as_deref(), Some("rm -rf build\nls"), "what an assertion is over is what the card shows");
-    // The same one said again is one.
-    d.hook(&hook("PermissionRequest", "Bash", "ls")).unwrap();
-    assert_eq!(wait().command.as_deref(), Some("rm -rf build\nls"));
 
     // Another tool's work, in parallel or in a subagent, says nothing of the dialog that is open.
     d.hook(&hook("PreToolUse", "Bash", "npm test")).unwrap();
@@ -543,15 +544,76 @@ async fn a_waits_label_stays_with_the_requests_it_is_about() {
     assert_eq!(r.term.dangerous_wait(), None);
 }
 
+/// An answer does not say which dialog it was for. Whichever came up first, and whatever order the hooks reached the daemon in, the dangerous one keeps its label until its own hook settles it.
 #[tokio::test]
-async fn an_answer_takes_the_request_it_answered_and_leaves_the_next() {
+async fn an_answer_cannot_take_the_label_off_the_dialog_still_open() {
+    for (first, second) in [("ls", "rm -rf build"), ("rm -rf build", "ls")] {
+        let mut r = rig();
+        r.daemon.hook(&hook("PermissionRequest", "Bash", first)).unwrap();
+        r.daemon.hook(&hook("PermissionRequest", "Bash", second)).unwrap();
+        let since = crate::session::fake::wait_on_user(&r.term);
+        let both = format!("{first}\n{second}");
+        assert_eq!(r.term.screen_view(10).wait.unwrap().command.as_deref(), Some(both.as_str()), "both are on the card");
+        // The harmless one's dialog is answered, in either order of arrival.
+        assert_eq!(r.ask_write(json!({"type": "answer", "id": "t1", "waiting_since": since, "text": "1"})).await["result"], "ok");
+        assert_eq!(r.term.dangerous_wait().as_deref(), Some(both.as_str()), "the answer settles nothing");
+        // Its tool ran: that one goes, and the other stays dangerous, with what it is.
+        r.daemon.hook(&hook("PostToolUse", "Bash", "ls")).unwrap();
+        crate::session::fake::wait_on_user(&r.term);
+        let wait = r.term.screen_view(10).wait.unwrap();
+        assert_eq!((wait.risk.level, wait.command.as_deref()), (risk::Level::Dangerous, Some("rm -rf build")));
+        assert_eq!(r.term.dangerous_wait().as_deref(), Some("rm -rf build"));
+    }
+}
+
+/// A prompt no hook spoke of comes first, with a request behind it. Answering that prompt says nothing of the request.
+#[tokio::test]
+async fn answering_some_other_prompt_leaves_a_request_behind_it_labelled() {
     let mut r = rig();
-    r.daemon.hook(&hook("PermissionRequest", "Bash", "ls")).unwrap();
     r.daemon.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
     let since = crate::session::fake::wait_on_user(&r.term);
     assert_eq!(r.ask_write(json!({"type": "answer", "id": "t1", "waiting_since": since, "text": "1"})).await["result"], "ok");
-    assert_eq!(r.term.screen_view(10).wait.unwrap().command.as_deref(), Some("rm -rf build"), "the next dialog keeps its label");
     assert_eq!(r.term.dangerous_wait().as_deref(), Some("rm -rf build"));
+}
+
+#[tokio::test]
+async fn a_tool_that_failed_is_done_with_and_a_tool_whose_report_does_not_match_stays() {
+    let r = rig();
+    let d = &r.daemon;
+    d.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
+    d.hook(&hook("PostToolUse", "Bash", "rm -rf something-else")).unwrap();
+    assert_eq!(r.term.dangerous_wait().as_deref(), Some("rm -rf build"), "not this one: it stays, which errs high");
+    d.hook(&hook("PostToolUseFailure", "Bash", "rm -rf build")).unwrap();
+    assert_eq!(r.term.dangerous_wait(), None);
+}
+
+#[tokio::test]
+async fn the_same_request_twice_is_two_until_each_has_run() {
+    let r = rig();
+    let d = &r.daemon;
+    d.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
+    d.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
+    d.hook(&hook("PostToolUse", "Bash", "rm -rf build")).unwrap();
+    assert_eq!(r.term.dangerous_wait().as_deref(), Some("rm -rf build"), "another agent's identical command has run; this dialog is still open");
+    d.hook(&hook("PostToolUse", "Bash", "rm -rf build")).unwrap();
+    assert_eq!(r.term.dangerous_wait(), None);
+}
+
+#[tokio::test]
+async fn a_full_list_of_requests_keeps_the_dangerous_one_whenever_it_came() {
+    let r = rig();
+    let d = &r.daemon;
+    d.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
+    for i in 0..40 {
+        d.hook(&hook("PermissionRequest", "Bash", &format!("ls a{i}"))).unwrap();
+    }
+    assert!(r.term.dangerous_wait().is_some_and(|c| c.contains("rm -rf build")), "first in, and not pushed out");
+    d.hook(&bare_hook("Stop", json!({}))).unwrap();
+    for i in 0..40 {
+        d.hook(&hook("PermissionRequest", "Bash", &format!("ls a{i}"))).unwrap();
+    }
+    d.hook(&hook("PermissionRequest", "Bash", "rm -rf build")).unwrap();
+    assert!(r.term.dangerous_wait().is_some_and(|c| c.contains("rm -rf build")), "last in, with the list full");
 }
 
 #[tokio::test]
