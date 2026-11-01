@@ -179,6 +179,33 @@ export function turnsByMessage(list: TurnList, messages: { id: string; at?: numb
   return out;
 }
 
+/** The files of a plan that start ticked: the safe ones. Risky ones wait for a deliberate tick. */
+export function safelyTicked(plan: UndoPlan): Set<string> {
+  return new Set(plan.items.filter((i) => i.action !== "skip" && i.state === "clean").map((i) => i.path));
+}
+
+export type UndoAttempt =
+  | { kind: "applied"; result: UndoResult }
+  /** The daemon refused or the undo stopped part way: nothing further happens without a new decision,
+   *  on a new plan. `plan` is null when that could not be read either. */
+  | { kind: "refused" | "failed"; error?: unknown; plan: UndoPlan | null; picked: Set<string> };
+
+/** One press of Undo. A confirmation names a path, not a version, so ticks made on the old plan must
+ *  not survive a refusal: the very next press would overwrite the save the refusal just protected. */
+export async function attemptUndo(api: { plan: () => Promise<UndoPlan>; undo: (paths: string[], confirm: string[]) => Promise<UndoResult> }, items: PlanItem[], picked: Set<string>): Promise<UndoAttempt> {
+  const chosen = items.filter((i) => picked.has(i.path));
+  const again = async () => {
+    const plan = await api.plan().catch(() => null);
+    return { plan, picked: plan ? safelyTicked(plan) : new Set<string>() };
+  };
+  try {
+    const result = await api.undo(chosen.map((i) => i.path), chosen.filter((i) => i.state !== "clean").map((i) => i.path));
+    return result.applied ? { kind: "applied", result } : { kind: "refused", ...(await again()) };
+  } catch (error) {
+    return { kind: "failed", error, ...(await again()) };
+  }
+}
+
 /** "3 files" with the lines added and removed after it, when there are any. */
 export function turnStats(rec: Pick<TurnRecord, "added" | "removed">, filesText: string): string {
   return rec.added || rec.removed ? `${filesText} +${rec.added} −${rec.removed}` : filesText;

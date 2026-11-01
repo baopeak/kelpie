@@ -281,6 +281,12 @@ thread_local! {
     static CPU: Cell<Duration> = const { Cell::new(Duration::ZERO) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// This thread's copies of the index end up with a new time, as on a filesystem that ignores the one set.
+    static STAMP_IGNORED: Cell<bool> = const { Cell::new(false) };
+}
+
 fn take_cpu() -> Duration {
     CPU.with(|c| c.replace(Duration::ZERO))
 }
@@ -439,6 +445,8 @@ fn copy_index(repo: &Repo, tmp_index: &Path, cache: StatCache) -> Result<()> {
         };
         std::fs::copy(&repo.index, tmp_index).context("copy index")?;
         let stamped = std::fs::File::options().write(true).open(tmp_index).and_then(|f| f.set_modified(stamp)).and_then(|()| std::fs::metadata(tmp_index)?.modified()).context("stamp the index copy").and_then(|got| {
+            #[cfg(test)]
+            let got = if STAMP_IGNORED.with(Cell::get) { SystemTime::now() } else { got };
             if stamp_held(stamp, got) {
                 Ok(())
             } else {
@@ -455,12 +463,12 @@ fn copy_index(repo: &Repo, tmp_index: &Path, cache: StatCache) -> Result<()> {
     Ok(())
 }
 
-/// `git add` with these arguments into a temporary index: the files git could not read. `--ignore-errors`:
+/// `git add` with these options into a temporary index: the files git could not read. `--ignore-errors`:
 /// a file another program holds open must not cost the rest; git then exits 1 (also for paths outside a
 /// sparse checkout) after writing the index.
-fn add_to_tmp_index(repo: &Repo, tmp_index: &Path, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<String>> {
+fn add_to_tmp_index(repo: &Repo, tmp_index: &Path, git_options: &[&str], add_options: &[&str], input: Option<Vec<u8>>) -> Result<Vec<String>> {
     let mut cmd = command(&repo.top, Some(tmp_index));
-    cmd.args(["add", "-A", "--ignore-errors"]).args(args);
+    cmd.args(git_options).args(["add", "-A", "--ignore-errors"]).args(add_options);
     let out = run(cmd, input)?;
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !matches!(out.status.code(), Some(0 | 1)) {
@@ -474,7 +482,7 @@ fn add_to_tmp_index(repo: &Repo, tmp_index: &Path, args: &[&str], input: Option<
 fn working_tree(repo: &Repo, tmp_index: &Path) -> Result<(String, Vec<String>)> {
     copy_index(repo, tmp_index, StatCache::Trusted)?;
     let result = (|| {
-        let unreadable = add_to_tmp_index(repo, tmp_index, &[], None)?;
+        let unreadable = add_to_tmp_index(repo, tmp_index, &[], &[], None)?;
         Ok((git(&repo.top, Some(tmp_index), &["write-tree"])?, unreadable))
     })();
     let _ = std::fs::remove_file(tmp_index);
@@ -507,7 +515,13 @@ fn tree_with_paths(repo: &Repo, tmp_index: &Path, tree: &str, paths: &[&str]) ->
         if !gone.is_empty() {
             git_raw(&repo.top, Some(tmp_index), &["update-index", "--force-remove", "-z", "--stdin"], Some(nul_separated(&gone)))?;
         }
-        let unreadable = if here.is_empty() { Vec::new() } else { add_to_tmp_index(repo, tmp_index, &["--pathspec-from-file=-", "--pathspec-file-nul"], Some(nul_separated(&here)))? };
+        // Whatever these paths hold counts, also what `add` would leave out: a file the turn stopped
+        // tracking and ignored (`-f`), or one outside a sparse checkout. An undo would overwrite those.
+        let unreadable = if here.is_empty() {
+            Vec::new()
+        } else {
+            add_to_tmp_index(repo, tmp_index, &["-c", "core.sparseCheckout=false"], &["-f", "--pathspec-from-file=-", "--pathspec-file-nul"], Some(nul_separated(&here)))?
+        };
         Ok((git(&repo.top, Some(tmp_index), &["write-tree"])?, unreadable))
     })();
     let _ = std::fs::remove_file(tmp_index);
@@ -1246,7 +1260,11 @@ impl Checkpoints {
         }
         let base = rec.base.clone().ok_or_else(|| anyhow!("no earlier snapshot to restore"))?;
         let changes = diff_changes(repo, &base, &rec.commit)?;
-        let paths: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+        // A folder the turn made a submodule: what was in it now belongs to another repository. Git stops
+        // on a path named inside it, and a restore would write into that repository.
+        let submodules: Vec<String> = changes.iter().filter(|c| c.new_mode == "160000").map(|c| format!("{}/", c.path)).collect();
+        let in_submodule = |path: &str| submodules.iter().any(|s| path.starts_with(s.as_str()));
+        let paths: Vec<&str> = changes.iter().map(|c| c.path.as_str()).filter(|p| !in_submodule(p)).collect();
         let stamps: FileStamps = paths.iter().map(|p| (p.to_string(), file_stamp(&repo.top, p))).collect();
         // What the turn's files hold now, against what the turn left: a difference is a later change.
         // Read for real, whatever the stat cache says: this decides what an undo may overwrite.
@@ -1282,9 +1300,19 @@ impl Checkpoints {
             unreadable.extend(b.unreadable.iter().map(String::as_str));
         }
         let between: HashSet<&str> = rec.between.iter().map(String::as_str).collect();
+        // A restore makes the folders a file needs, replacing whatever stands in their place, and replaces
+        // a folder standing in the file's place with all that is in it. Neither is one of the turn's files
+        // unless the turn put it there.
+        let in_the_way = |path: &str| {
+            Path::new(path).ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()).any(|a| !a.to_str().is_some_and(|s| stamps.contains_key(s)) && std::fs::symlink_metadata(repo.top.join(a)).is_ok_and(|m| !m.is_dir()))
+        };
+        let drifted_below = |path: &str| {
+            let below = format!("{path}/");
+            drift.iter().any(|d| d.starts_with(&below))
+        };
         let mut items = Vec::new();
         for c in changes {
-            let special = [&c.old_mode, &c.new_mode].iter().any(|m| matches!(m.as_str(), "120000" | "160000"));
+            let special = in_submodule(&c.path) || [&c.old_mode, &c.new_mode].iter().any(|m| matches!(m.as_str(), "120000" | "160000"));
             let (action, mut reason) = if special {
                 ("skip", Some("a link or submodule: restore it yourself"))
             } else if undone_already.contains(&c.path) {
@@ -1313,7 +1341,10 @@ impl Checkpoints {
             } else if unread.contains(&c.path) {
                 reason = Some("could not be read just now");
                 "modified"
-            } else if drift.contains(&c.path) {
+            } else if c.status != 'A' && in_the_way(&c.path) {
+                reason = Some("a file now stands where its folder was");
+                "modified"
+            } else if drift.contains(&c.path) || drifted_below(&c.path) {
                 "modified"
             } else if rec.kind == Kind::Turn && (rec.between_truncated || between.contains(c.path.as_str())) {
                 reason = Some("changed between turns, before this turn started");
@@ -1395,29 +1426,36 @@ impl Checkpoints {
                 _ => skipped.push(json!({"path": i.path, "reason": i.reason})),
             }
         }
+        // A file git takes as equal to its index entry is not written, so the restore runs on a copy
+        // that trusts no stat data (and never waits for the user's own git to let go of the real
+        // index's lock). Made first: one that cannot be made stops the undo before anything changes.
+        let tmp = self.tmp_index(sid);
         if !restore.is_empty() {
-            let input = nul_separated(&restore);
-            let source = format!("--source={base}");
-            // A file git takes as equal to its index entry is not written, so the restore too runs on
-            // a copy that trusts no stat data (and never waits for the user's own git to let go of
-            // the real index's lock). `--worktree` alone: the copy's contents do not change either.
-            let tmp = self.tmp_index(sid);
             copy_index(&repo, &tmp, StatCache::Distrusted)?;
-            let restored = git_raw(&repo.top, Some(&tmp), &["restore", &source, "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"], Some(input));
-            let _ = std::fs::remove_file(&tmp);
-            restored?;
         }
-        for p in &delete {
-            let file = repo.top.join(p);
-            if behind_a_link(&repo.top, &file) {
-                bail!("refusing to delete {p}: a folder on its path is a link");
+        let written: Result<()> = (|| {
+            // Deletes first. A case-only rename is one file on a case-insensitive filesystem, and a
+            // file and folder that swapped places are in each other's way.
+            for p in &delete {
+                let file = repo.top.join(p);
+                if behind_a_link(&repo.top, &file) {
+                    bail!("refusing to delete {p}: a folder on its path is a link");
+                }
+                match std::fs::remove_file(&file) {
+                    Ok(()) => remove_empty_parents(&repo.top, &file),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => bail!("delete {p}: {e}"),
+                }
             }
-            match std::fs::remove_file(&file) {
-                Ok(()) => remove_empty_parents(&repo.top, &file),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => bail!("delete {p}: {e}"),
+            if !restore.is_empty() {
+                // `--worktree` alone: the copy's contents do not change either.
+                let source = format!("--source={base}");
+                git_raw(&repo.top, Some(&tmp), &["restore", &source, "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"], Some(nul_separated(&restore)))?;
             }
-        }
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        written?;
         // The folder as it is now becomes the session's latest snapshot, so the next turn
         // does not include the undo.
         let applied = chosen.iter().filter(|i| i.action != "skip").map(|i| i.path.clone()).collect::<Vec<_>>();

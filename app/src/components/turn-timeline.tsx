@@ -8,7 +8,7 @@ import { relTimeShort } from "../lib/platform";
 import { setCovering } from "../lib/overlays";
 import { errorText, t } from "../lib/i18n";
 import {
-  artifactKind, inProject, listTurns, projectPrefix, setTurnSnapshots, sourceNote, turnFiles, turnOwners, turnStats, undoPlan, undoTurn, visibleTurns,
+  artifactKind, attemptUndo, inProject, listTurns, projectPrefix, safelyTicked, setTurnSnapshots, sourceNote, turnFiles, turnOwners, turnStats, undoPlan, undoTurn, visibleTurns,
   type PlanItem, type TurnFile, type TurnRecord, type UndoPlan,
 } from "../lib/checkpoints";
 import { Icon } from "./icons";
@@ -280,8 +280,7 @@ export function UndoDialog(props: { sessionId: string; sessionName: string; n: n
     try {
       const p = await undoPlan(props.sessionId, props.n);
       setPlan(p);
-      // The safe files start ticked; risky ones wait for a deliberate tick.
-      setPicked(new Set(p.items.filter((i) => i.action !== "skip" && i.state === "clean").map((i) => i.path)));
+      setPicked(safelyTicked(p));
     } catch (e) {
       setError(errorText(e));
     }
@@ -301,21 +300,16 @@ export function UndoDialog(props: { sessionId: string; sessionName: string; n: n
   const run = async () => {
     setBusy(true);
     setError(null);
-    try {
-      const paths = chosen().map((i) => i.path);
-      const confirm = chosen().filter(risky).map((i) => i.path);
-      const r = await undoTurn(props.sessionId, props.n, paths, confirm);
-      if (!r.applied) {
-        setError(t("Some files need a decision: reopen the preview."));
-        setBusy(false);
-        return;
-      }
-      store.notify(t("Undid turn #{n}: {files}", { n: props.n, files: filesText(r.files?.length ?? 0) }));
+    const r = await attemptUndo({ plan: () => undoPlan(props.sessionId, props.n), undo: (paths, confirm) => undoTurn(props.sessionId, props.n, paths, confirm) }, items(), picked());
+    if (r.kind === "applied") {
+      store.notify(t("Undid turn #{n}: {files}", { n: props.n, files: filesText(r.result.files?.length ?? 0) }));
       props.onClose(true);
-    } catch (e) {
-      setError(errorText(e));
-      setBusy(false);
+      return;
     }
+    if (r.plan) setPlan(r.plan);
+    setPicked(r.picked);
+    setError(r.kind === "refused" ? t("Some files changed: check the list again. Only the safe ones are ticked.") : t("The undo stopped: {error}. Files already put back show as done in the list.", { error: errorText(r.error) }));
+    setBusy(false);
   };
 
   const verb = (i: PlanItem) => (i.action === "delete" ? t("Delete") : i.action === "restore" ? t("Restore") : t("Skip"));
@@ -325,7 +319,9 @@ export function UndoDialog(props: { sessionId: string; sessionName: string; n: n
       const r = i.reason ?? "";
       if (r.startsWith("changed between")) return t("Changed between turns, before this turn started");
       if (r.startsWith("changed before")) return t("Changed before this turn started, not by it");
+      if (r.startsWith("could not be read just now")) return t("Could not be read just now: another program may hold it");
       if (r.startsWith("could not be read")) return t("Could not be read when a snapshot was taken");
+      if (r.startsWith("a file now stands")) return t("A file now stands where its folder was");
       if (r.startsWith("removed before")) return t("Removed before this turn started");
       return t("Changed since this turn");
     }

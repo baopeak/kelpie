@@ -436,16 +436,21 @@ fn a_file_with_converted_line_endings_is_not_a_change_of_every_snapshot() {
 
 #[test]
 fn a_save_between_the_undos_read_and_its_writes_is_not_overwritten() {
-    for (name, turn_text) in [("b.txt", "a turn's longer line\n"), ("new.txt", "made by the turn\n")] {
+    // By its size, by its time alone (same size, another time), and in a file the turn added.
+    for (name, turn_text, same_size) in [("b.txt", "a turn's longer line\n", false), ("b.txt", "a turn's longer line\n", true), ("new.txt", "made by the turn\n", false)] {
         let repo = fixture();
         let (cp, _) = store(&scratch());
         cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
         write(&repo, name, turn_text);
         cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
-        let (saved_in, file) = (repo.clone(), name.to_string());
-        *cp.before_writing.lock() = Some(Box::new(move || write(&saved_in, &file, "a person's save\n")));
+        let saved = if same_size { turn_text.to_uppercase() } else { "a person's save\n".to_string() };
+        let (saved_in, file, text) = (repo.clone(), name.to_string(), saved.clone());
+        *cp.before_writing.lock() = Some(Box::new(move || {
+            let time = std::fs::metadata(saved_in.join(&file)).unwrap().modified().unwrap();
+            write_at(&saved_in, &file, &text, if same_size { time + Duration::from_secs(5) } else { time });
+        }));
         let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
-        assert_eq!(read(&repo, name), "a person's save\n", "{name} survives");
+        assert_eq!(read(&repo, name), saved, "{name} survives");
         assert_eq!(refused["applied"], false, "{refused}");
         assert_eq!(refused["needs_confirmation"][0]["reason"], "changed while the undo was starting");
         // The next attempt reads it again, and decides on what is there now.
@@ -463,6 +468,237 @@ fn a_copy_of_the_index_fails_when_its_time_did_not_take() {
     let recent = std::time::SystemTime::now() - AGES;
     assert!(stamp_held(recent, recent + Duration::from_secs(2)), "rounded up by a coarse filesystem");
     assert!(!stamp_held(recent, std::time::SystemTime::now()));
+
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "a.txt", "turn one, a longer line\n");
+    write(&repo, "new.txt", "made by the turn\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let top = find_top(&repo).unwrap();
+    let handle = cp.repo(&top, &repo_key(&top)).unwrap();
+    let tmp = cp.tmp_index("s1");
+    STAMP_IGNORED.with(|s| s.set(true));
+    assert!(copy_index(&handle, &tmp, StatCache::Distrusted).is_err());
+    assert!(!tmp.exists(), "no copy stays behind");
+    // An undo stops before it changes anything, the file it would delete included.
+    assert!(undo(&cp, "s1", 1, None, &[], &IDLE).is_err());
+    assert_eq!(read(&repo, "a.txt"), "turn one, a longer line\n");
+    assert_eq!(read(&repo, "new.txt"), "made by the turn\n");
+    // And a snapshot on an index whose time the copy did not get is not taken.
+    stamp_index(&repo, std::time::SystemTime::now() - AGES);
+    write(&repo, "a.txt", "turn two, another longer line\n");
+    assert!(cp.run_job(&job("s1", &repo, Kind::Turn, 30, 40)).is_err());
+    STAMP_IGNORED.with(|s| s.set(false));
+}
+
+#[test]
+fn a_file_the_turn_stopped_tracking_and_ignored_is_not_overwritten_by_undo() {
+    let repo = fixture();
+    write(&repo, ".env", "SECRET=old\n");
+    g(&repo, &["add", ".env"]);
+    g(&repo, &["commit", "-qm", "env"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    g(&repo, &["rm", "-q", "--cached", ".env"]);
+    write(&repo, ".gitignore", "*.log\n.env\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    // Left alone, it already is what it was before the turn.
+    assert_eq!(item(&plan_of(&cp, "s1", 1), ".env")["action"], "skip");
+    write(&repo, ".env", "SECRET=a person's new value\n");
+    assert_eq!(item(&plan_of(&cp, "s1", 1), ".env")["state"], "modified");
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, ".env"), "SECRET=a person's new value\n");
+    assert_eq!(refused["applied"], false, "{refused}");
+}
+
+#[test]
+fn a_file_standing_where_the_turns_deleted_folder_was_is_not_overwritten_by_undo() {
+    let repo = fixture();
+    write(&repo, "sub/a.txt", "a v0\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "sub"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    std::fs::remove_dir_all(repo.join("sub")).unwrap();
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    write(&repo, "sub", "a person's file\n");
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, "sub"), "a person's file\n");
+    assert_eq!(refused["applied"], false, "{refused}");
+    assert_eq!(refused["needs_confirmation"][0]["reason"], "a file now stands where its folder was");
+}
+
+#[test]
+fn a_persons_files_in_the_folder_that_replaced_a_file_are_not_lost_to_undo() {
+    let repo = fixture();
+    write(&repo, "foo", "a file\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "foo"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    std::fs::remove_file(repo.join("foo")).unwrap();
+    write(&repo, "foo/bar", "inside\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    write(&repo, "foo/ignored.log", "a person's log\n");
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, "foo/ignored.log"), "a person's log\n");
+    assert_eq!(read(&repo, "foo/bar"), "inside\n");
+    assert_eq!(refused["applied"], false, "{refused}");
+}
+
+#[test]
+fn a_file_and_a_folder_that_swapped_places_go_back_without_an_error() {
+    for (before, after) in [("foo", "foo/bar"), ("foo/bar", "foo")] {
+        let repo = fixture();
+        write(&repo, before, "before\n");
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "before"]);
+        let (cp, _) = store(&scratch());
+        cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+        std::fs::remove_dir_all(repo.join("foo")).or_else(|_| std::fs::remove_file(repo.join("foo"))).unwrap();
+        write(&repo, after, "after\n");
+        cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+        assert!(plan_of(&cp, "s1", 1).iter().all(|i| i["state"] == "clean"), "the turn's own swap is not a person's file");
+        assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+        assert_eq!(read(&repo, before), "before\n");
+    }
+}
+
+#[test]
+fn undoing_a_case_only_rename_brings_the_file_back_under_its_old_name() {
+    let repo = fixture();
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    g(&repo, &["mv", "a.txt", "A.txt"]);
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    let names: Vec<String> = std::fs::read_dir(&repo).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.contains(&"a.txt".to_string()) && !names.contains(&"A.txt".to_string()), "{names:?}");
+    assert_eq!(read(&repo, "a.txt"), "a.txt v0\n");
+}
+
+#[test]
+fn a_folder_the_turn_made_a_submodule_does_not_stop_the_rest_of_the_undo() {
+    let repo = fixture();
+    write(&repo, "lib/x", "x v0\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "lib"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    g(&repo, &["rm", "-q", "-r", "--cached", "lib"]);
+    write(&repo, "lib/x", "x in another repository\n");
+    let lib = repo.join("lib");
+    g(&lib, &["init", "-q", "-b", "main"]);
+    g(&lib, &["add", "-A"]);
+    g(&lib, &["commit", "-qm", "inner"]);
+    write(&repo, "a.txt", "turn one, a longer line\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let items = plan_of(&cp, "s1", 1);
+    assert_eq!(item(&items, "lib")["action"], "skip");
+    assert_eq!(item(&items, "lib/x")["action"], "skip", "it is not this repository's to write");
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "a.txt"), "a.txt v0\n");
+    assert_eq!(read(&repo, "lib/x"), "x in another repository\n");
+}
+
+#[test]
+fn a_file_outside_the_sparse_checkout_is_read_by_undo() {
+    let repo = fixture();
+    write(&repo, "in/a.txt", "a v0\n");
+    write(&repo, "out/b.txt", "b v0\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "folders"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "out/b.txt", "the turn, a longer line\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "the turn"]);
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    g(&repo, &["sparse-checkout", "set", "in"]);
+    // Absent, as a sparse checkout leaves it: unknown, so asked about.
+    assert_eq!(read(&repo, "out/b.txt"), "<missing>");
+    assert_eq!(item(&plan_of(&cp, "s1", 1), "out/b.txt")["state"], "modified");
+    // Present with a person's text: not to be overwritten.
+    write(&repo, "out/b.txt", "a person's copy\n");
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(read(&repo, "out/b.txt"), "a person's copy\n");
+    assert_eq!(refused["applied"], false, "{refused}");
+}
+
+#[test]
+fn an_undo_works_in_a_repository_without_a_commit() {
+    let repo = scratch().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    g(&repo, &["init", "-q", "-b", "main"]);
+    g(&repo, &["config", "core.autocrlf", "false"]);
+    write(&repo, "a.txt", "a v0\n");
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    write(&repo, "a.txt", "the turn, a longer line\n");
+    write(&repo, "new.txt", "made by the turn\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert!(plan_of(&cp, "s1", 1).iter().all(|i| i["state"] == "clean"));
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "a.txt"), "a v0\n");
+    assert_eq!(read(&repo, "new.txt"), "<missing>");
+}
+
+/// A symbolic link to a folder or a file, or false where this user may not make one (Windows without
+/// developer mode): what needs one is then not checked here.
+fn link_to(target: &str, link: &Path, folder: bool) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = folder;
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        if folder {
+            std::os::windows::fs::symlink_dir(target, link).is_ok()
+        } else {
+            std::os::windows::fs::symlink_file(target, link).is_ok()
+        }
+    }
+}
+
+#[test]
+fn a_link_the_turn_made_is_left_for_the_person_and_the_rest_goes_back() {
+    let repo = fixture();
+    g(&repo, &["config", "core.symlinks", "true"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    if !link_to("a.txt", &repo.join("made-link"), false) {
+        return;
+    }
+    write(&repo, "b.txt", "turn one, a longer line\n");
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    assert_eq!(item(&plan_of(&cp, "s1", 1), "made-link")["action"], "skip");
+    assert_eq!(undo(&cp, "s1", 1, None, &[], &IDLE).unwrap()["applied"], true);
+    assert_eq!(read(&repo, "b.txt"), "b.txt v0\n");
+    assert!(std::fs::symlink_metadata(repo.join("made-link")).is_ok(), "the link stays");
+}
+
+#[test]
+fn a_link_standing_where_the_turns_deleted_folder_was_is_not_followed_or_replaced() {
+    let repo = fixture();
+    g(&repo, &["config", "core.symlinks", "true"]);
+    write(&repo, "sub/a.txt", "a v0\n");
+    g(&repo, &["add", "-A"]);
+    g(&repo, &["commit", "-qm", "sub"]);
+    let (cp, _) = store(&scratch());
+    cp.run_job(&job("s1", &repo, Kind::Baseline, 1, 1)).unwrap();
+    std::fs::remove_dir_all(repo.join("sub")).unwrap();
+    cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
+    let elsewhere = scratch();
+    std::fs::write(elsewhere.join("a.txt"), "elsewhere\n").unwrap();
+    if !link_to(&elsewhere.to_string_lossy(), &repo.join("sub"), true) {
+        return;
+    }
+    let refused = undo(&cp, "s1", 1, None, &[], &IDLE).unwrap();
+    assert_eq!(refused["applied"], false, "{refused}");
+    assert_eq!(std::fs::read_to_string(elsewhere.join("a.txt")).unwrap(), "elsewhere\n");
+    assert!(std::fs::symlink_metadata(repo.join("sub")).unwrap().file_type().is_symlink(), "the link stays");
 }
 
 #[test]
