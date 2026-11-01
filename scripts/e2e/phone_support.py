@@ -448,9 +448,11 @@ class Phone:
     second frame, or 250 ms after the first one not acknowledged) and answers the daemon's heartbeats.
     `auto_ack` and `auto_hb` switch those off for tests of what a silent phone gets."""
 
-    def __init__(self, base, device, auto_ack=True, auto_hb=True, caps=True):
+    def __init__(self, base, device, auto_ack=True, auto_hb=True, caps=True, origin=None):
+        """`origin`: as a page connects, with where it is."""
         self.url = link_url(base)
         self.device = device
+        self.origin = origin
         self.auto_ack, self.auto_hb = auto_ack, auto_hb
         self.caps = ["ack", "hb"] if caps else None  # None: a page from before frames were acknowledged
         self.log = []
@@ -471,7 +473,7 @@ class Phone:
         self.reader = self.acker = None
 
     async def open(self):
-        self.ws = await websockets.connect(self.url, max_size=None, open_timeout=10, ping_interval=None, compression=None)
+        self.ws = await websockets.connect(self.url, max_size=None, open_timeout=10, ping_interval=None, compression=None, **({"origin": self.origin} if self.origin else {}))
         init = ln.Initiator(ln.RECONNECT, self.device.priv, self.device.pub, self.device.dpk)
         try:
             await self.ws.send(init.first)
