@@ -412,7 +412,7 @@ export function MobileSettings() {
                     </select>
                   </Show>
                   <Show when={d.state === "ok" && d.secure_origin && store.daemonApi() >= LOCK_API}>
-                    <button class="btn" data-reset-lock disabled={busy() || !!d.lock_reset} onClick={() => void resetLock(d)}>{t("Reset this phone's lock")}</button>
+                    <button class="btn" data-reset-lock disabled={busy()} onClick={() => void resetLock(d)}>{t("Reset this phone's lock")}</button>
                   </Show>
                   <button class="btn" onClick={async () => (await confirmDialog(t("Unpair “{name}”? It is disconnected at once.", { name: d.name }))) && void run(() => daemon("mobile.revoke", { id: d.id }))}>{t("Unpair")}</button>
                 </div>

@@ -928,9 +928,10 @@ for n in (1, 2, 3):
     phone.js("window.dispatchEvent(new Event('online'))")
     run.check("a network flap in the foreground comes back open, asking nothing", bool(phone.wait(LIVE, 30)) and bool(phone.wait(open_js, 15)) and passkeys()[0]["signCount"] == signs)
 
-    # A reload has lost the window's secret, which was only in the page's memory, so it asks again, though the window is still open at the computer.
+    # A reload has lost the window's secret, which was only in the page's memory, so it asks again. Navigating away also hides the page, which sends `lock_now`, so whether the window is still open at
+    # the computer depends on that frame getting out. The program with a copied key above is what shows a window held open without the secret is refused.
     phone.go(secure)
-    run.check("a reload asks again, while the window is still open at the computer", bool(phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen === 'unlock'", 20)) and lock_device().get("unlocked") is True and not phone.js("return !!document.querySelector('.row')"), str(lock_device()))
+    run.check("a reload asks again", bool(phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen === 'unlock'", 20)) and not phone.js("return !!document.querySelector('.row')"), str(lock_device()))
     phone.js("document.querySelector('[data-lock-go]').click()")
     run.check("…and the passkey opens it", bool(phone.wait(open_js, 20)) and passkeys()[0]["signCount"] > signs, str(phone.js(lock_error)))
 
