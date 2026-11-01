@@ -276,6 +276,16 @@ nor sent to the phone; automation and approval events are never suppressed. A co
 is not being looked at, whatever the window shows. The desktop and the phone therefore agree by
 construction.
 
+**Destinations** (`notify/destinations.rs`). Each channel that is on and each phone with alerts on has its own bounded queue (32), thread and outbox, started by its first message and ended with it, so one that hangs delays nothing else. `Notifier::active` counts subscribed phones too; with no destination there is no thread, socket or timer. The classifier's thread only hands the message over (`Notifier::send`, under a millisecond), and the rest happens on the destination's thread.
+
+**Outbox** (`notify/outbox.rs`, `<data>/notify-outbox/`, written atomically, at most 50 entries, an older daemon ignores the folder). Before every attempt each entry is looked at again: a wait the person answered goes without a word. Network errors, 5xx and 429 retry after 1, 2, 4, 8, 16, 32, then 60 s with full jitter, and at least `Retry-After`; other 4xx do not retry. An entry goes at 10 minutes, unless it says someone still waits. After a failure several entries leave as one message ("N sessions need you"). At load L1 what wants no answer (finished, automation, cost) waits 1 s to leave with the others, from L2 5 s; needs-you, failed and approval are never held. A channel's entry holds its redacted text until it is sent; a phone's holds none. A file it cannot use is moved aside; one it cannot read is not written over.
+
+**Web Push** (`notify/web_push.rs`, API 24). The daemon is its own application server: no server of ours, no Apple or Google account. `push_info` makes the VAPID key on first need, kept with `kelpie_proto::secret_*` (`mobile-push-vapid`; a reset makes a new one; a failed read is an error and makes none), and `hello` carries its public half on a connection that may have alerts. `push_sub {endpoint, p256dh, auth, lang}` stores the subscription on the device record with its own HMAC, and `auth` in the credential store (`mobile-push-auth-<device>`). An alert is `{web_push: 8030, notification: {title: "Kelpie", body, navigate, tag}}`: Declarative Web Push, which iOS 18.4 and later shows by itself and `sw.ts` shows elsewhere. `body` is a fixed sentence per kind (EN or VI from `lang`), `navigate` is `<phone address>/#s=<session id>` (with `&a=1` when someone was waited for: a tap then says when that is over), and nothing else from a session is ever an input to it. It is encrypted to the subscription (RFC 8291, `aes128gcm`) and signed (RFC 8292: `aud` the endpoint's origin, 12 h, `sub` the project's address, no person's), and sent with `TTL: 600`, `Urgency: high` for what waits or failed, and `Topic`, a hash of the session and the wait, so a late one replaces its own. The RustCrypto crates do this, since the `web-push` crate needs OpenSSL through `ece`.
+
+The endpoint comes from a phone and the daemon POSTs to it, so it is held to a closed list: `https`, no port, no login, `fcm.googleapis.com`, `*.push.apple.com`, `*.push.services.mozilla.com`, `*.notify.windows.com` (the last two from the browsers' documentation, not yet seen from a real phone), no redirects. It is checked when it arrives and again before every request, and no error says it back. Only with `KELPIE_E2E` set may `KELPIE_PUSH_TEST_BASE` name one loopback address besides. A 404 or 410 ends the subscription; a revoke, reset, expiry or the kill switch ends it before returning, with its secret and what it had left to send; phone access off stops sending and keeps it for when access is back. The browser's side is looked at every time the app opens, and renewed with no tap once permission is given.
+
+A computer that is asleep sends nothing, and a computer that lost contact cannot say so: that needs someone else's server, and stays deferred. Real delivery to phones is not yet measured.
+
 **Channels** (Settings → Notifications → *Off this computer*, all through the app's connection,
 user-only): ntfy (server, a random 128-bit topic made when ntfy is first switched on, optional access
 token; the message goes as JSON to the server's root, so the topic is never in an address), Telegram
@@ -287,8 +297,8 @@ read, and `notify.get` says whether each secret is set, never its value (the top
 `reveal_topic`). Nothing runs until a channel is switched on: no thread, socket or timer (the sending
 thread starts with the first message). Send errors say what failed (`HTTP 500`, `timed out`…), never
 where; request addresses are not logged (the daemon's log filter keeps the HTTP client at `warn`, whatever
-`KELPIE_LOG` says: its trace output contains the request path, a Telegram bot token among it). The sending
-queue holds 32 messages and drops one that waited over 5 minutes; dropped ones are counted and shown in the
+`KELPIE_LOG` says: its trace output contains the request path, a Telegram bot token among it). What is dropped
+(a full queue, an outbox past its limit, an entry too old) is counted and shown in the
 settings. A cost-cap report has its own 30 s allowance (it arrives seconds after the turn's message). An ntfy
 access token is refused for an `http://` server on another computer. Filters: per-event switches (needs-you, done, failed,
 automation, approval, cost cap), a finished turn must last N s (default 30), *only while the window is
@@ -347,7 +357,8 @@ records remain available for a new connection, and a phone that was connected ke
 Turning access off is therefore not how to cut a phone off: `mobile.enable` stays open to any holder of the user token (audited,
 `phone_access_on`), and every paired phone then has its access back with no prompt. `mobile.revoke` and `mobile.revoke_all` remove it.
 
-- **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `hb`, `ack`, `sub`, `unsub`, `chat_sub` need
+- **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `hb`, `ack`, `sub`, `unsub`, `chat_sub`, and
+  `push_info`, `push_sub`, `push_unsub`, `push_test` (refused `insecure` where `transport_cap` would not let a page type) need
   *read*; `input`, `key`, `answer`, `chat_answer`, `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume` need *write*;
   anything else is `unknown_verb`. The
   permission is read from the device's record on every message, so a revoked or downgraded device is
@@ -645,7 +656,7 @@ or `lib/ipc` (the build fails), is about 68 KB gzip (page, script and style, wit
   phone with a hint to use the computer.
 - The phone has no `focus` or `visibility` verb (the table is closed): focus is `sub {focus}`, and a hidden page unsubscribes
   everything and re-subscribes, resuming, when it is shown.
-- A service worker keeps the app shell, only on secure origins; plain `http://` works without it.
+- A service worker keeps the app shell, only on secure origins; plain `http://` works without it. It also shows alerts where the system does not (`push`), opens their link on a tap, in this origin and nowhere else (`notificationclick`), and marks a subscription the browser changed (`pushsubscriptionchange`) for `push.ts`, which compares the browser's subscription with what the computer's `hello` says on every open and renews it with no tap once permission is given. A tap on an alert about a wait says "Already handled" when the synced list shows the wait is over.
 
 Checks: `cd app && pnpm test` (link, sync, state, inbox, composer, observer), `scripts/e2e/mobile.py` on the real page (inbox
 order, prompt tap, chat answer, `#s=` link, reconnect).

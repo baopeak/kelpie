@@ -1,13 +1,18 @@
 ---
 phase: 3b
 title: "Web Push sent directly by kelpied"
-status: pending
+status: in-progress
 priority: P1
 effort: "4d"
 dependencies: [3a, "roadmap phase 12"]
 ---
 
 # Phase 3b: Web Push from kelpied
+
+## State of this phase
+**Crate gate (step 1), 2026-11-01:** `cargo tree -i openssl` on a scratch project: `web-push 0.11.0` → `ece 2.4.2` → `openssl 0.10.81`, whatever the features. So `notify/web_push.rs` on RustCrypto (`p256` 0.13, `hkdf` 0.12, `aes-gcm` 0.10, `sha2`), checked byte for byte against the example of RFC 8291 appendix A, and against the signature in RFC 8292 section 2.4.
+
+**Sending one real push to a real iPhone and Android from step 1 is not done:** no person with phones was at hand, and the rule for this run is that nothing goes to a real push service. What a person still needs to check is in [the report](../reports/fullstack-developer-261101-0920-phone-phase3b.md).
 
 ## Overview
 Reach a locked phone when a session needs the user. The daemon signs with its own VAPID key and POSTs an RFC 8291-encrypted, content-free alert with a deep link to the phone's push service. No server of ours, no Apple or Google account. Replaces the "no Web Push" position in old phase 6 and RT-14 (user decision 2026-10-30). Includes the `notify.rs` delivery refactor and durable outbox moved from phase 6.
