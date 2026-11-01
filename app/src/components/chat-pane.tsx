@@ -246,7 +246,7 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
   onMount(() => {
     createEffect(on(target, (handle) => handle != null && transcript.attach(handle)));
     // The daemon dropped us for falling behind: re-attach (full replay).
-    const onResync = (e: Event) => (e as CustomEvent).detail === props.sessionId && target() != null && transcript.attach(target()!);
+    const onResync = (e: Event) => (e as CustomEvent).detail === props.sessionId && target() != null && transcript.attach(target()!, true);
     window.addEventListener("kelpie:chat-resync", onResync);
     // A phone answered one of the agent's requests first.
     const onResolved = (e: Event) => {
@@ -446,6 +446,13 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
     };
     bottomFrame = requestAnimationFrame(step);
   };
+  // A chat opens at its end, with what it already has and again once it is up to date. One scroll does not get there: rows
+  // not painted yet only estimate their height. A saved reply being shown decides the position itself.
+  const openAtEnd = () => {
+    if (stick && ctrl.state.items.length && bookmarks.pendingReveal()?.sessionId !== props.sessionId) toBottom();
+  };
+  onMount(openAtEnd);
+  createEffect(on(transcript.whole, (whole) => whole && openAtEnd()));
   // A saved reply asks to be shown: looked up once this mount has the whole transcript, whether this
   // chat was open already or was only just mounted for it.
   createEffect(() => {
@@ -534,6 +541,9 @@ function ChatBody(props: { sessionId: string; project: Project; focused: boolean
         <div class="chat-inner">
           <Show when={!showAll() && ctrl.state.items.length > RENDER_WINDOW}>
             <button class="btn chat-earlier" onClick={() => setShowAll(true)}>{t("Show {n} earlier items", { n: ctrl.state.items.length - RENDER_WINDOW })}</button>
+          </Show>
+          <Show when={!ctrl.state.ready && ctrl.state.items.length === 0}>
+            <div class="muted" style={{ "text-align": "center" }} data-chat-loading>{t("Loading the conversation…")}</div>
           </Show>
           <Show when={ctrl.state.ready && ctrl.state.items.length === 0}>
             <div class="muted" style={{ "text-align": "center" }}>

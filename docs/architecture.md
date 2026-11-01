@@ -721,7 +721,10 @@ the agent runs it in that conversation itself; a typed prompt (too long for a co
 for the program's first output before the quiet period counts. The daemon keeps the
 command/model/skill answers when it trims a chat's replay log. Streaming replies render
 finished markdown blocks once and only the open block as text; off-screen messages use
-`content-visibility: auto`.
+`content-visibility: auto`. A controller outlives its pane: coming back to a chat feeds only what the
+log holds beyond the offset already fed (`seq` of the attach reply, checked against the last bytes
+fed), still as a replay. It rebuilds when the log does not carry on from there or after
+`session.resync`, reading any history first and swapping in one update, so the old rows stay until then.
 
 Beyond the items, adapters fill shared state the UI renders the same way for every agent:
 
@@ -733,10 +736,12 @@ Beyond the items, adapters fill shared state the UI renders the same way for eve
 | tool category | tool name | `commandActions` (read / listFiles / search) | tool `kind` |
 
 `chat/tool-view.ts` turns a tool item into a row (verb, target, detail, IN/OUT) and diffs
-edit strings line by line. Below API 21 `ChatController` queues what is sent while the agent is busy and
-sends it when the turn ends (adapters set `busy = false` last); *Send now* uses the adapter's
-`steer` (Claude: written mid-turn, the CLI reads it at its next step; Codex: `turn/steer`,
-queued again if refused) or stops the turn; stopping holds the queue. From API 21 the queue is the daemon's, below. Approvals carry what they
+edit strings line by line. A message sent during a turn goes straight to the adapter's `steer` when it
+can (Claude: written mid-turn, the CLI reads and echoes it when the running tools finish, or, when the
+turn ends first, runs it as a turn of its own after a `result`, during which the adapter stays busy; Codex:
+`turn/steer`, queued again if refused): text only, no commands, and nothing else waiting. Below API 21
+`ChatController` queues the rest and sends it when the turn ends (adapters set `busy = false` last); *Send
+now* uses `steer` or stops the turn; stopping holds the queue. From API 21 the queue is the daemon's, below. Approvals carry what they
 are about (command, edit diff, plan) and Claude's `AskUserQuestion` / `ExitPlanMode` are
 answered in their card (`updatedInput.answers`, `updatedPermissions: setMode acceptEdits`).
 

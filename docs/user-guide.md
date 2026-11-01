@@ -141,9 +141,13 @@ features earlier (running sessions stop for a moment; agents that can resume con
      subagents as a tree with their status, time and tokens (Claude; Codex lists its agents without
      tokens, and ACP has no such thing to list). Click one for its prompt, what it did and its answer,
      and *Show in chat* for its row. `Esc` steps back, and never stops the agent.
-   - Messages sent while the agent works wait above the message field and go when its turn ends.
-     *Send now* gives one to the agent during its turn (Codex and Claude; for other agents it stops
-     the turn first); stopping the agent holds the queue until you send again.
+   - A message sent while Claude or Codex works goes into the running turn, as in their terminal: it
+     shows faded until the agent reads it at its next step, and the agent decides what to do with
+     it. To change course at once, stop the agent first (`Esc`). A command (`/`, `!`), a message
+     with a picture, a message for any other agent, and one sent while others wait, waits above the
+     message field and goes when the turn ends. *Send now* gives such a message to the agent during
+     its turn, or stops the turn first where it cannot go in; stopping the agent holds these until
+     you send again.
    - The agent's task list (Claude's todos, Codex and OMP plans) stays pinned above the message
      field. The ring next to the pickers shows how full the context is (hover for tokens and cost;
      click to compact).
