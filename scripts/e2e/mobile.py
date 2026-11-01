@@ -874,7 +874,12 @@ for n in (1, 2, 3):
     phone.go(base)  # the list the page keeps is saved as it connects
     phone.wait(CONNECTED, 30)
     phone.wait(missed_row, 20)
-    time.sleep(1)
+    # A write waits 1.5 s (`cache.ts`), and leaving the page before that drops it.
+    list_saved = """if (!window.__askedList) { window.__askedList = true; const open = indexedDB.open('kelpie-phone');
+      open.onsuccess = () => { const got = open.result.transaction('kv').objectStore('kv').get('list');
+        got.onsuccess = () => { window.__listSaved = (got.result?.sessions ?? []).some(s => s.name === 'missed-shell'); window.__askedList = false; open.result.close(); }; }; }
+      return window.__listSaved === true"""
+    run.check("the page has saved the list that names the new session", bool(phone.wait(list_saved, 15)))
     phone.go("about:blank")
     daemon(d, "mobile.revoke_all")
     daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT})
