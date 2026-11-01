@@ -2597,6 +2597,7 @@ impl Conn {
                 self.secure_transport()?;
                 let (daemon, device, req, page) = (self.daemon.clone(), self.device.clone(), req.clone(), self.page_origin.clone());
                 tokio::task::spawn_blocking(move || daemon.mobile.push_subscribe(&device, &req, page.as_deref())).await.map_err(|_| refuse("not_kept", "That did not finish."))??;
+                self.daemon.broadcast("mobile.updated", json!({}));
                 return Ok(Some(json!({"type": "ack", "result": "ok"})));
             }
             Verb::PushUnsub => {
@@ -2610,6 +2611,9 @@ impl Conn {
                     had
                 });
                 let had = had.await.unwrap_or(false);
+                if had {
+                    self.daemon.broadcast("mobile.updated", json!({}));
+                }
                 return Ok(Some(json!({"type": "ack", "result": if had { "ok" } else { "noop" }})));
             }
             // Handled by `reply`, which sends what it comes to when it is known.
@@ -7410,6 +7414,23 @@ mod tests {
         }
         assert!(r.daemon.mobile.destinations.device_ids().is_empty());
         assert_eq!(r.daemon.mobile.destinations.vapid_public(false).unwrap(), None, "and no key made for it");
+    }
+
+    #[tokio::test]
+    async fn settings_hear_when_a_phone_turns_its_alerts_on_or_off() {
+        let mut r = rig();
+        let (tx, mut events) = crate::session::client_channel();
+        r.daemon.set_client_role(77, &crate::auth::Role::App);
+        r.daemon.register_client(77, tx);
+        let mut updates = || std::iter::from_fn(|| events.try_recv().ok()).filter(|m| String::from_utf8_lossy(&m.data).contains("mobile.updated")).count();
+        r.ask(Permission::Read, subscription(ENDPOINT)).await;
+        assert_eq!(updates(), 1, "turned on");
+        r.ask(Permission::Read, json!({"type": "push_unsub"})).await;
+        assert_eq!(updates(), 1, "turned off");
+        r.ask(Permission::Read, json!({"type": "push_unsub"})).await;
+        assert_eq!(updates(), 0, "nothing changed, so nothing to hear");
+        assert_eq!(r.ask(Permission::Read, subscription("https://example.com/not-a-push-service")).await["code"], "bad_endpoint");
+        assert_eq!(updates(), 0, "refused, so nothing changed either");
     }
 
     #[tokio::test]
