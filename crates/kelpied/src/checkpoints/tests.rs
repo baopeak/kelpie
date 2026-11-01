@@ -713,7 +713,10 @@ fn an_undo_plan_reads_only_the_turns_files() {
     cp.run_job(&job("s1", &repo, Kind::Turn, 10, 20)).unwrap();
     let _ = std::fs::remove_file(repo.join("filter.log"));
     assert_eq!(item(&plan_of(&cp, "s1", 1), "a.txt")["state"], "clean");
-    assert_eq!(read(&repo, "filter.log").lines().collect::<Vec<_>>(), ["a.txt"]);
+    // Which files, not how often: one `add` runs the filter once per file on Windows and twice on Linux and macOS.
+    let log = read(&repo, "filter.log");
+    let files: std::collections::BTreeSet<&str> = log.lines().collect();
+    assert_eq!(files.into_iter().collect::<Vec<_>>(), ["a.txt"]);
 }
 
 #[test]
