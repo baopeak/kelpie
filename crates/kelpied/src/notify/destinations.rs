@@ -5,9 +5,9 @@
 //! with none there is no thread, no socket and no timer. What decides whether an event leaves at all (`Notifier::wants_push`) runs on
 //! the classifier's thread and takes no lock a worker holds across a request; everything that can block is on the worker's thread.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -32,6 +32,8 @@ pub struct Target {
     pub endpoint: String,
     pub p256dh: String,
     pub lang: String,
+    /// The origin of the page that subscribed, which is where its pairing is. None for a subscription from before it was recorded.
+    pub origin: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -51,12 +53,16 @@ pub trait Host: Send + Sync {
     fn load_level(&self) -> Level {
         Level::L0
     }
-    /// The phone page's address, for the link in an alert.
+    /// The run's task still waits for approval. What is true of a run is the run's to say: it outlives a restart.
+    fn task_waiting(&self, _run: &str, _task: &str) -> bool {
+        true
+    }
+    /// The phone page's address, for the link in an alert to a phone whose own origin is not known. None while there is no right one.
     fn phone_url(&self) -> Option<String> {
         None
     }
-    /// The push service says this phone's subscription is over.
-    fn subscription_gone(&self, _device: &str) {}
+    /// The push service says this phone's subscription at this address is over.
+    fn subscription_gone(&self, _device: &str, _endpoint: Option<&str>) {}
 }
 
 #[cfg(test)]
@@ -71,7 +77,10 @@ struct Shared {
     config: Arc<Mutex<Config>>,
     status: Arc<Mutex<HashMap<&'static str, ChannelStatus>>>,
     dropped: Arc<AtomicU64>,
-    waiting_tasks: Arc<Mutex<HashSet<(String, String)>>>,
+    /// `notify.json` said what is on (it may not have been there). A file of a channel that seems off is not deleted on the word of one it could not read.
+    config_known: AtomicBool,
+    /// The same of who has alerts on, from the device store and the key that checks it.
+    devices_known: AtomicBool,
     devices: Mutex<HashMap<String, Target>>,
     vapid: Mutex<Option<Arc<Vapid>>>,
     /// A unit test's stand-in for a push service (the environment is one per process, and tests run side by side).
@@ -79,9 +88,16 @@ struct Shared {
     test_base: Mutex<Option<String>>,
 }
 
+/// A destination's thread as seen from here.
+struct Worker {
+    tx: mpsc::SyncSender<Entry>,
+    /// Its destination was taken away. It touches the file no more: a new thread may be using it.
+    retired: Arc<AtomicBool>,
+}
+
 pub struct Destinations {
     shared: Arc<Shared>,
-    workers: Mutex<HashMap<Dest, mpsc::SyncSender<Entry>>>,
+    workers: Mutex<HashMap<Dest, Worker>>,
     device_count: AtomicUsize,
 }
 
@@ -107,7 +123,8 @@ impl Destinations {
                 config: Arc::new(Mutex::new(Config::default())),
                 status: Arc::new(Mutex::new(HashMap::new())),
                 dropped: Arc::new(AtomicU64::new(0)),
-                waiting_tasks: Arc::new(Mutex::new(HashSet::new())),
+                config_known: AtomicBool::new(true),
+                devices_known: AtomicBool::new(true),
                 devices: Mutex::new(HashMap::new()),
                 vapid: Mutex::new(None),
                 #[cfg(test)]
@@ -130,8 +147,17 @@ impl Destinations {
         self.shared.dropped.clone()
     }
 
-    pub(super) fn waiting_tasks(&self) -> Arc<Mutex<HashSet<(String, String)>>> {
-        self.shared.waiting_tasks.clone()
+    pub(super) fn set_config_known(&self, known: bool) {
+        self.shared.config_known.store(known, Ordering::Relaxed);
+    }
+
+    pub fn set_devices_known(&self, known: bool) {
+        self.shared.devices_known.store(known, Ordering::Relaxed);
+    }
+
+    /// This phone is among those being sent to.
+    pub fn has_device(&self, id: &str) -> bool {
+        self.shared.devices.lock().contains_key(id)
     }
 
     /// What a test run may send to besides the push services' own hosts.
@@ -177,8 +203,18 @@ impl Destinations {
     }
 
     fn remove(&self, dest: &Dest) {
-        self.workers.lock().remove(dest);
+        if let Some(worker) = self.workers.lock().remove(dest) {
+            worker.retired.store(true, Ordering::SeqCst);
+        }
         let _ = std::fs::remove_file(path_of(&self.shared.dir, dest));
+    }
+
+    /// Files moved aside because they could not be used. They can hold a channel's text, and clearing the channels clears them too.
+    pub fn remove_leftovers(&self) {
+        let Ok(files) = std::fs::read_dir(&self.shared.dir) else { return };
+        for file in files.flatten().filter(|f| f.file_name().to_string_lossy().contains(".unreadable-")) {
+            let _ = std::fs::remove_file(file.path());
+        }
     }
 
     /// A worker for what a run before this one left to send. Called once, at the start; nothing starts without something to send.
@@ -200,9 +236,12 @@ impl Destinations {
             }
             match known.get(&name) {
                 Some(dest) => self.worker(dest),
-                // Of a destination that is no more.
+                // Of a destination that is no more, if that is known: a state that could not be read says nothing of it.
                 None => {
-                    let _ = std::fs::remove_file(file.path());
+                    let known = if name.starts_with("device-") { &self.shared.devices_known } else { &self.shared.config_known };
+                    if known.load(Ordering::Relaxed) {
+                        let _ = std::fs::remove_file(file.path());
+                    }
                 }
             }
         }
@@ -211,8 +250,8 @@ impl Destinations {
     fn worker(&self, dest: &Dest) {
         let mut workers = self.workers.lock();
         if !workers.contains_key(dest) {
-            if let Some(tx) = spawn(dest.clone(), self.shared.clone()) {
-                workers.insert(dest.clone(), tx);
+            if let Some(worker) = spawn(dest.clone(), self.shared.clone()) {
+                workers.insert(dest.clone(), worker);
             }
         }
     }
@@ -221,30 +260,31 @@ impl Destinations {
     /// or a network. A full queue drops the entry (counted, shown in the settings, logged).
     pub fn enqueue(&self, dest: Dest, entry: Entry) {
         let mut workers = self.workers.lock();
-        if !workers.contains_key(&dest) {
-            match spawn(dest.clone(), self.shared.clone()) {
-                Some(tx) => {
-                    workers.insert(dest.clone(), tx);
+        let mut entry = entry;
+        // Twice at most: a thread that ended (its subscription was over, and a newer one is here) gives way to another.
+        for _ in 0..2 {
+            if !workers.contains_key(&dest) {
+                match spawn(dest.clone(), self.shared.clone()) {
+                    Some(worker) => {
+                        workers.insert(dest.clone(), worker);
+                    }
+                    None => break,
                 }
-                None => {
-                    self.shared.dropped.fetch_add(1, Ordering::Relaxed);
-                    return;
+            }
+            let Some(worker) = workers.get(&dest) else { break };
+            match worker.tx.try_send(entry) {
+                Ok(()) => return,
+                Err(mpsc::TrySendError::Full(_)) => {
+                    tracing::warn!("notify: the queue is full, a message was dropped");
+                    break;
+                }
+                Err(mpsc::TrySendError::Disconnected(back)) => {
+                    workers.remove(&dest);
+                    entry = back;
                 }
             }
         }
-        let Some(tx) = workers.get(&dest) else { return };
-        match tx.try_send(entry) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("notify: the queue is full, a message was dropped");
-            }
-            // It ended (its destination went): the next message, if there still is one, starts another.
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                workers.remove(&dest);
-                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        self.shared.dropped.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Whether a thread was ever started and still stands.
@@ -290,27 +330,30 @@ struct Alert {
     wording: Wording,
     /// The session's link, and whether a tap should say so when the wait has gone by then.
     link: Option<(String, bool)>,
+    /// What makes it this alert and no other. Only another alert about the very same thing may take its place, on the way or in the tray.
     about: String,
     high: bool,
 }
 
 impl Alert {
     fn test() -> Alert {
-        Alert { wording: Wording::Test, link: None, about: "test".into(), high: true }
+        // Each its own: a second press must show something, with the first still in the tray.
+        Alert { wording: Wording::Test, link: None, about: format!("test|{}", now_millis()), high: true }
     }
 
     fn of(attempt: &Attempt) -> Alert {
         match attempt {
             Attempt::One(e) => {
                 let kind = Kind::parse(&e.kind).unwrap_or(Kind::Waiting);
-                let about = e.session.as_ref().map_or_else(|| e.id.clone(), |s| format!("{s}|{}", e.wait.unwrap_or(0)));
+                let about = e.session.as_ref().map_or_else(|| e.id.clone(), |s| format!("{}|{s}|{}", kind.code(), e.wait.unwrap_or(0)));
                 Alert { wording: Wording::Kind(kind), link: e.session.clone().map(|s| (s, kind.waits())), about, high: kind.urgent() }
             }
-            Attempt::Together { sessions, needs_you, .. } => Alert {
-                wording: if *needs_you { Wording::NeedYou(*sessions) } else { Wording::Updates(*sessions) },
+            // A summary is its own too: one from a second outage must not take the place of one not read yet. The same on every try of it.
+            Attempt::Together { ids, need_you, updates, .. } => Alert {
+                wording: wording_of(*need_you, *updates),
                 link: None,
-                about: "summary".into(),
-                high: *needs_you,
+                about: format!("summary|{}", ids.first().map_or("", String::as_str)),
+                high: *need_you > 0,
             },
         }
     }
@@ -351,11 +394,18 @@ impl Shared {
         }
     }
 
+    /// The device has a subscription, and not at the address that ended.
+    fn has_moved_on(&self, dest: &Dest, endpoint: Option<&str>) -> bool {
+        let Dest::Device(id) = dest else { return false };
+        let now = self.devices.lock().get(id).map(|t| t.endpoint.clone());
+        now.is_some() && now.as_deref() != endpoint
+    }
+
     /// Whether what an entry says is still so. Only someone waiting can stop being so: what happened, happened.
     fn still_so(&self, e: &Entry) -> bool {
         match Kind::parse(&e.kind) {
             Some(Kind::Waiting) => e.session.as_deref().is_none_or(|s| self.host.still_waiting(s, e.wait)),
-            Some(Kind::Approval) => e.task.as_ref().is_none_or(|t| self.waiting_tasks.lock().contains(t)),
+            Some(Kind::Approval) => e.task.as_ref().is_none_or(|(run, task)| self.host.task_waiting(run, task)),
             _ => true,
         }
     }
@@ -364,15 +414,11 @@ impl Shared {
         match dest {
             Dest::Channel(ch) => {
                 let c = self.config.lock().clone();
-                let together;
                 let payload = match attempt {
-                    Attempt::One(e) => e.payload.as_ref().ok_or("nothing to say")?,
-                    Attempt::Together { sessions, needs_you, latest, .. } => {
-                        together = together_payload(*sessions, *needs_you, *latest);
-                        &together
-                    }
+                    Attempt::One(e) => Payload { id: Some(e.id.clone()), ..e.payload.clone().ok_or("nothing to say")? },
+                    Attempt::Together { ids, need_you, updates, latest } => together_payload(ids, *need_you, *updates, *latest),
                 };
-                deliver(self.secrets.as_ref(), &c, *ch, payload, &telegram_base())
+                deliver(self.secrets.as_ref(), &c, *ch, &payload, &telegram_base())
             }
             Dest::Device(id) => self.push_to(id, &Alert::of(attempt)),
         }
@@ -381,6 +427,15 @@ impl Shared {
     /// One request to a phone's push service. The address is checked here again: the record comes from a file, its address from a phone.
     fn push_to(&self, device: &str, alert: &Alert) -> Result<(), Failure> {
         let target = self.devices.lock().get(device).cloned().ok_or("this phone has no alerts on")?;
+        self.push_to_target(device, &target, alert).map_err(|mut f| {
+            if f.over {
+                f.over_endpoint = Some(target.endpoint.clone());
+            }
+            f
+        })
+    }
+
+    fn push_to_target(&self, device: &str, target: &Target, alert: &Alert) -> Result<(), Failure> {
         if !web_push::endpoint_allowed(&target.endpoint, self.test_base().as_deref()) {
             return Err(Failure::gone("not a push service"));
         }
@@ -389,8 +444,12 @@ impl Shared {
             Ok(None) => return Err(Failure::gone("the subscription's secret is gone")),
             Err(_) => return Err(Failure::again("the credential store did not answer")),
         };
-        let vapid = self.vapid(true).map_err(Failure::again)?.ok_or("no signing key")?;
-        let base = self.host.phone_url().ok_or_else(|| Failure::again("no address for the phone page"))?;
+        // Never made here: every subscription hangs on the key it was made under, so with none the phone has to subscribe again.
+        let vapid = self.vapid(false).map_err(Failure::again)?.ok_or_else(|| Failure::gone("no signing key"))?;
+        let base = match &target.origin {
+            Some(origin) => format!("{origin}/"),
+            None => self.host.phone_url().ok_or_else(|| Failure::again("no address for the phone page"))?,
+        };
         let navigate = match &alert.link {
             Some((session, waits)) => deep_link(&base, session).map(|l| if *waits { format!("{l}&a=1") } else { l }).unwrap_or_else(|| base.clone()),
             None => base.clone(),
@@ -422,23 +481,33 @@ impl Shared {
         record(&self.status, ch, &out.as_ref().map(|_| ()).map_err(|f| f.reason.clone()));
         if let (Dest::Device(id), Err(f)) = (dest, out) {
             if f.over {
-                self.host.subscription_gone(id);
+                self.host.subscription_gone(id, f.over_endpoint.as_deref());
             }
         }
     }
 }
 
-/// The message for a channel that stands for several.
-fn together_payload(sessions: usize, needs_you: bool, latest: u64) -> Payload {
-    let wording = if needs_you { Wording::NeedYou(sessions) } else { Wording::Updates(sessions) };
-    Payload { status: if needs_you { "needs_you" } else { "summary" }.into(), project: None, session: None, summary: web_push::sentence(wording, "en"), duration_s: None, screen: None, link: None, at: latest }
+fn wording_of(need_you: usize, updates: usize) -> Wording {
+    match (need_you, updates) {
+        (0, m) => Wording::Updates(m),
+        (n, 0) => Wording::NeedYou(n),
+        (n, m) => Wording::NeedYouAndUpdates(n, m),
+    }
 }
 
-fn spawn(dest: Dest, shared: Arc<Shared>) -> Option<mpsc::SyncSender<Entry>> {
+/// The message for a channel that stands for several: `status` is `needs_you` when someone waits, else `summary`.
+fn together_payload(ids: &[String], need_you: usize, updates: usize, latest: u64) -> Payload {
+    let status = if need_you > 0 { "needs_you" } else { "summary" };
+    Payload { status: status.into(), project: None, session: None, summary: web_push::sentence(wording_of(need_you, updates), "en"), duration_s: None, id: ids.first().cloned(), screen: None, link: None, at: latest }
+}
+
+fn spawn(dest: Dest, shared: Arc<Shared>) -> Option<Worker> {
     let (tx, rx) = mpsc::sync_channel::<Entry>(QUEUE);
     let _ = std::fs::create_dir_all(&shared.dir);
-    match std::thread::Builder::new().name("kelpie-notify".into()).spawn(move || run(dest, rx, shared)) {
-        Ok(_) => Some(tx),
+    let retired = Arc::new(AtomicBool::new(false));
+    let its = retired.clone();
+    match std::thread::Builder::new().name("kelpie-notify".into()).spawn(move || run(dest, rx, shared, its)) {
+        Ok(_) => Some(Worker { tx, retired }),
         Err(e) => {
             // Nothing is stored: the next message tries again.
             tracing::warn!("notify worker: {e}");
@@ -454,9 +523,12 @@ fn dice(n: u64) -> u64 {
 }
 
 /// A destination's thread: it waits for the next entry or the next attempt, whichever is first, and ends when the destination goes.
-fn run(dest: Dest, rx: mpsc::Receiver<Entry>, shared: Arc<Shared>) {
+fn run(dest: Dest, rx: mpsc::Receiver<Entry>, shared: Arc<Shared>, retired: Arc<AtomicBool>) {
     let mut outbox = Outbox::open(&path_of(&shared.dir, &dest));
     loop {
+        if retired.load(Ordering::SeqCst) {
+            return;
+        }
         // Every entry that came in, before looking at what to do.
         while let Ok(entry) = rx.try_recv() {
             shared.dropped.fetch_add(outbox.add(entry), Ordering::Relaxed);
@@ -490,11 +562,22 @@ fn run(dest: Dest, rx: mpsc::Receiver<Entry>, shared: Arc<Shared>) {
         };
         let out = shared.attempt(&dest, &attempt);
         shared.finished(&dest, &out);
+        // Taken away during the request: what came of it changes no file.
+        if retired.load(Ordering::SeqCst) {
+            return;
+        }
         match out {
             Ok(()) => outbox.sent(&attempt),
+            // A late answer about an address the phone has since left: what it has to send goes to the new one.
+            Err(f) if f.over && shared.has_moved_on(&dest, f.over_endpoint.as_deref()) => outbox.failed(now_millis(), None, &mut dice),
             Err(f) if f.over => {
                 outbox.discard();
                 return;
+            }
+            // A channel's receiver acts on each send, so one that may have arrived is not repeated without end. A phone's repeats take each other's place, under one `Topic` and `tag`.
+            Err(f) if f.unsure && matches!(dest, Dest::Channel(_)) => {
+                let lost = outbox.unsure(&attempt, now_millis(), f.retry_after, &mut dice);
+                shared.dropped.fetch_add(lost, Ordering::Relaxed);
             }
             Err(f) if f.retryable() => outbox.failed(now_millis(), f.retry_after, &mut dice),
             Err(_) => {
@@ -504,7 +587,7 @@ fn run(dest: Dest, rx: mpsc::Receiver<Entry>, shared: Arc<Shared>) {
         }
     }
     // The sender was let go: the destination went, or this daemon is ending and what is on disk is for the next.
-    if !shared.exists(&dest) {
+    if !retired.load(Ordering::SeqCst) && !shared.exists(&dest) {
         outbox.discard();
     }
 }

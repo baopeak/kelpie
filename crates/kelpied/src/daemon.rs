@@ -47,13 +47,20 @@ impl Host for NotifyHost {
         self.0.upgrade().map_or(crate::load::Level::L0, |d| d.mobile.load.level())
     }
 
-    fn phone_url(&self) -> Option<String> {
-        self.0.upgrade()?.mobile.running_url()
+    /// A daemon on its way down cannot say, as above. A run that is gone waits for nobody.
+    fn task_waiting(&self, run: &str, task: &str) -> bool {
+        let Some(d) = self.0.upgrade() else { return true };
+        let runs = d.runs.lock();
+        runs.get(run).is_some_and(|r| r.tasks.iter().any(|t| t.id == task && t.status == TaskStatus::WaitingApproval))
     }
 
-    fn subscription_gone(&self, device: &str) {
+    fn phone_url(&self) -> Option<String> {
+        self.0.upgrade()?.mobile.alert_url()
+    }
+
+    fn subscription_gone(&self, device: &str, endpoint: Option<&str>) {
         if let Some(d) = self.0.upgrade() {
-            d.mobile.push_gone(device);
+            d.mobile.push_gone(device, endpoint);
             d.broadcast("mobile.updated", json!({}));
         }
     }

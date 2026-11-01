@@ -125,6 +125,8 @@ const INPUT_DEDUPE: Duration = Duration::from_secs(60);
 const DEDUPE_PER_DEVICE: usize = 512;
 /// Least time between two test alerts of one phone.
 const PUSH_TEST_GAP: Duration = Duration::from_secs(5);
+/// Changes to one phone's subscription in a minute: each writes to the credential store and the audit log, and a phone that may only read could otherwise fill the log.
+const PUSH_CHANGES_PER_MINUTE: usize = 10;
 
 /// Credential-store keys: the desktop's Noise static key, and the key device records are MAC'd with.
 const K_LINK: &str = "mobile-link-key";
@@ -412,6 +414,8 @@ pub struct Mobile {
     destinations: Arc<Destinations>,
     /// When each phone last asked for a test alert.
     push_tested: Mutex<HashMap<String, Instant>>,
+    /// When each phone last changed its subscription.
+    push_changes: Mutex<HashMap<String, VecDeque<Instant>>>,
     /// How Tailscale is asked (see `tailscale`).
     tailscale_cli: Mutex<Arc<dyn tailscale::Cli>>,
     /// Held while Tailscale is looked at: one child at a time.
@@ -535,6 +539,7 @@ impl Mobile {
             key_unreadable: Mutex::new(false),
             destinations,
             push_tested: Mutex::new(HashMap::new()),
+            push_changes: Mutex::new(HashMap::new()),
             #[cfg(not(test))]
             tailscale_cli: Mutex::new(Arc::new(tailscale::Program)),
             #[cfg(test)]
@@ -546,6 +551,7 @@ impl Mobile {
             loopback_is_remote: AtomicBool::new(false),
         };
         m.verify_devices();
+        m.publish_push();
         if loaded.fresh {
             m.keep();
         }
@@ -581,13 +587,16 @@ impl Mobile {
     /// Tells the destinations who has alerts on: a device whose record and subscription both verify, while phone access is on. Whoever
     /// is no longer among them stops before this returns, which is what makes a revoke synchronous for alerts too.
     fn publish_push(&self) {
-        let key = self.mac_key(false).ok().flatten();
-        let test_base = self.destinations.test_base();
+        let read = self.mac_key(false);
         let broken = self.broken.lock().is_some();
+        // A store or a key that could not be read says nothing of who has alerts on: what they left to send stays until it can.
+        self.destinations.set_devices_known(read.is_ok() && !broken);
+        let key = read.ok().flatten();
+        let test_base = self.destinations.test_base();
         let targets: HashMap<String, Target> = {
             let c = self.config.lock();
             let usable = |d: &&Device| d.verified && d.push.is_some() && key.as_ref().is_some_and(|k| store::push_holds(d, k));
-            let target = |d: &Device| d.push.as_ref().filter(|p| web_push::endpoint_allowed(&p.endpoint, test_base.as_deref())).map(|p| (d.id.clone(), Target { endpoint: p.endpoint.clone(), p256dh: p.p256dh.clone(), lang: p.lang.clone() }));
+            let target = |d: &Device| d.push.as_ref().filter(|p| web_push::endpoint_allowed(&p.endpoint, test_base.as_deref())).map(|p| (d.id.clone(), Target { endpoint: p.endpoint.clone(), p256dh: p.p256dh.clone(), lang: p.lang.clone(), origin: p.origin.clone() }));
             if c.enabled && !broken { c.devices.iter().filter(usable).filter_map(target).collect() } else { HashMap::new() }
         };
         self.destinations.set_devices(targets);
@@ -613,10 +622,19 @@ impl Mobile {
             return Err(refuse("bad_keys", "The browser gave keys Kelpie cannot use."));
         }
         let lang = if req["lang"].as_str() == Some("vi") { "vi" } else { "en" };
-        // The look at every open says it again: what the computer already has costs no write.
-        let same = |p: &store::PushSub| p.endpoint == endpoint && p.p256dh == p256dh && p.lang == lang;
-        if self.config.lock().devices.iter().any(|d| d.id == device && d.verified && d.push.as_ref().is_some_and(same)) {
+        // A page from before this was sent has none, and is held to what it was. One it names must be where this computer answers.
+        let origin = text("origin");
+        if origin.is_some_and(|o| !self.serves_origin(o)) {
+            return Err(refuse("bad_origin", "This computer does not answer at the address of this page."));
+        }
+        // The look at every open says it again: what the computer already has costs no write. The file is not taken at its word: one that does not verify is sent nothing, and is replaced here.
+        let same = |p: &store::PushSub| p.endpoint == endpoint && p.p256dh == p256dh && p.lang == lang && p.origin.as_deref() == origin;
+        let has_it = self.destinations.has_device(device) && self.config.lock().devices.iter().any(|d| d.id == device && d.verified && d.push.as_ref().is_some_and(same));
+        if has_it {
             return Ok(());
+        }
+        if !self.push_change_allowed(device) {
+            return Err(refuse("rate_limited", "Alerts on this device were changed many times just now: wait a minute."));
         }
         let not_kept = || refuse("not_kept", "This computer's credential store would not keep the subscription.");
         self.destinations.vapid_public(true).map_err(|_| not_kept())?;
@@ -624,31 +642,71 @@ impl Mobile {
         self.secrets.set(&destinations::auth_key(device), auth).map_err(|_| not_kept())?;
         let name = {
             let mut c = self.config.lock();
-            let d = c.devices.iter_mut().find(|d| d.id == device && d.verified).ok_or_else(|| refuse("no_device", "This device is no longer paired."))?;
-            d.push = Some(store::PushSub { endpoint: endpoint.to_string(), p256dh: p256dh.to_string(), lang: lang.to_string(), created_at: now_millis(), mac: String::new() });
-            store::seal(d, &key);
-            d.name.clone()
+            c.devices.iter_mut().find(|d| d.id == device && d.verified).map(|d| {
+                d.push = Some(store::PushSub { endpoint: endpoint.to_string(), p256dh: p256dh.to_string(), lang: lang.to_string(), created_at: now_millis(), origin: origin.map(str::to_string), mac: String::new() });
+                store::seal(d, &key);
+                d.name.clone()
+            })
         };
-        self.keep();
+        let Some(name) = name else {
+            // Removed since the secret was kept: nothing else would ever remove it.
+            self.forget_push_secret(device);
+            return Err(refuse("no_device", "This device is no longer paired."));
+        };
         self.publish_push();
+        self.keep();
         self.audit.add(device, "push_on", &name);
         Ok(())
+    }
+
+    /// Whether a page at `origin` (`scheme://host[:port]`) is one this computer serves now: its Tailscale origin, or a listener with the scheme it answers in.
+    fn serves_origin(&self, origin: &str) -> bool {
+        let running = self.running.lock();
+        let Some(r) = running.as_ref() else { return false };
+        let scheme = if r.tls { "https" } else { "http" };
+        r.ts_origin.as_ref().is_some_and(|ts| origin == format!("https://{ts}")) || r.listeners.addrs().iter().any(|a| origin == format!("{scheme}://{}", listen::host(a)))
+    }
+
+    /// Where an alert leads a phone whose own origin is not recorded. None while Tailscale mode is on and its origin is not back yet: a link to this network's address
+    /// would open where the phone has no pairing, and the alert can wait for the right one.
+    pub fn alert_url(&self) -> Option<String> {
+        let tailscale = self.config.lock().tailscale;
+        if tailscale && self.tailscale_origin().is_none() {
+            return None;
+        }
+        self.running_url()
+    }
+
+    /// Whether this phone may change its subscription now (`PUSH_CHANGES_PER_MINUTE`).
+    fn push_change_allowed(&self, device: &str) -> bool {
+        let now = Instant::now();
+        let mut changes = self.push_changes.lock();
+        changes.retain(|_, at| at.back().is_some_and(|last| now.duration_since(*last) < Duration::from_secs(60)));
+        let at = changes.entry(device.to_string()).or_default();
+        at.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+        if at.len() >= PUSH_CHANGES_PER_MINUTE {
+            return false;
+        }
+        at.push_back(now);
+        true
     }
 
     /// Ends a phone's alerts; true when it had them.
     fn push_unsubscribe(&self, device: &str) -> bool {
         let had = self.config.lock().devices.iter_mut().find(|d| d.id == device).and_then(|d| d.push.take()).is_some();
         if had {
-            self.keep();
             self.publish_push();
+            self.keep();
             self.forget_push_secret(device);
         }
         had
     }
 
-    /// The push service says the subscription ended, or the record no longer has what it takes. The phone subscribes again when it next opens.
-    pub fn push_gone(&self, device: &str) {
-        if self.push_unsubscribe(device) {
+    /// The push service says the subscription at `endpoint` ended, or the record no longer has what it takes. The phone subscribes again when it next opens.
+    /// A late answer about an address it has since left is no news about the one it has now.
+    pub fn push_gone(&self, device: &str, endpoint: Option<&str>) {
+        let moved = endpoint.is_some_and(|e| self.config.lock().devices.iter().any(|d| d.id == device && d.push.as_ref().is_some_and(|p| p.endpoint != e)));
+        if !moved && self.push_unsubscribe(device) {
             self.audit.add(device, "push_gone", "the push service no longer takes this subscription");
         }
     }
@@ -667,8 +725,8 @@ impl Mobile {
 
     /// What a phone is told about its alerts.
     fn push_facts(&self, device: &str) -> Value {
-        let subscribed = self.config.lock().devices.iter().any(|d| d.id == device && d.push.is_some());
-        json!({"vapid": self.destinations.vapid_public(false).ok().flatten(), "subscribed": subscribed})
+        // What is being sent to, not what the file says: a subscription that does not verify gets nothing, and the phone should make a new one.
+        json!({"vapid": self.destinations.vapid_public(false).ok().flatten(), "subscribed": self.destinations.has_device(device)})
     }
 
     /// The key device records are MAC'd with. Made when `create` and only when the store says it has none: a read that failed,
@@ -985,8 +1043,8 @@ impl Mobile {
         if expired.is_empty() {
             return Vec::new();
         }
-        self.keep();
         self.publish_push();
+        self.keep();
         expired
             .into_iter()
             .map(|(id, name)| {
@@ -1468,8 +1526,9 @@ impl Mobile {
             device.or_else(|| c.legacy.iter().position(|d| d.id == id).map(|i| c.legacy.remove(i).name))
         };
         let name = removed.ok_or_else(|| anyhow!("no such device"))?;
-        self.keep();
+        // Alerts stop first: a slow disk does not keep them going.
         self.publish_push();
+        self.keep();
         self.forget_push_secret(id);
         self.audit.add(id, "revoke", &name);
         let event = DeviceEvent { id: id.to_string(), name, change: "removed", permission: None };
@@ -1524,8 +1583,8 @@ impl Mobile {
             r.stop.cancel();
         }
         self.codes.lock().clear();
-        self.keep();
         self.publish_push();
+        self.keep();
     }
 
     /// The kill switch: phone access off (listeners stopped, sockets closed, control stopped) and every device removed, whether
@@ -2651,11 +2710,17 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
         return;
     };
     let first = conn.publish(true).expect("forced");
+    // Only where it can be used (`Conn::secure_transport`). Read each time, off this task: until there is a key it asks the credential store, which can be slow.
+    let push = if conn.cap >= Permission::Write {
+        let (asker, id) = (daemon.clone(), device.id.clone());
+        tokio::task::spawn_blocking(move || asker.mobile.push_facts(&id)).await.ok()
+    } else {
+        None
+    };
     let hello = json!({
         "type": "hello", "v": 2, "api": kelpie_proto::API_LEVEL, "daemon_epoch": m.epoch, "rev": first["rev"],
         "device": device_hello(device, record, conn.cap),
-        // Only where it can be used (`Conn::secure_transport`). Read each time: the phone compares it with what its browser holds.
-        "push": (conn.cap >= Permission::Write).then(|| m.push_facts(&device.id)),
+        "push": push,
         "sessions": first["sessions"], "projects": first["projects"],
         "load": load.status().json(), "server_ts": now_millis(),
         "hb": {"idle_s": 20, "pong_s": 8, "dead_s": 45, "legacy": conn.legacy, "ack_frames": sync::WINDOW_FRAMES, "ack_bytes": sync::WINDOW_BYTES, "ack_every_frames": 2, "ack_every_ms": 250},
@@ -7153,10 +7218,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_late_answer_about_an_old_address_leaves_the_new_subscription_alone() {
+        let mut r = rig();
+        r.ask(Permission::Read, subscription(ENDPOINT)).await;
+        r.daemon.mobile.push_gone("phone", Some("https://fcm.googleapis.com/fcm/send/old"));
+        assert_eq!(r.daemon.mobile.destinations.device_ids(), ["phone"]);
+        assert!(secret_of(&r, "phone").is_some());
+        r.daemon.mobile.push_gone("phone", Some(ENDPOINT));
+        assert!(r.daemon.mobile.destinations.device_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_page_names_where_it_is_and_only_an_address_of_this_computer_counts() {
+        let network = NetworkRig::new().await;
+        let m = &network.rig.daemon.mobile;
+        let here = format!("http://{}", network.addr);
+        let subscribe = |origin: &str| {
+            let mut sub = subscription(ENDPOINT);
+            sub["origin"] = json!(origin);
+            sub
+        };
+        assert!(m.push_subscribe("phone", &subscribe(&here)).is_ok());
+        assert_eq!(m.config.lock().devices[0].push.as_ref().unwrap().origin.as_deref(), Some(here.as_str()));
+        let held = m.config.lock().devices[0].push.clone();
+        for bad in [format!("https://{}", network.addr), format!("http://{}:1", network.addr.ip()), "https://evil.example".to_string(), "http://192.168.1.5:4817".to_string(), format!("{here}/"), format!("{here}/x")] {
+            let refused = m.push_subscribe("phone", &subscribe(&bad)).map(|_| ()).err().expect("refused");
+            assert_eq!(refused.code, "bad_origin", "{bad}");
+            assert!(!refused.message.contains(&bad));
+        }
+        assert_eq!(m.config.lock().devices[0].push, held, "and the one it had stays");
+        // A page from before: what it names is nothing, and it is taken as before.
+        assert!(m.push_subscribe("phone", &subscription(ENDPOINT)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_page_at_the_tailscale_origin_may_name_it_and_with_the_origin_gone_a_phone_with_none_waits() {
+        let mut network = NetworkRig::new().await;
+        let fake = Arc::new(tailscale::fake::Fake::ready());
+        on_tailscale(&mut network, &fake).await;
+        publish(&network.rig.daemon).await;
+        let m = &network.rig.daemon.mobile;
+        let origin = format!("https://{ORIGIN}");
+        assert!(m.serves_origin(&origin));
+        assert!(!m.serves_origin(&format!("http://{ORIGIN}")), "not in the scheme it does not answer in");
+        assert_eq!(m.alert_url().as_deref(), Some(format!("{origin}/").as_str()));
+        m.set_tailscale_origin(None);
+        assert!(!m.serves_origin(&origin));
+        assert_eq!(m.alert_url(), None, "no link to this network's address in its place");
+        assert!(m.running_url().is_some(), "what the channels' link uses is as it was");
+    }
+
+    #[tokio::test]
+    async fn a_phone_changing_its_subscription_again_and_again_is_stopped() {
+        let mut r = rig();
+        let mut last = Value::Null;
+        for _ in 0..(PUSH_CHANGES_PER_MINUTE + 1) {
+            last = r.ask(Permission::Read, subscription(ENDPOINT)).await;
+        }
+        assert_eq!(last["code"], "rate_limited", "{last}");
+    }
+
+    #[tokio::test]
+    async fn a_subscription_that_does_not_verify_is_told_as_none_and_can_be_replaced() {
+        let mut r = rig();
+        let sub = subscription(ENDPOINT);
+        r.ask(Permission::Read, sub.clone()).await;
+        r.daemon.mobile.config.lock().devices[0].push.as_mut().unwrap().mac = "00".into();
+        r.daemon.mobile.publish_push();
+        assert_eq!(r.daemon.mobile.push_facts("phone")["subscribed"], false);
+        assert_eq!(r.ask(Permission::Read, sub).await["result"], "ok");
+        assert_eq!(r.daemon.mobile.push_facts("phone")["subscribed"], true);
+    }
+
+    #[tokio::test]
     async fn a_push_service_ending_the_subscription_ends_it_here() {
         let mut r = rig();
         r.ask(Permission::Read, subscription(ENDPOINT)).await;
-        r.daemon.mobile.push_gone("phone");
+        r.daemon.mobile.push_gone("phone", None);
         assert!(r.daemon.mobile.destinations.device_ids().is_empty());
         assert!(r.daemon.mobile.config.lock().devices[0].push.is_none(), "the pairing stays");
         assert_eq!(r.daemon.mobile.push_facts("phone")["subscribed"], false);

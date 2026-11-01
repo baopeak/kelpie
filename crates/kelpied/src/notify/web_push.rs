@@ -179,10 +179,12 @@ impl Vapid {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wording {
     Kind(Kind),
-    /// After an outage: this many sessions, at least one of them waiting.
+    /// After an outage: this many sessions wait on the person.
     NeedYou(usize),
     /// Several things that wait for nobody, gathered into one message.
     Updates(usize),
+    /// After an outage, both.
+    NeedYouAndUpdates(usize, usize),
     Test,
 }
 
@@ -205,8 +207,11 @@ pub fn sentence(wording: Wording, lang: &str) -> String {
         (Wording::NeedYou(1), false) => "1 session needs you".into(),
         (Wording::NeedYou(n), false) => format!("{n} sessions need you"),
         (Wording::NeedYou(n), true) => format!("{n} phiên đang cần bạn"),
+        (Wording::Updates(1), false) => "1 update from your sessions".into(),
         (Wording::Updates(n), false) => format!("{n} updates from your sessions"),
         (Wording::Updates(n), true) => format!("{n} cập nhật từ các phiên của bạn"),
+        (Wording::NeedYouAndUpdates(n, m), false) => format!("{}, and {}", sentence(Wording::NeedYou(n), "en"), if m == 1 { "1 more update".to_string() } else { format!("{m} more updates") }),
+        (Wording::NeedYouAndUpdates(n, m), true) => format!("{n} phiên đang cần bạn và {m} cập nhật khác"),
         (Wording::Test, false) => "Alerts from this computer work".into(),
         (Wording::Test, true) => "Cảnh báo từ máy tính này hoạt động".into(),
     }
@@ -406,7 +411,7 @@ mod tests {
     #[test]
     fn every_alert_says_a_fixed_sentence_and_fits() {
         for lang in ["en", "vi", "xx"] {
-            for wording in ALL.iter().map(|k| Wording::Kind(*k)).chain([Wording::NeedYou(1), Wording::NeedYou(49), Wording::Updates(3), Wording::Test]) {
+            for wording in ALL.iter().map(|k| Wording::Kind(*k)).chain([Wording::NeedYou(1), Wording::NeedYou(49), Wording::Updates(1), Wording::Updates(3), Wording::NeedYouAndUpdates(2, 1), Wording::Test]) {
                 let body = alert_json(wording, lang, "https://desk.tail1234.ts.net:8443/#s=abc", &topic("abc"));
                 assert!(body.len() <= MAX_ALERT_BYTES);
                 let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -419,6 +424,7 @@ mod tests {
         assert_eq!(sentence(Wording::Kind(Kind::Waiting), "xx"), "A session needs you", "an unknown language is English");
         assert_ne!(sentence(Wording::Kind(Kind::Waiting), "vi"), sentence(Wording::Kind(Kind::Waiting), "en"));
         assert_eq!(sentence(Wording::NeedYou(3), "en"), "3 sessions need you");
+        assert_eq!(sentence(Wording::NeedYouAndUpdates(1, 2), "en"), "1 session needs you, and 2 more updates");
     }
 
     #[test]

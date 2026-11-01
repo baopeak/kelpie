@@ -12,7 +12,10 @@ use std::time::Instant;
 enum Answer {
     Status(u16),
     RetryAfter(u16, &'static str),
+    /// The request is had, and no answer comes in the client's time: the receiver may have acted on it.
     Hang,
+    /// An answer, late.
+    After(u64, u16),
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +81,10 @@ impl PushService {
                 std::thread::sleep(Duration::from_secs(30));
                 return;
             }
+            Answer::After(ms, s) => {
+                std::thread::sleep(Duration::from_millis(ms));
+                (s, String::new())
+            }
         };
         let _ = stream.write_all(format!("HTTP/1.1 {status} X\r\n{extra}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes());
     }
@@ -101,6 +108,9 @@ struct FakeHost {
     waiting: Mutex<bool>,
     level: Mutex<Level>,
     gone: Mutex<Vec<String>>,
+    /// What the page's address is for a phone whose own is not known: none, as with Tailscale's origin not back yet.
+    url: Mutex<Option<String>>,
+    tasks: Mutex<bool>,
 }
 
 impl Host for FakeHost {
@@ -110,10 +120,13 @@ impl Host for FakeHost {
     fn load_level(&self) -> Level {
         *self.level.lock()
     }
-    fn phone_url(&self) -> Option<String> {
-        Some("https://desk.tail1234.ts.net:8443/".into())
+    fn task_waiting(&self, _run: &str, _task: &str) -> bool {
+        *self.tasks.lock()
     }
-    fn subscription_gone(&self, device: &str) {
+    fn phone_url(&self) -> Option<String> {
+        self.url.lock().clone()
+    }
+    fn subscription_gone(&self, device: &str, _endpoint: Option<&str>) {
         self.gone.lock().push(device.to_string());
     }
 }
@@ -135,7 +148,7 @@ impl Drop for Rig {
 fn rig() -> Rig {
     let dir = std::env::temp_dir().join(format!("kelpie-destinations-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let (host, secrets) = (Arc::new(FakeHost { waiting: Mutex::new(true), level: Mutex::new(Level::L0), gone: Mutex::default() }), Memory::new());
+    let (host, secrets) = (Arc::new(FakeHost { waiting: Mutex::new(true), level: Mutex::new(Level::L0), gone: Mutex::default(), url: Mutex::new(Some("https://desk.tail1234.ts.net:8443/".into())), tasks: Mutex::new(true) }), Memory::new());
     let dests = Destinations::new(&dir, secrets.clone(), host.clone());
     let notifier = Notifier::with_destinations(&dir, secrets.clone(), dests.clone());
     Rig { notifier, dests, host, secrets, dir }
@@ -144,11 +157,16 @@ fn rig() -> Rig {
 impl Rig {
     /// A phone with alerts on at `service`: what its browser would hold to read them.
     fn phone(&self, id: &str, service: &PushService, lang: &str) -> Phone {
+        self.phone_at(id, service, lang, None)
+    }
+
+    fn phone_at(&self, id: &str, service: &PushService, lang: &str, origin: Option<&str>) -> Phone {
         *self.dests.shared.test_base.lock() = Some(service.base.clone());
+        self.dests.vapid_public(true).unwrap();
         let (secret, p256dh, auth) = web_push::test_subscription();
         self.secrets.set(&auth_key(id), &auth).unwrap();
         let mut all = self.dests.shared.devices.lock().clone();
-        all.insert(id.to_string(), Target { endpoint: format!("{}/push/{id}", service.base), p256dh, lang: lang.into() });
+        all.insert(id.to_string(), Target { endpoint: format!("{}/push/{id}", service.base), p256dh, lang: lang.into(), origin: origin.map(str::to_string) });
         self.dests.set_devices(all);
         Phone { secret, auth: B64.decode(auth).unwrap() }
     }
@@ -190,7 +208,7 @@ fn a_needs_you_event_reaches_the_service_signed_encrypted_and_says_nothing_of_th
     assert_eq!(got.headers["urgency"], "high");
     assert_eq!(got.headers["content-encoding"], "aes128gcm");
     assert_eq!(got.headers["content-type"], "application/octet-stream");
-    assert_eq!(got.headers["topic"], web_push::topic("session-1|7"), "another wait of the session is another alert; a late one replaces its own");
+    assert_eq!(got.headers["topic"], web_push::topic("waiting|session-1|7"), "another wait of the session is another alert; a late one replaces its own");
     assert!(got.headers["topic"].len() <= 32);
     let (token, key) = got.headers["authorization"].strip_prefix("vapid t=").unwrap().split_once(", k=").unwrap();
     assert_eq!(key, r.dests.vapid_public(false).unwrap().unwrap());
@@ -463,7 +481,7 @@ fn a_daemon_that_starts_again_sends_what_the_last_left_and_lets_go_of_what_has_n
     let dest = Dest::Device("d1".into());
     std::fs::create_dir_all(&r.dests.shared.dir).unwrap();
     let mut left = Outbox::open(&r.outbox(&dest));
-    left.add(Entry { id: "e1".into(), kind: "waiting".into(), session: Some("s1".into()), wait: Some(1), task: None, at: now_millis(), hold_until: 0, payload: None });
+    left.add(Entry { id: "e1".into(), kind: "waiting".into(), session: Some("s1".into()), wait: Some(1), task: None, at: now_millis(), hold_until: 0, payload: None, unsure: 0 });
     let orphan = r.dests.shared.dir.join("device-orphan.json");
     std::fs::write(&orphan, b"{}").unwrap();
     let off = r.outbox(&Dest::Channel(Channel::Webhook));
@@ -529,25 +547,252 @@ fn at_a_calm_load_nothing_is_held() {
 }
 
 #[test]
-fn several_after_a_failure_are_one_summary_in_the_phones_language() {
-    let (r, service) = (rig(), PushService::start(&[Answer::Status(503)]));
+fn several_after_an_outage_are_one_summary_in_the_phones_language() {
+    let (r, service) = (rig(), PushService::start(&[Answer::Status(503), Answer::Status(503), Answer::Status(503)]));
     let phone = r.phone("d1", &service, "vi");
     r.notifier.send(&waiting("a"), &Context::default());
     service.wait_for(1, Duration::from_secs(3));
     r.notifier.send(&waiting("b"), &Context::default());
-    r.notifier.send(&waiting("c"), &Context::default());
-    let got = service.wait_for(2, Duration::from_secs(5));
-    let alert = phone.open(&got[1]);
-    assert_eq!(alert["notification"]["body"], web_push::sentence(Wording::NeedYou(3), "vi"));
+    r.notifier.send(&Raised { session: Some("c".into()), ..Raised::bare(Kind::Finished) }, &Context::default());
+    let got = service.wait_for(4, Duration::from_secs(12));
+    let alert = phone.open(&got[3]);
+    assert_eq!(alert["notification"]["body"], web_push::sentence(Wording::NeedYouAndUpdates(2, 1), "vi"), "what waits, counted apart");
     assert_eq!(alert["notification"]["navigate"], "https://desk.tail1234.ts.net:8443/", "the list, not one of them");
-    assert_eq!(alert["notification"]["tag"], web_push::topic("summary"));
     std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(service.count(), 2, "nothing else follows");
+    assert_eq!(service.count(), 4, "nothing else follows");
+}
+
+/// Master's channels kept each message as it was through a failure, and so do these.
+#[test]
+fn one_failed_attempt_leaves_each_message_with_its_own_text_and_link() {
+    let (r, service) = (rig(), PushService::start(&[Answer::Status(503)]));
+    let mut c = r.notifier.config();
+    c.ntfy.enabled = true;
+    c.ntfy.server = service.base.clone();
+    r.notifier.update(Some(c), &Value::Null).unwrap();
+    let telling_of = |title: &str| Context { project: Some("Proj".into()), title: Some(title.into()), phone_url: Some("http://192.168.1.5:4817/".into()), ..Default::default() };
+    r.notifier.send(&waiting("a"), &telling_of("first"));
+    service.wait_for(1, Duration::from_secs(3));
+    r.notifier.send(&waiting("b"), &telling_of("second"));
+    let got = service.wait_for(3, Duration::from_secs(6));
+    let bodies: Vec<Value> = got.iter().map(|g| serde_json::from_slice(&g.body).unwrap()).collect();
+    assert_eq!(bodies[1]["message"], "first: Needs your input");
+    assert_eq!(bodies[1]["click"], "http://192.168.1.5:4817/#s=a");
+    assert_eq!(bodies[1]["title"], "Kelpie · Proj");
+    assert_eq!(bodies[2]["message"], "second: Needs your input");
+    assert_eq!(bodies[2]["click"], "http://192.168.1.5:4817/#s=b");
+}
+
+/// What master did with a send that ended without a word, which a receiver may well have acted on: one more try, whoever waited how long.
+/// Nothing like it for each of the next ten minutes.
+#[test]
+fn a_channel_gets_a_message_that_may_have_arrived_twice_at_most_as_on_master() {
+    let (r, service) = (rig(), PushService::start(&[Answer::Hang, Answer::Hang, Answer::Hang, Answer::Hang]));
+    let mut c = r.notifier.config();
+    c.webhook.enabled = true;
+    r.notifier.update(Some(c), &serde_json::json!({"webhook_url": format!("{}/hook", service.base)})).unwrap();
+    r.notifier.send(&waiting("still-waiting"), &Context::default());
+    // Ten seconds each and the wait between them, then long enough for a third to have shown.
+    let got = service.wait_for(2, Duration::from_secs(15));
+    std::thread::sleep(Duration::from_secs(11));
+    assert_eq!(service.count(), 2, "the session still waits, and that buys no third");
+    assert_eq!(r.notifier.describe(false)["dropped"], 1, "said");
+    assert!(r.notifier.describe(false)["status"]["webhook"]["error"].to_string().contains("timed out"));
+    assert!(!r.outbox(&Dest::Channel(Channel::Webhook)).exists());
+    // A receiver can tell the second for what it is.
+    let ids: Vec<Value> = got.iter().map(|g| serde_json::from_slice::<Value>(&g.body).unwrap()["event"]["id"].clone()).collect();
+    assert!(ids[0].is_string());
+    assert_eq!(ids[0], ids[1]);
+}
+
+/// A push service does not act on a repeat as a webhook would: every try goes under one `Topic` and `tag`, and takes the last one's place.
+#[test]
+fn a_phone_keeps_being_tried_past_two_sends_that_may_have_arrived() {
+    let (r, service) = (rig(), PushService::start(&[Answer::Hang, Answer::Hang]));
+    let phone = r.phone("d1", &service, "en");
+    r.notifier.send(&waiting("s1"), &Context::default());
+    let got = service.wait_for(3, Duration::from_secs(26));
+    assert_eq!(got[0].headers["topic"], got[2].headers["topic"]);
+    assert_eq!(phone.open(&got[2])["notification"]["tag"], got[2].headers["topic"].as_str());
+}
+
+fn outbox_entry(id: &str, kind: Kind) -> Entry {
+    Entry { id: id.into(), kind: kind.code().into(), session: Some("s".into()), wait: None, task: None, at: now_millis(), hold_until: 0, payload: None, unsure: 0 }
 }
 
 #[test]
-fn a_channel_says_the_summary_too() {
-    let service = PushService::start(&[Answer::Status(503)]);
+fn a_kind_never_takes_the_place_of_another() {
+    let of = |kind: Kind| Alert::of(&Attempt::One(Box::new(outbox_entry("e", kind)))).about;
+    let all = [Kind::Waiting, Kind::Finished, Kind::Error, Kind::Automation, Kind::Approval, Kind::Cost].map(of);
+    for (i, a) in all.iter().enumerate() {
+        for b in &all[i + 1..] {
+            assert_ne!(web_push::topic(a), web_push::topic(b));
+        }
+    }
+    // The same thing again is the same alert: a repeat replaces it.
+    assert_eq!(of(Kind::Finished), of(Kind::Finished));
+    let summary = |id: &str| Alert::of(&Attempt::Together { ids: vec![id.into()], need_you: 2, updates: 0, latest: 0 }).about;
+    assert_ne!(summary("one"), summary("two"), "a second outage's does not replace a first not read yet");
+    assert_eq!(summary("one"), summary("one"), "tries of one do");
+    let first = Alert::test().about;
+    std::thread::sleep(Duration::from_millis(3));
+    assert_ne!(first, Alert::test().about, "a second test shows something");
+}
+
+#[test]
+fn a_finished_and_an_error_of_one_session_both_arrive_under_their_own_names() {
+    let (r, service) = (rig(), PushService::start(&[]));
+    let phone = r.phone("d1", &service, "en");
+    r.notifier.send(&Raised { session: Some("s1".into()), ..Raised::bare(Kind::Finished) }, &Context::default());
+    r.notifier.send(&Raised { session: Some("s1".into()), ..Raised::bare(Kind::Error) }, &Context::default());
+    let got = service.wait_for(2, Duration::from_secs(5));
+    assert_ne!(got[0].headers["topic"], got[1].headers["topic"]);
+    let tags: Vec<Value> = got.iter().map(|g| phone.open(g)["notification"]["tag"].clone()).collect();
+    assert_ne!(tags[0], tags[1]);
+}
+
+#[test]
+fn a_phones_alert_leads_to_the_origin_that_holds_its_pairing() {
+    let (r, service) = (rig(), PushService::start(&[]));
+    let phone = r.phone_at("d1", &service, "en", Some("https://192.168.1.5:4817"));
+    r.notifier.send(&waiting("s1"), &Context::default());
+    let got = service.wait_for(1, Duration::from_secs(5));
+    assert_eq!(phone.open(&got[0])["notification"]["navigate"], "https://192.168.1.5:4817/#s=s1&a=1", "not the address the daemon would name");
+    r.dests.test_device("d1").unwrap();
+    let got = service.wait_for(2, Duration::from_secs(2));
+    assert_eq!(phone.open(&got[1])["notification"]["navigate"], "https://192.168.1.5:4817/");
+}
+
+#[test]
+fn a_phone_with_no_origin_on_record_waits_while_there_is_no_right_address() {
+    let (r, service) = (rig(), PushService::start(&[]));
+    let phone = r.phone("d1", &service, "en");
+    *r.host.url.lock() = None;
+    r.notifier.send(&waiting("s1"), &Context::default());
+    let start = Instant::now();
+    while r.notifier.describe(false)["status"]["webpush"]["error"].is_null() && start.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(r.notifier.describe(false)["status"]["webpush"]["error"], "no address for the phone page");
+    assert_eq!(service.count(), 0, "no link to somewhere else");
+    *r.host.url.lock() = Some("https://desk.tail1234.ts.net:8443/".into());
+    let got = service.wait_for(1, Duration::from_secs(5));
+    assert_eq!(phone.open(&got[0])["notification"]["navigate"], "https://desk.tail1234.ts.net:8443/#s=s1&a=1");
+}
+
+#[test]
+fn an_approval_is_asked_of_the_run_and_so_survives_a_restart() {
+    let (r, service) = (rig(), PushService::start(&[]));
+    let phone = r.phone("d1", &service, "en");
+    let dest = Dest::Device("d1".into());
+    std::fs::create_dir_all(&r.dests.shared.dir).unwrap();
+    let mut left = Outbox::open(&r.outbox(&dest));
+    left.add(Entry { task: Some(("run".into(), "task".into())), session: None, ..outbox_entry("approval", Kind::Approval) });
+    r.notifier.resume();
+    let got = service.wait_for(1, Duration::from_secs(5));
+    assert_eq!(phone.open(&got[0])["notification"]["body"], "A run is waiting for your approval");
+    // Decided meanwhile: nothing goes.
+    let (r, service) = (rig(), PushService::start(&[]));
+    r.phone("d1", &service, "en");
+    *r.host.tasks.lock() = false;
+    std::fs::create_dir_all(&r.dests.shared.dir).unwrap();
+    let mut left = Outbox::open(&r.outbox(&dest));
+    left.add(Entry { task: Some(("run".into(), "task".into())), session: None, ..outbox_entry("approval", Kind::Approval) });
+    r.notifier.resume();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(service.count(), 0);
+}
+
+#[test]
+fn a_state_that_could_not_be_read_deletes_nothing_at_the_start() {
+    let r = rig();
+    std::fs::create_dir_all(&r.dests.shared.dir).unwrap();
+    let (channel, device) = (r.outbox(&Dest::Channel(Channel::Ntfy)), r.outbox(&Dest::Device("d1".into())));
+    std::fs::write(&channel, b"{}").unwrap();
+    std::fs::write(&device, b"{}").unwrap();
+    std::fs::write(r.dir.join("notify.json"), b"{not json").unwrap();
+    let dests = Destinations::new(&r.dir, r.secrets.clone(), r.host.clone());
+    let n = Notifier::with_destinations(&r.dir, r.secrets.clone(), dests.clone());
+    dests.set_devices_known(false);
+    n.resume();
+    assert!(channel.exists() && device.exists(), "what they had to send stays");
+    assert!(!n.started());
+    // Once it is known that nothing is on, they go.
+    let dests = Destinations::new(&r.dir, r.secrets.clone(), r.host.clone());
+    std::fs::remove_file(r.dir.join("notify.json")).unwrap();
+    let n = Notifier::with_destinations(&r.dir, r.secrets.clone(), dests);
+    n.resume();
+    assert!(!channel.exists() && !device.exists());
+}
+
+#[test]
+fn clearing_the_channels_clears_what_was_moved_aside() {
+    let r = rig();
+    std::fs::create_dir_all(&r.dests.shared.dir).unwrap();
+    let aside = r.dests.shared.dir.join("ntfy.unreadable-1");
+    std::fs::write(&aside, b"text").unwrap();
+    r.notifier.clear().unwrap();
+    assert!(!aside.exists());
+}
+
+/// A toggle while a request is under way: the thread from before leaves the file to the one after.
+#[test]
+fn a_channel_switched_off_and_on_during_a_request_has_one_writer() {
+    let (r, service) = (rig(), PushService::start(&[Answer::After(800, 503)]));
+    let mut c = r.notifier.config();
+    c.ntfy.enabled = true;
+    c.ntfy.server = service.base.clone();
+    r.notifier.update(Some(c.clone()), &Value::Null).unwrap();
+    r.notifier.send(&waiting("old"), &Context::default());
+    service.wait_for(1, Duration::from_secs(3));
+    let mut off = c.clone();
+    off.ntfy.enabled = false;
+    r.notifier.update(Some(off), &Value::Null).unwrap();
+    r.notifier.update(Some(c), &Value::Null).unwrap();
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(service.count(), 1, "what it had went with the first switch");
+    assert!(!r.outbox(&Dest::Channel(Channel::Ntfy)).exists(), "and the late answer wrote nothing");
+    r.notifier.send(&waiting("new"), &Context::default());
+    let got = service.wait_for(2, Duration::from_secs(3));
+    assert!(String::from_utf8_lossy(&got[1].body).contains("Needs your input"));
+}
+
+#[test]
+fn a_late_answer_about_an_address_the_phone_left_keeps_what_it_has_to_send() {
+    let (r, service) = (rig(), PushService::start(&[Answer::After(500, 410)]));
+    let phone = r.phone("d1", &service, "en");
+    r.notifier.send(&waiting("s1"), &Context::default());
+    service.wait_for(1, Duration::from_secs(3));
+    // The phone subscribed again while that request was out.
+    let phone2 = {
+        let (secret, p256dh, auth) = web_push::test_subscription();
+        r.secrets.set(&auth_key("d1"), &auth).unwrap();
+        let mut all = r.dests.shared.devices.lock().clone();
+        all.insert("d1".to_string(), Target { endpoint: format!("{}/push/new", service.base), p256dh, lang: "en".into(), origin: None });
+        r.dests.set_devices(all);
+        Phone { secret, auth: B64.decode(auth).unwrap() }
+    };
+    let _ = phone;
+    let got = service.wait_for(2, Duration::from_secs(5));
+    assert_eq!(got[1].path, "/push/new");
+    assert_eq!(phone2.open(&got[1])["notification"]["body"], "A session needs you");
+}
+
+#[test]
+fn a_worker_never_makes_a_signing_key_under_subscriptions_made_with_another() {
+    let (r, service) = (rig(), PushService::start(&[]));
+    r.phone("d1", &service, "en");
+    r.secrets.delete(K_VAPID).unwrap();
+    r.dests.forget_vapid();
+    assert_eq!(r.dests.test_device("d1").unwrap_err(), "no signing key");
+    assert_eq!(*r.host.gone.lock(), ["d1"], "the phone subscribes again");
+    assert_eq!(service.count(), 0);
+    assert_eq!(r.secrets.get(K_VAPID), None, "and none was made");
+}
+
+#[test]
+fn a_channel_says_the_summary_too_after_an_outage() {
+    let service = PushService::start(&[Answer::Status(503), Answer::Status(503), Answer::Status(503)]);
     let r = rig();
     let mut c = r.notifier.config();
     c.webhook.enabled = true;
@@ -555,11 +800,12 @@ fn a_channel_says_the_summary_too() {
     r.notifier.send(&waiting("a"), &Context::default());
     service.wait_for(1, Duration::from_secs(3));
     r.notifier.send(&waiting("b"), &Context::default());
-    let got = service.wait_for(2, Duration::from_secs(5));
-    let body: Value = serde_json::from_slice(&got[1].body).unwrap();
+    let got = service.wait_for(4, Duration::from_secs(12));
+    let body: Value = serde_json::from_slice(&got[3].body).unwrap();
     assert_eq!(body["event"]["summary"], "2 sessions need you");
     assert_eq!(body["event"]["status"], "needs_you");
-    assert_eq!(got[1].path, "/hook");
+    assert!(body["event"]["id"].is_string());
+    assert_eq!(got[3].path, "/hook");
 }
 
 #[test]

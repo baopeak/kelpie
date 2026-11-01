@@ -1,10 +1,12 @@
-//! What one destination still has to send, kept on disk: a computer that restarts or a service that is down for a while loses
-//! nothing and repeats nothing.
+//! What one destination still has to send, kept on disk: a daemon that restarts or a service that is down for a while does not lose
+//! what is still true. Entries written down survive a restart; the few in a queue on their way here do not.
 //!
 //! Before every attempt each entry is looked at again, so what the person already dealt with is never sent. A failure waits 1, 2,
 //! 4, 8, 16, 32, then 60 s, with full jitter so phones and channels do not retry together, and at least what the service's
 //! `Retry-After` asks. An entry older than ten minutes goes, unless it says someone is still waiting: that is still true, and is
-//! told once the service answers. Several entries that piled up during an outage leave as one message.
+//! told once the service answers. Several entries that piled up during a real outage leave as one message; one failed attempt
+//! merges nothing. A send that ended without a word may have arrived (`unsure`): a channel's receiver acts on each one, so that is tried
+//! [`MAX_UNSURE`] times at most.
 //!
 //! The file is written atomically, holds at most [`MAX_ENTRIES`], and holds only what is already safe to send: a phone's entries
 //! carry no text at all. A file that cannot be used is moved aside, not overwritten; one that cannot even be read keeps this
@@ -25,6 +27,11 @@ const VERSION: u32 = 1;
 const BACKOFF_S: [u64; 7] = [1, 2, 4, 8, 16, 32, 60];
 /// However the dice fall: a failed attempt is never followed at once by the next.
 const LEAST_WAIT_MS: u64 = 100;
+/// Sends of one entry that may each have reached a channel's receiver.
+pub const MAX_UNSURE: u32 = 2;
+/// What makes an outage of a failure: this many in a row, or what is ready this old.
+const OUTAGE_FAILURES: u32 = 3;
+const OUTAGE_AGE_MS: u64 = 60 * 1000;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Entry {
@@ -48,6 +55,9 @@ pub struct Entry {
     /// The message for a channel. A phone's message is built when it is sent and has no text to keep.
     #[serde(default)]
     pub payload: Option<Payload>,
+    /// Sends so far that ended without a word (`MAX_UNSURE`).
+    #[serde(default)]
+    pub unsure: u32,
 }
 
 impl Entry {
@@ -73,8 +83,8 @@ impl Entry {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Attempt {
     One(Box<Entry>),
-    /// Several as one: `sessions` different things are behind `ids`.
-    Together { ids: Vec<String>, sessions: usize, needs_you: bool, latest: u64 },
+    /// Several as one: `need_you` sessions someone waits on, and `updates` other things.
+    Together { ids: Vec<String>, need_you: usize, updates: usize, latest: u64 },
 }
 
 #[derive(Debug, PartialEq)]
@@ -212,9 +222,11 @@ impl Outbox {
             let first = self.entries.iter().map(|e| e.hold_until).min().unwrap_or(now);
             return Pick::Wait(Duration::from_millis(first.saturating_sub(now).max(1)));
         }
-        // After a failure everything that piled up is one message. Held back for the load: the same, for what can wait.
+        // After an outage everything that piled up is one message. Held back for the load: the same, for what can wait.
+        let oldest = ready.iter().map(|e| e.at).min().unwrap_or(now);
+        let outage = self.failures >= OUTAGE_FAILURES || (self.failures > 0 && now.saturating_sub(oldest) >= OUTAGE_AGE_MS);
         let held: Vec<&Entry> = ready.iter().copied().filter(|e| e.hold_until > 0).collect();
-        let together = if self.failures > 0 && ready.len() > 1 {
+        let together = if outage && ready.len() > 1 {
             ready.clone()
         } else if held.len() > 1 {
             held
@@ -222,11 +234,13 @@ impl Outbox {
             Vec::new()
         };
         if !together.is_empty() {
-            let sessions = together.iter().map(|e| e.about()).collect::<HashSet<_>>().len();
+            // A session counts once, as waiting if anything about it waits.
+            let waiting: HashSet<&str> = together.iter().filter(|e| e.waits()).map(|e| e.about()).collect();
+            let updates = together.iter().map(|e| e.about()).filter(|a| !waiting.contains(a)).collect::<HashSet<_>>().len();
             return Pick::Go(Attempt::Together {
                 ids: together.iter().map(|e| e.id.clone()).collect(),
-                sessions,
-                needs_you: together.iter().any(|e| e.waits()),
+                need_you: waiting.len(),
+                updates,
                 latest: together.iter().map(|e| e.at).max().unwrap_or(now),
             });
         }
@@ -267,6 +281,23 @@ impl Outbox {
         self.save();
     }
 
+    /// It ended without a word, and a receiver may have acted on it. What has had its share of such sends goes (the count is that); the
+    /// rest may be tried again.
+    pub fn unsure(&mut self, attempt: &Attempt, now: u64, retry_after: Option<Duration>, dice: &mut dyn FnMut(u64) -> u64) -> u64 {
+        let in_it = |e: &Entry| match attempt {
+            Attempt::One(a) => a.id == e.id,
+            Attempt::Together { ids, .. } => ids.contains(&e.id),
+        };
+        let before = self.entries.len();
+        for e in self.entries.iter_mut().filter(|e| in_it(e)) {
+            e.unsure += 1;
+        }
+        self.entries.retain(|e| e.unsure < MAX_UNSURE);
+        let lost = (before - self.entries.len()) as u64;
+        self.failed(now, retry_after, dice);
+        lost
+    }
+
     /// The destination is gone, and what it had to send with it.
     pub fn discard(&mut self) {
         self.entries.clear();
@@ -287,7 +318,7 @@ mod tests {
     }
 
     fn entry(id: &str, kind: Kind, at: u64) -> Entry {
-        Entry { id: id.into(), kind: kind.code().into(), session: Some(format!("s-{id}")), wait: None, task: None, at, hold_until: 0, payload: None }
+        Entry { id: id.into(), kind: kind.code().into(), session: Some(format!("s-{id}")), wait: None, task: None, at, hold_until: 0, payload: None, unsure: 0 }
     }
 
     fn always(_: &Entry) -> bool {
@@ -459,7 +490,7 @@ mod tests {
         let entries = [entry("a", Kind::Waiting, 0), entry("b", Kind::Waiting, 1000), entry("c", Kind::Approval, 2000)];
         let delivered = twelve_minute_outage(&entries, None);
         assert_eq!(delivered.len(), 1, "{delivered:?}");
-        assert!(matches!(&delivered[0], Attempt::Together { sessions: 3, needs_you: true, ids, .. } if ids.len() == 3));
+        assert!(matches!(&delivered[0], Attempt::Together { need_you: 3, updates: 0, ids, .. } if ids.len() == 3));
     }
 
     #[test]
@@ -482,9 +513,85 @@ mod tests {
         b.session = Some("same".into());
         o.add(a);
         o.add(b);
-        o.failed(0, None, &mut slowest);
-        let Pick::Go(Attempt::Together { sessions, needs_you, .. }) = o.pick(o.next_at) else { panic!("together") };
-        assert_eq!((sessions, needs_you), (1, true));
+        for _ in 0..OUTAGE_FAILURES {
+            o.failed(0, None, &mut slowest);
+        }
+        let Pick::Go(Attempt::Together { need_you, updates, .. }) = o.pick(o.next_at) else { panic!("together") };
+        assert_eq!((need_you, updates), (1, 0));
+    }
+
+    #[test]
+    fn a_summary_counts_as_waiting_only_what_waits() {
+        let mut o = Outbox::open(&scratch("mixed"));
+        o.add(entry("w", Kind::Waiting, 0));
+        o.add(entry("d1", Kind::Finished, 0));
+        o.add(entry("d2", Kind::Error, 0));
+        for _ in 0..OUTAGE_FAILURES {
+            o.failed(0, None, &mut slowest);
+        }
+        let Pick::Go(Attempt::Together { need_you, updates, .. }) = o.pick(o.next_at) else { panic!("together") };
+        assert_eq!((need_you, updates), (1, 2));
+    }
+
+    #[test]
+    fn one_failed_attempt_merges_nothing_and_a_real_outage_does() {
+        let mut o = Outbox::open(&scratch("blip"));
+        o.add(entry("a", Kind::Waiting, 0));
+        o.add(entry("b", Kind::Waiting, 100));
+        o.failed(1_000, None, &mut slowest);
+        let Pick::Go(a) = o.pick(o.next_at) else { panic!("due") };
+        assert!(matches!(&a, Attempt::One(e) if e.id == "a"), "each with its own text and link: {a:?}");
+        // Still the first failure, but what is ready has waited a minute.
+        assert!(matches!(o.pick(OUTAGE_AGE_MS), Pick::Go(Attempt::Together { need_you: 2, .. })));
+        o.failed(2_000, None, &mut slowest);
+        assert!(matches!(o.pick(o.next_at), Pick::Go(Attempt::One(_))), "two failures in a few seconds");
+        o.failed(3_000, None, &mut slowest);
+        assert!(matches!(o.pick(o.next_at), Pick::Go(Attempt::Together { need_you: 2, .. })), "three");
+        o.sent(&Attempt::One(Box::new(entry("a", Kind::Waiting, 0))));
+        assert_eq!(o.failures, 0, "and a success ends it");
+        assert!(matches!(o.pick(o.next_at), Pick::Go(Attempt::One(_))));
+    }
+
+    /// What master did: a send that ended without a word was tried once more, and that was that, however long someone waited.
+    #[test]
+    fn a_send_that_may_have_arrived_is_tried_twice_at_most_even_while_someone_waits() {
+        let mut o = Outbox::open(&scratch("unsure"));
+        o.add(entry("a", Kind::Waiting, 0));
+        let (mut sends, mut lost, mut now) = (0, 0, 0);
+        for _ in 0..50 {
+            now = now.max(o.next_at);
+            o.prune(now, &always);
+            let Pick::Go(a) = o.pick(now) else { break };
+            sends += 1;
+            lost += o.unsure(&a, now, None, &mut slowest);
+        }
+        assert_eq!(sends, MAX_UNSURE as usize);
+        assert_eq!(lost, 1, "counted");
+        assert!(o.is_empty());
+    }
+
+    #[test]
+    fn a_send_that_certainly_failed_keeps_being_tried_while_someone_waits() {
+        let mut o = Outbox::open(&scratch("certain"));
+        o.add(entry("a", Kind::Waiting, 0));
+        for _ in 0..50 {
+            let now = o.next_at;
+            o.prune(now, &always);
+            let Pick::Go(_) = o.pick(now) else { panic!("still there") };
+            o.failed(now, None, &mut slowest);
+        }
+        assert_eq!(o.entries.len(), 1);
+    }
+
+    #[test]
+    fn what_was_tried_unsure_survives_a_restart_with_its_count() {
+        let path = scratch("unsure-restart");
+        let mut o = Outbox::open(&path);
+        o.add(entry("a", Kind::Waiting, 0));
+        let Pick::Go(a) = o.pick(0) else { panic!("due") };
+        o.unsure(&a, 0, None, &mut slowest);
+        let again = Outbox::open(&path);
+        assert_eq!(again.entries[0].unsure, 1);
     }
 
     #[test]
@@ -512,7 +619,7 @@ mod tests {
         assert!(matches!(&a, Attempt::One(e) if e.id == "urgent"));
         o.sent(&a);
         let Pick::Go(a) = o.pick(1100) else { panic!("window over") };
-        assert!(matches!(&a, Attempt::Together { sessions: 2, needs_you: false, .. }));
+        assert!(matches!(&a, Attempt::Together { need_you: 0, updates: 2, .. }));
         o.sent(&a);
         assert!(o.is_empty());
         // Alone in its window, it is itself.

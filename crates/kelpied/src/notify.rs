@@ -393,6 +393,9 @@ pub struct Payload {
     pub session: Option<String>,
     pub summary: String,
     pub duration_s: Option<u64>,
+    /// The same for every try of one message, so that a receiver can tell a repeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -451,6 +454,7 @@ pub fn build_payload(ev: &Raised, ctx: &Context, include_screen: bool) -> Payloa
         session: session.map(line),
         summary: line(&summary(ev)),
         duration_s: ev.turn.map(|d| d.as_secs()),
+        id: None,
         screen,
         link,
         at: ev.at,
@@ -560,17 +564,25 @@ pub struct Failure {
     over: bool,
     /// Worth trying again, whatever the reason says.
     again: bool,
+    /// It ended without a word after it may have reached the receiver, which may have acted on it.
+    unsure: bool,
+    /// The address a subscription that is over was at: a newer one of the device is not what ended.
+    over_endpoint: Option<String>,
 }
 
 impl From<&str> for Failure {
     fn from(reason: &str) -> Failure {
-        Failure { reason: reason.into(), status: None, retry_after: None, over: false, again: false }
+        Failure { reason: reason.into(), status: None, retry_after: None, over: false, again: false, unsure: false, over_endpoint: None }
     }
 }
 
 impl Failure {
     fn gone(reason: impl Into<String>) -> Failure {
         Failure { over: true, ..Failure::from(reason.into().as_str()) }
+    }
+
+    fn unsure(reason: &str) -> Failure {
+        Failure { unsure: true, ..Failure::from(reason) }
     }
 
     fn again(reason: impl Into<String>) -> Failure {
@@ -620,11 +632,13 @@ fn post(url: &str, headers: &[(&str, &str)], content_type: &str, body: &[u8]) ->
             let asked = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| retry_after(v, now_millis()));
             Err(Failure { status: Some(status), retry_after: asked, ..Failure::from(format!("HTTP {status}").as_str()) })
         }
-        Err(ureq::Error::Timeout(_)) => Err("timed out".into()),
+        Err(ureq::Error::Timeout(_)) => Err(Failure::unsure("timed out")),
         Err(ureq::Error::HostNotFound) => Err("host not found".into()),
         Err(ureq::Error::ConnectionFailed) => Err("connection failed".into()),
-        Err(ureq::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => Err("connection failed".into()),
-        Err(_) => Err("network error".into()),
+        Err(ureq::Error::Io(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => Err("connection failed".into()),
+        // Cut off, maybe after the receiver had the whole request.
+        Err(ureq::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => Err(Failure::unsure("connection failed")),
+        Err(_) => Err(Failure::unsure("network error")),
     }
 }
 
@@ -658,7 +672,7 @@ pub struct Notifier {
     active: AtomicBool,
     ui: Mutex<HashMap<u64, Ui>>,
     seen: Mutex<HashMap<u32, Seen>>,
-    waiting_tasks: Arc<Mutex<HashSet<(String, String)>>>,
+    waiting_tasks: Mutex<HashSet<(String, String)>>,
     limiter: Mutex<RateLimiter>,
     status: Arc<Mutex<HashMap<&'static str, ChannelStatus>>>,
     /// Every place a message can go, and the threads that take it there.
@@ -680,7 +694,14 @@ impl Notifier {
     /// `destinations` is shared with phone access, which says who has alerts on.
     pub fn with_destinations(data_dir: &std::path::Path, secrets: Arc<dyn SecretStore>, destinations: Arc<destinations::Destinations>) -> Notifier {
         let path = data_dir.join("notify.json");
-        let loaded: Config = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        // A file that is not there is no channel on. One that cannot be read says nothing, and what the channels had to send stays until it can.
+        let read = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<Config>(&bytes).ok(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Config::default()),
+            Err(_) => None,
+        };
+        destinations.set_config_known(read.is_some());
+        let loaded = read.unwrap_or_default();
         let config = destinations.config();
         let active = AtomicBool::new(loaded.any_enabled());
         *config.lock() = loaded;
@@ -691,7 +712,7 @@ impl Notifier {
             config,
             ui: Mutex::new(HashMap::new()),
             seen: Mutex::new(HashMap::new()),
-            waiting_tasks: destinations.waiting_tasks(),
+            waiting_tasks: Mutex::new(HashSet::new()),
             limiter: Mutex::new(RateLimiter::new(RATE_WINDOW)),
             status: destinations.status(),
             dropped: destinations.dropped(),
@@ -865,6 +886,7 @@ impl Notifier {
             at: ev.at,
             hold_until: if hold > 0 { ev.at + hold } else { 0 },
             payload,
+            unsure: 0,
         };
         for ch in [Channel::Ntfy, Channel::Telegram, Channel::Webhook] {
             if channel_on(&c, ch) {
@@ -979,6 +1001,7 @@ impl Notifier {
         for key in SECRET_KEYS {
             self.secrets.delete(key)?;
         }
+        self.destinations.remove_leftovers();
         self.update(Some(Config::default()), &Value::Null)
     }
 }

@@ -57,6 +57,9 @@ pub struct PushSub {
     pub lang: String,
     #[serde(default)]
     pub created_at: u64,
+    /// The origin of the page that subscribed, which is where its pairing is and so where its alerts must lead. None: from before this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     /// HMAC-SHA256 (hex) over this record's `mac` and the fields above: an address edited in the file sends nothing.
     #[serde(default)]
     pub mac: String,
@@ -227,7 +230,8 @@ fn secure_input(d: &Device) -> Vec<u8> {
 /// What a subscription's `mac` covers: this record and no other, and what it was told to do.
 fn push_input(d: &Device, p: &PushSub) -> Vec<u8> {
     let mut out = b"kelpie-device-push/1".to_vec();
-    for field in [d.mac.as_str(), p.endpoint.as_str(), p.p256dh.as_str(), p.lang.as_str()] {
+    // Only when there is one: a subscription from before the field still verifies, and adding one in the file does not.
+    for field in [d.mac.as_str(), p.endpoint.as_str(), p.p256dh.as_str(), p.lang.as_str()].into_iter().chain(p.origin.as_deref()) {
         out.extend_from_slice(&(field.len() as u32).to_le_bytes());
         out.extend_from_slice(field.as_bytes());
     }
@@ -351,7 +355,7 @@ mod tests {
         let key = [3u8; 32];
         let plain = device(&key);
         let mut on = plain.clone();
-        on.push = Some(PushSub { endpoint: "https://fcm.googleapis.com/fcm/send/a".into(), p256dh: "k".into(), lang: "en".into(), created_at: 1, mac: String::new() });
+        on.push = Some(PushSub { endpoint: "https://fcm.googleapis.com/fcm/send/a".into(), p256dh: "k".into(), lang: "en".into(), created_at: 1, origin: None, mac: String::new() });
         assert!(!push_holds(&on, &key), "not sealed yet");
         seal(&mut on, &key);
         assert!(push_holds(&on, &key));
@@ -367,6 +371,18 @@ mod tests {
         seal(&mut other, &key);
         other.push = on.push.clone();
         assert!(!push_holds(&other, &key), "another record's subscription");
+        let mut led_away = on.clone();
+        led_away.push.as_mut().unwrap().origin = Some("https://elsewhere.example".into());
+        assert!(!push_holds(&led_away, &key), "an origin added in the file");
+        let mut with_origin = on.clone();
+        with_origin.push.as_mut().unwrap().origin = Some("https://desk.tail.ts.net:8443".into());
+        seal(&mut with_origin, &key);
+        assert!(push_holds(&with_origin, &key));
+        let mut changed = with_origin.clone();
+        changed.push.as_mut().unwrap().origin = Some("https://elsewhere.example".into());
+        assert!(!push_holds(&changed, &key), "an origin changed in the file");
+        changed.push.as_mut().unwrap().origin = None;
+        assert!(!push_holds(&changed, &key), "an origin removed from the file");
         let mut raised = on.clone();
         raised.permission = Permission::Write;
         seal(&mut raised, &key);
