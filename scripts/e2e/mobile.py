@@ -902,6 +902,26 @@ for n in (1, 2, 3):
         note = json.loads(plain).get("notification", {})
         run.check("…opened with the browser's keys it holds no text of the session and links to it", b"alert-secret-name" not in plain and note.get("title") == "Kelpie" and note.get("navigate", "").endswith(f"#s={shell_alert['id']}&a=1"), plain.decode()[:200])
         run.check("…and on the wire it is ciphertext", taken is not None and b"alert-secret-name" not in taken["body"] and b"navigate" not in taken["body"])
+        shown_js = "const done = arguments[0]; navigator.serviceWorker.getRegistration().then((r) => r.getNotifications()).then((n) => done(n.map((x) => ({title: x.title, body: x.body, tag: x.tag, icon: x.icon, navigate: x.data && x.data.navigate}))), (e) => done({err: String(e)}));"
+        def shown():
+            got = phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": shown_js, "args": []})
+            return got if isinstance(got, list) and got else None
+        # A cold worker first, as on a real phone: stopped, with nothing attached to it, and only then a push. What follows attaches to it, and could no longer show this.
+        if registration is not None:
+            page_cdp.call("ServiceWorker.stopAllWorkers")
+            def worker_stopped():
+                page_cdp.call("Runtime.evaluate", {"expression": "1"})  # what the browser said of its workers meanwhile is read with this
+                states = [v.get("runningStatus") for e in page_cdp.events if e.get("method") == "ServiceWorker.workerVersionUpdated" for v in e["params"]["versions"] if v.get("registrationId") == registration]
+                return bool(states) and states[-1] == "stopped"
+            run.check("the worker is stopped, as a phone's is between alerts", wait(worker_stopped, 10) is True)
+            cold = json.loads(plain)
+            cold["notification"]["tag"] = "cold-start"
+            page_cdp.call("ServiceWorker.deliverPushMessage", {"origin": origin, "registrationId": registration, "data": json.dumps(cold)})
+            # The browser reconciles `getNotifications` with what it has on display: a read at the very moment of showing may find nothing.
+            time.sleep(1)
+            cold_shown = wait(lambda: (n := shown()) and [x for x in n if x["tag"] == "cold-start"], 20)
+            run.check("a push starts a stopped worker, which shows it", bool(cold_shown) and cold_shown[0]["body"] == note.get("body"), str(cold_shown))
+            phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": "const done = arguments[0]; navigator.serviceWorker.getRegistration().then((r) => r.getNotifications()).then((n) => { n.forEach((x) => x.close()); done(true); }, () => done(false));", "args": []})
         delivered = False
         # What the worker does with it, from inside: whether the push reached its handler, and what became of `showNotification`.
         sw_cdp = Cdp(phone.debugger, "service_worker", origin) if registration is not None else None
@@ -919,10 +939,6 @@ for n in (1, 2, 3):
                 delivered = True
             except RuntimeError as e:
                 print(f"note: ServiceWorker.deliverPushMessage did not work here: {e}", flush=True)
-        shown_js = "const done = arguments[0]; navigator.serviceWorker.getRegistration().then((r) => r.getNotifications()).then((n) => done(n.map((x) => ({title: x.title, body: x.body, tag: x.tag, icon: x.icon, navigate: x.data && x.data.navigate}))), (e) => done({err: String(e)}));"
-        def shown():
-            got = phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": shown_js, "args": []})
-            return got if isinstance(got, list) and got else None
         # The browser reconciles `getNotifications` with what it has on display, so it is looked at once the worker says it has shown one.
         settled = wait(lambda: (s := worker_saw()) and (s["shown"] or s["failed"]) and s, 10) if delivered and sw_cdp else None
         run.check("the push reaches the worker's handler, and `showNotification` succeeds", bool(settled) and settled["pushes"] == 1 and len(settled["shown"]) == 1 and not settled["failed"], str(settled or (worker_saw() if sw_cdp else None)))

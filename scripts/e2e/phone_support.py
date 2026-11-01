@@ -372,11 +372,21 @@ def write_fake_tailscale(folder):
     open(log, "w", encoding="utf-8").close()
     with open(script, "w", encoding="utf-8") as f:
         f.write(
-            "import json, sys\n"
+            # Reads change nothing, and a change replaces the file whole. Two calls overlap whenever a window looks while a turn-on runs: with the file rewritten by every
+            # call, one read in about twenty met an empty file and failed, which a daemon can only take for a Tailscale that is stopped.
+            "import json, os, sys, tempfile, time\n"
             f"state_file, log = {state!r}, {log!r}\n"
             "args = ' '.join(sys.argv[1:])\n"
             "open(log, 'a', encoding='utf-8').write(args + '\\n')\n"
-            "state = json.load(open(state_file, encoding='utf-8'))\n"
+            "def read():\n"
+            "    for _ in range(100):\n"
+            "        try:\n"
+            "            return json.load(open(state_file, encoding='utf-8'))\n"
+            "        except (OSError, ValueError):\n"
+            "            time.sleep(0.02)\n"
+            "    raise SystemExit(70)\n"
+            "state = read()\n"
+            "before = dict(state)\n"
             "if args == 'status --json':\n    print(state['status'])\n"
             "elif args == 'serve status --json':\n    sys.exit(1) if state.get('serve_down') else print(state['serve'])\n"
             "elif args == 'serve --https=8443 off':\n    state['serve'] = '{}'\n"
@@ -384,7 +394,16 @@ def write_fake_tailscale(folder):
             "    port = args.rsplit(':', 1)[1]\n"
             f"    state['serve'] = json.dumps({{'TCP': {{'8443': {{'HTTPS': True}}}}, 'Web': {{'{FAKE_TAILNET_NAME}:8443': {{'Handlers': {{'/': {{'Proxy': 'http://127.0.0.1:' + port}}}}}}}}}})\n"
             "else:\n    sys.exit(3)\n"
-            "json.dump(state, open(state_file, 'w', encoding='utf-8'))\n")
+            "if state != before:\n"
+            "    fd, temporary = tempfile.mkstemp(dir=os.path.dirname(state_file))\n"
+            "    with os.fdopen(fd, 'w', encoding='utf-8') as f:\n"
+            "        json.dump(state, f)\n"
+            "    for _ in range(100):\n"
+            "        try:\n"
+            "            os.replace(temporary, state_file)\n"
+            "            break\n"
+            "        except OSError:\n"
+            "            time.sleep(0.02)\n")
     with open(program, "w", encoding="utf-8") as f:
         if os.name == "nt":
             f.write(f'@"{sys.executable}" "{script}" %*\r\n')
@@ -396,10 +415,20 @@ def write_fake_tailscale(folder):
 
 
 def fake_tailscale_says(state_file, **state):
+    """Replaces the file whole, as the program does: a call may be reading it."""
     with open(state_file, encoding="utf-8") as f:
         now = json.load(f)
-    with open(state_file, "w", encoding="utf-8") as f:
+    temporary = state_file + ".says"
+    with open(temporary, "w", encoding="utf-8") as f:
         json.dump({**now, **state}, f)
+    for attempt in range(100):
+        try:
+            os.replace(temporary, state_file)
+            return
+        except OSError:
+            if attempt == 99:
+                raise
+            time.sleep(0.02)
 
 
 def fake_tailscale_calls(log):

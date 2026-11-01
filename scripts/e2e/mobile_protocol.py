@@ -943,7 +943,8 @@ async def security(d):
     # ---------- alerts: the daemon really sends, to a local stand-in for a push service, with no window open ----------
     d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
     alert_key, alert_id = ps.pair(d, BASE, "Alerts", False)
-    alerts = ps.Phone(BASE, alert_key)
+    # As a browser connects: with where the page is.
+    alerts = ps.Phone(BASE, alert_key, origin=BASE.rstrip("/"))
     hello = await alerts.open() or {}
     check("a page that may have alerts hears of them in its hello, even one that may only read", isinstance(hello.get("push"), dict) and hello["push"]["subscribed"] is False, hello.get("push"))
     info_reply = await alerts.ask(type="push_info")
@@ -956,7 +957,14 @@ async def security(d):
         check(f"an address that is no push service is refused and not said back: {bad}", got.get("code") == "bad_endpoint" and bad not in json.dumps(got), got)
     for bad in ("https://evil.example", "http://192.168.1.5:4817", BASE.replace("http:", "https:").rstrip("/"), BASE):
         got = await alerts.ask(**{**subscribe, "origin": bad}) or {}
-        check(f"a page's origin this computer does not answer at is refused and not said back: {bad}", got.get("code") == "bad_origin" and bad not in json.dumps(got), got)
+        check(f"an origin other than this connection's is refused and not said back: {bad}", got.get("code") == "bad_origin" and bad not in json.dumps(got), got)
+    no_page = ps.Phone(BASE, alert_key)
+    await no_page.open()
+    got = await no_page.ask(**subscribe) or {}
+    check("…and one named by a connection that came with no origin", got.get("code") == "bad_origin", got)
+    await no_page.close()
+    alerts = ps.Phone(BASE, alert_key, origin=BASE.rstrip("/"))
+    await alerts.open()
     check("…and nothing was kept", d.call("notify.get")["webpush"]["devices"] == 0)
     got = await alerts.ask(**subscribe) or {}
     check("a subscription at the stand-in is taken", got.get("result") == "ok", got)
@@ -1065,7 +1073,7 @@ async def security(d):
         check("…with no second try", len(PUSH.at("/push/alerts")) == before + 1, len(PUSH.at("/push/alerts")) - before)
         d.call("session.close", {"handle": info(d, s["id"])["handle"]})
         await alerts.close()
-        alerts = ps.Phone(BASE, alert_key)
+        alerts = ps.Phone(BASE, alert_key, origin=BASE.rstrip("/"))
         hello = await alerts.open() or {}
         check("…and the next hello says so, for the phone to subscribe again", hello.get("push", {}).get("subscribed") is False, hello.get("push"))
         got = await alerts.ask(**subscribe) or {}
