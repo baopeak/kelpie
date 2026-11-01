@@ -7,7 +7,7 @@ import { Composer } from "./composer";
 import { KeyBar } from "./key-bar";
 import { PromptCard } from "./prompt-card";
 import { TerminalText } from "./terminal-text";
-import { canType, connected, dataState, dismissNotice, lastLiveAt, notice as sessionNotice, now, paintedFrom, screen, sessions } from "./phone-state";
+import { canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, paintedFrom, screen, sessions } from "./phone-state";
 import { promptKey } from "./screen-sync";
 import { t } from "./i18n";
 
@@ -57,7 +57,7 @@ export function SessionView(props: { id: string }) {
               when={canType() && s().alive}
               fallback={
                 <div class="readonly">
-                  {!s().alive ? t("This session has stopped.") : t("This device can only read. To type, allow it in Kelpie → Settings → Mobile, or use the Kelpie app or Tailscale/HTTPS.")}
+                  {!s().alive ? t("This session has stopped.") : device()?.capped ? t("This device can only read at this address. To type, pair it through Tailscale or at an HTTPS name.") : t("This device can only read. To type, allow it in Kelpie → Settings → Mobile, or use the Kelpie app or Tailscale/HTTPS.")}
                 </div>
               }
             >

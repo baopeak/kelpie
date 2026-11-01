@@ -2388,6 +2388,10 @@ impl Conn {
     async fn run(&mut self, granted: Permission, name: &str, req: &Value) -> Result<Option<Value>, Refusal> {
         let verb = Verb::parse(name).ok_or_else(|| refuse("unknown_verb", format!("unknown request {name:?}")))?;
         if verb.needs() > granted {
+            // What its record allows is another matter from what this connection does: Settings cannot help when it is the address that holds it back.
+            if self.daemon.mobile.permission(&self.device).is_some_and(|record| verb.needs() <= record) {
+                return Err(refuse("read_only", "This device can only read at this address. To type, pair it through Tailscale or at an HTTPS name."));
+            }
             return Err(refuse("read_only", "This device may read but not type. Allow it in Kelpie → Settings → Mobile."));
         }
         // A phone that names the daemon run it talked to: after a restart its ids and positions mean nothing.

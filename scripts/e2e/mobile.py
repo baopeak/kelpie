@@ -1000,6 +1000,8 @@ for n in (1, 2, 3):
     run.check("…says why it may only read", bool(phone.wait("return !!document.querySelector('[data-banner=no-passkey]')", 10)))
     phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('number-shell')).click()")
     run.check("…and has no way to type", bool(phone.wait("return !!document.querySelector('.readonly') && !document.querySelector('.send textarea')", 15)))
+    number_footer = phone.js("return document.querySelector('.readonly')?.textContent ?? ''")
+    run.check("…and is not sent to Settings for what Settings cannot change", "Settings" not in number_footer and "pair it" in number_footer, number_footer)
     phone.shot(os.path.join(shots, "29-phone-at-a-number.png"))
     daemon(d, "mobile.revoke", {"id": number_device["id"]})
     daemon(d, "session.close", {"handle": number_shell["handle"]})
