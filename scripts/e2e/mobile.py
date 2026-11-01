@@ -977,7 +977,15 @@ for n in (1, 2, 3):
     run.check("the price is stated: the name in public certificate logs", "certificate logs" in d.js("return document.querySelector('[data-tailscale-privacy]')?.textContent ?? ''"))
     run.shot("22-tailscale-ready")
     d.js("document.querySelector('[data-setting=\"mobile-tailscale\"] .switch').click()")
-    run.check("turning it on publishes it", d.wait(f"return {ts_serve[7:]} === 'ours'", 20) is True, str(ps.fake_tailscale_calls(FAKE_TS[2])[-3:]))
+    try:
+        published = d.wait(f"return {ts_serve[7:]} === 'ours'", 20) is True
+    except TimeoutError:
+        published = False
+    # What it is about, if it did not: the steps go on only when it did.
+    said = "" if published else f"; Settings says {d.js('return [...document.querySelectorAll(`.form-note.error, [data-setting=mobile-tailscale] .muted-inline`)].map((e) => e.textContent)')}; the daemon says {daemon(d, 'mobile.status').get('tailscale')}"
+    run.check("turning it on publishes it", published, str(ps.fake_tailscale_calls(FAKE_TS[2])[-6:]) + said)
+    if not published:
+        raise TimeoutError("Tailscale mode did not turn on")
     run.check("…and says where", ps.FAKE_TAILNET_NAME in d.js(ts_text))
     d.wait("return !!document.querySelector('[data-tailscale-pair]')", 10)
     d.js("document.querySelector('[data-tailscale-pair]').click()")
