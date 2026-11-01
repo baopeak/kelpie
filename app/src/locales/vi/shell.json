@@ -339,5 +339,8 @@
   "Agent: Restart, Keeping the Conversation": "Agent: Khởi động lại, giữ hội thoại",
   "{name} is working. Continue anyway?": "{name} đang làm việc. Vẫn tiếp tục?",
   "{name} did not stop.": "{name} không dừng được.",
-  "{name} is not ready yet.": "{name} chưa sẵn sàng."
+  "{name} is not ready yet.": "{name} chưa sẵn sàng.",
+  "Desktop notifications on: only when an agent needs you or something fails. Click to mute.": "Thông báo trên máy tính đang bật: chỉ khi agent cần bạn hoặc có lỗi. Nhấp để tắt.",
+  "Desktop notifications muted: everything still goes to Activity (the bell). Click to turn on.": "Thông báo trên máy tính đang tắt: mọi thứ vẫn vào Hoạt động (biểu tượng chuông). Nhấp để bật.",
+  "muted": "đã tắt"
 }

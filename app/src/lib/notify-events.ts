@@ -60,6 +60,26 @@ export function describeNotify(ev: NotifyEvent, ctx: NotifyContext): Described {
 }
 
 /** Why a "continue at reset" timer was dropped, as the daemon reports it. */
+/** Desktop popups are for what needs the user: input or an approval, a failure, the cost cap. A
+ *  finished turn pops up only when the user asked for it (Settings → Notifications); the rest
+ *  (automation started, worktree notes) stays in the inbox. */
+export function worthPopup(kind: InboxItem["kind"], notifyFinished: boolean): boolean {
+  return kind === "waiting" || kind === "error" || kind === "cost" || (kind === "finished" && notifyFinished);
+}
+
+/** Lets the same popup through once per `windowMs` (a session finishing turn after turn, a status
+ *  that flaps): true when `key` has not been let through within the window. */
+export function createRepeatGuard(windowMs: number, now: () => number = Date.now) {
+  const seen = new Map<string, number>();
+  return (key: string): boolean => {
+    const at = now();
+    for (const [k, since] of seen) if (at - since >= windowMs) seen.delete(k);
+    if (seen.has(key)) return false;
+    seen.set(key, at);
+    return true;
+  };
+}
+
 export type CancelReason = "exited" | "restarted" | "conversation" | "not_limited" | "input" | "daemon" | "user";
 
 /** The inbox note for a dropped timer; none when the user cancelled it themselves. */

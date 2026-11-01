@@ -427,8 +427,8 @@ kelpied worktree get
 The comment shows under the sidebar row and on its board card.
 
 When an agent exits, the pane offers **Restart** / **Resume** (agents resume their
-conversation). Desktop notifications fire when a session you are not looking at finishes or
-needs input.
+conversation). A desktop notification fires when a session you are not looking at needs input
+or fails (see Activity and notifications).
 
 ### Agents
 
@@ -499,9 +499,15 @@ the bottom. Settings → Terminal → *Scrollback* sets how many lines each term
 
 The bell in the status bar lists what happened while you looked elsewhere: agents that
 finished or need you, automation runs, new worktrees — with the agents working right now on
-top. Click an entry to jump there; right-click toggles read. Settings → Notifications can add
-a short chime to desktop notifications. A session you are looking at (the window has focus and
-shows it) raises nothing.
+top. Click an entry to jump there; right-click toggles read. A session you are looking at (the
+window has focus and shows it) raises nothing.
+
+Desktop notifications are kept for what needs you: an agent waiting for input, a run waiting
+for approval, a failure, the cost cap. Finished turns and automation starts stay in the bell's
+list; Settings → Notifications → **Also when a turn finishes** brings finished turns back, and
+can add a short chime. The same notification shows at most once a minute. The card icon next to
+the bell mutes desktop notifications (it reads *muted* in amber) and turns them on again; the
+list keeps everything either way.
 
 #### On your phone, with the window closed
 

@@ -109,6 +109,13 @@ export function StatusBar() {
           <Icon name="float" size={13} />
         </span>
       </Show>
+      {/* Desktop notifications: on (only what needs you) or muted; the inbox keeps everything either way. */}
+      <span class={`item clickable${store.state.settings.notifications ? "" : " muted"}`} data-notify-toggle
+        title={store.state.settings.notifications ? t("Desktop notifications on: only when an agent needs you or something fails. Click to mute.") : t("Desktop notifications muted: everything still goes to Activity (the bell). Click to turn on.")}
+        onClick={() => store.setSettings({ notifications: !store.state.settings.notifications })}>
+        <Icon name={store.state.settings.notifications ? "notify" : "notifyOff"} size={13} />
+        <Show when={!store.state.settings.notifications}>{t("muted")}</Show>
+      </span>
       <span class="item clickable inbox-anchor" title={t("Activity and notifications")} onPointerDown={(e) => e.stopPropagation()} onClick={() => setInbox(!inbox())}>
         <Icon name="bell" size={13} />
         <Show when={store.unreadInbox()}><span class="badge waiting">{store.unreadInbox()}</span></Show>

@@ -179,6 +179,8 @@ export interface Settings {
   sidebarWidth: number;
   sidebarCollapsed: boolean;
   notifications: boolean;
+  /** Also a desktop notification when a turn finishes (off: only when an agent needs you or fails). */
+  notifyFinished: boolean;
   /** Toast once per shortcut when Kelpie keeps a key from the focused terminal. */
   shortcutHints: boolean;
   projectFilter: "all" | "running" | "attention";

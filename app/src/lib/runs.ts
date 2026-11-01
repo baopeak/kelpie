@@ -184,7 +184,7 @@ function announce(prev: Run | undefined, next: Run) {
       if (!store.legacyNotify()) continue;
       const body = t("Waiting for your approval to start");
       store.addInbox({ kind: "waiting", title, body, projectId: project });
-      void store.desktopNotify(title, body);
+      void store.desktopNotify(title, body, "waiting");
     } else if (task.status === "failed") {
       store.addInbox({ kind: "error", title, body: task.error ?? t("Failed"), sessionId: task.session_id ?? undefined, projectId: project });
     }
@@ -192,8 +192,9 @@ function announce(prev: Run | undefined, next: Run) {
   if (prev?.status === "running" && next.status !== "running") {
     const body = next.status === "done" ? t("All tasks done") : next.status === "failed" ? t("Finished with failed tasks") : t("Cancelled");
     const title = t("Run · {name}", { name: next.name });
-    store.addInbox({ kind: next.status === "done" ? "finished" : "error", title, body, projectId: project });
-    void store.desktopNotify(title, body);
+    const kind = next.status === "done" ? "finished" : "error";
+    store.addInbox({ kind, title, body, projectId: project });
+    void store.desktopNotify(title, body, kind);
   }
 }
 

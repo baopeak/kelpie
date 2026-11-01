@@ -31,7 +31,7 @@ describe("desktop notifications", () => {
   it("are off on a new install: nothing is shown and the system is not asked for permission", async () => {
     const { store, os } = await boot(null);
     expect(store.state.settings.notifications).toBe(false);
-    await store.desktopNotify("Claude", "Needs your input");
+    await store.desktopNotify("Claude", "Needs your input", "waiting");
     expect(os.isPermissionGranted).not.toHaveBeenCalled();
     expect(os.requestPermission).not.toHaveBeenCalled();
     expect(os.sendNotification).not.toHaveBeenCalled();
@@ -40,14 +40,14 @@ describe("desktop notifications", () => {
   it("show once the person turns them on", async () => {
     const { store, os } = await boot(null);
     store.setSettings({ notifications: true });
-    await store.desktopNotify("Claude", "Needs your input");
+    await store.desktopNotify("Claude", "Needs your input", "waiting");
     expect(os.sendNotification).toHaveBeenCalledWith({ title: "Claude", body: "Needs your input" });
   });
 
   it("stay on for someone who already had them on", async () => {
     const { store, os } = await boot({ version: 3, settings: { notifications: true } });
     expect(store.state.settings.notifications).toBe(true);
-    await store.desktopNotify("Claude", "Needs your input");
+    await store.desktopNotify("Claude", "Needs your input", "waiting");
     expect(os.sendNotification).toHaveBeenCalledOnce();
   });
 });

@@ -1026,6 +1026,8 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .link-btn.danger { color: var(--danger); }
 .check-label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-dim); white-space: nowrap; cursor: pointer; }
 .statusbar .item.on { color: var(--accent); }
+/* Muted desktop notifications stay noticeable, so the quiet is never a surprise. */
+.statusbar .item.muted { color: var(--waiting); }
 .statusbar .item .badge { margin-left: -2px; }
 
 /* Changes panel */

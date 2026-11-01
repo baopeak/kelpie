@@ -13,6 +13,7 @@ export const defaultSettings: Settings = {
   sidebarWidth: 232,
   sidebarCollapsed: false,
   notifications: false,
+  notifyFinished: false,
   shortcutHints: true,
   projectFilter: "all",
   projectSort: "manual",
