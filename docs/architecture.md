@@ -315,32 +315,46 @@ token, so it opens only on a device that is already paired (the phone page strip
 **Telegram's choices** (`notify::TelegramMode`, `notify/telegram_poll.rs`, API 26). `telegram.mode` is `alert` (what it sent before
 there was a choice: the link only with *Include a link*), `alert_link` (the default when switched on from now on: the link
 `running_url` + `#s=`, the Tailscale origin when there is one, whatever *Include a link* says) or `approve_low`. A `notify.json`
-without the field reads as `alert`. `disable_web_page_preview` stays on, so Telegram does not fetch the link, but it sees it.
-- **Turning approvals on.** `notify.set` cannot: it refuses `approve_low` unless it is on already, and keeps `user_id` from what it
-  holds whatever the app sends. `notify.telegram_bind` (`auth::APP_ONLY`, then the person passes `user_presence`, then Telegram must
-  be on with a bot token) returns a 12-character code for five minutes. The first `/bind <code>` the bot gets in that time stores the
-  sender's `user_id` and that chat as `chat_id`, and sets `approve_low`. Five wrong codes end the binding.
+without the field reads as `alert`, and so does a `notify.set` from an app below API 26 (its `telegram` has no `mode`): a link the
+person had chosen goes, and approvals end, which fails safe. `disable_web_page_preview` stays on, so Telegram does not fetch the link, but it sees it.
+- **Turning approvals on.** `notify.set` cannot: it refuses `approve_low` unless it is on already, and keeps `user_id` and `user_name`
+  from what it holds whatever the app sends. `notify.telegram_bind` (`auth::APP_ONLY`, then the person passes `user_presence`, then
+  Telegram must be on with a bot token) returns a 12-character code for five minutes. The first `/bind <code>` the bot gets in that time
+  **in the configured chat** (any chat while none is set; `@name` matches the chat's username) stores the sender's `user_id`, its
+  `@username` or first name as `user_name` (shown next to the id, and in the audit entry), and that chat's number as `chat_id`, and sets
+  `approve_low`. A `/bind` from another chat, or from a group's anonymous admin (`sender_chat`, or the account 1087968824), is refused
+  with a reply and binds nothing; so is a code that was used or ran out. Five wrong codes from the configured chat end the binding;
+  other chats' do not count. A `notify.set` that leaves any mode but `approve_low`, switches Telegram off or names another chat, and a new
+  bot token, end a binding under way (`notify.telegram` `bind_cancelled`).
 - **Turning them off.** Another mode, Telegram off, another chat id or bot token, `notify.clear`, and the kill switch (`mobile.revoke_all`,
   `mobile.disable`, `mobile.reset`) set `alert_link` and forget the account, saved. Every nonce is burnt and the sent messages lose
-  their buttons (`editMessageText`). A `401` or `404` from `getUpdates`, a token Telegram rejects, does the same and says so.
-- **Polling.** One thread (`kelpie-telegram`) long-polls `getUpdates` (25 s, its own agent with a 35 s limit) only while approvals are
-  on or a binding waits: in `alert` and `alert_link` there is no thread and no request of its own. Outbound only, no listener. The
-  offset is kept in memory. Errors back off with full jitter from 1 s to 60 s; a `409` (a webhook, or another poller) is shown once
-  with what to do.
-- **Buttons.** Only for a needs-you message about a request the daemon labels `low` (`mobile::risk`), shown whole (at most 2000
-  characters, no hidden marks), with a one-time yes known to be one: in a terminal, the one open request a hook reported and a
-  permission menu with one plain *Yes* and one plain *No* (`choices::one_time_answers`); in a chat, the one open request, for which the
-  daemon writes the dialect's own one-time yes and no (Claude's `can_use_tool` repeating its input when that was at most 16 KiB, Codex's
-  command approvals in both versions, ACP's one `allow_once` and its `reject_once`), each of which `ChatSession::answer` must take as a
-  one-shot answer to that very request. `unknown`, `medium` and `dangerous` get the alert and the link. `callback_data` is `a:` or `d:`
+  their buttons (`editMessageText`). A `401` or `404` from `getUpdates`, a token Telegram rejects, does the same and says so. A press
+  taken before that answers nothing after it: approvals are looked at again right before the answer is written, after any wait for the
+  request.
+- **Polling.** One thread (`kelpie-telegram`) long-polls `getUpdates` (25 s, its own agent with a 35 s limit, at most 20 updates) only
+  while approvals are on or a binding waits: in `alert` and `alert_link` there is no thread and no request of its own. Chat messages are
+  asked for only while a binding waits and for a minute after it ends; otherwise only `callback_query`. A poll that returns nothing in
+  under a second waits out the second. Outbound only, no listener. The offset is kept in memory. Errors back off with full jitter from
+  1 s to 60 s; a `409` (a webhook, or another poller) is shown once with what to do.
+- **Buttons.** Only for a needs-you message about a request the daemon labels `low` (`mobile::risk`) that changes no file, shown whole
+  (at most 2000 characters, no hidden marks), with a one-time yes known to be one: in a terminal, the one open request a hook reported,
+  named in the screen lines above the menu (`choices::names_above_menu`), and a permission menu with one plain *Yes* and one plain *No*
+  (`choices::one_time_answers`); in a chat, the one open request, for which the daemon writes the dialect's own one-time yes and no
+  (Claude's `can_use_tool` repeating its input when that was at most 16 KiB, Codex's command approvals in both versions, ACP's one
+  `allow_once` and its `reject_once`), each of which `ChatSession::answer` must take as a one-shot answer to that very request. A file
+  edit, write, patch, move or delete (`risk::changes_files`: Claude's Edit, Write, MultiEdit and NotebookEdit, Codex's
+  `applyPatchApproval`, ACP's edit, move and delete kinds) shows only its path, so it gets the alert and the link however it is
+  labelled. `unknown`, `medium` and `dangerous` get the alert and the link. `callback_data` is `a:` or `d:`
   and a 128-bit nonce, in memory only, bound to its message, single use, gone after five minutes, when the request is answered
   elsewhere (looked at before each poll) and with a restart. At most six approvals a minute; past that, messages go without buttons.
 - **A press.** Counted only from the bound `user_id` in the bound `chat_id`; any other is dropped, and the count goes to the audit log
   once a minute (`telegram_ignored`). It answers through `Session::answer_by` with `waiting_since` or `ChatSession::answer`, as
   `By {id: "telegram", name: "Telegram"}`, after checking the request is still the one it was sent for: the first answer wins, and a
-  late press is told who answered. `chat.resolved` and the log's `kelpie_answer` say `by: "telegram"`. Every approval, denial and refused
-  press is in the phones' audit log as device `telegram`, with the command as a length and a hash. The app hears `notify.telegram`
-  `{change}` (`bound`, `bind_expired`, `bind_failed`, `off`, `error`) and reads `telegram` in `notify.get`.
+  late press is told who answered (*on the computer*, *from Telegram* or *on a paired phone*: never a phone's name). `chat.resolved`
+  and the log's `kelpie_answer` say `by: "telegram"`. Every approval, denial and refused press is in the phones' audit log as device
+  `telegram`, with the command as a length and a hash; presses of buttons that are no longer valid are counted and noted once a
+  minute, like strangers'. The app hears `notify.telegram` `{change}` (`bound`, `bind_expired`, `bind_failed`, `bind_cancelled`, `off`,
+  `error`) and reads `telegram` in `notify.get`.
 
 **Continue at reset.** Claude Code's `StopFailure` hook with error `rate_limit` marks the session
 `limited` (a `limited` field of `session.list`, cleared when the agent works again); other agents report
