@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { MobileStatus } from "../components/settings/mobile-settings";
-import { LOCK_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
+import { LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
 import { mobileSummary, OPTION_IDS, optionState, telegramChoice, type OptionFacts, type OptionId } from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
 import { emptyPushConfig, type PushState } from "./push-config";
 import { catalogEntry, entryMatches } from "./settings-catalog";
 
-const API = LOCK_API;
+const API = RELAY_API;
 const RESTART = "Restart Kelpie's background service";
 
 /** A new install with phone access just turned on, as the daemon reports it. */
@@ -17,6 +17,7 @@ function status(patch: Partial<MobileStatus> = {}): MobileStatus {
     devices: [], legacy: [], pairing_expires_in: null, pending: [], dormant_days: 90,
     tailscale: { on: false, origin: null },
     lock: { on: true, idle_s: 300, recheck: false, plain_read: true },
+    relay: { on: false, url: "wss://relay.example", default_url: "wss://relay.example", room: false, origin: null, operator_key: false, connected: false, error: null, rtt_ms: null, slow: false, phones: 0 },
     app: true,
     ...patch,
   };
@@ -27,12 +28,12 @@ const facts = (patch: Partial<OptionFacts> = {}): OptionFacts => ({ api: API, st
 const state = (id: OptionId, patch: Partial<OptionFacts> = {}) => optionState(id, facts(patch));
 
 /** The options the daemon keeps with phone access, and the level that brought each. */
-const PHONE_ROWS: [OptionId, number][] = [["mobile-tailscale", TAILSCALE_API], ["mobile-lock", LOCK_API], ["mobile-lock-idle", LOCK_API], ["mobile-lock-recheck", LOCK_API], ["mobile-lock-plain", LOCK_API]];
+const PHONE_ROWS: [OptionId, number][] = [["mobile-tailscale", TAILSCALE_API], ["mobile-relay", RELAY_API], ["mobile-lock", LOCK_API], ["mobile-lock-idle", LOCK_API], ["mobile-lock-recheck", LOCK_API], ["mobile-lock-plain", LOCK_API]];
 
 describe("a new install", () => {
   it("has the safe defaults", () => {
     const on = Object.fromEntries(OPTION_IDS.map((id) => [id, state(id).on]));
-    expect(on).toEqual({ "mobile-access": true, "mobile-tailscale": false, "mobile-webpush": false, "mobile-lock": true, "mobile-lock-idle": true, "mobile-lock-recheck": false, "mobile-lock-plain": true, "mobile-ntfy": false, "mobile-telegram": false });
+    expect(on).toEqual({ "mobile-access": true, "mobile-tailscale": false, "mobile-relay": false, "mobile-webpush": false, "mobile-lock": true, "mobile-lock-idle": true, "mobile-lock-recheck": false, "mobile-lock-plain": true, "mobile-ntfy": false, "mobile-telegram": false });
     expect(state("mobile-access", { status: status({ enabled: false }) }).on).toBe(false);
   });
 
@@ -46,6 +47,7 @@ describe("what a change asks of the person", () => {
 
   it("asks when it takes protection away", () => {
     expect(state("mobile-tailscale").presence).toContain("on asks");
+    expect(state("mobile-relay").presence).toContain("on asks");
     expect(state("mobile-lock").presence).toContain("off asks");
     expect(state("mobile-lock-idle").presence).toContain("longer time asks");
     expect(state("mobile-lock-recheck", lock({ recheck: true })).presence).toContain("off asks");
@@ -54,6 +56,7 @@ describe("what a change asks of the person", () => {
 
   it("asks nothing when it adds protection", () => {
     expect(state("mobile-tailscale", { status: status({ tailscale: { on: true, origin: null } }) }).presence).toBeNull();
+    expect(state("mobile-relay", { status: status({ relay: { ...status().relay!, on: true } }) }).presence).toBeNull();
     expect(state("mobile-lock", lock({ on: false })).presence).toBeNull();
     expect(state("mobile-lock-recheck").presence).toBeNull();
     expect(state("mobile-lock-plain").presence).toBeNull();
@@ -79,6 +82,7 @@ describe("when an option cannot be changed", () => {
   it("says so too when the daemon's status has no such field, whatever its level says", () => {
     expect(state("mobile-tailscale", { status: status({ tailscale: undefined }) }).disabled).toContain(RESTART);
     expect(state("mobile-lock", { status: status({ lock: undefined }) }).disabled).toContain(RESTART);
+    expect(state("mobile-relay", { status: status({ relay: undefined }) }).disabled).toContain(RESTART);
     const { webpush: _, ...older } = push();
     expect(state("mobile-webpush", { push: older }).disabled).toContain(RESTART);
   });
@@ -173,6 +177,10 @@ describe("the summary", () => {
 
   it("names the Tailscale address when phones can use it, and says when they cannot", () => {
     expect(summary({ tailscale: { on: true, origin: "pc.tail1.ts.net:8443" } }).reach).toContain("pc.tail1.ts.net:8443");
+    const relay = status().relay!;
+    expect(summary({ relay: { ...relay, on: true, connected: true } }).reach).toContain("through the relay");
+    expect(summary({ relay: { ...relay, on: true, connected: false } }).reach).toContain("not connected to it right now");
+    expect(summary().reach).not.toContain("relay");
     expect(summary({ tailscale: { on: true, origin: "pc.tail1.ts.net:8443" }, urls: [] }).reach).not.toContain("this network");
     expect(summary({ tailscale: { on: true, origin: null } }).reach).toContain("cannot use it right now");
   });

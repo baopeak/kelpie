@@ -7,7 +7,7 @@
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
-import { LOCK_API, TAILSCALE_API } from "../../lib/attention";
+import { LOCK_API, RELAY_API, TAILSCALE_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import { mobileSummary, optionState, telegramChoice, type OptionId } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
@@ -15,6 +15,7 @@ import { catalogEntry, entryMatches } from "../../lib/settings-catalog";
 import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
 import { OptionRow } from "./option-row";
+import { createRelayForm, RelayDetails, type RelayStatus } from "./mobile-relay-settings";
 import { SettingRow, settingsQuery } from "./setting-row";
 import { confirmDialog } from "../../lib/confirm-dialog";
 
@@ -66,6 +67,8 @@ export interface MobileStatus {
   tailscale?: { on: boolean; origin: string | null; to_remove?: boolean };
   /** The phones' app lock, as the daemon applies it (absent below `LOCK_API`). */
   lock?: { on: boolean; idle_s: number; recheck: boolean; plain_read: boolean };
+  /** The relay, as the daemon holds it (absent below `RELAY_API`). */
+  relay?: RelayStatus;
   /** This window is the verified Kelpie app: it may approve phones and raise what they may do. */
   app: boolean;
 }
@@ -252,6 +255,7 @@ export function MobileSettings() {
     });
   // What takes protection away asks the person, and is back to what holds now if they did not verify: the status did not change, so nothing else redraws it.
   const setLock = (patch: Partial<NonNullable<MobileStatus["lock"]>>) => run(() => mobileSecure("mobile.set_lock", patch));
+  const relay = createRelayForm(run);
   const resetLock = (d: MobileDevice) => run(() => mobileSecure("mobile.reset_lock", { id: d.id }));
   const setPermission = (d: MobileDevice, permission: MobilePermission) =>
     run(() => mobileSecure("mobile.set_permission", { id: d.id, permission }));
@@ -393,6 +397,11 @@ export function MobileSettings() {
                 <button class="btn primary" data-tailscale-pair disabled={busy() || !s()!.running} onClick={() => setGuideStep(1)}><Icon name="plus" size={13} /> {t("Pair a phone over Tailscale")}</button>
               </Show>
             </Show>
+          </Show>
+        </OptionRow>
+        <OptionRow id="mobile-relay" state={option("mobile-relay")} onChange={(on) => void relay.turn(on, s()!.relay)}>
+          <Show when={store.daemonApi() >= RELAY_API && s()!.relay}>
+            <RelayDetails status={s()!.relay!} form={relay} busy={busy()} />
           </Show>
         </OptionRow>
       </Show>

@@ -1,13 +1,13 @@
 // What each option of Settings → Mobile can do now, and the page's summary, from what the daemon said (`mobile.status`, `notify.get`).
 // Pure, so that every row is tested at every daemon level. The daemon enforces all of it; this only says so ahead of time:
 // `presence` follows `LockOptions::weakened_by` and `mobile.set_tailscale`, and a change it does not mention can still be refused.
-import { LOCK_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
+import { LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { t } from "./i18n";
 import { NOTIFY_API } from "./notify-events";
 import { pushSummary, type PushState, type TelegramMode } from "./push-config";
 import type { MobileStatus } from "../components/settings/mobile-settings";
 
-export const OPTION_IDS = ["mobile-access", "mobile-tailscale", "mobile-webpush", "mobile-lock", "mobile-lock-idle", "mobile-lock-recheck", "mobile-lock-plain", "mobile-ntfy", "mobile-telegram"] as const;
+export const OPTION_IDS = ["mobile-access", "mobile-tailscale", "mobile-relay", "mobile-webpush", "mobile-lock", "mobile-lock-idle", "mobile-lock-recheck", "mobile-lock-plain", "mobile-ntfy", "mobile-telegram"] as const;
 export type OptionId = (typeof OPTION_IDS)[number];
 
 /** What is known. `status` or `push` is null when the daemon could not say. */
@@ -54,6 +54,10 @@ export function optionState(id: OptionId, f: OptionFacts): OptionState {
       const on = !!s?.tailscale?.on;
       return { on, disabled: blocked(f, TAILSCALE_API, !!s?.tailscale, true), presence: on ? null : t("Turning this on asks you to verify first.") };
     }
+    case "mobile-relay": {
+      const on = !!s?.relay?.on;
+      return { on, disabled: blocked(f, RELAY_API, !!s?.relay, true), presence: on ? null : t("Turning this on asks you to verify first.") };
+    }
     // Each phone turns this on for itself: this computer only reports it, so nothing here changes it.
     case "mobile-webpush":
       return { on: (f.push?.webpush?.devices ?? 0) > 0, disabled: f.push && !f.push.webpush ? needsRestart() : null, presence: null };
@@ -92,6 +96,7 @@ function reachLine(s: MobileStatus): string {
   if (!s.running) return t("Phone access is on, but not running, so phones cannot reach this computer. See the message below.");
   const lines: string[] = [];
   if (s.tailscale?.on) lines.push(s.tailscale.origin ? t("Phones with Tailscale on reach this computer at {origin}, from anywhere.", { origin: s.tailscale.origin }) : t("Tailscale mode is on, but phones cannot use it right now: see its row."));
+  if (s.relay?.on) lines.push(s.relay.connected ? t("With Tailscale off, the installed app reaches this computer through the relay.") : t("The relay is on, but this computer is not connected to it right now: see its row."));
   if (s.urls.length) {
     if (s.tls) lines.push(t("Phones on this network connect over HTTPS, with your certificate."));
     else if (s.lock?.on && !s.lock.plain_read) lines.push(t("Phones on this network connect over plain HTTP, and see nothing: Allow reading over plain HTTP is off."));
