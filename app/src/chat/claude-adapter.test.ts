@@ -343,6 +343,61 @@ describe("createClaudeAdapter", () => {
     expect(h.written).toEqual([{ type: "control_request", request_id: "kelpie-init", request: { subtype: "initialize" } }]);
   });
 
+  describe("bypassing permissions", () => {
+    const INIT_OK = (current: string) => ({ type: "control_response", response: { subtype: "success", request_id: "kelpie-init", response: { commands: [], models: [{ value: "default", supportedEffortLevels: [] }], current_permission_mode: current } } });
+    const REFUSAL = "Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions";
+    const modeOf = (h: ReturnType<typeof harness>) => h.state.settings.find((s) => s.id === "mode")!;
+    const refuse = (a: ReturnType<typeof createClaudeAdapter>, h: ReturnType<typeof harness>, value = "bypassPermissions", error = REFUSAL) => {
+      a.setSetting!("mode", value);
+      const id = (h.written[h.written.length - 1] as { request_id: string }).request_id;
+      a.onMessage({ type: "control_response", response: { subtype: "error", request_id: id, error } }, "");
+    };
+
+    it("is offered in the mode picker, whatever mode the session started in", () => {
+      for (const current of ["default", "plan", "bypassPermissions"]) {
+        const h = harness();
+        createClaudeAdapter(h.ctx).onMessage(INIT_OK(current), "");
+        expect(modeOf(h).options.map((o) => o.value)).toContain("bypassPermissions");
+      }
+    });
+
+    it("starts the session again when its process cannot switch to it, keeping the mode it has meanwhile", () => {
+      const h = harness();
+      let restarts = 0;
+      const a = createClaudeAdapter(h.ctx, { onBypassRefused: () => restarts++ });
+      a.onMessage(INIT_OK("default"), "");
+      refuse(a, h);
+      expect(restarts).toBe(1);
+      expect(modeOf(h).value).toBe("default");
+      expect(h.state.items.some((i) => i.kind === "system")).toBe(false);
+    });
+
+    it("only says why for any other refusal, or with nobody to start it again", () => {
+      const h = harness();
+      let restarts = 0;
+      const a = createClaudeAdapter(h.ctx, { onBypassRefused: () => restarts++ });
+      a.onMessage(INIT_OK("default"), "");
+      refuse(a, h, "plan", "Cannot set permission mode to plan because the session was not launched with --dangerously-skip-permissions");
+      refuse(a, h, "bypassPermissions", "something else went wrong");
+      const bare = harness();
+      const b = createClaudeAdapter(bare.ctx);
+      b.onMessage(INIT_OK("default"), "");
+      refuse(b, bare);
+      expect(restarts).toBe(0);
+      expect(h.state.items.filter((i) => i.kind === "system")).toHaveLength(2);
+      expect(bare.state.items.some((i) => i.kind === "system" && /not launched with/.test((i as { text: string }).text))).toBe(true);
+    });
+
+    it("never starts anything again from a replayed refusal", () => {
+      const h = harness(true);
+      let restarts = 0;
+      const a = createClaudeAdapter(h.ctx, { onBypassRefused: () => restarts++ });
+      a.onMessage(INIT_OK("default"), "");
+      a.onMessage({ type: "control_response", response: { subtype: "error", request_id: "kelpie-mode:bypassPermissions:3", error: REFUSAL } }, "");
+      expect(restarts).toBe(0);
+    });
+  });
+
   it("system init sets the conversation, model and TUI-only commands", () => {
     const h = harness();
     const a = createClaudeAdapter(h.ctx);

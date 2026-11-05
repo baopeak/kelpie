@@ -106,7 +106,11 @@ features earlier (running sessions stop for a moment; agents that can resume con
    commands (skills and custom commands included), `@` the folder's files and, for Codex, `$` its
    skills (`↑`/`↓`, `Tab` or `Enter` to pick, `Esc` to close); the chips under the message field
    switch model and effort (one chip, left) and permission mode (right, amber when nothing asks
-   for approval; `Shift+Tab` steps through the guarded modes). While the agent works with nothing
+   for approval; `Shift+Tab` steps through the guarded modes). A Claude chat starts asking before
+   edits, and its mode chip also offers *Bypass permissions* (confirmed first, unless *Permissions:
+   Yolo* is set; a chat started before Kelpie could switch to it is started again in that mode,
+   continuing the same conversation). A chat that comes back after a restart keeps the mode it
+   last ran in. While the agent works with nothing
    typed, the round send button stops it. A command
    that only works in the terminal UI shows *Run it in the terminal*, which switches back and runs
    it there.
