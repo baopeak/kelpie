@@ -974,7 +974,7 @@ impl Mobile {
                 json!({
                     "id": d.id, "name": d.name, "permission": d.permission.name(), "kind": d.kind.name(), "can_write": d.permission >= Permission::Write,
                     "created_at": d.created_at, "last_seen": d.last_seen, "secure_origin": d.secure_origin, "push": d.push.is_some(), "state": if d.verified { "ok" } else if key_unreadable { "unchecked" } else { "unverified" },
-                    "passkey": d.lock.is_some(), "lock_reset": lock_reset, "unlocked": unlocked,
+                    "passkey": d.lock.is_some(), "lock_reset": lock_reset, "unlocked": unlocked, "may_control": d.verified && record_ceiling(d, options.on) == Permission::Control,
                 })
             }).collect::<Vec<_>>(),
             "legacy": c.legacy.iter().map(|d| json!({"id": d.id, "name": d.name, "created_at": d.created_at})).collect::<Vec<_>>(),
@@ -1279,7 +1279,6 @@ impl Mobile {
     }
 
     /// A flag for control the device is given (screen or browser takeover): cleared when it is revoked or downgraded.
-    #[allow(dead_code)] // the control paths of the later phases hold these
     pub fn grant(&self, device: &str) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(true));
         self.grants.lock().entry(device.to_string()).or_default().push(flag.clone());
@@ -1557,10 +1556,11 @@ impl Mobile {
     /// What the OS prompt asks when `permission` raises what the device may do now; None when it does not (lowering, or no change,
     /// needs nobody). What cannot be applied at all is refused here, with no prompt.
     pub fn raise_prompt(&self, id: &str, permission: Permission) -> Result<Option<crate::user_presence::Prompt>> {
+        let lock_on = self.lock_options().on;
         let c = self.config.lock();
         let d = c.devices.iter().find(|d| d.id == id).ok_or_else(|| anyhow!("no such device"))?;
         anyhow::ensure!(d.verified, "this device must be paired again");
-        anyhow::ensure!(permission <= d.kind.ceiling(), "a page in a browser cannot be given {}", permission.name());
+        anyhow::ensure!(permission <= record_ceiling(d, lock_on), "{}", ceiling_refusal(permission));
         Ok((permission > d.permission).then(|| crate::user_presence::Prompt::Raise { name: d.name.clone(), permission }))
     }
 
@@ -1588,11 +1588,13 @@ impl Mobile {
     /// control at once and makes its connection start again.
     pub fn set_permission(&self, id: &str, permission: Permission) -> Result<DeviceEvent> {
         let key = self.mac_key(true)?.ok_or_else(|| anyhow!("the credential store did not keep the device key"))?;
+        let lock_on = self.lock_options().on;
         let lower = {
             let c = self.config.lock();
             let d = c.devices.iter().find(|d| d.id == id).ok_or_else(|| anyhow!("no such device"))?;
             anyhow::ensure!(d.verified, "this device must be paired again");
-            anyhow::ensure!(permission <= d.kind.ceiling(), "a page in a browser cannot be given {}", permission.name());
+            // Lowering is always allowed: a device whose lock was turned off since keeps a record it can no longer use, and may be lowered from it.
+            anyhow::ensure!(permission <= d.permission || permission <= record_ceiling(d, lock_on), "{}", ceiling_refusal(permission));
             permission < d.permission
         };
         // What it controls stops before anything else changes.
@@ -1977,14 +1979,50 @@ fn plain_origin(origin: &str) -> bool {
 /// Tailscale address (or from this machine itself, which no network sits between); over plain HTTP elsewhere the page could have been
 /// swapped on the way, so it may only read. The native app is not capped. Through the relay come only devices paired on a secure origin,
 /// whose page is this daemon's and came over HTTPS (`link::reconnect`).
+/// A page may take control only as this computer's own HTTPS page, reached directly or through Tailscale Serve: never through the relay, where takeover is not offered.
+/// What its record allows, and its lock, decide the rest (`record_ceiling`, `Mobile::control_now`).
 fn transport_cap(kind: Kind, browser: bool, peer: &Peer) -> Permission {
     if kind == Kind::App && !browser {
+        return Permission::Control;
+    }
+    if peer.secure_origin && !peer.via_relay() {
         return Permission::Control;
     }
     if peer.tls || peer.via_relay() || peer.ip().is_loopback() || listen::tailscale(peer.ip()) {
         Permission::Write
     } else {
         Permission::Read
+    }
+}
+
+/// The most a device's record may be raised to. A page in a browser may be given control once it paired on this computer's HTTPS origin and its app
+/// lock is set up and on: control then rests on its passkey as well as on its key, and an auto-lock lets go of it like a revoke.
+fn record_ceiling(d: &Device, lock_on: bool) -> Permission {
+    match d.kind {
+        Kind::App => Permission::Control,
+        Kind::Pwa if d.secure_origin && d.lock.is_some() && lock_on => Permission::Control,
+        Kind::Pwa => Permission::Write,
+    }
+}
+
+fn ceiling_refusal(permission: Permission) -> String {
+    if permission == Permission::Control {
+        "a page in a browser can be given control only once it was paired over HTTPS (Tailscale), and its app lock is set up and on".into()
+    } else {
+        format!("a page in a browser cannot be given {}", permission.name())
+    }
+}
+
+impl Mobile {
+    /// Whether `device` may take control on a connection of this lock path, as things are at this moment: a browser device only while its record could be given control and the
+    /// passkey has opened it.
+    fn control_now(&self, device: &str, path: LockPath, gate: Gate) -> bool {
+        let lock_on = self.lock_options().on;
+        let c = self.config.lock();
+        c.devices.iter().find(|d| d.id == device).is_some_and(|d| match d.kind {
+            Kind::App => true,
+            Kind::Pwa => path == LockPath::Passkey && gate == Gate::Open && record_ceiling(d, lock_on) == Permission::Control,
+        })
     }
 }
 
@@ -2269,6 +2307,7 @@ impl Conn {
             return Some(json!({"type": "error", "req": tag, "code": "locked", "reason": null, "message": "Kelpie is locked on this phone."}));
         }
         let granted = if gate == Gate::ReadOnly { granted.min(Permission::Read) } else { granted };
+        let granted = if granted >= Permission::Control && !self.daemon.mobile.control_now(&self.device, self.lock_path, gate) { Permission::Write } else { granted };
         // Typing and answers may carry a `cid`: a repeat of one (a retry after a lost reply, over this or another connection
         // of the device) gets the first reply again, marked `dup`, and is not carried out twice. The daemon run's memory
         // only: a phone that sees `daemon_epoch` change starts over anyway.
@@ -2301,7 +2340,8 @@ impl Conn {
 
     /// The audit log's line for what this phone just did (only what was carried out; never the text itself).
     fn note(&self, name: &str, req: &Value, reply: Option<&Value>) {
-        if reply.is_some_and(|r| r["type"] == "error" || r["result"] == "dup") || !matches!(Verb::parse(name), Some(v) if v.needs() >= Permission::Write) {
+        // What a takeover sends never goes in the log: the broker notes its start and its end.
+        if reply.is_some_and(|r| r["type"] == "error" || r["result"] == "dup") || !matches!(Verb::parse(name), Some(v) if v.needs() >= Permission::Write && !v.takeover()) {
             return;
         }
         let id = req["id"].as_str().unwrap_or_default();
@@ -2440,6 +2480,16 @@ impl Conn {
     /// Carries out one request of the verb table; `Some` is a reply with content, `None` a plain ack.
     async fn run(&mut self, granted: Permission, name: &str, req: &Value) -> Result<Option<Value>, Refusal> {
         let verb = Verb::parse(name).ok_or_else(|| refuse("unknown_verb", format!("unknown request {name:?}")))?;
+        if verb.takeover() && verb.needs() > granted {
+            if self.daemon.mobile.permission(&self.device).is_some_and(|record| record >= Permission::Control) {
+                return Err(refuse("no_control", "Taking over a pane needs this computer's HTTPS address through Tailscale (not the relay), with the app lock on and unlocked."));
+            }
+            return Err(refuse("no_control", "This device may not take control. Allow it in Kelpie → Settings → Mobile."));
+        }
+        if verb.takeover() {
+            let phone = crate::takeover::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.out };
+            return self.daemon.takeover.phone_verb(&self.daemon, phone, name, req).await.map_err(|r| refuse(r.code, r.message));
+        }
         if verb.needs() > granted {
             // What its record allows is another matter from what this connection does: Settings cannot help when it is the address that holds it back.
             if self.daemon.mobile.permission(&self.device).is_some_and(|record| verb.needs() <= record) {
@@ -2693,6 +2743,8 @@ impl Conn {
                 }
             }
             Verb::LockTouch => self.daemon.mobile.lock_touch(&self.device, self.resume.as_deref()),
+            // Carried out by the broker above.
+            Verb::Panes | Verb::TkStart | Verb::TkInput | Verb::TkText | Verb::TkAck | Verb::TkStop | Verb::TkRebind => return Err(refuse("bad_request", "not here")),
             Verb::ChatAnswer => {
                 let (_, chat) = self.chat(req)?;
                 let request_id = req.get("request_id").filter(|r| r.is_string() || r.is_number()).ok_or_else(|| refuse("bad_request", "missing request_id"))?;
@@ -2736,6 +2788,8 @@ impl Conn {
         self.locked = gate == Gate::Locked;
         self.lock_told = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
         let cap = if gate == Gate::ReadOnly { self.cap.min(Permission::Read) } else { self.cap };
+        // Control only while it holds (`Mobile::control_now`): the phone offers takeover from what it hears here.
+        let cap = if cap >= Permission::Control && !m.control_now(&self.device, self.lock_path, gate) { Permission::Write } else { cap };
         let first = self.publish(true);
         // Only where it can be used (`Conn::secure_transport`). Read each time, off this task: until there is a key it asks the credential store, which can be slow.
         let push = if !self.locked && self.cap >= Permission::Write {
@@ -2797,6 +2851,8 @@ impl Conn {
     }
 
     fn end(&mut self) {
+        // A hold on this connection waits a while for the device's next one.
+        self.daemon.takeover.link_closed(self.id);
         for (_, followed) in self.followed.drain() {
             followed.task.abort();
         }
@@ -2920,7 +2976,8 @@ fn pair_link(scheme: &str, host: &str, mut payload: kelpie_link::QrPayload) -> R
 /// What the phone is told about itself: what it may do on this connection, and whether the transport holds it below its record.
 fn device_hello(device: &Device, record: Permission, cap: Permission) -> Value {
     let effective = record.min(cap);
-    json!({"id": device.id, "name": device.name, "can_write": effective >= Permission::Write, "permission": effective.name(), "kind": device.kind.name(), "capped": effective < record})
+    // `capped` says the address holds it back from typing; control held back by its lock is another matter, and its permission says so.
+    json!({"id": device.id, "name": device.name, "can_write": effective >= Permission::Write, "permission": effective.name(), "kind": device.kind.name(), "capped": effective.min(Permission::Write) < record.min(Permission::Write)})
 }
 
 /// Where this computer can be reached, for a phone to dial next time (after an address change above all). `list` is what a page from
@@ -3352,8 +3409,16 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_page_types_only_over_https_or_tailscale_and_never_controls() {
+    fn a_browser_page_types_only_over_https_or_tailscale_and_controls_only_as_this_computers_https_page() {
         let at = |addr: &str, tls: bool| Peer::direct(addr.parse().unwrap(), tls);
+        let secure = |mut p: Peer| {
+            p.secure_origin = true;
+            p
+        };
+        assert_eq!(transport_cap(Kind::Pwa, true, &secure(at("192.168.1.9:5000", true))), Permission::Control, "this computer's HTTPS page, at a name");
+        assert_eq!(transport_cap(Kind::Pwa, true, &secure(Peer::behind_serve("127.0.0.1:5000".parse().unwrap()))), Permission::Control, "through Tailscale Serve");
+        assert_eq!(transport_cap(Kind::Pwa, true, &Peer::relayed(3, Some("https://desk.tail1234.ts.net:8443".into()))), Permission::Write, "never through the relay");
+        assert_eq!(transport_cap(Kind::Pwa, true, &Peer::behind_serve("127.0.0.1:5000".parse().unwrap())), Permission::Write, "a page that is not this computer's origin");
         assert_eq!(transport_cap(Kind::Pwa, true, &at("192.168.1.9:5000", false)), Permission::Read, "plain http on the LAN: the page could be swapped");
         assert_eq!(transport_cap(Kind::Pwa, true, &at("192.168.1.9:5000", true)), Permission::Write);
         assert_eq!(transport_cap(Kind::Pwa, true, &at("100.100.1.2:5000", false)), Permission::Write, "tailscale");
@@ -3369,6 +3434,50 @@ mod tests {
         d.permission = Permission::Read;
         assert_eq!(device_hello(&d, d.permission, Permission::Read)["capped"], false, "it may only read anyway");
         assert_eq!(fingerprint(&[0u8; 32]), "6668 7AAD F862 BD77", "the phone computes the same (noise.test.ts)");
+    }
+
+    #[test]
+    fn a_browser_device_may_be_given_control_only_once_paired_on_https_with_its_lock_set_up_and_on() {
+        let mut d = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), verified: true };
+        assert_eq!(record_ceiling(&d, true), Permission::Write, "paired over plain HTTP");
+        d.secure_origin = true;
+        assert_eq!(record_ceiling(&d, true), Permission::Write, "no passkey yet");
+        d.lock = Some(store::LockCredential { cred_id: "c".into(), spki: "s".into(), origin: "https://desk.tail1234.ts.net:8443".into(), sign_count: 0, created_at: 0, mac: String::new() });
+        assert_eq!(record_ceiling(&d, false), Permission::Write, "the lock turned off");
+        assert_eq!(record_ceiling(&d, true), Permission::Control);
+        d.kind = Kind::App;
+        assert_eq!(record_ceiling(&Device { secure_origin: false, lock: None, ..d }, false), Permission::Control, "the native app");
+    }
+
+    #[tokio::test]
+    async fn control_holds_only_while_the_passkey_has_opened_a_device_that_may_have_it() {
+        let mut r = rig();
+        let key = r.daemon.mobile.mac_key(true).unwrap().unwrap();
+        {
+            let mut c = r.daemon.mobile.config.lock();
+            let d = c.devices.iter_mut().find(|d| d.id == "phone").unwrap();
+            d.kind = Kind::Pwa;
+            d.secure_origin = true;
+            d.permission = Permission::Control;
+            store::seal(d, &key);
+        }
+        r.conn.lock_path = LockPath::Passkey;
+        // Locked: nothing at all; a device with no passkey on record: no control, whatever its record says.
+        let reply = r.ask(Permission::Control, json!({"type": "panes"})).await;
+        assert_eq!(code(&reply), Some("locked"));
+        r.daemon.mobile.set_lock(store::LockOptions { on: false, ..r.daemon.mobile.lock_options() }).unwrap();
+        let reply = r.ask(Permission::Control, json!({"type": "panes"})).await;
+        assert_eq!(code(&reply), Some("no_control"), "the lock off: no control");
+        let refused = r.daemon.mobile.raise_prompt("phone", Permission::Control).unwrap_err().to_string();
+        assert!(refused.contains("app lock is set up and on"), "{refused}");
+        // A read-only or typing device is told it may not.
+        for permission in [Permission::Read, Permission::Write] {
+            let reply = r.ask(permission, json!({"type": "tk_start", "pane": "browser-a"})).await;
+            assert_eq!(code(&reply), Some("no_control"), "{permission:?}");
+        }
+        // The audit log never sees what a takeover sends.
+        r.conn.note("tk_text", &json!({"type": "tk_text", "tk": "t", "text": "hunter2"}), Some(&json!({"type": "ack", "result": "sent"})));
+        assert!(!r.daemon.mobile.audit_entries(50).to_string().contains("hunter2"));
     }
 
     #[test]

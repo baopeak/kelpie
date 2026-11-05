@@ -37,12 +37,14 @@ mod persist;
 mod ports;
 mod proc_tree;
 mod procs;
+mod provider;
 mod runtimes;
 mod runs;
 mod scheduled_input;
 mod server;
 mod session;
 mod status;
+mod takeover;
 mod user_presence;
 mod vt;
 

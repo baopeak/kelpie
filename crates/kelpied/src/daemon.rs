@@ -220,6 +220,10 @@ pub struct Daemon {
     scheduled: ScheduledInputs,
     /// What the sessions run, looked at when the app asks (`process.*`).
     procs: crate::procs::Procs,
+    /// The app's connection, asked for what only the window can do (`provider`).
+    pub providers: crate::provider::Providers,
+    /// Phones that took over a browser pane (`takeover`).
+    pub takeover: crate::takeover::Broker,
     /// This daemon, for threads that outlive a call.
     me: std::sync::Weak<Daemon>,
 }
@@ -339,6 +343,8 @@ impl Daemon {
                 notifier: Notifier::with_destinations(&data_dir, secrets, destinations),
                 scheduled: ScheduledInputs::open(&data_dir),
                 procs: crate::procs::Procs::default(),
+                providers: crate::provider::Providers::default(),
+                takeover: crate::takeover::Broker::default(),
                 me: weak,
                 data_dir,
                 exe,
@@ -987,6 +993,10 @@ impl Daemon {
     }
 
     pub fn unregister_client(&self, id: u64) {
+        // The app's requests in flight are answered now, and the phones that held its panes let go of them.
+        if !self.providers.client_gone(id).is_empty() {
+            self.takeover.provider_gone(self, id);
+        }
         self.clients.lock().remove(&id);
         self.client_roles.lock().remove(&id);
         self.auto_rt.drop_client(id);
@@ -1797,6 +1807,19 @@ impl Daemon {
                 // Kept for the next start: restored sessions of plugin agents must still resume.
                 write_atomic(&self.data_dir.join("custom-agents.json"), &serde_json::to_vec_pretty(&defs)?)?;
                 json!(true)
+            }
+            // The verified app only (`auth::APP_ONLY`): it provides browser panes to phones that take one over. A second one is refused and the desktop hears of it.
+            "provider.register" => {
+                let role = self.client_roles.lock().get(&client).cloned().unwrap_or(crate::auth::Role::Anonymous);
+                let kind = param(&params, "kind")?.as_str().unwrap_or_default();
+                match self.providers.register(client, &role, kind, tx)? {
+                    crate::provider::Registration::Registered => json!({"registered": true}),
+                    crate::provider::Registration::Taken => {
+                        self.mobile.audit("-", "provider_refused", kind);
+                        self.broadcast("provider.refused", json!({"kind": kind}));
+                        bail!("another connection already provides {kind}")
+                    }
+                }
             }
             "mobile.status" => self.mobile.status(self.client_roles.lock().get(&client) == Some(&crate::auth::Role::App)),
             "mobile.load" => {

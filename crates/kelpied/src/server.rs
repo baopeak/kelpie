@@ -147,6 +147,19 @@ where
                 };
                 let req_id = req.get("id").cloned().unwrap_or(Value::Null);
                 let method = req.get("method").and_then(Value::as_str).unwrap_or("").to_string();
+                // The app's answers to the daemon's own requests (`provider`) and what it says on its own, a frame above all: taken here, ahead of its
+                // requests, which may be slow. Nobody else is heard on these, and nothing is said back.
+                if matches!(method.as_str(), "provider.reply" | "provider.event") {
+                    if role == Role::App {
+                        let params = req.get("params").unwrap_or(&Value::Null);
+                        if method == "provider.reply" {
+                            daemon.providers.reply(id, params);
+                        } else {
+                            daemon.takeover.on_event(&daemon, id, params);
+                        }
+                    }
+                    continue;
+                }
                 let denied = if method == "auth" {
                     match auth::authenticate(&daemon, req.get("params").unwrap_or(&Value::Null)) {
                         Ok(r) => {

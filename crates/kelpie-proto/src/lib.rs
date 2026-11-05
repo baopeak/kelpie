@@ -36,7 +36,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// 25: the app lock (the phone's `lock_challenge`, `lock_enrol`, `lock_unlock`, `lock_now`, `lock_touch`, `locked` and `locked: true` in its `hello`, the `resume` secret on the ack of an unlock or enrolment and in its first sealed frame, the `desktop` state and `needs_desktop` refusal for a phone with no window to set up a passkey, and `recheck` refusing `input` and `key` during a dangerous request; `mobile.set_lock` and `mobile.reset_lock` from the verified app; `lock` in `mobile.status`) and the daemon's risk labels (`wait` on a screen frame, `chat_request_info`); an older daemon has none of it, so the app offers the lock's settings only at 25 and the phone page counts it as out of date below it.
 /// 26: Telegram's choices (`telegram.mode` and `telegram.user_id` in `notify.get`/`notify.set`, `end_binding` in `notify.set`, `telegram` in `notify.get`, `notify.telegram_bind` from the verified app, the `notify.telegram` event, and `telegram` as a `by` in `chat.resolved` and the log's answers); an older daemon has none of it, so the app offers the choice only at 26.
 /// 27: the relay (`mobile.set_relay` and `mobile.relay_recreate` from the verified app, `relay` in `mobile.status`; a `relay` endpoint in the QR code and in `addrs`; the phone's `relay` cap and `relay_token`, and the `relay` message that gives it a token; padded chunks, from the hello on, for a phone whose `caps` has `pad`, and `pad` in the hello); an older daemon has none of it, so the app offers the relay only at 27.
-pub const API_LEVEL: u32 = 27;
+/// 28: browser pane takeover (`provider.register`, the daemon's own requests to the app as `preq` with `provider.reply`, `provider.event` for frames, the
+/// `provider.refused` event; the phone's `panes`, `tk_start`, `tk_input`, `tk_text`, `tk_ack`, `tk_stop`, `tk_rebind` and the `tk_frame`, `tk_fhb`, `tk_end` messages;
+/// `control` for a browser device paired on a secure origin with its app lock set up and on, and `may_control` on a device in `mobile.status`); an older daemon has none of
+/// it, so the app offers `control` to such a device and the phone offers takeover only at 28.
+pub const API_LEVEL: u32 = 28;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

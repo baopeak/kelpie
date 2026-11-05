@@ -473,8 +473,12 @@ impl Mobile {
         }
         self.keep();
         self.audit.add("-", "setting", &format!("app lock: {}, idle {} s, re-check {}, reading over plain HTTP {} (was {}, {} s, {}, {})", next.on, next.idle_s, next.recheck, next.plain_read, was.on, was.idle_s, was.recheck, was.plain_read));
-        let devices: Vec<String> = self.config.lock().devices.iter().map(|d| d.id.clone()).collect();
-        for device in devices {
+        let devices: Vec<(String, bool)> = self.config.lock().devices.iter().map(|d| (d.id.clone(), d.kind == store::Kind::Pwa)).collect();
+        for (device, page) in devices {
+            // A page's control rests on its lock: with the lock off it has none.
+            if page && !next.on {
+                self.stop_grants(&device);
+            }
             self.tell_lock(&device);
         }
         Ok(json!({"on": next.on, "idle_s": next.idle_s, "recheck": next.recheck, "plain_read": next.plain_read}))
