@@ -250,7 +250,8 @@ async fn a_secure_phone_works_through_a_slot_gets_its_token_and_is_closed_when_r
     }
     assert!(others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([hash])), "{others:?}");
 
-    // Removed on the computer: the relay drops it from the list, and its slot is closed after it is told inside the session.
+    // Removed on the computer: it is told inside the session and its slot closed, and only then does the relay get the list without it. A
+    // real relay closes a socket whose token left the list at once, so the other order would lose the sealed `revoked`.
     others.clear();
     network.rig.daemon.mobile.revoke("phone").unwrap();
     let mut told_revoked = false;
@@ -263,8 +264,10 @@ async fn a_secure_phone_works_through_a_slot_gets_its_token_and_is_closed_when_r
                 break;
             }
         }
+        assert!(!others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([])), "the list went first: {others:?}");
     }
     assert!(told_revoked);
+    assert!(!others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([])), "the list went before the slot was closed: {others:?}");
     let deadline = Instant::now() + Duration::from_secs(3);
     while !others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([])) && Instant::now() < deadline {
         if let Some(WsMessage::Text(t)) = tokio::time::timeout(Duration::from_millis(200), ws.next()).await.ok().flatten().and_then(|m| m.ok()) {
@@ -272,4 +275,79 @@ async fn a_secure_phone_works_through_a_slot_gets_its_token_and_is_closed_when_r
         }
     }
     assert!(others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([])), "{others:?}");
+}
+
+/// A phone through the relay, connected and greeted on `slot`: its session.
+async fn greeted(ws: &mut RelaySocket, network: &NetworkRig, slot: u16, others: &mut Vec<Value>) -> kelpie_link::Session {
+    let desktop = network.rig.daemon.mobile.link_key().unwrap().public;
+    let mut session = reconnect(ws, slot, &network.rig.phone, &desktop, others).await.unwrap();
+    say(ws, slot, &mut session, json!({"caps": ["ack", "hb", "relay"]})).await;
+    assert_eq!(hear(ws, slot, &mut session, others).await.unwrap()["type"], "hello");
+    session
+}
+
+/// What reaches the relay until its socket closes: the relay's word, and frames as `{"frame": slot}`.
+async fn until_closed(ws: &mut RelaySocket) -> Vec<Value> {
+    let mut seen = Vec::new();
+    while let Some(msg) = next(ws).await {
+        match msg {
+            WsMessage::Text(t) => seen.push(serde_json::from_str(t.as_str()).unwrap()),
+            WsMessage::Binary(b) if b.len() >= 2 => seen.push(json!({"frame": u16::from_be_bytes([b[0], b[1]])})),
+            WsMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+    seen
+}
+
+#[tokio::test]
+async fn the_kill_switch_tells_relay_phones_first_then_lets_nobody_in() {
+    let mut fake = fake_relay().await;
+    let network = relay_rig(&fake, true, true).await;
+    let (_, mut ws) = desktop_socket(&mut fake).await;
+    next_text(&mut ws).await;
+    next_text(&mut ws).await;
+    let mut others = Vec::new();
+    let mut session = greeted(&mut ws, &network, 5, &mut others).await;
+    for _ in 0..2 {
+        hear(&mut ws, 5, &mut session, &mut others).await.unwrap();
+    }
+    network.rig.daemon.mobile.revoke_all();
+    let mut told_revoked = false;
+    let code = loop {
+        match hear(&mut ws, 5, &mut session, &mut others).await {
+            Ok(v) => told_revoked |= v["type"] == "revoked",
+            Err(code) => break code,
+        }
+    };
+    assert!(told_revoked, "the phone hears it was removed, inside its session");
+    assert_eq!(code, NOT_PAIRED);
+    let rest = until_closed(&mut ws).await;
+    assert_eq!(rest.iter().filter(|v| v["t"] == "allow").last(), Some(&json!({"t": "allow", "h": []})), "then nobody is let in: {rest:?}");
+    assert!(!rest.iter().any(|v| v["t"] == "drop"), "turning off keeps the room");
+}
+
+#[tokio::test]
+async fn a_reset_removes_the_room_with_the_keys() {
+    let mut fake = fake_relay().await;
+    let network = relay_rig(&fake, true, true).await;
+    let (_, mut ws) = desktop_socket(&mut fake).await;
+    next_text(&mut ws).await;
+    next_text(&mut ws).await;
+    network.rig.daemon.mobile.reset();
+    let rest = until_closed(&mut ws).await;
+    let at = |t: &str| rest.iter().position(|v| v["t"] == t);
+    assert!(at("allow").is_some() && at("drop").is_some() && at("allow") < at("drop"), "{rest:?}");
+    assert!(network.rig.daemon.mobile.relay_room().is_none(), "nothing of the room is kept here either");
+}
+
+#[tokio::test]
+async fn a_key_typed_with_no_room_to_make_is_not_kept() {
+    let fake = fake_relay().await;
+    let network = relay_rig(&fake, true, true).await;
+    let m = &network.rig.daemon.mobile;
+    let asked = relay_side::check_turn_on(m, &json!({"on": true, "url": fake.url, "operator_key": "typed-but-never-checked"})).unwrap();
+    relay_side::turn_on(&network.rig.daemon, asked).unwrap();
+    assert_eq!(m.secrets.read(KEYS[1]).unwrap(), None, "no room was made, so the relay never saw the key");
+    assert!(m.relay_live().is_some());
 }

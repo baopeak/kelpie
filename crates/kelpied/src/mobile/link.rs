@@ -318,6 +318,14 @@ pub fn held_silently(daemon: &Daemon, ip: IpAddr) {
     }
 }
 
+/// A phone that got the reply and then said nothing sealed. Only one silent for the whole wait counts against its address: one that closed
+/// at once is a phone whose other route won the race (`app/phone/src/link.ts`), and only the holder of the keys could have got this far.
+fn silent_after_reply(daemon: &Daemon, ip: IpAddr, asked: std::time::Instant) {
+    if asked.elapsed() >= HANDSHAKE {
+        held_silently(daemon, ip);
+    }
+}
+
 /// A failed pairing or handshake from `ip`; the desktop hears when the address is locked out.
 fn failed(daemon: &Daemon, ip: IpAddr) {
     if daemon.mobile.pairing_failed(ip) {
@@ -361,15 +369,18 @@ async fn pair(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>,
     let mut wire = Wire::new(ws, session);
     // The phone's first sealed message proves it finished this handshake (a replayed first message cannot make one): only
     // now is the code spent and the person asked.
+    let asked = std::time::Instant::now();
     let said = tokio::select! {
         biased;
         _ = generation.cancelled() => return,
         said = wire.recv_text(HANDSHAKE) => said.and_then(|t| serde_json::from_str::<Value>(&t).ok()),
     };
     drop(slot);
-    let Some(said) = said.filter(|v| v["type"] == "pair") else { return held_silently(&daemon, peer.ip()) };
+    let Some(said) = said.filter(|v| v["type"] == "pair") else { return silent_after_reply(&daemon, peer.ip(), asked) };
     // Single use: spent now, whatever happens next. Another connection may have spent it a moment ago.
-    let Some(kind) = m.spend_code(&psk) else {
+    let spent = m.spend_code(&psk);
+    m.relay_pair_spent(&psk);
+    let Some(kind) = spent else {
         wire.send(&json!({"type": "declined", "reason": "code"}).to_string()).await;
         wire.close(1000, "").await;
         return;
@@ -448,6 +459,7 @@ async fn reconnect(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generat
     let mut wire = Wire::new(ws, session);
     // The phone's first sealed message says what it can do (`caps`), and proves it finished this handshake: until then nothing
     // about the device changes. Cancellation covers it too, including an upgrade completed before disable.
+    let asked = std::time::Instant::now();
     let said = tokio::select! {
         biased;
         _ = generation.cancelled() => return,
@@ -457,7 +469,7 @@ async fn reconnect(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generat
     if generation.is_cancelled() {
         return;
     }
-    let Some(said) = said else { return held_silently(&daemon, peer.ip()) };
+    let Some(said) = said else { return silent_after_reply(&daemon, peer.ip(), asked) };
     // The relay keeps its own connection to the phone alive, so only the heartbeats inside the session would find a phone gone.
     if peer.via_relay() && !super::acknowledges(Some(&said)) {
         wire.close(RELAY_REFUSED, "caps").await;

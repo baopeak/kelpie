@@ -1606,7 +1606,8 @@ impl Mobile {
     pub fn disable(&self) {
         self.stop_all_grants();
         self.forget_all_locks();
-        self.relay_stop();
+        // The relay hears last: what the sessions still say goes first (a removed phone's `revoked`), then nobody is let in there.
+        let _ = self.relay_wind_down(None);
         {
             let mut c = self.config.lock();
             c.enabled = false;
@@ -1661,6 +1662,8 @@ impl Mobile {
             c.devices.clear();
             all
         };
+        // The room goes with the keys: its list and ticket would otherwise outlive them.
+        let _ = self.relay_wind_down(self.relay_room());
         self.disable();
         for (_, p) in self.pending.lock().drain() {
             let _ = p.reply.send(None);

@@ -110,6 +110,8 @@ pub enum Prompt {
     TelegramApprovals,
     /// Let paired phones reach this computer through the relay.
     Relay,
+    /// Make this computer a new room at the relay.
+    RelayRoom,
 }
 
 /// The languages the daemon's prompts are written in.
@@ -160,6 +162,8 @@ impl Prompt {
             (Prompt::TelegramApprovals, Lang::En) => "Kelpie: let one Telegram account approve low-risk requests on this computer from its chat, with no Face ID. Telegram can read those messages.".to_string(),
             (Prompt::TelegramApprovals, Lang::Vi) => "Kelpie: cho phép một tài khoản Telegram duyệt các yêu cầu rủi ro thấp trên máy tính này từ cuộc trò chuyện của nó, không cần Face ID. Telegram đọc được các tin nhắn đó.".to_string(),
             (Prompt::Relay, Lang::En) => "Kelpie: let phones paired over Tailscale reach this computer through the relay, which carries what they say without being able to read it.".to_string(),
+            (Prompt::RelayRoom, Lang::En) => "Kelpie: make a new room for this computer at the relay. Phones move to it by themselves, and the old room is removed.".to_string(),
+            (Prompt::RelayRoom, Lang::Vi) => "Kelpie: tạo một phòng mới cho máy tính này trên relay. Điện thoại tự chuyển sang, và phòng cũ bị xóa.".to_string(),
             (Prompt::Relay, Lang::Vi) => "Kelpie: cho phép các điện thoại đã ghép đôi qua Tailscale kết nối tới máy tính này qua relay, nơi chuyển tiếp dữ liệu mà không đọc được nội dung.".to_string(),
         }
     }
@@ -967,6 +971,7 @@ mod tests {
             Prompt::ResetLock { name: "Pixel".into() },
             Prompt::TelegramApprovals,
             Prompt::Relay,
+            Prompt::RelayRoom,
         ];
         for p in &prompts {
             let (en, vi) = (p.text(Lang::En), p.text(Lang::Vi));

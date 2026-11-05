@@ -70,6 +70,10 @@ const OUT_QUEUE: usize = 256;
 const MAX_FRAME: usize = 64 * 1024 + 2;
 /// How long phones have to hear of a new room before the old one is dropped.
 const MOVE_GRACE: Duration = Duration::from_secs(2);
+/// A device change reaches the relay this long after it is made, so that a removed phone hears it in its session before the relay closes it.
+const REVOKE_GRACE: Duration = Duration::from_secs(1);
+/// How long a gentle end waits for what the sessions still send.
+const FLUSH: Duration = Duration::from_secs(1);
 
 /// A slot's address, for the limits and for what the person reads: in 100::/64, the block set aside to go nowhere (RFC 6666), so
 /// no phone on any network can have one.
@@ -120,6 +124,11 @@ pub fn normalized_url(text: &str) -> Result<String> {
     let uri: axum::http::Uri = text.parse().map_err(|_| wrong())?;
     let host = uri.host().filter(|h| !h.is_empty()).ok_or_else(wrong)?;
     let bare = host.trim_start_matches('[').trim_end_matches(']');
+    // A name of letters, digits, dots and dashes, or an address: nothing that could mean more where the address is written into the page's CSP.
+    let plain_name = !bare.is_empty() && bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    if !plain_name && bare.parse::<IpAddr>().is_err() {
+        return Err(wrong());
+    }
     let local = bare == "localhost" || bare.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
     match uri.scheme_str() {
         Some("wss") => {}
@@ -155,17 +164,17 @@ fn backoff(attempt: u32) -> Duration {
 
 // ---------- what the relay's connection and its slots say to each other ----------
 
-/// What goes to the relay.
+/// What a phone's session sends the relay: a frame for its slot, or closing it with a code. Each names the generation the slot had
+/// when the session began, so what an old session still sends never reaches a phone that holds the slot number now.
 pub enum Out {
-    Frame(u16, Vec<u8>),
-    /// Close that phone's socket, with this code.
-    Kick(u16, u16, String),
-    Control(String),
+    Frame(u16, u64, Vec<u8>),
+    Kick(u16, u64, u16, String),
 }
 
 /// One phone's socket at the relay, as `link` sees it.
 pub struct Slot {
     slot: u16,
+    generation: u64,
     frames: mpsc::Receiver<Vec<u8>>,
     out: mpsc::Sender<Out>,
 }
@@ -177,11 +186,41 @@ impl Slot {
     }
 
     pub async fn send(&self, frame: Vec<u8>) -> bool {
-        self.out.send(Out::Frame(self.slot, frame)).await.is_ok()
+        self.out.send(Out::Frame(self.slot, self.generation, frame)).await.is_ok()
     }
 
     pub async fn close(&self, code: u16, reason: String) {
-        let _ = self.out.send(Out::Kick(self.slot, code, reason)).await;
+        let _ = self.out.send(Out::Kick(self.slot, self.generation, code, reason)).await;
+    }
+}
+
+/// The phone sockets of one relay connection, by slot number, each with the generation `open` gave it.
+#[derive(Default)]
+struct Slots {
+    next: u64,
+    open: HashMap<u16, (u64, mpsc::Sender<Vec<u8>>)>,
+}
+
+impl Slots {
+    /// A slot opened (again): an older holder's frames stop, and that session ends.
+    fn open(&mut self, slot: u16) -> (u64, mpsc::Receiver<Vec<u8>>) {
+        self.next += 1;
+        let (tx, rx) = mpsc::channel(SLOT_QUEUE);
+        self.open.insert(slot, (self.next, tx));
+        (self.next, rx)
+    }
+
+    /// Whether what a session sends is from the slot's present holder.
+    fn current(&self, slot: u16, generation: u64) -> bool {
+        self.open.get(&slot).is_some_and(|(g, _)| *g == generation)
+    }
+
+    fn close(&mut self, slot: u16) {
+        self.open.remove(&slot);
+    }
+
+    fn sender(&self, slot: u16) -> Option<&mpsc::Sender<Vec<u8>>> {
+        self.open.get(&slot).map(|(_, tx)| tx)
     }
 }
 
@@ -192,8 +231,9 @@ impl Slot {
 pub struct Runtime {
     task: Mutex<Option<Task>>,
     facts: Mutex<Facts>,
-    /// The connection's queue, while it is up.
-    out: Mutex<Option<mpsc::Sender<Out>>>,
+    /// What this end tells the relay itself (a pairing token, an origin), while the connection is up: a queue of its own, so that no
+    /// amount of phone traffic drops it.
+    control: Mutex<Option<mpsc::UnboundedSender<String>>>,
     /// Pairing tokens' hashes and until when they count, to tell a relay that connects meanwhile.
     pairs: Mutex<Vec<(String, Instant)>>,
     /// The time of the last signature: each one is later.
@@ -206,6 +246,18 @@ pub struct Runtime {
 struct Task {
     stop: Arc<Generation>,
     nudge: Arc<Notify>,
+    ending: Arc<Mutex<Ending>>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+/// How a connection ends when it is stopped.
+#[derive(Clone, PartialEq, Debug)]
+enum Ending {
+    /// At once (the relay turned off or moved).
+    Now,
+    /// After what the sessions still send (a removed phone's sealed `revoked`), with nobody let in from then on, and the room removed
+    /// when it is the one named.
+    Flush { drop: Option<String> },
 }
 
 #[derive(Default, Clone)]
@@ -223,15 +275,15 @@ impl Runtime {
         *last
     }
 
-    fn up(&self, out: mpsc::Sender<Out>) {
-        *self.out.lock() = Some(out);
+    fn up(&self, control: mpsc::UnboundedSender<String>) {
+        *self.control.lock() = Some(control);
         let mut f = self.facts.lock();
         f.connected = true;
         f.error = None;
     }
 
     fn down(&self, error: Option<String>) {
-        *self.out.lock() = None;
+        *self.control.lock() = None;
         let mut f = self.facts.lock();
         f.connected = false;
         f.error = error;
@@ -251,8 +303,8 @@ impl Runtime {
     }
 
     fn control(&self, msg: Value) {
-        if let Some(out) = self.out.lock().clone() {
-            let _ = out.try_send(Out::Control(msg.to_string()));
+        if let Some(control) = self.control.lock().as_ref() {
+            let _ = control.send(msg.to_string());
         }
     }
 
@@ -330,11 +382,11 @@ impl Mobile {
             let relay = relay.as_mut()?;
             let paired: HashSet<&str> = devices.iter().map(|d| d.id.as_str()).collect();
             relay.tokens.retain(|x| x.expires > now && paired.contains(x.device.as_str()));
-            let mut mine: Vec<u64> = relay.tokens.iter().filter(|x| x.device == device.id).map(|x| x.issued).collect();
-            mine.sort_unstable();
-            let keep_from = mine.len().saturating_sub(TOKENS_PER_DEVICE - 1);
-            let oldest_kept = mine.get(keep_from).copied();
-            relay.tokens.retain(|x| x.device != device.id || oldest_kept.is_some_and(|o| x.issued >= o));
+            // The one the phone says it holds stays, whatever else it was given: it may have missed a token given on a connection that
+            // dropped, and must not be shut out of the relay for that. Without one it holds, the newest stays.
+            let holds = |x: &RelayToken| x.device == device.id && super::same(&x.hash, held) && store::token_holds(x, device, &key);
+            let kept = relay.tokens.iter().filter(|x| holds(x)).map(|x| x.issued).max().or_else(|| relay.tokens.iter().filter(|x| x.device == device.id).map(|x| x.issued).max());
+            relay.tokens.retain(|x| x.device != device.id || Some(x.issued) == kept);
             relay.tokens.push(t.clone());
         }
         self.keep();
@@ -357,6 +409,12 @@ impl Mobile {
             pairs.drain(..extra);
         }
         self.relay.control(json!({"t": "pair", "h": hash, "ttl": super::CODE_TTL.as_secs()}));
+    }
+
+    /// A pairing code was spent: its token is not told to the relay again, on this connection or the next.
+    pub(super) fn relay_pair_spent(&self, psk: &[u8; 32]) {
+        let hash = token_hash(&pair_token(psk));
+        self.relay.pairs.lock().retain(|(h, _)| *h != hash);
     }
 
     /// Tailscale publishes this computer at a new origin: the room lets phones in from there.
@@ -414,6 +472,21 @@ impl Mobile {
         self.relay.down(None);
     }
 
+    /// Ends the relay's connection gently (phone access off, the kill switch, a reset, a new room): what the sessions still send goes
+    /// first, then the relay lets nobody in, and `drop` names a room to remove. Returns the task, to wait for it.
+    pub(super) fn relay_wind_down(&self, drop: Option<String>) -> Option<tokio::task::JoinHandle<()>> {
+        let t = self.relay.task.lock().take()?;
+        *t.ending.lock() = Ending::Flush { drop };
+        t.stop.cancel();
+        self.relay.down(None);
+        Some(t.handle)
+    }
+
+    /// The room this computer has at the relay, as kept.
+    pub(super) fn relay_room(&self) -> Option<String> {
+        self.config.lock().relay.as_ref().and_then(|r| r.room.clone())
+    }
+
     /// Everything of the relay is forgotten (a reset of phone access).
     pub(super) fn relay_forget(&self) {
         self.relay_stop();
@@ -466,8 +539,9 @@ pub fn follow(daemon: &Arc<Daemon>) {
     if should && task.is_none() {
         let stop = Arc::new(Generation::new());
         let nudge = Arc::new(Notify::new());
-        *task = Some(Task { stop: stop.clone(), nudge: nudge.clone() });
-        tokio::spawn(run(Arc::downgrade(daemon), stop, nudge));
+        let ending = Arc::new(Mutex::new(Ending::Now));
+        let handle = tokio::spawn(run(Arc::downgrade(daemon), stop.clone(), nudge.clone(), ending.clone()));
+        *task = Some(Task { stop, nudge, ending, handle });
     } else if !should {
         if let Some(t) = task.take() {
             t.stop.cancel();
@@ -523,8 +597,8 @@ pub fn turn_on(daemon: &Arc<Daemon>, asked: TurnOn) -> Result<Value> {
         settings.room = Some(room);
         settings.ticket = Some(ticket);
     }
-    // Kept once the relay took it (or it was not needed now): a wrong key typed never replaces a good one.
-    if let Some(k) = &asked.operator_key {
+    // Kept only once the relay took it: a key typed when no room was made was never checked, and must not replace a good one.
+    if let Some(k) = asked.operator_key.as_ref().filter(|_| asked.register) {
         m.secrets.set(K_OPERATOR, k).context("keeping the registration key")?;
         *m.relay.operator.lock() = Some(true);
     }
@@ -584,25 +658,35 @@ pub async fn recreate(daemon: Arc<Daemon>) -> Result<Value> {
     })
     .await
     .map_err(|_| anyhow!("that did not finish"))??;
-    let old = m.relay.out.lock().clone();
+    let old_room = m.relay_room();
+    let old_key = m.room_key()?;
     m.keep_room_key(&room_key)?;
-    let key = m.mac_key(false)?.ok_or_else(|| anyhow!("the device key cannot be read now"))?;
-    {
+    let committed = (|| -> Result<()> {
+        let key = m.mac_key(false)?.ok_or_else(|| anyhow!("the device key cannot be read now"))?;
         let mut c = m.config.lock();
-        let r = c.relay.as_mut().ok_or_else(|| anyhow!("the relay was turned off meanwhile"))?;
+        let r = c.relay.as_mut().filter(|r| r.on).ok_or_else(|| anyhow!("the relay was turned off meanwhile"))?;
         r.room = Some(room);
         r.ticket = Some(ticket);
         store::seal_relay(r, &key);
+        Ok(())
+    })();
+    if let Err(e) = committed {
+        // The settings still name the old room: so does the key again.
+        if let Some(k) = &old_key {
+            m.keep_room_key(k)?;
+        }
+        return Err(e);
     }
     m.keep();
     m.audit("-", "relay_room", "a new room");
     m.relay.facts.lock().slow_since = None;
     readvertise(m);
     tokio::time::sleep(MOVE_GRACE).await;
-    if let Some(out) = old {
-        let _ = out.send(Out::Control(json!({"t": "drop"}).to_string())).await;
+    // The old room is removed on its own connection, and that connection is gone before the next one opens the new room.
+    if let Some(old) = m.relay_wind_down(old_room) {
+        let _ = tokio::time::timeout(Duration::from_secs(5), old).await;
     }
-    restart(&daemon);
+    follow(&daemon);
     Ok(m.status(true))
 }
 
@@ -632,15 +716,23 @@ trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
 type Socket = tokio_tungstenite::WebSocketStream<Box<dyn Io>>;
 
-async fn run(daemon: Weak<Daemon>, stop: Arc<Generation>, nudge: Arc<Notify>) {
+/// Resolves when the connection is to end at once; never for a gentle end, which the connection carries out itself.
+async fn cut_short(stop: &Generation, ending: &Mutex<Ending>) {
+    stop.cancelled().await;
+    if *ending.lock() != Ending::Now {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn run(daemon: Weak<Daemon>, stop: Arc<Generation>, nudge: Arc<Notify>, ending: Arc<Mutex<Ending>>) {
     let mut attempt: u32 = 0;
     loop {
         let Some(d) = daemon.upgrade() else { return };
         let began = Instant::now();
         let ended = tokio::select! {
             biased;
-            _ = stop.cancelled() => return,
-            ended = connection(&d, &stop, &nudge) => ended,
+            _ = cut_short(&stop, &ending) => return,
+            ended = connection(&d, &stop, &nudge, &ending) => ended,
         };
         if stop.is_cancelled() {
             return;
@@ -715,8 +807,29 @@ fn allow_message(m: &Mobile) -> Value {
     json!({"t": "allow", "h": m.relay_allowed()})
 }
 
+/// What a session sent, on its way to the relay: dropped when its slot has another holder by now.
+async fn forward(ws: &mut Socket, slots: &mut Slots, out: Out) -> Result<()> {
+    match out {
+        Out::Frame(slot, generation, frame) if slots.current(slot, generation) => {
+            let mut framed = Vec::with_capacity(frame.len() + 2);
+            framed.extend_from_slice(&slot.to_be_bytes());
+            framed.extend_from_slice(&frame);
+            ws.send(WsMessage::binary(framed)).await.context("writing to the relay")
+        }
+        Out::Kick(slot, generation, code, reason) if slots.current(slot, generation) => {
+            slots.close(slot);
+            send_text(ws, json!({"t": "kick", "s": slot, "c": code, "r": reason})).await
+        }
+        _ => Ok(()),
+    }
+}
+
 /// One connection to the relay, until it ends.
-async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify) -> Result<()> {
+async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify, ending: &Mutex<Ending>) -> Result<()> {
+    // Stopped before it began: nothing to say, and no room to open (a new room's would be the wrong one to end).
+    if stop.is_cancelled() {
+        return Ok(());
+    }
     let m = &d.mobile;
     let r = m.relay_live().ok_or_else(|| anyhow!("the relay is off"))?;
     let (Some(room), Some(ticket)) = (r.room.clone(), r.ticket.clone()) else { bail!("this computer has no room at the relay") };
@@ -733,11 +846,14 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify) -> Resul
         send_text(&mut ws, json!({"t": "pair", "h": hash, "ttl": ttl})).await?;
     }
     let (out_tx, mut out_rx) = mpsc::channel::<Out>(OUT_QUEUE);
-    m.relay.up(out_tx.clone());
+    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<String>();
+    m.relay.up(control_tx);
     d.broadcast("mobile.updated", json!({}));
     tracing::info!("relay: connected");
-    let mut slots: HashMap<u16, mpsc::Sender<Vec<u8>>> = HashMap::new();
+    let mut slots = Slots::default();
     let mut devices = m.revoked.subscribe();
+    // A device change reaches the relay this long after it is made: a removed phone's session first tells it, inside the session, and closes its slot.
+    let mut list_due: Option<tokio::time::Instant> = None;
     let mut keepalive = tokio::time::interval_at(tokio::time::Instant::now() + KEEPALIVE, KEEPALIVE);
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut refresh = tokio::time::interval_at(tokio::time::Instant::now() + ALLOW_REFRESH, ALLOW_REFRESH);
@@ -747,16 +863,32 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify) -> Resul
         tokio::select! {
             biased;
             _ = stop.cancelled() => {
+                let wanted = ending.lock().clone();
+                if let Ending::Flush { drop } = wanted {
+                    let until = tokio::time::Instant::now() + FLUSH;
+                    while let Ok(Some(out)) = tokio::time::timeout_at(until, out_rx.recv()).await {
+                        forward(&mut ws, &mut slots, out).await?;
+                    }
+                    send_text(&mut ws, json!({"t": "allow", "h": []})).await?;
+                    if drop.as_deref() == Some(room.as_str()) {
+                        send_text(&mut ws, json!({"t": "drop"})).await?;
+                    }
+                }
                 let _ = ws.close(None).await;
                 return Ok(());
             }
-            // A device added, changed or removed: the relay's list follows the store's (a revoked phone's socket also closes from its own connection).
+            // A device added, changed or removed: the relay's list follows the store's, a moment later (`list_due`).
             event = devices.recv() => {
                 if matches!(event, Err(broadcast::error::RecvError::Closed)) {
                     return Ok(());
                 }
+                list_due.get_or_insert(tokio::time::Instant::now() + REVOKE_GRACE);
+            }
+            _ = sleep_until_due(list_due) => {
+                list_due = None;
                 send_text(&mut ws, allow_message(m)).await?;
             }
+            Some(text) = control_rx.recv() => ws.send(WsMessage::text(text)).await.context("writing to the relay")?,
             _ = nudge.notified() => send_text(&mut ws, allow_message(m)).await?,
             _ = refresh.tick() => send_text(&mut ws, allow_message(m)).await?,
             _ = keepalive.tick() => {
@@ -766,19 +898,7 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify) -> Resul
                 pinged = Some(Instant::now());
                 ws.send(WsMessage::text("ping")).await.context("writing to the relay")?;
             }
-            Some(out) = out_rx.recv() => match out {
-                Out::Frame(slot, frame) => {
-                    let mut framed = Vec::with_capacity(frame.len() + 2);
-                    framed.extend_from_slice(&slot.to_be_bytes());
-                    framed.extend_from_slice(&frame);
-                    ws.send(WsMessage::binary(framed)).await.context("writing to the relay")?;
-                }
-                Out::Kick(slot, code, reason) => {
-                    slots.remove(&slot);
-                    send_text(&mut ws, json!({"t": "kick", "s": slot, "c": code, "r": reason})).await?;
-                }
-                Out::Control(text) => ws.send(WsMessage::text(text)).await.context("writing to the relay")?,
-            },
+            Some(out) = out_rx.recv() => forward(&mut ws, &mut slots, out).await?,
             msg = ws.next() => {
                 let msg = match msg {
                     Some(Ok(msg)) => msg,
@@ -796,9 +916,9 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify) -> Resul
                     WsMessage::Binary(frame) if frame.len() >= 2 => {
                         let slot = u16::from_be_bytes([frame[0], frame[1]]);
                         // A phone that sends faster than its connection reads goes, rather than holding up the others.
-                        let full = slots.get(&slot).is_some_and(|tx| tx.try_send(frame[2..].to_vec()).is_err());
+                        let full = slots.sender(slot).is_some_and(|tx| tx.try_send(frame[2..].to_vec()).is_err());
                         if full {
-                            slots.remove(&slot);
+                            slots.close(slot);
                             send_text(&mut ws, json!({"t": "kick", "s": slot, "c": super::SLOW_CONSUMER, "r": "slow"})).await?;
                         }
                     }
@@ -810,27 +930,31 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify) -> Resul
     }
 }
 
+async fn sleep_until_due(due: Option<tokio::time::Instant>) {
+    match due {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// What the relay says of a phone slot: `open` starts a connection on it, as an upgrade on `/link` does; `close` ends it.
-fn on_control(d: &Arc<Daemon>, text: &str, slots: &mut HashMap<u16, mpsc::Sender<Vec<u8>>>, out: &mpsc::Sender<Out>) {
+fn on_control(d: &Arc<Daemon>, text: &str, slots: &mut Slots, out: &mpsc::Sender<Out>) {
     let Ok(v) = serde_json::from_str::<Value>(text) else { return };
     let Some(slot) = v["s"].as_u64().and_then(|s| u16::try_from(s).ok()) else { return };
     match v["t"].as_str() {
         Some("open") => {
-            let generation = d.mobile.running.lock().as_ref().map(|r| r.stop.clone());
-            let Some(generation) = generation else {
-                let _ = out.try_send(Out::Kick(slot, super::RECONNECT, "off".into()));
+            let running = d.mobile.running.lock().as_ref().map(|r| r.stop.clone());
+            // A slot opened again replaces what was there: its frames stop, and that connection ends.
+            let (generation, frames) = slots.open(slot);
+            let Some(running) = running else {
+                let _ = out.try_send(Out::Kick(slot, generation, super::RECONNECT, "off".into()));
                 return;
             };
-            let (tx, frames) = mpsc::channel(SLOT_QUEUE);
-            // A slot opened again replaces what was there: its frames stop, and that connection ends.
-            slots.insert(slot, tx);
             let origin = d.mobile.relay_live().and_then(|r| r.origin);
-            let carrier = Carrier::Relay(Slot { slot, frames, out: out.clone() });
-            tokio::spawn(link::accept(d.clone(), carrier, generation, Peer::relayed(slot, origin), true));
+            let carrier = Carrier::Relay(Slot { slot, generation, frames, out: out.clone() });
+            tokio::spawn(link::accept(d.clone(), carrier, running, Peer::relayed(slot, origin), true));
         }
-        Some("close") => {
-            slots.remove(&slot);
-        }
+        Some("close") => slots.close(slot),
         _ => {}
     }
 }
@@ -892,11 +1016,25 @@ mod tests {
         assert_eq!(normalized_url("wss://relay.example/").unwrap(), "wss://relay.example");
         assert_eq!(normalized_url(" wss://relay.example:8443 ").unwrap(), "wss://relay.example:8443");
         assert_eq!(normalized_url("ws://127.0.0.1:8787").unwrap(), "ws://127.0.0.1:8787");
-        for bad in ["https://relay.example", "ws://relay.example", "wss://relay.example/v1/desktop", "wss://me@relay.example", "wss://relay.example?x=1", "relay.example", ""] {
+        for bad in ["https://relay.example", "ws://relay.example", "wss://relay.example/v1/desktop", "wss://me@relay.example", "wss://relay.example?x=1", "relay.example", "", "wss://a;script-src.example", "wss://a,b.example", "wss://a%20b.example"] {
             assert!(normalized_url(bad).is_err(), "{bad}");
         }
         assert_eq!(http_url("wss://relay.example"), "https://relay.example");
         assert_eq!(connect_src("wss://relay.example"), "https://relay.example wss://relay.example");
+    }
+
+    #[test]
+    fn what_an_old_session_of_a_slot_sends_never_reaches_the_slots_new_holder() {
+        let mut slots = Slots::default();
+        let (first, _a) = slots.open(7);
+        let (second, _b) = slots.open(7);
+        assert_ne!(first, second);
+        assert!(!slots.current(7, first), "the old session's frames and kicks are dropped");
+        assert!(slots.current(7, second));
+        slots.close(7);
+        assert!(!slots.current(7, second), "a closed slot takes nothing");
+        let (third, _c) = slots.open(7);
+        assert!(third > second, "generations are never reused");
     }
 
     #[test]
@@ -978,6 +1116,28 @@ mod tests {
         assert!(m.relay_grant(&d, &caps(None)).is_some());
         assert_eq!(m.config.lock().relay.as_ref().unwrap().tokens.len(), TOKENS_PER_DEVICE);
         assert_eq!(m.relay_allowed().len(), TOKENS_PER_DEVICE);
+    }
+
+    #[test]
+    fn a_phone_that_missed_a_token_keeps_the_one_it_holds() {
+        let m = mobile();
+        relay_on(&m);
+        let d = secure_device(&m, "pixel");
+        let key = m.mac_key(false).unwrap().unwrap();
+        let held = |given: &str| token_hash(&kelpie_link::unb64(serde_json::from_str::<Value>(given).unwrap()["token"].as_str().unwrap()).unwrap());
+        let a = held(&m.relay_grant(&d, &caps(None)).unwrap());
+        for t in &mut m.config.lock().relay.as_mut().unwrap().tokens {
+            t.issued -= TOKEN_RENEW_MS;
+            store::seal_token(t, &d, &key);
+        }
+        // Given on a connection that dropped before the phone heard it.
+        let b = held(&m.relay_grant(&d, &caps(None)).unwrap());
+        // The phone comes back with the token it has, which is due for a new one.
+        let c = held(&m.relay_grant(&d, &caps(Some(&a))).unwrap());
+        let allowed = m.relay_allowed();
+        assert!(allowed.contains(&a), "what the phone holds still lets it in");
+        assert!(allowed.contains(&c));
+        assert!(!allowed.contains(&b), "the one it never got goes");
     }
 
     #[test]

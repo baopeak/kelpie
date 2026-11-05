@@ -2043,17 +2043,17 @@ impl Daemon {
                     return Ok(None);
                 }
             }
-            // A new room for a relay that stays slow. Needs the kept registration key and the verified app; it gives nobody more access.
+            // A new room for a relay that stays slow: the verified app, then the person. It needs the kept registration key, and gives nobody more access.
             "mobile.relay_recreate" => {
                 if !self.is_verified_app(client) {
                     bail!("this needs the Kelpie app: phone access is decided in Kelpie → Settings → Mobile");
                 }
-                let (me, tx, id) = (self.clone(), tx.clone(), id.clone());
-                tokio::spawn(async move {
-                    let answer = crate::mobile::relay::recreate(me.clone()).await;
+                let runtime = tokio::runtime::Handle::current();
+                self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::RelayRoom, move |me| {
+                    let v = runtime.block_on(crate::mobile::relay::recreate(me.clone()));
                     me.broadcast("mobile.updated", json!({}));
-                    let _ = tx.send(json_out(&rpc_answer(&id, answer)));
-                });
+                    v
+                })?;
                 return Ok(None);
             }
             "meta.list" => serde_json::to_value(&self.workspace_meta.lock().map)?,
