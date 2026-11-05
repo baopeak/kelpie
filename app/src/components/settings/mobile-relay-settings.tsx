@@ -93,3 +93,17 @@ export function RelayDetails(props: { status: RelayStatus; form: RelayForm; busy
     </div>
   );
 }
+
+/** Asked after a phone was removed with the relay on. No is the answer unless the person makes a room: "Not now" comes first and has the focus. */
+export function NewRoomOffer(props: { name: string; busy: boolean; onMake: () => void; onSkip: () => void }) {
+  return (
+    <div class="form-note warn-note" data-relay-room-offer>
+      <div>{t("“{name}” was removed. It still knows this computer's room at the relay, though the relay no longer lets it in. Make a new room too?", { name: props.name })}</div>
+      <div>{t("Phones connected now move to the new room by themselves, over their encrypted link. A phone not connected now cannot use the relay until it connects once over Tailscale, and may need to be paired again. Making a room asks you to verify.")}</div>
+      <div class="inline-fields" style={{ "margin-top": "6px" }}>
+        <button class="btn" data-relay-room-skip autofocus ref={(b) => queueMicrotask(() => b.focus())} onClick={() => props.onSkip()}>{t("Not now")}</button>
+        <button class="btn" data-relay-room-make disabled={props.busy} onClick={() => props.onMake()}>{t("Make a new room")}</button>
+      </div>
+    </div>
+  );
+}

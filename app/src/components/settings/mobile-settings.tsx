@@ -9,13 +9,13 @@ import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
 import { LOCK_API, RELAY_API, TAILSCALE_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
-import { mobileSummary, optionState, telegramChoice, type OptionId } from "../../lib/mobile-options";
+import { mobileSummary, offerNewRoom, optionState, telegramChoice, type OptionId } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
 import { catalogEntry, entryMatches } from "../../lib/settings-catalog";
 import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
 import { OptionRow } from "./option-row";
-import { createRelayForm, RelayDetails, type RelayStatus } from "./mobile-relay-settings";
+import { createRelayForm, NewRoomOffer, RelayDetails, type RelayStatus } from "./mobile-relay-settings";
 import { SettingRow, settingsQuery } from "./setting-row";
 import { confirmDialog } from "../../lib/confirm-dialog";
 
@@ -256,6 +256,18 @@ export function MobileSettings() {
   // What takes protection away asks the person, and is back to what holds now if they did not verify: the status did not change, so nothing else redraws it.
   const setLock = (patch: Partial<NonNullable<MobileStatus["lock"]>>) => run(() => mobileSecure("mobile.set_lock", patch));
   const relay = createRelayForm(run);
+  // The phone just removed while the relay was on: a new room is offered, and nothing happens unless the person makes it.
+  const [roomOffer, setRoomOffer] = createSignal<string | null>(null);
+  const unpair = async (d: MobileDevice) => {
+    if (!(await confirmDialog(t("Unpair “{name}”? It is disconnected at once.", { name: d.name })))) return;
+    const offer = offerNewRoom(s());
+    await run(() => daemon("mobile.revoke", { id: d.id }));
+    if (offer && !s()?.devices.some((x) => x.id === d.id)) setRoomOffer(d.name);
+  };
+  const makeRoom = async () => {
+    setRoomOffer(null);
+    await relay.recreate();
+  };
   const resetLock = (d: MobileDevice) => run(() => mobileSecure("mobile.reset_lock", { id: d.id }));
   const setPermission = (d: MobileDevice, permission: MobilePermission) =>
     run(() => mobileSecure("mobile.set_permission", { id: d.id, permission }));
@@ -555,6 +567,9 @@ export function MobileSettings() {
             </SettingRow>
           </Show>
           <SettingRow id="mobile-devices" wide>
+            <Show when={roomOffer()}>
+              <NewRoomOffer name={roomOffer()!} busy={busy()} onMake={() => void makeRoom()} onSkip={() => setRoomOffer(null)} />
+            </Show>
             <div class="saved-layouts">
               <For each={s()!.devices} fallback={<div class="muted-inline">{t("No paired devices.")}</div>}>
                 {(d) => (
@@ -580,7 +595,7 @@ export function MobileSettings() {
                     <Show when={d.state === "ok" && d.secure_origin && store.daemonApi() >= LOCK_API}>
                       <button class="btn" data-reset-lock disabled={busy()} onClick={() => void resetLock(d)}>{t("Reset this phone's lock")}</button>
                     </Show>
-                    <button class="btn" onClick={async () => (await confirmDialog(t("Unpair “{name}”? It is disconnected at once.", { name: d.name }))) && void run(() => daemon("mobile.revoke", { id: d.id }))}>{t("Unpair")}</button>
+                    <button class="btn" onClick={() => void unpair(d)}>{t("Unpair")}</button>
                   </div>
                 )}
               </For>

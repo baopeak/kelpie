@@ -125,3 +125,8 @@ export function mobileSummary(s: MobileStatus, push: PushState | null) {
     phones: phonesLine(s),
   };
 }
+
+/** Whether removing a phone offers a new room at the relay: the removed phone still knows the room's ticket, though the relay no longer lets it in. */
+export function offerNewRoom(s: MobileStatus | null | undefined): boolean {
+  return !!s?.relay?.on && !!s.relay.room;
+}

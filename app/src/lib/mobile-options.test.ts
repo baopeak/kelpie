@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { MobileStatus } from "../components/settings/mobile-settings";
 import { LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
-import { mobileSummary, OPTION_IDS, optionState, telegramChoice, type OptionFacts, type OptionId } from "./mobile-options";
+import { mobileSummary, offerNewRoom, OPTION_IDS, optionState, telegramChoice, type OptionFacts, type OptionId } from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
 import { emptyPushConfig, type PushState } from "./push-config";
 import { catalogEntry, entryMatches } from "./settings-catalog";
@@ -232,5 +232,23 @@ describe("what Telegram carries", () => {
     expect(telegramChoice(facts({ api: TELEGRAM_API, push: telegram(), status: status({ app: false }) }))?.approveBlocked).toContain("not the installed Kelpie app");
     expect(telegramChoice(facts({ api: TELEGRAM_API, push: telegram({}, false) }))?.approveBlocked).toBe("Telegram needs a bot token.");
     expect(telegramChoice(facts({ api: TELEGRAM_API, push: telegram(), status: null }))?.approveBlocked).toContain("not the installed Kelpie app");
+  });
+});
+
+describe("a new room after a phone is removed", () => {
+  const relay = (patch: Partial<NonNullable<MobileStatus["relay"]>>) => status({ relay: { ...status().relay!, ...patch } });
+
+  it("is offered only while the relay is on and this computer has a room there", () => {
+    expect(offerNewRoom(relay({ on: true, room: true }))).toBe(true);
+    expect(offerNewRoom(relay({ on: false, room: true }))).toBe(false);
+    expect(offerNewRoom(relay({ on: true, room: false }))).toBe(false);
+    expect(offerNewRoom(status({ relay: undefined }))).toBe(false);
+    expect(offerNewRoom(null)).toBe(false);
+  });
+
+  it("says plainly what it costs, in English and Vietnamese", () => {
+    const line = "Phones connected now move to the new room by themselves, over their encrypted link. A phone not connected now cannot use the relay until it connects once over Tailscale, and may need to be paired again. Making a room asks you to verify.";
+    expect(translated(line)).toBeTruthy();
+    expect(translated("Not now")).toBeTruthy();
   });
 });
