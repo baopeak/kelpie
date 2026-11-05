@@ -8,7 +8,7 @@ import { Composer } from "./composer";
 import { KeyBar } from "./key-bar";
 import { PromptCard } from "./prompt-card";
 import { TerminalText } from "./terminal-text";
-import { canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, paintedFrom, screen, sessions } from "./phone-state";
+import { canTakeOver, canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, paintedFrom, screen, sessions, takeovers } from "./phone-state";
 import { promptKey } from "./screen-sync";
 import { t } from "./i18n";
 
@@ -17,6 +17,15 @@ function AgeChip() {
   return (
     <Show when={connected() && dataState() !== "fresh"}>
       <div class={`age ${dataState()}`} role="status">{dataState() === "slow" ? t("Updating slowly") : t("The computer is not responding")}</div>
+    </Show>
+  );
+}
+
+/** An agent stuck on a sign-in in a browser pane: the pane can be driven from here (a device given control only). */
+function TakeOverButton(props: { project: string | null }) {
+  return (
+    <Show when={canTakeOver()}>
+      <div class="takeover-entry"><button class="btn" data-take-over disabled={!connected()} onClick={() => void takeovers.openPicker(props.project)}>{t("Take over a browser pane")}</button></div>
     </Show>
   );
 }
@@ -32,10 +41,11 @@ export function SessionView(props: { id: string }) {
       {(s) => (
         <Show
           when={!s().chat}
-          fallback={<ChatView row={s()} dim={stale()} />}
+          fallback={<><TakeOverButton project={s().project_id} /><ChatView row={s()} dim={stale()} /></>}
         >
           <div class="session" data-id={props.id} classList={{ dim: stale() }}>
             <AgeChip />
+            <TakeOverButton project={s().project_id} />
             <Show when={stale() && (paintedFrom() ?? lastLiveAt())}>
               <div class="asof">{t("As of {time} ({ago})", { time: clock((paintedFrom() ?? lastLiveAt())!, true), ago: ago((paintedFrom() ?? lastLiveAt())!, now()) })}</div>
             </Show>

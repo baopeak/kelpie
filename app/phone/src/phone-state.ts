@@ -26,6 +26,8 @@ import { screenNow } from "./install-guide";
 import { afterFailedPairing, movedTo, platformOf } from "./install-state";
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
+import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
+import { TAKEOVER_API } from "../../src/lib/attention";
 
 // ---------- signals the views read ----------
 
@@ -73,6 +75,12 @@ export function dismissNotice() {
 }
 
 export const canType = () => !!device()?.can_write;
+/** The computer's feature level, from its last hello. */
+export const [daemonApi, setDaemonApi] = createSignal(0);
+/** This phone may take over the computer's browser panes here (a device given control, on this computer's HTTPS address, unlocked). */
+export const canTakeOver = () => device()?.permission === "control" && daemonApi() >= TAKEOVER_API;
+/** A pane taken over, or being picked (null: none). */
+export const [takeover, setTakeover] = createSignal<TakeoverState | null>(null);
 export const connected = () => canAct(conn());
 
 // ---------- the link ----------
@@ -176,6 +184,7 @@ const link = new Link(browserEnv(), () => {
     document.documentElement.dataset.servedLegacy = String(h.hb?.legacy ?? false);
     batch(() => {
       setDevice(h.device);
+      setDaemonApi(h.api);
       setSessions(h.sessions);
       setProjects(h.projects);
       setPaintedFrom(null);
@@ -202,6 +211,11 @@ const link = new Link(browserEnv(), () => {
     wantFromAlert = false;
     if (wanted) openSession(wanted.id);
     else if (openId() && !h.sessions.some((s) => s.id === openId())) closeSession();
+    // A pane held when the connection dropped: this connection asks for it again.
+    void takeovers.reconnected();
+  },
+  takeover(m) {
+    takeovers.onMessage({ ...m, meta: m.meta as FrameMeta | undefined });
   },
   sessions(m: SessionsMsg) {
     const before = new Map(sessions().map((s) => [s.id, s.status]));
@@ -269,6 +283,7 @@ const link = new Link(browserEnv(), () => {
     wipeTypedText();
     forgetHistory();
     forgetSenders();
+    takeovers.close();
     batch(() => {
       setPaired(false);
       setNotPairedMessage(t("This device is no longer paired. Pair it again from Kelpie → Settings → Mobile."));
@@ -281,6 +296,21 @@ const link = new Link(browserEnv(), () => {
 }, relayRoute);
 
 export { link };
+
+const takeovers = new TakeoverSession({
+  panes: () => link.panes(),
+  start: (pane) => link.tkStart(pane),
+  stop: (tk) => link.tkStop(tk),
+  text: (tk, text, st) => link.tkText(tk, text, st),
+  rebind: (tk) => link.tkRebind(tk),
+  input: (tk, ops, st) => link.tkInput(tk, ops, st),
+  ack: (tk, seq) => link.tkAck(tk, seq),
+  serverNow: () => link.serverNow(),
+  now: () => Date.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+}, setTakeover, t);
+export { takeovers };
 
 // ---------- alerts ----------
 

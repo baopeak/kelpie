@@ -171,6 +171,11 @@ export class LagMeter {
     if (this.samples.length > this.keep) this.samples.shift();
     return diff - Math.min(...this.samples);
   }
+
+  /** The daemon's clock now, as well as it can be read: `localNow` less the smallest difference seen (the clocks' gap and the quickest delivery). */
+  serverNow(localNow: number): number {
+    return this.samples.length ? localNow - Math.min(...this.samples) : localNow;
+  }
 }
 
 /** How old what is shown is, for the data-age chip: fine, slow (amber) or not responding (red). */

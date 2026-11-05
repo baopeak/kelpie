@@ -21,6 +21,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { Initiator, MODE_RECONNECT, unb64url, type Endpoint, type Session } from "./noise";
 import type { Pairing } from "./pairing-store";
 import type { ScreenFrame } from "./screen-sync";
+import type { PaneRow, TkOp } from "./takeover";
 
 // ---------- what the daemon sends ----------
 
@@ -147,7 +148,7 @@ export interface ReplyError {
 /** What became of a request: the daemon's reply, or why there was none. */
 export type Outcome =
   /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; lock?: LockInfo; resume?: string }
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[] }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -173,6 +174,8 @@ export interface LinkHandlers {
   relay?(m: RelayGrant): void;
   /** Another device was paired, changed or removed on the computer. */
   deviceChanged?(m: { name: string; change: string; permission: string | null }): void;
+  /** A takeover's frame, heartbeat or end (`tk_frame`, `tk_fhb`, `tk_end`). */
+  takeover?(m: { type: string; tk?: string; seq?: number; data?: string; meta?: unknown; reason?: string }): void;
   /** The computer said, inside the session, that the device was removed: forget the pairing. Nothing else does: a close code
    *  or a refusal before a session is not authenticated, and would let anyone on the path destroy the pairing. */
   unpaired(): void;
@@ -664,6 +667,42 @@ export class Link {
     this.post({ type: "lock_touch" });
   }
 
+  // A pane taken over (takeover.ts). Input and acknowledgements need no reply; what they come to is in the frames.
+
+  panes() {
+    return this.request({ type: "panes" }, { write: false });
+  }
+
+  tkStart(pane: string) {
+    return this.request({ type: "tk_start", pane }, { write: false });
+  }
+
+  tkStop(tk: string) {
+    return this.request({ type: "tk_stop", tk }, { write: false });
+  }
+
+  tkRebind(tk: string) {
+    return this.request({ type: "tk_rebind", tk }, { write: false });
+  }
+
+  /** `st`: the computer's clock as this phone reads it, so that it can drop what came too late. */
+  tkText(tk: string, text: string, st: number) {
+    return this.request({ type: "tk_text", tk, text, st }, { write: false });
+  }
+
+  tkInput(tk: string, ops: TkOp[], st: number) {
+    this.post({ type: "tk_input", tk, ops, st });
+  }
+
+  tkAck(tk: string, seq: number) {
+    this.post({ type: "tk_ack", tk, seq });
+  }
+
+  /** The computer's clock as this phone reads it: this phone's, less the smallest difference seen lately. */
+  serverNow(): number {
+    return this.lag.serverNow(this.env.now());
+  }
+
   /** The secret of the window this page opened: said in the first message of every connection from now on. */
   setResume(secret: string | null) {
     this.resume = secret;
@@ -1088,6 +1127,13 @@ export class Link {
       case "device_changed":
         this.h.deviceChanged?.(m);
         break;
+      case "tk_frame":
+      case "tk_fhb":
+      case "tk_end":
+        this.h.takeover?.(m);
+        // A frame changes nothing else the views show.
+        if (m.type !== "tk_end") return;
+        break;
       default:
         break;
     }
@@ -1167,7 +1213,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, lock: m.lock, resume: m.resume });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes });
     }
     this.h.changed();
     return true;
