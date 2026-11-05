@@ -512,10 +512,6 @@ pub fn check_turn_on(m: &Mobile, params: &Value) -> Result<TurnOn> {
 pub fn turn_on(daemon: &Arc<Daemon>, asked: TurnOn) -> Result<Value> {
     let m = &daemon.mobile;
     let key = m.mac_key(true)?.ok_or_else(|| anyhow!("the credential store did not keep the device key"))?;
-    if let Some(k) = &asked.operator_key {
-        m.secrets.set(K_OPERATOR, k).context("keeping the registration key")?;
-        *m.relay.operator.lock() = Some(true);
-    }
     let mut settings = m.config.lock().relay.clone().filter(|r| store::relay_holds(r, &key)).unwrap_or_default();
     if asked.register {
         let operator = match asked.operator_key.clone() {
@@ -527,6 +523,11 @@ pub fn turn_on(daemon: &Arc<Daemon>, asked: TurnOn) -> Result<Value> {
         m.keep_room_key(&room_key)?;
         settings.room = Some(room);
         settings.ticket = Some(ticket);
+    }
+    // Kept once the relay took it (or it was not needed now): a wrong key typed never replaces a good one.
+    if let Some(k) = &asked.operator_key {
+        m.secrets.set(K_OPERATOR, k).context("keeping the registration key")?;
+        *m.relay.operator.lock() = Some(true);
     }
     settings.on = true;
     settings.url = asked.url.clone();
