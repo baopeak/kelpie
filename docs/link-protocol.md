@@ -50,6 +50,9 @@ one workerd process when self-hosted ([relay-self-host.md](relay-self-host.md)).
 | `POST /v1/rooms`, `Authorization: Bearer <registration key>`, body `{"pk": "<P-256 public key, uncompressed, base64url>"}`, no `Origin` | `201 {"room", "ticket"}`; 401 a wrong key, 429 after 10 wrong keys from one address in a day, 403 any `Origin`, 400 a key that is not one |
 | `GET /v1/desktop?t=<ticket>&ts=<ms>&sig=<signature>` (WebSocket) | 101, or 403 a bad ticket, signature or `Origin`, 404 no such room, 429 the month's cap is spent |
 | `GET /v1/phone?t=<ticket>&k=<token>` or `&p=<pairing token>` (WebSocket) | 101, or 403 a bad ticket, an unknown token or a foreign `Origin`, 409 eight phones already, 429 the cap |
+
+A ticket is no secret (every QR code has one), so the router counts the sockets a room refused (403, 404) by a hash of the address and the room:
+past 30 in 10 minutes it answers 429 without asking the room. In the isolate's memory only, so best effort.
 | anything else | 404, 405 or 426, in plain text: the relay never serves a page |
 
 - **Ticket**: `<room id, 32 hex>.<HMAC-SHA256(TICKET_SECRET, room id), base64url>`. Checked in the router before any Durable Object call.
@@ -62,7 +65,10 @@ one workerd process when self-hosted ([relay-self-host.md](relay-self-host.md)).
 ### On the sockets
 
 Binary frames only carry kelpie-link, at most 64 KiB. A phone's frame reaches the desktop as `[slot, u16 big-endian] + frame`; the desktop's
-frame names the slot it goes to. Nothing is queued: with no desktop ready, a phone's frame is dropped.
+frame names the slot it goes to. Nothing is queued: with no desktop ready, a phone's frame is dropped. A slot is a number for one phone
+socket, taken from a counter the room keeps and never given out while any socket, open or closing, still holds it: a late `close`, frame or
+`kick` of an old socket cannot reach the phone that connected after it. The daemon also numbers each `open` of a slot, and drops what an older
+session of it still sends.
 
 Text `ping` is answered `pong` by the runtime, without waking the room. Anything else in text from a phone closes it (4003). The desktop's
 text is JSON:
@@ -90,8 +96,8 @@ text is JSON:
 | 4002 | The token is no longer on the allow-list. |
 | 4003 | Text that is not accepted. |
 | 4004 | The room was removed. |
-| 4008 | More than 200 messages in a second from one socket. |
-| 4009 | The room went past its burst of 4 MB (refilled at 4 MB a second). |
+| 4008 | More than 200 messages in a second from one phone, or sent to one phone by the desktop. A desktop over the limit closes that phone, never itself. |
+| 4009 | The room went past its burst of 4 MB (refilled at 4 MB a second); for the desktop's frames, the phone they were for is closed. |
 | 4010 | The room's 2 GB for the month (UTC) are spent. |
 | 1009 | A frame over 64 KiB. |
 | 1006 | No close frame at all, which is what a code update on Cloudflare gives. Clients take it as any other drop. |
@@ -101,9 +107,14 @@ heartbeats).
 
 ### Limits and storage
 
-- A room stores its id, its public key, the last signature time, the allow-list, live pairing tokens, the phones' origin and its byte count for
-  the month, written as messages arrive, in batches of 5 s or 1 MB, never on a timer. An unused room is removed 90 days after its last
-  connection, on one alarm set each time it is used.
+- A room stores its id, its public key, the last signature time, the allow-list, live pairing tokens, the phones' origin, the next slot number
+  and its byte count for the month, written as messages arrive, in batches of 5 s or 1 MB, never on a timer. An unused room is removed 90 days
+  after its last connection, on one alarm set each time it is used; a desktop still connected when the alarm comes counts as use.
+- **How the daemon ends its connection**: when the relay is turned off or moves, at once. When phone access goes off, the kill switch or a reset:
+  for a second it passes on what the sessions still send (a removed phone's sealed `revoked`), then sends `allow` with nothing, so nobody is let
+  in, and a reset also sends `drop`. A new room drops the old one the same way, after phones were told the new ticket. A device change reaches
+  the relay a second after it is made, so a removed phone hears `revoked` in its session and is closed by the daemon (4401) before the relay
+  would close it for its token (4002).
 - No payload is ever logged or stored; Workers observability is off. Cloudflare's own edge keeps its logs (connection metadata), as any
   network on the way does.
 - Room placement: no location hint. The room is made by the desktop's own request, so it lands near the desktop.

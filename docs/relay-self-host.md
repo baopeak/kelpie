@@ -18,15 +18,20 @@ the relay*). By default that is the relay Kelpie's maintainer runs on Cloudflare
 
 ## With Docker (one command)
 
+Make the two secrets once, in a file only you can read, and keep it: `TICKET_SECRET` must stay the same for as long as the relay lives
+(tickets made with another one are refused, and every computer would have to make a new room).
+
 ```bash
+umask 077
+printf 'TICKET_SECRET=%s\nREGISTRATION_KEY=%s\n' "$(openssl rand -base64 32)" "$(openssl rand -base64 32)" > /etc/kelpie-relay.env
 cd relay
 docker build -t kelpie-relay .
 docker run -d --name kelpie-relay --restart unless-stopped -p 127.0.0.1:8787:8787 -v kelpie-relay:/data \
-  -e TICKET_SECRET="$(openssl rand -base64 32)" -e REGISTRATION_KEY="<a long random key>" kelpie-relay
+  --env-file /etc/kelpie-relay.env kelpie-relay
 ```
 
-The rooms live in the `kelpie-relay` volume. `TICKET_SECRET` must stay the same across restarts: tickets made with another one are refused,
-and every computer would have to make a new room. Keep it where your secrets live (a Docker secret, an environment file only root can read).
+The rooms live in the `kelpie-relay` volume, so an upgrade (a new image, the same file and volume) keeps them. The secrets stay out of your
+shell history; `docker inspect` still shows them to whoever may run Docker on that machine, so keep that to yourself.
 
 ## Without Docker
 
