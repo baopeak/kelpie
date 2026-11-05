@@ -531,7 +531,8 @@ keeps it up while agents work.
 - **ntfy**: switch it on, install the ntfy app and subscribe to the topic Kelpie shows (*Show topic*).
   The topic is 128 random bits only you know; use *New topic* if you shared it by accident. An
   access token is optional, and the server can be your own.
-- **Telegram**: make a bot with @BotFather, paste its token and your chat id, press *Send a test*.
+- **Telegram**: make a bot with @BotFather, paste its token and your chat id, press *Send a test*. What
+  it gets is chosen in Settings → Mobile (see [Telegram's choices](#telegram-alerts-links-and-approvals)).
 - **Webhook**: a JSON `POST` to an address you choose.
 
 Choose which events go out (needs you, finished, failed, automation, run approval, cost cap), skip
@@ -987,8 +988,26 @@ while its dialog is still on screen Kelpie asks you to close it before showing a
 | *Ask again for dangerous commands* | off | turning it off |
 | *Allow reading over plain HTTP* | on | turning it on |
 | *ntfy*, *Telegram* | off | no |
+| *Telegram gets* | *Alerts with a link* (a setting from before keeps *Alerts only*) | choosing approvals |
 
 The *ntfy* and *Telegram* switches here are the same ones as in Settings → Notifications, which keeps their server, topic and tokens. *Allow reading over plain HTTP* only counts while the lock is on: with the lock off such a page reads anyway.
+
+<a id="telegram-alerts-links-and-approvals"></a>**Telegram: alerts, links and approvals.** With Telegram on, *Telegram gets* has three choices:
+
+- **Alerts only**: what Kelpie sent before there was a choice. A setting from an earlier version stays here, so nothing changes until you choose; the link to the session comes only with *Include a link to the phone page* in Settings → Notifications.
+- **Alerts with a link** (what Telegram gets when you switch it on now): each message ends with a link to the session in the phone app, at the Tailscale address when there is one. Telegram sees the link, with this computer's name or address in it, but does not open it, and the link holds no code or token.
+- **Alerts with a link, and approvals of low-risk requests**: off unless you choose it. A message about a request Kelpie labels **low risk** gets two buttons, *Approve once* and *Deny*; everything else (risk unknown, medium or dangerous) gets the alert and the link only, and you answer it on the computer or a paired phone.
+
+Read what approving from Telegram gives up before choosing it: **Telegram can read these messages** (a chat with a bot is not end-to-end encrypted, and it shows the command), **a tap asks for no Face ID**, and **anyone who has this Telegram account can approve** (a stolen phone, a SIM swap, a session left open elsewhere). Kelpie asks you to verify first (Windows Hello or your password), then shows a code: from the Telegram account that will approve, send `/bind <code>` to your bot within five minutes. That account and that chat are then the only ones whose presses count; the chat becomes the one Telegram's messages go to. Only the installed Kelpie app can turn this on, and only on the computer.
+
+How the buttons behave:
+
+- Each pair answers one request, once, for five minutes. It stops working when the request is answered anywhere else (the message then says so), when Kelpie restarts, and when you turn approvals off. The first answer wins: a late press is told who answered.
+- Only the one-time choice is offered. "Always", "don't ask again" and "for this session" stay on the computer, and so does a request whose one-time yes Kelpie cannot tell for certain (two requests at once, a terminal menu it does not recognise).
+- At most six approvals a minute from Telegram; past that, messages come without buttons until the minute is over.
+- Every approval, denial and refused press is in *What phones did* under Advanced, as *telegram*, with the command as a length and a hash. Presses from any other account or chat do nothing, and their count is noted there once a minute.
+- **Turning it off**: choose *Alerts with a link* or *Alerts only*, or switch Telegram off. Another chat id or bot token turns approvals off too, and so does *Turn off phone access and revoke all*, turning phone access off, and resetting it. The messages already sent lose their buttons, and turning approvals on again needs a new code.
+- If Telegram refuses the polling because the bot has a webhook or another program reads its messages, Settings says so; remove the webhook (`deleteWebhook`) or stop that program. A token Telegram rejects stops approvals, and Settings says that too. Kelpie only ever connects out to Telegram: nothing listens on your computer for it.
 
 **Reaching this computer from anywhere, with Tailscale.** If you use [Tailscale](https://tailscale.com) on
 both the computer and the phone, turn on *Reach this computer with Tailscale* in Settings → Mobile. Kelpie then

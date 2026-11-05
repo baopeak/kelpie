@@ -1,7 +1,7 @@
 ---
 phase: 3e
 title: "Telegram: alert + deep link, opt-in low-risk approvals"
-status: pending
+status: done (local, unmerged; the manual check with a real bot from a phone has not run)
 priority: P2
 effort: "3d"
 dependencies: [3b, 3c, 3d]
@@ -48,6 +48,24 @@ approve: low-risk request → sendMessage + inline keyboard {callback_data: a|d 
 ## Related Code Files
 - Create: `crates/kelpied/src/notify/telegram_poll.rs`
 - Modify: `crates/kelpied/src/notify.rs`, `crates/kelpied/src/notify/destinations.rs`, `crates/kelpied/src/daemon.rs`, `crates/kelpied/src/auth.rs` (`APP_ONLY`), `crates/kelpied/src/chat.rs`, `crates/kelpied/src/mobile.rs` (kill-switch hooks), `crates/kelpie-proto/src/lib.rs`, `app/src/components/settings/mobile-settings.tsx`, `app/src/components/settings/push-settings.tsx`, `app/src/lib/ipc.ts`, `app/src/lib/types.ts`, locales, `docs/architecture.md`, `docs/user-guide.md`, `README.md` (privacy)
+
+## Step 1: the answer line per dialect (traced 2026-11-05, decided)
+The phone does not build lines itself: it renders the shared adapters (`app/src/chat/*-adapter.ts`), and `ChatSession::answer` only checks what they wrote (`exact_answer`, `answer_is_one_shot`). Traced per dialect:
+
+| Dialect, request | One-time yes the adapter writes | No | What the daemon needs to write it |
+|---|---|---|---|
+| Claude `can_use_tool` | `control_response` `{behavior: allow, updatedInput: <input>}` | `{behavior: deny, message}` | the tool's input, which `Pending` did not keep |
+| Claude `elicitation` | a form's answers | | not an approval: no buttons |
+| Codex `item/commandExecution/requestApproval` | `{id, result: {decision: accept}}` | `decline` | nothing more |
+| Codex `execCommandApproval`, `applyPatchApproval` | `{decision: approved}` | `denied` | nothing more |
+| Codex `item/fileChange/requestApproval` | as above | | its label is always `unknown`: no buttons |
+| Codex `item/permissions/requestApproval` | a grant with a scope | | a grant, not an approval: no buttons |
+| ACP `session/request_permission` | `outcome: selected` with the `allow_once` option | the `reject_once` option, else `cancelled` | the options, which `Pending` keeps |
+| Terminal (Claude Code with hooks) | the menu's key | the menu's key | which key is the plain one-time *Yes* and the plain *No* |
+
+**Decision: all three chat dialects and Claude Code terminals ship**, each only where its one-time yes is certain:
+- Chat: `Pending` keeps Claude's tool input up to 16 KiB (a bigger one gets no buttons). `ChatSession::telegram_approval` builds the lines for the methods above, and offers them only if `answer` itself takes each as a one-shot answer to that very request and `answer_approves` reads the yes as a yes and the no as a no. Only when exactly one request is open.
+- Terminal: exactly one open request reported by a hook, labelled `low`, and a permission menu on screen with exactly one plain *Yes* and one plain *No*, neither lasting (`choices::one_time_answers`). Other agents' terminals have no label, so they never get buttons. The menu is drawn after the hook, so the sender waits for it up to 3 s.
 
 ## Implementation Steps
 1. Trace the answer line per dialect; decide scope; record it here.

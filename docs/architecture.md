@@ -92,8 +92,8 @@ anything but `daemon.info` answers:
 - the **verified app** (`Role::App`): the user token, `client: "app"`, *and* the connection's peer process runs the Kelpie
   app's executable (`crates/kelpied/src/peer_identity.rs`: `kelpie` next to the daemon, or in the folder named by a runtime slot's
   `source.txt`, which an AppImage rewrites at every start because its mount moves while the daemon lives; on macOS a path check only, no code-signature check, a known weakening to fix or accept before macOS ships). Only
-  it may ask for the phone decisions `mobile.approve`, `mobile.set_permission`, `mobile.set_write`, `mobile.reset`, `mobile.set_tailscale`
-  (`auth::APP_ONLY`), and for a `mobile.set_options` that keeps unused phones longer. Those that raise access take effect only
+  it may ask for the phone decisions `mobile.approve`, `mobile.set_permission`, `mobile.set_write`, `mobile.reset`, `mobile.set_tailscale`,
+  `mobile.set_lock`, `mobile.reset_lock` and for approvals from Telegram, `notify.telegram_bind` (`auth::APP_ONLY`), and for a `mobile.set_options` that keeps unused phones longer. Those that raise access take effect only
   after **the daemon itself** asked the operating system to verify the person (`crates/kelpied/src/user_presence.rs`: Windows
   Hello, else the Windows password prompt checked with `LogonUserW` and required to be this user's account; macOS Touch ID or the
   login password; Linux polkit, by running `pkcheck --action-id org.freedesktop.policykit.exec --process <own pid>
@@ -295,7 +295,7 @@ token; the message goes as JSON to the server's root, so the topic is never in a
 service and never reads or writes the installed app's entries; `notify.json` holds only what is safe to
 read, and `notify.get` says whether each secret is set, never its value (the topic only with
 `reveal_topic`). Nothing runs until a channel is switched on: no thread, socket or timer (the sending
-thread starts with the first message). Send errors say what failed (`HTTP 500`, `timed out`…), never
+thread starts with the first message; approvals from Telegram, which the person turns on, add one polling thread, below). Send errors say what failed (`HTTP 500`, `timed out`…), never
 where; request addresses are not logged (the daemon's log filter keeps the HTTP client at `warn`, whatever
 `KELPIE_LOG` says: its trace output contains the request path, a Telegram bot token among it). What is dropped
 (a full queue, an outbox past its limit, an entry too old, one tried twice with no answer) is counted and shown in the
@@ -311,6 +311,36 @@ screen is included only when switched on (a warning is shown), last 14 lines, 10
 The phone link is `<phone address>/#s=<session id>` while phone access is on and *Include a link to the
 phone page* is (default on; the link holds this computer's LAN address and goes to the chosen server): no pairing code and no
 token, so it opens only on a device that is already paired (the phone page strips the fragment).
+
+**Telegram's choices** (`notify::TelegramMode`, `notify/telegram_poll.rs`, API 26). `telegram.mode` is `alert` (what it sent before
+there was a choice: the link only with *Include a link*), `alert_link` (the default when switched on from now on: the link
+`running_url` + `#s=`, the Tailscale origin when there is one, whatever *Include a link* says) or `approve_low`. A `notify.json`
+without the field reads as `alert`. `disable_web_page_preview` stays on, so Telegram does not fetch the link, but it sees it.
+- **Turning approvals on.** `notify.set` cannot: it refuses `approve_low` unless it is on already, and keeps `user_id` from what it
+  holds whatever the app sends. `notify.telegram_bind` (`auth::APP_ONLY`, then the person passes `user_presence`, then Telegram must
+  be on with a bot token) returns a 12-character code for five minutes. The first `/bind <code>` the bot gets in that time stores the
+  sender's `user_id` and that chat as `chat_id`, and sets `approve_low`. Five wrong codes end the binding.
+- **Turning them off.** Another mode, Telegram off, another chat id or bot token, `notify.clear`, and the kill switch (`mobile.revoke_all`,
+  `mobile.disable`, `mobile.reset`) set `alert_link` and forget the account, saved. Every nonce is burnt and the sent messages lose
+  their buttons (`editMessageText`). A `401` or `404` from `getUpdates`, a token Telegram rejects, does the same and says so.
+- **Polling.** One thread (`kelpie-telegram`) long-polls `getUpdates` (25 s, its own agent with a 35 s limit) only while approvals are
+  on or a binding waits: in `alert` and `alert_link` there is no thread and no request of its own. Outbound only, no listener. The
+  offset is kept in memory. Errors back off with full jitter from 1 s to 60 s; a `409` (a webhook, or another poller) is shown once
+  with what to do.
+- **Buttons.** Only for a needs-you message about a request the daemon labels `low` (`mobile::risk`), shown whole (at most 2000
+  characters, no hidden marks), with a one-time yes known to be one: in a terminal, the one open request a hook reported and a
+  permission menu with one plain *Yes* and one plain *No* (`choices::one_time_answers`); in a chat, the one open request, for which the
+  daemon writes the dialect's own one-time yes and no (Claude's `can_use_tool` repeating its input when that was at most 16 KiB, Codex's
+  command approvals in both versions, ACP's one `allow_once` and its `reject_once`), each of which `ChatSession::answer` must take as a
+  one-shot answer to that very request. `unknown`, `medium` and `dangerous` get the alert and the link. `callback_data` is `a:` or `d:`
+  and a 128-bit nonce, in memory only, bound to its message, single use, gone after five minutes, when the request is answered
+  elsewhere (looked at before each poll) and with a restart. At most six approvals a minute; past that, messages go without buttons.
+- **A press.** Counted only from the bound `user_id` in the bound `chat_id`; any other is dropped, and the count goes to the audit log
+  once a minute (`telegram_ignored`). It answers through `Session::answer_by` with `waiting_since` or `ChatSession::answer`, as
+  `By {id: "telegram", name: "Telegram"}`, after checking the request is still the one it was sent for: the first answer wins, and a
+  late press is told who answered. `chat.resolved` and the log's `kelpie_answer` say `by: "telegram"`. Every approval, denial and refused
+  press is in the phones' audit log as device `telegram`, with the command as a length and a hash. The app hears `notify.telegram`
+  `{change}` (`bound`, `bind_expired`, `bind_failed`, `off`, `error`) and reads `telegram` in `notify.get`.
 
 **Continue at reset.** Claude Code's `StopFailure` hook with error `rate_limit` marks the session
 `limited` (a `limited` field of `session.list`, cleared when the agent works again); other agents report
