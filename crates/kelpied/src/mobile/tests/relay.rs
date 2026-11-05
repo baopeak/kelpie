@@ -1,0 +1,273 @@
+//! The relay at the daemon, against a stand-in relay on this machine: what it is told first, what a slot is let do, and what it refuses.
+//! The stand-in forwards nothing by itself: the test plays the relay and the phone on its side of the socket.
+
+use super::*;
+use crate::mobile::relay::{self as relay_side, KEYS};
+use futures_util::{SinkExt, StreamExt};
+use p256::ecdsa::signature::Verifier;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response as Handshake};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+const ORIGIN: &str = "https://desk.tail1234.ts.net:8443";
+const ROOM: &str = "abababababababababababababababab";
+type RelaySocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+/// A relay that takes desktops and hands each one's socket to the test, with the address it asked for.
+struct FakeRelay {
+    url: String,
+    accepted: mpsc::Receiver<(String, RelaySocket)>,
+}
+
+async fn fake_relay() -> FakeRelay {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let (tx, accepted) = mpsc::channel(4);
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let asked = Arc::new(Mutex::new(String::new()));
+            let seen = asked.clone();
+            let callback = move |req: &Request, resp: Handshake| -> std::result::Result<Handshake, ErrorResponse> {
+                *seen.lock() = req.uri().to_string();
+                Ok(resp)
+            };
+            if let Ok(ws) = tokio_tungstenite::accept_hdr_async(tcp, callback).await {
+                let asked = asked.lock().clone();
+                let _ = tx.send((asked, ws)).await;
+            }
+        }
+    });
+    FakeRelay { url, accepted }
+}
+
+fn room_key() -> p256::ecdsa::SigningKey {
+    p256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap()
+}
+
+/// The rig with the relay on at the stand-in (its phone paired on a secure origin when `secure`), and phone access running.
+async fn relay_rig(fake: &FakeRelay, secure: bool, on: bool) -> NetworkRig {
+    let r = rig();
+    let m = &r.daemon.mobile;
+    let key = m.mac_key(true).unwrap().unwrap();
+    if secure {
+        let mut c = m.config.lock();
+        let phone = c.devices.iter_mut().find(|x| x.id == "phone").unwrap();
+        phone.secure_origin = true;
+        store::seal(phone, &key);
+    }
+    m.secrets.set(KEYS[0], &hex(&room_key().to_bytes())).unwrap();
+    let mut settings = store::RelaySettings { on, url: fake.url.clone(), room: Some(ROOM.into()), ticket: Some(format!("{ROOM}.ticket")), origin: Some(ORIGIN.into()), ..Default::default() };
+    store::seal_relay(&mut settings, &key);
+    m.config.lock().relay = Some(settings);
+    let dir = m.dir.clone();
+    let mut network = NetworkRig { rig: r, dir, addr: "127.0.0.1:0".parse().unwrap() };
+    network.restart().await;
+    network
+}
+
+async fn desktop_socket(fake: &mut FakeRelay) -> (String, RelaySocket) {
+    tokio::time::timeout(Duration::from_secs(5), fake.accepted.recv()).await.expect("the daemon dialled the relay").unwrap()
+}
+
+async fn next(ws: &mut RelaySocket) -> Option<WsMessage> {
+    match tokio::time::timeout(Duration::from_secs(3), ws.next()).await {
+        Ok(Some(Ok(WsMessage::Text(t)))) if t.as_str() == "ping" => Box::pin(next(ws)).await,
+        Ok(Some(Ok(msg))) => Some(msg),
+        _ => None,
+    }
+}
+
+async fn next_text(ws: &mut RelaySocket) -> Value {
+    match next(ws).await {
+        Some(WsMessage::Text(t)) => serde_json::from_str(t.as_str()).unwrap(),
+        other => panic!("expected the relay's word, got {other:?}"),
+    }
+}
+
+async fn open_slot(ws: &mut RelaySocket, slot: u16) {
+    ws.send(WsMessage::text(json!({"t": "open", "s": slot, "via": "token"}).to_string())).await.unwrap();
+}
+
+async fn to_slot(ws: &mut RelaySocket, slot: u16, bytes: &[u8]) {
+    let mut framed = slot.to_be_bytes().to_vec();
+    framed.extend_from_slice(bytes);
+    ws.send(WsMessage::binary(framed)).await.unwrap();
+}
+
+/// What came for `slot`: a frame, or the daemon's kick with its code.
+enum ForSlot {
+    Frame(Vec<u8>),
+    Kick(u16),
+}
+
+/// The next thing the daemon says about `slot`; what it says about other slots, and its allow-lists, go to `others`.
+async fn for_slot(ws: &mut RelaySocket, slot: u16, others: &mut Vec<Value>) -> Option<ForSlot> {
+    loop {
+        match next(ws).await? {
+            WsMessage::Binary(b) if b.len() >= 2 && u16::from_be_bytes([b[0], b[1]]) == slot => return Some(ForSlot::Frame(b[2..].to_vec())),
+            WsMessage::Text(t) => {
+                let v: Value = serde_json::from_str(t.as_str()).unwrap();
+                if v["t"] == "kick" && v["s"] == slot {
+                    return Some(ForSlot::Kick(v["c"].as_u64().unwrap() as u16));
+                }
+                others.push(v);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A reconnect through the relay: the session, or the code the slot was closed with.
+async fn reconnect(ws: &mut RelaySocket, slot: u16, keys: &kelpie_link::Keypair, desktop: &[u8; 32], others: &mut Vec<Value>) -> std::result::Result<kelpie_link::Session, u16> {
+    open_slot(ws, slot).await;
+    let (init, first) = kelpie_link::Initiator::reconnect(keys, desktop).unwrap();
+    to_slot(ws, slot, &first).await;
+    match for_slot(ws, slot, others).await {
+        Some(ForSlot::Frame(reply)) => Ok(init.finish(&reply).unwrap()),
+        Some(ForSlot::Kick(code)) => Err(code),
+        None => Err(0),
+    }
+}
+
+async fn say(ws: &mut RelaySocket, slot: u16, session: &mut kelpie_link::Session, value: Value) {
+    for frame in session.seal(value.to_string().as_bytes()).unwrap() {
+        to_slot(ws, slot, &frame).await;
+    }
+}
+
+/// The next whole message the daemon sealed for `slot`, or the code it was closed with.
+async fn hear(ws: &mut RelaySocket, slot: u16, session: &mut kelpie_link::Session, others: &mut Vec<Value>) -> std::result::Result<Value, u16> {
+    loop {
+        match for_slot(ws, slot, others).await {
+            Some(ForSlot::Frame(f)) => {
+                if let Some(bytes) = session.open(&f, now_millis()).unwrap() {
+                    return Ok(serde_json::from_slice(&bytes).unwrap());
+                }
+            }
+            Some(ForSlot::Kick(code)) => return Err(code),
+            None => return Err(0),
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_relay_hears_first_who_may_come_in_and_from_where_and_the_desktop_signs_in_fresh() {
+    let mut fake = fake_relay().await;
+    let _network = relay_rig(&fake, true, true).await;
+    let (asked, mut ws) = desktop_socket(&mut fake).await;
+    let query: HashMap<String, String> = asked.split_once('?').unwrap().1.split('&').filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    assert!(asked.starts_with("/v1/desktop?"), "{asked}");
+    assert_eq!(query["t"], format!("{ROOM}.ticket"));
+    let ts: u64 = query["ts"].parse().unwrap();
+    assert!(now_millis().abs_diff(ts) < 60_000);
+    let sig = p256::ecdsa::Signature::from_slice(&kelpie_link::unb64(&query["sig"]).unwrap()).unwrap();
+    assert!(room_key().verifying_key().verify(relay_side::statement(ROOM, ts).as_bytes(), &sig).is_ok(), "signed with the room key");
+    assert_eq!(next_text(&mut ws).await, json!({"t": "allow", "h": []}), "nobody has a token yet");
+    assert_eq!(next_text(&mut ws).await, json!({"t": "origin", "o": ORIGIN}));
+    // Once more, as after a drop: a new signature, later than the last, and the list first again.
+    drop(ws);
+    let (again, mut ws) = desktop_socket(&mut fake).await;
+    let later: u64 = again.split("ts=").nth(1).unwrap().split('&').next().unwrap().parse().unwrap();
+    assert!(later > ts);
+    assert_eq!(next_text(&mut ws).await["t"], "allow");
+}
+
+#[tokio::test]
+async fn with_the_relay_off_nothing_dials_out() {
+    let mut fake = fake_relay().await;
+    let network = relay_rig(&fake, true, false).await;
+    assert!(tokio::time::timeout(Duration::from_secs(2), fake.accepted.recv()).await.is_err(), "no socket while it is off");
+    assert!(network.rig.daemon.mobile.relay_endpoint().is_none());
+    let told: Value = serde_json::from_str(&addrs_message(&network.rig.daemon.mobile.addrs.borrow())).unwrap();
+    assert!(!told["endpoints"].as_array().unwrap().iter().any(|e| e["t"] == "relay"), "phones are not told of a relay that is off: {told}");
+}
+
+#[tokio::test]
+async fn garbage_on_a_slot_is_dropped_unanswered_and_costs_no_diffie_hellman() {
+    let mut fake = fake_relay().await;
+    let network = relay_rig(&fake, true, true).await;
+    let (_, mut ws) = desktop_socket(&mut fake).await;
+    next_text(&mut ws).await;
+    next_text(&mut ws).await;
+    open_slot(&mut ws, 1).await;
+    to_slot(&mut ws, 1, &[0x01, 0x02, 0x03].repeat(40)).await;
+    let mut first = vec![kelpie_link::VERSION, kelpie_link::MODE_RECONNECT];
+    first.extend_from_slice(&[9u8; 16 + 48]);
+    open_slot(&mut ws, 2).await;
+    to_slot(&mut ws, 2, &first).await;
+    assert!(tokio::time::timeout(Duration::from_millis(600), ws.next()).await.is_err(), "no reply, no kick, nothing");
+    let budget = network.rig.daemon.mobile.handshake_budget.lock().tokens;
+    assert!(budget >= HANDSHAKES_PER_SECOND - 0.5, "the budget was not spent: {budget}");
+}
+
+#[tokio::test]
+async fn a_page_paired_over_plain_http_is_turned_away_at_the_relay() {
+    let mut fake = fake_relay().await;
+    let network = relay_rig(&fake, false, true).await;
+    let (_, mut ws) = desktop_socket(&mut fake).await;
+    next_text(&mut ws).await;
+    next_text(&mut ws).await;
+    let desktop = network.rig.daemon.mobile.link_key().unwrap().public;
+    let mut others = Vec::new();
+    assert_eq!(reconnect(&mut ws, 0, &network.rig.phone, &desktop, &mut others).await.err(), Some(link::RELAY_REFUSED), "refused before any reply");
+}
+
+#[tokio::test]
+async fn a_secure_phone_works_through_a_slot_gets_its_token_and_is_closed_when_removed() {
+    let mut fake = fake_relay().await;
+    let network = relay_rig(&fake, true, true).await;
+    let (_, mut ws) = desktop_socket(&mut fake).await;
+    next_text(&mut ws).await;
+    next_text(&mut ws).await;
+    let desktop = network.rig.daemon.mobile.link_key().unwrap().public;
+    let phone = network.rig.phone.clone();
+    let mut others = Vec::new();
+
+    // A client with no heartbeat has no place on the relay.
+    let mut session = reconnect(&mut ws, 3, &phone, &desktop, &mut others).await.unwrap();
+    say(&mut ws, 3, &mut session, json!({"caps": ["ack"]})).await;
+    assert_eq!(hear(&mut ws, 3, &mut session, &mut others).await.err(), Some(link::RELAY_REFUSED));
+
+    // One that answers heartbeats and can use the relay: the hello, where to reach the computer, then its token.
+    let mut session = reconnect(&mut ws, 4, &phone, &desktop, &mut others).await.unwrap();
+    say(&mut ws, 4, &mut session, json!({"caps": ["ack", "hb", "relay"]})).await;
+    let hello = hear(&mut ws, 4, &mut session, &mut others).await.unwrap();
+    assert_eq!(hello["type"], "hello");
+    assert_eq!(hello["device"]["permission"], "write", "a secure device types through the relay: {hello}");
+    let addrs = hear(&mut ws, 4, &mut session, &mut others).await.unwrap();
+    assert!(addrs["endpoints"].as_array().unwrap().iter().any(|e| e["t"] == "relay" && e["r"] == format!("{ROOM}.ticket")), "{addrs}");
+    let given = hear(&mut ws, 4, &mut session, &mut others).await.unwrap();
+    assert_eq!(given["type"], "relay");
+    let token = kelpie_link::unb64(given["token"].as_str().unwrap()).unwrap();
+    let hash = relay_side::token_hash(&token);
+    // The relay is told the new list.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([hash])) && Instant::now() < deadline {
+        if let Some(WsMessage::Text(t)) = tokio::time::timeout(Duration::from_millis(200), ws.next()).await.ok().flatten().and_then(|m| m.ok()) {
+            others.push(serde_json::from_str(t.as_str()).unwrap());
+        }
+    }
+    assert!(others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([hash])), "{others:?}");
+
+    // Removed on the computer: the relay drops it from the list, and its slot is closed after it is told inside the session.
+    others.clear();
+    network.rig.daemon.mobile.revoke("phone").unwrap();
+    let mut told_revoked = false;
+    loop {
+        match hear(&mut ws, 4, &mut session, &mut others).await {
+            Ok(v) if v["type"] == "revoked" => told_revoked = true,
+            Ok(_) => {}
+            Err(code) => {
+                assert_eq!(code, NOT_PAIRED);
+                break;
+            }
+        }
+    }
+    assert!(told_revoked);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([])) && Instant::now() < deadline {
+        if let Some(WsMessage::Text(t)) = tokio::time::timeout(Duration::from_millis(200), ws.next()).await.ok().flatten().and_then(|m| m.ok()) {
+            others.push(serde_json::from_str(t.as_str()).unwrap());
+        }
+    }
+    assert!(others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([])), "{others:?}");
+}

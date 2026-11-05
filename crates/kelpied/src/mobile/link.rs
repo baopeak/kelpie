@@ -1,5 +1,6 @@
-//! `/link`: a phone's WebSocket carrying kelpie-link (see the `kelpie-link` crate). Binary messages only; the first one is
-//! the phone's half of a handshake, and nothing readable passes before the second.
+//! `/link`: a phone's WebSocket carrying kelpie-link (see the `kelpie-link` crate), or one of the relay's slots (`relay`), which carries the
+//! same messages and is handled the same way. Binary messages only; the first one is the phone's half of a handshake, and nothing readable
+//! passes before the second.
 //!
 //! What a first message costs is bounded before it costs anything: a connection counts against the handshakes pending (16, the
 //! oldest giving way to a newcomer; 4 from one address) from its upgrade until its first valid sealed frame or 5 s, it carries exactly one handshake, its `mac1` is checked before
@@ -42,6 +43,8 @@ pub const HANDSHAKE: Duration = Duration::from_millis(kelpie_link::HANDSHAKE_TIM
 pub const BAD_CODE: u16 = 4403;
 pub const TOO_MANY: u16 = 4429;
 pub const BUSY: u16 = 4503;
+/// Over the relay: this device may not use it (it paired over plain HTTP, or does not answer heartbeats). It may still connect directly.
+pub const RELAY_REFUSED: u16 = 4412;
 /// The phone's connection details, from the listener that accepted it.
 #[derive(Clone, Debug)]
 pub struct Peer {
@@ -69,6 +72,17 @@ impl Peer {
     /// A connection accepted by the loopback listener behind Tailscale Serve.
     pub fn behind_serve(addr: SocketAddr) -> Peer {
         Peer { addr, tls: true, through_serve: true, client: None, secure_origin: false, origin: None }
+    }
+
+    /// A phone on one of the relay's slots. Its address is the slot's (`relay::slot_ip`), which no network address can be, and its page is at the origin the room
+    /// lets phones in from, which a browser cannot lie about. The relay could, and still has no session without the phone's keys.
+    pub fn relayed(slot: u16, origin: Option<String>) -> Peer {
+        Peer { addr: SocketAddr::new(super::relay::slot_ip(slot), 0), tls: false, through_serve: false, client: None, secure_origin: origin.is_some(), origin }
+    }
+
+    /// It came through the relay.
+    pub fn via_relay(&self) -> bool {
+        !self.through_serve && super::relay::is_slot_ip(self.addr.ip())
     }
 
     /// The address the limits and the desktop go by. Never this machine for what comes through serve: every phone behind it
@@ -106,9 +120,48 @@ fn forwarded_client(headers: &HeaderMap) -> Option<IpAddr> {
     listen::tailscale(ip).then_some(ip)
 }
 
-/// A WebSocket with an established kelpie-link session.
+/// What carries a phone's messages: its own WebSocket on `/link`, or a slot of the relay's (`relay`). Both give and take what a WebSocket does, so everything
+/// above them is the same code.
+pub enum Carrier {
+    Socket(WebSocket),
+    Relay(super::relay::Slot),
+}
+
+impl Carrier {
+    /// The next message; None once the carrier is gone.
+    pub async fn recv(&mut self) -> Option<Result<Message, axum::Error>> {
+        match self {
+            Carrier::Socket(ws) => ws.recv().await,
+            Carrier::Relay(slot) => slot.recv().await.map(|frame| Ok(Message::Binary(frame.into()))),
+        }
+    }
+
+    pub async fn send(&mut self, msg: Message) -> Result<(), axum::Error> {
+        match self {
+            Carrier::Socket(ws) => ws.send(msg).await,
+            Carrier::Relay(slot) => match msg {
+                Message::Binary(frame) => {
+                    if slot.send(frame.to_vec()).await {
+                        Ok(())
+                    } else {
+                        Err(axum::Error::new(std::io::Error::other("the relay connection is gone")))
+                    }
+                }
+                Message::Close(frame) => {
+                    let (code, reason) = frame.map_or((1000, String::new()), |f| (f.code, f.reason.as_str().to_string()));
+                    slot.close(code, reason).await;
+                    Ok(())
+                }
+                // The relay keeps its own connection to the phone alive.
+                _ => Ok(()),
+            },
+        }
+    }
+}
+
+/// A carrier with an established kelpie-link session.
 pub struct Wire {
-    pub ws: WebSocket,
+    pub ws: Carrier,
     pub session: kelpie_link::Session,
 }
 
@@ -123,7 +176,7 @@ pub enum Opened {
 }
 
 impl Wire {
-    pub fn new(ws: WebSocket, session: kelpie_link::Session) -> Wire {
+    pub fn new(ws: Carrier, session: kelpie_link::Session) -> Wire {
         Wire { ws, session }
     }
 
@@ -193,7 +246,7 @@ impl Wire {
     }
 }
 
-pub async fn close(ws: &mut WebSocket, code: u16, reason: &'static str) {
+pub async fn close(ws: &mut Carrier, code: u16, reason: &'static str) {
     let _ = tokio::time::timeout(CLOSE_TIMEOUT, ws.send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))).await;
 }
 
@@ -208,7 +261,7 @@ fn hello_name(v: &Value) -> String {
 }
 
 /// A phone's connection, from its first message on.
-pub async fn accept(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Generation>, peer: Peer, browser: bool) {
+pub async fn accept(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>, peer: Peer, browser: bool) {
     let m = &daemon.mobile;
     let ip = peer.ip();
     // Too many handshakes under way, in all or from this address: dropped, unanswered.
@@ -273,8 +326,12 @@ fn failed(daemon: &Daemon, ip: IpAddr) {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn pair(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Generation>, peer: Peer, browser: bool, key: &kelpie_link::Keypair, first: &[u8], psks: Vec<[u8; 32]>, psk: [u8; 32], slot: HandshakeSlot) {
+async fn pair(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>, peer: Peer, browser: bool, key: &kelpie_link::Keypair, first: &[u8], psks: Vec<[u8; 32]>, psk: [u8; 32], slot: HandshakeSlot) {
     let m = &daemon.mobile;
+    // Over the relay only a page at the origin the room lets in may pair: what pairs there is a device the relay may serve.
+    if peer.via_relay() && !peer.secure_origin {
+        return;
+    }
     // Kelpie is short of CPU or memory: one handshake at a time, spaced out. The code is not spent, and it says so: the phone
     // proved it holds the code.
     if m.pairing_paced() {
@@ -334,7 +391,11 @@ async fn pair(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Generation
     m.remove_pending(&id);
     daemon.broadcast("mobile.updated", json!({}));
     let told = match decision {
-        Some(Ok(Ok(Some(device)))) => json!({"type": "paired", "device": {"id": device.id, "name": device.name, "permission": device.permission.name(), "kind": device.kind.name()}}),
+        // A phone paired on a secure origin gets its relay token now: the next time it connects, the relay may be its only way.
+        Some(Ok(Ok(Some(device)))) => {
+            let relay = m.relay_grant(&device, &json!({"caps": ["relay"]})).and_then(|g| serde_json::from_str::<Value>(&g).ok());
+            json!({"type": "paired", "device": {"id": device.id, "name": device.name, "permission": device.permission.name(), "kind": device.kind.name()}, "relay": relay})
+        }
         Some(Ok(Ok(None))) => json!({"type": "declined"}),
         Some(_) => json!({"type": "timeout"}),
         None => return,
@@ -343,7 +404,7 @@ async fn pair(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Generation
     wire.close(1000, "").await;
 }
 /// Resolves when the phone closes its side (anything it sends meanwhile is ignored: it has nothing to say yet).
-async fn gone(ws: &mut WebSocket) {
+async fn gone(ws: &mut Carrier) {
     while let Some(Ok(msg)) = ws.recv().await {
         if matches!(msg, Message::Close(_)) {
             return;
@@ -352,7 +413,7 @@ async fn gone(ws: &mut WebSocket) {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn reconnect(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Generation>, peer: Peer, browser: bool, key: &kelpie_link::Keypair, first: &[u8], slot: HandshakeSlot) {
+async fn reconnect(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>, peer: Peer, browser: bool, key: &kelpie_link::Keypair, first: &[u8], slot: HandshakeSlot) {
     let m = &daemon.mobile;
     if !m.handshake_allowed(peer.ip()) {
         return;
@@ -373,6 +434,11 @@ async fn reconnect(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Gener
             return;
         }
     };
+    // The relay serves only a device that paired on a secure origin: a page that could have been swapped on the way has no business there.
+    if peer.via_relay() && !device.secure_origin {
+        close(&mut ws, RELAY_REFUSED, "relay").await;
+        return;
+    }
     let Ok((session, reply)) = opened.accept() else { return };
     if tokio::time::timeout(HANDSHAKE, ws.send(Message::Binary(reply.into()))).await.is_err() {
         return;
@@ -390,6 +456,11 @@ async fn reconnect(daemon: Arc<Daemon>, mut ws: WebSocket, generation: Arc<Gener
         return;
     }
     let Some(said) = said else { return held_silently(&daemon, peer.ip()) };
+    // The relay keeps its own connection to the phone alive, so only the heartbeats inside the session would find a phone gone.
+    if peer.via_relay() && !super::acknowledges(Some(&said)) {
+        wire.close(RELAY_REFUSED, "caps").await;
+        return;
+    }
     if !m.reconnect_allowed(&device.id) {
         wire.close(TOO_MANY, "too_many").await;
         return;

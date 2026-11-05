@@ -2020,6 +2020,42 @@ impl Daemon {
                 self.mobile.set_projects(&params);
                 json!(true)
             }
+            // The verified app only (`auth::APP_ONLY`). Turning the relay off asks nobody; turning it on is checked first (an address, a registration key when
+            // the room is to be made), then the person verifies, and only then is a room made and a socket opened.
+            "mobile.set_relay" => {
+                if !self.is_verified_app(client) {
+                    bail!("this needs the Kelpie app: phone access is decided in Kelpie → Settings → Mobile");
+                }
+                use crate::mobile::relay;
+                if !param(&params, "on")?.as_bool().ok_or_else(|| anyhow!("on must be true or false"))? {
+                    let v = relay::turn_off(self)?;
+                    self.broadcast("mobile.updated", json!({}));
+                    v
+                } else {
+                    let asked = relay::check_turn_on(&self.mobile, &params)?;
+                    let runtime = tokio::runtime::Handle::current();
+                    self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::Relay, move |me| {
+                        let _in_runtime = runtime.enter();
+                        let v = relay::turn_on(me, asked)?;
+                        me.broadcast("mobile.updated", json!({}));
+                        Ok(v)
+                    })?;
+                    return Ok(None);
+                }
+            }
+            // A new room for a relay that stays slow. Needs the kept registration key and the verified app; it gives nobody more access.
+            "mobile.relay_recreate" => {
+                if !self.is_verified_app(client) {
+                    bail!("this needs the Kelpie app: phone access is decided in Kelpie → Settings → Mobile");
+                }
+                let (me, tx, id) = (self.clone(), tx.clone(), id.clone());
+                tokio::spawn(async move {
+                    let answer = crate::mobile::relay::recreate(me.clone()).await;
+                    me.broadcast("mobile.updated", json!({}));
+                    let _ = tx.send(json_out(&rpc_answer(&id, answer)));
+                });
+                return Ok(None);
+            }
             "meta.list" => serde_json::to_value(&self.workspace_meta.lock().map)?,
             "meta.get" => {
                 let path = param(&params, "path")?.as_str().unwrap_or_default();

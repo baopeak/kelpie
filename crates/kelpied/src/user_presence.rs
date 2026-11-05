@@ -108,6 +108,8 @@ pub enum Prompt {
     ResetLock { name: String },
     /// Let a Telegram account approve low-risk requests, with no Face ID.
     TelegramApprovals,
+    /// Let paired phones reach this computer through the relay.
+    Relay,
 }
 
 /// The languages the daemon's prompts are written in.
@@ -157,6 +159,8 @@ impl Prompt {
             (Prompt::ResetLock { name }, Lang::Vi) => format!("Kelpie: cho phép điện thoại {} thiết lập khóa truy cập mới cho khóa ứng dụng, trong 5 phút tới.", quoted(name)),
             (Prompt::TelegramApprovals, Lang::En) => "Kelpie: let one Telegram account approve low-risk requests on this computer from its chat, with no Face ID. Telegram can read those messages.".to_string(),
             (Prompt::TelegramApprovals, Lang::Vi) => "Kelpie: cho phép một tài khoản Telegram duyệt các yêu cầu rủi ro thấp trên máy tính này từ cuộc trò chuyện của nó, không cần Face ID. Telegram đọc được các tin nhắn đó.".to_string(),
+            (Prompt::Relay, Lang::En) => "Kelpie: let phones paired over Tailscale reach this computer through the relay, which carries what they say without being able to read it.".to_string(),
+            (Prompt::Relay, Lang::Vi) => "Kelpie: cho phép các điện thoại đã ghép đôi qua Tailscale kết nối tới máy tính này qua relay, nơi chuyển tiếp dữ liệu mà không đọc được nội dung.".to_string(),
         }
     }
 }
@@ -962,6 +966,7 @@ mod tests {
             Prompt::WeakenLock,
             Prompt::ResetLock { name: "Pixel".into() },
             Prompt::TelegramApprovals,
+            Prompt::Relay,
         ];
         for p in &prompts {
             let (en, vi) = (p.text(Lang::En), p.text(Lang::Vi));

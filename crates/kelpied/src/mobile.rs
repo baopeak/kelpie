@@ -15,14 +15,16 @@
 //! minutes) and only after the person types, in the Kelpie app, the code the phone shows and passes the OS
 //! verification the daemon runs (`user_presence`); each device is a public key in a MAC'd record (`store`), `read` until raised, revocable; a
 //! page in a browser may type only over HTTPS or Tailscale; HTTPS is used when a certificate is
-//! configured (e.g. from `tailscale cert`), or by Tailscale Serve in front of one loopback listener (`tailscale`); and a phone that
-//! paired on a secure origin reaches nothing until its passkey passes, here and not in the page (`lock`).
+//! configured (e.g. from `tailscale cert`), or by Tailscale Serve in front of one loopback listener (`tailscale`); a phone that
+//! paired on a secure origin reaches nothing until its passkey passes, here and not in the page (`lock`); and such a phone may also
+//! come through the relay, which forwards what it cannot read (`relay`).
 
 pub mod audit;
 mod lanes;
 mod link;
 mod listen;
 mod lock;
+pub mod relay;
 pub mod risk;
 mod store;
 mod sync;
@@ -343,6 +345,8 @@ struct Addrs {
     list: Vec<String>,
     /// The Tailscale HTTPS origin, `<name>:8443`.
     ts: Option<String>,
+    /// The relay and this computer's room there, while it is on.
+    relay: Option<kelpie_link::Endpoint>,
 }
 
 /// The replies kept for one device: (`cid`, when, how long it counts, the reply).
@@ -429,6 +433,8 @@ pub struct Mobile {
     tailscale_ended: AtomicU64,
     /// Held while Tailscale's serve configuration is being changed: one change at a time.
     tailscale_change: tokio::sync::Mutex<()>,
+    /// The relay's connection and what it knows (`relay`).
+    relay: relay::Runtime,
     /// The app lock's windows, challenges and settings as checked (`lock`).
     lock_memory: LockMemory,
     /// A test on the only address it can bind holds this machine to the limits for an address.
@@ -554,6 +560,7 @@ impl Mobile {
             tailscale_check: tokio::sync::Mutex::new(()),
             tailscale_ended: AtomicU64::new(0),
             tailscale_change: tokio::sync::Mutex::new(()),
+            relay: relay::Runtime::default(),
             lock_memory: LockMemory::default(),
             #[cfg(test)]
             loopback_is_remote: AtomicBool::new(false),
@@ -926,6 +933,7 @@ impl Mobile {
         self.verify_devices();
         let key_unreadable = *self.key_unreadable.lock();
         let options = self.lock_options();
+        let relay = self.relay_status();
         let c = self.config.lock();
         let running = self.running.lock();
         let now = Instant::now();
@@ -960,6 +968,7 @@ impl Mobile {
             "dormant_days": c.dormant_days.unwrap_or(store::DEFAULT_DORMANT_DAYS),
             "tailscale": {"on": c.tailscale, "origin": running.as_ref().and_then(|r| r.ts_origin.clone()), "to_remove": c.tailscale_remove},
             "lock": {"on": options.on, "idle_s": options.idle_s, "recheck": options.recheck, "plain_read": options.plain_read},
+            "relay": relay,
             "app": app,
         })
     }
@@ -1370,6 +1379,7 @@ impl Mobile {
             r.listeners.clone()
         };
         advertise(self, &listeners);
+        self.relay_note_origin();
         true
     }
 
@@ -1427,21 +1437,30 @@ impl Mobile {
             codes.push(Code { psk, kind, at: Instant::now(), attempts: HashMap::new() });
         }
         let lan: Vec<String> = addrs.iter().map(listen::host).collect();
-        // The Tailscale origin first: what does not fit in a QR code is left out from the end, so it is the last to go.
-        let endpoints = ts.iter().map(|a| kelpie_link::Endpoint::tailscale(a)).chain(lan.iter().map(|a| kelpie_link::Endpoint::lan(a))).collect();
+        // A phone can pair through the relay too, with a token from this code, and with no address of this network to bind.
+        let relay = if plain { None } else { self.relay_endpoint() };
+        if relay.is_some() {
+            self.relay_pair(&psk);
+        }
+        // The page the installed app is at, while Tailscale is not publishing it now.
+        let relay_host = if ts.is_none() && relay.is_some() { self.relay_live().and_then(|r| r.origin?.strip_prefix("https://").map(str::to_string)) } else { None };
+        let over_relay = relay.is_some();
+        // The Tailscale origin first, then the relay: what does not fit in a QR code is left out from the end, so they are the last to go.
+        let endpoints = ts.iter().map(|a| kelpie_link::Endpoint::tailscale(a)).chain(relay).chain(lan.iter().map(|a| kelpie_link::Endpoint::lan(a))).collect();
         // The secret travels in the fragment: browsers never send it in a request or a Referer.
         let preferred = self.config.lock().ip.clone();
-        let host = match &ts {
+        let host = match ts.as_ref().or(relay_host.as_ref()) {
             Some(origin) => origin.clone(),
             // The address chosen, if something listens there: with Tailscale mode on the server also runs with this network's listeners down.
             None => preferred.and_then(|ip| ip.parse::<IpAddr>().ok()).filter(|ip| addrs.iter().any(|a| a.ip() == *ip)).map(|ip| listen::host(&SocketAddr::new(ip, port))).or_else(|| lan.first().cloned()).ok_or_else(|| anyhow!("no address to pair on"))?,
         };
-        let secure = tls || ts.is_some();
+        let secure = tls || ts.is_some() || relay_host.is_some();
         let scheme = if secure { "https" } else { "http" };
         let (link, qr) = pair_link(scheme, &host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints, name: listen::hostname() })?;
         // Whether a phone that pairs at this link can have a passkey, and so type while the lock is on.
         let passkey = webauthn::rp_id(&format!("{scheme}://{host}")).is_some();
-        Ok(json!({"url": link, "qr": qr_svg(&qr), "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": secure, "tailscale": ts.is_some(), "passkey": passkey}))
+        // `tailscale`: the link is the installed app's origin, so the app can scan it; `relay`: a phone may pair through the relay too.
+        Ok(json!({"url": link, "qr": qr_svg(&qr), "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": secure, "tailscale": ts.is_some() || relay_host.is_some(), "relay": over_relay, "passkey": passkey}))
     }
 
     /// The person says no to a pairing request (no verification: it adds nothing).
@@ -1587,6 +1606,7 @@ impl Mobile {
     pub fn disable(&self) {
         self.stop_all_grants();
         self.forget_all_locks();
+        self.relay_stop();
         {
             let mut c = self.config.lock();
             c.enabled = false;
@@ -1648,7 +1668,8 @@ impl Mobile {
         for (id, _) in &devices {
             self.forget_push_secret(id);
         }
-        for key in [K_LINK, K_MAC, destinations::K_VAPID] {
+        self.relay_forget();
+        for key in [K_LINK, K_MAC, destinations::K_VAPID].into_iter().chain(relay::KEYS) {
             if let Err(e) = self.secrets.delete(key) {
                 tracing::warn!("phone access reset: {e:#}");
             }
@@ -1664,6 +1685,7 @@ impl Mobile {
             c.tailscale_remove = c.tailscale_remove || c.tailscale_port.is_some();
             // Sealed with the key that just went: back to the strictest.
             c.lock = None;
+            c.relay = None;
         }
         self.check_lock_options();
         *self.broken.lock() = None;
@@ -1738,8 +1760,8 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
         let c = daemon.mobile.config.lock();
         (c.ip.clone(), c.port.unwrap_or(DEFAULT_PORT), c.cert.clone(), c.key.clone())
     };
-    // With Tailscale mode on, no address here is no reason to stop: a laptop away from home has none, and that is what the mode is for.
-    let keep_going = daemon.mobile.config.lock().tailscale;
+    // With Tailscale mode or the relay on, no address here is no reason to stop: a laptop away from home has none, and that is what they are for.
+    let keep_going = daemon.mobile.config.lock().tailscale || daemon.mobile.relay_live().is_some();
     let mut no_network = None;
     let ips = match listen::wanted(ip.as_deref()) {
         Ok(ips) => ips,
@@ -1785,6 +1807,7 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
     if daemon.mobile.config.lock().tailscale {
         tokio::spawn(tailscale::resume(daemon.clone()));
     }
+    relay::follow(&daemon);
     // Measuring the machine's load runs exactly as long as this server does.
     let told = Arc::downgrade(&daemon);
     daemon.mobile.load.start(
@@ -1851,11 +1874,13 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
 fn advertise(m: &Mobile, listeners: &listen::Listeners) {
     let list: Vec<String> = listeners.addrs().iter().map(listen::host).collect();
     let ts = m.tailscale_origin();
+    let relay = m.relay_endpoint();
     m.addrs.send_modify(|a| {
-        if a.list != list || a.ts != ts {
+        if a.list != list || a.ts != ts || a.relay != relay {
             a.seq += 1;
             a.list = list;
             a.ts = ts;
+            a.relay = relay;
         }
     });
 }
@@ -1934,12 +1959,13 @@ fn plain_origin(origin: &str) -> bool {
 /// The most a connection may do whatever its device's record says: a page in a browser (a device paired as one, or any
 /// connection whose upgrade carried a browser's `Origin`) may type only over HTTPS (its listener's own, or Tailscale Serve's) or from a
 /// Tailscale address (or from this machine itself, which no network sits between); over plain HTTP elsewhere the page could have been
-/// swapped on the way, so it may only read. The native app is not capped.
+/// swapped on the way, so it may only read. The native app is not capped. Through the relay come only devices paired on a secure origin,
+/// whose page is this daemon's and came over HTTPS (`link::reconnect`).
 fn transport_cap(kind: Kind, browser: bool, peer: &Peer) -> Permission {
     if kind == Kind::App && !browser {
         return Permission::Control;
     }
-    if peer.tls || peer.ip().is_loopback() || listen::tailscale(peer.ip()) {
+    if peer.tls || peer.via_relay() || peer.ip().is_loopback() || listen::tailscale(peer.ip()) {
         Permission::Write
     } else {
         Permission::Read
@@ -1957,9 +1983,12 @@ fn phone_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
     PHONE_ASSETS.iter().find(|(p, _, _)| *p == path).map(|(_, ty, body)| (*ty, *body))
 }
 
-fn secure_headers(mut r: Response) -> Response {
+/// `relay`: what the page may connect to besides itself, the relay while it is on (`Mobile::relay_connect_src`) and nothing else.
+fn secure_headers(mut r: Response, relay: Option<&str>) -> Response {
+    const ONLY_SELF: &str = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
     let h = r.headers_mut();
-    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"));
+    let csp = relay.and_then(|relay| HeaderValue::from_str(&ONLY_SELF.replace("connect-src 'self'", &format!("connect-src 'self' {relay}"))).ok());
+    h.insert(header::CONTENT_SECURITY_POLICY, csp.unwrap_or(HeaderValue::from_static(ONLY_SELF)));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -1967,14 +1996,15 @@ fn secure_headers(mut r: Response) -> Response {
     r
 }
 
-async fn page(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+async fn page(State(daemon): State<Arc<Daemon>>, method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    let relay = daemon.mobile.relay_connect_src();
     if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
-        return secure_headers(StatusCode::METHOD_NOT_ALLOWED.into_response());
+        return secure_headers(StatusCode::METHOD_NOT_ALLOWED.into_response(), relay.as_deref());
     }
     let Some((ty, body)) = phone_asset(uri.path()) else {
-        return secure_headers(StatusCode::NOT_FOUND.into_response());
+        return secure_headers(StatusCode::NOT_FOUND.into_response(), relay.as_deref());
     };
-    let mut r = secure_headers(([(header::CONTENT_TYPE, ty)], body).into_response());
+    let mut r = secure_headers(([(header::CONTENT_TYPE, ty)], body).into_response(), relay.as_deref());
     // Files under /assets/ carry a hash of their content in their name: the browser may keep them. The page,
     // the service worker and the manifest are asked for again every time.
     if uri.path().starts_with("/assets/") {
@@ -2007,7 +2037,7 @@ async fn link_socket(State(daemon): State<Arc<Daemon>>, axum::Extension(generati
     }
     let browser = headers.contains_key(header::ORIGIN);
     // One Noise message per WebSocket message.
-    ws.max_message_size(kelpie_link::MAX_NOISE_MESSAGE + 16).max_frame_size(kelpie_link::MAX_NOISE_MESSAGE + 16).on_upgrade(move |s| link::accept(daemon, s, generation, peer, browser))
+    ws.max_message_size(kelpie_link::MAX_NOISE_MESSAGE + 16).max_frame_size(kelpie_link::MAX_NOISE_MESSAGE + 16).on_upgrade(move |s| link::accept(daemon, link::Carrier::Socket(s), generation, peer, browser))
 }
 
 fn sessions(daemon: &Daemon) -> Value {
@@ -2192,6 +2222,8 @@ struct Conn {
     locked: bool,
     /// How its lock stands, as it was last told.
     lock_told: &'static str,
+    /// A token for the relay, sent once after the hello (`relay`).
+    relay_offer: Option<String>,
     _phone: Option<crate::load::PhoneGuard>,
 }
 
@@ -2779,7 +2811,8 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     let mut conn = Conn {
         daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(),
         followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(), chat_at: HashMap::new(), waiting, overflowed,
-        cap, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, lock_path, secure_page, resume: first["resume"].as_str().filter(|r| r.len() <= 64).map(str::to_string), locked: false, lock_told: "", _phone: Some(daemon.mobile.load.phone()),
+        cap, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, lock_path, secure_page, resume: first["resume"].as_str().filter(|r| r.len() <= 64).map(str::to_string), locked: false, lock_told: "",
+        relay_offer: daemon.mobile.relay_grant(&device, &first), _phone: Some(daemon.mobile.load.phone()),
     };
     // The device's older connection, if any, is told it was replaced.
     let replaced = Arc::new(Notify::new());
@@ -2873,7 +2906,7 @@ fn device_hello(device: &Device, record: Permission, cap: Permission) -> Value {
 /// Where this computer can be reached, for a phone to dial next time (after an address change above all). `list` is what a page from
 /// before `endpoints` reads: the direct addresses only.
 fn addrs_message(a: &Addrs) -> String {
-    let endpoints: Vec<kelpie_link::Endpoint> = a.ts.iter().map(|o| kelpie_link::Endpoint::tailscale(o)).chain(a.list.iter().map(|l| kelpie_link::Endpoint::lan(l))).collect();
+    let endpoints: Vec<kelpie_link::Endpoint> = a.ts.iter().map(|o| kelpie_link::Endpoint::tailscale(o)).chain(a.relay.clone()).chain(a.list.iter().map(|l| kelpie_link::Endpoint::lan(l))).collect();
     json!({"type": "addrs", "seq": a.seq, "list": a.list, "endpoints": endpoints, "hostname": listen::hostname()}).to_string()
 }
 
@@ -2911,6 +2944,11 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
     let told = addrs.borrow_and_update().clone();
     if !wire.send(&addrs_message(&told)).await {
         return;
+    }
+    if let Some(offer) = conn.relay_offer.take() {
+        if !wire.send(&offer).await {
+            return;
+        }
     }
     let (mut live, mut beats) = (Liveness::new(Instant::now()), 0);
     let began = Instant::now();
@@ -3280,6 +3318,7 @@ mod tests {
     use super::*;
 
     mod lock;
+    mod relay;
 
     #[test]
     fn comparisons_and_hex() {
@@ -3374,7 +3413,7 @@ mod tests {
         let (out_tx, out) = mpsc::channel(16);
         let conn = Conn {
             daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
-            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", _phone: None,
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         };
         Rig { daemon, conn, out, term, typed, chat, phone }
     }
@@ -5037,7 +5076,7 @@ mod tests {
         let (out, _out_rx) = mpsc::channel(16);
         Conn {
             daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
-            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", _phone: None,
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         }
     }
 
