@@ -140,6 +140,15 @@ function askRecheck(request: string, command: string): Promise<Proof | null> {
   });
 }
 
+/** The relay was turned on, off or moved: the kept shell is fetched again, for the CSP that names it (sw.ts). */
+function refreshShell() {
+  try {
+    navigator.serviceWorker?.controller?.postMessage({ type: "kelpie-refresh-shell" });
+  } catch {
+    /* no worker on this page */
+  }
+}
+
 /** The relay, for the installed app on its HTTPS origin, once the computer gave this phone a token. */
 const relayRoute = () => {
   const p = currentPairing();
@@ -231,11 +240,19 @@ const link = new Link(browserEnv(), () => {
     setMovedHost(movedTo(known, location.host));
     const p = currentPairing();
     // `endpoints` is the whole list, the relay's included (or left out, when it was turned off); a computer from before sends the direct addresses only.
-    if (p && m.seq > p.addrsSeq) void savePairing({ ...p, endpoints: m.endpoints ? known : [...known, ...p.endpoints.filter((e) => e.t !== "lan" && e.t !== "ts")], addrsSeq: m.seq });
+    if (p && m.seq > p.addrsSeq) {
+      const relayBefore = JSON.stringify(p.endpoints.find((e) => e.t === "relay") ?? null);
+      const endpoints = m.endpoints ? known : [...known, ...p.endpoints.filter((e) => e.t !== "lan" && e.t !== "ts")];
+      void savePairing({ ...p, endpoints, addrsSeq: m.seq });
+      if (JSON.stringify(endpoints.find((e) => e.t === "relay") ?? null) !== relayBefore) refreshShell();
+    }
   },
   relay(m) {
     const p = currentPairing();
-    if (p) void savePairing({ ...p, relayToken: m.token, relayExpires: m.expires, endpoints: [...p.endpoints.filter((e) => e.t !== "relay"), { t: "relay", a: m.url, r: m.ticket }] });
+    if (!p) return;
+    const was = p.endpoints.find((e) => e.t === "relay");
+    void savePairing({ ...p, relayToken: m.token, relayExpires: m.expires, endpoints: [...p.endpoints.filter((e) => e.t !== "relay"), { t: "relay", a: m.url, r: m.ticket }] });
+    if (was?.a !== m.url) refreshShell();
   },
   deviceChanged(m) {
     const name = m.name;

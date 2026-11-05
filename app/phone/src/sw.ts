@@ -7,12 +7,15 @@
 // It also shows alerts where the system does not do it by itself (iOS 18.4 reads the same payload natively): one notification per
 // `tag`, so a repeat takes the place of the last. An alert has no text from a session, only a fixed sentence and a link to open. This
 // file stands alone in the build: a classic worker cannot import or export anything.
-interface FetchEvent extends Event {
+interface ExtendableEvent extends Event {
+  waitUntil(promise: Promise<unknown>): void;
+}
+interface FetchEvent extends ExtendableEvent {
   request: Request;
   respondWith(response: Promise<Response>): void;
 }
-interface ExtendableEvent extends Event {
-  waitUntil(promise: Promise<unknown>): void;
+interface MessageEvent extends ExtendableEvent {
+  data: unknown;
 }
 interface PushEvent extends ExtendableEvent {
   data: { json(): unknown } | null;
@@ -30,6 +33,7 @@ interface Scope {
   addEventListener(type: "fetch", listener: (e: FetchEvent) => void): void;
   addEventListener(type: "push", listener: (e: PushEvent) => void): void;
   addEventListener(type: "notificationclick", listener: (e: ClickEvent) => void): void;
+  addEventListener(type: "message", listener: (e: MessageEvent) => void): void;
   skipWaiting(): Promise<void>;
   clients: { claim(): Promise<void>; matchAll(options: { type: "window"; includeUncontrolled: boolean }): Promise<WindowClient[]>; openWindow(url: string): Promise<unknown> };
   registration: { showNotification(title: string, options: { body?: string; tag?: string; icon?: string; data?: unknown }): Promise<void> };
@@ -52,6 +56,26 @@ const RESUBSCRIBE_MARK = "/resubscribe";
  *  computer's own address does not answer, instead of waiting for that address first. */
 const SHELL_FLAGS = "kelpie-shell-flags";
 const PAIRED_MARK = "/paired";
+/** What the page sends when the relay changed: the kept shell is fetched again for the CSP that goes with it. */
+const REFRESH_SHELL = "kelpie-refresh-shell";
+
+/** The kept page, fetched again behind the one just served: kept when it is this version's own page, so that what changes is its headers
+ *  (the CSP names the relay once it is on). A page of another version waits for its own worker, which keeps its own files with it. */
+async function refreshShell(): Promise<void> {
+  try {
+    const cache = await caches.open(CACHE);
+    const [kept, fresh] = await Promise.all([cache.match("/"), fetch("/", { cache: "no-store" })]);
+    if (!kept || !fresh.ok || fresh.redirected) return;
+    const [was, is] = await Promise.all([kept.clone().text(), fresh.clone().text()]);
+    if (was === is) await cache.put("/", fresh);
+  } catch {
+    /* Out of reach: the next open tries again. */
+  }
+}
+
+sw.addEventListener("message", (e) => {
+  if ((e.data as { type?: unknown } | null)?.type === REFRESH_SHELL) e.waitUntil(refreshShell());
+});
 /** The app's icon, 72 px, in this file. A worker's own requests do not pass through its `fetch` handler, so a path here would go to the computer, which the phone may not be able to reach: the alert would wait for it. */
 const ALERT_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAMAAABiM0N1AAAAYFBMVEWdVDPrkF4WGyhWNCnx5Nf0so9fVlZ4RTGUcV0oT1gXqpnwx62alpMcK0Hqc1lNPUC8hGBndIHBXC0dhH4TFyMqMULqdDv1qHD9yan+9ejtd0zQaTcsKDIjLUDlbTT9snVGl2y/AAAAIHRSTlP//////////////////////////////////////////3Fe9GAAAAL1SURBVHja7ZbpctsgEIABcciVrKStQRfI7/+W3QUJX+Cg2NMfne5MZFjBp71YQk5vEvIf9B90I1X11abUigRoNl+YScxcAmKzeU4ixsyszCJjVJ6j4HWRRfhFY7JxqvAtKQflSJ5TCFJmwsU2xbH4Zkp5nkq/oQLjkCBZjJ+gpioFDSIdUc8ZSkF2mYZBTMtjJIhZJjEM02KLQFBIsLqhDyTg0Aa+kSqj5FnzoGG4JyEH9SLldBJEAghJ1XXoAgdApBgUdtyQIgdiXQpSG6ihsTChEDE+AaQKQdUGgooh9sSsZScLZooNVO0DAWYmhMxQPLMfrKhykDVT08D6xdzJAl9omil5elIgLKR+esB41CTSZZTu2XM4tmmZkmWUBhHzVMjfB1VzdOPGpyBzVQxSYQftexpRE87CUJ2K0x84574/0w10PbPFZ+25RaVnzV7CQm9idJnZwuYf01P9unBmFXNQ2Pxj8ismZdwL5fyzXvK+ZW7adfXIo3mKybEla8iK7/4NJA9VNA9mllzM2wdiTJkF/IE/hbNdoOgaGMFsJ3wPEqJj7BTNm/cF25B6GKMMNXl22jKgCWURCOCtlC3HkVi8uhhUraAOOJyPLQNpcTSKbgVVpTctgrqOB58kg8x74V3nQaU3bfBt6Uck8ZFrzdchXXKe5Xo2tmfhd8OjrreRWDLJzzU2D6LeHD421jb4CzC6ZP+ZS4KY8knD3EsrbdvCA8M0+LQpVgyS0Hug+9CGc0i+4FxAAXDe0KCXSZB+FGyGXj610/qgrYUHDD9X9fkzsekRxOqN058lAwrAHDyYvOhrthN0vSGnz4KcjOt76W70kXStz4JgB+3PIBBVV6LPgiCssgaR7m69c0Gv3RfBdnHFEQ9qYrlD/VHr5yBHDEl+rEhuQWb+OL4OggneFu4NIIeXD3kDSB8/kHR8GXT88GFyNoj7Lmj1zLlDkF0pvMtaiPWPIAf7bdCa/d+vgbRWmzPBsxeCvQ32x1oT/Sb5h0F/ALdqkPw7JUSOAAAAAElFTkSuQmCC";
 
@@ -128,8 +152,11 @@ sw.addEventListener("fetch", (e) => {
     e.respondWith(
       (async () => {
         const shell = await caches.open(CACHE).then((c) => c.match("/"));
-        // A paired app opens at once from what it kept. A newer version arrives as a new worker, as it does anyway.
-        if (shell && (await caches.open(SHELL_FLAGS).then((c) => c.match(PAIRED_MARK)))) return shell;
+        // A paired app opens at once from what it kept, and the page is fetched again behind it. A newer version arrives as a new worker.
+        if (shell && (await caches.open(SHELL_FLAGS).then((c) => c.match(PAIRED_MARK)))) {
+          e.waitUntil(refreshShell());
+          return shell;
+        }
         // A 5xx is Tailscale answering for a computer whose Kelpie does not: the kept shell says that better than its error page.
         return withTimeout(fetch(req), NAVIGATION_WAIT_MS)
           .then((r) => {
