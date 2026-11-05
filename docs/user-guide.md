@@ -1048,7 +1048,7 @@ room there once and stays in the credential store. *Relay address* is Kelpie's r
 and that changes every week; removing a phone shuts it out of the relay too, even while this computer is offline. The phone tries the
 Tailscale address first and the relay a moment later, and goes back to the Tailscale address by itself once it answers again.
 
-What to know: **installing the app on a phone still needs Tailscale the first time**, because the relay serves no page. With the relay down
+What to know: **installing the app on a phone still needs Tailscale the first time**, because the relay serves no page. **The relay also needs Tailscale mode to have been on at least once**: it lets phones in only from this computer's Tailscale address, so with no such address no phone can use it, and its row says so. If this computer's Tailscale name changes (renaming it, or MagicDNS giving it a new name), phones installed from the old name are cut off from the relay as well as from the old address, until you install and pair them again at the new name. With the relay down
 and Tailscale off the app has no way to this computer, and says *No way to your computer*; *Relay unreachable* and *Computer offline* say
 which of the two does not answer. The relay sees that a phone and this computer are connected, their internet addresses, when and how much
 they send, and the room's number, never what is said; *What the relay can see* under its row says the same. If the relay stays slow from
