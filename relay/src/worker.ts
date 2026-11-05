@@ -21,13 +21,36 @@ const SOCKET_PATHS = new Set(["/v1/desktop", "/v1/phone"]);
 /** A P-256 public key, uncompressed (65 bytes), base64url. */
 const ROOM_KEY = /^[A-Za-z0-9_-]{87}$/;
 const MAX_REGISTRATION_BODY = 1024;
-/** Wrong registration keys one address may send in a day, kept as a hash of the address in this isolate only. */
-const REGISTRATION_FAILURES = 10;
-const FAILURE_WINDOW_MS = 24 * 3600 * 1000;
 const FAILURES_KEPT = 4096;
 
+/** Failures counted by a hash of the address (and, for sockets, the room), in this isolate only: best effort, and never the address itself. */
+class Strikes {
+  private readonly seen = new Map<string, { count: number; since: number }>();
+
+  constructor(private readonly limit: number, private readonly windowMs: number) {}
+
+  out(key: string, now: number): boolean {
+    const f = this.seen.get(key);
+    if (f && now - f.since >= this.windowMs) this.seen.delete(key);
+    return (this.seen.get(key)?.count ?? 0) >= this.limit;
+  }
+
+  note(key: string, now: number): void {
+    if (this.seen.size >= FAILURES_KEPT && !this.seen.has(key)) this.seen.clear();
+    const f = this.seen.get(key) ?? { count: 0, since: now };
+    f.count += 1;
+    this.seen.set(key, f);
+  }
+}
+
+/** Wrong registration keys one address may send in a day. */
+const registrations = new Strikes(10, 24 * 3600 * 1000);
+/** Sockets a room refused one address in 10 minutes: a ticket is no secret (every QR code has one), so with one a stranger could
+ *  otherwise make the room look at every guess. Past this, the router refuses without asking the room. */
+export const ADMISSION_REFUSALS = 30;
+const admissions = new Strikes(ADMISSION_REFUSALS, 10 * 60 * 1000);
+
 let cachedKey: { secret: string; key: Promise<CryptoKey> } | undefined;
-const failures = new Map<string, { count: number; since: number }>();
 
 function ticketKey(secret: string): Promise<CryptoKey> {
   if (cachedKey?.secret !== secret) {
@@ -79,22 +102,9 @@ async function sameSecret(a: string, b: string): Promise<boolean> {
   return crypto.subtle.timingSafeEqual(x, y);
 }
 
-/** Where a failed registration counts: a hash of the address, never the address itself. */
-async function failureKey(request: Request): Promise<string> {
-  return hex(await digest(`kelpie-relay/1 ${request.headers.get("cf-connecting-ip") ?? ""}`));
-}
-
-function failedTooOften(key: string, now: number): boolean {
-  const f = failures.get(key);
-  if (f && now - f.since >= FAILURE_WINDOW_MS) failures.delete(key);
-  return (failures.get(key)?.count ?? 0) >= REGISTRATION_FAILURES;
-}
-
-function noteFailure(key: string, now: number): void {
-  if (failures.size >= FAILURES_KEPT && !failures.has(key)) failures.clear();
-  const f = failures.get(key) ?? { count: 0, since: now };
-  f.count += 1;
-  failures.set(key, f);
+/** Where a failure counts: a hash of the address (and what else is given), never the address itself. */
+async function failureKey(request: Request, also = ""): Promise<string> {
+  return hex(await digest(`kelpie-relay/1 ${request.headers.get("cf-connecting-ip") ?? ""} ${also}`));
 }
 
 /** Makes a room for the holder of the registration key: the desktop sends its room's public key. */
@@ -104,10 +114,10 @@ async function register(request: Request, env: Env): Promise<Response> {
   if (!env.REGISTRATION_KEY || !env.TICKET_SECRET) return plain(503, "relay not configured\n");
   const now = Date.now();
   const who = await failureKey(request);
-  if (failedTooOften(who, now)) return plain(429, "too many attempts\n");
+  if (registrations.out(who, now)) return plain(429, "too many attempts\n");
   const given = /^Bearer (\S{1,256})$/.exec(request.headers.get("authorization") ?? "")?.[1];
   if (!given || !(await sameSecret(given, env.REGISTRATION_KEY))) {
-    noteFailure(who, now);
+    registrations.note(who, now);
     return plain(401, "registration key\n");
   }
   if (Number(request.headers.get("content-length") ?? "0") > MAX_REGISTRATION_BODY) return plain(413, "too large\n");
@@ -146,10 +156,15 @@ export default {
     const room = await checkTicket(searchParams.get("t"), env.TICKET_SECRET);
     if (room === null) return plain(403, "bad ticket\n");
 
+    const who = await failureKey(request, room);
+    const now = Date.now();
+    if (admissions.out(who, now)) return plain(429, "too many attempts\n");
     const stub = env.ROOM.get(env.ROOM.idFromName(room));
     const forwarded = new Request(request);
     forwarded.headers.set("x-entry-colo", String(request.cf?.colo ?? ""));
     forwarded.headers.set("x-kelpie-room", room);
-    return stub.fetch(forwarded);
+    const answer = await stub.fetch(forwarded);
+    if (answer.status === 403 || answer.status === 404) admissions.note(who, now);
+    return answer;
   },
 };

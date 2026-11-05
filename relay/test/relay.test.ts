@@ -5,7 +5,7 @@ import roomSource from "../src/room.ts?raw";
 import workerSource from "../src/worker.ts?raw";
 import { encodeBase64Url, hex } from "../src/encoding";
 import { desktopStatement, MESSAGES_PER_SECOND, MONTHLY_BYTES, ROOM_TTL_MS, tokenSha256, verifyDesktop, type Room } from "../src/room";
-import { makeTicket, type Env } from "../src/worker";
+import { ADMISSION_REFUSALS, makeTicket, type Env } from "../src/worker";
 import vectors from "./vectors.json";
 
 const relayEnv = env as unknown as Env;
@@ -69,8 +69,10 @@ async function desktopQuery(r: Registered, ts = (lastTs = Math.max(Date.now(), l
   return `t=${encodeURIComponent(r.ticket)}&ts=${ts}&sig=${await signature(r, ts)}`;
 }
 
+/** Each upgrade from an address of its own unless the test names one, so that refusals counted by address stay with the test that makes them. */
 function upgrade(path: string, query: string, headers: Record<string, string> = {}): Promise<Response> {
-  return self().fetch(`https://relay.test${path}${query ? `?${query}` : ""}`, { headers: { upgrade: "websocket", ...headers } });
+  const from = `10.${crypto.getRandomValues(new Uint8Array(3)).join(".")}`;
+  return self().fetch(`https://relay.test${path}${query ? `?${query}` : ""}`, { headers: { upgrade: "websocket", "cf-connecting-ip": from, ...headers } });
 }
 
 interface Socket {
@@ -170,6 +172,19 @@ describe("the ticket is checked before any Durable Object call", () => {
 
   it("finds no room behind a genuine ticket that was never registered", async () => {
     expect((await upgrade("/v1/phone", `t=${await makeTicket(randomRoom(), relayEnv.TICKET_SECRET)}&k=${token()}`)).status).toBe(404);
+  });
+});
+
+describe("refused admissions", () => {
+  it("stop reaching the room once one address has had too many refused", async () => {
+    const r = await register();
+    const from = { "cf-connecting-ip": "198.51.100.77" };
+    for (let i = 0; i < ADMISSION_REFUSALS; i++) expect((await phone(r, `k=${token()}`, from)).status).toBe(403);
+    const lookup = vi.spyOn(relayEnv.ROOM, "idFromName");
+    expect((await phone(r, `k=${token()}`, from)).status).toBe(429);
+    expect(lookup).not.toHaveBeenCalled();
+    // Another address is not held up by it.
+    expect((await phone(r, `k=${token()}`, { "cf-connecting-ip": "198.51.100.78" })).status).toBe(403);
   });
 });
 
@@ -322,6 +337,28 @@ describe("the phone's admission", () => {
     expect(Array.from(new Uint8Array((await back.next()) as ArrayBuffer))).toEqual([0, 0, 9]);
   });
 
+  it("gives a phone's new socket a slot of its own while the old one closes, so nothing late of the old reaches the new", async () => {
+    const r = await register();
+    const k = token();
+    const d = await desktop(r, [k]);
+    const old = socket(await phone(r, `k=${k}`));
+    const first = (await d.said()).s as number;
+    const fresh = socket(await phone(r, `k=${k}`));
+    const opened = await d.said();
+    expect(opened.t).toBe("open");
+    const second = opened.s as number;
+    expect(second).not.toBe(first);
+    // At once, before the old socket is gone: the new one gets what is sent to its slot, and the old nothing.
+    d.ws.send(Uint8Array.of(second >> 8, second & 255, 5, 6));
+    expect(Array.from(new Uint8Array((await fresh.next()) as ArrayBuffer))).toEqual([5, 6]);
+    expect(await old.closed).toBe(4001);
+    expect(await d.said()).toEqual({ t: "close", s: first });
+    // A kick of the old slot, as a late one would be, leaves the new socket alone.
+    d.ws.send(JSON.stringify({ t: "kick", s: first, c: 4409 }));
+    d.ws.send(Uint8Array.of(second >> 8, second & 255, 7));
+    expect(Array.from(new Uint8Array((await fresh.next()) as ArrayBuffer))).toEqual([7]);
+  });
+
   it("replaces a phone's older socket with the same token", async () => {
     const r = await register();
     const k = token();
@@ -331,7 +368,7 @@ describe("the phone's admission", () => {
     expect(await old.closed).toBe(4001);
   });
 
-  it("refuses a ninth phone and reuses a slot once one is free", async () => {
+  it("refuses a ninth phone and lets one in once a place is free", async () => {
     const r = await register();
     const tokens = Array.from({ length: 9 }, token);
     await desktop(r, tokens);
@@ -444,6 +481,33 @@ describe("forwarding", () => {
     expect(await p.closed).toBe(4008);
   });
 
+  it("closes the phone the desktop sends too much, never the desktop and the room with it", async () => {
+    const r = await register();
+    const [k1, k2] = [token(), token()];
+    const d = await desktop(r, [k1, k2]);
+    const busy = socket(await phone(r, `k=${k1}`));
+    const other = socket(await phone(r, `k=${k2}`));
+    const [a, b] = [(await d.said()).s as number, (await d.said()).s as number];
+    while (Date.now() % 1000 > 700) await new Promise((resolve) => setTimeout(resolve, 50));
+    await runInDurableObject(stub(r), (instance: Room) => {
+      (instance as unknown as { rates: Map<string, { second: number; count: number }> }).rates.set(`to:${a}`, { second: Math.floor(Date.now() / 1000), count: MESSAGES_PER_SECOND });
+    });
+    d.ws.send(Uint8Array.of(a >> 8, a & 255, 1));
+    expect(await busy.closed).toBe(4008);
+    d.ws.send(Uint8Array.of(b >> 8, b & 255, 2));
+    expect(Array.from(new Uint8Array((await other.next()) as ArrayBuffer))).toEqual([2]);
+    await runInDurableObject(stub(r), (instance: Room) => {
+      (instance as unknown as { bucket: { tokens: number; at: number } }).bucket = { tokens: 1000, at: Date.now() + 10_000 };
+    });
+    d.ws.send(new Uint8Array(64 * 1024).fill(0).map((_, i) => (i === 0 ? b >> 8 : i === 1 ? b & 255 : 0)));
+    expect(await other.closed).toBe(4009);
+    // The desktop is still in the room: it hears both phones go, then answers.
+    d.ws.send("info");
+    const said = [await d.said(), await d.said(), await d.said()];
+    expect(said.filter((m) => m.t === "close").map((m) => m.s).sort()).toEqual([a, b].sort());
+    expect(said.some((m) => "sockets" in m)).toBe(true);
+  });
+
   it("closes a socket that pushes the room past its burst", async () => {
     const r = await register();
     const k = token();
@@ -451,7 +515,7 @@ describe("forwarding", () => {
     const p = socket(await phone(r, `k=${k}`));
     // The burst is spent; it refills at 4 MB a second, far more than this test's next second could use.
     await runInDurableObject(stub(r), (instance: Room) => {
-      (instance as unknown as { bucket: { tokens: number; at: number } }).bucket = { tokens: 1000, at: Date.now() };
+      (instance as unknown as { bucket: { tokens: number; at: number } }).bucket = { tokens: 1000, at: Date.now() + 10_000 };
     });
     p.ws.send(new Uint8Array(64 * 1024));
     expect(await p.closed).toBe(4009);
@@ -499,6 +563,18 @@ describe("the room's life", () => {
       expect(await state.storage.getAlarm()).toBeNull();
     });
     expect((await upgrade("/v1/desktop", await desktopQuery(r))).status).toBe(404);
+  });
+
+  it("is kept while its desktop stays connected, however long ago it signed in", async () => {
+    const r = await register();
+    await desktop(r);
+    await runInDurableObject(stub(r), async (_room: Room, state) => {
+      await state.storage.put("lastUsed", Date.now() - ROOM_TTL_MS - 1);
+    });
+    expect(await runDurableObjectAlarm(stub(r))).toBe(true);
+    await runInDurableObject(stub(r), async (_room: Room, state) => {
+      expect(await state.storage.get("pk")).toBeTypeOf("string");
+    });
   });
 
   it("is kept when it was used since", async () => {

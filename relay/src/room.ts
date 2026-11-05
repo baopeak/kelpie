@@ -9,7 +9,9 @@
 // - **Phone**: `/v1/phone?t=&k=<token>` with a token whose SHA-256 the desktop put on the allow-list, or `&p=<pair token>`
 //   once. An `Origin`, when there is one, must be the one the desktop registered.
 // - **Frames**: binary only, at most 64 KiB. A phone's frame reaches the desktop as `[slot, u16 big-endian] + frame`; the
-//   desktop's goes to the slot it names. Nothing is queued: with no desktop ready a phone's frame is dropped.
+//   desktop's goes to the slot it names. Nothing is queued: with no desktop ready a phone's frame is dropped. A slot is a number
+//   for one phone socket, never given to another while any socket still holds it, so a late close, frame or kick of an old socket
+//   cannot reach a new one. The desktop's frames are limited per slot: one phone's traffic closes that phone, not the room.
 // - **The desktop's word** (JSON text): `allow` (the whole allow-list; phones whose token left it are closed, and the desktop
 //   hears of phones only after it), `pair`, `origin`, `kick`, `drop`. It hears `open` and `close` for each phone slot.
 //   Phones hear `desktop_offline` and `desktop_online`, which a relay can forge: hints only.
@@ -44,6 +46,8 @@ interface Usage {
 
 const MAX_PHONES = 8;
 const SLOT_BYTES = 2;
+/** How many slot numbers there are (a u16). */
+const SLOTS = 65_536;
 export const MAX_FRAME = 64 * 1024;
 const MAX_ALLOWED = 64;
 const MAX_PAIR_TOKENS = 4;
@@ -121,6 +125,8 @@ export class Room extends DurableObject<RoomEnv> {
     const lastTs = (await this.ctx.storage.get<number>("lastTs")) ?? 0;
     if (!Number.isSafeInteger(ts) || Math.abs(now - ts) > CLOCK_SKEW_MS || ts <= lastTs) return plain(403, "stale signature\n");
     if (!(await verifyDesktop(pk, room, ts, sig))) return plain(403, "bad signature\n");
+    // Looked at again: another request with this very signature may have got in while this one was being checked.
+    if (ts <= ((await this.ctx.storage.get<number>("lastTs")) ?? 0)) return plain(403, "stale signature\n");
     await this.ctx.storage.put({ lastTs: ts, lastUsed: now });
     await this.ctx.storage.setAlarm(now + ROOM_TTL_MS);
 
@@ -158,13 +164,14 @@ export class Room extends DurableObject<RoomEnv> {
       // One socket per token: a phone that connects again replaces its older socket.
       for (const old of this.phones()) if (attachment(old).cred === cred) old.close(CLOSE_REPLACED, "replaced");
     }
-    const slot = this.freeSlot();
+    if (this.phones().length >= MAX_PHONES) return plain(409, "room full\n");
+    const slot = await this.newSlot();
     if (slot < 0) return plain(409, "room full\n");
 
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server, ["phone", slotTag(slot)]);
     server.serializeAttachment({ role: "phone", slot, entry, via, cred } satisfies Attachment);
-    await this.ctx.storage.put("lastUsed", now);
+    await this.ctx.storage.put({ lastUsed: now, nextSlot: (slot + 1) % SLOTS });
     const desktop = this.readyDesktop();
     if (desktop) desktop.send(JSON.stringify({ t: "open", s: slot, via }));
     else server.send(JSON.stringify({ t: "desktop_offline" }));
@@ -173,16 +180,25 @@ export class Room extends DurableObject<RoomEnv> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const from = attachment(ws);
-    if (!this.withinRate(from)) return ws.close(CLOSE_TOO_MANY, "too many messages");
     if (typeof message === "string") {
+      if (!this.withinRate(from.role === "desktop" ? "desktop" : slotTag(from.slot))) return ws.close(CLOSE_TOO_MANY, "too many messages");
       if (from.role === "desktop") return this.control(ws, from, message);
       return ws.close(CLOSE_TEXT_NOT_ACCEPTED, "binary frames only");
     }
-    if (message.byteLength > MAX_FRAME + (from.role === "desktop" ? SLOT_BYTES : 0)) return ws.close(CLOSE_TOO_LARGE, "frame too large");
-    if (!this.spend(message.byteLength)) return ws.close(CLOSE_ROOM_RATE, "room over its rate");
+    if (from.role === "phone") {
+      if (!this.withinRate(slotTag(from.slot))) return ws.close(CLOSE_TOO_MANY, "too many messages");
+      if (message.byteLength > MAX_FRAME) return ws.close(CLOSE_TOO_LARGE, "frame too large");
+      if (!this.spend(message.byteLength)) return ws.close(CLOSE_ROOM_RATE, "room over its rate");
+      if (!(await this.count(message.byteLength))) return this.closeAll(CLOSE_MONTHLY, "monthly limit");
+      return this.toDesktop(from.slot, message);
+    }
+    if (message.byteLength < SLOT_BYTES || message.byteLength > MAX_FRAME + SLOT_BYTES) return ws.close(CLOSE_TOO_LARGE, "frame too large");
+    // The desktop carries every phone's traffic: what one phone is sent too much of closes that phone, never the room.
+    const slot = new DataView(message).getUint16(0);
+    if (!this.withinRate(`to:${slot}`)) return this.closeSlot(slot, CLOSE_TOO_MANY, "too many messages");
+    if (!this.spend(message.byteLength)) return this.closeSlot(slot, CLOSE_ROOM_RATE, "room over its rate");
     if (!(await this.count(message.byteLength))) return this.closeAll(CLOSE_MONTHLY, "monthly limit");
-    if (from.role === "phone") this.toDesktop(from.slot, message);
-    else if (from.ready) this.toPhone(message);
+    if (from.ready) this.toPhone(slot, message.slice(SLOT_BYTES));
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
@@ -200,6 +216,8 @@ export class Room extends DurableObject<RoomEnv> {
 
   /** The room has not been used for its lifetime: it goes. Set again on each desktop connection, never in a loop. */
   async alarm(): Promise<void> {
+    // A desktop that stays connected is using the room, however long ago it signed in.
+    if (this.ctx.getWebSockets("desktop").length) await this.ctx.storage.put("lastUsed", Date.now());
     const lastUsed = (await this.ctx.storage.get<number>("lastUsed")) ?? 0;
     if (Date.now() - lastUsed >= ROOM_TTL_MS) await this.dropRoom();
     else await this.ctx.storage.setAlarm(lastUsed + ROOM_TTL_MS);
@@ -269,10 +287,7 @@ export class Room extends DurableObject<RoomEnv> {
         const slot = Number(msg.s);
         const code = Number(msg.c);
         const reason = typeof msg.r === "string" ? msg.r.slice(0, 64) : "";
-        for (const phone of this.ctx.getWebSockets(slotTag(slot))) {
-          phone.close(Number.isInteger(code) && code >= 4000 && code <= 4999 ? code : 1000, reason);
-        }
-        return;
+        return this.closeSlot(slot, Number.isInteger(code) && code >= 4000 && code <= 4999 ? code : 1000, reason);
       }
       case "drop":
         return this.dropRoom();
@@ -291,11 +306,24 @@ export class Room extends DurableObject<RoomEnv> {
     desktop.send(framed);
   }
 
-  private toPhone(frame: ArrayBuffer): void {
-    if (frame.byteLength < SLOT_BYTES) return;
-    const slot = new DataView(frame).getUint16(0);
-    const payload = frame.slice(SLOT_BYTES);
-    for (const phone of this.ctx.getWebSockets(slotTag(slot))) phone.send(payload);
+  private toPhone(slot: number, payload: ArrayBuffer): void {
+    for (const phone of this.ctx.getWebSockets(slotTag(slot))) {
+      try {
+        phone.send(payload);
+      } catch {
+        /* closing: nothing more goes to it */
+      }
+    }
+  }
+
+  private closeSlot(slot: number, code: number, reason: string): void {
+    for (const phone of this.ctx.getWebSockets(slotTag(slot))) {
+      try {
+        phone.close(code, reason);
+      } catch {
+        /* already closed */
+      }
+    }
   }
 
   /** The desktop phones may reach: connected, and done with its allow-list. */
@@ -307,17 +335,23 @@ export class Room extends DurableObject<RoomEnv> {
     return this.ctx.getWebSockets("phone").filter((ws) => ws !== except && ws.readyState === OPEN);
   }
 
-  private freeSlot(): number {
-    const used = new Set(this.phones().map((ws) => attachment(ws).slot));
-    for (let slot = 0; slot < MAX_PHONES; slot++) if (!used.has(slot)) return slot;
+  /** The next slot number no socket holds, open or closing: from a counter kept with the room, so numbers come round only after 65,536. */
+  private async newSlot(): Promise<number> {
+    const start = (await this.ctx.storage.get<number>("nextSlot")) ?? 0;
+    for (let i = 0; i < SLOTS; i++) {
+      const slot = (start + i) % SLOTS;
+      if (this.ctx.getWebSockets(slotTag(slot)).length === 0) return slot;
+    }
     return -1;
   }
 
-  private withinRate(from: Attachment): boolean {
+  /** `key`: the desktop's word, a phone's socket, or what the desktop sends one slot. */
+  private withinRate(key: string): boolean {
     const second = Math.floor(Date.now() / 1000);
-    const key = from.role === "desktop" ? "desktop" : slotTag(from.slot);
     const r = this.rates.get(key);
     if (!r || r.second !== second) {
+      // Slots come and go: what counted for a second gone by is forgotten.
+      if (this.rates.size > 64) for (const [k, v] of this.rates) if (v.second !== second) this.rates.delete(k);
       this.rates.set(key, { second, count: 1 });
       return true;
     }
