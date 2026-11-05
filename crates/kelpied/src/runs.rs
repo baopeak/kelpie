@@ -139,10 +139,7 @@ impl TaskHost {
     /// What `ssh` will be handed: nothing that could be read as an option, a second word or a quote.
     pub fn validate(&self) -> Result<()> {
         let d = &self.dest;
-        anyhow::ensure!(
-            !d.is_empty() && d.len() <= 255 && !d.starts_with('-') && d.chars().all(|c| c.is_ascii_alphanumeric() || "._@:%[]-".contains(c)),
-            "invalid ssh destination `{d}`"
-        );
+        anyhow::ensure!(kelpie_proto::ssh::valid_dest(d), "invalid ssh destination `{d}`");
         anyhow::ensure!(self.port != Some(0), "invalid ssh port");
         anyhow::ensure!(self.path.starts_with('/') && !self.path.chars().any(char::is_control), "a task on a host needs the absolute folder there");
         if let Some(c) = &self.config {

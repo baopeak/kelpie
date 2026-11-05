@@ -100,12 +100,12 @@ fn ssh_dir() -> PathBuf {
 }
 
 pub(crate) fn vault_path() -> PathBuf {
-    kelpie_proto::data_dir().join("ssh").join("hosts.json")
+    kelpie_proto::ssh::hosts_path()
 }
 
 /// The generated ssh config every Kelpie ssh / scp reads.
 pub fn config_path() -> PathBuf {
-    kelpie_proto::data_dir().join("ssh").join("config")
+    kelpie_proto::ssh::config_path()
 }
 
 pub fn user_config() -> PathBuf {
@@ -156,13 +156,7 @@ fn askpass_exe() -> PathBuf {
 /// Environment that lets ssh ask Kelpie for saved secrets instead of a terminal. `host_id` is the
 /// host the connection is for (its password wins when a jump host has the same address).
 pub fn askpass_env(host_id: &str) -> Vec<(String, String)> {
-    vec![
-        ("SSH_ASKPASS".into(), askpass_exe().to_string_lossy().into_owned()),
-        ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
-        ("KELPIE_ASKPASS".into(), if host_id.is_empty() { "-".into() } else { host_id.to_string() }),
-        // Older OpenSSH only uses askpass with a display set.
-        ("DISPLAY".into(), std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into())),
-    ]
+    kelpie_proto::ssh::askpass_env(&askpass_exe(), host_id)
 }
 
 /// A saved host by alias.
@@ -170,18 +164,7 @@ pub fn host_by_alias(alias: &str) -> Option<Host> {
     load().hosts.into_iter().find(|h| h.alias == alias)
 }
 
-/// An OpenSSH program. On Windows, the system's own (`System32\OpenSSH`) when present: a Git
-/// Bash one earlier on PATH reads `C:\…` as a host named `C` and cannot reach the Windows
-/// ssh-agent service.
-pub fn program(name: &str) -> PathBuf {
-    if cfg!(windows) {
-        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into())).join("System32").join("OpenSSH").join(format!("{name}.exe"));
-        if system.is_file() {
-            return system;
-        }
-    }
-    PathBuf::from(name)
-}
+pub use kelpie_proto::ssh::program;
 
 /// A process for an OpenSSH tool (no console window on Windows).
 pub fn tool(name: &str) -> tokio::process::Command {
