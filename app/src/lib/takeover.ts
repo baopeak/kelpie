@@ -1,0 +1,95 @@
+// Browser pane takeover, the window's side. A phone with control takes over one of the browser panes to get past a sign-in; the daemon's broker
+// decides who holds it, and Rust (src-tauri/src/browser/takeover.rs) streams the page and drives it. What this window does: tell the daemon which
+// panes there are, bring the pane taken over to the front and keep it there, show who controls it with a Stop button (browser-pane.tsx), and say
+// when it ends. The daemon's requests come as `provider-request` events and are answered with `provider_reply`.
+import { invoke } from "@tauri-apps/api/core";
+import { createRoot, createSignal } from "solid-js";
+import { onEvent } from "./ipc";
+import { browserState } from "./browser";
+import { store } from "./store";
+import { t } from "./i18n";
+import { findPane, listPanes } from "./takeover-panes";
+
+/** A pane a phone holds now, by pane id: the daemon's takeover id and the device's name. */
+export interface Held {
+  tk: string;
+  device: string;
+}
+
+export const [held, setHeld] = createRoot(() => createSignal<Readonly<Record<string, Held>>>({}));
+
+interface ProviderRequest {
+  preq: number;
+  method: string;
+  params: Record<string, unknown>;
+}
+
+const answer = (preq: number, result: unknown) => invoke("provider_reply", { preq, result, error: null });
+const refuse = (preq: number, error: string) => invoke("provider_reply", { preq, result: null, error });
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Starts streaming once the pane's page is open: a pane brought to the front from another tab opens it in about half a second. */
+async function startWhenOpen(tk: string, label: string, device: string, settings: unknown): Promise<{ host: string }> {
+  let last: unknown = null;
+  for (let i = 0; i < 20; i++) {
+    try {
+      return await invoke<{ host: string }>("browser_takeover_start", { tk, label, banner: t("Controlled from {device}", { device }), settings });
+    } catch (e) {
+      last = e;
+      if (!String(e).includes("no browser")) break;
+      await sleep(250);
+    }
+  }
+  throw last;
+}
+
+async function onRequest(r: ProviderRequest) {
+  const projects = store.state.projects;
+  if (r.method === "browser.panes") return answer(r.preq, { panes: listPanes(projects, store.workspace, browserState) });
+  if (r.method !== "browser.takeover_start") return refuse(r.preq, "unknown request");
+  const p = r.params as { tk: string; pane: string; device: string };
+  const at = findPane(p.pane, projects, store.workspace);
+  if (!at) return refuse(r.preq, t("That pane was closed on the computer."));
+  // The pane stays in front for as long as the phone holds it: a hidden page may send no frames.
+  store.switchProject(at.projectId);
+  store.focusPane(at.projectId, at.tabId, at.paneId);
+  try {
+    const started = await startWhenOpen(p.tk, p.pane, p.device, r.params);
+    setHeld((h) => ({ ...h, [at.paneId]: { tk: p.tk, device: p.device } }));
+    store.notify(t("{device} took over a browser pane", { device: p.device }));
+    return answer(r.preq, { title: browserState[at.paneId]?.title || started.host, host: started.host });
+  } catch (e) {
+    return refuse(r.preq, String(e).replace(/^Error: /, ""));
+  }
+}
+
+/** The person pressed Stop on the computer. */
+export async function stopTakeover(tk: string) {
+  await invoke("browser_takeover_stop", { tk }).catch(() => {});
+}
+
+function ended(e: { tk: string; reason: string }) {
+  const found = Object.entries(held()).find(([, x]) => x.tk === e.tk);
+  if (!found) return;
+  const [pane, x] = found;
+  setHeld((h) => {
+    const next: Record<string, Held> = { ...h };
+    delete next[pane];
+    return next;
+  });
+  if (e.reason !== "desktop") store.notify(t("{device} no longer controls the browser pane", { device: x.device }));
+}
+
+let started = false;
+/** Listens for the daemon's requests (once). */
+export function initTakeover() {
+  if (started) return;
+  started = true;
+  void onEvent<ProviderRequest>("provider-request", (r) => void onRequest(r));
+  void onEvent<{ tk: string; reason: string }>("takeover-ended", ended);
+  void onEvent<{ event: string; params: { kind?: string } }>("daemon-event", (m) => {
+    // Something of this user's tried to stand in for this window: the daemon refused it, and the person should know.
+    if (m.event === "provider.refused") store.notify(t("A program on this computer tried to provide Kelpie's browser panes to phones in this window's place. It was refused."), undefined, 10000);
+  });
+}

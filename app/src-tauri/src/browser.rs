@@ -5,14 +5,21 @@
 //!
 //! Events to the UI (`browser-event`): `{label, kind: "nav" | "load" | "title" | "pick" |
 //! "cancel" | "popup", url?, title?, data?}`.
+//!
+//! A `window.open` that asks for a size (an OAuth or sign-in window) opens as a window of its own on the pane's WebView2 environment, so the page keeps
+//! `window.opener` and gets the sign-in back; any other new window opens in the pane. A pane and its popups are one group for a phone that takes the
+//! pane over (`takeover`).
+
+mod takeover;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use base64::Engine as _;
 use serde::Serialize;
 use serde_json::{json, Value};
-use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
+use tauri::webview::{NewWindowFeatures, NewWindowResponse, PageLoadEvent, WebviewBuilder};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, WebviewUrl};
 
 use crate::fs_ops::{err, CmdResult};
@@ -20,10 +27,72 @@ use crate::fs_ops::{err, CmdResult};
 const PICKER: &str = include_str!("browser_picker.js");
 const SENTINEL_HOST: &str = "kelpie-pick.invalid";
 
-/// Nonce of each browser webview (by label); reports carrying another one are ignored.
+pub use takeover::{browser_takeover_start, browser_takeover_stop, provider_reply, Takeovers};
+
+/// Nonce of each browser webview (by label); reports carrying another one are ignored. The popups each pane opened, oldest first, and their pages' titles.
 #[derive(Default)]
 pub struct Browsers {
     nonces: Mutex<HashMap<String, String>>,
+    popups: Mutex<HashMap<String, Vec<String>>>,
+    popup_titles: Mutex<HashMap<String, String>>,
+    next_popup: AtomicU64,
+}
+
+impl Browsers {
+    fn popups_of(&self, pane: &str) -> Vec<String> {
+        self.popups.lock().unwrap().get(pane).cloned().unwrap_or_default()
+    }
+
+    fn popup_page_title(&self, popup: &str) -> String {
+        self.popup_titles.lock().unwrap().get(popup).cloned().unwrap_or_default()
+    }
+
+    fn forget_popup(&self, pane: &str, popup: &str) {
+        if let Some(list) = self.popups.lock().unwrap().get_mut(pane) {
+            list.retain(|p| p != popup);
+        }
+        self.popup_titles.lock().unwrap().remove(popup);
+    }
+}
+
+/// A request or a notice of the daemon for this window (`takeover`).
+pub fn provider_message(app: &AppHandle, msg: Value) {
+    takeover::on_message(app, msg);
+}
+
+/// The daemon's connection dropped.
+pub fn daemon_gone(app: &AppHandle) {
+    takeover::daemon_gone(app);
+}
+
+/// A sized `window.open` of pane `pane` as a window of its own, on the pane's WebView2 environment (`window_features` carries it). Like the pane it has no IPC
+/// (the app's capability covers the main webview only) and stays on the web; it opens nothing further. None when it could not be made: the pane opens it instead.
+fn open_popup(app: &AppHandle, pane: &str, url: &Url, features: NewWindowFeatures) -> Option<tauri::WebviewWindow> {
+    let state = app.state::<Browsers>();
+    let label = format!("{pane}-popup-{}", state.next_popup.fetch_add(1, Ordering::Relaxed) + 1);
+    valid_label(&label).ok()?;
+    let (title_app, title_label, title_pane) = (app.clone(), label.clone(), pane.to_string());
+    let window = tauri::WebviewWindowBuilder::new(app, &label, WebviewUrl::External(Url::parse("about:blank").ok()?))
+        .window_features(features)
+        .title(url.host_str().unwrap_or_default())
+        .on_navigation(|u| u.host_str() != Some(SENTINEL_HOST) && matches!(u.scheme(), "http" | "https" | "about" | "data" | "blob"))
+        .on_new_window(|_, _| NewWindowResponse::Deny)
+        .on_document_title_changed(move |w, title| {
+            title_app.state::<Browsers>().popup_titles.lock().unwrap().insert(title_label.clone(), title.clone());
+            let _ = w.set_title(&title_app.state::<Takeovers>().popup_title(&title_pane, &title));
+        })
+        .build()
+        .ok()?;
+    state.popups.lock().unwrap().entry(pane.to_string()).or_default().push(label.clone());
+    let (gone_app, gone_pane) = (app.clone(), pane.to_string());
+    window.on_window_event(move |e| {
+        if let tauri::WindowEvent::Destroyed = e {
+            gone_app.state::<Browsers>().forget_popup(&gone_pane, &label);
+            takeover::retarget(&gone_app, &gone_pane);
+        }
+    });
+    takeover::retarget(app, pane);
+    Some(window)
 }
 
 #[derive(Serialize, Clone)]
@@ -137,11 +206,18 @@ pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, lab
             }
         })
         .on_document_title_changed(move |_, title| emit(&title_app, &title_label, "title", None, Some(title), None))
-        .on_new_window(move |u, _features| {
+        .on_new_window(move |u, features| {
             match decode_report(&u, &popup_nonce) {
                 Some((kind, data)) => emit(&popup_app, &popup_label, if kind == "pick" { "pick" } else { "cancel" }, None, None, Some(data)),
-                // Links that open a new window open in this pane instead.
-                None if matches!(u.scheme(), "http" | "https") && u.host_str() != Some(SENTINEL_HOST) => emit(&popup_app, &popup_label, "popup", Some(u.to_string()), None, None),
+                None if matches!(u.scheme(), "http" | "https") && u.host_str() != Some(SENTINEL_HOST) => {
+                    // A window with a size is a sign-in window: its own, beside the pane. Links that open a new window open in this pane instead.
+                    if features.size().is_some() || features.position().is_some() {
+                        if let Some(window) = open_popup(&popup_app, &popup_label, &u, features) {
+                            return NewWindowResponse::Create { window };
+                        }
+                    }
+                    emit(&popup_app, &popup_label, "popup", Some(u.to_string()), None, None)
+                }
                 None => {}
             }
             NewWindowResponse::Deny
@@ -212,6 +288,14 @@ pub async fn browser_info(app: AppHandle, label: String) -> CmdResult<Value> {
 #[tauri::command]
 pub async fn browser_close(app: AppHandle, state: tauri::State<'_, Browsers>, label: String) -> CmdResult<()> {
     state.nonces.lock().unwrap().remove(&label);
+    // A takeover of the pane ends, and its popups go with it.
+    takeover::pane_closed(&app, &label).await;
+    let popups = state.popups.lock().unwrap().remove(&label).unwrap_or_default();
+    for popup in popups {
+        if let Some(w) = app.get_webview_window(&popup) {
+            let _ = w.close();
+        }
+    }
     match app.get_webview(&label) {
         Some(wv) => wv.close().map_err(err),
         None => Ok(()),
@@ -307,7 +391,7 @@ async fn capture(wv: &tauri::Webview, clip: Option<Rect>) -> CmdResult<Vec<u8>> 
 
 /// Calls a DevTools protocol method on the page's WebView2 and returns its JSON result.
 #[cfg(windows)]
-async fn devtools(wv: &tauri::Webview, method: &'static str, params: Value) -> CmdResult<Value> {
+pub(crate) async fn devtools(wv: &tauri::Webview, method: &'static str, params: Value) -> CmdResult<Value> {
     use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
     use windows::core::HSTRING;
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();

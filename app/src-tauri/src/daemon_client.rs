@@ -85,6 +85,11 @@ impl DaemonClient {
                     // tokens answers with an error the read loop ignores.
                     if let Some(token) = kelpie_proto::read_user_token(&endpoint) {
                         let _ = out_tx.send(Frame::json(&json!({"id": "auth", "method": "auth", "params": {"token": token, "client": "app"}})).encode());
+                        // This window provides its browser panes to a phone that takes one over (Windows: the WebView2 DevTools protocol). The daemon takes
+                        // that from the verified app only; an older one has no such method, and the read loop ignores the error.
+                        if cfg!(windows) {
+                            let _ = out_tx.send(Frame::json(&json!({"id": "provider", "method": "provider.register", "params": {"kind": "browser"}})).encode());
+                        }
                     }
                     *self.out.lock() = Some(out_tx);
                     self.connected.store(true, Ordering::SeqCst);
@@ -131,6 +136,8 @@ impl DaemonClient {
         }
         // Views must re-attach (with their last seq) once reconnected.
         self.views.lock().clear();
+        // A daemon that went took its takeovers with it: the panes stop streaming and lose their banner.
+        crate::browser::daemon_gone(&self.app);
         let _ = self.app.emit("daemon-status", json!({"connected": false}));
     }
 
@@ -179,6 +186,9 @@ impl DaemonClient {
                         }
                     } else if msg.get("event").is_some() {
                         let _ = self.app.emit("daemon-event", msg);
+                    } else if msg.get("preq").is_some() || msg.get("pnote").is_some() {
+                        // The daemon asks the window for something only it can do (`browser::takeover`).
+                        crate::browser::provider_message(&self.app, msg);
                     }
                 }
                 Frame::Input { .. } => {}
@@ -276,6 +286,20 @@ impl DaemonClient {
 
     pub fn input(&self, handle: u32, data: Vec<u8>) -> Result<()> {
         self.send_frame(&Frame::Input { handle, data })
+    }
+
+    /// Tells the daemon something it does not answer (a provider's reply or event): no id, nothing waited for.
+    pub fn notify(&self, method: &str, params: Value) -> Result<()> {
+        self.send_frame(&Frame::json(&json!({"method": method, "params": params})))
+    }
+
+    /// The answer to the daemon's request `preq` (`provider` in the daemon).
+    pub fn provider_reply(&self, preq: u64, result: Result<Value, String>) -> Result<()> {
+        let params = match result {
+            Ok(v) => json!({"preq": preq, "result": v}),
+            Err(e) => json!({"preq": preq, "error": {"message": e}}),
+        };
+        self.notify("provider.reply", params)
     }
 }
 

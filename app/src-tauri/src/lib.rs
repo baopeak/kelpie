@@ -527,6 +527,7 @@ pub fn run() {
             app.manage(watcher::Watchers::new(app.handle().clone(), index.clone()));
             app.manage(index);
             app.manage(browser::Browsers::default());
+            app.manage(browser::Takeovers::default());
             app.manage(ssh_hosts::Forwards::default());
             ssh_hosts::init();
             Ok(())
@@ -674,6 +675,9 @@ pub fn run() {
             voice::voice_transcribe,
             browser::browser_screenshot,
             browser::browser_test_input,
+            browser::browser_takeover_start,
+            browser::browser_takeover_stop,
+            browser::provider_reply,
             test_window_size,
             ssh_hosts::ssh_vault_load,
             ssh_hosts::ssh_vault_save,
