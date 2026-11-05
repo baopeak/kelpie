@@ -191,7 +191,7 @@ export interface SocketLike {
   onerror: ((e: unknown) => void) | null;
   readyState: number;
   send(data: Uint8Array | string): void;
-  close(): void;
+  close(code?: number): void;
 }
 
 /** Turns protocol messages into socket messages and back, for one connection. */
@@ -353,10 +353,13 @@ function relayControl(data: unknown): "offline" | "online" | "pong" | null {
   }
 }
 
-function closeQuietly(ws: SocketLike) {
+/** The close a race loser is given: the computer then does not count it as a handshake left unfinished. */
+export const ROUTE_LOST = 4000;
+
+function closeQuietly(ws: SocketLike, code?: number) {
   ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
   try {
-    ws.close();
+    ws.close(code);
   } catch {
     /* already gone */
   }
@@ -771,7 +774,7 @@ export class Link {
   private win(a: Attempt) {
     this.clearTimer("connect");
     this.clearTimer("stagger");
-    for (const other of this.attempts) if (other !== a) closeQuietly(other.ws);
+    for (const other of this.attempts) if (other !== a) closeQuietly(other.ws, ROUTE_LOST);
     this.attempts = [];
     this.ws = a.ws;
     this.codec = a.codec;

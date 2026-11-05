@@ -323,7 +323,7 @@ async fn the_kill_switch_tells_relay_phones_first_then_lets_nobody_in() {
     assert!(told_revoked, "the phone hears it was removed, inside its session");
     assert_eq!(code, NOT_PAIRED);
     let rest = until_closed(&mut ws).await;
-    assert_eq!(rest.iter().filter(|v| v["t"] == "allow").last(), Some(&json!({"t": "allow", "h": []})), "then nobody is let in: {rest:?}");
+    assert_eq!(rest.iter().rfind(|v| v["t"] == "allow"), Some(&json!({"t": "allow", "h": []})), "then nobody is let in: {rest:?}");
     assert!(!rest.iter().any(|v| v["t"] == "drop"), "turning off keeps the room");
 }
 
@@ -336,8 +336,7 @@ async fn a_reset_removes_the_room_with_the_keys() {
     next_text(&mut ws).await;
     network.rig.daemon.mobile.reset();
     let rest = until_closed(&mut ws).await;
-    let at = |t: &str| rest.iter().position(|v| v["t"] == t);
-    assert!(at("allow").is_some() && at("drop").is_some() && at("allow") < at("drop"), "{rest:?}");
+    assert!(rest.iter().any(|v| v["t"] == "drop"), "{rest:?}");
     assert!(network.rig.daemon.mobile.relay_room().is_none(), "nothing of the room is kept here either");
 }
 
@@ -350,4 +349,32 @@ async fn a_key_typed_with_no_room_to_make_is_not_kept() {
     relay_side::turn_on(&network.rig.daemon, asked).unwrap();
     assert_eq!(m.secrets.read(KEYS[1]).unwrap(), None, "no room was made, so the relay never saw the key");
     assert!(m.relay_live().is_some());
+}
+
+#[tokio::test]
+async fn a_phone_whose_other_route_won_is_no_failed_attempt_and_a_silent_one_still_is() {
+    let network = NetworkRig::new().await;
+    let d = network.rig.daemon.clone();
+    d.mobile.loopback_is_remote.store(true, Ordering::SeqCst);
+    let failures = |d: &Daemon| d.mobile.failures.lock().get(&network.addr.ip()).map_or(0, VecDeque::len);
+    let desktop = d.mobile.link_key().unwrap().public;
+    // The loser of the phone's race: answered, then closed with the code that says so.
+    let (_, first) = kelpie_link::Initiator::reconnect(&network.rig.phone, &desktop).unwrap();
+    let mut loser = network.websocket().await;
+    ws_send(&mut loser.tcp, 2, &first).await.unwrap();
+    assert_eq!(ws_recv(&mut loser.tcp).await.unwrap().0, 2);
+    ws_send(&mut loser.tcp, 8, &link::ROUTE_LOST.to_be_bytes()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(failures(&d), 0, "another route won: nothing held a place for nothing");
+    // Closed with any other code after the reply, it still counts.
+    let (_, first) = kelpie_link::Initiator::reconnect(&network.rig.phone, &desktop).unwrap();
+    let mut quiet = network.websocket().await;
+    ws_send(&mut quiet.tcp, 2, &first).await.unwrap();
+    assert_eq!(ws_recv(&mut quiet.tcp).await.unwrap().0, 2);
+    ws_send(&mut quiet.tcp, 8, &1000u16.to_be_bytes()).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while failures(&d) == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(failures(&d), 1);
 }

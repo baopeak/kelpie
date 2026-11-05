@@ -49,8 +49,6 @@ pub const KEYS: [&str; 2] = [K_ROOM, K_OPERATOR];
 const DAY_MS: u64 = 24 * 3600 * 1000;
 const TOKEN_LIFE_MS: u64 = 30 * DAY_MS;
 const TOKEN_RENEW_MS: u64 = 7 * DAY_MS;
-/// A phone keeps its newest two: the one it holds, and a new one it may not have received.
-const TOKENS_PER_DEVICE: usize = 2;
 const MAX_ALLOWED: usize = 64;
 const PAIR_TOKENS: usize = 4;
 const KEEPALIVE: Duration = Duration::from_secs(20);
@@ -869,9 +867,11 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify, ending: 
                     while let Ok(Some(out)) = tokio::time::timeout_at(until, out_rx.recv()).await {
                         forward(&mut ws, &mut slots, out).await?;
                     }
-                    send_text(&mut ws, json!({"t": "allow", "h": []})).await?;
+                    // A room that goes takes everything with it, and its phones hear that it is gone (4004); one that stays lets nobody in.
                     if drop.as_deref() == Some(room.as_str()) {
                         send_text(&mut ws, json!({"t": "drop"})).await?;
+                    } else {
+                        send_text(&mut ws, json!({"t": "allow", "h": []})).await?;
                     }
                 }
                 let _ = ws.close(None).await;
@@ -1114,8 +1114,8 @@ mod tests {
         }
         assert!(m.relay_grant(&d, &caps(Some(&hash))).is_some());
         assert!(m.relay_grant(&d, &caps(None)).is_some());
-        assert_eq!(m.config.lock().relay.as_ref().unwrap().tokens.len(), TOKENS_PER_DEVICE);
-        assert_eq!(m.relay_allowed().len(), TOKENS_PER_DEVICE);
+        assert_eq!(m.config.lock().relay.as_ref().unwrap().tokens.len(), 2, "the one it holds and the new one");
+        assert_eq!(m.relay_allowed().len(), 2);
     }
 
     #[test]

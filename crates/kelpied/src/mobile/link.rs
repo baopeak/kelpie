@@ -45,6 +45,8 @@ pub const TOO_MANY: u16 = 4429;
 pub const BUSY: u16 = 4503;
 /// Over the relay: this device may not use it (it paired over plain HTTP, or does not answer heartbeats). It may still connect directly.
 pub const RELAY_REFUSED: u16 = 4412;
+/// From the phone: it closes this socket because another of its routes (the relay, or its own address) finished its handshake first.
+pub const ROUTE_LOST: u16 = 4000;
 /// The phone's connection details, from the listener that accepted it.
 #[derive(Clone, Debug)]
 pub struct Peer {
@@ -165,6 +167,8 @@ impl Carrier {
 pub struct Wire {
     pub ws: Carrier,
     pub session: kelpie_link::Session,
+    /// The phone closed it saying another route won the race (`ROUTE_LOST`).
+    pub route_lost: bool,
 }
 
 /// What a message from the phone turned out to be.
@@ -179,7 +183,7 @@ pub enum Opened {
 
 impl Wire {
     pub fn new(ws: Carrier, session: kelpie_link::Session) -> Wire {
-        Wire { ws, session }
+        Wire { ws, session, route_lost: false }
     }
 
     /// Seals and sends one message; false when the connection is over (the socket is gone, or took longer than `SLOW_AFTER`).
@@ -220,8 +224,12 @@ impl Wire {
                 Err(_) => Opened::End,
             },
             Message::Ping(_) | Message::Pong(_) => Opened::Nothing,
+            Message::Close(frame) => {
+                self.route_lost = frame.is_some_and(|f| f.code == ROUTE_LOST);
+                Opened::End
+            }
             // Plain text has no business here: someone is not speaking kelpie-link.
-            Message::Text(_) | Message::Close(_) => Opened::End,
+            Message::Text(_) => Opened::End,
         }
     }
 
@@ -318,10 +326,10 @@ pub fn held_silently(daemon: &Daemon, ip: IpAddr) {
     }
 }
 
-/// A phone that got the reply and then said nothing sealed. Only one silent for the whole wait counts against its address: one that closed
-/// at once is a phone whose other route won the race (`app/phone/src/link.ts`), and only the holder of the keys could have got this far.
-fn silent_after_reply(daemon: &Daemon, ip: IpAddr, asked: std::time::Instant) {
-    if asked.elapsed() >= HANDSHAKE {
+/// A connection that got the reply and then said nothing sealed counts against its address, unless the phone closed it saying another of
+/// its routes won the race (`app/phone/src/link.ts`). Through the relay each socket has a slot number of its own, so such closes never add up there.
+fn silent_after_reply(daemon: &Daemon, ip: IpAddr, wire: &Wire) {
+    if !wire.route_lost {
         held_silently(daemon, ip);
     }
 }
@@ -369,14 +377,13 @@ async fn pair(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>,
     let mut wire = Wire::new(ws, session);
     // The phone's first sealed message proves it finished this handshake (a replayed first message cannot make one): only
     // now is the code spent and the person asked.
-    let asked = std::time::Instant::now();
     let said = tokio::select! {
         biased;
         _ = generation.cancelled() => return,
         said = wire.recv_text(HANDSHAKE) => said.and_then(|t| serde_json::from_str::<Value>(&t).ok()),
     };
     drop(slot);
-    let Some(said) = said.filter(|v| v["type"] == "pair") else { return silent_after_reply(&daemon, peer.ip(), asked) };
+    let Some(said) = said.filter(|v| v["type"] == "pair") else { return silent_after_reply(&daemon, peer.ip(), &wire) };
     // Single use: spent now, whatever happens next. Another connection may have spent it a moment ago.
     let spent = m.spend_code(&psk);
     m.relay_pair_spent(&psk);
@@ -459,7 +466,6 @@ async fn reconnect(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generat
     let mut wire = Wire::new(ws, session);
     // The phone's first sealed message says what it can do (`caps`), and proves it finished this handshake: until then nothing
     // about the device changes. Cancellation covers it too, including an upgrade completed before disable.
-    let asked = std::time::Instant::now();
     let said = tokio::select! {
         biased;
         _ = generation.cancelled() => return,
@@ -469,7 +475,7 @@ async fn reconnect(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generat
     if generation.is_cancelled() {
         return;
     }
-    let Some(said) = said else { return silent_after_reply(&daemon, peer.ip(), asked) };
+    let Some(said) = said else { return silent_after_reply(&daemon, peer.ip(), &wire) };
     // The relay keeps its own connection to the phone alive, so only the heartbeats inside the session would find a phone gone.
     if peer.via_relay() && !super::acknowledges(Some(&said)) {
         wire.close(RELAY_REFUSED, "caps").await;

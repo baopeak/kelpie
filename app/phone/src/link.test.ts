@@ -23,11 +23,13 @@ class FakeSocket implements SocketLike {
   readyState = 0;
   sent: any[] = [];
   closed = false;
+  closedWith: number | undefined;
   send(data: Uint8Array | string) {
     this.sent.push(typeof data === "string" ? JSON.parse(data) : { binary: data });
   }
-  close() {
+  close(code?: number) {
     this.closed = true;
+    this.closedWith = code;
   }
   open() {
     this.readyState = 1;
@@ -998,6 +1000,7 @@ describe("the relay route", () => {
     expect(relay.sent[0]).toHaveProperty("binary");
     relay.say({});
     expect(direct.closed).toBe(true);
+    expect(direct.closedWith).toBe(4000);
     expect(relay.sent[1]).toEqual({ caps: ["ack", "hb", "relay", "pad"] });
     relay.say({ type: "hello", ...hello({ server_ts: r.now() }) });
     expect(r.link.facts.ready).toBe(true);
