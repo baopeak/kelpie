@@ -982,6 +982,7 @@ while its dialog is still on screen Kelpie asks you to close it before showing a
 | Option | Starts | Changing it asks you to verify |
 | --- | --- | --- |
 | *Reach this computer with Tailscale* | off | turning it on |
+| *Reach this computer through the relay* | off | turning it on |
 | *Alerts on your phone* | off, until a phone turns them on | no. Each phone turns them on for itself, in the phone app, so here it only shows how many have |
 | *Lock Kelpie on phones* | on | turning it off |
 | *Lock after idle* | 5 minutes | a longer time |
@@ -1037,6 +1038,21 @@ inside the connection. [Tailnet Lock](https://tailscale.com/kb/1226/tailnet-lock
 Tailscale plan is for non-commercial use. Turning phone access off, the kill switch and a reset all end this mode and
 remove the entry; turning phone access on again does not bring it back until you turn it on and confirm. If Tailscale is stopped at that moment, Settings says the entry is
 still there. Kelpie tries again when you open Settings → Mobile or press *Check again*, and when it next starts; nothing runs in the background to retry while phone access is off.
+
+**Reaching this computer without Tailscale, through the relay.** With *Reach this computer through the relay* on, the installed app
+reaches this computer when Tailscale is off on the phone, or a network blocks it, through a relay on Cloudflare that passes on what they say
+without being able to read it. This computer connects out to the relay; nothing on it is opened to the internet. Turning it on asks you to
+confirm, and the first time it asks for the relay's registration key, which whoever runs the relay gives you: it makes this computer's
+room there once and stays in the credential store. *Relay address* is Kelpie's relay unless you run your own
+([relay-self-host.md](relay-self-host.md)). Only phones paired over Tailscale can use it, each with a token it gets the next time it connects
+and that changes every week; removing a phone shuts it out of the relay too, even while this computer is offline. The phone tries the
+Tailscale address first and the relay a moment later, and goes back to the Tailscale address by itself once it answers again.
+
+What to know: **installing the app on a phone still needs Tailscale the first time**, because the relay serves no page. With the relay down
+and Tailscale off the app has no way to this computer, and says *No way to your computer*; *Relay unreachable* and *Computer offline* say
+which of the two does not answer. The relay sees that a phone and this computer are connected, their internet addresses, when and how much
+they send, and the room's number, never what is said; *What the relay can see* under its row says the same. If the relay stays slow from
+this computer for a day, its row offers *Make a new room*, placed near where the computer is now; phones move to it by themselves.
 
 **The app lock.** A phone paired at a name over Tailscale or HTTPS opens only after Face ID, a fingerprint or its passcode, and your computer checks that. Someone who copied the phone's key cannot get in while it is unlocked, cannot keep it unlocked, and cannot set up a passkey of their own, with one gap: in the five minutes after you approve a phone or press *Reset this phone's lock*, someone with its key could set one up first. Your computer tells you when a phone sets up its lock: if that was not you, unpair it. Set it up right after pairing, when it asks. If those five minutes have passed, it says to press *Reset this phone's lock* on the computer first. It locks again the moment you leave the app or reload the page, and after the idle time in Settings → Mobile (5 minutes unless you change it). Unlocking is one tap and then Face ID: it never starts by itself. A network that drops and comes back while you are using it does not ask again; restarting Kelpie on the computer does.
 

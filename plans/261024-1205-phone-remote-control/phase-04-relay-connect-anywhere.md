@@ -1,13 +1,15 @@
 ---
 phase: 4
 title: "Relay: one Cloudflare relay, connect from anywhere"
-status: pending
+status: in-progress
 priority: P1
 effort: "6d"
 dependencies: [3, 3a, 3c, 4a]
 ---
 
 # Phase 4: Relay — connect from anywhere
+
+**Status (2026-11-05):** relay, daemon, phone and Settings code committed on `phone/phase4-relay`. Relay tests and the phone/app suites pass, and the relay is deployed as `kelpie-link-relay` on `*.workers.dev` and smoke-tested there; the Rust side is written but not yet built or tested (it builds after the rebase onto phase 3e), and the relay e2e and real-carrier checks are still to run. Owner decisions of 2026-11-05: no chaff or padding traffic, the lost-contact push stays deferred, the 7-day soak is not waited for, first install needs Tailscale.
 
 ## Overview
 An opt-in, untrusted relay so the installed phone app reaches the desktop when Tailscale is off or blocked. **One** relay on Cloudflare Workers + Durable Objects, personal use first (user decision 2026-10-30; a public service is a later, separate decision). The desktop dials out; the relay forwards opaque `kelpie-link` frames. Same TypeScript runs on `workerd`, so self-host stays possible. Noise stays end to end: the relay stores no content and cannot read it, on Cloudflare or anywhere else; it sees IPs, timing and sizes.
