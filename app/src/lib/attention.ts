@@ -16,6 +16,9 @@ export const TAILSCALE_API = 23;
 /** Daemon API level that has the phones' app lock (`mobile.set_lock`, `mobile.reset_lock`, `lock` in `mobile.status`). */
 export const LOCK_API = 25;
 
+/** Daemon API level that has Telegram's choices: alerts, alerts with a link, approvals of low-risk requests (`telegram.mode`, `notify.telegram_bind`, the `notify.telegram` event). */
+export const TELEGRAM_API = 26;
+
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;
 

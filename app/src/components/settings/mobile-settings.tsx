@@ -1,7 +1,7 @@
 // Settings → Mobile: the daemon's web app for phones (crates/kelpied/src/mobile.rs). Off by default. A phone pairs with a
 // one-time QR code and end-to-end encryption (kelpie-link); the person approves it here by typing the six digits the phone
 // shows, and the daemon then asks the OS to verify them (Windows Hello or the password). Raising what a phone may do, resetting
-// phone access and keeping unused phones longer ask for that verification too (`mobileSecure`); what the prompt says is the daemon's.
+// phone access, keeping unused phones longer and approvals from Telegram ask for that verification too (`mobileSecure`); what the prompt says is the daemon's.
 // The page: a summary, one `OptionRow` per option, and the address, certificate and paired phones under Advanced.
 // Revoke all stays outside Advanced: a lost phone is when it is needed, and it must not take a search to find.
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
@@ -9,8 +9,8 @@ import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
 import { LOCK_API, TAILSCALE_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
-import { mobileSummary, optionState, type OptionId } from "../../lib/mobile-options";
-import { pushChanged, pushRevision, telegramProblems, type PushState } from "../../lib/push-config";
+import { mobileSummary, optionState, telegramChoice, type OptionId } from "../../lib/mobile-options";
+import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
 import { catalogEntry, entryMatches } from "../../lib/settings-catalog";
 import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
@@ -138,6 +138,10 @@ const ADVANCED = ["mobile-network", "mobile-tls", "mobile-devices"];
 
 const errText = (e: unknown) => String(e).replace(/^Error: /, "");
 
+/** Said by the choice and by the question before it: what approving from Telegram gives up. */
+const telegramWarning = () =>
+  t("Telegram can read these messages: a bot chat is not end-to-end encrypted. A tap in Telegram asks for no Face ID, and anyone who has this Telegram account can approve. Only requests Kelpie labels low risk get buttons, each for one time and five minutes.");
+
 export function MobileSettings() {
   const [status, { refetch }] = createResource(() => store.connected(), () => mobileStatus().catch(() => null));
   const [busy, setBusy] = createSignal(false);
@@ -165,10 +169,20 @@ export function MobileSettings() {
   });
   onMount(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
-    const un = onEvent<{ event: string }>("daemon-event", (m) => {
+    const un = onEvent<{ event: string; params?: { change?: string } }>("daemon-event", (m) => {
       if (m.event === "mobile.updated" || m.event === "mobile.pair_request" || m.event === "mobile.device_changed") void refetch();
       // A phone turned its alerts on or off, or was removed.
       if (m.event === "mobile.updated") void loadPush();
+      // Approvals from Telegram changed on their own: an account was bound, the code ran out, or they stopped.
+      if (m.event === "notify.telegram") {
+        const change = m.params?.change;
+        // An error alone (another poller, say) leaves a code that waits as it is.
+        if (change !== "error") setBinding(null);
+        // Every page that shows these settings reads them again: one sending what it read before would undo the change.
+        pushChanged();
+        if (change === "bound") store.notify(t("Telegram account bound: it can approve low-risk requests from its chat."), undefined, 8000);
+        else if (change === "bind_expired" || change === "bind_failed") store.notify(t("The Telegram code was not used in time, so nothing was bound. Choose approvals again for a new code."), undefined, 8000);
+      }
       if (m.event === "mobile.device_changed") {
         setQr(null);
         setGuideStep(null);
@@ -243,6 +257,31 @@ export function MobileSettings() {
       }),
     );
     return channelWrites;
+  };
+  // What Telegram carries. Approvals are turned on by binding an account (the verified app, then the person); the code waits here until it is used.
+  const [binding, setBinding] = createSignal<{ command: string; until: number } | null>(null);
+  const bindingOpen = () => !!binding() && binding()!.until > now();
+  const telegram = () => telegramChoice({ api: store.daemonApi(), status: s() ?? null, push: push() ?? null });
+  const telegramMode = (): TelegramMode => (bindingOpen() ? "approve_low" : telegram()?.mode ?? "alert");
+  const setTelegramMode = async (mode: TelegramMode) => {
+    if (mode === "approve_low") {
+      if (!(await confirmDialog(`${telegramWarning()} ${t("Turn on approvals from Telegram? Kelpie asks you to verify first, then shows a code to send to your bot.")}`))) return;
+      await run(async () => {
+        const r = await mobileSecure<{ command: string; expires_in: number }>("notify.telegram_bind", {});
+        setBinding({ command: r.command, until: Date.now() + r.expires_in * 1000 });
+      });
+      return;
+    }
+    setBinding(null);
+    channelWrites = channelWrites.then(() =>
+      run(async () => {
+        const now = await daemon<PushState>("notify.get");
+        now.config.telegram.mode = mode;
+        await daemon("notify.set", { config: now.config });
+        pushChanged();
+      }),
+    );
+    await channelWrites;
   };
   const reset = async () => {
     if (!(await confirmDialog(t("Reset phone access? Every paired phone is removed and disconnected, the pairing keys are replaced and phone access turns off."))))
@@ -424,6 +463,38 @@ export function MobileSettings() {
           <OptionRow id="mobile-telegram" state={option("mobile-telegram")} onChange={(on) => void setChannel("telegram", on)}>
             <For each={push() ? telegramProblems(push()!.config, push()!.secrets) : []}>{(p) => <div class="form-note warn-note" data-telegram-problem>{p}</div>}</For>
             <button class="link-btn" data-open-notifications onClick={() => store.openSettings("notifications", "push-telegram")}>{t("Bot token and chat id: Settings → Notifications")}</button>
+            <Show when={telegram()}>
+              <div class="inline-fields" style={{ "align-items": "center" }}>
+                <span>{t("Telegram gets")}</span>
+                <select class="text-input" data-telegram-mode value={telegramMode()} disabled={busy()} onChange={(e) => {
+                  const select = e.currentTarget;
+                  // Back to what holds now when the person did not go on (nothing else redraws it then).
+                  void setTelegramMode(select.value as TelegramMode).then(() => { select.value = telegramMode(); });
+                }}>
+                  <option value="alert">{t("Alerts only")}</option>
+                  <option value="alert_link">{t("Alerts with a link")}</option>
+                  <option value="approve_low" disabled={!!telegram()!.approveBlocked && telegramMode() !== "approve_low"}>{t("Alerts with a link, and approvals of low-risk requests")}</option>
+                </select>
+              </div>
+              <Show when={telegram()!.approveBlocked && telegramMode() !== "approve_low"}><div class="muted-inline" data-telegram-approve-blocked>{telegram()!.approveBlocked}</div></Show>
+              <Show when={telegramMode() !== "alert"}>
+                <div class="form-note" data-telegram-link-note>{t("The link holds this computer's name or address on your network, which Telegram sees. Telegram does not open it, and it holds no code or token.")}</div>
+              </Show>
+              <Show when={telegramMode() === "approve_low"}><div class="form-note warn-note" data-telegram-warning>{telegramWarning()}</div></Show>
+              <Show when={bindingOpen()}>
+                <div class="form-note" data-telegram-bind>
+                  {t("From the Telegram account that will approve, send this to your bot within {n} s:", { n: Math.max(0, Math.round((binding()!.until - now()) / 1000)) })}
+                  {" "}
+                  <span class="mono" data-telegram-bind-command>{binding()!.command}</span>
+                  {" "}
+                  <button class="btn mini" data-telegram-bind-copy onClick={() => void navigator.clipboard?.writeText(binding()!.command)}>{t("Copy")}</button>
+                </div>
+              </Show>
+              <Show when={push()?.telegram?.approving && !bindingOpen()}>
+                <div class="muted-inline" data-telegram-bound>{t("Approvals are on for Telegram account {user} in chat {chat}. Presses from anyone else do nothing.", { user: push()!.config.telegram.user_id ?? "", chat: push()!.config.telegram.chat_id })}</div>
+              </Show>
+              <Show when={push()?.telegram?.error}><div class="form-note error" data-telegram-error>{errorText(push()!.telegram!.error)}</div></Show>
+            </Show>
           </OptionRow>
         </Show>
       </Show>

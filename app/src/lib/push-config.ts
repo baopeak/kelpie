@@ -8,9 +8,13 @@ const [pushRevision, setPushRevision] = createSignal(0);
 export { pushRevision };
 export const pushChanged = () => setPushRevision((n) => n + 1);
 
+/** What a Telegram message carries: the alert as before (a link only with `phone_link`), the alert with a link, or that and buttons for a low-risk request. */
+export type TelegramMode = "alert" | "alert_link" | "approve_low";
+
 export interface PushConfig {
   ntfy: { enabled: boolean; server: string };
-  telegram: { enabled: boolean; chat_id: string };
+  /** `mode` and `user_id` are absent below `TELEGRAM_API`. `user_id` is the bound account: only a binding sets it, and what is sent back is not read. */
+  telegram: { enabled: boolean; chat_id: string; mode?: TelegramMode; user_id?: string };
   webhook: { enabled: boolean };
   events: { needs_you: boolean; done: boolean; failed: boolean; automation: boolean; approval: boolean; cost_cap: boolean };
   /** A finished turn shorter than this many seconds is not sent. */
@@ -37,13 +41,15 @@ export interface PushState {
   webpush?: { devices: number };
   /** Messages not sent because they queued up behind a server that did not answer. */
   dropped?: number;
+  /** Approvals from Telegram: on, polling, a binding code still valid for this many seconds, what stopped them, buttons open (absent below `TELEGRAM_API`). */
+  telegram?: { approving: boolean; polling: boolean; binding_expires_in: number | null; error: string | null; open: number };
 }
 
 /** What the daemon starts with (the same defaults as `Config::default`). */
 export function emptyPushConfig(): PushConfig {
   return {
     ntfy: { enabled: false, server: "https://ntfy.sh" },
-    telegram: { enabled: false, chat_id: "" },
+    telegram: { enabled: false, chat_id: "", mode: "alert_link" },
     webhook: { enabled: false },
     events: { needs_you: true, done: true, failed: true, automation: true, approval: true, cost_cap: true },
     min_turn_s: 30,

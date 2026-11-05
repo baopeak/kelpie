@@ -1,10 +1,10 @@
 // What each option of Settings → Mobile can do now, and the page's summary, from what the daemon said (`mobile.status`, `notify.get`).
 // Pure, so that every row is tested at every daemon level. The daemon enforces all of it; this only says so ahead of time:
 // `presence` follows `LockOptions::weakened_by` and `mobile.set_tailscale`, and a change it does not mention can still be refused.
-import { LOCK_API, TAILSCALE_API } from "./attention";
+import { LOCK_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { t } from "./i18n";
 import { NOTIFY_API } from "./notify-events";
-import { pushSummary, type PushState } from "./push-config";
+import { pushSummary, type PushState, type TelegramMode } from "./push-config";
 import type { MobileStatus } from "../components/settings/mobile-settings";
 
 export const OPTION_IDS = ["mobile-access", "mobile-tailscale", "mobile-webpush", "mobile-lock", "mobile-lock-idle", "mobile-lock-recheck", "mobile-lock-plain", "mobile-ntfy", "mobile-telegram"] as const;
@@ -71,6 +71,19 @@ export function optionState(id: OptionId, f: OptionFacts): OptionState {
     case "mobile-telegram":
       return channel(f, !!f.push?.config.telegram.enabled);
   }
+}
+
+/** What Telegram carries, as the daemon holds it, and why approvals cannot be turned on from here now (null: they can). Null when there is
+ *  nothing to choose: Telegram is off, or the daemon is older than the choice and sends what it always did. */
+export function telegramChoice(f: OptionFacts): { mode: TelegramMode; approveBlocked: string | null } | null {
+  const tg = f.push?.config.telegram;
+  if (!tg?.enabled || f.api < TELEGRAM_API || !f.push?.telegram) return null;
+  const approveBlocked = !f.status?.app
+    ? t("This window is not the installed Kelpie app, so it cannot turn on approvals from Telegram.")
+    : !f.push.secrets.telegram_token
+      ? t("Telegram needs a bot token.")
+      : null;
+  return { mode: tg.mode ?? "alert", approveBlocked };
 }
 
 /** How a phone reaches this computer now. */

@@ -1,10 +1,10 @@
 // Settings → Notifications → "Off this computer": ntfy, Telegram and a webhook, kept by the session
 // daemon (crates/kelpied/src/notify.rs) so they work with the window closed. The daemon holds the
 // secrets in the OS credential store; this page only learns whether each one is set.
-import { For, Show, createEffect, createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { store } from "../../lib/store";
-import { daemon } from "../../lib/ipc";
+import { daemon, onEvent } from "../../lib/ipc";
 import { confirmDialog } from "../../lib/confirm-dialog";
 import { errorText, t } from "../../lib/i18n";
 import { SettingRow, Toggle } from "./setting-row";
@@ -43,6 +43,13 @@ export default function PushSettings() {
   createEffect(() => {
     pushRevision();
     if (store.connected()) void refetch();
+  });
+  // Approvals from Telegram change in the daemon on their own (an account bound, a token refused): a save from what was read before would undo that.
+  onMount(() => {
+    const un = onEvent<{ event: string }>("daemon-event", (m) => {
+      if (m.event === "notify.telegram") void refetch();
+    });
+    onCleanup(() => void un.then((f) => f()));
   });
   const [error, setError] = createSignal<string | null>(null);
   const [topic, setTopic] = createSignal<string | null>(null);
@@ -139,6 +146,12 @@ export default function PushSettings() {
               <button class="btn mini" disabled={!secrets().telegram_token || !cfg().telegram.chat_id} onClick={() => void test("telegram")}>{t("Send a test")}</button>
             </div>
             <Show when={tested().telegram ?? status("telegram")?.error}><div class="form-note">{tested().telegram ?? status("telegram")?.error}</div></Show>
+            <Show when={state()?.telegram?.approving}>
+              <div class="form-note warn-note" data-telegram-approving>{t("Approvals from Telegram are on: another chat id or bot token turns them off.")}</div>
+            </Show>
+            <Show when={state()?.telegram}>
+              <button class="link-btn" data-open-mobile-telegram onClick={() => store.openSettings("mobile", "mobile-telegram")}>{t("Alerts, a link, or approvals of low-risk requests: Settings → Mobile")}</button>
+            </Show>
           </div>
         </Show>
       </SettingRow>

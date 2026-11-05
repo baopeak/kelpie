@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { MobileStatus } from "../components/settings/mobile-settings";
-import { LOCK_API, TAILSCALE_API } from "./attention";
+import { LOCK_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
-import { mobileSummary, OPTION_IDS, optionState, type OptionFacts, type OptionId } from "./mobile-options";
+import { mobileSummary, OPTION_IDS, optionState, telegramChoice, type OptionFacts, type OptionId } from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
 import { emptyPushConfig, type PushState } from "./push-config";
 import { catalogEntry, entryMatches } from "./settings-catalog";
@@ -195,5 +195,34 @@ describe("the summary", () => {
     expect(summary().phones).toBe("No phone is paired.");
     expect(summary({ devices: [device] }).phones).toBe("1 phone is paired.");
     expect(summary({ devices: [device], legacy: [{ id: "b", name: "B", created_at: 0 }] }).phones).toBe("2 phones are paired.");
+  });
+});
+
+describe("what Telegram carries", () => {
+  const telegram = (patch: Partial<PushState["config"]["telegram"]> = {}, token = true): PushState => {
+    const p = push();
+    p.config.telegram = { ...p.config.telegram, enabled: true, chat_id: "42", ...patch };
+    p.secrets.telegram_token = token;
+    p.telegram = { approving: false, polling: false, binding_expires_in: null, error: null, open: 0 };
+    return p;
+  };
+
+  it("is offered only with Telegram on and a daemon that has the choice", () => {
+    expect(telegramChoice(facts({ api: TELEGRAM_API, push: telegram() }))).toEqual({ mode: "alert_link", approveBlocked: null });
+    expect(telegramChoice(facts({ api: TELEGRAM_API, push: telegram({ enabled: false }) }))).toBeNull();
+    expect(telegramChoice(facts({ api: TELEGRAM_API - 1, push: telegram() }))).toBeNull();
+    const old = telegram();
+    delete old.telegram;
+    expect(telegramChoice(facts({ api: TELEGRAM_API, push: old }))).toBeNull();
+  });
+
+  it("reads a setting from before the choice as the alert it always was", () => {
+    expect(telegramChoice(facts({ api: TELEGRAM_API, push: telegram({ mode: undefined }) }))?.mode).toBe("alert");
+  });
+
+  it("turns approvals on only from the installed app, with a bot token", () => {
+    expect(telegramChoice(facts({ api: TELEGRAM_API, push: telegram(), status: status({ app: false }) }))?.approveBlocked).toContain("not the installed Kelpie app");
+    expect(telegramChoice(facts({ api: TELEGRAM_API, push: telegram({}, false) }))?.approveBlocked).toBe("Telegram needs a bot token.");
+    expect(telegramChoice(facts({ api: TELEGRAM_API, push: telegram(), status: null }))?.approveBlocked).toContain("not the installed Kelpie app");
   });
 });
