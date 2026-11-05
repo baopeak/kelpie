@@ -122,6 +122,8 @@ fn forwarded_client(headers: &HeaderMap) -> Option<IpAddr> {
 
 /// What carries a phone's messages: its own WebSocket on `/link`, or a slot of the relay's (`relay`). Both give and take what a WebSocket does, so everything
 /// above them is the same code.
+// One per phone connection, made once and never moved about in bulk: its size is no cost worth a box.
+#[allow(clippy::large_enum_variant)]
 pub enum Carrier {
     Socket(WebSocket),
     Relay(super::relay::Slot),

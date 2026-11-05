@@ -408,7 +408,7 @@ fn padding_that_is_not_zeros_or_says_more_than_there_is_is_not_ours() {
     assert_eq!(unframe_chunk(&[FLAG_PADDED, 0]).unwrap_err(), LinkError::Malformed, "no room for the count");
     assert_eq!(unframe_chunk(&[4, b'a']).unwrap_err(), LinkError::Malformed, "an unknown flag");
     assert_eq!(unframe_chunk(&[]).unwrap_err(), LinkError::Malformed);
-    assert_eq!(unframe_chunk(&[FLAG_PADDED, b'a', 0, 0, 1]).unwrap(), (false, &[b'a'][..]));
+    assert_eq!(unframe_chunk(&[FLAG_PADDED, b'a', 0, 0, 1]).unwrap(), (false, &b"a"[..]));
     assert_eq!(unframe_chunk(&[FLAG_PADDED | FLAG_MORE, b'a', 0, 0, 0]).unwrap(), (true, &[b'a', 0][..]), "a zero that is data stays data when the count says so");
     assert_eq!(unframe_chunk(&[FLAG_MORE, 1, 2]).unwrap(), (true, &[1u8, 2][..]));
 }

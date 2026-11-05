@@ -18,6 +18,8 @@ struct FakeRelay {
     accepted: mpsc::Receiver<(String, RelaySocket)>,
 }
 
+// The handshake callback's error type is tungstenite's own.
+#[allow(clippy::result_large_err)]
 async fn fake_relay() -> FakeRelay {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());

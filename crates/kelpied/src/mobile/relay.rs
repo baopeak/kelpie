@@ -28,7 +28,6 @@ use futures_util::{SinkExt, StreamExt};
 use hkdf::Hkdf;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
