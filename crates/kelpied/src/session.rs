@@ -1133,7 +1133,8 @@ impl Session {
     }
 
     /// What a Telegram button could answer in the wait that began at `wait` (`notify::telegram_poll`): one request open, which the daemon labels
-    /// low, and a permission menu on screen whose one-time yes and plain no are unmistakable. Nothing for any other wait, nor once it was answered.
+    /// low and which changes no file, and a permission menu on screen that names it, whose one-time yes and plain no are unmistakable. Nothing
+    /// for any other wait, nor once it was answered.
     /// Read under the lock, judged after it is let go.
     pub fn telegram_approval(&self, wait: u64) -> Option<(crate::notify::telegram_poll::Target, String)> {
         use crate::mobile::risk::{label, Level};
@@ -1146,7 +1147,12 @@ impl Session {
             (g.wait_requests.clone(), g.screen_prompt.clone()?, g.vt.text_tail(PROMPT_LOOK_LINES))
         };
         let [request] = open.as_slice() else { return None };
-        if label(request, &worktree).level != Level::Low || request.shown.is_empty() {
+        // A file edit, write or patch shows its path alone, not what it writes: the alert and its link only.
+        if label(request, &worktree).level != Level::Low || request.shown.is_empty() || crate::mobile::risk::changes_files(request) {
+            return None;
+        }
+        // The menu must be for this request: a hook's request that outlived its own dialog says nothing of the one on screen now.
+        if !crate::choices::names_above_menu(&screen, &request.shown) {
             return None;
         }
         let (yes, no) = crate::choices::one_time_answers(&screen)?;
@@ -1168,7 +1174,7 @@ impl Session {
             }
             g.wait_requests.clone()
         };
-        matches!(open.as_slice(), [one] if crate::mobile::risk::label(one, &worktree).level == crate::mobile::risk::Level::Low)
+        matches!(open.as_slice(), [one] if crate::mobile::risk::label(one, &worktree).level == crate::mobile::risk::Level::Low && !crate::mobile::risk::changes_files(one))
     }
 
     /// Who answered the wait that began at `wait`, while that is remembered.
@@ -1785,15 +1791,21 @@ mod tests {
 
     /// A Claude permission menu on screen for `command`, the request its hook reported, and the wait it began.
     fn asking(command: &str, tool: &str) -> (Arc<Session>, fake::Typed, u64) {
+        asking_for(&format!("Bash({command})"), tool, json!({"command": command}))
+    }
+
+    /// The same menu under the header `header`, for a hook's request of `tool` with `input`.
+    fn asking_for(header: &str, tool: &str, input: Value) -> (Arc<Session>, fake::Typed, u64) {
         let (s, rx) = fake::running(1, "s1", "claude");
-        let menu = format!("● Bash({command})\r\n Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. Yes, and don't ask again for these commands\r\n   3. No, and tell Claude what to do differently (esc)\r\n");
+        s.spec.lock().cwd = "C:/work/proj".into();
+        let menu = format!("● {header}\r\n Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. Yes, and don't ask again for these commands\r\n   3. No, and tell Claude what to do differently (esc)\r\n");
         let screen = {
             let mut g = s.inner.lock();
             g.vt.feed(menu.as_bytes());
             g.vt.text_tail(PROMPT_LOOK_LINES)
         };
         s.inner.lock().screen_prompt = crate::choices::detect(&screen);
-        s.request_hook("PermissionRequest", &json!({"tool_name": tool, "tool_input": {"command": command}}));
+        s.request_hook("PermissionRequest", &json!({"tool_name": tool, "tool_input": input}));
         let since = fake::wait_on_user(&s);
         (s, rx, since)
     }
@@ -1830,6 +1842,22 @@ mod tests {
         let (s, _rx, since) = asking("ls", "Bash");
         s.inner.lock().screen_prompt = Some(crate::choices::Prompt { keys: vec!["1".into(), "2".into(), "3".into()], question: None, line: false, lasting: vec!["1".into()], selected: None });
         assert!(s.telegram_approval(since).is_none(), "the screen's own reading says 1 lasts");
+        // A file edit or write inside the worktree is labelled low, but Telegram would see only its path: no buttons, nor a wait for a menu.
+        for (header, tool, input) in [
+            ("Update(src/a.rs)", "Edit", json!({"file_path": "src/a.rs", "old_string": "x", "new_string": "y"})),
+            ("Write(src/new.rs)", "Write", json!({"file_path": "src/new.rs", "content": "fn main() {}"})),
+            ("Update(src/a.rs)", "MultiEdit", json!({"file_path": "src/a.rs", "edits": []})),
+        ] {
+            let (s, _rx, since) = asking_for(header, tool, input);
+            let request = s.inner.lock().wait_requests[0].clone();
+            assert_eq!(crate::mobile::risk::label(&request, "C:/work/proj").level, crate::mobile::risk::Level::Low, "{tool}");
+            assert!(s.telegram_approval(since).is_none(), "{tool}");
+            s.inner.lock().screen_prompt = None;
+            assert!(!s.telegram_menu_due(since), "{tool}");
+        }
+        // A menu that names another command than the request the hook reported is not that request's.
+        let (s, _rx, since) = asking_for("Bash(cat notes.txt)", "Bash", json!({"command": "ls"}));
+        assert!(s.telegram_approval(since).is_none(), "the menu is for something else");
     }
 
     /// Who the error says answered, when it says that.

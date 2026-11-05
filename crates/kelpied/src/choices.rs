@@ -326,6 +326,19 @@ pub fn one_time_answers(screen: &str) -> Option<(String, String)> {
     (yes != no).then_some((yes, no))
 }
 
+/// Whether the lines above the permission menu on screen name `asked`, the command a hook reported: its first line (Claude Code shows it
+/// there, and in its `Bash(<command>` header). Spaces, line breaks and box borders are left out on both sides, so a command the screen wrapped
+/// still counts; one the screen cut short does not, and its request gets no button.
+pub fn names_above_menu(screen: &str, asked: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    let Some((_, end)) = menu(&lines) else { return false };
+    let (_, first) = menu_labels(&lines, end);
+    let above = &lines[lines.len().saturating_sub(MENU_LINES).min(first)..first];
+    let squeezed = |s: &str| s.chars().filter(|c| !c.is_whitespace() && !matches!(c, '│' | '|')).collect::<String>();
+    let wanted = squeezed(asked.lines().next().unwrap_or_default());
+    !wanted.is_empty() && squeezed(&above.concat()).contains(&wanted)
+}
+
 /// The menu and the index of its last item in `lines`.
 fn menu(lines: &[&str]) -> Option<(Prompt, usize)> {
     let start = lines.len().saturating_sub(MENU_LINES);
@@ -755,6 +768,12 @@ mod tests {
     fn a_button_from_afar_is_offered_only_for_an_unmistakable_yes_once_and_no() {
         let claude = "● Bash(npm test)\n\n Bash command\n   npm test\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for npm test commands in D:\\proj\n   3. No, and tell Claude what to do differently (esc)\n";
         assert_eq!(one_time_answers(claude), Some(("1".into(), "3".into())));
+        // The menu must be for the request the button names: above it, as the screen shows it, wrapped or in a box.
+        assert!(names_above_menu(claude, "npm test") && names_above_menu(claude, "npm test\nsecond line"));
+        assert!(!names_above_menu(claude, "ls -la") && !names_above_menu(claude, "") && !names_above_menu("npm test\n", "npm test"));
+        let boxed = "│ Bash command\n│   cargo test --workspace --no-fai\n│   l-fast\n│ Do you want to proceed?\n│ ❯ 1. Yes\n│   2. No\n";
+        assert!(names_above_menu(boxed, "cargo test --workspace --no-fail-fast"));
+        assert!(!names_above_menu("Do you want to proceed?\n ❯ 1. Yes\n   2. No, npm test\n", "npm test"), "only above the menu");
         assert_eq!(one_time_answers("Allow execution of: 'git status'?\n● 1. Yes, allow once\n  2. Yes, allow always\n  3. No, suggest changes (esc)\n"), Some(("1".into(), "3".into())));
         for unsure in [
             // Two plain yeses, or none: which one a button means is not for the daemon to guess.

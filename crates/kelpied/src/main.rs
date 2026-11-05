@@ -291,15 +291,19 @@ fn init_logging(data_dir: &std::path::Path) {
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
     let file = std::fs::OpenOptions::new().create(true).append(true).open(&path);
-    // The HTTP client logs the address of each request (a bot token is part of Telegram's): never,
-    // whatever level the user asks for.
-    let mut filter = tracing_subscriber::EnvFilter::try_from_env("KELPIE_LOG").unwrap_or_else(|_| "info".into());
-    for quiet in ["ureq=warn", "ureq_proto=warn"] {
-        filter = filter.add_directive(quiet.parse().expect("log directive"));
-    }
+    let filter = log_filter(tracing_subscriber::EnvFilter::try_from_env("KELPIE_LOG").unwrap_or_else(|_| "info".into()));
     if let Ok(file) = file {
         tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
     }
+}
+
+/// The level asked for, except that the HTTP client logs the address of each request (a bot token is part of Telegram's): never,
+/// whatever level the user asks for.
+pub(crate) fn log_filter(mut filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
+    for quiet in ["ureq=warn", "ureq_proto=warn"] {
+        filter = filter.add_directive(quiet.parse().expect("log directive"));
+    }
+    filter
 }
 
 /// Called by agents' hook machinery. Must be fast, print nothing to stdout (Claude feeds

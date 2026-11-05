@@ -84,6 +84,12 @@ fn tool_kind(tool: &str) -> ToolKind {
     }
 }
 
+/// A request whose effect is what it writes to files (an edit, a write, a patch, a move or a delete): its path names the file, not what
+/// goes in it. A button that shows only `shown` (`notify::telegram_poll`) is not offered for it. The level is not changed by this.
+pub fn changes_files(request: &Request) -> bool {
+    request.tool.as_deref().is_some_and(|t| matches!(tool_kind(t), ToolKind::Edit | ToolKind::Delete))
+}
+
 // What a test runs whenever a label is begun on its thread.
 #[cfg(test)]
 thread_local! {

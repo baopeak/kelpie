@@ -131,6 +131,9 @@ pub struct Telegram {
     /// The Telegram account whose button presses count, set by the binding alone (`notify.telegram_bind`): what the app sends is not read.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub user_id: String,
+    /// That account's `@username`, or its first name, as Telegram gave it when it bound: shown next to the id. Kept and cleared with it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub user_name: String,
 }
 
 impl Telegram {
@@ -1045,6 +1048,7 @@ impl Notifier {
         // Approvals are the binding's to turn on (`telegram_bind`, the verified app and the person), and whatever changes who or where they come from turns them off.
         let config = config.map(|mut c| {
             c.telegram.user_id = before.telegram.user_id.clone();
+            c.telegram.user_name = before.telegram.user_name.clone();
             c
         });
         if let Some(c) = &config {
@@ -1067,6 +1071,12 @@ impl Notifier {
             if ends {
                 c.telegram.mode = if c.telegram.mode == TelegramMode::ApproveLow { TelegramMode::AlertLink } else { c.telegram.mode };
                 c.telegram.user_id.clear();
+                c.telegram.user_name.clear();
+            }
+            // A code shown for approvals binds nothing once the person chose otherwise: another mode, Telegram off or another chat.
+            let t = &c.telegram;
+            if t.mode != TelegramMode::ApproveLow || !t.enabled || t.chat_id != before.telegram.chat_id {
+                approvals.cancel_binding();
             }
             if c.ntfy.enabled && self.secrets.get(K_TOPIC).is_none() {
                 self.secrets.set(K_TOPIC, &random_topic())?;
@@ -1079,6 +1089,10 @@ impl Notifier {
             if ends {
                 approvals.ended("turned off in Settings", true);
             }
+        }
+        // Nor through another bot.
+        if token_changed {
+            approvals.cancel_binding();
         }
         approvals.refresh();
         Ok(())

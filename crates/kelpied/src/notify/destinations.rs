@@ -74,8 +74,10 @@ pub trait Host: Send + Sync {
     fn telegram_still(&self, approval: &Approval) -> bool {
         self.telegram_approval(&approval.session, approval.wait()).as_ref() == Some(approval)
     }
-    /// Answers it through the session's own answer path, for `telegram`: the first answer wins.
-    fn telegram_answer(&self, _approval: &Approval, _allow: bool) -> Answered {
+    /// Answers it through the session's own answer path, for `telegram`: the first answer wins. `go` is asked right before the answer is
+    /// written, after any wait for the request: approvals that ended meanwhile answer nothing (`Answered::Off`). `Already` names who answered
+    /// by id: `desktop`, `telegram` or a phone's.
+    fn telegram_answer(&self, _approval: &Approval, _allow: bool, _go: &dyn Fn() -> bool) -> Answered {
         Answered::Gone
     }
     /// A line in the phones' audit log, as the device `telegram`.

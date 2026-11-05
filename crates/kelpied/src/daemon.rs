@@ -88,27 +88,33 @@ impl Host for NotifyHost {
     }
 
     /// Only for the request the button was sent for, still as it was: then the session's own answer path decides, and the first answer wins.
-    fn telegram_answer(&self, approval: &Approval, allow: bool) -> Answered {
+    fn telegram_answer(&self, approval: &Approval, allow: bool, go: &dyn Fn() -> bool) -> Answered {
         let Some(entry) = self.0.upgrade().and_then(|d| d.by_id(&approval.session)) else { return Answered::Gone };
         let still = self.telegram_still(approval);
         match (&entry, &approval.target) {
             (Entry::Term(s), Target::Term { wait, yes, no }) => {
                 if !still {
-                    return s.resolution(*wait).map_or(Answered::Gone, |r| Answered::Already(r.by.name));
+                    return s.resolution(*wait).map_or(Answered::Gone, |r| Answered::Already(r.by.id));
+                }
+                if !go() {
+                    return Answered::Off;
                 }
                 match s.answer_by(Some(*wait), Answer::Text(if allow { yes } else { no }), false, By::telegram()) {
                     Ok(()) => Answered::Done,
-                    Err(AnswerError::Answered(r)) => Answered::Already(r.by.name),
+                    Err(AnswerError::Answered(r)) => Answered::Already(r.by.id),
                     Err(_) => Answered::Gone,
                 }
             }
             (Entry::Chat(c), Target::Chat { request_id, allow: yes, deny: no }) => {
                 if !still {
-                    return c.resolution(request_id, yes).map_or(Answered::Gone, |r| Answered::Already(r.by.name));
+                    return c.resolution(request_id, yes).map_or(Answered::Gone, |r| Answered::Already(r.by.id));
+                }
+                if !go() {
+                    return Answered::Off;
                 }
                 match c.answer(request_id, if allow { yes } else { no }, By::telegram()) {
                     Ok(()) => Answered::Done,
-                    Err(crate::chat::NotAnswered::AlreadyAnswered(r)) => Answered::Already(r.by.name),
+                    Err(crate::chat::NotAnswered::AlreadyAnswered(r)) => Answered::Already(r.by.id),
                     Err(_) => Answered::Gone,
                 }
             }
@@ -2901,17 +2907,56 @@ mod tests {
 
     #[tokio::test]
     async fn the_phones_kill_switch_stops_approvals_from_telegram_too() {
-        for method in ["mobile.revoke_all", "mobile.disable"] {
+        for method in ["mobile.revoke_all", "mobile.disable", "mobile.reset"] {
             let (d, dir) = test_daemon("telegram-kill");
             approving(&d);
-            let (tx, _rx) = crate::session::client_channel();
-            d.dispatch(1, &tx, &json!(1), method, json!({})).unwrap();
+            let (tx, mut rx) = crate::session::client_channel();
+            if method == "mobile.reset" {
+                // The app's, once the person said yes.
+                d.set_client_role(1, &crate::auth::Role::App);
+                d.presence.inject(|_| Ok(()));
+                assert!(d.dispatch(1, &tx, &json!(1), method, json!({})).unwrap().is_none(), "answered after the prompt");
+                let o = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("a reply").expect("a reply");
+                let reply: Value = serde_json::from_slice(&o.data[5..]).unwrap();
+                assert_eq!(reply["result"], true, "{reply}");
+            } else {
+                d.dispatch(1, &tx, &json!(1), method, json!({})).unwrap();
+            }
             let t = d.notifier.config().telegram;
             assert!(!t.approving() && t.user_id.is_empty() && t.mode == notify::TelegramMode::AlertLink, "{method}");
             let log = d.mobile.audit_entries(20).to_string();
             assert!(log.contains("telegram_off"), "{method}: {log}");
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn a_telegram_press_answers_a_chat_through_its_own_answer_path() {
+        let (d, dir) = test_daemon("telegram-chat");
+        let c = ChatSession::new(9, SessionSpec { id: "chat-tg".into(), kind: "codex".into(), cwd: dir.to_string_lossy().into_owned(), ..Default::default() });
+        let mut stdin = c.live_for_test();
+        d.insert_for_test(Entry::Chat(c.clone()));
+        c.ingest_for_test(json!({"id": 7, "method": "execCommandApproval", "params": {"command": ["ls"]}}).to_string());
+        let host = NotifyHost(Arc::downgrade(&d));
+        let approval = host.telegram_approval("chat-tg", None).expect("a low request with a one-time yes");
+        assert!(matches!(&approval.target, Target::Chat { request_id, .. } if *request_id == json!(7)) && approval.command == "ls", "{approval:?}");
+        // Approvals that ended while the press was on its way write nothing.
+        assert_eq!(host.telegram_answer(&approval, true, &|| false), Answered::Off);
+        assert!(stdin.try_recv().is_err());
+        // Deny first: the dialect's no goes to the agent, as Telegram's answer.
+        assert_eq!(host.telegram_answer(&approval, false, &|| true), Answered::Done);
+        let written: Value = serde_json::from_slice(&stdin.try_recv().expect("the no")).unwrap();
+        assert_eq!(written, json!({"id": 7, "result": {"decision": "denied"}}));
+        assert_eq!(c.resolution(&json!(7), &json!({"id": 7, "result": {"decision": "approved"}}).to_string()).map(|r| r.by), Some(By::telegram()));
+        // A later press is told who answered, by id, and writes nothing.
+        assert_eq!(host.telegram_answer(&approval, true, &|| true), Answered::Already("telegram".into()));
+        assert!(stdin.try_recv().is_err());
+        // A button for another kind of session, or for one that is gone, answers nothing.
+        let term = Approval { target: Target::Term { wait: 1, yes: "1".into(), no: "3".into() }, ..approval.clone() };
+        assert_eq!(host.telegram_answer(&term, true, &|| true), Answered::Gone);
+        let gone = Approval { session: "nobody".into(), ..approval };
+        assert_eq!(host.telegram_answer(&gone, true, &|| true), Answered::Gone);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
