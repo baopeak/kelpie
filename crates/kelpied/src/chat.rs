@@ -385,11 +385,11 @@ fn rpc_request(method: &str, params: &Value) -> crate::mobile::risk::Request {
     match method {
         "item/commandExecution/requestApproval" | "execCommandApproval" => {
             let command = command_text(&params["command"]);
-            Request { tool: Some("exec".into()), shown: shown_text(command.clone().unwrap_or_default()), command, paths: Vec::new(), cwd }
+            Request { tool: Some("exec".into()), shown: shown_text(command.clone().unwrap_or_default()), command, cwd, ..Default::default() }
         }
         "applyPatchApproval" => {
             let paths: Vec<String> = params["fileChanges"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
-            Request { tool: Some("apply_patch".into()), shown: shown_text(paths.join("\n")), command: None, paths, cwd }
+            Request { tool: Some("apply_patch".into()), shown: shown_text(paths.join("\n")), paths, cwd, ..Default::default() }
         }
         "session/request_permission" => {
             let call = &params["toolCall"];
@@ -1580,6 +1580,14 @@ impl ChatSession {
         if label(&pending.request, &worktree).level != Level::Low || pending.request.shown.is_empty() || crate::mobile::risk::changes_files(&pending.request) {
             return None;
         }
+        let (allow, deny) = Self::telegram_lines(&pending)?;
+        Some((crate::notify::telegram_poll::Target::Chat { request_id: pending.id.clone(), allow, deny }, pending.request.shown))
+    }
+
+    /// The lines in the agent's dialect that approve `pending` once and refuse it, when the daemon can write both: each one `answer` takes as
+    /// a one-shot answer to that very request, the yes read as a yes and the no as a no. Whether a button may carry them is
+    /// `telegram_approval`'s to say.
+    fn telegram_lines(pending: &Pending) -> Option<(String, String)> {
         let id = &pending.id;
         let decided = |yes: &str, no: &str| (json!({"id": id, "result": {"decision": yes}}), json!({"id": id, "result": {"decision": no}}));
         let (allow, deny) = match pending.method.as_str() {
@@ -1589,7 +1597,7 @@ impl ChatSession {
                 (line(json!({"behavior": "allow", "updatedInput": input})), line(json!({"behavior": "deny", "message": "The user denied this action."})))
             }
             "item/commandExecution/requestApproval" => decided("accept", "decline"),
-            "execCommandApproval" => decided("approved", "denied"),
+            "execCommandApproval" | "applyPatchApproval" => decided("approved", "denied"),
             "session/request_permission" => {
                 let [yes] = pending.allows.as_slice() else { return None };
                 let no = pending.once.iter().find(|o| !pending.allows.contains(o)).map_or_else(|| json!({"outcome": "cancelled"}), |o| json!({"outcome": "selected", "optionId": o}));
@@ -1603,7 +1611,7 @@ impl ChatSession {
         if !takes(&allow) || !takes(&deny) || !answer_approves(&pending.allows, &serde_json::from_str(&allow).unwrap_or_default()) || answer_approves(&pending.allows, &serde_json::from_str(&deny).unwrap_or_default()) {
             return None;
         }
-        Some((crate::notify::telegram_poll::Target::Chat { request_id: id.clone(), allow, deny }, pending.request.shown))
+        Some((allow, deny))
     }
 
     /// Who answered the request whose answer `line` would be, while that is remembered.
@@ -2089,19 +2097,28 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"toolCall": {"kind": "execute", "rawInput": {"command": "ls"}}, "options": [{"optionId": "always", "kind": "allow_always"}]}}),
             json!({"id": 7, "method": "item/fileChange/requestApproval", "params": {"itemId": "i"}}),
             json!({"id": 7, "method": "item/permissions/requestApproval", "params": {"permissions": {}}}),
-            // A file edit, write or patch inside the worktree is labelled low, but its message would show only the path.
+            // A delete is never low.
+            json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"toolCall": {"kind": "delete", "rawInput": {"path": "src/a.rs"}}, "options": options}}),
+        ] {
+            assert!(lines(line.clone()).2.is_none(), "{line}");
+        }
+        // A file edit, write, patch or move inside the worktree is labelled low and has its lines, but its message would show only the path:
+        // that alone keeps the buttons away.
+        for line in [
             json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "Edit", "input": {"file_path": "src/a.rs", "old_string": "x", "new_string": "y"}}}),
             json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": {"file_path": "build.rs", "content": "fn main() {}"}}}),
             json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "MultiEdit", "input": {"file_path": "src/a.rs", "edits": []}}}),
             json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "NotebookEdit", "input": {"notebook_path": "a.ipynb", "new_source": "x"}}}),
             json!({"id": 7, "method": "applyPatchApproval", "params": {"fileChanges": {"src/a.rs": {"update": {"unified_diff": "+x"}}}}}),
             json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"toolCall": {"kind": "edit", "rawInput": {"path": "src/a.rs"}}, "options": options}}),
-            json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"toolCall": {"kind": "delete", "rawInput": {"path": "src/a.rs"}}, "options": options}}),
+            json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"toolCall": {"kind": "move", "rawInput": {"path": "src/a.rs"}}, "options": options}}),
         ] {
-            assert!(lines(line.clone()).2.is_none(), "{line}");
+            let (c, _stdin, offered) = lines(line.clone());
+            let pending = c.inner.lock().pending.items.values().next().cloned().expect("the request");
+            assert_eq!(crate::mobile::risk::label(&pending.request, "C:/work/proj").level, crate::mobile::risk::Level::Low, "{line}");
+            assert!(ChatSession::telegram_lines(&pending).is_some(), "the daemon could answer it: {line}");
+            assert!(offered.is_none(), "{line}");
         }
-        let edit = crate::mobile::risk::from_tool("Edit", &json!({"file_path": "src/a.rs"}), None);
-        assert_eq!(crate::mobile::risk::label(&edit, "C:/work/proj").level, crate::mobile::risk::Level::Low, "the edit is low, and still has no buttons");
         let (c, _stdin) = chat();
         c.ingest_line(json!({"type": "control_request", "request_id": "a", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}}).to_string());
         c.ingest_line(json!({"type": "control_request", "request_id": "b", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}}).to_string());

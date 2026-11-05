@@ -51,6 +51,9 @@ pub struct Request {
     /// The files a file tool reads or changes.
     pub paths: Vec<String>,
     pub cwd: Option<String>,
+    /// What the agent says the call is for (`description` in Claude's Bash input), which its permission dialog shows under the command.
+    /// Only for telling that dialog on screen apart (`choices::menu_shows_command`): never shown, never read for the level.
+    pub description: String,
 }
 
 /// More sub-commands than a person reads on a phone, and a good way to bury one of them.
@@ -143,7 +146,7 @@ pub fn from_tool(tool: &str, input: &serde_json::Value, cwd: Option<&str>) -> Re
     let command = input.get("command").and_then(command_text);
     let paths: Vec<String> = ["file_path", "notebook_path", "path"].iter().find_map(|k| text(k)).into_iter().collect();
     let shown = command.clone().or_else(|| paths.first().cloned()).unwrap_or_else(|| if input.is_null() { String::new() } else { input.to_string() });
-    Request { tool: Some(tool.to_string()), command, shown: shown_text(shown), paths, cwd: cwd.map(str::to_string) }
+    Request { tool: Some(tool.to_string()), command, shown: shown_text(shown), paths, cwd: cwd.map(str::to_string), description: text("description").unwrap_or_default() }
 }
 
 /// A command as an agent's protocol gives it: a line a shell will read, or its words, which no shell has split. Words are quoted where they need it, so that a word keeps its
