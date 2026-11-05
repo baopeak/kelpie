@@ -13,8 +13,9 @@ export type TelegramMode = "alert" | "alert_link" | "approve_low";
 
 export interface PushConfig {
   ntfy: { enabled: boolean; server: string };
-  /** `mode` and `user_id` are absent below `TELEGRAM_API`. `user_id` is the bound account: only a binding sets it, and what is sent back is not read. */
-  telegram: { enabled: boolean; chat_id: string; mode?: TelegramMode; user_id?: string };
+  /** `mode`, `user_id` and `user_name` are absent below `TELEGRAM_API`. `user_id` is the bound account and `user_name` its `@username` or
+   * first name: only a binding sets them, and what is sent back is not read. */
+  telegram: { enabled: boolean; chat_id: string; mode?: TelegramMode; user_id?: string; user_name?: string };
   webhook: { enabled: boolean };
   events: { needs_you: boolean; done: boolean; failed: boolean; automation: boolean; approval: boolean; cost_cap: boolean };
   /** A finished turn shorter than this many seconds is not sent. */

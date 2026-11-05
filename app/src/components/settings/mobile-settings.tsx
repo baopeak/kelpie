@@ -263,6 +263,12 @@ export function MobileSettings() {
   const bindingOpen = () => !!binding() && binding()!.until > now();
   const telegram = () => telegramChoice({ api: store.daemonApi(), status: s() ?? null, push: push() ?? null });
   const telegramMode = (): TelegramMode => (bindingOpen() ? "approve_low" : telegram()?.mode ?? "alert");
+  // The bound account as Telegram names it, next to its id: a bare number is hard to tell from someone else's.
+  const boundAccount = () => {
+    const tg = push()?.config.telegram;
+    const id = tg?.user_id ?? "";
+    return tg?.user_name ? `${tg.user_name} (${id})` : id;
+  };
   const setTelegramMode = async (mode: TelegramMode) => {
     if (mode === "approve_low") {
       if (!(await confirmDialog(`${telegramWarning()} ${t("Turn on approvals from Telegram? Kelpie asks you to verify first, then shows a code to send to your bot.")}`))) return;
@@ -483,7 +489,7 @@ export function MobileSettings() {
               <Show when={telegramMode() === "approve_low"}><div class="form-note warn-note" data-telegram-warning>{telegramWarning()}</div></Show>
               <Show when={bindingOpen()}>
                 <div class="form-note" data-telegram-bind>
-                  {t("From the Telegram account that will approve, send this to your bot within {n} s:", { n: Math.max(0, Math.round((binding()!.until - now()) / 1000)) })}
+                  {t("From the Telegram account that will approve, send this within {n} s in the chat set in Settings → Notifications (your chat with the bot, or the group):", { n: Math.max(0, Math.round((binding()!.until - now()) / 1000)) })}
                   {" "}
                   <span class="mono" data-telegram-bind-command>{binding()!.command}</span>
                   {" "}
@@ -491,7 +497,7 @@ export function MobileSettings() {
                 </div>
               </Show>
               <Show when={push()?.telegram?.approving && !bindingOpen()}>
-                <div class="muted-inline" data-telegram-bound>{t("Approvals are on for Telegram account {user} in chat {chat}. Presses from anyone else do nothing.", { user: push()!.config.telegram.user_id ?? "", chat: push()!.config.telegram.chat_id })}</div>
+                <div class="muted-inline" data-telegram-bound>{t("Approvals are on for Telegram account {user} in chat {chat}. Presses from anyone else do nothing.", { user: boundAccount(), chat: push()!.config.telegram.chat_id })}</div>
               </Show>
               <Show when={push()?.telegram?.error}><div class="form-note error" data-telegram-error>{errorText(push()!.telegram!.error)}</div></Show>
             </Show>
@@ -499,7 +505,11 @@ export function MobileSettings() {
         </Show>
       </Show>
       <Show when={s() && (!query() || advancedMatches())}>
-        <details class="option-advanced" ref={advanced} data-mobile-advanced open={advancedOpen()} onToggle={(e) => advancedForced() || setAdvancedWanted(e.currentTarget.open)}>
+        <details class="option-advanced" ref={advanced} data-mobile-advanced open={advancedOpen()} onToggle={(e) => {
+          // Held open while something under it must be seen: the page's state and the element stay the same.
+          if (advancedForced()) e.currentTarget.open = true;
+          else setAdvancedWanted(e.currentTarget.open);
+        }}>
           <summary>{t("Advanced: address, certificate and paired phones")}</summary>
           <Show when={s()!.enabled}>
             <SettingRow id="mobile-network" wide>
