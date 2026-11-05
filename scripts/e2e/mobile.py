@@ -1387,6 +1387,8 @@ for n in (1, 2, 3):
     d.js("const a = document.querySelector('[data-audit]'); a.open = true;")
     run.check("the list of what phones did shows entries, with an intact log", bool(d.wait("return document.querySelectorAll('[data-audit-entry]').length > 0 && !document.querySelector('[data-audit-broken]')", 10)))
     run.shot("20-mobile-audit")
+    d.js("const a = document.querySelector('[data-mobile-advanced]'); a.open = false; a.dispatchEvent(new Event('toggle'));")
+    run.check("revoke all is in sight with Advanced closed", d.js("const b = document.querySelector('[data-revoke-all]'); return !!b && !b.closest('[data-mobile-advanced]') && b.getClientRects().length > 0") is True)
     d.js("document.querySelector('[data-revoke-all]').click()")
     run.check("the kill switch turns phone access off and removes every phone", bool(wait(lambda: (lambda s: not s["running"] and not s["devices"])(daemon(d, "mobile.status")), 10)))
     run.check("…and the phone hears it at once", bool(phone.wait("return document.querySelector('.card')?.textContent.includes('no longer paired')", 15)))

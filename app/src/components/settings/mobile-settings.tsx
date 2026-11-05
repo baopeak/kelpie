@@ -3,6 +3,7 @@
 // shows, and the daemon then asks the OS to verify them (Windows Hello or the password). Raising what a phone may do, resetting
 // phone access and keeping unused phones longer ask for that verification too (`mobileSecure`); what the prompt says is the daemon's.
 // The page: a summary, one `OptionRow` per option, and the address, certificate and paired phones under Advanced.
+// Revoke all stays outside Advanced: a lost phone is when it is needed, and it must not take a search to find.
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
@@ -301,6 +302,11 @@ export function MobileSettings() {
           <button class="btn danger" disabled={busy()} onClick={() => void reset()}>{t("Reset phone access")}</button>
         </div>
       </Show>
+      <Show when={hasAccess() && !s()!.store_error && (!query() || advancedMatches())}>
+        <div class="inline-fields" style={{ "margin-top": "8px" }}>
+          <button class="btn danger" data-revoke-all onClick={() => void revokeAll()}>{t("Turn off phone access and revoke all")}</button>
+        </div>
+      </Show>
       <Show when={s()}>
         <OptionRow id="mobile-tailscale" state={option("mobile-tailscale")} onChange={(on) => void setTailscaleMode(on)}>
           <Show when={store.daemonApi() >= TAILSCALE_API}>
@@ -492,7 +498,6 @@ export function MobileSettings() {
             </div>
             <Show when={hasAccess() && !s()!.store_error}>
               <div class="inline-fields" style={{ "margin-top": "8px" }}>
-                <button class="btn danger" data-revoke-all onClick={() => void revokeAll()}>{t("Turn off phone access and revoke all")}</button>
                 <button class="btn danger" disabled={busy()} onClick={() => void reset()}>{t("Reset phone access")}</button>
               </div>
             </Show>
