@@ -7,11 +7,18 @@
 // reconnecting with full-jitter backoff and on visibility / network triggers, resuming subscriptions, and the offline
 // policy: nothing is queued, requests made while not connected are refused at once, and an answer whose reply was lost
 // is retried once under the same `cid` (the daemon lets the first answer win and recognises a repeat).
+//
+// Two routes race: the page's own origin (the computer's Tailscale address) first, and the relay 250 ms later, or at once
+// when the direct one has already failed; the first to complete its handshake wins and the other is closed. The relay
+// carries the same sealed frames and cannot read them; what it says itself (`desktop_offline`) is a hint, and only ever
+// ends a connection. On the relay the direct address is looked at every 30 s and when the network changes, and once it
+// has answered for 10 s the link moves back to it with a new handshake, and picks up what it followed.
 import { PHONE_API } from "../../src/lib/attention";
 import { backoffMs, LagMeter, reachFromAnswer, whyNoAnswer, type ConnFacts, type Reach } from "./conn-state";
 import type { Risk } from "./command-text";
 import type { LockInfo } from "./lock";
-import { Initiator, MODE_RECONNECT, type Endpoint, type Session } from "./noise";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { Initiator, MODE_RECONNECT, unb64url, type Endpoint, type Session } from "./noise";
 import type { Pairing } from "./pairing-store";
 import type { ScreenFrame } from "./screen-sync";
 
@@ -117,6 +124,14 @@ export interface ChatRequestInfo {
   risk: Risk;
 }
 
+/** A token for the relay, given inside the session (`relay`), and where the relay and this computer's room are. */
+export interface RelayGrant {
+  url: string;
+  ticket: string;
+  token: string;
+  expires: number;
+}
+
 export interface ReplyError {
   code: string;
   reason?: string | null;
@@ -152,6 +167,8 @@ export interface LinkHandlers {
   chatResync(id: string): void;
   /** The computer's addresses (after a handshake, and when they change). */
   addrs?(m: AddrsMsg): void;
+  /** A token for the relay, to keep with the pairing. */
+  relay?(m: RelayGrant): void;
   /** Another device was paired, changed or removed on the computer. */
   deviceChanged?(m: { name: string; change: string; permission: string | null }): void;
   /** The computer said, inside the session, that the device was removed: forget the pairing. Nothing else does: a close code
@@ -185,6 +202,13 @@ export interface Codec {
    *  Throws when the connection is broken (a message that does not decrypt, a reply from another computer). */
   receive(data: unknown): unknown[];
   send(msg: Record<string, unknown>): (Uint8Array | string)[];
+  /** What goes into the first sealed message besides `caps`. */
+  greeting?(): Record<string, unknown>;
+}
+
+/** SHA-256 of a base64url token's bytes, hex: how the computer and the relay know it. */
+export function tokenHash(token: string): string {
+  return Array.from(sha256(unb64url(token)), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** kelpie-link: a Noise IK reconnect with this phone's key, then every message sealed. */
@@ -215,6 +239,8 @@ export function linkCodec(p: Pairing): Codec {
       if (!session) throw new Error("not connected");
       return session.seal(enc.encode(JSON.stringify(msg)));
     },
+    // Which relay token this phone holds, so that the computer gives it a new one only when it needs one.
+    greeting: () => (p.relayToken ? { relay_token: tokenHash(p.relayToken) } : {}),
   };
 }
 
@@ -276,6 +302,13 @@ export const KICK_GAP_MS = 2000;
 /** A connection must last this long before the failure count starts over. */
 const LASTED_MS = 5000;
 const CONNECT_MS = 8000;
+/** The relay is tried this long after the direct route, unless that one fails first. */
+export const RELAY_STAGGER_MS = 250;
+/** On the relay, how often the direct route is looked at, and how long it must answer before the link moves back to it. */
+export const DIRECT_PROBE_MS = 30_000;
+export const DIRECT_STABLE_MS = 10_000;
+/** The relay's word that this computer said nothing it could read: the device may not use it. */
+const RELAY_REFUSED = 4412;
 /** How often a computer that says it does not know this device is asked again. */
 const NOT_PAIRED_RETRY_MS = 60_000;
 /** Connections in a row that opened, sent their first message and were closed with no reply, while the computer's server answers,
@@ -289,7 +322,38 @@ const TICK_MS = 2000;
 /** A restart's resync is given up on (and typing allowed) after this long. */
 const RESYNC_MS = 5000;
 
-type TimerName = "connect" | "hello" | "retry" | "tick" | "probe";
+type TimerName = "connect" | "hello" | "retry" | "tick" | "probe" | "stagger" | "direct";
+
+export type Route = "direct" | "relay";
+
+/** A socket being tried, until one completes its handshake. */
+interface Attempt {
+  ws: SocketLike;
+  codec: Codec;
+  route: Route;
+  opened: boolean;
+}
+
+/** What the relay itself said, as opposed to a sealed frame it carried. */
+function relayControl(data: unknown): "offline" | "online" | "pong" | null {
+  if (typeof data !== "string") return null;
+  if (data === "pong") return "pong";
+  try {
+    const t = (JSON.parse(data) as { t?: unknown }).t;
+    return t === "desktop_offline" ? "offline" : t === "desktop_online" ? "online" : null;
+  } catch {
+    return null;
+  }
+}
+
+function closeQuietly(ws: SocketLike) {
+  ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+  try {
+    ws.close();
+  } catch {
+    /* already gone */
+  }
+}
 
 interface Pending {
   msg: Record<string, unknown>;
@@ -310,7 +374,7 @@ export class Link {
   readonly facts: ConnFacts = {
     online: true, ready: false, connecting: false, attempt: 0, nextAt: null, reach: "unknown", lastLiveAt: 0, replaced: false,
     unpaired: false, notPairedHere: null, outdated: false, restartedAt: 0, rttMs: null, rttAt: 0, probeSince: null, lagMs: 0, lagAt: 0,
-    resyncing: false, load: { level: 0, reasons: [] }, route: "direct",
+    resyncing: false, load: { level: 0, reasons: [] }, route: "direct", relay: "none",
   };
   epoch: string | null = null;
   device: DeviceInfo | null = null;
@@ -320,10 +384,17 @@ export class Link {
 
   private ws: SocketLike | null = null;
   private codec: Codec | null = null;
+  /** The sockets being tried, while none has won. */
+  private attempts: Attempt[] = [];
+  /** What the routes that failed said, the most telling first (`attemptFailed`). */
+  private failCode = 0;
+  /** On the relay: a direct connection being made to move to, and since when the direct route answers. */
+  private migration: Attempt | null = null;
+  private directOkSince: number | null = null;
   private readyAt = 0;
   private hideSubs = false;
   private stopped = true;
-  private timers = { connect: null as unknown, hello: null as unknown, retry: null as unknown, tick: null as unknown, probe: null as unknown };
+  private timers = { connect: null as unknown, hello: null as unknown, retry: null as unknown, tick: null as unknown, probe: null as unknown, stagger: null as unknown, direct: null as unknown };
   private probedReachAt = 0;
   private lastKickAt = -Infinity;
   private probeSentAt = 0;
@@ -346,8 +417,8 @@ export class Link {
   private lockedNow = false;
   private noReplyCloses = 0;
 
-  /** `codec` makes the framing for one connection; null while this phone is not paired. */
-  constructor(private env: Env, private codecFor: () => Codec | null, private h: LinkHandlers) {}
+  /** `codec` makes the framing for one connection; null while this phone is not paired. `relayUrl`: the relay's address with this phone's ticket and token, when it has them. */
+  constructor(private env: Env, private codecFor: () => Codec | null, private h: LinkHandlers, private relayUrl: () => string | null = () => null) {}
 
   // ---------- life ----------
 
@@ -358,6 +429,7 @@ export class Link {
     this.facts.unpaired = false;
     this.facts.notPairedHere = null;
     this.facts.replaced = false;
+    if (this.facts.relay === "refused") this.facts.relay = "unknown";
     this.noReplyCloses = 0;
     this.open();
   }
@@ -389,6 +461,7 @@ export class Link {
     }
     if (this.facts.ready) {
       if (now - this.lastIn > 1000) this.probe();
+      this.checkDirect();
       return;
     }
     if (now - this.lastKickAt < KICK_GAP_MS) return;
@@ -409,6 +482,12 @@ export class Link {
       this.kick();
     }
     this.h.changed();
+  }
+
+  /** The network changed under the page (another Wi-Fi, mobile data): on the relay, the direct route may be back. */
+  networkChanged() {
+    this.directOkSince = null;
+    this.checkDirect();
   }
 
   /** Hidden page: let go of every subscription but the session list (which is always pushed) and stop
@@ -586,72 +665,246 @@ export class Link {
     this.clearTimer("retry");
     this.facts.nextAt = null;
     this.sentFirst = false;
-    const codec = this.codecFor();
-    if (!codec) return;
+    if (!this.codecFor()) return;
     this.detach();
-    this.codec = codec;
+    this.failCode = 0;
     this.facts.connecting = true;
     this.facts.ready = false;
+    const relayAddress = this.relayUrl();
+    if (!relayAddress) this.facts.relay = "none";
+    else if (this.facts.relay === "none") this.facts.relay = "unknown";
+    // The computer said it will not serve this device through the relay: no use asking again until the link starts over.
+    const relay = this.facts.relay === "refused" ? null : relayAddress;
+    // No route completed its handshake in this long: the attempt is over.
+    this.timers.connect = this.env.setTimeout(() => this.attempts.length && this.drop(1006), CONNECT_MS);
+    const direct = this.tryRoute("direct", this.env.url());
+    if (relay && direct) this.timers.stagger = this.env.setTimeout(() => this.tryRelay(), RELAY_STAGGER_MS);
+    else if (relay) this.tryRoute("relay", relay);
+    if (!this.attempts.length) return this.closed(this.failCode || 1006, false);
+    this.h.changed();
+  }
+
+  /** The relay's turn in the race (or at once, when the direct route has failed). */
+  private tryRelay() {
+    this.clearTimer("stagger");
+    const url = this.relayUrl();
+    if (!url || this.ws || this.facts.relay === "refused" || this.attempts.some((a) => a.route === "relay")) return;
+    if (!this.tryRoute("relay", url) && !this.attempts.length) this.closed(this.failCode || 1006, false);
+  }
+
+  /** Opens one route's socket; false when it could not even be made. The first whose handshake completes wins (`win`); the others are closed. */
+  private tryRoute(route: Route, url: string): boolean {
+    const codec = this.codecFor();
+    if (!codec) return false;
+    let ws: SocketLike;
+    try {
+      ws = this.env.socket(url);
+    } catch {
+      if (route === "relay") this.facts.relay = "down";
+      this.failCode ||= 1006;
+      return false;
+    }
+    const a: Attempt = { ws, codec, route, opened: false };
+    this.attempts.push(a);
+    ws.onopen = () => {
+      if (!this.attempts.includes(a)) return;
+      a.opened = true;
+      if (route === "relay" && this.facts.relay !== "no_computer") this.facts.relay = "up";
+      const first = codec.open();
+      this.sentFirst = true;
+      if (first === null) this.win(a);
+      else ws.send(first);
+    };
+    ws.onmessage = (e) => {
+      if (this.ws === ws) return this.onSocketMessage(ws, e.data);
+      if (!this.attempts.includes(a)) return;
+      const said = route === "relay" ? relayControl(e.data) : null;
+      if (said === "offline") {
+        // The relay has no computer for this room now: no use waiting on this route.
+        this.facts.relay = "no_computer";
+        return this.attemptFailed(a, route, 1006);
+      }
+      if (said) return;
+      try {
+        codec.receive(e.data);
+      } catch {
+        return this.attemptFailed(a, route, 1006);
+      }
+      if (codec.ready()) this.win(a);
+    };
+    ws.onclose = (e) => {
+      if (this.ws === ws) return this.closed(e.code);
+      if (this.attempts.includes(a)) this.attemptFailed(a, route, e.code, a.opened);
+    };
+    ws.onerror = () => {};
+    return true;
+  }
+
+  /** One route failed before its handshake; when none is left, the connection failed with what the most telling of them said. */
+  private attemptFailed(a: Attempt, route: Route, code: number, opened = false) {
+    this.attempts = this.attempts.filter((x) => x !== a);
+    closeQuietly(a.ws);
+    if (route === "relay") {
+      if (code === RELAY_REFUSED) this.facts.relay = "refused";
+      else if (!opened && this.facts.relay !== "no_computer") this.facts.relay = "down";
+    }
+    // A code from the computer says more than a socket that just ended; the relay refusing this device says nothing of the computer.
+    if (code !== RELAY_REFUSED && this.failCode < 4000 && (code >= 4000 || !this.failCode)) this.failCode = code;
+    // The direct route is gone already: the relay need not wait its turn.
+    if (route === "direct" && this.timers.stagger !== null) {
+      this.clearTimer("stagger");
+      const url = this.relayUrl();
+      if (url && !this.ws && this.facts.relay !== "refused") this.tryRoute("relay", url);
+    }
+    if (this.attempts.length || this.ws) return this.h.changed();
+    this.closed(this.failCode || code, false);
+  }
+
+  /** This route completed its handshake first: it is the connection. */
+  private win(a: Attempt) {
+    this.clearTimer("connect");
+    this.clearTimer("stagger");
+    for (const other of this.attempts) if (other !== a) closeQuietly(other.ws);
+    this.attempts = [];
+    this.ws = a.ws;
+    this.codec = a.codec;
+    this.facts.route = a.route;
+    // The hello must come within this long of the handshake.
+    this.timers.hello = this.env.setTimeout(() => this.ws === a.ws && this.drop(1006), HELLO_MS);
+    this.greet();
+    this.h.changed();
+  }
+
+  /** `caps`: this client acknowledges frames and answers heartbeats (without both the daemon serves it as one that does not), and can use a
+   *  relay token. `resume`: it is the page that unlocked, so a flap asks nothing. */
+  private greet() {
+    this.post({ caps: ["ack", "hb", "relay"], ...(this.codec?.greeting?.() ?? {}), ...(this.resume ? { resume: this.resume } : {}) });
+  }
+
+  private onSocketMessage(ws: SocketLike, data: unknown) {
+    if (this.facts.route === "relay") {
+      const said = relayControl(data);
+      // The computer left the relay: the session it had with this phone went with it.
+      if (said === "offline") {
+        this.facts.relay = "no_computer";
+        return this.drop(1006);
+      }
+      if (said) return;
+    }
+    let msgs: unknown[];
+    try {
+      msgs = this.codec!.receive(data);
+    } catch {
+      // A message that does not decrypt (or a reply from another computer): this connection is over; a new one starts
+      // with a new handshake.
+      return this.drop(1006);
+    }
+    for (const m of msgs) {
+      if (this.ws !== ws) return;
+      if (m && typeof m === "object") this.onMessage(m);
+    }
+  }
+
+  // ---------- moving back from the relay ----------
+
+  /** On the relay: does the direct route answer? Once it has for `DIRECT_STABLE_MS`, the link moves to it. */
+  private checkDirect() {
+    if (!this.facts.ready || this.facts.route !== "relay" || this.migration) return;
+    this.clearTimer("direct");
+    void this.env.reach().then((r) => {
+      if (!this.facts.ready || this.facts.route !== "relay" || this.migration) return;
+      if (r !== "reachable") {
+        this.directOkSince = null;
+        return this.scheduleDirect(DIRECT_PROBE_MS);
+      }
+      const now = this.env.now();
+      if (this.directOkSince === null) {
+        this.directOkSince = now;
+        return this.scheduleDirect(DIRECT_STABLE_MS);
+      }
+      if (now - this.directOkSince >= DIRECT_STABLE_MS) this.migrate();
+      else this.scheduleDirect(DIRECT_STABLE_MS - (now - this.directOkSince));
+    });
+  }
+
+  private scheduleDirect(ms: number) {
+    this.clearTimer("direct");
+    if (this.facts.route === "relay") this.timers.direct = this.env.setTimeout(() => this.checkDirect(), ms);
+  }
+
+  /** A new handshake on the direct route while the relay carries on; the relay's connection goes only once this one is made. */
+  private migrate() {
+    const codec = this.codecFor();
+    if (!codec) return;
     let ws: SocketLike;
     try {
       ws = this.env.socket(this.env.url());
     } catch {
-      this.facts.connecting = false;
-      this.failed();
       return;
     }
-    this.ws = ws;
-    this.timers.connect = this.env.setTimeout(() => this.ws === ws && this.drop(1006), CONNECT_MS);
-    // `caps`: this client acknowledges frames and answers heartbeats; without both the daemon serves it as one that does not. `resume`: it is the page that unlocked, so a flap asks nothing.
-    const greet = () => this.post({ caps: ["ack", "hb"], ...(this.resume ? { resume: this.resume } : {}) });
+    const a: Attempt = { ws, codec, route: "direct", opened: false };
+    this.migration = a;
+    const giveUp = () => {
+      if (this.migration !== a) return;
+      this.migration = null;
+      this.directOkSince = null;
+      closeQuietly(ws);
+      this.scheduleDirect(DIRECT_PROBE_MS);
+    };
+    const timer = this.env.setTimeout(giveUp, CONNECT_MS);
     ws.onopen = () => {
-      if (this.ws !== ws) return;
-      this.clearTimer("connect");
-      // The hello must come within this long of the handshake starting (its reply included).
-      this.timers.hello = this.env.setTimeout(() => this.ws === ws && this.drop(1006), HELLO_MS);
+      if (this.migration !== a) return;
       const first = codec.open();
-      this.sentFirst = true;
-      if (first === null) greet();
+      if (first === null) this.moveTo(a, timer);
       else ws.send(first);
     };
     ws.onmessage = (e) => {
-      if (this.ws !== ws) return;
-      const before = codec.ready();
-      let msgs: unknown[];
+      if (this.ws === ws) return this.onSocketMessage(ws, e.data);
+      if (this.migration !== a) return;
       try {
-        msgs = codec.receive(e.data);
+        codec.receive(e.data);
       } catch {
-        // A message that does not decrypt (or a reply from another computer): this connection is over; a new one starts
-        // with a new handshake.
-        return this.drop(1006);
+        return giveUp();
       }
-      if (!before && codec.ready()) greet();
-      for (const m of msgs) {
-        if (this.ws !== ws) return;
-        if (m && typeof m === "object") this.onMessage(m);
-      }
+      if (codec.ready()) this.moveTo(a, timer);
     };
     ws.onclose = (e) => {
-      if (this.ws !== ws) return;
-      this.closed(e.code);
+      if (this.ws === ws) return this.closed(e.code);
+      giveUp();
     };
     ws.onerror = () => {};
+  }
+
+  private moveTo(a: Attempt, timer: unknown) {
+    this.env.clearTimeout(timer);
+    this.migration = null;
+    this.directOkSince = null;
+    const old = this.ws;
+    // What was in flight on the relay may not be answered there: an answer is sent again after the new hello, as after any drop.
+    this.loseInFlight();
+    this.clearTimer("probe");
+    this.clearTimer("direct");
+    this.facts.probeSince = null;
+    this.ws = a.ws;
+    this.codec = a.codec;
+    this.facts.route = "direct";
+    if (old) closeQuietly(old);
+    this.timers.hello = this.env.setTimeout(() => this.ws === a.ws && this.drop(1006), HELLO_MS);
+    this.greet();
     this.h.changed();
   }
 
-  /** Stops listening to the current socket and closes it. */
+  /** Stops listening to the current socket and closes it, with any being tried. */
   private detach() {
+    for (const a of this.attempts) closeQuietly(a.ws);
+    this.attempts = [];
+    this.clearTimer("stagger");
+    if (this.migration) closeQuietly(this.migration.ws);
+    this.migration = null;
     const ws = this.ws;
     this.ws = null;
     this.codec = null;
-    if (ws) {
-      ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
-      try {
-        ws.close();
-      } catch {
-        /* already gone */
-      }
-    }
+    if (ws) closeQuietly(ws);
   }
 
   /** The connection is dead as far as this client is concerned. */
@@ -697,10 +950,17 @@ export class Link {
   /** What ending a connection means for this client, whatever comes next. */
   private down() {
     this.ws = null;
+    for (const a of this.attempts) closeQuietly(a.ws);
+    this.attempts = [];
+    if (this.migration) closeQuietly(this.migration.ws);
+    this.migration = null;
+    this.directOkSince = null;
     this.clearTimer("connect");
     this.clearTimer("hello");
     this.clearTimer("probe");
     this.clearTimer("tick");
+    this.clearTimer("stagger");
+    this.clearTimer("direct");
     const lasted = this.facts.ready && this.env.now() - this.readyAt > LASTED_MS;
     this.facts.ready = false;
     this.facts.connecting = false;
@@ -812,6 +1072,9 @@ export class Link {
       case "addrs":
         this.h.addrs?.(m as AddrsMsg);
         break;
+      case "relay":
+        if (typeof m.token === "string" && typeof m.url === "string" && typeof m.ticket === "string") this.h.relay?.(m as RelayGrant);
+        break;
       case "device_changed":
         this.h.deviceChanged?.(m);
         break;
@@ -847,6 +1110,7 @@ export class Link {
     this.epoch = hello.daemon_epoch;
     if (epochChanged) this.facts.restartedAt = now;
     this.armTick();
+    if (this.facts.route === "relay") this.scheduleDirect(DIRECT_PROBE_MS);
     // The hello comes first; then the subscriptions pick up where the phone is.
     this.h.hello(hello, epochChanged);
     // A restart seen while the page is hidden counts too: nothing is re-followed until the page is shown, and

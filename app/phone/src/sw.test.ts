@@ -4,13 +4,14 @@ const ORIGIN = "https://desk.tail1234.ts.net:8443";
 const KEPT = "the kept shell";
 
 /** The worker, loaded fresh on a scope of its own: what it does with one request. */
-async function ask(request: { url: string; mode: string; method?: string }, network: () => Promise<Response>) {
+async function ask(request: { url: string; mode: string; method?: string }, network: () => Promise<Response>, paired = false) {
   vi.resetModules();
   const handlers: Record<string, (e: unknown) => void> = {};
   vi.stubGlobal("self", { addEventListener: (type: string, h: (e: unknown) => void) => (handlers[type] = h), location: { origin: ORIGIN }, skipWaiting: async () => {}, clients: { claim: async () => {} } });
   vi.stubGlobal("__PRECACHE__", ["/", "/icon.svg"]);
   vi.stubGlobal("__VERSION__", "test");
-  vi.stubGlobal("caches", { open: async () => ({ match: async () => new Response(KEPT), put: async () => {}, addAll: async () => {} }), keys: async () => [] });
+  const kept = (name: string) => async () => (name === "kelpie-shell-flags" ? (paired ? new Response("1") : undefined) : new Response(KEPT));
+  vi.stubGlobal("caches", { open: async (name: string) => ({ match: kept(name), put: async () => {}, addAll: async () => {} }), keys: async () => [] });
   vi.stubGlobal("fetch", vi.fn(network));
   await import("./sw");
   let answered: Promise<Response> | null = null;
@@ -129,6 +130,13 @@ describe("opening the app", () => {
   it("uses the kept shell with no network at all", async () => {
     const r = await ask(page, () => Promise.reject(new TypeError("failed to fetch")));
     expect(await (await r)!.text()).toBe(KEPT);
+  });
+
+  it("opens a paired app from its kept shell at once, with no wait for the computer's address", async () => {
+    const network = vi.fn(() => new Promise<Response>(() => {}));
+    const r = await ask(page, network, true);
+    expect(await (await r)!.text()).toBe(KEPT);
+    expect(network).not.toHaveBeenCalled();
   });
 
   it("leaves the socket and the reachability request to the network", async () => {

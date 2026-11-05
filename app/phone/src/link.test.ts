@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { PHONE_API } from "../../src/lib/attention";
-import { canAct, deriveConn } from "./conn-state";
-import { Link, linkCodec, PING_AFTER_MS, PROBE_MS, RETRY_WINDOW_MS, type Codec, type Env, type Hello, type LinkHandlers, type Outcome, type SocketLike } from "./link";
+import { canAct, deriveConn, type Reach } from "./conn-state";
+import { DIRECT_PROBE_MS, DIRECT_STABLE_MS, Link, linkCodec, PING_AFTER_MS, PROBE_MS, RELAY_STAGGER_MS, RETRY_WINDOW_MS, tokenHash, type Codec, type Env, type Hello, type LinkHandlers, type Outcome, type SocketLike } from "./link";
 import { FIRST_HEADER, Initiator, keypair, MODE_RECONNECT } from "./noise";
+import { relayUrl, type Pairing } from "./pairing-store";
+import vectors from "../../../relay/test/vectors.json";
 
 /** Plain JSON, no handshake: what the link does is tested apart from kelpie-link (noise.test.ts, and the codec test below). */
 const jsonCodec = (): Codec => ({
@@ -13,6 +15,7 @@ const jsonCodec = (): Codec => ({
 });
 
 class FakeSocket implements SocketLike {
+  constructor(readonly url = "") {}
   onopen: SocketLike["onopen"] = null;
   onmessage: SocketLike["onmessage"] = null;
   onclose: SocketLike["onclose"] = null;
@@ -49,16 +52,16 @@ function hello(over: Partial<Hello> = {}): Hello {
   };
 }
 
-function rig(opts: { random?: number; token?: string | null; codec?: () => Codec | null } = {}) {
+function rig(opts: { random?: number; token?: string | null; codec?: () => Codec | null; relay?: string | null } = {}) {
   let t = 1_000_000;
   const timers: { at: number; fn: () => void; id: number }[] = [];
   let nextId = 1;
   const sockets: FakeSocket[] = [];
   let online = true;
-  let reach: "reachable" | "portal" | "unreachable" = "reachable";
+  let reach: Reach = "reachable";
   const env: Env = {
-    socket: () => {
-      const s = new FakeSocket();
+    socket: (url) => {
+      const s = new FakeSocket(url);
       sockets.push(s);
       return s;
     },
@@ -92,10 +95,11 @@ function rig(opts: { random?: number; token?: string | null; codec?: () => Codec
     chatResync: (id) => log.push(`resync ${id}`),
     locked: (lock) => log.push(`locked ${lock.state}`),
     unpaired: () => log.push("unpaired"),
+    relay: (m) => log.push(`relay ${m.token}`),
     haveRev: (id) => have[id] ?? null,
     chatSince: () => null,
   };
-  const link = new Link(env, opts.codec ?? (() => (opts.token === null ? null : jsonCodec())), handlers);
+  const link = new Link(env, opts.codec ?? (() => (opts.token === null ? null : jsonCodec())), handlers, () => opts.relay ?? null);
   const advance = (ms: number) => {
     const end = t + ms;
     for (;;) {
@@ -182,11 +186,11 @@ describe("while the computer holds the phone locked", () => {
 });
 
 describe("Link handshake", () => {
-  it("declares ack and hb in its first message, so it is never served as a legacy page", () => {
+  it("declares ack and hb in its first message, so it is never served as a legacy page, and that it can use a relay token", () => {
     const r = rig();
     r.link.start();
     r.last().open();
-    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"] });
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay"] });
   });
 
   it("says the window's secret first on every connection while it holds one, and not once it has let it go", async () => {
@@ -204,12 +208,12 @@ describe("Link handshake", () => {
     r.link.setResume("the-secret");
     r.link.start();
     r.last().open();
-    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"], resume: "the-secret" });
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay"], resume: "the-secret" });
     await reconnect();
-    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"], resume: "the-secret" });
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay"], resume: "the-secret" });
     r.link.setResume(null);
     await reconnect();
-    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb"] });
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay"] });
   });
 
   it("over kelpie-link: every connection opens with a new first message, so the daemon never takes a retry for a replay", async () => {
@@ -928,5 +932,207 @@ describe("Link requests: nothing is queued while offline", () => {
     r.advance(300);
     r.connect();
     expect(r.sockets.flatMap((s) => s.sent).filter((m) => m.type === "input")).toHaveLength(1);
+  });
+});
+
+/** A codec with a handshake: its first message is binary, and the first frame back completes it. */
+const handshakeCodec = (): Codec => {
+  let ready = false;
+  return {
+    open: () => new Uint8Array([1]),
+    ready: () => ready,
+    receive: (d) => {
+      if (!ready) {
+        ready = true;
+        return [];
+      }
+      return [JSON.parse(d as string)];
+    },
+    send: (m) => [JSON.stringify(m)],
+  };
+};
+
+const flush = async () => {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+};
+
+describe("the relay route", () => {
+  const RELAY = "wss://relay.example/v1/phone?t=room.ticket&k=token";
+  const live = (r: ReturnType<typeof rig>) => r.sockets.filter((s) => !s.closed && s.readyState !== 3);
+  /** Every socket of the attempt under way fails, the relay's too once it has started. */
+  const failAll = (r: ReturnType<typeof rig>, code = 1006) => {
+    for (let s = live(r); s.length; s = live(r)) s.forEach((x) => x.die(code));
+  };
+  /** Advances while the computer keeps talking on `ws`, so the link never thinks it gone. */
+  const talk = async (r: ReturnType<typeof rig>, ws: FakeSocket, ms: number) => {
+    for (let at = 0; at < ms; at += 5000) {
+      ws.say({ type: "hb", n: 1, server_ts: r.now() });
+      r.advance(Math.min(5000, ms - at));
+      await flush();
+    }
+  };
+  /** Connected over the relay (the computer's address having failed), with its hello. */
+  const onRelay = () => {
+    const r = rig({ relay: RELAY, codec: handshakeCodec });
+    r.link.start();
+    r.sockets[0].die();
+    const relay = r.last();
+    relay.open();
+    relay.say({});
+    relay.say({ type: "hello", ...hello({ server_ts: r.now() }) });
+    return { r, relay };
+  };
+
+  it("tries the computer's address first and the relay 250 ms later; the first handshake wins and the other is closed", () => {
+    const r = rig({ relay: RELAY, codec: handshakeCodec });
+    r.link.start();
+    expect(r.sockets.map((s) => s.url)).toEqual(["ws://test/ws"]);
+    r.advance(RELAY_STAGGER_MS - 1);
+    expect(r.sockets).toHaveLength(1);
+    r.advance(1);
+    expect(r.sockets.map((s) => s.url)).toEqual(["ws://test/ws", RELAY]);
+    const [direct, relay] = r.sockets;
+    direct.open();
+    relay.open();
+    expect(direct.sent[0]).toHaveProperty("binary");
+    expect(relay.sent[0]).toHaveProperty("binary");
+    relay.say({});
+    expect(direct.closed).toBe(true);
+    expect(relay.sent[1]).toEqual({ caps: ["ack", "hb", "relay"] });
+    relay.say({ type: "hello", ...hello({ server_ts: r.now() }) });
+    expect(r.link.facts.ready).toBe(true);
+    expect(r.link.facts.route).toBe("relay");
+  });
+
+  it("goes to the relay at once when the computer's address has already failed, and not at all without a token", () => {
+    const r = rig({ relay: RELAY, codec: handshakeCodec });
+    r.link.start();
+    r.sockets[0].die();
+    expect(r.sockets.map((s) => s.url)).toEqual(["ws://test/ws", RELAY]);
+    expect(r.link.facts.connecting).toBe(true);
+
+    const none = rig({ codec: handshakeCodec });
+    none.link.start();
+    none.sockets[0].die();
+    none.advance(5000);
+    expect(none.sockets.map((s) => s.url)).not.toContain(RELAY);
+    expect(none.link.facts.relay).toBe("none");
+  });
+
+  it("keeps the computer's address when it answers first", () => {
+    const r = rig({ relay: RELAY, codec: handshakeCodec });
+    r.link.start();
+    r.last().open();
+    r.last().say({});
+    r.advance(1000);
+    expect(r.sockets).toHaveLength(1);
+    expect(r.link.facts.route).toBe("direct");
+  });
+
+  it("says the computer is offline when the relay says it is not there", async () => {
+    const r = rig({ relay: RELAY, codec: handshakeCodec });
+    r.setReach("unreachable");
+    r.link.start();
+    for (let i = 0; i < 3; i++) {
+      for (let waited = 0; !live(r).some((s) => s.url === RELAY) && waited < 100; waited++) r.advance(100);
+      const relay = live(r).find((s) => s.url === RELAY)!;
+      relay.open();
+      relay.onmessage?.({ data: JSON.stringify({ t: "desktop_offline" }) });
+      expect(relay.closed).toBe(true);
+      failAll(r);
+      await flush();
+    }
+    expect(r.link.facts.relay).toBe("no_computer");
+    expect(deriveConn(r.link.facts, r.now()).kind).toBe("computer_offline");
+  });
+
+  it("says there is no way to the computer with Tailscale off on the phone and the relay down", async () => {
+    const r = rig({ relay: RELAY, codec: handshakeCodec });
+    r.setReach("no_tailnet");
+    r.link.start();
+    for (let i = 0; i < 3; i++) {
+      failAll(r);
+      await flush();
+      r.advance(60_000);
+    }
+    expect(r.link.facts.relay).toBe("down");
+    expect(deriveConn(r.link.facts, r.now()).kind).toBe("no_path");
+  });
+
+  it("stops trying a relay that will not serve this device, until the link starts again", () => {
+    const r = rig({ relay: RELAY, codec: handshakeCodec });
+    r.link.start();
+    r.sockets[0].die();
+    r.last().open();
+    r.last().die(4412);
+    expect(r.link.facts.relay).toBe("refused");
+    r.advance(60_000);
+    expect(r.sockets.slice(2).map((s) => s.url)).not.toContain(RELAY);
+  });
+
+  it("ends a relay session when the relay says the computer left: that session went with it", () => {
+    const { r, relay } = onRelay();
+    expect(r.link.facts.ready).toBe(true);
+    relay.onmessage?.({ data: JSON.stringify({ t: "desktop_offline" }) });
+    expect(r.link.facts.ready).toBe(false);
+    expect(relay.closed).toBe(true);
+  });
+
+  it("moves back to the computer's address once it has answered for 10 s, and follows again what it followed", async () => {
+    const { r, relay } = onRelay();
+    r.setReach("unreachable");
+    r.link.follow("t1", "term");
+    expect(relay.types()).toContain("sub");
+    r.setReach("reachable");
+    await talk(r, relay, DIRECT_PROBE_MS);
+    expect(r.sockets).toHaveLength(2);
+    await talk(r, relay, DIRECT_STABLE_MS);
+    const direct = r.last();
+    expect(r.sockets).toHaveLength(3);
+    expect(direct.url).toBe("ws://test/ws");
+    direct.open();
+    direct.say({});
+    expect(relay.closed).toBe(true);
+    expect(r.link.facts.route).toBe("direct");
+    expect(direct.sent[1]).toEqual({ caps: ["ack", "hb", "relay"] });
+    direct.say({ type: "hello", ...hello({ server_ts: r.now() }) });
+    expect(direct.types()).toContain("sub");
+    expect(r.link.facts.ready).toBe(true);
+  });
+
+  it("does not flap: while the computer's address keeps failing, it stays on the relay", async () => {
+    const { r, relay } = onRelay();
+    r.setReach("unreachable");
+    await talk(r, relay, 3 * DIRECT_PROBE_MS);
+    expect(r.sockets).toHaveLength(2);
+    expect(r.link.facts.route).toBe("relay");
+    // An address that answered once and then not again is no reason to move.
+    r.setReach("reachable");
+    await talk(r, relay, DIRECT_PROBE_MS);
+    r.setReach("unreachable");
+    await talk(r, relay, DIRECT_STABLE_MS + 1000);
+    expect(r.sockets).toHaveLength(2);
+  });
+
+  it("keeps the token it is given, and names the one it holds, by its hash, in its first message", () => {
+    const r = rig();
+    r.link.start();
+    r.connect();
+    r.last().say({ type: "relay", url: "wss://relay.example", ticket: "room.ticket", token: "abc", expires: 1 });
+    expect(r.log).toContain("relay abc");
+    const p: Pairing = { priv: keypair().priv, pub: keypair().pub, dpk: keypair().pub, deviceId: "d", name: "n", computer: "c", endpoints: [], addrsSeq: 0, relayToken: vectors.device_token };
+    expect(linkCodec(p).greeting?.()).toEqual({ relay_token: vectors.device_token_sha256 });
+    expect(tokenHash(vectors.device_token)).toBe(vectors.device_token_sha256);
+    expect(linkCodec({ ...p, relayToken: undefined }).greeting?.()).toEqual({});
+  });
+
+  it("dials a relay only from a secure page, with a token that has not expired, and skips kinds it does not know", () => {
+    const p: Pairing = { priv: new Uint8Array(32), pub: new Uint8Array(32), dpk: new Uint8Array(32), deviceId: "d", name: "n", computer: "c", addrsSeq: 0, relayToken: "tok", relayExpires: 2000, endpoints: [{ t: "carrier-pigeon", a: "x" }, { t: "ts", a: "desk:8443" }, { t: "relay", a: "wss://relay.example", r: "room.ticket" }] };
+    expect(relayUrl(p, 1000, true)).toBe("wss://relay.example/v1/phone?t=room.ticket&k=tok");
+    expect(relayUrl(p, 1000, false)).toBeNull();
+    expect(relayUrl(p, 2000, true)).toBeNull();
+    expect(relayUrl({ ...p, relayToken: undefined }, 1000, true)).toBeNull();
+    expect(relayUrl({ ...p, endpoints: [{ t: "relay", a: "http://relay.example", r: "x" }] }, 1000, true)).toBeNull();
+    expect(relayUrl({ ...p, endpoints: [{ t: "relay", a: "wss://relay.example" }] }, 1000, true)).toBeNull();
   });
 });

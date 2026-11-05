@@ -2,7 +2,8 @@
 // daemon in scripts/e2e: here a fake Initiator stands in for it, so each answer from the computer can be tried.
 import { describe, expect, it, vi } from "vitest";
 import { b64url, keypair } from "./noise";
-import { pair, type PairSocket } from "./pair";
+import { pair, pairToken, type PairSocket } from "./pair";
+import vectors from "../../../relay/test/vectors.json";
 import type { Pairing } from "./pairing-store";
 
 const decoder = new TextDecoder();
@@ -197,5 +198,59 @@ describe("pairing a phone", () => {
     const r = await pair("not-a-link", "Pixel", socket, () => {});
     expect(r.ok).toBe(false);
     expect(socket).not.toHaveBeenCalled();
+  });
+});
+
+describe("pairing through the relay", () => {
+  const psk = new Uint8Array(32).fill(7);
+  const withRelay = b64url(encoder.encode(JSON.stringify({ v: 1, dpk: b64url(desktop.pub), psk: b64url(psk), ep: [{ t: "ts", a: "desk.tail1234.ts.net:8443" }, { t: "relay", a: "wss://relay.example", r: "room.ticket" }], name: "Desk" })));
+
+  it("derives the relay's pairing token from the code's secret as the computer does", () => {
+    const secret = Uint8Array.from(vectors.psk_hex.match(/../g)!, (h) => parseInt(h, 16));
+    expect(pairToken(secret)).toBe(vectors.pair_token);
+  });
+
+  it("goes through the relay only when the computer's address never answered, and keeps the token it is given", async () => {
+    const direct = new FakeSocket();
+    const relay = new FakeSocket();
+    const urls: string[] = [];
+    const result = pair(withRelay, "Pixel", () => direct, () => {}, null, (url) => {
+      urls.push(url);
+      return relay;
+    });
+    direct.onopen?.({});
+    direct.onclose?.({ code: 1006 });
+    await vi.waitFor(() => expect(urls).toEqual([`wss://relay.example/v1/phone?t=room.ticket&p=${pairToken(psk)}`]));
+    relay.onopen?.({});
+    expect([...relay.sent[0]]).toEqual([1, 2, 3]);
+    relay.receive(new Uint8Array([9]));
+    relay.say({ type: "paired", device: { id: "d1", name: "Pixel" }, relay: { token: "tok", expires: 123 } });
+    const r = await result;
+    expect(r.ok && [r.pairing.relayToken, r.pairing.relayExpires]).toEqual(["tok", 123]);
+  });
+
+  it("does not try the relay once the computer answered, even to refuse", async () => {
+    const direct = new FakeSocket();
+    let tried = false;
+    const result = pair(withRelay, "Pixel", () => direct, () => {}, null, () => {
+      tried = true;
+      return new FakeSocket();
+    });
+    direct.onopen?.({});
+    direct.onclose?.({ code: 4403 });
+    expect((await result).ok).toBe(false);
+    expect(tried).toBe(false);
+  });
+
+  it("says so when the relay has no computer in the room", async () => {
+    const relay = new FakeSocket();
+    const result = pair(withRelay, "Pixel", () => {
+      throw new Error("no route");
+    }, () => {}, null, () => relay);
+    await vi.waitFor(() => expect(relay.onopen).not.toBeNull());
+    relay.onopen?.({});
+    relay.onmessage?.({ data: JSON.stringify({ t: "desktop_offline" }) });
+    const r = await result;
+    expect(r.ok ? "" : r.message).toMatch(/not connected to the relay/);
   });
 });

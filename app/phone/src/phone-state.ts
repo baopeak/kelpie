@@ -15,7 +15,7 @@ import { canAct, dataAge, deriveConn, type ConnState } from "./conn-state";
 import { browserEnv, Link, linkCodec, type ChatMsg, type ChatQueueMsg, type ChatRequestInfo, type ChatResolved, type DeviceInfo, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
 import { browserCredentials, LockModel, type LockInfo, type Proof } from "./lock";
 import { pair, type PairSocket } from "./pair";
-import { currentPairing, forgetPairing, loadPairing, savePairing, seemsPaired } from "./pairing-store";
+import { currentPairing, forgetPairing, loadPairing, relayUrl, savePairing, seemsPaired } from "./pairing-store";
 import { emptyView, ScreenSync, type Prompt, type ScreenFrame, type ScreenView } from "./screen-sync";
 import { forgetHistory } from "./history";
 import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
@@ -140,6 +140,12 @@ function askRecheck(request: string, command: string): Promise<Proof | null> {
   });
 }
 
+/** The relay, for the installed app on its HTTPS origin, once the computer gave this phone a token. */
+const relayRoute = () => {
+  const p = currentPairing();
+  return p ? relayUrl(p, Date.now(), location.protocol === "https:") : null;
+};
+
 const link = new Link(browserEnv(), () => {
   const p = currentPairing();
   return p ? linkCodec(p) : null;
@@ -224,7 +230,12 @@ const link = new Link(browserEnv(), () => {
     const known = m.endpoints ?? m.list.map((a) => ({ t: "lan", a }));
     setMovedHost(movedTo(known, location.host));
     const p = currentPairing();
-    if (p && m.seq > p.addrsSeq) void savePairing({ ...p, endpoints: [...known, ...p.endpoints.filter((e) => e.t !== "lan" && e.t !== "ts")], addrsSeq: m.seq });
+    // `endpoints` is the whole list, the relay's included (or left out, when it was turned off); a computer from before sends the direct addresses only.
+    if (p && m.seq > p.addrsSeq) void savePairing({ ...p, endpoints: m.endpoints ? known : [...known, ...p.endpoints.filter((e) => e.t !== "lan" && e.t !== "ts")], addrsSeq: m.seq });
+  },
+  relay(m) {
+    const p = currentPairing();
+    if (p) void savePairing({ ...p, relayToken: m.token, relayExpires: m.expires, endpoints: [...p.endpoints.filter((e) => e.t !== "relay"), { t: "relay", a: m.url, r: m.ticket }] });
   },
   deviceChanged(m) {
     const name = m.name;
@@ -247,7 +258,7 @@ const link = new Link(browserEnv(), () => {
   },
   haveRev: (id) => syncs.get(id)?.haveRev() ?? null,
   chatSince: (id) => chats.since(id),
-});
+}, relayRoute);
 
 export { link };
 
@@ -573,7 +584,9 @@ export async function pairDevice(code: string, name: string): Promise<string | n
   setPairShown(null);
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/link`;
   const held = await loadPairing();
-  const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }), held);
+  // The relay only for the installed app on its HTTPS origin: a plain-HTTP page is not let in there.
+  const relaySocket = location.protocol === "https:" ? (relay: string) => new WebSocket(relay) as unknown as PairSocket : undefined;
+  const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }), held, relaySocket);
   setPairShown(null);
   if (!r.ok) {
     if (!held) {
@@ -669,6 +682,8 @@ export function startApp() {
     if (e.data?.type === "kelpie-open" && typeof e.data.navigate === "string") openFromAlert(e.data.navigate);
   });
   window.addEventListener("online", () => link.setOnline(true));
+// Another network under the page: on the relay, the computer's own address may answer again.
+(navigator as Navigator & { connection?: EventTarget }).connection?.addEventListener?.("change", () => link.networkChanged());
   window.addEventListener("offline", () => link.setOnline(false));
   window.addEventListener("pageshow", (e) => e.persisted && link.kick());
   // What counts as the person being there, for the computer's idle time.

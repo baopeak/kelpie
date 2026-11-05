@@ -48,6 +48,10 @@ const NAVIGATION_WAIT_MS = 2500;
 /** Where the worker leaves word for the page, which reads it the next time it opens (push.ts). */
 const PUSH_FLAGS = "kelpie-push-flags";
 const RESUBSCRIBE_MARK = "/resubscribe";
+/** Where the page leaves word that this app is paired (pairing-store.ts): it then opens from the kept shell at once, which dials the relay when the
+ *  computer's own address does not answer, instead of waiting for that address first. */
+const SHELL_FLAGS = "kelpie-shell-flags";
+const PAIRED_MARK = "/paired";
 /** The app's icon, 72 px, in this file. A worker's own requests do not pass through its `fetch` handler, so a path here would go to the computer, which the phone may not be able to reach: the alert would wait for it. */
 const ALERT_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAMAAABiM0N1AAAAYFBMVEWdVDPrkF4WGyhWNCnx5Nf0so9fVlZ4RTGUcV0oT1gXqpnwx62alpMcK0Hqc1lNPUC8hGBndIHBXC0dhH4TFyMqMULqdDv1qHD9yan+9ejtd0zQaTcsKDIjLUDlbTT9snVGl2y/AAAAIHRSTlP//////////////////////////////////////////3Fe9GAAAAL1SURBVHja7ZbpctsgEIABcciVrKStQRfI7/+W3QUJX+Cg2NMfne5MZFjBp71YQk5vEvIf9B90I1X11abUigRoNl+YScxcAmKzeU4ixsyszCJjVJ6j4HWRRfhFY7JxqvAtKQflSJ5TCFJmwsU2xbH4Zkp5nkq/oQLjkCBZjJ+gpioFDSIdUc8ZSkF2mYZBTMtjJIhZJjEM02KLQFBIsLqhDyTg0Aa+kSqj5FnzoGG4JyEH9SLldBJEAghJ1XXoAgdApBgUdtyQIgdiXQpSG6ihsTChEDE+AaQKQdUGgooh9sSsZScLZooNVO0DAWYmhMxQPLMfrKhykDVT08D6xdzJAl9omil5elIgLKR+esB41CTSZZTu2XM4tmmZkmWUBhHzVMjfB1VzdOPGpyBzVQxSYQftexpRE87CUJ2K0x84574/0w10PbPFZ+25RaVnzV7CQm9idJnZwuYf01P9unBmFXNQ2Pxj8ismZdwL5fyzXvK+ZW7adfXIo3mKybEla8iK7/4NJA9VNA9mllzM2wdiTJkF/IE/hbNdoOgaGMFsJ3wPEqJj7BTNm/cF25B6GKMMNXl22jKgCWURCOCtlC3HkVi8uhhUraAOOJyPLQNpcTSKbgVVpTctgrqOB58kg8x74V3nQaU3bfBt6Uck8ZFrzdchXXKe5Xo2tmfhd8OjrreRWDLJzzU2D6LeHD421jb4CzC6ZP+ZS4KY8knD3EsrbdvCA8M0+LQpVgyS0Hug+9CGc0i+4FxAAXDe0KCXSZB+FGyGXj610/qgrYUHDD9X9fkzsekRxOqN058lAwrAHDyYvOhrthN0vSGnz4KcjOt76W70kXStz4JgB+3PIBBVV6LPgiCssgaR7m69c0Gv3RfBdnHFEQ9qYrlD/VHr5yBHDEl+rEhuQWb+OL4OggneFu4NIIeXD3kDSB8/kHR8GXT88GFyNoj7Lmj1zLlDkF0pvMtaiPWPIAf7bdCa/d+vgbRWmzPBsxeCvQ32x1oT/Sb5h0F/ALdqkPw7JUSOAAAAAElFTkSuQmCC";
 
@@ -122,13 +126,18 @@ sw.addEventListener("fetch", (e) => {
   if (url.pathname === "/link" || url.pathname === "/manifest.webmanifest") return;
   if (req.mode === "navigate") {
     e.respondWith(
-      // A 5xx is Tailscale answering for a computer whose Kelpie does not: the kept shell says that better than its error page.
-      withTimeout(fetch(req), NAVIGATION_WAIT_MS)
-        .then((r) => {
-          if (r.status >= 500) throw new Error("no answer");
-          return r;
-        })
-        .catch(async () => (await caches.open(CACHE).then((c) => c.match("/"))) ?? fetch(req)),
+      (async () => {
+        const shell = await caches.open(CACHE).then((c) => c.match("/"));
+        // A paired app opens at once from what it kept. A newer version arrives as a new worker, as it does anyway.
+        if (shell && (await caches.open(SHELL_FLAGS).then((c) => c.match(PAIRED_MARK)))) return shell;
+        // A 5xx is Tailscale answering for a computer whose Kelpie does not: the kept shell says that better than its error page.
+        return withTimeout(fetch(req), NAVIGATION_WAIT_MS)
+          .then((r) => {
+            if (r.status >= 500) throw new Error("no answer");
+            return r;
+          })
+          .catch(async () => shell ?? fetch(req));
+      })(),
     );
     return;
   }
