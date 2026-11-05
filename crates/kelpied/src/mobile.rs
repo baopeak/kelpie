@@ -1593,7 +1593,7 @@ impl Mobile {
             let c = self.config.lock();
             let d = c.devices.iter().find(|d| d.id == id).ok_or_else(|| anyhow!("no such device"))?;
             anyhow::ensure!(d.verified, "this device must be paired again");
-            // Lowering is always allowed: a device whose lock was turned off since keeps a record it can no longer use, and may be lowered from it.
+            // Lowering is always allowed, whatever the device could be raised to now.
             anyhow::ensure!(permission <= d.permission || permission <= record_ceiling(d, lock_on), "{}", ceiling_refusal(permission));
             permission < d.permission
         };
@@ -3468,6 +3468,7 @@ mod tests {
         r.daemon.mobile.set_lock(store::LockOptions { on: false, ..r.daemon.mobile.lock_options() }).unwrap();
         let reply = r.ask(Permission::Control, json!({"type": "panes"})).await;
         assert_eq!(code(&reply), Some("no_control"), "the lock off: no control");
+        assert_eq!(r.daemon.mobile.permission("phone"), Some(Permission::Write), "and its record went back to typing");
         let refused = r.daemon.mobile.raise_prompt("phone", Permission::Control).unwrap_err().to_string();
         assert!(refused.contains("app lock is set up and on"), "{refused}");
         // A read-only or typing device is told it may not.

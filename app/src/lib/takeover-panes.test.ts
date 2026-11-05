@@ -43,6 +43,10 @@ describe("who Settings offers control to", () => {
     expect(offersControl({ kind: "pwa", permission: "write" }, TAKEOVER_API)).toBe(false);
   });
 
+  it("no longer offers it to a device whose lock was turned off: its record went back to typing, and the daemon says it may not have control", () => {
+    expect(offersControl({ kind: "pwa", permission: "write", may_control: false }, TAKEOVER_API)).toBe(false);
+  });
+
   it("keeps the choice for a device that has control, so that it can be lowered", () => {
     expect(offersControl({ kind: "pwa", permission: "control", may_control: false }, TAKEOVER_API)).toBe(true);
   });

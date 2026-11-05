@@ -22,7 +22,7 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use super::store::{self, Device, LockCredential, LockOptions};
-use super::{refuse, same, webauthn, DeviceEvent, Mobile, Peer, Refusal};
+use super::{refuse, same, webauthn, DeviceEvent, Mobile, Peer, Permission, Refusal};
 use crate::session::now_millis;
 
 /// How long a challenge may wait for the person.
@@ -458,6 +458,26 @@ impl Mobile {
         let key = self.mac_key(true)?.ok_or_else(|| anyhow!("the credential store did not keep the device key"))?;
         store::seal_options(&mut next, &key);
         let was = self.lock_options();
+        // A page's control rests on its lock: turned off, its record goes back to typing, and only a new grant on the desktop, verified, gives it control
+        // again. Its grants stop first, before anything else changes.
+        let lowered: Vec<DeviceEvent> = if next.on {
+            Vec::new()
+        } else {
+            let pages: Vec<String> = self.config.lock().devices.iter().filter(|d| d.kind == store::Kind::Pwa && d.permission == Permission::Control).map(|d| d.id.clone()).collect();
+            for id in &pages {
+                self.stop_grants(id);
+            }
+            let mut c = self.config.lock();
+            c.devices
+                .iter_mut()
+                .filter(|d| pages.contains(&d.id) && d.permission == Permission::Control)
+                .map(|d| {
+                    d.permission = Permission::Write;
+                    store::seal(d, &key);
+                    DeviceEvent { id: d.id.clone(), name: d.name.clone(), change: "changed", permission: Some(Permission::Write) }
+                })
+                .collect()
+        };
         self.config.lock().lock = Some(next.clone());
         *self.lock_memory.options.lock() = next.clone();
         {
@@ -473,6 +493,11 @@ impl Mobile {
         }
         self.keep();
         self.audit.add("-", "setting", &format!("app lock: {}, idle {} s, re-check {}, reading over plain HTTP {} (was {}, {} s, {}, {})", next.on, next.idle_s, next.recheck, next.plain_read, was.on, was.idle_s, was.recheck, was.plain_read));
+        for event in lowered {
+            self.audit.add(&event.id, "permission", &format!("{} now write: the app lock was turned off", event.name));
+            // Its connection starts again with the new record.
+            let _ = self.revoked.send(event);
+        }
         let devices: Vec<(String, bool)> = self.config.lock().devices.iter().map(|d| (d.id.clone(), d.kind == store::Kind::Pwa)).collect();
         for (device, page) in devices {
             // A page's control rests on its lock: with the lock off it has none.
