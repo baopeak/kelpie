@@ -71,7 +71,9 @@ function chatEnv(kind: SessionKind, opts: { account?: string; home?: string | nu
  *  restore the conversation's own settings themselves). */
 function chatArgv(kind: SessionKind, resumeId: string | null, settings: AgentSettings = {}): string[] {
   const profile = store.profileLaunch(kind, { yolo: false }).args;
-  if (kind === "claude") return claudeArgs(resumeId, withSettings(kind, profile, settings));
+  // Able to switch to bypass from the mode picker: it still starts in the mode it is given, asking by default. (On a host
+  // that logs in as root the daemon leaves the flag out: Claude refuses it there.)
+  if (kind === "claude") return claudeArgs(resumeId, [...withSettings(kind, profile, settings), "--allow-dangerously-skip-permissions"]);
   if (kind === "codex") return codexArgs(profile);
   const acp = acpArgv(kind);
   if (!acp) throw new Error(`${kind} has no chat mode`);
@@ -97,7 +99,7 @@ export function getController(s: SessionInfo): ChatController {
   let c = controllers.get(s.id);
   if (c) return c;
   const make = (ctx: AdapterContext): Adapter =>
-    s.kind === "claude" ? createClaudeAdapter(ctx) : s.kind === "codex" ? createCodexAdapter(ctx) : createAcpAdapter(ctx);
+    s.kind === "claude" ? createClaudeAdapter(ctx, { onBypassRefused: () => void restartInBypass(s.id) }) : s.kind === "codex" ? createCodexAdapter(ctx) : createAcpAdapter(ctx);
   c = new ChatController(s.id, s.cwd, s.agent_session_id, make, { transport: desktopTransport(), daemonQueue: () => daemonOwnsQueue(store.daemonApi()) });
   if (s.kind === "claude" && s.agent_session_id) {
     const resumeId = s.agent_session_id;
@@ -259,20 +261,66 @@ async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane, comman
 async function resumeChat(s: SessionInfo) {
   const conv = s.agent_session_id && s.agent_session_id !== "latest" ? s.agent_session_id : null;
   try {
-    const settings = s.kind === "claude" ? await claudeSettings(s, conv) : {};
-    const info = await createSession({
-      kind: s.kind, cwd: s.cwd, project_id: s.project_id ?? undefined, name: s.name ?? undefined,
-      agent_session_id: conv ?? (s.kind === "codex" ? "latest" : undefined),
-      chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null, settings),
-      env: ownEnv(s) ?? store.profileLaunch(s.kind).env,
-    });
-    store.setSessions(info.id, info);
-    const loc = store.paneLocation(s.id);
-    if (loc) store.replacePaneIn(loc.projectId, loc.tabId, loc.paneId, { id: loc.paneId, kind: "chat", sessionId: info.id });
-    disposeController(s.id);
-    await daemon("session.close", { handle: s.handle }).catch(() => {});
+    await replaceChat(s, conv, s.kind === "claude" ? await claudeSettings(s, conv) : {});
   } catch (e) {
     store.notify(t("Could not resume the {agent} chat: {error}", { agent: s.kind, error: String(e) }));
+  }
+}
+
+/** A new chat front-end for `s`'s conversation `conv` (a new conversation when there is none yet), in its pane, on the
+ *  same account and environment. The old process must have stopped. */
+async function replaceChat(s: SessionInfo, conv: string | null, settings: AgentSettings) {
+  const info = await createSession({
+    kind: s.kind, cwd: s.cwd, project_id: s.project_id ?? undefined, name: s.name ?? undefined,
+    agent_session_id: conv ?? (s.kind === "codex" ? "latest" : undefined),
+    chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null, settings),
+    env: ownEnv(s) ?? store.profileLaunch(s.kind).env,
+  });
+  store.setSessions(info.id, info);
+  const loc = store.paneLocation(s.id);
+  if (loc) store.replacePaneIn(loc.projectId, loc.tabId, loc.paneId, { id: loc.paneId, kind: "chat", sessionId: info.id });
+  disposeController(s.id);
+  await daemon("session.close", { handle: s.handle }).catch(() => {});
+}
+
+/** Conversations already started again for bypass: one that is refused again (a host where the flag is left out) is not
+ *  started over and over. */
+const restartedForBypass = new Set<string>();
+
+/** Bypass was picked in a Claude chat whose process was started unable to switch to it: it stops cleanly and Claude
+ *  continues the same conversation, started in bypass. */
+async function restartInBypass(sessionId: string) {
+  const s = store.sessions[sessionId];
+  const ctrl = controllers.get(sessionId);
+  if (!s || !ctrl || switching.has(sessionId)) return;
+  const conv = ctrl.state.conversationId ?? (s.agent_session_id && s.agent_session_id !== "latest" ? s.agent_session_id : null);
+  const key = conv ?? sessionId;
+  if (restartedForBypass.has(key)) {
+    store.notify(t("Claude cannot bypass permissions here."), undefined, 7000);
+    return;
+  }
+  if (ctrl.state.busy && !(await confirmDialog(t("Claude is working. Stop it and continue in bypass mode?")))) return;
+  switching.add(sessionId);
+  try {
+    store.notify(t("Starting Claude again in bypass mode…"));
+    const stopped = await stopProcess(s, async () => {
+      // As for a switch to the terminal: no queued message slips in between the interrupt and the end of stdin.
+      await daemon("chat.queue_op", { handle: s.handle, op: "hold" }).catch(() => {});
+      ctrl.interrupt();
+      await sleep(200);
+      await daemon("chat.close_stdin", { handle: s.handle }).catch(() => {});
+    });
+    if (!stopped) {
+      await daemon("chat.queue_op", { handle: s.handle, op: "hold", held: false }).catch(() => {});
+      store.notify(t("The chat process did not stop; not starting a second writer."));
+      return;
+    }
+    restartedForBypass.add(key);
+    await replaceChat(s, conv, { ...chatSettings(ctrl), mode: "bypassPermissions" });
+  } catch (e) {
+    store.notify(t("Could not resume the {agent} chat: {error}", { agent: s.kind, error: String(e) }));
+  } finally {
+    switching.delete(sessionId);
   }
 }
 

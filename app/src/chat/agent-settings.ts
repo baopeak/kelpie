@@ -3,7 +3,8 @@
 // way (a TUI in bypass mode does not come back as "ask before edits").
 //
 // Claude Code restores none of these on `--resume`; its transcript records them (`permission-mode`
-// entries, each reply's `effort` and requested model), and both front-ends take them as flags.
+// entries and the mode of each message sent, each reply's `effort` and requested model), and both
+// front-ends take them as flags.
 // Codex's app-server restores the thread's own settings; its TUI is told them as flags. OMP keeps
 // its model and thinking level in the session file both front-ends read.
 
@@ -20,14 +21,16 @@ export function claudeSettingsFrom(lines: string[], args: string[] = []): AgentS
   const out: AgentSettings = {};
   for (let i = lines.length - 1; i >= 0 && (out.mode == null || out.model == null || out.effort == null); i--) {
     const line = lines[i];
-    if (!line.includes('"permission-mode"') && !line.includes('"assistant"')) continue;
+    if (!line.includes('"permissionMode"') && !line.includes('"assistant"')) continue;
     let m: any;
     try {
       m = JSON.parse(line);
     } catch {
       continue;
     }
-    if (m.type === "permission-mode" && out.mode == null && typeof m.permissionMode === "string") out.mode = m.permissionMode;
+    // The TUI records a change as a `permission-mode` entry; every message the person sends carries the mode it went
+    // with (all that chat view's process records). A sub-agent's messages carry their own.
+    if (out.mode == null && typeof m.permissionMode === "string" && (m.type === "permission-mode" || (m.type === "user" && !m.isSidechain))) out.mode = m.permissionMode;
     if (m.type === "assistant" && !m.isSidechain) {
       if (out.model == null) out.model = m.requestedModel ?? m.message?.model ?? null;
       if (out.effort == null && typeof m.effort === "string") out.effort = m.effort;

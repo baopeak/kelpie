@@ -189,6 +189,12 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
   /** Busy with nothing to send: the send button stops the turn instead, as in Claude Code. */
   const stops = () => ctrl.state.busy && !draft().trim() && !pictures.images().length;
   const sendKey = isMac ? "↩" : "⏎";
+  /** A mode that asks for nothing is confirmed first, unless the person already lets agents skip permissions (Yolo). */
+  const pickMode = async (id: string, value: string) => {
+    const unguarded = UNGUARDED.has(value) && !UNGUARDED.has(modeSetting()?.value ?? "");
+    if (unguarded && store.state.settings.agentPermissions !== "yolo" && !(await confirmDialog(t("Let {agent} run commands and change files without asking?", { agent: props.agentLabel })))) return;
+    ctrl.setSetting(id, value);
+  };
   const cycleMode = () => {
     const mode = modeSetting()!;
     const options = mode.options.filter((o) => !UNGUARDED.has(o.value));
@@ -339,7 +345,7 @@ export function ChatComposer(props: { ctrl: ChatController; session: SessionInfo
           </Show>
           <ContextMeter ctrl={ctrl} />
           <Show when={modeSetting()}>
-            {(mode) => <SettingPicker settings={[mode()]} right warn={UNGUARDED.has(mode().value ?? "")} disabled={ctrl.state.exited} onPick={(id, v) => ctrl.setSetting(id, v)} />}
+            {(mode) => <SettingPicker settings={[mode()]} right warn={UNGUARDED.has(mode().value ?? "")} disabled={ctrl.state.exited} onPick={(id, v) => void pickMode(id, v)} />}
           </Show>
           <Show when={props.session && !props.session.alive}>
             <button class="btn" style={{ height: "26px" }} title={t("Start the agent again, continuing this conversation")} onClick={() => void store.resumeSession(props.session!.id)}>

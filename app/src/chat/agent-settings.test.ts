@@ -16,6 +16,22 @@ describe("claudeSettingsFrom", () => {
     expect(claudeSettingsFrom(lines)).toEqual({ mode: "bypassPermissions", model: "opus", effort: "high" });
   });
 
+  it("reads the mode chat view ran in from the messages sent, as its process records no change of mode", () => {
+    const lines = [
+      line({ type: "user", permissionMode: "bypassPermissions", message: { content: "fix it" } }),
+      line({ type: "assistant", requestedModel: "opus", effort: "high" }),
+      line({ type: "user", permissionMode: "plan", isSidechain: true, message: { content: "sub-agent" } }),
+      line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t", content: "ok" }] } }),
+    ];
+    expect(claudeSettingsFrom(lines)).toEqual({ mode: "bypassPermissions", model: "opus", effort: "high" });
+  });
+
+  it("takes the latest of a recorded change and a message's mode", () => {
+    const later = [line({ type: "user", permissionMode: "bypassPermissions" }), line({ type: "permission-mode", permissionMode: "acceptEdits" })];
+    expect(claudeSettingsFrom(later).mode).toBe("acceptEdits");
+    expect(claudeSettingsFrom([...later, line({ type: "user", permissionMode: "default" })]).mode).toBe("default");
+  });
+
   it("falls back to the session's own flags", () => {
     expect(claudeSettingsFrom([], ["--dangerously-skip-permissions", "--model=haiku", "--effort", "max"])).toEqual({ mode: "bypassPermissions", model: "haiku", effort: "max" });
     expect(claudeSettingsFrom([], [])).toEqual({ mode: null, model: null, effort: null });

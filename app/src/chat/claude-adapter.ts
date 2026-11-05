@@ -205,16 +205,20 @@ const DENIED = "The user denied this action.";
 
 interface ClaudeModel { value: string; resolvedModel?: string; displayName?: string; description?: string; supportedEffortLevels?: string[]; supportsAutoMode?: boolean }
 
-const modes = (auto: boolean, current: string | null) => [
+const modes = (auto: boolean) => [
   { value: "default", label: t("Ask before edits") },
   { value: "acceptEdits", label: t("Accept edits") },
   { value: "plan", label: t("Plan") },
   ...(auto ? [{ value: "auto", label: t("Auto") }] : []),
-  // Reachable only when the session was started with it; never offered otherwise.
-  ...(current === "bypassPermissions" ? [{ value: "bypassPermissions", label: t("Bypass permissions") }] : []),
+  // Chat processes start able to switch to it (`--allow-dangerously-skip-permissions`); one started before that refuses.
+  { value: "bypassPermissions", label: t("Bypass permissions") },
 ];
 
-export function createClaudeAdapter(ctx: AdapterContext): Adapter {
+/** Request ids of mode changes carry the mode asked for. */
+const MODE_REQUEST = "kelpie-mode:";
+
+/** `onBypassRefused`: this process was started unable to bypass permissions and was just asked to (live, not a replay). */
+export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused?: () => void } = {}): Adapter {
   /** `sent`: the pictures sent from this window. A log replayed here keeps them, by path. */
   const live = { msgId: null as string | null, sent: new Map<string, UserImage>() };
   let blocks = new Map<number, string>(); // stream block index → item id
@@ -248,7 +252,7 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
     });
     const levels = (entry ?? modelEntry("default"))?.supportedEffortLevels ?? [];
     if (levels.length) putSetting(ctx, { id: "effort", label: t("Effort"), value: effort, options: levels.map((l) => ({ value: l, label: l })) });
-    putSetting(ctx, { id: "mode", label: t("Mode"), value: mode, options: modes(!!entry?.supportsAutoMode, mode) });
+    putSetting(ctx, { id: "mode", label: t("Mode"), value: mode, options: modes(!!entry?.supportsAutoMode) });
   }
 
   function markTuiOnly() {
@@ -364,6 +368,11 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
           if (r.subtype === "error") {
             // An interrupt with nothing running (e.g. before a hand-off to the TUI) is no news.
             if (String(r.request_id).startsWith("kelpie-interrupt-")) return;
+            // Started without the flag that lets it switch to bypass: chat view starts it again with it, in that mode.
+            if (String(r.request_id).startsWith(`${MODE_REQUEST}bypassPermissions:`) && /dangerously-skip-permissions/.test(String(r.error)) && opts.onBypassRefused && !ctx.replaying()) {
+              opts.onBypassRefused();
+              return;
+            }
             ctx.upsert({ kind: "system", id: `ctl-${r.request_id}`, text: t("Claude: {error}", { error: String(r.error ?? "request failed") }), tone: "error" });
             return;
           }
@@ -457,7 +466,7 @@ export function createClaudeAdapter(ctx: AdapterContext): Adapter {
     },
     setSetting(id, value) {
       if (id === "model") control({ subtype: "set_model", model: value });
-      else if (id === "mode") control({ subtype: "set_permission_mode", mode: value });
+      else if (id === "mode") control({ subtype: "set_permission_mode", mode: value }, `${MODE_REQUEST}${value}:${++requestSeq}`);
       else if (id === "effort") control({ subtype: "apply_flag_settings", settings: { effortLevel: value } }, `kelpie-effort:${value}:${++requestSeq}`);
     },
     respond(id, option, reply) {
