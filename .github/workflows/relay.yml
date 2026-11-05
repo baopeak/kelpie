@@ -1,13 +1,13 @@
 name: relay
 
-# The phone relay (relay/): its own workspace and lockfile, so it is checked here, not in ci.yml.
-# A pull request that touches it: typecheck, tests on workerd, and the self-hosted bundle smoke-tested on a local workerd.
-# A tag relay-v*: the same, then the room script and the router deployed to Cloudflare, smoke-tested there, and the self-host image published.
+# The phone relay (relay/): its own workspace and lockfile, so it is checked here, not in ci.yml. Checks only: typecheck, tests on
+# workerd, and the self-hosted bundle smoke-tested on a local workerd. Deploying is done by hand with wrangler (docs/relay-self-host.md).
 on:
   pull_request:
     paths: ["relay/**", ".github/workflows/relay.yml"]
   push:
-    tags: ["relay-v*"]
+    branches: [master]
+    paths: ["relay/**", ".github/workflows/relay.yml"]
 
 jobs:
   test:
@@ -37,53 +37,3 @@ jobs:
           for i in $(seq 1 30); do curl -sf http://localhost:8787/v1/health && break; sleep 1; done
           cd ..
           RELAY_URL=http://localhost:8787 REGISTRATION_KEY=ci-registration pnpm smoke
-
-  deploy:
-    if: startsWith(github.ref, 'refs/tags/relay-v')
-    needs: test
-    runs-on: ubuntu-22.04
-    environment: relay
-    defaults:
-      run:
-        working-directory: relay
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - run: pnpm install --frozen-lockfile
-      # The room script first: the router binds to it. TICKET_SECRET and REGISTRATION_KEY are Worker secrets already, set once with
-      # `wrangler secret put`, and never pass through this job.
-      - run: pnpm deploy:room
-      - run: pnpm deploy:router
-      - name: Smoke test on Cloudflare
-        env:
-          RELAY_URL: ${{ vars.RELAY_URL }}
-          REGISTRATION_KEY: ${{ secrets.RELAY_REGISTRATION_KEY }}
-        run: pnpm smoke
-
-  image:
-    if: startsWith(github.ref, 'refs/tags/relay-v')
-    needs: test
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: relay
-          push: true
-          tags: ghcr.io/baopeak/kelpie-relay:${{ github.ref_name }},ghcr.io/baopeak/kelpie-relay:latest

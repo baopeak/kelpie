@@ -28,8 +28,6 @@ docker run -d --name kelpie-relay --restart unless-stopped -p 127.0.0.1:8787:878
 The rooms live in the `kelpie-relay` volume. `TICKET_SECRET` must stay the same across restarts: tickets made with another one are refused,
 and every computer would have to make a new room. Keep it where your secrets live (a Docker secret, an environment file only root can read).
 
-A tagged release publishes the same image as `ghcr.io/baopeak/kelpie-relay`.
-
 ## Without Docker
 
 ```bash
@@ -71,6 +69,27 @@ It makes a room, signs in as a desktop, lets a phone in with a token, sends 100 
 In Kelpie, Settings → Mobile, *Reach this computer through the relay*: put `wss://relay.example.com` as the relay's address, paste the
 registration key, and turn it on. The key is used once, to make this computer's room, and kept in the computer's credential store for making
 a new room later. Phones paired over Tailscale get their token the next time they connect.
+
+## Kelpie's own relay on Cloudflare
+
+Kelpie's default relay (`wss://kelpie-link-relay.baopeak.workers.dev`) is deployed by hand with wrangler, never from CI; `.github/workflows/relay.yml`
+only runs the checks (typecheck, tests, and the self-hosted bundle smoke-tested on a local workerd). With `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` set in that shell only:
+
+```bash
+cd relay
+pnpm install --frozen-lockfile && pnpm typecheck && pnpm test
+pnpm deploy:room       # the Durable Object script first: the router binds to it
+pnpm deploy:router
+# once, or to replace one (never in a file of the repository):
+wrangler secret put TICKET_SECRET -c wrangler.toml
+wrangler secret put REGISTRATION_KEY -c wrangler.toml
+RELAY_URL=https://kelpie-link-relay.baopeak.workers.dev REGISTRATION_KEY=... pnpm smoke
+```
+
+A router deploy leaves live rooms alone; a room-script deploy drops active rooms' sockets (code 1006), and phones reconnect by themselves.
+Deploy rarely and off-peak, and roll back with `wrangler rollback`. Changing `TICKET_SECRET` voids every ticket, so every computer has to make a
+new room.
 
 ## Limits it applies
 
