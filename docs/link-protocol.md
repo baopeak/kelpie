@@ -102,6 +102,8 @@ text is JSON:
 | 1009 | A frame over 64 KiB. |
 | 1006 | No close frame at all, which is what a code update on Cloudflare gives. Clients take it as any other drop. |
 
+From the phone, on its own route: 4000 closes the loser of its race (another route finished its handshake first), which the computer does not count as a failed attempt.
+
 From the computer, through `kick`: the codes of `/link` (architecture.md), and 4412 for a device that may not use the relay (paired over plain HTTP, or without
 heartbeats).
 
@@ -112,7 +114,7 @@ heartbeats).
   after its last connection, on one alarm set each time it is used; a desktop still connected when the alarm comes counts as use.
 - **How the daemon ends its connection**: when the relay is turned off or moves, at once. When phone access goes off, the kill switch or a reset:
   for a second it passes on what the sessions still send (a removed phone's sealed `revoked`), then sends `allow` with nothing, so nobody is let
-  in, and a reset also sends `drop`. A new room drops the old one the same way, after phones were told the new ticket. A device change reaches
+  in; a reset sends `drop` instead, and its phones see 4004. A new room drops the old one the same way, after phones were told the new ticket. A device change reaches
   the relay a second after it is made, so a removed phone hears `revoked` in its session and is closed by the daemon (4401) before the relay
   would close it for its token (4002).
 - No payload is ever logged or stored; Workers observability is off. Cloudflare's own edge keeps its logs (connection metadata), as any
