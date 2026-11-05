@@ -8,9 +8,9 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: "2026-10-15",
         durableObjects: { ROOM: { className: "Room", useSQLite: true } },
-        bindings: { TICKET_SECRET: "test-only-ticket-secret", RELAY_VERSION: "test" },
-        // The room asks Cloudflare where it runs; tests must not reach the network.
-        outboundService: () => new Response("fl=1\ncolo=TST\n"),
+        bindings: { TICKET_SECRET: "test-only-ticket-secret", REGISTRATION_KEY: "test-only-registration-key", RELAY_VERSION: "test" },
+        // Tests must not reach the network.
+        outboundService: () => new Response("not in tests\n", { status: 599 }),
       },
     }),
   ],

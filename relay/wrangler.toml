@@ -1,6 +1,7 @@
-# The router: checks the ticket and hands the socket to the room. Holds no state of its own.
-# The room class lives in its own script (wrangler.room.toml), so deploy that one first.
-name = "kelpie-relay"
+# The router: checks the ticket and hands the socket to the room, and makes rooms for the registration key's holder. Holds no
+# state of its own. The room class lives in its own script (wrangler.room.toml), so deploy that one first: a router deploy then
+# leaves live rooms alone.
+name = "kelpie-link-relay"
 main = "src/worker.ts"
 compatibility_date = "2026-10-15"
 workers_dev = true
@@ -12,6 +13,6 @@ enabled = false
 [[durable_objects.bindings]]
 name = "ROOM"
 class_name = "Room"
-script_name = "kelpie-relay-room"
+script_name = "kelpie-link-relay-room"
 
-# TICKET_SECRET comes from `wrangler secret put TICKET_SECRET`, never from this file.
+# TICKET_SECRET and REGISTRATION_KEY come from `wrangler secret put`, never from this file.

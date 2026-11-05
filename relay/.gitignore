@@ -1,2 +1,5 @@
 .wrangler/
 .dev.vars*
+workerd/dist/
+workerd/rooms/
+dist/

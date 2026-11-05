@@ -1,5 +1,5 @@
 # The room: a Durable Object per room, reached only through the router's binding.
-name = "kelpie-relay-room"
+name = "kelpie-link-relay-room"
 main = "src/room.ts"
 compatibility_date = "2026-10-15"
 workers_dev = false
@@ -9,7 +9,7 @@ preview_urls = false
 enabled = false
 
 [vars]
-RELAY_VERSION = "dev"
+RELAY_VERSION = "1"
 
 [[durable_objects.bindings]]
 name = "ROOM"
