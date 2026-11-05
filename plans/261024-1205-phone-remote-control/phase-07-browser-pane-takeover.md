@@ -1,7 +1,7 @@
 ---
 phase: 7
 title: "Browser pane takeover (CDP screencast) + app provider channel"
-status: pending
+status: in-progress
 priority: P2
 effort: "5d"
 dependencies: [3, 3a, 3c]
@@ -11,7 +11,18 @@ dependencies: [3, 3a, 3c]
 
 > **Updated 2026-10-30 (path D).** Runs over Tailscale HTTPS (or LAN HTTPS) from the installed PWA. **Relay-mode takeover is deferred**; the relay figures below stand as reference and do not gate this phase. API level: next free, expected 25.
 >
-> **`control` for the PWA**: `transport_cap` (`mobile.rs`) caps browsers at `write` and the desktop offers `control` to `app` devices only (`mobile-settings.tsx`), following the 2026-10-24 decision "`control` native only". With the native app deferred, this phase needs that amended: a PWA device with `secure_origin` (3a) and an enrolled app lock (3c) may hold `control`, granted on the desktop with presence. **Confirm with the user before starting** (open question in the plan).
+> **`control` for the PWA — owner decision, final (2026-11-05):** a PWA device may hold `control` only when it paired over HTTPS/Tailscale (`secure_origin`), its app lock is enrolled and on, and it was granted on the desktop with OS verification (presence). Other browser devices stay capped at `write`. An app-lock auto-lock releases the hold like a revoke. Relay-mode takeover stays deferred: takeover is refused over the relay. API level **28** (26 is 3e, 27 is phase 4).
+
+## Execution state — 2026-11-05
+
+**Code written, not built** (branch `phone/phase7-takeover`, from `phone/phase4-relay` b8c4e84). Cargo was not run (another build held the machine); the Rust unit tests below are written and unrun, as is `scripts/e2e/takeover.py`. Report: `plans/reports/fullstack-developer-261105-1900-phone-phase7.md`.
+
+**Research (docs and the crates' sources, tauri 2.12.4 / tauri-runtime 2.12.2 / wry 0.57 / webview2-com 0.39.1), design chosen from it:**
+- Popups: `WebviewBuilder::on_new_window` may return `NewWindowResponse::Create { window }`; on Windows the new webview must use the opener's environment, which `WebviewWindowBuilder::window_features(features)` sets (`with_environment(features.opener().environment)`). The docs' own example builds the window inside the handler. Only a `window.open` with a size or position (`NewWindowFeatures::size()/position()`, an OAuth window) is made a window; any other new window still opens in the pane, which keeps `browser.py`'s target=_blank check as it was.
+- Frames: `ICoreWebView2::GetDevToolsProtocolEventReceiver("Page.screencastFrame")` + `add_DevToolsProtocolEventReceived` (`DevToolsProtocolEventReceivedEventHandler`, `ParameterObjectAsJson`), attached for a held pane only and removed with its token; `Page.startScreencast {format: jpeg, quality, maxWidth, maxHeight, everyNthFrame}` and `Page.screencastFrameAck {sessionId}`, sent without waiting. The handler only hands the JSON to a task (window thread kept free).
+- Input reuses `devtools()` (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.insertText`) behind the daemon's takeover id; `browser_test_input` stays as it was, debug and e2e only.
+
+**Spike checks still owed (need a built app):** frames arrive and `isTrusted` holds on a real login page; tap → visible change ≤ 150 ms p95 on LAN/Tailscale; frames while the pane is hidden or covered (the window brings its tab to the front at start; a dialog over it may still stop them); `Create` from inside the handler works (no deadlock) and `window.opener`/`postMessage` survive; coordinates under page zoom and DPI (`deviceWidth`/`pageScaleFactor`); JPEG sizes q40–q70 at 800–1280 px for text-heavy pages; `msedgewebview2` CPU with and without a screencast, and the L2 cap cutting it ≥ 50 %; `Page.startScreencast` without `Page.enable`; ≤ 2 ms window-thread time per frame.
 
 ## Overview
 The cheapest takeover for the most common blocker — a login, OAuth consent, 2FA or captcha in a Kelpie browser pane — with no OS capture
