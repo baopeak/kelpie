@@ -1705,7 +1705,9 @@ impl Daemon {
                     Some(c) if !c.is_null() => Some(serde_json::from_value(c.clone()).context("notify config")?),
                     _ => None,
                 };
-                self.notifier.update(config, params.get("secrets").unwrap_or(&Value::Null))?;
+                // `end_binding`: the person chose another Telegram mode than approvals, so a code shown for them binds nothing.
+                let ends_binding = params.get("end_binding").and_then(Value::as_bool) == Some(true);
+                self.notifier.update_choosing(config, params.get("secrets").unwrap_or(&Value::Null), ends_binding)?;
                 self.notifier.describe(false)
             }
             // The verified app only (`auth::APP_ONLY`), then the person: it lets a Telegram account approve low-risk requests with no Face ID.

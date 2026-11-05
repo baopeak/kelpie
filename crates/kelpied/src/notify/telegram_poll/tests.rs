@@ -22,6 +22,12 @@ struct Api {
     refuse: Option<u16>,
     /// A message with buttons is refused, as a malformed one would be.
     refuse_buttons: bool,
+    /// What the last `getUpdates` asked for: as Telegram does, an update of another kind made meanwhile is never kept.
+    allowed: Option<Vec<String>>,
+    /// Updates dropped for that.
+    dropped: usize,
+    /// `answerCallbackQuery` takes this long.
+    slow_answers: Option<Duration>,
 }
 
 struct Fake {
@@ -47,6 +53,10 @@ impl Fake {
 
     fn push(&self, kind: &str, body: Value) {
         let mut api = self.api.lock();
+        if api.allowed.as_ref().is_some_and(|a| !a.iter().any(|k| k == kind)) {
+            api.dropped += 1;
+            return;
+        }
         let id = api.next_update;
         api.next_update += 1;
         api.updates.push_back(json!({"update_id": id, kind: body}));
@@ -125,7 +135,13 @@ fn serve(mut stream: std::net::TcpStream, api: &Mutex<Api>) {
     let (status, reply) = if !path.starts_with(&format!("/bot{TOKEN}/")) {
         (404, json!({"ok": false, "error_code": 404}))
     } else if method == "getUpdates" {
-        let refuse = api.lock().refuse;
+        let refuse = {
+            let mut a = api.lock();
+            if let Some(kinds) = body["allowed_updates"].as_array() {
+                a.allowed = Some(kinds.iter().filter_map(|k| k.as_str().map(str::to_string)).collect());
+            }
+            a.refuse
+        };
         match refuse {
             Some(code) => (code, json!({"ok": false, "error_code": code})),
             None => {
@@ -141,6 +157,8 @@ fn serve(mut stream: std::net::TcpStream, api: &Mutex<Api>) {
                 }
             }
         }
+    } else if method == "getMe" {
+        (200, json!({"ok": true, "result": {"id": 123456, "is_bot": true, "username": "kelpie_bot"}}))
     } else if method == "sendMessage" && body.get("reply_markup").is_some() && api.lock().refuse_buttons {
         (400, json!({"ok": false, "error_code": 400}))
     } else if method == "sendMessage" {
@@ -149,6 +167,10 @@ fn serve(mut stream: std::net::TcpStream, api: &Mutex<Api>) {
         body["_message_id"] = json!(a.next_message);
         (200, json!({"ok": true, "result": {"message_id": a.next_message, "chat": {"id": body["chat_id"]}}}))
     } else {
+        let slow = if method == "answerCallbackQuery" { api.lock().slow_answers } else { None };
+        if let Some(d) = slow {
+            std::thread::sleep(d);
+        }
         (200, json!({"ok": true, "result": true}))
     };
     api.lock().calls.push((method, body));
@@ -317,16 +339,22 @@ fn a_binding_needs_its_code_from_the_chat_set_and_binds_the_account_that_sent_it
     r.fake.read();
     assert!(!r.n.config().telegram.approving(), "nothing bound");
     assert!(r.approvals().describe()["binding_expires_in"].as_u64().is_some(), "the binding still waits");
-    assert!(r.fake.said_to(555).iter().all(|t| t.contains("only in the chat set")) && r.fake.said_to(555).len() == MAX_WRONG as usize + 1);
-    assert!(r.fake.said_to(CHAT).iter().filter(|t| t.contains("as yourself")).count() == 2, "{:?}", r.fake.said_to(CHAT));
-    // A wrong code in the chat set binds nothing, and says so.
-    r.fake.push("message", json!({"message_id": 12, "from": {"id": 7}, "chat": {"id": CHAT}, "text": "/bind WRONGCODE"}));
-    r.fake.push("message", json!({"message_id": 13, "from": {"id": 7}, "chat": {"id": CHAT}, "text": "hello"}));
+    // Each chat is answered once a minute at most, however many codes it sends.
+    until(|| r.fake.said_to(555).len() == 1 && r.fake.said_to(CHAT).len() == 1, "one answer for each chat");
+    assert!(r.fake.said_to(555)[0].contains("only in the chat set") && r.fake.said_to(CHAT)[0].contains("as yourself"), "{:?}", r.fake.said_to(CHAT));
+    // A wrong code in the chat set binds nothing, and says so; a command for another bot is that bot's, and no business of this one.
+    r.approvals().forget_replies();
+    r.fake.push("message", json!({"message_id": 12, "from": {"id": ME}, "chat": {"id": CHAT}, "text": format!("/bind@other_bot {code}")}));
+    r.fake.push("message", json!({"message_id": 13, "from": {"id": 7}, "chat": {"id": CHAT}, "text": "/bind WRONGCODE"}));
+    r.fake.push("message", json!({"message_id": 14, "from": {"id": 7}, "chat": {"id": CHAT}, "text": "hello"}));
     r.fake.read();
-    assert!(!r.n.config().telegram.approving(), "a wrong code binds nothing");
-    assert!(r.fake.said_to(CHAT).iter().any(|t| t.contains("not the code Kelpie shows")));
+    assert!(!r.n.config().telegram.approving(), "a wrong code binds nothing, nor a code sent to another bot");
+    until(|| r.fake.said_to(CHAT).len() == 2, "the wrong code is answered");
+    assert!(r.fake.said_to(CHAT)[1].contains("not the code Kelpie shows"), "{:?}", r.fake.said_to(CHAT));
+    assert_eq!(r.approvals().state.lock().binding.as_ref().map(|b| b.wrong), Some(1), "another bot's command is no wrong code");
     // The code, in the chat set, binds the account that sent it, and keeps its name to show.
-    r.fake.push("message", json!({"message_id": 14, "from": {"id": ME, "first_name": "Bao\u{202e}\u{7}"}, "chat": {"id": CHAT}, "text": format!("/bind@kelpie_bot {}", code.to_lowercase())}));
+    r.approvals().forget_replies();
+    r.fake.push("message", json!({"message_id": 15, "from": {"id": ME, "first_name": "Bao\u{202e}\u{7}"}, "chat": {"id": CHAT}, "text": format!("/bind@Kelpie_Bot {}", code.to_lowercase())}));
     until(|| r.n.config().telegram.approving(), "bound");
     let t = r.n.config().telegram;
     assert_eq!((t.user_id.as_str(), t.user_name.as_str(), t.chat_id.as_str(), t.mode), ("42", "Bao", "-100777", TelegramMode::ApproveLow));
@@ -336,7 +364,8 @@ fn a_binding_needs_its_code_from_the_chat_set_and_binds_the_account_that_sent_it
     assert!(r.sessions.noted("telegram_bound").iter().any(|s| s.contains("Bao (42)") && s.contains("-100777")), "{:?}", r.sessions.noted("telegram_bound"));
     assert!(r.sessions.changed.lock().contains(&"bound".to_string()));
     // The code was for once, and a late one is told so.
-    r.fake.push("message", json!({"message_id": 15, "from": {"id": 9}, "chat": {"id": CHAT}, "text": format!("/bind {code}")}));
+    r.approvals().forget_replies();
+    r.fake.push("message", json!({"message_id": 16, "from": {"id": 9}, "chat": {"id": CHAT}, "text": format!("/bind {code}")}));
     until(|| r.fake.said_to(CHAT).iter().any(|t| t.contains("No code is waiting")), "told the code was used");
     assert_eq!(r.n.config().telegram.user_id, "42");
 }
@@ -369,10 +398,11 @@ fn a_binding_ends_when_the_person_chooses_otherwise() {
             "chat" => c.telegram.chat_id = "-100999".into(),
             _ => {}
         }
-        if change == "token" {
-            r.n.update(None, &json!({"telegram_token": "999:OTHERbot"})).unwrap();
-        } else {
-            r.n.update(Some(c), &Value::Null).unwrap();
+        match change {
+            "token" => r.n.update(None, &json!({"telegram_token": "999:OTHERbot"})).unwrap(),
+            // Choosing a mode is said so by the page (`end_binding`), even the one already saved.
+            "alert_link" | "alert" => r.n.update_choosing(Some(c), &Value::Null, true).unwrap(),
+            _ => r.n.update(Some(c), &Value::Null).unwrap(),
         }
         assert!(r.approvals().describe()["binding_expires_in"].is_null(), "{change}");
         assert!(r.sessions.changed.lock().contains(&"bind_cancelled".to_string()), "{change}: the page is told");
@@ -392,19 +422,96 @@ fn a_binding_ends_when_the_person_chooses_otherwise() {
 }
 
 #[test]
-fn polls_ask_for_a_bounded_batch_and_for_chat_messages_only_around_a_binding() {
+fn a_save_of_anything_else_while_a_code_is_shown_leaves_the_code_be() {
+    let r = rig(TelegramMode::AlertLink);
+    let code = r.code();
+    until(|| r.approvals().polls() > 0, "polling");
+    // What the page and Settings → Notifications save on each change: ntfy switched on, an event, the shortest turn.
+    let mut c = r.n.config();
+    c.ntfy.enabled = true;
+    c.min_turn_s = 5;
+    r.n.update(Some(c), &Value::Null).unwrap();
+    // As the page sends a mode change with nothing to say about a code.
+    r.n.update(Some(r.n.config()), &Value::Null).unwrap();
+    assert!(r.approvals().describe()["binding_expires_in"].as_u64().is_some(), "the code still waits");
+    assert!(!r.sessions.changed.lock().contains(&"bind_cancelled".to_string()));
+    r.fake.push("message", json!({"message_id": 1, "from": {"id": ME, "username": "me_here"}, "chat": {"id": CHAT}, "text": format!("/bind {code}")}));
+    until(|| r.n.config().telegram.approving(), "bound after all");
+    assert!(r.n.config().ntfy.enabled, "and the other change stands");
+}
+
+#[test]
+fn a_code_read_while_the_person_chose_otherwise_saves_nothing() {
+    for change in ["cancelled", "mode"] {
+        let r = rig(TelegramMode::AlertLink);
+        let code = r.code();
+        // The settings are being saved when the code arrives: it is read, then waits to be saved.
+        let saving = r.approvals().saving();
+        let approvals = r.approvals().clone();
+        let reading = std::thread::spawn(move || approvals.handle(&json!({"update_id": 1, "message": {"message_id": 1, "from": {"id": ME}, "chat": {"id": CHAT}, "text": format!("/bind {code}")}})));
+        until(|| r.approvals().describe()["binding_expires_in"].is_null(), "the code read");
+        // What that save does meanwhile: ends the code (the person chose another mode), or sets another mode without saying so (an older app).
+        match change {
+            "cancelled" => r.approvals().cancel_binding(),
+            _ => r.approvals().config.lock().telegram.mode = TelegramMode::Alert,
+        }
+        drop(saving);
+        reading.join().unwrap();
+        let t = r.n.config().telegram;
+        assert!(!t.approving() && t.user_id.is_empty() && t.mode != TelegramMode::ApproveLow, "{change}: {t:?}");
+        assert!(r.fake.said_to(CHAT).iter().any(|t| t.starts_with("Nothing was bound")), "{change}: the chat is told");
+        assert!(r.sessions.changed.lock().contains(&"bind_failed".to_string()), "{change}: the page drops the code");
+        assert!(r.sessions.noted("telegram_bind_failed").iter().any(|s| s.contains("settings changed")), "{change}");
+    }
+}
+
+#[test]
+fn polls_ask_for_a_bounded_batch_and_always_for_chat_messages() {
     let r = rig(TelegramMode::AlertLink);
     r.approvals().bind_for_test(ME, CHAT);
-    until(|| !r.fake.calls("getUpdates").is_empty(), "a poll");
-    let first = r.fake.calls("getUpdates")[0].clone();
-    assert_eq!((first["limit"].clone(), first["allowed_updates"].clone()), (json!(UPDATES_PER_POLL), json!(["callback_query"])), "{first}");
+    until(|| r.fake.calls("getUpdates").len() >= 2, "polls");
+    // Telegram keeps only what the last poll asked for: a code sent while only presses were asked for would never arrive.
+    for body in r.fake.calls("getUpdates") {
+        assert_eq!((body["limit"].clone(), body["allowed_updates"].clone()), (json!(UPDATES_PER_POLL), json!(["message", "callback_query"])), "{body}");
+    }
     // A server that answers at once with nothing is not asked again at the speed of the network.
     let polls = r.approvals().polls();
     std::thread::sleep(Duration::from_millis(2500));
     let more = r.approvals().polls() - polls;
     assert!((1..=4).contains(&more), "{more} polls in 2.5 s");
-    r.code();
-    until(|| r.fake.calls("getUpdates").iter().any(|b| b["allowed_updates"] == json!(["message", "callback_query"])), "messages while a binding waits");
+    // A code sent at once, while approvals were on and polling went on, arrives.
+    let code = r.code();
+    r.fake.push("message", json!({"message_id": 1, "from": {"id": ME, "username": "me_here"}, "chat": {"id": CHAT}, "text": format!("/bind {code}")}));
+    until(|| r.fake.said_to(CHAT).iter().any(|t| t.contains("can now approve")), "bound again");
+    assert_eq!(r.fake.api.lock().dropped, 0);
+}
+
+#[test]
+fn a_first_name_cannot_pass_for_a_username() {
+    let name = |from: Value| binder_name(&json!({"from": from}));
+    assert_eq!(name(json!({"username": "alice_real", "first_name": "Alice"})), "@alice_real");
+    assert_eq!(name(json!({"first_name": "@alice_real"})), "alice_real");
+    assert_eq!(name(json!({"first_name": " \u{200b}@ ＠@alice"})), "alice");
+    assert_eq!(name(json!({"username": "", "first_name": "Alice"})), "Alice");
+    assert_eq!(name(json!({"id": 1})), "");
+}
+
+#[test]
+fn a_press_on_old_buttons_does_not_hold_up_the_polling() {
+    let r = rig(TelegramMode::ApproveLow).bound();
+    r.sessions.offer("s1", 5);
+    r.waiting("s1", 5);
+    until(|| r.fake.buttons().is_some(), "buttons");
+    let (yes, _, message) = r.fake.buttons().unwrap();
+    // Telegram is slow to take the note each press gets: ten presses of an old button, then the real one, in one batch.
+    r.fake.api.lock().slow_answers = Some(Duration::from_secs(3));
+    for _ in 0..10 {
+        r.fake.press("a:00000000000000000000000000000000", ME, CHAT, message);
+    }
+    let began = Instant::now();
+    r.fake.press(&yes, ME, CHAT, message);
+    until(|| r.sessions.answers.lock().len() == 1, "answered");
+    assert!(began.elapsed() < Duration::from_secs(3), "answered after {:?}", began.elapsed());
 }
 
 #[test]
@@ -586,17 +693,21 @@ fn a_kill_switch_while_a_press_is_on_its_way_answers_nothing() {
     r.waiting("s1", 5);
     until(|| r.fake.buttons().is_some(), "buttons");
     let (yes, _, message) = r.fake.buttons().unwrap();
-    // The kill switch lands while the press waits for its request (a terminal's menu, say), after the press was let through.
+    // The kill switch lands while the press waits for its request (a terminal's menu, say), after the press was let through, and approvals
+    // are turned on again before it goes on: they are on when it looks, so only the count of times they ended can tell.
     let approvals = Arc::downgrade(r.approvals());
     *r.sessions.before_go.lock() = Some(Box::new(move || {
         if let Some(a) = approvals.upgrade() {
             a.turn_off("every phone was revoked");
+            a.bind_for_test(ME, CHAT);
+            assert!(a.approving(), "on again");
         }
     }));
     r.fake.press(&yes, ME, CHAT, message);
     until(|| r.sessions.noted("telegram_refused").iter().any(|s| s.contains("turned off")), "refused");
     assert!(r.sessions.answers.lock().is_empty(), "nothing answered");
     until(|| r.fake.told("Approvals from Telegram are off"), "told");
+    assert!(r.n.config().telegram.approving(), "and they stay on for what comes next");
 }
 
 #[test]

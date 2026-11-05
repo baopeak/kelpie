@@ -1019,6 +1019,12 @@ impl Notifier {
     /// Replaces the configuration and changes the secrets named in `secrets` (a string sets,
     /// null removes). Switching ntfy on creates its random topic.
     pub fn update(&self, config: Option<Config>, secrets: &Value) -> Result<()> {
+        self.update_choosing(config, secrets, false)
+    }
+
+    /// `update`, and with `ends_binding` the person chose a Telegram mode other than approvals while a code for them was shown: that code
+    /// binds nothing from now on. Any other save leaves a code be, unless it switches Telegram off, or changes its chat or its bot token.
+    pub fn update_choosing(&self, config: Option<Config>, secrets: &Value, ends_binding: bool) -> Result<()> {
         let mut changes: Vec<(&str, Option<String>)> = Vec::new();
         for (field, key) in [("ntfy_token", K_NTFY_TOKEN), ("telegram_token", K_TELEGRAM_TOKEN), ("webhook_url", K_WEBHOOK)] {
             match secrets.get(field) {
@@ -1063,6 +1069,11 @@ impl Notifier {
                 None => self.secrets.delete(key)?,
             }
         }
+        // A code shown for approvals binds nothing once the person chose another mode, switched Telegram off, or named another chat or bot.
+        // Under `saving`: a code read already is not saved after this.
+        if ends_binding || token_changed || config.as_ref().is_some_and(|c| !c.telegram.enabled || c.telegram.chat_id != before.telegram.chat_id) {
+            approvals.cancel_binding();
+        }
         // A new bot token is a new bot: an account bound to the old one approves nothing through it.
         let config = config.or_else(|| (token_changed && before.telegram.mode == TelegramMode::ApproveLow).then(|| before.clone()));
         if let Some(mut c) = config {
@@ -1072,11 +1083,6 @@ impl Notifier {
                 c.telegram.mode = if c.telegram.mode == TelegramMode::ApproveLow { TelegramMode::AlertLink } else { c.telegram.mode };
                 c.telegram.user_id.clear();
                 c.telegram.user_name.clear();
-            }
-            // A code shown for approvals binds nothing once the person chose otherwise: another mode, Telegram off or another chat.
-            let t = &c.telegram;
-            if t.mode != TelegramMode::ApproveLow || !t.enabled || t.chat_id != before.telegram.chat_id {
-                approvals.cancel_binding();
             }
             if c.ntfy.enabled && self.secrets.get(K_TOPIC).is_none() {
                 self.secrets.set(K_TOPIC, &random_topic())?;
@@ -1089,10 +1095,6 @@ impl Notifier {
             if ends {
                 approvals.ended("turned off in Settings", true);
             }
-        }
-        // Nor through another bot.
-        if token_changed {
-            approvals.cancel_binding();
         }
         approvals.refresh();
         Ok(())
