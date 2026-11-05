@@ -323,22 +323,30 @@ person had chosen goes, and approvals end, which fails safe. `disable_web_page_p
   **in the configured chat** (any chat while none is set; `@name` matches the chat's username) stores the sender's `user_id`, its
   `@username` or first name as `user_name` (shown next to the id, and in the audit entry), and that chat's number as `chat_id`, and sets
   `approve_low`. A `/bind` from another chat, or from a group's anonymous admin (`sender_chat`, or the account 1087968824), is refused
-  with a reply and binds nothing; so is a code that was used or ran out. Five wrong codes from the configured chat end the binding;
-  other chats' do not count. A `notify.set` that leaves any mode but `approve_low`, switches Telegram off or names another chat, and a new
-  bot token, end a binding under way (`notify.telegram` `bind_cancelled`).
+  with a reply and binds nothing; so is a code that was used or ran out. Those replies go at most once a minute to each chat, off the
+  polling thread. `/bind@<bot>` counts only for this bot's own username (`getMe`); a command for another bot is ignored. Five wrong
+  codes from the configured chat end the binding; other chats' do not count. A `notify.set` with `end_binding: true` (the page sends it
+  when the person picks another mode), one that switches Telegram off or names another chat, and a new bot token end a binding under way
+  (`notify.telegram` `bind_cancelled`); any other save leaves it waiting. A correct code is saved only if, under the same lock as the
+  settings' writer, Telegram is still on with the same chat and mode and the binding was not cancelled, renewed or killed meanwhile;
+  otherwise, as when the file cannot be written, the chat is told nothing was bound and the app hears `bind_failed`.
 - **Turning them off.** Another mode, Telegram off, another chat id or bot token, `notify.clear`, and the kill switch (`mobile.revoke_all`,
   `mobile.disable`, `mobile.reset`) set `alert_link` and forget the account, saved. Every nonce is burnt and the sent messages lose
   their buttons (`editMessageText`). A `401` or `404` from `getUpdates`, a token Telegram rejects, does the same and says so. A press
   taken before that answers nothing after it: approvals are looked at again right before the answer is written, after any wait for the
   request.
 - **Polling.** One thread (`kelpie-telegram`) long-polls `getUpdates` (25 s, its own agent with a 35 s limit, at most 20 updates) only
-  while approvals are on or a binding waits: in `alert` and `alert_link` there is no thread and no request of its own. Chat messages are
-  asked for only while a binding waits and for a minute after it ends; otherwise only `callback_query`. A poll that returns nothing in
-  under a second waits out the second. Outbound only, no listener. The offset is kept in memory. Errors back off with full jitter from
+  while approvals are on or a binding waits: in `alert` and `alert_link` there is no thread and no request of its own. Every poll asks for
+  `message` and `callback_query`: Telegram keeps only what the last poll asked for, so a `/bind` sent while presses alone were asked for
+  would never arrive. A `/bind` sent while nothing polls waits at Telegram, and the next poll answers it (no code waiting, or a wrong code
+  when a new one is open). The bot's username is asked once per token (`getMe`). A poll that returns nothing in under a second waits out
+  the second. A note on a press of a button no longer valid is sent off the polling thread. Outbound only, no listener. The offset is kept in memory. Errors back off with full jitter from
   1 s to 60 s; a `409` (a webhook, or another poller) is shown once with what to do.
 - **Buttons.** Only for a needs-you message about a request the daemon labels `low` (`mobile::risk`) that changes no file, shown whole
   (at most 2000 characters, no hidden marks), with a one-time yes known to be one: in a terminal, the one open request a hook reported,
-  named in the screen lines above the menu (`choices::names_above_menu`), and a permission menu with one plain *Yes* and one plain *No*
+  shown whole in the menu's own dialog, between its `… command` header and its question, alone or followed by the hook's own
+  `description` (`choices::menu_shows_command`; whitespace collapsed, anything more or less refuses), and a permission menu with one
+  plain *Yes* and one plain *No*
   (`choices::one_time_answers`); in a chat, the one open request, for which the daemon writes the dialect's own one-time yes and no
   (Claude's `can_use_tool` repeating its input when that was at most 16 KiB, Codex's command approvals in both versions, ACP's one
   `allow_once` and its `reject_once`), each of which `ChatSession::answer` must take as a one-shot answer to that very request. A file

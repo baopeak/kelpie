@@ -1,7 +1,7 @@
 ---
 phase: 3e
 title: "Telegram: alert + deep link, opt-in low-risk approvals"
-status: done, review fixes applied (local, unmerged; the manual check with a real bot from a phone and a calm-machine mobile.py run have not run)
+status: done, two rounds of review fixes applied (local, unmerged; the manual check with a real bot from a phone and a calm-machine mobile.py run have not run)
 priority: P2
 effort: "3d"
 dependencies: [3b, 3c, 3d]
