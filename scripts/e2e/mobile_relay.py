@@ -243,6 +243,8 @@ async def main(d, phone_tap, desk_tap, registration_key):
         phone = ps.Phone(BASE, device, origin=ORIGIN)
         phone.url = phone_url(ticket, token)
         phone.caps = ["ack", "hb", "relay", "pad"]
+        # As the app does: which token it holds, so that the computer does not rotate the one in use.
+        phone.greeting = {"relay_token": hashlib.sha256(ln.unb64(token)).hexdigest()}
         hello = await phone.open()
         if hello.get("pad"):
             phone.session.pad = True
@@ -351,17 +353,23 @@ async def main(d, phone_tap, desk_tap, registration_key):
     check("…before its socket is closed by the computer (4401), not by the relay (4002)", phone_c.closed == 4401, phone_c.closed)
 
     # ---------- the kill switch ----------
-    if phone.closed is not None:
-        phone, _ = await through_relay(device, ticket, token)
+    # A fresh connection: the one from before the relay was cut was told `desktop_offline`, which the page acts on by connecting again.
+    await phone.close()
+    phone, _ = await through_relay(device, ticket, token)
     await call("mobile.revoke_all")
     await until(lambda: _closed(phone), 10)
     check("the kill switch tells a phone on the relay it was removed", any(m["type"] == "revoked" for m in phone.log), [m["type"] for m in phone.log][-4:])
-    try:
-        after = await websockets.connect(phone_url(ticket, token), origin=ORIGIN, open_timeout=5)
-        await after.close()
-        check("…and the relay lets its token in no more", False)
-    except websockets.exceptions.InvalidHandshake as e:
-        check("…and the relay lets its token in no more", status_of(e) == 403, status_of(e))
+
+    async def refused():
+        try:
+            after = await websockets.connect(phone_url(ticket, token), origin=ORIGIN, open_timeout=5)
+            await after.close()
+            return None
+        except websockets.exceptions.InvalidHandshake as e:
+            return status_of(e)
+
+    # The relay hears last, a second after the sessions had their say.
+    check("…and the relay lets its token in no more", await until(refused, 10, step=0.5) == 403)
     await call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
     await until(lambda: _connected(relay_status), 30)
     # ---------- off ----------
