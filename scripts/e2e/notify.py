@@ -32,9 +32,10 @@ and are removed at the end.
    its address.
 8. Telegram's choices in Settings → Mobile: a new Telegram sends alerts with a link and polls nothing; choosing approvals warns, asks for
    the verification (the debug daemon's stand-in, KELPIE_TEST_USER_PRESENCE=approve, so no real prompt comes up) and shows a code; a
-   wrong code binds nothing, `/bind <code>` from an account binds it and its chat. A low-risk request's message has Approve once and
-   Deny; presses from another account, another chat or with a made-up nonce do nothing, the bound account's approves once; the
-   desktop answering first takes the buttons off the message and a later press does nothing; a dangerous request gets no buttons;
+   wrong code binds nothing, nor the code from a chat other than the one set; `/bind <code>` in the chat set binds the account that
+   sent it, shown by name. A low-risk request's message has Approve once and Deny; presses from another account, another chat or with
+   a made-up nonce do nothing, the bound account's approves once; Deny pressed first types the plain No, once; the desktop answering
+   first takes the buttons off the message and a later press does nothing; a dangerous request gets no buttons;
    choosing alerts with a link again forgets the account and stops the polling. The fake Bot API answers `getUpdates` itself.
 9. Cleanup leaves no credential-store entry of this run.
 """
@@ -791,14 +792,19 @@ def telegram_approvals(d, run):
     check("the warning stays on the row", d.js("return !!document.querySelector('[data-telegram-warning]')"))
     check("a binding polls Telegram, outbound, while it waits", bool(until(lambda: sink.polls() > 0, 15)))
     run.shot("08-telegram-bind")
-    sink.push_update("message", {"message_id": 1, "from": {"id": 5}, "chat": {"id": 5}, "text": "/bind 000000000000"})
-    time.sleep(2)
-    check("a wrong code binds nothing", not rpc("notify.get")["config"]["telegram"].get("user_id"))
+    group = int(CHAT)
+    sink.push_update("message", {"message_id": 1, "from": {"id": 5}, "chat": {"id": group}, "text": "/bind 000000000000"})
+    # The right code, from a chat other than the one set: refused, and the bot says where to send it.
     sink.push_update("message", {"message_id": 2, "from": {"id": TG_USER}, "chat": {"id": TG_USER}, "text": command})
+    told_elsewhere = until(lambda: any((r["body"] or {}).get("chat_id") == TG_USER and "only in the chat set" in (r["body"] or {}).get("text", "") for r in sink.by("telegram")), 10)
+    check("a wrong code binds nothing, nor the code from another chat, which is told where to send it",
+          not rpc("notify.get")["config"]["telegram"].get("user_id") and bool(told_elsewhere))
+    sink.push_update("message", {"message_id": 3, "from": {"id": TG_USER, "username": "e2e_person"}, "chat": {"id": group}, "text": command})
     bound = until(lambda: (t := rpc("notify.get")["config"]["telegram"]) and t.get("mode") == "approve_low" and t, 15)
-    check("the code binds the account that sent it and its chat", bool(bound) and bound.get("user_id") == str(TG_USER) and bound.get("chat_id") == str(TG_USER), json.dumps(bound))
-    check("…the page says so", bool(until(lambda: d.js("return !!document.querySelector('[data-telegram-bound]')"), 10)))
-    check("…and the bot told that chat", bool(until(lambda: any((r["body"] or {}).get("chat_id") == TG_USER for r in sink.by("telegram")), 10)))
+    check("the code, in the chat set, binds the account that sent it, by name", bool(bound) and bound.get("user_id") == str(TG_USER) and bound.get("user_name") == "@e2e_person" and bound.get("chat_id") == CHAT, json.dumps(bound))
+    shown = until(lambda: d.js("const e = document.querySelector('[data-telegram-bound]'); return e && e.textContent"), 10) or ""
+    check("…the page says so, with the account's name next to its number", f"@e2e_person ({TG_USER})" in shown, shown)
+    check("…and the bot told that chat", bool(until(lambda: any((r["body"] or {}).get("chat_id") == group and "can now approve" in (r["body"] or {}).get("text", "") for r in sink.by("telegram")), 10)))
     d.js(f"{S}.setOverlay(null)")
     d.js(f"{S}.switchProject(arguments[0])", state["other_pid"])
 
@@ -811,15 +817,15 @@ def telegram_approvals(d, run):
           bool(msg) and "ls -la" in msg["body"]["text"] and re.fullmatch(r"a:[0-9a-f]{32}", yes) is not None and re.fullmatch(r"d:[0-9a-f]{32}", no) is not None and msg["body"].get("disable_web_page_preview") is True,
           json.dumps(msg)[:400])
     message_id = (msg or {}).get("message_id")
-    sink.press(yes, 5, TG_USER, message_id)
+    sink.press(yes, 5, group, message_id)
     sink.press(yes, TG_USER, 999, message_id)
-    sink.press("a:" + "0" * 32, TG_USER, TG_USER, message_id)
+    sink.press("a:" + "0" * 32, TG_USER, group, message_id)
     time.sleep(3)
     check("a press from another account, another chat or with a made-up nonce answers nothing", "PICKED:" not in screen(rpc, a["handle"]))
-    sink.press(yes, TG_USER, TG_USER, message_id)
+    sink.press(yes, TG_USER, group, message_id)
     check("the bound account's press approves it, as Telegram", bool(until(lambda: "PICKED:1" in screen(rpc, a["handle"]), 15)))
-    sink.press(yes, TG_USER, TG_USER, message_id)
-    sink.press(no, TG_USER, TG_USER, message_id)
+    sink.press(yes, TG_USER, group, message_id)
+    sink.press(no, TG_USER, group, message_id)
     time.sleep(3)
     check("…once: pressing again, or Deny, types nothing more", screen(rpc, a["handle"]).count("PICKED:") == 1, screen(rpc, a["handle"])[-300:])
     check("Telegram is told, and the message loses its buttons",
@@ -831,6 +837,21 @@ def telegram_approvals(d, run):
           any(e["action"] == "telegram_approve" for e in mine) and any(e["action"] == "telegram_refused" for e in mine) and any(e["action"] == "telegram_bound" for e in mine) and "ls -la" not in json.dumps(mine),
           json.dumps(mine)[:500])
 
+    # Deny first: the menu's plain No is typed, once.
+    n = asking_telegram("tg-deny", "ls -la")
+    msg = telegram_message("tg-deny")
+    yes, no = (buttons(msg) + ["", ""])[:2]
+    message_id = (msg or {}).get("message_id")
+    sink.press(no, TG_USER, group, message_id)
+    check("Deny pressed first types the menu's plain No, as Telegram", bool(no) and bool(until(lambda: "PICKED:3" in screen(rpc, n["handle"]), 15)), screen(rpc, n["handle"])[-300:])
+    sink.press(yes, TG_USER, group, message_id)
+    time.sleep(3)
+    check("…once: Approve after it types nothing", screen(rpc, n["handle"]).count("PICKED:") == 1, screen(rpc, n["handle"])[-300:])
+    check("…and Telegram is told, the message loses its buttons and the log says denied",
+          any(c.get("text") == "Denied from Telegram." for c in sink.calls("answerCallbackQuery"))
+          and any(e.get("message_id") == message_id and "Denied from Telegram." in e.get("text", "") for e in sink.calls("editMessageText"))
+          and any(e["action"] == "telegram_deny" and e["device"] == "telegram" for e in rpc("mobile.audit", {"limit": 100})["entries"]))
+
     # The desktop answers first: Telegram is told, and its button answers nothing.
     b = asking_telegram("tg-desktop", "ls -la")
     msg = telegram_message("tg-desktop")
@@ -841,7 +862,7 @@ def telegram_approvals(d, run):
     check("the desktop answers first", bool(yes) and bool(until(lambda: "PICKED:1" in screen(rpc, b["handle"]), 10)))
     check("Telegram is told: the message loses its buttons and says it was answered elsewhere",
           bool(until(lambda: any(e.get("message_id") == message_id and "Answered elsewhere" in e.get("text", "") for e in sink.calls("editMessageText")), 40)))
-    sink.press(yes, TG_USER, TG_USER, message_id)
+    sink.press(yes, TG_USER, group, message_id)
     time.sleep(3)
     check("a press after that types nothing", screen(rpc, b["handle"]).count("PICKED:") == 1)
 
@@ -849,7 +870,7 @@ def telegram_approvals(d, run):
     c = asking_telegram("tg-dangerous", "rm -rf build")
     msg = telegram_message("tg-dangerous")
     check("a dangerous request gets no buttons", bool(msg) and not msg["body"].get("reply_markup"), json.dumps(msg)[:300])
-    for s in (a, b, c):
+    for s in (a, n, b, c):
         hook(rpc, s["id"], "Stop")
 
     # Off again, from the page: the account is forgotten and the polling stops.
@@ -1010,8 +1031,8 @@ def restart_daemon(check):
     check("a pending timer is written to the data folder", len(timers()) == 1 and os.path.exists(os.path.join(DATA, "scheduled.json")))
     try:
         rpc("daemon.shutdown", {"kill_sessions": False})
-    except RuntimeError:
-        pass  # the reply may race the daemon exiting
+    except Exception:
+        pass  # the reply may race the daemon exiting: an error, or a connection closed mid-frame
     procs["daemon"].wait(timeout=30)
     procs["daemon"] = subprocess.Popen([kelpied, "serve"], env=dict(os.environ, KELPIE_LOG="trace"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     rpc = None
