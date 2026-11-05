@@ -320,7 +320,7 @@ def _refused(conn, method, params):
     try:
         conn.call(method, params)
         return None
-    except Exception as e:  # noqa: BLE001
+    except SystemExit as e:  # kelpie-call's way of reporting an error
         return str(e)
 
 
