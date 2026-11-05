@@ -1079,14 +1079,15 @@ disconnects it at once.
 
 **Taking over a browser pane from the phone** (Windows). When an agent is stuck on a sign-in, a consent screen, a 2FA code or a check in one of Kelpie's
 browser panes, a phone may drive that pane: *Take over a browser pane* in a session lists the panes with a page open, those of the session's project first.
-The phone shows the page; a tap clicks, a quick swipe scrolls, a long press and then a move drags, the key row has Enter, Tab, Backspace, Esc and the arrows,
+The phone shows the page; a tap clicks, a swipe scrolls, holding still for a moment (0.4 s) and then moving drags, pinching does not zoom the page, the key row has Enter, Tab, Backspace, Esc and the arrows,
 and the text field types into the page (a password goes as one message, and the phone says *Sent to the page* or *Not sent*; it is never sent twice by
 itself). A sign-in window the page opens comes to the phone too, and closing it goes back to the page. On the computer the pane's tab comes to the front and
 stays there, with *Controlled from <phone> · Stop* above it; the sign-in window's title says the same. Stop on either side ends it, and so do 10 minutes with
 nothing typed, the phone locking or leaving the app, and removing the phone or lowering what it may do, within a second or two.
 
 Only a phone given *May take control* can do this, and Settings → Mobile offers that only for a phone paired over Tailscale (or your own HTTPS name) whose app
-lock is set up, while *Lock Kelpie on phones* is on; giving it asks you to verify. It works over Tailscale or that HTTPS address, not through the relay. What is typed
+lock is set up, while *Lock Kelpie on phones* is on; giving it asks you to verify, and that is the only confirmation a takeover asks for. Turning the lock
+off takes control away from every such phone, which can then only type: after turning the lock back on, give it *May take control* again. It works over Tailscale or that HTTPS address, not through the relay. What is typed
 is not recorded anywhere: *What phones did* says only when a takeover started and why it ended. If the computer is very busy a new takeover waits; if the
 picture stops for a few seconds the phone dims it and sends nothing until it is back, so a tap never lands on a page that changed meanwhile. A program on the
 computer that tries to stand in for Kelpie's window here is refused, and Kelpie says so.

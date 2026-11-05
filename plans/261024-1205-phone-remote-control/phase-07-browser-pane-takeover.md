@@ -17,6 +17,12 @@ dependencies: [3, 3a, 3c]
 
 **Code written, not built** (branch `phone/phase7-takeover`, from `phone/phase4-relay` b8c4e84). Cargo was not run (another build held the machine); the Rust unit tests below are written and unrun, as is `scripts/e2e/takeover.py`. Report: `plans/reports/fullstack-developer-261105-1900-phone-phase7.md`.
 
+**Owner answers (2026-11-05), applied:**
+1. The desktop grant of `control`, with OS verification, is the first-takeover confirmation: no extra prompt.
+2. Turning the app lock off lowers every browser device's `control` to `write` in its record; getting it back takes a new grant on the desktop with verification (`Mobile::set_lock`, test `turning_the_lock_off_takes_a_pages_control_back_to_typing_until_it_is_granted_again`).
+3. A `window.open` with a size or position becomes its own window; every other new window opens in the pane.
+4. Gestures: a tap clicks, a drag scrolls, a 400 ms hold then a drag drags, pinch is not passed through.
+
 **Research (docs and the crates' sources, tauri 2.12.4 / tauri-runtime 2.12.2 / wry 0.57 / webview2-com 0.39.1), design chosen from it:**
 - Popups: `WebviewBuilder::on_new_window` may return `NewWindowResponse::Create { window }`; on Windows the new webview must use the opener's environment, which `WebviewWindowBuilder::window_features(features)` sets (`with_environment(features.opener().environment)`). The docs' own example builds the window inside the handler. Only a `window.open` with a size or position (`NewWindowFeatures::size()/position()`, an OAuth window) is made a window; any other new window still opens in the pane, which keeps `browser.py`'s target=_blank check as it was.
 - Frames: `ICoreWebView2::GetDevToolsProtocolEventReceiver("Page.screencastFrame")` + `add_DevToolsProtocolEventReceived` (`DevToolsProtocolEventReceivedEventHandler`, `ParameterObjectAsJson`), attached for a held pane only and removed with its token; `Page.startScreencast {format: jpeg, quality, maxWidth, maxHeight, everyNthFrame}` and `Page.screencastFrameAck {sessionId}`, sent without waiting. The handler only hands the JSON to a task (window thread kept free).

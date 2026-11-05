@@ -600,7 +600,8 @@ third implementation for the tests, and all three are checked against the crate'
   `mobile.pair_start` makes browser pairings only. `control` (taking over a browser pane, API 28) is for a browser device only while all of these hold: it paired
   on a secure origin, its passkey is set up and the app lock is on (`record_ceiling`, `may_control` in `mobile.status`), it was raised to it on the desktop with the
   person's verification, this connection is this computer's own HTTPS page and not the relay (`transport_cap`), and the passkey has opened it now (`Mobile::control_now`,
-  read on every message). Owner decision, 2026-11-05.
+  read on every message). That grant is also the confirmation of the device's first takeover: no other prompt. Turning the app lock off (`set_lock`) lowers every such
+  record to `write` (sealed, audited, its connection starts again); turning it back on does not restore it, a new grant does. Owner decisions, 2026-11-05.
 - **Tailscale mode** (`mobile/tailscale.rs`, off by default): `tailscale serve --bg --https=8443 http://127.0.0.1:<port>` publishes the
   page at `https://<fqdn>:8443` to the person's own tailnet, and forwards to one loopback listener that exists only while the mode is on and
   follows the same `Generation` stop as the others, with its own for what came through it, so turning it off cuts those phones and no
@@ -716,7 +717,7 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
 - **Broker** (`takeover.rs`): the phone's verbs `panes`, `tk_start {pane}`, `tk_input {tk, ops, st}`, `tk_text {tk, text, st}`, `tk_ack {tk, seq}`, `tk_stop`,
   `tk_rebind`, all needing `control`; to the phone `tk_frame {tk, seq, data, meta}`, `tk_fhb {tk, seq}` every second, `tk_end {tk, reason}`. A hold is keyed by
   device, link connection and provider connection, one per pane, one per device. It rests on a `Mobile::grant` flag that a revoke, a lower permission, the lock
-  (`lock_now`, an idle window running out, `set_lock` turning it off), phone access off or a reset clear at once: every input checks it and the hold's task lets
+  (`lock_now`, an idle window running out, `set_lock` turning it off, which also lowers the record to `write`), phone access off or a reset clear at once: every input checks it and the hold's task lets
   go of the pane within 250 ms. A dropped link keeps the hold 15 s for the same device's next connection (`tk_rebind`, after its handshake), which gets a fresh
   frame, never one from before. 10 minutes with no input ends it, and so does Stop on either side. New takeovers are refused at load L2 and above (`host_busy`).
 - **Frames are not queued**: the app acknowledges each `Page.screencastFrame` at once and hands it over; the broker keeps the newest one and sends it when the
@@ -725,7 +726,7 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
   message holds 1 MiB), up when the median of 10 is under 150 ms and the step held 5 s. Load caps: L1 q60/1280/8 fps, L2 q50/960/4, L3 q40/800/2. Nothing
   acknowledged for 2 s pauses the screencast; the next acknowledgement resumes it with a fresh frame. The relay's 55 KB/s budget is not built: relay takeover is deferred.
 - **Input**: a closed set (`tap`, `down`, `move`, `up` in CSS pixels of the page's viewport, `wheel`, `key` from a short list) checked by the daemon, 32 to a
-  message, dispatched in order as `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`; text as `Input.insertText` with an answer of its own, sent or not sent,
+  message (on the phone a tap clicks, a drag scrolls, a 400 ms hold then a drag drags, and pinch is not passed on: owner decision, 2026-11-05), dispatched in order as `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`; text as `Input.insertText` with an answer of its own, sent or not sent,
   never retried. Input whose `st` (the phone's reading of this computer's clock) is more than 1 s off is dropped, so a tap that arrives after a gap clicks
   nothing; the phone merges moves and scrolls and sends nothing while its picture is not live (3 s without a frame or heartbeat dims it). **Nothing typed is logged**:
   `Conn::note` leaves the takeover verbs out, the audit log has `takeover_start` (the page's host) and `takeover_stop` (why), and no log line names input.
@@ -735,7 +736,7 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
   for a size (an OAuth or sign-in window) opens as a top-level window of its own on the pane's WebView2 environment (`NewWindowResponse::Create`, `window_features`
   carrying the opener's environment), so `window.opener` holds; it has no IPC and stays on http(s) like the pane, its title says who controls it, and while it is
   open it is what the phone sees. Closing it goes back to the pane; closing the pane closes its popups and ends its takeover. Any other new window still opens in the
-  pane.
+  pane (owner decision, 2026-11-05).
 - **Limits, until the spike on a built app**: the phase file lists what is not yet seen on a real page (frames while the pane is hidden, coordinates under page
   zoom, `Create` inside the new-window handler, CPU at L2).
 
