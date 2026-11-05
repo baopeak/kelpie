@@ -1,0 +1,12 @@
+{
+  "_about": "Padded chunk plaintexts, checked by crates/kelpie-link/src/tests.rs and app/phone/src/noise.test.ts: flags, then the bytes, then zeros, then their number (u16 big-endian).",
+  "buckets": [256, 1024, 4096, 16384, 65519],
+  "cases": [
+    { "more": false, "byte": 104, "len": 0, "padded_len": 256, "flags": 2, "zeros": 253 },
+    { "more": false, "byte": 104, "len": 2, "padded_len": 256, "flags": 2, "zeros": 251 },
+    { "more": true, "byte": 97, "len": 300, "padded_len": 1024, "flags": 3, "zeros": 721 },
+    { "more": false, "byte": 97, "len": 253, "padded_len": 256, "flags": 2, "zeros": 0 },
+    { "more": false, "byte": 97, "len": 254, "padded_len": 1024, "flags": 2, "zeros": 767 },
+    { "more": true, "byte": 120, "len": 65516, "padded_len": 65519, "flags": 3, "zeros": 0 }
+  ]
+}

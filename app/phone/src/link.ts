@@ -80,6 +80,8 @@ export interface Hello {
   push?: { vapid: string | null; subscribed: boolean };
   /** The computer holds this phone locked: the rest says nothing of any session. */
   locked?: boolean;
+  /** The computer reads padded chunks: this phone pads what it sends from now on (absent from a computer before the relay). */
+  pad?: boolean;
   lock?: LockInfo;
 }
 
@@ -204,6 +206,8 @@ export interface Codec {
   send(msg: Record<string, unknown>): (Uint8Array | string)[];
   /** What goes into the first sealed message besides `caps`. */
   greeting?(): Record<string, unknown>;
+  /** Pads what this connection sends from now on, so that the carrier sees only a few sizes. */
+  padding?(on: boolean): void;
 }
 
 /** SHA-256 of a base64url token's bytes, hex: how the computer and the relay know it. */
@@ -241,6 +245,9 @@ export function linkCodec(p: Pairing): Codec {
     },
     // Which relay token this phone holds, so that the computer gives it a new one only when it needs one.
     greeting: () => (p.relayToken ? { relay_token: tokenHash(p.relayToken) } : {}),
+    padding(on) {
+      if (session) session.pad = on;
+    },
   };
 }
 
@@ -775,10 +782,10 @@ export class Link {
     this.h.changed();
   }
 
-  /** `caps`: this client acknowledges frames and answers heartbeats (without both the daemon serves it as one that does not), and can use a
-   *  relay token. `resume`: it is the page that unlocked, so a flap asks nothing. */
+  /** `caps`: this client acknowledges frames and answers heartbeats (without both the daemon serves it as one that does not), can use a
+   *  relay token, and reads padded chunks. `resume`: it is the page that unlocked, so a flap asks nothing. */
   private greet() {
-    this.post({ caps: ["ack", "hb", "relay"], ...(this.codec?.greeting?.() ?? {}), ...(this.resume ? { resume: this.resume } : {}) });
+    this.post({ caps: ["ack", "hb", "relay", "pad"], ...(this.codec?.greeting?.() ?? {}), ...(this.resume ? { resume: this.resume } : {}) });
   }
 
   private onSocketMessage(ws: SocketLike, data: unknown) {
@@ -1096,6 +1103,8 @@ export class Link {
     this.facts.lastLiveAt = now;
     this.facts.probeSince = null;
     this.readyAt = now;
+    // The computer pads what it sends to this phone, and says it reads padded chunks: from now on both directions do.
+    if (hello.pad) this.codec?.padding?.(true);
     this.awaiting.clear();
     this.clearResyncTimer();
     // Locked, it says nothing of any session. What depends on the computer's run waits for the hello that does: that is the one that finds a restart.

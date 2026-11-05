@@ -190,7 +190,7 @@ describe("Link handshake", () => {
     const r = rig();
     r.link.start();
     r.last().open();
-    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay"] });
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay", "pad"] });
   });
 
   it("says the window's secret first on every connection while it holds one, and not once it has let it go", async () => {
@@ -208,12 +208,12 @@ describe("Link handshake", () => {
     r.link.setResume("the-secret");
     r.link.start();
     r.last().open();
-    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay"], resume: "the-secret" });
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay", "pad"], resume: "the-secret" });
     await reconnect();
-    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay"], resume: "the-secret" });
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay", "pad"], resume: "the-secret" });
     r.link.setResume(null);
     await reconnect();
-    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay"] });
+    expect(r.last().sent[0]).toEqual({ caps: ["ack", "hb", "relay", "pad"] });
   });
 
   it("over kelpie-link: every connection opens with a new first message, so the daemon never takes a retry for a replay", async () => {
@@ -998,7 +998,7 @@ describe("the relay route", () => {
     expect(relay.sent[0]).toHaveProperty("binary");
     relay.say({});
     expect(direct.closed).toBe(true);
-    expect(relay.sent[1]).toEqual({ caps: ["ack", "hb", "relay"] });
+    expect(relay.sent[1]).toEqual({ caps: ["ack", "hb", "relay", "pad"] });
     relay.say({ type: "hello", ...hello({ server_ts: r.now() }) });
     expect(r.link.facts.ready).toBe(true);
     expect(r.link.facts.route).toBe("relay");
@@ -1094,7 +1094,7 @@ describe("the relay route", () => {
     direct.say({});
     expect(relay.closed).toBe(true);
     expect(r.link.facts.route).toBe("direct");
-    expect(direct.sent[1]).toEqual({ caps: ["ack", "hb", "relay"] });
+    expect(direct.sent[1]).toEqual({ caps: ["ack", "hb", "relay", "pad"] });
     direct.say({ type: "hello", ...hello({ server_ts: r.now() }) });
     expect(direct.types()).toContain("sub");
     expect(r.link.facts.ready).toBe(true);
@@ -1134,5 +1134,22 @@ describe("the relay route", () => {
     expect(relayUrl({ ...p, relayToken: undefined }, 1000, true)).toBeNull();
     expect(relayUrl({ ...p, endpoints: [{ t: "relay", a: "http://relay.example", r: "x" }] }, 1000, true)).toBeNull();
     expect(relayUrl({ ...p, endpoints: [{ t: "relay", a: "wss://relay.example" }] }, 1000, true)).toBeNull();
+  });
+});
+describe("padding", () => {
+  it("pads from the hello of a computer that reads padded chunks, and not before", () => {
+    const calls: boolean[] = [];
+    const codec = (): Codec => ({ ...jsonCodec(), padding: (on) => void calls.push(on) });
+    const r = rig({ codec });
+    r.link.start();
+    r.last().open();
+    expect(r.last().sent[0].caps).toContain("pad");
+    r.last().say({ type: "hello", ...hello({ server_ts: r.now() }) });
+    expect(calls).toEqual([]);
+    r.last().die();
+    r.advance(1000);
+    r.last().open();
+    r.last().say({ type: "hello", ...hello({ server_ts: r.now(), pad: true }) });
+    expect(calls).toEqual([true]);
   });
 });

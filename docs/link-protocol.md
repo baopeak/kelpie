@@ -20,7 +20,13 @@ the published cacophony ones in `cacophony-ik.json`.
   follow. One application message is at most 1 MiB. Each direction rekeys every 2^16 messages by counting. A message that does not decrypt ends the
   connection: there is no reorder window and no resumption, and every reconnect is a new handshake.
 - **First sealed frame**: `{type: "pair", name, want}` when pairing, `{caps, resume?, relay_token?}` when reconnecting. `caps` holds `ack`
-  and `hb` (a client without both is served as one that acknowledges nothing, and is refused on the relay), and `relay` from a client that can use a relay token.
+  and `hb` (a client without both is served as one that acknowledges nothing, and is refused on the relay), `relay` from a client that can use a relay token, and `pad` from one that reads padded chunks.
+- **Padding**: a chunk's plaintext may be padded so that the carrier sees only a few sizes: flags with bit `2` set, the bytes, zeros, and
+  the number of zeros as a u16 big-endian last, the whole rounded up to the smallest of 256, 1,024, 4,096, 16,384 or 65,519 bytes that holds it
+  (a padded chunk carries at most 65,516 bytes). Filler that is not zeros, or a count larger than what is there, is a broken connection.
+  Every end reads padded and unpadded chunks; an end pads only once the other has said it reads them: the computer once the phone's `caps`
+  has `pad`, from its hello on, and the phone once that hello says `pad: true`. Pairing messages are not padded. Nothing is ever sent only to
+  fill the line: the timing and number of frames still show. Vectors: [`crates/kelpie-link/tests/padding.json`](../crates/kelpie-link/tests/padding.json).
 - **Approval code**: `HKDF-BLAKE2s(ikm = handshake hash, no salt, info = "kelpie-sas")`, its first 4 bytes big-endian, modulo 10^6.
 - **QR payload** (`#p=`): base64url of `{v: 1, dpk, psk, ep: [{t, a, r?}], name}`. Endpoint kinds: `ts` (`a` = `<name>:<port>` of the HTTPS
   origin), `relay` (`a` = `wss://<host>`, `r` = the room's ticket), `lan` (`a` = `ip:port`). A client skips kinds it does not know.

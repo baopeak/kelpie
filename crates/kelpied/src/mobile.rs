@@ -2733,7 +2733,7 @@ impl Conn {
             None => (json!(0), json!([]), json!({})),
         };
         json!({
-            "type": "hello", "v": 2, "api": kelpie_proto::API_LEVEL, "daemon_epoch": m.epoch, "rev": rev,
+            "type": "hello", "v": 2, "api": kelpie_proto::API_LEVEL, "daemon_epoch": m.epoch, "rev": rev, "pad": true,
             "device": device_hello(device, record, cap),
             "push": push,
             "locked": self.locked,
@@ -2794,6 +2794,10 @@ impl Conn {
 async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>, device: Device, peer: Peer, browser: bool, first: Value) {
     daemon.mobile.seen(&device.id);
     let legacy = !acknowledges(Some(&first));
+    // A phone that reads padded chunks gets them from the hello on, so that a carrier on the way sees a few sizes and not what was said.
+    if first["caps"].as_array().is_some_and(|caps| caps.iter().any(|c| c == "pad")) {
+        wire.session.set_padding(true);
+    }
     let cap = transport_cap(device.kind, browser, &peer);
     let lock_path = daemon.mobile.lock_path(&device, &peer);
     let secure_page = peer.origin.clone().filter(|_| peer.secure_origin);
