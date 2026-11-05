@@ -299,6 +299,33 @@ fn lasting_keys(lines: &[&str], end: usize, keys: &[String]) -> Vec<String> {
     dedup(found.into_iter().filter(|k| keys.contains(k)).collect())
 }
 
+/// On a numbered menu that asks for permission, the key that says yes to this one prompt and the key that says no. Each must be the only choice
+/// of its kind and last no longer than the prompt; anything else is None. A button that answers from afar (`notify::telegram_poll`) has to be
+/// unmistakable, where a person looking at the menu can tell for themselves.
+pub fn one_time_answers(screen: &str) -> Option<(String, String)> {
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    let (prompt, end) = menu(&lines)?;
+    let (items, first) = menu_labels(&lines, end);
+    if items.is_empty() || !prompt.keys.iter().all(|k| items.iter().any(|item| &item.key == k)) {
+        return None;
+    }
+    let above = &lines[lines.len().saturating_sub(MENU_LINES).min(first)..first];
+    if !asks_permission(above, &items) || question_lasts(above) {
+        return None;
+    }
+    let lasting = lasting_keys(&lines, end, &prompt.keys);
+    // A yes with a description under it may say more than its first line: it is not offered.
+    let only = |re: &Regex, whole: bool| -> Option<String> {
+        let found: Vec<&MenuItem> = items.iter().filter(|item| re.is_match(item.first_line.trim())).collect();
+        match found.as_slice() {
+            [one] if (!whole || one.label == one.first_line) && !lasting.contains(&one.key) => Some(one.key.clone()),
+            _ => None,
+        }
+    };
+    let (yes, no) = (only(&ONCE, true)?, only(&REFUSES, false)?);
+    (yes != no).then_some((yes, no))
+}
+
 /// The menu and the index of its last item in `lines`.
 fn menu(lines: &[&str]) -> Option<(Prompt, usize)> {
     let start = lines.len().saturating_sub(MENU_LINES);
@@ -722,6 +749,31 @@ mod tests {
         let p = detect(s).unwrap();
         assert_eq!(p.keys, ["1", "2", "3"]);
         assert_eq!(p.question.as_deref(), Some("Do you want to proceed?"));
+    }
+
+    #[test]
+    fn a_button_from_afar_is_offered_only_for_an_unmistakable_yes_once_and_no() {
+        let claude = "● Bash(npm test)\n\n Bash command\n   npm test\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for npm test commands in D:\\proj\n   3. No, and tell Claude what to do differently (esc)\n";
+        assert_eq!(one_time_answers(claude), Some(("1".into(), "3".into())));
+        assert_eq!(one_time_answers("Allow execution of: 'git status'?\n● 1. Yes, allow once\n  2. Yes, allow always\n  3. No, suggest changes (esc)\n"), Some(("1".into(), "3".into())));
+        for unsure in [
+            // Two plain yeses, or none: which one a button means is not for the daemon to guess.
+            "Do you want to proceed?\n ❯ 1. Yes\n   2. Yes\n   3. No\n",
+            "Do you want to proceed?\n ❯ 1. Yes, and don't ask again\n   2. No\n",
+            // No plain no.
+            "Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again\n",
+            // The question makes the yes last.
+            "Always allow this tool?\n ❯ 1. Yes\n   2. No\n",
+            "Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No, exit\n",
+            // Not a question of permission, nor a menu at all.
+            "Which style?\n ❯ 1. Yes\n   2. No\n",
+            "Allow command?\n$ cargo build\nYes (y)   Always (a)   No, provide feedback (n)\n",
+            "Delete it? (y/n)",
+            // A description under the yes.
+            "Do you want to proceed?\n ❯ 1. Yes\n      and run every hook from now on\n   2. No\n",
+        ] {
+            assert_eq!(one_time_answers(unsure), None, "{unsure}");
+        }
     }
 
     #[test]

@@ -204,7 +204,7 @@ fn waiting(session: &str) -> Raised {
 const NEEDLE: &str = "needle-text-from-the-session";
 
 fn telling() -> Context {
-    Context { project: Some(NEEDLE.into()), title: Some(NEEDLE.into()), screen: Some(NEEDLE.into()), phone_url: Some("http://elsewhere/".into()) }
+    Context { project: Some(NEEDLE.into()), title: Some(NEEDLE.into()), screen: Some(NEEDLE.into()), phone_url: Some("http://elsewhere/".into()), telegram_url: Some("http://elsewhere/".into()) }
 }
 
 #[test]

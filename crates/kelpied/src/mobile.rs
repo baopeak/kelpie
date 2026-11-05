@@ -18,7 +18,7 @@
 //! configured (e.g. from `tailscale cert`), or by Tailscale Serve in front of one loopback listener (`tailscale`); and a phone that
 //! paired on a secure origin reaches nothing until its passkey passes, here and not in the page (`lock`).
 
-mod audit;
+pub mod audit;
 mod lanes;
 mod link;
 mod listen;
@@ -5708,7 +5708,7 @@ mod tests {
         let forbidden = [
             "mobile.approve", "mobile.revoke", "mobile.revoke_all", "mobile.reset", "mobile.set_permission", "mobile.set_write", "mobile.pair_start", "mobile.enable", "mobile.disable", "mobile.set_options", "mobile.audit",
             "pair", "approve", "revoke", "upgrade", "set_permission", "settings", "set_settings", "daemon.set_policy", "daemon.set_theme", "daemon.shutdown",
-            "agent.set_custom", "agent.run", "hook.report", "mcp", "plugin", "automation.save", "automation.approve", "automation.delete", "automation.set_paused", "always_allow", "notify.set",
+            "agent.set_custom", "agent.run", "hook.report", "mcp", "plugin", "automation.save", "automation.approve", "automation.delete", "automation.set_paused", "always_allow", "notify.set", "notify.telegram_bind",
             "session.create", "session.close", "session.update", "session.attach", "run.approve", "meta.set",
         ];
         for name in forbidden {

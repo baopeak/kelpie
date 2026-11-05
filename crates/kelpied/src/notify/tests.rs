@@ -291,6 +291,7 @@ fn a_payload_is_redacted_and_screen_text_is_off_unless_asked_for() {
         title: Some(format!("Claude · fixing {key}")),
         screen: Some(format!("$ export GITHUB_TOKEN={key}\nline two\npassword: hunter2hunter2")),
         phone_url: Some("http://192.168.1.5:4817/".into()),
+        telegram_url: None,
     };
     let ev = Raised { session: Some("abc-123".into()), turn: Some(Duration::from_secs(125)), ..Raised::bare(Kind::Waiting) };
 
@@ -374,7 +375,7 @@ fn the_topic_is_128_random_bits() {
 #[test]
 fn secrets_live_in_the_store_and_never_in_the_file_or_the_reply() {
     let (n, secrets, dir) = notifier();
-    let c = Config { ntfy: Ntfy { enabled: true, server: "https://ntfy.example.org".into() }, telegram: Telegram { enabled: true, chat_id: "-100123".into() }, webhook: Webhook { enabled: true }, ..Config::default() };
+    let c = Config { ntfy: Ntfy { enabled: true, server: "https://ntfy.example.org".into() }, telegram: Telegram { enabled: true, chat_id: "-100123".into(), ..Default::default() }, webhook: Webhook { enabled: true }, ..Config::default() };
     let hook = "https://hooks.example.org/in/abcdefSECRET";
     n.update(Some(c.clone()), &json!({"ntfy_token": "tk_ntfySECRETvalue", "telegram_token": "123456:TELEGRAMsecret", "webhook_url": hook})).unwrap();
     let topic = secrets.get(K_TOPIC).expect("switching ntfy on creates the topic");
@@ -418,7 +419,7 @@ fn bad_settings_are_refused_and_change_nothing() {
         Config { ntfy: Ntfy { enabled: true, server: "ftp://x".into() }, ..good.clone() },
         Config { ntfy: Ntfy { enabled: true, server: "https://user:pw@ntfy.sh".into() }, ..good.clone() },
         Config { ntfy: Ntfy { enabled: true, server: "https://".into() }, ..good.clone() },
-        Config { telegram: Telegram { enabled: true, chat_id: "me; drop".into() }, ..good.clone() },
+        Config { telegram: Telegram { enabled: true, chat_id: "me; drop".into(), ..Default::default() }, ..good.clone() },
         Config { min_turn_s: 100_000, ..good.clone() },
     ] {
         assert!(n.update(Some(bad), &Value::Null).is_err());
@@ -429,7 +430,7 @@ fn bad_settings_are_refused_and_change_nothing() {
         assert_eq!(secrets.0.lock().len(), before, "a refused change writes nothing");
     }
     assert!(!dir.join("notify.json").exists());
-    assert!(n.update(Some(Config { telegram: Telegram { enabled: false, chat_id: "@my_channel".into() }, ..good }), &Value::Null).is_ok());
+    assert!(n.update(Some(Config { telegram: Telegram { enabled: false, chat_id: "@my_channel".into(), ..Default::default() }, ..good }), &Value::Null).is_ok());
 }
 
 #[test]
@@ -519,7 +520,7 @@ fn ntfy_gets_json_with_the_topic_in_the_body_and_the_token_in_a_header() {
 fn telegram_and_webhook_get_their_messages() {
     let (url, rx) = sink(2, 200);
     let (n, _, _dir) = notifier();
-    let c = Config { telegram: Telegram { enabled: true, chat_id: "-100777".into() }, webhook: Webhook { enabled: true }, ..Config::default() };
+    let c = Config { telegram: Telegram { enabled: true, chat_id: "-100777".into(), ..Default::default() }, webhook: Webhook { enabled: true }, ..Config::default() };
     n.update(Some(c), &json!({"telegram_token": "123456:BOTtoken", "webhook_url": format!("{url}/hook/1")})).unwrap();
     n.test_via(Channel::Telegram, &url).unwrap();
     let tg = rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -552,7 +553,7 @@ fn errors_say_what_failed_and_never_where() {
     assert!(!status.contains("127.0.0.1"), "{status}");
     // Channels without their secrets fail without a request.
     let (n3, _, dir3) = notifier();
-    n3.update(Some(Config { telegram: Telegram { enabled: true, chat_id: "1".into() }, ..Config::default() }), &Value::Null).unwrap();
+    n3.update(Some(Config { telegram: Telegram { enabled: true, chat_id: "1".into(), ..Default::default() }, ..Config::default() }), &Value::Null).unwrap();
     assert_eq!(n3.test_via(Channel::Telegram, "http://127.0.0.1:1").unwrap_err(), "no bot token");
     drop((dir, dir2, dir3));
 }
@@ -572,6 +573,42 @@ fn an_event_is_posted_once_by_the_worker_and_carries_a_link_only_with_phone_acce
     assert_eq!(r.body["click"], "http://192.168.1.5:4817/#s=s1");
     assert!(!n.wants_push(&ev, now + Duration::from_secs(1)), "the same session again within 30 s is dropped");
     assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "exactly one request");
+}
+
+#[test]
+fn telegram_from_before_the_choice_sends_exactly_what_it_sent_and_new_ones_link() {
+    let (url, rx) = sink(4, 200);
+    let dir = Scratch(std::env::temp_dir().join(format!("kelpie-notify-{}", uuid::Uuid::new_v4())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    std::fs::write(dir.join("notify.json"), br#"{"telegram":{"enabled":true,"chat_id":"-100777"},"min_turn_s":0,"phone_link":false}"#).unwrap();
+    let secrets = Memory::new();
+    secrets.set(K_TELEGRAM_TOKEN, "123456:BOTtoken").unwrap();
+    let n = Notifier::new(&dir, secrets);
+    n.destinations.telegram().set_test_base(&url);
+    assert_eq!(n.config().telegram.mode, TelegramMode::Alert, "a file from before keeps its behaviour");
+    let ev = Raised { session: Some("s1".into()), ..Raised::bare(Kind::Waiting) };
+    let ctx = |phone: bool| Context { project: Some("Kelpie".into()), title: Some("Claude · docs".into()), phone_url: phone.then(|| "http://192.168.1.5:4817/".into()), telegram_url: Some("https://box.tail1.ts.net/".into()), ..Default::default() };
+    let text = |r: Request| (r.path, r.body["text"].as_str().unwrap_or_default().to_string(), r.body["disable_web_page_preview"].as_bool(), r.body.get("reply_markup").is_some());
+    // As before: the link only with `phone_link`, and Telegram never fetches it.
+    n.send(&ev, &ctx(false));
+    assert_eq!(text(rx.recv_timeout(Duration::from_secs(5)).unwrap()), ("/bot123456:BOTtoken/sendMessage".to_string(), "Kelpie · Kelpie\nClaude · docs: Needs your input".to_string(), Some(true), false));
+    n.send(&ev, &ctx(true));
+    assert_eq!(text(rx.recv_timeout(Duration::from_secs(5)).unwrap()).1, "Kelpie · Kelpie\nClaude · docs: Needs your input\n\nhttp://192.168.1.5:4817/#s=s1");
+    // Alert + link: its own link, whatever `phone_link` says, and `phone_link`'s first when there is one.
+    let mut c = n.config();
+    c.telegram.mode = TelegramMode::AlertLink;
+    n.update(Some(c), &Value::Null).unwrap();
+    n.send(&ev, &ctx(false));
+    assert_eq!(text(rx.recv_timeout(Duration::from_secs(5)).unwrap()).1, "Kelpie · Kelpie\nClaude · docs: Needs your input\n\nhttps://box.tail1.ts.net/#s=s1");
+    n.send(&ev, &ctx(true));
+    assert!(text(rx.recv_timeout(Duration::from_secs(5)).unwrap()).1.ends_with("http://192.168.1.5:4817/#s=s1"));
+    // What is saved names the mode, and no account until one is bound.
+    let saved = std::fs::read_to_string(dir.join("notify.json")).unwrap();
+    assert!(saved.contains("\"mode\": \"alert_link\"") && !saved.contains("user_id"), "{saved}");
+    // Switched on from now on, it links.
+    assert_eq!(Config::default().telegram.mode, TelegramMode::AlertLink);
+    assert_eq!(serde_json::from_str::<Config>("{}").unwrap().telegram.mode, TelegramMode::AlertLink);
+    assert!(!n.destinations.telegram().polling(), "no thread for alerts");
 }
 
 // ---------- cost ----------

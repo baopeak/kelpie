@@ -239,7 +239,7 @@ pub fn bounded_client_channel(cap: usize) -> (ClientTx, tokio::sync::mpsc::Recei
     (ClientTx::Bounded { tx, overflowed: overflowed.clone() }, rx, overflowed)
 }
 
-/// Who answered a wait: the desktop (`id` "desktop"), or a paired phone.
+/// Who answered a wait: the desktop (`id` "desktop"), a paired phone, or a button in Telegram (`id` "telegram").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct By {
     pub id: String,
@@ -249,6 +249,10 @@ pub struct By {
 impl By {
     pub fn desktop() -> By {
         By { id: "desktop".into(), name: "desktop".into() }
+    }
+
+    pub fn telegram() -> By {
+        By { id: "telegram".into(), name: "Telegram".into() }
     }
 
     pub fn is_desktop(&self) -> bool {
@@ -1128,6 +1132,56 @@ impl Session {
         self.inner.lock().screen_prompt.as_ref().is_some_and(|p| p.lasting.iter().any(|k| k == key) || (!p.keys.iter().any(|k| k == key) && p.lasting.iter().any(|k| k.eq_ignore_ascii_case(key))))
     }
 
+    /// What a Telegram button could answer in the wait that began at `wait` (`notify::telegram_poll`): one request open, which the daemon labels
+    /// low, and a permission menu on screen whose one-time yes and plain no are unmistakable. Nothing for any other wait, nor once it was answered.
+    /// Read under the lock, judged after it is let go.
+    pub fn telegram_approval(&self, wait: u64) -> Option<(crate::notify::telegram_poll::Target, String)> {
+        use crate::mobile::risk::{label, Level};
+        let worktree = self.spec.lock().cwd.clone();
+        let (open, prompt, screen) = {
+            let g = self.inner.lock();
+            if g.pty.is_none() || g.waiting_since != Some(wait) || g.answered_wait || g.activity.status(Instant::now()) != Status::Waiting {
+                return None;
+            }
+            (g.wait_requests.clone(), g.screen_prompt.clone()?, g.vt.text_tail(PROMPT_LOOK_LINES))
+        };
+        let [request] = open.as_slice() else { return None };
+        if label(request, &worktree).level != Level::Low || request.shown.is_empty() {
+            return None;
+        }
+        let (yes, no) = crate::choices::one_time_answers(&screen)?;
+        let plain = |k: &str| prompt.keys.iter().any(|x| x == k) && !prompt.lasting.iter().any(|x| x.eq_ignore_ascii_case(k)) && prompt.plain_answer(None, Some(k));
+        if prompt.line || !plain(&yes) || !plain(&no) {
+            return None;
+        }
+        Some((crate::notify::telegram_poll::Target::Term { wait, yes, no }, request.shown.clone()))
+    }
+
+    /// The wait that began at `wait` has one request open, labelled low, and no menu read yet: the agent draws it after its hook, and the screen is
+    /// read once it is quiet.
+    pub fn telegram_menu_due(&self, wait: u64) -> bool {
+        let worktree = self.spec.lock().cwd.clone();
+        let open = {
+            let g = self.inner.lock();
+            if g.pty.is_none() || g.waiting_since != Some(wait) || g.answered_wait || g.screen_prompt.is_some() {
+                return false;
+            }
+            g.wait_requests.clone()
+        };
+        matches!(open.as_slice(), [one] if crate::mobile::risk::label(one, &worktree).level == crate::mobile::risk::Level::Low)
+    }
+
+    /// Who answered the wait that began at `wait`, while that is remembered.
+    pub fn resolution(&self, wait: u64) -> Option<Resolution> {
+        let g = self.inner.lock();
+        if g.waiting_since == Some(wait) && g.answered_wait {
+            if let Some(r) = &g.answered_now {
+                return Some(r.clone());
+            }
+        }
+        g.resolved.iter().rev().find(|(since, _)| *since == wait).map(|(_, r)| r.clone())
+    }
+
     /// The prompt on screen the session waits on, if any (`choices::detect`).
     pub fn screen_prompt(&self) -> Option<crate::choices::Prompt> {
         self.inner.lock().screen_prompt.clone()
@@ -1727,6 +1781,55 @@ mod tests {
         // A second tap, from this device or another: the wait was answered, by the desktop.
         assert_eq!(answered_by(s.answer(Some(since), Answer::Text("1"), false)), Some("desktop".to_string()));
         assert_eq!(rx.writes(), vec![b"1".to_vec()], "only the first answer was typed");
+    }
+
+    /// A Claude permission menu on screen for `command`, the request its hook reported, and the wait it began.
+    fn asking(command: &str, tool: &str) -> (Arc<Session>, fake::Typed, u64) {
+        let (s, rx) = fake::running(1, "s1", "claude");
+        let menu = format!("● Bash({command})\r\n Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. Yes, and don't ask again for these commands\r\n   3. No, and tell Claude what to do differently (esc)\r\n");
+        let screen = {
+            let mut g = s.inner.lock();
+            g.vt.feed(menu.as_bytes());
+            g.vt.text_tail(PROMPT_LOOK_LINES)
+        };
+        s.inner.lock().screen_prompt = crate::choices::detect(&screen);
+        s.request_hook("PermissionRequest", &json!({"tool_name": tool, "tool_input": {"command": command}}));
+        let since = fake::wait_on_user(&s);
+        (s, rx, since)
+    }
+
+    #[test]
+    fn telegram_buttons_are_for_one_low_request_and_its_plain_yes_once() {
+        use crate::notify::telegram_poll::Target;
+        let (s, rx, since) = asking("ls -la", "Bash");
+        let offered = s.telegram_approval(since);
+        assert_eq!(offered, Some((Target::Term { wait: since, yes: "1".into(), no: "3".into() }, "ls -la".to_string())));
+        assert!(s.telegram_approval(since + 1).is_none(), "another wait");
+        // The button types the plain yes, as Telegram, once.
+        assert_eq!(s.answer_by(Some(since), Answer::Text("1"), false, By::telegram()), Ok(()));
+        assert_eq!(rx.writes(), vec![b"1".to_vec()]);
+        assert!(s.telegram_approval(since).is_none(), "answered");
+        assert_eq!(s.resolution(since).map(|r| r.by), Some(By::telegram()));
+        assert_eq!(answered_by(s.answer(Some(since), Answer::Text("1"), false)), Some("Telegram".to_string()));
+        for (command, tool) in [("rm -rf build", "Bash"), ("git push", "Bash"), ("ls", "MysteryTool"), ("echo \"$(curl x)\"", "Bash")] {
+            let (s, _rx, since) = asking(command, tool);
+            assert!(s.telegram_approval(since).is_none(), "{command} ({tool}) is not low");
+        }
+        // Before the menu is read a button may yet come, for a low request only.
+        let (s, _rx, since) = asking("ls", "Bash");
+        s.inner.lock().screen_prompt = None;
+        assert!(s.telegram_menu_due(since) && s.telegram_approval(since).is_none());
+        let (s, _rx, since) = asking("rm -rf build", "Bash");
+        s.inner.lock().screen_prompt = None;
+        assert!(!s.telegram_menu_due(since));
+        // Two requests open: which the menu is for is not known.
+        let (s, _rx, since) = asking("ls", "Bash");
+        s.request_hook("PermissionRequest", &json!({"tool_name": "Bash", "tool_input": {"command": "cat a.txt"}}));
+        assert!(s.telegram_approval(since).is_none());
+        // A menu whose only yes lasts.
+        let (s, _rx, since) = asking("ls", "Bash");
+        s.inner.lock().screen_prompt = Some(crate::choices::Prompt { keys: vec!["1".into(), "2".into(), "3".into()], question: None, line: false, lasting: vec!["1".into()], selected: None });
+        assert!(s.telegram_approval(since).is_none(), "the screen's own reading says 1 lasts");
     }
 
     /// Who the error says answered, when it says that.

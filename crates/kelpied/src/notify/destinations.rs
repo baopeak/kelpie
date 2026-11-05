@@ -14,8 +14,9 @@ use std::time::Duration;
 use parking_lot::Mutex;
 
 use super::outbox::{Attempt, Entry, Outbox, Pick};
+use super::telegram_poll::{Answered, Approval, Approvals};
 use super::web_push::{self, Vapid, Wording};
-use super::{channel_on, deep_link, deliver, push_test_base, record, telegram_base, Channel, ChannelStatus, Config, Failure, Kind, Payload, SecretStore, QUEUE};
+use super::{channel_on, deep_link, deliver, push_test_base, record, Channel, ChannelStatus, Config, Failure, Kind, Payload, SecretStore, QUEUE};
 use crate::load::Level;
 use crate::session::now_millis;
 
@@ -65,6 +66,22 @@ pub trait Host: Send + Sync {
     }
     /// The push service says this phone's subscription at this address is over.
     fn subscription_gone(&self, _device: &str, _endpoint: Option<&str>) {}
+    /// What a Telegram button could answer for this wait (`telegram_poll`): a request the daemon labels low, with a one-time choice. None for all else.
+    fn telegram_approval(&self, _session: &str, _wait: Option<u64>) -> Option<Approval> {
+        None
+    }
+    /// The request a button is for still waits, as it was.
+    fn telegram_still(&self, approval: &Approval) -> bool {
+        self.telegram_approval(&approval.session, approval.wait()).as_ref() == Some(approval)
+    }
+    /// Answers it through the session's own answer path, for `telegram`: the first answer wins.
+    fn telegram_answer(&self, _approval: &Approval, _allow: bool) -> Answered {
+        Answered::Gone
+    }
+    /// A line in the phones' audit log, as the device `telegram`.
+    fn telegram_audit(&self, _action: &str, _summary: &str) {}
+    /// Approvals from Telegram changed on their own (bound, ran out, stopped): the app reads them again.
+    fn telegram_changed(&self, _what: &str) {}
 }
 
 #[cfg(test)]
@@ -85,6 +102,8 @@ struct Shared {
     devices_known: AtomicBool,
     devices: Mutex<HashMap<String, Target>>,
     vapid: Mutex<Option<Arc<Vapid>>>,
+    /// Telegram's buttons, and the polling that hears them.
+    approvals: Arc<Approvals>,
     /// A unit test's stand-in for a push service (the environment is one per process, and tests run side by side).
     #[cfg(test)]
     test_base: Mutex<Option<String>>,
@@ -117,12 +136,15 @@ fn path_of(dir: &Path, dest: &Dest) -> PathBuf {
 
 impl Destinations {
     pub fn new(data_dir: &Path, secrets: Arc<dyn SecretStore>, host: Arc<dyn Host>) -> Arc<Destinations> {
+        let config = Arc::new(Mutex::new(Config::default()));
+        let approvals = Approvals::new(data_dir, secrets.clone(), config.clone(), host.clone());
         Arc::new(Destinations {
             shared: Arc::new(Shared {
                 dir: data_dir.join("notify-outbox"),
                 secrets,
                 host,
-                config: Arc::new(Mutex::new(Config::default())),
+                config,
+                approvals,
                 status: Arc::new(Mutex::new(HashMap::new())),
                 dropped: Arc::new(AtomicU64::new(0)),
                 config_known: AtomicBool::new(true),
@@ -139,6 +161,10 @@ impl Destinations {
 
     pub(super) fn config(&self) -> Arc<Mutex<Config>> {
         self.shared.config.clone()
+    }
+
+    pub fn telegram(&self) -> &Arc<Approvals> {
+        &self.shared.approvals
     }
 
     pub(super) fn status(&self) -> Arc<Mutex<HashMap<&'static str, ChannelStatus>>> {
@@ -420,7 +446,13 @@ impl Shared {
                     Attempt::One(e) => Payload { id: Some(e.id.clone()), ..e.payload.clone().ok_or("nothing to say")? },
                     Attempt::Together { ids, need_you, updates, urgent, latest } => together_payload(ids, *need_you, *updates, *urgent, *latest),
                 };
-                deliver(self.secrets.as_ref(), &c, *ch, &payload, &telegram_base())
+                // With buttons, when approvals are on and this wait can have them.
+                if let (Channel::Telegram, Attempt::One(e)) = (ch, attempt) {
+                    if let Some(out) = self.approvals.send(&c, e, &payload) {
+                        return out;
+                    }
+                }
+                deliver(self.secrets.as_ref(), &c, *ch, &payload, &self.approvals.base())
             }
             Dest::Device(id) => self.push_to(id, &Alert::of(attempt)),
         }
