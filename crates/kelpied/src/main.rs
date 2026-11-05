@@ -26,6 +26,7 @@ mod cli;
 mod client;
 mod daemon;
 mod echo_bench;
+mod files;
 mod load;
 mod meta;
 mod mobile;
