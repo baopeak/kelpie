@@ -160,6 +160,8 @@
   "Turn on approvals from Telegram? Kelpie asks you to verify first, then shows a code to send to your bot.": "Bật duyệt yêu cầu từ Telegram? Kelpie sẽ yêu cầu bạn xác minh trước, rồi hiện một mã để bạn gửi cho bot.",
   "Telegram account bound: it can approve low-risk requests from its chat.": "Đã liên kết tài khoản Telegram: tài khoản này có thể duyệt các yêu cầu rủi ro thấp từ cuộc trò chuyện của nó.",
   "The Telegram code was not used in time, so nothing was bound. Choose approvals again for a new code.": "Mã Telegram không được dùng kịp thời nên chưa liên kết được gì. Hãy chọn lại duyệt yêu cầu để lấy mã mới.",
+  "Nothing was bound with the Telegram code: too many wrong codes, or the settings changed meanwhile. Choose approvals again for a new code.": "Mã Telegram chưa liên kết được gì: có quá nhiều mã sai, hoặc cài đặt đã thay đổi trong lúc đó. Hãy chọn lại duyệt yêu cầu để lấy mã mới.",
+  "The Telegram code was cancelled because Telegram's settings changed, so nothing was bound. Choose approvals again for a new code.": "Mã Telegram đã bị hủy vì cài đặt Telegram đã thay đổi, nên chưa liên kết được gì. Hãy chọn lại duyệt yêu cầu để lấy mã mới.",
   "Telegram gets": "Telegram nhận",
   "Alerts only": "Chỉ cảnh báo",
   "Alerts with a link": "Cảnh báo kèm đường liên kết",

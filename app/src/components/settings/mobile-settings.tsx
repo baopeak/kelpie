@@ -176,12 +176,22 @@ export function MobileSettings() {
       // Approvals from Telegram changed on their own: an account was bound, the code ran out, or they stopped.
       if (m.event === "notify.telegram") {
         const change = m.params?.change;
-        // An error alone (another poller, say) leaves a code that waits as it is.
-        if (change !== "error") setBinding(null);
+        const shown = bindingOpen();
+        // An error (another poller, say) leaves a code be only while the daemon still has it waiting.
+        if (change === "error") void daemon<PushState>("notify.get").then(
+            (p) => {
+              if (!p.telegram?.binding_expires_in) setBinding(null);
+            },
+            () => {},
+          );
+        else setBinding(null);
         // Every page that shows these settings reads them again: one sending what it read before would undo the change.
         pushChanged();
         if (change === "bound") store.notify(t("Telegram account bound: it can approve low-risk requests from its chat."), undefined, 8000);
-        else if (change === "bind_expired" || change === "bind_failed") store.notify(t("The Telegram code was not used in time, so nothing was bound. Choose approvals again for a new code."), undefined, 8000);
+        else if (change === "bind_expired") store.notify(t("The Telegram code was not used in time, so nothing was bound. Choose approvals again for a new code."), undefined, 8000);
+        else if (change === "bind_failed") store.notify(t("Nothing was bound with the Telegram code: too many wrong codes, or the settings changed meanwhile. Choose approvals again for a new code."), undefined, 8000);
+        // This page dropped its own code when the person chose otherwise here: only a code still shown is news.
+        else if (change === "bind_cancelled" && shown) store.notify(t("The Telegram code was cancelled because Telegram's settings changed, so nothing was bound. Choose approvals again for a new code."), undefined, 8000);
       }
       if (m.event === "mobile.device_changed") {
         setQr(null);
@@ -283,7 +293,8 @@ export function MobileSettings() {
       run(async () => {
         const now = await daemon<PushState>("notify.get");
         now.config.telegram.mode = mode;
-        await daemon("notify.set", { config: now.config });
+        // The person chose otherwise: a code shown for approvals binds nothing now. Any other save leaves it be.
+        await daemon("notify.set", { config: now.config, end_binding: true });
         pushChanged();
       }),
     );
