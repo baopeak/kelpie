@@ -75,7 +75,7 @@ def forget_secrets(endpoint):
     if not endpoint or endpoint.startswith("kelpie-" + os.environ.get("USERNAME", os.environ.get("USER", "")) + "-v"):
         raise ValueError(f"not a test endpoint: {endpoint!r}")
     service = f"Kelpie ({endpoint})"
-    for key in ("mobile-link-key", "mobile-device-key", "mobile-push-vapid", "notify-ntfy-topic"):
+    for key in ("mobile-link-key", "mobile-device-key", "mobile-push-vapid", "notify-ntfy-topic", "mobile-relay-room-key", "mobile-relay-operator-key"):
         if os.name == "nt":
             ctypes.windll.advapi32.CredDeleteW(f"{key}.{service}", 1, 0)  # CRED_TYPE_GENERIC
         else:
