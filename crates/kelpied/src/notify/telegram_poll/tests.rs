@@ -28,6 +28,8 @@ struct Api {
     dropped: usize,
     /// `answerCallbackQuery` takes this long.
     slow_answers: Option<Duration>,
+    /// A message to any chat but the one set for Telegram takes this long.
+    slow_strangers: Option<Duration>,
 }
 
 struct Fake {
@@ -162,6 +164,10 @@ fn serve(mut stream: std::net::TcpStream, api: &Mutex<Api>) {
     } else if method == "sendMessage" && body.get("reply_markup").is_some() && api.lock().refuse_buttons {
         (400, json!({"ok": false, "error_code": 400}))
     } else if method == "sendMessage" {
+        let slow = api.lock().slow_strangers.filter(|_| body["chat_id"] != CHAT);
+        if let Some(d) = slow {
+            std::thread::sleep(d);
+        }
         let mut a = api.lock();
         a.next_message += 1;
         body["_message_id"] = json!(a.next_message);
@@ -463,6 +469,70 @@ fn a_code_read_while_the_person_chose_otherwise_saves_nothing() {
         assert!(r.sessions.changed.lock().contains(&"bind_failed".to_string()), "{change}: the page drops the code");
         assert!(r.sessions.noted("telegram_bind_failed").iter().any(|s| s.contains("settings changed")), "{change}");
     }
+}
+
+#[test]
+fn a_code_read_right_after_the_kill_switch_binds_nothing() {
+    let r = rig(TelegramMode::AlertLink);
+    let code = r.code();
+    // The code arrives the moment the kill switch has saved the settings and let them go, before it is done.
+    let approvals = Arc::downgrade(r.approvals());
+    *r.approvals().after_off_saved.lock() = Some(Box::new(move || {
+        if let Some(a) = approvals.upgrade() {
+            a.handle(&json!({"update_id": 1, "message": {"message_id": 1, "from": {"id": ME}, "chat": {"id": CHAT}, "text": format!("/bind {code}")}}));
+        }
+    }));
+    r.n.telegram_off("every phone was revoked");
+    let t = r.n.config().telegram;
+    assert!(!t.approving() && t.user_id.is_empty() && t.mode == TelegramMode::AlertLink, "{t:?}");
+    let saved: Config = serde_json::from_slice(&std::fs::read(r.dir.join("notify.json")).unwrap()).unwrap();
+    assert!(saved.telegram.user_id.is_empty() && saved.telegram.mode != TelegramMode::ApproveLow, "{:?}", saved.telegram);
+    assert!(r.approvals().describe()["binding_expires_in"].is_null());
+    until(|| r.fake.said_to(CHAT).iter().any(|t| t.contains("No code is waiting")), "the chat is told");
+}
+
+#[test]
+fn a_reply_left_out_does_not_mute_its_chat_and_strangers_cannot_crowd_out_the_chat_set() {
+    let r = rig(TelegramMode::AlertLink);
+    r.code();
+    until(|| r.approvals().polls() > 0, "polling");
+    // Telegram is slow to take what is said to other chats, and more of them send `/bind` than replies may be under way at once.
+    r.fake.api.lock().slow_strangers = Some(Duration::from_secs(2));
+    let strangers: Vec<i64> = (1..=ASIDE_MAX as i64 + 2).map(|i| 500 + i).collect();
+    for (i, &chat) in strangers.iter().enumerate() {
+        r.fake.push("message", json!({"message_id": i, "from": {"id": chat}, "chat": {"id": chat}, "text": "/bind WRONGCODE"}));
+    }
+    r.fake.push("message", json!({"message_id": 99, "from": {"id": ME}, "chat": {"id": CHAT}, "text": "/bind WRONGCODE"}));
+    // The chat set is answered at once, while the strangers' replies are still under way.
+    until(|| r.fake.said_to(CHAT).len() == 1, "the chat set is answered");
+    assert!(r.fake.said_to(CHAT)[0].contains("not the code Kelpie shows"), "{:?}", r.fake.said_to(CHAT));
+    assert!(strangers.iter().all(|&c| r.fake.said_to(c).is_empty()), "ahead of the strangers");
+    until(|| r.approvals().aside_calls.load(Ordering::SeqCst) == 0, "the replies under way are done");
+    let answered = strangers.iter().filter(|&&c| !r.fake.said_to(c).is_empty()).count();
+    assert_eq!(answered, ASIDE_MAX - 1, "the strangers leave a reply free for the chat set");
+    // A chat whose reply was left out is not muted for it: its next `/bind` is answered, and a chat answered already is not, within the minute.
+    for (i, &chat) in strangers.iter().enumerate() {
+        r.fake.push("message", json!({"message_id": 100 + i, "from": {"id": chat}, "chat": {"id": chat}, "text": "/bind WRONGCODE"}));
+    }
+    until(|| strangers.iter().all(|&c| r.fake.said_to(c).len() == 1), "each stranger answered once");
+    until(|| r.approvals().aside_calls.load(Ordering::SeqCst) == 0, "done");
+    assert!(strangers.iter().all(|&c| r.fake.said_to(c).len() == 1));
+}
+
+#[test]
+fn a_bot_name_counts_only_for_the_token_it_was_learnt_with() {
+    let r = rig(TelegramMode::AlertLink);
+    r.code();
+    until(|| r.approvals().state.lock().bot.is_some(), "the name learnt");
+    assert!(r.approvals().is_bind("/bind@Kelpie_Bot") && !r.approvals().is_bind("/bind@other_bot"));
+    // Another bot: Telegram does not answer for it here, so its name is not known, and the old one's is no longer this bot's.
+    r.n.update(None, &json!({"telegram_token": "999:OTHERbot"})).unwrap();
+    assert!(!r.approvals().is_bind("/bind@kelpie_bot") && r.approvals().is_bind("/bind"));
+    // Nor when the old token's name is kept after the change, as a lookup on its way meanwhile would.
+    r.approvals().state.lock().bot = Some((token_key(TOKEN), "kelpie_bot".into()));
+    assert!(!r.approvals().is_bind("/bind@kelpie_bot"));
+    r.approvals().state.lock().bot = Some((token_key("999:OTHERbot"), "other_bot".into()));
+    assert!(r.approvals().is_bind("/bind@other_bot"), "the name learnt for this token");
 }
 
 #[test]

@@ -49,9 +49,9 @@ const MIN_POLL: Duration = Duration::from_secs(1);
 const ANONYMOUS_ADMIN: i64 = 1_087_968_824;
 /// How much of the binder's name is kept.
 const NAME_MAX: usize = 64;
-/// Chats told within the last minute that their `/bind` bound nothing, at most: past that, refusals go unanswered.
+/// Chats told within the last minute that their `/bind` bound nothing, at most: past that, refusals go unanswered, except in the chat set.
 const REPLIED_MAX: usize = 64;
-/// Calls made off the polling thread that may be under way at once (`aside`). Past that, they are left out.
+/// Calls made off the polling thread that may be under way at once (`aside`), one of them kept for the chat set. Past that, they are left out.
 const ASIDE_MAX: usize = 4;
 /// How long a call made aside may take.
 const ASIDE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -155,6 +155,9 @@ pub struct Approvals {
     aside_calls: AtomicUsize,
     #[cfg(test)]
     test_base: Mutex<Option<String>>,
+    /// What a test runs once the kill switch has saved the settings and let them go.
+    #[cfg(test)]
+    after_off_saved: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl State {
@@ -188,6 +191,8 @@ impl Approvals {
             aside_calls: AtomicUsize::new(0),
             #[cfg(test)]
             test_base: Mutex::new(None),
+            #[cfg(test)]
+            after_off_saved: Mutex::new(None),
         })
     }
 
@@ -322,10 +327,14 @@ impl Approvals {
 
     /// The kill switch, and a token Telegram rejected: approvals off and saved so, the binding forgotten, every button dead.
     pub fn turn_off(self: &Arc<Self>, why: &str) {
-        let was_on = {
+        let (was_on, binding) = {
             let _saving = self.saving.lock();
-            // A code read already saves nothing after this.
-            self.state.lock().binding_epoch += 1;
+            // A code read already saves nothing after this, and one read from now on finds no binding: both before `saving` is let go.
+            let binding = {
+                let mut s = self.state.lock();
+                s.binding_epoch += 1;
+                s.end_binding()
+            };
             let mut c = self.config.lock().clone();
             let was_on = c.telegram.mode == TelegramMode::ApproveLow || !c.telegram.user_id.is_empty();
             if was_on {
@@ -338,9 +347,12 @@ impl Approvals {
                 }
                 *self.config.lock() = c;
             }
-            was_on
+            (was_on, binding)
         };
-        let binding = self.state.lock().end_binding();
+        #[cfg(test)]
+        if let Some(hook) = self.after_off_saved.lock().take() {
+            hook();
+        }
         self.ended(why, was_on || binding);
         if was_on || binding {
             self.host.telegram_changed("off");
@@ -435,10 +447,7 @@ impl Approvals {
 
     /// Asks Telegram this bot's `@username` once for each token. Until it is known, `/bind@<anything>` is taken for another bot's.
     fn learn_bot_name(&self, token: &str) {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        token.hash(&mut h);
-        let key = h.finish();
+        let key = token_key(token);
         if self.state.lock().bot.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
@@ -448,11 +457,24 @@ impl Approvals {
         }
     }
 
-    /// Whether `command` is `/bind`, or `/bind@<this bot>`: a command addressed to another bot is that bot's.
+    /// The bot token changed: the name learnt for the old one is another bot's.
+    pub fn forget_bot_name(&self) {
+        self.state.lock().bot = None;
+    }
+
+    /// Whether `command` is `/bind`, or `/bind@<this bot>`: a command addressed to another bot is that bot's. The name counts only for the
+    /// token it was learnt with, the one held now.
     fn is_bind(&self, command: &str) -> bool {
         match command.split_once('@') {
             None => command == "/bind",
-            Some((c, to)) => c == "/bind" && self.state.lock().bot.as_ref().is_some_and(|(_, name)| !name.is_empty() && name.eq_ignore_ascii_case(to)),
+            Some((c, to)) => {
+                if c != "/bind" {
+                    return false;
+                }
+                let Ok(Some(token)) = self.secrets.read(K_TELEGRAM_TOKEN) else { return false };
+                let key = token_key(&token);
+                self.state.lock().bot.as_ref().is_some_and(|(k, name)| *k == key && !name.is_empty() && name.eq_ignore_ascii_case(to))
+            }
         }
     }
 
@@ -480,18 +502,20 @@ impl Approvals {
         };
         let named = m.pointer("/chat/username").and_then(Value::as_str).is_some_and(|u| set.strip_prefix('@').is_some_and(|s| s.eq_ignore_ascii_case(u)));
         if !set.is_empty() && set != chat.to_string() && !named {
-            return self.refuse(chat, "Kelpie takes the code only in the chat set in Kelpie → Settings → Notifications: send it there.");
+            return self.refuse(chat, "Kelpie takes the code only in the chat set in Kelpie → Settings → Notifications: send it there.", false);
         }
+        // From here on, the chat set (while one is): its replies go ahead of any other chat's.
+        let ours = !set.is_empty();
         // An anonymous admin is the group speaking: any of its admins, so nobody who could be the one account that approves.
         if m.get("sender_chat").is_some_and(|c| !c.is_null()) || from == ANONYMOUS_ADMIN {
-            return self.refuse(chat, "Send the code as yourself, not anonymously for the group: the account that sends it is the one that approves.");
+            return self.refuse(chat, "Send the code as yourself, not anonymously for the group: the account that sends it is the one that approves.", ours);
         }
         let now = Instant::now();
         let epoch = {
             let mut s = self.state.lock();
             let Some(b) = s.binding.as_mut().filter(|b| now < b.until) else {
                 drop(s);
-                return self.refuse(chat, "No code is waiting: it was used already, or it ran out. Check Kelpie → Settings → Mobile, and choose approvals again for a new code.");
+                return self.refuse(chat, "No code is waiting: it was used already, or it ran out. Check Kelpie → Settings → Mobile, and choose approvals again for a new code.", ours);
             };
             if !same(&b.code, &given) {
                 b.wrong += 1;
@@ -506,7 +530,7 @@ impl Approvals {
                     self.reply(chat, "Too many wrong codes, so nothing was bound. Choose approvals again in Kelpie → Settings → Mobile for a new code.");
                     self.refresh();
                 } else {
-                    self.refuse(chat, "That is not the code Kelpie shows now, or it was used already: check Kelpie → Settings → Mobile.");
+                    self.refuse(chat, "That is not the code Kelpie shows now, or it was used already: check Kelpie → Settings → Mobile.", ours);
                 }
                 return;
             }
@@ -591,7 +615,7 @@ impl Approvals {
             self.state.lock().stale += 1;
             // Off the polling thread: many old buttons pressed at once do not hold up the next poll.
             if !id.is_empty() {
-                self.aside("answerCallbackQuery", json!({"callback_query_id": id, "text": "This button is no longer valid: answer on the computer or the phone."}));
+                self.aside("answerCallbackQuery", json!({"callback_query_id": id, "text": "This button is no longer valid: answer on the computer or the phone."}), false);
             }
             return;
         };
@@ -697,11 +721,13 @@ impl Approvals {
     }
 
     /// A call whose answer nothing waits for, on a thread of its own: a slow Telegram does not hold up the polling. At most `ASIDE_MAX`
-    /// at once; past that, it is left out, which is only a note not shown.
-    fn aside(self: &Arc<Self>, method: &'static str, body: Value) {
-        if self.aside_calls.fetch_add(1, Ordering::SeqCst) >= ASIDE_MAX {
+    /// at once, the last of them kept for a reply to the chat set for Telegram (`ours`), so other chats cannot crowd it out. Past that, it
+    /// is left out, which is only a note not shown. Whether it started.
+    fn aside(self: &Arc<Self>, method: &'static str, body: Value, ours: bool) -> bool {
+        let most = if ours { ASIDE_MAX } else { ASIDE_MAX - 1 };
+        if self.aside_calls.fetch_add(1, Ordering::SeqCst) >= most {
             self.aside_calls.fetch_sub(1, Ordering::SeqCst);
-            return;
+            return false;
         }
         let me = self.clone();
         let spawned = std::thread::Builder::new().name("kelpie-telegram-reply".into()).spawn(move || {
@@ -711,20 +737,25 @@ impl Approvals {
         if spawned.is_err() {
             self.aside_calls.fetch_sub(1, Ordering::SeqCst);
         }
+        spawned.is_ok()
     }
 
     /// Tells a chat its `/bind` bound nothing, at most once a minute: a busy chat, or one that sends codes over and over, gets one answer.
-    fn refuse(self: &Arc<Self>, chat: i64, text: &str) {
+    /// A reply left out does not count, so that chat is answered next time. The chat set for Telegram (`ours`) is answered whatever
+    /// other chats sent meanwhile.
+    fn refuse(self: &Arc<Self>, chat: i64, text: &str, ours: bool) {
         let now = Instant::now();
         {
             let mut s = self.state.lock();
             s.replied.retain(|_, at| now.duration_since(*at) < MINUTE);
-            if s.replied.contains_key(&chat) || s.replied.len() >= REPLIED_MAX {
+            if s.replied.contains_key(&chat) || (!ours && s.replied.len() >= REPLIED_MAX) {
                 return;
             }
-            s.replied.insert(chat, now);
         }
-        self.aside("sendMessage", json!({"chat_id": chat, "text": text}));
+        // Only the polling thread refuses, so nothing else answers this chat between the look above and this.
+        if self.aside("sendMessage", json!({"chat_id": chat, "text": text}), ours) {
+            self.state.lock().replied.insert(chat, now);
+        }
     }
 
     /// The message without its buttons, saying what became of them.
@@ -857,6 +888,14 @@ fn binder_name(m: &Value) -> String {
         (_, Some(first)) => first.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '@' | '＠' | '﹫')).chars().take(NAME_MAX).collect::<String>().trim_end().to_string(),
         _ => String::new(),
     }
+}
+
+/// Which token a bot name was learnt with, without keeping the token.
+fn token_key(token: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut h);
+    h.finish()
 }
 
 fn same(a: &str, b: &str) -> bool {

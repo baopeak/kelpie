@@ -1074,6 +1074,9 @@ impl Notifier {
         if ends_binding || token_changed || config.as_ref().is_some_and(|c| !c.telegram.enabled || c.telegram.chat_id != before.telegram.chat_id) {
             approvals.cancel_binding();
         }
+        if token_changed {
+            approvals.forget_bot_name();
+        }
         // A new bot token is a new bot: an account bound to the old one approves nothing through it.
         let config = config.or_else(|| (token_changed && before.telegram.mode == TelegramMode::ApproveLow).then(|| before.clone()));
         if let Some(mut c) = config {
