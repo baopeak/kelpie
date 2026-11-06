@@ -22,6 +22,7 @@ import { Initiator, MODE_RECONNECT, unb64url, type Endpoint, type Session } from
 import type { Pairing } from "./pairing-store";
 import type { ScreenFrame } from "./screen-sync";
 import type { PaneRow, TkOp } from "./takeover";
+import { MEDIA as SCREEN_MEDIA, type ScOp, type TargetRow } from "./screen";
 
 // ---------- what the daemon sends ----------
 
@@ -148,7 +149,7 @@ export interface ReplyError {
 /** What became of a request: the daemon's reply, or why there was none. */
 export type Outcome =
   /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[] }
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; targets?: TargetRow[] }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -176,6 +177,10 @@ export interface LinkHandlers {
   deviceChanged?(m: { name: string; change: string; permission: string | null }): void;
   /** A takeover's frame, heartbeat or end (`tk_frame`, `tk_fhb`, `tk_end`). */
   takeover?(m: { type: string; tk?: string; seq?: number; data?: string; meta?: unknown; reason?: string; paused?: boolean }): void;
+  /** The computer's screen: its state, stats, heartbeat or end (`sc_state`, `sc_stats`, `sc_fhb`, `sc_end`). */
+  screen?(m: { type: string; sc?: string; [k: string]: unknown }): void;
+  /** A binary media message of the screen (video, a crisp tile, the cursor). */
+  screenMedia?(bytes: Uint8Array): void;
   /** The computer said, inside the session, that the device was removed: forget the pairing. Nothing else does: a close code
    *  or a refusal before a session is not authenticated, and would let anyone on the path destroy the pairing. */
   unpaired(): void;
@@ -240,7 +245,10 @@ export function linkCodec(p: Pairing): Codec {
         return [];
       }
       const whole = session.open(bytes);
-      return whole ? [JSON.parse(dec.decode(whole))] : [];
+      if (!whole) return [];
+      // A screen's media is binary and starts with a byte no JSON message does (crates/kelpie-screen/src/wire.rs).
+      if (whole[0] === SCREEN_MEDIA) return [{ type: "sc_media", bytes: whole }];
+      return [JSON.parse(dec.decode(whole))];
     },
     send(msg) {
       if (!session) throw new Error("not connected");
@@ -699,6 +707,44 @@ export class Link {
     this.post({ type: "tk_ack", tk, seq });
   }
 
+  // The computer's screen (screen.ts). Input, acknowledgements and keyframe requests need no reply.
+
+  screens() {
+    return this.request({ type: "screens" }, { write: false });
+  }
+
+  scStart(target: string) {
+    return this.request({ type: "sc_start", target }, { write: false });
+  }
+
+  scStop(sc: string) {
+    return this.request({ type: "sc_stop", sc }, { write: false });
+  }
+
+  scRebind(sc: string) {
+    return this.request({ type: "sc_rebind", sc }, { write: false });
+  }
+
+  scText(sc: string, text: string, st: number) {
+    return this.request({ type: "sc_text", sc, text, st }, { write: false });
+  }
+
+  scInput(sc: string, ops: ScOp[], st: number) {
+    this.post({ type: "sc_input", sc, ops, st });
+  }
+
+  scAck(sc: string, seq: number) {
+    this.post({ type: "sc_ack", sc, seq });
+  }
+
+  scKey(sc: string) {
+    this.post({ type: "sc_key", sc });
+  }
+
+  scResume(sc: string) {
+    this.post({ type: "sc_resume", sc });
+  }
+
   /** The computer's clock as this phone reads it: this phone's, less the smallest difference seen lately. */
   serverNow(): number {
     return this.lag.serverNow(this.env.now());
@@ -1135,6 +1181,17 @@ export class Link {
         // A frame changes nothing else the views show.
         if (m.type !== "tk_end") return;
         break;
+      // The screen: media many times a second, which changes nothing else the views show.
+      case "sc_media":
+        this.h.screenMedia?.(m.bytes as Uint8Array);
+        return;
+      case "sc_state":
+      case "sc_stats":
+      case "sc_fhb":
+      case "sc_end":
+        this.h.screen?.(m);
+        if (m.type !== "sc_end") return;
+        break;
       default:
         break;
     }
@@ -1214,7 +1271,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, targets: m.targets });
     }
     this.h.changed();
     return true;

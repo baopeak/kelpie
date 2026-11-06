@@ -4,8 +4,9 @@ import { createSignal, For, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
 import { Inbox } from "./inbox";
 import { localeSetting, setLocale, t, type LocaleSetting } from "./i18n";
-import { alertsError, alertsState, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, sessions, setPairing, takeover, takeovers, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
+import { alertsError, alertsState, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, remoteScreen, remoteScreens, sessions, setPairing, takeover, takeovers, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
 import { PaneTakeover } from "./pane-takeover";
+import { ScreenView } from "./screen-view";
 import { LockCover, LockScreen, RecheckSheet } from "./lock-screen";
 import { InstallGuide, ScanCode, screenNow } from "./install-guide";
 import { labelOf, needsCount } from "./inbox-order";
@@ -199,16 +200,17 @@ export function App() {
   const open = () => !paired() || lockShown().clear;
   const title = () => {
     if (takeover() && open()) return t("Browser pane");
+    if (remoteScreen() && open()) return t("Computer screen");
     const id = openId();
     const s = id && open() ? sessions().find((x) => x.id === id) : undefined;
     return s ? labelOf(s) : "Kelpie";
   };
   const badge = () => (open() ? needsCount(sessions()) : 0);
-  const back = () => (takeover() ? takeovers.close() : history.state?.s ? history.back() : closeSession());
+  const back = () => (remoteScreen() ? remoteScreens.close() : takeover() ? takeovers.close() : history.state?.s ? history.back() : closeSession());
   return (
     <>
       <header id="top">
-        <Show when={(openId() || takeover()) && open()}>
+        <Show when={(openId() || takeover() || remoteScreen()) && open()}>
           <button class="icon" aria-label={t("Back")} onClick={back}>‹</button>
         </Show>
         <h1>{title()}</h1>
@@ -220,8 +222,10 @@ export function App() {
       <main id="view">
         <Show when={paired()} fallback={<NotPaired />}>
           <Show when={lockShown().clear} fallback={<LockScreen />}>
-            <Show when={!takeover()} fallback={<PaneTakeover />}>
-              <Show when={openId()} keyed fallback={<Inbox />}>{(id) => <SessionView id={id} />}</Show>
+            <Show when={!remoteScreen()} fallback={<ScreenView />}>
+              <Show when={!takeover()} fallback={<PaneTakeover />}>
+                <Show when={openId()} keyed fallback={<Inbox />}>{(id) => <SessionView id={id} />}</Show>
+              </Show>
             </Show>
           </Show>
         </Show>

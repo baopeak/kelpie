@@ -8,7 +8,7 @@ import { Composer } from "./composer";
 import { KeyBar } from "./key-bar";
 import { PromptCard } from "./prompt-card";
 import { TerminalText } from "./terminal-text";
-import { canTakeOver, canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, paintedFrom, screen, sessions, takeovers } from "./phone-state";
+import { canSeeScreen, canTakeOver, canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, paintedFrom, remoteScreens, screen, sessions, takeovers } from "./phone-state";
 import { promptKey } from "./screen-sync";
 import { t } from "./i18n";
 
@@ -21,11 +21,14 @@ function AgeChip() {
   );
 }
 
-/** An agent stuck on a sign-in in a browser pane: the pane can be driven from here (a device given control only). */
+/** An agent stuck on a sign-in in a browser pane, or on a dialog of the computer: the pane, or the computer's screen, can be driven from here (a device given control only). */
 function TakeOverButton(props: { project: string | null }) {
   return (
-    <Show when={canTakeOver()}>
-      <div class="takeover-entry"><button class="btn" data-take-over disabled={!connected()} onClick={() => void takeovers.openPicker(props.project)}>{t("Take over a browser pane")}</button></div>
+    <Show when={canTakeOver() || canSeeScreen()}>
+      <div class="takeover-entry">
+        <Show when={canTakeOver()}><button class="btn" data-take-over disabled={!connected()} onClick={() => void takeovers.openPicker(props.project)}>{t("Take over a browser pane")}</button></Show>
+        <Show when={canSeeScreen()}><button class="btn" data-see-screen disabled={!connected()} onClick={() => void remoteScreens.openPicker()}>{t("See the computer's screen")}</button></Show>
+      </div>
     </Show>
   );
 }

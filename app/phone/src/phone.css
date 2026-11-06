@@ -179,3 +179,9 @@ a.btn { display: inline-block; text-decoration: none; color: inherit; }
 .takeover .keybar .btn { padding: 8px 12px; flex: none; }
 .takeover-text { display: flex; gap: 8px; }
 .takeover-text .field { flex: 1; min-width: 0; }
+/* The computer's screen: a canvas the size of its box (the picture, the crisp tiles and the cursor are drawn into it). */
+.takeover-entry .btn + .btn { margin-left: 8px; }
+.screen-canvas canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+.screen-live.dim .screen-canvas canvas { opacity: .4; }
+.screen-quality { margin: 0; padding: 4px 12px; font-size: 12px; min-height: 16px; }
+.screen-debug { position: absolute; left: 8px; bottom: 8px; margin: 0; padding: 6px 8px; max-width: calc(100% - 16px); border-radius: 6px; background: rgba(0, 0, 0, .7); color: #9fe; font-size: 11px; white-space: pre-wrap; word-break: break-all; pointer-events: none; }

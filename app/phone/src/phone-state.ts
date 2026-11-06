@@ -27,7 +27,8 @@ import { afterFailedPairing, movedTo, platformOf } from "./install-state";
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
-import { TAKEOVER_API } from "../../src/lib/attention";
+import { ScreenSession, type ScreenState } from "./screen";
+import { SCREEN_API, TAKEOVER_API } from "../../src/lib/attention";
 
 // ---------- signals the views read ----------
 
@@ -81,6 +82,15 @@ export const [daemonApi, setDaemonApi] = createSignal(0);
 export const canTakeOver = () => device()?.permission === "control" && daemonApi() >= TAKEOVER_API;
 /** A pane taken over, or being picked (null: none). */
 export const [takeover, setTakeover] = createSignal<TakeoverState | null>(null);
+/** This phone may see the computer's screen (the same rule as a pane's takeover, at a computer that has it). */
+export const canSeeScreen = () => device()?.permission === "control" && daemonApi() >= SCREEN_API;
+/** The computer's screen seen from here, or being picked (null: none). Its media goes to the view directly (`onScreenMedia`), not through a signal. */
+export const [remoteScreen, setRemoteScreen] = createSignal<ScreenState | null>(null);
+let screenMediaSink: ((bytes: Uint8Array) => void) | null = null;
+/** The screen view takes the media messages while it is shown. */
+export function onScreenMedia(sink: ((bytes: Uint8Array) => void) | null) {
+  screenMediaSink = sink;
+}
 export const connected = () => canAct(conn());
 
 // ---------- the link ----------
@@ -211,11 +221,19 @@ const link = new Link(browserEnv(), () => {
     wantFromAlert = false;
     if (wanted) openSession(wanted.id);
     else if (openId() && !h.sessions.some((s) => s.id === openId())) closeSession();
-    // A pane held when the connection dropped: this connection asks for it again.
+    // A pane held when the connection dropped: this connection asks for it again. The screen likewise.
     void takeovers.reconnected();
+    void remoteScreens.reconnected();
   },
   takeover(m) {
     takeovers.onMessage({ ...m, meta: m.meta as FrameMeta | undefined });
+  },
+  screen(m) {
+    remoteScreens.onMessage(m as Parameters<ScreenSession["onMessage"]>[0]);
+  },
+  screenMedia(bytes) {
+    remoteScreens.media();
+    screenMediaSink?.(bytes);
   },
   sessions(m: SessionsMsg) {
     const before = new Map(sessions().map((s) => [s.id, s.status]));
@@ -284,6 +302,7 @@ const link = new Link(browserEnv(), () => {
     forgetHistory();
     forgetSenders();
     takeovers.close();
+    remoteScreens.close();
     batch(() => {
       setPaired(false);
       setNotPairedMessage(t("This device is no longer paired. Pair it again from Kelpie → Settings → Mobile."));
@@ -311,6 +330,23 @@ const takeovers = new TakeoverSession({
   clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
 }, setTakeover, t);
 export { takeovers };
+
+const remoteScreens = new ScreenSession({
+  targets: () => link.screens(),
+  start: (target) => link.scStart(target),
+  stop: (sc) => link.scStop(sc),
+  text: (sc, text, st) => link.scText(sc, text, st),
+  rebind: (sc) => link.scRebind(sc),
+  resume: (sc) => link.scResume(sc),
+  input: (sc, ops, st) => link.scInput(sc, ops, st),
+  ack: (sc, seq) => link.scAck(sc, seq),
+  keyframe: (sc) => link.scKey(sc),
+  serverNow: () => link.serverNow(),
+  now: () => Date.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+}, setRemoteScreen, t);
+export { remoteScreens };
 
 // ---------- alerts ----------
 
