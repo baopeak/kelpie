@@ -335,6 +335,8 @@ fn on_output(app: &AppHandle, h: &Helper, out: Out) {
                 Some("input_refused") => event(app, json!({"sc": sc, "kind": "state", "state": "not_front"})),
                 Some("stats") => event(app, json!({"sc": sc, "kind": "stats", "stats": v})),
                 Some("encoder") => {
+                    // Which encoder, and which of its low-latency settings it refused or did not keep (read back after each is set).
+                    tracing::info!(encoder = %v["name"].as_str().unwrap_or("?"), kind = %v["encoder"].as_str().unwrap_or("?"), refused = %v["refused"], first_output_ms = %v["first_output_ms"], "screen encoder");
                     event(app, json!({"sc": sc, "kind": "encoder", "encoder": v["encoder"], "name": v["name"]}));
                     let _ = app.emit_to("main", "screen-note", json!({"sc": sc, "note": "encoder", "encoder": v["encoder"], "name": v["name"]}));
                 }

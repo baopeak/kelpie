@@ -173,6 +173,9 @@ const END_REASONS: &[&str] = &["hotkey", "closed", "desktop", "encoder_failed", 
 const STATES: &[&str] = &["live", "locked", "secure_desktop", "closed", "minimized", "elevated", "covered", "paused_load", "blocked", "not_front"];
 
 /// A target as the phone is told it: only known fields, short strings.
+/// The stage timings a stats event may carry (`kelpie_screen::control::Stages`).
+const STAGE_FIELDS: &[&str] = &["capture_to_send_ms_p50", "capture_to_send_ms_p95", "convert_ms_p95", "encode_ms_p50", "send_interval_ms_p95", "ack_rtt_ms_p50", "ack_rtt_ms_p95", "top_off", "big_frames", "held", "first_output_ms"];
+
 fn target_row(t: &Value) -> Option<Value> {
     let id = t["id"].as_str().filter(|s| kelpie_screen::targets::TargetId::parse(s).is_some())?;
     let kind = t["kind"].as_str().filter(|k| matches!(*k, "monitor" | "window"))?;
@@ -299,7 +302,9 @@ impl Broker {
                 let n = |k: &str| s[k].as_f64().filter(|v| v.is_finite()).map_or(json!(null), |v| json!((v * 10.0).round() / 10.0));
                 let reason = s["reason"].as_str().filter(|r| matches!(*r, "none" | "cpu" | "bandwidth" | "load" | "encoder")).unwrap_or("none");
                 let encoder = s["encoder"].as_str().filter(|e| matches!(*e, "hw" | "sw")).unwrap_or("hw");
-                self.tell(&hold, json!({"type": "sc_stats", "sc": sc, "fps": n("fps"), "w": n("w"), "h": n("h"), "kbps": n("kbps"), "encode_ms_p95": n("encode_ms_p95"), "dropped": n("dropped"), "reason": reason, "degraded": s["degraded"].as_bool() == Some(true), "level": n("level"), "encoder": encoder, "idr_ratio": n("idr_ratio"), "crisp": s["crisp"].as_bool()}));
+                // The stages' timings for the measurement plan (`kelpie_screen::control::Stages`): known numbers only.
+                let stages: serde_json::Map<String, Value> = STAGE_FIELDS.iter().map(|k| (k.to_string(), s["stages"][*k].as_f64().filter(|v| v.is_finite() && *v >= 0.0).map_or(json!(null), |v| json!((v * 10.0).round() / 10.0)))).collect();
+                self.tell(&hold, json!({"type": "sc_stats", "sc": sc, "fps": n("fps"), "w": n("w"), "h": n("h"), "kbps": n("kbps"), "encode_ms_p95": n("encode_ms_p95"), "dropped": n("dropped"), "reason": reason, "degraded": s["degraded"].as_bool() == Some(true), "level": n("level"), "encoder": encoder, "idr_ratio": n("idr_ratio"), "crisp": s["crisp"].as_bool(), "stages": stages}));
             }
             Some("encoder") => {
                 let encoder = params["encoder"].as_str().filter(|e| matches!(*e, "hw" | "sw")).unwrap_or("hw");

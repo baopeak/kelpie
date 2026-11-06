@@ -4,8 +4,12 @@
 //! Settings, from the H.264 encoder's documentation: output type before input type; CBR with a buffer of about two frames; no B-frames;
 //! a long GOP with a keyframe only when asked (`CODECAPI_AVEncVideoForceKeyFrame`, which certified hardware encoders must support);
 //! `CODECAPI_AVLowLatencyMode` (optional for hardware: it may be ignored, which the spike measures); one reference frame where offered.
-//! The bitrate changes live (`CODECAPI_AVEncCommonMeanBitRate`); a new size makes a new encoder. Every setting that did not take is
-//! recorded in `refused`, and the stream says which encoder it uses and what it refused.
+//! The bitrate changes live (`CODECAPI_AVEncCommonMeanBitRate`); a new size makes a new encoder. Every setting is read back after it is set:
+//! one the encoder refused, or took and did not keep, is recorded in `refused` (with what it reads back), and the stream says which encoder it
+//! uses and what it refused. Low latency, as the research list has it: `AVLowLatencyMode`, CBR, the mean bitrate, a buffer of two frames, a GOP
+//! of an hour (keyframes only when asked), no B-frames, one reference, `QualityVsSpeed` towards speed, `MF_LOW_LATENCY` on the transform; the
+//! hardware encoder is fed only on `METransformNeedInput`. Each output's quantizer (`MFSampleExtension_VideoEncodeQP`, set by the encoder) is
+//! read for the top-off, and the delay to the first output and the frames held inside the encoder are counted for the stats.
 
 use std::mem::ManuallyDrop;
 
@@ -31,6 +35,8 @@ pub struct Encoded {
     pub key: bool,
     /// The input's time, in 100 ns units, as it was given.
     pub time: i64,
+    /// The quantizer the encoder says it used (its default QP field), when it says.
+    pub qp: Option<u32>,
 }
 
 pub struct Encoder {
@@ -53,8 +59,14 @@ pub struct Encoder {
     pub h: u32,
     fps: u32,
     pub sequence_header: Option<Vec<u8>>,
-    /// Settings this encoder would not take.
-    pub refused: Vec<&'static str>,
+    /// Settings this encoder would not take, or took and did not keep (`name (reads N)`).
+    pub refused: Vec<String>,
+    /// Frames given to the encoder and frames it gave back: the difference is what it holds.
+    submitted: u64,
+    delivered: u64,
+    first_in: Option<std::time::Instant>,
+    /// From the first frame given to the first frame back, ms.
+    pub first_output_ms: Option<f64>,
 }
 
 // The MFT is used from the stream's thread only.
@@ -169,18 +181,21 @@ impl Encoder {
             fps,
             sequence_header: None,
             refused: Vec::new(),
+            submitted: 0,
+            delivered: 0,
+            first_in: None,
+            first_output_ms: None,
         };
         // What must be set before the output type.
-        me.set("low latency", &CODECAPI_AVLowLatencyMode, VARIANT::from(true));
+        me.set_flag("low latency", &CODECAPI_AVLowLatencyMode, true);
         me.set("B-frames", &CODECAPI_AVEncMPVDefaultBPictureCount, VARIANT::from(0u32));
         me.set("CBR", &CODECAPI_AVEncCommonRateControlMode, VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32));
         me.set("bitrate", &CODECAPI_AVEncCommonMeanBitRate, VARIANT::from(kbps * 1000));
         me.set("buffer", &CODECAPI_AVEncCommonBufferSize, VARIANT::from(kbps * 1000 / 8 * 2 / fps.max(1)));
         me.set("GOP", &CODECAPI_AVEncMPVGOPSize, VARIANT::from(fps.max(1) * 3600));
         me.set("one reference", &CODECAPI_AVEncVideoMaxNumRefFrame, VARIANT::from(1u32));
-        if !hardware {
-            me.set("speed", &CODECAPI_AVEncCommonQualityVsSpeed, VARIANT::from(20u32));
-        }
+        // Towards speed (0 is the fastest, 100 the best quality): optional for hardware, which may refuse it.
+        me.set("speed", &CODECAPI_AVEncCommonQualityVsSpeed, VARIANT::from(20u32));
         unsafe {
             let out = video_type(&MFVideoFormat_H264, w, h, fps)?;
             out.SetUINT32(&MF_MT_AVG_BITRATE, kbps * 1000)?;
@@ -203,11 +218,36 @@ impl Encoder {
         Ok(me)
     }
 
+    /// Sets a number and reads it back: refused, or not kept, is recorded.
     fn set(&mut self, what: &'static str, key: &GUID, value: VARIANT) {
-        let ok = self.codec.as_ref().is_some_and(|c| unsafe { c.SetValue(key, &value) }.is_ok());
-        if !ok {
-            self.refused.push(what);
+        self.set_checked(what, key, value, false);
+    }
+
+    /// Sets a switch (`VT_BOOL`, which an encoder may read back as 1 or -1) and reads it back.
+    fn set_flag(&mut self, what: &'static str, key: &GUID, on: bool) {
+        self.set_checked(what, key, VARIANT::from(on), true);
+    }
+
+    fn set_checked(&mut self, what: &'static str, key: &GUID, value: VARIANT, flag: bool) {
+        let Some(c) = &self.codec else {
+            self.refused.push(what.to_string());
+            return;
+        };
+        if unsafe { c.SetValue(key, &value) }.is_err() {
+            self.refused.push(what.to_string());
+            return;
         }
+        // An encoder that cannot say what it holds is taken at its word.
+        let (Ok(back), Ok(want)) = (unsafe { c.GetValue(key) }, i64::try_from(&value)) else { return };
+        let Ok(got) = i64::try_from(&back) else { return };
+        if !kept(want, got, flag) {
+            self.refused.push(format!("{what} (reads {got})"));
+        }
+    }
+
+    /// What the encoder holds now: frames given and not yet given back.
+    pub fn held(&self) -> u64 {
+        self.submitted.saturating_sub(self.delivered)
     }
 
     pub fn set_bitrate(&mut self, kbps: u32) {
@@ -253,6 +293,8 @@ impl Encoder {
         if self.hardware {
             self.need_input -= 1;
         }
+        self.submitted += 1;
+        self.first_in.get_or_insert_with(std::time::Instant::now);
         Ok(true)
     }
 
@@ -368,14 +410,29 @@ impl Encoder {
         unsafe {
             let key = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1;
             let time = sample.GetSampleTime().unwrap_or(0);
+            // Bits 0-15 are the default QP (the layout `CODECAPI_AVEncVideoEncodeQP` documents).
+            let qp = sample.GetUINT64(&MFSampleExtension_VideoEncodeQP).ok().map(|v| (v & 0xffff) as u32).filter(|q| *q <= 51);
+            self.delivered += 1;
+            if self.first_output_ms.is_none() {
+                self.first_output_ms = self.first_in.map(|at| at.elapsed().as_secs_f64() * 1000.0);
+            }
             let buffer = sample.ConvertToContiguousBuffer()?;
             let mut p: *mut u8 = std::ptr::null_mut();
             let mut len = 0u32;
             buffer.Lock(&mut p, None, Some(&mut len))?;
             let data = std::slice::from_raw_parts(p, len as usize).to_vec();
             buffer.Unlock()?;
-            Ok(Some(Encoded { data, key, time }))
+            Ok(Some(Encoded { data, key, time, qp }))
         }
+    }
+}
+
+/// Whether a setting read back as `got` is the `want` that was set: for a switch, any non-zero is on.
+fn kept(want: i64, got: i64, flag: bool) -> bool {
+    if flag {
+        (want != 0) == (got != 0)
+    } else {
+        want == got
     }
 }
 

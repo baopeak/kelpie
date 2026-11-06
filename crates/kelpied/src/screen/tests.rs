@@ -167,10 +167,12 @@ async fn targets_come_from_the_app_checked_and_the_stream_goes_on_the_media_lane
     r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "state", "state": "elevated"}));
     assert_eq!(r.next("sc_state").await.unwrap()["state"], "elevated");
     r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "state", "state": "<script>"}));
-    r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "stats", "stats": {"fps": 15, "w": 1280, "h": 720, "reason": "load", "degraded": true, "crisp": false, "secret": "x"}}));
+    r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "stats", "stats": {"fps": 15, "w": 1280, "h": 720, "reason": "load", "degraded": true, "crisp": false, "secret": "x", "stages": {"capture_to_send_ms_p95": 41.26, "top_off": 3, "convert_ms_p95": "a lot", "secret": 7}}}));
     let stats = r.next("sc_stats").await.unwrap();
     assert_eq!((stats["fps"].as_f64(), stats["reason"].as_str(), stats.get("secret")), (Some(15.0), Some("load"), None));
     assert_eq!(stats["crisp"], false, "crisp text off for now: the phone says so");
+    let stages = &stats["stages"];
+    assert_eq!((stages["capture_to_send_ms_p95"].as_f64(), stages["top_off"].as_f64(), &stages["convert_ms_p95"], stages.get("secret")), (Some(41.3), Some(3.0), &json!(null), None), "the stages' timings: known numbers only");
     // Input goes to the app with the computer's clock; stop from the phone tells the app; the audit log has the start, the end, nothing typed.
     r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "click", "x": 10, "y": 20}], "st": now_millis()})).await.unwrap();
     let input = r.told_now("screen.input").await;

@@ -46,6 +46,8 @@ pub struct Grid {
     changed: Vec<u64>,
     painted: Vec<bool>,
     seen: bool,
+    /// The pixels the last update found changed (all of them on the first): the large-frame guard's measure (`pace::BigFrame`).
+    last_area: u64,
 }
 
 impl Grid {
@@ -53,7 +55,7 @@ impl Grid {
         let cols = w.div_ceil(TILE) as usize;
         let rows = h.div_ceil(TILE) as usize;
         let n = cols * rows;
-        Grid { w, h, cols, rows, hash: vec![0; n], changed: vec![now; n], painted: vec![false; n], seen: false }
+        Grid { w, h, cols, rows, hash: vec![0; n], changed: vec![now; n], painted: vec![false; n], seen: false, last_area: 0 }
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -92,6 +94,7 @@ impl Grid {
             _ => (0..self.rows).flat_map(|row| (0..self.cols).map(move |col| (col, row))).collect(),
         };
         let mut unpaint: Vec<Rect> = Vec::new();
+        self.last_area = if first { u64::from(self.w) * u64::from(self.h) } else { 0 };
         for (col, row) in cells {
             let i = row * self.cols + col;
             let r = self.cell_rect(col, row);
@@ -103,6 +106,7 @@ impl Grid {
             if h != self.hash[i] {
                 self.hash[i] = h;
                 self.changed[i] = now;
+                self.last_area += r.w as u64 * r.h as u64;
                 if std::mem::take(&mut self.painted[i]) {
                     match unpaint.last_mut() {
                         Some(last) if last.y == r.y && last.h == r.h && last.right() == r.x => last.w += r.w,
@@ -112,6 +116,11 @@ impl Grid {
             }
         }
         unpaint
+    }
+
+    /// The pixels the last update found changed.
+    pub fn last_changed_area(&self) -> u64 {
+        self.last_area
     }
 
     /// Whether every cell has stood still for `STABLE_MS`.
@@ -210,10 +219,12 @@ mod tests {
         let mut g = Grid::new(200, 130, 0);
         assert_eq!((g.cols, g.rows), (4, 3));
         assert!(g.update(&p.px, p.stride, 0, None).is_empty(), "the first picture is the baseline");
+        assert_eq!(g.last_changed_area(), 200 * 130, "all of it is new");
         p.set(70, 70, 0xff);
         g.update(&p.px, p.stride, 100, None);
         let changed: Vec<usize> = (0..12).filter(|i| g.changed[*i] == 100).collect();
         assert_eq!(changed, [5], "column 1, row 1");
+        assert_eq!(g.last_changed_area(), 64 * 64, "one cell's pixels: what the large-frame guard measures");
         // The padding past each row is not the picture: changing it changes nothing.
         let pad = p.stride - 1;
         p.px[pad] ^= 0xff;

@@ -11,6 +11,8 @@
 //! - `targets`: which windows are offered, and the shortcuts (IDEs, the Kelpie window).
 //! - `states`: secure desktop, locked, elevated, minimized, closed, covered: what the phone is told and what input may do.
 //! - `control`: the quality ladder, the encoder overuse detector, the bandwidth controller, the load caps and the keyframe limit.
+//! - `pace`: when to take a picture (a constant-rate timer, one in flight, a boost after input), the top-off of a still one, the large-frame
+//!   guard and when the encoder hears a new bitrate.
 //! - `tiles`: which 64×64 cells changed, and which still ones get a crisp tile painted over the video.
 //! - `sps`: the SPS rewrite that tells a decoder no frame is reordered, and the codec string.
 //! - `wire`: the helper's stdout frames and the media messages the phone reads.
@@ -22,6 +24,7 @@ pub const BORDER_CLASS: &str = "KelpieScreenBorder";
 pub mod control;
 pub mod geom;
 pub mod input;
+pub mod pace;
 pub mod sps;
 pub mod states;
 pub mod targets;

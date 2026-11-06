@@ -552,6 +552,19 @@ impl Controller {
         1000.0 / f64::from(self.params().fps.max(1))
     }
 
+    /// The interval while input is being answered (`pace::Pacer::boost`): the top rung's, within the load and software caps only. The link is
+    /// still protected by the frames in flight (`MAX_INFLIGHT`) and the encoder by its one frame at a time.
+    pub fn boost_interval_ms(&self) -> f64 {
+        let mut fps = RUNGS[0].fps;
+        if let Some((cap, _)) = load_cap(self.level) {
+            fps = fps.min(cap);
+        }
+        if self.software {
+            fps = fps.min(SOFTWARE_CAP.0);
+        }
+        (1000.0 / f64::from(fps.max(1))).min(self.interval_ms())
+    }
+
     /// A frame was encoded in `encode_ms`.
     pub fn on_encoded(&mut self, encode_ms: f64, now: u64) -> Option<Event> {
         let interval = self.interval_ms();
@@ -597,6 +610,10 @@ impl Controller {
     }
 }
 
+fn round1(v: Option<f64>) -> Option<f64> {
+    v.map(|x| (x * 10.0).round() / 10.0)
+}
+
 /// The `q` quantile of the values, None for none.
 pub fn percentile(values: impl Iterator<Item = f64>, q: f64) -> Option<f64> {
     let mut v: Vec<f64> = values.filter(|x| x.is_finite()).collect();
@@ -622,6 +639,32 @@ pub struct Stats {
     keys: u32,
     delta_bytes: u64,
     deltas: u32,
+    capture_to_send: Vec<f64>,
+    convert: Vec<f64>,
+    send_intervals: Vec<f64>,
+    ack_rtts: Vec<f64>,
+    last_send: Option<u64>,
+    pub top_off: u32,
+    pub big_frames: u32,
+}
+
+/// Where a frame's time went in the helper over the last second (ms), for the measurement plan: from the picture being taken to its message
+/// leaving for the app, the GPU conversion, the encoder alone, and the interval between frames sent; with how many were top-off passes or
+/// had their quality lowered as too large (`pace::BigFrame`), and what the encoder held at the report.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Stages {
+    pub capture_to_send_ms_p50: Option<f64>,
+    pub capture_to_send_ms_p95: Option<f64>,
+    pub convert_ms_p95: Option<f64>,
+    pub encode_ms_p50: Option<f64>,
+    pub send_interval_ms_p95: Option<f64>,
+    /// From the daemon queueing a frame to the phone acknowledging it (its decoder done): the daemon's queue, the wire and the phone.
+    pub ack_rtt_ms_p50: Option<f64>,
+    pub ack_rtt_ms_p95: Option<f64>,
+    pub top_off: u32,
+    pub big_frames: u32,
+    pub held: u64,
+    pub first_output_ms: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -641,6 +684,7 @@ pub struct Report {
     pub idr_ratio: Option<f64>,
     /// Crisp tiles: on, off for now because the link is slow (`false`), or switched off in Settings (`None`).
     pub crisp: Option<bool>,
+    pub stages: Stages,
 }
 
 impl Stats {
@@ -663,8 +707,34 @@ impl Stats {
         }
     }
 
-    /// The second's report, once a second has passed; the counters start again.
+    /// A frame left for the app at `now`: `capture_to_send_ms` after its picture was taken, `convert_ms` of it on the GPU.
+    pub fn timing(&mut self, now: u64, capture_to_send_ms: f64, convert_ms: f64) {
+        if self.capture_to_send.len() < 240 {
+            self.capture_to_send.push(capture_to_send_ms);
+            self.convert.push(convert_ms);
+        }
+        if let Some(last) = self.last_send.replace(now) {
+            if self.send_intervals.len() < 240 {
+                self.send_intervals.push(now.saturating_sub(last) as f64);
+            }
+        }
+    }
+
+    /// The phone acknowledged a frame `rtt_ms` after the daemon queued it.
+    pub fn ack(&mut self, rtt_ms: u32) {
+        if self.ack_rtts.len() < 240 {
+            self.ack_rtts.push(f64::from(rtt_ms));
+        }
+    }
+
+    /// The second's report, once a second has passed; the counters start again (the interval carries on from the last frame).
     pub fn report(&mut self, now: u64, p: &Params, level: u8, software: bool, crisp: Option<bool>) -> Option<Report> {
+        self.report_with(now, p, level, software, crisp, 0, None)
+    }
+
+    /// `report`, with what the encoder holds and its first output's delay.
+    #[allow(clippy::too_many_arguments)]
+    pub fn report_with(&mut self, now: u64, p: &Params, level: u8, software: bool, crisp: Option<bool>, held: u64, first_output_ms: Option<f64>) -> Option<Report> {
         let span = now.saturating_sub(self.since);
         if span < 1000 {
             return None;
@@ -689,8 +759,23 @@ impl Stats {
             encoder: if software { "sw" } else { "hw" },
             idr_ratio,
             crisp,
+            stages: Stages {
+                capture_to_send_ms_p50: round1(percentile(self.capture_to_send.iter().copied(), 0.5)),
+                capture_to_send_ms_p95: round1(percentile(self.capture_to_send.iter().copied(), 0.95)),
+                convert_ms_p95: round1(percentile(self.convert.iter().copied(), 0.95)),
+                encode_ms_p50: round1(percentile(self.encode_ms.iter().copied(), 0.5)),
+                send_interval_ms_p95: round1(percentile(self.send_intervals.iter().copied(), 0.95)),
+                ack_rtt_ms_p50: round1(percentile(self.ack_rtts.iter().copied(), 0.5)),
+                ack_rtt_ms_p95: round1(percentile(self.ack_rtts.iter().copied(), 0.95)),
+                top_off: self.top_off,
+                big_frames: self.big_frames,
+                held,
+                first_output_ms: round1(first_output_ms),
+            },
         };
+        let last_send = self.last_send;
         *self = Stats::new(now);
+        self.last_send = last_send;
         Some(r)
     }
 }
@@ -1074,6 +1159,11 @@ mod tests {
             s.frame(if i == 0 { 60_000 } else { 6_000 }, i == 0, 4.0 + f64::from(i % 5));
         }
         s.dropped_encoder = 2;
+        for i in 0..30u64 {
+            s.timing(i * 33, 40.0 + (i % 10) as f64, 2.0);
+            s.ack(60 + (i % 3) as u32 * 10);
+        }
+        s.top_off = 4;
         let p = Params { fps: 30, w: 1920, h: 1080, kbps: 1500, reason: Reason::None, degraded: false };
         assert!(s.report(999, &p, 0, false, Some(true)).is_none());
         let r = s.report(1000, &p, 1, false, Some(false)).unwrap();
@@ -1082,6 +1172,11 @@ mod tests {
         assert_eq!(r.encode_ms_p95, 8.0);
         assert_eq!(serde_json::to_value(&r).unwrap()["reason"], "none");
         assert_eq!(serde_json::to_value(&r).unwrap()["crisp"], false, "crisp text off for now");
+        let st = &r.stages;
+        assert_eq!((st.capture_to_send_ms_p50, st.capture_to_send_ms_p95, st.convert_ms_p95, st.send_interval_ms_p95), (Some(45.0), Some(49.0), Some(2.0), Some(33.0)));
+        assert_eq!((st.ack_rtt_ms_p50, st.ack_rtt_ms_p95, st.top_off, st.held), (Some(70.0), Some(80.0), 4, 0));
         assert_eq!(s.report(1500, &p, 0, true, None), None, "counters started again");
+        s.timing(2000, 10.0, 1.0);
+        assert_eq!(s.report(2000, &p, 0, false, None).unwrap().stages.send_interval_ms_p95, Some(1043.0), "the interval carries on from the last frame before the report");
     }
 }

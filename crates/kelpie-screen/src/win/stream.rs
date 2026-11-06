@@ -1,16 +1,20 @@
 //! One stream, from `start` to its end, and `Host`, which the stdin commands reach.
 //!
 //! A stream is two threads. The **stream thread** owns the device, the capture, the converter and the encoder: it looks at the machine four
-//! times a second (states, the window's place, the border), takes the newest picture when the phone has room and the rung's interval has
-//! passed (`control`), encodes it, rewrites the SPS (`sps`), sends video, paint-over tiles (`tiles`) and the cursor, and once a second the
-//! stats. The **input thread** does the phone's input as it comes, so that encoding never delays a click; it reads the target's place and
-//! what the state allows from what the stream thread last wrote.
+//! times a second (states, the window's place, the border), takes the newest picture when the phone has room and the pacer says so
+//! (`pace::Pacer`: a constant-rate timer from the last capture's start, one frame in the encoder at a time, the top rung's rate for a second
+//! after input), encodes it, rewrites the SPS (`sps`), sends video, paint-over tiles (`tiles`) and the cursor, and once a second the stats
+//! with the stages' timings. A still picture is topped off in the codec first (`pace::TopOff`), and only then painted over with tiles; an
+//! update too large to arrive in time is encoded at a one-frame bitrate dip (`pace::BigFrame`). The **input thread** does the phone's input
+//! as it comes, so that encoding never delays a click; it reads the target's place and what the state allows from what the stream thread
+//! last wrote, and counts what it did, which boosts the capture rate.
 //!
 //! Frames lost on the way never hold the stream (`control::Flight`): a keyframe request, or the daemon saying what it dropped, gives up the
 //! frames in flight. A frame that is not sent after all (too large) puts its unpaint rectangles back, so a crisp tile is never left over a
 //! change. Sharing does not start without the border and the stop hotkey.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -30,7 +34,8 @@ use super::input_win::{self, Geometry, Outcome};
 use super::states_win::Looker;
 use super::targets_win::{self, hwnd};
 use super::{system, wall_ms};
-use crate::control::{Controller, Event, Flight, Params, Stats};
+use crate::control::{Controller, Event, Flight, Params, Stats, MIN_KBPS};
+use crate::pace::{self, BigFrame, EncoderRate, Pacer, TopOff, BIG_FRAME_PERCENT};
 use crate::geom::{self, Rect};
 use crate::input::{fresh, parse_hotkey, Hotkey, QUEUE};
 use crate::sps;
@@ -46,6 +51,8 @@ const DESKTOP_EVERY: Duration = Duration::from_secs(2);
 const CURSOR_EVERY: Duration = Duration::from_millis(33);
 /// How long the loop waits for a picture while frames are still in the encoder (its output is taken on the way round).
 const ENCODER_POLL_MS: u64 = 4;
+/// How long the loop waits for a change once a capture is due (it comes round for the encoder, the cursor and the app at least this often).
+const CAPTURE_WAIT_MS: u64 = 30;
 /// Paint-over tiles: at most this share of the video's rate, with this much at once.
 const TILE_SHARE: f64 = 0.5;
 const TILE_BURST: f64 = 256.0 * 1024.0;
@@ -78,6 +85,16 @@ enum Source {
 struct Shared {
     geometry: Geometry,
     policy: InputPolicy,
+}
+
+/// A frame in the encoder: its time (the encoder's key for it), when it went in, when its picture was taken (ms since the stream started),
+/// the conversion's time, and whether it is a top-off pass of a still picture.
+struct InEncoder {
+    time: i64,
+    began: Instant,
+    captured: u64,
+    convert_ms: f64,
+    pass: bool,
 }
 
 unsafe impl Send for Shared {}
@@ -336,12 +353,14 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let mut desktop = geom::virtual_desktop(&d3d::monitors());
     let shared = Arc::new(Mutex::new(Shared { geometry: Geometry { window: window_handle.map(|(h, _)| h), rect, src, desktop }, policy: input_policy(State::Live, window) }));
     let (outcome_tx, outcome_rx) = channel::<Outcome>();
+    // Input done, counted by the input thread: each one boosts the capture rate (`pace::Pacer::boost`).
+    let inputs = Arc::new(AtomicU64::new(0));
     let input_thread = {
-        let (shared, out, stopping) = (shared.clone(), out.clone(), stopping.clone());
-        std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping))
+        let (shared, out, stopping, inputs) = (shared.clone(), out.clone(), stopping.clone(), inputs.clone());
+        std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping, inputs))
     };
     let _ = started.send(Ok(json!({"kind": if window { "window" } else { "monitor" }, "title": title, "exe": exe, "w": src.0, "h": src.1, "encoder": if encoder.hardware { "hw" } else { "sw" }, "encoder_name": encoder.name})));
-    emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": if encoder.hardware { "hw" } else { "sw" }, "name": encoder.name, "refused": encoder.refused}));
+    emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": if encoder.hardware { "hw" } else { "sw" }, "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms}));
 
     let mut tracker = Tracker::default();
     let looker = Looker::new();
@@ -349,14 +368,21 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let mut grid = opts.tiles.then(|| Grid::new(src.0, src.1, 0));
     let mut readback = Readback::new();
     let mut flight = Flight::default();
-    let mut last_encode: Option<u64> = None;
-    let mut times: std::collections::VecDeque<(i64, Instant)> = std::collections::VecDeque::new();
+    let mut pacer = Pacer::default();
+    let mut top_off = TopOff::default();
+    let mut big = BigFrame::default();
+    let mut rate = EncoderRate::new(params.kbps);
+    // A big frame's bitrate dip: the frame's time, and the bitrate to go back to once it is out.
+    let mut dip: Option<(i64, u32)> = None;
+    let mut seen_inputs = 0u64;
+    let mut in_encoder: VecDeque<InEncoder> = VecDeque::new();
     let mut link_paused = false;
     let (mut unpaint, mut unpaint_all) = (Vec::<Rect>::new(), false);
     let (mut tile_id, mut tile_tokens, mut tile_at) = (0u32, TILE_BURST, now_ms());
     let (mut last_look, mut last_desktop, mut last_cursor) = (Instant::now() - LOOK_EVERY, Instant::now(), Instant::now());
     let mut cursor_told: Option<(u8, bool, i32, i32)> = None;
-    // The last picture taken: encoded again when a keyframe is owed and nothing new came (a still window sends no frames by itself).
+    // The last picture taken: encoded again when a keyframe is owed and nothing new came (a still window sends no frames by itself), and for
+    // the top-off passes of a still one.
     let mut last_picture: Option<ID3D11Texture2D> = None;
     let reason: String = 'stream: loop {
         let now = now_ms();
@@ -370,6 +396,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                     flight.dropped_through(dropped_through);
                     if rtt_ms > 0 {
                         ctl.bandwidth.on_ack(rtt_ms, now);
+                        stats.ack(rtt_ms);
                     }
                     ctl.bandwidth.on_wire(raw, wire);
                     ctl.set_level(level, now);
@@ -383,6 +410,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 Ok(Cmd::Keyframe) => flight.ask_key(now),
                 Ok(Cmd::Pause(p)) => {
                     link_paused = p;
+                    top_off.stop();
                     if !p {
                         // A new connection: a fresh keyframe, and every tile painted again on it.
                         flight.restart();
@@ -415,6 +443,12 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 Outcome::Blocked => emit(&out, json!({"event": "input_blocked", "sc": opts.sc})),
                 _ => {}
             }
+        }
+        // Input was done: the capture rate is boosted for a while, so that what it changed shows at once.
+        let done_inputs = inputs.load(Ordering::SeqCst);
+        if done_inputs != seen_inputs {
+            seen_inputs = done_inputs;
+            pacer.boost(now);
         }
         // Four times a second: the states, the window's place; every two seconds, the monitors.
         if last_look.elapsed() >= LOOK_EVERY {
@@ -452,7 +486,8 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         if let Some(Event::PausedForLoad) = ctl.tick(flight.inflight(), now) {
             emit(&out, json!({"event": "paused", "sc": opts.sc, "reason": "load"}));
         }
-        // What the ladder says now: a new size is a new converter and encoder; a new bitrate is set live.
+        // What the ladder says now: a new size is a new converter and encoder; a new bitrate is set live, when it is worth a reconfiguration
+        // (`pace::EncoderRate`), and not while a big frame's dip holds.
         let next = ctl.params();
         if (next.w, next.h) != (params.w, params.h) {
             match (Converter::new(&d, src, (next.w, next.h), u32::from(next.fps)), Encoder::open(&d, next.w, next.h, u32::from(next.fps), next.kbps, !ctl.software())) {
@@ -462,37 +497,56 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                     if let Some(h) = &encoder.sequence_header {
                         ps.seed(h);
                     }
-                    times.clear();
+                    in_encoder.clear();
+                    pacer.done();
+                    top_off.stop();
+                    rate = EncoderRate::new(next.kbps);
+                    dip = None;
                     flight.restart();
                 }
                 _ => break 'stream "encoder_failed".to_string(),
             }
-        } else if next.kbps != params.kbps {
-            encoder.set_bitrate(next.kbps);
+        } else if dip.is_none() {
+            if let Some(k) = rate.next(next.kbps) {
+                encoder.set_bitrate(k);
+            }
         }
         params = next;
 
-        let since_last = last_encode.map(|t| now.saturating_sub(t));
-        // A keyframe owed but not yet allowed: anything else would only be dropped on the way.
-        let may = !link_paused && !flight.gated() && tracker.state().picture_moves() && ctl.may_encode(flight.inflight(), since_last);
         // A frame the encoder never gave back (it may drop one) is not waited for after a second.
-        while times.front().is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(1)) {
-            times.pop_front();
+        while in_encoder.front().is_some_and(|f| f.began.elapsed() > Duration::from_secs(1)) {
+            in_encoder.pop_front();
+            pacer.done();
         }
-        // With frames in the encoder the loop comes back within a few milliseconds to take them: its time is then the encoder's own, not
-        // how long the loop waited for a picture (which the overuse detector would read as a slow encoder, and lower the rate for).
-        let wait = Duration::from_millis(if !times.is_empty() { ENCODER_POLL_MS } else if may { 30 } else { 50 });
+        let interval = ctl.interval_ms();
+        let due = pacer.due_in(interval, ctl.boost_interval_ms(), now);
+        // Room for a frame on the link, nothing gating a keyframe, a picture that may move: then the pacer says when.
+        let ready = !link_paused && !flight.gated() && tracker.state().picture_moves() && ctl.may_encode(flight.inflight(), None);
+        let may = ready && due == Some(0);
+        let top_off_due = may && top_off.due(now) && ctl.crisp_ok(flight.inflight(), now);
+        // While a frame is in the encoder the loop comes back within a few milliseconds to take it, so that its time is the encoder's own;
+        // once due it waits for the next change (a still picture gives nothing until then), but not past a top-off pass that is due.
+        let wait_ms = if pacer.pending() {
+            ENCODER_POLL_MS
+        } else if may {
+            // Something to encode again at once (a keyframe owed, a top-off pass), once there is a picture to encode again.
+            if (top_off_due || flight.wants_key()) && last_picture.is_some() { 0 } else { CAPTURE_WAIT_MS }
+        } else if ready {
+            due.unwrap_or(ENCODER_POLL_MS).clamp(1, CAPTURE_WAIT_MS)
+        } else {
+            50
+        };
         let grabbed: Option<(ID3D11Texture2D, Option<Vec<Rect>>)> = if !may {
-            std::thread::sleep(wait);
+            std::thread::sleep(Duration::from_millis(wait_ms));
             None
         } else {
             match &mut source {
-                Source::Monitor(dxgi, tex) => match dxgi.grab(&d, wait.as_millis() as u32, tex) {
+                Source::Monitor(dxgi, tex) => match dxgi.grab(&d, wait_ms as u32, tex) {
                     capture_dxgi::Grab::Frame { dirty } => Some((tex.clone(), dirty)),
                     capture_dxgi::Grab::Changed => break 'stream "display_changed".to_string(),
                     _ => None,
                 },
-                Source::Window(wgc, ..) => match wgc.grab(wait) {
+                Source::Window(wgc, ..) => match wgc.grab(Duration::from_millis(wait_ms)) {
                     (capture_wgc::Grab::Frame { w, h }, Some(t)) => {
                         if (w, h) != src {
                             // Resized: everything that depends on the size again.
@@ -505,7 +559,11 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                                 (Ok(c), Ok(e)) => {
                                     conv = c;
                                     encoder = e;
-                                    times.clear();
+                                    in_encoder.clear();
+                                    pacer.done();
+                                    top_off.stop();
+                                    rate = EncoderRate::new(params.kbps);
+                                    dip = None;
                                     flight.restart();
                                 }
                                 _ => break 'stream "encoder_failed".to_string(),
@@ -522,47 +580,75 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 },
             }
         };
-        // A keyframe owed and allowed, and no new picture: the last one again, or the phone (and the daemon, which holds input back while one
-        // is owed) would wait for the window to change.
-        let grabbed = match grabbed {
+        // A new picture; else, with a keyframe owed and allowed, the last one again (the phone, and the daemon, which holds input back while
+        // one is owed, would wait for the window to change); else a top-off pass of the still one.
+        let (picture, dirty, pass) = match grabbed {
             Some((tex, dirty)) => {
                 last_picture = Some(tex.clone());
-                Some((tex, dirty))
+                (Some(tex), dirty, false)
             }
-            None if may && flight.wants_key() => last_picture.clone().map(|t| (t, None)),
-            None => None,
+            None if may && flight.wants_key() => (last_picture.clone(), None, false),
+            None if top_off_due => (last_picture.clone(), None, true),
+            None => (None, None, false),
         };
-        if let Some((tex, dirty)) = grabbed {
-            if let Some(g) = &mut grid {
-                if readback.read(&d, &tex, src.0, src.1).is_ok() {
-                    unpaint.extend(g.update(&readback.buf, readback.stride, now, dirty.as_deref()));
+        if let Some(tex) = picture {
+            let mut area = u64::from(src.0) * u64::from(src.1);
+            if !pass {
+                if let Some(g) = &mut grid {
+                    if readback.read_regions(&d, &tex, src.0, src.1, dirty.as_deref()).is_ok() {
+                        unpaint.extend(g.update(&readback.buf, readback.stride, now, dirty.as_deref()));
+                        area = g.last_changed_area();
+                    }
+                } else if let Some(rects) = &dirty {
+                    area = pace::area(rects);
                 }
             }
+            let converting = Instant::now();
             if let Ok(nv12) = conv.convert(&tex) {
+                let convert_ms = converting.elapsed().as_secs_f64() * 1000.0;
                 let time = (started_at.elapsed().as_nanos() / 100) as i64;
-                let began = Instant::now();
                 let key = flight.wants_key();
+                // Too large to arrive in time at this bitrate: a coarser frame now, not a late one (CRD's guard), with the bitrate back once
+                // it is out. A keyframe and a top-off pass are what they are.
+                if !key && !pass && dip.is_none() && big.check(area, params.kbps, interval) {
+                    encoder.set_bitrate((params.kbps * BIG_FRAME_PERCENT / 100).max(MIN_KBPS));
+                    dip = Some((time, rate.applied));
+                    stats.big_frames += 1;
+                }
+                let began = Instant::now();
                 match encoder.encode(&d, &nv12, time, key) {
                     Ok(true) => {
                         if let Some(extra) = delay {
                             std::thread::sleep(extra);
                         }
+                        pacer.started(now);
                         flight.encoded(key, now);
-                        last_encode = Some(now);
-                        times.push_back((time, began));
-                        while times.len() > 8 {
-                            times.pop_front();
+                        in_encoder.push_back(InEncoder { time, began, captured: now, convert_ms, pass });
+                        while in_encoder.len() > 8 {
+                            in_encoder.pop_front();
                         }
                     }
-                    Ok(false) => stats.dropped_encoder += 1,
+                    Ok(false) => {
+                        // No room in the encoder now: a moment for it, not a spin.
+                        stats.dropped_encoder += 1;
+                        std::thread::sleep(Duration::from_millis(ENCODER_POLL_MS));
+                        if dip.is_some_and(|(t, _)| t == time) {
+                            encoder.set_bitrate(rate.applied);
+                            dip = None;
+                        }
+                    }
                     Err(_) => {
                         // The hardware encoder failed: the software one from now on, and said so.
                         if encoder.hardware {
                             if let Ok(e) = Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false) {
                                 encoder = e;
                                 ctl.set_software(true);
+                                in_encoder.clear();
+                                pacer.done();
+                                rate = EncoderRate::new(params.kbps);
+                                dip = None;
                                 flight.restart();
-                                emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "why": "failed"}));
+                                emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms, "why": "failed"}));
                                 continue;
                             }
                         }
@@ -575,13 +661,26 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         match encoder.poll() {
             Ok(done) => {
                 for e in done {
-                    let encode_ms = times.iter().position(|(t, _)| *t == e.time).map(|i| times.remove(i).expect("found").1.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0) + delay.map_or(0.0, |d| d.as_secs_f64() * 1000.0);
+                    let entry = in_encoder.iter().position(|f| f.time == e.time).and_then(|i| in_encoder.remove(i));
+                    // One frame in the encoder at a time: the next capture may be scheduled.
+                    pacer.done();
+                    let encode_ms = entry.as_ref().map_or(0.0, |f| f.began.elapsed().as_secs_f64() * 1000.0) + delay.map_or(0.0, |d| d.as_secs_f64() * 1000.0);
+                    if let Some((t, back)) = dip {
+                        if t == e.time {
+                            encoder.set_bitrate(back);
+                            dip = None;
+                        }
+                    }
                     if let Some(Event::UseSoftware) = ctl.on_encoded(encode_ms, now) {
                         if let Ok(sw) = Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false) {
                             encoder = sw;
                             ctl.set_software(true);
+                            in_encoder.clear();
+                            pacer.done();
+                            rate = EncoderRate::new(params.kbps);
+                            dip = None;
                             flight.restart();
-                            emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "why": "slow"}));
+                            emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms, "why": "slow"}));
                             break;
                         }
                     }
@@ -591,31 +690,43 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         continue;
                     };
                     let key = e.key || sps::is_keyframe(&au);
-                    let v = Video { key, seq: flight.seq() + 1, capture_ms: now as u32, src: (src.0 as u16, src.1 as u16), coded: (params.w as u16, params.h as u16), unpaint: std::mem::take(&mut unpaint), unpaint_all: std::mem::take(&mut unpaint_all) };
+                    let captured = entry.as_ref().map_or(now, |f| f.captured);
+                    let v = Video { key, seq: flight.seq() + 1, capture_ms: captured as u32, src: (src.0 as u16, src.1 as u16), coded: (params.w as u16, params.h as u16), unpaint: std::mem::take(&mut unpaint), unpaint_all: std::mem::take(&mut unpaint_all) };
                     let msg = wire::video(&v, &au);
                     if msg.len() > wire::MAX_MEDIA {
                         // Too large for one message: not sent. Its unpaint goes with the next frame, less bitrate, and a keyframe.
                         unpaint = v.unpaint;
                         unpaint_all = v.unpaint_all;
-                        ctl.bandwidth.kbps = (ctl.bandwidth.kbps * 3 / 4).max(crate::control::MIN_KBPS);
+                        ctl.bandwidth.kbps = (ctl.bandwidth.kbps * 3 / 4).max(MIN_KBPS);
                         flight.restart();
                         stats.dropped_link += 1;
                         continue;
                     }
                     flight.sent();
+                    ctl.bandwidth.on_sent(now);
                     stats.frame(msg.len(), key, encode_ms);
                     let _ = out.send(wire::out_media(&opts.sc, &msg));
+                    let sent_at = now_ms();
+                    stats.timing(sent_at, sent_at.saturating_sub(captured) as f64, entry.as_ref().map_or(0.0, |f| f.convert_ms));
+                    // A new picture starts the top-off of what follows it; a pass says how far it got.
+                    if entry.as_ref().is_some_and(|f| f.pass) {
+                        stats.top_off += 1;
+                        top_off.passed(sent_at, interval, msg.len(), e.qp);
+                    } else {
+                        top_off.changed(sent_at, interval, e.qp);
+                    }
                 }
             }
             Err(_) => break 'stream "encoder_failed".to_string(),
         }
-        // Paint-over: still regions as crisp tiles, from the last picture read, within a share of the video's rate.
+        // Paint-over: still regions as crisp tiles, from the last picture read, within a share of the video's rate, once the top-off has
+        // refined the video itself (tiles then cover what the codec cannot: text at the source's own resolution and colour).
         if let Some(g) = &mut grid {
-            let rate = f64::from(params.kbps) * 1000.0 / 8.0 * TILE_SHARE;
-            tile_tokens = (tile_tokens + rate * now.saturating_sub(tile_at) as f64 / 1000.0).min(TILE_BURST);
+            let rate_bytes = f64::from(params.kbps) * 1000.0 / 8.0 * TILE_SHARE;
+            tile_tokens = (tile_tokens + rate_bytes * now.saturating_sub(tile_at) as f64 / 1000.0).min(TILE_BURST);
             tile_at = now;
             // Off by itself while the link is slow or was just cut (`Controller::crisp_ok`): the video needs the room.
-            if flight.seq() > 0 && !flight.wants_key() && !link_paused && ctl.crisp_ok(flight.inflight(), now) && readback.stride > 0 && tile_tokens > 32_768.0 && g.any_due(now) && g.size() == src {
+            if flight.seq() > 0 && !flight.wants_key() && !top_off.active() && !link_paused && ctl.crisp_ok(flight.inflight(), now) && readback.stride > 0 && tile_tokens > 32_768.0 && g.any_due(now) && g.size() == src {
                 for r in g.due(now, TILE_CELLS_AT_ONCE) {
                     match tile_image::encode(&readback.buf, readback.stride, r) {
                         Some((format, image)) if (image.len() as f64) <= tile_tokens => {
@@ -640,7 +751,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
             }
         }
         let crisp = opts.tiles.then(|| ctl.crisp_ok(flight.inflight(), now));
-        if let Some(r) = stats.report(now, &params, ctl.level(), ctl.software(), crisp) {
+        if let Some(r) = stats.report_with(now, &params, ctl.level(), ctl.software(), crisp, encoder.held(), encoder.first_output_ms) {
             let mut v = serde_json::to_value(&r).unwrap_or_default();
             v["event"] = json!("stats");
             v["sc"] = json!(opts.sc);
@@ -659,7 +770,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
 
 /// The phone's input, in the order it came, as long as it is fresh, the stream is not stopping and the state allows it. A button a `down` left
 /// pressed is released when it ends.
-fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Sender<Outcome>, out: SyncSender<Vec<u8>>, stopping: Arc<AtomicBool>) {
+fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Sender<Outcome>, out: SyncSender<Vec<u8>>, stopping: Arc<AtomicBool>, inputs: Arc<AtomicU64>) {
     let _mmcss = system::Mmcss::capture();
     let mut pressed: Option<&'static str> = None;
     loop {
@@ -694,6 +805,7 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
                     continue;
                 }
                 let o = input_win::run(&ops, &g, p, &mut pressed);
+                inputs.fetch_add(1, Ordering::SeqCst);
                 if o != Outcome::Done {
                     let _ = outcomes.send(o);
                 }
@@ -712,6 +824,7 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
                         _ => json!({"id": id, "err": "typing is not possible in this state"}),
                     }
                 };
+                inputs.fetch_add(1, Ordering::SeqCst);
                 emit(&out, reply);
             }
         }
