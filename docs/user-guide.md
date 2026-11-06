@@ -877,11 +877,19 @@ The **SSH hosts** page (the server icon at the bottom of the sidebar, `Ctrl+Alt+
     - A dropped connection is retried for up to 5 minutes and continues where it stopped.
     - After the background service restarts, a transfer shows *Interrupted* with *Resume*.
     - A name already there is never overwritten unasked: *Replace*, *Skip*, *Keep both*, *Replace if newer* or
-      *Skip identical*, with *Apply to all in this transfer*.
+      *Skip identical*, with *Apply to all in this transfer*. Two files of one transfer with the same name (from two
+      folders) are both kept, as `name (2)`, and a retry writes the same names again.
     - Names Windows cannot hold are saved with `_` and listed.
     - Links to folders inside a copied folder are not followed.
+    - An upload keeps the source file's permissions. From Windows, which has none to keep, a replaced file keeps its
+      own and a new one gets the host's usual ones (often `rw-r--r--`). A file edited from Kelpie keeps the server
+      copy's permissions.
+    - A full disk on the target fails the files it refuses instead of retrying. A transfer that needs more room than
+      the target has fails with *not enough free space*; *Retry* continues it once there is room.
     - An update or a switch to a newer background service waits for running transfers and says so (*Waiting for N
-      file transfers to finish*). *Install anyway* / *Switch anyway* stops them; they show *Interrupted* with *Resume*.
+      file transfers to finish*; click it to switch now). A transfer that only waits for your answer does not hold
+      them: it shows *Interrupted* afterwards, to answer and resume. *Install anyway* / *Switch anyway* stops running
+      transfers; they show *Interrupted* with *Resume*.
   - **Host to host**: with a host in each pane, *Copy (Auto)* goes **direct** when the first host can log in to
     the second by itself, as the same user Kelpie uses for it and with its own known hosts. Otherwise the data
     streams **through this computer**, with nothing written to its disk. The queue says which, and why
@@ -889,7 +897,8 @@ The **SSH hosts** page (the server icon at the bottom of the sidebar, `Ctrl+Alt+
     computer* always relays.
     - Kelpie never turns on agent forwarding for this. With forwarding, anyone with root (or your user) on the
       first host could use your loaded keys for as long as the connection lasts.
-  - **Permissions…** (a host) sets rwx or octal, optionally for everything inside a folder; *x for folders only* keeps folders openable and leaves each file's own x as it was. Delete on a host asks
+  - **Permissions…** (a host) sets rwx or octal, optionally for everything inside a folder; *x for folders only*
+    keeps folders openable and leaves each file's own x as it was, where the file stays readable. Delete on a host asks
     first: there is no trash there. Delete on this computer moves to the trash.
   - **Edit** a host's file *in Kelpie* (through the host's remote project; needs a shell on the host) or *with an
     external editor*: a private copy is opened and uploaded on every save. A change made on the server meanwhile is

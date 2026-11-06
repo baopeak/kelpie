@@ -147,17 +147,21 @@ impl RemoteFs for SftpFs {
     async fn open_write(&self, path: &str, offset: u64, create: bool) -> FsResult<Box<dyn WriteFile>> {
         let c = self.c();
         let mut f = if create && offset == 0 {
-            // Made new: what has the name (a stale partial, a planted link) goes, then an exclusive create, 0600.
-            match c.sftp.remove_file(path).await.map_err(|e| c.error(e)) {
-                Err(e) if e.kind != ErrKind::NotFound => return Err(e),
-                _ => {}
+            // Made new with an exclusive create, 0600. Only when that fails is what has the name (a stale partial, a
+            // planted link) removed and the create tried once more: protocol 3 has no "exists" status to tell by.
+            match self.create_new(path).await {
+                Ok(f) => f,
+                Err(first) if matches!(first.kind, ErrKind::Other | ErrKind::Exists) => match c.sftp.remove_file(path).await.map_err(|e| c.error(e)) {
+                    Ok(()) => self.create_new(path).await?,
+                    Err(e) if e.kind == ErrKind::NotFound => return Err(first),
+                    Err(e) => return Err(e),
+                },
+                Err(e) => return Err(e),
             }
-            let mut a = FileAttributes::empty();
-            a.permissions = Some(0o600);
-            c.sftp.open_with_flags_and_attributes(path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE, a).await.map_err(|e| c.error(e))?
         } else {
-            let flags = if create { OpenFlags::WRITE | OpenFlags::CREATE } else { OpenFlags::WRITE };
-            c.sftp.open_with_flags(path, flags).await.map_err(|e| c.error(e))?
+            // A resume continues a file that is there: it is never created (a partial gone meanwhile must not come
+            // back zero-filled up to the offset).
+            c.sftp.open_with_flags(path, OpenFlags::WRITE).await.map_err(|e| c.error(e))?
         };
         if offset > 0 {
             // Anything past the offset (a partial longer than what is kept) is cut off first.
@@ -173,6 +177,38 @@ impl RemoteFs for SftpFs {
         let c = self.c();
         let s = c.sftp.fs_info(path).await.map_err(|e| c.error(e))?;
         Ok(s.map(|s| s.blocks_avail.saturating_mul(if s.fragment_size > 0 { s.fragment_size } else { s.block_size })))
+    }
+
+    fn case_insensitive(&self) -> bool {
+        self.0.windows
+    }
+
+    fn new_file_mode(&self) -> u32 {
+        self.0.new_mode.lock().unwrap_or(0o644)
+    }
+}
+
+impl SftpFs {
+    /// An exclusive create, owner-only. The session's first one is made with the host's default mode and read back
+    /// (`0666` less the host's umask: what a new file gets there), then narrowed to 0600 before anything is written.
+    async fn create_new(&self, path: &str) -> FsResult<File> {
+        let c = &self.0;
+        let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE;
+        let learned = c.new_mode.lock().is_some();
+        let mut a = FileAttributes::empty();
+        if learned {
+            a.permissions = Some(0o600);
+        }
+        let f = c.sftp.open_with_flags_and_attributes(path, flags, a).await.map_err(|e| c.error(e))?;
+        if !learned {
+            if let Some(mode) = f.metadata().await.ok().and_then(|m| m.permissions) {
+                *c.new_mode.lock() = Some(mode & 0o777);
+            }
+            let mut a = FileAttributes::empty();
+            a.permissions = Some(0o600);
+            f.set_metadata(a).await.map_err(|e| c.error(e))?;
+        }
+        Ok(f)
     }
 }
 

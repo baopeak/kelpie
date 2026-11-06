@@ -19,6 +19,8 @@ export default function UpdateDialog() {
   // (the transfers then show Interrupted, with Resume).
   createEffect(() => setStopsDaemon(survives() === false));
   const held = () => !updateMayInstall({ daemonStops: survives() === false, transfers: activeCount() });
+  // "When idle" must know first whether the daemon stops, or it would not wait for the transfers.
+  const later = () => busy() || whenIdle() || survives.loading;
   const install = async () => {
     setBusy(true);
     setError(null);
@@ -58,9 +60,9 @@ export default function UpdateDialog() {
               <Show when={error()}><p class="update-error">{error()}</p></Show>
               <div class="footer">
                 <button class="btn" disabled={busy()} onClick={() => { skipUpdate(); close(); }}>{t("Skip this version")}</button>
-                <button class="btn" disabled={busy() || whenIdle()} onClick={() => { installWhenIdle(); close(); }}>{t("Install when idle")}</button>
+                <button class="btn" disabled={later()} onClick={() => { installWhenIdle(); close(); }}>{t("Install when idle")}</button>
                 <Show when={held()} fallback={<button class="btn primary" disabled={busy()} onClick={() => void install()}>{t("Install now")}</button>}>
-                  <button class="btn primary" disabled={busy() || whenIdle()} data-action="install-after-transfers" onClick={() => { installWhenIdle(); close(); }}>{t("Install when they finish")}</button>
+                  <button class="btn primary" disabled={later()} data-action="install-after-transfers" onClick={() => { installWhenIdle(); close(); }}>{t("Install when they finish")}</button>
                   <button class="btn" disabled={busy()} data-action="install-anyway" onClick={() => void install()}>{t("Install anyway")}</button>
                 </Show>
               </div>

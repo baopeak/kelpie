@@ -82,28 +82,58 @@ pub fn decide(policy: Policy, src: &Meta, target: Option<&Meta>) -> Decision {
     }
 }
 
-/// Shared with the queue: progress counted on bytes written, and the person's pause or cancel.
-#[derive(Debug, Default)]
+/// Shared with the queue: progress, the room on the target, and the person's pause or cancel.
+#[derive(Debug)]
 pub struct Control {
-    /// Bytes accounted for: written, resumed or skipped (the job's progress).
+    /// Bytes accounted for: written, resumed or skipped (the job's progress bar).
     pub bytes: AtomicU64,
-    /// Bytes actually written in this attempt (whether a retry made progress).
-    pub written: AtomicU64,
+    /// Bytes the target holds for sure in this attempt: resumed from, already complete, or written and closed (a
+    /// host confirms a write only some 64 writes after it was sent). Whether a retry made progress.
+    pub confirmed: AtomicU64,
     pub cancel: AtomicBool,
     pub pause: AtomicBool,
-    /// Woken on pause or cancel, so a stalled read or write stops at once.
+    /// The attempt ends for another reason (a file lost the connection): the other files stop as on a pause and keep
+    /// their partials.
+    pub halted: AtomicBool,
+    /// Free bytes on the target when the attempt started (`u64::MAX`: unknown), and what this attempt's files still
+    /// have to write.
+    pub free: AtomicU64,
+    pub needed: AtomicU64,
+    /// Woken on pause, cancel or halt, so a stalled read or write stops at once.
     pub wake: tokio::sync::Notify,
+}
+
+impl Default for Control {
+    fn default() -> Self {
+        Control {
+            bytes: AtomicU64::new(0),
+            confirmed: AtomicU64::new(0),
+            cancel: AtomicBool::new(false),
+            pause: AtomicBool::new(false),
+            halted: AtomicBool::new(false),
+            free: AtomicU64::new(u64::MAX),
+            needed: AtomicU64::new(0),
+            wake: tokio::sync::Notify::new(),
+        }
+    }
 }
 
 impl Control {
     pub fn stop(&self) -> Option<Stop> {
         if self.cancel.load(Ordering::Relaxed) {
             Some(Stop::Cancel)
-        } else if self.pause.load(Ordering::Relaxed) {
+        } else if self.pause.load(Ordering::Relaxed) || self.halted.load(Ordering::Relaxed) {
             Some(Stop::Pause)
         } else {
             None
         }
+    }
+
+    /// Room for `n` more bytes on the target: counted when a file's offset is known, so what is already there
+    /// (complete, skipped, resumed) never needs room. False when the target had less free when the attempt started.
+    pub fn reserve(&self, n: u64) -> bool {
+        let need = self.needed.fetch_add(n, Ordering::Relaxed).saturating_add(n);
+        need <= self.free.load(Ordering::Relaxed)
     }
 }
 
@@ -123,6 +153,8 @@ pub enum Copied {
     /// The target changed after the answer: the person is asked again (the partial is kept).
     TargetChanged { now: Meta },
     Stopped(Stop),
+    /// The target has no room for what is left of this file (when the attempt started). The partial is kept.
+    NoRoom { free: u64 },
 }
 
 /// One file to copy.
@@ -142,6 +174,10 @@ pub struct FileCopy<'a> {
     pub source_seen: Option<(u64, u64)>,
     /// Set the target's time (and mode, where the end has modes) from the source.
     pub preserve: bool,
+    /// Where an earlier attempt moved the old target aside (in the journal): only that is ever repaired.
+    pub aside: Option<&'a str>,
+    /// Records the moved-aside name before the move (`None` once the replace is through), in the journal.
+    pub record_aside: &'a (dyn Fn(Option<String>) + Send + Sync),
 }
 
 async fn read_at(fs: &dyn RemoteFs, path: &str, offset: u64, len: u64) -> FsResult<Vec<u8>> {
@@ -175,19 +211,23 @@ fn absent<T>(r: FsResult<T>) -> FsResult<Option<T>> {
 }
 
 /// After a stop between the two renames of a replace (a crash, an update, a dropped connection), the old file is
-/// only in its moved-aside name. With the target gone it is put back; with the target there and equal to the
-/// source (the new one took its place) the old one is removed; anything else is left for the person, untouched.
-pub async fn recover_aside(dst: &dyn RemoteFs, dir: &str, name: &str, tag: &str, src: &Meta) -> FsResult<()> {
-    let old = dst.join(dir, &aside_name(name, tag));
-    if absent(dst.lstat(&old).await)?.is_none() {
+/// only in its moved-aside name, which the journal recorded. With the target gone it is put back; with the target
+/// there and equal to the source (the new one took its place) the old one is removed; anything else is left for the
+/// person, untouched. Nothing is looked up when no move-aside was recorded.
+pub async fn recover_aside(c: &FileCopy<'_>, src: &Meta) -> FsResult<()> {
+    let Some(old) = c.aside else { return Ok(()) };
+    if absent(c.dst.lstat(old).await)?.is_none() {
+        (c.record_aside)(None);
         return Ok(());
     }
-    let target = dst.join(dir, name);
-    match absent(dst.lstat(&target).await)? {
-        None => dst.rename(&old, &target, false).await,
-        Some(t) if t.kind == Kind::File && t.size == src.size && t.mtime == src.mtime => dst.remove_file(&old).await,
-        Some(_) => Ok(()),
+    let target = c.dst.join(c.dst_dir, c.dst_name);
+    match absent(c.dst.lstat(&target).await)? {
+        None => c.dst.rename(old, &target, false).await?,
+        Some(t) if t.kind == Kind::File && t.size == src.size && t.mtime == src.mtime => c.dst.remove_file(old).await?,
+        Some(_) => {}
     }
+    (c.record_aside)(None);
+    Ok(())
 }
 
 /// Copies one file as described at the top of this module.
@@ -197,9 +237,13 @@ pub async fn copy_file(c: &FileCopy<'_>, ctl: &Control) -> FsResult<Copied> {
         return Err(FsError::invalid(format!("{} is not a file", c.src_path)));
     }
     let partial = c.dst.join(c.dst_dir, &partial_name(c.dst_name, c.tag));
-    recover_aside(c.dst, c.dst_dir, c.dst_name, c.tag, &src).await?;
+    recover_aside(c, &src).await?;
     let offset = resume_offset(c, &src, &partial).await?;
+    if !ctl.reserve(src.size - offset) {
+        return Ok(Copied::NoRoom { free: ctl.free.load(Ordering::Relaxed) });
+    }
     ctl.bytes.fetch_add(offset, Ordering::Relaxed);
+    ctl.confirmed.fetch_add(offset, Ordering::Relaxed);
 
     let reader = c.src.open_read(c.src_path, offset).await?;
     // A fresh partial is made new (0600, never through a link someone left there); a resume continues the job's own.
@@ -209,7 +253,9 @@ pub async fn copy_file(c: &FileCopy<'_>, ctl: &Control) -> FsResult<Copied> {
     let closed = writer.finish(true).await;
     let stopped = match (read, write) {
         (Err(e), _) | (_, Err(e)) => return Err(e),
-        (Ok(stop), Ok(_)) => stop.or_else(|| ctl.stop()),
+        (Ok(Read::Stopped(stop)), _) => Some(stop),
+        // The reader reached the source's end and the writer took it all, unless a stop came meanwhile.
+        (Ok(_), Ok(_)) => ctl.stop(),
     };
     if let Some(stop) = stopped {
         if stop == Stop::Cancel {
@@ -218,7 +264,11 @@ pub async fn copy_file(c: &FileCopy<'_>, ctl: &Control) -> FsResult<Copied> {
         return Ok(Copied::Stopped(stop));
     }
     closed?;
-    finish_partial(c, &src, &partial, offset).await
+    let out = finish_partial(c, &src, &partial, offset).await?;
+    if matches!(out, Copied::Done { .. }) {
+        ctl.confirmed.fetch_add(src.size - offset, Ordering::Relaxed);
+    }
+    Ok(out)
 }
 
 /// Puts a complete partial in place: checks its size and the source again, then the target (absent, or what was
@@ -236,9 +286,10 @@ pub async fn finish_partial(c: &FileCopy<'_>, src: &Meta, partial: &str, offset:
     }
 
     // The re-check: replace only what was approved, never what appeared or changed since.
-    if let Some(now) = absent(c.dst.lstat(&target).await)? {
+    let replaced = absent(c.dst.lstat(&target).await)?;
+    if let Some(now) = &replaced {
         if c.approved != Some((now.size, now.mtime)) || now.kind == Kind::Dir {
-            return Ok(Copied::TargetChanged { now });
+            return Ok(Copied::TargetChanged { now: now.clone() });
         }
         replace(c, &partial, &target).await?;
     } else {
@@ -252,62 +303,80 @@ pub async fn finish_partial(c: &FileCopy<'_>, src: &Meta, partial: &str, offset:
                 warning = Some(format!("the time was not kept: {e}"));
             }
         }
-        // rwx only: setuid, setgid and sticky bits are never carried over (as OpenSSH's sftp does).
-        if let Some(mode) = src.mode {
-            if let Err(e) = c.dst.chmod(&target, mode & 0o777).await {
-                if e.kind != ErrKind::Unsupported {
-                    warning = Some(format!("the permissions were not kept: {e}"));
-                }
-            }
+    }
+    // The partial was owner-only: the file always gets its final mode. The source's when it is kept, else the
+    // replaced file's, else what a new file gets on the target. rwx only: setuid, setgid and sticky bits are never
+    // carried over (as OpenSSH's sftp does), nor kept from a replaced file.
+    let mode = c.preserve.then_some(src.mode).flatten().or(replaced.and_then(|m| m.mode)).map_or_else(|| c.dst.new_file_mode(), |m| m & 0o777);
+    if let Err(e) = c.dst.chmod(&target, mode).await {
+        if e.kind != ErrKind::Unsupported {
+            warning = Some(format!("the permissions could not be set: {e}"));
         }
     }
     Ok(Copied::Done { bytes: src.size, resumed_at: offset, warning })
 }
 
-/// Reads the source into the bounded channel until its end, a pause or a cancel (returned), or an error.
-async fn read_side(mut reader: Box<dyn tokio::io::AsyncRead + Send + Unpin>, tx: mpsc::Sender<Vec<u8>>, ctl: &Control) -> FsResult<Option<Stop>> {
+/// How the reader ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Read {
+    /// The source's end.
+    End,
+    Stopped(Stop),
+    /// The writer is gone (it failed: its error is the one reported).
+    WriterGone,
+}
+
+/// Awaits `fut`; a wake ends the wait only when it is a stop (pause, cancel, halt), and the same future is awaited
+/// again otherwise, so nothing it holds (a chunk on its way) is dropped.
+async fn unless_stopped<T>(fut: impl std::future::Future<Output = T>, ctl: &Control) -> Result<T, Stop> {
+    tokio::pin!(fut);
     loop {
         if let Some(stop) = ctl.stop() {
-            return Ok(Some(stop));
+            return Err(stop);
         }
-        let mut buf = vec![0u8; CHUNK];
-        let n = tokio::select! {
-            r = tokio::time::timeout(STALL, reader.read(&mut buf)) => match r {
-                Ok(r) => r?,
-                Err(_) => return Err(FsError::new(ErrKind::Connection, "no data for 60 s: the connection seems lost")),
-            },
-            _ = ctl.wake.notified() => continue,
-        };
-        if n == 0 {
-            return Ok(None);
-        }
-        buf.truncate(n);
         tokio::select! {
-            sent = tx.send(buf) => if sent.is_err() { return Ok(None) }, // the writer failed; its error is the one reported
-            _ = ctl.wake.notified() => continue,
+            out = &mut fut => return Ok(out),
+            _ = ctl.wake.notified() => {}
         }
     }
 }
 
-/// Writes what the reader hands over, counting progress on bytes written. Ends when the reader is done, or at once on
-/// a pause or cancel (what is written so far stays in the partial).
+/// Reads the source into the bounded channel until its end, a stop, or an error.
+async fn read_side(mut reader: Box<dyn tokio::io::AsyncRead + Send + Unpin>, tx: mpsc::Sender<Vec<u8>>, ctl: &Control) -> FsResult<Read> {
+    loop {
+        let mut buf = vec![0u8; CHUNK];
+        let n = match unless_stopped(tokio::time::timeout(STALL, reader.read(&mut buf)), ctl).await {
+            Err(stop) => return Ok(Read::Stopped(stop)),
+            Ok(Ok(r)) => r?,
+            Ok(Err(_)) => return Err(FsError::new(ErrKind::Connection, "no data for 60 s: the connection seems lost")),
+        };
+        if n == 0 {
+            return Ok(Read::End);
+        }
+        buf.truncate(n);
+        match unless_stopped(tx.send(buf), ctl).await {
+            Err(stop) => return Ok(Read::Stopped(stop)),
+            Ok(Err(_)) => return Ok(Read::WriterGone),
+            Ok(Ok(())) => {}
+        }
+    }
+}
+
+/// Writes what the reader hands over, counting progress on bytes handed to the target. Ends when the reader is done,
+/// or at once on a stop (what is written so far stays in the partial).
 async fn write_side(writer: &mut Box<dyn super::WriteFile>, mut rx: mpsc::Receiver<Vec<u8>>, ctl: &Control) -> FsResult<u64> {
     let mut written = 0u64;
     loop {
-        let buf = tokio::select! {
-            b = rx.recv() => match b { Some(b) => b, None => return Ok(written) },
-            _ = ctl.wake.notified() => return Ok(written),
+        let buf = match unless_stopped(rx.recv(), ctl).await {
+            Err(_) | Ok(None) => return Ok(written),
+            Ok(Some(b)) => b,
         };
-        if ctl.stop().is_some() {
-            return Ok(written);
-        }
-        tokio::select! {
-            r = writer.write_all(&buf) => r?,
-            _ = ctl.wake.notified() => return Ok(written),
+        match unless_stopped(writer.write_all(&buf), ctl).await {
+            Err(_) => return Ok(written),
+            Ok(r) => r?,
         }
         written += buf.len() as u64;
         ctl.bytes.fetch_add(buf.len() as u64, Ordering::Relaxed);
-        ctl.written.fetch_add(buf.len() as u64, Ordering::Relaxed);
     }
 }
 
@@ -319,19 +388,27 @@ async fn replace(c: &FileCopy<'_>, partial: &str, target: &str) -> FsResult<()> 
         Err(e) if e.kind == ErrKind::Unsupported => {}
         other => return other,
     }
-    // A stale moved-aside file (left by a stop `recover_aside` could not judge) is never removed: another name is used.
+    // A stale moved-aside file (left by a stop `recover_aside` could not judge) is never removed: another name is used,
+    // and the name used is what the journal records, so a repair finds this one.
     let mut old = c.dst.join(c.dst_dir, &aside_name(c.dst_name, c.tag));
     let mut n = 1;
     while absent(c.dst.lstat(&old).await)?.is_some() {
         n += 1;
         old = c.dst.join(c.dst_dir, &format!("{}.{n}", aside_name(c.dst_name, c.tag)));
     }
-    c.dst.rename(target, &old, false).await?;
+    (c.record_aside)(Some(old.clone()));
+    if let Err(e) = c.dst.rename(target, &old, false).await {
+        (c.record_aside)(None);
+        return Err(e);
+    }
     if let Err(e) = c.dst.rename(partial, target, false).await {
-        let _ = c.dst.rename(&old, target, false).await;
+        if c.dst.rename(&old, target, false).await.is_ok() {
+            (c.record_aside)(None);
+        }
         return Err(e);
     }
     let _ = c.dst.remove_file(&old).await;
+    (c.record_aside)(None);
     Ok(())
 }
 #[cfg(test)]
@@ -372,8 +449,10 @@ mod tests {
         assert_eq!(decide(Policy::Replace, &folder, Some(&older)), clash);
     }
 
+    fn no_record(_: Option<String>) {}
+
     fn job<'a>(src: &'a MemFs, dst: &'a MemFs, approved: Option<(u64, u64)>) -> FileCopy<'a> {
-        FileCopy { src, src_path: "/src/big.bin", dst, dst_dir: "/dst", dst_name: "big.bin", tag: "t1", approved, resume: true, source_seen: None, preserve: true }
+        FileCopy { src, src_path: "/src/big.bin", dst, dst_dir: "/dst", dst_name: "big.bin", tag: "t1", approved, resume: true, source_seen: None, preserve: true, aside: None, record_aside: &no_record }
     }
 
     fn data(n: usize) -> Vec<u8> {
@@ -458,23 +537,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_replace_cut_between_its_renames_is_repaired_on_the_next_attempt() {
+    async fn a_replace_cut_between_its_renames_is_repaired_from_the_recorded_name() {
         let src = MemFs::new();
         let dst = MemFs::new().without_posix_rename();
         src.put("/src/big.bin", &data(1000), 1);
         dst.put("/dst/big.bin", b"old", 5);
-        // The second rename (partial -> target) fails: the old file is put back.
+        let recorded: parking_lot::Mutex<Vec<Option<String>>> = Default::default();
+        let record = |a: Option<String>| recorded.lock().push(a);
+        // The second rename (partial -> target) fails: the old file is put back, and nothing stays recorded.
         dst.fail_rename_to(Some("/dst/big.bin"));
-        assert!(copy_file(&job(&src, &dst, Some((3, 5))), &Control::default()).await.is_err());
+        let mut j = job(&src, &dst, Some((3, 5)));
+        j.record_aside = &record;
+        assert!(copy_file(&j, &Control::default()).await.is_err());
         assert_eq!(dst.read("/dst/big.bin").unwrap(), b"old");
-        // As if the daemon stopped between the renames: only the moved-aside copy is left.
+        assert_eq!(*recorded.lock(), [Some("/dst/.big.bin.t1.kelpie-old".to_string()), None], "recorded before the move");
+        // As if the daemon stopped between the renames of a replace that found a stale moved-aside file: the person's
+        // file is only under the numbered name the journal recorded.
         dst.fail_rename_to(None);
-        dst.rename("/dst/big.bin", "/dst/.big.bin.t1.kelpie-old", false).await.unwrap();
-        recover_aside(&dst, "/dst", "big.bin", "t1", &src.stat("/src/big.bin").await.unwrap()).await.unwrap();
-        assert_eq!(dst.read("/dst/big.bin").unwrap(), b"old", "the person's file is back");
-        assert!(!dst.exists("/dst/.big.bin.t1.kelpie-old"));
-        // And a later replace is not blocked by a stale moved-aside name.
         dst.put("/dst/.big.bin.t1.kelpie-old", b"stale", 1);
+        dst.rename("/dst/big.bin", "/dst/.big.bin.t1.kelpie-old.2", false).await.unwrap();
+        let mut again = job(&src, &dst, Some((3, 5)));
+        again.aside = Some("/dst/.big.bin.t1.kelpie-old.2");
+        recover_aside(&again, &src.stat("/src/big.bin").await.unwrap()).await.unwrap();
+        assert_eq!(dst.read("/dst/big.bin").unwrap(), b"old", "the newest original is back, not the stale one");
+        assert_eq!(dst.read("/dst/.big.bin.t1.kelpie-old").unwrap(), b"stale", "a stale moved-aside file is never removed");
+        // Nothing recorded: nothing is looked up or touched.
+        recover_aside(&job(&src, &dst, None), &src.stat("/src/big.bin").await.unwrap()).await.unwrap();
+        assert!(dst.exists("/dst/.big.bin.t1.kelpie-old"));
+        // A later replace is not blocked by the stale name.
         assert!(matches!(copy_file(&job(&src, &dst, Some((3, 5))), &Control::default()).await.unwrap(), Copied::Done { .. }));
         assert_eq!(dst.read("/dst/big.bin").unwrap(), data(1000));
     }
@@ -502,6 +592,88 @@ mod tests {
         assert_eq!(dst.lstat("/dst/.big.bin.t1.kelpie-part").await.unwrap().mode, Some(0o600));
         copy_file(&job(&src, &dst, None), &Control::default()).await.unwrap();
         assert_eq!(dst.stat("/dst/big.bin").await.unwrap().mode, Some(0o755));
+    }
+
+    #[tokio::test]
+    async fn the_final_mode_is_the_sources_else_the_replaced_files_else_a_new_files() {
+        // This computer on Windows has no modes.
+        let src = MemFs::new().without_modes();
+        let dst = MemFs::new();
+        src.put("/src/big.bin", &data(10), 1);
+        dst.mkdir_all("/dst");
+        copy_file(&job(&src, &dst, None), &Control::default()).await.unwrap();
+        assert_eq!(dst.mode("/dst/big.bin"), Some(0o644), "a new file gets what new files get there, never the partial's 0600");
+        dst.chmod("/dst/big.bin", 0o755).await.unwrap();
+        let m = dst.lstat("/dst/big.bin").await.unwrap();
+        copy_file(&job(&src, &dst, Some((m.size, m.mtime))), &Control::default()).await.unwrap();
+        assert_eq!(dst.mode("/dst/big.bin"), Some(0o755), "a replaced file keeps its mode");
+        // Without "keep times and permissions" the source's mode is not carried.
+        let unix = MemFs::new();
+        unix.put("/src/big.bin", &data(10), 1);
+        unix.chmod("/src/big.bin", 0o700).await.unwrap();
+        dst.remove_file("/dst/big.bin").await.unwrap();
+        let mut j = job(&unix, &dst, None);
+        j.preserve = false;
+        copy_file(&j, &Control::default()).await.unwrap();
+        assert_eq!(dst.mode("/dst/big.bin"), Some(0o644));
+    }
+
+    #[tokio::test]
+    async fn only_bytes_the_target_holds_count_as_a_retrys_progress() {
+        let (src, dst) = (MemFs::new(), MemFs::new());
+        let all = data(800_000);
+        src.put("/src/big.bin", &all, 1);
+        dst.mkdir_all("/dst");
+        src.fail_reads_after(Some(300_000));
+        let ctl = Control::default();
+        assert!(copy_file(&job(&src, &dst, None), &ctl).await.is_err());
+        assert!(ctl.bytes.load(Ordering::Relaxed) > 0);
+        assert_eq!(ctl.confirmed.load(Ordering::Relaxed), 0, "handed to the target is not held by it");
+        src.fail_reads_after(None);
+        let ctl = Control::default();
+        copy_file(&job(&src, &dst, None), &ctl).await.unwrap();
+        assert_eq!(ctl.confirmed.load(Ordering::Relaxed), 800_000, "resumed from, then written and closed");
+    }
+
+    #[tokio::test]
+    async fn room_is_needed_only_for_what_is_left_to_write() {
+        let (src, dst) = (MemFs::new(), MemFs::new());
+        let all = data(500_000);
+        src.put("/src/big.bin", &all, 1);
+        dst.put("/dst/.big.bin.t1.kelpie-part", &all[..300_000], 1);
+        let ctl = Control::default();
+        ctl.free.store(250_000, Ordering::Relaxed);
+        assert!(matches!(copy_file(&job(&src, &dst, None), &ctl).await.unwrap(), Copied::Done { resumed_at: 300_000, .. }));
+        dst.remove_file("/dst/big.bin").await.unwrap();
+        let ctl = Control::default();
+        ctl.free.store(250_000, Ordering::Relaxed);
+        assert_eq!(copy_file(&job(&src, &dst, None), &ctl).await.unwrap(), Copied::NoRoom { free: 250_000 });
+        assert!(!dst.exists("/dst/big.bin"));
+        assert!(Control::default().reserve(u64::MAX / 2), "unknown free space never refuses");
+    }
+
+    #[tokio::test]
+    async fn a_halt_stops_a_file_still_copying_and_keeps_every_byte_of_its_partial() {
+        let (src, dst) = (MemFs::new(), MemFs::new());
+        src.put("/src/big.bin", &data(800_000), 1);
+        dst.mkdir_all("/dst");
+        // Its reads stop answering after 300 000 bytes while another file of the job loses the connection.
+        src.stall_reads_of("/src/big.bin", Some(300_000));
+        let ctl = Control::default();
+        let partial = "/dst/.big.bin.t1.kelpie-part";
+        let halter = async {
+            for _ in 0..400 {
+                if dst.read(partial).map_or(0, |b| b.len()) >= 300_000 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            ctl.halted.store(true, Ordering::Relaxed);
+            ctl.wake.notify_waiters();
+        };
+        let (out, ()) = tokio::join!(copy_file(&job(&src, &dst, None), &ctl), halter);
+        assert_eq!(out.unwrap(), Copied::Stopped(Stop::Pause), "stopped as on a pause, never \"the source changed\"");
+        assert_eq!(dst.read(partial).unwrap(), data(800_000)[..300_000], "kept whole for the resume");
     }
 
     #[tokio::test]

@@ -8,7 +8,8 @@ its own `kelpied serve` with them: the real daemon and the real ~/.ssh are never
 through `net_fault_proxy.py`. Only the processes this script starts are stopped, by their own handles.
 
 Covers: realpath / mkdir / list / rename / stat / chmod on a host, local.list, an unknown host key (ssh's own text),
-upload and download with equal SHA-256, conflict ask -> keep both, apply-to-all (one transfer only), cancel leaving no
+upload and download with equal SHA-256, the final mode of a new and of a replaced file, conflict ask -> keep both,
+apply-to-all (one transfer only), cancel leaving no
 partial, pause and resume from the partial, the host going away mid-transfer and coming back (resumes by itself), a
 daemon restart (the job shows interrupted, then resumes), Unicode names, 2 000 small files with a folder link (not
 followed by the copy, the link alone removed by a delete), delete and recursive chmod jobs, and no ssh left running.
@@ -224,6 +225,20 @@ try:
     jid = c.call("xfer.start", {"src": {}, "dst": {"dest": "e2e-host"}, "items": [big], "dst_dir": posix(up_dir), "conflict": "ask"})["id"]
     j = wait_job(c, jid, finished)
     check(j["state"] == "done" and sha(os.path.join(up_dir, "big.bin")) == sha(big), "upload: done, SHA-256 equal")
+    # The final mode, never the partial's 0600 (the test server keeps POSIX modes with a umask of 022): a new file gets
+    # what the host gives new files (this computer has no modes on Windows), a replaced one keeps its own.
+    host_mode = lambda p: c.call("sftp.stat", {"dest": "e2e-host", "path": posix(p)})["stat"]["mode"]
+    up_mode = host_mode(os.path.join(up_dir, "big.bin"))
+    check(up_mode == 0o644, f"an upload gets the host's mode for a new file ({oct(up_mode or 0)})")
+    small = os.path.join(scratch, "run.sh")
+    open(small, "w").write("echo hi\n")
+    jid = c.call("xfer.start", {"src": {}, "dst": {"dest": "e2e-host"}, "items": [small], "dst_dir": posix(up_dir), "preserve": False})["id"]
+    wait_job(c, jid, finished)
+    c.call("sftp.chmod", {"dest": "e2e-host", "paths": [posix(os.path.join(up_dir, "run.sh"))], "mode": 0o755})
+    jid = c.call("xfer.start", {"src": {}, "dst": {"dest": "e2e-host"}, "items": [small], "dst_dir": posix(up_dir), "conflict": "replace", "preserve": False})["id"]
+    j = wait_job(c, jid, finished)
+    run_mode = host_mode(os.path.join(up_dir, "run.sh"))
+    check(j["state"] == "done" and run_mode == 0o755, f"a replaced file keeps its mode ({oct(run_mode or 0)})")
     down_dir = os.path.join(scratch, "down")
     os.makedirs(down_dir)
     jid = c.call("xfer.start", {"src": {"dest": "e2e-host"}, "dst": {}, "items": [posix(os.path.join(up_dir, "big.bin"))], "dst_dir": down_dir})["id"]
@@ -300,8 +315,9 @@ try:
     wait_job(c, jid, lambda j: j["totals"]["done_bytes"] > (4 << 20))
     c.call("xfer.control", {"id": jid, "action": "pause"})
     j = wait_job(c, jid, lambda j: j["state"] == "paused")
-    partial = os.path.join(slow_dir, ".big.bin.kelpie-part")
-    kept = os.path.getsize(partial) if os.path.exists(partial) else 0
+    # The job's own partial: `.big.bin.<job tag>.kelpie-part`.
+    parts = [n for n in os.listdir(slow_dir) if n.startswith(".big.bin.") and n.endswith(".kelpie-part")]
+    kept = os.path.getsize(os.path.join(slow_dir, parts[0])) if parts else 0
     check(kept > 0, f"pause keeps the partial ({kept} bytes)")
     c.call("xfer.control", {"id": jid, "action": "resume"})
     j = wait_job(c, jid, finished, timeout=300)

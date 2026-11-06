@@ -63,8 +63,8 @@ describe("host to host", () => {
 });
 
 describe("updates wait for transfers", () => {
-  it("counts only transfers that run or wait to run", () => {
-    expect(activeCount({ a: job({ id: "a" }), b: job({ id: "b", state: "paused" }), c: job({ id: "c", state: "interrupted" }), d: job({ id: "d", state: "waiting" }) })).toBe(2);
+  it("counts only transfers that copy or are about to, never one waiting only on an answer", () => {
+    expect(activeCount({ a: job({ id: "a" }), b: job({ id: "b", state: "paused" }), c: job({ id: "c", state: "interrupted" }), d: job({ id: "d", state: "waiting" }), e: job({ id: "e", state: "queued" }) })).toBe(2);
   });
   it("holds only an update that stops the daemon, and only while transfers run", () => {
     expect(updateMayInstall({ daemonStops: false, transfers: 3 })).toBe(true);

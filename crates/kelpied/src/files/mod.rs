@@ -166,10 +166,10 @@ pub trait RemoteFs: Send + Sync {
     async fn chmod(&self, path: &str, mode: u32) -> FsResult<()>;
     async fn set_times(&self, path: &str, atime: u64, mtime: u64) -> FsResult<()>;
     async fn open_read(&self, path: &str, offset: u64) -> FsResult<Box<dyn AsyncRead + Send + Unpin>>;
-    /// Opens for writing at `offset`; anything past `offset` is cut off (a resume continues from what is kept).
-    /// With `create` and offset 0 the file is made new: whatever has that name (a stale partial, a link someone
-    /// planted) is removed first and the file is created exclusively, readable by its owner only (0600) until
-    /// the copy sets the final mode.
+    /// Opens for writing at `offset`; anything past `offset` is cut off (a resume continues from what is kept, and
+    /// is never created: the file must be there). With `create` and offset 0 the file is made new, exclusively and
+    /// readable by its owner only (0600) until the copy sets the final mode; only when that create fails is whatever
+    /// has the name (a stale partial, a link someone planted) removed and the create tried again.
     async fn open_write(&self, path: &str, offset: u64, create: bool) -> FsResult<Box<dyn WriteFile>>;
     /// Free bytes on the file system holding `path`, when the end can tell.
     async fn free_space(&self, path: &str) -> FsResult<Option<u64>>;
@@ -184,6 +184,15 @@ pub trait RemoteFs: Send + Sync {
     }
     /// Names must be mapped to what Windows can hold ([`names::windows_safe`]).
     fn windows_names(&self) -> bool {
+        false
+    }
+    /// The mode a new file gets here when the copy keeps none (the host's default where it showed it, else 0644).
+    fn new_file_mode(&self) -> u32 {
+        0o644
+    }
+    /// `lstat` never follows a link here, so a folder it reports is a folder of its own (this computer). On a host
+    /// the walk also asks for the real path: some servers' `lstat` follows links.
+    fn lstat_is_exact(&self) -> bool {
         false
     }
 }

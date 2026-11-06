@@ -5,11 +5,11 @@ import { MemoryMeter, UsageMeters } from "./usage-meter";
 import { InboxPanel } from "./inbox";
 import { setCovering } from "../lib/overlays";
 import { activeRuns } from "../lib/runs";
-import { available, whenIdle } from "../lib/updater";
+import { available, stopsDaemon, whenIdle } from "../lib/updater";
 import { pluginStatus, pluginStatusItems, type PluginInfo, type PluginStatusItem } from "../lib/plugins";
 import { t, msg } from "../lib/i18n";
 import { automationEvents } from "../lib/automation-events";
-import { chipText, closeConflicts, conflictsShown, heldText, initTransfers, isActive, jobList, nextQuestion, openConflicts, reloadTransfers } from "../lib/transfers";
+import { activeCount, chipText, closeConflicts, conflictsShown, heldText, initTransfers, isActive, jobList, nextQuestion, openConflicts, reloadTransfers, updateMayInstall } from "../lib/transfers";
 import { XFER_API } from "../lib/ipc";
 import { hostByAlias } from "../lib/ssh-hosts";
 import { openFiles, openHosts } from "./hosts-page";
@@ -90,8 +90,12 @@ export function StatusBar() {
       </Show>
       <Show when={available()}>
         {(u) => (
-          <span class="item clickable update-chip" title={t("A newer Kelpie is ready to install")} onClick={() => store.setOverlay("update")}>
-            <Icon name="down" size={13} /> {whenIdle() ? t("Update {version} when idle", { version: u().version }) : t("Update {version}", { version: u().version })}
+          <span class="item clickable update-chip" data-update-chip title={t("A newer Kelpie is ready to install")} onClick={() => store.setOverlay("update")}>
+            <Icon name="down" size={13} />{" "}
+            {/* A postponed update that has to stop the session daemon says what it waits for, after the dialog is closed too. */}
+            {whenIdle() && !updateMayInstall({ daemonStops: stopsDaemon(), transfers: activeCount() })
+              ? t("Update {version} after file transfers", { version: u().version })
+              : whenIdle() ? t("Update {version} when idle", { version: u().version }) : t("Update {version}", { version: u().version })}
           </span>
         )}
       </Show>
@@ -113,7 +117,7 @@ export function StatusBar() {
       </Show>
       {/* A daemon switch (after an update) waits for running file transfers: said here until they finish. */}
       <Show when={heldText(store.handOverHeldFor())}>
-        {(text) => <span class="item" data-handover-held title={t("The new session daemon takes over once they have finished; Switch now in the notice stops them (they resume afterwards)")}>{text()}</span>}
+        {(text) => <span class="item clickable" data-handover-held title={t("The new session daemon takes over once they have finished. Click to switch now: they stop and can be resumed afterwards.")} onClick={() => void store.switchDaemon()}>{text()}</span>}
       </Show>
       {/* File transfers outlive the Hosts page: one chip while they run, which opens their queue. */}
       <Show when={chipText()}>

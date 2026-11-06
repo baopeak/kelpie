@@ -157,8 +157,9 @@ export function chipText(all: Jobs = jobs()): string | null {
 
 // ---- updates wait for transfers ----
 
-/** Transfers running or waiting to run (paused and interrupted ones do not hold an update). */
-export const activeCount = (all: Jobs = jobs()): number => Object.values(all).filter(isActive).length;
+/** Transfers copying or about to (as the daemon counts them): one waiting only on an answer, a paused and an interrupted
+ *  one hold no update. */
+export const activeCount = (all: Jobs = jobs()): number => Object.values(all).filter((j) => isActive(j) && j.state !== "waiting").length;
 
 /** Whether an update may install now: one that stops the session daemon waits until no transfer runs. */
 export function updateMayInstall(o: { daemonStops: boolean; transfers: number }): boolean {

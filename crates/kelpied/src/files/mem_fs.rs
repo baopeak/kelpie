@@ -44,6 +44,18 @@ struct State {
     bump_on_read: std::collections::HashSet<String>,
     /// `lstat` of these bumps their mtime first (a target that keeps changing).
     bump_on_lstat: std::collections::HashSet<String>,
+    /// Readers of these paths fail as a lost connection after so many bytes (one file of several).
+    fail_reads_of: std::collections::HashMap<String, u64>,
+    /// Readers of these paths stop answering after so many bytes (a stalled read).
+    stall_reads_of: std::collections::HashMap<String, u64>,
+    /// Writes that would grow a file past this many bytes are refused, as a full disk refuses them.
+    fail_writes_after: Option<u64>,
+    /// No permission bits (this computer on Windows).
+    no_modes: bool,
+    /// Every `open_read`: path and offset.
+    opened: Vec<(String, u64)>,
+    /// `realpath` fails (a server or drive that cannot say).
+    realpath_fails: bool,
     now: u64,
 }
 
@@ -64,7 +76,25 @@ impl Default for MemFs {
 
 impl MemFs {
     pub fn new() -> Self {
-        let fs = MemFs(Arc::new(Mutex::new(State { nodes: BTreeMap::new(), posix_rename: true, free: None, fail_reads_after: None, fail_lists_after: None, listing_follows_links: false, lstat_follows: false, fail_rename_to: None, bump_on_read: Default::default(), bump_on_lstat: Default::default(), now: 1_700_000_000 })));
+        let fs = MemFs(Arc::new(Mutex::new(State {
+            nodes: BTreeMap::new(),
+            posix_rename: true,
+            free: None,
+            fail_reads_after: None,
+            fail_lists_after: None,
+            listing_follows_links: false,
+            lstat_follows: false,
+            fail_rename_to: None,
+            bump_on_read: Default::default(),
+            bump_on_lstat: Default::default(),
+            fail_reads_of: Default::default(),
+            stall_reads_of: Default::default(),
+            fail_writes_after: None,
+            no_modes: false,
+            opened: Vec::new(),
+            realpath_fails: false,
+            now: 1_700_000_000,
+        })));
         fs.0.lock().nodes.insert("/".into(), Node { body: Body::Dir, mtime: 0, mode: 0o755 });
         fs.mkdir_all(HOME);
         fs
@@ -110,6 +140,51 @@ impl MemFs {
 
     pub fn bump_mtime_on_lstat(&self, path: &str) {
         self.0.lock().bump_on_lstat.insert(path.into());
+    }
+
+    /// Readers of `path` opened from now on fail as a lost connection after `n` bytes; `None` heals.
+    pub fn fail_reads_of(&self, path: &str, n: Option<u64>) {
+        let mut s = self.0.lock();
+        match n {
+            Some(n) => s.fail_reads_of.insert(path.into(), n),
+            None => s.fail_reads_of.remove(path),
+        };
+    }
+
+    /// Readers of `path` opened from now on stop answering after `n` bytes; `None` heals.
+    pub fn stall_reads_of(&self, path: &str, n: Option<u64>) {
+        let mut s = self.0.lock();
+        match n {
+            Some(n) => s.stall_reads_of.insert(path.into(), n),
+            None => s.stall_reads_of.remove(path),
+        };
+    }
+
+    /// Writes that would make a file larger than `n` bytes fail as on a full disk; `None` heals.
+    pub fn fail_writes_after(&self, n: Option<u64>) {
+        self.0.lock().fail_writes_after = n;
+    }
+
+    /// Reports no permission bits, as this computer does on Windows.
+    pub fn without_modes(self) -> Self {
+        self.0.lock().no_modes = true;
+        self
+    }
+
+    /// `realpath` of anything but the login folder fails.
+    pub fn without_realpath(self) -> Self {
+        self.0.lock().realpath_fails = true;
+        self
+    }
+
+    /// The offsets `path` was opened for reading at, in order.
+    pub fn opened_at(&self, path: &str) -> Vec<u64> {
+        self.0.lock().opened.iter().filter(|(p, _)| p == path).map(|(_, o)| *o).collect()
+    }
+
+    /// The mode a path has (`None`: missing).
+    pub fn mode(&self, path: &str) -> Option<u32> {
+        self.0.lock().nodes.get(path).map(|n| n.mode)
     }
 
     pub fn mkdir_all(&self, path: &str) {
@@ -190,6 +265,14 @@ impl MemFs {
         };
         Meta { kind, size, mtime: n.mtime, mode: Some(n.mode), uid: Some(1000), gid: Some(1000) }
     }
+
+    /// What a stat reports: without modes where the end has none.
+    fn shown(s: &State, mut m: Meta) -> Meta {
+        if s.no_modes {
+            m.mode = None;
+        }
+        m
+    }
 }
 
 #[async_trait]
@@ -220,11 +303,14 @@ impl RemoteFs for MemFs {
                         Body::Link(t) => Some(t.clone()),
                         _ => None,
                     },
-                    meta: match &n.body {
-                        // A server that reports what a link points to (its listing uses stat).
-                        Body::Link(_) if s.listing_follows_links => MemFs::resolve(&s, p).ok().and_then(|r| s.nodes.get(&r)).map_or_else(|| MemFs::meta(n), MemFs::meta),
-                        _ => MemFs::meta(n),
-                    },
+                    meta: MemFs::shown(
+                        &s,
+                        match &n.body {
+                            // A server that reports what a link points to (its listing uses stat).
+                            Body::Link(_) if s.listing_follows_links => MemFs::resolve(&s, p).ok().and_then(|r| s.nodes.get(&r)).map_or_else(|| MemFs::meta(n), MemFs::meta),
+                            _ => MemFs::meta(n),
+                        },
+                    ),
                     name,
                     owner: Some("test".into()),
                     group: Some("test".into()),
@@ -236,7 +322,7 @@ impl RemoteFs for MemFs {
     async fn stat(&self, path: &str) -> FsResult<Meta> {
         let s = self.0.lock();
         let p = MemFs::resolve(&s, path)?;
-        Ok(MemFs::meta(&s.nodes[&p]))
+        Ok(MemFs::shown(&s, MemFs::meta(&s.nodes[&p])))
     }
 
     async fn lstat(&self, path: &str) -> FsResult<Meta> {
@@ -248,10 +334,10 @@ impl RemoteFs for MemFs {
         }
         if s.lstat_follows {
             let p = MemFs::resolve(&s, path)?;
-            return Ok(MemFs::meta(&s.nodes[&p]));
+            return Ok(MemFs::shown(&s, MemFs::meta(&s.nodes[&p])));
         }
         let p = MemFs::resolve_parent(&s, path)?;
-        s.nodes.get(&p).map(MemFs::meta).ok_or_else(|| not_found(path))
+        s.nodes.get(&p).map(|n| MemFs::shown(&s, MemFs::meta(n))).ok_or_else(|| not_found(path))
     }
 
     async fn readlink(&self, path: &str) -> FsResult<String> {
@@ -267,7 +353,11 @@ impl RemoteFs for MemFs {
         if matches!(path, "" | "." | "~") {
             return Ok(HOME.into());
         }
-        MemFs::resolve(&self.0.lock(), path)
+        let s = self.0.lock();
+        if s.realpath_fails {
+            return Err(FsError::new(ErrKind::Other, "the host cannot say (test)"));
+        }
+        MemFs::resolve(&s, path)
     }
 
     async fn mkdir(&self, path: &str) -> FsResult<()> {
@@ -285,10 +375,6 @@ impl RemoteFs for MemFs {
 
     async fn rename(&self, from: &str, to: &str, overwrite: bool) -> FsResult<()> {
         let mut s = self.0.lock();
-        if s.fail_rename_to.as_deref() == Some(to) {
-            s.fail_rename_to = None;
-            return Err(FsError::new(ErrKind::Other, "rename failed (test)"));
-        }
         if !s.nodes.contains_key(from) {
             return Err(not_found(from));
         }
@@ -299,6 +385,11 @@ impl RemoteFs for MemFs {
             if !s.posix_rename {
                 return Err(FsError::new(ErrKind::Unsupported, "the host cannot replace a file in one step"));
             }
+        }
+        // After the checks a real host makes first: the rename that would have happened fails.
+        if s.fail_rename_to.as_deref() == Some(to) {
+            s.fail_rename_to = None;
+            return Err(FsError::new(ErrKind::Other, "rename failed (test)"));
         }
         let moved: Vec<String> = s.nodes.keys().filter(|k| k.as_str() == from || k.starts_with(&format!("{from}/"))).cloned().collect();
         for k in moved {
@@ -353,10 +444,15 @@ impl RemoteFs for MemFs {
                 n.mtime += 1;
             }
         }
+        s.opened.push((path.to_string(), offset));
         let p = MemFs::resolve(&s, path)?;
         let Body::File(b) = &s.nodes[&p].body else { return Err(FsError::invalid("not a file")) };
         let start = (offset as usize).min(b.len());
-        Ok(Box::new(FailAfter { data: b[start..].to_vec(), pos: 0, fail_after: s.fail_reads_after }))
+        // Limits count from the start of the file, as a connection that drops at one point of it.
+        let from_here = |n: u64| n.saturating_sub(start as u64);
+        let fail_after = s.fail_reads_of.get(path).copied().map(from_here).or(s.fail_reads_after);
+        let stall_after = s.stall_reads_of.get(path).copied().map(from_here);
+        Ok(Box::new(FailAfter { data: b[start..].to_vec(), pos: 0, fail_after, stall_after }))
     }
 
     async fn open_write(&self, path: &str, offset: u64, create: bool) -> FsResult<Box<dyn WriteFile>> {
@@ -379,9 +475,7 @@ impl RemoteFs for MemFs {
                 *mtime = now;
             }
             Some(_) => return Err(FsError::invalid("not a file")),
-            None if create => {
-                s.nodes.insert(path.into(), Node { body: Body::File(Vec::new()), mtime: now, mode: 0o644 });
-            }
+            // A resume never creates the file.
             None => return Err(not_found(path)),
         }
         Ok(Box::new(MemWrite { fs: self.clone(), path: path.into(), pos: offset as usize }))
@@ -390,18 +484,29 @@ impl RemoteFs for MemFs {
     async fn free_space(&self, _path: &str) -> FsResult<Option<u64>> {
         Ok(self.0.lock().free)
     }
+
+    fn lstat_is_exact(&self) -> bool {
+        !self.0.lock().lstat_follows
+    }
 }
 
 struct FailAfter {
     data: Vec<u8>,
     pos: usize,
     fail_after: Option<u64>,
+    stall_after: Option<u64>,
 }
 
 impl AsyncRead for FailAfter {
     fn poll_read(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let me = &mut *self;
         let mut end = me.data.len();
+        if let Some(limit) = me.stall_after {
+            if me.pos as u64 >= limit {
+                return Poll::Pending; // never woken: only a pause, cancel or halt ends it
+            }
+            end = end.min(limit as usize);
+        }
         if let Some(limit) = me.fail_after {
             if me.pos as u64 >= limit {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, "connection lost")));
@@ -425,6 +530,10 @@ impl AsyncWrite for MemWrite {
     fn poll_write(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
         let me = &mut *self;
         let mut s = me.fs.0.lock();
+        if s.fail_writes_after.is_some_and(|l| (me.pos + data.len()) as u64 > l) {
+            // As russh-sftp reports a status the host sent for a write: its text only.
+            return Poll::Ready(Err(io::Error::other("No space left on device")));
+        }
         let Some(Node { body: Body::File(b), .. }) = s.nodes.get_mut(&me.path) else {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::NotFound, "the file went away")));
         };

@@ -198,16 +198,20 @@ impl RemoteFs for LocalFs {
     async fn open_write(&self, path: &str, offset: u64, create: bool) -> FsResult<Box<dyn WriteFile>> {
         let mut opts = tokio::fs::OpenOptions::new();
         opts.write(true);
-        if create && offset == 0 {
-            match tokio::fs::remove_file(path).await {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                _ => {}
-            }
+        let fresh = create && offset == 0;
+        if fresh {
             opts.create_new(true);
             #[cfg(unix)]
             opts.mode(0o600);
         }
-        let mut f = opts.open(path).await?;
+        let mut f = match opts.open(path).await {
+            // A stale partial or a planted link has the name: it goes, and the create is tried once more.
+            Err(e) if fresh && e.kind() == std::io::ErrorKind::AlreadyExists => {
+                tokio::fs::remove_file(path).await?;
+                opts.open(path).await?
+            }
+            r => r?,
+        };
         if offset > 0 {
             f.set_len(offset).await?;
             f.seek(std::io::SeekFrom::Start(offset)).await?;
@@ -230,6 +234,10 @@ impl RemoteFs for LocalFs {
 
     fn windows_names(&self) -> bool {
         cfg!(windows)
+    }
+
+    fn lstat_is_exact(&self) -> bool {
+        true
     }
 }
 
@@ -320,6 +328,13 @@ mod tests {
         w.write_all(b"def").await.unwrap();
         w.finish(false).await.unwrap();
         assert_eq!(std::fs::read(d.join("b.part")).unwrap(), b"abcdef");
+        // A stale file with the name is replaced by the fresh one; a resume never creates what is gone.
+        std::fs::write(d.join("stale.part"), b"old bytes").unwrap();
+        let mut w = fs.open_write(&p("stale.part"), 0, true).await.unwrap();
+        w.write_all(b"new").await.unwrap();
+        w.finish(false).await.unwrap();
+        assert_eq!(std::fs::read(d.join("stale.part")).unwrap(), b"new");
+        assert_eq!(fs.open_write(&p("gone.part"), 3, true).await.err().unwrap().kind, ErrKind::NotFound);
 
         let mut r = fs.open_read(&p("b.part"), 2).await.unwrap();
         let mut s = String::new();

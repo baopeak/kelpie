@@ -35,6 +35,16 @@ pub struct Conn {
     child: Mutex<Child>,
     stderr: Arc<Mutex<Vec<u8>>>,
     last_used: Mutex<Instant>,
+    /// A Windows OpenSSH server (its paths start with a drive, `/C:/…`): names that differ only in case are one file.
+    pub windows: bool,
+    /// The mode the host gives a new file (`0666` less its umask), learned from the first file this session made.
+    pub new_mode: Mutex<Option<u32>>,
+}
+
+/// A Windows server's path: `/C:` or `/C:/…`.
+pub fn windows_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' && (b.len() == 3 || b[3] == b'/')
 }
 
 /// The child's stdout and stdin as the one stream russh-sftp speaks over.
@@ -113,7 +123,11 @@ impl Conn {
         let cfg = Config { max_concurrent_reads: IN_FLIGHT, max_concurrent_writes: IN_FLIGHT, request_timeout_secs: 30, ..Default::default() };
         let started = tokio::time::timeout(Duration::from_secs(40), SftpSession::new_with_config(Stdio2 { r, w }, cfg)).await;
         match started {
-            Ok(Ok(sftp)) => Ok(Arc::new(Conn { sftp, dest: dest.to_string(), child: Mutex::new(child), stderr, last_used: Mutex::new(Instant::now()) })),
+            Ok(Ok(sftp)) => {
+                // One round trip per session: where it starts says whether the host is a Windows server.
+                let windows = sftp.canonicalize(".").await.is_ok_and(|p| windows_path(&p));
+                Ok(Arc::new(Conn { sftp, dest: dest.to_string(), child: Mutex::new(child), stderr, last_used: Mutex::new(Instant::now()), windows, new_mode: Mutex::new(None) }))
+            }
             failed => {
                 // ssh's own words (auth, host key) arrive just before it exits.
                 let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
@@ -154,8 +168,9 @@ impl Conn {
         classify(e, || if self.alive() { None } else { Some(self.stderr_text()) }, &self.dest)
     }
 
-    /// An I/O error from a file on this connection: a status inside it is the host's answer, anything else a lost
-    /// connection.
+    /// An I/O error from a file on this connection. The crate reports a status the host sent for a read or a write as
+    /// a plain text error (`io::Error::other(message)`): while ssh runs, that is the host's answer (a full disk, a
+    /// quota, a read error), not a lost connection.
     pub fn io_error(&self, e: io::Error) -> FsError {
         io_classify(e, || if self.alive() { None } else { Some(self.stderr_text()) }, &self.dest)
     }
@@ -174,14 +189,29 @@ pub fn classify(e: russh_sftp::client::error::Error, ended: impl Fn() -> Option<
 /// See [`Conn::io_error`].
 pub fn io_classify(e: io::Error, ended: impl Fn() -> Option<String>, dest: &str) -> FsError {
     if let Some(inner) = e.get_ref().and_then(|i| i.downcast_ref::<russh_sftp::client::error::Error>()) {
-        if let russh_sftp::client::error::Error::Status(s) = inner {
-            return super::sftp_status(status_number(&s.status_code), &s.error_message);
-        }
+        return classify(inner.clone(), ended, dest);
     }
     match e.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => FsError::from(e),
+        // A status's text (`io::Error::other(status.error_message)`), or a reply that made no sense.
+        io::ErrorKind::Other if e.get_ref().is_some() => match ended() {
+            Some(said) => lost_text(Some(said), dest),
+            None => host_said(&e.to_string()),
+        },
         _ => lost_text(ended(), dest),
     }
+}
+
+/// A status the crate passed on as its text only: the code is guessed back from OpenSSH's words for it.
+fn host_said(text: &str) -> FsError {
+    let code = match text.trim().to_ascii_lowercase().as_str() {
+        "no such file" => 2,
+        "permission denied" => 3,
+        "bad message" => 5,
+        "operation unsupported" => 8,
+        _ => 4,
+    };
+    super::sftp_status(code, text)
 }
 
 /// A lost connection, in the words `remote::exec` uses (so the app's host-key check still recognises it).
@@ -306,10 +336,33 @@ mod tests {
             assert_eq!(classify(e, alive, "prod").kind, ErrKind::Connection);
         }
         assert_eq!(classify(E::IO("x".into()), || Some("Connection reset by peer".into()), "prod").message, "ssh prod: Connection reset by peer");
-        // Inside an I/O error (what a file's reads and writes return).
-        assert_eq!(io_classify(io::Error::other(status()), alive, "prod").kind, ErrKind::Denied);
-        assert_eq!(io_classify(io::Error::other(E::UnexpectedBehavior("sender dropped".into())), alive, "prod").kind, ErrKind::Connection);
+        // Inside an I/O error, in the shapes the crate builds: `Err(Error)` turned into an `io::Error` (a dropped
+        // session), and a status the host sent for a read or a write, which keeps only its text.
+        assert_eq!(io_classify(io::Error::from(status()), alive, "prod").kind, ErrKind::Denied);
+        assert_eq!(io_classify(io::Error::from(E::UnexpectedBehavior("RecvError".into())), alive, "prod").kind, ErrKind::Connection);
+        assert_eq!(io_classify(io::Error::from(E::Timeout), alive, "prod").kind, ErrKind::Connection);
         assert_eq!(io_classify(io::Error::new(io::ErrorKind::BrokenPipe, "pipe"), alive, "prod").kind, ErrKind::Connection);
+    }
+
+    #[test]
+    fn a_full_disk_during_a_write_is_the_hosts_answer_not_a_lost_connection() {
+        let alive = || None;
+        // What russh-sftp's `File` returns for a write the host refused (`check_write_result`).
+        let full = io_classify(io::Error::other("No space left on device".to_string()), alive, "prod");
+        assert_ne!(full.kind, ErrKind::Connection);
+        assert!(full.message.contains("No space left on device"), "{full:?}");
+        // OpenSSH's protocol 3 says only "Failure" for it.
+        assert_eq!(io_classify(io::Error::other("Failure".to_string()), alive, "prod").message, "the host refused the operation");
+        assert_eq!(io_classify(io::Error::other("Permission denied".to_string()), alive, "prod").kind, ErrKind::Denied);
+        // The same text once ssh has ended is the lost connection, in ssh's words.
+        let gone = io_classify(io::Error::other("unexpected response packet".to_string()), || Some("Connection reset by peer".into()), "prod");
+        assert_eq!((gone.kind, gone.message.as_str()), (ErrKind::Connection, "ssh prod: Connection reset by peer"));
+    }
+
+    #[test]
+    fn windows_server_paths() {
+        assert!(windows_path("/C:/Users/me") && windows_path("/d:") && windows_path("/C:/"));
+        assert!(!windows_path("/home/me") && !windows_path("/C") && !windows_path("/CC:/x") && !windows_path("/C:x"));
     }
 
     #[test]

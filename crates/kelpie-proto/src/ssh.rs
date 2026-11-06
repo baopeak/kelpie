@@ -41,20 +41,41 @@ pub fn askpass_env(exe: &Path, host_id: &str) -> Vec<(String, String)> {
 
 /// The id of the saved host named `dest` (an alias, or `user@alias`), read from `hosts.json`. Never writes; a
 /// missing or unreadable file gives `None` (the connection then runs without a saved secret). `user@alias` with a
-/// user other than the saved host's gives `None`: a saved password is never offered for another account.
+/// user other than the saved host's gives `None`: a saved password is never offered for another account. A saved
+/// host without a user logs in as whoever ssh's config says: `user@alias` gets its password only when `ssh -G`
+/// reports that same user for the alias.
 pub fn host_id_for_alias(dest: &str) -> Option<String> {
     let bytes = std::fs::read(hosts_path()).ok()?;
-    host_id_in(&serde_json::from_slice(&bytes).ok()?, dest)
+    host_id_in(&serde_json::from_slice(&bytes).ok()?, dest, config_user)
 }
 
-fn host_id_in(hosts: &serde_json::Value, dest: &str) -> Option<String> {
+/// The user ssh logs in as for `alias` with Kelpie's config (`ssh -G`, which reads the config and connects nowhere).
+/// Asked only for `user@alias` against a saved host without a user.
+fn config_user(alias: &str) -> Option<String> {
+    if !valid_dest(alias) {
+        return None;
+    }
+    let mut cmd = std::process::Command::new(program("ssh"));
+    cmd.arg("-F").arg(config_path()).arg("-G").arg(alias).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.strip_prefix("user ").map(|u| u.trim().to_string()))
+}
+
+fn host_id_in(hosts: &serde_json::Value, dest: &str, config_user: impl FnOnce(&str) -> Option<String>) -> Option<String> {
     let (user, alias) = match dest.rsplit_once('@') {
         Some((u, a)) => (Some(u), a),
         None => (None, dest),
     };
     let h = hosts.get("hosts")?.as_array()?.iter().find(|h| h.get("alias").and_then(|a| a.as_str()) == Some(alias))?;
     if let Some(u) = user {
-        if h.get("user").and_then(|v| v.as_str()).unwrap_or("") != u {
+        let saved = h.get("user").and_then(|v| v.as_str()).unwrap_or("");
+        let same = if saved.is_empty() { config_user(alias).as_deref() == Some(u) } else { saved == u };
+        if !same {
             return None;
         }
     }
@@ -94,12 +115,17 @@ mod tests {
     #[test]
     fn host_ids_by_alias() {
         let hosts = serde_json::json!({"hosts": [{"id": "a", "alias": "prod", "user": "deploy"}, {"id": "b", "alias": "dev"}]});
-        assert_eq!(host_id_in(&hosts, "dev").as_deref(), Some("b"));
-        assert_eq!(host_id_in(&hosts, "other"), None);
-        assert_eq!(host_id_in(&hosts, "deploy@prod").as_deref(), Some("a"), "the saved user");
-        assert_eq!(host_id_in(&hosts, "root@prod"), None, "another account never gets the saved password");
-        assert_eq!(host_id_in(&hosts, "someone@dev"), None, "nor does a user the host does not name");
-        assert_eq!(host_id_in(&serde_json::json!({}), "dev"), None);
+        let none = |_: &str| -> Option<String> { None };
+        let me = |alias: &str| (alias == "dev").then(|| "me".to_string());
+        assert_eq!(host_id_in(&hosts, "dev", none).as_deref(), Some("b"));
+        assert_eq!(host_id_in(&hosts, "other", none), None);
+        assert_eq!(host_id_in(&hosts, "deploy@prod", none).as_deref(), Some("a"), "the saved user");
+        assert_eq!(host_id_in(&hosts, "root@prod", me), None, "another account never gets the saved password");
+        // A saved host without a user: the user ssh's config gives the alias decides.
+        assert_eq!(host_id_in(&hosts, "me@dev", me).as_deref(), Some("b"), "the user ssh logs in as anyway");
+        assert_eq!(host_id_in(&hosts, "root@dev", me), None, "another account");
+        assert_eq!(host_id_in(&hosts, "me@dev", none), None, "ssh could not tell: no password");
+        assert_eq!(host_id_in(&serde_json::json!({}), "dev", none), None);
     }
 
     #[cfg(windows)]

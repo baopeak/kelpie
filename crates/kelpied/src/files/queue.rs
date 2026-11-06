@@ -7,12 +7,13 @@
 //! - A dropped connection is retried after 2, 5, 15, 30 and 60 s for up to 5 minutes; files resume from their
 //!   partials, and files already complete (same size and time) are not copied again.
 //! - A daemon restart loads unfinished jobs as interrupted; the person resumes them.
-//! - Conflicts follow the job's policy; `ask` puts a question on the job while its other files go on.
+//! - Conflicts follow the job's policy; `ask` puts a question on the job while its other files go on. A job whose
+//!   every file under way waits for an answer is `waiting`: it holds no update or daemon hand-over.
 //! - Logs name the job, its kind and byte counts, never file contents or names.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -65,7 +66,7 @@ pub enum State {
     Queued,
     Scanning,
     Running,
-    /// Every file left waits for an answer.
+    /// Every file under way waits for an answer (the job holds no update or hand-over meanwhile).
     Waiting,
     Paused,
     /// The connection dropped: `attempt` and `next_s` say when it tries again.
@@ -199,6 +200,13 @@ pub struct Job {
     /// are ever resumed or removed.
     #[serde(default)]
     pub partials: BTreeMap<String, (u64, u64)>,
+    /// Target names this job chose for a source (keep both, a second file for one target, a saved copy): source path
+    /// -> target name. Every attempt, and a resume after a restart, write the same one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub names: BTreeMap<String, String>,
+    /// Where a replace moved the old target aside, by partial path: only that file is ever put back.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub asides: BTreeMap<String, String>,
     pub created: u64,
     pub updated: u64,
     #[serde(default)]
@@ -253,23 +261,39 @@ struct Live {
     halt: AtomicBool,
     answers: Mutex<HashMap<u64, oneshot::Sender<(Choice, bool)>>>,
     next_q: AtomicU64,
-    /// Targets this job has put in place (keys as in `target_key`): a second file for one of them is "keep both".
-    written: Mutex<HashSet<String>>,
     speed: Mutex<Speed>,
-    /// Bytes of the files found, and of those that need no space (skipped, complete, resumed).
-    discovered: AtomicU64,
-    not_needed: AtomicU64,
+    /// Work under way (files, a folder being made), and how much of it waits for an answer.
+    busy: AtomicUsize,
+    asking: AtomicUsize,
     /// Direct copiers an attempt left on the first host (it could not be told to stop): stopped before the next starts.
     stale_pids: Mutex<Vec<u32>>,
+}
+
+/// One piece of a job's work under way, counted while it lives.
+struct Busy<'a>(&'a AtomicUsize);
+
+impl<'a> Busy<'a> {
+    fn new(n: &'a AtomicUsize) -> Self {
+        n.fetch_add(1, Ordering::Relaxed);
+        Busy(n)
+    }
+}
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// A job's copier on the first host, shared by its direct files (one at a time).
 type DirectSession = tokio::sync::Mutex<Option<route::Session>>;
 
 impl Live {
-    /// Ends the attempt: the walk stops, and files waiting on a question are released (their question is dropped).
+    /// Ends the attempt: the walk stops, files waiting on a question are released (their question is dropped), and
+    /// files still copying stop as on a pause, keeping their partials for the next attempt.
     fn halt(&self) {
         self.halt.store(true, Ordering::Relaxed);
+        self.ctl.halted.store(true, Ordering::Relaxed);
         self.answers.lock().clear();
         self.ctl.wake.notify_waiters();
     }
@@ -308,14 +332,28 @@ impl Retry {
     }
 }
 
-/// Whether the files found so far need more room than the target had when the job started.
-pub fn over_space(discovered: u64, not_needed: u64, free: Option<u64>) -> bool {
-    free.is_some_and(|f| discovered.saturating_sub(not_needed) > f)
-}
 
 /// A job's tag in its hidden file names (8 characters of its id): no two jobs share a partial.
 pub fn tag(id: &str) -> String {
     id.chars().filter(char::is_ascii_alphanumeric).take(8).collect()
+}
+
+/// Whether `path` is one of the job's own hidden files (a partial or moved-aside name with the job's tag): a cleanup
+/// removes or puts back nothing else, whatever its journal says.
+fn owns(job_tag: &str, path: &str) -> bool {
+    let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    // A numbered moved-aside name: `.<name>.<tag>.kelpie-old.2`.
+    let file = match file.rsplit_once('.') {
+        Some((head, n)) if head.ends_with(".kelpie-old") && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => file,
+    };
+    super::names::split_hidden(file).is_some_and(|(_, t)| t == job_tag)
+}
+
+/// `C:` as a path's only part: a whole drive.
+fn is_drive(part: &str) -> bool {
+    let b = part.as_bytes();
+    b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
 /// The key a target is claimed by across the queue: its end and its path (lower-cased where the end ignores case).
@@ -380,8 +418,10 @@ fn check_item(end: &End, path: &str) -> Result<()> {
     if parts.iter().any(|p| *p == "." || *p == "..") {
         bail!("{path}: a path with . or .. is not transferred");
     }
+    // A whole drive: this computer's on Windows (`C:\`), or a Windows host's (`/C:`).
+    let drive = parts.len() == 1 && if end.dest.is_some() { is_drive(parts[0]) } else { cfg!(windows) && parts[0].ends_with(':') };
     match parts.last() {
-        Some(last) if super::readable_name(last) && !(end.dest.is_none() && cfg!(windows) && parts.len() == 1 && last.ends_with(':')) => Ok(()),
+        Some(last) if super::readable_name(last) && !drive => Ok(()),
         _ => bail!("{path}: a whole drive or the root folder is not transferred"),
     }
 }
@@ -440,6 +480,11 @@ impl Queue {
         self.jobs.lock().iter().find(|j| j.id == id).cloned()
     }
 
+    /// Reads one thing of a job without copying the job (its maps grow with its files).
+    fn with_job<T>(&self, id: &str, f: impl FnOnce(&Job) -> T) -> Option<T> {
+        self.jobs.lock().iter().find(|j| j.id == id).map(f)
+    }
+
     /// Changes a job, tells the clients and saves the journal.
     fn update(&self, id: &str, f: impl FnOnce(&mut Job)) -> Option<Job> {
         let job = {
@@ -491,7 +536,8 @@ impl Queue {
         let removed = self.prune();
         let (local, remote): (Vec<Job>, Vec<Job>) = removed.into_iter().partition(|j| j.dst.dest.is_none());
         for j in &local {
-            for p in j.partials.keys() {
+            let t = tag(&j.id);
+            for p in j.partials.keys().filter(|p| owns(&t, p)) {
                 let _ = std::fs::remove_file(p);
             }
         }
@@ -515,15 +561,24 @@ impl Queue {
         let me = self.clone();
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         rt.spawn(async move {
-            let mut by_end: BTreeMap<Option<String>, Vec<String>> = BTreeMap::new();
+            // Each partial with the old file a cut replace left aside (if the journal recorded one); only the job's own.
+            let mut by_end: BTreeMap<Option<String>, Vec<(String, Option<String>)>> = BTreeMap::new();
             for j in jobs {
-                by_end.entry(j.dst.dest.clone()).or_default().extend(j.partials.into_keys());
+                let t = tag(&j.id);
+                let mut asides = j.asides;
+                let list = by_end.entry(j.dst.dest.clone()).or_default();
+                for p in j.partials.into_keys().filter(|p| owns(&t, p)) {
+                    let aside = asides.remove(&p).filter(|a| owns(&t, a));
+                    list.push((p, aside));
+                }
             }
             for (dest, partials) in by_end {
                 let Ok(fs) = me.end(&End { dest }).await else { continue };
-                for p in partials {
+                for (p, aside) in partials {
                     let _ = fs.remove_file(&p).await;
-                    restore_aside(fs.as_ref(), &p).await;
+                    if let Some(a) = aside {
+                        restore_aside(fs.as_ref(), &p, &a).await;
+                    }
                 }
             }
         });
@@ -667,6 +722,8 @@ impl Queue {
             walk: Skipped::default(),
             renamed: Vec::new(),
             partials: BTreeMap::new(),
+            names: BTreeMap::new(),
+            asides: BTreeMap::new(),
             created: t,
             updated: t,
             finished: None,
@@ -751,10 +808,11 @@ impl Queue {
         Ok(())
     }
 
-    /// Transfers running or waiting to run (not paused, interrupted or finished): a daemon hand-over (an update)
-    /// waits for them (`daemon.shutdown` with `if_idle` or `if_no_transfers`).
+    /// Transfers copying or about to (not waiting only on an answer, paused, interrupted or finished): a daemon
+    /// hand-over (an update) waits for them (`daemon.shutdown` with `if_idle` or `if_no_transfers`). A job waiting
+    /// on an unanswered question does not hold it: it loads as interrupted on the next daemon, to answer and resume.
     pub fn active_count(&self) -> usize {
-        self.jobs.lock().iter().filter(|j| j.state.active()).count()
+        self.jobs.lock().iter().filter(|j| j.state.active() && j.state != State::Waiting).count()
     }
 
     /// Tests: a job waiting to run, never started (no ssh is opened).
@@ -846,14 +904,17 @@ impl Queue {
         let (me, id) = (self.clone(), id.to_string());
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         rt.spawn(async move {
+            let mut ending = Ending { q: me.clone(), id: id.clone(), normal: false };
             me.run(&id, live, resumed).await;
-            me.live.lock().remove(&id);
+            ending.normal = true;
         });
     }
 
     async fn run(self: &Arc<Self>, id: &str, live: Arc<Live>, mut resumed: bool) {
         let Ok(_slot) = self.slots.clone().acquire_owned().await else { return };
         let mut retry = Retry::default();
+        // The most the target was found to hold in an attempt: a retry made progress only when the next holds more.
+        let mut best = 0u64;
         loop {
             if let Some(stop) = Self::halted(&live) {
                 return self.finish_stopped(id, stop);
@@ -868,9 +929,10 @@ impl Queue {
                 j.next_s = 0;
             });
             live.ctl.bytes.store(0, Ordering::Relaxed);
-            live.ctl.written.store(0, Ordering::Relaxed);
-            live.discovered.store(0, Ordering::Relaxed);
-            live.not_needed.store(0, Ordering::Relaxed);
+            live.ctl.confirmed.store(0, Ordering::Relaxed);
+            live.ctl.needed.store(0, Ordering::Relaxed);
+            live.ctl.free.store(u64::MAX, Ordering::Relaxed);
+            live.ctl.halted.store(false, Ordering::Relaxed);
             live.halt.store(false, Ordering::Relaxed);
             *live.speed.lock() = Speed::default();
             match self.attempt(id, &live, resumed).await {
@@ -883,6 +945,9 @@ impl Queue {
                         j.speed_bps = 0;
                         j.eta_s = None;
                         j.totals.done_bytes = j.totals.done_bytes.max(live.ctl.bytes.load(Ordering::Relaxed));
+                        // A done job is never resumed: what it kept for that goes.
+                        j.names.clear();
+                        j.asides.clear();
                     });
                     if let Some(j) = job {
                         tracing::info!(job = %id, files = j.totals.done_files, bytes = j.totals.done_bytes, failed = j.totals.failed, "transfer done");
@@ -890,7 +955,11 @@ impl Queue {
                 }
                 Ok(stop) => self.finish_stopped(id, stop),
                 Err(e) if e.kind == ErrKind::Connection => {
-                    let progressed = live.ctl.written.load(Ordering::Relaxed) > 0;
+                    // Bytes the target holds (resumed from, complete, written and closed), never writes still on
+                    // their way: a host that refuses them (a full disk) would otherwise look like progress forever.
+                    let held = live.ctl.confirmed.load(Ordering::Relaxed);
+                    let progressed = held > best;
+                    best = best.max(held);
                     let Some(wait) = retry.on_drop(Instant::now(), progressed) else {
                         tracing::info!(job = %id, "transfer failed: the connection stayed lost");
                         self.fail(id, &e);
@@ -994,7 +1063,8 @@ impl Queue {
             Err(e) if e.kind == ErrKind::Connection => return Err(e),
             Err(e) => return Err(FsError::new(e.kind, format!("the target folder {}: {e}", job.dst_dir))),
         }
-        let free = dst.free_space(&job.dst_dir).await.ok().flatten();
+        // Measured for each attempt; each file needs room only for what is left of it (`Control::reserve`).
+        live.ctl.free.store(dst.free_space(&job.dst_dir).await.ok().flatten().unwrap_or(u64::MAX), Ordering::Relaxed);
         let direct = self.route_for(job).await;
         let session: Arc<DirectSession> = Arc::new(tokio::sync::Mutex::new(None));
         let (tx, mut rx) = mpsc::channel::<Found>(256);
@@ -1017,6 +1087,9 @@ impl Queue {
             let mut first_error: Option<FsError> = None;
             let mut started_running = false;
             let key = |rel: &[String]| rel.join("\u{0}");
+            // Targets of this attempt's files so far: a later file for one of them is kept beside it. The walk meets
+            // sources in the same order every attempt, so the same file is the one kept beside.
+            let mut targets: HashSet<String> = HashSet::new();
             while let Some(found) = rx.recv().await {
                 if first_error.is_some() || live.halt.load(Ordering::Relaxed) {
                     continue; // drain so the walk can finish
@@ -1031,9 +1104,18 @@ impl Queue {
                 match found {
                     Found::Dir { rel, path } => {
                         let parent = dirs.get(&key(&rel[..rel.len() - 1])).cloned().flatten();
-                        let target = match parent {
+                        let made = {
+                            let _busy = Busy::new(&live.busy);
+                            self.refresh_waiting(&job.id, live);
+                            match &parent {
+                                None => None,
+                                Some(parent) => Some(self.target_dir(job, &src, &dst, live, &path, parent, rel.last().unwrap()).await),
+                            }
+                        };
+                        self.refresh_waiting(&job.id, live);
+                        let target = match made {
                             None => None,
-                            Some(parent) => match self.target_dir(job, &src, &dst, live, &path, &parent, rel.last().unwrap()).await {
+                            Some(made) => match made {
                                 Ok(t) => t,
                                 Err(e) if e.kind == ErrKind::Connection => {
                                     first_error = Some(e);
@@ -1064,17 +1146,18 @@ impl Queue {
                             j.totals.files += 1;
                             j.totals.bytes += meta.size;
                         });
-                        let found = live.discovered.fetch_add(meta.size, Ordering::Relaxed) + meta.size;
-                        if over_space(found, live.not_needed.load(Ordering::Relaxed), free) {
-                            first_error = Some(FsError::new(ErrKind::Other, format!("not enough free space on the target ({} bytes free when the transfer started)", free.unwrap_or(0))));
-                            live.halt();
-                            continue;
-                        }
+                        let name = self.mapped_name(job, dst.as_ref(), rel.last().unwrap());
+                        let clash = !targets.insert(target_key(&job.dst, dst.as_ref(), &dst.join(&dir, &name)));
                         let permits = if meta.size >= BIG_FILE { FILES_AT_ONCE } else { 1 };
                         let Ok(permit) = files.clone().acquire_many_owned(permits).await else { break };
-                        let (me, live, src, dst, job, name, direct, session) = (self.clone(), live.clone(), src.clone(), dst.clone(), job.clone(), rel.last().unwrap().clone(), direct.clone(), session.clone());
+                        let (me, live, src, dst, job, direct, session) = (self.clone(), live.clone(), src.clone(), dst.clone(), job.clone(), direct.clone(), session.clone());
                         tasks.spawn(async move {
-                            let r = me.copy_one(&job, &live, src.as_ref(), dst.as_ref(), &path, &meta, &dir, &name, resumed, direct.as_deref().map(|t| (t, session.as_ref()))).await;
+                            let r = {
+                                let _busy = Busy::new(&live.busy);
+                                me.refresh_waiting(&job.id, &live);
+                                me.copy_one(&job, &live, src.as_ref(), dst.as_ref(), &path, &meta, &dir, &name, clash, resumed, direct.as_deref().map(|t| (t, session.as_ref()))).await
+                            };
+                            me.refresh_waiting(&job.id, &live);
                             drop(permit);
                             r
                         });
@@ -1082,14 +1165,14 @@ impl Queue {
                     Found::Link { .. } => {}
                 }
                 while let Some(done) = tasks.try_join_next() {
-                    if let Ok(Err(e)) = done {
+                    if let Some(e) = file_error(done) {
                         first_error.get_or_insert(e);
                         live.halt();
                     }
                 }
             }
             while let Some(done) = tasks.join_next().await {
-                if let Ok(Err(e)) = done {
+                if let Some(e) = file_error(done) {
                     first_error.get_or_insert(e);
                     live.halt();
                 }
@@ -1143,7 +1226,7 @@ impl Queue {
                     };
                 }
                 if decision == Decision::KeepBoth {
-                    let other = self.free_name(dst.as_ref(), parent, &name).await?;
+                    let other = self.free_name(job, dst.as_ref(), parent, &name).await?;
                     let path = dst.join(parent, &other);
                     dst.mkdir(&path).await?;
                     return Ok(Some(path));
@@ -1175,11 +1258,11 @@ impl Queue {
         safe
     }
 
-    /// The first `name (n)` free in `dir` (on the target, and not claimed by a file on its way there).
-    async fn free_name(&self, dst: &dyn RemoteFs, dir: &str, name: &str) -> FsResult<String> {
+    /// The first `name (n)` free in `dir`: not on the target, and not claimed by a file on its way there.
+    async fn free_name(&self, job: &Job, dst: &dyn RemoteFs, dir: &str, name: &str) -> FsResult<String> {
         let mut taken = HashSet::new();
         loop {
-            let candidate = keep_both(name, |c| taken.contains(c));
+            let candidate = keep_both(name, |c| taken.contains(c) || self.claims.lock().contains(&target_key(&job.dst, dst, &dst.join(dir, c))));
             match dst.lstat(&dst.join(dir, &candidate)).await {
                 Err(e) if e.kind == ErrKind::NotFound => return Ok(candidate),
                 Err(e) => return Err(e),
@@ -1221,18 +1304,44 @@ impl Queue {
             return None;
         }
         let question = q.clone();
-        self.update(id, |j| {
-            j.questions.push(question);
-            j.state = State::Waiting;
-        });
+        live.asking.fetch_add(1, Ordering::Relaxed);
+        self.update(id, |j| j.questions.push(question));
+        self.refresh_waiting(id, live);
         let answer = rx.await.ok();
-        self.update(id, |j| {
-            j.questions.retain(|x| x.id != qid);
-            if j.questions.is_empty() && j.state == State::Waiting {
-                j.state = State::Running;
-            }
-        });
+        live.asking.fetch_sub(1, Ordering::Relaxed);
+        self.update(id, |j| j.questions.retain(|x| x.id != qid));
+        self.refresh_waiting(id, live);
         answer.map(|(c, _)| c)
+    }
+
+    /// `waiting` only while everything the job has under way waits for an answer; `running` otherwise.
+    fn refresh_waiting(&self, id: &str, live: &Live) {
+        let asking = live.asking.load(Ordering::Relaxed);
+        let want = if asking > 0 && asking >= live.busy.load(Ordering::Relaxed) { State::Waiting } else { State::Running };
+        let moves = |s: State| matches!(s, State::Scanning | State::Running | State::Waiting) && s != want;
+        // Scanning stays scanning until something waits.
+        let moves = |s: State| moves(s) && !(s == State::Scanning && want == State::Running);
+        if self.with_job(id, |j| moves(j.state)).unwrap_or(false) {
+            self.update(id, |j| {
+                if moves(j.state) {
+                    j.state = want;
+                }
+            });
+        }
+    }
+
+    /// Picks a free `name (n)` for `path` and keeps it in the journal, so every later attempt writes the same one.
+    async fn keep_both_name(&self, job: &Job, dst: &dyn RemoteFs, dir: &str, base: &str, path: &str) -> FsResult<String> {
+        let name = self.free_name(job, dst, dir, base).await?;
+        self.set_name(&job.id, path, &name);
+        Ok(name)
+    }
+
+    fn set_name(&self, id: &str, path: &str, name: &str) {
+        let (p, n) = (path.to_string(), name.to_string());
+        self.count(id, move |j| {
+            j.names.insert(p, n);
+        });
     }
 
     fn failed(&self, id: &str, path: &str, e: &FsError) {
@@ -1245,13 +1354,25 @@ impl Queue {
         });
     }
 
-    /// One file of a copy job. Errors that are not a lost connection are counted on the job, not returned.
+    /// One file of a copy job, to `dir/name` (`name` as the target can hold it). `clash`: an earlier file of this attempt
+    /// has the same target (one name in two picked folders, names that differ only in case or map to one Windows name),
+    /// so this one is kept beside it. A name the job chose for this source before is used again. Errors that are not a
+    /// lost connection are counted on the job, not returned; no room on the target is returned (it ends the job).
     #[allow(clippy::too_many_arguments)]
-    async fn copy_one(&self, job: &Job, live: &Arc<Live>, src: &dyn RemoteFs, dst: &dyn RemoteFs, path: &str, meta: &Meta, dir: &str, name: &str, resumed: bool, direct: Option<(&Target, &DirectSession)>) -> FsResult<()> {
-        let mut name = self.mapped_name(job, dst, name);
+    async fn copy_one(&self, job: &Job, live: &Arc<Live>, src: &dyn RemoteFs, dst: &dyn RemoteFs, path: &str, meta: &Meta, dir: &str, base: &str, clash: bool, resumed: bool, direct: Option<(&Target, &DirectSession)>) -> FsResult<()> {
         let tag = tag(&job.id);
         self.count(&job.id, |j| j.current = Some(path.to_string()));
+        let chosen = self.with_job(&job.id, |j| j.names.get(path).cloned()).flatten();
+        let mut name = chosen.clone().unwrap_or_else(|| base.to_string());
         let mut approved_override: Option<Option<(u64, u64)>> = None;
+        // A name just picked as free (and what it was numbered from): taken by the time the file holds it, the next
+        // free one is picked.
+        let mut fresh: Option<String> = None;
+        if clash && chosen.is_none() {
+            name = self.keep_both_name(job, dst, dir, base, path).await?;
+            approved_override = Some(None);
+            fresh = Some(base.to_string());
+        }
         let mut changed = false;
         let mut changes = 0;
         loop {
@@ -1274,16 +1395,15 @@ impl Queue {
             // After a reconnect or a resume: a file already in place with the source's size and time is complete.
             if resumed && approved_override.is_none() && !changed && existing.as_ref().is_some_and(|m| m.kind == FsKind::File && m.size == meta.size && m.mtime == meta.mtime) {
                 live.ctl.bytes.fetch_add(meta.size, Ordering::Relaxed);
-                live.not_needed.fetch_add(meta.size, Ordering::Relaxed);
+                live.ctl.confirmed.fetch_add(meta.size, Ordering::Relaxed);
                 self.count(&job.id, |j| j.totals.done_files += 1);
                 return Ok(());
             }
-            // A second file for a target this job already wrote (same names from two folders, names that differ only
-            // in case, names that map to the same Windows name).
-            let same_job_clash = existing.is_some() && live.written.lock().contains(&key);
-            let decision = if same_job_clash {
-                Decision::KeepBoth
-            } else if let Some(approved) = approved_override.take() {
+            if let (Some(from), Some(_)) = (&fresh, &existing) {
+                name = self.keep_both_name(job, dst, dir, from, path).await?;
+                continue;
+            }
+            let decision = if let Some(approved) = approved_override.take() {
                 Decision::Copy { approved }
             } else if changed {
                 // A target that changed after it was approved is always asked about, never decided by policy again.
@@ -1312,11 +1432,13 @@ impl Queue {
                             // `name (edited).ext`, numbered only when that is taken too.
                             let wanted = with_suffix(&name, " (edited)");
                             name = match dst.lstat(&dst.join(dir, &wanted)).await {
-                                Err(e) if e.kind == ErrKind::NotFound => wanted,
+                                Err(e) if e.kind == ErrKind::NotFound => wanted.clone(),
                                 Err(e) if e.kind == ErrKind::Connection => return Err(e),
-                                _ => self.free_name(dst, dir, &wanted).await?,
+                                _ => self.free_name(job, dst, dir, &wanted).await?,
                             };
+                            self.set_name(&job.id, path, &name);
                             approved_override = Some(None);
+                            fresh = Some(wanted);
                             changed = false;
                             continue;
                         }
@@ -1329,20 +1451,20 @@ impl Queue {
             match decision {
                 Decision::Skip | Decision::Merge => {
                     live.ctl.bytes.fetch_add(meta.size, Ordering::Relaxed);
-                    live.not_needed.fetch_add(meta.size, Ordering::Relaxed);
                     self.count(&job.id, |j| j.totals.skipped += 1);
                     return Ok(());
                 }
                 Decision::KeepBoth => {
-                    name = self.free_name(dst, dir, &name).await?;
+                    name = self.keep_both_name(job, dst, dir, base, path).await?;
                     approved_override = Some(None);
+                    fresh = Some(base.to_string());
                     continue;
                 }
                 Decision::Ask { .. } => unreachable!("answered above"),
                 Decision::Copy { approved } => {
                     let partial = dst.join(dir, &partial_name(&name, &tag));
                     // Only a partial this job recorded is ever continued.
-                    let seen = self.get(&job.id).and_then(|j| j.partials.get(&partial).copied());
+                    let (seen, aside) = self.with_job(&job.id, |j| (j.partials.get(&partial).copied(), j.asides.get(&partial).cloned())).unwrap_or_default();
                     if seen != Some((meta.size, meta.mtime)) {
                         // Saved with the next journal write (within a second). A partial whose entry was lost to a
                         // crash is not the job's, so it is started again rather than resumed: safe either way.
@@ -1351,16 +1473,29 @@ impl Queue {
                             j.partials.insert(p, s);
                         });
                     }
-                    let fc = FileCopy { src, src_path: path, dst, dst_dir: dir, dst_name: &name, tag: &tag, approved, resume: seen.is_some(), source_seen: seen, preserve: job.preserve };
+                    // A replace that moves the old file aside says where first, and the journal is written at once.
+                    let record_aside = |a: Option<String>| {
+                        let (p, now_aside) = (partial.clone(), a.is_some());
+                        self.count(&job.id, move |j| match a {
+                            Some(a) => {
+                                j.asides.insert(p, a);
+                            }
+                            None => {
+                                j.asides.remove(&p);
+                            }
+                        });
+                        if now_aside {
+                            self.save();
+                        }
+                    };
+                    let fc = FileCopy { src, src_path: path, dst, dst_dir: dir, dst_name: &name, tag: &tag, approved, resume: seen.is_some(), source_seen: seen, preserve: job.preserve, aside: aside.as_deref(), record_aside: &record_aside };
                     // Direct when the route allows and the names fit an sftp batch line; else through this computer.
                     let result = match (direct, &job.src.dest) {
                         (Some((t, session)), Some(a)) if route::batch_quote(path).is_some() && route::batch_quote(&partial).is_some() => self.direct_one(&fc, live, a, t, &partial, session).await,
                         _ => copy_file(&fc, &live.ctl).await,
                     };
                     match result {
-                        Ok(Copied::Done { warning, resumed_at, .. }) => {
-                            live.not_needed.fetch_add(resumed_at, Ordering::Relaxed);
-                            live.written.lock().insert(key);
+                        Ok(Copied::Done { warning, .. }) => {
                             self.count(&job.id, |j| {
                                 j.partials.remove(&partial);
                                 j.totals.done_files += 1;
@@ -1379,7 +1514,12 @@ impl Queue {
                                 return Ok(());
                             }
                             changed = true;
+                            fresh = None;
                             continue;
+                        }
+                        Ok(Copied::NoRoom { free }) => {
+                            // The job ends Failed; the partial stays, so a retry after making room continues it.
+                            return Err(FsError::new(ErrKind::Other, format!("not enough free space on the target ({free} bytes free when the transfer started)")));
                         }
                         Ok(Copied::Stopped(Stop::Pause)) => return Ok(()),
                         Ok(Copied::Stopped(Stop::Cancel)) => {
@@ -1400,7 +1540,6 @@ impl Queue {
             }
         }
     }
-
     /// How a host-to-host copy travels this attempt (direct: B as A reaches it), recorded on the job with the reason.
     async fn route_for(&self, job: &Job) -> Option<Arc<Target>> {
         let (Some(a), Some(b)) = (&job.src.dest, &job.dst.dest) else { return None };
@@ -1430,14 +1569,18 @@ impl Queue {
     #[allow(clippy::too_many_arguments)]
     async fn direct_one(&self, fc: &FileCopy<'_>, live: &Arc<Live>, a: &str, b: &Target, partial: &str, session: &DirectSession) -> FsResult<Copied> {
         let src = fc.src.stat(fc.src_path).await?;
-        recover_aside(fc.dst, fc.dst_dir, fc.dst_name, fc.tag, &src).await?;
+        recover_aside(fc, &src).await?;
         // The same checks as any resume: the job's own partial, a regular file (never through a link), the tail.
         let offset = resume_offset(fc, &src, partial).await?;
+        if !live.ctl.reserve(src.size - offset) {
+            return Ok(Copied::NoRoom { free: live.ctl.free.load(Ordering::Relaxed) });
+        }
         if offset == 0 {
             // Made new and owner-only here; whatever had the name (a stale partial, a planted link) goes first.
             fc.dst.open_write(partial, 0, true).await?.finish(false).await?;
         }
         live.ctl.bytes.fetch_add(offset, Ordering::Relaxed);
+        live.ctl.confirmed.fetch_add(offset, Ordering::Relaxed);
         let plan = route::direct_plan(offset, src.size);
         if plan != route::DirectPlan::Complete {
             let exe = self.pool.exe();
@@ -1455,10 +1598,11 @@ impl Queue {
                 tokio::select! {
                     r = guard.as_mut().expect("started").done(seq) => break r,
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        // The partial's size on B is what B holds: progress and confirmed alike.
                         if let Ok(m) = fc.dst.lstat(partial).await {
                             let d = m.size.saturating_sub(last);
                             live.ctl.bytes.fetch_add(d, Ordering::Relaxed);
-                            live.ctl.written.fetch_add(d, Ordering::Relaxed);
+                            live.ctl.confirmed.fetch_add(d, Ordering::Relaxed);
                             last = last.max(m.size);
                         }
                     }
@@ -1481,7 +1625,7 @@ impl Queue {
             drop(guard);
             let have = fc.dst.lstat(partial).await.map(|m| m.size).unwrap_or(0);
             live.ctl.bytes.fetch_add(have.saturating_sub(last), Ordering::Relaxed);
-            live.ctl.written.fetch_add(have.saturating_sub(last), Ordering::Relaxed);
+            live.ctl.confirmed.fetch_add(have.saturating_sub(last), Ordering::Relaxed);
             if have != src.size {
                 let kind = if route::lost(&said) { ErrKind::Connection } else { ErrKind::Other };
                 return Err(FsError::new(kind, if said.is_empty() { "the copy on the first host did not finish".to_string() } else { format!("the copy on the first host failed: {said}") }));
@@ -1597,17 +1741,45 @@ impl Queue {
     }
 }
 
-/// A partial's old file left under its moved-aside name, with the target gone: put back.
-async fn restore_aside(fs: &dyn RemoteFs, partial: &str) {
+/// The old file a cut replace left under the moved-aside name the journal recorded (`old`), with the target gone:
+/// put back.
+async fn restore_aside(fs: &dyn RemoteFs, partial: &str, old: &str) {
     let seps: &[char] = if fs.windows_names() { &['/', '\\'] } else { &['/'] };
     let (dir, file) = match partial.rsplit_once(seps) {
         Some((d, f)) => (if d.is_empty() { "/" } else { d }, f),
         None => return,
     };
-    let Some((name, tag)) = super::names::split_hidden(file) else { return };
-    let (old, target) = (fs.join(dir, &super::names::aside_name(name, tag)), fs.join(dir, name));
-    if fs.lstat(&old).await.is_ok() && fs.lstat(&target).await.is_err() {
-        let _ = fs.rename(&old, &target, false).await;
+    let Some((name, _)) = super::names::split_hidden(file) else { return };
+    let target = fs.join(dir, name);
+    if fs.lstat(old).await.is_ok() && fs.lstat(&target).await.is_err() {
+        let _ = fs.rename(old, &target, false).await;
+    }
+}
+
+/// A file task's end: its error, or a task that ended without one (a panic) as a failure of the attempt.
+fn file_error(done: Result<FsResult<()>, tokio::task::JoinError>) -> Option<FsError> {
+    match done {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(e),
+        Err(e) => Some(FsError::new(ErrKind::Other, format!("a file's copy stopped unexpectedly: {e}"))),
+    }
+}
+
+/// A job's task: when it ends without finishing (a panic), the job fails instead of staying "running" forever, holding
+/// updates and refusing resume and cancel.
+struct Ending {
+    q: Arc<Queue>,
+    id: String,
+    normal: bool,
+}
+
+impl Drop for Ending {
+    fn drop(&mut self) {
+        self.q.live.lock().remove(&self.id);
+        if !self.normal {
+            tracing::warn!(job = %self.id, "transfer task ended unexpectedly");
+            self.q.fail(&self.id, &FsError::new(ErrKind::Other, "the transfer stopped unexpectedly"));
+        }
     }
 }
 
@@ -1631,13 +1803,14 @@ impl Choice {
 /// The bits a recursive chmod sets on a file whose mode is now `current`: only the rwx bits in `mask` (the ones the
 /// person changed; all of rwx without one) take `mode`'s value. A file's setuid, setgid and sticky bits are never
 /// changed, so a folder's special bits never spread to the files inside. With `dirs_only_x` ("x for folders only")
-/// a file keeps its own x bits, so a script stays runnable and nothing else becomes runnable.
+/// a file keeps its own x bits, only for the classes the new mode lets read it: a script stays runnable, nothing else
+/// becomes runnable, and nothing ends up runnable without being readable (no 0711).
 pub fn chmod_file_mode(mode: u32, dirs_only_x: bool, current: Option<u32>, mask: Option<u32>) -> u32 {
     let cur = current.unwrap_or(0) & 0o7777;
     let mask = mask.unwrap_or(0o777) & 0o777;
     let mut new = (cur & !mask) | (mode & mask);
     if dirs_only_x {
-        new = (new & !0o111) | (cur & 0o111);
+        new = (new & !0o111) | (cur & 0o111 & ((new & 0o444) >> 2));
     }
     new
 }
@@ -1666,6 +1839,8 @@ mod tests {
         assert_eq!(chmod_file_mode(0o644, true, Some(0o755), None), 0o755, "a script stays runnable");
         assert_eq!(chmod_file_mode(0o750, true, Some(0o700), None), 0o740);
         assert_eq!(chmod_file_mode(0o640, true, None, None), 0o640);
+        assert_eq!(chmod_file_mode(0o700, true, Some(0o755), None), 0o700, "x only where the new mode lets read: never 0711");
+        assert_eq!(chmod_file_mode(0o640, true, Some(0o755), None), 0o750);
     }
 
     #[test]
@@ -1888,6 +2063,11 @@ mod tests {
             json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["relative"], "dst_dir": "/y"}),
             json!({"kind": "delete", "src": {}, "items": ["C:\\x"]}),
             json!({"kind": "chmod", "src": {"dest": "a"}, "items": ["/x"]}),
+            // A whole drive of a Windows host.
+            json!({"kind": "delete", "src": {"dest": "a"}, "items": ["/C:"]}),
+            json!({"kind": "delete", "src": {"dest": "a"}, "items": ["/C:/"]}),
+            json!({"kind": "chmod", "src": {"dest": "a"}, "items": ["/d:"], "mode": 0o755}),
+            json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/C:"], "dst_dir": "/y"}),
         ] {
             assert!(r.q.rpc("xfer.start", &bad).await.is_err(), "{bad}");
         }
@@ -1966,13 +2146,152 @@ mod tests {
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 
-    #[test]
-    fn free_space_counts_only_new_bytes() {
-        assert!(!over_space(100, 0, None));
-        assert!(!over_space(100, 0, Some(100)));
-        assert!(over_space(101, 0, Some(100)));
-        // Skipped, complete and resumed bytes need no room.
-        assert!(!over_space(150, 60, Some(100)));
+    #[tokio::test]
+    async fn a_retry_needs_room_only_for_what_is_still_to_write() {
+        let r = rig("room");
+        let (one, two) = (data(1 << 20), data(3 << 20));
+        r.a.put("/s/one.bin", &one, 10);
+        r.a.put("/s/two.bin", &two, 20);
+        r.b.mkdir_all("/dst");
+        // two.bin loses the connection after 2 MiB.
+        r.a.fail_reads_of("/s/two.bin", Some(2 << 20));
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s"], "dst_dir": "/dst", "conflict": "replace"})).await;
+        until(&r, &id, |j| j.state == State::Reconnecting).await;
+        // The retry finds less room than both files need, but enough for what is left of them.
+        r.b.set_free(Some(5 << 19));
+        r.a.fail_reads_of("/s/two.bin", None);
+        let j = until(&r, &id, |j| j.state.finished()).await;
+        assert_eq!(j.state, State::Done, "{j:?}");
+        assert_eq!(r.b.read("/dst/s/two.bin").unwrap(), two);
+        assert_eq!(r.b.read("/dst/s/one.bin").unwrap(), one);
+        // A file that does not fit still fails the job, keeping its partial for a retry once there is room.
+        r.a.put("/t/big.bin", &data(2 << 20), 1);
+        r.b.set_free(Some(1 << 20));
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/t"], "dst_dir": "/dst"})).await;
+        let j = until(&r, &id, |j| j.state.finished()).await;
+        assert_eq!(j.state, State::Failed);
+        assert!(j.error.as_deref().unwrap_or_default().contains("not enough free space"), "{j:?}");
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_full_disk_fails_the_files_instead_of_retrying_forever() {
+        let r = rig("full");
+        r.a.put("/s/a.bin", &data(1 << 20), 1);
+        r.a.put("/s/b.bin", &data(1 << 20), 1);
+        r.b.mkdir_all("/dst");
+        r.b.fail_writes_after(Some(100_000));
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s"], "dst_dir": "/dst"})).await;
+        let j = until(&r, &id, |j| j.state.finished() || j.state == State::Reconnecting).await;
+        assert_eq!(j.state, State::Done, "the host's answer, never a lost connection: {j:?}");
+        assert_eq!(j.totals.failed, 2);
+        assert!(j.failures[0].error.contains("No space left on device"), "{j:?}");
+        assert!(r.b.paths().iter().all(|p| !p.contains("kelpie-part")), "{:?}", r.b.paths());
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_lost_connection_on_one_file_keeps_the_partials_of_the_others() {
+        let r = rig("siblings");
+        let (one, two) = (data(4 << 20), (0..4 << 20).map(|i| (i % 7) as u8).collect::<Vec<u8>>());
+        r.a.put("/s/one.bin", &one, 1);
+        r.a.put("/s/two.bin", &two, 1);
+        r.b.mkdir_all("/dst");
+        // one.bin stops answering after 1 MiB; two.bin then loses the connection.
+        r.a.stall_reads_of("/s/one.bin", Some(1 << 20));
+        r.a.fail_reads_of("/s/two.bin", Some(3 << 20));
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s"], "dst_dir": "/dst"})).await;
+        until(&r, &id, |j| j.state == State::Reconnecting).await;
+        r.a.stall_reads_of("/s/one.bin", None);
+        r.a.fail_reads_of("/s/two.bin", None);
+        let j = until(&r, &id, |j| j.state.finished()).await;
+        assert_eq!((j.state, j.totals.failed), (State::Done, 0), "never \"the source changed\": {j:?}");
+        assert_eq!(r.b.read("/dst/s/one.bin").unwrap(), one);
+        assert_eq!(r.b.read("/dst/s/two.bin").unwrap(), two);
+        assert_eq!(r.a.opened_at("/s/one.bin").last(), Some(&(1 << 20)), "one.bin continued from its partial");
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn files_kept_beside_each_other_keep_their_names_across_retries_and_restarts() {
+        let r = rig("samename");
+        let (one, two) = (data(1 << 20), (0..1 << 20).map(|i| (i % 7) as u8).collect::<Vec<u8>>());
+        r.a.put("/x/readme.md", &one, 10);
+        r.a.put("/y/readme.md", &two, 20);
+        r.b.mkdir_all("/dst");
+        r.a.fail_reads_of("/y/readme.md", Some(1 << 19));
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/x/readme.md", "/y/readme.md"], "dst_dir": "/dst", "conflict": "replace"})).await;
+        until(&r, &id, |j| j.state == State::Reconnecting).await;
+        // As if the daemon stopped now and started again.
+        r.q.shutdown();
+        until(&r, &id, |j| j.state == State::Paused).await;
+        journal_until(&r, |v| v["jobs"][0]["state"] == "paused" && v["jobs"][0]["names"]["/y/readme.md"] == "readme (2).md").await;
+        let again = Queue::new(r.dir.clone(), Arc::new(Pool::new(PathBuf::from("kelpied"))), Arc::new(|_: &str, _: Value| {}));
+        again.test_ends.lock().insert("a".into(), Arc::new(r.a.clone()));
+        again.test_ends.lock().insert("b".into(), Arc::new(r.b.clone()));
+        r.a.fail_reads_of("/y/readme.md", None);
+        again.rpc("xfer.control", &json!({"id": id, "action": "resume"})).await.unwrap();
+        let mut tries = 0;
+        let j = loop {
+            let j = again.get(&id).unwrap();
+            tries += 1;
+            if j.state.finished() || tries > 400 {
+                break j;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        assert_eq!(j.state, State::Done, "{j:?}");
+        assert_eq!(r.b.read("/dst/readme.md").unwrap(), one, "the first source was not replaced by the second");
+        assert_eq!(r.b.read("/dst/readme (2).md").unwrap(), two);
+        assert!(!r.b.exists("/dst/readme (3).md"), "{:?}", r.b.paths());
+        assert!(r.b.paths().iter().all(|p| !p.contains("kelpie-part")), "{:?}", r.b.paths());
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_cleanup_removes_only_the_jobs_own_hidden_files() {
+        let r = rig("owned");
+        r.a.put("/s/x", b"x", 1);
+        r.b.mkdir_all("/dst");
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s/x"], "dst_dir": "/dst"})).await;
+        until(&r, &id, |j| j.state.finished()).await;
+        let own = partial(&id, "/dst", "x");
+        r.b.put(&own, b"part", 1);
+        r.b.put("/dst/important.txt", b"keep", 1);
+        {
+            let mut jobs = r.q.jobs.lock();
+            let j = jobs.iter_mut().find(|j| j.id == id).unwrap();
+            j.partials.insert(own.clone(), (1, 1));
+            // A damaged or edited journal naming someone else's file.
+            j.partials.insert("/dst/important.txt".into(), (1, 1));
+        }
+        r.q.rpc("xfer.clear_finished", &json!({})).await.unwrap();
+        for _ in 0..100 {
+            if !r.b.exists(&own) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!r.b.exists(&own));
+        assert_eq!(r.b.read("/dst/important.txt").unwrap(), b"keep");
+        assert!(owns(&tag(&id), &format!("/dst/.x.{}.kelpie-old.2", tag(&id))));
+        assert!(!owns(&tag(&id), "/dst/.x.othertag.kelpie-part"));
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_job_still_copying_beside_a_question_is_running() {
+        let r = rig("mixed");
+        r.a.put("/s/a.txt", b"new", 10);
+        r.b.put("/dst/s/a.txt", b"old", 5);
+        r.a.put("/s/b.bin", &data(1 << 20), 10);
+        r.a.stall_reads_of("/s/b.bin", Some(1 << 19));
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s"], "dst_dir": "/dst"})).await;
+        until(&r, &id, |j| !j.questions.is_empty() && j.state == State::Running).await;
+        assert_eq!(r.q.active_count(), 1, "it holds an update while b.bin copies");
+        r.q.rpc("xfer.control", &json!({"id": id, "action": "cancel"})).await.unwrap();
+        until(&r, &id, |j| j.state == State::Cancelled).await;
+        let _ = std::fs::remove_dir_all(&r.dir);
     }
 
     #[tokio::test]
@@ -2062,11 +2381,13 @@ mod tests {
         r.a.put("/s/x", b"x", 1);
         r.b.put("/dst/x", b"old", 1);
         let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s/x"], "dst_dir": "/dst"})).await;
-        until(&r, &id, |j| !j.questions.is_empty()).await;
-        assert_eq!(r.q.active_count(), 1, "a transfer waiting on a question still runs");
+        until(&r, &id, |j| !j.questions.is_empty() && j.state == State::Waiting).await;
+        assert_eq!(r.q.active_count(), 0, "a transfer waiting only on an answer holds no update or hand-over");
+        r.q.queue_for_test();
+        assert_eq!(r.q.active_count(), 1, "one about to copy does");
         r.q.rpc("xfer.control", &json!({"id": id, "action": "pause"})).await.unwrap();
         until(&r, &id, |j| j.state == State::Paused).await;
-        assert_eq!(r.q.active_count(), 0, "a paused one does not hold an update");
+        assert_eq!(r.q.active_count(), 1, "a paused one does not");
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 
