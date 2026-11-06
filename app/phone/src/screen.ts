@@ -664,6 +664,9 @@ export class ScreenSession {
   private heardAt = 0;
   private mediaAt = 0;
   private decodedAt = 0;
+  /** The last frame that came before the start's answer (the picture can overtake it): acknowledged once the screen's id is known, or the
+   *  computer would count it in flight, and hold the phone's input back, until a later frame came. */
+  private early = 0;
   private keyAskedAt = 0;
 
   constructor(private port: ScreenPort, private changed: (s: ScreenState | null) => void, private t: (s: string) => string = (s) => s) {}
@@ -693,6 +696,7 @@ export class ScreenSession {
   async pick(target: string) {
     if (this.state?.phase !== "pick") return;
     this.patch({ phase: "starting", message: null });
+    this.early = 0;
     const r = await this.port.start(target);
     if (this.phase() !== "starting") return;
     if (r.t !== "ack" || !r.sc) {
@@ -702,6 +706,8 @@ export class ScreenSession {
     const now = this.port.now();
     this.heardAt = this.mediaAt = this.decodedAt = now;
     this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", encoder: r.encoder ?? "hw" });
+    if (this.early) this.port.ack(r.sc, this.early);
+    this.early = 0;
     this.watch();
   }
 
@@ -729,13 +735,18 @@ export class ScreenSession {
   decoded(seq: number) {
     this.decodedAt = this.port.now();
     if (this.state?.stuck) this.patch({ stuck: false });
+    this.acknowledge(seq);
+  }
+
+  private acknowledge(seq: number) {
     if (this.state?.sc && this.state.phase !== "ended") this.port.ack(this.state.sc, seq);
+    else if (this.state?.phase === "starting") this.early = Math.max(this.early, seq);
   }
 
   /** Video frame `seq` will not be shown (skipped while a keyframe is awaited, or the decoder failed on it): it is acknowledged all the same, so
    *  the computer never waits for it, and a keyframe is asked for. */
   skipped(seq: number) {
-    if (this.state?.sc && this.state.phase !== "ended") this.port.ack(this.state.sc, seq);
+    this.acknowledge(seq);
     this.needKeyframe();
   }
 

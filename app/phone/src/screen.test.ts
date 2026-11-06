@@ -315,6 +315,20 @@ describe("one screen from the phone", () => {
     expect(r.s.state?.phase).toBe("ended");
   });
 
+  it("a frame that overtakes the start's answer is acknowledged once the screen is known", async () => {
+    const r = rig();
+    await r.s.openPicker();
+    const starting = r.s.pick("w:1:2");
+    // The picture comes on its own lane and can arrive first: nothing to acknowledge it with yet.
+    r.s.decoded(1);
+    r.s.skipped(2);
+    expect(r.acks).toEqual([]);
+    await starting;
+    expect(r.acks, "the last of them, so the computer does not count them in flight").toEqual([2]);
+    r.s.decoded(3);
+    expect(r.acks).toEqual([2, 3]);
+  });
+
   it("a refusal stays on the picker with the computer's words", async () => {
     const r = rig({ start: { t: "error", code: "host_busy", message: "The computer is too busy." } });
     await r.s.openPicker();
