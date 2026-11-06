@@ -10,7 +10,7 @@
 //! `window.opener` and gets the sign-in back; any other new window opens in the pane. A pane and its popups are one group for a phone that takes the
 //! pane over (`takeover`).
 
-mod takeover;
+pub(crate) mod takeover;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,7 +27,8 @@ use crate::fs_ops::{err, CmdResult};
 const PICKER: &str = include_str!("browser_picker.js");
 const SENTINEL_HOST: &str = "kelpie-pick.invalid";
 
-pub use takeover::{browser_takeover_start, browser_takeover_stop, provider_reply, Takeovers};
+// The commands are registered by their own path (`browser::takeover::…`): `generate_handler!` needs the macros `#[tauri::command]` puts beside them.
+pub use takeover::Takeovers;
 
 /// Nonce of each browser webview (by label); reports carrying another one are ignored. The popups each pane opened, oldest first, and their pages' titles.
 #[derive(Default)]
