@@ -1331,6 +1331,11 @@ impl Mobile {
         self.config.lock().enabled = true;
     }
 
+    /// What the page leaving the app does (`lock_now`), for tests outside this module.
+    pub(crate) fn lock_now_for_test(&self, device: &str) {
+        self.lock_now(device);
+    }
+
     /// A paired device as `approve` makes one (its record sealed with this store's key).
     fn add_test_device(&self, id: &str, name: &str, pk: [u8; 32], permission: Permission, kind: Kind) {
         let key = self.mac_key(true).expect("a readable store").expect("a key");
