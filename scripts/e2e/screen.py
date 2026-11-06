@@ -483,6 +483,8 @@ async def scenario(run, d):
     if stats:
         s = stats[-1]
         print(f"SPIKE stats: {s.get('fps')} fps, {s.get('w')}x{s.get('h')}, {s.get('kbps')} kbps, encode p95 {s.get('encode_ms_p95')} ms, encoder {s.get('encoder')}, reason {s.get('reason')}, crisp {s.get('crisp')}", flush=True)
+        print(f"SPIKE stages: {json.dumps(s.get('stages'))}", flush=True)
+    check("the computer reports its stages' timings for the measurement plan", bool(stats) and isinstance(stats[-1].get('stages'), dict) and 'capture_to_send_ms_p95' in stats[-1]['stages'], stats[-1].get('stages') if stats else None)
     told = [(m["type"], m.get("state") or m.get("reason") or m.get("code")) for m in phone.log if m["type"] in ("sc_end", "sc_state", "error")]
     check("a picture that changes keeps coming while it changes", len(moving) >= 20, f"{len(moving)} frames; the phone was told {told[-8:]}")
 
