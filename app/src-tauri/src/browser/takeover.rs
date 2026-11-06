@@ -1141,10 +1141,13 @@ mod tests {
         assert!(!t.hidden("browser-a"), "shown again, input goes");
     }
 
+    /// The calls a queue made, and its answers to text.
+    type Driven = (Vec<String>, Vec<(u64, Result<Value, String>)>);
+
     /// How the queue runs `items` on window 1. `look_hidden`: what the look at each item's turn says. `hidden_after`: once that many calls were made,
     /// what is known here says the pane is hidden. `refused_at`: the window thread finds it hidden at that call. The calls made (`type`, "text", and
     /// " unguarded" for one the window thread does not check), and the answers to text.
-    fn drive(items: Vec<Queued>, pressed: Pressed, look_hidden: bool, hidden_after: Option<usize>, refused_at: Option<usize>) -> (Vec<String>, Vec<(u64, Result<Value, String>)>) {
+    fn drive(items: Vec<Queued>, pressed: Pressed, look_hidden: bool, hidden_after: Option<usize>, refused_at: Option<usize>) -> Driven {
         tauri::async_runtime::block_on(async move {
             let (tx, rx) = mpsc::channel(QUEUE);
             for item in items {
