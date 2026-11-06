@@ -1082,7 +1082,7 @@ browser panes, a phone may drive that pane: *Take over a browser pane* in a sess
 The phone shows the page; a tap clicks, a swipe scrolls, holding still for a moment (0.4 s) and then moving drags, pinching does not zoom the page, the key row has Enter, Tab, Backspace, Esc and the arrows,
 and the text field types into the page (a password goes as one message, and the phone says *Sent to the page* or *Not sent*; it is never sent twice by
 itself). A sign-in window the page opens comes to the phone too, and closing it goes back to the page. On the computer the pane's tab comes to the front and
-stays there, with *Controlled from <phone> · Stop* above it; the sign-in window's title says the same. Stop on either side ends it, and so do 10 minutes with
+stays there (switching away brings it back, since a hidden page shows the phone nothing), with *Controlled from <phone> · Stop* above it; the sign-in window's title says the same. Stop on either side ends it, and so do 10 minutes with
 nothing typed, the phone locking or leaving the app, and removing the phone or lowering what it may do, within a second or two.
 
 Only a phone given *May take control* can do this, and Settings → Mobile offers that only for a phone paired over Tailscale (or your own HTTPS name) whose app

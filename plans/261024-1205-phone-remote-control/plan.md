@@ -116,7 +116,7 @@ Numbers are stable names, not an order (no rename: other phases and reports refe
 | 3e | [Telegram: alert + deep link, opt-in low-risk approvals](phase-03e-telegram-options.md) | P2 | 3d | 3b, 3c, 3d | 26 | pending |
 | 4a | [Relay validation on a real Cloudflare deployment](phase-04a-relay-cloudflare-validation.md) (run ahead of the order at the owner's request, Free plan on `*.workers.dev`, see the phase) | P1 | 1d + 7-day soak | 3e | none | in-progress |
 | 4 | [Relay: one Cloudflare relay, connect from anywhere](phase-04-relay-connect-anywhere.md) | P1 | 6d | 3, 3a, 3c, 4a | 27 | pending |
-| 7 | [Browser pane takeover + app provider channel](phase-07-browser-pane-takeover.md) (over Tailscale; relay mode deferred) | P2 | 5d | 3, 3a, 3c | 28 | code on `phone/phase7-takeover`, not built yet; tests and spike owed |
+| 7 | [Browser pane takeover + app provider channel](phase-07-browser-pane-takeover.md) (over Tailscale; relay mode deferred) | P2 | 5d | 3, 3a, 3c | 28 | built and tested on `phone/phase7-takeover` (on phase 4 `832e966`); spike done, L2 CPU and zoom unmeasured |
 | 8 | [Desktop / window screen control — Windows](phase-08-desktop-screen-windows.md) (over Tailscale; TURN deferred) | P2 | 10d | 3, 3a, 3c, 7 | 29 | pending |
 | 9 | [Desktop / window screen control — macOS](phase-09-desktop-screen-macos.md) | P2 | 6d | 7, 8 | none expected | pending |
 

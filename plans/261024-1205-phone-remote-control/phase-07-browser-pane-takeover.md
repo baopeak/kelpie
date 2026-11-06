@@ -1,7 +1,7 @@
 ---
 phase: 7
 title: "Browser pane takeover (CDP screencast) + app provider channel"
-status: in-progress
+status: completed
 priority: P2
 effort: "5d"
 dependencies: [3, 3a, 3c]
@@ -15,7 +15,14 @@ dependencies: [3, 3a, 3c]
 
 ## Execution state — 2026-11-05
 
-**Code written, not built** (branch `phone/phase7-takeover`, from `phone/phase4-relay` b8c4e84). Cargo was not run (another build held the machine); the Rust unit tests below are written and unrun, as is `scripts/e2e/takeover.py`. Report: `plans/reports/fullstack-developer-261105-1900-phone-phase7.md`.
+**Built and tested 2026-11-06** (branch `phone/phase7-takeover`, rebased onto phase 4's `832e966`): `cargo test -p kelpie-proto -p kelpied -p kelpie -p kelpie-link` all green, clippy clean, pnpm typecheck/test/i18n green, `scripts/e2e/takeover.py` 39/0 and `browser.py` 37/0 on a debug app with an isolated daemon. Report: `plans/reports/fullstack-developer-261105-1900-phone-phase7.md`.
+
+**Spike results (Windows 10, WebView2 156, debug app, `takeover.py --spike`):**
+- Frames arrive without `Page.enable`; clicks are `isTrusted`. A login page (948 × 784 CSS px) at q70/1280: JPEG ~12.8 KB, newest frame 11 ms old p50 / 17 ms p95 on loopback, ~8 fps with a CSS animation.
+- Tap → the page's click handler: 23 ms p50 / 58 ms p95 (earlier runs 26/90 and 51/128), inside the 150 ms budget before the frame back.
+- `NewWindowResponse::Create` inside the handler works, no deadlock; `window.opener` and `postMessage` hold. A new popup sends no screencast frames (its window is behind the main one, and its DevTools state starts over on load): the stream restarts on its load, and a 1 s silent stream falls back to `Page.captureScreenshot` every 500 ms. `window.close()` left the window open (wry destroys only the view): now closed with it.
+- A pane hidden behind another tab sends **0** frames in 4 s: kill rule applied, the held pane's tab is brought back to the front (28 frames in the same 4 s after the fix), plus the capture fallback.
+- WebView2 CPU on that page: 34 % of a core without a stream, 85–107 % with it at L0. **Not measured:** the L2 cap's CPU cut, window-thread time per frame, coordinates under browser zoom, JPEG sizes at q40–q55 (the ladder did not step down on loopback).
 
 **Owner answers (2026-11-05), applied:**
 1. The desktop grant of `control`, with OS verification, is the first-takeover confirmation: no extra prompt.

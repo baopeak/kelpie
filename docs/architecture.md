@@ -750,8 +750,14 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
   carrying the opener's environment), so `window.opener` holds; it has no IPC and stays on http(s) like the pane, its title says who controls it, and while it is
   open it is what the phone sees. Closing it goes back to the pane; closing the pane closes its popups and ends its takeover. Any other new window still opens in the
   pane (owner decision, 2026-11-05).
-- **Limits, until the spike on a built app**: the phase file lists what is not yet seen on a real page (frames while the pane is hidden, coordinates under page
-  zoom, `Create` inside the new-window handler, CPU at L2).
+- **What WebView2 does, as measured (2026-11-06, Windows 10)**: a pane hidden behind another tab, and a popup window behind the main one, paint no
+  screencast frames. So while a pane is held the window brings its tab back to the front (`keepInFront`), and a stream silent for 1 s is captured
+  with `Page.captureScreenshot` at the step's quality and width every 500 ms until frames come again (`fallback`, `meta.captured`). `window.close()` in a popup
+  makes wry destroy only its page view; the app closes the window with it, so the group goes back to the pane. `Create` inside the new-window handler works and
+  `window.opener` holds. A popup's DevTools state starts over when it takes the opener's request, so its screencast starts again when its page has loaded.
+  `Page.startScreencast` needs no `Page.enable`.
+- **Limits**: a dialog over the pane hides it (the native view would cover the dialog), and then only captures come; coordinates under browser zoom are
+  untested; the window-thread time per frame and the L2 CPU cut are not measured (the phase file has the numbers that are).
 
 ### Phone client
 
