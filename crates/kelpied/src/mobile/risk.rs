@@ -654,6 +654,17 @@ fn program_of(word: &str) -> String {
     name
 }
 
+/// Whether `word`, first on a line, names a program or a shell word this table knows, however it is cased or wherever it is (`Rm`,
+/// `/bin/rm`, `rm.exe`): a line that starts with it reads as a command.
+pub fn names_a_program(word: &str) -> bool {
+    let program = program_of(word);
+    let p = program.as_str();
+    is_shell(p)
+        || [READ_ONLY, KNOWN_CHANGES, NETWORK, DELETES, SUDO, WRAPPERS].iter().any(|list| list.contains(&p))
+        || matches!(p, "find" | "eval" | "source" | "." | "iex" | "invoke-expression" | "perl" | "xargs" | "parallel" | "watch" | "printenv" | "cmdkey" | "security" | "vault" | "op")
+        || matches!(p, "if" | "then" | "elif" | "else" | "fi" | "while" | "until" | "for" | "do" | "done" | "case" | "esac" | "function" | "!")
+}
+
 fn is_shell(program: &str) -> bool {
     matches!(program, "sh" | "bash" | "zsh" | "dash" | "fish" | "ksh" | "pwsh" | "powershell" | "cmd")
 }

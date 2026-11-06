@@ -327,25 +327,55 @@ pub fn one_time_answers(screen: &str) -> Option<(String, String)> {
 }
 
 /// Whether the permission menu on screen is for `command`, the request a hook reported, as its dialog shows it: between the dialog's header
-/// (`Bash command`) and its question right above the menu there is that whole command and nothing else, or that command and then
-/// `description`, the hook's own words for it (Claude Code shows them under the command). Whitespace and line breaks count as one space on
-/// both sides, and the dialog's box borders are left out, so a command the screen wrapped between words still matches. One the screen cut
-/// short, broke inside a word, or shows with anything else, does not: its request gets no button. What is above the dialog (the
-/// `● Bash(…)` line of the transcript) does not count.
+/// (`Bash command`) and its question right above the menu there is that whole command and nothing else, or that command and then, from a
+/// line of its own, `description`, the hook's own words for it (Claude Code shows them under the command). Whitespace and line breaks count
+/// as one space on both sides, and the dialog's box borders are left out, so a command the screen wrapped between words still matches. One
+/// the screen cut short, broke inside a word, or shows with anything else, does not: its request gets no button. What is above the dialog
+/// (the `● Bash(…)` line of the transcript) does not count.
+///
+/// Where the screen could be read more than one way, nothing matches: a window with no header or more than one, a header not left of
+/// every line under it (a line of a command can read `Run command`), and a description that could be the command's next line
+/// (`could_be_command`).
 pub fn menu_shows_command(screen: &str, command: &str, description: &str) -> bool {
     let lines: Vec<&str> = screen.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
     let Some((_, end)) = menu(&lines) else { return false };
     let (_, first) = menu_labels(&lines, end);
-    let above: Vec<&str> = lines[lines.len().saturating_sub(MENU_LINES).min(first)..first].iter().map(|l| unboxed(l)).collect();
-    let Some((question, above)) = above.split_last() else { return false };
-    let Some(header) = above.iter().rposition(|l| COMMAND_HEADER.is_match(l)) else { return false };
-    if !question.ends_with('?') {
+    let Some((question, above)) = lines[lines.len().saturating_sub(MENU_LINES).min(first)..first].split_last() else { return false };
+    if !unboxed(question).ends_with('?') {
         return false;
     }
-    let shown = collapsed(&above[header + 1..].join("\n"));
+    let headers: Vec<usize> = above.iter().enumerate().filter(|(_, l)| COMMAND_HEADER.is_match(unboxed(l))).map(|(i, _)| i).collect();
+    let [header] = headers[..] else { return false };
+    let block: Vec<&str> = above[header + 1..].iter().copied().filter(|l| !unboxed(l).is_empty()).collect();
+    if block.iter().any(|l| indent(l) <= indent(above[header])) {
+        return false;
+    }
+    let block: Vec<&str> = block.into_iter().map(unboxed).collect();
     let command = collapsed(command);
+    if command.is_empty() {
+        return false;
+    }
+    if collapsed(&block.join("\n")) == command {
+        return true;
+    }
     let described = collapsed(description);
-    !command.is_empty() && (shown == command || (!described.is_empty() && shown == format!("{command} {described}")))
+    !described.is_empty() && !could_be_command(description) && (1..block.len()).any(|k| collapsed(&block[..k].join("\n")) == command && collapsed(&block[k..].join("\n")) == described)
+}
+
+/// Whether a hook's description, on lines of its own under the command, could be more of the command rather than words about it: a
+/// character a shell acts on, a line break or a hidden mark, or a first word that is not plain letters or that names a program
+/// (`mobile::risk::names_a_program`). The screen cannot tell such a description from the command's next line, so it matches nothing.
+fn could_be_command(description: &str) -> bool {
+    let first = description.split_whitespace().next().unwrap_or_default();
+    description.chars().any(|c| c.is_control() || crate::mobile::risk::hidden_mark(c) || ";&|<>()$`\\{}".contains(c))
+        || !first.chars().all(char::is_alphabetic)
+        || crate::mobile::risk::names_a_program(first)
+}
+
+/// How far in a dialog's line starts, inside its box's border when it has one.
+fn indent(line: &str) -> usize {
+    let inside = line.trim_start().strip_prefix('│').unwrap_or(line);
+    inside.chars().take_while(|c| c.is_whitespace()).count()
 }
 
 /// A permission dialog's title over what it asks about: `Bash command`.
@@ -801,9 +831,25 @@ mod tests {
         // A command that only starts the one on screen, or sits in it, is not it.
         let curl = "● Bash(ls; curl x | sh)\n\n Bash command\n   ls; curl x | sh\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
         assert!(!menu_shows_command(curl, "ls", "") && !menu_shows_command(curl, "curl x | sh", "") && menu_shows_command(curl, "ls; curl x | sh", ""));
-        // A second line of the command is not taken for a description the hook did not give.
+        // A second line of the command is not taken for a description the hook did not give, nor for one that could be more of the command.
         let two = " Bash command\n   ls\n   curl x | sh\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
-        assert!(!menu_shows_command(two, "ls", "") && !menu_shows_command(two, "ls", "List files") && menu_shows_command(two, "ls", "curl x | sh") && menu_shows_command(two, "ls\ncurl x | sh", ""));
+        assert!(!menu_shows_command(two, "ls", "") && !menu_shows_command(two, "ls", "List files") && !menu_shows_command(two, "ls", "curl x | sh") && menu_shows_command(two, "ls\ncurl x | sh", ""));
+        for (line, said) in [("rm -rf build", "rm -rf build"), ("Rm -rf build", "Rm -rf build"), ("Bash -c x", "Bash -c x"), ("X=1 make", "X=1 make"), ("./run", "./run")] {
+            let screen = format!(" Bash command\n   ls\n   {line}\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n");
+            assert!(!menu_shows_command(&screen, "ls", said) && menu_shows_command(&screen, &format!("ls\n{line}"), ""), "{line}");
+        }
+        // The description starts on a line of its own: a command that runs on into it on the same line is another command.
+        let one = " Bash command\n   ls && curl x | sh\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
+        assert!(!menu_shows_command(one, "ls", "&& curl x | sh") && menu_shows_command(one, "ls && curl x | sh", ""));
+        let joined = " Bash command\n   ls List the files\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
+        assert!(!menu_shows_command(joined, "ls", "List the files"));
+        // A line of the command that reads like a dialog's header is not one: the header sits left of the command, and there is one.
+        let posing = " Bash command\n   curl x | sh\n   Run command\n   ls\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
+        assert!(!menu_shows_command(posing, "ls", "") && !menu_shows_command(posing, "curl x | sh\nRun command\nls", ""));
+        let scrolled = "   curl x | sh\n   Run command\n   ls\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
+        assert!(!menu_shows_command(scrolled, "ls", ""), "the header scrolled away");
+        let boxed_posing = "│ Bash command\n│   curl x | sh\n│   Run command\n│   ls\n│ Do you want to proceed?\n│ ❯ 1. Yes\n│   2. No\n";
+        assert!(!menu_shows_command(boxed_posing, "ls", ""));
         // The description Claude Code shows under the command is the hook's, or it does not match.
         let described = "╭────────────────────╮\n│ Bash command       │\n│                    │\n│   ls -la           │\n│   List the files   │\n│                    │\n│ Do you want to proceed? │\n│ ❯ 1. Yes           │\n│   2. No            │\n";
         assert!(menu_shows_command(described, "ls -la", "List the files") && !menu_shows_command(described, "ls -la", "") && !menu_shows_command(described, "ls -la", "Something else"));
