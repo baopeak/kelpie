@@ -836,7 +836,8 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   the helper encodes only while fewer than 3 frames are in flight. The media lane (`mobile/lanes.rs`) holds 6 messages, behind everything else, and nothing of
   it goes to a locked phone; when it is full or more than 512 KiB wait unacknowledged, video is dropped up to the next keyframe, asked for at most once a second.
   **Lost frames never hold the stream** (`control::Flight`): `screen.flow` carries `dropped_through`, the last frame dropped, and the helper stops counting
-  those as in flight; a keyframe request gives up every frame in flight; while a keyframe is owed but not yet allowed, nothing else is encoded; the phone
+  those as in flight; a keyframe request gives up every frame in flight; while a keyframe is owed but not yet allowed, nothing else is encoded, and once it is
+  allowed a still window's last picture is encoded again (a window that does not change sends no frames, and input waits while a keyframe is owed); the phone
   acknowledges frames it skips or its decoder fails on. A tile or the cursor goes only while the lane has 3 places free, so it never takes video's room.
   `screen.flow` also carries the bytes the media took on the wire (the link pads each message to a few sizes: a 5 KB frame goes as 16 KB), and the encoder is
   asked for the link's rate divided by that factor. The phone calls its picture **stuck** when the computer says it sends frames, the heartbeat goes on and

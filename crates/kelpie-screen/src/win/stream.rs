@@ -121,7 +121,14 @@ impl Host {
         let stopping = Arc::new(AtomicBool::new(false));
         let out = self.out.clone();
         let flag = stopping.clone();
-        let thread = std::thread::spawn(move || run(opts, cmd_rx, input_rx, out, started_tx, flag));
+        let (told, told_sc) = (self.out.clone(), sc.clone());
+        let thread = std::thread::spawn(move || {
+            // A stream that fails on its way is said to have ended, never left frozen without a word (its border and input go with it).
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(opts, cmd_rx, input_rx, out, started_tx, flag))).is_err() {
+                system::streaming(false);
+                emit(&told, json!({"event": "ended", "sc": told_sc, "reason": "failed"}));
+            }
+        });
         let mut running = Running { sc, cmds, input, stopping, thread: Some(thread) };
         match started_rx.recv_timeout(START_WAIT) {
             Ok(Ok(v)) => {
@@ -347,6 +354,8 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let (mut tile_id, mut tile_tokens, mut tile_at) = (0u32, TILE_BURST, now_ms());
     let (mut last_look, mut last_desktop, mut last_cursor) = (Instant::now() - LOOK_EVERY, Instant::now(), Instant::now());
     let mut cursor_told: Option<(u8, bool, i32, i32)> = None;
+    // The last picture taken: encoded again when a keyframe is owed and nothing new came (a still window sends no frames by itself).
+    let mut last_picture: Option<ID3D11Texture2D> = None;
     let reason: String = 'stream: loop {
         let now = now_ms();
         // What the app said.
@@ -504,6 +513,16 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                     }
                 },
             }
+        };
+        // A keyframe owed and allowed, and no new picture: the last one again, or the phone (and the daemon, which holds input back while one
+        // is owed) would wait for the window to change.
+        let grabbed = match grabbed {
+            Some((tex, dirty)) => {
+                last_picture = Some(tex.clone());
+                Some((tex, dirty))
+            }
+            None if may && flight.wants_key() => last_picture.clone().map(|t| (t, None)),
+            None => None,
         };
         if let Some((tex, dirty)) = grabbed {
             if let Some(g) = &mut grid {
