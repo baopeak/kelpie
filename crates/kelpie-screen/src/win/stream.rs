@@ -44,6 +44,8 @@ const LOOK_EVERY: Duration = Duration::from_millis(250);
 /// How often the monitors are looked at again (one plugged in or out moves the virtual desktop `SendInput` maps over).
 const DESKTOP_EVERY: Duration = Duration::from_secs(2);
 const CURSOR_EVERY: Duration = Duration::from_millis(33);
+/// How long the loop waits for a picture while frames are still in the encoder (its output is taken on the way round).
+const ENCODER_POLL_MS: u64 = 4;
 /// Paint-over tiles: at most this share of the video's rate, with this much at once.
 const TILE_SHARE: f64 = 0.5;
 const TILE_BURST: f64 = 256.0 * 1024.0;
@@ -473,7 +475,13 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         let since_last = last_encode.map(|t| now.saturating_sub(t));
         // A keyframe owed but not yet allowed: anything else would only be dropped on the way.
         let may = !link_paused && !flight.gated() && tracker.state().picture_moves() && ctl.may_encode(flight.inflight(), since_last);
-        let wait = Duration::from_millis(if may { 30 } else { 50 });
+        // A frame the encoder never gave back (it may drop one) is not waited for after a second.
+        while times.front().is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(1)) {
+            times.pop_front();
+        }
+        // With frames in the encoder the loop comes back within a few milliseconds to take them: its time is then the encoder's own, not
+        // how long the loop waited for a picture (which the overuse detector would read as a slow encoder, and lower the rate for).
+        let wait = Duration::from_millis(if !times.is_empty() { ENCODER_POLL_MS } else if may { 30 } else { 50 });
         let grabbed: Option<(ID3D11Texture2D, Option<Vec<Rect>>)> = if !may {
             std::thread::sleep(wait);
             None
