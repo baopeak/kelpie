@@ -23,11 +23,13 @@ const ROOM_KEY = /^[A-Za-z0-9_-]{87}$/;
 const MAX_REGISTRATION_BODY = 1024;
 const FAILURES_KEPT = 4096;
 
-/** Failures counted by a hash of the address (and, for sockets, the room), in this isolate only: best effort, and never the address itself. */
-class Strikes {
+/** Failures counted by a hash of the network (and, for sockets, the path and the room), in this isolate only: best effort, and never the
+ *  address itself. A full table lets go of what expired and then of its oldest, one for each that comes, never of everything at once. */
+export class Strikes {
+  /** In the order counting began, which is the order they expire in. */
   private readonly seen = new Map<string, { count: number; since: number }>();
 
-  constructor(private readonly limit: number, private readonly windowMs: number) {}
+  constructor(private readonly limit: number, private readonly windowMs: number, private readonly kept = FAILURES_KEPT) {}
 
   out(key: string, now: number): boolean {
     const f = this.seen.get(key);
@@ -36,11 +38,38 @@ class Strikes {
   }
 
   note(key: string, now: number): void {
-    if (this.seen.size >= FAILURES_KEPT && !this.seen.has(key)) this.seen.clear();
-    const f = this.seen.get(key) ?? { count: 0, since: now };
-    f.count += 1;
-    this.seen.set(key, f);
+    const f = this.seen.get(key);
+    if (f && now - f.since < this.windowMs) {
+      f.count += 1;
+      return;
+    }
+    this.seen.delete(key);
+    for (const [k, v] of this.seen) {
+      if (this.seen.size < this.kept && now - v.since < this.windowMs) break;
+      this.seen.delete(k);
+    }
+    this.seen.set(key, { count: 1, since: now });
   }
+
+  get size(): number {
+    return this.seen.size;
+  }
+}
+
+/** Where an address's failures count: an IPv6 address by its /64, which one home or phone network has whole (an address in it costs nothing
+ *  to change), an IPv4 address as it is. */
+export function network(ip: string): string {
+  if (!ip.includes(":")) return ip;
+  // An IPv4 address written as IPv6 (`::ffff:192.0.2.1`) is that IPv4 address.
+  if (ip.includes(".")) return ip.slice(ip.lastIndexOf(":") + 1);
+  const halves = ip.toLowerCase().split("::");
+  if (halves.length > 2) return ip;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const zeros = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  const groups = [...head, ...Array<string>(Math.max(zeros, 0)).fill("0"), ...tail];
+  if (zeros < 0 || groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return ip;
+  return `${groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(":")}::/64`;
 }
 
 /** Wrong registration keys one address may send in a day. */
@@ -102,10 +131,13 @@ async function sameSecret(a: string, b: string): Promise<boolean> {
   return crypto.subtle.timingSafeEqual(x, y);
 }
 
-/** Where a failure counts: a hash of the address (and what else is given), never the address itself. */
+/** Where a failure counts: a hash of the network (and what else is given), never the address itself. */
 async function failureKey(request: Request, also = ""): Promise<string> {
-  return hex(await digest(`kelpie-relay/1 ${request.headers.get("cf-connecting-ip") ?? ""} ${also}`));
+  return hex(await digest(`kelpie-relay/1 ${network(request.headers.get("cf-connecting-ip") ?? "")} ${also}`));
 }
+
+/** The router's own refusal, which says so (`x-kelpie-reason`), so that the desktop does not take it for the room's monthly limit. */
+export const TOO_MANY_REFUSED = "attempts";
 
 /** Makes a room for the holder of the registration key: the desktop sends its room's public key. */
 async function register(request: Request, env: Env): Promise<Response> {
@@ -156,9 +188,14 @@ export default {
     const room = await checkTicket(searchParams.get("t"), env.TICKET_SECRET);
     if (room === null) return plain(403, "bad ticket\n");
 
-    const who = await failureKey(request, room);
+    // Phones' refusals and the desktop's count apart: a removed phone that keeps trying from the desktop's network never shuts the desktop out.
+    const who = await failureKey(request, `${pathname} ${room}`);
     const now = Date.now();
-    if (admissions.out(who, now)) return plain(429, "too many attempts\n");
+    if (admissions.out(who, now)) {
+      const refused = plain(429, "too many refused attempts\n");
+      refused.headers.set("x-kelpie-reason", TOO_MANY_REFUSED);
+      return refused;
+    }
     const stub = env.ROOM.get(env.ROOM.idFromName(room));
     const forwarded = new Request(request);
     forwarded.headers.set("x-entry-colo", String(request.cf?.colo ?? ""));

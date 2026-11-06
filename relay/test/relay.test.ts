@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import roomSource from "../src/room.ts?raw";
 import workerSource from "../src/worker.ts?raw";
 import { encodeBase64Url, hex } from "../src/encoding";
-import { desktopStatement, MESSAGES_PER_SECOND, MONTHLY_BYTES, ROOM_TTL_MS, tokenSha256, verifyDesktop, type Room } from "../src/room";
-import { ADMISSION_REFUSALS, makeTicket, type Env } from "../src/worker";
+import { desktopStatement, MESSAGES_PER_SECOND, MONTHLY_BYTES, ROOM_BURST_BYTES, ROOM_TTL_MS, tokenSha256, verifyDesktop, type Room } from "../src/room";
+import { ADMISSION_REFUSALS, makeTicket, network, Strikes, TOO_MANY_REFUSED, type Env } from "../src/worker";
 import vectors from "./vectors.json";
 
 const relayEnv = env as unknown as Env;
@@ -186,6 +186,53 @@ describe("refused admissions", () => {
     // Another address is not held up by it.
     expect((await phone(r, `k=${token()}`, { "cf-connecting-ip": "198.51.100.78" })).status).toBe(403);
   });
+
+  it("count phones and the desktop apart, and say that the refusal is the router's", async () => {
+    const r = await register();
+    const from = { "cf-connecting-ip": "198.51.100.90" };
+    for (let i = 0; i < ADMISSION_REFUSALS; i++) expect((await phone(r, `k=${token()}`, from)).status).toBe(403);
+    const refused = await phone(r, `k=${token()}`, from);
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("x-kelpie-reason")).toBe(TOO_MANY_REFUSED);
+    // A removed phone retrying from the desktop's own network leaves the desktop its room.
+    socket(await upgrade("/v1/desktop", await desktopQuery(r), from));
+  });
+
+  it("count an IPv6 network as one, whichever of its addresses is used", async () => {
+    const r = await register();
+    for (let i = 0; i < ADMISSION_REFUSALS; i++) {
+      expect((await phone(r, `k=${token()}`, { "cf-connecting-ip": `2001:db8:5:6:${(i + 1).toString(16)}::1` })).status).toBe(403);
+    }
+    expect((await phone(r, `k=${token()}`, { "cf-connecting-ip": "2001:0db8:0005:0006:ffff:ffff:ffff:ffff" })).status).toBe(429);
+    expect((await phone(r, `k=${token()}`, { "cf-connecting-ip": "2001:db8:5:7::1" })).status).toBe(403);
+  });
+
+  it("know an address's network", () => {
+    expect(network("203.0.113.9")).toBe("203.0.113.9");
+    expect(network("2001:db8:5:6:a:b:c:d")).toBe("2001:db8:5:6::/64");
+    expect(network("2001:DB8:0005:6::1")).toBe("2001:db8:5:6::/64");
+    expect(network("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(network("::ffff:192.0.2.1")).toBe("192.0.2.1");
+    expect(network("not an address")).toBe("not an address");
+    expect(network("1::2::3")).toBe("1::2::3");
+  });
+
+  it("let go of what expired, then of the oldest, never of every count at once", () => {
+    const strikes = new Strikes(1, 1000, 3);
+    strikes.note("a", 0);
+    strikes.note("b", 10);
+    strikes.note("c", 20);
+    strikes.note("d", 30);
+    expect(strikes.size).toBe(3);
+    expect(strikes.out("a", 40)).toBe(false);
+    expect(["b", "c", "d"].every((k) => strikes.out(k, 40))).toBe(true);
+    // Once b and c expired, a newcomer takes their place and d is kept.
+    strikes.note("e", 1025);
+    expect(strikes.size).toBe(2);
+    expect(strikes.out("d", 1025)).toBe(true);
+    expect(strikes.out("e", 1025)).toBe(true);
+    expect(strikes.out("b", 1025) || strikes.out("c", 1025)).toBe(false);
+  });
 });
 
 describe("registration", () => {
@@ -266,7 +313,7 @@ describe("the phone's admission", () => {
     expect((await phone(r, `k=${token()}`)).status).toBe(403);
     expect((await phone(r, "k=short")).status).toBe(403);
     socket(await phone(r, `k=${k}`));
-    expect(await d.said()).toEqual({ t: "open", s: 0, via: "token" });
+    expect(await d.said()).toEqual({ t: "open", s: 0, via: "token", k: await tokenHash(k) });
   });
 
   it("takes only the origin the desktop registered, or none", async () => {
@@ -288,7 +335,7 @@ describe("the phone's admission", () => {
     d.ws.send(JSON.stringify({ t: "pair", h: await tokenHash(p), ttl: 120 }));
     await expect.poll(async () => runInDurableObject(stub(r), async (_room: Room, state) => ((await state.storage.get<unknown[]>("pair")) ?? []).length)).toBe(1);
     socket(await phone(r, `p=${p}`));
-    expect(await d.said()).toEqual({ t: "open", s: 0, via: "pair" });
+    expect(await d.said()).toEqual({ t: "open", s: 0, via: "pair", k: await tokenHash(p) });
     expect((await phone(r, `p=${p}`)).status).toBe(403);
 
     const late = token();
@@ -329,11 +376,11 @@ describe("the phone's admission", () => {
     a.ws.send(new Uint8Array([1, 2, 3]));
     await allow(back, [kept]);
     expect(await b.closed).toBe(4002);
-    expect(await back.said()).toEqual({ t: "open", s: 0, via: "token" });
+    expect(await back.said()).toEqual({ t: "open", s: 0, via: "token", k: await tokenHash(kept) });
     expect(await a.said()).toEqual({ t: "desktop_online" });
     a.ws.send(new Uint8Array([9]));
     // The phone that was closed is reported gone too; what comes next is a's frame, and not the one sent before the list.
-    expect(await back.said()).toEqual({ t: "close", s: 1 });
+    expect(await back.said()).toMatchObject({ t: "close", s: 1 });
     expect(Array.from(new Uint8Array((await back.next()) as ArrayBuffer))).toEqual([0, 0, 9]);
   });
 
@@ -352,7 +399,7 @@ describe("the phone's admission", () => {
     d.ws.send(Uint8Array.of(second >> 8, second & 255, 5, 6));
     expect(Array.from(new Uint8Array((await fresh.next()) as ArrayBuffer))).toEqual([5, 6]);
     expect(await old.closed).toBe(4001);
-    expect(await d.said()).toEqual({ t: "close", s: first });
+    expect(await d.said()).toMatchObject({ t: "close", s: first });
     // A kick of the old slot, as a late one would be, leaves the new socket alone.
     d.ws.send(JSON.stringify({ t: "kick", s: first, c: 4409 }));
     d.ws.send(Uint8Array.of(second >> 8, second & 255, 7));
@@ -377,6 +424,16 @@ describe("the phone's admission", () => {
     expect((await phone(r, `k=${tokens[8]}`)).status).toBe(409);
     phones[3].ws.close(1000, "done");
     await expect.poll(async () => (await phone(r, `k=${tokens[8]}`)).status).toBe(101);
+  });
+
+  it("gives phones that come in at the same moment slots of their own, also just after the room woke", async () => {
+    const r = await register();
+    const tokens = [token(), token(), token()];
+    const d = await desktop(r, tokens);
+    await evictDurableObject(stub(r));
+    for (const answer of await Promise.all(tokens.map((k) => phone(r, `k=${k}`)))) socket(answer);
+    const slots = [(await d.said()).s, (await d.said()).s, (await d.said()).s];
+    expect(new Set(slots).size).toBe(3);
   });
 });
 
@@ -433,14 +490,59 @@ describe("forwarding", () => {
     const k = token();
     const d = await desktop(r, [k]);
     const p = socket(await phone(r, `k=${k}`));
-    expect(await d.said()).toEqual({ t: "open", s: 0, via: "token" });
-    p.ws.close(1000, "bye");
-    expect(await d.said()).toEqual({ t: "close", s: 0 });
+    expect(await d.said()).toEqual({ t: "open", s: 0, via: "token", k: await tokenHash(k) });
+    // With the phone's code: the route that lost the phone's race says so, and is not counted against it.
+    p.ws.close(4000, "route lost");
+    expect(await d.said()).toEqual({ t: "close", s: 0, c: 4000 });
 
     const again = socket(await phone(r, `k=${k}`));
     await d.said();
     d.ws.close(1000, "bye");
     expect(await again.said()).toEqual({ t: "desktop_offline" });
+  });
+
+  it("drops a phone's frames while no desktop is ready, and counts nothing for them", async () => {
+    const r = await register();
+    const k = token();
+    const first = await desktop(r, [k]);
+    first.ws.close(1000, "away");
+    await first.closed;
+    const p = socket(await phone(r, `k=${k}`));
+    expect(await p.said()).toEqual({ t: "desktop_offline" });
+    for (let i = 0; i < 3; i++) p.ws.send(new Uint8Array(32 * 1024));
+    // Text from a phone closes it, once the frames before it were taken.
+    p.ws.send("done");
+    expect(await p.closed).toBe(4003);
+    await runInDurableObject(stub(r), (instance: Room) => {
+      const room = instance as unknown as { usage?: { bytes: number }; bucket: { tokens: number } };
+      expect(room.usage?.bytes ?? 0).toBe(0);
+      expect(room.bucket.tokens).toBe(ROOM_BURST_BYTES);
+    });
+  });
+
+  it("hears nothing more from a desktop that another took the room from", async () => {
+    const r = await register();
+    const k = token();
+    await desktop(r, [k]);
+    const fresh = await desktop(r, [k]);
+    const p = socket(await phone(r, `k=${k}`));
+    expect((await fresh.said()).t).toBe("open");
+    // The old connection's last word, arriving late, as the room would get it from the socket it replaced.
+    await runInDurableObject(stub(r), async (instance: Room, state) => {
+      const late = {
+        readyState: 1,
+        deserializeAttachment: () => ({ role: "desktop", slot: 0, entry: "", ready: true, replaced: true }),
+        serializeAttachment: vi.fn(),
+        send: vi.fn(),
+        close: vi.fn(),
+      } as unknown as WebSocket;
+      await instance.webSocketMessage(late, JSON.stringify({ t: "allow", h: [] }));
+      await instance.webSocketMessage(late, JSON.stringify({ t: "kick", s: 0, c: 4401 }));
+      await instance.webSocketMessage(late, JSON.stringify({ t: "drop" }));
+      expect(await state.storage.get("allow")).toEqual([await tokenHash(k)]);
+    });
+    p.ws.send(new Uint8Array([3]));
+    expect(Array.from(new Uint8Array((await fresh.next()) as ArrayBuffer)).slice(2)).toEqual([3]);
   });
 
   it("lets the desktop close one phone with its own code", async () => {

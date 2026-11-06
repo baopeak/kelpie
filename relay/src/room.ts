@@ -9,11 +9,12 @@
 // - **Phone**: `/v1/phone?t=&k=<token>` with a token whose SHA-256 the desktop put on the allow-list, or `&p=<pair token>`
 //   once. An `Origin`, when there is one, must be the one the desktop registered.
 // - **Frames**: binary only, at most 64 KiB. A phone's frame reaches the desktop as `[slot, u16 big-endian] + frame`; the
-//   desktop's goes to the slot it names. Nothing is queued: with no desktop ready a phone's frame is dropped. A slot is a number
+//   desktop's goes to the slot it names. Nothing is queued: with no desktop ready a phone's frame is dropped, uncounted. A slot is a number
 //   for one phone socket, never given to another while any socket still holds it, so a late close, frame or kick of an old socket
 //   cannot reach a new one. The desktop's frames are limited per slot: one phone's traffic closes that phone, not the room.
 // - **The desktop's word** (JSON text): `allow` (the whole allow-list; phones whose token left it are closed, and the desktop
-//   hears of phones only after it), `pair`, `origin`, `kick`, `drop`. It hears `open` and `close` for each phone slot.
+//   hears of phones only after it), `pair`, `origin`, `kick`, `drop`, heard from the newest desktop socket only. It hears
+//   `open` for each phone slot, with the hash the phone came in with (`k`), and `close`, with the phone's close code (`c`).
 //   Phones hear `desktop_offline` and `desktop_online`, which a relay can forge: hints only.
 
 import { DurableObject } from "cloudflare:workers";
@@ -27,11 +28,13 @@ interface Attachment {
   role: "desktop" | "phone";
   slot: number;
   entry: string;
-  /** Phone: how it was let in, and the hash of its token, so that a revoke can close it. */
+  /** Phone: how it was let in, and the hash of its token (or of its pairing token), so that a revoke can close it. */
   via?: "token" | "pair";
   cred?: string;
   /** Desktop: it has sent its allow-list on this socket, so phones may reach it. */
   ready?: boolean;
+  /** Desktop: a newer desktop took the room; what this socket still says is not heard. */
+  replaced?: boolean;
 }
 
 interface PairToken {
@@ -84,6 +87,8 @@ export class Room extends DurableObject<RoomEnv> {
   private readonly rates = new Map<string, { second: number; count: number }>();
   private bucket = { tokens: ROOM_BURST_BYTES, at: Date.now() };
   private usage?: Usage;
+  /** The next slot number to try, read from storage once per start and then kept here, so that two admissions never take one number. */
+  private nextSlot?: number;
   private unflushed = 0;
   private flushedAt = Date.now();
 
@@ -131,8 +136,15 @@ export class Room extends DurableObject<RoomEnv> {
     await this.ctx.storage.setAlarm(now + ROOM_TTL_MS);
 
     const [client, server] = Object.values(new WebSocketPair());
-    // Last desktop wins, so a half-open old socket cannot hold the room.
-    for (const old of this.ctx.getWebSockets("desktop")) old.close(CLOSE_REPLACED, "replaced");
+    // Last desktop wins, so a half-open old socket cannot hold the room; what it still sends (a late `allow []`) is not heard.
+    for (const old of this.ctx.getWebSockets("desktop")) {
+      try {
+        old.serializeAttachment({ ...attachment(old), ready: false, replaced: true } satisfies Attachment);
+        old.close(CLOSE_REPLACED, "replaced");
+      } catch {
+        /* already closed */
+      }
+    }
     this.ctx.acceptWebSocket(server, ["desktop"]);
     server.serializeAttachment({ role: "desktop", slot: 0, entry, ready: false } satisfies Attachment);
     return new Response(null, { status: 101, webSocket: client });
@@ -157,29 +169,42 @@ export class Room extends DurableObject<RoomEnv> {
       // Single use: spent before the socket is even open.
       await this.ctx.storage.put("pair", live.filter((p) => p.h !== h));
       via = "pair";
+      cred = h;
     } else {
       return plain(403, "not allowed\n");
     }
-    if (cred !== undefined) {
+    const stored = this.nextSlot === undefined ? await this.ctx.storage.get<number>("nextSlot") : undefined;
+    // Another admission may have read it meanwhile and moved on: its number stands.
+    this.nextSlot ??= stored ?? 0;
+    // From here to the accept nothing waits, so no other admission runs in between: the count and the slot hold.
+    if (via === "token") {
       // One socket per token: a phone that connects again replaces its older socket.
       for (const old of this.phones()) if (attachment(old).cred === cred) old.close(CLOSE_REPLACED, "replaced");
     }
     if (this.phones().length >= MAX_PHONES) return plain(409, "room full\n");
-    const slot = await this.newSlot();
+    const slot = this.freeSlot(this.nextSlot);
     if (slot < 0) return plain(409, "room full\n");
 
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server, ["phone", slotTag(slot)]);
     server.serializeAttachment({ role: "phone", slot, entry, via, cred } satisfies Attachment);
-    await this.ctx.storage.put({ lastUsed: now, nextSlot: (slot + 1) % SLOTS });
+    this.nextSlot = (slot + 1) % SLOTS;
     const desktop = this.readyDesktop();
-    if (desktop) desktop.send(JSON.stringify({ t: "open", s: slot, via }));
+    if (desktop) desktop.send(this.opened(slot, via, cred));
     else server.send(JSON.stringify({ t: "desktop_offline" }));
+    await this.ctx.storage.put({ lastUsed: now, nextSlot: this.nextSlot });
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /** What the desktop hears of a phone's slot: how it came in, and the hash it came in with, which its limits go by (the slot is new every time). */
+  private opened(slot: number, via: Attachment["via"], cred: string | undefined): string {
+    return JSON.stringify({ t: "open", s: slot, via, k: cred });
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const from = attachment(ws);
+    // A desktop that another took the room from has no say in it: not its list, not its kicks, not its frames.
+    if (from.role === "desktop" && from.replaced) return;
     if (typeof message === "string") {
       if (!this.withinRate(from.role === "desktop" ? "desktop" : slotTag(from.slot))) return ws.close(CLOSE_TOO_MANY, "too many messages");
       if (from.role === "desktop") return this.control(ws, from, message);
@@ -188,6 +213,8 @@ export class Room extends DurableObject<RoomEnv> {
     if (from.role === "phone") {
       if (!this.withinRate(slotTag(from.slot))) return ws.close(CLOSE_TOO_MANY, "too many messages");
       if (message.byteLength > MAX_FRAME) return ws.close(CLOSE_TOO_LARGE, "frame too large");
+      // With nobody to carry it to, a frame is dropped before it costs the room anything.
+      if (!this.readyDesktop()) return;
       if (!this.spend(message.byteLength)) return ws.close(CLOSE_ROOM_RATE, "room over its rate");
       if (!(await this.count(message.byteLength))) return this.closeAll(CLOSE_MONTHLY, "monthly limit");
       return this.toDesktop(from.slot, message);
@@ -202,7 +229,7 @@ export class Room extends DurableObject<RoomEnv> {
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
-    this.gone(ws);
+    this.gone(ws, code);
     try {
       ws.close(code >= 3000 && code <= 4999 ? code : 1000, reason.slice(0, 64));
     } catch {
@@ -211,7 +238,7 @@ export class Room extends DurableObject<RoomEnv> {
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
-    this.gone(ws);
+    this.gone(ws, 1006);
   }
 
   /** The room has not been used for its lifetime: it goes. Set again on each desktop connection, never in a loop. */
@@ -223,11 +250,11 @@ export class Room extends DurableObject<RoomEnv> {
     else await this.ctx.storage.setAlarm(lastUsed + ROOM_TTL_MS);
   }
 
-  /** A socket left: the other side hears of it. */
-  private gone(ws: WebSocket): void {
+  /** A socket left: the other side hears of it. The desktop hears the phone's code (a phone that closes the route that lost its race says so). */
+  private gone(ws: WebSocket, code: number): void {
     const left = attachment(ws);
     if (left.role === "phone") {
-      this.readyDesktop(ws)?.send(JSON.stringify({ t: "close", s: left.slot }));
+      this.readyDesktop(ws)?.send(JSON.stringify({ t: "close", s: left.slot, c: code }));
     } else if (left.ready && !this.readyDesktop(ws)) {
       for (const phone of this.phones(ws)) phone.send(JSON.stringify({ t: "desktop_offline" }));
     }
@@ -258,7 +285,7 @@ export class Room extends DurableObject<RoomEnv> {
           ws.serializeAttachment({ ...from, ready: true } satisfies Attachment);
           for (const phone of this.phones()) {
             const a = attachment(phone);
-            ws.send(JSON.stringify({ t: "open", s: a.slot, via: a.via }));
+            ws.send(this.opened(a.slot, a.via, a.cred));
             phone.send(JSON.stringify({ t: "desktop_online" }));
           }
         }
@@ -335,9 +362,9 @@ export class Room extends DurableObject<RoomEnv> {
     return this.ctx.getWebSockets("phone").filter((ws) => ws !== except && ws.readyState === OPEN);
   }
 
-  /** The next slot number no socket holds, open or closing: from a counter kept with the room, so numbers come round only after 65,536. */
-  private async newSlot(): Promise<number> {
-    const start = (await this.ctx.storage.get<number>("nextSlot")) ?? 0;
+  /** The next slot number from `start` that no socket holds, open or closing: from a counter kept with the room, so numbers come round only
+   *  after 65,536. Waits for nothing. */
+  private freeSlot(start: number): number {
     for (let i = 0; i < SLOTS; i++) {
       const slot = (start + i) % SLOTS;
       if (this.ctx.getWebSockets(slotTag(slot)).length === 0) return slot;
