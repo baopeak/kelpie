@@ -1109,7 +1109,18 @@ with no grace), removing the phone or lowering what it may do (within a second),
 address and never through the relay, and one phone at a time. If the computer is very busy a new screen waits, and after five very busy minutes the picture
 pauses until you tap it. The phone says when the computer is locked, when a Windows security prompt (UAC) is up, when an app running as administrator is in
 front, and when the window is minimized: those cannot be seen or answered from the phone. What is typed or clicked is not recorded anywhere: *What phones
-did* says which program was shared (such as `Code.exe`, never the window's title) or that it was a whole screen, when, and why it ended. The phone needs a browser that decodes H.264 video with WebCodecs: Safari on iOS 16.4 or later (iOS 26 works
+did* says which program was shared (such as `Code.exe`, never the window's title) or that it was a whole screen, when, and why it ended.
+
+Keys and text go only into the shared window: if another window has taken the focus on the computer, Kelpie brings the shared one to the front once,
+and if that does not work it types nothing and the phone says *Not typed*, so a password never lands in a chat that popped up. Sharing does not start
+if the orange border cannot be shown or another program holds the stop hotkey (Kelpie says so: pick another hotkey), nor while Kelpie itself runs as
+administrator. A 4K or larger screen is shown at 1080p, with crisp text at its full sharpness; a rotated screen cannot be shown yet (share one of its
+windows). If the picture stops while the computer says it is sending, the phone says *The picture is stuck* and asks for a fresh one.
+
+**What *May take control* means for the screen.** A phone given it can do anything you can do at this computer while signed in: for example Win+R and a
+command runs any program as you. Win+L locks the computer, and the phone cannot unlock it again: someone has to sign in at the computer. Ctrl+Alt+Del
+cannot be sent from the phone, and Windows security prompts (UAC), the lock screen and sign-in cannot be seen or answered from it. Give it only to your own
+phone, with its lock on. The phone needs a browser that decodes H.264 video with WebCodecs: Safari on iOS 16.4 or later (iOS 26 works
 best), or Chrome on Android; an older one says so.
 
 **"Not paired here" on the phone** means the computer did not recognise this phone, or keeps not

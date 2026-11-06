@@ -800,11 +800,21 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   openh264: CBR with a buffer of about two frames, no B-frames, keyframes only when asked, `AVLowLatencyMode`, live bitrate. Every SPS it emits is rewritten
   with `bitstream_restriction` (`max_num_reorder_frames = 0`) so a decoder holds no frame (`sps.rs`), and every keyframe carries its SPS and PPS. Input with
   `SendInput` in the picture's pixels mapped through the target's place (`DWMWA_EXTENDED_FRAME_BOUNDS`, per-monitor DPI v2, absolute units over the virtual
-  desktop, `geom.rs`); a window target is brought to the front before its first click, and a click that would land on a window over it is dropped and reported.
+  desktop, `geom.rs`). For a window target nothing goes anywhere but that window or a menu or dialog of its own process: a press that would land on another
+  window over it is dropped and reported (`covered`), and **keys and text go only while the target is the foreground window** (brought there once if it is not,
+  else refused as `not_front`, and `sc_text` answers not typed), so a password never goes into a window that took the focus meanwhile. A button a press left
+  held is released when the stream ends; input still queued when it stops is not done. A target the list would not offer (another virtual desktop, a tool
+  window, the border) is refused at the start. The encoder's picture is at most the top rung, 1920×1080 (a 4K or 5K monitor is shown at 1080p, an ultrawide
+  no wider than 1920; crisp tiles keep its text at the source's resolution); a rotated monitor is refused for now, and a mode change ends the stream
+  (`display_changed`).
   An always-on-top border and badge (who sees it, the stop hotkey) are drawn around what is shared and left out of every capture (`WDA_EXCLUDEFROMCAPTURE`);
-  the stop hotkey (default Ctrl+Alt+Shift+K, Settings → Mobile; always on, it cannot be turned off) is `RegisterHotKey` on that window's thread. Above-normal priority and no EcoQoS while it
+  the stop hotkey (default Ctrl+Alt+Shift+K, Settings → Mobile; always on, it cannot be turned off) is `RegisterHotKey` on that window's thread. **Sharing
+  does not start without both**: a border that cannot be shown or a hotkey another program holds fails the start, and the phone hears why. Above-normal priority and no EcoQoS while it
   streams, MMCSS "Capture" on its threads. The decisions are pure modules tested without a GPU (`geom`, `targets`, `states`, `control`, `tiles`, `sps`, `wire`,
-  `input`); the native code is in `win/`, one API per module.
+  `input`); the native code is in `win/`, one API per module. The app runs only the helper next to its own executable (its install folder, as for
+  `kelpie-stt`; `KELPIE_SCREEN_PATH` in debug builds only, for the e2e), and none while it runs as administrator (the helper would inherit that and drive
+  elevated windows). Its start budget (hello 4 s, start 9 s) stays under the daemon's 15 s; a start the daemon gave up on is stopped when it finishes, and a
+  stop that cannot be queued drops the helper.
 - **Media messages** (`kelpie-screen/src/wire.rs`, read by `app/phone/src/screen.ts`): binary, little-endian, first byte `0x01` (no JSON message starts with it,
   which is how the page tells them apart on the link): video (key and unpaint-all flags, unpaint rectangles, `seq`, capture time, source and coded size, an
   Annex B access unit), a tile (PNG or JPEG q90, the `seq` it matches, its rectangle in source pixels), the cursor (shape, visible, position). On the local pipe
@@ -813,13 +823,22 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   `Mobile::grant`: input checks it every time and the hold's task ends within 250 ms (`revoked`). 15 s for the same device's next connection (`sc_rebind`),
   after which the helper sends a keyframe first; 10 minutes with no input ends it. New screens are refused at load L2+ and with under 20 % memory free
   (`host_busy`), without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper
-  are checked again (known ids and kinds, short titles). The audit log has `screen_start` (`monitor`, or `window:` and the program's file name such as
+  are checked again (known ids and kinds, short titles). A start reserves the screen for its whole length: a second start meanwhile, by any device, is
+  refused as in use (`sc_taken`), and the first holder keeps it; a failed or timed-out start tells the app to stop; a link that closes during a start leaves a
+  hold that waits for the device's next connection. A hold also rests on the record as it is now (`control_held`, looked at again by its task), takes at most
+  60 input messages a second, and a rebind from the connection that holds it is no change. The audit log has `screen_start` (`monitor`, or `window:` and the program's file name such as
   `Code.exe`, never the window's title, which can name a document) and `screen_stop` (why); **no input is logged**. The phone locking (`lock_now` when its page
   is hidden, or its idle time running out) clears the grant like a revoke, with no grace, and the page ends its view at once.
 - **Flow on TCP**: nothing is lost on the link, only delayed, so frames are dropped before encoding, never after (a dropped P-frame would break every frame
   after it). The phone acknowledges each frame as it decodes (`sc_ack`); the broker forwards `{acked, rtt_ms, level}` (`screen.flow`, also once a second) and
   the helper encodes only while fewer than 3 frames are in flight. The media lane (`mobile/lanes.rs`) holds 6 messages, behind everything else, and nothing of
   it goes to a locked phone; when it is full or more than 512 KiB wait unacknowledged, video is dropped up to the next keyframe, asked for at most once a second.
+  **Lost frames never hold the stream** (`control::Flight`): `screen.flow` carries `dropped_through`, the last frame dropped, and the helper stops counting
+  those as in flight; a keyframe request gives up every frame in flight; while a keyframe is owed but not yet allowed, nothing else is encoded; the phone
+  acknowledges frames it skips or its decoder fails on. A tile or the cursor goes only while the lane has 3 places free, so it never takes video's room.
+  `screen.flow` also carries the bytes the media took on the wire (the link pads each message to a few sizes: a 5 KB frame goes as 16 KB), and the encoder is
+  asked for the link's rate divided by that factor. The phone calls its picture **stuck** when the computer says it sends frames, the heartbeat goes on and
+  nothing has been shown for 2 s, and asks for a fresh one; input onto a stale picture (a frame unacknowledged, or a keyframe owed, for 2 s) is not sent.
 - **Quality** (`control.rs`): one ladder, frames a second first, then size (30/20/15/10/8 fps at 100 %, then 8 fps 75 %, 6 and 4 fps 67 %, 4 fps 50 %; a window
   never under 540 lines). Three things move along it and the lowest wins: the encoder's own load (EMA of encode time over the frame interval, over 0.85 for 2 s
   down, under 0.42 for 10 s up), the link (lag = the window of frames full or the round trip 150 ms over its minimum; 2 s of lag takes 25 % off the bitrate, 10
@@ -829,7 +848,9 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   dropped, reason, degraded, level, encoder, idr_ratio}`. `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS` adds encode time to drive the ladder without a GPU.
 - **Crisp text** (`tiles.rs`, `tile_image.rs`): the picture read back is hashed in 64×64 cells; cells still for 300 ms are sent once more as tiles of up to
   8×4 cells, PNG, or JPEG q90 where PNG would be over a byte a pixel, at the source's size, within a byte budget of the video's rate (burst 512 KiB). A video
-  frame carries the rectangles of painted cells that changed, and the phone drops those tiles as it draws that frame. Off with *Crisp text* in Settings
+  frame carries the rectangles of painted cells that changed, and the phone drops those tiles as it draws that frame, or as it skips it. A dropped video frame
+  makes the helper paint every still cell again (`lost_tiles`, then unpaint-all), a frame not sent puts its unpaint back on the next one, and the phone refuses
+  a tile whose region a later frame changed while its image was still being decoded. Tiles take at most half the video's rate. Off with *Crisp text* in Settings
   (on by default), and off by itself while the link is slow: under 1 Mbps, lagging, or within 10 s of a bitrate cut, and at L3 (`Controller::crisp_ok`).
   It is measured, so cellular counts like any slow link (an iPhone page cannot tell cellular from Wi-Fi); `sc_stats.crisp` says so (`false`).
 - **States, never a silent freeze** (`states.rs`): four looks a second at the input desktop (`OpenInputDesktop`: the secure desktop of UAC and the lock screen
@@ -843,7 +864,10 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   pinch zoom and pan of the view only, a key bar with Ctrl, Shift, Alt and the Windows key (`meta`, alone for Start or held), text with an answer of its
   own. The entry is in the inbox and in a session's view. Input older than 1 s by the
   computer's clock is dropped by the daemon and by the helper; 3 s without media or heartbeat dims the picture; frames that come and do not decode for 1 s
-  ask for a keyframe.
+  ask for a keyframe. In trackpad mode a tap clicks where the computer's cursor is drawn: with no finger down the page takes the computer's position.
+- **What `control` of the screen allows.** It is the person's whole session: Win+R and a command runs anything as the user, so a phone given `control` can
+  run anything this user can. Win+L locks the computer, and the phone can then only show "locked": it cannot sign in again. Ctrl+Alt+Del cannot be sent by any
+  program, and UAC prompts and the lock and sign-in screens are on the secure desktop, which can be neither seen nor answered from here.
 
 ### Phone client
 
