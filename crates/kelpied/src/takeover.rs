@@ -49,6 +49,8 @@ const WATCH: Duration = Duration::from_millis(250);
 pub const MAX_FRAME_B64: usize = 700 * 1024;
 /// Input events in one message, and text in one.
 pub const MAX_OPS: usize = 32;
+/// Input messages a hold takes in a second; the rest are dropped (a phone does not need more, and the app's queue stays short).
+pub const INPUT_PER_SECOND: u32 = 60;
 pub const MAX_TEXT: usize = 4096;
 /// The screencast's own rate, from which `everyNthFrame` is worked out.
 const SOURCE_FPS: u8 = 60;
@@ -197,6 +199,10 @@ struct State {
     /// `IDLE_STOP` and `REBIND_WINDOW` (tests shorten them).
     idle: Duration,
     rebind: Duration,
+    /// Input messages taken in the current second, and when it began.
+    inputs: (Instant, u32),
+    /// Times the hold's task went round its loop (a paused hold must not spin).
+    wakes: u64,
 }
 
 pub struct Hold {
@@ -219,6 +225,20 @@ impl Hold {
 #[derive(Default)]
 pub struct Broker {
     holds: Mutex<HashMap<String, Arc<Hold>>>,
+    /// Panes and devices whose start is under way: a second start for either is refused at once.
+    starting: Mutex<Vec<String>>,
+}
+
+/// A start under way, for a pane and a device, until it is dropped.
+struct Starting<'a> {
+    broker: &'a Broker,
+    keys: [String; 2],
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        self.broker.starting.lock().retain(|k| !self.keys.contains(k));
+    }
 }
 
 /// What the app is told a hold should make now.
@@ -285,6 +305,17 @@ impl Broker {
             return Err(refused("tk_elsewhere", "That takeover is on another connection."));
         }
         Ok(hold)
+    }
+
+    /// Whether one more input message fits in this second.
+    fn input_allowed(hold: &Hold) -> bool {
+        let mut st = hold.state.lock();
+        let now = Instant::now();
+        if now.duration_since(st.inputs.0) >= Duration::from_secs(1) {
+            st.inputs = (now, 0);
+        }
+        st.inputs.1 += 1;
+        st.inputs.1 <= INPUT_PER_SECOND
     }
 
     /// Ends hold `tk`: the phone and the app are told (the app only when it did not end it itself), and the audit log has it.
@@ -365,7 +396,7 @@ impl Broker {
     /// The phone's takeover verbs. `Some` is a reply with content, `None` a plain ack.
     pub async fn phone_verb(&self, d: &Arc<Daemon>, phone: Phone<'_>, verb: &str, req: &Value) -> Result<Option<Value>, Refused> {
         match verb {
-            "panes" => self.panes(d).await.map(Some),
+            "panes" => self.panes(d, phone.device).await.map(Some),
             "tk_start" => self.start(d, &phone, req).await.map(Some),
             "tk_stop" => {
                 let hold = self.held_here(&phone, req)?;
@@ -381,21 +412,27 @@ impl Broker {
             "tk_input" => {
                 let hold = self.held_here(&phone, req)?;
                 let ops = checked_ops(&req["ops"]).ok_or_else(|| refused("bad_request", "not input a page takes"))?;
-                // Late input is dropped without a word: the phone already shows it as not live.
-                if !fresh(req["st"].as_u64(), now_millis()) || hold.state.lock().paused {
+                // Which window the phone mapped it against (`window_id` of its frame): the app refuses input meant for another.
+                let window = req["w"].as_u64().ok_or_else(|| refused("bad_request", "missing w"))?;
+                let st = req["st"].as_u64().unwrap_or_default();
+                // Late input is dropped without a word: the phone already shows it as not live, and a paused hold says so in its heartbeat.
+                if !fresh(Some(st), now_millis()) || hold.state.lock().paused || !Self::input_allowed(&hold) {
                     return Ok(None);
                 }
                 if !hold.live() {
                     return Err(refused("tk_gone", "That takeover has ended."));
                 }
                 hold.state.lock().last_input = Instant::now();
-                d.providers.notify("browser", "browser.takeover_input", json!({"tk": hold.tk, "ops": ops}));
+                // `st` goes on, so that the app drops what waited too long in its own queue.
+                d.providers.notify("browser", "browser.takeover_input", json!({"tk": hold.tk, "ops": ops, "w": window, "st": st}));
                 Ok(None)
             }
             "tk_text" => {
                 let hold = self.held_here(&phone, req)?;
                 let text = req["text"].as_str().filter(|t| !t.is_empty() && t.chars().count() <= MAX_TEXT).ok_or_else(|| refused("bad_request", "missing or too long text"))?;
-                if !fresh(req["st"].as_u64(), now_millis()) {
+                let window = req["w"].as_u64().ok_or_else(|| refused("bad_request", "missing w"))?;
+                let st = req["st"].as_u64().unwrap_or_default();
+                if !fresh(Some(st), now_millis()) {
                     return Err(refused("not_sent", "Not sent: it came too late. Check the page, then type it again."));
                 }
                 hold.state.lock().last_input = Instant::now();
@@ -403,7 +440,8 @@ impl Broker {
                 if !hold.live() {
                     return Err(refused("tk_gone", "That takeover has ended."));
                 }
-                match d.providers.request("browser", "browser.takeover_text", json!({"tk": hold.tk, "text": text})).await {
+                // The app types it in the queue of the taps before it, so it never overtakes them.
+                match d.providers.request("browser", "browser.takeover_text", json!({"tk": hold.tk, "text": text, "w": window, "st": st})).await {
                     Ok(_) => Ok(Some(json!({"type": "ack", "result": "sent"}))),
                     Err(_) => Err(refused("not_sent", "Not sent. Check the page, then type it again.")),
                 }
@@ -413,9 +451,10 @@ impl Broker {
         }
     }
 
-    async fn panes(&self, d: &Arc<Daemon>) -> Result<Value, Refused> {
+    async fn panes(&self, d: &Arc<Daemon>, device: &str) -> Result<Value, Refused> {
         let got = d.providers.request("browser", "browser.panes", json!({})).await.map_err(|e| refused("no_app", format!("{e}")))?;
-        let held: Vec<String> = self.holds.lock().values().map(|h| h.pane.clone()).collect();
+        // A pane this device holds is not shown as taken to it: after a reload it may take it again.
+        let held: Vec<String> = self.holds.lock().values().filter(|h| h.device != device).map(|h| h.pane.clone()).collect();
         let panes: Vec<Value> = got["panes"]
             .as_array()
             .map(|a| a.iter().take(64).filter_map(|p| {
@@ -436,6 +475,16 @@ impl Broker {
         if self.holds.lock().values().any(|h| h.pane == pane && h.device != phone.device) {
             return Err(refused("tk_taken", "Another device has taken over that pane."));
         }
+        // Held for the whole start, through the app's answer: a second start of this pane, or by this device, does not slip in meanwhile.
+        let _starting = {
+            let keys = [format!("pane {pane}"), format!("device {}", phone.device)];
+            let mut starting = self.starting.lock();
+            if starting.iter().any(|k| keys.contains(k)) {
+                return Err(refused("tk_taken", "That pane, or this device, is starting a takeover already."));
+            }
+            starting.extend(keys.iter().cloned());
+            Starting { broker: self, keys }
+        };
         // One pane at a time: the one this device held before ends.
         let mine: Vec<String> = self.holds.lock().values().filter(|h| h.device == phone.device).map(|h| h.tk.clone()).collect();
         for tk in mine {
@@ -449,7 +498,14 @@ impl Broker {
         let mut params = settings(&tk, step, false, true);
         params["pane"] = json!(pane);
         params["device"] = json!(phone.name);
-        let started = d.providers.request("browser", "browser.takeover_start", params).await.map_err(|e| refused("no_pane", format!("{e}")))?;
+        let started = match d.providers.request("browser", "browser.takeover_start", params).await {
+            Ok(v) => v,
+            Err(e) => {
+                // It may yet start in the app after this gave up on it (a timeout): it is told to let go.
+                d.providers.notify("browser", "browser.takeover_stop", json!({"tk": tk, "reason": "failed"}));
+                return Err(refused("no_pane", format!("{e}")));
+            }
+        };
         if !grant.load(Ordering::SeqCst) {
             d.providers.notify("browser", "browser.takeover_stop", json!({"tk": tk, "reason": "revoked"}));
             return Err(refused("tk_gone", "Control was taken away."));
@@ -462,7 +518,7 @@ impl Broker {
             grant,
             ended: AtomicBool::new(false),
             wake: Notify::new(),
-            state: Mutex::new(State { conn: Some((phone.conn, phone.out.clone())), gone_at: None, credit: CREDIT, pending: None, seq: 0, sent: VecDeque::new(), last_sent: None, last_input: now, last_beat: now, paused: false, ladder, applied: step, idle: IDLE_STOP, rebind: REBIND_WINDOW }),
+            state: Mutex::new(State { conn: Some((phone.conn, phone.out.clone())), gone_at: None, credit: CREDIT, pending: None, seq: 0, sent: VecDeque::new(), last_sent: None, last_input: now, last_beat: now, paused: false, ladder, applied: step, idle: IDLE_STOP, rebind: REBIND_WINDOW, inputs: (now, 0), wakes: 0 }),
         });
         self.holds.lock().insert(tk.clone(), hold.clone());
         d.mobile.audit(phone.device, "takeover_start", &short(started.get("host"), 120));
@@ -498,6 +554,10 @@ impl Broker {
         let hold = self.hold(tk).filter(|h| h.device == phone.device && h.live()).ok_or_else(|| refused("tk_gone", "That takeover has ended."))?;
         let step = {
             let mut st = hold.state.lock();
+            // The connection that holds it already (a hello after an unlock, on the same connection): nothing to do.
+            if st.conn.as_ref().is_some_and(|(c, _)| *c == phone.conn) {
+                return Ok(());
+            }
             let window = st.rebind;
             if st.conn.is_some() || st.gone_at.is_none_or(|at| at.elapsed() >= window) {
                 return Err(refused("tk_gone", "That takeover has ended."));
@@ -528,9 +588,11 @@ impl Broker {
 async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
     loop {
         let wait = {
-            let st = hold.state.lock();
+            let mut st = hold.state.lock();
+            st.wakes += 1;
             match (&st.pending, st.last_sent) {
-                (Some(_), Some(at)) if st.credit > 0 => (at + st.applied.gap()).saturating_duration_since(Instant::now()).min(WATCH),
+                // Paused, a frame that waits is not due: the hold sleeps until something changes.
+                (Some(_), Some(at)) if st.credit > 0 && !st.paused => (at + st.applied.gap()).saturating_duration_since(Instant::now()).min(WATCH),
                 _ => WATCH,
             }
         };
@@ -541,7 +603,9 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
         if hold.ended.load(Ordering::SeqCst) {
             return;
         }
-        if !hold.grant.load(Ordering::SeqCst) {
+        // The grant first, then what it rests on as it is now: the record, and for a page its lock. Every path that takes control away clears the
+        // grant; this holds whatever a later one forgets.
+        if !hold.grant.load(Ordering::SeqCst) || !d.mobile.control_held(&hold.device) {
             return d.takeover.end(&d, &hold.tk, "revoked", true);
         }
         let now = Instant::now();
@@ -572,10 +636,12 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
                     }
                     if now.duration_since(st.last_beat) >= HEARTBEAT {
                         st.last_beat = now;
-                        let _ = out.try_send(json!({"type": "tk_fhb", "tk": hold.tk, "seq": st.seq, "server_ts": now_millis()}).to_string());
+                        // `paused`: the phone's input is not taken now, until it acknowledges (it may have a frame it could not show).
+                        let _ = out.try_send(json!({"type": "tk_fhb", "tk": hold.tk, "seq": st.seq, "paused": st.paused, "server_ts": now_millis()}).to_string());
                     }
                     if !st.paused && st.sent.front().is_some_and(|(_, at)| now.duration_since(*at) >= PAUSE_AFTER) {
                         st.paused = true;
+                        st.pending = None;
                         tell = Some(settings(&hold.tk, step, true, false));
                     }
                 }
@@ -611,24 +677,52 @@ mod tests {
 
     const APP: u64 = 900;
 
+    /// How the app answers a start.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Start {
+        Ok,
+        Fail,
+        /// After this many milliseconds.
+        Slow(u64),
+    }
+
     fn rig() -> Rig {
+        rig_with(Start::Ok)
+    }
+
+    fn rig_with(start: Start) -> Rig {
         let dir = std::env::temp_dir().join(format!("kelpie-takeover-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let d = Daemon::with_secrets(dir, std::path::PathBuf::from("kelpied"), crate::notify::Memory::new());
+        // Devices given control, as the store has them: a hold rests on its record as well as on its grant.
+        d.mobile.add_test_controller("phone");
+        d.mobile.add_test_controller("tablet");
         let (tx, mut rx) = crate::session::client_channel();
-        d.providers.register(APP, &Role::App, "browser", &tx).unwrap();
+        d.providers.register(APP, &Role::App, "browser", None, &tx).unwrap();
         let notes = Arc::new(Mutex::new(Vec::new()));
         let (app, kept) = (d.clone(), notes.clone());
         tokio::spawn(async move {
             while let Some(o) = rx.recv().await {
                 let m: Value = serde_json::from_slice(&o.data[5..]).unwrap();
                 if let Some(id) = m["preq"].as_u64() {
-                    let result = match m["method"].as_str() {
-                        Some("browser.panes") => json!({"panes": [{"pane": "browser-a", "title": "Sign in", "host": "accounts.example", "project": "p1", "project_name": "Shop"}]}),
-                        Some("browser.takeover_start") => json!({"title": "Sign in", "host": "accounts.example"}),
-                        _ => json!(true),
-                    };
-                    app.providers.reply(APP, &json!({"preq": id, "result": result}));
+                    let (app, method) = (app.clone(), m["method"].as_str().unwrap_or_default().to_string());
+                    tokio::spawn(async move {
+                        let answer = match method.as_str() {
+                            "browser.panes" => json!({"result": {"panes": [{"pane": "browser-a", "title": "Sign in", "host": "accounts.example", "project": "p1", "project_name": "Shop"}]}}),
+                            "browser.takeover_start" => match start {
+                                Start::Fail => json!({"error": {"message": "no such pane"}}),
+                                Start::Slow(ms) => {
+                                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                                    json!({"result": {"title": "Sign in", "host": "accounts.example"}})
+                                }
+                                Start::Ok => json!({"result": {"title": "Sign in", "host": "accounts.example"}}),
+                            },
+                            _ => json!({"result": true}),
+                        };
+                        let mut reply = answer;
+                        reply["preq"] = json!(id);
+                        app.providers.reply(APP, &reply);
+                    });
                 } else {
                     kept.lock().push(m);
                 }
@@ -691,7 +785,10 @@ mod tests {
         assert_eq!(panes["panes"][0]["host"], "accounts.example");
         assert_eq!(panes["panes"][0]["held"], false);
         let tk = r.start().await;
-        assert_eq!(r.verb("panes", json!({})).await.unwrap().unwrap()["panes"][0]["held"], true);
+        assert_eq!(r.verb("panes", json!({})).await.unwrap().unwrap()["panes"][0]["held"], false, "its own hold is not taken from it");
+        let (out2, _rx2) = mpsc::channel(4);
+        let tablet = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2 };
+        assert_eq!(r.d.takeover.phone_verb(&r.d, tablet, "panes", &json!({})).await.unwrap().unwrap()["panes"][0]["held"], true, "another device sees it taken");
         r.frame(&tk, "one");
         let first = r.next("tk_frame").await.expect("a frame");
         assert_eq!((first["seq"].as_u64(), first["data"].as_str(), first["meta"]["deviceWidth"].as_u64()), (Some(1), Some("one"), Some(800)));
@@ -707,7 +804,7 @@ mod tests {
         assert_eq!((next["seq"].as_u64(), next["data"].as_str()), (Some(3), Some("five")));
         assert!(r.next("tk_fhb").await.is_some(), "a heartbeat, frames or not");
         // Stop from the phone: the app is told, and the audit log has the start and the end and nothing typed.
-        r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 10, "y": 20}], "st": now_millis()})).await.unwrap();
+        r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 10, "y": 20}], "st": now_millis(), "w": 1})).await.unwrap();
         r.verb("tk_stop", json!({"tk": tk})).await.unwrap();
         assert_eq!(r.next("tk_end").await.unwrap()["reason"], "phone");
         assert_eq!(r.told_now("browser.takeover_stop").await.len(), 1);
@@ -722,7 +819,7 @@ mod tests {
         let tk = r.start().await;
         let at = std::time::Instant::now();
         let _ = r.d.mobile.revoke("phone");
-        let late = r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 1, "y": 1}], "st": now_millis()})).await;
+        let late = r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 1, "y": 1}], "st": now_millis(), "w": 1})).await;
         assert_eq!(late.unwrap_err().code, "tk_gone", "the grant is checked on every input");
         assert_eq!(r.next("tk_end").await.expect("told")["reason"], "revoked");
         assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
@@ -749,7 +846,7 @@ mod tests {
         shorten(&r, &tk, Duration::from_millis(1500), REBIND_WINDOW);
         for _ in 0..4 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "key", "key": "Tab"}], "st": now_millis()})).await.unwrap();
+            r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "key", "key": "Tab"}], "st": now_millis(), "w": 1})).await.unwrap();
         }
         assert_eq!(r.d.takeover.count(), 1, "typing starts the time over");
         assert_eq!(r.next("tk_end").await.expect("told")["reason"], "idle");
@@ -794,20 +891,20 @@ mod tests {
         let r = rig();
         let tk = r.start().await;
         let old = now_millis() - 1500;
-        r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 5, "y": 5}], "st": old})).await.unwrap();
-        r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 5, "y": 5}]})).await.unwrap();
+        r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 5, "y": 5}], "st": old, "w": 1})).await.unwrap();
+        r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 5, "y": 5}], "w": 1})).await.unwrap();
         assert!(r.told("browser.takeover_input").is_empty(), "a tap after a gap never clicks");
-        assert_eq!(r.verb("tk_text", json!({"tk": tk, "text": "hunter2", "st": old})).await.unwrap_err().code, "not_sent");
+        assert_eq!(r.verb("tk_text", json!({"tk": tk, "text": "hunter2", "st": old, "w": 1})).await.unwrap_err().code, "not_sent");
         for bad in [json!([]), json!([{"k": "eval", "x": 1, "y": 1}]), json!([{"k": "tap", "x": -1, "y": 1}]), json!([{"k": "tap", "x": "1", "y": 1}]), json!([{"k": "key", "key": "F12"}]), json!(vec![json!({"k": "tap", "x": 1, "y": 1}); MAX_OPS + 1])] {
-            assert_eq!(r.verb("tk_input", json!({"tk": tk, "ops": bad, "st": now_millis()})).await.unwrap_err().code, "bad_request", "{bad}");
+            assert_eq!(r.verb("tk_input", json!({"tk": tk, "ops": bad, "st": now_millis(), "w": 1})).await.unwrap_err().code, "bad_request", "{bad}");
         }
-        r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "wheel", "x": 5, "y": 5, "dx": 0, "dy": 120}, {"k": "key", "key": "Enter"}], "st": now_millis()})).await.unwrap();
+        r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "wheel", "x": 5, "y": 5, "dx": 0, "dy": 120}, {"k": "key", "key": "Enter"}], "st": now_millis(), "w": 1})).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(r.told("browser.takeover_input").len(), 1);
-        let sent = r.verb("tk_text", json!({"tk": tk, "text": "hunter2", "st": now_millis()})).await.unwrap().unwrap();
+        let sent = r.verb("tk_text", json!({"tk": tk, "text": "hunter2", "st": now_millis(), "w": 1})).await.unwrap().unwrap();
         assert_eq!(sent["result"], "sent");
         let other = Phone { device: "phone", name: "Phone", conn: 9, out: &r.out };
-        assert_eq!(r.d.takeover.phone_verb(&r.d, other, "tk_input", &json!({"tk": tk, "ops": [{"k": "tap", "x": 1, "y": 1}], "st": now_millis()})).await.unwrap_err().code, "tk_elsewhere");
+        assert_eq!(r.d.takeover.phone_verb(&r.d, other, "tk_input", &json!({"tk": tk, "ops": [{"k": "tap", "x": 1, "y": 1}], "st": now_millis(), "w": 1})).await.unwrap_err().code, "tk_elsewhere");
     }
 
     #[tokio::test]
@@ -865,5 +962,100 @@ mod tests {
         assert_eq!(STEPS[0].capped(Level::L2), Step { quality: 50, width: 960, fps: 4 });
         assert_eq!(STEPS[5].capped(Level::L1), STEPS[5], "a cap never raises");
         assert_eq!((STEPS[0].every_nth(), STEPS[2].every_nth()), (6, 30));
+    }
+
+    #[tokio::test]
+    async fn input_goes_with_the_window_it_was_meant_for_and_its_clock_and_only_so_much_of_it() {
+        let r = rig();
+        let tk = r.start().await;
+        let st = now_millis();
+        assert_eq!(r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 1, "y": 1}], "st": st})).await.unwrap_err().code, "bad_request", "no window: refused");
+        r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 1, "y": 1}], "st": st, "w": 7})).await.unwrap();
+        let sent = r.told_now("browser.takeover_input").await;
+        assert_eq!((sent[0]["w"].as_u64(), sent[0]["st"].as_u64()), (Some(7), Some(st)), "the app checks both again");
+        for _ in 0..(INPUT_PER_SECOND + 20) {
+            r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "move", "x": 1, "y": 1}], "st": now_millis(), "w": 7})).await.unwrap();
+        }
+        assert!(r.told_now("browser.takeover_input").await.len() <= INPUT_PER_SECOND as usize + 1, "a flood is cut to a rate the page can take");
+    }
+
+    #[tokio::test]
+    async fn a_phone_that_stops_acknowledging_pauses_the_stream_without_spinning_and_its_ack_resumes_it() {
+        let mut r = rig();
+        let tk = r.start().await;
+        r.frame(&tk, "one");
+        let first = r.next("tk_frame").await.expect("a frame");
+        // Not acknowledged: after PAUSE_AFTER the app is told to pause, and the heartbeat says so.
+        tokio::time::sleep(PAUSE_AFTER + WATCH * 2).await;
+        assert!(r.told("browser.takeover_set").iter().any(|s| s["paused"] == true), "{:?}", r.told("browser.takeover_set"));
+        let mut paused_beat = false;
+        for _ in 0..6 {
+            if r.next("tk_fhb").await.expect("a heartbeat")["paused"] == true {
+                paused_beat = true;
+                break;
+            }
+        }
+        assert!(paused_beat, "the heartbeat says it is paused");
+        // A frame that comes now waits, and the hold sleeps meanwhile instead of going round every millisecond.
+        r.frame(&tk, "late");
+        let hold = r.d.takeover.hold(&tk).unwrap();
+        let before = hold.state.lock().wakes;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let woke = hold.state.lock().wakes - before;
+        assert!(woke <= 6, "{woke} wakes in 500 ms while paused");
+        let dropped = r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "tap", "x": 1, "y": 1}], "st": now_millis(), "w": 1})).await.unwrap();
+        assert!(dropped.is_none() && r.told("browser.takeover_input").is_empty(), "no input while paused");
+        // The acknowledgement resumes it with a fresh frame.
+        r.verb("tk_ack", json!({"tk": tk, "seq": first["seq"]})).await.unwrap();
+        let resumed = r.told_now("browser.takeover_set").await;
+        assert!(resumed.last().is_some_and(|s| s["paused"] == false && s["fresh"] == true), "{resumed:?}");
+        r.frame(&tk, "fresh");
+        assert_eq!(r.next("tk_frame").await.expect("frames again")["data"], "fresh");
+    }
+
+    #[tokio::test]
+    async fn a_start_that_fails_tells_the_app_to_let_go() {
+        let r = rig_with(Start::Fail);
+        assert_eq!(r.verb("tk_start", json!({"pane": "browser-a"})).await.unwrap_err().code, "no_pane");
+        let stops = r.told_now("browser.takeover_stop").await;
+        assert_eq!(stops.len(), 1, "it may have started after all");
+        assert_eq!(r.d.takeover.count(), 0);
+        assert!(r.d.takeover.starting.lock().is_empty(), "nothing is left starting");
+    }
+
+    #[tokio::test]
+    async fn two_starts_at_once_for_one_pane_get_one_hold() {
+        let r = rig_with(Start::Slow(300));
+        let first = tokio::spawn({
+            let (d, out) = (r.d.clone(), r.out.clone());
+            async move {
+                let phone = Phone { device: "phone", name: "Phone", conn: 1, out: &out };
+                d.takeover.phone_verb(&d, phone, "tk_start", &json!({"pane": "browser-a"})).await.map(|v| v.is_some()).map_err(|e| e.code)
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (out2, _rx) = mpsc::channel(4);
+        let tablet = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2 };
+        assert_eq!(r.d.takeover.phone_verb(&r.d, tablet, "tk_start", &json!({"pane": "browser-a"})).await.unwrap_err().code, "tk_taken", "the pane is starting already");
+        assert_eq!(r.verb("tk_start", json!({"pane": "browser-a"})).await.unwrap_err().code, "tk_taken", "and so is this device");
+        assert_eq!(first.await.unwrap(), Ok(true));
+        assert_eq!(r.d.takeover.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_rebind_on_the_connection_that_holds_it_keeps_it() {
+        let r = rig();
+        let tk = r.start().await;
+        r.verb("tk_rebind", json!({"tk": tk})).await.unwrap();
+        assert_eq!(r.d.takeover.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_lower_permission_ends_the_hold() {
+        let mut r = rig();
+        r.start().await;
+        r.d.mobile.set_permission("phone", crate::mobile::Permission::Write).unwrap();
+        assert_eq!(r.next("tk_end").await.expect("told")["reason"], "revoked");
+        assert_eq!(r.d.takeover.count(), 0);
     }
 }

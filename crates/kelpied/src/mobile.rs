@@ -1323,6 +1323,14 @@ impl Mobile {
 
 #[cfg(test)]
 impl Mobile {
+    /// A native app's record with `control`, sealed: what a takeover rests on, for tests outside this module.
+    pub(crate) fn add_test_controller(&self, id: &str) {
+        let mut pk = [0u8; 32];
+        pk[..id.len().min(32)].copy_from_slice(&id.as_bytes()[..id.len().min(32)]);
+        self.add_test_device(id, id, pk, Permission::Control, Kind::App);
+        self.config.lock().enabled = true;
+    }
+
     /// A paired device as `approve` makes one (its record sealed with this store's key).
     fn add_test_device(&self, id: &str, name: &str, pk: [u8; 32], permission: Permission, kind: Kind) {
         let key = self.mac_key(true).expect("a readable store").expect("a key");
@@ -2013,16 +2021,43 @@ fn ceiling_refusal(permission: Permission) -> String {
     }
 }
 
+/// What a page's control rests on, whatever its record's kind: paired on a secure origin, a passkey on record and the lock on.
+fn page_may_control(d: &Device, lock_on: bool) -> bool {
+    d.secure_origin && d.lock.is_some() && lock_on
+}
+
 impl Mobile {
-    /// Whether `device` may take control on a connection of this lock path, as things are at this moment: a browser device only while its record could be given control and the
-    /// passkey has opened it.
-    fn control_now(&self, device: &str, path: LockPath, gate: Gate) -> bool {
+    /// Whether `device` may take control on a connection of this lock path, as things are at this moment. A connection from a page in a browser
+    /// (`browser`) is held to the page's rule whatever its record's kind, an app record used from a browser too: control only while its passkey has
+    /// opened it. Only the native app's own connection is not.
+    fn control_now(&self, device: &str, path: LockPath, gate: Gate, browser: bool) -> bool {
         let lock_on = self.lock_options().on;
         let c = self.config.lock();
-        c.devices.iter().find(|d| d.id == device).is_some_and(|d| match d.kind {
-            Kind::App => true,
-            Kind::Pwa => path == LockPath::Passkey && gate == Gate::Open && record_ceiling(d, lock_on) == Permission::Control,
+        c.devices.iter().find(|d| d.id == device).is_some_and(|d| {
+            if d.kind == Kind::App && !browser {
+                return true;
+            }
+            path == LockPath::Passkey && gate == Gate::Open && page_may_control(d, lock_on)
         })
+    }
+
+    /// Whether `device` still holds what a takeover rests on, read again as the hold goes (`takeover::watch`): a verified record with `control`, and for a page
+    /// its lock on and a window its passkey opened. Every path that takes control away also clears the device's grants; this holds if one forgets.
+    pub(crate) fn control_held(&self, device: &str) -> bool {
+        let lock_on = self.lock_options().on;
+        let window = self.window_open(device);
+        if self.broken.lock().is_some() {
+            return false;
+        }
+        let c = self.config.lock();
+        c.enabled
+            && c.devices.iter().find(|d| d.id == device && d.verified).is_some_and(|d| {
+                d.permission >= Permission::Control
+                    && match d.kind {
+                        Kind::App => true,
+                        Kind::Pwa => page_may_control(d, lock_on) && window,
+                    }
+            })
     }
 }
 
@@ -2307,7 +2342,7 @@ impl Conn {
             return Some(json!({"type": "error", "req": tag, "code": "locked", "reason": null, "message": "Kelpie is locked on this phone."}));
         }
         let granted = if gate == Gate::ReadOnly { granted.min(Permission::Read) } else { granted };
-        let granted = if granted >= Permission::Control && !self.daemon.mobile.control_now(&self.device, self.lock_path, gate) { Permission::Write } else { granted };
+        let granted = if granted >= Permission::Control && !self.daemon.mobile.control_now(&self.device, self.lock_path, gate, self.page_origin.is_some()) { Permission::Write } else { granted };
         // Typing and answers may carry a `cid`: a repeat of one (a retry after a lost reply, over this or another connection
         // of the device) gets the first reply again, marked `dup`, and is not carried out twice. The daemon run's memory
         // only: a phone that sees `daemon_epoch` change starts over anyway.
@@ -2789,7 +2824,7 @@ impl Conn {
         self.lock_told = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
         let cap = if gate == Gate::ReadOnly { self.cap.min(Permission::Read) } else { self.cap };
         // Control only while it holds (`Mobile::control_now`): the phone offers takeover from what it hears here.
-        let cap = if cap >= Permission::Control && !m.control_now(&self.device, self.lock_path, gate) { Permission::Write } else { cap };
+        let cap = if cap >= Permission::Control && !m.control_now(&self.device, self.lock_path, gate, self.page_origin.is_some()) { Permission::Write } else { cap };
         let first = self.publish(true);
         // Only where it can be used (`Conn::secure_transport`). Read each time, off this task: until there is a key it asks the credential store, which can be slow.
         let push = if !self.locked && self.cap >= Permission::Write {
@@ -3396,6 +3431,7 @@ mod tests {
 
     mod lock;
     mod relay;
+    mod takeover;
 
     #[test]
     fn comparisons_and_hex() {

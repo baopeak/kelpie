@@ -1167,7 +1167,11 @@ async fn turning_the_lock_off_takes_a_pages_control_back_to_typing_until_it_is_g
     m.set_lock(off).unwrap();
     assert!(!grant.load(Ordering::SeqCst), "what it controlled stopped");
     assert_eq!(m.permission("phone"), Some(Permission::Write), "its record went back to typing");
-    assert!(device_of(&r).verified, "and is sealed as it is now");
+    // Its tags are checked again from scratch, as at a load: the lowered record is sealed as it is now.
+    m.config.lock().devices.iter_mut().for_each(|d| d.verified = false);
+    m.verify_devices();
+    assert!(device_of(&r).verified, "the lowered record verifies");
+    assert_eq!(device_of(&r).permission, Permission::Write);
     assert_eq!(m.permission("native"), Some(Permission::Control), "the native app's control does not rest on the lock");
     let mut changed = None;
     while let Ok(e) = heard.try_recv() {

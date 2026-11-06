@@ -528,6 +528,11 @@ impl Mobile {
         self.tell_lock(id);
     }
 
+    /// Whether `device` is unlocked now: a window its passkey opened, by the clock.
+    pub(super) fn window_open(&self, device: &str) -> bool {
+        self.lock_memory.unlocked.lock().get(device).is_some_and(|w| w.until > Instant::now())
+    }
+
     /// For `mobile.status`: whether a device's window to set up a passkey is open, and whether it is unlocked now.
     pub(super) fn lock_facts(&self, id: &str) -> (bool, bool) {
         let now = Instant::now();
