@@ -115,38 +115,51 @@ impl Overuse {
 pub const START_KBPS: u32 = 1500;
 pub const MIN_KBPS: u32 = 150;
 pub const MAX_KBPS: u32 = 4000;
-/// Queueing delay (round trip over the smallest seen lately) that counts as lag.
-const QUEUE_LAG_MS: f64 = 150.0;
-const LAG_FOR_MS: u64 = 2000;
+/// Queueing delay that counts as overuse: the round trip's floor of the last `TREND_WINDOW_MS` over its floor of `MIN_RTT_WINDOW_MS` (the
+/// research's "act at +40-50 ms", GCC-like, instead of waiting for 150 ms for two seconds).
+const QUEUE_LAG_MS: f64 = 50.0;
+/// The window the recent floor is taken over, and the least time between two cuts for queueing.
+const TREND_WINDOW_MS: u64 = 500;
+/// Samples the recent floor needs: one late acknowledgement is not a trend.
+const TREND_MIN_SAMPLES: usize = 3;
+/// The window of frames full this long is a cut too.
+const FULL_FOR_MS: u64 = 1000;
+/// A cut keeps this share (percent): at once, as GCC's multiplicative decrease does.
+const CUT_PERCENT: u32 = 85;
 const MIN_RTT_WINDOW_MS: u64 = 10_000;
 const UP_WAIT_MS: u64 = 10_000;
 const UP_WAIT_MAX_MS: u64 = 60_000;
 /// An up-step that held this long without a down-step resets the wait.
 const UP_HELD_MS: u64 = 30_000;
+/// No frame sent for this long: the stream is application-limited (a still screen), which says nothing about what the link carries.
+const IDLE_AFTER_MS: u64 = 1000;
 /// Crisp tiles turn themselves off below this bitrate, and for this long after the bitrate was cut (owner decision 2026-11-06).
 pub const CRISP_MIN_KBPS: u32 = 1000;
 pub const CRISP_CALM_MS: u64 = 10_000;
 
-/// The bitrate the link takes, from what the phone acknowledges: lag (the window of frames full, or the round trip grown by queueing) for
-/// 2 s takes 25 % off at once; 10 s with none adds 10 %. An up-step undone within 10 s doubles the wait before the next (to a minute), so a
-/// link that cannot hold a rate is not pushed to it every few seconds.
+/// The bitrate the link takes, from what the phone acknowledges. **Queueing** (the round trip's floor over the last half second, counted from
+/// after the last cut, above its floor over ten seconds by more than 50 ms) cuts 15 % at once, and again half a second later only if it still
+/// holds on what came after the cut; the window of frames **full** for a second cuts the same. Ten seconds with neither, while frames are being
+/// sent, add 10 %; an application-limited stream (a still screen) earns no increase, so a rate is never raised on no evidence and motion that
+/// resumes after a pause starts from the last rate the link carried. An up-step undone within 10 s doubles the wait before the next (to a
+/// minute), so a link that cannot hold a rate is not pushed to it every few seconds.
 #[derive(Debug)]
 pub struct Bandwidth {
     pub kbps: u32,
     rtts: VecDeque<(u64, u32)>,
-    srtt: Option<f64>,
-    lag_since: Option<u64>,
+    full_since: Option<u64>,
     clean_since: u64,
     last_down: Option<u64>,
     last_up: Option<u64>,
     up_wait: u64,
+    last_sent: Option<u64>,
     /// Bytes on the wire for each byte of media (the link pads every message to a few sizes), smoothed.
     wire: f64,
 }
 
 impl Bandwidth {
     pub fn new(now: u64) -> Bandwidth {
-        Bandwidth { kbps: START_KBPS, rtts: VecDeque::new(), srtt: None, lag_since: None, clean_since: now, last_down: None, last_up: None, up_wait: UP_WAIT_MS, wire: 1.0 }
+        Bandwidth { kbps: START_KBPS, rtts: VecDeque::new(), full_since: None, clean_since: now, last_down: None, last_up: None, up_wait: UP_WAIT_MS, last_sent: None, wire: 1.0 }
     }
 
     /// A frame's round trip, from the daemon sending it to the phone's acknowledgement.
@@ -155,8 +168,16 @@ impl Bandwidth {
         while self.rtts.front().is_some_and(|(t, _)| now.saturating_sub(*t) > MIN_RTT_WINDOW_MS) {
             self.rtts.pop_front();
         }
-        let r = f64::from(rtt_ms);
-        self.srtt = Some(self.srtt.map_or(r, |s| s + 0.125 * (r - s)));
+    }
+
+    /// A frame went out.
+    pub fn on_sent(&mut self, now: u64) {
+        self.last_sent = Some(now);
+    }
+
+    /// No frame went out lately: what the link carries is not being tested.
+    pub fn app_limited(&self, now: u64) -> bool {
+        self.last_sent.is_none_or(|s| now.saturating_sub(s) >= IDLE_AFTER_MS)
     }
 
     /// A media message of `raw` bytes went out as `wire` bytes (the daemon works it out from the link's padding).
@@ -172,26 +193,43 @@ impl Bandwidth {
         self.wire.clamp(1.0, 4.0)
     }
 
+    /// The queueing delay now: the floor of the round trips of the last `TREND_WINDOW_MS` (after the last cut) over the floor of ten seconds.
     pub fn queueing_ms(&self) -> Option<f64> {
-        let min = self.rtts.iter().map(|(_, r)| *r).min()?;
-        Some((self.srtt? - f64::from(min)).max(0.0))
+        let base = self.rtts.iter().map(|(_, r)| *r).min()?;
+        let latest = self.rtts.back()?.0;
+        let from = latest.saturating_sub(TREND_WINDOW_MS).max(self.last_down.map_or(0, |d| d + 1));
+        let recent: Vec<u32> = self.rtts.iter().filter(|(t, _)| *t >= from).map(|(_, r)| *r).collect();
+        if recent.len() < TREND_MIN_SAMPLES {
+            return None;
+        }
+        Some(f64::from(recent.iter().min()? - base))
     }
 
     pub fn lagging(&self, inflight: u32) -> bool {
         inflight >= MAX_INFLIGHT || self.queueing_ms().is_some_and(|q| q > QUEUE_LAG_MS)
     }
 
-    /// Looked at once in a while with the frames in flight now. True when the bitrate changed.
+    /// Looked at in every turn with the frames in flight now. True when the bitrate changed.
     pub fn tick(&mut self, inflight: u32, now: u64) -> bool {
-        if self.lagging(inflight) {
-            let since = *self.lag_since.get_or_insert(now);
+        let queueing = self.queueing_ms().is_some_and(|q| q > QUEUE_LAG_MS);
+        let full = inflight >= MAX_INFLIGHT;
+        if full {
+            self.full_since.get_or_insert(now);
+        } else {
+            self.full_since = None;
+        }
+        if queueing || full {
             self.clean_since = now;
-            if now.saturating_sub(since) >= LAG_FOR_MS && self.last_down.is_none_or(|d| now.saturating_sub(d) >= LAG_FOR_MS) {
+            let since = self.full_since.unwrap_or(now);
+            let due = (queueing && self.last_down.is_none_or(|d| now.saturating_sub(d) >= TREND_WINDOW_MS)) || (full && now.saturating_sub(since) >= FULL_FOR_MS);
+            if due {
                 if self.last_up.is_some_and(|u| now.saturating_sub(u) < UP_WAIT_MS) {
                     self.up_wait = (self.up_wait * 2).min(UP_WAIT_MAX_MS);
                 }
-                let next = (self.kbps * 3 / 4).max(MIN_KBPS);
-                self.lag_since = Some(now);
+                let next = (self.kbps * CUT_PERCENT / 100).max(MIN_KBPS);
+                if full {
+                    self.full_since = Some(now);
+                }
                 self.last_down = Some(now);
                 if next != self.kbps {
                     self.kbps = next;
@@ -200,7 +238,10 @@ impl Bandwidth {
             }
             return false;
         }
-        self.lag_since = None;
+        if self.app_limited(now) {
+            self.clean_since = now;
+            return false;
+        }
         if let Some(up) = self.last_up {
             if now.saturating_sub(up) >= UP_HELD_MS && self.last_down.is_none_or(|d| d < up) {
                 self.up_wait = UP_WAIT_MS;
@@ -723,35 +764,70 @@ mod tests {
     }
 
     #[test]
-    fn a_full_window_for_two_seconds_takes_a_quarter_off_and_ten_clean_seconds_add_a_tenth() {
+    fn a_full_window_for_a_second_takes_fifteen_percent_off_and_ten_seconds_of_sending_add_a_tenth() {
         let mut b = Bandwidth::new(0);
         acks(&mut b, 40, 0, 1000);
         assert!(!b.tick(3, 1000), "lag starts");
-        assert!(!b.tick(3, 2500));
-        assert!(b.tick(3, 3000), "two seconds of it");
-        assert_eq!(b.kbps, 1125);
-        assert!(!b.tick(3, 3500), "not again within two seconds");
-        assert!(b.tick(3, 5000));
-        assert_eq!(b.kbps, 843);
-        assert!(!b.tick(0, 6000), "clean from now");
-        assert!(!b.tick(0, 14_000));
-        assert!(b.tick(0, 15_000), "ten clean seconds");
-        assert_eq!(b.kbps, 927);
-        for _ in 0..100 {
-            b.tick(3, 100_000);
-            b.tick(3, 103_000);
+        assert!(!b.tick(3, 1500));
+        assert!(b.tick(3, 2000), "a second of it");
+        assert_eq!(b.kbps, 1275);
+        assert!(!b.tick(3, 2500), "not again within a second");
+        assert!(b.tick(3, 3000));
+        assert_eq!(b.kbps, 1083);
+        let mut t = 3500;
+        let up = loop {
+            b.on_sent(t);
+            if b.tick(0, t) {
+                break t;
+            }
+            t += 500;
+            assert!(t < 20_000, "never went up");
+        };
+        assert_eq!((up, b.kbps), (13_000, 1191), "ten clean seconds of frames going out");
+        // A still screen sends nothing: no evidence, so no increase, however long it lasts.
+        let held = b.kbps;
+        for t in (13_500..60_000).step_by(500) {
+            assert!(!b.tick(0, t));
         }
+        assert_eq!(b.kbps, held, "an application-limited stream earns nothing");
         let mut b2 = Bandwidth::new(0);
         let mut t = 0;
         while b2.kbps > MIN_KBPS {
-            t += 2000;
+            t += 1000;
             b2.tick(3, t);
             if t > 10_000_000 {
                 panic!("never reached the floor");
             }
         }
         assert_eq!(b2.kbps, MIN_KBPS);
-        assert!(!b2.tick(3, t + 2000), "no lower than the floor");
+        assert!(!b2.tick(3, t + 1000), "no lower than the floor");
+    }
+
+    #[test]
+    fn a_queue_that_grows_is_cut_at_once_and_again_only_on_what_came_after_the_cut() {
+        let mut b = Bandwidth::new(0);
+        acks(&mut b, 30, 0, 2000);
+        assert!(!b.lagging(1));
+        // 90 ms over the floor: the link's queue grows (Wi-Fi bufferbloat). Once the last half second is all above it, cut: not two
+        // seconds later.
+        acks(&mut b, 120, 2000, 2400);
+        assert!(!b.tick(1, 2400), "the window still holds the floor");
+        acks(&mut b, 120, 2400, 2600);
+        assert!(b.tick(1, 2600), "half a second of queueing: cut now");
+        assert_eq!(b.kbps, 1275);
+        assert!(!b.tick(1, 2700), "nothing came after the cut yet");
+        acks(&mut b, 120, 2633, 3000);
+        assert!(!b.tick(1, 3000), "half a second between cuts");
+        assert!(b.tick(1, 3100), "still queueing on what came after the cut");
+        assert_eq!(b.kbps, 1083);
+        acks(&mut b, 35, 3133, 3700);
+        assert!(!b.tick(1, 3700), "the queue drained: no more cuts");
+        assert!(!b.tick(1, 4500));
+        // One late acknowledgement is not a trend.
+        let mut c = Bandwidth::new(0);
+        acks(&mut c, 30, 0, 2000);
+        c.on_ack(300, 2010);
+        assert!(!c.tick(1, 2010));
     }
 
     #[test]
@@ -774,9 +850,10 @@ mod tests {
         let (mut t, mut lag_until) = (0u64, 0u64);
         while t < 300_000 {
             let was = b.kbps;
+            b.on_sent(t);
             let changed = b.tick(if t < lag_until { 3 } else { 0 }, t);
             if changed && b.kbps > was {
-                lag_until = t + 2500;
+                lag_until = t + 1500;
             } else if changed && b.kbps < was {
                 cycles_per_min[(t / 60_000) as usize] += 1;
             }
@@ -791,12 +868,12 @@ mod tests {
         let mut c = Controller::new((1920, 1080), false, false, 0);
         assert!(c.crisp_ok(0, 0), "1.5 Mbps to start: room for it");
         assert!(!c.crisp_ok(MAX_INFLIGHT, 0), "the window full: lag");
-        // Two seconds of lag cut the bitrate: off for ten seconds after the cut, even with the link quiet again.
+        // A second of lag cuts the bitrate: off for ten seconds after the cut, even with the link quiet again.
         c.tick(MAX_INFLIGHT, 1000);
-        c.tick(MAX_INFLIGHT, 3000);
-        assert_eq!(c.bandwidth.kbps, 1125);
-        assert!(!c.crisp_ok(0, 3000 + CRISP_CALM_MS - 1));
-        assert!(c.crisp_ok(0, 3000 + CRISP_CALM_MS));
+        c.tick(MAX_INFLIGHT, 2000);
+        assert_eq!(c.bandwidth.kbps, 1275);
+        assert!(!c.crisp_ok(0, 2000 + CRISP_CALM_MS - 1));
+        assert!(c.crisp_ok(0, 2000 + CRISP_CALM_MS));
         // A slow link (cellular, a weak Wi-Fi): below 1 Mbps, off whatever else.
         c.bandwidth.kbps = 900;
         assert!(!c.crisp_ok(0, 100_000));
