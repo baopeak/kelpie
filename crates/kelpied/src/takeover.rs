@@ -203,6 +203,17 @@ struct State {
     inputs: (Instant, u32),
     /// Times the hold's task went round its loop (a paused hold must not spin).
     wakes: u64,
+    /// The number of the last notice to the app of what to make (`notice`): notices are sent after the lock is let go, so two may arrive out of order,
+    /// and the app keeps the newest.
+    version: u64,
+}
+
+/// What the app is told to make now, numbered under the hold's lock.
+fn notice(st: &mut State, tk: &str, step: Step, paused: bool, fresh: bool) -> Value {
+    st.version += 1;
+    let mut v = settings(tk, step, paused, fresh);
+    v["v"] = json!(st.version);
+    v
 }
 
 pub struct Hold {
@@ -527,7 +538,7 @@ impl Broker {
             grant,
             ended: AtomicBool::new(false),
             wake: Notify::new(),
-            state: Mutex::new(State { conn: Some((phone.conn, phone.out.clone())), gone_at: None, credit: CREDIT, pending: None, seq: 0, sent: VecDeque::new(), last_sent: None, last_input: now, last_beat: now, paused: false, ladder, applied: step, idle: IDLE_STOP, rebind: REBIND_WINDOW, inputs: (now, 0), wakes: 0 }),
+            state: Mutex::new(State { conn: Some((phone.conn, phone.out.clone())), gone_at: None, credit: CREDIT, pending: None, seq: 0, sent: VecDeque::new(), last_sent: None, last_input: now, last_beat: now, paused: false, ladder, applied: step, idle: IDLE_STOP, rebind: REBIND_WINDOW, inputs: (now, 0), wakes: 0, version: 0 }),
         });
         self.holds.lock().insert(tk.clone(), hold.clone());
         d.mobile.audit(phone.device, "takeover_start", &short(started.get("host"), 120));
@@ -555,11 +566,14 @@ impl Broker {
                 st.sent.clear();
             }
             st.credit = CREDIT.saturating_sub(st.sent.len() as u32);
-            was_paused.then(|| st.ladder.step().capped(d.mobile.load.level()))
+            was_paused.then(|| {
+                let step = st.ladder.step().capped(d.mobile.load.level());
+                st.applied = step;
+                notice(&mut st, &hold.tk, step, false, true)
+            })
         };
-        if let Some(step) = resume {
-            hold.state.lock().applied = step;
-            d.providers.notify("browser", "browser.takeover_set", settings(&hold.tk, step, false, true));
+        if let Some(params) = resume {
+            d.providers.notify("browser", "browser.takeover_set", params);
         }
         hold.wake.notify_one();
     }
@@ -567,7 +581,7 @@ impl Broker {
     fn rebind(&self, d: &Daemon, phone: &Phone<'_>, req: &Value) -> Result<(), Refused> {
         let tk = req["tk"].as_str().unwrap_or_default();
         let hold = self.hold(tk).filter(|h| h.device == phone.device && h.live()).ok_or_else(|| refused("tk_gone", "That takeover has ended."))?;
-        let step = {
+        let params = {
             let mut st = hold.state.lock();
             // The connection that holds it already (a hello after an unlock, on the same connection): nothing to do.
             if st.conn.as_ref().is_some_and(|(c, _)| *c == phone.conn) {
@@ -584,10 +598,11 @@ impl Broker {
             st.pending = None;
             st.paused = false;
             st.applied = st.ladder.step().capped(d.mobile.load.level());
-            st.applied
+            let step = st.applied;
+            notice(&mut st, &hold.tk, step, false, true)
         };
         // A fresh frame, never one from before the gap.
-        d.providers.notify("browser", "browser.takeover_set", settings(&hold.tk, step, false, true));
+        d.providers.notify("browser", "browser.takeover_set", params);
         hold.wake.notify_one();
         Ok(())
     }
@@ -637,13 +652,15 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
                 if let Some((_, out)) = st.conn.clone() {
                     let due = st.last_sent.is_none_or(|at| now.duration_since(at) >= st.applied.gap());
                     if st.credit > 0 && due && !st.paused {
-                        if let Some(frame) = st.pending.take() {
-                            st.seq += 1;
-                            let msg = json!({"type": "tk_frame", "tk": hold.tk, "seq": st.seq, "data": frame.data, "meta": frame.meta, "server_ts": now_millis()}).to_string();
-                            // A lane with no room drops it: the next frame replaces it anyway.
+                        if let Some(frame) = st.pending.as_ref() {
+                            let seq = st.seq + 1;
+                            let msg = json!({"type": "tk_frame", "tk": hold.tk, "seq": seq, "data": frame.data, "meta": frame.meta, "server_ts": now_millis()}).to_string();
+                            // A lane with no room keeps the frame for the next pass, unless a newer one comes first: a page that then goes still would
+                            // otherwise leave the phone with the picture before.
                             if out.try_send(msg).is_ok() {
+                                st.pending = None;
+                                st.seq = seq;
                                 st.credit -= 1;
-                                let seq = st.seq;
                                 st.sent.push_back((seq, now));
                                 st.last_sent = Some(now);
                             }
@@ -657,17 +674,17 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
                     if !st.paused && st.sent.front().is_some_and(|(_, at)| now.duration_since(*at) >= PAUSE_AFTER) {
                         st.paused = true;
                         st.pending = None;
-                        tell = Some(settings(&hold.tk, step, true, false));
+                        tell = Some(notice(&mut st, &hold.tk, step, true, false));
                     }
                 } else if !st.paused {
                     // The link is down (waiting for the same device's next connection): the app stops making frames nobody can take. The rebind resumes it.
                     st.paused = true;
                     st.pending = None;
-                    tell = Some(settings(&hold.tk, step, true, false));
+                    tell = Some(notice(&mut st, &hold.tk, step, true, false));
                 }
                 if tell.is_none() && !st.paused && step != st.applied {
                     st.applied = step;
-                    tell = Some(settings(&hold.tk, step, false, false));
+                    tell = Some(notice(&mut st, &hold.tk, step, false, false));
                 }
                 None
             }
@@ -1098,7 +1115,7 @@ mod tests {
         r.frame(&tk, "fresh");
         assert_eq!(r.next("tk_frame").await.expect("frames again")["data"], "fresh");
         tokio::time::sleep(PAUSE_AFTER / 2).await;
-        assert_eq!(r.d.takeover.hold(&tk).unwrap().state.lock().paused, false, "and it does not pause again at once");
+        assert!(!r.d.takeover.hold(&tk).unwrap().state.lock().paused, "and it does not pause again at once");
     }
 
     #[tokio::test]
@@ -1124,5 +1141,38 @@ mod tests {
         let sent = r.told_now("browser.takeover_input").await;
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0]["ops"], json!([{"k": "up", "x": 2.0, "y": 2.0}]), "only the release: a button is never left pressed");
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_finds_the_lane_full_waits_for_room_instead_of_being_lost() {
+        let r = rig();
+        let (small, mut lane) = mpsc::channel(1);
+        let phone = Phone { device: "phone", name: "Phone", conn: 1, out: &small };
+        let tk = r.d.takeover.phone_verb(&r.d, phone, "tk_start", &json!({"pane": "browser-a"})).await.unwrap().unwrap()["tk"].as_str().unwrap().to_string();
+        small.try_send("something else".into()).unwrap();
+        r.frame(&tk, "the change");
+        tokio::time::sleep(WATCH * 2).await;
+        assert_eq!(lane.recv().await.unwrap(), "something else");
+        let got = loop {
+            let m: Value = serde_json::from_str(&tokio::time::timeout(Duration::from_secs(2), lane.recv()).await.unwrap().unwrap()).unwrap();
+            if m["type"] == "tk_frame" {
+                break m;
+            }
+        };
+        assert_eq!((got["data"].as_str(), got["seq"].as_u64()), (Some("the change"), Some(1)), "it went once there was room, under the next number");
+    }
+
+    #[tokio::test]
+    async fn notices_to_the_app_are_numbered_so_that_an_older_one_arriving_late_is_ignored() {
+        let r = rig();
+        let tk = r.start().await;
+        r.d.takeover.link_closed(1);
+        tokio::time::sleep(WATCH * 3).await;
+        let (out2, _rx2) = mpsc::channel(16);
+        r.d.takeover.phone_verb(&r.d, Phone { device: "phone", name: "Phone", conn: 2, out: &out2 }, "tk_rebind", &json!({"tk": tk})).await.unwrap();
+        let set = r.told_now("browser.takeover_set").await;
+        let versions: Vec<u64> = set.iter().map(|s| s["v"].as_u64().unwrap()).collect();
+        assert!(versions.len() >= 2 && versions.windows(2).all(|w| w[0] < w[1]), "{versions:?}");
+        assert_eq!(set.last().unwrap()["paused"], false, "the newest says resume");
     }
 }
