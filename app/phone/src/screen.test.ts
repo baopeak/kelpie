@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   avcC,
   avcChunk,
+  CURSOR_ECHO_MS,
+  CURSOR_SNAP_PX,
+  FrameTimes,
+  reconcileCursor,
   canDecode,
   clampView,
   coalesce,
@@ -463,5 +467,50 @@ describe("whether this browser can show the screen", () => {
     expect(await canDecode({ VideoDecoder: { isConfigSupported: async () => ({ supported: false }) } })).toBe(false);
     expect(await canDecode({ VideoDecoder: { isConfigSupported: async () => { throw new Error("no"); } } })).toBe(false);
     expect(await canDecode({ VideoDecoder: { isConfigSupported: async (c: unknown) => ({ supported: (c as { optimizeForLatency?: boolean }).optimizeForLatency === true }) } })).toBe(true);
+  });
+});
+
+describe("the cursor the finger moves", () => {
+  it("is drawn where the finger put it until the computer's positions catch up, and then follows them", () => {
+    const drawn = { shape: 0, visible: true, x: 500, y: 300 };
+    // A round trip old: the computer still says where the cursor was before the finger moved it.
+    const old = { shape: 1, visible: true, x: 420, y: 300 };
+    const held = reconcileCursor(drawn, old, 1000, 900);
+    expect(held, "no jump back during the echo, but the shape is the computer's").toEqual({ shape: 1, visible: true, x: 500, y: 300 });
+    // Past the hold, the computer's place wins: it is where the cursor really is (a program may have moved it).
+    expect(reconcileCursor(drawn, old, 900 + CURSOR_ECHO_MS, 900)).toEqual(old);
+    // Close enough is the same place: no jitter of a pixel or two.
+    const near = { shape: 0, visible: true, x: 500 + CURSOR_SNAP_PX, y: 300 - CURSOR_SNAP_PX };
+    expect(reconcileCursor(drawn, near, 10_000, 0)).toEqual({ ...near, x: 500, y: 300 });
+    expect(reconcileCursor(drawn, { ...near, x: 500 + CURSOR_SNAP_PX + 1 }, 10_000, 0).x).toBe(500 + CURSOR_SNAP_PX + 1);
+    expect(reconcileCursor(drawn, { ...drawn, visible: false }, 1000, 999).visible, "hidden by the computer is hidden").toBe(false);
+  });
+});
+
+describe("what the phone measures of each frame", () => {
+  it("counts the intervals between frames received and shown, their gaps, the decoder's time and what was never shown", () => {
+    const t = new FrameTimes();
+    let at = 0;
+    for (let seq = 1; seq <= 20; seq++) {
+      at += seq === 10 ? 300 : 33;
+      t.arrival(seq, at);
+      t.decoding(seq, at + 1);
+      if (seq === 15) t.skipped(seq);
+      else t.presented(seq, at + 6, at + 7);
+    }
+    const s = t.snapshot();
+    expect(s.arrivalInterval.n).toBe(19);
+    expect(s.arrivalInterval.p50).toBe(33);
+    expect(s.arrivalInterval.max).toBe(300);
+    expect(s.arrivalGaps, "one gap over 100 ms and over 250 ms").toEqual([1, 1]);
+    expect(s.gapThresholdsMs).toEqual([100, 250]);
+    expect(s.presentGaps).toEqual([1, 1]);
+    expect(s.decodeMs.p50).toBe(5);
+    expect(s.receiveToPresentMs.p95).toBe(7);
+    expect(s.dropped, "the skipped one").toBe(1);
+    // A frame that never comes out of the decoder counts once it is far behind.
+    t.arrival(21, 2000);
+    t.arrival(100, 2100);
+    expect(t.snapshot().dropped).toBe(2);
   });
 });

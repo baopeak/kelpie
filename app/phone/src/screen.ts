@@ -311,6 +311,111 @@ export function coalesce(ops: ScOp[]): ScOp[] {
   return out;
 }
 
+/** After the phone moved its own cursor, the computer's cursor messages (a round trip old) leave its position alone for this long. */
+export const CURSOR_ECHO_MS = 400;
+/** Past the hold, a computer position this close (source pixels) to the drawn one is taken as the same, so the cursor does not jitter. */
+export const CURSOR_SNAP_PX = 3;
+
+export interface CursorPos {
+  shape: number;
+  visible: boolean;
+  x: number;
+  y: number;
+}
+
+/** Where to draw the cursor when the computer says where it is: the shape and visibility always follow it; the position does too, unless the
+ *  phone moved the cursor itself within `CURSOR_ECHO_MS` (its own echo is newer than this message), or it is within `CURSOR_SNAP_PX`. */
+export function reconcileCursor(drawn: CursorPos, host: CursorPos, now: number, echoedAt: number): CursorPos {
+  const echoing = now - echoedAt < CURSOR_ECHO_MS;
+  const close = Math.abs(host.x - drawn.x) <= CURSOR_SNAP_PX && Math.abs(host.y - drawn.y) <= CURSOR_SNAP_PX;
+  return echoing || close ? { ...host, x: drawn.x, y: drawn.y } : host;
+}
+
+/** Intervals longer than these count as gaps (the second is the threshold that decides on another transport). */
+export const GAP_MS = [100, 250] as const;
+/** How many of the latest frames the timings keep. */
+export const TIMES_KEPT = 2000;
+
+/** The `q` quantile of `v` (sorted ascending), null for none. */
+function quantile(v: number[], q: number): number | null {
+  if (!v.length) return null;
+  return v[Math.min(v.length - 1, Math.round((v.length - 1) * q))];
+}
+
+function spread(v: number[]) {
+  const s = [...v].sort((a, b) => a - b);
+  const r = (x: number | null) => (x === null ? null : Math.round(x * 10) / 10);
+  return { n: s.length, p50: r(quantile(s, 0.5)), p95: r(quantile(s, 0.95)), p99: r(quantile(s, 0.99)), max: r(s.length ? s[s.length - 1] : null) };
+}
+
+/** Where each video frame's time went on the phone, for the measurement plan: arrival, the `decode()` call, the decoder's output and the
+ *  picture drawn, as `performance.now()` milliseconds; from them the inter-arrival and inter-present intervals (p50/p95/p99 and the gaps
+ *  over `GAP_MS`), the receive → present time, and the frames that were never shown. */
+export class FrameTimes {
+  private arrived = new Map<number, { at: number; decodeAt: number | null }>();
+  private arrivals: number[] = [];
+  private presents: number[] = [];
+  private decodeMs: number[] = [];
+  private toPresentMs: number[] = [];
+  private lastArrival: number | null = null;
+  private lastPresent: number | null = null;
+  dropped = 0;
+
+  private keep(list: number[], v: number) {
+    list.push(v);
+    if (list.length > TIMES_KEPT) list.shift();
+  }
+
+  /** Frame `seq` came off the link at `at`. */
+  arrival(seq: number, at: number) {
+    if (this.lastArrival !== null) this.keep(this.arrivals, at - this.lastArrival);
+    this.lastArrival = at;
+    this.arrived.set(seq, { at, decodeAt: null });
+    // Frames that never came out of the decoder are counted once they are far behind.
+    for (const [s] of this.arrived) {
+      if (s >= seq - 60) break;
+      this.arrived.delete(s);
+      this.dropped++;
+    }
+  }
+
+  /** Frame `seq` was handed to the decoder at `at`. */
+  decoding(seq: number, at: number) {
+    const a = this.arrived.get(seq);
+    if (a) a.decodeAt = at;
+  }
+
+  /** Frame `seq` was skipped (no decoder, or waiting for a keyframe). */
+  skipped(seq: number) {
+    if (this.arrived.delete(seq)) this.dropped++;
+  }
+
+  /** Frame `seq` came out of the decoder at `out` and was drawn at `drawn`. */
+  presented(seq: number, out: number, drawn: number) {
+    const a = this.arrived.get(seq);
+    this.arrived.delete(seq);
+    if (a?.decodeAt != null) this.keep(this.decodeMs, out - a.decodeAt);
+    if (a) this.keep(this.toPresentMs, drawn - a.at);
+    if (this.lastPresent !== null) this.keep(this.presents, drawn - this.lastPresent);
+    this.lastPresent = drawn;
+  }
+
+  /** What was measured so far. */
+  snapshot() {
+    const gaps = (v: number[]) => GAP_MS.map((g) => v.filter((x) => x > g).length);
+    return {
+      arrivalInterval: spread(this.arrivals),
+      presentInterval: spread(this.presents),
+      decodeMs: spread(this.decodeMs),
+      receiveToPresentMs: spread(this.toPresentMs),
+      arrivalGaps: gaps(this.arrivals),
+      presentGaps: gaps(this.presents),
+      gapThresholdsMs: [...GAP_MS],
+      dropped: this.dropped,
+    };
+  }
+}
+
 export interface Touch {
   id: number;
   x: number;
@@ -557,6 +662,8 @@ export interface Stats {
   encoder?: string;
   /** Crisp text: on, off for now because the link is slow (false), or switched off on the computer (null). */
   crisp?: boolean | null;
+  /** The computer's stage timings over the last second, in ms (`kelpie_screen::control::Stages`): for the measurement plan, shown in the debug view. */
+  stages?: Record<string, number | null>;
 }
 
 export interface ScreenState {
@@ -712,14 +819,14 @@ export class ScreenSession {
   }
 
   /** `sc_state`, `sc_stats`, `sc_fhb`, `sc_end`. */
-  onMessage(m: { type: string; sc?: string; state?: string; reason?: string; encoder?: string } & Stats) {
+  onMessage(m: { type: string; sc?: string; state?: string; reason?: string; encoder?: string; stages?: Record<string, number | null> } & Stats) {
     const s = this.state;
     if (!s?.sc || m.sc !== s.sc || s.phase === "ended") return;
     if (m.type === "sc_end") return this.ended(endedText(m.reason ?? "", this.t));
     this.heardAt = this.port.now();
     if (m.type === "sc_state" && m.state === "encoder") this.patch({ encoder: m.encoder === "sw" ? "sw" : "hw" });
     else if (m.type === "sc_state" && m.state) this.patch({ remote: m.state });
-    else if (m.type === "sc_stats") this.patch({ stats: { fps: m.fps, w: m.w, h: m.h, kbps: m.kbps, encode_ms_p95: m.encode_ms_p95, dropped: m.dropped, reason: m.reason, degraded: m.degraded, level: m.level, encoder: m.encoder, crisp: m.crisp } });
+    else if (m.type === "sc_stats") this.patch({ stats: { fps: m.fps, w: m.w, h: m.h, kbps: m.kbps, encode_ms_p95: m.encode_ms_p95, dropped: m.dropped, reason: m.reason, degraded: m.degraded, level: m.level, encoder: m.encoder, crisp: m.crisp, stages: m.stages } });
     if (this.state?.phase === "frozen") this.patch({ phase: "live" });
   }
 

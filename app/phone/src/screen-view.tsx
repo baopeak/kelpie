@@ -1,8 +1,10 @@
 // The computer's screen on the phone: what to see (its screens, Kelpie and IDEs first, then windows), then the picture, which a finger drives
 // as a trackpad or directly, a key bar with Ctrl, Shift and Alt, a field for text (sent as one message, said as sent or not sent), the
 // quality line, and Stop. Video is decoded with WebCodecs and drawn with the crisp tiles and the cursor over it; the logic is screen.ts.
+// Nothing waits to be shown: a decoded frame is drawn as it comes out of the decoder (no smoothing buffer), on a low-latency canvas where the
+// browser offers one, and a frame the decoder is too far behind for is skipped. The cursor the finger moves is drawn at once (local echo).
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { avcChunk, canDecode, clampView, fitView, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
+import { avcChunk, canDecode, clampView, fitView, FrameTimes, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, reconcileCursor, remoteText, sameSetup, setupFor, toClient, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
 import { connected, onScreenMedia, remoteScreen, remoteScreens } from "./phone-state";
 import { t } from "./i18n";
 
@@ -95,6 +97,15 @@ function Live() {
   const overlay = new Overlay<ImageBitmap>((b) => b.close());
   let shownSeq = 0;
   let drawQueued = false;
+  let ctx2d: CanvasRenderingContext2D | null = null;
+  // When the finger last moved the cursor: the computer's cursor messages (a round trip old) leave its position alone for a moment.
+  let echoedAt = -Infinity;
+  const times = new FrameTimes();
+  // For the measurement plan: what the phone saw, read from the page (a debugging console or a test driver).
+  (globalThis as { __kelpieScreenTimes?: () => unknown }).__kelpieScreenTimes = () => ({ ...times.snapshot(), desynchronized: lowLatency() });
+  // Asked for once, before any other drawing: a canvas the browser may show without waiting for the next composited frame.
+  const context = () => (ctx2d ??= canvas.getContext("2d", { desynchronized: true, alpha: false }));
+  const lowLatency = () => !!(context()?.getContextAttributes?.() as { desynchronized?: boolean } | undefined)?.desynchronized;
 
   const frame = (): Frame => {
     const r = box.getBoundingClientRect();
@@ -103,7 +114,7 @@ function Live() {
 
   const draw = () => {
     drawQueued = false;
-    const ctx = canvas.getContext("2d");
+    const ctx = context();
     if (!ctx || !src.w) return;
     const dpr = window.devicePixelRatio || 1;
     const r = box.getBoundingClientRect();
@@ -144,6 +155,7 @@ function Live() {
     decoder = new VideoDecoder({
       output: (f) => {
         const seq = f.timestamp;
+        const out = performance.now();
         latest?.close();
         latest = f;
         const p = pending.get(seq);
@@ -158,7 +170,9 @@ function Live() {
         shownSeq = seq;
         setQueue(decoder?.decodeQueueSize ?? 0);
         remoteScreens.decoded(seq);
-        redraw();
+        // Drawn now, not at the next animation frame: nothing holds a decoded picture back.
+        draw();
+        times.presented(seq, out, performance.now());
       },
       error: () => {
         // A decoder that failed is made again from the next keyframe. The frames it held are acknowledged, so the computer never waits for them,
@@ -183,7 +197,7 @@ function Live() {
     const m = parseMedia(bytes);
     if (!m) return;
     if (m.kind === "cursor") {
-      cursor = { shape: m.shape, visible: m.visible, x: m.x, y: m.y };
+      cursor = reconcileCursor(cursor, { shape: m.shape, visible: m.visible, x: m.x, y: m.y }, performance.now(), echoedAt);
       // With no finger down, a tap clicks where the computer's cursor is drawn, wherever the desk or a program moved it.
       if (gestures.idle()) gestures.cursor = { x: m.x, y: m.y };
       return redraw();
@@ -195,6 +209,7 @@ function Live() {
       }, () => {});
       return;
     }
+    times.arrival(m.seq, performance.now());
     if (m.key) {
       const next = setupFor(m.au, m.codedW, m.codedH);
       if (next && (!sameSetup(next, setup) || !decoder || decoder.state !== "configured")) configure(next);
@@ -203,18 +218,21 @@ function Live() {
     // A frame that is not decoded is still acknowledged (the computer must not wait for it), and its unpaint still applies, so that no crisp tile
     // stays over what it changed.
     const skip = () => {
+      times.skipped(m.seq);
       overlay.onFrame({ seq: m.seq, unpaint: m.unpaint, unpaintAll: m.unpaintAll, srcW: m.srcW, srcH: m.srcH });
       remoteScreens.skipped(m.seq);
       redraw();
     };
     if (!decoder || decoder.state !== "configured" || skipToKey) return skip();
-    // Far behind: frames after a dropped one cannot be decoded, so everything waits for a keyframe.
-    if (decoder.decodeQueueSize > 3 && !m.key) {
+    // Far behind (more than two waiting): a newer picture is better than a late one, and frames after a dropped one cannot be decoded, so
+    // everything waits for a keyframe.
+    if (decoder.decodeQueueSize > 2 && !m.key) {
       skipToKey = true;
       return skip();
     }
     pending.set(m.seq, { unpaint: m.unpaint, unpaintAll: m.unpaintAll, srcW: m.srcW, srcH: m.srcH });
     if (pending.size > 30) pending.delete(pending.keys().next().value!);
+    times.decoding(m.seq, performance.now());
     decoder.decode(new EncodedVideoChunk({ type: m.key ? "key" : "delta", timestamp: m.seq, data: avcChunk(m.au) }));
   };
 
@@ -225,6 +243,7 @@ function Live() {
     onCleanup(() => window.removeEventListener("resize", resize));
   });
   onCleanup(() => {
+    delete (globalThis as { __kelpieScreenTimes?: unknown }).__kelpieScreenTimes;
     onScreenMedia(null);
     decoder?.close();
     latest?.close();
@@ -241,9 +260,11 @@ function Live() {
       redraw();
     }
     send(o.ops);
+    // The finger moved the cursor: drawn there at once (local echo), the computer's next positions reconciled to it.
     if (o.ops.some((op) => op.k === "move")) {
       cursor = { ...cursor, x: gestures.cursor.x, y: gestures.cursor.y };
-      redraw();
+      echoedAt = performance.now();
+      draw();
     }
   };
   const touch = (e: PointerEvent) => ({ id: e.pointerId, x: e.clientX, y: e.clientY });
@@ -291,7 +312,7 @@ function Live() {
         <Show when={s().phase === "frozen" || !connected()}><div class="takeover-lost" role="status">{t("Connection lost: nothing is sent until the picture is back.")}</div></Show>
         <Show when={s().phase === "live" && s().stuck}><div class="takeover-lost" role="status" data-screen-stuck>{t("The picture is stuck: asking the computer for a fresh one.")}</div></Show>
         <Show when={debug()}>
-          <pre class="screen-debug">{JSON.stringify({ ...s().stats, queue: queue(), shown: shownSeq, tiles: overlay.count, encoder: s().encoder })}</pre>
+          <pre class="screen-debug">{JSON.stringify({ ...s().stats, queue: queue(), shown: shownSeq, tiles: overlay.count, encoder: s().encoder, phone: { ...times.snapshot(), desynchronized: lowLatency() } }, null, 1)}</pre>
         </Show>
       </div>
       <p class="muted screen-quality" onClick={() => setDebug(!debug())}>{qualityText(s().stats, t)}<Show when={s().encoder === "sw"}> · {t("software encoder")}</Show></p>
