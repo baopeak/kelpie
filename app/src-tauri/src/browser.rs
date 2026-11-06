@@ -270,8 +270,13 @@ pub async fn browser_bounds(app: AppHandle, label: String, rect: Rect) -> CmdRes
 #[tauri::command]
 pub async fn browser_visible(app: AppHandle, label: String, visible: bool) -> CmdResult<()> {
     let Some(wv) = app.get_webview(&label) else { return Ok(()) };
-    app.state::<Takeovers>().set_visible(&label, visible);
-    if visible { wv.show() } else { wv.hide() }.map_err(err)
+    if visible {
+        app.state::<Takeovers>().set_visible(&label, true);
+        wv.show().map_err(err)
+    } else {
+        takeover::hiding(&app, &label).await;
+        wv.hide().map_err(err)
+    }
 }
 
 #[tauri::command]
@@ -420,6 +425,32 @@ async fn capture(wv: &tauri::Webview, clip: Option<Rect>) -> CmdResult<Vec<u8>> 
 /// Calls a DevTools protocol method on the page's WebView2 and returns its JSON result.
 #[cfg(windows)]
 pub(crate) async fn devtools(wv: &tauri::Webview, method: &'static str, params: Value) -> CmdResult<Value> {
+    devtools_when(wv, method, params, None).await
+}
+
+/// What a call made only while the page is shown answers when it is not.
+pub(crate) const NOT_SHOWN: &str = "the pane is hidden on the computer";
+
+/// Whether the view is shown now: not hidden (`SetIsVisible`) and its window not minimised. On the window thread.
+#[cfg(windows)]
+unsafe fn shown(controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, IsIconic, GA_ROOT};
+    let mut visible = windows::core::BOOL::default();
+    if controller.IsVisible(&mut visible).is_err() || !visible.as_bool() {
+        return false;
+    }
+    let mut parent = windows::Win32::Foundation::HWND::default();
+    if controller.ParentWindow(&mut parent).is_err() {
+        return false;
+    }
+    !IsIconic(GetAncestor(parent, GA_ROOT)).as_bool()
+}
+
+/// `devtools`, but with `hidden` (a record of what the window hides) given, only while the page is shown: that, the view's own visibility and its
+/// window's minimised state are looked at on the window thread right before the call, so a hide posted after the look cannot overtake the call.
+/// Refused, it answers `NOT_SHOWN`.
+#[cfg(windows)]
+pub(crate) async fn devtools_when(wv: &tauri::Webview, method: &'static str, params: Value, hidden: Option<Box<dyn FnOnce() -> bool + Send>>) -> CmdResult<Value> {
     use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
     use windows::core::HSTRING;
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
@@ -431,6 +462,11 @@ pub(crate) async fn devtools(wv: &tauri::Webview, method: &'static str, params: 
                 let _ = tx.send(r);
             }
         };
+        if let Some(hidden) = hidden {
+            if hidden() || !shown(&pv.controller()) {
+                return send(Err(NOT_SHOWN.into()));
+            }
+        }
         let core = match pv.controller().CoreWebView2() {
             Ok(c) => c,
             Err(e) => return send(Err(e.to_string())),
