@@ -324,7 +324,9 @@ person had chosen goes, and approvals end, which fails safe. `disable_web_page_p
   `@username` or first name as `user_name` (shown next to the id, and in the audit entry), and that chat's number as `chat_id`, and sets
   `approve_low`. A `/bind` from another chat, or from a group's anonymous admin (`sender_chat`, or the account 1087968824), is refused
   with a reply and binds nothing; so is a code that was used or ran out. Those replies go at most once a minute to each chat, off the
-  polling thread. `/bind@<bot>` counts only for this bot's own username (`getMe`); a command for another bot is ignored. Five wrong
+  polling thread, at most four at once; the last of the four is kept for the configured chat, which the 64-chat cap does not hold
+  either, and a reply left out does not count towards the minute. `/bind@<bot>` counts only for this bot's own username (`getMe`,
+  for the token held now); a command for another bot is ignored. Five wrong
   codes from the configured chat end the binding; other chats' do not count. A `notify.set` with `end_binding: true` (the page sends it
   when the person picks another mode), one that switches Telegram off or names another chat, and a new bot token end a binding under way
   (`notify.telegram` `bind_cancelled`); any other save leaves it waiting. A correct code is saved only if, under the same lock as the
@@ -339,13 +341,15 @@ person had chosen goes, and approvals end, which fails safe. `disable_web_page_p
   while approvals are on or a binding waits: in `alert` and `alert_link` there is no thread and no request of its own. Every poll asks for
   `message` and `callback_query`: Telegram keeps only what the last poll asked for, so a `/bind` sent while presses alone were asked for
   would never arrive. A `/bind` sent while nothing polls waits at Telegram, and the next poll answers it (no code waiting, or a wrong code
-  when a new one is open). The bot's username is asked once per token (`getMe`). A poll that returns nothing in under a second waits out
+  when a new one is open). The bot's username is asked once per token (`getMe`), and forgotten when the token changes. A poll that returns nothing in under a second waits out
   the second. A note on a press of a button no longer valid is sent off the polling thread. Outbound only, no listener. The offset is kept in memory. Errors back off with full jitter from
   1 s to 60 s; a `409` (a webhook, or another poller) is shown once with what to do.
 - **Buttons.** Only for a needs-you message about a request the daemon labels `low` (`mobile::risk`) that changes no file, shown whole
   (at most 2000 characters, no hidden marks), with a one-time yes known to be one: in a terminal, the one open request a hook reported,
-  shown whole in the menu's own dialog, between its `… command` header and its question, alone or followed by the hook's own
-  `description` (`choices::menu_shows_command`; whitespace collapsed, anything more or less refuses), and a permission menu with one
+  shown whole in the menu's own dialog, between its `… command` header and its question, alone or followed, from a line of its own,
+  by the hook's own `description` (`choices::menu_shows_command`; whitespace collapsed, anything more or less refuses). The window
+  must hold one header, left of every line under it, and a description that could be the command's next line (a character a shell
+  acts on, or a first word that is not plain letters or names a program the risk table knows) matches nothing. Then a permission menu with one
   plain *Yes* and one plain *No*
   (`choices::one_time_answers`); in a chat, the one open request, for which the daemon writes the dialect's own one-time yes and no
   (Claude's `can_use_tool` repeating its input when that was at most 16 KiB, Codex's command approvals in both versions, ACP's one
