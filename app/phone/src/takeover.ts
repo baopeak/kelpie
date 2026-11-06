@@ -287,7 +287,10 @@ export class TakeoverSession {
     if (m.type === "tk_end") return this.ended(endedText(m.reason ?? "", this.t));
     this.heardAt = this.port.now();
     if (m.type === "tk_frame" && typeof m.data === "string" && typeof m.seq === "number") {
+      // The same picture as the one shown: the page does not load it again, so nothing would acknowledge it. It is shown already.
+      const same = s.frame?.data === m.data;
       this.patch({ phase: "live", frame: { seq: m.seq, data: m.data, meta: m.meta ?? {} } });
+      if (same) this.shown(m.seq);
     } else if (m.type === "tk_fhb" && m.paused === true) {
       // The computer waits for an acknowledgement it never got (a frame lost on the way, or not shown): the picture is stuck, input is not taken. It is
       // asked to go on from the last frame acknowledged, which brings a fresh one.

@@ -419,8 +419,13 @@ impl Broker {
                 // Which window the phone mapped it against (`window_id` of its frame): the app refuses input meant for another.
                 let window = req["w"].as_u64().ok_or_else(|| refused("bad_request", "missing w"))?;
                 let st = req["st"].as_u64().unwrap_or_default();
-                // Late input is dropped without a word: the phone already shows it as not live, and a paused hold says so in its heartbeat.
+                // Late input is dropped without a word: the phone already shows it as not live, and a paused hold says so in its heartbeat. A release goes
+                // all the same (the app lets it through too), so a button is never left pressed in the page.
                 if !fresh(Some(st), now_millis()) || hold.state.lock().paused || !Self::input_allowed(&hold) {
+                    let releases: Vec<Value> = ops.into_iter().filter(|op| op["k"] == "up").collect();
+                    if !releases.is_empty() && hold.live() {
+                        d.providers.notify("browser", "browser.takeover_input", json!({"tk": hold.tk, "ops": releases, "w": window, "st": st}));
+                    }
                     return Ok(None);
                 }
                 if !hold.live() {
@@ -543,8 +548,14 @@ impl Broker {
                     st.ladder.sample(now.duration_since(at), now);
                 }
             }
+            let was_paused = std::mem::replace(&mut st.paused, false);
+            if was_paused {
+                // Whatever is still counted as on its way (a frame the phone never showed, or one it acknowledges under an older number) is written off:
+                // the resume brings a fresh frame, and the phone may have it at once.
+                st.sent.clear();
+            }
             st.credit = CREDIT.saturating_sub(st.sent.len() as u32);
-            std::mem::replace(&mut st.paused, false).then(|| st.ladder.step().capped(d.mobile.load.level()))
+            was_paused.then(|| st.ladder.step().capped(d.mobile.load.level()))
         };
         if let Some(step) = resume {
             hold.state.lock().applied = step;
@@ -648,6 +659,11 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
                         st.pending = None;
                         tell = Some(settings(&hold.tk, step, true, false));
                     }
+                } else if !st.paused {
+                    // The link is down (waiting for the same device's next connection): the app stops making frames nobody can take. The rebind resumes it.
+                    st.paused = true;
+                    st.pending = None;
+                    tell = Some(settings(&hold.tk, step, true, false));
                 }
                 if tell.is_none() && !st.paused && step != st.applied {
                     st.applied = step;
@@ -1061,5 +1077,52 @@ mod tests {
         r.d.mobile.set_permission("phone", crate::mobile::Permission::Write).unwrap();
         assert_eq!(r.next("tk_end").await.expect("told")["reason"], "revoked");
         assert_eq!(r.d.takeover.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_acknowledgement_under_an_older_number_while_paused_still_resumes_the_stream() {
+        // The phone acknowledged frame 1, then got frames it never acknowledged (the same picture again, which the page does not load a second
+        // time). Paused, it acknowledges 1 again, as the page does on a paused heartbeat: the stream must come back.
+        let mut r = rig();
+        let tk = r.start().await;
+        r.frame(&tk, "one");
+        let first = r.next("tk_frame").await.expect("a frame");
+        r.verb("tk_ack", json!({"tk": tk, "seq": first["seq"]})).await.unwrap();
+        for data in ["same", "same again"] {
+            r.frame(&tk, data);
+            r.next("tk_frame").await.expect("frames on credit");
+        }
+        tokio::time::sleep(PAUSE_AFTER + WATCH * 2).await;
+        assert!(r.told("browser.takeover_set").iter().any(|s| s["paused"] == true));
+        r.verb("tk_ack", json!({"tk": tk, "seq": first["seq"]})).await.unwrap();
+        r.frame(&tk, "fresh");
+        assert_eq!(r.next("tk_frame").await.expect("frames again")["data"], "fresh");
+        tokio::time::sleep(PAUSE_AFTER / 2).await;
+        assert_eq!(r.d.takeover.hold(&tk).unwrap().state.lock().paused, false, "and it does not pause again at once");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_link_pauses_the_app_until_the_device_is_back() {
+        let r = rig();
+        let tk = r.start().await;
+        r.d.takeover.link_closed(1);
+        tokio::time::sleep(WATCH * 3).await;
+        assert!(r.told_now("browser.takeover_set").await.iter().any(|s| s["paused"] == true), "no frames are made for nobody");
+        let (out2, _rx2) = mpsc::channel(16);
+        let back = Phone { device: "phone", name: "Phone", conn: 2, out: &out2 };
+        r.d.takeover.phone_verb(&r.d, back, "tk_rebind", &json!({"tk": tk})).await.unwrap();
+        let set = r.told_now("browser.takeover_set").await;
+        assert!(set.last().is_some_and(|s| s["paused"] == false && s["fresh"] == true), "{set:?}");
+    }
+
+    #[tokio::test]
+    async fn a_release_goes_even_when_the_rest_of_its_message_is_dropped() {
+        let r = rig();
+        let tk = r.start().await;
+        let old = now_millis() - 5000;
+        r.verb("tk_input", json!({"tk": tk, "ops": [{"k": "move", "x": 1, "y": 1}, {"k": "up", "x": 2, "y": 2}], "st": old, "w": 1})).await.unwrap();
+        let sent = r.told_now("browser.takeover_input").await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["ops"], json!([{"k": "up", "x": 2.0, "y": 2.0}]), "only the release: a button is never left pressed");
     }
 }

@@ -246,4 +246,17 @@ describe("a takeover from the phone", () => {
     r.session.onMessage({ type: "tk_fhb", tk: "tk1", seq: 7, paused: false });
     expect(r.state()?.phase).toBe("live");
   });
+
+  it("acknowledges at once a frame identical to the one shown, which the page will not load again", async () => {
+    const r = rig();
+    await r.session.openPicker(null);
+    await r.session.pick("browser-a");
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 1, data: "still", meta: {} });
+    r.session.shown(1);
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 2, data: "still", meta: {} });
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 3, data: "still", meta: {} });
+    expect(r.acks).toEqual([1, 2, 3]);
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 4, data: "changed", meta: {} });
+    expect(r.acks, "a new picture waits until it is shown").toEqual([1, 2, 3]);
+  });
 });
