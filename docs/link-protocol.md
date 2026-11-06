@@ -50,10 +50,12 @@ one workerd process when self-hosted ([relay-self-host.md](relay-self-host.md)).
 | `POST /v1/rooms`, `Authorization: Bearer <registration key>`, body `{"pk": "<P-256 public key, uncompressed, base64url>"}`, no `Origin` | `201 {"room", "ticket"}`; 401 a wrong key, 429 after 10 wrong keys from one address in a day, 403 any `Origin`, 400 a key that is not one |
 | `GET /v1/desktop?t=<ticket>&ts=<ms>&sig=<signature>` (WebSocket) | 101, or 403 a bad ticket, signature or `Origin`, 404 no such room, 429 the month's cap is spent |
 | `GET /v1/phone?t=<ticket>&k=<token>` or `&p=<pairing token>` (WebSocket) | 101, or 403 a bad ticket, an unknown token or a foreign `Origin`, 409 eight phones already, 429 the cap |
-
-A ticket is no secret (every QR code has one), so the router counts the sockets a room refused (403, 404) by a hash of the address and the room:
-past 30 in 10 minutes it answers 429 without asking the room. In the isolate's memory only, so best effort.
 | anything else | 404, 405 or 426, in plain text: the relay never serves a page |
+
+A ticket is no secret (every QR code has one), so the router counts the sockets a room refused (403, 404) by a hash of the network (an IPv6
+address by its /64, an IPv4 address whole), the path and the room: phones' refusals never count against the desktop. Past 30 in 10 minutes it
+answers 429 with `x-kelpie-reason: attempts`, without asking the room; a 429 without it is the room's monthly cap. A full table lets go of
+expired counts, then of the oldest, never of all at once. In the isolate's memory only, so best effort.
 
 - **Ticket**: `<room id, 32 hex>.<HMAC-SHA256(TICKET_SECRET, room id), base64url>`. Checked in the router before any Durable Object call.
 - **Desktop signature**: ECDSA P-256 / SHA-256 with the room key, `r || s` base64url (86 characters), over `kelpie-relay/1 desktop <room> <ts>`.
@@ -65,7 +67,8 @@ past 30 in 10 minutes it answers 429 without asking the room. In the isolate's m
 ### On the sockets
 
 Binary frames only carry kelpie-link, at most 64 KiB. A phone's frame reaches the desktop as `[slot, u16 big-endian] + frame`; the desktop's
-frame names the slot it goes to. Nothing is queued: with no desktop ready, a phone's frame is dropped. A slot is a number for one phone
+frame names the slot it goes to. Nothing is queued: with no desktop ready, a phone's frame is dropped, and counts against neither the burst
+nor the month. Only the newest desktop socket is heard: what a replaced one still sends, text or frames, is ignored. A slot is a number for one phone
 socket, taken from a counter the room keeps and never given out while any socket, open or closing, still holds it: a late `close`, frame or
 `kick` of an old socket cannot reach the phone that connected after it. The daemon also numbers each `open` of a slot, and drops what an older
 session of it still sends.
@@ -84,8 +87,8 @@ text is JSON:
 
 | From the relay | To | Meaning |
 | --- | --- | --- |
-| `{"t": "open", "s", "via": "token" \| "pair"}` | desktop | A phone is on slot `s`. |
-| `{"t": "close", "s"}` | desktop | That phone left. |
+| `{"t": "open", "s", "via": "token" \| "pair", "k": "<sha256 hex>"}` | desktop | A phone is on slot `s`, let in by the token (or pairing token) with hash `k`. The daemon's limits go by `k`, since a slot is new for every socket. |
+| `{"t": "close", "s", "c"}` | desktop | That phone left, closing with code `c` (1006 when its socket just dropped). 4000 is a phone's route that lost its race, which the daemon does not count as a failed attempt. |
 | `{"t": "desktop_offline"}`, `{"t": "desktop_online"}` | phones | The desktop left, or is back. Hints only: a relay can say anything, so they only ever end a connection. |
 
 ### Close codes
