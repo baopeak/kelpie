@@ -158,7 +158,15 @@ class Sftp(paramiko.SFTPServerInterface):
             path = subprocess.run([BASH, "-c", "printf %s \"$HOME\""], capture_output=True, text=True, env=dict(os.environ, HOME=HOME)).stdout or "/"
             if re.match(r"^[A-Za-z]:", path):
                 path = "/" + path[0].lower() + path[2:].replace("\\", "/")
-        return os.path.normpath(path).replace("\\", "/") if path.startswith("/") else path
+        if not path.startswith("/"):
+            return path
+        # Listings and lstat here follow links (os.stat); realpath does resolve them, as servers do, so a client
+        # can tell a link to a folder from the folder. Only a path with a link in it changes.
+        local = local_path(path)
+        real = os.path.realpath(local)
+        if os.path.normcase(real) != os.path.normcase(os.path.abspath(local)) and re.match(r"^[A-Za-z]:", real):
+            return "/" + real[0].lower() + real[2:].replace("\\", "/")
+        return os.path.normpath(path).replace("\\", "/")
 
     def _err(self, e):
         return paramiko.SFTPServer.convert_errno(e.errno)

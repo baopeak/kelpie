@@ -192,9 +192,22 @@ impl RemoteFs for LocalFs {
     }
 
     async fn open_write(&self, path: &str, offset: u64, create: bool) -> FsResult<Box<dyn WriteFile>> {
-        let mut f = tokio::fs::OpenOptions::new().write(true).create(create).open(path).await?;
-        f.set_len(offset).await?;
-        f.seek(std::io::SeekFrom::Start(offset)).await?;
+        let mut opts = tokio::fs::OpenOptions::new();
+        opts.write(true);
+        if create && offset == 0 {
+            match tokio::fs::remove_file(path).await {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            opts.create_new(true);
+            #[cfg(unix)]
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(path).await?;
+        if offset > 0 {
+            f.set_len(offset).await?;
+            f.seek(std::io::SeekFrom::Start(offset)).await?;
+        }
         Ok(Box::new(LocalWrite(f)))
     }
 

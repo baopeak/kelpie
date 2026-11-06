@@ -165,8 +165,10 @@ pub trait RemoteFs: Send + Sync {
     async fn chmod(&self, path: &str, mode: u32) -> FsResult<()>;
     async fn set_times(&self, path: &str, atime: u64, mtime: u64) -> FsResult<()>;
     async fn open_read(&self, path: &str, offset: u64) -> FsResult<Box<dyn AsyncRead + Send + Unpin>>;
-    /// Opens for writing at `offset`; anything past `offset` is cut off (a resume continues from what is
-    /// kept, a restart passes 0). `create` makes a missing file.
+    /// Opens for writing at `offset`; anything past `offset` is cut off (a resume continues from what is kept).
+    /// With `create` and offset 0 the file is made new: whatever has that name (a stale partial, a link someone
+    /// planted) is removed first and the file is created exclusively, readable by its owner only (0600) until
+    /// the copy sets the final mode.
     async fn open_write(&self, path: &str, offset: u64, create: bool) -> FsResult<Box<dyn WriteFile>>;
     /// Free bytes on the file system holding `path`, when the end can tell.
     async fn free_space(&self, path: &str) -> FsResult<Option<u64>>;

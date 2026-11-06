@@ -865,8 +865,8 @@ The **SSH hosts** page (the server icon at the bottom of the sidebar, `Ctrl+Alt+
 - **Files**: two panes, by default this computer (Downloads) on the left and the host on the right. Each pane can
   show this computer or any saved host, so a copy can also go from one host to another.
   - **Panes**: a path bar, up, home, drives (Windows), hidden files, a filter, new folder, and columns you can sort
-    (name, size, modified, permissions, owner). Owner and group show as names when the host sends them, else as
-    uid / gid numbers.
+    (name, size, modified, permissions, owner). Owner and group show as uid / gid numbers (SFTP does not send
+    names).
   - **Keys**: Ctrl/Cmd+click and Shift+click select several, Enter opens, Backspace goes up, F2 renames, Delete
     deletes, Tab switches panes, F5 copies to the other pane.
   - **Copy**: drag between the panes, use the arrow buttons or the context menu, or drop files from Explorer /

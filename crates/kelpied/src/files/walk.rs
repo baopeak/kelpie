@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use super::{FsResult, Kind, Meta, RemoteFs};
+use super::{ErrKind, FsError, FsResult, Kind, Meta, RemoteFs};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Found {
@@ -47,17 +47,54 @@ pub struct Skipped {
     pub max_queued: usize,
 }
 
-/// The last part of a path on either end (`/` or `\`).
-pub fn base_name(path: &str) -> &str {
-    let t = path.trim_end_matches(['/', '\\']);
-    t.rsplit(['/', '\\']).next().unwrap_or(t)
+/// The last part of a path: on a host and on macOS / Linux `/` only (`\` is an ordinary character in a name there),
+/// on Windows `\` too.
+pub fn base_name(path: &str, windows: bool) -> &str {
+    let seps: &[char] = if windows { &['/', '\\'] } else { &['/'] };
+    let t = path.trim_end_matches(seps);
+    t.rsplit(seps).next().unwrap_or(t)
 }
 
-/// Walks `picked` on `fs`. Stops early (with what was skipped so far) when `cancel` is set or the receiver
-/// is gone. A picked item that cannot be read is an error; anything below it is counted instead.
+fn parent_of(fs: &dyn RemoteFs, path: &str) -> String {
+    if fs.windows_names() {
+        std::path::Path::new(path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+    } else {
+        super::parent_remote(path).to_string()
+    }
+}
+
+/// Errors that end a walk: anything but a missing or forbidden path (a lost connection above all) would otherwise
+/// leave part of the tree out of a job that then reports itself done.
+fn fatal(e: FsError) -> FsResult<()> {
+    match e.kind {
+        ErrKind::NotFound | ErrKind::Denied => Ok(()),
+        _ => Err(e),
+    }
+}
+
+/// Whether `path` (named `name` in a folder whose real path is `parent_real`) is a folder of its own and not a link to
+/// one. Some servers (the e2e fixture among them) report a link's target in listings and even in `lstat`; the real
+/// path then differs from where the name sits, which catches them.
+async fn real_dir(fs: &dyn RemoteFs, path: &str, parent_real: &str, name: &str) -> FsResult<Option<String>> {
+    match fs.lstat(path).await {
+        Ok(m) if m.kind == Kind::Dir => {}
+        Ok(_) => return Ok(None),
+        Err(e) => return fatal(e).map(|_| None),
+    }
+    match fs.realpath(path).await {
+        Ok(real) if real == fs.join(parent_real, name) => Ok(Some(real)),
+        Ok(_) => Ok(None),
+        Err(e) => fatal(e).map(|_| None),
+    }
+}
+
+/// Walks `picked` on `fs`. Stops early (with what was skipped so far) when `cancel` is set or the receiver is gone.
+/// A picked item that cannot be read is an error; below it a missing or forbidden entry is counted, anything else
+/// (a lost connection) ends the walk with that error.
 pub async fn walk(fs: &dyn RemoteFs, picked: &[String], tx: &mpsc::Sender<Found>, cancel: &AtomicBool, links: Links) -> FsResult<Skipped> {
     let mut skipped = Skipped::default();
-    let mut queue: VecDeque<(String, Vec<String>)> = VecDeque::new();
+    // Folders still to list: (path, parts below the target, real path).
+    let mut queue: VecDeque<(String, Vec<String>, String)> = VecDeque::new();
     macro_rules! send {
         ($item:expr) => {
             if tx.send($item).await.is_err() {
@@ -69,25 +106,48 @@ pub async fn walk(fs: &dyn RemoteFs, picked: &[String], tx: &mpsc::Sender<Found>
         if cancel.load(Ordering::Relaxed) {
             return Ok(skipped);
         }
-        let rel = vec![base_name(path).to_string()];
+        let name = base_name(path, fs.windows_names());
+        if !super::readable_name(name) {
+            return Err(FsError::invalid(format!("{path} cannot be transferred by name")));
+        }
+        let rel = vec![name.to_string()];
         let meta = if links == Links::Report { fs.lstat(path).await? } else { fs.stat(path).await? };
         match meta.kind {
             Kind::File => send!(Found::File { path: path.clone(), rel, meta }),
             Kind::Dir => {
-                send!(Found::Dir { path: path.clone(), rel: rel.clone() });
-                queue.push_back((path.clone(), rel));
+                let parent = parent_of(fs, path);
+                // A delete or chmod acts on a picked link itself, even on a server whose lstat follows links.
+                let real = if links == Links::Report {
+                    match fs.realpath(&parent).await {
+                        Ok(p) => real_dir(fs, path, &p, name).await?,
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    Some(fs.realpath(path).await?)
+                };
+                match real {
+                    Some(real) => {
+                        send!(Found::Dir { path: path.clone(), rel: rel.clone() });
+                        queue.push_back((path.clone(), rel, real));
+                    }
+                    None => send!(Found::Link { path: path.clone(), rel }),
+                }
             }
             Kind::Link => send!(Found::Link { path: path.clone(), rel }),
             Kind::Other => skipped.special += 1,
         }
     }
-    while let Some((dir, rel)) = queue.pop_front() {
+    while let Some((dir, rel, real)) = queue.pop_front() {
         if cancel.load(Ordering::Relaxed) {
             return Ok(skipped);
         }
-        let Ok(entries) = fs.list(&dir).await else {
-            skipped.unlistable += 1;
-            continue;
+        let entries = match fs.list(&dir).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                fatal(e)?;
+                skipped.unlistable += 1;
+                continue;
+            }
         };
         for e in entries {
             if !e.readable_name {
@@ -96,20 +156,28 @@ pub async fn walk(fs: &dyn RemoteFs, picked: &[String], tx: &mpsc::Sender<Found>
             }
             let path = fs.join(&dir, &e.name);
             let mut sub = rel.clone();
-            sub.push(e.name);
+            sub.push(e.name.clone());
             match e.meta.kind {
                 Kind::File => send!(Found::File { path, rel: sub, meta: e.meta }),
-                Kind::Dir => {
-                    send!(Found::Dir { path: path.clone(), rel: sub.clone() });
-                    queue.push_back((path, sub));
-                    skipped.max_queued = skipped.max_queued.max(queue.len());
-                }
+                Kind::Dir => match real_dir(fs, &path, &real, &e.name).await? {
+                    Some(sub_real) => {
+                        send!(Found::Dir { path: path.clone(), rel: sub.clone() });
+                        queue.push_back((path, sub, sub_real));
+                        skipped.max_queued = skipped.max_queued.max(queue.len());
+                    }
+                    // A link the listing showed as a folder.
+                    None if links == Links::Report => send!(Found::Link { path, rel: sub }),
+                    None => skipped.folder_links += 1,
+                },
                 Kind::Link if links == Links::Report => send!(Found::Link { path, rel: sub }),
                 Kind::Link => match fs.stat(&path).await {
                     Ok(target) if target.kind == Kind::File => send!(Found::File { path, rel: sub, meta: target }),
                     Ok(target) if target.kind == Kind::Dir => skipped.folder_links += 1,
                     Ok(_) => skipped.special += 1,
-                    Err(_) => skipped.broken_links += 1,
+                    Err(e) => {
+                        fatal(e)?;
+                        skipped.broken_links += 1;
+                    }
                 },
                 Kind::Other => skipped.special += 1,
             }
@@ -117,7 +185,6 @@ pub async fn walk(fs: &dyn RemoteFs, picked: &[String], tx: &mpsc::Sender<Found>
     }
     Ok(skipped)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +298,60 @@ mod tests {
         assert_eq!(rels(&found), ["d/", "d/a.txt", "d/to-elsewhere@", "d/to-file@"]);
     }
 
+    async fn walk_all(fs: &MemFs, picked: &str, links: Links) -> (Vec<Found>, FsResult<Skipped>) {
+        let (tx, mut rx) = mpsc::channel(64);
+        let cancel = AtomicBool::new(false);
+        let (fs2, picked) = (fs.clone(), vec![picked.to_string()]);
+        let walker = tokio::spawn(async move { walk(&fs2, &picked, &tx, &cancel, links).await });
+        let mut found = Vec::new();
+        while let Some(f) = rx.recv().await {
+            found.push(f);
+        }
+        (found, walker.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_connection_lost_while_listing_ends_the_walk_with_that_error() {
+        let fs = MemFs::new();
+        for d in 0..5 {
+            fs.put(&format!("/t/d{d}/f"), b"x", 1);
+        }
+        fs.fail_lists_after(Some(2));
+        let (_, r) = walk_all(&fs, "/t", Links::Follow).await;
+        assert_eq!(r.unwrap_err().kind, ErrKind::Connection, "never a walk that reports itself complete");
+    }
+
+    #[tokio::test]
+    async fn servers_whose_listing_or_lstat_follow_links_are_never_followed_into() {
+        for lstat_too in [false, true] {
+            let fs = MemFs::new().following_links(lstat_too);
+            fs.put("/d/a.txt", b"a", 1);
+            fs.put("/outside/keep.txt", b"k", 1);
+            fs.link("/d/to-outside", "/outside");
+            let (found, r) = walk_all(&fs, "/d", Links::Report).await;
+            r.unwrap();
+            assert_eq!(rels(&found), ["d/", "d/a.txt", "d/to-outside@"], "lstat follows: {lstat_too}");
+            let (found, r) = walk_all(&fs, "/d", Links::Follow).await;
+            assert_eq!(rels(&found), ["d/", "d/a.txt"], "lstat follows: {lstat_too}");
+            assert_eq!(r.unwrap().folder_links, 1);
+        }
+        // A picked link, on a server whose lstat follows it, is acted on as the link itself.
+        let fs = MemFs::new().following_links(true);
+        fs.put("/outside/keep.txt", b"k", 1);
+        fs.link("/pick", "/outside");
+        let (found, _) = walk_all(&fs, "/pick", Links::Report).await;
+        assert_eq!(rels(&found), ["pick@"]);
+    }
+
+    #[tokio::test]
+    async fn refuses_picked_items_without_a_name() {
+        let fs = MemFs::new();
+        for bad in ["/", "/home/.."] {
+            let (_, r) = walk_all(&fs, bad, Links::Report).await;
+            assert_eq!(r.unwrap_err().kind, ErrKind::Invalid, "{bad}");
+        }
+    }
+
     #[tokio::test]
     async fn cancel_stops_the_walk() {
         let fs = MemFs::new();
@@ -242,9 +363,10 @@ mod tests {
 
     #[test]
     fn base_names() {
-        assert_eq!(base_name("/a/b/c.txt"), "c.txt");
-        assert_eq!(base_name(r"C:\Users\me\dir\"), "dir");
-        assert_eq!(base_name("/a/b/"), "b");
-        assert_eq!(base_name("x"), "x");
+        assert_eq!(base_name("/a/b/c.txt", false), "c.txt");
+        assert_eq!(base_name(r"C:\Users\me\dir\", true), "dir");
+        assert_eq!(base_name("/a/b/", false), "b");
+        assert_eq!(base_name("x", false), "x");
+        assert_eq!(base_name("/srv/a\\b", false), "a\\b", "a backslash is part of a host name");
     }
 }

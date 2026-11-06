@@ -62,13 +62,28 @@ pub fn same_name(a: &str, b: &str, case_insensitive: bool) -> bool {
 /// Whether this computer's file systems usually ignore case (Windows, and macOS by default).
 pub const LOCAL_CASE_INSENSITIVE: bool = cfg!(any(windows, target_os = "macos"));
 
-/// The hidden file a transfer writes beside its target, renamed into place when complete.
-pub fn partial_name(name: &str) -> String {
-    format!(".{name}.kelpie-part")
+/// The hidden file a job writes beside its target, renamed into place when complete. `tag` is the job's: two jobs (or
+/// two files of one job) never share a partial.
+pub fn partial_name(name: &str, tag: &str) -> String {
+    format!(".{name}.{tag}.kelpie-part")
 }
 
+/// Where a replace keeps the old file while the new one takes its place (same job tag, same folder).
+pub fn aside_name(name: &str, tag: &str) -> String {
+    format!(".{name}.{tag}.kelpie-old")
+}
+
+/// The target name and job tag of a partial or moved-aside name.
+pub fn split_hidden(file: &str) -> Option<(&str, &str)> {
+    let rest = file.strip_prefix('.')?;
+    let rest = rest.strip_suffix(".kelpie-part").or_else(|| rest.strip_suffix(".kelpie-old"))?;
+    let (name, tag) = rest.rsplit_once('.')?;
+    (!name.is_empty() && !tag.is_empty()).then_some((name, tag))
+}
+
+#[cfg(test)]
 pub fn is_partial(name: &str) -> bool {
-    name.starts_with('.') && name.ends_with(".kelpie-part") && name.len() > ".kelpie-part".len() + 1
+    name.ends_with(".kelpie-part") && split_hidden(name).is_some()
 }
 
 #[cfg(test)]
@@ -119,9 +134,13 @@ mod tests {
 
     #[test]
     fn partials() {
-        assert_eq!(partial_name("big.iso"), ".big.iso.kelpie-part");
-        assert!(is_partial(".big.iso.kelpie-part"));
+        assert_eq!(partial_name("big.iso", "1a2b3c4d"), ".big.iso.1a2b3c4d.kelpie-part");
+        assert_eq!(aside_name("big.iso", "1a2b3c4d"), ".big.iso.1a2b3c4d.kelpie-old");
+        assert!(is_partial(".big.iso.1a2b3c4d.kelpie-part"));
+        assert_eq!(split_hidden(".big.iso.1a2b3c4d.kelpie-old"), Some(("big.iso", "1a2b3c4d")));
+        assert_eq!(split_hidden(".x.t.kelpie-part"), Some(("x", "t")));
         assert!(!is_partial(".kelpie-part"));
         assert!(!is_partial("big.iso"));
+        assert_ne!(partial_name("a", "job1"), partial_name("a", "job2"), "two jobs never share a partial");
     }
 }

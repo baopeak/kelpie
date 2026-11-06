@@ -559,7 +559,7 @@ export interface RemoteEntry {
   mode: number | null;
   uid: number | null;
   gid: number | null;
-  /** The owner's and group's names when the host sends them, else the uid / gid as text. */
+  /** The uid / gid as text (SFTP v3 sends no names); names only from a server that adds them. */
   owner: string | null;
   group: string | null;
   link_target: string | null;

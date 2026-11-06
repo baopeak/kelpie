@@ -8,9 +8,10 @@ its own `kelpied serve` with them: the real daemon and the real ~/.ssh are never
 through `net_fault_proxy.py`. Only the processes this script starts are stopped, by their own handles.
 
 Covers: realpath / mkdir / list / rename / stat / chmod on a host, local.list, an unknown host key (ssh's own text),
-upload and download with equal SHA-256, conflict ask -> keep both and apply-to-all, cancel leaving no partial, pause
-and resume from the partial, the host going away mid-transfer and coming back (resumes by itself), a daemon restart
-(the job shows interrupted, then resumes), delete and recursive chmod jobs.
+upload and download with equal SHA-256, conflict ask -> keep both, apply-to-all (one transfer only), cancel leaving no
+partial, pause and resume from the partial, the host going away mid-transfer and coming back (resumes by itself), a
+daemon restart (the job shows interrupted, then resumes), Unicode names, 2 000 small files with a folder link (not
+followed by the copy, the link alone removed by a delete), delete and recursive chmod jobs, and no ssh left running.
 """
 import hashlib
 import importlib.util
@@ -99,6 +100,7 @@ def start_daemon():
 
 
 def stop_daemon(c):
+    """Returns how it stopped: "clean" (it exited after daemon.shutdown) or "killed"."""
     try:
         c.call("daemon.shutdown")
     except (SystemExit, OSError):
@@ -107,8 +109,26 @@ def stop_daemon(c):
     if p:
         try:
             p.wait(15)
+            return "clean"
         except subprocess.TimeoutExpired:
             p.kill()
+            return "killed"
+    return "clean"
+
+
+def our_ssh():
+    """ssh processes started for this run: their command line names this run's generated config."""
+    marker = fwd(os.path.join(data, "ssh", "config")).lower()
+    if os.name == "nt":
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='ssh.exe'\" | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"], capture_output=True, text=True).stdout
+    else:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,args="], capture_output=True, text=True).stdout.replace(" ", "\t", 1)
+    pids = []
+    for line in out.splitlines():
+        pid, _, cmd = line.strip().partition("\t")
+        if pid.isdigit() and marker in fwd(cmd).lower():
+            pids.append(int(pid))
+    return pids
 
 
 ok = True
@@ -216,6 +236,53 @@ try:
     j = wait_job(c, jid, finished)
     check(os.path.exists(os.path.join(up_dir, "big (2).bin")), "keep both: big (2).bin")
 
+    # Apply to all: three files already there, one answer replaces them all (this transfer only).
+    trio = os.path.join(scratch, "trio")
+    os.makedirs(trio, exist_ok=True)
+    for n in ("a.txt", "b.txt", "c.txt"):
+        open(os.path.join(trio, n), "w").write("new " + n)
+        os.makedirs(os.path.join(up_dir, "trio"), exist_ok=True)
+        open(os.path.join(up_dir, "trio", n), "w").write("old")
+    jid = c.call("xfer.start", {"src": {}, "dst": {"dest": "e2e-host"}, "items": [trio], "dst_dir": posix(up_dir)})["id"]
+    wait_job(c, jid, lambda j: j["questions"] or finished(j))
+    c.call("xfer.answer", {"id": jid, "choice": "replace", "all": True})
+    j = wait_job(c, jid, finished)
+    check(j["state"] == "done" and all(open(os.path.join(up_dir, "trio", n)).read() == "new " + n for n in ("a.txt", "b.txt", "c.txt")), "apply to all replaces the rest of the transfer")
+
+    # Unicode names, and 2 000 small files with a folder link inside (a junction on Windows).
+    many = os.path.join(scratch, "many")
+    shutil.rmtree(many, ignore_errors=True)
+    os.makedirs(os.path.join(many, "sub"))
+    for i in range(2000):
+        open(os.path.join(many, "sub" if i % 2 else "", f"f{i}.txt"), "w").write(str(i))
+    open(os.path.join(many, "ünïcødé 日本語.txt"), "w").write("u")
+    outside = os.path.join(scratch, "outside")
+    os.makedirs(outside, exist_ok=True)
+    open(os.path.join(outside, "keep.txt"), "w").write("keep")
+    link = os.path.join(many, "to-outside")
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", link, outside], capture_output=True, check=True)
+    else:
+        os.symlink(outside, link)
+    jid = c.call("xfer.start", {"src": {}, "dst": {"dest": "e2e-host"}, "items": [many], "dst_dir": posix(up_dir), "conflict": "replace"})["id"]
+    j = wait_job(c, jid, finished, timeout=600)
+    landed = os.path.join(up_dir, "many")
+    count = sum(len(fs) for _, _, fs in os.walk(landed))
+    check(j["state"] == "done" and count == 2001 and os.path.exists(os.path.join(landed, "ünïcødé 日本語.txt")), f"2 000 files and a Unicode name arrive ({count} files)")
+    check(j["walk"]["folder_links"] == 1 and not os.path.exists(os.path.join(landed, "to-outside")), "the folder link is not followed")
+    # A delete on the host of a folder with a link inside removes the link, never what it points to.
+    host_tree = os.path.join(work, "with-link")
+    os.makedirs(host_tree, exist_ok=True)
+    open(os.path.join(host_tree, "x.txt"), "w").write("x")
+    host_link = os.path.join(host_tree, "to-outside")
+    if os.name == "nt":
+        subprocess.run(["cmd", "/c", "mklink", "/J", host_link, outside], capture_output=True, check=True)
+    else:
+        os.symlink(outside, host_link)
+    jid = c.call("xfer.start", {"kind": "delete", "src": {"dest": "e2e-host"}, "items": [posix(host_tree)]})["id"]
+    j = wait_job(c, jid, finished)
+    check(open(os.path.join(outside, "keep.txt")).read() == "keep", f"a delete never follows a folder link ({j['state']}, failed {j['totals']['failed']})")
+
     # Cancel mid-way through the throttled route: no partial is left.
     slow_dir = os.path.join(work, "slow")
     os.makedirs(slow_dir)
@@ -253,7 +320,8 @@ try:
     os.remove(os.path.join(slow_dir, "big.bin"))
     jid = c.call("xfer.start", {"src": {}, "dst": {"dest": "e2e-slow"}, "items": [big], "dst_dir": posix(slow_dir), "conflict": "replace"})["id"]
     wait_job(c, jid, lambda j: j["totals"]["done_bytes"] > (4 << 20))
-    stop_daemon(c)
+    how = stop_daemon(c)
+    print(f"     (the daemon stopped: {how})", flush=True)
     c = start_daemon()
     j = job(c, jid)
     check(j["state"] == "interrupted", f"after a restart: {j['state']}")
@@ -285,6 +353,13 @@ finally:
             proxy.wait(5)
         except subprocess.TimeoutExpired:
             proxy.kill()
+
+# Nothing of this run keeps running: no ssh outlives the daemon that started it.
+time.sleep(2)
+left = our_ssh()
+check(not left, f"no ssh left running after cleanup ({left})")
+for pid in left:
+    subprocess.run(["taskkill", "/F", "/PID", str(pid)] if os.name == "nt" else ["kill", "-9", str(pid)], capture_output=True)
 
 print("ALL PASS" if ok else "SOME FAILED", flush=True)
 sys.exit(0 if ok else 1)

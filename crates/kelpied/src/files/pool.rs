@@ -147,30 +147,48 @@ impl Conn {
         String::from_utf8_lossy(&self.stderr.lock()).trim().to_string()
     }
 
-    /// A lost connection, in the words `remote::exec` uses (so the app's host-key check still recognises it).
-    pub fn lost(&self) -> FsError {
-        let text = self.stderr_text();
-        FsError::new(ErrKind::Connection, if text.is_empty() { format!("ssh {}: the connection ended", self.dest) } else { format!("ssh {}: {text}", self.dest) })
-    }
-
-    /// An SFTP error as a plain message; anything but a status from a dead child is a lost connection.
+    /// An SFTP error as a plain message. Only a status is the host's answer; everything else (a timeout, a closed
+    /// stream, a packet that makes no sense) means the session is gone, even before ssh is seen to exit: a spurious
+    /// retry costs little, a lost connection taken for a file error loses the resume.
     pub fn error(&self, e: russh_sftp::client::error::Error) -> FsError {
-        use russh_sftp::client::error::Error as E;
-        match e {
-            E::Status(s) => super::sftp_status(status_number(&s.status_code), &s.error_message),
-            _ if !self.alive() => self.lost(),
-            E::Timeout => FsError::new(ErrKind::Connection, format!("{} did not answer in time", self.dest)),
-            other => FsError::new(ErrKind::Other, other.to_string()),
-        }
+        classify(e, || if self.alive() { None } else { Some(self.stderr_text()) }, &self.dest)
     }
 
-    /// An I/O error from a file on this connection.
+    /// An I/O error from a file on this connection: a status inside it is the host's answer, anything else a lost
+    /// connection.
     pub fn io_error(&self, e: io::Error) -> FsError {
-        if self.alive() {
-            FsError::from(e)
-        } else {
-            self.lost()
+        io_classify(e, || if self.alive() { None } else { Some(self.stderr_text()) }, &self.dest)
+    }
+}
+
+/// See [`Conn::error`]; `ended` gives ssh's words once it has exited.
+pub fn classify(e: russh_sftp::client::error::Error, ended: impl Fn() -> Option<String>, dest: &str) -> FsError {
+    use russh_sftp::client::error::Error as E;
+    match e {
+        E::Status(s) => super::sftp_status(status_number(&s.status_code), &s.error_message),
+        E::Timeout => FsError::new(ErrKind::Connection, format!("{dest} did not answer in time")),
+        _ => lost_text(ended(), dest),
+    }
+}
+
+/// See [`Conn::io_error`].
+pub fn io_classify(e: io::Error, ended: impl Fn() -> Option<String>, dest: &str) -> FsError {
+    if let Some(inner) = e.get_ref().and_then(|i| i.downcast_ref::<russh_sftp::client::error::Error>()) {
+        if let russh_sftp::client::error::Error::Status(s) = inner {
+            return super::sftp_status(status_number(&s.status_code), &s.error_message);
         }
+    }
+    match e.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => FsError::from(e),
+        _ => lost_text(ended(), dest),
+    }
+}
+
+/// A lost connection, in the words `remote::exec` uses (so the app's host-key check still recognises it).
+fn lost_text(stderr: Option<String>, dest: &str) -> FsError {
+    match stderr.filter(|s| !s.is_empty()) {
+        Some(text) => FsError::new(ErrKind::Connection, format!("ssh {dest}: {text}")),
+        None => FsError::new(ErrKind::Connection, format!("ssh {dest}: the connection ended")),
     }
 }
 
@@ -270,6 +288,23 @@ mod tests {
     async fn refuses_a_destination_ssh_could_read_as_an_option() {
         let err = Conn::open("-oProxyCommand=calc", std::path::Path::new("kelpied")).await.err().unwrap();
         assert_eq!(err.kind, ErrKind::Invalid);
+    }
+
+    #[test]
+    fn only_a_status_is_the_hosts_answer_everything_else_is_a_lost_connection() {
+        use russh_sftp::client::error::Error as E;
+        use russh_sftp::protocol::{Status, StatusCode};
+        let status = || E::Status(Status { id: 1, status_code: StatusCode::PermissionDenied, error_message: "Permission denied".into(), language_tag: String::new() });
+        let alive = || None;
+        assert_eq!(classify(status(), alive, "prod").kind, ErrKind::Denied);
+        for e in [E::UnexpectedBehavior("RecvError".into()), E::IO("broken pipe".into()), E::UnexpectedPacket, E::Timeout] {
+            assert_eq!(classify(e, alive, "prod").kind, ErrKind::Connection);
+        }
+        assert_eq!(classify(E::IO("x".into()), || Some("Connection reset by peer".into()), "prod").message, "ssh prod: Connection reset by peer");
+        // Inside an I/O error (what a file's reads and writes return).
+        assert_eq!(io_classify(io::Error::other(status()), alive, "prod").kind, ErrKind::Denied);
+        assert_eq!(io_classify(io::Error::other(E::UnexpectedBehavior("sender dropped".into())), alive, "prod").kind, ErrKind::Connection);
+        assert_eq!(io_classify(io::Error::new(io::ErrorKind::BrokenPipe, "pipe"), alive, "prod").kind, ErrKind::Connection);
     }
 
     #[test]

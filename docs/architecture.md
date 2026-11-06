@@ -1581,7 +1581,7 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
   - `LocalFs` for this computer (Windows' `""` is the list of drives; junctions count as links);
   - `MemFs` in tests.
 
-  Host paths must be absolute and free of control characters. Names that are not UTF-8 arrive lossily from the crate (U+FFFD), so they are flagged `readable_name: false` and never selected or copied. The crate's listing has no long name: owner and group are the names when the server sends them, else the numbers.
+  Host paths must be absolute and free of control characters. Names that are not UTF-8 arrive lossily from the crate (U+FFFD), so they are flagged `readable_name: false` and never selected or copied. The crate's listing has no long name and SFTP v3 attributes carry no names, so owner and group show as uid / gid numbers.
 - **Sessions** (`files/pool.rs`):
   - One browse session per destination, opened on first use and closed after 5 minutes unused.
   - A session whose ssh ended is replaced on the next call, never in the middle of one.
@@ -1600,13 +1600,18 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
   - **Walk** (`files/walk.rs`): streamed, so copying starts before a large folder is listed. Only the queue of folders still to list is held in memory.
     - Links to files are followed. Links to folders are skipped and counted, so a loop cannot happen.
     - Delete and chmod jobs report links as themselves and never follow them. A chmod skips links, because setting a link's mode would change its target.
+    - Some servers (the e2e fixture among them) report a link's target in listings and even in `lstat`. A folder is walked only when `lstat` says folder **and** its `realpath` is where its name sits; anything else counts as a link.
+    - A lost connection during the walk ends the attempt as a lost connection (retried), never as a job that is done with folders left out. Only missing or forbidden entries are counted and skipped.
+    - Picked items with `.` or `..` parts, the root and whole drives are refused.
 - **One file** (`files/copy.rs`):
-  - Data goes to `.<name>.kelpie-part` beside the target, through a bounded 8 MiB pipeline, with progress counted on bytes written.
+  - Data goes to `.<name>.<job tag>.kelpie-part` beside the target, through a bounded 8 MiB pipeline, with progress counted on bytes written. A target is claimed queue-wide while it is written, so two files (of one job or two) never write one target or one partial; a second file for a target its job already wrote gets "keep both" naming.
+  - A fresh partial is created new and exclusively, mode 0600 (whatever had its name, a link included, is removed first).
   - A resume continues from the partial's size when the job owns that partial (it is in the journal), the source has the same size and time as when it started, and the last 64 KiB match.
-  - Before the rename into place, the target is checked again: it must still be absent, or still have the size and time the person approved. Otherwise it is asked about again.
-  - A host without a one-step replace has the old file moved aside first, and put back if the new one cannot take its place. SFTP v3 has no compare-and-swap, so the check and the rename are milliseconds apart, not atomic.
+  - After the copy the source is checked again: a source rewritten meanwhile (same size or not) is never put in place.
+  - Before the rename into place, the target is checked again: it must still be absent, or still have the size and time the person approved. Otherwise the person is asked again, never the policy; after 3 changes the file fails with "keeps changing".
+  - A host without a one-step replace has the old file moved aside first (`.<name>.<job tag>.kelpie-old`), and put back if the new one cannot take its place. A stop between the two renames is repaired on the job's next attempt: the old file is put back when the target is gone, and removed only when the target is the new one. SFTP v3 has no compare-and-swap, so the check and the rename are milliseconds apart, not atomic.
   - Cancel removes the partial; pause keeps it.
-  - Times and modes are kept (on Windows, times only).
+  - Times and modes are kept (on Windows, times only); only rwx travels, never setuid, setgid or sticky.
   - Names Windows cannot hold are mapped (`files/names.rs`) and reported as `renamed`. On a target that ignores case, two names from one job that differ only in case get "keep both" naming.
 - **Conflicts**:
   - The policies are `ask`, `replace`, `skip`, `keep_both`, `newer` and `skip_identical`.
@@ -1614,14 +1619,14 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
   - Folders merge. A file and a folder of the same name are never replaced: only skip or keep both.
   - `expect {size, mtime}` on a one-file upload (an edited file) asks "changed on the server" when the target differs. The answers are `overwrite`, `save_copy` (`name (edited).ext`) or `discard`.
 - **Failures and restarts**:
-  - A lost connection is retried after 2, 5, 15, 30 and 60 s, for up to 5 minutes (state `reconnecting`, with `attempt` and `next_s`).
+  - A lost connection is retried after 2, 5, 15, 30 and 60 s, for up to 5 minutes from the drop (an attempt that wrote something starts the count again; state `reconnecting`, with `attempt` and `next_s`). Only an SFTP status is a host's answer: anything else from the session counts as a lost connection. A pause or cancel stops at once, also while a session opens or a read stalls.
   - A retry walks again: files already in place with the source's size and time count as done, and partials resume.
   - After a daemon restart, unfinished jobs load as `interrupted`. The person resumes them; a restart is often an update, and the source may have changed.
 - **Journal** (`<data>/transfers.json`):
-  - Written atomically, on every state change and at most once a second for progress. Only the jobs are kept, with no per-file lists beyond 200 failures and 50 renames.
+  - Written atomically off the async workers, in order (a snapshot carries a generation), on every state change and at most once a second for progress. Only the jobs are kept, with no per-file lists beyond 200 failures and 50 renames (both reset per attempt).
   - Unknown fields are kept.
   - A file that cannot be understood is copied aside (`transfers.json.damaged-<time>`). One that cannot be read at all turns saving off and is never written over; `xfer.list` reports it as `notice`.
-  - Finished jobs are kept for 7 days or 200 entries. Their partials are removed when they go.
+  - Finished jobs are kept for 7 days or 200 entries. Their partials are removed when they go: on this computer at start, on a host once the queue runs, one host after another.
 - **Methods and events**:
   - `xfer.start` → `{id}`, `xfer.list`, `xfer.control {id, action: pause|resume|cancel|retry|clear}`, `xfer.answer`, `xfer.clear_finished`.
   - `xfer.updated {job}` is sent on every change and at most 4 times a second for progress, with speed as an average over about 3 s. `xfer.removed {id}` is sent when a job is cleared.

@@ -37,6 +37,7 @@ pub const MAX_RUNNING: usize = 3;
 const FILES_AT_ONCE: u32 = 4;
 const BIG_FILE: u64 = 8 << 20;
 const BACKOFF: [u64; 5] = [2, 5, 15, 30, 60];
+/// How long after a connection is lost the job keeps trying (from the drop, not from the job's start).
 const RETRY_FOR: Duration = Duration::from_secs(5 * 60);
 /// Per-file detail kept for failures; beyond it only the count.
 const KEEP_FAILURES: usize = 200;
@@ -226,13 +227,25 @@ impl Choice {
 #[derive(Default)]
 struct Live {
     ctl: Control,
-    /// Set on pause or cancel: stops the walk too.
+    /// Set on pause, cancel or a failure that ends the attempt: stops the walk too.
     halt: AtomicBool,
     answers: Mutex<HashMap<u64, oneshot::Sender<(Choice, bool)>>>,
     next_q: AtomicU64,
-    /// Lower-cased targets written by this job (case-insensitive targets only).
+    /// Targets this job has put in place (keys as in `target_key`): a second file for one of them is "keep both".
     written: Mutex<HashSet<String>>,
     speed: Mutex<Speed>,
+    /// Bytes of the files found, and of those that need no space (skipped, complete, resumed).
+    discovered: AtomicU64,
+    not_needed: AtomicU64,
+}
+
+impl Live {
+    /// Ends the attempt: the walk stops, and files waiting on a question are released (their question is dropped).
+    fn halt(&self) {
+        self.halt.store(true, Ordering::Relaxed);
+        self.answers.lock().clear();
+        self.ctl.wake.notify_waiters();
+    }
 }
 
 #[derive(Default)]
@@ -244,6 +257,58 @@ struct Speed {
     emitted_bytes: u64,
 }
 
+/// When to try again after a lost connection: the 5 minutes run from the first drop, and an attempt that wrote
+/// something starts the count again.
+#[derive(Debug, Default)]
+pub struct Retry {
+    first_drop: Option<Instant>,
+    pub attempt: u32,
+}
+
+impl Retry {
+    /// Seconds to wait before the next attempt, or `None` to give up.
+    pub fn on_drop(&mut self, now: Instant, progressed: bool) -> Option<u64> {
+        if progressed {
+            self.first_drop = None;
+            self.attempt = 0;
+        }
+        let first = *self.first_drop.get_or_insert(now);
+        if now.duration_since(first) >= RETRY_FOR {
+            return None;
+        }
+        self.attempt += 1;
+        Some(BACKOFF[(self.attempt as usize - 1).min(BACKOFF.len() - 1)])
+    }
+}
+
+/// Whether the files found so far need more room than the target had when the job started.
+pub fn over_space(discovered: u64, not_needed: u64, free: Option<u64>) -> bool {
+    free.is_some_and(|f| discovered.saturating_sub(not_needed) > f)
+}
+
+/// A job's tag in its hidden file names (8 characters of its id): no two jobs share a partial.
+pub fn tag(id: &str) -> String {
+    id.chars().filter(char::is_ascii_alphanumeric).take(8).collect()
+}
+
+/// The key a target is claimed by across the queue: its end and its path (lower-cased where the end ignores case).
+fn target_key(end: &End, dst: &dyn RemoteFs, target: &str) -> String {
+    let path = if dst.case_insensitive() { target.to_lowercase() } else { target.to_string() };
+    format!("{}\u{0}{path}", end.dest.as_deref().unwrap_or(""))
+}
+
+/// A target being written: no other file of any job writes it at the same time.
+struct Claim<'a> {
+    set: &'a Mutex<HashSet<String>>,
+    key: String,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        self.set.lock().remove(&self.key);
+    }
+}
+
 pub struct Queue {
     file: PathBuf,
     pool: Arc<Pool>,
@@ -251,10 +316,16 @@ pub struct Queue {
     jobs: Mutex<Vec<Job>>,
     live: Mutex<HashMap<String, Arc<Live>>>,
     slots: Arc<Semaphore>,
+    claims: Mutex<HashSet<String>>,
     /// Off when the journal exists but could not be read: nothing is written over it.
     can_save: AtomicBool,
     notice: Mutex<Option<String>>,
     dirty: AtomicBool,
+    /// Journal writes in order: each snapshot has a generation, and an older one never lands after a newer one.
+    generation: AtomicU64,
+    saved: Arc<Mutex<u64>>,
+    /// Cleanups of hosts' partials that wait for the runtime (jobs pruned at start).
+    pending_cleanup: Mutex<Vec<Job>>,
     ticker: std::sync::Once,
     /// Tests: in-memory hosts by destination instead of ssh.
     #[cfg(test)]
@@ -266,6 +337,24 @@ enum Outcome {
     Done,
     Paused,
     Cancelled,
+}
+
+/// Picked items Kelpie can name: no `.` or `..` parts, not the root, a readable last part.
+fn check_item(end: &End, path: &str) -> Result<()> {
+    match end.dest {
+        Some(_) => check_remote_path(path),
+        None => check_local_path(path),
+    }
+    .map_err(|e| anyhow!("{e}"))?;
+    let seps: &[char] = if end.dest.is_none() && cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    let parts: Vec<&str> = path.split(seps).filter(|p| !p.is_empty()).collect();
+    if parts.iter().any(|p| *p == "." || *p == "..") {
+        bail!("{path}: a path with . or .. is not transferred");
+    }
+    match parts.last() {
+        Some(last) if super::readable_name(last) && !(end.dest.is_none() && cfg!(windows) && parts.len() == 1 && last.ends_with(':')) => Ok(()),
+        _ => bail!("{path}: a whole drive or the root folder is not transferred"),
+    }
 }
 
 impl Queue {
@@ -300,14 +389,18 @@ impl Queue {
             jobs: Mutex::new(jobs),
             live: Mutex::new(HashMap::new()),
             slots: Arc::new(Semaphore::new(MAX_RUNNING)),
+            claims: Mutex::new(HashSet::new()),
             can_save: AtomicBool::new(can_save),
             notice: Mutex::new(notice),
             dirty: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+            saved: Arc::new(Mutex::new(0)),
+            pending_cleanup: Mutex::new(Vec::new()),
             ticker: std::sync::Once::new(),
             #[cfg(test)]
             test_ends: Mutex::new(HashMap::new()),
         });
-        q.prune_and_clean();
+        q.prune_at_start();
         q
     }
 
@@ -339,41 +432,68 @@ impl Queue {
         self.dirty.store(true, Ordering::Relaxed);
     }
 
+    /// Writes the journal off the async workers (synchronously when there is no runtime: start, shutdown).
     fn save(&self) {
         if !self.can_save.load(Ordering::Relaxed) {
             return;
         }
         self.dirty.store(false, Ordering::Relaxed);
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let snapshot = Journal { version: journal::VERSION, jobs: self.jobs.lock().clone(), extra: Default::default() };
-        if let Err(e) = journal::save(&self.file, &snapshot) {
-            tracing::warn!("transfers journal: {e:#}");
-        }
-    }
-
-    /// Finished jobs beyond 7 days or 200 go; their partials (only possible after a cancel failed to remove them)
-    /// are removed with them.
-    fn prune_and_clean(self: &Arc<Self>) {
-        let removed: Vec<Job> = {
-            let mut jobs = self.jobs.lock();
-            let before: Vec<Job> = jobs.clone();
-            journal::prune(&mut jobs, now(), |j| j.state.finished().then_some(j.finished.unwrap_or(j.updated)));
-            before.into_iter().filter(|b| !jobs.iter().any(|j| j.id == b.id)).collect()
+        let (file, saved) = (self.file.clone(), self.saved.clone());
+        let write = move || {
+            let mut last = saved.lock();
+            if generation > *last {
+                if let Err(e) = journal::save(&file, &snapshot) {
+                    tracing::warn!("transfers journal: {e:#}");
+                }
+                *last = generation;
+            }
         };
-        for j in removed {
-            self.remove_partials(j);
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => drop(rt.spawn_blocking(write)),
+            Err(_) => write(),
         }
     }
 
-    fn remove_partials(self: &Arc<Self>, job: Job) {
-        if job.partials.is_empty() {
+    /// Finished jobs beyond 7 days or 200 go, with their partials: this computer's now, a host's when the runtime runs.
+    fn prune_at_start(self: &Arc<Self>) {
+        let removed = self.prune();
+        let (local, remote): (Vec<Job>, Vec<Job>) = removed.into_iter().partition(|j| j.dst.dest.is_none());
+        for j in &local {
+            for p in j.partials.keys() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        self.pending_cleanup.lock().extend(remote);
+    }
+
+    fn prune(&self) -> Vec<Job> {
+        let mut jobs = self.jobs.lock();
+        let before: Vec<Job> = jobs.clone();
+        journal::prune(&mut jobs, now(), |j| j.state.finished().then_some(j.finished.unwrap_or(j.updated)));
+        before.into_iter().filter(|b| !jobs.iter().any(|j| j.id == b.id)).collect()
+    }
+
+    /// Removes the partials of jobs that are gone, one host after another, and puts back an old file a stopped
+    /// replace left only under its moved-aside name.
+    fn remove_partials(self: &Arc<Self>, jobs: Vec<Job>) {
+        let jobs: Vec<Job> = jobs.into_iter().filter(|j| !j.partials.is_empty()).collect();
+        if jobs.is_empty() {
             return;
         }
         let me = self.clone();
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         rt.spawn(async move {
-            if let Ok(fs) = me.end(&job.dst).await {
-                for p in job.partials.keys() {
-                    let _ = fs.remove_file(p).await;
+            let mut by_end: BTreeMap<Option<String>, Vec<String>> = BTreeMap::new();
+            for j in jobs {
+                by_end.entry(j.dst.dest.clone()).or_default().extend(j.partials.into_keys());
+            }
+            for (dest, partials) in by_end {
+                let Ok(fs) = me.end(&End { dest }).await else { continue };
+                for p in partials {
+                    let _ = fs.remove_file(&p).await;
+                    restore_aside(fs.as_ref(), &p).await;
                 }
             }
         });
@@ -428,10 +548,10 @@ impl Queue {
                     *jobs = kept;
                     gone
                 };
-                for j in removed {
+                for j in &removed {
                     (self.emit)("xfer.removed", json!({ "id": j.id }));
-                    self.remove_partials(j);
                 }
+                self.remove_partials(removed);
                 self.save();
                 Ok(json!(true))
             }
@@ -456,15 +576,8 @@ impl Queue {
         if items.is_empty() {
             bail!("nothing to transfer");
         }
-        let check = |end: &End, path: &str| -> Result<()> {
-            match end.dest {
-                Some(_) => check_remote_path(path),
-                None => check_local_path(path),
-            }
-            .map_err(|e| anyhow!("{e}"))
-        };
         for i in &items {
-            check(&src, i)?;
+            check_item(&src, i)?;
         }
         let dst_dir = p.get("dst_dir").and_then(Value::as_str).unwrap_or_default().to_string();
         match kind {
@@ -472,7 +585,11 @@ impl Queue {
                 if src.dest.is_none() && dst.dest.is_none() {
                     bail!("copies on this computer are for Explorer or Finder");
                 }
-                check(&dst, &dst_dir)?;
+                match dst.dest {
+                    Some(_) => check_remote_path(&dst_dir),
+                    None => check_local_path(&dst_dir),
+                }
+                .map_err(|e| anyhow!("{e}"))?;
             }
             JobKind::Delete | JobKind::Chmod => {
                 // A local delete goes to the trash through the app; neither runs on this computer here.
@@ -530,22 +647,20 @@ impl Queue {
             "pause" => {
                 let live = live.ok_or_else(|| anyhow!("the transfer is not running"))?;
                 live.ctl.pause.store(true, Ordering::Relaxed);
-                live.halt.store(true, Ordering::Relaxed);
-                live.answers.lock().clear();
+                live.halt();
             }
             "cancel" => match live {
                 Some(live) => {
                     live.ctl.cancel.store(true, Ordering::Relaxed);
-                    live.halt.store(true, Ordering::Relaxed);
-                    live.answers.lock().clear();
+                    live.halt();
                 }
                 None if !job.state.finished() => {
                     self.update(id, |j| {
                         j.state = State::Cancelled;
                         j.finished = Some(now());
+                        j.partials.clear();
                     });
-                    self.update(id, |j| j.partials.clear());
-                    self.remove_partials(job);
+                    self.remove_partials(vec![job]);
                 }
                 None => bail!("the transfer has already finished"),
             },
@@ -570,7 +685,7 @@ impl Queue {
                 self.jobs.lock().retain(|j| j.id != id);
                 (self.emit)("xfer.removed", json!({ "id": id }));
                 self.save();
-                self.remove_partials(job);
+                self.remove_partials(vec![job]);
             }
             other => bail!("unknown action {other}"),
         }
@@ -603,10 +718,13 @@ impl Queue {
     }
 
     /// Before the daemon exits: what is running is saved as it is (it loads as interrupted).
+    ///
+    /// Open question for the owner: a daemon hand-over (an update) interrupts running transfers today; it could
+    /// instead wait for them, or refuse while they run. Kept as it is until the owner decides.
     pub fn shutdown(&self) {
         for live in self.live.lock().values() {
             live.ctl.pause.store(true, Ordering::Relaxed);
-            live.halt.store(true, Ordering::Relaxed);
+            live.halt();
         }
         self.save();
     }
@@ -615,6 +733,8 @@ impl Queue {
 
     fn start_ticker(self: &Arc<Self>) {
         let me = Arc::downgrade(self);
+        let pending: Vec<Job> = std::mem::take(&mut *self.pending_cleanup.lock());
+        self.remove_partials(pending);
         self.ticker.call_once(|| {
             tokio::spawn(async move {
                 let mut saved = Instant::now();
@@ -685,25 +805,27 @@ impl Queue {
 
     async fn run(self: &Arc<Self>, id: &str, live: Arc<Live>, mut resumed: bool) {
         let Ok(_slot) = self.slots.clone().acquire_owned().await else { return };
-        if live.halt.load(Ordering::Relaxed) {
-            let state = if live.ctl.cancel.load(Ordering::Relaxed) { State::Cancelled } else { State::Paused };
-            self.update(id, |j| j.state = state);
-            return;
-        }
-        let started = Instant::now();
-        let mut attempt = 0u32;
+        let mut retry = Retry::default();
         loop {
+            if let Some(stop) = Self::halted(&live) {
+                return self.finish_stopped(id, stop);
+            }
             self.update(id, |j| {
                 j.state = State::Scanning;
                 j.totals = Totals::default();
                 j.walk = Skipped::default();
-                j.attempt = attempt;
+                j.failures.clear();
+                j.renamed.clear();
+                j.attempt = retry.attempt;
                 j.next_s = 0;
             });
             live.ctl.bytes.store(0, Ordering::Relaxed);
+            live.ctl.written.store(0, Ordering::Relaxed);
+            live.discovered.store(0, Ordering::Relaxed);
+            live.not_needed.store(0, Ordering::Relaxed);
+            live.halt.store(false, Ordering::Relaxed);
             *live.speed.lock() = Speed::default();
-            let result = self.attempt(id, &live, resumed).await;
-            match result {
+            match self.attempt(id, &live, resumed).await {
                 Ok(Outcome::Done) => {
                     let job = self.update(id, |j| {
                         j.state = State::Done;
@@ -718,83 +840,88 @@ impl Queue {
                         tracing::info!(job = %id, files = j.totals.done_files, bytes = j.totals.done_bytes, failed = j.totals.failed, "transfer done");
                     }
                 }
-                Ok(Outcome::Paused) => {
-                    self.update(id, |j| {
-                        j.state = State::Paused;
-                        j.questions.clear();
-                        j.speed_bps = 0;
-                        j.eta_s = None;
-                    });
-                }
-                Ok(Outcome::Cancelled) => {
-                    let job = self.update(id, |j| {
-                        j.state = State::Cancelled;
-                        j.finished = Some(now());
-                        j.questions.clear();
-                        j.speed_bps = 0;
-                        j.eta_s = None;
-                    });
-                    if let Some(j) = job {
-                        self.update(id, |j| j.partials.clear());
-                        self.remove_partials(j);
-                    }
-                }
-                Err(e) if e.kind == ErrKind::Connection && started.elapsed() < RETRY_FOR => {
-                    attempt += 1;
-                    let wait = BACKOFF[(attempt as usize - 1).min(BACKOFF.len() - 1)];
-                    tracing::info!(job = %id, attempt, wait, "transfer connection lost; retrying");
+                Ok(stop) => self.finish_stopped(id, stop),
+                Err(e) if e.kind == ErrKind::Connection => {
+                    let progressed = live.ctl.written.load(Ordering::Relaxed) > 0;
+                    let Some(wait) = retry.on_drop(Instant::now(), progressed) else {
+                        tracing::info!(job = %id, "transfer failed: the connection stayed lost");
+                        self.fail(id, &e);
+                        return;
+                    };
+                    tracing::info!(job = %id, attempt = retry.attempt, wait, "transfer connection lost; retrying");
                     for left in (1..=wait).rev() {
                         self.update(id, |j| {
                             j.state = State::Reconnecting;
-                            j.attempt = attempt;
+                            j.attempt = retry.attempt;
                             j.next_s = left;
                             j.error = Some(e.message.clone());
                             j.speed_bps = 0;
                             j.eta_s = None;
                             j.questions.clear();
                         });
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        if live.halt.load(Ordering::Relaxed) {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                            _ = live.ctl.wake.notified() => {}
+                        }
+                        if Self::halted(&live).is_some() {
                             break;
                         }
-                    }
-                    if live.halt.load(Ordering::Relaxed) {
-                        let cancelled = live.ctl.cancel.load(Ordering::Relaxed);
-                        let job = self.update(id, |j| {
-                            j.state = if cancelled { State::Cancelled } else { State::Paused };
-                            j.finished = cancelled.then(now);
-                        });
-                        if let (true, Some(j)) = (cancelled, job) {
-                            self.update(id, |j| j.partials.clear());
-                            self.remove_partials(j);
-                        }
-                        return;
                     }
                     resumed = true;
                     continue;
                 }
                 Err(e) => {
                     tracing::info!(job = %id, kind = ?e.kind, "transfer failed");
-                    self.update(id, |j| {
-                        j.state = State::Failed;
-                        j.error = Some(e.message.clone());
-                        j.finished = Some(now());
-                        j.questions.clear();
-                        j.speed_bps = 0;
-                        j.eta_s = None;
-                    });
+                    self.fail(id, &e);
                 }
             }
             return;
         }
     }
 
+    fn fail(&self, id: &str, e: &FsError) {
+        self.update(id, |j| {
+            j.state = State::Failed;
+            j.error = Some(e.message.clone());
+            j.finished = Some(now());
+            j.questions.clear();
+            j.speed_bps = 0;
+            j.eta_s = None;
+        });
+    }
+
+    /// Paused (partials kept for the resume) or cancelled (partials removed).
+    fn finish_stopped(self: &Arc<Self>, id: &str, stop: Outcome) {
+        let cancelled = matches!(stop, Outcome::Cancelled);
+        let job = self.update(id, |j| {
+            j.state = if cancelled { State::Cancelled } else { State::Paused };
+            j.finished = cancelled.then(now);
+            j.questions.clear();
+            j.speed_bps = 0;
+            j.eta_s = None;
+        });
+        if let (true, Some(j)) = (cancelled, job) {
+            self.update(id, |j| j.partials.clear());
+            self.remove_partials(vec![j]);
+        }
+    }
+
     async fn attempt(self: &Arc<Self>, id: &str, live: &Arc<Live>, resumed: bool) -> FsResult<Outcome> {
         let job = self.get(id).ok_or_else(|| FsError::new(ErrKind::Other, "the transfer is gone"))?;
-        let src = self.end(&job.src).await?;
+        // Opening a session can take up to ssh's connect timeout: a pause or cancel does not wait for it.
+        let open = |end: End| {
+            let live = live.clone();
+            async move {
+                tokio::select! {
+                    r = self.end(&end) => r.map(Some),
+                    _ = live.ctl.wake.notified() => Ok(None),
+                }
+            }
+        };
+        let Some(src) = open(job.src.clone()).await? else { return Ok(Self::halted(live).unwrap_or(Outcome::Paused)) };
         match job.kind {
             JobKind::Copy => {
-                let dst = self.end(&job.dst).await?;
+                let Some(dst) = open(job.dst.clone()).await? else { return Ok(Self::halted(live).unwrap_or(Outcome::Paused)) };
                 self.copy_job(&job, src, dst, live, resumed).await
             }
             JobKind::Delete | JobKind::Chmod => self.tree_job(&job, src, live).await,
@@ -812,6 +939,13 @@ impl Queue {
     }
 
     async fn copy_job(self: &Arc<Self>, job: &Job, src: Arc<dyn RemoteFs>, dst: Arc<dyn RemoteFs>, live: &Arc<Live>, resumed: bool) -> FsResult<Outcome> {
+        // The target folder must be there: files must not all "skip" into a folder that is missing.
+        match dst.stat(&job.dst_dir).await {
+            Ok(m) if m.kind == FsKind::Dir => {}
+            Ok(_) => return Err(FsError::invalid(format!("{} is not a folder", job.dst_dir))),
+            Err(e) if e.kind == ErrKind::Connection => return Err(e),
+            Err(e) => return Err(FsError::new(e.kind, format!("the target folder {}: {e}", job.dst_dir))),
+        }
         let free = dst.free_space(&job.dst_dir).await.ok().flatten();
         let (tx, mut rx) = mpsc::channel::<Found>(256);
         let walker = {
@@ -823,26 +957,37 @@ impl Queue {
             }
         };
         let consumer = async {
-            // Target folder for each source folder (relative parts); `None`: skipped, with everything below.
-            let mut dirs: HashMap<Vec<String>, Option<String>> = HashMap::new();
-            dirs.insert(Vec::new(), Some(job.dst_dir.clone()));
+            // Target folder for each source folder (its parts joined); `None`: skipped, with everything below. The walk
+            // is breadth first, so only the last two depths are ever looked up and older entries are dropped.
+            let mut dirs: HashMap<String, Option<String>> = HashMap::new();
+            let mut deepest = 0usize;
+            dirs.insert(String::new(), Some(job.dst_dir.clone()));
             let files = Arc::new(Semaphore::new(FILES_AT_ONCE as usize));
             let mut tasks = tokio::task::JoinSet::new();
             let mut first_error: Option<FsError> = None;
             let mut started_running = false;
+            let key = |rel: &[String]| rel.join("\u{0}");
             while let Some(found) = rx.recv().await {
                 if first_error.is_some() || live.halt.load(Ordering::Relaxed) {
                     continue; // drain so the walk can finish
                 }
+                let depth = match &found {
+                    Found::Dir { rel, .. } | Found::File { rel, .. } | Found::Link { rel, .. } => rel.len(),
+                };
+                if depth > deepest {
+                    deepest = depth;
+                    dirs.retain(|k, _| k.is_empty() || k.split('\u{0}').count() + 1 >= depth);
+                }
                 match found {
                     Found::Dir { rel, path } => {
-                        let parent = dirs.get(&rel[..rel.len() - 1]).cloned().flatten();
+                        let parent = dirs.get(&key(&rel[..rel.len() - 1])).cloned().flatten();
                         let target = match parent {
                             None => None,
                             Some(parent) => match self.target_dir(job, &src, &dst, live, &path, &parent, rel.last().unwrap()).await {
                                 Ok(t) => t,
                                 Err(e) if e.kind == ErrKind::Connection => {
                                     first_error = Some(e);
+                                    live.halt();
                                     None
                                 }
                                 Err(e) => {
@@ -854,10 +999,10 @@ impl Queue {
                         if target.is_none() {
                             self.count(&job.id, |j| j.totals.skipped += 1);
                         }
-                        dirs.insert(rel, target);
+                        dirs.insert(key(&rel), target);
                     }
                     Found::File { path, rel, meta } => {
-                        let Some(dir) = dirs.get(&rel[..rel.len() - 1]).cloned().flatten() else {
+                        let Some(dir) = dirs.get(&key(&rel[..rel.len() - 1])).cloned().flatten() else {
                             self.count(&job.id, |j| j.totals.skipped += 1);
                             continue;
                         };
@@ -865,17 +1010,14 @@ impl Queue {
                             started_running = true;
                             self.update(&job.id, |j| j.state = State::Running);
                         }
-                        let over = {
-                            let mut jobs = self.jobs.lock();
-                            jobs.iter_mut().find(|j| j.id == job.id).map(|j| {
-                                j.totals.files += 1;
-                                j.totals.bytes += meta.size;
-                                free.is_some_and(|f| j.totals.bytes.saturating_sub(live.ctl.bytes.load(Ordering::Relaxed)) > f)
-                            })
-                        };
-                        if over == Some(true) {
-                            first_error = Some(FsError::new(ErrKind::Other, format!("not enough free space on the target ({} free)", free.unwrap_or(0))));
-                            live.halt.store(true, Ordering::Relaxed);
+                        self.count(&job.id, |j| {
+                            j.totals.files += 1;
+                            j.totals.bytes += meta.size;
+                        });
+                        let found = live.discovered.fetch_add(meta.size, Ordering::Relaxed) + meta.size;
+                        if over_space(found, live.not_needed.load(Ordering::Relaxed), free) {
+                            first_error = Some(FsError::new(ErrKind::Other, format!("not enough free space on the target ({} bytes free when the transfer started)", free.unwrap_or(0))));
+                            live.halt();
                             continue;
                         }
                         let permits = if meta.size >= BIG_FILE { FILES_AT_ONCE } else { 1 };
@@ -892,31 +1034,34 @@ impl Queue {
                 while let Some(done) = tasks.try_join_next() {
                     if let Ok(Err(e)) = done {
                         first_error.get_or_insert(e);
-                        live.halt.store(true, Ordering::Relaxed);
+                        live.halt();
                     }
                 }
             }
             while let Some(done) = tasks.join_next().await {
                 if let Ok(Err(e)) = done {
                     first_error.get_or_insert(e);
+                    live.halt();
                 }
             }
             first_error
         };
         let (walked, failed) = tokio::join!(walker, consumer);
-        let skipped = walked?;
+        if let Some(stop) = Self::halted(live) {
+            return Ok(stop);
+        }
+        // A lost connection in the walk is a lost connection of the job (retried), never a job that is "done".
+        let skipped = match (walked, failed) {
+            (_, Some(e)) => return Err(e),
+            (Err(e), None) => return Err(e),
+            (Ok(s), None) => s,
+        };
         self.update(&job.id, |j| {
             j.totals.skipped += skipped.folder_links + skipped.unreadable_names + skipped.broken_links + skipped.special;
             j.walk = skipped;
             j.current = None;
         });
-        if let Some(stop) = Self::halted(live) {
-            return Ok(stop);
-        }
-        match failed {
-            Some(e) => Err(e),
-            None => Ok(Outcome::Done),
-        }
+        Ok(Outcome::Done)
     }
 
     /// The target folder for a source folder: made when absent, merged when a folder, and a file in the way
@@ -976,7 +1121,7 @@ impl Queue {
         safe
     }
 
-    /// The first `name (n)` free in `dir`.
+    /// The first `name (n)` free in `dir` (on the target, and not claimed by a file on its way there).
     async fn free_name(&self, dst: &dyn RemoteFs, dir: &str, name: &str) -> FsResult<String> {
         let mut taken = HashSet::new();
         loop {
@@ -991,13 +1136,36 @@ impl Queue {
         }
     }
 
-    /// Puts a question on the job and waits for the answer; `None` when the job is paused or cancelled meanwhile.
+    /// Waits until no other file of any job is writing `key`, then holds it; `None` when the job is halted meanwhile.
+    async fn claim(&self, key: String, live: &Live) -> Option<Claim<'_>> {
+        loop {
+            if self.claims.lock().insert(key.clone()) {
+                return Some(Claim { set: &self.claims, key });
+            }
+            if live.halt.load(Ordering::Relaxed) {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Puts a question on the job and waits for the answer; `None` when the job is paused, cancelled or halted meanwhile.
     async fn ask(&self, id: &str, live: &Arc<Live>, mut q: Question) -> Option<Choice> {
-        // A policy set by "apply to all" while this file was on its way answers it.
         let qid = live.next_q.fetch_add(1, Ordering::Relaxed) + 1;
         q.id = qid;
         let (tx, rx) = oneshot::channel();
         live.answers.lock().insert(qid, tx);
+        // "Apply to all" given while this file was on its way answers it too (never a changed or clashing target).
+        if !q.changed && !q.kind_clash {
+            if let Some(choice) = Choice::for_policy(self.policy(id)) {
+                live.answers.lock().remove(&qid);
+                return Some(choice);
+            }
+        }
+        if live.halt.load(Ordering::Relaxed) {
+            live.answers.lock().remove(&qid);
+            return None;
+        }
         let question = q.clone();
         self.update(id, |j| {
             j.questions.push(question);
@@ -1027,14 +1195,19 @@ impl Queue {
     #[allow(clippy::too_many_arguments)]
     async fn copy_one(&self, job: &Job, live: &Arc<Live>, src: &dyn RemoteFs, dst: &dyn RemoteFs, path: &str, meta: &Meta, dir: &str, name: &str, resumed: bool) -> FsResult<()> {
         let mut name = self.mapped_name(job, dst, name);
+        let tag = tag(&job.id);
         self.count(&job.id, |j| j.current = Some(path.to_string()));
         let mut approved_override: Option<Option<(u64, u64)>> = None;
         let mut changed = false;
+        let mut changes = 0;
         loop {
             if live.halt.load(Ordering::Relaxed) {
                 return Ok(());
             }
             let target = dst.join(dir, &name);
+            let key = target_key(&job.dst, dst, &target);
+            // Two files (of this job or another) that would write one target take turns.
+            let Some(_claim) = self.claim(key.clone(), live).await else { return Ok(()) };
             let existing = match dst.lstat(&target).await {
                 Ok(m) => Some(m),
                 Err(e) if e.kind == ErrKind::NotFound => None,
@@ -1045,18 +1218,22 @@ impl Queue {
                 }
             };
             // After a reconnect or a resume: a file already in place with the source's size and time is complete.
-            if resumed && approved_override.is_none() && existing.as_ref().is_some_and(|m| m.kind == FsKind::File && m.size == meta.size && m.mtime == meta.mtime) {
+            if resumed && approved_override.is_none() && !changed && existing.as_ref().is_some_and(|m| m.kind == FsKind::File && m.size == meta.size && m.mtime == meta.mtime) {
                 live.ctl.bytes.fetch_add(meta.size, Ordering::Relaxed);
+                live.not_needed.fetch_add(meta.size, Ordering::Relaxed);
                 self.count(&job.id, |j| j.totals.done_files += 1);
                 return Ok(());
             }
-            // Two names that differ only in case, both from this job, on a target that ignores case.
-            let lower = target.to_lowercase();
-            let same_job_clash = dst.case_insensitive() && existing.is_some() && live.written.lock().contains(&lower);
+            // A second file for a target this job already wrote (same names from two folders, names that differ only
+            // in case, names that map to the same Windows name).
+            let same_job_clash = existing.is_some() && live.written.lock().contains(&key);
             let decision = if same_job_clash {
                 Decision::KeepBoth
             } else if let Some(approved) = approved_override.take() {
                 Decision::Copy { approved }
+            } else if changed {
+                // A target that changed after it was approved is always asked about, never decided by policy again.
+                Decision::Ask { identical: false, kind_clash: false }
             } else if let Some(e) = job.expect {
                 match &existing {
                     None => Decision::Copy { approved: None },
@@ -1098,6 +1275,7 @@ impl Queue {
             match decision {
                 Decision::Skip | Decision::Merge => {
                     live.ctl.bytes.fetch_add(meta.size, Ordering::Relaxed);
+                    live.not_needed.fetch_add(meta.size, Ordering::Relaxed);
                     self.count(&job.id, |j| j.totals.skipped += 1);
                     return Ok(());
                 }
@@ -1108,9 +1286,9 @@ impl Queue {
                 }
                 Decision::Ask { .. } => unreachable!("answered above"),
                 Decision::Copy { approved } => {
-                    let partial = dst.join(dir, &partial_name(&name));
+                    let partial = dst.join(dir, &partial_name(&name, &tag));
+                    // Only a partial this job recorded is ever continued.
                     let seen = self.get(&job.id).and_then(|j| j.partials.get(&partial).copied());
-                    let resume = resumed && seen.is_some();
                     if seen != Some((meta.size, meta.mtime)) {
                         // Saved with the next journal write (within a second). A partial whose entry was lost to a
                         // crash is not the job's, so it is started again rather than resumed: safe either way.
@@ -1119,9 +1297,11 @@ impl Queue {
                             j.partials.insert(p, s);
                         });
                     }
-                    let fc = FileCopy { src, src_path: path, dst, dst_dir: dir, dst_name: &name, approved, resume, source_seen: seen, preserve: job.preserve };
+                    let fc = FileCopy { src, src_path: path, dst, dst_dir: dir, dst_name: &name, tag: &tag, approved, resume: seen.is_some(), source_seen: seen, preserve: job.preserve };
                     match copy_file(&fc, &live.ctl).await {
-                        Ok(Copied::Done { warning, .. }) => {
+                        Ok(Copied::Done { warning, resumed_at, .. }) => {
+                            live.not_needed.fetch_add(resumed_at, Ordering::Relaxed);
+                            live.written.lock().insert(key);
                             self.count(&job.id, |j| {
                                 j.partials.remove(&partial);
                                 j.totals.done_files += 1;
@@ -1129,15 +1309,17 @@ impl Queue {
                             if let Some(w) = warning {
                                 self.failed(&job.id, &target, &FsError::new(ErrKind::Other, w));
                             }
-                            if dst.case_insensitive() {
-                                live.written.lock().insert(lower);
-                            }
                             return Ok(());
                         }
-                        Ok(Copied::TargetChanged { now }) => {
-                            // Asked again with what is there now; the partial stays for the answer.
+                        Ok(Copied::TargetChanged { .. }) => {
+                            // Asked again with what is there now; the partial stays and is continued after the answer.
+                            changes += 1;
+                            if changes > MAX_TARGET_CHANGES {
+                                self.drop_partial(job, dst, &partial).await;
+                                self.failed(&job.id, path, &FsError::new(ErrKind::Other, format!("{target} keeps changing on the target; not replaced")));
+                                return Ok(());
+                            }
                             changed = true;
-                            let _ = now;
                             continue;
                         }
                         Ok(Copied::Stopped(Stop::Pause)) => return Ok(()),
@@ -1149,6 +1331,8 @@ impl Queue {
                         }
                         Err(e) if e.kind == ErrKind::Connection => return Err(e),
                         Err(e) => {
+                            // A file that failed for another reason is not resumed: its partial goes.
+                            self.drop_partial(job, dst, &partial).await;
                             self.failed(&job.id, path, &e);
                             return Ok(());
                         }
@@ -1158,8 +1342,16 @@ impl Queue {
         }
     }
 
+    async fn drop_partial(&self, job: &Job, dst: &dyn RemoteFs, partial: &str) {
+        let _ = dst.remove_file(partial).await;
+        let p = partial.to_string();
+        self.count(&job.id, move |j| {
+            j.partials.remove(&p);
+        });
+    }
+
     /// A delete or chmod job on a host: files as they are found, folders at the end (deepest first, so a delete
-    /// empties them first and a chmod never locks the walk out).
+    /// empties them first and a chmod never locks the walk out). Links are acted on as links, never followed.
     async fn tree_job(self: &Arc<Self>, job: &Job, fs: Arc<dyn RemoteFs>, live: &Arc<Live>) -> FsResult<Outcome> {
         let (tx, mut rx) = mpsc::channel::<Found>(256);
         let walker = {
@@ -1206,45 +1398,79 @@ impl Queue {
                 };
                 match result {
                     Ok(()) => self.count(&job.id, |j| j.totals.done_files += 1),
-                    Err(e) if e.kind == ErrKind::Connection => first_error = Some(e),
+                    Err(e) if e.kind == ErrKind::Connection => {
+                        first_error = Some(e);
+                        live.halt();
+                    }
                     Err(e) => self.failed(&job.id, &path, &e),
                 }
             }
-            if first_error.is_none() && !live.halt.load(Ordering::Relaxed) {
-                dirs.sort_by(|a, b| b.0.cmp(&a.0));
-                for (_, path) in dirs {
-                    if live.halt.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    self.count(&job.id, |j| j.totals.files += 1);
-                    let r = if job.kind == JobKind::Delete { fs.remove_dir(&path).await } else { fs.chmod(&path, dir_mode).await };
-                    match r {
-                        Ok(()) => self.count(&job.id, |j| j.totals.done_files += 1),
-                        Err(e) if e.kind == ErrKind::Connection => {
-                            first_error = Some(e);
-                            break;
-                        }
-                        Err(e) => self.failed(&job.id, &path, &e),
-                    }
-                }
-            }
-            first_error
+            (first_error, dirs)
         };
-        let (walked, failed) = tokio::join!(walker, consumer);
-        let skipped = walked?;
-        self.update(&job.id, |j| j.walk = skipped);
+        let (walked, (failed, mut dirs)) = tokio::join!(walker, consumer);
         if let Some(stop) = Self::halted(live) {
             return Ok(stop);
         }
-        match failed {
-            Some(e) => Err(e),
-            None => Ok(Outcome::Done),
+        let skipped = match (walked, failed) {
+            (_, Some(e)) => return Err(e),
+            (Err(e), None) => return Err(e),
+            (Ok(s), None) => s,
+        };
+        // Folders only after a complete walk (a lost connection mid-walk left some unvisited), deepest first.
+        dirs.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, path) in dirs {
+            if let Some(stop) = Self::halted(live) {
+                return Ok(stop);
+            }
+            self.count(&job.id, |j| j.totals.files += 1);
+            let r = if job.kind == JobKind::Delete { fs.remove_dir(&path).await } else { fs.chmod(&path, dir_mode).await };
+            match r {
+                Ok(()) => self.count(&job.id, |j| j.totals.done_files += 1),
+                Err(e) if e.kind == ErrKind::Connection => return Err(e),
+                Err(e) => self.failed(&job.id, &path, &e),
+            }
         }
+        self.update(&job.id, |j| j.walk = skipped);
+        Ok(Outcome::Done)
+    }
+}
+
+/// A partial's old file left under its moved-aside name, with the target gone: put back.
+async fn restore_aside(fs: &dyn RemoteFs, partial: &str) {
+    let seps: &[char] = if fs.windows_names() { &['/', '\\'] } else { &['/'] };
+    let (dir, file) = match partial.rsplit_once(seps) {
+        Some((d, f)) => (if d.is_empty() { "/" } else { d }, f),
+        None => return,
+    };
+    let Some((name, tag)) = super::names::split_hidden(file) else { return };
+    let (old, target) = (fs.join(dir, &super::names::aside_name(name, tag)), fs.join(dir, name));
+    if fs.lstat(&old).await.is_ok() && fs.lstat(&target).await.is_err() {
+        let _ = fs.rename(&old, &target, false).await;
+    }
+}
+
+/// How often a target that keeps changing under a copy is asked about before that file fails.
+const MAX_TARGET_CHANGES: u32 = 3;
+
+impl Choice {
+    /// The answer a job's policy gives without asking (`None` for `ask`, and for `skip_identical`, which asks about
+    /// files that differ).
+    fn for_policy(p: Policy) -> Option<Choice> {
+        Some(match p {
+            Policy::Ask | Policy::SkipIdentical => return None,
+            Policy::Replace => Choice::Replace,
+            Policy::Skip => Choice::Skip,
+            Policy::KeepBoth => Choice::KeepBoth,
+            Policy::Newer => Choice::Newer,
+        })
     }
 }
 
 /// The bits a recursive chmod sets on files and on folders. With `dirs_only_x` files lose x and folders get x
 /// wherever they have r, so they stay searchable.
+///
+/// Open question for the owner: with `dirs_only_x`, files that already had x (scripts) lose it too; `chmod X`
+/// semantics would keep it. Kept as it is until the owner decides.
 pub fn chmod_modes(mode: u32, dirs_only_x: bool) -> (u32, u32) {
     let mode = mode & 0o7777;
     if dirs_only_x {
@@ -1310,8 +1536,22 @@ mod tests {
         panic!("timed out: {:?}", r.q.get(id));
     }
 
-    fn data(n: usize) -> Vec<u8> {
-        (0..n).map(|i| (i * 7 % 253) as u8).collect()
+    fn partial(id: &str, dir: &str, name: &str) -> String {
+        format!("{dir}/{}", partial_name(name, &tag(id)))
+    }
+
+    /// The journal is written off the async workers: read it once it says what is expected.
+    async fn journal_until(r: &Rig, ok: impl Fn(&Value) -> bool) -> Value {
+        for _ in 0..200 {
+            if let Some(v) = std::fs::read(r.dir.join("transfers.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).filter(|v| ok(v)) {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the journal never said so");
+    }
+
+    fn data(n: usize) -> Vec<u8> {        (0..n).map(|i| (i * 7 % 253) as u8).collect()
     }
 
     #[tokio::test]
@@ -1328,7 +1568,7 @@ mod tests {
         assert_eq!(r.b.stat("/dst/p/one.txt").await.unwrap().mtime, 10, "times are kept");
         assert!(r.b.paths().iter().all(|p| !p.contains("kelpie-part")));
         assert!(r.events.lock().iter().any(|(e, _)| e == "xfer.updated"));
-        let saved: Value = serde_json::from_slice(&std::fs::read(r.dir.join("transfers.json")).unwrap()).unwrap();
+        let saved = journal_until(&r, |v| v["jobs"][0]["state"] == "done").await;
         assert_eq!(saved["jobs"][0]["state"], "done");
         let _ = std::fs::remove_dir_all(&r.dir);
     }
@@ -1385,7 +1625,7 @@ mod tests {
         let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/src/big.bin"], "dst_dir": "/dst", "conflict": "replace"})).await;
         let j = until(&r, &id, |j| j.state == State::Reconnecting).await;
         assert_eq!(j.attempt, 1);
-        assert!(r.b.exists("/dst/.big.bin.kelpie-part"), "kept for the resume");
+        assert!(r.b.exists(&partial(&id, "/dst", "big.bin")), "kept for the resume");
         r.a.fail_reads_after(None);
         let j = until(&r, &id, |j| j.state.finished()).await;
         assert_eq!(j.state, State::Done, "{j:?}");
@@ -1405,12 +1645,12 @@ mod tests {
         r.q.rpc("xfer.control", &json!({"id": id, "action": "cancel"})).await.unwrap();
         until(&r, &id, |j| j.state == State::Cancelled).await;
         for _ in 0..100 {
-            if !r.b.exists("/dst/.big.bin.kelpie-part") {
+            if !r.b.exists(&partial(&id, "/dst", "big.bin")) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(!r.b.exists("/dst/.big.bin.kelpie-part"));
+        assert!(!r.b.exists(&partial(&id, "/dst", "big.bin")));
         assert!(!r.b.exists("/dst/big.bin"));
         let _ = std::fs::remove_dir_all(&r.dir);
     }
@@ -1437,7 +1677,7 @@ mod tests {
         let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/src/x"], "dst_dir": "/nowhere", "conflict": "replace"})).await;
         until(&r, &id, |j| j.state.finished()).await;
         // As if the daemon stopped while it ran.
-        let mut saved: Value = serde_json::from_slice(&std::fs::read(r.dir.join("transfers.json")).unwrap()).unwrap();
+        let mut saved = journal_until(&r, |v| v["jobs"][0]["state"] == "done").await;
         saved["jobs"][0]["state"] = json!("running");
         std::fs::write(r.dir.join("transfers.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
         let again = Queue::new(r.dir.clone(), Arc::new(Pool::new(PathBuf::from("kelpied"))), Arc::new(|_: &str, _: Value| {}));
@@ -1463,6 +1703,154 @@ mod tests {
         ] {
             assert!(r.q.rpc("xfer.start", &bad).await.is_err(), "{bad}");
         }
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn two_files_for_one_target_never_share_a_partial() {
+        // Same name from two folders in one job, and a second job to the same folder.
+        let r = rig("claims");
+        let (one, two) = (data(3 << 20), (0..3 << 20).map(|i| (i % 7) as u8).collect::<Vec<u8>>());
+        r.a.put("/x/readme.md", &one, 10);
+        r.a.put("/y/readme.md", &two, 20);
+        r.b.mkdir_all("/dst");
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/x/readme.md", "/y/readme.md"], "dst_dir": "/dst"})).await;
+        let j = until(&r, &id, |j| j.state.finished()).await;
+        assert_eq!((j.state, j.totals.done_files), (State::Done, 2), "{j:?}");
+        let got = [r.b.read("/dst/readme.md").unwrap(), r.b.read("/dst/readme (2).md").unwrap()];
+        assert!(got.contains(&one) && got.contains(&two), "each target holds one whole source");
+        // Two jobs at once to one folder, replacing: the result is one source, whole.
+        r.b.remove_file("/dst/readme.md").await.unwrap();
+        let first = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/x/readme.md"], "dst_dir": "/dst", "conflict": "replace"})).await;
+        let second = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/y/readme.md"], "dst_dir": "/dst", "conflict": "replace"})).await;
+        until(&r, &first, |j| j.state.finished()).await;
+        until(&r, &second, |j| j.state.finished()).await;
+        let end = r.b.read("/dst/readme.md").unwrap();
+        assert!(end == one || end == two, "never a mix of the two");
+        assert!(r.b.paths().iter().all(|p| !p.contains("kelpie-part")), "{:?}", r.b.paths());
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[test]
+    fn the_retry_window_runs_from_the_drop() {
+        let t0 = Instant::now();
+        let mut r = Retry::default();
+        // A drop long after the job started still retries; the waits grow.
+        assert_eq!(r.on_drop(t0 + Duration::from_secs(3600), false), Some(2));
+        assert_eq!(r.on_drop(t0 + Duration::from_secs(3610), false), Some(5));
+        // An attempt that wrote something starts the count again.
+        assert_eq!(r.on_drop(t0 + Duration::from_secs(3700), true), Some(2));
+        assert_eq!(r.attempt, 1);
+        // Five minutes after the first drop without progress, it gives up.
+        assert_eq!(r.on_drop(t0 + Duration::from_secs(3700) + RETRY_FOR, false), None);
+    }
+
+    #[tokio::test]
+    async fn a_connection_lost_while_listing_is_retried_not_done() {
+        let r = rig("walkdrop");
+        for d in 0..6 {
+            r.a.put(&format!("/t/d{d}/f.txt"), b"x", 1);
+        }
+        r.b.mkdir_all("/dst");
+        r.a.fail_lists_after(Some(2));
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/t"], "dst_dir": "/dst", "conflict": "replace"})).await;
+        let j = until(&r, &id, |j| j.state == State::Reconnecting || j.state.finished()).await;
+        assert_eq!(j.state, State::Reconnecting, "never done with folders left out");
+        r.a.fail_lists_after(None);
+        let j = until(&r, &id, |j| j.state.finished()).await;
+        assert_eq!((j.state, j.totals.done_files), (State::Done, 6), "{j:?}");
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_failure_releases_files_waiting_on_a_question() {
+        let r = rig("release");
+        r.a.put("/s/a-asks.txt", b"new", 10);
+        r.a.put("/s/b-big.bin", &data(1 << 20), 10);
+        r.b.put("/dst/s/a-asks.txt", b"old", 5);
+        // The first file waits on its question; the second loses the connection.
+        r.a.fail_reads_after(Some(100_000));
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s"], "dst_dir": "/dst"})).await;
+        let j = until(&r, &id, |j| j.state == State::Reconnecting || j.state.finished()).await;
+        // Without the release this waits for an answer with a dead connection.
+        assert_eq!(j.state, State::Reconnecting, "{j:?}");
+        r.q.rpc("xfer.control", &json!({"id": id, "action": "cancel"})).await.unwrap();
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[test]
+    fn free_space_counts_only_new_bytes() {
+        assert!(!over_space(100, 0, None));
+        assert!(!over_space(100, 0, Some(100)));
+        assert!(over_space(101, 0, Some(100)));
+        // Skipped, complete and resumed bytes need no room.
+        assert!(!over_space(150, 60, Some(100)));
+    }
+
+    #[tokio::test]
+    async fn a_target_that_keeps_changing_fails_plainly_instead_of_looping() {
+        let r = rig("changing");
+        r.a.put("/s/log.txt", &data(1000), 10);
+        r.b.put("/dst/log.txt", b"live", 5);
+        r.b.bump_mtime_on_lstat("/dst/log.txt");
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s/log.txt"], "dst_dir": "/dst", "conflict": "replace"})).await;
+        // Every re-check finds it changed: asked each time, then the file fails.
+        for _ in 0..10 {
+            let j = until(&r, &id, |j| !j.questions.is_empty() || j.state.finished()).await;
+            if j.state.finished() {
+                break;
+            }
+            assert!(j.questions[0].changed, "a changed target is asked about, never decided by policy");
+            let _ = r.q.rpc("xfer.answer", &json!({"id": id, "choice": "replace"})).await;
+        }
+        let j = until(&r, &id, |j| j.state.finished()).await;
+        assert_eq!(j.totals.failed, 1, "{j:?}");
+        assert!(j.failures[0].error.contains("keeps changing"));
+        assert_eq!(r.b.read("/dst/log.txt").unwrap(), b"live");
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_missing_target_folder_fails_the_job() {
+        let r = rig("nofolder");
+        r.a.put("/s/x", b"x", 1);
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s/x"], "dst_dir": "/not/there"})).await;
+        let j = until(&r, &id, |j| j.state.finished()).await;
+        assert_eq!(j.state, State::Failed, "never a job of skips into nowhere");
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn names_windows_cannot_hold_and_unicode_names_arrive_on_this_computer() {
+        let r = rig("names");
+        r.a.put("/s/ünïcødé 日本語.txt", b"u", 1);
+        r.a.put("/s/a:b?.txt", b"w", 1);
+        let local = r.dir.join("down");
+        std::fs::create_dir_all(&local).unwrap();
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {}, "items": ["/s"], "dst_dir": local.to_string_lossy()})).await;
+        let j = until(&r, &id, |j| j.state.finished()).await;
+        assert_eq!(j.state, State::Done, "{j:?}");
+        assert_eq!(std::fs::read(local.join("s").join("ünïcødé 日本語.txt")).unwrap(), b"u");
+        if cfg!(windows) {
+            assert_eq!(std::fs::read(local.join("s").join("a_b_.txt")).unwrap(), b"w");
+            assert_eq!(j.renamed, vec![("a:b?.txt".to_string(), "a_b_.txt".to_string())]);
+        }
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_delete_on_a_server_whose_listing_follows_links_keeps_the_target() {
+        let r = rig("deletefollow");
+        let host = MemFs::new().following_links(true);
+        r.q.test_ends.lock().insert("f".into(), Arc::new(host.clone()));
+        host.put("/srv/old/a.txt", b"a", 1);
+        host.put("/keep/k.txt", b"k", 1);
+        host.link("/srv/old/to-keep", "/keep");
+        let id = start(&r, json!({"kind": "delete", "src": {"dest": "f"}, "items": ["/srv/old"]})).await;
+        let j = until(&r, &id, |j| j.state.finished()).await;
+        assert_eq!(j.state, State::Done, "{j:?}");
+        assert!(!host.exists("/srv/old"));
+        assert_eq!(host.read("/keep/k.txt").unwrap(), b"k", "data outside the selection is never touched");
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 

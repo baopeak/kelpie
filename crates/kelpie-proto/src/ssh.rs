@@ -39,16 +39,26 @@ pub fn askpass_env(exe: &Path, host_id: &str) -> Vec<(String, String)> {
     ]
 }
 
-/// The id of the saved host named `alias` (`user@alias` is accepted), read from `hosts.json`. Never
-/// writes; a missing or unreadable file gives `None` (the connection then runs without a saved secret).
-pub fn host_id_for_alias(alias: &str) -> Option<String> {
-    let alias = alias.rsplit('@').next().unwrap_or(alias);
+/// The id of the saved host named `dest` (an alias, or `user@alias`), read from `hosts.json`. Never writes; a
+/// missing or unreadable file gives `None` (the connection then runs without a saved secret). `user@alias` with a
+/// user other than the saved host's gives `None`: a saved password is never offered for another account.
+pub fn host_id_for_alias(dest: &str) -> Option<String> {
     let bytes = std::fs::read(hosts_path()).ok()?;
-    host_id_in(&serde_json::from_slice(&bytes).ok()?, alias)
+    host_id_in(&serde_json::from_slice(&bytes).ok()?, dest)
 }
 
-fn host_id_in(hosts: &serde_json::Value, alias: &str) -> Option<String> {
-    hosts.get("hosts")?.as_array()?.iter().find(|h| h.get("alias").and_then(|a| a.as_str()) == Some(alias)).and_then(|h| h.get("id")?.as_str()).map(str::to_string)
+fn host_id_in(hosts: &serde_json::Value, dest: &str) -> Option<String> {
+    let (user, alias) = match dest.rsplit_once('@') {
+        Some((u, a)) => (Some(u), a),
+        None => (None, dest),
+    };
+    let h = hosts.get("hosts")?.as_array()?.iter().find(|h| h.get("alias").and_then(|a| a.as_str()) == Some(alias))?;
+    if let Some(u) = user {
+        if h.get("user").and_then(|v| v.as_str()).unwrap_or("") != u {
+            return None;
+        }
+    }
+    h.get("id")?.as_str().map(str::to_string)
 }
 
 /// What may be handed to `ssh` as its destination: an alias, `user@host`, an IPv4 or bracketed IPv6
@@ -83,9 +93,12 @@ mod tests {
 
     #[test]
     fn host_ids_by_alias() {
-        let hosts = serde_json::json!({"hosts": [{"id": "a", "alias": "prod"}, {"id": "b", "alias": "dev"}]});
+        let hosts = serde_json::json!({"hosts": [{"id": "a", "alias": "prod", "user": "deploy"}, {"id": "b", "alias": "dev"}]});
         assert_eq!(host_id_in(&hosts, "dev").as_deref(), Some("b"));
         assert_eq!(host_id_in(&hosts, "other"), None);
+        assert_eq!(host_id_in(&hosts, "deploy@prod").as_deref(), Some("a"), "the saved user");
+        assert_eq!(host_id_in(&hosts, "root@prod"), None, "another account never gets the saved password");
+        assert_eq!(host_id_in(&hosts, "someone@dev"), None, "nor does a user the host does not name");
         assert_eq!(host_id_in(&serde_json::json!({}), "dev"), None);
     }
 

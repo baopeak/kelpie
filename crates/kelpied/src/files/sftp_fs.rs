@@ -146,14 +146,19 @@ impl RemoteFs for SftpFs {
 
     async fn open_write(&self, path: &str, offset: u64, create: bool) -> FsResult<Box<dyn WriteFile>> {
         let c = self.c();
-        let mut flags = OpenFlags::WRITE;
-        if create {
-            flags |= OpenFlags::CREATE;
-        }
-        if offset == 0 {
-            flags |= OpenFlags::TRUNCATE;
-        }
-        let mut f = c.sftp.open_with_flags(path, flags).await.map_err(|e| c.error(e))?;
+        let mut f = if create && offset == 0 {
+            // Made new: what has the name (a stale partial, a planted link) goes, then an exclusive create, 0600.
+            match c.sftp.remove_file(path).await.map_err(|e| c.error(e)) {
+                Err(e) if e.kind != ErrKind::NotFound => return Err(e),
+                _ => {}
+            }
+            let mut a = FileAttributes::empty();
+            a.permissions = Some(0o600);
+            c.sftp.open_with_flags_and_attributes(path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE, a).await.map_err(|e| c.error(e))?
+        } else {
+            let flags = if create { OpenFlags::WRITE | OpenFlags::CREATE } else { OpenFlags::WRITE };
+            c.sftp.open_with_flags(path, flags).await.map_err(|e| c.error(e))?
+        };
         if offset > 0 {
             // Anything past the offset (a partial longer than what is kept) is cut off first.
             let mut a = FileAttributes::empty();
@@ -178,8 +183,19 @@ struct SftpFile {
 }
 
 impl SftpFile {
+    /// A lost connection comes out as `ConnectionReset` (an `ErrKind::Connection` for the copy); the host's own
+    /// answers keep their kind.
     fn map(&self, r: io::Result<()>) -> io::Result<()> {
-        r.map_err(|e| if self.conn.alive() { e } else { io::Error::new(io::ErrorKind::ConnectionReset, self.conn.lost().message) })
+        r.map_err(|e| {
+            let fs = self.conn.io_error(e);
+            let kind = match fs.kind {
+                ErrKind::Connection => io::ErrorKind::ConnectionReset,
+                ErrKind::NotFound => io::ErrorKind::NotFound,
+                ErrKind::Denied => io::ErrorKind::PermissionDenied,
+                _ => io::ErrorKind::Other,
+            };
+            io::Error::new(kind, fs.message)
+        })
     }
 }
 

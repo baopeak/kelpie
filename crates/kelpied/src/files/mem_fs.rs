@@ -32,6 +32,18 @@ struct State {
     posix_rename: bool,
     free: Option<u64>,
     fail_reads_after: Option<u64>,
+    /// `list` fails as a lost connection after this many more calls.
+    fail_lists_after: Option<u64>,
+    /// Listings report a link's target, as some servers (and the e2e fixture) do.
+    listing_follows_links: bool,
+    /// `lstat` follows links too: the worst server there is.
+    lstat_follows: bool,
+    /// The next rename to this path fails once.
+    fail_rename_to: Option<String>,
+    /// Opening these for reading bumps their mtime (a file rewritten while it is copied).
+    bump_on_read: std::collections::HashSet<String>,
+    /// `lstat` of these bumps their mtime first (a target that keeps changing).
+    bump_on_lstat: std::collections::HashSet<String>,
     now: u64,
 }
 
@@ -52,7 +64,7 @@ impl Default for MemFs {
 
 impl MemFs {
     pub fn new() -> Self {
-        let fs = MemFs(Arc::new(Mutex::new(State { nodes: BTreeMap::new(), posix_rename: true, free: None, fail_reads_after: None, now: 1_700_000_000 })));
+        let fs = MemFs(Arc::new(Mutex::new(State { nodes: BTreeMap::new(), posix_rename: true, free: None, fail_reads_after: None, fail_lists_after: None, listing_follows_links: false, lstat_follows: false, fail_rename_to: None, bump_on_read: Default::default(), bump_on_lstat: Default::default(), now: 1_700_000_000 })));
         fs.0.lock().nodes.insert("/".into(), Node { body: Body::Dir, mtime: 0, mode: 0o755 });
         fs.mkdir_all(HOME);
         fs
@@ -70,6 +82,34 @@ impl MemFs {
     /// Every reader opened from now on fails after `n` bytes; `None` heals.
     pub fn fail_reads_after(&self, n: Option<u64>) {
         self.0.lock().fail_reads_after = n;
+    }
+
+    /// `list` fails as a lost connection after `n` more calls; `None` heals.
+    pub fn fail_lists_after(&self, n: Option<u64>) {
+        self.0.lock().fail_lists_after = n;
+    }
+
+    /// Listings (and, with `lstat_too`, `lstat`) report a link's target instead of the link.
+    pub fn following_links(self, lstat_too: bool) -> Self {
+        {
+            let mut s = self.0.lock();
+            s.listing_follows_links = true;
+            s.lstat_follows = lstat_too;
+        }
+        self
+    }
+
+    /// The next rename to `path` fails once.
+    pub fn fail_rename_to(&self, path: Option<&str>) {
+        self.0.lock().fail_rename_to = path.map(str::to_string);
+    }
+
+    pub fn bump_mtime_on_read(&self, path: &str) {
+        self.0.lock().bump_on_read.insert(path.into());
+    }
+
+    pub fn bump_mtime_on_lstat(&self, path: &str) {
+        self.0.lock().bump_on_lstat.insert(path.into());
     }
 
     pub fn mkdir_all(&self, path: &str) {
@@ -155,7 +195,14 @@ impl MemFs {
 #[async_trait]
 impl RemoteFs for MemFs {
     async fn list(&self, dir: &str) -> FsResult<Vec<Entry>> {
-        let s = self.0.lock();
+        let mut s = self.0.lock();
+        if let Some(n) = s.fail_lists_after {
+            if n == 0 {
+                return Err(FsError::new(ErrKind::Connection, "ssh test: the connection ended"));
+            }
+            s.fail_lists_after = Some(n - 1);
+        }
+        let s = s;
         let dir = MemFs::resolve(&s, dir)?;
         if !matches!(s.nodes[&dir].body, Body::Dir) {
             return Err(FsError::new(ErrKind::Other, "not a folder"));
@@ -173,8 +220,12 @@ impl RemoteFs for MemFs {
                         Body::Link(t) => Some(t.clone()),
                         _ => None,
                     },
+                    meta: match &n.body {
+                        // A server that reports what a link points to (its listing uses stat).
+                        Body::Link(_) if s.listing_follows_links => MemFs::resolve(&s, p).ok().and_then(|r| s.nodes.get(&r)).map_or_else(|| MemFs::meta(n), MemFs::meta),
+                        _ => MemFs::meta(n),
+                    },
                     name,
-                    meta: MemFs::meta(n),
                     owner: Some("test".into()),
                     group: Some("test".into()),
                 }
@@ -189,7 +240,16 @@ impl RemoteFs for MemFs {
     }
 
     async fn lstat(&self, path: &str) -> FsResult<Meta> {
-        let s = self.0.lock();
+        let mut s = self.0.lock();
+        if s.bump_on_lstat.contains(path) {
+            if let Some(n) = s.nodes.get_mut(path) {
+                n.mtime += 1;
+            }
+        }
+        if s.lstat_follows {
+            let p = MemFs::resolve(&s, path)?;
+            return Ok(MemFs::meta(&s.nodes[&p]));
+        }
         let p = MemFs::resolve_parent(&s, path)?;
         s.nodes.get(&p).map(MemFs::meta).ok_or_else(|| not_found(path))
     }
@@ -225,6 +285,10 @@ impl RemoteFs for MemFs {
 
     async fn rename(&self, from: &str, to: &str, overwrite: bool) -> FsResult<()> {
         let mut s = self.0.lock();
+        if s.fail_rename_to.as_deref() == Some(to) {
+            s.fail_rename_to = None;
+            return Err(FsError::new(ErrKind::Other, "rename failed (test)"));
+        }
         if !s.nodes.contains_key(from) {
             return Err(not_found(from));
         }
@@ -283,7 +347,12 @@ impl RemoteFs for MemFs {
     }
 
     async fn open_read(&self, path: &str, offset: u64) -> FsResult<Box<dyn AsyncRead + Send + Unpin>> {
-        let s = self.0.lock();
+        let mut s = self.0.lock();
+        if s.bump_on_read.contains(path) {
+            if let Some(n) = s.nodes.get_mut(path) {
+                n.mtime += 1;
+            }
+        }
         let p = MemFs::resolve(&s, path)?;
         let Body::File(b) = &s.nodes[&p].body else { return Err(FsError::invalid("not a file")) };
         let start = (offset as usize).min(b.len());
@@ -296,6 +365,14 @@ impl RemoteFs for MemFs {
             return Err(not_found(parent_remote(path)));
         }
         let now = s.now;
+        if create && offset == 0 {
+            // Made new, owner-only, replacing whatever had the name (never written through a link).
+            if matches!(s.nodes.get(path).map(|n| &n.body), Some(Body::Dir)) {
+                return Err(FsError::invalid("is a folder"));
+            }
+            s.nodes.insert(path.into(), Node { body: Body::File(Vec::new()), mtime: now, mode: 0o600 });
+            return Ok(Box::new(MemWrite { fs: self.clone(), path: path.into(), pos: 0 }));
+        }
         match s.nodes.get_mut(path) {
             Some(Node { body: Body::File(b), mtime, .. }) => {
                 b.truncate(offset as usize);
