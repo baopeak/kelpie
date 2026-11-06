@@ -1,9 +1,10 @@
 //! The phone's input as `SendInput`: absolute mouse positions over the virtual desktop, buttons, the wheel, keys and Unicode text.
 //!
-//! For a window target, nothing goes anywhere but that window (or a menu or dialog of its own process):
-//! - a press that would land on another window over it is dropped and reported (`Covered`);
-//! - keys and text go only while the target is the foreground window. If it is not, it is brought to the front once; if it still is not, they are
-//!   refused (`NotFront`) and the phone is told, so a password never goes into whatever window took the focus meanwhile.
+//! For a window target, nothing goes anywhere but that window:
+//! - a press that would land on another program's window over it is dropped and reported (`Covered`); its own menus and dropdowns take it;
+//! - keys and text go only while the target, or a dialog it owns, is the foreground window. If not (another program, or another window of the
+//!   same one), it is brought to the front once; if it still is not, they are refused (`NotFront`) and the phone is told, so a password never goes
+//!   into whatever window took the focus meanwhile.
 //!
 //! `SendInput` does not reduce its count when UIPI drops input into an elevated window (Microsoft documents this), so `Blocked` is rare: the
 //! `elevated` state (`states_win`) is the real signal.
@@ -16,7 +17,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
     MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
-use windows::Win32::UI::WindowsAndMessaging::{BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, SW_RESTORE};
+use windows::Win32::UI::WindowsAndMessaging::{
+    BringWindowToTop, GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GUITHREADINFO, SW_RESTORE,
+};
 
 use super::targets_win::{minimized, process_of, window_rect};
 use crate::geom::{self, Rect};
@@ -101,19 +104,44 @@ fn of_target(h: HWND, w: HWND) -> bool {
     !w.is_invalid() && (w == h || process_of(w) == process_of(h))
 }
 
-/// Whether the target (or a window of its own) has the keyboard focus.
-fn in_front(h: HWND) -> bool {
-    of_target(h, unsafe { GetForegroundWindow() })
+/// Whether a window in front is the target or one it owns (its dialogs): another top-level window of the same program (a second document, a
+/// chat window) is not, so what the phone types never goes into a window it does not see.
+fn owned_by_target(h: HWND, w: HWND) -> bool {
+    !w.is_invalid() && (w == h || unsafe { GetAncestor(w, GA_ROOTOWNER) } == h)
 }
 
-/// The target in front, brought there once if it is not: false when it still is not.
+/// Whether the target (or a dialog of its own) has the keyboard focus: the window in front is, and so is the one its thread gives the keys to,
+/// which moves only once that thread has taken the activation (two windows of one program share a thread).
+fn in_front(h: HWND) -> bool {
+    let fg = unsafe { GetForegroundWindow() };
+    if !owned_by_target(h, fg) {
+        return false;
+    }
+    let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+    let thread = unsafe { GetWindowThreadProcessId(fg, None) };
+    if thread == 0 || unsafe { GetGUIThreadInfo(thread, &mut info) }.is_err() {
+        return false;
+    }
+    info.hwndFocus.is_invalid() || owned_by_target(h, unsafe { GetAncestor(info.hwndFocus, GA_ROOT) })
+}
+
+/// The target in front, brought there once if it is not (and given a moment to take the keys): false when it still is not.
 fn front(h: HWND) -> bool {
     if in_front(h) && !minimized(h) {
         return true;
     }
     bring_front(h);
-    in_front(h) && !minimized(h)
+    for _ in 0..FRONT_WAIT_STEPS {
+        if in_front(h) && !minimized(h) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
 }
+
+/// How long `front` waits for the target to take the keys after bringing it there: 15 × 20 ms.
+const FRONT_WAIT_STEPS: u32 = 15;
 
 /// Whether the screen point is on the target (or a window of its own), not on another window over it.
 fn lands_on(h: HWND, x: i32, y: i32) -> bool {

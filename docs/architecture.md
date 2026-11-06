@@ -802,7 +802,8 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   with `bitstream_restriction` (`max_num_reorder_frames = 0`) so a decoder holds no frame (`sps.rs`), and every keyframe carries its SPS and PPS. Input with
   `SendInput` in the picture's pixels mapped through the target's place (`DWMWA_EXTENDED_FRAME_BOUNDS`, per-monitor DPI v2, absolute units over the virtual
   desktop, `geom.rs`). For a window target nothing goes anywhere but that window or a menu or dialog of its own process: a press that would land on another
-  window over it is dropped and reported (`covered`), and **keys and text go only while the target is the foreground window** (brought there once if it is not,
+  window over it is dropped and reported (`covered`), and **keys and text go only while the target, or a dialog it owns, is the foreground window**, never
+  another top-level window of the same program (brought there once if it is not,
   else refused as `not_front`, and `sc_text` answers not typed), so a password never goes into a window that took the focus meanwhile. A button a press left
   held is released when the stream ends; input still queued when it stops is not done. A target the list would not offer (another virtual desktop, a tool
   window, the border) is refused at the start. The encoder's picture is at most the top rung, 1920×1080 (a 4K or 5K monitor is shown at 1080p, an ultrawide
