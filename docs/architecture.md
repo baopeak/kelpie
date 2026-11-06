@@ -754,14 +754,18 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
   screencast frames. So right after the person switches away from the newest held pane, the window brings its tab back once (`keepInFront`,
   `paneToBringBack`: one hold only, once per hold, never several against one another), and a stream silent for 1 s is captured with
   `Page.captureScreenshot` at the step's quality and width (`fallback`, `meta.captured`): at the ladder's rate and no faster than twice a second, every 2 s
-  on a still page nobody touches, never while paused (the daemon pauses the app while the phone's link is down too), and never the same picture twice. The
+  on a still page nobody touches, never while paused (the daemon pauses the app while the phone's link is down too), and never the same picture twice in a
+  row (a resume, a rebind or a new window starts that over, since the phone may not have the last one; a new ladder step alone does not). A hidden pane gives
+  no capture either, and WebView2 keeps input sent to it and runs it once the pane is shown, on whatever is there by then: the app sends a hidden pane
+  (`browser_visible`) nothing but a release at the point pressed, and refuses text. A screencast started again on a still, visible page sends no first frame
+  by itself; the capture shows it. The
   phone acknowledges at once a frame identical to the one shown, and an acknowledgement while paused writes off what was counted as on its way, so a still
   page cannot lock the stream. A start that finishes after the daemon gave up stops its screencast and is refused, and Stop on the desktop always takes the
   banner down. `window.close()` in a popup
   makes wry destroy only its page view; the app closes the window with it, so the group goes back to the pane. `Create` inside the new-window handler works and
   `window.opener` holds. A popup's DevTools state starts over when it takes the opener's request, so its screencast starts again when its page has loaded.
   `Page.startScreencast` needs no `Page.enable`.
-- **Limits**: a dialog over the pane hides it (the native view would cover the dialog), and then only captures come; coordinates under browser zoom are
+- **Limits**: a dialog over the pane hides it (the native view would cover the dialog), and then the phone's picture stops and its input is not sent until the pane shows again; coordinates under browser zoom are
   untested; the window-thread time per frame and the L2 CPU cut are not measured (the phase file has the numbers that are).
 
 ### Phone client
