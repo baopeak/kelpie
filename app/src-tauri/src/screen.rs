@@ -59,6 +59,20 @@ struct Helper {
 struct Viewer {
     device: String,
     title: String,
+    /// The number of the newest pause or resume the daemon sent: one that arrives after a newer one is ignored.
+    pause_v: u64,
+}
+
+/// Whether a numbered notice `v` is newer than the last one taken (`last`, moved on if so). A notice without a number is always taken.
+fn newer(last: &mut u64, v: Option<u64>) -> bool {
+    match v {
+        Some(v) if v <= *last => false,
+        Some(v) => {
+            *last = v;
+            true
+        }
+        None => true,
+    }
 }
 
 /// What a person set in Settings → Mobile.
@@ -369,7 +383,12 @@ pub fn provider_message(app: &AppHandle, msg: Value) {
         "screen.input" => send(&h, json!({"cmd": "input", "sc": sc, "ops": params["ops"], "t": params["t"]})),
         "screen.flow" => send(&h, json!({"cmd": "flow", "sc": sc, "acked": params["acked"], "dropped_through": params["dropped_through"], "rtt_ms": params["rtt_ms"], "level": params["level"], "lost_tiles": params["lost_tiles"], "raw": params["raw"], "wire": params["wire"]})),
         "screen.keyframe" => send(&h, json!({"cmd": "keyframe", "sc": sc})),
-        "screen.pause" => send(&h, json!({"cmd": "pause", "sc": sc, "paused": params["paused"]})),
+        "screen.pause" => {
+            let take = sc.as_str().is_some_and(|sc| app.state::<Screens>().viewers.lock().get_mut(sc).is_none_or(|v| newer(&mut v.pause_v, params["v"].as_u64())));
+            if take {
+                send(&h, json!({"cmd": "pause", "sc": sc, "paused": params["paused"]}));
+            }
+        }
         "screen.resume_load" => send(&h, json!({"cmd": "resume_load", "sc": sc})),
         "screen.stop" => {
             let reason = params["reason"].as_str().unwrap_or("phone").to_string();
@@ -422,7 +441,7 @@ async fn request(app: &AppHandle, method: &str, params: Value) -> Result<Value, 
                 return Err("the phone's request ended before the screen was ready".into());
             }
             let title = started["title"].as_str().unwrap_or_default().to_string();
-            app.state::<Screens>().viewers.lock().insert(sc.clone(), Viewer { device: device.clone(), title: title.clone() });
+            app.state::<Screens>().viewers.lock().insert(sc.clone(), Viewer { device: device.clone(), title: title.clone(), pause_v: 0 });
             let _ = app.emit_to("main", "screen-started", json!({"sc": sc, "device": device, "title": title, "kind": started["kind"], "hotkey": prefs.hotkey}));
             Ok(started)
         }
@@ -471,4 +490,20 @@ pub fn screen_viewers(app: AppHandle) -> Vec<Value> {
 #[tauri::command]
 pub fn screen_available() -> bool {
     cfg!(windows) && helper_path().is_some_and(|p| p.is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newer;
+
+    #[test]
+    fn a_pause_older_than_the_last_one_taken_is_ignored() {
+        let mut last = 0;
+        assert!(newer(&mut last, Some(2)));
+        assert!(!newer(&mut last, Some(1)), "a pause that arrives after the resume that followed it");
+        assert!(!newer(&mut last, Some(2)));
+        assert!(newer(&mut last, Some(3)));
+        assert!(newer(&mut last, None), "a notice without a number is taken");
+        assert_eq!(last, 3);
+    }
 }

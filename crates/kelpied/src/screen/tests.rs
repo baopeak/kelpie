@@ -471,3 +471,31 @@ async fn only_the_hold_s_own_provider_is_heard_and_what_it_ends_is_ended() {
     assert!(r.told_now("screen.stop").await.is_empty(), "the helper ended it itself");
     assert!(Broker::owns_event(&json!({"sc": "x"})) && !Broker::owns_event(&json!({"tk": "x"})));
 }
+
+#[tokio::test]
+async fn a_release_goes_even_when_the_rest_of_its_late_message_is_dropped() {
+    let r = rig();
+    let sc = r.start().await;
+    r.send(&sc, &video(1, true, 100));
+    r.verb("sc_ack", json!({"sc": sc, "seq": 1})).await.unwrap();
+    let old = now_millis() - 1500;
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "move", "x": 1, "y": 1}, {"k": "up", "x": 2, "y": 2, "b": "left"}], "st": old})).await.unwrap();
+    let sent = r.told_now("screen.input").await;
+    assert_eq!(sent.len(), 1);
+    let ops = sent[0]["ops"].as_array().unwrap();
+    assert_eq!(ops.len(), 1, "only the release: a mouse button is never left pressed on the computer");
+    assert_eq!(ops[0]["k"], "up");
+}
+
+#[tokio::test]
+async fn pauses_and_resumes_are_numbered_so_that_an_older_one_arriving_late_is_ignored() {
+    let r = rig();
+    let sc = r.start().await;
+    r.d.screen.link_closed(&r.d, 1);
+    r.d.screen.phone_verb(&r.d, r.phone(), "sc_rebind", &json!({"sc": sc})).await.unwrap();
+    r.d.screen.link_closed(&r.d, 1);
+    let told = r.told_now("screen.pause").await;
+    let versions: Vec<u64> = told.iter().map(|p| p["v"].as_u64().unwrap()).collect();
+    assert_eq!(versions, [1, 2, 3], "{told:?}");
+    assert_eq!(told.last().unwrap()["paused"], true, "the newest says pause");
+}

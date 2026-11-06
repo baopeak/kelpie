@@ -92,6 +92,9 @@ struct State {
     level: Level,
     idle: Duration,
     rebind: Duration,
+    /// The number of the last pause or resume told to the app: those are sent after the lock is let go, so two may arrive out of order, and the
+    /// app keeps the newest.
+    version: u64,
 }
 
 pub struct Hold {
@@ -152,6 +155,12 @@ pub fn wire_len(len: usize) -> usize {
         total += kelpie_link::PAD_BUCKETS.iter().copied().find(|b| *b >= plain).unwrap_or(plain) + TAG;
     }
     total
+}
+
+/// The app's `screen.pause` for a hold, numbered under its lock.
+fn pause_notice(st: &mut State, sc: &str, paused: bool) -> Value {
+    st.version += 1;
+    json!({"sc": sc, "paused": paused, "v": st.version})
 }
 
 fn end_message(sc: &str, reason: &str) -> String {
@@ -231,22 +240,21 @@ impl Broker {
 
     /// The link connection `conn` closed: its holds wait for the same device's next one, and the helper stops encoding meanwhile.
     pub fn link_closed(&self, d: &Daemon, conn: u64) {
-        let gone: Vec<String> = self
+        let gone: Vec<Value> = self
             .holds
             .lock()
             .values()
-            .filter(|h| {
+            .filter_map(|h| {
                 let mut st = h.state.lock();
                 if !st.conn.as_ref().is_some_and(|(c, ..)| *c == conn) {
-                    return false;
+                    return None;
                 }
                 Self::set_gone(&mut st);
-                true
+                Some(pause_notice(&mut st, &h.sc, true))
             })
-            .map(|h| h.sc.clone())
             .collect();
-        for sc in gone {
-            d.providers.notify("screen", "screen.pause", json!({"sc": sc, "paused": true}));
+        for params in gone {
+            d.providers.notify("screen", "screen.pause", params);
         }
     }
 
@@ -424,6 +432,11 @@ impl Broker {
                 // Late input, input onto a stale picture, or more than a phone needs is dropped without a word: the phone already shows it as not live.
                 let stale = Self::stale(&hold.state.lock());
                 if !kelpie_screen::input::fresh(req["st"].as_u64(), now_millis()) || stale || !Self::input_allowed(&hold) {
+                    // A release goes all the same, so a mouse button is never left pressed on the computer (keys go down and up in one message).
+                    let releases: Vec<Value> = ops.into_iter().filter(|op| op["k"] == "up").collect();
+                    if !releases.is_empty() && hold.live() {
+                        d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": releases, "t": now_millis()}));
+                    }
                     return Ok(None);
                 }
                 if !hold.live() {
@@ -536,16 +549,18 @@ impl Broker {
             level,
             idle: IDLE_STOP,
             rebind: REBIND_WINDOW,
+            version: 0,
         };
         // The link closed while the app was starting: the hold waits for the same device's next connection, like one whose link dropped.
         let link_gone = phone.out.is_closed() || phone.media.is_closed();
-        if link_gone {
+        let pause = link_gone.then(|| {
             Self::set_gone(&mut state);
-        }
+            pause_notice(&mut state, &sc, true)
+        });
         let hold = Arc::new(Hold { sc: sc.clone(), device: phone.device.to_string(), provider, grant, ended: AtomicBool::new(false), wake: Notify::new(), state: Mutex::new(state) });
         self.holds.lock().insert(sc.clone(), hold.clone());
-        if link_gone {
-            d.providers.notify("screen", "screen.pause", json!({"sc": sc, "paused": true}));
+        if let Some(params) = pause {
+            d.providers.notify("screen", "screen.pause", params);
         }
         let title = short(started.get("title"), 80);
         let kind = if started["kind"] == "window" { "window" } else { "monitor" };
@@ -560,7 +575,7 @@ impl Broker {
     fn rebind(&self, d: &Daemon, phone: &Phone<'_>, req: &Value) -> Result<(), Refused> {
         let sc = req["sc"].as_str().unwrap_or_default();
         let hold = self.hold(sc).filter(|h| h.device == phone.device && h.live()).ok_or_else(|| refused("sc_gone", "That screen has ended."))?;
-        {
+        let params = {
             let mut st = hold.state.lock();
             // The connection that holds it already (a hello after an unlock, on the same connection): nothing to do.
             if st.conn.as_ref().is_some_and(|(c, ..)| *c == phone.conn) {
@@ -576,9 +591,10 @@ impl Broker {
             st.unacked = 0;
             st.need_key = true;
             st.need_key_since = Instant::now();
-        }
+            pause_notice(&mut st, sc, false)
+        };
         // The helper goes on, with a keyframe first: never a frame from before the gap.
-        d.providers.notify("screen", "screen.pause", json!({"sc": sc, "paused": false}));
+        d.providers.notify("screen", "screen.pause", params);
         hold.wake.notify_one();
         Ok(())
     }
