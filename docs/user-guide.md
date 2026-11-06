@@ -1092,6 +1092,25 @@ is not recorded anywhere: *What phones did* says only when a takeover started an
 picture stops for a few seconds the phone dims it and sends nothing until it is back, so a tap never lands on a page that changed meanwhile. A program on the
 computer that tries to stand in for Kelpie's window here is refused, and Kelpie says so.
 
+**Seeing the computer's screen from the phone** (Windows). When an agent waits on something outside Kelpie — a dialog, an installer, the app it is building,
+an IDE — a phone given *May take control* can see one of the computer's screens or one window and use it: *See the computer's screen* in a session lists the
+screens, then Kelpie and the code editors that are open, then the other windows. On the phone one finger works as a trackpad: it moves the computer's pointer,
+a tap clicks where the pointer is, holding still then moving drags, and a long press right-clicks; *Direct touch* clicks under your finger instead. Two fingers
+scroll, pinching zooms the phone's view (not the computer's), and two fingers tapped together right-click. The key row has Ctrl, Shift and Alt (tap one, then
+a key, or type one letter with it held for a shortcut such as Ctrl+S), Esc, Tab, Enter, the arrows and a few more; the text field types on the computer and
+the phone says *Typed on the computer* or *Not sent*. Under the picture the phone says how it is going (`720p · 15 fps · reduced: computer busy`); tap that
+line for details. When text stands still it is sent once more as a sharp picture (*Crisp text* in Settings → Mobile → Advanced; it uses more data).
+
+On the computer an orange border goes around what is shared, with a badge naming the phone and the stop hotkey, and the status bar says *Shared with <phone>*
+with *Stop*. **Ctrl+Alt+Shift+K stops it from anywhere** (change it in Settings → Mobile → Advanced; Kelpie tells you if another program holds it). Stop on
+the phone ends it too, and so do 10 minutes with nothing done, the phone locking or leaving the app, removing the phone or lowering what it may do (within
+a second), and closing the shared window. It needs the Kelpie app open on the computer (the phone says so otherwise), works over Tailscale or your HTTPS
+address and never through the relay, and one phone at a time. If the computer is very busy a new screen waits, and after five very busy minutes the picture
+pauses until you tap it. The phone says when the computer is locked, when a Windows security prompt (UAC) is up, when an app running as administrator is in
+front, and when the window is minimized: those cannot be seen or answered from the phone. What is typed or clicked is not recorded anywhere: *What phones
+did* says what was shared, when, and why it ended. The phone needs a browser that decodes H.264 video with WebCodecs: Safari on iOS 16.4 or later (iOS 26 works
+best), or Chrome on Android; an older one says so.
+
 **"Not paired here" on the phone** means the computer did not recognise this phone, or keeps not
 answering it. It may have been removed there, phone access may have been reset, something on the
 network may be interfering, or the answer may not have come from your computer. The phone keeps its pairing and tries again by itself. If it was

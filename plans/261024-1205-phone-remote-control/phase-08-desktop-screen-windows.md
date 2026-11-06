@@ -110,7 +110,7 @@ kelpie-screen: WGC (window) | DXGI duplication (monitor) → texture pool (4) �
 - `cargo test -p kelpie-screen` (no GPU): coordinate mapping (multi-monitor, negative origins, 100–200 % DPI), target filters, state logic, ladder/overuse/bandwidth controller, keyframe gate, tile change detection and paint-over, SPS rewrite, media framing, input checks and hotkey parsing.
 - `cargo test -p kelpied screen`: hold start/stop, revoke ⇒ input refused at once and the hold gone < 1 s, idle stop, rebind window, provider gone, IDR-on-overflow, L2 refusal, audit without input.
 - `pnpm exec vitest run phone/src/screen.test.ts`: media parsing, `avcC` building, codec string, gestures (trackpad and direct), coordinate mapping with zoom, tile overlay life, freeze and keyframe request, unsupported decoder message.
-- Integration (owed, needs a built helper): the software MFT encodes ≥ 30 frames that `openh264`-free decode in the test (MF H.264 decoder) round-trips.
+- Integration (owed, needs a built helper and Windows): the inbox software MFT encodes ≥ 30 frames of a test pattern, and the Media Foundation H.264 decoder decodes them all, with the rewritten SPS.
 - e2e `scripts/e2e/screen.py`: phone-emulated client receives a test window, clicks a button in it (verified by the window), Stop via hotkey and via phone, revoke stops input < 1 s, read/write devices refused, app closed ⇒ "open Kelpie" refusal.
 
 ## Perf gate
