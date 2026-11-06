@@ -27,6 +27,8 @@
   "reduced: slow connection": "đã giảm: kết nối chậm",
   "reduced: computer busy": "đã giảm: máy tính đang bận",
   "reduced: software encoder": "đã giảm: bộ mã hóa phần mềm",
+  "crisp text off: slow connection": "tắt chữ sắc nét: kết nối chậm",
+  "Ended when this phone locked.": "Đã kết thúc khi điện thoại này khóa.",
   "main screen": "màn hình chính",
   "minimized": "đang thu nhỏ",
   "See it": "Xem",
@@ -48,5 +50,5 @@
   "Screen ended": "Màn hình đã kết thúc",
   "Computer screen": "Màn hình máy tính",
   "This computer's screen on a phone": "Màn hình máy tính này trên điện thoại",
-  "A phone allowed to take control can see a screen or one window of this computer and use it. An orange border and a badge show what is shared, the status bar has Stop, and this hotkey stops it from anywhere. Crisp text sends still parts of the screen once more as sharp images, which uses more data.": "Một điện thoại được phép điều khiển có thể xem và dùng một màn hình hoặc một cửa sổ của máy tính này. Viền cam và một nhãn cho biết phần đang chia sẻ, thanh trạng thái có nút Dừng, và phím tắt này dừng được từ bất cứ đâu. Chữ sắc nét gửi lại những phần đứng yên của màn hình dưới dạng ảnh sắc nét, tốn thêm dữ liệu."
+  "A phone allowed to take control can see a screen or one window of this computer and use it. An orange border and a badge show what is shared, the status bar has Stop, and this hotkey, which is always on, stops it from anywhere. Crisp text sends still parts of the screen once more as sharp images, which uses more data; it turns itself off while the connection is slow.": "Một điện thoại được phép điều khiển có thể xem và dùng một màn hình hoặc một cửa sổ của máy tính này. Viền cam và một nhãn cho biết phần đang chia sẻ, thanh trạng thái có nút Dừng, và phím tắt này, luôn bật, dừng được từ bất cứ đâu. Chữ sắc nét gửi lại những phần đứng yên của màn hình dưới dạng ảnh sắc nét, tốn thêm dữ liệu; nó tự tắt khi kết nối chậm."
 }

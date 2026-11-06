@@ -6,8 +6,8 @@ import { avcChunk, canDecode, clampView, fitView, Gestures, KEYS, MODS, Overlay,
 import { connected, onScreenMedia, remoteScreen, remoteScreens } from "./phone-state";
 import { t } from "./i18n";
 
-const KEY_LABELS: Record<(typeof KEYS)[number], string> = { Escape: "Esc", Tab: "⇥", Enter: "⏎", Backspace: "⌫", Delete: "Del", ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→", Home: "Home", End: "End", PageUp: "PgUp", PageDown: "PgDn", F5: "F5", ContextMenu: "☰" };
-const MOD_LABELS: Record<Mod, string> = { ctrl: "Ctrl", shift: "Shift", alt: "Alt" };
+const KEY_LABELS: Record<(typeof KEYS)[number], string> = { Escape: "Esc", Tab: "⇥", Enter: "⏎", Backspace: "⌫", Delete: "Del", ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→", Home: "Home", End: "End", PageUp: "PgUp", PageDown: "PgDn", F5: "F5", ContextMenu: "☰", Meta: "⊞" };
+const MOD_LABELS: Record<Mod, string> = { ctrl: "Ctrl", shift: "Shift", alt: "Alt", meta: "Win" };
 
 function Group(props: { title: string; rows: TargetRow[] }) {
   const s = () => remoteScreen()!;

@@ -276,11 +276,12 @@ export type ScOp =
   | { k: "click"; x: number; y: number; b: Button; n?: 1 | 2 }
   | { k: "wheel"; x: number; y: number; dx: number; dy: number }
   | { k: "key"; key: string; mods: Mod[] };
-export type Mod = "ctrl" | "shift" | "alt";
+export type Mod = "ctrl" | "shift" | "alt" | "meta";
 
-/** The key bar: what a dialog, an IDE or a sign-in needs. Letters and digits are typed as text, or sent as keys with a modifier held. */
-export const KEYS = ["Escape", "Tab", "Enter", "Backspace", "Delete", "ArrowLeft", "ArrowUp", "ArrowDown", "ArrowRight", "Home", "End", "PageUp", "PageDown", "F5", "ContextMenu"] as const;
-export const MODS: Mod[] = ["ctrl", "shift", "alt"];
+/** The key bar: what a dialog, an IDE or a sign-in needs, the Windows key last. Letters and digits are typed as text, or sent as keys with a modifier held. */
+export const KEYS = ["Escape", "Tab", "Enter", "Backspace", "Delete", "ArrowLeft", "ArrowUp", "ArrowDown", "ArrowRight", "Home", "End", "PageUp", "PageDown", "F5", "ContextMenu", "Meta"] as const;
+/** Ctrl, Shift, Alt and the Windows key (`meta`): tapped, a modifier is held for the next key. The Windows key alone is `Meta` (Start). */
+export const MODS: Mod[] = ["ctrl", "shift", "alt", "meta"];
 
 /** Merges what waits to be sent: of moves in a row only the last, wheels in a row added up. Presses, releases, clicks and keys stay in order. */
 export function coalesce(ops: ScOp[]): ScOp[] {
@@ -519,6 +520,8 @@ export interface Stats {
   degraded?: boolean;
   level?: number;
   encoder?: string;
+  /** Crisp text: on, off for now because the link is slow (false), or switched off on the computer (null). */
+  crisp?: boolean | null;
 }
 
 export interface ScreenState {
@@ -593,6 +596,7 @@ export function qualityText(s: Stats | null, t: (s: string) => string): string {
   const parts = [`${Math.round(s.h)}p`, `${Math.round(s.fps ?? 0)} fps`];
   const why: Record<string, string> = { cpu: t("reduced: encoding is slow"), bandwidth: t("reduced: slow connection"), load: t("reduced: computer busy"), encoder: t("reduced: software encoder") };
   if (s.degraded && s.reason && why[s.reason]) parts.push(why[s.reason]);
+  if (s.crisp === false) parts.push(t("crisp text off: slow connection"));
   return parts.join(" · ");
 }
 
@@ -666,7 +670,7 @@ export class ScreenSession {
     this.heardAt = this.port.now();
     if (m.type === "sc_state" && m.state === "encoder") this.patch({ encoder: m.encoder === "sw" ? "sw" : "hw" });
     else if (m.type === "sc_state" && m.state) this.patch({ remote: m.state });
-    else if (m.type === "sc_stats") this.patch({ stats: { fps: m.fps, w: m.w, h: m.h, kbps: m.kbps, encode_ms_p95: m.encode_ms_p95, dropped: m.dropped, reason: m.reason, degraded: m.degraded, level: m.level, encoder: m.encoder } });
+    else if (m.type === "sc_stats") this.patch({ stats: { fps: m.fps, w: m.w, h: m.h, kbps: m.kbps, encode_ms_p95: m.encode_ms_p95, dropped: m.dropped, reason: m.reason, degraded: m.degraded, level: m.level, encoder: m.encoder, crisp: m.crisp } });
     if (this.state?.phase === "frozen") this.patch({ phase: "live" });
   }
 
@@ -723,6 +727,11 @@ export class ScreenSession {
     const ok = r.t === "ack" && r.result === "sent";
     this.patch({ text: ok ? "sent" : "not_sent" });
     return ok;
+  }
+
+  /** This phone locked (it left the app, or its idle time ran out): the computer has ended the screen, and so does the page, at once. */
+  locked() {
+    if (this.state?.sc && this.state.phase !== "ended" && this.state.phase !== "pick") this.ended(this.t("Ended when this phone locked."));
   }
 
   async stop() {

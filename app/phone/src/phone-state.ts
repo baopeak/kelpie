@@ -120,7 +120,11 @@ export const [lockShown, setLockShown] = createSignal<{ clear: boolean; face: st
 const lock = new LockModel({
   credentials: browserCredentials(),
   ask: (m) => link.lockAsk(m),
-  lockNow: () => link.lockNow(),
+  lockNow: () => {
+    // Leaving the app locks it, and that ends a screen at once (the computer does the same on `lock_now`).
+    remoteScreens.locked();
+    link.lockNow();
+  },
   touch: () => link.lockTouch(),
   setResume: (secret) => link.setResume(secret),
   connected: () => link.ready,
@@ -183,6 +187,8 @@ const link = new Link(browserEnv(), () => {
   changed: () => recompute(),
   locked(info: LockInfo) {
     lock.told(info);
+    // The computer ended any screen this phone saw when it locked: no grace (owner decision 2026-11-06).
+    remoteScreens.locked();
   },
   chatRequestInfo(m: ChatRequestInfo) {
     setRequestInfo((cur) => ({ ...cur, [infoKey(m.id, m.request_id)]: m }));

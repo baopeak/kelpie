@@ -10,7 +10,9 @@ import {
   fitView,
   FREEZE_MS,
   Gestures,
+  KEYS,
   LONG_PRESS_MS,
+  MODS,
   nalType,
   nalUnits,
   Overlay,
@@ -272,6 +274,10 @@ describe("one screen from the phone", () => {
     expect(r.acks).toEqual([1]);
     r.s.onMessage({ type: "sc_stats", sc: "sc1", fps: 15, h: 720, reason: "load", degraded: true });
     expect(qualityText(r.s.state!.stats, (x) => x)).toBe("720p · 15 fps · reduced: computer busy");
+    r.s.onMessage({ type: "sc_stats", sc: "sc1", fps: 30, h: 1080, crisp: false });
+    expect(qualityText(r.s.state!.stats, (x) => x), "the computer turned crisp text off on a slow link").toBe("1080p · 30 fps · crisp text off: slow connection");
+    r.s.onMessage({ type: "sc_stats", sc: "sc1", fps: 30, h: 1080, crisp: null });
+    expect(qualityText(r.s.state!.stats, (x) => x), "switched off on the computer: nothing to say").toBe("1080p · 30 fps");
     r.s.onMessage({ type: "sc_state", sc: "other", state: "locked" });
     expect(r.s.state?.remote, "another screen's word changes nothing").toBe("live");
     r.s.onMessage({ type: "sc_state", sc: "sc1", state: "secure_desktop" });
@@ -325,6 +331,23 @@ describe("one screen from the phone", () => {
     r.s.input([{ k: "click", x: 1, y: 1, b: "left" }]);
     expect(r.sent).toEqual([]);
     expect(r.resumed).toEqual(["sc1"]);
+  });
+
+  it("this phone locking ends the screen at once, and a picker is left alone", async () => {
+    const r = rig();
+    await r.s.openPicker();
+    r.s.locked();
+    expect(r.s.state?.phase, "nothing was being seen").toBe("pick");
+    await r.s.pick("w:1:2");
+    r.s.locked();
+    expect(r.s.state).toMatchObject({ phase: "ended", message: "Ended when this phone locked." });
+    r.s.input([{ k: "click", x: 1, y: 1, b: "left" }]);
+    expect(r.sent).toEqual([]);
+  });
+
+  it("the key bar has the Windows key, alone and as a modifier", () => {
+    expect(KEYS).toContain("Meta");
+    expect(MODS).toEqual(["ctrl", "shift", "alt", "meta"]);
   });
 
   it("text is said as sent or not, and never sent twice", async () => {
