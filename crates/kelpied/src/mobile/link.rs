@@ -19,17 +19,21 @@
 //! - **Reconnecting** (`MODE_RECONNECT`, Noise IK): the phone's static key must be a paired device's (a record whose MAC checks
 //!   out); anything else is closed without a reply. The frame is its `{caps}`; only then does it count as seen, take over from
 //!   its older connection, and count against its 5 handshakes in 10 s.
-//! - **Afterwards**: [`Wire`] seals each JSON message of the phone protocol (and a screen's binary media, `Wire::send_bytes`) into binary messages and opens what comes in; a
-//!   message that does not decrypt, or chunks that stop coming, end the connection (both ends then handshake again).
+//! - **Afterwards**: [`Wire`] seals each JSON message of the phone protocol (and a screen's binary media) into binary messages and opens what comes in; a
+//!   message that does not decrypt, or chunks that stop coming, end the connection (both ends then handshake again). It sends from a task of its own,
+//!   so what the phone sends is read while a large message is on its way to it.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
 use axum::http::{header, HeaderMap};
 use serde_json::{json, Value};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use super::lanes::SLOW_AFTER;
 use super::store::Kind;
@@ -170,10 +174,77 @@ impl Carrier {
     }
 }
 
-/// A carrier with an established kelpie-link session.
+/// What a carrier gives once its session is established: the phone's messages. Its other half is the writer's (`Wire`).
+pub enum CarrierRx {
+    Socket(SplitStream<WebSocket>),
+    Relay(super::relay::Slot),
+}
+
+impl CarrierRx {
+    /// The next message; None once the carrier is gone.
+    pub async fn recv(&mut self) -> Option<Result<Message, axum::Error>> {
+        match self {
+            CarrierRx::Socket(ws) => ws.next().await,
+            CarrierRx::Relay(slot) => slot.recv().await.map(|got| {
+                Ok(match got {
+                    Ok(frame) => Message::Binary(frame.into()),
+                    Err(code) => Message::Close(Some(CloseFrame { code, reason: "".into() })),
+                })
+            }),
+        }
+    }
+}
+
+/// The half of a carrier the writer sends on.
+enum CarrierTx {
+    Socket(SplitSink<WebSocket, Message>),
+    Relay(super::relay::SlotSender),
+}
+
+impl CarrierTx {
+    async fn send(&mut self, msg: Message) -> Result<(), axum::Error> {
+        match self {
+            CarrierTx::Socket(ws) => ws.send(msg).await,
+            CarrierTx::Relay(slot) => match msg {
+                Message::Binary(frame) => {
+                    if slot.send(frame.to_vec()).await {
+                        Ok(())
+                    } else {
+                        Err(axum::Error::new(std::io::Error::other("the relay connection is gone")))
+                    }
+                }
+                Message::Close(frame) => {
+                    let (code, reason) = frame.map_or((1000, String::new()), |f| (f.code, f.reason.as_str().to_string()));
+                    slot.close(code, reason).await;
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
+        }
+    }
+}
+
+/// What the writer is given, in the order it is to go out.
+enum Outgoing {
+    /// A whole message, sealed by the writer as it goes (so that the session's numbering is the socket's order).
+    Message(Vec<u8>),
+    /// The screen's media lane: taken only when no message waits, and dropped while `locked` (nothing of it goes to a locked phone).
+    Media(mpsc::Receiver<Vec<u8>>, Arc<AtomicBool>),
+    Close(u16, &'static str, oneshot::Sender<()>),
+}
+
+/// Messages waiting for the writer, at most: a sender waits for room (`SLOW_AFTER` at most) once they are there.
+const WRITER_QUEUE: usize = 8;
+
+/// A carrier with an established kelpie-link session. **What comes in never waits for what goes out**: a writer task of its own sends, so
+/// that a large frame of a screen on its way to a slow phone (a keyframe takes most of a second at 1.5 Mbps) does not hold back the phone's
+/// clicks and acknowledgements, which the connection's task reads meanwhile. The writer seals each message as it sends it and takes the
+/// screen's media only when no other message waits, so a message waits at most for the one media message being written.
 pub struct Wire {
-    pub ws: Carrier,
-    pub session: kelpie_link::Session,
+    pub ws: CarrierRx,
+    session: Arc<parking_lot::Mutex<kelpie_link::Session>>,
+    out: mpsc::Sender<Outgoing>,
+    writer: tokio::task::JoinHandle<()>,
     /// The phone closed it saying another route won the race (`ROUTE_LOST`).
     pub route_lost: bool,
 }
@@ -188,49 +259,57 @@ pub enum Opened {
     End,
 }
 
+impl Drop for Wire {
+    /// The connection goes with it, as the socket did before the writer had one half of it.
+    fn drop(&mut self) {
+        self.writer.abort();
+    }
+}
+
 impl Wire {
     pub fn new(ws: Carrier, session: kelpie_link::Session) -> Wire {
-        Wire { ws, session, route_lost: false }
+        let (rx, tx) = match ws {
+            Carrier::Socket(ws) => {
+                let (sink, stream) = ws.split();
+                (CarrierRx::Socket(stream), CarrierTx::Socket(sink))
+            }
+            Carrier::Relay(slot) => {
+                let sender = slot.sender();
+                (CarrierRx::Relay(slot), CarrierTx::Relay(sender))
+            }
+        };
+        let session = Arc::new(parking_lot::Mutex::new(session));
+        let (out, queue) = mpsc::channel(WRITER_QUEUE);
+        let writer = tokio::spawn(write(tx, session.clone(), queue));
+        Wire { ws: rx, session, out, writer, route_lost: false }
     }
 
-    /// Seals and sends one message; false when the connection is over (the socket is gone, or took longer than `SLOW_AFTER`).
-    /// A message too long to seal changes nothing about the session: it is reported and dropped, and the session carries on.
-    /// Any other failure to seal leaves a session that cannot go on: the phone is told to connect again.
+    /// The session, for what is not sending or opening (its pairing code, padding, reassembly).
+    pub fn session(&self) -> parking_lot::MutexGuard<'_, kelpie_link::Session> {
+        self.session.lock()
+    }
+
+    /// Queues one message; false when the connection is over (the writer stopped: the socket is gone, or a message took longer than
+    /// `SLOW_AFTER` to go), or no room came within `SLOW_AFTER`. A message too long to seal is reported and dropped by the writer, and the
+    /// session carries on; any other failure to seal tells the phone to connect again.
     pub async fn send(&mut self, text: &str) -> bool {
         self.send_bytes(text.as_bytes()).await
     }
 
-    /// A binary message: a screen's media (`screen`), which starts with a byte no JSON message starts with (`kelpie_screen::wire::MEDIA`).
+    /// A binary message: a screen's media (`screen`) starts with a byte no JSON message starts with (`kelpie_screen::wire::MEDIA`).
     pub async fn send_bytes(&mut self, msg: &[u8]) -> bool {
-        let frames = match self.session.seal(msg) {
-            Ok(frames) => frames,
-            Err(kelpie_link::LinkError::TooLarge) => {
-                tracing::warn!("phone link: dropped a message of {} bytes, too long for a phone", msg.len());
-                return true;
-            }
-            Err(e) => {
-                tracing::warn!("phone link: could not seal a message: {e}");
-                close(&mut self.ws, RECONNECT, "seal").await;
-                return false;
-            }
-        };
-        let ws = &mut self.ws;
-        matches!(
-            tokio::time::timeout(SLOW_AFTER, async move {
-                for f in frames {
-                    ws.send(Message::Binary(f.into())).await?;
-                }
-                Ok::<(), axum::Error>(())
-            })
-            .await,
-            Ok(Ok(()))
-        )
+        matches!(tokio::time::timeout(SLOW_AFTER, self.out.send(Outgoing::Message(msg.to_vec()))).await, Ok(Ok(())))
+    }
+
+    /// Hands the screen's media lane to the writer: sent behind every other message, and dropped while `locked` is set.
+    pub async fn attach_media(&mut self, media: mpsc::Receiver<Vec<u8>>, locked: Arc<AtomicBool>) -> bool {
+        matches!(tokio::time::timeout(SLOW_AFTER, self.out.send(Outgoing::Media(media, locked))).await, Ok(Ok(())))
     }
 
     /// Opens one message from the socket.
     pub fn open(&mut self, msg: Message) -> Opened {
         match msg {
-            Message::Binary(b) => match self.session.open(&b, now()) {
+            Message::Binary(b) => match self.session.lock().open(&b, now()) {
                 Ok(Some(bytes)) => String::from_utf8(bytes).map_or(Opened::End, Opened::Text),
                 Ok(None) => Opened::Nothing,
                 Err(_) => Opened::End,
@@ -258,13 +337,73 @@ impl Wire {
         }
     }
 
-    /// Ends the connection. A close frame is not authenticated, so what tells a phone it was removed is the sealed message before
-    /// it: only that makes the phone forget its pairing.
+    /// Ends the connection, after what was queued before. A close frame is not authenticated, so what tells a phone it was removed is the
+    /// sealed message before it: only that makes the phone forget its pairing. A writer that cannot finish within `CLOSE_TIMEOUT` is stopped,
+    /// which drops the connection.
     pub async fn close(&mut self, code: u16, reason: &'static str) {
+        let end = tokio::time::Instant::now() + CLOSE_TIMEOUT;
         if code == NOT_PAIRED {
-            let _ = tokio::time::timeout(CLOSE_TIMEOUT, self.send(r#"{"type":"revoked"}"#)).await;
+            let _ = tokio::time::timeout_at(end, self.out.send(Outgoing::Message(br#"{"type":"revoked"}"#.to_vec()))).await;
         }
-        close(&mut self.ws, code, reason).await;
+        let (done, closed) = oneshot::channel();
+        if matches!(tokio::time::timeout_at(end, self.out.send(Outgoing::Close(code, reason, done))).await, Ok(Ok(()))) {
+            let _ = tokio::time::timeout_at(end, closed).await;
+        }
+        self.writer.abort();
+    }
+}
+
+/// The writer: messages first, in order, then the screen's media when nothing else waits. Each message is sealed as it goes and must be on
+/// the socket within `SLOW_AFTER`; a socket that takes longer, or is gone, ends the writer, and with it the connection.
+async fn write(mut tx: CarrierTx, session: Arc<parking_lot::Mutex<kelpie_link::Session>>, mut queue: mpsc::Receiver<Outgoing>) {
+    let mut media: Option<(mpsc::Receiver<Vec<u8>>, Arc<AtomicBool>)> = None;
+    loop {
+        let next = tokio::select! {
+            biased;
+            o = queue.recv() => match o {
+                Some(o) => o,
+                None => return,
+            },
+            Some(m) = async { media.as_mut()?.0.recv().await }, if media.is_some() => {
+                if media.as_ref().is_some_and(|(_, locked)| locked.load(Ordering::SeqCst)) {
+                    continue;
+                }
+                Outgoing::Message(m)
+            }
+        };
+        match next {
+            Outgoing::Media(rx, locked) => media = Some((rx, locked)),
+            Outgoing::Close(code, reason, done) => {
+                let _ = tokio::time::timeout(CLOSE_TIMEOUT, tx.send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))).await;
+                let _ = done.send(());
+                return;
+            }
+            Outgoing::Message(msg) => {
+                let sealed = session.lock().seal(&msg);
+                let frames = match sealed {
+                    Ok(frames) => frames,
+                    Err(kelpie_link::LinkError::TooLarge) => {
+                        tracing::warn!("phone link: dropped a message of {} bytes, too long for a phone", msg.len());
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!("phone link: could not seal a message: {e}");
+                        let _ = tokio::time::timeout(CLOSE_TIMEOUT, tx.send(Message::Close(Some(CloseFrame { code: RECONNECT, reason: "seal".into() })))).await;
+                        return;
+                    }
+                };
+                let sent = tokio::time::timeout(SLOW_AFTER, async {
+                    for f in frames {
+                        tx.send(Message::Binary(f.into())).await?;
+                    }
+                    Ok::<(), axum::Error>(())
+                })
+                .await;
+                if !matches!(sent, Ok(Ok(()))) {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -411,7 +550,7 @@ async fn pair(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>,
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     let fingerprint = super::fingerprint(&remote);
-    m.add_pending(&id, &name, kind, remote, wire.session.pair_code(), want, peer.ip(), peer.secure_origin, tx);
+    m.add_pending(&id, &name, kind, remote, wire.session().pair_code(), want, peer.ip(), peer.secure_origin, tx);
     daemon.broadcast("mobile.pair_request", json!({"id": id, "name": name, "kind": kind.name(), "fingerprint": fingerprint, "want": want.name(), "address": listen::shown(peer.ip())}));
     // The person types the phone's code on the desktop. Meanwhile the phone may only wait (or go away).
     let decision = tokio::select! {
@@ -436,7 +575,7 @@ async fn pair(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>,
     wire.close(1000, "").await;
 }
 /// Resolves when the phone closes its side (anything it sends meanwhile is ignored: it has nothing to say yet).
-async fn gone(ws: &mut Carrier) {
+async fn gone(ws: &mut CarrierRx) {
     while let Some(Ok(msg)) = ws.recv().await {
         if matches!(msg, Message::Close(_)) {
             return;

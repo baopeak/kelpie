@@ -43,7 +43,7 @@ use crate::takeover::{Refused, IDLE_STOP, INPUT_PER_SECOND, REBIND_WINDOW};
 const WATCH: Duration = Duration::from_millis(250);
 pub const HEARTBEAT: Duration = Duration::from_secs(1);
 /// Media sent and not acknowledged, at most.
-pub const MAX_UNACKED_BYTES: usize = 512 * 1024;
+pub const MAX_UNACKED_BYTES: usize = 192 * 1024;
 /// The phone's picture is stale when a frame waited this long for its acknowledgement, or a keyframe has been owed this long: input is not sent.
 pub const STALE_AFTER: Duration = Duration::from_secs(2);
 /// Room the media lane keeps for video: a tile or the cursor goes only with at least this many places free.

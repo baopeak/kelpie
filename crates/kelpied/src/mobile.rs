@@ -2917,7 +2917,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     let legacy = !acknowledges(Some(&first));
     // A phone that reads padded chunks gets them from the hello on, so that a carrier on the way sees a few sizes and not what was said.
     if first["caps"].as_array().is_some_and(|caps| caps.iter().any(|c| c == "pad")) {
-        wire.session.set_padding(true);
+        wire.session().set_padding(true);
     }
     let cap = transport_cap(device.kind, browser, &peer);
     let lock_path = daemon.mobile.lock_path(&device, &peer);
@@ -2944,7 +2944,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     if let Some((_, older)) = daemon.mobile.connections.lock().insert(device.id.clone(), (id, replaced.clone())) {
         older.notify_one();
     }
-    let mut wires = Wires { bulk_rx: lanes.bulk_rx, media_rx: lanes.media_rx, slow: lanes.slow, dirty, replaced };
+    let mut wires = Wires { bulk_rx: lanes.bulk_rx, media_rx: Some(lanes.media_rx), slow: lanes.slow, dirty, replaced };
     // Dropping serve cancels an in-flight request/send, then the common cleanup still runs.
     tokio::select! {
         biased;
@@ -2977,7 +2977,8 @@ fn acknowledges(first: Option<&Value>) -> bool {
 /// What a connection waits on besides its socket.
 struct Wires {
     bulk_rx: mpsc::Receiver<String>,
-    media_rx: mpsc::Receiver<Vec<u8>>,
+    /// A screen's media, handed to the wire's writer when the connection is served (`Wire::attach_media`).
+    media_rx: Option<mpsc::Receiver<Vec<u8>>>,
     /// Something decided this phone cannot take what it is sent.
     slow: Arc<Notify>,
     /// The session list may have changed.
@@ -3077,11 +3078,20 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
             return;
         }
     }
+    // A screen's media goes from the wire's own writer, behind every other message, and none of it to a locked phone: the writer reads
+    // `media_locked`, which follows `conn.locked`.
+    let media_locked = Arc::new(AtomicBool::new(conn.locked));
+    if let Some(media) = wires.media_rx.take() {
+        if !wire.attach_media(media, media_locked.clone()).await {
+            return;
+        }
+    }
     let (mut live, mut beats) = (Liveness::new(Instant::now()), 0);
     let began = Instant::now();
     let mut tick = tokio::time::interval(lanes::TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        media_locked.store(conn.locked, Ordering::SeqCst);
         // Also check synchronously: a busy socket can keep this future ready without yielding.
         if generation.is_cancelled() {
             return;
@@ -3133,7 +3143,7 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
             }
             _ = tick.tick() => {
                 // A message whose chunks stopped coming: this session is broken, the phone handshakes again.
-                if wire.session.reassembly_expired(now_millis()) {
+                if wire.session().reassembly_expired(now_millis()) {
                     return;
                 }
                 if began.elapsed() >= REHANDSHAKE_AFTER {
@@ -3232,12 +3242,7 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                     return;
                 }
             }
-            // A screen's media, last of all; nothing of it goes to a locked phone.
-            Some(media) = wires.media_rx.recv() => {
-                if !conn.locked && !wire.send_bytes(&media).await {
-                    return;
-                }
-            }
+
         }
     }
 }

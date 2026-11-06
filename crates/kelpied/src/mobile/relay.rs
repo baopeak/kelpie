@@ -206,6 +206,29 @@ impl Slot {
     pub async fn close(&self, code: u16, reason: String) {
         let _ = self.out.send(Out::Kick(self.slot, self.generation, code, reason)).await;
     }
+
+    /// What sends for this slot, for a writer of its own (`link::Wire`), while this keeps receiving.
+    pub fn sender(&self) -> SlotSender {
+        SlotSender { slot: self.slot, generation: self.generation, out: self.out.clone() }
+    }
+}
+
+/// The sending side of a slot.
+#[derive(Clone)]
+pub struct SlotSender {
+    slot: u16,
+    generation: u64,
+    out: mpsc::Sender<Out>,
+}
+
+impl SlotSender {
+    pub async fn send(&self, frame: Vec<u8>) -> bool {
+        self.out.send(Out::Frame(self.slot, self.generation, frame)).await.is_ok()
+    }
+
+    pub async fn close(&self, code: u16, reason: String) {
+        let _ = self.out.send(Out::Kick(self.slot, self.generation, code, reason)).await;
+    }
 }
 
 /// The phone sockets of one relay connection, by slot number, each with the generation `open` gave it.
