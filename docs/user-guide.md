@@ -862,8 +862,30 @@ The **SSH hosts** page (the server icon at the bottom of the sidebar, `Ctrl+Alt+
   the open project or unlink it (the host stays saved).
 - **First connection**: Kelpie shows the host's key fingerprints before trusting it, and warns
   loudly when a known host's key changed.
-- **Files**: browse the host, upload files or folders (or drop them from Explorer / Finder onto
-  the list), download, new folder, rename, delete (`scp` / SFTP).
+- **Files**: two panes, by default this computer (Downloads) on the left and the host on the right. Each pane can
+  show this computer or any saved host, so a copy can also go from one host to another.
+  - **Panes**: a path bar, up, home, drives (Windows), hidden files, a filter, new folder, and columns you can sort
+    (name, size, modified, permissions, owner). Owner and group show as names when the host sends them, else as
+    uid / gid numbers.
+  - **Keys**: Ctrl/Cmd+click and Shift+click select several, Enter opens, Backspace goes up, F2 renames, Delete
+    deletes, Tab switches panes, F5 copies to the other pane.
+  - **Copy**: drag between the panes, use the arrow buttons or the context menu, or drop files from Explorer /
+    Finder onto a host's pane. Copies on this computer itself are for Explorer / Finder.
+  - **Transfers** run in Kelpie's background service, so closing the window does not stop them. The queue below the
+    panes shows progress, speed and time left, with pause, resume, cancel and retry; a chip in the status bar shows
+    them from any page.
+    - A dropped connection is retried for up to 5 minutes and continues where it stopped.
+    - After the background service restarts, a transfer shows *Interrupted* with *Resume*.
+    - A name already there is never overwritten unasked: *Replace*, *Skip*, *Keep both*, *Replace if newer* or
+      *Skip identical*, with *Apply to all in this transfer*.
+    - Names Windows cannot hold are saved with `_` and listed.
+    - Links to folders inside a copied folder are not followed.
+  - **Permissions…** (a host) sets rwx or octal, optionally for everything inside a folder. Delete on a host asks
+    first: there is no trash there. Delete on this computer moves to the trash.
+  - **Edit** a host's file *in Kelpie* (through the host's remote project; needs a shell on the host) or *with an
+    external editor*: a private copy is opened and uploaded on every save. A change made on the server meanwhile is
+    asked about, never overwritten. *Stop* deletes the copy, and copies older than 7 days are removed when Kelpie
+    starts.
 - **Run a command on several hosts**: tick hosts in the list, type the command (or pick a quick
   command), one terminal each.
 - **Keychain**: the keys in `~/.ssh` with type and fingerprint; generate (Ed25519, RSA 4096,

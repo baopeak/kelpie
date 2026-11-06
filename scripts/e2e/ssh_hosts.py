@@ -197,13 +197,16 @@ try:
     run.check("new folder on the host", wait(lambda: os.path.isdir(os.path.join(home, "made-by-e2e")) and exists('[data-entry="made-by-e2e"]'), 20))
     up = os.path.join(scratch, "upload-me.txt")
     open(up, "w").write("uploaded by kelpie")
-    invoke("ssh_transfer", {"alias": "test-box", "upload": True, "sources": [up], "target": posix(home) + "/made-by-e2e"})
-    run.check("upload (scp)", open(os.path.join(home, "made-by-e2e", "upload-me.txt")).read() == "uploaded by kelpie")
+    def xfer(job):
+        jid = daemon(d, "xfer.start", job)["id"]
+        return wait(lambda: next((j for j in daemon(d, "xfer.list")["jobs"] if j["id"] == jid and j["state"] in ("done", "failed", "cancelled")), None), 60)
+    j = xfer({"src": {}, "dst": {"dest": "test-box"}, "items": [up], "dst_dir": posix(home) + "/made-by-e2e", "conflict": "replace"})
+    run.check("upload (transfer queue)", j and j["state"] == "done" and open(os.path.join(home, "made-by-e2e", "upload-me.txt")).read() == "uploaded by kelpie", str(j))
     down = os.path.join(scratch, "downloads")
     shutil.rmtree(down, ignore_errors=True)
     os.makedirs(down)
-    invoke("ssh_transfer", {"alias": "test-box", "upload": False, "sources": [posix(home) + "/existing.txt"], "target": down})
-    run.check("download (scp)", open(os.path.join(down, "existing.txt")).read() == "on the host")
+    j = xfer({"src": {"dest": "test-box"}, "dst": {}, "items": [posix(home) + "/existing.txt"], "dst_dir": down, "conflict": "replace"})
+    run.check("download (transfer queue)", j and j["state"] == "done" and open(os.path.join(down, "existing.txt")).read() == "on the host", str(j))
     run.shot("06-files")
 
     # ---- port forwards ----

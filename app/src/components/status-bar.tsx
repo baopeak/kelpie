@@ -9,12 +9,18 @@ import { available, whenIdle } from "../lib/updater";
 import { pluginStatus, pluginStatusItems, type PluginInfo, type PluginStatusItem } from "../lib/plugins";
 import { t, msg } from "../lib/i18n";
 import { automationEvents } from "../lib/automation-events";
+import { chipText, initTransfers, isActive, jobList } from "../lib/transfers";
+import { XFER_API } from "../lib/ipc";
+import { hostByAlias } from "../lib/ssh-hosts";
+import { openFiles, openHosts } from "./hosts-page";
 
 const waitingApproval = () => activeRuns().reduce((n, r) => n + r.tasks.filter((t) => t.status === "waiting_approval").length, 0);
 
 export function StatusBar() {
   const [inbox, setInbox] = createSignal(false);
   createEffect(() => setCovering("inbox", inbox()));
+  // The transfer queue, followed from the start so the chip shows whatever page is open.
+  createEffect(() => store.connected() && store.daemonApi() >= XFER_API && initTransfers());
   onMount(() => {
     const close = () => setInbox(false);
     const open = () => setInbox(true);
@@ -87,6 +93,17 @@ export function StatusBar() {
         {" · "}<span style={{ color: counts().working ? "var(--working)" : "var(--text-faint)" }}>{t("{n} working", { n: counts().working })}</span>
         {" · "}<span style={{ color: counts().waiting ? "var(--waiting)" : "var(--text-faint)" }}>{t("{n} need you", { n: counts().waiting })}</span>
       </span>
+      {/* File transfers outlive the Hosts page: one chip while they run, which opens their queue. */}
+      <Show when={chipText()}>
+        {(text) => (
+          <span class="item clickable" data-transfer-chip title={t("File transfers in progress")} onClick={() => {
+            const j = jobList().find(isActive);
+            const host = hostByAlias(j?.dst.dest ?? j?.src.dest ?? "");
+            if (host) openFiles(host.id);
+            else openHosts();
+          }}>{text()}</span>
+        )}
+      </Show>
       <Show when={activeRuns().length}>
         <span class="item clickable" title={t("Orchestration runs in progress")} onClick={() => store.setOverlay("runs")}>
           <Icon name="board" size={13} /> {activeRuns().length === 1 ? t("{n} run", { n: 1 }) : t("{n} runs", { n: activeRuns().length })}

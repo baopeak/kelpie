@@ -952,63 +952,6 @@ pub fn ssh_forward_status(state: tauri::State<'_, Forwards>) -> BTreeMap<String,
         .collect()
 }
 
-// ---------- file transfer ----------
-
-/// Copies files and folders between this computer and a host with `scp -r`: `upload` sends
-/// local `sources` into the remote folder `target`; otherwise remote `sources` land in the
-/// local folder `target`.
-#[tauri::command]
-pub async fn ssh_transfer(alias: String, upload: bool, sources: Vec<String>, target: String) -> CmdResult<()> {
-    if !valid_alias(&alias) && !valid_jump(&alias) {
-        return Err("invalid host".into());
-    }
-    if sources.is_empty() {
-        return Ok(());
-    }
-    let r = crate::remote::parse_root(&format!("ssh://{alias}/")).ok_or("invalid host")?;
-    let remote_path = |p: &str| -> CmdResult<String> {
-        if !p.starts_with('/') || p.contains(['\n', '\r']) {
-            return Err(format!("{p}: not an absolute path on the host"));
-        }
-        Ok(match r.port {
-            Some(_) => format!("scp://{}{}", r.dest, p),
-            None => format!("{}:{p}", r.dest),
-        })
-    };
-    // `-S`: scp starts `ssh` from PATH otherwise (see `program`).
-    let mut args: Vec<String> = vec!["-S".into(), program("ssh").to_string_lossy().into_owned(), "-F".into(), config_path().to_string_lossy().into_owned(), "-r".into(), "-p".into(), "-o".into(), "ConnectTimeout=15".into(), "-o".into(), "NumberOfPasswordPrompts=1".into()];
-    if let Some(p) = r.port {
-        args.extend(["-P".into(), p.to_string()]);
-    }
-    if upload {
-        for s in &sources {
-            if !Path::new(s).exists() {
-                return Err(format!("{s} does not exist"));
-            }
-            args.push(s.clone());
-        }
-        args.push(remote_path(&format!("{}/", target.trim_end_matches('/')))?);
-    } else {
-        for s in &sources {
-            args.push(remote_path(s)?);
-        }
-        if !Path::new(&target).is_dir() {
-            return Err(format!("{target} is not a folder"));
-        }
-        args.push(target);
-    }
-    let host_id = host_by_alias(&r.dest).map(|h| h.id).unwrap_or_default();
-    let out = tokio::time::timeout(Duration::from_secs(3600), tool("scp").envs(askpass_env(&host_id)).args(&args).output())
-        .await
-        .map_err(|_| "the transfer took more than an hour".to_string())?
-        .map_err(not_found("scp"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    Err(if msg.is_empty() { format!("scp failed (exit code {:?})", out.status.code()) } else { msg })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
