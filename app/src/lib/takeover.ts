@@ -93,8 +93,8 @@ function ended(e: { tk: string; reason: string }) {
   if (e.reason !== "desktop") store.notify(t("{device} no longer controls the browser pane", { device: x.device }));
 }
 
-/** A pane hidden behind another tab or project sends no screencast frames (seen on WebView2; the app captures it instead, less often). Right after the
- *  person switches away from the newest held pane its tab is brought back, once per hold, with one toast; a second switch away stays. */
+/** A pane hidden behind another tab or project sends no screencast frames and takes no input (seen on WebView2: the phone is told it is hidden). Right
+ *  after the person switches away from the newest held pane its tab is brought back, once per hold, with one toast; a second switch away stays. */
 function keepInFront() {
   let wasInFront: Record<string, boolean> = {};
   const broughtBack = new Set<string>();
@@ -119,7 +119,7 @@ function keepInFront() {
         if (!at) return;
         store.switchProject(at.projectId);
         store.focusPane(at.projectId, at.tabId, at.paneId);
-        store.notify(t("A phone controls this browser pane, so it was brought back to the front once. Switch away again and the phone sees it less often."));
+        store.notify(t("A phone controls this browser pane, so it was brought back to the front once. Switch away again and the phone sees that the pane is hidden and can do nothing in it."));
       }, 0);
     }),
   );

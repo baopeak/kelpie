@@ -267,4 +267,20 @@ describe("a takeover from the phone", () => {
     r.session.onMessage({ type: "tk_fhb", tk: "tk1", seq: 2, paused: true });
     expect(r.acks).toEqual([0]);
   });
+
+  it("says the pane is hidden on the computer while it is, sends nothing then, and is live again once it shows", async () => {
+    const r = rig();
+    await r.session.openPicker(null);
+    await r.session.pick("browser-a");
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 1, data: "jpeg", meta: {} });
+    r.session.onMessage({ type: "tk_fhb", tk: "tk1", seq: 1, paused: false, hidden: true });
+    expect(r.state()?.phase).toBe("hidden");
+    r.session.input([{ k: "tap", x: 1, y: 1 }]);
+    expect(await r.session.type("pw"), "no text either").toBe(false);
+    expect(r.sent).toEqual([]);
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 2, data: "late", meta: {} });
+    expect(r.state()?.phase, "a frame still on its way does not make it look live").toBe("hidden");
+    r.session.onMessage({ type: "tk_fhb", tk: "tk1", seq: 2, paused: false, hidden: false });
+    expect(r.state()?.phase).toBe("live");
+  });
 });

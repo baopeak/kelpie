@@ -51,7 +51,8 @@ function Live() {
 
   const at = (e: PointerEvent) => {
     const meta = s().frame?.meta;
-    if (!meta) return null;
+    // No picture on the screen (the pane is hidden on the computer): no point on the page either.
+    if (!meta || !img?.isConnected) return null;
     const r = img.getBoundingClientRect();
     return toPage(e.clientX, e.clientY, drawnBox({ left: r.left, top: r.top, width: r.width, height: r.height }, img.naturalWidth, img.naturalHeight), meta);
   };
@@ -82,8 +83,16 @@ function Live() {
         <button class="btn danger" data-takeover-stop onClick={() => void takeovers.stop()}>{t("Stop")}</button>
       </div>
       <div class="takeover-screen" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel}>
-        <Show when={s().frame} fallback={<p class="muted">{t("Waiting for the page…")}</p>}>
-          {(f) => <img ref={img} src={`data:image/jpeg;base64,${f().data}`} alt={t("The computer's browser pane")} draggable={false} onLoad={() => settled(true)} onError={() => settled(false)} />}
+        {/* Hidden on the computer, the last picture is not shown: it would look live, and nothing sent would reach the page. */}
+        <Show when={s().phase !== "hidden"} fallback={
+          <div class="takeover-hidden" role="status" data-takeover-hidden>
+            <p>{t("The pane is hidden on the computer.")}</p>
+            <p class="muted">{t("Nothing is sent to it until it is shown there again.")}</p>
+          </div>
+        }>
+          <Show when={s().frame} fallback={<p class="muted">{t("Waiting for the page…")}</p>}>
+            {(f) => <img ref={img} src={`data:image/jpeg;base64,${f().data}`} alt={t("The computer's browser pane")} draggable={false} onLoad={() => settled(true)} onError={() => settled(false)} />}
+          </Show>
         </Show>
         <Show when={s().phase === "frozen" || !connected()} fallback={<Show when={s().broken}><div class="takeover-lost" role="status" data-takeover-broken>{t("The last picture could not be shown: what you see may be behind the page.")}</div></Show>}>
           <div class="takeover-lost" role="status">{t("Connection lost: nothing is sent until the picture is back.")}</div>

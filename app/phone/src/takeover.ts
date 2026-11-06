@@ -178,8 +178,9 @@ export interface TakeoverPort {
 }
 
 export interface TakeoverState {
-  /** `pick`: choosing a pane; `starting`; `live`: frames come; `frozen`: nothing for a while, input off; `ended`. */
-  phase: "pick" | "starting" | "live" | "frozen" | "ended";
+  /** `pick`: choosing a pane; `starting`; `live`: frames come; `frozen`: nothing for a while, input off; `hidden`: the computer does not show the
+   * pane now (another tab in front, its window minimised or behind another), input off; `ended`. */
+  phase: "pick" | "starting" | "live" | "frozen" | "hidden" | "ended";
   project: string | null;
   panes: PaneRow[] | null;
   tk: string | null;
@@ -281,7 +282,7 @@ export class TakeoverSession {
   }
 
   /** A `tk_frame`, `tk_fhb` or `tk_end` from the computer. */
-  onMessage(m: { type: string; tk?: string; seq?: number; data?: string; meta?: FrameMeta; reason?: string; paused?: boolean }) {
+  onMessage(m: { type: string; tk?: string; seq?: number; data?: string; meta?: FrameMeta; reason?: string; paused?: boolean; hidden?: boolean }) {
     const s = this.state;
     if (!s?.tk || m.tk !== s.tk || s.phase === "ended") return;
     if (m.type === "tk_end") return this.ended(endedText(m.reason ?? "", this.t));
@@ -289,15 +290,17 @@ export class TakeoverSession {
     if (m.type === "tk_frame" && typeof m.data === "string" && typeof m.seq === "number") {
       // The same picture as the one shown: the page does not load it again, so nothing would acknowledge it. It is shown already.
       const same = s.frame?.data === m.data;
-      this.patch({ phase: "live", frame: { seq: m.seq, data: m.data, meta: m.meta ?? {} } });
+      // A frame does not end `hidden`: the heartbeat that says the pane shows again does.
+      this.patch({ phase: s.phase === "hidden" ? "hidden" : "live", frame: { seq: m.seq, data: m.data, meta: m.meta ?? {} } });
       if (same) this.shown(m.seq);
-    } else if (m.type === "tk_fhb" && m.paused === true) {
-      // The computer waits for an acknowledgement it never got (a frame lost on the way, or not shown): the picture is stuck, input is not taken. It is
-      // asked to go on from the last frame acknowledged, which brings a fresh one.
-      this.queue = [];
-      if (s.phase === "live") this.patch({ phase: "frozen" });
-      // Any acknowledgement resumes a paused hold, so one that never acknowledged a frame still says 0.
-      this.port.ack(s.tk, this.ackedSeq);
+    } else if (m.type === "tk_fhb") {
+      // `paused`: the computer waits for an acknowledgement it never got (a frame lost on the way, or not shown), so the picture is stuck and input is
+      // not taken. It is asked to go on from the last frame acknowledged, which brings a fresh one. Any acknowledgement resumes a paused hold, so one
+      // that never acknowledged a frame still says 0. `hidden`: the computer does not show the pane, so nothing sent would reach it.
+      if (m.paused === true) this.port.ack(s.tk, this.ackedSeq);
+      const phase = m.hidden === true ? "hidden" : m.paused === true ? "frozen" : "live";
+      if (phase !== "live") this.queue = [];
+      if (phase !== s.phase) this.patch({ phase });
     } else if (s.phase === "frozen") this.patch({ phase: "live" });
   }
 
@@ -389,7 +392,7 @@ export class TakeoverSession {
     this.unwatch();
     const look = () => {
       this.watchTimer = this.port.setTimeout(look, 500);
-      if (this.state?.phase === "live" && this.port.now() - this.heardAt > FREEZE_MS) {
+      if ((this.state?.phase === "live" || this.state?.phase === "hidden") && this.port.now() - this.heardAt > FREEZE_MS) {
         this.queue = [];
         this.patch({ phase: "frozen" });
       }
