@@ -95,3 +95,37 @@ kelpied already links tokio, serde and others, so the real increase will be smal
 - A1 passes everything else and downloads as fast as the CLI.
 
 B would give up per-file live progress, the streamed walk and the in-process resume checks. Options are listed in the progress report: `plans/reports/fullstack-developer-261106-0130-file-transfer.md` (main worktree).
+
+## Upload diagnosis plan (the owner chose option 3; written before the run)
+**Question**: does the 9–13 MB/s upload limit come from the crate, the process pipes, ssh.exe's stdin, or the Python fixture? No real OpenSSH server is available.
+
+**Code**: spike branch commit ecb7215. `scratch/sftp-spike/src/sink.rs` is a native SFTP v3 sink: writes are counted and dropped, reads return a pattern. It costs one parse and one reply per request, with no disk. Upload data comes from memory (`mem=`).
+
+**Measurements** (`run_spike.py --only diag-inproc,diag-child,diag-stdin`; 3 runs each, median):
+| Id | What | Path |
+|---|---|---|
+| I0 | A1 upload, 1 GiB | in process: client ↔ sink over a 1 MiB in-memory duplex (no process, no OS pipe, no ssh, no Python) |
+| I50 | A1 upload, 256 MiB, every reply delayed 50 ms | in process (pipelining: 64 × 32 KiB per 50 ms caps at about 42 MB/s) |
+| D0 | A1 download, 1 GiB | in process |
+| I0_a2 | A2 upload, 1 GiB | in process (for the record) |
+| P, P_npipe, PD | A1 upload with tokio's pipes, upload with an overlapped named pipe for stdin, download | the sink as a child process (`sftp-spike serve`): the same process pipes the daemon would use, no ssh, no Python |
+| S_tokio, S_thread, S_npipe, S_file | ssh.exe carrying 256 MiB of stdin to `cat > /dev/null` on the fixture: from tokio's `ChildStdin`, from a blocking thread of our own, from an overlapped named pipe, and with ssh reading a file itself | pipe-only, no SFTP |
+| C | sftp CLI upload of the same 256 MiB | same run, on the fixture |
+
+**Decision rules** (the driver prints which one fired; in order):
+- **R1 → B**: I0 < 30 MB/s, or I50 < 29 MB/s (0.7 × the 42 MB/s ceiling). The crate itself cannot carry uploads even with no I/O.
+- **R2** (only with I0 ≥ 100 and I50 ≥ 29): P < 70 MB/s means the process pipes are the limit.
+  - **A1** if P_npipe ≥ 70, with that stdin in the phase-2 pool.
+  - Otherwise **B**.
+- **R3** (only with P ≥ 70): S_tokio < 60 MB/s means tokio's stdin writer into ssh.exe is the limit.
+  - **A1** if another writer (thread, named pipe) reaches ≥ 60, with that writer in the pool.
+  - If no writer does: no automatic verdict (the fixture's exec path may be the limit). The numbers go to the owner.
+- **R4 → A1**: I0 ≥ 100, I50 ≥ 29, P ≥ 70 and S_tokio ≥ 60. Everything on Kelpie's side carries far more than the fixture takes, so the limit is the Python server.
+- Anything else, between the thresholds: no automatic verdict; the numbers go to the owner.
+
+**Stop rules**:
+- Time box: 4 hours of slot time, builds included. At 4 hours I stop wherever I am and report.
+- Order: build → diag-inproc → diag-child → diag-stdin. I stop as soon as a rule fires (R1 already fires after diag-inproc).
+- If a mode fails to build or run, at most 45 minutes go into fixing it. After that it is dropped, and the verdict uses only what ran; a rule that needs the missing figure stays open.
+- No new variants beyond those listed. No patches to either crate. Nothing outside the spike branch, apart from this report.
+- Same isolation as the spike: temp folders, the fixture on 127.0.0.1, no services, only processes this run started.
