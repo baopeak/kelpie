@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./ipc", () => ({ onEvent: vi.fn(), xferList: vi.fn() }));
 
-import { applyJob, chipText, directionText, etaText, jobTitle, nextQuestion, progress, removeJob, speedText, stateText } from "./transfers";
+import { activeCount, applyJob, chipText, directionText, etaText, heldText, jobTitle, nextQuestion, progress, removeJob, speedText, stateText, updateMayInstall } from "./transfers";
 import type { XferJob, XferQuestion } from "./types";
 
 const meta = { kind: "file" as const, size: 1, mtime: 1, mode: 0o644, uid: null, gid: null };
@@ -49,6 +49,22 @@ describe("words", () => {
     expect(directionText(job({ kind: "delete", src: { dest: "prod" } }))).toBe("delete on prod");
     expect(stateText(job({ state: "reconnecting", next_s: 5, attempt: 2 }))).toBe("Connection lost: trying again in 5 s (attempt 2)");
     expect(stateText(job({ state: "done", totals: { files: 3, bytes: 3, done_files: 2, done_bytes: 3, skipped: 0, failed: 1 } }))).toBe("Done, 1 could not be copied");
+  });
+});
+
+describe("updates wait for transfers", () => {
+  it("counts only transfers that run or wait to run", () => {
+    expect(activeCount({ a: job({ id: "a" }), b: job({ id: "b", state: "paused" }), c: job({ id: "c", state: "interrupted" }), d: job({ id: "d", state: "waiting" }) })).toBe(2);
+  });
+  it("holds only an update that stops the daemon, and only while transfers run", () => {
+    expect(updateMayInstall({ daemonStops: false, transfers: 3 })).toBe(true);
+    expect(updateMayInstall({ daemonStops: true, transfers: 3 })).toBe(false);
+    expect(updateMayInstall({ daemonStops: true, transfers: 0 })).toBe(true);
+  });
+  it("says what holds it", () => {
+    expect(heldText(0)).toBeNull();
+    expect(heldText(1)).toBe("Waiting for 1 file transfer to finish");
+    expect(heldText(4)).toBe("Waiting for 4 file transfers to finish");
   });
 });
 

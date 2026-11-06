@@ -717,10 +717,24 @@ impl Queue {
         Ok(())
     }
 
-    /// Before the daemon exits: what is running is saved as it is (it loads as interrupted).
-    ///
-    /// Open question for the owner: a daemon hand-over (an update) interrupts running transfers today; it could
-    /// instead wait for them, or refuse while they run. Kept as it is until the owner decides.
+    /// Transfers running or waiting to run (not paused, interrupted or finished): a daemon hand-over (an update)
+    /// waits for them (`daemon.shutdown` with `if_idle` or `if_no_transfers`).
+    pub fn active_count(&self) -> usize {
+        self.jobs.lock().iter().filter(|j| j.state.active()).count()
+    }
+
+    /// Tests: a job waiting to run, never started (no ssh is opened).
+    #[cfg(test)]
+    pub fn queue_for_test(&self) -> String {
+        let dir = if cfg!(windows) { "C:\\" } else { "/" };
+        let job = self.new_job(&json!({"src": {"dest": "host"}, "dst": {}, "items": ["/x"], "dst_dir": dir})).unwrap();
+        let id = job.id.clone();
+        self.jobs.lock().push(job);
+        id
+    }
+
+    /// Before the daemon exits: what is running is saved as it is, and loads as interrupted with Resume. Only a hand-over
+    /// the person asked for despite running transfers gets here with any (it waits for them otherwise).
     pub fn shutdown(&self) {
         for live in self.live.lock().values() {
             live.ctl.pause.store(true, Ordering::Relaxed);
@@ -1362,7 +1376,7 @@ impl Queue {
                 r
             }
         };
-        let (file_mode, dir_mode) = chmod_modes(job.mode.unwrap_or(0), job.dirs_only_x);
+        let (mode, only_x) = (job.mode.unwrap_or(0), job.dirs_only_x);
         let consumer = async {
             let mut dirs: Vec<(usize, String)> = Vec::new();
             let mut first_error = None;
@@ -1380,9 +1394,9 @@ impl Queue {
                         dirs.push((rel.len(), path));
                         continue;
                     }
-                    Found::File { path, .. } => {
+                    Found::File { path, meta, .. } => {
                         self.count(&job.id, |j| j.totals.files += 1);
-                        let r = if job.kind == JobKind::Delete { fs.remove_file(&path).await } else { fs.chmod(&path, file_mode).await };
+                        let r = if job.kind == JobKind::Delete { fs.remove_file(&path).await } else { fs.chmod(&path, chmod_file_mode(mode, only_x, meta.mode)).await };
                         (path, r)
                     }
                     Found::Link { path, .. } => {
@@ -1423,7 +1437,7 @@ impl Queue {
                 return Ok(stop);
             }
             self.count(&job.id, |j| j.totals.files += 1);
-            let r = if job.kind == JobKind::Delete { fs.remove_dir(&path).await } else { fs.chmod(&path, dir_mode).await };
+            let r = if job.kind == JobKind::Delete { fs.remove_dir(&path).await } else { fs.chmod(&path, chmod_dir_mode(mode, only_x)).await };
             match r {
                 Ok(()) => self.count(&job.id, |j| j.totals.done_files += 1),
                 Err(e) if e.kind == ErrKind::Connection => return Err(e),
@@ -1466,17 +1480,25 @@ impl Choice {
     }
 }
 
-/// The bits a recursive chmod sets on files and on folders. With `dirs_only_x` files lose x and folders get x
-/// wherever they have r, so they stay searchable.
-///
-/// Open question for the owner: with `dirs_only_x`, files that already had x (scripts) lose it too; `chmod X`
-/// semantics would keep it. Kept as it is until the owner decides.
-pub fn chmod_modes(mode: u32, dirs_only_x: bool) -> (u32, u32) {
+/// The bits a recursive chmod sets on a file whose mode is now `current`. With `dirs_only_x` ("x for folders only")
+/// a file keeps its own x bits, so a script stays runnable and nothing else becomes runnable.
+pub fn chmod_file_mode(mode: u32, dirs_only_x: bool, current: Option<u32>) -> u32 {
     let mode = mode & 0o7777;
     if dirs_only_x {
-        (mode & !0o111, mode | ((mode & 0o444) >> 2))
+        (mode & !0o111) | (current.unwrap_or(0) & 0o111)
     } else {
-        (mode, mode)
+        mode
+    }
+}
+
+/// The bits a recursive chmod sets on a folder. With `dirs_only_x` folders always get x wherever they have r, so
+/// they stay searchable.
+pub fn chmod_dir_mode(mode: u32, dirs_only_x: bool) -> u32 {
+    let mode = mode & 0o7777;
+    if dirs_only_x {
+        mode | ((mode & 0o444) >> 2)
+    } else {
+        mode
     }
 }
 
@@ -1486,10 +1508,14 @@ mod tests {
 
     #[test]
     fn chmod_bits() {
-        assert_eq!(chmod_modes(0o755, false), (0o755, 0o755));
-        assert_eq!(chmod_modes(0o644, true), (0o644, 0o755));
-        assert_eq!(chmod_modes(0o750, true), (0o640, 0o750));
-        assert_eq!(chmod_modes(0o100640, false), (0o640, 0o640));
+        assert_eq!((chmod_file_mode(0o755, false, Some(0o644)), chmod_dir_mode(0o755, false)), (0o755, 0o755));
+        // x for folders only: folders always get it, files keep their own.
+        assert_eq!(chmod_dir_mode(0o644, true), 0o755);
+        assert_eq!(chmod_file_mode(0o644, true, Some(0o600)), 0o644, "a plain file does not become runnable");
+        assert_eq!(chmod_file_mode(0o644, true, Some(0o755)), 0o755, "a script stays runnable");
+        assert_eq!(chmod_file_mode(0o750, true, Some(0o700)), 0o740);
+        assert_eq!(chmod_file_mode(0o640, true, None), 0o640);
+        assert_eq!(chmod_dir_mode(0o100640, false), 0o640);
     }
 
     #[test]
@@ -1851,6 +1877,21 @@ mod tests {
         assert_eq!(j.state, State::Done, "{j:?}");
         assert!(!host.exists("/srv/old"));
         assert_eq!(host.read("/keep/k.txt").unwrap(), b"k", "data outside the selection is never touched");
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn counts_the_transfers_an_update_waits_for() {
+        let r = rig("active");
+        assert_eq!(r.q.active_count(), 0);
+        r.a.put("/s/x", b"x", 1);
+        r.b.put("/dst/x", b"old", 1);
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s/x"], "dst_dir": "/dst"})).await;
+        until(&r, &id, |j| !j.questions.is_empty()).await;
+        assert_eq!(r.q.active_count(), 1, "a transfer waiting on a question still runs");
+        r.q.rpc("xfer.control", &json!({"id": id, "action": "pause"})).await.unwrap();
+        until(&r, &id, |j| j.state == State::Paused).await;
+        assert_eq!(r.q.active_count(), 0, "a paused one does not hold an update");
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 

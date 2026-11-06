@@ -64,7 +64,7 @@
   "Replace if newer": "Thay nếu mới hơn",
   "Restart Kelpie's background service to use the file manager": "Hãy khởi động lại dịch vụ nền của Kelpie để dùng trình quản lý file",
   "Run / open": "Chạy / mở",
-  "Run / open (x) on folders only, so files do not become runnable": "Chỉ cho thư mục quyền chạy / mở (x), để file không thành chạy được",
+  "x for folders only: folders can always be opened, files keep their own x": "x chỉ cho thư mục: thư mục luôn mở được, file giữ nguyên quyền x của nó",
   "Save as a copy": "Lưu thành bản sao",
   "Show": "Hiện",
   "Show in folder": "Hiện trong thư mục",
@@ -82,5 +82,14 @@
   "Upload on save": "Tải lên khi lưu",
   "uploaded {when}": "đã tải lên {when}",
   "Waiting for your answer": "Đang chờ bạn trả lời",
-  "Waiting to start": "Đang chờ bắt đầu"
+  "Waiting to start": "Đang chờ bắt đầu",
+  "{n} file transfers are running. Switch anyway? They stop and show Interrupted, with Resume, on the new daemon. Cancel waits until they have finished.": "Đang chạy {n} lượt chuyển file. Vẫn chuyển? Chúng sẽ dừng và hiện Bị ngắt, có nút Tiếp tục, trên dịch vụ mới. Huỷ để chờ chúng xong.",
+  "The session daemon switches once {n} file transfers have finished": "Dịch vụ phiên sẽ chuyển khi {n} lượt chuyển file xong",
+  "The new session daemon takes over once {n} file transfers have finished": "Dịch vụ phiên mới sẽ tiếp quản khi {n} lượt chuyển file xong",
+  "Waiting for 1 file transfer to finish": "Đang chờ 1 lượt chuyển file xong",
+  "Waiting for {n} file transfers to finish": "Đang chờ {n} lượt chuyển file xong",
+  "installing now would stop them. They can be resumed afterwards.": "cài ngay sẽ dừng chúng. Có thể tiếp tục chúng sau đó.",
+  "Install when they finish": "Cài khi chúng xong",
+  "Install anyway": "Vẫn cài",
+  "The new session daemon takes over once they have finished; Switch now in the notice stops them (they resume afterwards)": "Dịch vụ phiên mới tiếp quản khi chúng xong; Chuyển ngay trong thông báo sẽ dừng chúng (tiếp tục được sau đó)"
 }

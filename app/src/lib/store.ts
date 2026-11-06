@@ -185,11 +185,43 @@ function createAppStore() {
   /** The key the daemon files each project's notes under (its worktree's folder), by project id. */
   const [noteKeys, setNoteKeys] = createStore<Record<string, string>>({});
 
+  /** File transfers the old daemon still runs: a hand-over (an update) waits for them. 0 when none, or unknown. */
+  const [handOverHeldFor, setHandOverHeldFor] = createSignal(0);
+  const runningTransfers = () => ipc.daemon<{ transfers?: number }>("daemon.info", {}).then((i) => i.transfers ?? 0).catch(() => 0);
+  /** The person asked to switch while transfers ran and chose to wait: switch as soon as they have finished. */
+  let switchWhenTransfersEnd = false;
+
   async function switchDaemon() {
     if (!(await confirmDialog(t("Switch to the new session daemon now? Running sessions stop for a moment; agents that can resume continue their conversation.")))) return;
+    const transfers = await runningTransfers();
+    if (transfers && !(await confirmDialog(t("{n} file transfers are running. Switch anyway? They stop and show Interrupted, with Resume, on the new daemon. Cancel waits until they have finished.", { n: transfers })))) {
+      switchWhenTransfersEnd = true;
+      setHandOverHeldFor(transfers);
+      notify(t("The session daemon switches once {n} file transfers have finished", { n: transfers }));
+      return void waitForTransfers();
+    }
     olderDaemon = false;
+    switchWhenTransfersEnd = false;
+    setHandOverHeldFor(0);
     setDaemonNeedsSwitch(false);
     void ipc.daemon("daemon.shutdown", { kill_sessions: false }).catch(() => {});
+  }
+
+  /** Checks again every few seconds while transfers hold a hand-over. */
+  let transferTimer: ReturnType<typeof setTimeout> | undefined;
+  function waitForTransfers() {
+    clearTimeout(transferTimer);
+    transferTimer = setTimeout(async () => {
+      const transfers = await runningTransfers();
+      setHandOverHeldFor(transfers);
+      if (transfers) return waitForTransfers();
+      if (switchWhenTransfersEnd) {
+        switchWhenTransfersEnd = false;
+        olderDaemon = false;
+        setDaemonNeedsSwitch(false);
+        void ipc.daemon("daemon.shutdown", { kill_sessions: false, if_no_transfers: true }).catch(() => {});
+      } else handOverIfIdle();
+    }, 5_000);
   }
 
   /** Updates keep the daemon — and every session — running; the updated app connects to it.
@@ -250,6 +282,14 @@ function createAppStore() {
       if (!olderDaemon) return;
       const list = await ipc.listSessions().catch(() => null);
       if (!list || list.some((s) => s.alive)) return;
+      // File transfers hold it too: the old daemon would cut them off.
+      const transfers = await runningTransfers();
+      if (transfers) {
+        if (!handOverHeldFor()) notify(t("The new session daemon takes over once {n} file transfers have finished", { n: transfers }));
+        setHandOverHeldFor(transfers);
+        return waitForTransfers();
+      }
+      setHandOverHeldFor(0);
       olderDaemon = false;
       void ipc.daemon("daemon.shutdown", { kill_sessions: false, if_idle: true }).catch(() => {});
     }, 10_000);
@@ -1608,7 +1648,7 @@ function createAppStore() {
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
     registryAgent, settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
-    daemonNeedsSwitch, switchDaemon, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting,
+    daemonNeedsSwitch, switchDaemon, handOverHeldFor, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting,
     notesFor, addNote, removeNotes, noteKeyFor, clearNotesAt, promptsFor, rememberPrompt, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
     newFloating, toggleFloating, selectFloating, closeFloating,
   };

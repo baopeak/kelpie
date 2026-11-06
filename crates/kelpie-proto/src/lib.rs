@@ -38,7 +38,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// 26: the daemon browses hosts over SFTP and this computer (`sftp.list`, `sftp.stat`, `sftp.realpath`, `sftp.mkdir`, `sftp.rename`,
 /// `sftp.chmod`, `local.list`, `local.home`); an older daemon has none of them, so the app's file manager asks for a restart below 26.
 /// 27: the transfer queue (`xfer.start` with copy, delete and chmod jobs and an `expect` for an edited file's upload, `xfer.list`,
-/// `xfer.control`, `xfer.answer`, `xfer.clear_finished`; the `xfer.updated` and `xfer.removed` events; `<data>/transfers.json`); an
+/// `xfer.control`, `xfer.answer`, `xfer.clear_finished`; the `xfer.updated` and `xfer.removed` events; `<data>/transfers.json`; `transfers` in
+/// `daemon.info` and `daemon.shutdown` waiting for them under `if_idle` / `if_no_transfers`); an
 /// older daemon has none of it, so the app's file manager asks for a restart below 27.
 pub const API_LEVEL: u32 = 27;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous

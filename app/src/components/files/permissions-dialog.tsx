@@ -65,7 +65,7 @@ export function PermissionsDialog(props: { dest: string; dir: string; entries: R
         <Show when={hasDir}>
           <label class="check-inline"><input type="checkbox" data-field="recursive" checked={recursive()} onChange={(e) => setRecursive(e.currentTarget.checked)} /> {t("Apply to everything inside")}</label>
           <Show when={recursive()}>
-            <label class="check-inline"><input type="checkbox" checked={dirsOnlyX()} onChange={(e) => setDirsOnlyX(e.currentTarget.checked)} /> {t("Run / open (x) on folders only, so files do not become runnable")}</label>
+            <label class="check-inline"><input type="checkbox" checked={dirsOnlyX()} onChange={(e) => setDirsOnlyX(e.currentTarget.checked)} /> {t("x for folders only: folders can always be opened, files keep their own x")}</label>
           </Show>
         </Show>
         <Show when={error()}><div class="form-note error">{error()}</div></Show>

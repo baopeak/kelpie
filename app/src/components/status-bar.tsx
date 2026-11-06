@@ -9,7 +9,7 @@ import { available, whenIdle } from "../lib/updater";
 import { pluginStatus, pluginStatusItems, type PluginInfo, type PluginStatusItem } from "../lib/plugins";
 import { t, msg } from "../lib/i18n";
 import { automationEvents } from "../lib/automation-events";
-import { chipText, initTransfers, isActive, jobList } from "../lib/transfers";
+import { chipText, heldText, initTransfers, isActive, jobList } from "../lib/transfers";
 import { XFER_API } from "../lib/ipc";
 import { hostByAlias } from "../lib/ssh-hosts";
 import { openFiles, openHosts } from "./hosts-page";
@@ -93,6 +93,10 @@ export function StatusBar() {
         {" · "}<span style={{ color: counts().working ? "var(--working)" : "var(--text-faint)" }}>{t("{n} working", { n: counts().working })}</span>
         {" · "}<span style={{ color: counts().waiting ? "var(--waiting)" : "var(--text-faint)" }}>{t("{n} need you", { n: counts().waiting })}</span>
       </span>
+      {/* A daemon switch (after an update) waits for running file transfers: said here until they finish. */}
+      <Show when={heldText(store.handOverHeldFor())}>
+        {(text) => <span class="item" data-handover-held title={t("The new session daemon takes over once they have finished; Switch now in the notice stops them (they resume afterwards)")}>{text()}</span>}
+      </Show>
       {/* File transfers outlive the Hosts page: one chip while they run, which opens their queue. */}
       <Show when={chipText()}>
         {(text) => (

@@ -880,7 +880,9 @@ The **SSH hosts** page (the server icon at the bottom of the sidebar, `Ctrl+Alt+
       *Skip identical*, with *Apply to all in this transfer*.
     - Names Windows cannot hold are saved with `_` and listed.
     - Links to folders inside a copied folder are not followed.
-  - **Permissions…** (a host) sets rwx or octal, optionally for everything inside a folder. Delete on a host asks
+    - An update or a switch to a newer background service waits for running transfers and says so (*Waiting for N
+      file transfers to finish*). *Install anyway* / *Switch anyway* stops them; they show *Interrupted* with *Resume*.
+  - **Permissions…** (a host) sets rwx or octal, optionally for everything inside a folder; *x for folders only* keeps folders openable and leaves each file's own x as it was. Delete on a host asks
     first: there is no trash there. Delete on this computer moves to the trash.
   - **Edit** a host's file *in Kelpie* (through the host's remote project; needs a shell on the host) or *with an
     external editor*: a private copy is opened and uploaded on every save. A change made on the server meanwhile is

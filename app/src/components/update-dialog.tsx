@@ -1,11 +1,12 @@
 // The update offer: release notes and when to install. Sessions keep running either way.
-import { Show, createResource, createSignal } from "solid-js";
+import { Show, createEffect, createResource, createSignal } from "solid-js";
 import { store } from "../lib/store";
 import { t } from "../lib/i18n";
 import { LoadBar } from "./load-bar";
 import { daemon } from "../lib/ipc";
 import { isWindows } from "../lib/platform";
-import { available, daemonSurvivesUpdate, installUpdate, installWhenIdle, progress, skipUpdate, whenIdle } from "../lib/updater";
+import { available, daemonSurvivesUpdate, installUpdate, installWhenIdle, progress, setStopsDaemon, skipUpdate, whenIdle } from "../lib/updater";
+import { activeCount, heldText, updateMayInstall } from "../lib/transfers";
 
 export default function UpdateDialog() {
   const [error, setError] = createSignal<string | null>(null);
@@ -14,6 +15,10 @@ export default function UpdateDialog() {
   // has to stop for this one update.
   const [survives] = createResource(() => daemon<{ exe?: string }>("daemon.info").then((i) => daemonSurvivesUpdate(i.exe, !isWindows)).catch(() => true));
   const close = () => store.setOverlay(null);
+  // An update that stops the daemon would cut file transfers off: it waits for them, unless the person installs anyway
+  // (the transfers then show Interrupted, with Resume).
+  createEffect(() => setStopsDaemon(survives() === false));
+  const held = () => !updateMayInstall({ daemonStops: survives() === false, transfers: activeCount() });
   const install = async () => {
     setBusy(true);
     setError(null);
@@ -49,11 +54,15 @@ export default function UpdateDialog() {
                 <p class="muted-inline">{percent() != null ? t("Downloading… {percent}%", { percent: percent()! }) : t("Preparing the update…")}</p>
               </Show>
               <Show when={whenIdle()}><p class="muted-inline">{t("Installs as soon as no session is working.")}</p></Show>
+              <Show when={held()}><p class="update-warning" data-update-held>{heldText(activeCount())}: {t("installing now would stop them. They can be resumed afterwards.")}</p></Show>
               <Show when={error()}><p class="update-error">{error()}</p></Show>
               <div class="footer">
                 <button class="btn" disabled={busy()} onClick={() => { skipUpdate(); close(); }}>{t("Skip this version")}</button>
                 <button class="btn" disabled={busy() || whenIdle()} onClick={() => { installWhenIdle(); close(); }}>{t("Install when idle")}</button>
-                <button class="btn primary" disabled={busy()} onClick={() => void install()}>{t("Install now")}</button>
+                <Show when={held()} fallback={<button class="btn primary" disabled={busy()} onClick={() => void install()}>{t("Install now")}</button>}>
+                  <button class="btn primary" disabled={busy() || whenIdle()} data-action="install-after-transfers" onClick={() => { installWhenIdle(); close(); }}>{t("Install when they finish")}</button>
+                  <button class="btn" disabled={busy()} data-action="install-anyway" onClick={() => void install()}>{t("Install anyway")}</button>
+                </Show>
               </div>
             </>
           )}

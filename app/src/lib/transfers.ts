@@ -135,3 +135,18 @@ export function chipText(all: Jobs = jobs()): string | null {
   const done = sized.reduce((n, j) => n + Math.min(j.totals.done_bytes, j.totals.bytes), 0);
   return total ? `↑↓ ${active.length} · ${Math.floor((done / total) * 100)} %` : `↑↓ ${active.length}`;
 }
+
+// ---- updates wait for transfers ----
+
+/** Transfers running or waiting to run (paused and interrupted ones do not hold an update). */
+export const activeCount = (all: Jobs = jobs()): number => Object.values(all).filter(isActive).length;
+
+/** Whether an update may install now: one that stops the session daemon waits until no transfer runs. */
+export function updateMayInstall(o: { daemonStops: boolean; transfers: number }): boolean {
+  return !o.daemonStops || o.transfers === 0;
+}
+
+/** What holds an update or a daemon switch, in words; null when nothing does. */
+export function heldText(transfers: number): string | null {
+  return transfers > 0 ? (transfers === 1 ? t("Waiting for 1 file transfer to finish") : t("Waiting for {n} file transfers to finish", { n: transfers })) : null;
+}

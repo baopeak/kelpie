@@ -1631,6 +1631,8 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
   - `xfer.start` → `{id}`, `xfer.list`, `xfer.control {id, action: pause|resume|cancel|retry|clear}`, `xfer.answer`, `xfer.clear_finished`.
   - `xfer.updated {job}` is sent on every change and at most 4 times a second for progress, with speed as an average over about 3 s. `xfer.removed {id}` is sent when a job is cleared.
   - Programs in sessions neither call these methods nor see the events.
+- **Hand-overs wait**: `daemon.info` reports `transfers` (running or waiting to run). `daemon.shutdown` with `if_idle` or `if_no_transfers` answers `{waiting_for_transfers: n}` instead of stopping while any run. The app holds the switch to a newer daemon, and an update that has to stop the daemon, with a *Waiting for N file transfers* notice. *Switch anyway* / *Install anyway* stops them, and they load as interrupted, with Resume.
+- **Recursive chmod**: *x for folders only* gives folders x wherever they have r; files keep their own x bits.
 - **Logs**: job id, kind, destinations, counts and error kinds. Never file contents or names.
 
 ## Features beyond sessions
