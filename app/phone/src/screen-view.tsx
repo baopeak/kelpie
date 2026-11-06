@@ -149,7 +149,7 @@ function Live() {
         const p = pending.get(seq);
         pending.delete(seq);
         if (p) {
-          overlay.onFrame(p);
+          overlay.onFrame({ seq, ...p });
           if (p.srcW !== src.w || p.srcH !== src.h) {
             src = { w: p.srcW, h: p.srcH };
             setView(fitView(src.w, src.h));
@@ -161,10 +161,19 @@ function Live() {
         redraw();
       },
       error: () => {
-        // A decoder that failed is made again from the next keyframe.
+        // A decoder that failed is made again from the next keyframe. The frames it held are acknowledged, so the computer never waits for them,
+        // and their unpaints still apply.
         setup = null;
         skipToKey = true;
-        remoteScreens.needKeyframe();
+        let last = 0;
+        for (const [seq, p] of pending) {
+          overlay.onFrame({ seq, ...p });
+          last = Math.max(last, seq);
+        }
+        pending.clear();
+        if (last) remoteScreens.skipped(last);
+        else remoteScreens.needKeyframe();
+        redraw();
       },
     });
     decoder.configure({ codec: next.codec, description: next.description, codedWidth: next.codedWidth, codedHeight: next.codedHeight, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
@@ -175,7 +184,8 @@ function Live() {
     if (!m) return;
     if (m.kind === "cursor") {
       cursor = { shape: m.shape, visible: m.visible, x: m.x, y: m.y };
-      if (mode() === "direct" || !gestures.cursor.x) gestures.cursor = { x: m.x, y: m.y };
+      // With no finger down, a tap clicks where the computer's cursor is drawn, wherever the desk or a program moved it.
+      if (gestures.idle()) gestures.cursor = { x: m.x, y: m.y };
       return redraw();
     }
     if (m.kind === "tile") {
@@ -190,15 +200,18 @@ function Live() {
       if (next && (!sameSetup(next, setup) || !decoder || decoder.state !== "configured")) configure(next);
       skipToKey = false;
     }
-    if (!decoder || decoder.state !== "configured" || skipToKey) {
-      remoteScreens.needKeyframe();
-      return;
-    }
+    // A frame that is not decoded is still acknowledged (the computer must not wait for it), and its unpaint still applies, so that no crisp tile
+    // stays over what it changed.
+    const skip = () => {
+      overlay.onFrame({ seq: m.seq, unpaint: m.unpaint, unpaintAll: m.unpaintAll, srcW: m.srcW, srcH: m.srcH });
+      remoteScreens.skipped(m.seq);
+      redraw();
+    };
+    if (!decoder || decoder.state !== "configured" || skipToKey) return skip();
     // Far behind: frames after a dropped one cannot be decoded, so everything waits for a keyframe.
     if (decoder.decodeQueueSize > 3 && !m.key) {
       skipToKey = true;
-      remoteScreens.needKeyframe();
-      return;
+      return skip();
     }
     pending.set(m.seq, { unpaint: m.unpaint, unpaintAll: m.unpaintAll, srcW: m.srcW, srcH: m.srcH });
     if (pending.size > 30) pending.delete(pending.keys().next().value!);
@@ -276,6 +289,7 @@ function Live() {
         <canvas ref={canvas} aria-label={t("The computer's screen")} />
         <Show when={remoteText(s().remote, t)}>{(line) => <div class="takeover-lost" role="status" data-remote-state={s().remote}>{line()}</div>}</Show>
         <Show when={s().phase === "frozen" || !connected()}><div class="takeover-lost" role="status">{t("Connection lost: nothing is sent until the picture is back.")}</div></Show>
+        <Show when={s().phase === "live" && s().stuck}><div class="takeover-lost" role="status" data-screen-stuck>{t("The picture is stuck: asking the computer for a fresh one.")}</div></Show>
         <Show when={debug()}>
           <pre class="screen-debug">{JSON.stringify({ ...s().stats, queue: queue(), shown: shownSeq, tiles: overlay.count, encoder: s().encoder })}</pre>
         </Show>

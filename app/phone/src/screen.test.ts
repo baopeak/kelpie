@@ -64,7 +64,7 @@ describe("H.264 made ready for WebCodecs", () => {
   it("splits NAL units on both start codes and keeps the codec string of the SPS", () => {
     const nals = nalUnits(au);
     expect(nals.map(nalType)).toEqual([7, 8, 5]);
-    expect([...nals[2]]).toEqual([...idr], "the trailing zero is not the picture's, the zero inside is");
+    expect([...nals[2]], "the trailing zero is not the picture's, the zero inside is").toEqual([...idr]);
     expect(codecString(sps)).toBe("avc1.4d0028");
   });
 
@@ -84,7 +84,7 @@ describe("H.264 made ready for WebCodecs", () => {
 });
 
 describe("crisp tiles over the video", () => {
-  const frame = (over: Partial<{ unpaint: { x: number; y: number; w: number; h: number }[]; unpaintAll: boolean }> = {}) => ({ unpaint: [], unpaintAll: false, srcW: 1000, srcH: 500, ...over });
+  const frame = (over: Partial<{ seq: number; unpaint: { x: number; y: number; w: number; h: number }[]; unpaintAll: boolean }> = {}) => ({ seq: 0, unpaint: [], unpaintAll: false, srcW: 1000, srcH: 500, ...over });
 
   it("shows a tile from its frame on, and drops it as the frame that changes its region is drawn", () => {
     const closed: string[] = [];
@@ -92,16 +92,30 @@ describe("crisp tiles over the video", () => {
     o.onFrame(frame());
     o.add({ id: 1, seq: 5, rect: { x: 0, y: 0, w: 512, h: 256 }, image: "a" });
     o.add({ id: 2, seq: 5, rect: { x: 512, y: 0, w: 488, h: 256 }, image: "b" });
-    expect(o.drawable(4)).toEqual([], "not over an older frame");
+    expect(o.drawable(4), "not over an older frame").toEqual([]);
     expect(o.drawable(5).map((t) => t.id)).toEqual([1, 2]);
     o.onFrame(frame({ unpaint: [{ x: 600, y: 100, w: 64, h: 64 }] }));
     expect(o.drawable(9).map((t) => t.id)).toEqual([1]);
-    expect(closed).toEqual(["b"], "its image is freed");
+    expect(closed, "its image is freed").toEqual(["b"]);
     o.onFrame(frame({ unpaintAll: true }));
     expect(o.count).toBe(0);
     o.add({ id: 3, seq: 6, rect: { x: 0, y: 0, w: 64, h: 64 }, image: "c" });
     o.onFrame({ ...frame(), srcW: 800 });
     expect(o.count, "a new size: no tile fits").toBe(0);
+  });
+
+  it("a tile decoded only after a later frame changed its region is refused, and one elsewhere is not", () => {
+    const closed: string[] = [];
+    const o = new Overlay<string>((img) => closed.push(img));
+    o.onFrame(frame());
+    // Frame 6 changes the top-left while the image of tile 5 (matching frame 5) was still being decoded.
+    o.onFrame(frame({ seq: 6, unpaint: [{ x: 0, y: 0, w: 64, h: 64 }] }));
+    expect(o.add({ id: 1, seq: 5, rect: { x: 0, y: 0, w: 128, h: 64 }, image: "late" }), "it would cover the change").toBe(false);
+    expect(closed).toEqual(["late"]);
+    expect(o.add({ id: 2, seq: 5, rect: { x: 512, y: 0, w: 64, h: 64 }, image: "fine" })).toBe(true);
+    expect(o.add({ id: 3, seq: 6, rect: { x: 0, y: 0, w: 64, h: 64 }, image: "new" }), "a tile of that frame or later is fine").toBe(true);
+    o.onFrame(frame({ seq: 9, unpaintAll: true }));
+    expect(o.add({ id: 4, seq: 8, rect: { x: 900, y: 400, w: 64, h: 64 }, image: "x" }), "unpaint-all covers everything").toBe(false);
   });
 
   it("a larger tile over the same place replaces the smaller ones under it", () => {
@@ -204,6 +218,21 @@ describe("what fingers do", () => {
     expect(scrolled.ops).toEqual([{ k: "wheel", x: 10, y: 10, dx: 0, dy: 240 }]);
   });
 
+  it("a second finger during a one-finger gesture is ignored, and the first finger ends it", () => {
+    const g = new Gestures();
+    g.cursor = { x: 100, y: 100 };
+    g.down({ id: 1, x: 50, y: 50 }, 0, f());
+    g.move({ id: 1, x: 70, y: 50 }, 30, f());
+    expect(g.idle()).toBe(false);
+    g.down({ id: 2, x: 300, y: 200 }, 40, f());
+    expect(g.move({ id: 2, x: 390, y: 200 }, 50, f()).ops, "the second finger moves nothing").toEqual([]);
+    expect(g.move({ id: 1, x: 80, y: 50 }, 60, f()).ops).toEqual([{ k: "move", x: 244, y: 100 }]);
+    expect(g.up({ id: 1, x: 80, y: 50 }, 70, f()).ops).toEqual([]);
+    expect(g.move({ id: 2, x: 395, y: 200 }, 80, f()).ops, "nor after the first lifted").toEqual([]);
+    expect(g.up({ id: 2, x: 395, y: 200 }, 90, f()).ops).toEqual([]);
+    expect(g.idle()).toBe(true);
+  });
+
   it("merges moves and wheels in a row, and nothing else", () => {
     const ops: ScOp[] = [{ k: "move", x: 1, y: 1 }, { k: "move", x: 2, y: 2 }, { k: "click", x: 2, y: 2, b: "left" }, { k: "wheel", x: 5, y: 5, dx: 0, dy: 120 }, { k: "wheel", x: 6, y: 6, dx: 120, dy: 120 }, { k: "key", key: "Tab", mods: [] }];
     expect(coalesce(ops)).toEqual([{ k: "move", x: 2, y: 2 }, { k: "click", x: 2, y: 2, b: "left" }, { k: "wheel", x: 5, y: 5, dx: 120, dy: 240 }, { k: "key", key: "Tab", mods: [] }]);
@@ -299,7 +328,7 @@ describe("one screen from the phone", () => {
     await r.s.pick("w:1:2");
     r.s.input([{ k: "move", x: 1, y: 1 }]);
     r.s.input([{ k: "move", x: 2, y: 2 }]);
-    expect(r.sent).toEqual([], "moves wait a moment for the next");
+    expect(r.sent, "moves wait a moment for the next").toEqual([]);
     r.s.input([{ k: "click", x: 2, y: 2, b: "left" }]);
     expect(r.sent).toEqual([{ sc: "sc1", ops: [{ k: "move", x: 2, y: 2 }, { k: "click", x: 2, y: 2, b: "left" }], st: 1005 }]);
     r.advance(FREEZE_MS + 300);
@@ -321,6 +350,49 @@ describe("one screen from the phone", () => {
     expect(r.keyframes.length).toBeGreaterThanOrEqual(1);
     expect(r.keyframes.length).toBeLessThanOrEqual(2);
     expect(r.keyframes[0] - 1000).toBeGreaterThan(STUCK_MS);
+  });
+
+  it("the cursor moving alone does not count as frames that fail to decode", async () => {
+    const r = rig();
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    for (let i = 0; i < 12; i++) {
+      r.advance(250);
+      r.s.media(false);
+    }
+    expect(r.keyframes).toEqual([]);
+    expect(r.s.state?.phase).toBe("live");
+  });
+
+  it("frames that will not be shown are acknowledged all the same, and a keyframe is asked for", async () => {
+    const r = rig();
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    r.s.skipped(7);
+    expect(r.acks).toEqual([7]);
+    expect(r.keyframes.length).toBe(1);
+  });
+
+  it("a picture that stops while the computer says it sends and the heartbeat goes on is called stuck", async () => {
+    const r = rig();
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    r.s.decoded(1);
+    r.s.onMessage({ type: "sc_stats", sc: "sc1", fps: 15, h: 720 });
+    for (let i = 0; i < 10; i++) {
+      r.advance(250);
+      r.s.onMessage({ type: "sc_fhb", sc: "sc1" });
+    }
+    expect(r.s.state).toMatchObject({ phase: "live", stuck: true });
+    expect(r.keyframes.length).toBeGreaterThan(0);
+    r.s.decoded(2);
+    expect(r.s.state?.stuck).toBe(false);
+    // A still screen sends nothing, and says so: not stuck.
+    r.s.onMessage({ type: "sc_stats", sc: "sc1", fps: 0, h: 720 });
+    r.advance(3000);
+    r.s.onMessage({ type: "sc_fhb", sc: "sc1" });
+    r.advance(250);
+    expect(r.s.state?.stuck).toBe(false);
   });
 
   it("a pause to protect the computer is resumed by a tap, which is not sent as a click", async () => {

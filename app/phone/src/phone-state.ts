@@ -27,7 +27,7 @@ import { afterFailedPairing, movedTo, platformOf } from "./install-state";
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
-import { ScreenSession, type ScreenState } from "./screen";
+import { KIND_VIDEO, ScreenSession, type ScreenState } from "./screen";
 import { SCREEN_API, TAKEOVER_API } from "../../src/lib/attention";
 
 // ---------- signals the views read ----------
@@ -238,7 +238,8 @@ const link = new Link(browserEnv(), () => {
     remoteScreens.onMessage(m as Parameters<ScreenSession["onMessage"]>[0]);
   },
   screenMedia(bytes) {
-    remoteScreens.media();
+    // Only video says frames are coming; a cursor or a tile does not.
+    remoteScreens.media(bytes[1] === KIND_VIDEO);
     screenMediaSink?.(bytes);
   },
   sessions(m: SessionsMsg) {

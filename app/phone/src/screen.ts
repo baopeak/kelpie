@@ -17,6 +17,8 @@ const TILE_HEADER = 20;
 export const FREEZE_MS = 3000;
 /** Frames arriving but none decoded for this long: ask for a keyframe. */
 export const STUCK_MS = 1000;
+/** The computer says it sends frames and none was shown for this long: the picture is called stuck. */
+export const STUCK_SHOW_MS = 2000;
 /** Moves and scrolls are merged and sent at most this often. */
 export const FLUSH_MS = 33;
 /** A press held this long without moving is a long press. */
@@ -148,15 +150,25 @@ export interface Tile<T> {
   image: T;
 }
 
+/** How many frames' unpaints are remembered, to refuse a tile that arrives after a frame that changed its region. */
+const UNPAINT_HISTORY = 64;
+
 /** The crisp tiles over the video: a tile is drawn once the video frame it matches is shown, and dropped as the frame that changes its region
- *  is drawn. `T` is what the page decoded the image to (an ImageBitmap), with `close` to free it. */
+ *  is drawn, or skipped. A tile whose image is decoded only after a later frame changed its region (decoding is asynchronous) is refused: the
+ *  unpaints of the last frames are remembered for that. `T` is what the page decoded the image to (an ImageBitmap), with `close` to free it. */
 export class Overlay<T> {
   private tiles = new Map<number, Tile<T>>();
   private size = { w: 0, h: 0 };
+  private history: { seq: number; all: boolean; rects: Rect[] }[] = [];
 
   constructor(private close: (image: T) => void = () => {}) {}
 
-  add(t: Tile<T>) {
+  /** False when the tile came too late: a frame after the one it matches changed its region. */
+  add(t: Tile<T>): boolean {
+    if (this.history.some((h) => h.seq > t.seq && (h.all || h.rects.some((r) => overlaps(r, t.rect))))) {
+      this.close(t.image);
+      return false;
+    }
     const old = this.tiles.get(t.id);
     if (old) this.close(old.image);
     // A newer tile over the same place replaces the ones under it.
@@ -167,11 +179,15 @@ export class Overlay<T> {
       }
     }
     this.tiles.set(t.id, t);
+    return true;
   }
 
-  /** A video frame is being drawn: what changed under tiles drops them, and a new source size drops all. */
-  onFrame(f: { unpaint: Rect[]; unpaintAll: boolean; srcW: number; srcH: number }) {
-    if (f.unpaintAll || f.srcW !== this.size.w || f.srcH !== this.size.h) {
+  /** A video frame is drawn, or skipped: what changed under tiles drops them, and a new source size drops all. */
+  onFrame(f: { seq: number; unpaint: Rect[]; unpaintAll: boolean; srcW: number; srcH: number }) {
+    const resized = f.srcW !== this.size.w || f.srcH !== this.size.h;
+    this.history.push({ seq: f.seq, all: f.unpaintAll || resized, rects: f.unpaint });
+    if (this.history.length > UNPAINT_HISTORY) this.history.shift();
+    if (f.unpaintAll || resized) {
       this.clear();
       this.size = { w: f.srcW, h: f.srcH };
       return;
@@ -326,7 +342,14 @@ export class Gestures {
   mode: "trackpad" | "direct" = "trackpad";
   /** Where the computer's cursor is, in source pixels (the computer says it; trackpad mode moves it). */
   cursor = { x: 0, y: 0 };
+
+  /** No finger is down: the computer's own cursor (moved at the desk, or by a program) is where a tap clicks. */
+  idle(): boolean {
+    return this.touches.size === 0;
+  }
   private touches = new Map<number, { x: number; y: number; x0: number; y0: number; t0: number }>();
+  /** The finger a one-finger gesture follows: another one that lands during it is ignored. */
+  private first: number | null = null;
   private state: "idle" | "press" | "point" | "drag" | "scroll1" | "two" | "two_up" | "scroll2" | "pinch" = "idle";
   private pinch0 = { d: 0, view: null as View | null, mid: { x: 0, y: 0 } };
   private carry = { x: 0, y: 0 };
@@ -342,7 +365,10 @@ export class Gestures {
 
   down(t: Touch, time: number, f: Frame): GestureOut {
     this.touches.set(t.id, { x: t.x, y: t.y, x0: t.x, y0: t.y, t0: time });
-    if (this.touches.size === 1) this.state = "press";
+    if (this.touches.size === 1) {
+      this.state = "press";
+      this.first = t.id;
+    }
     else if (this.touches.size === 2 && (this.state === "press" || this.state === "idle")) {
       this.state = "two";
       const p = this.pair()!;
@@ -354,6 +380,7 @@ export class Gestures {
   move(t: Touch, time: number, f: Frame): GestureOut {
     const was = this.touches.get(t.id);
     if (!was) return NONE;
+    if ((this.state === "point" || this.state === "drag" || this.state === "scroll1") && t.id !== this.first) return NONE;
     let dx = t.x - was.x;
     let dy = t.y - was.y;
     was.x = t.x;
@@ -441,6 +468,14 @@ export class Gestures {
     if (!this.touches.size) {
       this.state = "idle";
       this.carry = { x: 0, y: 0 };
+    }
+    const oneFinger = state === "point" || state === "drag" || state === "scroll1";
+    // A finger that landed during a one-finger gesture lifts: the gesture goes on.
+    if (oneFinger && t.id !== this.first) return NONE;
+    // The first finger ends it, whatever other finger is still down.
+    if (oneFinger) {
+      this.state = "idle";
+      this.first = null;
     }
     if (state === "drag") {
       const at = this.mode === "trackpad" ? this.cursor : this.src(f, t.x, t.y);
@@ -537,9 +572,11 @@ export interface ScreenState {
   encoder: string;
   message: string | null;
   text: "sending" | "sent" | "not_sent" | null;
+  /** The computer says it sends frames, the heartbeat goes on, and none has been shown for a while: the picture is stuck. */
+  stuck: boolean;
 }
 
-const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null });
+const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null, stuck: false });
 
 /** Why a screen ended, in the phone's words; the reason codes are the daemon's and the helper's. */
 export function endedText(reason: string, t: (s: string) => string): string {
@@ -558,6 +595,10 @@ export function endedText(reason: string, t: (s: string) => string): string {
       return t("The connection was lost for too long.");
     case "replaced":
       return t("Another screen was opened instead.");
+    case "display_changed":
+      return t("The screen's size or orientation changed on the computer. See it again.");
+    case "failed":
+      return t("The screen could not be started.");
     case "encoder_failed":
       return t("The computer could not encode its screen.");
     case "app_closed":
@@ -581,6 +622,8 @@ export function remoteText(remote: string, t: (s: string) => string): string | n
       return t("An app running as administrator is in front: Windows does not let Kelpie type into it.");
     case "covered":
       return t("Another window is over this one where you tapped: the tap was not sent.");
+    case "not_front":
+      return t("The shared window is not in front on the computer, so keys and text were not sent. Tap it to bring it to the front.");
     case "blocked":
       return t("Windows did not take that input: an app running as administrator, or a secure screen.");
     case "paused_load":
@@ -674,16 +717,26 @@ export class ScreenSession {
     if (this.state?.phase === "frozen") this.patch({ phase: "live" });
   }
 
-  /** A media message arrived (the view decodes it). */
-  media() {
-    this.heardAt = this.mediaAt = this.port.now();
+  /** A media message arrived (the view decodes it). Only video says frames are coming: the cursor moves on its own. */
+  media(video = true) {
+    const now = this.port.now();
+    this.heardAt = now;
+    if (video) this.mediaAt = now;
     if (this.state?.phase === "frozen") this.patch({ phase: "live" });
   }
 
   /** Video frame `seq` came out of the decoder: the computer may send more. */
   decoded(seq: number) {
     this.decodedAt = this.port.now();
+    if (this.state?.stuck) this.patch({ stuck: false });
     if (this.state?.sc && this.state.phase !== "ended") this.port.ack(this.state.sc, seq);
+  }
+
+  /** Video frame `seq` will not be shown (skipped while a keyframe is awaited, or the decoder failed on it): it is acknowledged all the same, so
+   *  the computer never waits for it, and a keyframe is asked for. */
+  skipped(seq: number) {
+    if (this.state?.sc && this.state.phase !== "ended") this.port.ack(this.state.sc, seq);
+    this.needKeyframe();
   }
 
   /** The decoder failed or was reset: a keyframe, at most once a second. */
@@ -777,6 +830,11 @@ export class ScreenSession {
         this.patch({ phase: "frozen" });
       }
       if (this.state?.phase === "live" && this.mediaAt - this.decodedAt > STUCK_MS) this.needKeyframe();
+      // Heartbeats come and the computer says it sends frames, yet nothing has been shown: say so, and ask for a fresh picture.
+      const sending = (this.state?.stats?.fps ?? 0) > 0;
+      const stuck = this.state?.phase === "live" && sending && now - this.decodedAt > STUCK_SHOW_MS;
+      if (stuck) this.needKeyframe();
+      if (this.state && this.state.phase !== "ended" && stuck !== this.state.stuck) this.patch({ stuck });
     };
     this.watchTimer = this.port.setTimeout(look, 250);
   }
