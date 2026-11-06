@@ -206,6 +206,9 @@ struct State {
     /// The number of the last notice to the app of what to make (`notice`): notices are sent after the lock is let go, so two may arrive out of order,
     /// and the app keeps the newest.
     version: u64,
+    /// The app says the computer does not show the pane now (another tab in front, a minimised window, a window behind another): the phone hears it
+    /// in its heartbeats and shows that instead of a picture that looks live.
+    hidden: bool,
 }
 
 /// What the app is told to make now, numbered under the hold's lock.
@@ -396,6 +399,17 @@ impl Broker {
                 drop(st);
                 hold.wake.notify_one();
             }
+            Some("hidden") => {
+                let on = params["on"].as_bool() == Some(true);
+                let mut st = hold.state.lock();
+                if st.hidden != on {
+                    st.hidden = on;
+                    // Said at once, in the next heartbeat.
+                    st.last_beat = Instant::now().checked_sub(HEARTBEAT).unwrap_or(st.last_beat);
+                    drop(st);
+                    hold.wake.notify_one();
+                }
+            }
             Some("ended") => {
                 let reason = match params["reason"].as_str() {
                     Some("desktop") => "desktop",
@@ -538,7 +552,7 @@ impl Broker {
             grant,
             ended: AtomicBool::new(false),
             wake: Notify::new(),
-            state: Mutex::new(State { conn: Some((phone.conn, phone.out.clone())), gone_at: None, credit: CREDIT, pending: None, seq: 0, sent: VecDeque::new(), last_sent: None, last_input: now, last_beat: now, paused: false, ladder, applied: step, idle: IDLE_STOP, rebind: REBIND_WINDOW, inputs: (now, 0), wakes: 0, version: 0 }),
+            state: Mutex::new(State { conn: Some((phone.conn, phone.out.clone())), gone_at: None, credit: CREDIT, pending: None, seq: 0, sent: VecDeque::new(), last_sent: None, last_input: now, last_beat: now, paused: false, ladder, applied: step, idle: IDLE_STOP, rebind: REBIND_WINDOW, inputs: (now, 0), wakes: 0, version: 0, hidden: false }),
         });
         self.holds.lock().insert(tk.clone(), hold.clone());
         d.mobile.audit(phone.device, "takeover_start", &short(started.get("host"), 120));
@@ -652,13 +666,13 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
                 if let Some((_, out)) = st.conn.clone() {
                     let due = st.last_sent.is_none_or(|at| now.duration_since(at) >= st.applied.gap());
                     if st.credit > 0 && due && !st.paused {
-                        if let Some(frame) = st.pending.as_ref() {
-                            let seq = st.seq + 1;
-                            let msg = json!({"type": "tk_frame", "tk": hold.tk, "seq": seq, "data": frame.data, "meta": frame.meta, "server_ts": now_millis()}).to_string();
-                            // A lane with no room keeps the frame for the next pass, unless a newer one comes first: a page that then goes still would
-                            // otherwise leave the phone with the picture before.
-                            if out.try_send(msg).is_ok() {
-                                st.pending = None;
+                        // A lane with no room keeps the frame for the next pass, unless a newer one comes first: a page that then goes still would
+                        // otherwise leave the phone with the picture before. The frame is made into a message only once there is room for it.
+                        let room = if st.pending.is_some() { out.try_reserve().ok() } else { None };
+                        if let Some(permit) = room {
+                            if let Some(frame) = st.pending.take() {
+                                let seq = st.seq + 1;
+                                permit.send(json!({"type": "tk_frame", "tk": hold.tk, "seq": seq, "data": frame.data, "meta": frame.meta, "server_ts": now_millis()}).to_string());
                                 st.seq = seq;
                                 st.credit -= 1;
                                 st.sent.push_back((seq, now));
@@ -669,7 +683,7 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
                     if now.duration_since(st.last_beat) >= HEARTBEAT {
                         st.last_beat = now;
                         // `paused`: the phone's input is not taken now, until it acknowledges (it may have a frame it could not show).
-                        let _ = out.try_send(json!({"type": "tk_fhb", "tk": hold.tk, "seq": st.seq, "paused": st.paused, "server_ts": now_millis()}).to_string());
+                        let _ = out.try_send(json!({"type": "tk_fhb", "tk": hold.tk, "seq": st.seq, "paused": st.paused, "hidden": st.hidden, "server_ts": now_millis()}).to_string());
                     }
                     if !st.paused && st.sent.front().is_some_and(|(_, at)| now.duration_since(*at) >= PAUSE_AFTER) {
                         st.paused = true;
@@ -1174,5 +1188,20 @@ mod tests {
         let versions: Vec<u64> = set.iter().map(|s| s["v"].as_u64().unwrap()).collect();
         assert!(versions.len() >= 2 && versions.windows(2).all(|w| w[0] < w[1]), "{versions:?}");
         assert_eq!(set.last().unwrap()["paused"], false, "the newest says resume");
+    }
+
+    #[tokio::test]
+    async fn the_phone_hears_at_once_that_the_computer_hides_the_pane() {
+        let mut r = rig();
+        let tk = r.start().await;
+        assert_eq!(r.next("tk_fhb").await.expect("a heartbeat")["hidden"], false);
+        r.d.takeover.on_event(&r.d, APP, &json!({"kind": "hidden", "tk": tk, "on": true}));
+        let at = Instant::now();
+        let beat = r.next("tk_fhb").await.expect("a heartbeat");
+        assert!(beat["hidden"] == true && at.elapsed() < HEARTBEAT / 2, "said in the next pass, not the next second: {beat}");
+        r.d.takeover.on_event(&r.d, 99, &json!({"kind": "hidden", "tk": tk, "on": false}));
+        assert_eq!(r.next("tk_fhb").await.expect("a heartbeat")["hidden"], true, "only the hold's own app is heard");
+        r.d.takeover.on_event(&r.d, APP, &json!({"kind": "hidden", "tk": tk, "on": false}));
+        assert_eq!(r.next("tk_fhb").await.expect("a heartbeat")["hidden"], false);
     }
 }
