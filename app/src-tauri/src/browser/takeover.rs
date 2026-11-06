@@ -3,26 +3,39 @@
 //!
 //! - The pane is streamed with `Page.startScreencast` (JPEG); each `Page.screencastFrame` is acknowledged at once and handed to the daemon, which keeps
 //!   only the newest and paces it to the phone. The event receiver is attached for a takeover only: with none held, no DevTools subscription exists.
-//! - The phone's input arrives as a closed set of events (`tap`, `down`, `move`, `up`, `wheel`, `key`) that the daemon checked, and goes into the page
-//!   in order as `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`; text as `Input.insertText`. None of it is logged.
+//! - **One queue per takeover, in order**: the phone's input (a closed set of events, `tap`, `down`, `move`, `up`, `wheel`, `key`, that the daemon checked)
+//!   and its text both go through it, so text never overtakes the tap that chose its field. Each item names the window it was meant for (`window_id`
+//!   of the frame the phone mapped it against): meant for another (a popup that opened or closed meanwhile) it is dropped. Anything but a release
+//!   older than `INPUT_TTL_MS` by the phone's reading of this computer's clock is dropped when its turn comes, and the queue holds at most `QUEUE`
+//!   items. A button left pressed is released when the takeover ends or its window changes. None of it is logged.
 //! - A pane and the popups it opened (`window.open` with a size: OAuth and sign-in windows) are one group: the popup on top is streamed while it is
 //!   open, and closing it goes back to the pane. The window's title says the group is controlled from the phone; the pane's own banner is the app's
 //!   (`browser-pane.tsx`).
 //!
 //! What the window shows (picking the pane, its tab brought to the front, the banner) is the interface's: `browser.panes` and `browser.takeover_start` go to it
-//! as a `provider-request` event, and it answers with `provider_reply` after `browser_takeover_start`.
+//! as a `provider-request` event, and it answers with `provider_reply` after `browser_takeover_start`. A start the daemon has given up on (it said
+//! `browser.takeover_stop` first) is refused.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::mpsc;
 
 use super::{valid_label, Browsers};
 use crate::daemon_client::DaemonClient;
 use crate::fs_ops::CmdResult;
+
+/// Input older than this when its turn comes is dropped (the daemon checked it once already, on arrival).
+const INPUT_TTL_MS: u64 = 1000;
+/// Items one takeover's queue holds; more are dropped (text is answered as not sent).
+const QUEUE: usize = 64;
+/// Takeovers the daemon gave up on, remembered so that a start that comes after is refused.
+const CANCELLED: usize = 32;
 
 /// How a frame is made, as the daemon's ladder says.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,6 +56,16 @@ impl Settings {
     }
 }
 
+/// What waits in a takeover's queue: input, or text with the request to answer once it is typed.
+#[derive(Debug)]
+enum Queued {
+    Ops { ops: Vec<Value>, window: u64, st: u64 },
+    Text { text: String, window: u64, st: u64, preq: u64 },
+}
+
+/// Where the mouse button was pressed and not yet released, for each takeover.
+type Pressed = Arc<Mutex<Option<(f64, f64)>>>;
+
 struct Held {
     /// The pane's webview, and the one streamed now (the pane, or its popup on top).
     pane: String,
@@ -51,21 +74,23 @@ struct Held {
     banner: String,
     settings: Settings,
     paused: bool,
-    /// Frames of an older target (or an older start of this one) are dropped.
+    /// The streamed window's id: frames carry it (`window_id`), input names it back, and frames or input of another are dropped.
     generation: u64,
     /// The `Page.screencastFrame` receiver on `target`.
     token: Option<i64>,
-    input: tokio::sync::mpsc::UnboundedSender<Vec<Value>>,
+    input: mpsc::Sender<Queued>,
+    pressed: Pressed,
 }
 
 /// A frame as WebView2 handed it: takeover, generation, the event's JSON.
-type FrameSink = tokio::sync::mpsc::UnboundedSender<(String, u64, String)>;
+type FrameSink = mpsc::UnboundedSender<(String, u64, String)>;
 
 #[derive(Default)]
 pub struct Takeovers {
     held: Mutex<HashMap<String, Held>>,
     generation: AtomicU64,
     sink: Mutex<Option<FrameSink>>,
+    cancelled: Mutex<VecDeque<String>>,
 }
 
 impl Takeovers {
@@ -78,12 +103,25 @@ impl Takeovers {
         self.held.lock().get(tk).filter(|h| generation.is_none_or(|g| g == h.generation)).map(|h| h.target.clone())
     }
 
+    /// The window streamed for `tk` and its id.
+    fn window(&self, tk: &str) -> Option<(String, u64)> {
+        self.held.lock().get(tk).map(|h| (h.target.clone(), h.generation))
+    }
+
     /// The title a popup of `pane` shows: who controls the group, while someone does.
     pub(super) fn popup_title(&self, pane: &str, title: &str) -> String {
         match self.held.lock().values().find(|h| h.pane == pane) {
             Some(h) => format!("{} — {title}", h.banner),
             None => title.to_string(),
         }
+    }
+
+    fn cancel(&self, tk: &str) {
+        let mut c = self.cancelled.lock();
+        if c.len() >= CANCELLED {
+            c.pop_front();
+        }
+        c.push_back(tk.to_string());
     }
 }
 
@@ -103,6 +141,24 @@ fn event(app: &AppHandle, params: Value) {
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Puts `item` in the queue of takeover `tk`. Text that does not fit, or has no takeover to go to, is answered as not sent.
+fn enqueue(app: &AppHandle, tk: &str, item: Queued) {
+    let sent = match app.try_state::<Takeovers>() {
+        Some(state) => match state.held.lock().get(tk) {
+            Some(h) => h.input.try_send(item).map_err(|e| e.into_inner()),
+            None => Err(item),
+        },
+        None => Err(item),
+    };
+    if let Err(Queued::Text { preq, .. }) = sent {
+        reply(app, preq, Err("not sent".into()));
+    }
+}
+
 /// A request or a notice from the daemon (`daemon_client`'s read loop).
 pub fn on_message(app: &AppHandle, msg: Value) {
     if let Some(preq) = msg["preq"].as_u64() {
@@ -115,13 +171,10 @@ pub fn on_message(app: &AppHandle, msg: Value) {
                     reply(app, preq, Err("the window is not ready".into()));
                 }
             }
+            // Behind the input that came before it, never ahead.
             "browser.takeover_text" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let tk = params["tk"].as_str().unwrap_or_default();
-                    let done = insert_text(&app, tk, params["text"].as_str().unwrap_or_default()).await;
-                    reply(&app, preq, done.map(|()| json!(true)));
-                });
+                let item = Queued::Text { text: params["text"].as_str().unwrap_or_default().to_string(), window: params["w"].as_u64().unwrap_or(0), st: params["st"].as_u64().unwrap_or(0), preq };
+                enqueue(app, params["tk"].as_str().unwrap_or_default(), item);
             }
             _ => reply(app, preq, Err(format!("unknown request {method}"))),
         }
@@ -131,10 +184,8 @@ pub fn on_message(app: &AppHandle, msg: Value) {
     let tk = params["tk"].as_str().unwrap_or_default().to_string();
     match msg["pnote"].as_str() {
         Some("browser.takeover_input") => {
-            let Some(state) = app.try_state::<Takeovers>() else { return };
-            let held = state.held.lock();
-            if let (Some(h), Some(ops)) = (held.get(&tk), params["ops"].as_array()) {
-                let _ = h.input.send(ops.clone());
+            if let Some(ops) = params["ops"].as_array() {
+                enqueue(app, &tk, Queued::Ops { ops: ops.clone(), window: params["w"].as_u64().unwrap_or(0), st: params["st"].as_u64().unwrap_or(0) });
             }
         }
         Some("browser.takeover_set") => {
@@ -160,15 +211,19 @@ pub async fn browser_takeover_start(app: AppHandle, tk: String, label: String, b
     }
     let wv = app.get_webview(&label).ok_or_else(|| format!("no browser {label}"))?;
     let state = app.state::<Takeovers>();
+    if state.cancelled.lock().iter().any(|c| *c == tk) {
+        return Err("the phone's request ended before the pane was ready".into());
+    }
     if state.tk_of_pane(&label).is_some() {
         return Err("that pane is taken over already".into());
     }
     // A popup of the pane already open is what the phone sees first.
     let target = app.state::<Browsers>().popups_of(&label).last().cloned().unwrap_or_else(|| label.clone());
-    let (input, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (input, rx) = mpsc::channel(QUEUE);
+    let pressed: Pressed = Arc::new(Mutex::new(None));
     let generation = state.generation.fetch_add(1, Ordering::Relaxed) + 1;
-    state.held.lock().insert(tk.clone(), Held { pane: label.clone(), target, banner: banner.chars().take(80).collect(), settings: Settings::from(&settings), paused: false, generation, token: None, input });
-    tauri::async_runtime::spawn(inputs(app.clone(), tk.clone(), rx));
+    state.held.lock().insert(tk.clone(), Held { pane: label.clone(), target, banner: banner.chars().take(80).collect(), settings: Settings::from(&settings), paused: false, generation, token: None, input, pressed: pressed.clone() });
+    tauri::async_runtime::spawn(inputs(app.clone(), tk.clone(), rx, pressed));
     if let Err(e) = stream_on(&app, &tk).await {
         state.held.lock().remove(&tk);
         return Err(e);
@@ -197,10 +252,22 @@ pub fn provider_reply(app: AppHandle, preq: u64, result: Option<Value>, error: O
     Ok(())
 }
 
-/// Ends takeover `tk` here: the stream stops, the interface takes its banner down. False when there was none.
+/// Releases the mouse button in `target` if a drag left it pressed.
+async fn release(app: &AppHandle, target: &str, pressed: &Pressed) {
+    let at = pressed.lock().take();
+    if let (Some((x, y)), Some(wv)) = (at, app.get_webview(target)) {
+        let _ = cdp(&wv, "Input.dispatchMouseEvent", json!({"type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1})).await;
+    }
+}
+
+/// Ends takeover `tk` here: the stream stops, the interface takes its banner down. False when there was none: a start for it that comes later is refused.
 async fn stop(app: &AppHandle, tk: &str, reason: &str) -> bool {
     let state = app.state::<Takeovers>();
-    let Some(held) = state.held.lock().remove(tk) else { return false };
+    let Some(held) = state.held.lock().remove(tk) else {
+        state.cancel(tk);
+        return false;
+    };
+    release(app, &held.target, &held.pressed).await;
     stream_off(app, &held.target, held.token).await;
     retitle_popups(app, &held.pane);
     let _ = app.emit_to("main", "takeover-ended", json!({"tk": tk, "pane": held.pane, "reason": reason}));
@@ -227,7 +294,8 @@ pub(super) fn daemon_gone(app: &AppHandle) {
     }
 }
 
-/// The group's top window changed (a popup opened or closed): the phone sees that one from now on.
+/// The group's top window changed (a popup opened or closed): the phone sees that one from now on, under a new window id, so that input aimed at the
+/// window before goes nowhere.
 pub(super) fn retarget(app: &AppHandle, pane: &str) {
     let Some(tk) = app.state::<Takeovers>().tk_of_pane(pane) else { return };
     let app = app.clone();
@@ -241,11 +309,12 @@ pub(super) fn retarget(app: &AppHandle, pane: &str) {
             if h.target == next {
                 return;
             }
-            let old = (h.target.clone(), h.token.take());
+            let old = (h.target.clone(), h.token.take(), h.pressed.clone());
             h.target = next;
             h.generation = state.generation.fetch_add(1, Ordering::Relaxed) + 1;
             old
         };
+        release(&app, &old.0, &old.2).await;
         stream_off(&app, &old.0, old.1).await;
         let _ = stream_on(&app, &tk).await;
         retitle_popups(&app, &pane);
@@ -334,14 +403,15 @@ fn frame_sink(app: &AppHandle) -> FrameSink {
     if let Some(s) = sink.as_ref().filter(|s| !s.is_closed()) {
         return s.clone();
     }
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::unbounded_channel();
     tauri::async_runtime::spawn(frames(app.clone(), rx));
     *sink = Some(tx.clone());
     tx
 }
 
-/// Each frame: acknowledged to the page at once (the daemon keeps only the newest, so the page never waits on the phone), then handed to the daemon.
-async fn frames(app: AppHandle, mut rx: tokio::sync::mpsc::UnboundedReceiver<(String, u64, String)>) {
+/// Each frame: acknowledged to the page at once (the daemon keeps only the newest, so the page never waits on the phone), then handed to the daemon
+/// with the id of the window it shows.
+async fn frames(app: AppHandle, mut rx: mpsc::UnboundedReceiver<(String, u64, String)>) {
     while let Some((tk, generation, json)) = rx.recv().await {
         let Some(target) = app.state::<Takeovers>().target(&tk, Some(generation)) else { continue };
         let Ok(mut v) = serde_json::from_str::<Value>(&json) else { continue };
@@ -351,22 +421,95 @@ async fn frames(app: AppHandle, mut rx: tokio::sync::mpsc::UnboundedReceiver<(St
         }
         let mut meta = v.get_mut("metadata").map(Value::take).unwrap_or_else(|| json!({}));
         meta["window"] = json!(if target.contains("-popup-") { "popup" } else { "pane" });
+        meta["window_id"] = json!(generation);
         let data = v.get_mut("data").map(Value::take).unwrap_or(Value::Null);
         event(&app, json!({"kind": "frame", "tk": tk, "data": data, "meta": meta}));
     }
 }
 
-/// The phone's input for `tk`, in the order it came.
-async fn inputs(app: AppHandle, tk: String, mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<Value>>) {
-    let mut pressed = false;
-    while let Some(ops) = rx.recv().await {
-        let Some(target) = app.state::<Takeovers>().target(&tk, None) else { return };
-        let Some(wv) = app.get_webview(&target) else { continue };
-        for op in ops {
-            // A page that refuses one event gets the next: what was refused is not said anywhere.
-            let _ = dispatch(&wv, &op, &mut pressed).await;
+/// What one queued item comes to, at its turn: the protocol calls to make in order, and for text the request to answer and whether it may go.
+#[derive(Debug, PartialEq)]
+enum Plan {
+    Calls(Vec<(&'static str, Value)>),
+    Text { preq: u64, text: Option<String>, why: &'static str },
+}
+
+/// Decides an item at its turn against the window streamed now (`window`) and the clock. Input meant for another window is dropped; stale input is
+/// dropped but for releases, which never leave a button pressed.
+fn plan(item: Queued, window: u64, now: u64, pressed: &mut Option<(f64, f64)>) -> Plan {
+    let stale = |st: u64| now.saturating_sub(st) > INPUT_TTL_MS || st > now + INPUT_TTL_MS;
+    match item {
+        Queued::Ops { ops, window: w, st } => {
+            if w != window {
+                return Plan::Calls(vec![]);
+            }
+            let old = stale(st);
+            Plan::Calls(ops.iter().filter(|op| !old || op["k"] == "up").flat_map(|op| protocol_events(op, pressed)).collect())
+        }
+        Queued::Text { text, window: w, st, preq } => {
+            if w != window {
+                Plan::Text { preq, text: None, why: "the window changed: check the page, then type it again" }
+            } else if stale(st) {
+                Plan::Text { preq, text: None, why: "not sent: it came too late" }
+            } else {
+                Plan::Text { preq, text: Some(text), why: "" }
+            }
         }
     }
+}
+
+/// Runs one takeover's queue, in order: `window` names the window streamed now (none once it ended), `call` makes a protocol call there, `answer`
+/// answers text's request once it is typed (or refused).
+async fn run_queue<C, F>(mut rx: mpsc::Receiver<Queued>, window: impl Fn() -> Option<u64>, pressed: Pressed, mut call: C, mut answer: impl FnMut(u64, Result<Value, String>))
+where
+    C: FnMut(&'static str, Value) -> F,
+    F: Future<Output = CmdResult<Value>>,
+{
+    while let Some(item) = rx.recv().await {
+        let Some(current) = window() else {
+            if let Queued::Text { preq, .. } = item {
+                answer(preq, Err("that takeover has ended".into()));
+            }
+            return;
+        };
+        let planned = plan(item, current, now_ms(), &mut pressed.lock());
+        match planned {
+            Plan::Calls(calls) => {
+                for (method, params) in calls {
+                    // A page that refuses one event gets the next: what was refused is not said anywhere.
+                    let _ = call(method, params).await;
+                }
+            }
+            Plan::Text { preq, text: Some(text), .. } => {
+                let done = call("Input.insertText", json!({"text": text})).await;
+                answer(preq, done.map(|_| json!(true)));
+            }
+            Plan::Text { preq, text: None, why } => answer(preq, Err(why.into())),
+        }
+    }
+}
+
+/// The phone's input and text for `tk`, in the order they came, into the window streamed now.
+async fn inputs(app: AppHandle, tk: String, rx: mpsc::Receiver<Queued>, pressed: Pressed) {
+    let (a, b, c) = (app.clone(), app.clone(), app.clone());
+    let (ta, tb) = (tk.clone(), tk.clone());
+    run_queue(
+        rx,
+        move || a.state::<Takeovers>().window(&ta).map(|(_, w)| w),
+        pressed,
+        move |method, params| {
+            let target = b.state::<Takeovers>().target(&tb, None);
+            let wv = target.and_then(|t| b.get_webview(&t));
+            async move {
+                match wv {
+                    Some(wv) => cdp(&wv, method, params).await,
+                    None => Err("the page is gone".into()),
+                }
+            }
+        },
+        move |preq, result| reply(&c, preq, result),
+    )
+    .await;
 }
 
 /// `(key, code, Windows virtual key, text)` of the keys the daemon lets through.
@@ -390,23 +533,29 @@ fn key_info(key: &str) -> Option<(&'static str, &'static str, u32, Option<&'stat
     })
 }
 
-/// One input event as the DevTools protocol takes it.
-fn protocol_events(op: &Value, pressed: &mut bool) -> Vec<(&'static str, Value)> {
+/// One input event as the DevTools protocol takes it. `pressed` is where the button went down, while it is down.
+fn protocol_events(op: &Value, pressed: &mut Option<(f64, f64)>) -> Vec<(&'static str, Value)> {
     let (x, y) = (op["x"].as_f64().unwrap_or(0.0), op["y"].as_f64().unwrap_or(0.0));
     let mouse = |kind: &str, button: &str, buttons: u8, clicks: u8| json!({"type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": clicks});
     const MOUSE: &str = "Input.dispatchMouseEvent";
     match op["k"].as_str() {
         Some("tap") => {
-            *pressed = false;
+            *pressed = None;
             vec![(MOUSE, mouse("mouseMoved", "none", 0, 0)), (MOUSE, mouse("mousePressed", "left", 1, 1)), (MOUSE, mouse("mouseReleased", "left", 0, 1))]
         }
         Some("down") => {
-            *pressed = true;
+            *pressed = Some((x, y));
             vec![(MOUSE, mouse("mouseMoved", "none", 0, 0)), (MOUSE, mouse("mousePressed", "left", 1, 1))]
         }
-        Some("move") => vec![(MOUSE, mouse("mouseMoved", if *pressed { "left" } else { "none" }, u8::from(*pressed), 0))],
+        Some("move") => {
+            let down = pressed.is_some();
+            if down {
+                *pressed = Some((x, y));
+            }
+            vec![(MOUSE, mouse("mouseMoved", if down { "left" } else { "none" }, u8::from(down), 0))]
+        }
         Some("up") => {
-            *pressed = false;
+            *pressed = None;
             vec![(MOUSE, mouse("mouseReleased", "left", 0, 1))]
         }
         Some("wheel") => vec![(MOUSE, json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": op["dx"].as_f64().unwrap_or(0.0), "deltaY": op["dy"].as_f64().unwrap_or(0.0)}))],
@@ -421,19 +570,6 @@ fn protocol_events(op: &Value, pressed: &mut bool) -> Vec<(&'static str, Value)>
         }
         _ => vec![],
     }
-}
-
-async fn dispatch(wv: &tauri::Webview, op: &Value, pressed: &mut bool) -> CmdResult<()> {
-    for (method, params) in protocol_events(op, pressed) {
-        cdp(wv, method, params).await?;
-    }
-    Ok(())
-}
-
-async fn insert_text(app: &AppHandle, tk: &str, text: &str) -> Result<(), String> {
-    let target = app.state::<Takeovers>().target(tk, None).ok_or("that takeover has ended")?;
-    let wv = app.get_webview(&target).ok_or("the page is gone")?;
-    cdp(&wv, "Input.insertText", json!({"text": text})).await.map(|_| ())
 }
 
 #[cfg(windows)]
@@ -526,7 +662,7 @@ mod tests {
 
     #[test]
     fn a_tap_is_a_press_and_a_release_and_a_drag_holds_the_button() {
-        let mut pressed = false;
+        let mut pressed = None;
         let tap = protocol_events(&json!({"k": "tap", "x": 10.5, "y": 20}), &mut pressed);
         let kinds: Vec<&str> = tap.iter().map(|(_, p)| p["type"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["mouseMoved", "mousePressed", "mouseReleased"]);
@@ -534,15 +670,16 @@ mod tests {
         protocol_events(&json!({"k": "down", "x": 1, "y": 1}), &mut pressed);
         let moved = protocol_events(&json!({"k": "move", "x": 5, "y": 5}), &mut pressed);
         assert_eq!((moved[0].1["button"].as_str(), moved[0].1["buttons"].as_u64()), (Some("left"), Some(1)));
+        assert_eq!(pressed, Some((5.0, 5.0)), "where it would be released");
         protocol_events(&json!({"k": "up", "x": 5, "y": 5}), &mut pressed);
-        assert!(!pressed);
+        assert_eq!(pressed, None);
         let wheel = protocol_events(&json!({"k": "wheel", "x": 1, "y": 2, "dx": 0, "dy": 120}), &mut pressed);
         assert_eq!((wheel[0].1["type"].as_str(), wheel[0].1["deltaY"].as_f64()), (Some("mouseWheel"), Some(120.0)));
     }
 
     #[test]
     fn keys_carry_their_codes_and_only_known_ones_go() {
-        let mut pressed = false;
+        let mut pressed = None;
         let enter = protocol_events(&json!({"k": "key", "key": "Enter"}), &mut pressed);
         assert_eq!((enter[0].0, enter[0].1["type"].as_str(), enter[0].1["text"].as_str(), enter[0].1["windowsVirtualKeyCode"].as_u64()), ("Input.dispatchKeyEvent", Some("keyDown"), Some("\r"), Some(13)));
         assert_eq!(enter[1].1["type"], "keyUp");
@@ -550,5 +687,62 @@ mod tests {
         assert_eq!(tab[0].1["type"], "rawKeyDown", "a key with no text");
         assert!(protocol_events(&json!({"k": "key", "key": "F12"}), &mut pressed).is_empty());
         assert!(protocol_events(&json!({"k": "eval", "x": 1, "y": 1}), &mut pressed).is_empty());
+    }
+
+    #[test]
+    fn input_meant_for_another_window_or_too_old_is_dropped_but_a_release_always_goes() {
+        let now = 10_000;
+        let mut pressed = None;
+        let tap = || vec![json!({"k": "tap", "x": 1, "y": 1})];
+        assert_eq!(plan(Queued::Ops { ops: tap(), window: 2, st: now }, 3, now, &mut pressed), Plan::Calls(vec![]), "aimed at the window before a popup opened");
+        assert_eq!(plan(Queued::Ops { ops: tap(), window: 3, st: now - 1500 }, 3, now, &mut pressed), Plan::Calls(vec![]), "a tap that waited too long");
+        let Plan::Calls(late_release) = plan(Queued::Ops { ops: vec![json!({"k": "down", "x": 1, "y": 1}), json!({"k": "up", "x": 4, "y": 4})], window: 3, st: now - 1500 }, 3, now, &mut pressed) else { panic!() };
+        assert_eq!(late_release.iter().map(|(_, p)| p["type"].as_str().unwrap()).collect::<Vec<_>>(), ["mouseReleased"], "only the release");
+        let Plan::Calls(fresh) = plan(Queued::Ops { ops: tap(), window: 3, st: now - 100 }, 3, now, &mut pressed) else { panic!() };
+        assert_eq!(fresh.len(), 3);
+        assert_eq!(plan(Queued::Text { text: "pw".into(), window: 2, st: now, preq: 5 }, 3, now, &mut pressed), Plan::Text { preq: 5, text: None, why: "the window changed: check the page, then type it again" });
+        assert_eq!(plan(Queued::Text { text: "pw".into(), window: 3, st: now - 5000, preq: 6 }, 3, now, &mut pressed), Plan::Text { preq: 6, text: None, why: "not sent: it came too late" });
+        assert_eq!(plan(Queued::Text { text: "pw".into(), window: 3, st: now, preq: 7 }, 3, now, &mut pressed), Plan::Text { preq: 7, text: Some("pw".into()), why: "" });
+    }
+
+    #[test]
+    fn text_never_overtakes_the_tap_before_it() {
+        tauri::async_runtime::block_on(async {
+            let (tx, rx) = mpsc::channel(QUEUE);
+            let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+            let answers = Arc::new(Mutex::new(Vec::<(u64, bool)>::new()));
+            let st = now_ms();
+            tx.try_send(Queued::Ops { ops: vec![json!({"k": "tap", "x": 150, "y": 118})], window: 1, st }).unwrap();
+            tx.try_send(Queued::Text { text: "secret".into(), window: 1, st, preq: 9 }).unwrap();
+            drop(tx);
+            let (seen, told) = (calls.clone(), answers.clone());
+            run_queue(
+                rx,
+                || Some(1),
+                Arc::new(Mutex::new(None)),
+                move |method, params| {
+                    let seen = seen.clone();
+                    async move {
+                        // Each call takes a while, as a round trip to the window's thread does.
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        seen.lock().push(format!("{method} {}", params["type"].as_str().unwrap_or("text")));
+                        Ok(json!({}))
+                    }
+                },
+                move |preq, result| told.lock().push((preq, result.is_ok())),
+            )
+            .await;
+            assert_eq!(*calls.lock(), ["Input.dispatchMouseEvent mouseMoved", "Input.dispatchMouseEvent mousePressed", "Input.dispatchMouseEvent mouseReleased", "Input.insertText text"]);
+            assert_eq!(*answers.lock(), [(9, true)], "answered once it is typed");
+        });
+    }
+
+    #[test]
+    fn a_full_queue_refuses_more_rather_than_growing() {
+        let (tx, _rx) = mpsc::channel::<Queued>(QUEUE);
+        for _ in 0..QUEUE {
+            tx.try_send(Queued::Ops { ops: vec![], window: 1, st: 0 }).unwrap();
+        }
+        assert!(tx.try_send(Queued::Ops { ops: vec![], window: 1, st: 0 }).is_err());
     }
 }

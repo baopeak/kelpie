@@ -29,10 +29,11 @@ const refuse = (preq: number, error: string) => invoke("provider_reply", { preq,
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Starts streaming once the pane's page is open: a pane brought to the front from another tab opens it in about half a second. */
+/** Starts streaming once the pane's page is open: a pane brought to the front from another tab opens it in about half a second. It tries for 3 s at
+ *  most, well inside the 10 s the daemon waits: past that the daemon gives up and tells Rust to refuse the start. */
 async function startWhenOpen(tk: string, label: string, device: string, settings: unknown): Promise<{ host: string }> {
   let last: unknown = null;
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 12; i++) {
     try {
       return await invoke<{ host: string }>("browser_takeover_start", { tk, label, banner: t("Controlled from {device}", { device }), settings });
     } catch (e) {
@@ -51,7 +52,7 @@ async function onRequest(r: ProviderRequest) {
   const p = r.params as { tk: string; pane: string; device: string };
   const at = findPane(p.pane, projects, store.workspace);
   if (!at) return refuse(r.preq, t("That pane was closed on the computer."));
-  // The pane stays in front for as long as the phone holds it: a hidden page may send no frames.
+  // The pane is brought to the front: a hidden page may send no frames. Nothing keeps it there if the person switches away.
   store.switchProject(at.projectId);
   store.focusPane(at.projectId, at.tabId, at.paneId);
   try {
