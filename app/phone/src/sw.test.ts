@@ -153,7 +153,9 @@ describe("the kept shell, fetched again behind it", () => {
     vi.resetModules();
     const handlers: Record<string, (e: unknown) => void> = {};
     const kept = new Map<string, Response>([["kelpie-phone-test/", new Response("<html>v1</html>", { headers: { "content-security-policy": "connect-src 'self'" } })], ["kelpie-shell-flags/paired", new Response("1")]]);
-    vi.stubGlobal("self", { addEventListener: (type: string, h: (e: unknown) => void) => (handlers[type] = h), location: { origin: ORIGIN }, skipWaiting: async () => {}, clients: { claim: async () => {} } });
+    const told: unknown[] = [];
+    const page = { url: ORIGIN + "/", focus: async () => {}, postMessage: (m: unknown) => void told.push(m) };
+    vi.stubGlobal("self", { addEventListener: (type: string, h: (e: unknown) => void) => (handlers[type] = h), location: { origin: ORIGIN }, skipWaiting: async () => {}, clients: { claim: async () => {}, matchAll: async () => [page] } });
     vi.stubGlobal("__PRECACHE__", ["/"]);
     vi.stubGlobal("__VERSION__", "test");
     vi.stubGlobal("caches", {
@@ -179,7 +181,7 @@ describe("the kept shell, fetched again behind it", () => {
       await Promise.all(waits);
     };
     const csp = () => kept.get("kelpie-phone-test/")?.headers.get("content-security-policy");
-    return { open, message, csp };
+    return { open, message, csp, told };
   }
 
   it("keeps the page's new headers, so a relay turned on after install is allowed the next time the app opens", async () => {
@@ -194,6 +196,25 @@ describe("the kept shell, fetched again behind it", () => {
     const w = await shellWorker(async () => new Response("<html>v1</html>", { headers: { "content-security-policy": "connect-src 'self' https://relay.example wss://relay.example" } }));
     await w.message({ type: "kelpie-refresh-shell" });
     expect(w.csp()).toContain("wss://relay.example");
+  });
+
+  it("tells open pages once the kept CSP changed, and only then, since a page keeps the CSP it loaded with", async () => {
+    const w = await shellWorker(async () => new Response("<html>v1</html>", { headers: { "content-security-policy": "connect-src 'self' wss://relay.example" } }));
+    await w.message({ type: "kelpie-refresh-shell" });
+    expect(w.told).toEqual([{ type: "kelpie-shell-changed" }]);
+    // Fetched again with the same headers: nothing changed, nobody is told, so a page that reloads for it cannot do so again and again.
+    await w.message({ type: "kelpie-refresh-shell" });
+    await w.open();
+    expect(w.told).toHaveLength(1);
+  });
+
+  it("tells nobody when the page answered is another version's, or nothing answered", async () => {
+    const other = await shellWorker(async () => new Response("<html>v2</html>", { headers: { "content-security-policy": "connect-src 'self' wss://relay.example" } }));
+    await other.message({ type: "kelpie-refresh-shell" });
+    expect(other.told).toEqual([]);
+    const offline = await shellWorker(() => Promise.reject(new TypeError("offline")));
+    await offline.message({ type: "kelpie-refresh-shell" });
+    expect(offline.told).toEqual([]);
   });
 
   it("leaves the kept page alone when another version answers, or nothing does", async () => {

@@ -19,6 +19,7 @@ import { currentPairing, forgetPairing, loadPairing, relayUrl, savePairing, seem
 import { emptyView, ScreenSync, type Prompt, type ScreenFrame, type ScreenView } from "./screen-sync";
 import { forgetHistory } from "./history";
 import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
+import { browserReloadEnv, ShellReload, SHELL_CHANGED } from "./shell-reload";
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
 import { screenNow } from "./install-guide";
@@ -148,6 +149,8 @@ function refreshShell() {
     /* no worker on this page */
   }
 }
+
+const shellReload = new ShellReload(browserReloadEnv());
 
 /** The relay, for the installed app on its HTTPS origin, once the computer gave this phone a token. */
 const relayRoute = () => {
@@ -697,7 +700,10 @@ export function startApp() {
   setInterval(tick, 1000);
   navigator.serviceWorker?.addEventListener("message", (e: MessageEvent) => {
     if (e.data?.type === "kelpie-open" && typeof e.data.navigate === "string") openFromAlert(e.data.navigate);
+    if (e.data?.type === SHELL_CHANGED) shellReload.shellChanged();
   });
+  // A page keeps the CSP it loaded with: one that refuses the relay loads again, from the shell the worker kept for it (shell-reload.ts).
+  document.addEventListener("securitypolicyviolation", (e) => shellReload.violation(e.blockedURI, relayRoute()));
   window.addEventListener("online", () => link.setOnline(true));
 // Another network under the page: on the relay, the computer's own address may answer again.
 (navigator as Navigator & { connection?: EventTarget }).connection?.addEventListener?.("change", () => link.networkChanged());
@@ -713,6 +719,7 @@ export function startApp() {
     // Nothing goes out from a hidden page, not even a late acknowledgement.
     if (document.hidden) for (const s of syncs.values()) s.dispose();
     if (!document.hidden) recompute();
+    if (!document.hidden) shellReload.visible();
   });
   window.addEventListener("hashchange", () => {
     const waited = readAlertLink(location.hash).waited;

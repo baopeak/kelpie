@@ -58,18 +58,31 @@ const SHELL_FLAGS = "kelpie-shell-flags";
 const PAIRED_MARK = "/paired";
 /** What the page sends when the relay changed: the kept shell is fetched again for the CSP that goes with it. */
 const REFRESH_SHELL = "kelpie-refresh-shell";
+/** What open pages are told once the kept shell's CSP changed: a page keeps the CSP it loaded with, so it loads again (shell-reload.ts). */
+const SHELL_CHANGED = "kelpie-shell-changed";
+const CSP = "content-security-policy";
 
 /** The kept page, fetched again behind the one just served: kept when it is this version's own page, so that what changes is its headers
  *  (the CSP names the relay once it is on). A page of another version waits for its own worker, which keeps its own files with it. */
 async function refreshShell(): Promise<void> {
+  let changed = false;
   try {
     const cache = await caches.open(CACHE);
     const [kept, fresh] = await Promise.all([cache.match("/"), fetch("/", { cache: "no-store" })]);
     if (!kept || !fresh.ok || fresh.redirected) return;
     const [was, is] = await Promise.all([kept.clone().text(), fresh.clone().text()]);
-    if (was === is) await cache.put("/", fresh);
+    if (was !== is) return;
+    changed = kept.headers.get(CSP) !== fresh.headers.get(CSP);
+    await cache.put("/", fresh);
   } catch {
     /* Out of reach: the next open tries again. */
+    return;
+  }
+  if (!changed) return;
+  try {
+    for (const page of await sw.clients.matchAll({ type: "window", includeUncontrolled: false })) page.postMessage({ type: SHELL_CHANGED });
+  } catch {
+    /* No page to tell: the next one opens with the new shell. */
   }
 }
 
