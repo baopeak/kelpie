@@ -125,6 +125,11 @@ document.getElementById('allow').addEventListener('click', (e) => {
 });
 </script></body></html>"""
 PAGE2 = "<!doctype html><html><head><title>Second Page</title></head><body><h1>Page two</h1></body></html>"
+# A page that never changes by itself: no animation, no caret. The screencast goes silent on it.
+STATIC = """<!doctype html><html><head><title>Still page</title><style>body{margin:0;font:16px sans-serif} #go{position:absolute;left:40px;top:40px;width:220px;height:40px}</style></head>
+<body><button id="go">Continue</button><script>
+document.getElementById('go').addEventListener('click', (e) => { e.target.textContent = e.target.textContent === 'Done' ? 'Continue' : 'Done'; fetch('/report?' + new URLSearchParams({still: Date.now(), trusted: e.isTrusted})); });
+</script></body></html>"""
 reports = []
 reports_lock = threading.Lock()
 
@@ -140,7 +145,7 @@ class Site(BaseHTTPRequestHandler):
                 reports.append(dict(urllib.parse.parse_qsl(query)))
             body = b"ok"
         else:
-            body = (OAUTH if path == "/oauth" else PAGE2 if path == "/page2" else LOGIN).encode()
+            body = (OAUTH if path == "/oauth" else PAGE2 if path == "/page2" else STATIC if path == "/static" else LOGIN).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -238,13 +243,26 @@ class TkPhone(ps.Phone):
                     m = self.log[seen]
                     seen += 1
                     if m["type"] == "tk_frame":
+                        # As a page that never loads the same picture twice, when asked: such a frame is not acknowledged.
+                        same = self.prev_data == m["data"]
+                        self.prev_data = m["data"]
+                        if same and not self.ack_identical:
+                            continue
+                        self.acked_seq = m["seq"]
                         await self.send(type="tk_ack", tk=m["tk"], seq=m["seq"])
+                    elif m["type"] == "tk_fhb" and m.get("paused") and self.acked_seq:
+                        # The page's answer to a paused heartbeat: its last acknowledged frame again.
+                        await self.send(type="tk_ack", tk=m["tk"], seq=self.acked_seq)
                 if time.time() - touched > 20:
                     touched = time.time()
                     await self.send(type="lock_touch")
                 await asyncio.sleep(0.03)
         except Exception:  # noqa: BLE001 - the socket closed under it
             pass
+
+    ack_identical = True
+    prev_data = None
+    acked_seq = 0
 
     @property
     def last_frame(self):
@@ -399,6 +417,30 @@ async def scenario(run, d):
     if SPIKE:
         await spike(phone, tk, w, pid)
 
+    # ---------- a still page: the screencast goes silent, captures stand in, and the stream never locks up ----------
+    phone.ack_identical = False
+    mark = phone.mark()
+    await asyncio.to_thread(w.invoke, "browser_navigate", {"label": label, "url": f"http://127.0.0.1:{SITE_PORT}/static"})
+    await asyncio.sleep(8)
+    frames = [m for m in phone.log[mark:] if m["type"] == "tk_frame"]
+    check("a still page is captured once the stream is silent", any(m["meta"].get("captured") for m in frames), [m["meta"].get("captured") for m in frames][-6:])
+    captured = [m["data"] for m in frames if m["meta"].get("captured")]
+    check("…and the same capture is not sent again", len(captured) == len(set(captured)), len(captured))
+    paused = [m for m in phone.log[mark:] if m["type"] == "tk_fhb" and m.get("paused")]
+    since = report_count()
+    await phone.tap(tk, 150, 60)
+    still = await asyncio.to_thread(until, lambda: reported("still", since), 5)
+    check("after 8 still seconds a tap still clicks: the stream is not locked", bool(still) and still[-1].get("trusted") == "true", {"paused beats": len(paused)})
+    mark = phone.mark()
+    changed = await phone.frame(mark, timeout=5)
+    check("…and the page's change reaches the phone", changed is not None)
+    phone.ack_identical = True
+    if SPIKE:
+        await spike_hidden_still(phone, tk, w, pid)
+    await asyncio.to_thread(w.invoke, "browser_navigate", {"label": label, "url": f"http://127.0.0.1:{SITE_PORT}/login"})
+    await asyncio.to_thread(until, lambda: "/login" in (w.invoke("browser_info", {"label": label}).get("ok") or {}).get("url", ""), 10)
+    await asyncio.sleep(1.5)
+
     # ---------- 4. the OAuth window ----------
     since = report_count()
     mark = phone.mark()
@@ -539,13 +581,40 @@ async def spike(phone, tk, w, pid):
     print(f"SPIKE webview cpu with the stream: {on}% of a core", flush=True)
     tab = await asyncio.to_thread(w.js, "const s = window.__kelpie.store; const ws = s.workspace(arguments[0]); return ws.activeTab;", pid)
     await asyncio.to_thread(w.js, "window.__kelpie.browser.openBrowser('about:blank', 'tab', arguments[0])", pid)
-    await asyncio.sleep(1)
+    await asyncio.sleep(1.5)
+    other = await asyncio.to_thread(w.js, "const ws = window.__kelpie.store.workspace(arguments[0]); return ws.tabs[ws.tabs.length - 1].id;", pid)
+    back = await asyncio.to_thread(w.js, "return window.__kelpie.store.workspace(arguments[0]).activeTab;", pid)
+    print(f"SPIKE first switch away: the held pane's tab came back: {back == tab}", flush=True)
+    # The second switch away stays: the pane is hidden now, and only captures come.
+    await asyncio.to_thread(w.js, "window.__kelpie.store.selectTab(arguments[0], arguments[1])", pid, other)
+    await asyncio.sleep(2.5)
     mark = phone.mark()
-    await asyncio.sleep(4)
+    await asyncio.sleep(3)
     hidden = [m for m in phone.log[mark:] if m["type"] == "tk_frame"]
-    print(f"SPIKE frames in 4 s with the pane hidden behind another tab: {len(hidden)}", flush=True)
+    print(f"SPIKE frames in 3 s with the pane hidden: {len(hidden)} ({sum(1 for m in hidden if m['meta'].get('captured'))} captures)", flush=True)
     await asyncio.to_thread(w.js, "window.__kelpie.store.selectTab(arguments[0], arguments[1])", pid, tab)
-    await asyncio.sleep(1)
+    await asyncio.sleep(1.5)
+
+
+async def spike_hidden_still(phone, tk, w, pid):
+    """Whether a capture of a hidden pane is current: on a still page only a changed picture is sent, so a capture that comes after a click on the
+    hidden pane shows the click."""
+    tab = await asyncio.to_thread(w.js, "return window.__kelpie.store.workspace(arguments[0]).activeTab;", pid)
+    other = await asyncio.to_thread(w.js, "const ws = window.__kelpie.store.workspace(arguments[0]); return ws.tabs.find((t) => t.id !== arguments[1])?.id;", pid, tab)
+    if not other:
+        print("SPIKE hidden still pane: no other tab to switch to", flush=True)
+        return
+    await asyncio.to_thread(w.js, "window.__kelpie.store.selectTab(arguments[0], arguments[1])", pid, other)
+    await asyncio.sleep(3)
+    hidden_tab = await asyncio.to_thread(w.js, "return window.__kelpie.store.workspace(arguments[0]).activeTab;", pid)
+    mark = phone.mark()
+    since = report_count()
+    await phone.tap(tk, 150, 60)
+    clicked = await asyncio.to_thread(until, lambda: reported("still", since), 3, 0.05)
+    after = await phone.frame(mark, lambda m: m["meta"].get("captured"), 5)
+    print(f"SPIKE hidden still pane: still hidden {hidden_tab == other}; the click happened {bool(clicked)}; a capture showing it came: {after is not None}", flush=True)
+    await asyncio.to_thread(w.js, "window.__kelpie.store.selectTab(arguments[0], arguments[1])", pid, tab)
+    await asyncio.sleep(1.5)
 
 
 def refused(d, method, params):
