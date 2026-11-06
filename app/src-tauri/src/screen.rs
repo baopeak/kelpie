@@ -165,7 +165,7 @@ fn spawn(app: &AppHandle) -> Result<Arc<Helper>, String> {
                 Ok(n) => n,
             };
             frames.push(&buf[..n]);
-            while let Some(out) = frames.next() {
+            while let Some(out) = frames.take() {
                 if let Some(tx) = hello.take() {
                     let ok = matches!(&out, Out::Json(v) if v["event"] == "hello" && v["proto"].as_u64() == Some(u64::from(PROTO)));
                     let _ = tx.send(if ok { Ok(()) } else { Err("the screen helper does not match this version of Kelpie: reinstall Kelpie".into()) });

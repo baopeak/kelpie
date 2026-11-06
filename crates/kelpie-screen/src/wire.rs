@@ -88,7 +88,7 @@ pub fn video(v: &Video, au: &[u8]) -> Vec<u8> {
     let all = v.unpaint_all || v.unpaint.len() > MAX_UNPAINT;
     let rects: &[Rect] = if all { &[] } else { &v.unpaint };
     let mut out = Vec::with_capacity(VIDEO_HEADER + rects.len() * 8 + au.len());
-    let flags = u8::from(v.key) * FLAG_KEY | u8::from(all) * FLAG_UNPAINT_ALL;
+    let flags = (u8::from(v.key) * FLAG_KEY) | (u8::from(all) * FLAG_UNPAINT_ALL);
     out.extend_from_slice(&[MEDIA, KIND_VIDEO, flags, rects.len() as u8]);
     out.extend_from_slice(&v.seq.to_le_bytes());
     out.extend_from_slice(&v.capture_ms.to_le_bytes());
@@ -192,7 +192,7 @@ impl Deframer {
     }
 
     /// The next whole frame, if one is in.
-    pub fn next(&mut self) -> Option<Out> {
+    pub fn take(&mut self) -> Option<Out> {
         if self.broken || self.buf.len() < 5 {
             return None;
         }
@@ -278,7 +278,7 @@ mod tests {
         let mut got = Vec::new();
         for chunk in bytes.chunks(3) {
             d.push(chunk);
-            while let Some(o) = d.next() {
+            while let Some(o) = d.take() {
                 got.push(o);
             }
         }
@@ -288,11 +288,11 @@ mod tests {
         assert!(!d.broken());
         let mut bad = Deframer::default();
         bad.push(&[0xff, 0xff, 0xff, 0x7f, 1]);
-        assert_eq!(bad.next(), None);
+        assert_eq!(bad.take(), None);
         assert!(bad.broken());
         let mut odd = Deframer::default();
         odd.push(&[2, 0, 0, 0, 9, 0]);
-        assert_eq!(odd.next(), None);
+        assert_eq!(odd.take(), None);
         assert!(odd.broken(), "an unknown kind");
     }
 }
