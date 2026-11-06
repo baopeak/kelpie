@@ -259,4 +259,12 @@ describe("a takeover from the phone", () => {
     r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 4, data: "changed", meta: {} });
     expect(r.acks, "a new picture waits until it is shown").toEqual([1, 2, 3]);
   });
+
+  it("asks a paused computer to go on even when it never acknowledged a frame", async () => {
+    const r = rig();
+    await r.session.openPicker(null);
+    await r.session.pick("browser-a");
+    r.session.onMessage({ type: "tk_fhb", tk: "tk1", seq: 2, paused: true });
+    expect(r.acks).toEqual([0]);
+  });
 });

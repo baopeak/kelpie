@@ -296,7 +296,8 @@ export class TakeoverSession {
       // asked to go on from the last frame acknowledged, which brings a fresh one.
       this.queue = [];
       if (s.phase === "live") this.patch({ phase: "frozen" });
-      if (this.ackedSeq) this.port.ack(s.tk, this.ackedSeq);
+      // Any acknowledgement resumes a paused hold, so one that never acknowledged a frame still says 0.
+      this.port.ack(s.tk, this.ackedSeq);
     } else if (s.phase === "frozen") this.patch({ phase: "live" });
   }
 
