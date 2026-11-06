@@ -180,6 +180,12 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
             }
             let mods: Vec<&str> = op["mods"].as_array().map(|m| m.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
             let events: Vec<INPUT> = key_events(op["key"].as_str().unwrap_or_default(), &mods).into_iter().map(key).collect();
+            // Looked at again right before the call: the focus may have moved while the events were made.
+            if let Some(h) = g.window {
+                if !in_front(h) {
+                    return Outcome::NotFront;
+                }
+            }
             if !send(&events) {
                 return Outcome::Blocked;
             }
@@ -262,27 +268,35 @@ pub fn release(pressed: &mut Option<&'static str>) {
     }
 }
 
+/// The events of one typed unit (its key down and up): what goes in one `SendInput` call while typing.
+const TEXT_BATCH: usize = 2;
+
 /// Types text into the target, which must be the foreground window (brought there once if it is not): `NotFront` otherwise, and nothing typed.
-pub fn type_text(text: &str, g: &Geometry, policy: InputPolicy) -> Outcome {
+/// With the units typed so far.
+///
+/// `SendInput` cannot name a window: keys go to whichever has the focus when Windows delivers them. So the foreground and its focus are looked
+/// at again right before every call, one unit (a character, Enter, a Tab) at a time, and typing stops the moment they moved: what remains of
+/// the race is the time between that look and the call, and a program that moves its own focus from one of its windows to another in it
+/// (see `docs/architecture.md`).
+pub fn type_text(text: &str, g: &Geometry, policy: InputPolicy) -> (Outcome, usize) {
     if !policy.keys {
-        return Outcome::Refused;
+        return (Outcome::Refused, 0);
     }
     if let Some(h) = g.window {
         if !front(h) {
-            return Outcome::NotFront;
+            return (Outcome::NotFront, 0);
         }
     }
     let events: Vec<INPUT> = text_events(text).into_iter().map(key).collect();
-    // In pieces: one call per few hundred events keeps a long text from stalling the input queue. The focus is checked again between them.
-    for chunk in events.chunks(200) {
+    for (typed, unit) in events.chunks(TEXT_BATCH).enumerate() {
         if let Some(h) = g.window {
             if !in_front(h) {
-                return Outcome::NotFront;
+                return (Outcome::NotFront, typed);
             }
         }
-        if !send(chunk) {
-            return Outcome::Blocked;
+        if !send(unit) {
+            return (Outcome::Blocked, typed);
         }
     }
-    Outcome::Done
+    (Outcome::Done, events.len() / TEXT_BATCH)
 }

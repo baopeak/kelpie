@@ -815,12 +815,17 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
                     json!({"id": id, "err": "it came too late"})
                 } else {
                     match input_win::type_text(&text, &g, p) {
-                        Outcome::Done => json!({"id": id, "ok": true}),
-                        Outcome::NotFront => {
+                        (Outcome::Done, _) => json!({"id": id, "ok": true}),
+                        (Outcome::NotFront, 0) => {
                             let _ = outcomes.send(Outcome::NotFront);
                             json!({"id": id, "err": "not_front: the shared window is not in front on the computer, so nothing was typed"})
                         }
-                        Outcome::Blocked => json!({"id": id, "err": "Windows did not take it: an app run as administrator, or a secure screen"}),
+                        // The focus moved partway: what came before went to the shared window, the rest was not typed.
+                        (Outcome::NotFront, typed) => {
+                            let _ = outcomes.send(Outcome::NotFront);
+                            json!({"id": id, "err": format!("not_front_partial: another window took the focus after {typed} characters; the rest was not typed")})
+                        }
+                        (Outcome::Blocked, _) => json!({"id": id, "err": "Windows did not take it: an app run as administrator, or a secure screen"}),
                         _ => json!({"id": id, "err": "typing is not possible in this state"}),
                     }
                 };

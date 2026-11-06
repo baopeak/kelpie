@@ -464,6 +464,7 @@ impl Broker {
                 match d.providers.request("screen", "screen.text", json!({"sc": hold.sc, "text": text, "t": now_millis()})).await {
                     Ok(_) => Ok(Some(json!({"type": "ack", "result": "sent"}))),
                     // The helper types only into the shared window, in front: anywhere else, nothing is typed, and the phone says so.
+                    Err(e) if e.to_string().starts_with("not_front_partial") => Err(refused("not_front", "Stopped partway: another window took the focus on the computer. Check what was typed before typing again.")),
                     Err(e) if e.to_string().starts_with("not_front") => Err(refused("not_front", "Not typed: the shared window is not in front on the computer. Tap it, then type again.")),
                     Err(e) => Err(refused("not_sent", format!("Not sent: {e}. Check the screen, then type it again."))),
                 }
