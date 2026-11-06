@@ -129,3 +129,32 @@ B would give up per-file live progress, the streamed walk and the in-process res
 - If a mode fails to build or run, at most 45 minutes go into fixing it. After that it is dropped, and the verdict uses only what ran; a rule that needs the missing figure stays open.
 - No new variants beyond those listed. No patches to either crate. Nothing outside the spike branch, apart from this report.
 - Same isolation as the spike: temp folders, the fixture on 127.0.0.1, no services, only processes this run started.
+
+## Upload diagnosis result (run 2026-11-06, 20:56–21:23, about 27 minutes of slot time)
+Medians of 3 runs. Build clean, no fixes, no mode dropped.
+
+| Id | Measurement | MB/s | Threshold |
+|---|---|---|---|
+| I0 | A1 upload in process, 1 GiB | **766.7** | ≥ 100 ✓ |
+| D0 | A1 download in process, 1 GiB | 415.2 | |
+| I50 | A1 upload in process, 50 ms simulated RTT | **38.7** | ≥ 29 ✓ (ceiling ≈ 42) |
+| I0_a2 | A2 upload in process | 201.6 | |
+| P | A1 upload, sink as a child process, tokio's pipes | **180.7** | ≥ 70 ✓ |
+| P_npipe | the same with an overlapped named pipe for stdin | 258.3 | |
+| PD | A1 download, child process | 155.9 | |
+| S_tokio | ssh.exe stdin → `cat > /dev/null` on the fixture, tokio writer | **2.0** | ≥ 60 ✗ |
+| S_thread | the same, blocking thread writer | 3.2 | |
+| S_npipe | the same, overlapped named pipe | 3.3 | |
+| S_file | the same, ssh reading a file itself (no pipe from Kelpie) | 3.8 | |
+| C | sftp CLI upload on the fixture, same run | 24.2 | |
+
+**Rule fired: R3, "no writer reaches 60 MB/s" → no automatic verdict**, as agreed.
+
+**What the numbers show** (facts):
+- R1 and R2 are cleared by wide margins:
+  - russh-sftp uploads at 767 MB/s with no I/O, and keeps its 64 requests in flight at 50 ms (38.7 of the ≈ 42 possible);
+  - through the very process pipes the daemon would use, it uploads at 181 MB/s (258 with the named pipe).
+  - So neither the crate nor tokio's Windows process pipes come anywhere near the 9–13 MB/s seen through ssh.
+- The pipe-only test cannot isolate ssh.exe. Every writer, including ssh reading a file by itself with no pipe from Kelpie, gets 2–4 MB/s, which is below even the sftp CLI's 24 MB/s on the same fixture. That limit is the fixture's exec path (paramiko → Git Bash `cat`), not ssh.exe's stdin and not the writer.
+
+**What is still unproven**: why A1 through ssh.exe and the paramiko SFTP server uploads at about half the CLI's speed (12 vs 24 MB/s here, earlier 12 vs 23–70). The only parts left between the fast child-pipe result and the slow one are ssh.exe and the paramiko server. Telling them apart needs a non-Python SSH server, and none is available. That gap is the in-between case the rules hand back to the owner.
