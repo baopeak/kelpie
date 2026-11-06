@@ -718,7 +718,7 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
   is answered with an error at once and every hold it served ends, before its queued requests are drained. The app retries a refused registration five times,
   0.5 to 8 s apart. A request whose caller is dropped leaves nothing waiting.
 - **Broker** (`takeover.rs`): the phone's verbs `panes`, `tk_start {pane}`, `tk_input {tk, ops, st, w}`, `tk_text {tk, text, st, w}`, `tk_ack {tk, seq}`, `tk_stop`,
-  `tk_rebind`, all needing `control`; to the phone `tk_frame {tk, seq, data, meta}` (`meta.window_id` names the window shown), `tk_fhb {tk, seq, paused}` every
+  `tk_rebind`, all needing `control`; to the phone `tk_frame {tk, seq, data, meta}` (`meta.window_id` names the window shown), `tk_fhb {tk, seq, paused, hidden}` every
   second, `tk_end {tk, reason}`. A hold is keyed by device, link connection and provider connection, one per pane, one per device; a start reserves its pane and
   device until the app has answered, so two starts at once get one hold, and a start the app fails or does not answer in time tells it to let go
   (`browser.takeover_stop`, which also makes the app refuse that start if it comes later). It rests on a `Mobile::grant` flag that a revoke, a lower permission,
@@ -756,8 +756,13 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
   `Page.captureScreenshot` at the step's quality and width (`fallback`, `meta.captured`): at the ladder's rate and no faster than twice a second, every 2 s
   on a still page nobody touches, never while paused (the daemon pauses the app while the phone's link is down too), and never the same picture twice in a
   row (a resume, a rebind or a new window starts that over, since the phone may not have the last one; a new ladder step alone does not). A hidden pane gives
-  no capture either, and WebView2 keeps input sent to it and runs it once the pane is shown, on whatever is there by then: the app sends a hidden pane
-  (`browser_visible`) nothing but a release at the point pressed, and refuses text. A screencast started again on a still, visible page sends no first frame
+  no capture either, and WebView2 keeps input sent to it and runs it once the pane is shown, on whatever is there by then. So a window counts as hidden
+  when the window hides the pane (`browser_visible`), when its window is minimised, or when its page says so (`document.visibilityState`, asked before each
+  input item and every 250 ms, 500 ms at most for an answer): it gets nothing but a release at the point pressed, its text is refused, nothing is captured of
+  it, and the app tells the daemon (`provider.event {kind: "hidden", on}`), whose next heartbeat says `hidden`, so the phone shows "the pane is hidden on the
+  computer" instead of a picture that looks live. Before each call but a release the queue looks again (the window, hidden, `st`), and the view's visibility
+  and its window's minimised state are read on the window thread right before the call (`devtools_when`), so a hide posted after that cannot overtake it. A
+  button the phone holds down is released before the window hides its pane. A screencast started again on a still, visible page sends no first frame
   by itself; the capture shows it. The
   phone acknowledges at once a frame identical to the one shown, and an acknowledgement while paused writes off what was counted as on its way, so a still
   page cannot lock the stream. A start that finishes after the daemon gave up stops its screencast and is refused, and Stop on the desktop always takes the
