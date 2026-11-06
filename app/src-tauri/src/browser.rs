@@ -270,6 +270,7 @@ pub async fn browser_bounds(app: AppHandle, label: String, rect: Rect) -> CmdRes
 #[tauri::command]
 pub async fn browser_visible(app: AppHandle, label: String, visible: bool) -> CmdResult<()> {
     let Some(wv) = app.get_webview(&label) else { return Ok(()) };
+    app.state::<Takeovers>().set_visible(&label, visible);
     if visible { wv.show() } else { wv.hide() }.map_err(err)
 }
 

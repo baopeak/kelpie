@@ -59,6 +59,7 @@ async function onRequest(r: ProviderRequest) {
   store.focusPane(at.projectId, at.tabId, at.paneId);
   try {
     const started = await startWhenOpen(p.tk, p.pane, p.device, r.params);
+    if (endedEarly.includes(p.tk)) return refuse(r.preq, "the phone's request ended before the pane was ready");
     setHeld((h) => ({ ...h, [at.paneId]: { tk: p.tk, device: p.device, startedAt: Date.now() } }));
     store.notify(t("{device} took over a browser pane", { device: p.device }));
     return answer(r.preq, { title: browserState[at.paneId]?.title || started.host, host: started.host });
@@ -73,9 +74,16 @@ export async function stopTakeover(tk: string) {
   ended({ tk, reason: "desktop" });
 }
 
+/** Takeovers that ended before the window had them as held (the daemon gave up while the start was finishing): a start that answers later is not shown. */
+const endedEarly: string[] = [];
+
 function ended(e: { tk: string; reason: string }) {
   const found = Object.entries(held()).find(([, x]) => x.tk === e.tk);
-  if (!found) return;
+  if (!found) {
+    endedEarly.push(e.tk);
+    if (endedEarly.length > 16) endedEarly.shift();
+    return;
+  }
   const [pane, x] = found;
   setHeld((h) => {
     const next: Record<string, Held> = { ...h };
@@ -103,9 +111,12 @@ function keepInFront() {
       wasInFront = Object.fromEntries(holds.map((h) => [h.paneId, h.inFront]));
       if (!back) return;
       broughtBack.add(back);
-      const { at } = holds.find((h) => h.paneId === back)!;
-      // After this turn, not inside it: the switch re-runs this effect, which then finds the pane in front.
+      // After this turn, not inside it: the switch re-runs this effect, which then finds the pane in front. The hold and the pane are looked up again
+      // then: the takeover may have ended, or the pane gone, meanwhile.
       setTimeout(() => {
+        if (!held()[back]) return;
+        const at = findPane(browserLabelOf(back), store.state.projects, store.workspace);
+        if (!at) return;
         store.switchProject(at.projectId);
         store.focusPane(at.projectId, at.tabId, at.paneId);
         store.notify(t("A phone controls this browser pane, so it was brought back to the front once. Switch away again and the phone sees it less often."));
@@ -113,6 +124,7 @@ function keepInFront() {
     }),
   );
 }
+
 let started = false;
 /** Listens for the daemon's requests (once). */
 export function initTakeover() {

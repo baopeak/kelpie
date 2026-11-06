@@ -16,7 +16,7 @@
 //! as a `provider-request` event, and it answers with `provider_reply` after `browser_takeover_start`. A start the daemon has given up on (it said
 //! `browser.takeover_stop` first) is refused.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -84,6 +84,10 @@ struct Held {
     last_frame: Arc<AtomicU64>,
     /// When the phone last sent input (ms): a still page is captured more often again once it may change.
     last_input: Arc<AtomicU64>,
+    /// The number of the last notice of the daemon's applied (`apply_settings`).
+    version: u64,
+    /// Counts the stream's starts over (a resume, a restart, a new window): the captures forget what they sent before.
+    fresh: Arc<AtomicU64>,
 }
 
 /// A frame as WebView2 handed it: takeover, generation, the event's JSON.
@@ -95,6 +99,9 @@ pub struct Takeovers {
     generation: AtomicU64,
     sink: Mutex<Option<FrameSink>>,
     cancelled: Mutex<VecDeque<String>>,
+    /// Panes the window hides now (another tab in front): WebView2 keeps input sent to one until it is shown again and then runs it on whatever the
+    /// page shows by then, so none is sent there.
+    hidden: Mutex<HashSet<String>>,
 }
 
 impl Takeovers {
@@ -110,6 +117,20 @@ impl Takeovers {
     /// The window streamed for `tk` and its id.
     fn window(&self, tk: &str) -> Option<(String, u64)> {
         self.held.lock().get(tk).map(|h| (h.target.clone(), h.generation))
+    }
+
+    /// The window shows or hides a pane (`browser_visible`).
+    pub(super) fn set_visible(&self, label: &str, visible: bool) {
+        let mut hidden = self.hidden.lock();
+        if visible {
+            hidden.remove(label);
+        } else {
+            hidden.insert(label.to_string());
+        }
+    }
+
+    fn hidden(&self, label: &str) -> bool {
+        self.hidden.lock().contains(label)
     }
 
     /// The title a popup of `pane` shows: who controls the group, while someone does.
@@ -196,8 +217,15 @@ pub fn on_message(app: &AppHandle, msg: Value) {
             }
         }
         Some("browser.takeover_set") => {
+            // Taken in here, in the order the daemon numbered it: the task that follows only makes the stream match what the hold says by then, so two
+            // such tasks in either order end the same way.
+            if let Some(state) = app.try_state::<Takeovers>() {
+                if !apply_settings(&mut state.held.lock(), &tk, &params) {
+                    return;
+                }
+            }
             let app = app.clone();
-            tauri::async_runtime::spawn(async move { set(&app, &tk, &params).await });
+            tauri::async_runtime::spawn(async move { reconcile(&app, &tk).await });
         }
         Some("browser.takeover_stop") => {
             let app = app.clone();
@@ -230,7 +258,7 @@ pub async fn browser_takeover_start(app: AppHandle, tk: String, label: String, b
     let pressed: Pressed = Arc::new(Mutex::new(None));
     let generation = state.generation.fetch_add(1, Ordering::Relaxed) + 1;
     let first = target.clone();
-    state.held.lock().insert(tk.clone(), Held { pane: label.clone(), target, banner: banner.chars().take(80).collect(), settings: Settings::from(&settings), paused: false, generation, token: None, input, pressed: pressed.clone(), last_frame: Arc::new(AtomicU64::new(now_ms())), last_input: Arc::new(AtomicU64::new(now_ms())) });
+    state.held.lock().insert(tk.clone(), Held { pane: label.clone(), target, banner: banner.chars().take(80).collect(), settings: Settings::from(&settings), paused: false, generation, token: None, input, pressed: pressed.clone(), last_frame: Arc::new(AtomicU64::new(now_ms())), last_input: Arc::new(AtomicU64::new(now_ms())), version: 0, fresh: Arc::new(AtomicU64::new(0)) });
     tauri::async_runtime::spawn(inputs(app.clone(), tk.clone(), rx, pressed));
     tauri::async_runtime::spawn(fallback(app.clone(), tk.clone()));
     if let Err(e) = stream_on(&app, &tk).await {
@@ -292,6 +320,7 @@ async fn stop(app: &AppHandle, tk: &str, reason: &str) -> bool {
 
 /// A pane's webview is closing: its takeover ends, and the daemon hears why.
 pub(super) async fn pane_closed(app: &AppHandle, label: &str) {
+    app.state::<Takeovers>().set_visible(label, true);
     let tk = app.state::<Takeovers>().tk_of_pane(label);
     if let Some(tk) = tk {
         if stop(app, &tk, "closed").await {
@@ -328,6 +357,7 @@ pub(super) fn retarget(app: &AppHandle, pane: &str) {
             let old = (h.target.clone(), h.token.take(), h.pressed.clone());
             h.target = next;
             h.generation = state.generation.fetch_add(1, Ordering::Relaxed) + 1;
+            h.fresh.fetch_add(1, Ordering::Relaxed);
             (old, h.generation)
         };
         release(&app, &old.0, &old.2).await;
@@ -346,7 +376,6 @@ pub(super) fn retarget(app: &AppHandle, pane: &str) {
 
 /// A popup's page finished loading: if it is what the phone sees, its screencast starts again there.
 pub(super) fn popup_loaded(app: &AppHandle, pane: &str, popup: &str) {
-
     let Some(tk) = app.state::<Takeovers>().tk_of_pane(pane) else { return };
     if app.state::<Takeovers>().target(&tk, None).as_deref() != Some(popup) {
         return;
@@ -367,32 +396,32 @@ fn retitle_popups(app: &AppHandle, pane: &str) {
     }
 }
 
-/// What the daemon's ladder says now: a new rate or size restarts the stream (which also brings a fresh frame), a pause stops it.
-async fn set(app: &AppHandle, tk: &str, params: &Value) {
-    let (target, restart) = {
-        let state = app.state::<Takeovers>();
-        let mut held = state.held.lock();
-        let Some(h) = held.get_mut(tk) else { return };
-        let settings = Settings::from(params);
-        let paused = params["paused"].as_bool() == Some(true);
-        let restart = !paused && (settings != h.settings || h.paused || params["fresh"].as_bool() == Some(true));
-        let was_paused = std::mem::replace(&mut h.paused, paused);
-        h.settings = settings;
-        (h.target.clone(), if paused && !was_paused { Some(false) } else if restart { Some(true) } else { None })
-    };
+/// What the daemon's ladder says now (`browser.takeover_set`), kept on the hold if it is newer than the last one applied: false when there is nothing to
+/// do (an older notice, or no such takeover). A notice that resumes or asks for a fresh frame (`fresh`) starts the captures over too, so the next capture
+/// goes even if it shows the same picture as one sent before: the phone may never have got that one. A new ladder step alone does not: nothing was lost.
+fn apply_settings(held: &mut HashMap<String, Held>, tk: &str, params: &Value) -> bool {
+    let Some(h) = held.get_mut(tk) else { return false };
+    let version = params["v"].as_u64().unwrap_or(0);
+    if version != 0 && version <= h.version {
+        return false;
+    }
+    h.version = version.max(h.version);
+    let was_paused = h.paused;
+    h.paused = params["paused"].as_bool() == Some(true);
+    h.settings = Settings::from(params);
+    if !h.paused && (was_paused || params["fresh"].as_bool() == Some(true)) {
+        h.fresh.fetch_add(1, Ordering::Relaxed);
+    }
+    true
+}
+
+/// Makes the stream match the hold: stopped while paused, started again with its settings (which also brings a fresh frame) otherwise.
+async fn reconcile(app: &AppHandle, tk: &str) {
+    let Some((target, paused, settings)) = app.state::<Takeovers>().held.lock().get(tk).map(|h| (h.target.clone(), h.paused, h.settings)) else { return };
     let Some(wv) = app.get_webview(&target) else { return };
-    match restart {
-        Some(false) => {
-            let _ = cdp(&wv, "Page.stopScreencast", json!({})).await;
-        }
-        Some(true) => {
-            let _ = cdp(&wv, "Page.stopScreencast", json!({})).await;
-            let settings = app.state::<Takeovers>().held.lock().get(tk).map(|h| h.settings);
-            if let Some(s) = settings {
-                let _ = cdp(&wv, "Page.startScreencast", s.screencast()).await;
-            }
-        }
-        None => {}
+    let _ = cdp(&wv, "Page.stopScreencast", json!({})).await;
+    if !paused {
+        let _ = cdp(&wv, "Page.startScreencast", settings.screencast()).await;
     }
 }
 
@@ -437,6 +466,7 @@ async fn stream_on(app: &AppHandle, tk: &str) -> CmdResult<()> {
     let _ = cdp(&wv, "Page.stopScreencast", json!({})).await;
     cdp(&wv, "Page.startScreencast", settings.screencast()).await.map(|_| ())
 }
+
 async fn stream_off(app: &AppHandle, target: &str, token: Option<i64>) {
     if let Some(wv) = app.get_webview(target) {
         let _ = cdp(&wv, "Page.stopScreencast", json!({})).await;
@@ -537,6 +567,12 @@ impl Captures {
         self.last_hash = None;
         self.same = 0;
     }
+
+    /// The stream starts over: nothing sent before counts, and the next capture is due at once.
+    fn forget(&mut self) {
+        self.streamed();
+        self.last_at = 0;
+    }
 }
 
 /// A page the screencast sends nothing from (WebView2 paints no frames for a pane that is hidden or a window another covers, nor for a page that does
@@ -545,13 +581,18 @@ impl Captures {
 /// nobody touches is looked at less often.
 async fn fallback(app: AppHandle, tk: String) {
     let mut captures = Captures::default();
-    let mut seen_frame = 0;
+    let (mut seen_frame, mut seen_fresh) = (0, 0);
     loop {
         tokio::time::sleep(CAPTURE_TICK).await;
-        let Some((target, generation, settings, paused, last, input)) = app.state::<Takeovers>().held.lock().get(&tk).map(|h| (h.target.clone(), h.generation, h.settings, h.paused, h.last_frame.load(Ordering::Relaxed), h.last_input.load(Ordering::Relaxed))) else { return };
+        let Some((target, generation, settings, paused, last, input, fresh)) = app.state::<Takeovers>().held.lock().get(&tk).map(|h| (h.target.clone(), h.generation, h.settings, h.paused, h.last_frame.load(Ordering::Relaxed), h.last_input.load(Ordering::Relaxed), h.fresh.load(Ordering::Relaxed))) else { return };
         if last != seen_frame {
             seen_frame = last;
             captures.streamed();
+        }
+        if fresh != seen_fresh {
+            // The daemon asked for a fresh frame, or the window changed: the next capture goes at once, whatever was sent before.
+            seen_fresh = fresh;
+            captures.forget();
         }
         let now = now_ms();
         if paused || !captures.due(now, last, settings, now.saturating_sub(input)) {
@@ -582,6 +623,7 @@ async fn fallback(app: AppHandle, tk: String) {
         event(&app, json!({"kind": "frame", "tk": tk, "data": data, "meta": meta}));
     }
 }
+
 /// What one queued item comes to, at its turn: the protocol calls to make in order, and for text the request to answer and whether it may go.
 #[derive(Debug, PartialEq)]
 enum Plan {
@@ -589,23 +631,30 @@ enum Plan {
     Text { preq: u64, text: Option<String>, why: &'static str },
 }
 
-/// Decides an item at its turn against the window streamed now (`window`) and the clock. Input meant for another window is dropped; stale input is
-/// dropped but for releases, which never leave a button pressed.
-fn plan(item: Queued, window: u64, now: u64, pressed: &mut Option<(f64, f64)>) -> Plan {
+/// Decides an item at its turn against the window streamed now (`window`, `hidden` while the window hides it) and the clock. Input meant for another
+/// window is dropped; stale input, or input for a hidden pane, is dropped but for releases, which never leave a button pressed.
+fn plan(item: Queued, window: u64, hidden: bool, now: u64, pressed: &mut Option<(f64, f64)>) -> Plan {
     let stale = |st: u64| now.saturating_sub(st) > INPUT_TTL_MS || st > now + INPUT_TTL_MS;
     match item {
         Queued::Ops { ops, window: w, st } => {
             if w != window {
                 return Plan::Calls(vec![]);
             }
-            let old = stale(st);
-            Plan::Calls(ops.iter().filter(|op| !old || op["k"] == "up").flat_map(|op| protocol_events(op, pressed)).collect())
+            if !stale(st) && !hidden {
+                return Plan::Calls(ops.iter().flat_map(|op| protocol_events(op, pressed)).collect());
+            }
+            // Late, or for a pane the window hides: only a release, at the point the button went down, so a drag that waited moves nothing.
+            let Some((x, y)) = *pressed else { return Plan::Calls(vec![]) };
+            let up = ops.iter().any(|op| op["k"] == "up");
+            Plan::Calls(if up { protocol_events(&json!({"k": "up", "x": x, "y": y}), pressed) } else { vec![] })
         }
         Queued::Text { text, window: w, st, preq } => {
             if w != window {
                 Plan::Text { preq, text: None, why: "the window changed: check the page, then type it again" }
             } else if stale(st) {
                 Plan::Text { preq, text: None, why: "not sent: it came too late" }
+            } else if hidden {
+                Plan::Text { preq, text: None, why: "not sent: the pane is hidden on the computer" }
             } else {
                 Plan::Text { preq, text: Some(text), why: "" }
             }
@@ -613,21 +662,21 @@ fn plan(item: Queued, window: u64, now: u64, pressed: &mut Option<(f64, f64)>) -
     }
 }
 
-/// Runs one takeover's queue, in order: `window` names the window streamed now (none once it ended), `call` makes a protocol call there, `answer`
-/// answers text's request once it is typed (or refused).
-async fn run_queue<C, F>(mut rx: mpsc::Receiver<Queued>, window: impl Fn() -> Option<u64>, pressed: Pressed, mut call: C, mut answer: impl FnMut(u64, Result<Value, String>))
+/// Runs one takeover's queue, in order: `window` names the window streamed now and whether the window hides it (none once it ended), `call` makes a
+/// protocol call there, `answer` answers text's request once it is typed (or refused).
+async fn run_queue<C, F>(mut rx: mpsc::Receiver<Queued>, window: impl Fn() -> Option<(u64, bool)>, pressed: Pressed, mut call: C, mut answer: impl FnMut(u64, Result<Value, String>))
 where
     C: FnMut(&'static str, Value) -> F,
     F: Future<Output = CmdResult<Value>>,
 {
     while let Some(item) = rx.recv().await {
-        let Some(current) = window() else {
+        let Some((current, hidden)) = window() else {
             if let Queued::Text { preq, .. } = item {
                 answer(preq, Err("that takeover has ended".into()));
             }
             return;
         };
-        let planned = plan(item, current, now_ms(), &mut pressed.lock());
+        let planned = plan(item, current, hidden, now_ms(), &mut pressed.lock());
         match planned {
             Plan::Calls(calls) => {
                 for (method, params) in calls {
@@ -650,7 +699,10 @@ async fn inputs(app: AppHandle, tk: String, rx: mpsc::Receiver<Queued>, pressed:
     let (ta, tb) = (tk.clone(), tk.clone());
     run_queue(
         rx,
-        move || a.state::<Takeovers>().window(&ta).map(|(_, w)| w),
+        move || {
+            let state = a.state::<Takeovers>();
+            state.window(&ta).map(|(target, w)| (w, state.hidden(&target)))
+        },
         pressed,
         move |method, params| {
             let target = b.state::<Takeovers>().target(&tb, None);
@@ -709,10 +761,11 @@ fn protocol_events(op: &Value, pressed: &mut Option<(f64, f64)>) -> Vec<(&'stati
             }
             vec![(MOUSE, mouse("mouseMoved", if down { "left" } else { "none" }, u8::from(down), 0))]
         }
-        Some("up") => {
-            *pressed = None;
-            vec![(MOUSE, mouse("mouseReleased", "left", 0, 1))]
-        }
+        // A release with no press recorded (its press was dropped as late) sends nothing: the page must not see a click it never had.
+        Some("up") => match pressed.take() {
+            Some(_) => vec![(MOUSE, mouse("mouseReleased", "left", 0, 1))],
+            None => vec![],
+        },
         Some("wheel") => vec![(MOUSE, json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": op["dx"].as_f64().unwrap_or(0.0), "deltaY": op["dy"].as_f64().unwrap_or(0.0)}))],
         Some("key") => {
             let Some((key, code, vk, text)) = op["key"].as_str().and_then(key_info) else { return vec![] };
@@ -833,6 +886,45 @@ mod tests {
     }
 
     #[test]
+    fn a_release_with_no_press_sends_nothing() {
+        let mut pressed = None;
+        assert!(protocol_events(&json!({"k": "up", "x": 3, "y": 3}), &mut pressed).is_empty());
+    }
+
+    #[test]
+    fn a_fresh_start_sends_the_same_picture_again_at_once() {
+        // The capture went, and may never have reached the phone (a link that dropped, a frame the daemon dropped): after the daemon's fresh request
+        // the same picture is due at once and goes.
+        let mut c = Captures::default();
+        assert!(c.taken(10_000, "H"));
+        assert!(!c.taken(10_500, "H"));
+        c.forget();
+        assert!(c.due(10_600, 0, settings(6), 0), "due at once");
+        assert!(c.taken(10_600, "H"), "and it goes");
+    }
+
+    #[test]
+    fn an_older_notice_of_the_daemon_is_ignored_and_a_resume_starts_the_captures_over() {
+        let (input, _rx) = mpsc::channel(1);
+        let mut held = HashMap::new();
+        held.insert("tk".to_string(), Held { pane: "browser-a".into(), target: "browser-a".into(), banner: String::new(), settings: Settings::from(&json!({})), paused: false, generation: 1, token: None, input, pressed: Arc::new(Mutex::new(None)), last_frame: Arc::new(AtomicU64::new(0)), last_input: Arc::new(AtomicU64::new(0)), version: 0, fresh: Arc::new(AtomicU64::new(0)) });
+        // Resume (3) then pause (2), as two notices sent out of order arrive: the resume stands.
+        assert!(apply_settings(&mut held, "tk", &json!({"v": 3, "paused": false, "fresh": true})));
+        assert!(!apply_settings(&mut held, "tk", &json!({"v": 2, "paused": true})));
+        let h = &held["tk"];
+        assert!(!h.paused && h.version == 3);
+        assert_eq!(h.fresh.load(Ordering::Relaxed), 1, "the resume started the captures over");
+        assert!(apply_settings(&mut held, "tk", &json!({"v": 4, "paused": true})));
+        assert!(held["tk"].paused);
+        assert_eq!(held["tk"].fresh.load(Ordering::Relaxed), 1, "a pause does not");
+        assert!(apply_settings(&mut held, "tk", &json!({"v": 5, "paused": false, "fresh": false})));
+        assert_eq!(held["tk"].fresh.load(Ordering::Relaxed), 2, "coming out of a pause does, whatever it says");
+        assert!(apply_settings(&mut held, "tk", &json!({"v": 6, "paused": false, "fresh": false, "quality": 40})));
+        assert_eq!(held["tk"].fresh.load(Ordering::Relaxed), 2, "a new ladder step alone does not: the same picture is not sent again for it");
+        assert!(!apply_settings(&mut held, "other", &json!({"v": 9})));
+    }
+
+    #[test]
     fn keys_carry_their_codes_and_only_known_ones_go() {
         let mut pressed = None;
         let enter = protocol_events(&json!({"k": "key", "key": "Enter"}), &mut pressed);
@@ -849,15 +941,36 @@ mod tests {
         let now = 10_000;
         let mut pressed = None;
         let tap = || vec![json!({"k": "tap", "x": 1, "y": 1})];
-        assert_eq!(plan(Queued::Ops { ops: tap(), window: 2, st: now }, 3, now, &mut pressed), Plan::Calls(vec![]), "aimed at the window before a popup opened");
-        assert_eq!(plan(Queued::Ops { ops: tap(), window: 3, st: now - 1500 }, 3, now, &mut pressed), Plan::Calls(vec![]), "a tap that waited too long");
-        let Plan::Calls(late_release) = plan(Queued::Ops { ops: vec![json!({"k": "down", "x": 1, "y": 1}), json!({"k": "up", "x": 4, "y": 4})], window: 3, st: now - 1500 }, 3, now, &mut pressed) else { panic!() };
-        assert_eq!(late_release.iter().map(|(_, p)| p["type"].as_str().unwrap()).collect::<Vec<_>>(), ["mouseReleased"], "only the release");
-        let Plan::Calls(fresh) = plan(Queued::Ops { ops: tap(), window: 3, st: now - 100 }, 3, now, &mut pressed) else { panic!() };
+        assert_eq!(plan(Queued::Ops { ops: tap(), window: 2, st: now }, 3, false, now, &mut pressed), Plan::Calls(vec![]), "aimed at the window before a popup opened");
+        assert_eq!(plan(Queued::Ops { ops: tap(), window: 3, st: now - 1500 }, 3, false, now, &mut pressed), Plan::Calls(vec![]), "a tap that waited too long");
+        let late = |pressed: &mut Option<(f64, f64)>| plan(Queued::Ops { ops: vec![json!({"k": "move", "x": 9, "y": 9}), json!({"k": "up", "x": 4, "y": 4})], window: 3, st: now - 1500 }, 3, false, now, pressed);
+        assert_eq!(late(&mut None), Plan::Calls(vec![]), "a late release with no press recorded sends nothing");
+        let mut held_down = Some((1.0, 2.0));
+        let Plan::Calls(late_release) = late(&mut held_down) else { panic!() };
+        assert_eq!(late_release.iter().map(|(_, p)| (p["type"].as_str().unwrap(), p["x"].as_f64(), p["y"].as_f64())).collect::<Vec<_>>(), [("mouseReleased", Some(1.0), Some(2.0))], "only the release, where the button went down");
+        assert_eq!(held_down, None);
+        let Plan::Calls(fresh) = plan(Queued::Ops { ops: tap(), window: 3, st: now - 100 }, 3, false, now, &mut pressed) else { panic!() };
         assert_eq!(fresh.len(), 3);
-        assert_eq!(plan(Queued::Text { text: "pw".into(), window: 2, st: now, preq: 5 }, 3, now, &mut pressed), Plan::Text { preq: 5, text: None, why: "the window changed: check the page, then type it again" });
-        assert_eq!(plan(Queued::Text { text: "pw".into(), window: 3, st: now - 5000, preq: 6 }, 3, now, &mut pressed), Plan::Text { preq: 6, text: None, why: "not sent: it came too late" });
-        assert_eq!(plan(Queued::Text { text: "pw".into(), window: 3, st: now, preq: 7 }, 3, now, &mut pressed), Plan::Text { preq: 7, text: Some("pw".into()), why: "" });
+        assert_eq!(plan(Queued::Text { text: "pw".into(), window: 2, st: now, preq: 5 }, 3, false, now, &mut pressed), Plan::Text { preq: 5, text: None, why: "the window changed: check the page, then type it again" });
+        assert_eq!(plan(Queued::Text { text: "pw".into(), window: 3, st: now - 5000, preq: 6 }, 3, false, now, &mut pressed), Plan::Text { preq: 6, text: None, why: "not sent: it came too late" });
+        assert_eq!(plan(Queued::Text { text: "pw".into(), window: 3, st: now, preq: 7 }, 3, false, now, &mut pressed), Plan::Text { preq: 7, text: Some("pw".into()), why: "" });
+    }
+
+    #[test]
+    fn nothing_but_a_release_goes_to_a_pane_the_window_hides() {
+        // WebView2 keeps such input until the pane is shown again, and then clicks whatever is there by then.
+        let now = 10_000;
+        let tap = || vec![json!({"k": "tap", "x": 1, "y": 1})];
+        assert_eq!(plan(Queued::Ops { ops: tap(), window: 3, st: now }, 3, true, now, &mut None), Plan::Calls(vec![]), "a tap");
+        let mut held_down = Some((1.0, 2.0));
+        let Plan::Calls(release) = plan(Queued::Ops { ops: vec![json!({"k": "up", "x": 4, "y": 4})], window: 3, st: now }, 3, true, now, &mut held_down) else { panic!() };
+        assert_eq!(release.iter().map(|(_, p)| (p["type"].as_str().unwrap(), p["x"].as_f64())).collect::<Vec<_>>(), [("mouseReleased", Some(1.0))], "the release, where the button went down");
+        assert_eq!(plan(Queued::Text { text: "pw".into(), window: 3, st: now, preq: 8 }, 3, true, now, &mut None), Plan::Text { preq: 8, text: None, why: "not sent: the pane is hidden on the computer" });
+        let t = Takeovers::default();
+        t.set_visible("browser-a", false);
+        assert!(t.hidden("browser-a") && !t.hidden("browser-b"));
+        t.set_visible("browser-a", true);
+        assert!(!t.hidden("browser-a"), "shown again, input goes");
     }
 
     #[test]
@@ -873,7 +986,7 @@ mod tests {
             let (seen, told) = (calls.clone(), answers.clone());
             run_queue(
                 rx,
-                || Some(1),
+                || Some((1, false)),
                 Arc::new(Mutex::new(None)),
                 move |method, params| {
                     let seen = seen.clone();
