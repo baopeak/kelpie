@@ -66,6 +66,7 @@ const paths: Record<string, () => JSX.Element> = {
   camera: () => <><path d="M2.5 5.5h2.5L6.2 4h3.6L11 5.5h2.5v7h-11z" /><circle cx="8" cy="8.8" r="2.2" /></>,
   code: () => <path d="M6 4.5L2.5 8 6 11.5M10 4.5L13.5 8 10 11.5" />,
   server: () => <><rect x="2.5" y="2.5" width="11" height="4.5" rx="1" /><rect x="2.5" y="9" width="11" height="4.5" rx="1" /><path d="M5 4.75h.01M5 11.25h.01" /></>,
+  screen: () => <><rect x="2" y="2.5" width="12" height="8.5" rx="1.2" /><path d="M6 13.5h4M8 11v2.5" /></>,
 };
 
 export function Icon(props: { name: keyof typeof paths | string; size?: number }) {

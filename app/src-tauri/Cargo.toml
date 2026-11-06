@@ -13,6 +13,8 @@ tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 kelpie-proto = { path = "../../crates/kelpie-proto" }
+# The screen helper's stdout frames and the stop hotkey's syntax (screen.rs); its pure modules only.
+kelpie-screen = { path = "../../crates/kelpie-screen", default-features = false }
 tauri = { version = "2.12", features = ["unstable", "devtools"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"

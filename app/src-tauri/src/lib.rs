@@ -20,6 +20,7 @@ mod integrations;
 mod plugins;
 mod voice;
 mod remote;
+mod screen;
 mod search;
 mod session_export;
 mod session_usage;
@@ -528,6 +529,7 @@ pub fn run() {
             app.manage(index);
             app.manage(browser::Browsers::default());
             app.manage(browser::Takeovers::default());
+            app.manage(screen::Screens::default());
             app.manage(ssh_hosts::Forwards::default());
             ssh_hosts::init();
             Ok(())
@@ -678,6 +680,10 @@ pub fn run() {
             browser::takeover::browser_takeover_start,
             browser::takeover::browser_takeover_stop,
             browser::takeover::provider_reply,
+            screen::screen_stop,
+            screen::screen_prefs,
+            screen::screen_viewers,
+            screen::screen_available,
             test_window_size,
             ssh_hosts::ssh_vault_load,
             ssh_hosts::ssh_vault_save,

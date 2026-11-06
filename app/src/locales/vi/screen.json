@@ -1,0 +1,16 @@
+{
+  "Stopped with the hotkey: {device} no longer sees this screen.": "Đã dừng bằng phím tắt: {device} không còn thấy màn hình này.",
+  "The shared window was closed: {device} no longer sees it.": "Cửa sổ đang chia sẻ đã đóng: {device} không còn thấy nó.",
+  "{device} lost control, or locked: it no longer sees this screen.": "{device} đã mất quyền điều khiển hoặc đã khóa: nó không còn thấy màn hình này.",
+  "{device} stopped seeing this screen after 10 minutes with nothing done.": "{device} đã ngừng xem màn hình này sau 10 phút không làm gì.",
+  "{device} no longer sees this screen.": "{device} không còn thấy màn hình này.",
+  "{device} sees this computer's screen: {title}": "{device} đang xem màn hình của máy tính này: {title}",
+  "Another program holds {hotkey}, so it cannot stop the shared screen: use Stop in the status bar, or pick another hotkey in Settings → Mobile.": "Một chương trình khác đang giữ {hotkey}, nên phím này không dừng được màn hình đang chia sẻ: hãy dùng Dừng trên thanh trạng thái, hoặc chọn phím tắt khác trong Cài đặt → Di động.",
+  "The shared screen uses the software encoder: smaller and slower, but it works.": "Màn hình đang chia sẻ dùng bộ mã hóa phần mềm: nhỏ hơn và chậm hơn, nhưng vẫn chạy.",
+  "{device} sees {title}. {hotkey} stops it too.": "{device} đang xem {title}. {hotkey} cũng dừng được.",
+  "Shared with {device}": "Đang chia sẻ với {device}",
+  "Stop hotkey": "Phím tắt dừng",
+  "Crisp text": "Chữ sắc nét",
+  "This computer's screen on a phone": "Màn hình máy tính này trên điện thoại",
+  "A phone allowed to take control can see a screen or one window of this computer and use it. An orange border and a badge show what is shared, the status bar has Stop, and this hotkey stops it from anywhere. Crisp text sends still parts of the screen once more as sharp images, which uses more data.": "Một điện thoại được phép điều khiển có thể xem và dùng một màn hình hoặc một cửa sổ của máy tính này. Viền cam và một nhãn cho biết phần đang chia sẻ, thanh trạng thái có nút Dừng, và phím tắt này dừng được từ bất cứ đâu. Chữ sắc nét gửi lại những phần đứng yên của màn hình dưới dạng ảnh sắc nét, tốn thêm dữ liệu."
+}

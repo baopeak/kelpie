@@ -2,12 +2,13 @@
 // one-time QR code and end-to-end encryption (kelpie-link); the person approves it here by typing the six digits the phone
 // shows, and the daemon then asks the OS to verify them (Windows Hello or the password). Raising what a phone may do, resetting
 // phone access, keeping unused phones longer and approvals from Telegram ask for that verification too (`mobileSecure`); what the prompt says is the daemon's.
-// The page: a summary, one `OptionRow` per option, and the address, certificate and paired phones under Advanced.
+// The page: a summary, one `OptionRow` per option, and the address, certificate, the shared screen's stop hotkey and paired phones under Advanced.
 // Revoke all stays outside Advanced: a lost phone is when it is needed, and it must not take a search to find.
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
-import { LOCK_API, RELAY_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
+import { invoke } from "@tauri-apps/api/core";
+import { LOCK_API, RELAY_API, SCREEN_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import { mobileSummary, offerNewRoom, optionState, telegramChoice, type OptionId } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
@@ -16,7 +17,7 @@ import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
 import { OptionRow } from "./option-row";
 import { createRelayForm, NewRoomOffer, RelayDetails, type RelayStatus } from "./mobile-relay-settings";
-import { SettingRow, settingsQuery } from "./setting-row";
+import { SettingRow, settingsQuery, Toggle } from "./setting-row";
 import { confirmDialog } from "../../lib/confirm-dialog";
 import { offersControl } from "../../lib/takeover-panes";
 
@@ -140,7 +141,7 @@ interface MobileAudit {
 const DORMANT_DAYS = [30, 90, 180, 0];
 const IDLE_SECONDS = [60, 300, 900, 1800, 3600];
 /** The rows under Advanced. */
-const ADVANCED = ["mobile-network", "mobile-tls", "mobile-devices"];
+const ADVANCED = ["mobile-network", "mobile-tls", "mobile-screen", "mobile-devices"];
 
 const errText = (e: unknown) => String(e).replace(/^Error: /, "");
 
@@ -152,6 +153,7 @@ export function MobileSettings() {
   const [status, { refetch }] = createResource(() => store.connected(), () => mobileStatus().catch(() => null));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [hotkeyError, setHotkeyError] = createSignal<string | null>(null);
   const [qr, setQr] = createSignal<{ url: string; qr: string; until: number; tls: boolean; tailscale?: boolean; passkey?: boolean } | null>(null);
   const [now, setNow] = createSignal(Date.now());
   // The two steps of pairing over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
@@ -545,7 +547,7 @@ export function MobileSettings() {
           if (advancedForced()) e.currentTarget.open = true;
           else setAdvancedWanted(e.currentTarget.open);
         }}>
-          <summary>{t("Advanced: address, certificate and paired phones")}</summary>
+          <summary>{t("Advanced: address, certificate, screen and paired phones")}</summary>
           <Show when={s()!.enabled}>
             <SettingRow id="mobile-network" wide>
               <div class="inline-fields">
@@ -567,6 +569,23 @@ export function MobileSettings() {
                 <input class="text-input mono" placeholder={t("certificate (.crt / .pem)")} value={s()!.cert ?? ""} onChange={(e) => void enable({ cert: e.currentTarget.value })} />
                 <input class="text-input mono" placeholder={t("private key (.key / .pem)")} value={s()!.key ?? ""} onChange={(e) => void enable({ key: e.currentTarget.value })} />
               </div>
+            </SettingRow>
+          </Show>
+          <Show when={store.daemonApi() >= SCREEN_API}>
+            <SettingRow id="mobile-screen" wide>
+              <div class="inline-fields" style={{ "align-items": "center" }}>
+                <span>{t("Stop hotkey")}</span>
+                <input class="text-input mono" data-screen-hotkey style={{ width: "180px" }} value={store.state.settings.screenStopHotkey} onChange={(e) => {
+                  const input = e.currentTarget;
+                  const hotkey = input.value.trim();
+                  // The app checks it as the helper will: two modifiers, one of them Ctrl or Alt.
+                  void invoke("screen_prefs", { hotkey, tiles: store.state.settings.screenCrispText })
+                    .then(() => store.setSettings({ screenStopHotkey: hotkey }))
+                    .catch((err) => { setHotkeyError(errorText(err)); input.value = store.state.settings.screenStopHotkey; });
+                }} onInput={() => setHotkeyError(null)} />
+                <Toggle on={store.state.settings.screenCrispText} label={t("Crisp text")} onChange={(on) => store.setSettings({ screenCrispText: on })} />
+              </div>
+              <Show when={hotkeyError()}><div class="form-note error">{hotkeyError()}</div></Show>
             </SettingRow>
           </Show>
           <SettingRow id="mobile-devices" wide>

@@ -215,6 +215,10 @@ export interface Settings {
   /** Sessions not on screen run below normal CPU priority, so typing stays quick when the
    *  machine is busy (Windows). */
   prioritizeVisible: boolean;
+  /** The global hotkey that stops a phone seeing this computer's screen (`Ctrl+Alt+Shift+K`). */
+  screenStopHotkey: string;
+  /** Still regions of a shared screen are sent once more as crisp images over the video. */
+  screenCrispText: boolean;
   /** Snapshot an agent's working folder when each turn ends (git folders on this computer), for
    *  the Turns panel and undo. */
   checkpoints: boolean;

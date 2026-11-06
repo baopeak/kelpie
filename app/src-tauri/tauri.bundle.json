@@ -1,5 +1,5 @@
 {
   "bundle": {
-    "externalBin": ["binaries/kelpied", "binaries/kelpie-stt"]
+    "externalBin": ["binaries/kelpied", "binaries/kelpie-stt", "binaries/kelpie-screen"]
   }
 }
