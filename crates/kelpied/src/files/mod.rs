@@ -6,10 +6,13 @@
 //! ProxyJump, agent and Kelpie's saved passwords apply exactly as in a terminal), and an in-memory one for
 //! tests. Paths are strings: absolute POSIX paths on a host, absolute OS paths here.
 
+pub mod copy;
+pub mod journal;
 pub mod local_fs;
 #[cfg(test)]
 pub mod mem_fs;
 pub mod names;
+pub mod walk;
 
 use std::fmt;
 
@@ -160,6 +163,19 @@ pub trait RemoteFs: Send + Sync {
     async fn open_write(&self, path: &str, offset: u64, create: bool) -> FsResult<Box<dyn WriteFile>>;
     /// Free bytes on the file system holding `path`, when the end can tell.
     async fn free_space(&self, path: &str) -> FsResult<Option<u64>>;
+
+    /// `dir` joined with one `name`, in this end's path syntax.
+    fn join(&self, dir: &str, name: &str) -> String {
+        join_remote(dir, name)
+    }
+    /// Names that differ only in case are the same file here (Windows, macOS by default).
+    fn case_insensitive(&self) -> bool {
+        false
+    }
+    /// Names must be mapped to what Windows can hold ([`names::windows_safe`]).
+    fn windows_names(&self) -> bool {
+        false
+    }
 }
 
 /// The kind in an SFTP / POSIX mode (`S_IFMT`).

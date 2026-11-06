@@ -202,6 +202,18 @@ impl RemoteFs for LocalFs {
         let path = path.to_string();
         blocking(move || free_space_blocking(&path)).await
     }
+
+    fn join(&self, dir: &str, name: &str) -> String {
+        path_string(&Path::new(dir).join(name))
+    }
+
+    fn case_insensitive(&self) -> bool {
+        super::names::LOCAL_CASE_INSENSITIVE
+    }
+
+    fn windows_names(&self) -> bool {
+        cfg!(windows)
+    }
 }
 
 #[cfg(windows)]

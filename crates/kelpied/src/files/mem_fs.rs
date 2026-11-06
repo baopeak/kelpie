@@ -106,15 +106,40 @@ impl MemFs {
         self.0.lock().nodes.keys().cloned().collect()
     }
 
+    /// `path` with every link on the way followed, the last one too (what `stat` sees).
     fn resolve(s: &State, path: &str) -> FsResult<String> {
-        let mut p = path.to_string();
-        for _ in 0..8 {
-            match &s.nodes.get(&p).ok_or_else(|| not_found(path))?.body {
-                Body::Link(t) => p = if t.starts_with('/') { t.clone() } else { join_remote(parent_remote(&p), t) },
-                _ => return Ok(p),
+        let mut cur = String::from("/");
+        let mut parts: std::collections::VecDeque<String> = path.split('/').filter(|p| !p.is_empty()).map(str::to_string).collect();
+        let mut hops = 0;
+        while let Some(part) = parts.pop_front() {
+            let next = join_remote(&cur, &part);
+            match s.nodes.get(&next).map(|n| &n.body) {
+                None => return Err(not_found(path)),
+                Some(Body::Link(t)) => {
+                    hops += 1;
+                    if hops > 16 {
+                        return Err(FsError::new(ErrKind::Other, "too many levels of links"));
+                    }
+                    if t.starts_with('/') {
+                        cur = "/".into();
+                    }
+                    for p in t.split('/').filter(|p| !p.is_empty()).rev() {
+                        parts.push_front(p.to_string());
+                    }
+                }
+                Some(_) => cur = next,
             }
         }
-        Err(FsError::new(ErrKind::Other, "too many levels of links"))
+        Ok(cur)
+    }
+
+    /// `path` with the links of its folders followed but not a link at its end (what `lstat` sees).
+    fn resolve_parent(s: &State, path: &str) -> FsResult<String> {
+        let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
+        if name.is_empty() {
+            return Ok("/".into());
+        }
+        Ok(join_remote(&MemFs::resolve(s, parent_remote(path))?, name))
     }
 
     fn meta(n: &Node) -> Meta {
@@ -164,11 +189,15 @@ impl RemoteFs for MemFs {
     }
 
     async fn lstat(&self, path: &str) -> FsResult<Meta> {
-        self.0.lock().nodes.get(path).map(MemFs::meta).ok_or_else(|| not_found(path))
+        let s = self.0.lock();
+        let p = MemFs::resolve_parent(&s, path)?;
+        s.nodes.get(&p).map(MemFs::meta).ok_or_else(|| not_found(path))
     }
 
     async fn readlink(&self, path: &str) -> FsResult<String> {
-        match &self.0.lock().nodes.get(path).ok_or_else(|| not_found(path))?.body {
+        let s = self.0.lock();
+        let p = MemFs::resolve_parent(&s, path)?;
+        match &s.nodes.get(&p).ok_or_else(|| not_found(path))?.body {
             Body::Link(t) => Ok(t.clone()),
             _ => Err(FsError::invalid("not a link")),
         }
