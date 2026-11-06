@@ -19,28 +19,64 @@ describe("where a touch lands on the page", () => {
 describe("what a finger does", () => {
   it("a short touch is a tap where it went down", () => {
     const g = new Gesture();
-    g.down({ x: 10, y: 10 }, 0);
-    expect(g.move({ x: 12, y: 11 }, 50)).toEqual([]);
-    expect(g.up({ x: 12, y: 11 })).toEqual([{ k: "tap", x: 10, y: 10 }]);
+    g.down(1, { x: 10, y: 10 }, 0);
+    expect(g.move(1, { x: 12, y: 11 }, 50)).toEqual([]);
+    expect(g.up(1, { x: 12, y: 11 })).toEqual([{ k: "tap", x: 10, y: 10 }]);
   });
 
   it("a quick move scrolls the page along with the finger", () => {
     const g = new Gesture();
-    g.down({ x: 100, y: 300 }, 0);
-    expect(g.move({ x: 100, y: 250 }, 100)).toEqual([{ k: "wheel", x: 100, y: 300, dx: 0, dy: 50 }]);
-    expect(g.move({ x: 100, y: 240 }, 120)).toEqual([{ k: "wheel", x: 100, y: 300, dx: 0, dy: 10 }]);
-    expect(g.up({ x: 100, y: 240 })).toEqual([]);
+    g.down(1, { x: 100, y: 300 }, 0);
+    expect(g.move(1, { x: 100, y: 250 }, 100)).toEqual([{ k: "wheel", x: 100, y: 300, dx: 0, dy: 50 }]);
+    expect(g.move(1, { x: 100, y: 240 }, 120)).toEqual([{ k: "wheel", x: 100, y: 300, dx: 0, dy: 10 }]);
+    expect(g.up(1, { x: 100, y: 240 })).toEqual([]);
   });
 
   it("a long press then a move drags, and lets go where it ends", () => {
     const g = new Gesture();
-    g.down({ x: 10, y: 10 }, 0);
-    expect(g.move({ x: 40, y: 10 }, LONG_PRESS_MS + 10)).toEqual([{ k: "down", x: 10, y: 10 }, { k: "move", x: 40, y: 10 }]);
-    expect(g.move({ x: 60, y: 10 }, LONG_PRESS_MS + 20)).toEqual([{ k: "move", x: 60, y: 10 }]);
-    expect(g.up({ x: 60, y: 10 })).toEqual([{ k: "up", x: 60, y: 10 }]);
-    g.down({ x: 1, y: 1 }, 0);
-    g.move({ x: 30, y: 1 }, LONG_PRESS_MS + 1);
-    expect(g.cancel()).toEqual([{ k: "up", x: 30, y: 1 }]);
+    g.down(1, { x: 10, y: 10 }, 0);
+    expect(g.move(1, { x: 40, y: 10 }, LONG_PRESS_MS + 10)).toEqual([{ k: "down", x: 10, y: 10 }, { k: "move", x: 40, y: 10 }]);
+    expect(g.move(1, { x: 60, y: 10 }, LONG_PRESS_MS + 20)).toEqual([{ k: "move", x: 60, y: 10 }]);
+    expect(g.up(1, { x: 60, y: 10 })).toEqual([{ k: "up", x: 60, y: 10 }]);
+    g.down(2, { x: 1, y: 1 }, 0);
+    g.move(2, { x: 30, y: 1 }, LONG_PRESS_MS + 1);
+    expect(g.cancel(2)).toEqual([{ k: "up", x: 30, y: 1 }]);
+  });
+
+  it("a drag released outside the picture lets go where the finger last was on it, not where it started", () => {
+    const g = new Gesture();
+    g.down(1, { x: 10, y: 10 }, 0);
+    g.move(1, { x: 70, y: 10 }, LONG_PRESS_MS + 5);
+    expect(g.up(1, null)).toEqual([{ k: "up", x: 70, y: 10 }]);
+  });
+
+  it("a pinch sends nothing: the second finger gives the gesture up until every finger is off", () => {
+    const g = new Gesture();
+    const sent: TkOp[] = [];
+    sent.push(...g.down(1, { x: 100, y: 100 }, 0));
+    sent.push(...g.down(2, { x: 200, y: 200 }, 10));
+    // Both fingers spread, long enough for a drag, interleaved as a browser delivers them.
+    for (let i = 1; i <= 10; i++) {
+      sent.push(...g.move(1, { x: 100 - i * 5, y: 100 - i * 5 }, 50 * i + LONG_PRESS_MS));
+      sent.push(...g.move(2, { x: 200 + i * 5, y: 200 + i * 5 }, 50 * i + LONG_PRESS_MS));
+    }
+    sent.push(...g.up(2, { x: 250, y: 250 }));
+    sent.push(...g.move(1, { x: 40, y: 40 }, 2000));
+    sent.push(...g.up(1, { x: 40, y: 40 }));
+    expect(sent).toEqual([]);
+    // With every finger off, the next touch is a gesture again.
+    g.down(3, { x: 5, y: 5 }, 3000);
+    expect(g.up(3, { x: 5, y: 5 })).toEqual([{ k: "tap", x: 5, y: 5 }]);
+  });
+
+  it("a second finger during a drag lets the drag go where it is, and nothing more", () => {
+    const g = new Gesture();
+    g.down(1, { x: 10, y: 10 }, 0);
+    g.move(1, { x: 50, y: 10 }, LONG_PRESS_MS + 5);
+    expect(g.down(2, { x: 200, y: 200 }, LONG_PRESS_MS + 10)).toEqual([{ k: "up", x: 50, y: 10 }]);
+    expect(g.move(1, { x: 90, y: 10 }, LONG_PRESS_MS + 20)).toEqual([]);
+    expect(g.up(1, { x: 90, y: 10 })).toEqual([]);
+    expect(g.up(2, null)).toEqual([]);
   });
 
   it("merges moves and scrolls in a row, and nothing else", () => {
@@ -54,21 +90,21 @@ function rig(replies: Partial<Record<"panes" | "start" | "stop" | "text" | "rebi
   let now = 1000;
   const timers: { at: number; fn: () => void; id: number }[] = [];
   let nextId = 0;
-  const sent: { tk: string; ops: TkOp[]; st: number }[] = [];
+  const sent: { tk: string; ops: TkOp[]; st: number; w: number }[] = [];
   const acks: number[] = [];
-  const texts: string[] = [];
+  const texts: { text: string; w: number }[] = [];
   const states: (TakeoverState | null)[] = [];
   const port: TakeoverPort = {
     panes: async () => replies.panes ?? { t: "ack", panes: [{ pane: "browser-b", title: "Other", host: "x.example", project: "p2", project_name: "B", held: false }, { pane: "browser-a", title: "Sign in", host: "accounts.example", project: "p1", project_name: "A", held: false }] },
     start: async () => replies.start ?? { t: "ack", result: "ok", tk: "tk1", title: "Sign in", host: "accounts.example" },
     stop: async () => replies.stop ?? { t: "ack" },
-    text: async (_tk, text) => {
-      texts.push(text);
+    text: async (_tk, text, _st, w) => {
+      texts.push({ text, w });
       return replies.text ?? { t: "ack", result: "sent" };
     },
     rebind: async () => replies.rebind ?? { t: "ack" },
-    input: (tk, ops, st) => sent.push({ tk, ops, st }),
-    ack: (_tk, seq) => acks.push(seq),
+    input: (tk, ops, st, w) => sent.push({ tk, ops, st, w }),
+    ack: (_tk, seq) => void acks.push(seq),
     serverNow: () => now + 5,
     now: () => now,
     setTimeout: (fn, ms) => {
@@ -124,7 +160,7 @@ describe("a takeover from the phone", () => {
     r.session.shown(4);
     expect(r.acks).toEqual([4]);
     r.session.input([{ k: "tap", x: 1, y: 2 }]);
-    expect(r.sent).toEqual([{ tk: "tk1", ops: [{ k: "tap", x: 1, y: 2 }], st: 1005 }]);
+    expect(r.sent).toEqual([{ tk: "tk1", ops: [{ k: "tap", x: 1, y: 2 }], st: 1005, w: 0 }]);
     r.session.input([{ k: "wheel", x: 1, y: 1, dx: 0, dy: 5 }]);
     r.session.input([{ k: "wheel", x: 1, y: 1, dx: 0, dy: 7 }]);
     expect(r.sent.length).toBe(1);
@@ -150,7 +186,7 @@ describe("a takeover from the phone", () => {
     await r.session.pick("browser-a");
     expect(await r.session.type("hunter2")).toBe(false);
     expect(r.state()?.text).toBe("not_sent");
-    expect(r.texts).toEqual(["hunter2"]);
+    expect(r.texts).toEqual([{ text: "hunter2", w: 0 }]);
   });
 
   it("ends when the computer says so, and after a reconnect the computer let go of", async () => {
@@ -166,5 +202,48 @@ describe("a takeover from the phone", () => {
     expect(again.state()).toMatchObject({ phase: "ended", message: "Stopped on the computer.", frame: null });
     again.session.input([{ k: "tap", x: 1, y: 1 }]);
     expect(again.sent).toEqual([]);
+  });
+
+  it("names the window each input was mapped against, and keeps input for two windows apart", async () => {
+    const r = rig();
+    await r.session.openPicker(null);
+    await r.session.pick("browser-a");
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 1, data: "pane", meta: { deviceWidth: 800, deviceHeight: 600, window_id: 4 } });
+    r.session.input([{ k: "wheel", x: 1, y: 1, dx: 0, dy: 5 }]);
+    // A popup opened: its frame comes before the scroll above went.
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 2, data: "popup", meta: { deviceWidth: 480, deviceHeight: 520, window: "popup", window_id: 5 } });
+    r.session.input([{ k: "wheel", x: 2, y: 2, dx: 0, dy: 7 }]);
+    r.advance(40);
+    expect(r.sent.map((s) => [s.w, s.ops])).toEqual([[4, [{ k: "wheel", x: 1, y: 1, dx: 0, dy: 5 }]], [5, [{ k: "wheel", x: 2, y: 2, dx: 0, dy: 7 }]]]);
+    await r.session.type("code");
+    expect(r.texts).toEqual([{ text: "code", w: 5 }]);
+  });
+
+  it("acknowledges a frame it could not show, and says the picture is behind until one shows", async () => {
+    const r = rig();
+    await r.session.openPicker(null);
+    await r.session.pick("browser-a");
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 3, data: "garbage", meta: {} });
+    r.session.failed(3);
+    expect(r.acks).toEqual([3]);
+    expect(r.state()?.broken).toBe(true);
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 4, data: "jpeg", meta: {} });
+    r.session.shown(4);
+    expect(r.state()?.broken).toBe(false);
+  });
+
+  it("shows itself stuck when the computer says it is paused, and asks it to go on from the last frame", async () => {
+    const r = rig();
+    await r.session.openPicker(null);
+    await r.session.pick("browser-a");
+    r.session.onMessage({ type: "tk_frame", tk: "tk1", seq: 6, data: "jpeg", meta: {} });
+    r.session.shown(6);
+    r.session.onMessage({ type: "tk_fhb", tk: "tk1", seq: 7, paused: true });
+    expect(r.state()?.phase).toBe("frozen");
+    expect(r.acks).toEqual([6, 6]);
+    r.session.input([{ k: "tap", x: 1, y: 1 }]);
+    expect(r.sent).toEqual([]);
+    r.session.onMessage({ type: "tk_fhb", tk: "tk1", seq: 7, paused: false });
+    expect(r.state()?.phase).toBe("live");
   });
 });

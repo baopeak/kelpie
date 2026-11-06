@@ -38,13 +38,15 @@ function Live() {
   const [text, setText] = createSignal("");
   const live = () => s().phase === "live" && connected();
 
-  // A frame is acknowledged once the image is decoded and on screen: the computer sends the next one then.
+  // A frame is acknowledged once the image is decoded and on screen: the computer sends the next one then. One that cannot be decoded is acknowledged
+  // all the same, so the stream goes on, and the screen says the picture is behind.
   let shownSeq = 0;
-  const onLoad = () => {
+  const settled = (ok: boolean) => {
     const seq = s().frame?.seq;
     if (!seq || seq === shownSeq) return;
     shownSeq = seq;
-    takeovers.shown(seq);
+    if (ok) takeovers.shown(seq);
+    else takeovers.failed(seq);
   };
 
   const at = (e: PointerEvent) => {
@@ -54,23 +56,24 @@ function Live() {
     return toPage(e.clientX, e.clientY, drawnBox({ left: r.left, top: r.top, width: r.width, height: r.height }, img.naturalWidth, img.naturalHeight), meta);
   };
   const send = (ops: TkOp[]) => live() && takeovers.input(ops);
+  // Each finger by its pointer id: only the first one drives the page, and a second one (a pinch) gives the gesture up.
   const down = (e: PointerEvent) => {
     const p = at(e);
     if (!p || !live()) return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    send(gesture.down(p, e.timeStamp));
+    send(gesture.down(e.pointerId, p, e.timeStamp));
   };
   const move = (e: PointerEvent) => {
     const p = at(e);
-    if (p) send(gesture.move(p, e.timeStamp));
+    if (p) send(gesture.move(e.pointerId, p, e.timeStamp));
   };
-  const up = (e: PointerEvent) => send(gesture.up(at(e)));
-  const cancel = () => send(gesture.cancel());
+  const up = (e: PointerEvent) => send(gesture.up(e.pointerId, at(e)));
+  const cancel = (e: PointerEvent) => send(gesture.cancel(e.pointerId));
 
   const sendText = async () => {
     if (await takeovers.type(text())) setText("");
   };
-  onCleanup(() => gesture.cancel());
+  onCleanup(() => send(gesture.cancel(-1)));
 
   return (
     <div class="takeover" classList={{ dim: !live() }} data-phase={s().phase}>
@@ -80,9 +83,11 @@ function Live() {
       </div>
       <div class="takeover-screen" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel}>
         <Show when={s().frame} fallback={<p class="muted">{t("Waiting for the page…")}</p>}>
-          {(f) => <img ref={img} src={`data:image/jpeg;base64,${f().data}`} alt={t("The computer's browser pane")} draggable={false} onLoad={onLoad} />}
+          {(f) => <img ref={img} src={`data:image/jpeg;base64,${f().data}`} alt={t("The computer's browser pane")} draggable={false} onLoad={() => settled(true)} onError={() => settled(false)} />}
         </Show>
-        <Show when={s().phase === "frozen" || !connected()}><div class="takeover-lost" role="status">{t("Connection lost: nothing is sent until the picture is back.")}</div></Show>
+        <Show when={s().phase === "frozen" || !connected()} fallback={<Show when={s().broken}><div class="takeover-lost" role="status" data-takeover-broken>{t("The last picture could not be shown: what you see may be behind the page.")}</div></Show>}>
+          <div class="takeover-lost" role="status">{t("Connection lost: nothing is sent until the picture is back.")}</div>
+        </Show>
       </div>
       <div class="composer">
         <div class="keybar">

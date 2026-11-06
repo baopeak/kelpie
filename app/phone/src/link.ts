@@ -175,7 +175,7 @@ export interface LinkHandlers {
   /** Another device was paired, changed or removed on the computer. */
   deviceChanged?(m: { name: string; change: string; permission: string | null }): void;
   /** A takeover's frame, heartbeat or end (`tk_frame`, `tk_fhb`, `tk_end`). */
-  takeover?(m: { type: string; tk?: string; seq?: number; data?: string; meta?: unknown; reason?: string }): void;
+  takeover?(m: { type: string; tk?: string; seq?: number; data?: string; meta?: unknown; reason?: string; paused?: boolean }): void;
   /** The computer said, inside the session, that the device was removed: forget the pairing. Nothing else does: a close code
    *  or a refusal before a session is not authenticated, and would let anyone on the path destroy the pairing. */
   unpaired(): void;
@@ -686,12 +686,13 @@ export class Link {
   }
 
   /** `st`: the computer's clock as this phone reads it, so that it can drop what came too late. */
-  tkText(tk: string, text: string, st: number) {
-    return this.request({ type: "tk_text", tk, text, st }, { write: false });
+  /** `w`: the window id of the frame the input was mapped against. */
+  tkText(tk: string, text: string, st: number, w: number) {
+    return this.request({ type: "tk_text", tk, text, st, w }, { write: false });
   }
 
-  tkInput(tk: string, ops: TkOp[], st: number) {
-    this.post({ type: "tk_input", tk, ops, st });
+  tkInput(tk: string, ops: TkOp[], st: number, w: number) {
+    this.post({ type: "tk_input", tk, ops, st, w });
   }
 
   tkAck(tk: string, seq: number) {

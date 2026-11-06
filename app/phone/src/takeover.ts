@@ -10,6 +10,8 @@ export interface FrameMeta {
   offsetTop?: number;
   pageScaleFactor?: number;
   window?: "pane" | "popup";
+  /** The window's id: input mapped against this frame names it, and the computer drops input meant for a window it no longer shows. */
+  window_id?: number;
 }
 
 export interface PaneRow {
@@ -64,21 +66,33 @@ export function toPage(clientX: number, clientY: number, box: Box, meta: FrameMe
   return { x: round1(u * meta.deviceWidth), y: round1(v * meta.deviceHeight + (meta.offsetTop ?? 0)) };
 }
 
-/** One finger on the picture, in page coordinates: a tap, a scroll (the page moves with the finger), or after a long press a drag. */
+/** One finger on the picture, in page coordinates: a tap, a scroll (the page moves with the finger), or after a long press a drag. Only the first
+ *  finger counts. A second one gives the gesture up: a drag lets go where it is, nothing else is sent for it, and nothing at all is until every finger
+ *  is off the picture. So a pinch never reaches the page. */
 export class Gesture {
   private start: { x: number; y: number; t: number } | null = null;
   private last: { x: number; y: number } | null = null;
   private mode: "none" | "scroll" | "drag" = "none";
+  private pointer: number | null = null;
+  private fingers = new Set<number>();
+  private blocked = false;
 
-  down(p: { x: number; y: number }, t: number): TkOp[] {
+  down(id: number, p: { x: number; y: number }, t: number): TkOp[] {
+    this.fingers.add(id);
+    if (this.fingers.size > 1) {
+      this.blocked = true;
+      return this.giveUp();
+    }
+    if (this.blocked) return [];
+    this.pointer = id;
     this.start = { ...p, t };
     this.last = p;
     this.mode = "none";
     return [];
   }
 
-  move(p: { x: number; y: number }, t: number): TkOp[] {
-    if (!this.start || !this.last) return [];
+  move(id: number, p: { x: number; y: number }, t: number): TkOp[] {
+    if (this.blocked || id !== this.pointer || !this.start || !this.last) return [];
     if (this.mode === "none") {
       if (Math.hypot(p.x - this.start.x, p.y - this.start.y) < DRAG_PX) return [];
       this.mode = t - this.start.t >= LONG_PRESS_MS ? "drag" : "scroll";
@@ -93,26 +107,45 @@ export class Gesture {
     return [{ k: "wheel", x: this.start.x, y: this.start.y, dx: round1(from.x - p.x), dy: round1(from.y - p.y) }];
   }
 
-  up(p: { x: number; y: number } | null): TkOp[] {
+  /** A finger lifted, at `p` on the picture or outside it (null): a drag lets go where the finger last was on it. */
+  up(id: number, p: { x: number; y: number } | null): TkOp[] {
+    this.fingers.delete(id);
+    if (this.blocked) {
+      if (!this.fingers.size) this.blocked = false;
+      return [];
+    }
+    if (id !== this.pointer) return [];
     const { start, mode } = this;
-    this.start = this.last = null;
-    this.mode = "none";
-    if (!start) return [];
+    const at = p ?? this.last ?? start;
+    this.reset();
+    if (!start || !at) return [];
     if (mode === "none") return [{ k: "tap", x: start.x, y: start.y }];
-    if (mode === "drag") return [{ k: "up", x: (p ?? start).x, y: (p ?? start).y }];
+    if (mode === "drag") return [{ k: "up", x: at.x, y: at.y }];
     return [];
   }
 
-  /** The touch was taken away (another finger, the system): a drag lets go where it is, nothing else is sent. */
-  cancel(): TkOp[] {
-    const was = this.mode === "drag" && this.last;
-    const at = this.last;
+  /** The system took the touch away: a drag lets go where it is, nothing else is sent. */
+  cancel(id: number): TkOp[] {
+    this.fingers.delete(id);
+    if (this.blocked) {
+      if (!this.fingers.size) this.blocked = false;
+      return [];
+    }
+    return id === this.pointer ? this.giveUp() : [];
+  }
+
+  private giveUp(): TkOp[] {
+    const at = this.mode === "drag" ? this.last : null;
+    this.reset();
+    return at ? [{ k: "up", x: at.x, y: at.y }] : [];
+  }
+
+  private reset() {
     this.start = this.last = null;
     this.mode = "none";
-    return was && at ? [{ k: "up", x: at.x, y: at.y }] : [];
+    this.pointer = null;
   }
 }
-
 /** Merges what waits to be sent: of moves in a row only the last, scrolls in a row added up. Taps, presses, releases and keys stay as they are, in order. */
 export function coalesce(ops: TkOp[]): TkOp[] {
   const out: TkOp[] = [];
@@ -132,9 +165,10 @@ export interface TakeoverPort {
   panes(): Promise<Reply>;
   start(pane: string): Promise<Reply>;
   stop(tk: string): Promise<Reply>;
-  text(tk: string, text: string, st: number): Promise<Reply>;
+  /** `w`: the window id of the frame the input was mapped against (the computer drops what is meant for a window it no longer shows). */
+  text(tk: string, text: string, st: number, w: number): Promise<Reply>;
   rebind(tk: string): Promise<Reply>;
-  input(tk: string, ops: TkOp[], st: number): void;
+  input(tk: string, ops: TkOp[], st: number, w: number): void;
   ack(tk: string, seq: number): void;
   /** The computer's clock, as this phone reads it. */
   serverNow(): number;
@@ -156,9 +190,11 @@ export interface TakeoverState {
   message: string | null;
   /** What became of the last text sent: it is never sent again by itself. */
   text: "sending" | "sent" | "not_sent" | null;
+  /** The last frame could not be shown: the picture on screen is older than the page. */
+  broken: boolean;
 }
 
-const fresh = (project: string | null): TakeoverState => ({ phase: "pick", project, panes: null, tk: null, title: "", host: "", frame: null, message: null, text: null });
+const fresh = (project: string | null): TakeoverState => ({ phase: "pick", project, panes: null, tk: null, title: "", host: "", frame: null, message: null, text: null, broken: false });
 
 /** Why a takeover ended, in the phone's words; the reason codes are the daemon's. */
 export function endedText(reason: string, t: (s: string) => string): string {
@@ -185,6 +221,10 @@ export function endedText(reason: string, t: (s: string) => string): string {
 export class TakeoverSession {
   state: TakeoverState | null = null;
   private queue: TkOp[] = [];
+  /** The window the queued input was mapped against. */
+  private queueWindow = 0;
+  /** The last frame acknowledged. */
+  private ackedSeq = 0;
   private flushTimer: unknown = null;
   private watchTimer: unknown = null;
   private heardAt = 0;
@@ -232,24 +272,49 @@ export class TakeoverSession {
   }
 
   /** A `tk_frame`, `tk_fhb` or `tk_end` from the computer. */
-  onMessage(m: { type: string; tk?: string; seq?: number; data?: string; meta?: FrameMeta; reason?: string }) {
+  onMessage(m: { type: string; tk?: string; seq?: number; data?: string; meta?: FrameMeta; reason?: string; paused?: boolean }) {
     const s = this.state;
     if (!s?.tk || m.tk !== s.tk || s.phase === "ended") return;
     if (m.type === "tk_end") return this.ended(endedText(m.reason ?? "", this.t));
     this.heardAt = this.port.now();
     if (m.type === "tk_frame" && typeof m.data === "string" && typeof m.seq === "number") {
       this.patch({ phase: "live", frame: { seq: m.seq, data: m.data, meta: m.meta ?? {} } });
+    } else if (m.type === "tk_fhb" && m.paused === true) {
+      // The computer waits for an acknowledgement it never got (a frame lost on the way, or not shown): the picture is stuck, input is not taken. It is
+      // asked to go on from the last frame acknowledged, which brings a fresh one.
+      this.queue = [];
+      if (s.phase === "live") this.patch({ phase: "frozen" });
+      if (this.ackedSeq) this.port.ack(s.tk, this.ackedSeq);
     } else if (s.phase === "frozen") this.patch({ phase: "live" });
   }
 
   /** The frame `seq` is on the screen: the computer may send the next. */
   shown(seq: number) {
-    if (this.state?.tk && this.state.phase !== "ended") this.port.ack(this.state.tk, seq);
+    if (!this.state?.tk || this.state.phase === "ended") return;
+    this.ackedSeq = Math.max(this.ackedSeq, seq);
+    this.port.ack(this.state.tk, seq);
+    if (this.state.broken) this.patch({ broken: false });
+  }
+
+  /** The frame `seq` could not be decoded: it is acknowledged all the same, so that the next one comes, and the screen says the picture is behind. */
+  failed(seq: number) {
+    if (!this.state?.tk || this.state.phase === "ended") return;
+    this.ackedSeq = Math.max(this.ackedSeq, seq);
+    this.port.ack(this.state.tk, seq);
+    this.patch({ broken: true });
+  }
+
+  private windowNow(): number {
+    return this.state?.frame?.meta.window_id ?? 0;
   }
 
   /** Input, while the picture is live: anything else is dropped here, never kept for later. */
   input(ops: TkOp[]) {
     if (this.state?.phase !== "live" || !ops.length) return;
+    // Input mapped against another window's picture goes on its own, with that window's id.
+    const w = this.windowNow();
+    if (this.queue.length && w !== this.queueWindow) this.flush();
+    this.queueWindow = w;
     this.queue.push(...ops);
     // A tap, a press, a release or a key goes now; moves and scrolls wait a moment for the ones that follow.
     if (ops.some((o) => o.k !== "move" && o.k !== "wheel")) this.flush();
@@ -260,7 +325,7 @@ export class TakeoverSession {
     if (this.flushTimer !== null) this.port.clearTimeout(this.flushTimer);
     this.flushTimer = null;
     const ops = coalesce(this.queue.splice(0));
-    if (ops.length && this.state?.tk && this.state.phase === "live") this.port.input(this.state.tk, ops, this.port.serverNow());
+    if (ops.length && this.state?.tk && this.state.phase === "live") this.port.input(this.state.tk, ops, this.port.serverNow(), this.queueWindow);
   }
 
   /** Text into the page (a password, a code): said as sent or not sent, never sent twice. */
@@ -268,7 +333,7 @@ export class TakeoverSession {
     if (this.state?.phase !== "live" || !this.state.tk || !text) return false;
     this.flush();
     this.patch({ text: "sending" });
-    const r = await this.port.text(this.state.tk, text, this.port.serverNow());
+    const r = await this.port.text(this.state.tk, text, this.port.serverNow(), this.windowNow());
     const ok = r.t === "ack" && r.result === "sent";
     this.patch({ text: ok ? "sent" : "not_sent" });
     return ok;
@@ -290,7 +355,7 @@ export class TakeoverSession {
     if (this.state?.tk !== tk) return;
     if (r.t === "ack") {
       this.heardAt = this.port.now();
-      this.patch({ phase: "live", frame: null });
+      this.patch({ phase: "live" });
     } else if (r.t === "error") this.ended(endedText("link_lost", this.t));
   }
 
