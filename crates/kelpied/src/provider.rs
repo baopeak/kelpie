@@ -1,4 +1,4 @@
-//! The daemon's own requests to the Kelpie app: what only the window can do (a browser pane's screen and input today, the desktop's later).
+//! The daemon's own requests to the Kelpie app: what only the window can do (a browser pane's screen and input, and the desktop's through the screen helper the app spawns).
 //!
 //! Everything else the daemon says to a client is an event nobody answers (`Daemon::broadcast`). A provider is a connection of the verified
 //! app (`Role::App`, `peer_identity`) that registered for a kind of work; the daemon sends it `{"preq": n, "method", "params"}` and waits up to
@@ -23,7 +23,7 @@ use crate::session::{json_out, ClientTx};
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The kinds of work a provider may register for.
-pub const KINDS: &[&str] = &["browser"];
+pub const KINDS: &[&str] = &["browser", "screen"];
 
 struct Registered {
     client: u64,

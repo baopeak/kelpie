@@ -32,6 +32,8 @@ sha2 = "0.10"
 # Phone records are MAC'd (mobile/store.rs); phone traffic is end-to-end encrypted (kelpie-link).
 hmac = "0.12"
 kelpie-link = { path = "../kelpie-link" }
+# A phone's screen (screen.rs): the media messages' format and the input checks, shared with the helper. Its pure modules only.
+kelpie-screen = { path = "../kelpie-screen", default-features = false }
 regex = "1"
 # SSH passwords / key passphrases saved by the app, read when ssh asks (askpass.rs).
 keyring = { version = "3.6", default-features = false, features = ["windows-native", "apple-native"] }

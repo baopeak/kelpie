@@ -224,6 +224,8 @@ pub struct Daemon {
     pub providers: crate::provider::Providers,
     /// Phones that took over a browser pane (`takeover`).
     pub takeover: crate::takeover::Broker,
+    /// Phones that see this computer's screen (`screen`).
+    pub screen: crate::screen::Broker,
     /// This daemon, for threads that outlive a call.
     me: std::sync::Weak<Daemon>,
 }
@@ -345,6 +347,7 @@ impl Daemon {
                 procs: crate::procs::Procs::default(),
                 providers: crate::provider::Providers::default(),
                 takeover: crate::takeover::Broker::default(),
+                screen: crate::screen::Broker::default(),
                 me: weak,
                 data_dir,
                 exe,
@@ -993,8 +996,8 @@ impl Daemon {
     }
 
     pub fn unregister_client(&self, id: u64) {
-        // The app's requests in flight are answered now, and the phones that held its panes let go of them (the read loop did, unless this connection
-        // never had one).
+        // The app's requests in flight are answered now, and the phones that held its panes or its screen let go of them (the read loop did, unless this
+        // connection never had one).
         self.provider_gone(id);
         self.clients.lock().remove(&id);
         self.client_roles.lock().remove(&id);
@@ -1017,7 +1020,12 @@ impl Daemon {
         match self.providers.register(client, role, kind, pid, tx)? {
             crate::provider::Registration::Registered => Ok(json!({"registered": true})),
             crate::provider::Registration::Replaced(old) => {
-                self.takeover.provider_gone(self, old);
+                // The old connection is on its way out: what it served of this kind ends.
+                if kind == "screen" {
+                    self.screen.provider_gone(self, old);
+                } else {
+                    self.takeover.provider_gone(self, old);
+                }
                 Ok(json!({"registered": true}))
             }
             crate::provider::Registration::Taken => {
@@ -1033,6 +1041,7 @@ impl Daemon {
     pub fn provider_gone(&self, client: u64) {
         if !self.providers.client_gone(client).is_empty() {
             self.takeover.provider_gone(self, client);
+            self.screen.provider_gone(self, client);
         }
     }
 

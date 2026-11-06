@@ -19,7 +19,7 @@
 //! - **Reconnecting** (`MODE_RECONNECT`, Noise IK): the phone's static key must be a paired device's (a record whose MAC checks
 //!   out); anything else is closed without a reply. The frame is its `{caps}`; only then does it count as seen, take over from
 //!   its older connection, and count against its 5 handshakes in 10 s.
-//! - **Afterwards**: [`Wire`] seals each JSON message of the phone protocol into binary messages and opens what comes in; a
+//! - **Afterwards**: [`Wire`] seals each JSON message of the phone protocol (and a screen's binary media, `Wire::send_bytes`) into binary messages and opens what comes in; a
 //!   message that does not decrypt, or chunks that stop coming, end the connection (both ends then handshake again).
 
 use std::net::{IpAddr, SocketAddr};
@@ -197,10 +197,15 @@ impl Wire {
     /// A message too long to seal changes nothing about the session: it is reported and dropped, and the session carries on.
     /// Any other failure to seal leaves a session that cannot go on: the phone is told to connect again.
     pub async fn send(&mut self, text: &str) -> bool {
-        let frames = match self.session.seal(text.as_bytes()) {
+        self.send_bytes(text.as_bytes()).await
+    }
+
+    /// A binary message: a screen's media (`screen`), which starts with a byte no JSON message starts with (`kelpie_screen::wire::MEDIA`).
+    pub async fn send_bytes(&mut self, msg: &[u8]) -> bool {
+        let frames = match self.session.seal(msg) {
             Ok(frames) => frames,
             Err(kelpie_link::LinkError::TooLarge) => {
-                tracing::warn!("phone link: dropped a message of {} bytes, too long for a phone", text.len());
+                tracing::warn!("phone link: dropped a message of {} bytes, too long for a phone", msg.len());
                 return true;
             }
             Err(e) => {

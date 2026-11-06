@@ -31,18 +31,25 @@ const DEAD: Duration = Duration::from_secs(45);
 /// but a phone that has not been heard from for this long is gone whatever the machine was doing.
 const EXCUSE_LIMIT: Duration = Duration::from_secs(600);
 
-/// The bulk lane's two ends (the writer owns the receiving one), and the signal that something decided
-/// the consumer is too slow.
+/// Binary media messages of a screen the phone sees (`screen`), behind everything else: a few frames, and
+/// a full lane drops video up to the next keyframe (the screen broker's rule) rather than making anything wait.
+const MEDIA_CAPACITY: usize = 6;
+
+/// The bulk lane's two ends (the writer owns the receiving one), the media lane's, and the signal that
+/// something decided the consumer is too slow.
 pub struct Lanes {
     pub bulk: mpsc::Sender<String>,
     pub bulk_rx: mpsc::Receiver<String>,
+    pub media: mpsc::Sender<Vec<u8>>,
+    pub media_rx: mpsc::Receiver<Vec<u8>>,
     /// Fires when something decided the consumer is too slow.
     pub slow: Arc<Notify>,
 }
 
 pub fn lanes() -> Lanes {
     let (bulk, bulk_rx) = mpsc::channel(BULK_CAPACITY);
-    Lanes { bulk, bulk_rx, slow: Arc::new(Notify::new()) }
+    let (media, media_rx) = mpsc::channel(MEDIA_CAPACITY);
+    Lanes { bulk, bulk_rx, media, media_rx, slow: Arc::new(Notify::new()) }
 }
 
 /// Whether the phone on the other end is there. Anything it sends counts; the daemon asks (`Beat::Ping`)
@@ -188,5 +195,9 @@ mod tests {
             lanes.bulk.try_send("frame".into()).unwrap();
         }
         assert!(lanes.bulk.try_send("frame".into()).is_err());
+        for _ in 0..MEDIA_CAPACITY {
+            lanes.media.try_send(vec![1]).unwrap();
+        }
+        assert!(lanes.media.try_send(vec![1]).is_err(), "the media lane too");
     }
 }

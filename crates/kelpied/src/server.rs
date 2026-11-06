@@ -165,6 +165,8 @@ where
                         let params = req.get("params").unwrap_or(&Value::Null);
                         if method == "provider.reply" {
                             daemon.providers.reply(id, params);
+                        } else if crate::screen::Broker::owns_event(params) {
+                            daemon.screen.on_event(&daemon, id, params);
                         } else {
                             daemon.takeover.on_event(&daemon, id, params);
                         }

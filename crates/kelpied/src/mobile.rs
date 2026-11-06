@@ -2281,6 +2281,8 @@ struct Conn {
     /// Where screen frames and chat messages (JSON text) wait for the socket, and where what must not
     /// wait behind them does.
     out: mpsc::Sender<String>,
+    /// Where a screen's binary media waits for the socket, behind everything else (`screen`).
+    media: mpsc::Sender<Vec<u8>>,
     /// Terminal sessions followed, by session id.
     followed: HashMap<String, Followed>,
     /// Chat sessions watched.
@@ -2517,9 +2519,14 @@ impl Conn {
         let verb = Verb::parse(name).ok_or_else(|| refuse("unknown_verb", format!("unknown request {name:?}")))?;
         if verb.takeover() && verb.needs() > granted {
             if self.daemon.mobile.permission(&self.device).is_some_and(|record| record >= Permission::Control) {
-                return Err(refuse("no_control", "Taking over a pane needs this computer's HTTPS address through Tailscale (not the relay), with the app lock on and unlocked."));
+                let what = if verb.screen() { "Seeing the computer's screen" } else { "Taking over a pane" };
+                return Err(refuse("no_control", format!("{what} needs this computer's HTTPS address through Tailscale (not the relay), with the app lock on and unlocked.")));
             }
             return Err(refuse("no_control", "This device may not take control. Allow it in Kelpie → Settings → Mobile."));
+        }
+        if verb.screen() {
+            let phone = crate::screen::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.out, media: &self.media };
+            return self.daemon.screen.phone_verb(&self.daemon, phone, name, req).await.map_err(|r| refuse(r.code, r.message));
         }
         if verb.takeover() {
             let phone = crate::takeover::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.out };
@@ -2888,6 +2895,7 @@ impl Conn {
     fn end(&mut self) {
         // A hold on this connection waits a while for the device's next one.
         self.daemon.takeover.link_closed(self.id);
+        self.daemon.screen.link_closed(&self.daemon, self.id);
         for (_, followed) in self.followed.drain() {
             followed.task.abort();
         }
@@ -2920,7 +2928,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     let waiting = Arc::new(AtomicUsize::new(0));
     daemon.mobile.waiting.lock().insert(id, waiting.clone());
     let mut conn = Conn {
-        daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(),
+        daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(), media: lanes.media.clone(),
         followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(), chat_at: HashMap::new(), waiting, overflowed,
         cap, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, lock_path, secure_page, resume: first["resume"].as_str().filter(|r| r.len() <= 64).map(str::to_string), locked: false, lock_told: "",
         relay_offer: daemon.mobile.relay_grant(&device, &first), _phone: Some(daemon.mobile.load.phone()),
@@ -2930,7 +2938,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     if let Some((_, older)) = daemon.mobile.connections.lock().insert(device.id.clone(), (id, replaced.clone())) {
         older.notify_one();
     }
-    let mut wires = Wires { bulk_rx: lanes.bulk_rx, slow: lanes.slow, dirty, replaced };
+    let mut wires = Wires { bulk_rx: lanes.bulk_rx, media_rx: lanes.media_rx, slow: lanes.slow, dirty, replaced };
     // Dropping serve cancels an in-flight request/send, then the common cleanup still runs.
     tokio::select! {
         biased;
@@ -2963,6 +2971,7 @@ fn acknowledges(first: Option<&Value>) -> bool {
 /// What a connection waits on besides its socket.
 struct Wires {
     bulk_rx: mpsc::Receiver<String>,
+    media_rx: mpsc::Receiver<Vec<u8>>,
     /// Something decided this phone cannot take what it is sent.
     slow: Arc<Notify>,
     /// The session list may have changed.
@@ -3214,6 +3223,12 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
             // What was on its way when the phone was locked goes no further.
             Some(msg) = wires.bulk_rx.recv() => {
                 if !conn.locked && !wire.send(&msg).await {
+                    return;
+                }
+            }
+            // A screen's media, last of all; nothing of it goes to a locked phone.
+            Some(media) = wires.media_rx.recv() => {
+                if !conn.locked && !wire.send_bytes(&media).await {
                     return;
                 }
             }
@@ -3511,10 +3526,17 @@ mod tests {
         for permission in [Permission::Read, Permission::Write] {
             let reply = r.ask(permission, json!({"type": "tk_start", "pane": "browser-a"})).await;
             assert_eq!(code(&reply), Some("no_control"), "{permission:?}");
+            // The screen likewise.
+            for verb in [json!({"type": "screens"}), json!({"type": "sc_start", "target": "w:1:2"}), json!({"type": "sc_input", "sc": "s", "ops": []})] {
+                let reply = r.ask(permission, verb.clone()).await;
+                assert_eq!(code(&reply), Some("no_control"), "{permission:?} {verb}");
+            }
         }
-        // The audit log never sees what a takeover sends.
+        // The audit log never sees what a takeover or a screen sends.
         r.conn.note("tk_text", &json!({"type": "tk_text", "tk": "t", "text": "hunter2"}), Some(&json!({"type": "ack", "result": "sent"})));
-        assert!(!r.daemon.mobile.audit_entries(50).to_string().contains("hunter2"));
+        r.conn.note("sc_text", &json!({"type": "sc_text", "sc": "s", "text": "hunter3"}), Some(&json!({"type": "ack", "result": "sent"})));
+        let audit = r.daemon.mobile.audit_entries(50).to_string();
+        assert!(!audit.contains("hunter2") && !audit.contains("hunter3"));
     }
 
     #[test]
@@ -3578,7 +3600,7 @@ mod tests {
         let (tx, _rx, overflowed) = bounded_client_channel(8);
         let (out_tx, out) = mpsc::channel(16);
         let conn = Conn {
-            daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
+            daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, media: mpsc::channel(4).0, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
             chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         };
         Rig { daemon, conn, out, term, typed, chat, phone }
@@ -5241,7 +5263,7 @@ mod tests {
         let (tx, _rx, overflowed) = bounded_client_channel(8);
         let (out, _out_rx) = mpsc::channel(16);
         Conn {
-            daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
+            daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, media: mpsc::channel(4).0, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
             chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         }
     }
@@ -7847,6 +7869,7 @@ mod tests {
             ("mobile/listen.rs", include_str!("mobile/listen.rs")),
             ("mobile/audit.rs", include_str!("mobile/audit.rs")),
             ("load.rs", include_str!("load.rs")),
+            ("screen.rs", include_str!("screen.rs")),
         ];
         // The part of each file before its tests: what ships.
         for (name, source) in sources {
