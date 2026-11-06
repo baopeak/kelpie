@@ -600,7 +600,7 @@ third implementation for the tests, and all three are checked against the crate'
   `mobile.pair_start` makes browser pairings only. `control` (taking over a browser pane, API 28) is for a browser device only while all of these hold: it paired
   on a secure origin, its passkey is set up and the app lock is on (`record_ceiling`, `may_control` in `mobile.status`), it was raised to it on the desktop with the
   person's verification, this connection is this computer's own HTTPS page and not the relay (`transport_cap`), and the passkey has opened it now (`Mobile::control_now`,
-  read on every message). That grant is also the confirmation of the device's first takeover: no other prompt. Turning the app lock off (`set_lock`) lowers every such
+  read on every message; a connection from a page is held to this rule whatever its record's kind, an app record used from a browser too). That grant is also the confirmation of the device's first takeover: no other prompt. Turning the app lock off (`set_lock`) lowers every such
   record to `write` (sealed, audited, its connection starts again); turning it back on does not restore it, a new grant does. Owner decisions, 2026-11-05.
 - **Tailscale mode** (`mobile/tailscale.rs`, off by default): `tailscale serve --bg --https=8443 http://127.0.0.1:<port>` publishes the
   page at `https://<fqdn>:8443` to the person's own tailnet, and forwards to one loopback listener that exists only while the mode is on and
@@ -712,22 +712,35 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
 - **Provider channel** (`provider.rs`): the daemon's own requests to the app. A connection of the verified app (`Role::App`) registers with `provider.register {kind:
   "browser"}` (`APP_ONLY`); a second registration is refused, the audit log has `provider_refused` and the desktop hears `provider.refused`. The daemon sends
   `{preq, method, params}` and waits 10 s for `provider.reply {preq, result | error}`, or `{pnote, method, params}`, which nobody answers. `provider.reply` and the
-  app's own `provider.event` are read on the connection's read loop, ahead of its requests, and only from that connection. When it goes, every request it had is
-  answered with an error at once (`unregister_client`) and every hold it served ends.
-- **Broker** (`takeover.rs`): the phone's verbs `panes`, `tk_start {pane}`, `tk_input {tk, ops, st}`, `tk_text {tk, text, st}`, `tk_ack {tk, seq}`, `tk_stop`,
-  `tk_rebind`, all needing `control`; to the phone `tk_frame {tk, seq, data, meta}`, `tk_fhb {tk, seq}` every second, `tk_end {tk, reason}`. A hold is keyed by
-  device, link connection and provider connection, one per pane, one per device. It rests on a `Mobile::grant` flag that a revoke, a lower permission, the lock
-  (`lock_now`, an idle window running out, `set_lock` turning it off, which also lowers the record to `write`), phone access off or a reset clear at once: every input checks it and the hold's task lets
-  go of the pane within 250 ms. A dropped link keeps the hold 15 s for the same device's next connection (`tk_rebind`, after its handshake), which gets a fresh
+  app's own `provider.event` are read on the connection's read loop, ahead of its requests, and only from that connection; so is `provider.register`, whose
+  peer process id says whether a new connection is the same app: the same process takes the kind over from its connection before with no alert (a quick
+  reconnect), anything else is refused. When the connection's read loop ends, or it authenticates again as something other than the app, every request it had
+  is answered with an error at once and every hold it served ends, before its queued requests are drained. The app retries a refused registration five times,
+  0.5 to 8 s apart. A request whose caller is dropped leaves nothing waiting.
+- **Broker** (`takeover.rs`): the phone's verbs `panes`, `tk_start {pane}`, `tk_input {tk, ops, st, w}`, `tk_text {tk, text, st, w}`, `tk_ack {tk, seq}`, `tk_stop`,
+  `tk_rebind`, all needing `control`; to the phone `tk_frame {tk, seq, data, meta}` (`meta.window_id` names the window shown), `tk_fhb {tk, seq, paused}` every
+  second, `tk_end {tk, reason}`. A hold is keyed by device, link connection and provider connection, one per pane, one per device; a start reserves its pane and
+  device until the app has answered, so two starts at once get one hold, and a start the app fails or does not answer in time tells it to let go
+  (`browser.takeover_stop`, which also makes the app refuse that start if it comes later). It rests on a `Mobile::grant` flag that a revoke, a lower permission,
+  the lock (`lock_now`, an idle window running out, `set_lock` turning it off, which also lowers the record to `write`), phone access off or a reset clear at once:
+  every input checks it, and the hold's task lets go of the pane within 250 ms, also when what the flag rests on is gone without it being cleared
+  (`Mobile::control_held`: the record's `control`, and for a page its lock on and a window its passkey opened). A rebind on the connection that holds it already
+  keeps it; a device's own hold is not listed to it as taken. At most 60 input messages a second are taken. A dropped link keeps the hold 15 s for the same device's next connection (`tk_rebind`, after its handshake), which gets a fresh
   frame, never one from before. 10 minutes with no input ends it, and so does Stop on either side. New takeovers are refused at load L2 and above (`host_busy`).
 - **Frames are not queued**: the app acknowledges each `Page.screencastFrame` at once and hands it over; the broker keeps the newest one and sends it when the
   phone has credit (2 frames unacknowledged; the phone acknowledges once the image is decoded), at the step's rate. Steps (`Ladder`): q70/1280 px at 10, 5 and 2 fps,
   then q55/1024, q45/800, q40/800, down when the median acknowledgement round trip of the last 3 is over 400 ms or a frame is over 700 KiB of base64 (one link
   message holds 1 MiB), up when the median of 10 is under 150 ms and the step held 5 s. Load caps: L1 q60/1280/8 fps, L2 q50/960/4, L3 q40/800/2. Nothing
-  acknowledged for 2 s pauses the screencast; the next acknowledgement resumes it with a fresh frame. The relay's 55 KB/s budget is not built: relay takeover is deferred.
+  acknowledged for 2 s pauses the screencast and drops the waiting frame, and the hold sleeps until something changes; the heartbeat says `paused`, and the phone
+  shows the picture as stuck and acknowledges its last frame again, which resumes it with a fresh one. A frame the phone cannot decode is acknowledged all the
+  same, and the phone says its picture is behind. The relay's 55 KB/s budget is not built: relay takeover is deferred.
 - **Input**: a closed set (`tap`, `down`, `move`, `up` in CSS pixels of the page's viewport, `wheel`, `key` from a short list) checked by the daemon, 32 to a
-  message (on the phone a tap clicks, a drag scrolls, a 400 ms hold then a drag drags, and pinch is not passed on: owner decision, 2026-11-05), dispatched in order as `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`; text as `Input.insertText` with an answer of its own, sent or not sent,
-  never retried. Input whose `st` (the phone's reading of this computer's clock) is more than 1 s off is dropped, so a tap that arrives after a gap clicks
+  message. On the phone a tap clicks, a drag scrolls, a 400 ms hold then a drag drags (owner decision, 2026-11-05); only the first finger counts, and a second one
+  gives the gesture up (a drag lets go where it is) until every finger is off, so a pinch reaches the page as nothing. Every input names the window id of the
+  frame it was mapped against. In the app one ordered queue per takeover (at most 64 items) carries both input and text, so text never overtakes the tap that
+  chose its field; at its turn an item meant for another window (a popup that opened or closed meanwhile) is dropped, and so is anything but a release whose
+  `st` is more than 1 s off by then. Input goes as `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`; text as `Input.insertText`, answered once it is typed,
+  sent or not sent, never retried. A button a drag left pressed is released when the takeover ends or its window changes. Input whose `st` (the phone's reading of this computer's clock) is more than 1 s off is dropped, so a tap that arrives after a gap clicks
   nothing; the phone merges moves and scrolls and sends nothing while its picture is not live (3 s without a frame or heartbeat dims it). **Nothing typed is logged**:
   `Conn::note` leaves the takeover verbs out, the audit log has `takeover_start` (the page's host) and `takeover_stop` (why), and no log line names input.
 - **The app** (`browser/takeover.rs`, `lib/takeover.ts`): `browser.panes` and `browser.takeover_start` go to the window (`provider-request`), which lists the
