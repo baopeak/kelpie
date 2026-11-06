@@ -20,9 +20,11 @@ The phone here is emulated: it gets the binary media messages and acknowledges e
    refused the screen.
 3. The phone lists the test window, sees it (a keyframe with SPS and PPS first, numbered frames after), and the desktop shows who sees it.
 4. A click on the window's button, in the picture's pixels, reaches the window; a click with a stale clock does not; text goes into its field.
-5. Stop with the hotkey, Stop on the phone and Stop on the desktop each end it; a revoke ends it within a second, and input after it does nothing.
+5. Stop with the hotkey, Stop on the phone and Stop on the desktop each end it; a revoke ends it within a second, and input after it does nothing;
+   the phone locking (leaving the app) ends it within a second too.
 6. With the app closed, the phone is told to open Kelpie on the computer.
-7. The audit log has each start (with what was shared) and end, and nothing typed; the typed text is in no file of the daemon's data folder.
+7. The audit log has each start (with the program shared, never the window's title) and end, and nothing typed; the typed text is in no file of
+   the daemon's data folder.
 """
 import asyncio
 import ctypes
@@ -275,7 +277,7 @@ async def control_phone(d, call, serve_port, name):
     await phone.close()
     phone = ScreenPhone(f"http://{ORIGIN}/", device, origin=f"https://{ORIGIN}", resume=enrolled["resume"], **held)
     hello = await phone.open()
-    return phone, device, hello
+    return phone, device, hello, passkey
 
 
 async def scenario(run, d):
@@ -299,9 +301,9 @@ async def scenario(run, d):
     await call("mobile.set_tailscale", {"on": True})
     changes = [c for c in ps.fake_tailscale_calls(TS_LOG) if c.startswith("serve --bg")]
     serve_port = int(changes[-1].rsplit(":", 1)[1])
-    phone, device, hello = await control_phone(d, call, serve_port, "Screen phone")
+    phone, device, hello, _ = await control_phone(d, call, serve_port, "Screen phone")
     check("the phone comes back unlocked, with control", hello.get("locked") is False and hello["device"]["permission"] == "control", hello.get("device"))
-    spare, spare_device, _ = await control_phone(d, call, serve_port, "Spare phone")
+    spare, spare_device, _, spare_key = await control_phone(d, call, serve_port, "Spare phone")
     for name, can_write in (("Reader", False), ("Typist", True)):
         other_device, _ = await asyncio.to_thread(ps.pair, d, BASE, name, can_write)
         other = ScreenPhone(BASE, other_device)
@@ -320,11 +322,12 @@ async def scenario(run, d):
     check("the phone lists the screens and the test window", target is not None and any(r["kind"] == "monitor" for r in rows), [r.get("title") for r in rows][:10])
     hwnd = int(target["id"].split(":")[1]) if target else 0
 
-    async def see():
-        mark = phone.mark()
-        started = await phone.ask(type="sc_start", target=target["id"], timeout=20)
-        phone.sc = (started or {}).get("sc")
-        first = await phone.media(mark, lambda m: m["kind"] == "video", 15)
+    async def see(p=None):
+        p = p or phone
+        mark = p.mark()
+        started = await p.ask(type="sc_start", target=target["id"], timeout=20)
+        p.sc = (started or {}).get("sc")
+        first = await p.media(mark, lambda m: m["kind"] == "video", 15)
         return started, first, mark
 
     started, first, mark = await see()
@@ -392,6 +395,17 @@ async def scenario(run, d):
     check("…and input after it does nothing", events().count("clicked") == clicks)
     await phone.close()
 
+    # Leaving the app on the phone locks it, and that ends the screen at once, with no grace.
+    await see(spare)
+    await asyncio.to_thread(until, lambda: w.js("return !!document.querySelector('[data-screen-shared]')"), 5)
+    at = time.time()
+    await spare.send(type="lock_now")
+    gone = await asyncio.to_thread(until, lambda: not w.js("return !!document.querySelector('[data-screen-shared]')"), 5, 0.05)
+    check("the phone locking ends the screen within a second", bool(gone) and time.time() - at < 1.5, f"{time.time() - at:.2f} s")
+    challenge = (await spare.ask(type="lock_challenge"))["lock"]["challenge"]
+    unlocked = await spare.ask(type="lock_unlock", **spare_key.get(challenge))
+    check("…and it can be unlocked again", (unlocked or {}).get("result") == "ok", unlocked and unlocked.get("type"))
+
     # ---------- 6. the app closed ----------
     await asyncio.to_thread(w.quit)
     run.d = None
@@ -402,7 +416,9 @@ async def scenario(run, d):
 
     # ---------- 7. what is kept ----------
     entries = json.dumps((await call("mobile.audit", {"limit": 200}))["entries"])
-    check("the audit log has the screens' starts, with what was shared, and their ends", "screen_start" in entries and TITLE in entries and "screen_stop" in entries)
+    program = os.path.basename(sys.executable)
+    check("the audit log has the screens' starts, with the program shared, and their ends", "screen_start" in entries and program in entries and "screen_stop" in entries, program)
+    check("…never the window's title", TITLE not in entries)
     check("…and nothing typed", TYPED not in entries)
     leaked = []
     for root, _, files in os.walk(DATA):
