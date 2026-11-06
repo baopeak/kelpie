@@ -346,10 +346,12 @@ person had chosen goes, and approvals end, which fails safe. `disable_web_page_p
   1 s to 60 s; a `409` (a webhook, or another poller) is shown once with what to do.
 - **Buttons.** Only for a needs-you message about a request the daemon labels `low` (`mobile::risk`) that changes no file, shown whole
   (at most 2000 characters, no hidden marks), with a one-time yes known to be one: in a terminal, the one open request a hook reported,
-  shown whole in the menu's own dialog, between its `… command` header and its question, alone or followed, from a line of its own,
-  by the hook's own `description` (`choices::menu_shows_command`; whitespace collapsed, anything more or less refuses). The window
-  must hold one header, left of every line under it, and a description that could be the command's next line (a character a shell
-  acts on, or a first word that is not plain letters or names a program the risk table knows) matches nothing. Then a permission menu with one
+  shown whole on one line of the menu's own dialog, between its `… command` header and its question, alone or followed, from the next
+  line, by the hook's own `description` (`choices::menu_shows_command`; whitespace collapsed, anything more or less refuses). A command
+  of more than one line, in the request or in the dialog, gets no buttons: a wrapped line cannot be told from a line break, which the
+  shell runs as a second command. The window must hold one header, left of every line under it, and a description that could be the
+  command's next line (a character a shell acts on, or a first word that is not plain letters or names a program the risk table knows)
+  matches nothing. Then a permission menu with one
   plain *Yes* and one plain *No*
   (`choices::one_time_answers`); in a chat, the one open request, for which the daemon writes the dialect's own one-time yes and no
   (Claude's `can_use_tool` repeating its input when that was at most 16 KiB, Codex's command approvals in both versions, ACP's one
