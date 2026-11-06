@@ -11,9 +11,9 @@ export function EditSessions(props: { label: (alias: string) => string }) {
       case "downloading":
         return t("Downloading…");
       case "uploading":
-        return t("Uploading…");
+        return s.dirty ? t("Uploading… (a newer save follows)") : t("Uploading…");
       case "asking":
-        return t("Waiting for your answer");
+        return s.dirty ? t("Waiting for your answer (a newer save follows)") : t("Waiting for your answer");
       case "pending":
         return t("Changed: not uploaded yet");
       case "error":

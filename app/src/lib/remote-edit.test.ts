@@ -5,13 +5,14 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./ipc", () => ({ onEvent: vi.fn(), sftpStat: vi.fn(), xferList: vi.fn(), xferStart: vi.fn() }));
 vi.mock("./store", () => ({ store: { notify: vi.fn(), state: { projects: [] } } }));
 vi.mock("./ssh-hosts", () => ({ checkHost: vi.fn(), hostProject: vi.fn(), isHostKeyError: () => false }));
+vi.mock("./confirm-dialog", () => ({ confirmDialog: vi.fn() }));
 
-import { afterUpload, uploadJob, type EditSession } from "./remote-edit";
+import { afterUpload, onSave, unsent, uploadAgain, uploadJob, type EditSession } from "./remote-edit";
 import type { XferJob } from "./types";
 
 const session: EditSession = {
   id: "s", dest: "prod", remotePath: "/srv/app/config.yml", localPath: "C:\\Users\\me\\AppData\\Local\\Kelpie\\sftp-edit\\s\\config.yml", name: "config.yml",
-  base: { size: 120, mtime: 1_700_000_000 }, auto: true, state: "open", lastUpload: null, error: null,
+  base: { size: 120, mtime: 1_700_000_000 }, auto: true, state: "open", lastUpload: null, error: null, dirty: false,
 };
 
 const job = (over: Partial<XferJob>): XferJob => ({
@@ -35,5 +36,21 @@ describe("uploading an edited file", () => {
   it("keeps the base when the person discarded the upload, and reports a failure", () => {
     expect(afterUpload(session, job({ totals: { files: 1, bytes: 1, done_files: 0, done_bytes: 1, skipped: 1, failed: 0 } }), null)).toEqual({ state: "open" });
     expect(afterUpload(session, job({ state: "failed", error: "permission denied" }), null)).toEqual({ state: "error", error: "permission denied" });
+  });
+});
+
+describe("saves while an upload runs", () => {
+  it("a second save during an upload follows it with the latest content", () => {
+    expect(onSave({ ...session, state: "uploading" })).toBe("follow");
+    expect(onSave({ ...session, state: "asking" })).toBe("follow");
+    expect(onSave(session)).toBe("upload");
+    expect(onSave({ ...session, auto: false })).toBe("ask");
+    expect(uploadAgain({ ...session, dirty: true, state: "open" })).toBe(true);
+    expect(uploadAgain({ ...session, dirty: true, state: "error" })).toBe(false);
+    expect(uploadAgain({ ...session, dirty: false, state: "open" })).toBe(false);
+  });
+  it("Stop asks first when edits are not on the server yet", () => {
+    expect(unsent(session)).toBe(false);
+    for (const s of [{ dirty: true }, { state: "pending" as const }, { state: "error" as const }, { state: "uploading" as const }]) expect(unsent({ ...session, ...s })).toBe(true);
   });
 });

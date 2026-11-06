@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount, createEffect, on } from "solid-js";
 import { store } from "../lib/store";
 import { Icon } from "./icons";
 import { MemoryMeter, UsageMeters } from "./usage-meter";
@@ -9,7 +9,7 @@ import { available, whenIdle } from "../lib/updater";
 import { pluginStatus, pluginStatusItems, type PluginInfo, type PluginStatusItem } from "../lib/plugins";
 import { t, msg } from "../lib/i18n";
 import { automationEvents } from "../lib/automation-events";
-import { chipText, heldText, initTransfers, isActive, jobList } from "../lib/transfers";
+import { chipText, closeConflicts, conflictsShown, heldText, initTransfers, isActive, jobList, nextQuestion, openConflicts, reloadTransfers } from "../lib/transfers";
 import { XFER_API } from "../lib/ipc";
 import { hostByAlias } from "../lib/ssh-hosts";
 import { openFiles, openHosts } from "./hosts-page";
@@ -21,6 +21,21 @@ export function StatusBar() {
   createEffect(() => setCovering("inbox", inbox()));
   // The transfer queue, followed from the start so the chip shows whatever page is open.
   createEffect(() => store.connected() && store.daemonApi() >= XFER_API && initTransfers());
+  // After a reconnect (a daemon switch included) the queue is read again.
+  createEffect(on(() => [store.connected(), store.daemonApi()] as const, ([connected, api]) => connected && api >= XFER_API && void reloadTransfers(), { defer: true }));
+  // A transfer that needs an answer is said wherever the person is: a notice that opens the question.
+  let lastAsked: string | null = null;
+  createEffect(() => {
+    const n = nextQuestion();
+    if (!n) {
+      lastAsked = null;
+      return closeConflicts();
+    }
+    const key = `${n.job.id}:${n.q.id}`;
+    if (key === lastAsked || conflictsShown()) return;
+    lastAsked = key;
+    store.notify(t("A file transfer needs your answer"), { label: t("Answer"), run: openConflicts }, 10000);
+  });
   onMount(() => {
     const close = () => setInbox(false);
     const open = () => setInbox(true);
@@ -93,6 +108,9 @@ export function StatusBar() {
         {" · "}<span style={{ color: counts().working ? "var(--working)" : "var(--text-faint)" }}>{t("{n} working", { n: counts().working })}</span>
         {" · "}<span style={{ color: counts().waiting ? "var(--waiting)" : "var(--text-faint)" }}>{t("{n} need you", { n: counts().waiting })}</span>
       </span>
+      <Show when={nextQuestion() && !conflictsShown()}>
+        <span class="item clickable" data-transfer-question title={t("A file transfer waits for your answer")} onClick={openConflicts}>{t("Transfer needs an answer")}</span>
+      </Show>
       {/* A daemon switch (after an update) waits for running file transfers: said here until they finish. */}
       <Show when={heldText(store.handOverHeldFor())}>
         {(text) => <span class="item" data-handover-held title={t("The new session daemon takes over once they have finished; Switch now in the notice stops them (they resume afterwards)")}>{text()}</span>}

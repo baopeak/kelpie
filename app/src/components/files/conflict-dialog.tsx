@@ -1,10 +1,11 @@
 // A file in the way: one question at a time (the oldest waiting transfer's first), with both sides' size and date.
+// Mounted once for the whole app: a question shows in a Files view, or from the status bar's chip or a notice anywhere.
 // "Apply to all in this transfer" answers the rest of that transfer only.
 import { Show, createSignal } from "solid-js";
 import { t } from "../../lib/i18n";
 import * as ipc from "../../lib/ipc";
 import { formatSize, formatTime } from "../../lib/file-pane";
-import { nextQuestion } from "../../lib/transfers";
+import { conflictsShown, nextQuestion } from "../../lib/transfers";
 import type { XferChoice } from "../../lib/types";
 
 export function ConflictDialog() {
@@ -16,7 +17,7 @@ export function ConflictDialog() {
     setAll(false);
   };
   return (
-    <Show when={nextQuestion()} keyed>
+    <Show when={conflictsShown() && nextQuestion()} keyed>
       {(n) => (
         <div class="overlay">
           <div class="modal conflict-dialog" role="dialog" aria-modal="true" aria-label={t("A file is in the way")} data-conflict>

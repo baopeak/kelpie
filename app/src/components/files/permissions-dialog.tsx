@@ -1,38 +1,49 @@
 // Permissions of files and folders on a host: an rwx grid kept in step with an octal field, owner and group shown
 // read-only (no chown), and for folders "apply to everything inside" (a queue job), optionally with x on folders only.
+// Only the bits the person changes are applied, to each item over its own mode: one item's setuid, setgid or sticky
+// bits never spread to the others.
 import { For, Show, createSignal } from "solid-js";
 import { t, errorText } from "../../lib/i18n";
 import * as ipc from "../../lib/ipc";
-import { bitsMode, joinPath, modeBits, octal, parseOctal } from "../../lib/file-pane";
+import { changedBits, joinPath, modeBits, bitsMode, octal, parseOctal, sharedBits, withChange } from "../../lib/file-pane";
 import type { RemoteEntry } from "../../lib/types";
 
 export function PermissionsDialog(props: { dest: string; dir: string; entries: RemoteEntry[]; onClose: () => void; onDone: () => void }) {
   const first = props.entries[0];
-  const keep = first?.mode ?? 0o644;
-  const [bits, setBits] = createSignal(modeBits(keep));
-  const [text, setText] = createSignal(octal(keep));
+  // What every selected item has (rwx only).
+  const start = sharedBits(props.entries.map((e) => e.mode));
+  const [bits, setBits] = createSignal(modeBits(start));
+  const [text, setText] = createSignal(octal(start));
   const [recursive, setRecursive] = createSignal(false);
   const [dirsOnlyX, setDirsOnlyX] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
   const hasDir = props.entries.some((e) => e.kind === "dir");
-  const mode = () => bitsMode(bits(), keep);
   const toggle = (i: number) => {
     const next = bits().map((b, j) => (j === i ? !b : b));
     setBits(next);
-    setText(octal(bitsMode(next, keep)));
+    setText(octal(bitsMode(next)));
   };
   const typed = (v: string) => {
     setText(v);
     const m = parseOctal(v);
-    if (m != null) setBits(modeBits(m));
+    if (m != null) setBits(modeBits(m & 0o777));
   };
+  const target = () => (parseOctal(text()) ?? bitsMode(bits())) & 0o777;
   const apply = async () => {
     setError(null);
-    const paths = props.entries.map((e) => joinPath(props.dest, props.dir, e.name));
-    const m = parseOctal(text()) ?? mode();
+    const changed = changedBits(start, target());
     try {
-      if (recursive() && hasDir) await ipc.xferStart({ kind: "chmod", src: { dest: props.dest }, items: paths, mode: m, dirs_only_x: dirsOnlyX() });
-      else await ipc.sftpChmod(props.dest, paths, m);
+      if (recursive() && hasDir) {
+        await ipc.xferStart({ kind: "chmod", src: { dest: props.dest }, items: props.entries.map((e) => joinPath(props.dest, props.dir, e.name)), mode: target(), mask: changed, dirs_only_x: dirsOnlyX() });
+      } else if (changed) {
+        // One call per resulting mode: each item keeps the bits that were not changed.
+        const byMode = new Map<number, string[]>();
+        for (const e of props.entries) {
+          const m = withChange(e.mode ?? 0, target(), changed);
+          byMode.set(m, [...(byMode.get(m) ?? []), joinPath(props.dest, props.dir, e.name)]);
+        }
+        for (const [m, paths] of byMode) await ipc.sftpChmod(props.dest, paths, m);
+      }
       props.onDone();
       props.onClose();
     } catch (e) {
@@ -47,6 +58,9 @@ export function PermissionsDialog(props: { dest: string; dir: string; entries: R
         <h3>{props.entries.length === 1 ? t("Permissions of {name}", { name: first?.name ?? "" }) : t("Permissions of {n} items", { n: props.entries.length })}</h3>
         <Show when={first?.owner || first?.group}>
           <div class="muted-inline">{t("Owner {owner}, group {group} (changing them needs root on most servers)", { owner: first?.owner ?? "?", group: first?.group ?? "?" })}</div>
+        </Show>
+        <Show when={props.entries.length > 1}>
+          <div class="muted-inline">{t("Only the boxes you change are applied; each item keeps the rest of its own permissions.")}</div>
         </Show>
         <table class="perm-grid">
           <thead><tr><th /><For each={what}>{(w) => <th>{w}</th>}</For></tr></thead>

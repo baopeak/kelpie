@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bitsMode, clickSelect, filterEntries, formatSize, joinPath, modeBits, modeString, octal, parentPath, parseOctal, selectAll, sortEntries } from "./file-pane";
+import { bitsMode, changedBits, clickSelect, filterEntries, formatSize, joinPath, listNames, modeBits, modeString, octal, parentPath, parseOctal, pruneSelection, selectAll, sharedBits, sortEntries, withChange } from "./file-pane";
 import type { RemoteEntry } from "./types";
 
 const e = (name: string, over: Partial<RemoteEntry> = {}): RemoteEntry => ({
@@ -85,4 +85,31 @@ it("formats sizes", () => {
   expect(formatSize(1536)).toBe("1.5 KB");
   expect(formatSize(5 << 20)).toBe("5.0 MB");
   expect(formatSize(300 * 2 ** 30)).toBe("300 GB");
+});
+
+describe("permissions of several items", () => {
+  it("start from the bits they share, never their special bits", () => {
+    expect(sharedBits([0o2775, 0o755, 0o750])).toBe(0o750);
+    expect(sharedBits([0o4755])).toBe(0o755);
+    expect(sharedBits([null, 0o644])).toBe(0);
+  });
+  it("apply only what was changed, over each item's own mode", () => {
+    const changed = changedBits(0o750, 0o754); // others: read
+    expect(changed).toBe(0o004);
+    expect(withChange(0o2770, 0o754, changed)).toBe(0o2774); // a setgid folder keeps setgid
+    expect(withChange(0o700, 0o754, changed)).toBe(0o704); // other bits of the item stay
+    expect(withChange(0o4755, 0o754, changed)).toBe(0o4755);
+  });
+});
+
+describe("deleting what is shown", () => {
+  it("keeps the selection to the shown items", () => {
+    const sel = { picked: ["a", "b", "c", "d"], anchor: "a" };
+    expect(pruneSelection(sel, ["b", "d", "x"])).toEqual({ picked: ["b", "d"], anchor: "b" });
+    expect(pruneSelection(sel, [])).toEqual({ picked: [], anchor: null });
+  });
+  it("lists the first names and how many more", () => {
+    expect(listNames(["a", "b"])).toEqual({ shown: ["a", "b"], more: 0 });
+    expect(listNames(["1", "2", "3", "4", "5", "6", "7"])).toEqual({ shown: ["1", "2", "3", "4", "5"], more: 2 });
+  });
 });

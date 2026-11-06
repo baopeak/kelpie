@@ -22,12 +22,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
-use super::copy::{copy_file, decide, finish_partial, recover_aside, Control, Copied, Decision, FileCopy, Policy, Stop};
+use super::copy::{copy_file, decide, finish_partial, recover_aside, resume_offset, Control, Copied, Decision, FileCopy, Policy, Stop};
 use super::journal::{self, Journal, Loaded};
 use super::local_fs::LocalFs;
 use super::names::{keep_both, partial_name, with_suffix, windows_safe};
 use super::pool::Pool;
-use super::route::{self, Direct, Target};
+use super::route::{self, Target};
 use super::sftp_fs::SftpFs;
 use super::walk::{walk, Found, Links, Skipped};
 use super::{check_local_path, check_remote_path, ErrKind, FsError, FsResult, Kind as FsKind, Meta, RemoteFs};
@@ -159,6 +159,9 @@ pub struct Job {
     pub mode: Option<u32>,
     #[serde(default)]
     pub dirs_only_x: bool,
+    /// chmod: the bits the person changed (only these take `mode`'s value); none: all of them.
+    #[serde(default)]
+    pub mask: Option<u32>,
     #[serde(default)]
     pub expect: Option<Expect>,
     /// Host to host: how it should travel, how it did (`direct` / `relay`), and why when it did not go direct.
@@ -256,7 +259,12 @@ struct Live {
     /// Bytes of the files found, and of those that need no space (skipped, complete, resumed).
     discovered: AtomicU64,
     not_needed: AtomicU64,
+    /// Direct copiers an attempt left on the first host (it could not be told to stop): stopped before the next starts.
+    stale_pids: Mutex<Vec<u32>>,
 }
+
+/// A job's copier on the first host, shared by its direct files (one at a time).
+type DirectSession = tokio::sync::Mutex<Option<route::Session>>;
 
 impl Live {
     /// Ends the attempt: the walk stops, and files waiting on a question are released (their question is dropped).
@@ -641,6 +649,7 @@ impl Queue {
             preserve: p.get("preserve").and_then(Value::as_bool).unwrap_or(true),
             mode,
             dirs_only_x: p.get("dirs_only_x").and_then(Value::as_bool).unwrap_or(false),
+            mask: p.get("mask").and_then(Value::as_u64).map(|m| m as u32 & 0o7777),
             expect,
             route: serde_json::from_value(p.get("route").cloned().unwrap_or(json!("auto"))).map_err(|_| anyhow!("unknown route"))?,
             route_used: None,
@@ -987,6 +996,7 @@ impl Queue {
         }
         let free = dst.free_space(&job.dst_dir).await.ok().flatten();
         let direct = self.route_for(job).await;
+        let session: Arc<DirectSession> = Arc::new(tokio::sync::Mutex::new(None));
         let (tx, mut rx) = mpsc::channel::<Found>(256);
         let walker = {
             let (src, items, live) = (src.clone(), job.items.clone(), live.clone());
@@ -1062,9 +1072,9 @@ impl Queue {
                         }
                         let permits = if meta.size >= BIG_FILE { FILES_AT_ONCE } else { 1 };
                         let Ok(permit) = files.clone().acquire_many_owned(permits).await else { break };
-                        let (me, live, src, dst, job, name, direct) = (self.clone(), live.clone(), src.clone(), dst.clone(), job.clone(), rel.last().unwrap().clone(), direct.clone());
+                        let (me, live, src, dst, job, name, direct, session) = (self.clone(), live.clone(), src.clone(), dst.clone(), job.clone(), rel.last().unwrap().clone(), direct.clone(), session.clone());
                         tasks.spawn(async move {
-                            let r = me.copy_one(&job, &live, src.as_ref(), dst.as_ref(), &path, &meta, &dir, &name, resumed, direct.as_deref()).await;
+                            let r = me.copy_one(&job, &live, src.as_ref(), dst.as_ref(), &path, &meta, &dir, &name, resumed, direct.as_deref().map(|t| (t, session.as_ref()))).await;
                             drop(permit);
                             r
                         });
@@ -1087,6 +1097,10 @@ impl Queue {
             first_error
         };
         let (walked, failed) = tokio::join!(walker, consumer);
+        if let Some(a) = &job.src.dest {
+            let left = session.lock().await.take();
+            self.stop_copier(live, left, a).await;
+        }
         if let Some(stop) = Self::halted(live) {
             return Ok(stop);
         }
@@ -1233,7 +1247,7 @@ impl Queue {
 
     /// One file of a copy job. Errors that are not a lost connection are counted on the job, not returned.
     #[allow(clippy::too_many_arguments)]
-    async fn copy_one(&self, job: &Job, live: &Arc<Live>, src: &dyn RemoteFs, dst: &dyn RemoteFs, path: &str, meta: &Meta, dir: &str, name: &str, resumed: bool, direct: Option<&Target>) -> FsResult<()> {
+    async fn copy_one(&self, job: &Job, live: &Arc<Live>, src: &dyn RemoteFs, dst: &dyn RemoteFs, path: &str, meta: &Meta, dir: &str, name: &str, resumed: bool, direct: Option<(&Target, &DirectSession)>) -> FsResult<()> {
         let mut name = self.mapped_name(job, dst, name);
         let tag = tag(&job.id);
         self.count(&job.id, |j| j.current = Some(path.to_string()));
@@ -1340,7 +1354,7 @@ impl Queue {
                     let fc = FileCopy { src, src_path: path, dst, dst_dir: dir, dst_name: &name, tag: &tag, approved, resume: seen.is_some(), source_seen: seen, preserve: job.preserve };
                     // Direct when the route allows and the names fit an sftp batch line; else through this computer.
                     let result = match (direct, &job.src.dest) {
-                        (Some(t), Some(a)) if route::reput_line(path, &partial).is_some() => self.direct_one(&fc, live, a, t, &partial).await,
+                        (Some((t, session)), Some(a)) if route::batch_quote(path).is_some() && route::batch_quote(&partial).is_some() => self.direct_one(&fc, live, a, t, &partial, session).await,
                         _ => copy_file(&fc, &live.ctl).await,
                     };
                     match result {
@@ -1410,51 +1424,81 @@ impl Queue {
         target
     }
 
-    /// One file copied by host A itself (`sftp -b` on A, `reput` into B's partial), with progress read from the
-    /// partial's size through Kelpie's own session to B; then put in place as any copy is.
-    async fn direct_one(&self, fc: &FileCopy<'_>, live: &Arc<Live>, a: &str, b: &Target, partial: &str) -> FsResult<Copied> {
+    /// One file copied by host A itself, through the job's copier on A (`put` for a fresh partial, `reput` to continue
+    /// one), with progress read from the partial's size through Kelpie's own session to B; then put in place as any
+    /// copy is.
+    #[allow(clippy::too_many_arguments)]
+    async fn direct_one(&self, fc: &FileCopy<'_>, live: &Arc<Live>, a: &str, b: &Target, partial: &str, session: &DirectSession) -> FsResult<Copied> {
         let src = fc.src.stat(fc.src_path).await?;
         recover_aside(fc.dst, fc.dst_dir, fc.dst_name, fc.tag, &src).await?;
-        if !fc.resume || fc.source_seen.is_some_and(|s| s != (src.size, src.mtime)) {
-            // A fresh partial: made new and owner-only here, so `reput` writes into it from 0.
+        // The same checks as any resume: the job's own partial, a regular file (never through a link), the tail.
+        let offset = resume_offset(fc, &src, partial).await?;
+        if offset == 0 {
+            // Made new and owner-only here; whatever had the name (a stale partial, a planted link) goes first.
             fc.dst.open_write(partial, 0, true).await?.finish(false).await?;
         }
-        let mut last = fc.dst.lstat(partial).await.map(|m| m.size).unwrap_or(0);
-        let offset = last;
-        live.ctl.bytes.fetch_add(last, Ordering::Relaxed);
-        let line = route::reput_line(fc.src_path, partial).ok_or_else(|| FsError::invalid("the name does not fit a batch line"))?;
-        let exe = self.pool.exe();
-        let mut run = Direct::start(exe, a, b, &line).await?;
-        let finished = loop {
-            tokio::select! {
-                r = run.wait() => break r,
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    if let Ok(m) = fc.dst.lstat(partial).await {
-                        let d = m.size.saturating_sub(last);
-                        live.ctl.bytes.fetch_add(d, Ordering::Relaxed);
-                        live.ctl.written.fetch_add(d, Ordering::Relaxed);
-                        last = last.max(m.size);
+        live.ctl.bytes.fetch_add(offset, Ordering::Relaxed);
+        let plan = route::direct_plan(offset, src.size);
+        if plan != route::DirectPlan::Complete {
+            let exe = self.pool.exe();
+            let mut guard = session.lock().await;
+            if guard.as_ref().is_some_and(|s| s.files >= route::FILES_PER_LOGIN) {
+                self.stop_copier(live, guard.take(), a).await;
+            }
+            if guard.is_none() {
+                let stale: Vec<u32> = std::mem::take(&mut *live.stale_pids.lock());
+                *guard = Some(route::Session::start(exe, a, b, &stale).await?);
+            }
+            let seq = guard.as_mut().expect("started").send(plan, fc.src_path, partial).await?;
+            let mut last = offset;
+            let finished = loop {
+                tokio::select! {
+                    r = guard.as_mut().expect("started").done(seq) => break r,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        if let Ok(m) = fc.dst.lstat(partial).await {
+                            let d = m.size.saturating_sub(last);
+                            live.ctl.bytes.fetch_add(d, Ordering::Relaxed);
+                            live.ctl.written.fetch_add(d, Ordering::Relaxed);
+                            last = last.max(m.size);
+                        }
                     }
+                    _ = live.ctl.wake.notified() => {}
                 }
-                _ = live.ctl.wake.notified() => {}
-            }
-            if let Some(stop) = live.ctl.stop() {
-                run.stop(exe, a).await;
-                if stop == Stop::Cancel {
-                    let _ = fc.dst.remove_file(partial).await;
+                if let Some(stop) = live.ctl.stop() {
+                    self.stop_copier(live, guard.take(), a).await;
+                    if stop == Stop::Cancel {
+                        let _ = fc.dst.remove_file(partial).await;
+                    }
+                    return Ok(Copied::Stopped(stop));
                 }
-                return Ok(Copied::Stopped(stop));
+            };
+            if let Err(e) = finished {
+                // The copier is gone (a dropped connection): it is stopped on A before any retry starts another.
+                self.stop_copier(live, guard.take(), a).await;
+                return Err(e);
             }
-        };
-        finished?;
-        if let Ok(m) = fc.dst.lstat(partial).await {
-            let d = m.size.saturating_sub(last);
-            live.ctl.bytes.fetch_add(d, Ordering::Relaxed);
-            live.ctl.written.fetch_add(d, Ordering::Relaxed);
+            let said = guard.as_ref().map(|s| s.stderr_text()).unwrap_or_default();
+            drop(guard);
+            let have = fc.dst.lstat(partial).await.map(|m| m.size).unwrap_or(0);
+            live.ctl.bytes.fetch_add(have.saturating_sub(last), Ordering::Relaxed);
+            live.ctl.written.fetch_add(have.saturating_sub(last), Ordering::Relaxed);
+            if have != src.size {
+                let kind = if route::lost(&said) { ErrKind::Connection } else { ErrKind::Other };
+                return Err(FsError::new(kind, if said.is_empty() { "the copy on the first host did not finish".to_string() } else { format!("the copy on the first host failed: {said}") }));
+            }
         }
         finish_partial(fc, &src, partial, offset).await
     }
 
+    /// Ends a job's copier on A; one that A could not be told about is stopped before the next copier starts.
+    async fn stop_copier(&self, live: &Live, session: Option<route::Session>, a: &str) {
+        if let Some(s) = session {
+            let pid = s.pid;
+            if !s.stop(self.pool.exe(), a).await {
+                live.stale_pids.lock().extend(pid);
+            }
+        }
+    }
     async fn drop_partial(&self, job: &Job, dst: &dyn RemoteFs, partial: &str) {
         let _ = dst.remove_file(partial).await;
         let p = partial.to_string();
@@ -1495,7 +1539,7 @@ impl Queue {
                     }
                     Found::File { path, meta, .. } => {
                         self.count(&job.id, |j| j.totals.files += 1);
-                        let r = if job.kind == JobKind::Delete { fs.remove_file(&path).await } else { fs.chmod(&path, chmod_file_mode(mode, only_x, meta.mode)).await };
+                        let r = if job.kind == JobKind::Delete { fs.remove_file(&path).await } else { fs.chmod(&path, chmod_file_mode(mode, only_x, meta.mode, job.mask)).await };
                         (path, r)
                     }
                     Found::Link { path, .. } => {
@@ -1536,7 +1580,12 @@ impl Queue {
                 return Ok(stop);
             }
             self.count(&job.id, |j| j.totals.files += 1);
-            let r = if job.kind == JobKind::Delete { fs.remove_dir(&path).await } else { fs.chmod(&path, chmod_dir_mode(mode, only_x)).await };
+            let r = if job.kind == JobKind::Delete {
+                fs.remove_dir(&path).await
+            } else {
+                let current = fs.lstat(&path).await.ok().and_then(|m| m.mode);
+                fs.chmod(&path, chmod_dir_mode(mode, only_x, current, job.mask)).await
+            };
             match r {
                 Ok(()) => self.count(&job.id, |j| j.totals.done_files += 1),
                 Err(e) if e.kind == ErrKind::Connection => return Err(e),
@@ -1579,42 +1628,56 @@ impl Choice {
     }
 }
 
-/// The bits a recursive chmod sets on a file whose mode is now `current`. With `dirs_only_x` ("x for folders only")
+/// The bits a recursive chmod sets on a file whose mode is now `current`: only the rwx bits in `mask` (the ones the
+/// person changed; all of rwx without one) take `mode`'s value. A file's setuid, setgid and sticky bits are never
+/// changed, so a folder's special bits never spread to the files inside. With `dirs_only_x` ("x for folders only")
 /// a file keeps its own x bits, so a script stays runnable and nothing else becomes runnable.
-pub fn chmod_file_mode(mode: u32, dirs_only_x: bool, current: Option<u32>) -> u32 {
-    let mode = mode & 0o7777;
+pub fn chmod_file_mode(mode: u32, dirs_only_x: bool, current: Option<u32>, mask: Option<u32>) -> u32 {
+    let cur = current.unwrap_or(0) & 0o7777;
+    let mask = mask.unwrap_or(0o777) & 0o777;
+    let mut new = (cur & !mask) | (mode & mask);
     if dirs_only_x {
-        (mode & !0o111) | (current.unwrap_or(0) & 0o111)
-    } else {
-        mode
+        new = (new & !0o111) | (cur & 0o111);
     }
+    new
 }
 
-/// The bits a recursive chmod sets on a folder. With `dirs_only_x` folders always get x wherever they have r, so
-/// they stay searchable.
-pub fn chmod_dir_mode(mode: u32, dirs_only_x: bool) -> u32 {
-    let mode = mode & 0o7777;
+/// The bits a recursive chmod sets on a folder whose mode is now `current`: the bits in `mask` (all without one) take
+/// `mode`'s value. With `dirs_only_x` folders always get x wherever they have r, so they stay searchable.
+pub fn chmod_dir_mode(mode: u32, dirs_only_x: bool, current: Option<u32>, mask: Option<u32>) -> u32 {
+    let cur = current.unwrap_or(0) & 0o7777;
+    let mask = mask.unwrap_or(0o7777) & 0o7777;
+    let mut new = (cur & !mask) | (mode & mask);
     if dirs_only_x {
-        mode | ((mode & 0o444) >> 2)
-    } else {
-        mode
+        new |= (new & 0o444) >> 2;
     }
+    new
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn chmod_bits() {
-        assert_eq!((chmod_file_mode(0o755, false, Some(0o644)), chmod_dir_mode(0o755, false)), (0o755, 0o755));
+        assert_eq!((chmod_file_mode(0o755, false, Some(0o644), None), chmod_dir_mode(0o755, false, Some(0o700), None)), (0o755, 0o755));
         // x for folders only: folders always get it, files keep their own.
-        assert_eq!(chmod_dir_mode(0o644, true), 0o755);
-        assert_eq!(chmod_file_mode(0o644, true, Some(0o600)), 0o644, "a plain file does not become runnable");
-        assert_eq!(chmod_file_mode(0o644, true, Some(0o755)), 0o755, "a script stays runnable");
-        assert_eq!(chmod_file_mode(0o750, true, Some(0o700)), 0o740);
-        assert_eq!(chmod_file_mode(0o640, true, None), 0o640);
-        assert_eq!(chmod_dir_mode(0o100640, false), 0o640);
+        assert_eq!(chmod_dir_mode(0o644, true, Some(0o700), None), 0o755);
+        assert_eq!(chmod_file_mode(0o644, true, Some(0o600), None), 0o644, "a plain file does not become runnable");
+        assert_eq!(chmod_file_mode(0o644, true, Some(0o755), None), 0o755, "a script stays runnable");
+        assert_eq!(chmod_file_mode(0o750, true, Some(0o700), None), 0o740);
+        assert_eq!(chmod_file_mode(0o640, true, None, None), 0o640);
+    }
+
+    #[test]
+    fn a_recursive_chmod_changes_only_the_bits_the_person_changed_and_never_spreads_special_bits() {
+        // On a setgid shared folder (2775) the person only turns on "others: read" (mask 0o004).
+        let (mode, mask) = (0o2775 | 0o004, Some(0o004));
+        assert_eq!(chmod_dir_mode(mode, false, Some(0o2770), mask), 0o2774, "the folder keeps its setgid, gets o+r");
+        assert_eq!(chmod_file_mode(mode, false, Some(0o640), mask), 0o644, "files get o+r and nothing else");
+        assert_eq!(chmod_file_mode(mode, true, Some(0o750), mask), 0o754, "a script keeps its x, gets no setgid");
+        // Without a mask (all bits): still never setuid / setgid on files.
+        assert_eq!(chmod_file_mode(0o4755, false, Some(0o644), None), 0o755);
+        assert_eq!(chmod_file_mode(0o755, false, Some(0o4700), None), 0o4755, "a file's own special bit is not removed either");
     }
 
     #[test]

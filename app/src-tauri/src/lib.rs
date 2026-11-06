@@ -706,6 +706,12 @@ pub fn run() {
             ssh_hosts::ssh_forward_status,
             sys_stats::memory_stats,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Kelpie");
+        .build(tauri::generate_context!())
+        .expect("error while running Kelpie")
+        .run(|_app, event| {
+            // Copies of host files opened in an external editor do not outlive the app.
+            if let tauri::RunEvent::Exit = event {
+                sftp_edit::remove_all();
+            }
+        });
 }

@@ -42,19 +42,41 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
+/// A name the private copy may have: one path piece that every OS holds as it is. No separators, no `:` (on Windows
+/// `C:x` would leave the folder, and `a:b` names a stream), nothing Windows refuses or renames (`<>"|?*`, a trailing
+/// dot or space, device names), so the copy is always exactly where the download put it.
 fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0']) && !name.chars().any(char::is_control)
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*'))
+        && !name.ends_with(['.', ' '])
+        && !device
+}
+
+/// File types the shell's default action runs instead of opening for editing: never handed to the OS as "open".
+pub fn runs_code(name: &str) -> bool {
+    const RUN: &[&str] = &[
+        "bat", "cmd", "com", "exe", "msi", "msp", "scr", "pif", "cpl", "js", "jse", "vbs", "vbe", "wsf", "wsh", "hta", "lnk", "url", "ps1", "psm1", "psd1", "reg", "jar", "msc", "application",
+        "appref-ms", "gadget", "inf", "sct", "chm", "command", "app", "tool", "sh", "bash", "zsh", "csh", "py", "pyw", "rb", "pl", "php", "desktop", "run", "bin", "appimage",
+    ];
+    let lower = name.to_lowercase();
+    lower.rsplit_once('.').is_some_and(|(_, ext)| RUN.contains(&ext))
 }
 
 /// Editors' own temporary files next to the one being edited.
+#[cfg(test)]
 pub fn editor_temp(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower.ends_with(".swp") || lower.ends_with(".swx") || lower.ends_with(".swo") || lower.ends_with('~') || lower.ends_with(".tmp") || lower.ends_with(".bak") || lower.starts_with(".#") || lower.starts_with("~$") || lower == "4913" || lower.starts_with(".~lock.")
 }
 
-/// Whether a change to `name` in the session's folder is a save of the edited file `watched`.
+/// Whether a change to `name` in the session's folder is a save of the edited file `watched`: its own name only, so an
+/// editor's swap and backup files never count, and a watched file that is itself named `*.tmp` or `*~` still does.
 pub fn concerns(name: &str, watched: &str) -> bool {
-    name == watched && !editor_temp(name)
+    name == watched
 }
 
 #[derive(Serialize)]
@@ -67,7 +89,7 @@ pub struct Prepared {
 #[tauri::command]
 pub fn sftp_edit_prepare(name: String) -> CmdResult<Prepared> {
     if !valid_name(&name) {
-        return Err("invalid file name".into());
+        return Err(format!("{name} cannot be saved under that name on this computer: edit it in Kelpie instead"));
     }
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
@@ -75,7 +97,11 @@ pub fn sftp_edit_prepare(name: String) -> CmdResult<Prepared> {
     let dir = root().join(&id);
     kelpie_proto::ensure_private_dir(&root()).map_err(err)?;
     std::fs::create_dir_all(&dir).map_err(err)?;
-    Ok(Prepared { id, path: dir.join(&name).to_string_lossy().into_owned() })
+    let file = dir.join(&name);
+    if file.parent() != Some(dir.as_path()) {
+        return Err("invalid file name".into());
+    }
+    Ok(Prepared { id, path: file.to_string_lossy().into_owned() })
 }
 
 /// Opens the downloaded copy (with `open_with`, an app the person picked, else the default one) and starts watching it.
@@ -86,6 +112,9 @@ pub fn sftp_edit_watch(app: AppHandle, state: State<'_, EditSessions>, id: Strin
     }
     let dir = root().join(&id);
     let file = dir.join(&name);
+    if file.parent() != Some(dir.as_path()) {
+        return Err("invalid edit session".into());
+    }
     if !file.is_file() {
         return Err("the downloaded copy is missing".into());
     }
@@ -110,11 +139,30 @@ pub fn sftp_edit_watch(app: AppHandle, state: State<'_, EditSessions>, id: Strin
         }))
         .map_err(err)?;
     state.live.lock().insert(id, Live { _watcher: watcher });
-    let opened = match open_with.filter(|w| !w.trim().is_empty()) {
-        Some(app) => tauri_plugin_opener::open_path(&file, Some(app)),
-        None => tauri_plugin_opener::open_path(&file, None::<&str>),
-    };
-    opened.map_err(|e| format!("could not open the file: {e}"))
+    open_for_editing(&file, &name, open_with)
+}
+
+/// Opens the copy in an editor, never runs it: the app the person picked, else the system's default for documents,
+/// except for types whose default action runs them (scripts, programs, shortcuts), which open in a plain text editor.
+fn open_for_editing(file: &std::path::Path, name: &str, open_with: Option<String>) -> CmdResult<()> {
+    if let Some(app) = open_with.filter(|w| !w.trim().is_empty()) {
+        return tauri_plugin_opener::open_path(file, Some(app)).map_err(|e| format!("could not open the file: {e}"));
+    }
+    if !runs_code(name) {
+        return tauri_plugin_opener::open_path(file, None::<&str>).map_err(|e| format!("could not open the file: {e}"));
+    }
+    #[cfg(windows)]
+    let r = std::process::Command::new("notepad.exe").arg(file).spawn().map(|_| ());
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg("-e").arg(file).spawn().map(|_| ());
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let r: std::io::Result<()> = Err(std::io::Error::other("choose an editor with Open with… for this file type"));
+    r.map_err(|e| format!("{name} could run instead of opening, so it opens in a text editor, which failed: {e}"))
+}
+
+/// When the app exits: the copies go (sessions end with it).
+pub fn remove_all() {
+    let _ = std::fs::remove_dir_all(root());
 }
 
 /// Calls `changed` once per save: after `QUIET` without events, and only when the size holds still.
@@ -190,12 +238,26 @@ mod tests {
         }
         assert!(concerns("main.rs", "main.rs"));
         assert!(!concerns(".main.rs.swp", "main.rs") && !concerns("main.rs~", "main.rs") && !concerns("other.rs", "main.rs"));
+        assert!(concerns("notes.tmp", "notes.tmp") && concerns("4913", "4913"), "a watched file with a temp-like name still uploads");
     }
 
     #[test]
     fn ids_and_names_cannot_leave_the_folder() {
         assert!(valid_id("18c3f-1a2b-0") && !valid_id("../x") && !valid_id("") && !valid_id("a/b"));
-        assert!(valid_name("report (1).pdf") && !valid_name("..") && !valid_name("a/b") && !valid_name("a\\b") && !valid_name(""));
+        assert!(valid_name("report (1).pdf") && valid_name("ünïcødé 日本語.txt") && valid_name(".env"));
+        for bad in ["..", "a/b", "a\\b", "", "C:evil.txt", "a:b", "x?.txt", "a|b", "x.", "x ", "CON.txt", "lpt1", "nul"] {
+            assert!(!valid_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn programs_and_scripts_are_never_run_to_be_edited() {
+        for n in ["deploy.bat", "x.CMD", "x.js", "x.vbs", "x.hta", "x.lnk", "x.url", "x.msi", "x.ps1", "run.sh", "x.command", "x.py", "x.exe"] {
+            assert!(runs_code(n), "{n}");
+        }
+        for n in ["notes.txt", "config.yml", "main.rs", "Makefile", "x.json", ".bashrc"] {
+            assert!(!runs_code(n), "{n}");
+        }
     }
 
     #[test]

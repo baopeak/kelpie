@@ -639,6 +639,8 @@ export interface XferStart {
   conflict?: XferPolicy;
   preserve?: boolean;
   mode?: number;
+  /** chmod: the bits the person changed (only these take `mode`'s value). */
+  mask?: number;
   dirs_only_x?: boolean;
   /** One file's upload replaces the target only while it is still this size and time (an edited file). */
   expect?: { size: number; mtime: number };

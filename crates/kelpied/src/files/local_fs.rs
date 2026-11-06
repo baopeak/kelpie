@@ -133,6 +133,10 @@ impl RemoteFs for LocalFs {
 
     async fn realpath(&self, path: &str) -> FsResult<String> {
         if matches!(path, "" | "." | "~") {
+            // `KELPIE_FILES_HOME` stands in for the home folder in end-to-end tests: nothing they do lands in the real one.
+            if let Some(h) = std::env::var_os("KELPIE_FILES_HOME").filter(|h| !h.is_empty()) {
+                return Ok(path_string(std::path::Path::new(&h)));
+            }
             return dirs::home_dir().map(|h| path_string(&h)).ok_or_else(|| FsError::new(ErrKind::NotFound, "no home folder"));
         }
         Ok(path_string(&simplify(tokio::fs::canonicalize(path).await?)))

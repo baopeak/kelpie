@@ -8,11 +8,10 @@ import * as ipc from "../../lib/ipc";
 import { store } from "../../lib/store";
 import { vault, type SshHost } from "../../lib/ssh-hosts";
 import { joinPath, type PaneEnd } from "../../lib/file-pane";
-import { initTransfers, isFinished, jobList } from "../../lib/transfers";
+import { filesViewClosed, filesViewOpened, initTransfers, isFinished, jobList } from "../../lib/transfers";
 import type { RemoteEntry, XferRoute, XferStart } from "../../lib/types";
 import { FilePane, type DragFiles, type PaneApi } from "./file-pane";
 import { TransferQueue } from "./transfer-queue";
-import { ConflictDialog } from "./conflict-dialog";
 import { PermissionsDialog } from "./permissions-dialog";
 import { EditSessions } from "./edit-sessions";
 import { editExternal, editInKelpie, initRemoteEdit } from "../../lib/remote-edit";
@@ -23,6 +22,9 @@ type Side = "left" | "right";
 export function FilesPanes(props: { host: SshHost; onHostKey: () => void }) {
   initTransfers();
   initRemoteEdit();
+  // Conflict questions show while a Files view is open (elsewhere from the status bar).
+  filesViewOpened();
+  onCleanup(filesViewClosed);
   const [ends, setEnds] = createSignal<Record<Side, PaneEnd>>({ left: null, right: props.host.alias });
   const [active, setActive] = createSignal<Side>("right");
   const [error, setError] = createSignal<string | null>(null);
@@ -74,7 +76,8 @@ export function FilesPanes(props: { host: SshHost; onHostKey: () => void }) {
   };
 
   // A job that finishes refreshes the panes showing its target (or, for a delete or chmod, its folder).
-  const seen = new Set<string>();
+  // Jobs that had already finished when the view opened are not news.
+  const seen = new Set<string>(jobList().filter(isFinished).map((j) => j.id));
   createEffect(on(jobList, (list) => {
     for (const j of list) {
       if (!isFinished(j) || seen.has(j.id)) continue;
@@ -146,7 +149,6 @@ export function FilesPanes(props: { host: SshHost; onHostKey: () => void }) {
         </div>
         <EditSessions label={label} />
         <TransferQueue label={label} />
-        <ConflictDialog />
         <Show when={perms()} keyed>
           {(p) => <PermissionsDialog dest={p.dest} dir={p.dir} entries={p.entries} onClose={() => setPerms(null)} onDone={() => (["left", "right"] as Side[]).forEach((s) => ends()[s] === p.dest && void apis[s]?.reload())} />}
         </Show>

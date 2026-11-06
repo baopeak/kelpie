@@ -1,12 +1,12 @@
 // One pane of the Files tab: this computer or a saved host, with a path bar, sorting, filtering, selection,
 // keys, a context menu and drag to the other pane. Listing and changes go through the daemon (`sftp.*`, `local.*`).
-import { For, Show, createMemo, createSignal, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as ipc from "../../lib/ipc";
 import { t, errorText } from "../../lib/i18n";
 import { confirmDialog } from "../../lib/confirm-dialog";
 import { isHostKeyError, type SshHost } from "../../lib/ssh-hosts";
-import { baseName, clickSelect, filterEntries, formatSize, formatTime, joinPath, modeString, parentPath, selectAll, sortEntries, type PaneEnd, type Selection, type SortKey } from "../../lib/file-pane";
+import { baseName, clickSelect, filterEntries, formatSize, formatTime, joinPath, listNames, modeString, parentPath, pruneSelection, selectAll, sortEntries, type PaneEnd, type Selection, type SortKey } from "../../lib/file-pane";
 import type { RemoteEntry } from "../../lib/types";
 import { openContextMenu, type MenuItem } from "../context-menu";
 import { AskRow, type Ask } from "../ask-row";
@@ -79,7 +79,12 @@ export function FilePane(props: {
   const shown = createMemo(() => sortEntries(filterEntries(entries() ?? [], filter()), sort().key, sort().asc));
   const order = () => shown().filter((e) => e.readable_name).map((e) => e.name);
   const byName = (name: string) => entries()?.find((e) => e.name === name);
-  const pickedEntries = () => sel().picked.map(byName).filter((e): e is RemoteEntry => !!e);
+  const pickedEntries = () => sel().picked.filter((n) => order().includes(n)).map(byName).filter((e): e is RemoteEntry => !!e);
+  // A filter that hides selected items takes them out of the selection.
+  createEffect(on(order, (shownNow) => {
+    const pruned = pruneSelection(sel(), shownNow);
+    if (pruned.picked.length !== sel().picked.length) setSel(pruned);
+  }, { defer: true }));
 
   const load = async (path: string) => {
     setError(null);
@@ -160,18 +165,26 @@ export function FilePane(props: {
   };
 
   const remove = async () => {
-    const names = sel().picked;
+    // Only what is shown and selected: a filter never lets a delete reach hidden items.
+    const names = sel().picked.filter((n) => order().includes(n));
     if (!names.length) return;
     const end = host();
+    const { shown: listed, more } = listNames(names);
+    const list = listed.join("\n") + (more ? `\n${t("and {n} more", { n: more })}` : "");
+    const folders = names.some((n) => byName(n)?.kind === "dir");
     if (end === null) {
-      if (!(await confirmDialog(t("Move {n} item(s) to the trash?", { n: names.length })))) return;
+      if (!(await confirmDialog(`${t("Move {n} item(s) to the trash?", { n: names.length })}\n\n${list}`))) return;
       return void run(async () => { for (const n of names) await ipc.deleteEntry(dir(), n); });
     }
-    if (!(await confirmDialog(t("Delete {n} item(s) on {host}? There is no trash on the host.", { n: names.length, host: props.label(end) })))) return;
+    const warn = folders ? `\n\n${t("Folders are deleted with everything inside.")}` : "";
+    if (!(await confirmDialog(`${t("Delete {n} item(s) on {host}? There is no trash on the host.", { n: names.length, host: props.label(end) })}\n\n${list}${warn}`))) return;
     await run(() => ipc.xferStart({ kind: "delete", src: { dest: end }, items: names.map((n) => joinPath(end, dir(), n)) }));
   };
 
-  const copyOver = () => sel().picked.length && props.onCopy({ end: host(), dir: dir(), names: sel().picked });
+  const copyOver = () => {
+    const names = sel().picked.filter((n) => order().includes(n));
+    if (names.length) props.onCopy({ end: host(), dir: dir(), names });
+  };
 
   const menu = (ev: MouseEvent, e: RemoteEntry) => {
     if (!sel().picked.includes(e.name)) setSel({ picked: [e.name], anchor: e.name });

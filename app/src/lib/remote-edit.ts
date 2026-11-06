@@ -8,6 +8,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { onEvent, sftpStat, xferList, xferStart } from "./ipc";
 import { t } from "./i18n";
 import { store } from "./store";
+import { confirmDialog } from "./confirm-dialog";
 import { checkHost, hostProject, isHostKeyError, type SshHost } from "./ssh-hosts";
 import { baseName, parentPath } from "./file-pane";
 import type { XferJob, XferStart } from "./types";
@@ -25,6 +26,8 @@ export interface EditSession {
   state: "downloading" | "open" | "uploading" | "asking" | "pending" | "error";
   lastUpload: number | null;
   error: string | null;
+  /** A save arrived while an upload ran or waited for an answer: the latest content is uploaded right after it. */
+  dirty: boolean;
 }
 
 const [sessions, setSessions] = createSignal<Record<string, EditSession>>({});
@@ -81,7 +84,7 @@ export async function editExternal(dest: string, remotePath: string, pick = fals
   const st = await sftpStat(dest, remotePath);
   const base = { size: st.stat?.size ?? 0, mtime: st.stat?.mtime ?? 0 };
   const { id, path } = await invoke<{ id: string; path: string }>("sftp_edit_prepare", { name });
-  setSessions((all) => ({ ...all, [id]: { id, dest, remotePath, localPath: path, name, base, auto: true, state: "downloading", lastUpload: null, error: null } }));
+  setSessions((all) => ({ ...all, [id]: { id, dest, remotePath, localPath: path, name, base, auto: true, state: "downloading", lastUpload: null, error: null, dirty: false } }));
   try {
     const job = await finished(await xferStart({ kind: "copy", src: { dest }, dst: {}, items: [remotePath], dst_dir: parentPath(null, path), conflict: "replace" }));
     if (job.state !== "done" || job.totals.failed) throw new Error(job.error ?? job.failures[0]?.error ?? t("The download did not finish"));
@@ -92,11 +95,23 @@ export async function editExternal(dest: string, remotePath: string, pick = fals
   }
 }
 
-/** Uploads the session's copy now. */
+/** What a save does: upload now, or (an upload is running or asking) mark that a newer save follows it. */
+export function onSave(s: EditSession): "upload" | "follow" | "ask" {
+  if (s.state === "uploading" || s.state === "asking") return "follow";
+  return s.auto ? "upload" : "ask";
+}
+
+/** After an upload: send the newer save that came in meanwhile (never one that failed or was discarded). */
+export function uploadAgain(s: EditSession): boolean {
+  return s.dirty && s.state === "open";
+}
+
+/** Uploads the session's copy now; a save that arrives meanwhile follows as soon as this one is done. */
 export async function uploadEdit(id: string) {
   const s = sessions()[id];
-  if (!s || s.state === "uploading" || s.state === "asking") return;
-  patch(id, { state: "uploading", error: null });
+  if (!s) return;
+  if (s.state === "uploading" || s.state === "asking") return patch(id, { dirty: true });
+  patch(id, { state: "uploading", error: null, dirty: false });
   try {
     const job = await finished(await xferStart(uploadJob(s)), () => patch(id, { state: "asking" }));
     const now = job.state === "done" ? await sftpStat(s.dest, s.remotePath).then((r) => (r.stat ? { size: r.stat.size, mtime: r.stat.mtime } : null)).catch(() => null) : null;
@@ -104,14 +119,23 @@ export async function uploadEdit(id: string) {
   } catch (e) {
     patch(id, { state: "error", error: String(e) });
   }
+  const after = sessions()[id];
+  if (after && uploadAgain(after)) return uploadEdit(id);
+  // A newer save after a failed or discarded upload stays to be sent by hand.
+  if (after?.dirty) patch(id, { state: after.state === "error" ? "error" : "pending" });
 }
 
 export function setAutoUpload(id: string, auto: boolean) {
   patch(id, { auto });
 }
 
-/** Stops watching and deletes the local copy. */
+/** Whether Stop would lose edits not yet on the server. */
+export const unsent = (s: EditSession) => s.dirty || s.state === "pending" || s.state === "error" || s.state === "uploading" || s.state === "asking";
+
+/** Stops watching and deletes the local copy (asking first when it holds edits not yet on the server). */
 export async function stopEdit(id: string) {
+  const s = sessions()[id];
+  if (s && unsent(s) && !(await confirmDialog(t("{name} has changes that are not on {host} yet. Stop anyway and delete the local copy?", { name: s.name, host: s.dest })))) return;
   await invoke("sftp_edit_stop", { id }).catch(() => {});
   setSessions((all) => {
     const next = { ...all };
@@ -128,7 +152,9 @@ export function initRemoteEdit() {
   void onEvent<{ id: string }>("sftp-edit-changed", ({ id }) => {
     const s = sessions()[id];
     if (!s) return;
-    if (s.auto) return void uploadEdit(id);
+    const what = onSave(s);
+    if (what === "follow") return patch(id, { dirty: true });
+    if (what === "upload") return void uploadEdit(id);
     patch(id, { state: "pending" });
     store.notify(t("{name} changed: upload it to {host}?", { name: s.name, host: s.dest }), { label: t("Upload"), run: () => void uploadEdit(id) });
   });
@@ -143,11 +169,17 @@ export async function editInKelpie(host: SshHost, path: string) {
     if (isHostKeyError(e)) throw e;
     throw new Error(t("Kelpie's editor needs a shell on the host; use an external editor ({reason})", { reason: String(e) }));
   }
-  let id = await hostProject(host, check);
-  let root = store.state.projects.find((p) => p.id === id)?.remote?.path ?? "/";
   const inside = (r: string) => r === "/" || path.startsWith(`${r.replace(/\/+$/, "")}/`);
+  // A remote project of this host that holds the file (the deepest one), else the host's own, else one for its folder.
+  const holding = store.state.projects
+    .filter((p) => p.remote?.dest === host.alias && inside(p.remote.path))
+    .sort((a, b) => (b.remote?.path.length ?? 0) - (a.remote?.path.length ?? 0))[0];
+  let id = holding?.id ?? (await hostProject(host, check));
+  let root = store.state.projects.find((p) => p.id === id)?.remote?.path ?? "/";
   if (!inside(root)) {
     root = parentPath(host.alias, path);
+    // A project root keeps no backslash and no space at either end of a folder name: such a folder opens elsewhere.
+    if (root.split("/").some((part) => part.includes("\\") || part !== part.trim())) throw new Error(t("Kelpie's editor cannot open a file in this folder; use an external editor"));
     id = await hostProject(host, check, root);
   }
   store.setOverlay(null);

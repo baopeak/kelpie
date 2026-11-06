@@ -4,7 +4,7 @@ import { For, Show } from "solid-js";
 import { t } from "../../lib/i18n";
 import * as ipc from "../../lib/ipc";
 import { formatSize } from "../../lib/file-pane";
-import { directionText, etaText, isActive, isFinished, jobList, jobTitle, progress, routeText, speedText, stateText, transferNotice } from "../../lib/transfers";
+import { directionText, etaText, isActive, isFinished, jobList, jobTitle, progress, routeText, speedText, stateText, transferJobs, transferNotice } from "../../lib/transfers";
 import type { XferJob } from "../../lib/types";
 
 export function TransferQueue(props: { label: (alias: string) => string }) {
@@ -24,43 +24,48 @@ export function TransferQueue(props: { label: (alias: string) => string }) {
         </Show>
       </div>
       <Show when={transferNotice()}><div class="form-note error">{transferNotice()}</div></Show>
-      <For each={jobList()} fallback={<div class="muted">{t("No transfers. Drag files between the panes, or press F5 to copy the selection to the other pane.")}</div>}>
-        {(j) => {
-          const p = () => progress(j);
+      <For each={jobList().map((j) => j.id)} fallback={<div class="muted">{t("No transfers. Drag files between the panes, or press F5 to copy the selection to the other pane.")}</div>}>
+        {(id) => {
+          // Keyed by id: an update replaces the job, not the row (an opened failure list stays open).
+          // Rendered only while the job exists (the Show below).
+          const j = () => transferJobs()[id] as XferJob;
+          const p = () => (j() ? progress(j()) : null);
           return (
-            <div class={`transfer-job ${j.state}`} data-job={j.id} data-state={j.state}>
+            <Show when={j()}>
+            <div class={`transfer-job ${j().state}`} data-job={j().id} data-state={j().state}>
               <div class="transfer-job-line">
-                <span class="transfer-job-title" title={j.items.join("\n")}>{jobTitle(j)}</span>
-                <span class="muted-inline">{directionText(j, props.label)}</span>
-                <Show when={routeText(j, props.label)}>{(r) => <span class="muted-inline" data-route={j.route_used ?? ""}>{r()}</span>}</Show>
+                <span class="transfer-job-title" title={j().items.join("\n")}>{jobTitle(j())}</span>
+                <span class="muted-inline">{directionText(j(), props.label)}</span>
+                <Show when={routeText(j(), props.label)}>{(r) => <span class="muted-inline" data-route={j().route_used ?? ""}>{r()}</span>}</Show>
                 <span class="spacer" />
-                <Show when={j.kind === "copy" && j.totals.bytes}>
-                  <span class="muted-inline">{formatSize(j.totals.done_bytes)} / {formatSize(j.totals.bytes)}</span>
+                <Show when={j().kind === "copy" && j().totals.bytes}>
+                  <span class="muted-inline">{formatSize(j().totals.done_bytes)} / {formatSize(j().totals.bytes)}</span>
                 </Show>
-                <Show when={isActive(j) && j.speed_bps}><span class="muted-inline">{speedText(j.speed_bps)}</span></Show>
-                <Show when={isActive(j) && j.eta_s != null}><span class="muted-inline">{etaText(j.eta_s)}</span></Show>
+                <Show when={isActive(j()) && j().speed_bps}><span class="muted-inline">{speedText(j().speed_bps)}</span></Show>
+                <Show when={isActive(j()) && j().eta_s != null}><span class="muted-inline">{etaText(j().eta_s)}</span></Show>
               </div>
-              <div class="transfer-bar"><div class="transfer-bar-fill" style={{ width: `${Math.round((p() ?? 0) * 100)}%` }} classList={{ unknown: p() == null && isActive(j) }} /></div>
+              <div class="transfer-bar"><div class="transfer-bar-fill" style={{ width: `${Math.round((p() ?? 0) * 100)}%` }} classList={{ unknown: p() == null && isActive(j()) }} /></div>
               <div class="transfer-job-line">
-                <span class={`transfer-state ${j.state}`} data-job-state>{stateText(j)}</span>
-                <Show when={j.walk.folder_links}><span class="muted-inline">{t("{n} links to folders not followed", { n: j.walk.folder_links })}</span></Show>
-                <Show when={j.walk.unreadable_names}><span class="muted-inline">{t("{n} names not readable, skipped", { n: j.walk.unreadable_names })}</span></Show>
-                <Show when={j.renamed.length}><span class="muted-inline" title={j.renamed.map(([a, b]) => `${a} → ${b}`).join("\n")}>{t("{n} saved under another name", { n: j.renamed.length })}</span></Show>
+                <span class={`transfer-state ${j().state}`} data-job-state>{stateText(j())}</span>
+                <Show when={j().walk.folder_links}><span class="muted-inline">{t("{n} links to folders not followed", { n: j().walk.folder_links })}</span></Show>
+                <Show when={j().walk.unreadable_names}><span class="muted-inline">{t("{n} names not readable, skipped", { n: j().walk.unreadable_names })}</span></Show>
+                <Show when={j().renamed.length}><span class="muted-inline" title={j().renamed.map(([a, b]) => `${a} → ${b}`).join("\n")}>{t("{n} saved under another name", { n: j().renamed.length })}</span></Show>
                 <span class="spacer" />
-                <Show when={isActive(j) && j.state !== "queued"}><button class="btn" data-action="pause" onClick={() => act(j, "pause")}>{t("Pause")}</button></Show>
-                <Show when={j.state === "paused" || j.state === "interrupted"}><button class="btn primary" data-action="resume" onClick={() => act(j, "resume")}>{t("Resume")}</button></Show>
-                <Show when={j.state === "failed"}><button class="btn primary" data-action="retry" onClick={() => act(j, "retry")}>{t("Retry")}</button></Show>
-                <Show when={!isFinished(j)}><button class="btn" data-action="cancel" onClick={() => act(j, "cancel")}>{t("Cancel")}</button></Show>
-                <Show when={j.state === "done" && j.kind === "copy" && !j.dst.dest}><button class="btn" data-action="reveal" onClick={() => reveal(j)}>{t("Show")}</button></Show>
-                <Show when={isFinished(j)}><button class="btn" data-action="clear" onClick={() => act(j, "clear")}>{t("Clear")}</button></Show>
+                <Show when={isActive(j()) && j().state !== "queued"}><button class="btn" data-action="pause" onClick={() => act(j(), "pause")}>{t("Pause")}</button></Show>
+                <Show when={j().state === "paused" || j().state === "interrupted"}><button class="btn primary" data-action="resume" onClick={() => act(j(), "resume")}>{t("Resume")}</button></Show>
+                <Show when={j().state === "failed"}><button class="btn primary" data-action="retry" onClick={() => act(j(), "retry")}>{t("Retry")}</button></Show>
+                <Show when={!isFinished(j())}><button class="btn" data-action="cancel" onClick={() => act(j(), "cancel")}>{t("Cancel")}</button></Show>
+                <Show when={j().state === "done" && j().kind === "copy" && !j().dst.dest}><button class="btn" data-action="reveal" onClick={() => reveal(j())}>{t("Show")}</button></Show>
+                <Show when={isFinished(j())}><button class="btn" data-action="clear" onClick={() => act(j(), "clear")}>{t("Clear")}</button></Show>
               </div>
-              <Show when={j.failures.length}>
+              <Show when={j().failures.length}>
                 <details class="transfer-failures">
-                  <summary>{t("{n} could not be copied", { n: j.totals.failed })}</summary>
-                  <For each={j.failures}>{(f) => <div class="mono">{f.path}: {f.error}</div>}</For>
+                  <summary>{t("{n} could not be copied", { n: j().totals.failed })}</summary>
+                  <For each={j().failures}>{(f) => <div class="mono">{f.path}: {f.error}</div>}</For>
                 </details>
               </Show>
             </div>
+            </Show>
           );
         }}
       </For>

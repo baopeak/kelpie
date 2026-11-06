@@ -888,7 +888,8 @@ The **SSH hosts** page (the server icon at the bottom of the sidebar, `Ctrl+Alt+
     (*through this computer: the first host has no login of its own on the second host*). *Copy through this
     computer* always relays.
     - Kelpie never turns on agent forwarding for this. With forwarding, anyone with root (or your user) on the
-      first host could use your loaded keys for as long as the connection lasts.  - **Permissions…** (a host) sets rwx or octal, optionally for everything inside a folder; *x for folders only* keeps folders openable and leaves each file's own x as it was. Delete on a host asks
+      first host could use your loaded keys for as long as the connection lasts.
+  - **Permissions…** (a host) sets rwx or octal, optionally for everything inside a folder; *x for folders only* keeps folders openable and leaves each file's own x as it was. Delete on a host asks
     first: there is no trash there. Delete on this computer moves to the trash.
   - **Edit** a host's file *in Kelpie* (through the host's remote project; needs a shell on the host) or *with an
     external editor*: a private copy is opened and uploaded on every save. A change made on the server meanwhile is

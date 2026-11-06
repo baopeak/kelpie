@@ -97,5 +97,18 @@
   "through this computer": "qua máy này",
   "Auto copies directly when the first host can log in to the second by itself (Kelpie never lends it your keys); otherwise the data goes through this computer": "Tự động sao chép trực tiếp khi host thứ nhất tự đăng nhập được vào host thứ hai (Kelpie không bao giờ cho nó mượn khoá của bạn); nếu không, dữ liệu đi qua máy này",
   "Copy (Auto)": "Sao chép (Tự động)",
-  "Copy through this computer": "Sao chép qua máy này"
+  "Copy through this computer": "Sao chép qua máy này",
+  "{name} has changes that are not on {host} yet. Stop anyway and delete the local copy?": "{name} có thay đổi chưa lên {host}. Vẫn dừng và xoá bản sao trên máy?",
+  "A file transfer needs your answer": "Một lượt chuyển file cần bạn trả lời",
+  "A file transfer waits for your answer": "Một lượt chuyển file đang chờ bạn trả lời",
+  "and {n} more": "và {n} mục khác",
+  "Folders are deleted with everything inside.": "Thư mục bị xoá cùng mọi thứ bên trong.",
+  "Kelpie's editor cannot open a file in this folder; use an external editor": "Trình sửa của Kelpie không mở được file trong thư mục này; hãy dùng trình sửa bên ngoài",
+  "Only the boxes you change are applied; each item keeps the rest of its own permissions.": "Chỉ các ô bạn đổi được áp dụng; mỗi mục giữ nguyên phần quyền còn lại của nó.",
+  "Transfer needs an answer": "Lượt chuyển cần trả lời",
+  "Uploading… (a newer save follows)": "Đang tải lên… (bản lưu mới hơn sẽ theo sau)",
+  "Waiting for your answer (a newer save follows)": "Đang chờ bạn trả lời (bản lưu mới hơn sẽ theo sau)",
+  "Copy path": "Sao chép đường dẫn",
+  "Paused": "Đã tạm dừng",
+  "this computer": "máy này"
 }

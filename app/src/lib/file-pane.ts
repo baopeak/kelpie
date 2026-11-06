@@ -87,6 +87,28 @@ export function parseOctal(text: string): number | null {
   return /^[0-7]{3,4}$/.test(s) ? parseInt(s, 8) : null;
 }
 
+/** The rwx bits every one of `modes` has (special bits never: they are not offered for several items at once). */
+export const sharedBits = (modes: (number | null)[]): number => modes.reduce<number>((acc, m) => acc & (m ?? 0), 0o777) & 0o777;
+
+/** The rwx bits the person changed from `start` to `target`. */
+export const changedBits = (start: number, target: number): number => (start ^ target) & 0o777;
+
+/** `mode` with only the `changed` bits taken from `target` (its other bits, special ones included, kept). */
+export const withChange = (mode: number, target: number, changed: number): number => ((mode & 0o7777) & ~changed) | (target & changed);
+
+// ---- delete ----
+
+/** The selection kept to what is shown (a filter hides items: an action never reaches what the person cannot see). */
+export function pruneSelection(sel: Selection, shown: string[]): Selection {
+  const picked = sel.picked.filter((n) => shown.includes(n));
+  return { picked, anchor: sel.anchor && shown.includes(sel.anchor) ? sel.anchor : picked[0] ?? null };
+}
+
+/** The names a delete lists: the first `max`, and how many more. */
+export function listNames(names: string[], max = 5): { shown: string[]; more: number } {
+  return { shown: names.slice(0, max), more: Math.max(0, names.length - max) };
+}
+
 // ---- paths ----
 
 const windowsPath = (p: string) => /^[A-Za-z]:/.test(p) || p.startsWith("\\\\");

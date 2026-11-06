@@ -44,7 +44,8 @@ export function initTransfers() {
 export async function reloadTransfers() {
   try {
     const r = await xferList();
-    setJobs(Object.fromEntries(r.jobs.map((j) => [j.id, j])));
+    // Merged: an event newer than the snapshot (it was in flight meanwhile) wins; jobs gone from the list go.
+    setJobs((cur) => Object.fromEntries(r.jobs.map((j) => [j.id, cur[j.id] && cur[j.id].updated > j.updated ? cur[j.id] : j])));
     setNotice(r.notice);
   } catch {
     // An older daemon has no queue: the Files tab says so.
@@ -123,6 +124,17 @@ export function routeText(j: XferJob, label: (alias: string) => string = (a) => 
   if (j.route_used === "direct") return t("direct {a} → {b}", { a: label(j.src.dest), b: label(j.dst.dest) });
   return j.route_reason ? t("through this computer: {reason}", { reason: j.route_reason }) : t("through this computer");
 }
+
+/** The conflict dialog shows while a Files view is open, or when the person opened it from the status bar or a notice. */
+const [filesViews, setFilesViews] = createSignal(0);
+const [answering, setAnswering] = createSignal(false);
+export const filesViewOpened = () => setFilesViews((n) => n + 1);
+export const filesViewClosed = () => setFilesViews((n) => Math.max(0, n - 1));
+export const openConflicts = () => setAnswering(true);
+/** Called when no question is left (an effect in the status bar), so the next one waits for the person again. */
+export const closeConflicts = () => setAnswering(false);
+/** Whether the dialog shows now. */
+export const conflictsShown = (all: Jobs = jobs()): boolean => !!nextQuestion(all) && (answering() || filesViews() > 0);
 
 /** The question shown next: the oldest waiting job's first one (one at a time, never stacked). */
 export function nextQuestion(all: Jobs = jobs()): { job: XferJob; q: XferQuestion } | null {

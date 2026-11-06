@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./ipc", () => ({ onEvent: vi.fn(), xferList: vi.fn() }));
 
-import { activeCount, applyJob, chipText, directionText, etaText, heldText, jobTitle, nextQuestion, progress, removeJob, routeText, speedText, stateText, updateMayInstall } from "./transfers";
+import { activeCount, applyJob, chipText, closeConflicts, conflictsShown, directionText, etaText, filesViewClosed, filesViewOpened, heldText, jobTitle, nextQuestion, openConflicts, progress, removeJob, routeText, speedText, stateText, updateMayInstall } from "./transfers";
 import type { XferJob, XferQuestion } from "./types";
 
 const meta = { kind: "file" as const, size: 1, mtime: 1, mode: 0o644, uid: null, gid: null };
@@ -84,8 +84,20 @@ describe("questions and the chip", () => {
     expect(nextQuestion(jobs)).toEqual({ job: jobs.b, q: q(3) });
     expect(nextQuestion({ c: job({ id: "c" }) })).toBeNull();
   });
-  it("counts running jobs and their overall progress", () => {
-    expect(chipText({})).toBeNull();
+  it("shows a waiting question while a Files view is open, or anywhere once the person asks for it", () => {
+    const waiting = { a: job({ id: "a", questions: [q(1)] }) };
+    expect(conflictsShown(waiting)).toBe(false);
+    filesViewOpened();
+    expect(conflictsShown(waiting)).toBe(true);
+    expect(conflictsShown({})).toBe(false);
+    filesViewClosed();
+    expect(conflictsShown(waiting)).toBe(false);
+    openConflicts();
+    expect(conflictsShown(waiting)).toBe(true);
+    closeConflicts();
+    expect(conflictsShown(waiting)).toBe(false);
+  });
+  it("counts running jobs and their overall progress", () => {    expect(chipText({})).toBeNull();
     expect(chipText({ a: job({ id: "a", state: "done" }) })).toBeNull();
     const jobs = { a: job({ id: "a" }), b: job({ id: "b", totals: { files: 1, bytes: 200, done_files: 0, done_bytes: 130, skipped: 0, failed: 0 } }) };
     expect(chipText(jobs)).toBe("↑↓ 2 · 45 %");

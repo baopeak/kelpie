@@ -34,6 +34,8 @@ home = os.path.join(scratch, "home")
 work = os.path.join(scratch, "work")
 os.environ["KELPIE_DATA_DIR"] = data
 os.environ["KELPIE_SSH_DIR"] = ssh_dir
+# The Files tab's home is a scratch folder too: nothing lands in the real profile.
+os.environ["KELPIE_FILES_HOME"] = os.path.join(scratch, "files-home")
 for d in (data, ssh_dir, home, work):
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
