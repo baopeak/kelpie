@@ -89,11 +89,19 @@ impl Dxgi {
             let dirty = self.dirty_rects(dup, info.TotalMetadataBufferSize);
             match resource.and_then(|r| r.cast::<ID3D11Texture2D>().ok()) {
                 Some(tex) => {
-                    // `into` may be a little smaller (a monitor of an odd size, made even for the encoder): its own size is copied.
+                    // `into` may be a little smaller (a monitor of an odd size, made even for the encoder): only its own size counts. It
+                    // keeps the picture between frames, so only what changed is copied into it (all of it when DXGI does not say).
                     let mut desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
                     unsafe { into.GetDesc(&mut desc) };
-                    let region = windows::Win32::Graphics::Direct3D11::D3D11_BOX { left: 0, top: 0, front: 0, right: desc.Width, bottom: desc.Height, back: 1 };
-                    unsafe { d.ctx.CopySubresourceRegion(into, 0, 0, 0, 0, &tex, 0, Some(&region)) };
+                    let bounds = Rect::new(0, 0, desc.Width as i32, desc.Height as i32);
+                    let regions: Vec<Rect> = match &dirty {
+                        Some(rects) => rects.iter().filter_map(|r| r.intersect(bounds)).collect(),
+                        None => vec![bounds],
+                    };
+                    for r in &regions {
+                        let region = windows::Win32::Graphics::Direct3D11::D3D11_BOX { left: r.x as u32, top: r.y as u32, front: 0, right: r.right() as u32, bottom: r.bottom() as u32, back: 1 };
+                        unsafe { d.ctx.CopySubresourceRegion(into, 0, r.x as u32, r.y as u32, 0, &tex, 0, Some(&region)) };
+                    }
                     Grab::Frame { dirty }
                 }
                 None => Grab::Timeout,
@@ -105,27 +113,23 @@ impl Dxgi {
         out
     }
 
-    /// The changed rectangles (move rectangles count as changes at their destination), monitor-relative.
+    /// What changed, monitor-relative, as WebRTC's duplicator reads it (`geom::updated_region`): the move rectangles first, then the dirty
+    /// ones, from one buffer of the frame's metadata size; a move counts where its pixels came from and where they went. None (everything)
+    /// when the metadata is missing or cannot be read.
     fn dirty_rects(&self, dup: &IDXGIOutputDuplication, size: u32) -> Option<Vec<Rect>> {
+        use windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_MOVE_RECT;
         if size == 0 {
             return None;
         }
-        let mut buf = vec![RECT::default(); (size as usize) / std::mem::size_of::<RECT>() + 1];
+        let move_size = std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>();
+        let mut moves = vec![DXGI_OUTDUPL_MOVE_RECT::default(); size as usize / move_size + 1];
         let mut used = 0u32;
-        let bytes = (buf.len() * std::mem::size_of::<RECT>()) as u32;
-        unsafe { dup.GetFrameDirtyRects(bytes, buf.as_mut_ptr(), &mut used).ok()? };
-        let n = used as usize / std::mem::size_of::<RECT>();
-        let mut out: Vec<Rect> = buf[..n].iter().map(|r| Rect::from_edges(r.left, r.top, r.right, r.bottom)).collect();
-        let mut moves = vec![windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_MOVE_RECT::default(); 64];
+        unsafe { dup.GetFrameMoveRects((moves.len() * move_size) as u32, moves.as_mut_ptr(), &mut used).ok()? };
+        let moved: Vec<(i32, i32, Rect)> = moves[..used as usize / move_size].iter().map(|m| (m.SourcePoint.x, m.SourcePoint.y, Rect::from_edges(m.DestinationRect.left, m.DestinationRect.top, m.DestinationRect.right, m.DestinationRect.bottom))).collect();
+        let mut buf = vec![RECT::default(); size as usize / std::mem::size_of::<RECT>() + 1];
         let mut used = 0u32;
-        let bytes = (moves.len() * std::mem::size_of::<windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_MOVE_RECT>()) as u32;
-        if unsafe { dup.GetFrameMoveRects(bytes, moves.as_mut_ptr(), &mut used) }.is_ok() {
-            let n = used as usize / std::mem::size_of::<windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_MOVE_RECT>();
-            out.extend(moves[..n].iter().map(|m| Rect::from_edges(m.DestinationRect.left, m.DestinationRect.top, m.DestinationRect.right, m.DestinationRect.bottom)));
-        } else {
-            // More moves than room: say "everything".
-            return None;
-        }
-        Some(out)
+        unsafe { dup.GetFrameDirtyRects((buf.len() * std::mem::size_of::<RECT>()) as u32, buf.as_mut_ptr(), &mut used).ok()? };
+        let dirty: Vec<Rect> = buf[..used as usize / std::mem::size_of::<RECT>()].iter().map(|r| Rect::from_edges(r.left, r.top, r.right, r.bottom)).collect();
+        Some(crate::geom::updated_region(&dirty, &moved))
     }
 }

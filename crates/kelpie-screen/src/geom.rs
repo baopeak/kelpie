@@ -154,9 +154,34 @@ pub fn scaled(src_w: u32, src_h: u32, scale: u8, min_lines: u32, max_lines: u32)
     (even(w), even(h.max(2)))
 }
 
+/// What changed in a desktop duplication frame, as WebRTC's `DxgiOutputDuplicator::DoDetectUpdatedRegion` has it: every dirty rectangle, and
+/// for each move both where the pixels came from and where they went (`(source x, source y, destination)`); a "move" that moved nothing is
+/// skipped (DXGI reports some). Empty rectangles are left out.
+pub fn updated_region(dirty: &[Rect], moves: &[(i32, i32, Rect)]) -> Vec<Rect> {
+    let mut out: Vec<Rect> = Vec::with_capacity(dirty.len() + moves.len() * 2);
+    for &(sx, sy, dest) in moves {
+        if sx == dest.x && sy == dest.y {
+            continue;
+        }
+        out.push(Rect::new(sx, sy, dest.w, dest.h));
+        out.push(dest);
+    }
+    out.extend(dirty.iter().copied());
+    out.retain(|r| !r.is_empty());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scroll_updates_where_the_pixels_came_from_and_went_and_an_unmoved_move_nothing() {
+        let dirty = [Rect::new(0, 900, 1920, 180), Rect::new(5, 5, 0, 10)];
+        let moves = [(0, 100, Rect::new(0, 60, 1920, 840)), (10, 10, Rect::new(10, 10, 50, 50))];
+        assert_eq!(updated_region(&dirty, &moves), [Rect::new(0, 100, 1920, 840), Rect::new(0, 60, 1920, 840), Rect::new(0, 900, 1920, 180)]);
+        assert!(updated_region(&[], &[]).is_empty());
+    }
 
     fn monitors() -> Vec<Monitor> {
         vec![

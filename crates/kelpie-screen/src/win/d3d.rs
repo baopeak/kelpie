@@ -88,6 +88,41 @@ impl Readback {
 
     /// Copies the top-left `w`×`h` of `tex` (BGRA, which may be larger: a monitor of an odd size) into `buf`, rows `stride` bytes apart.
     pub fn read(&mut self, d: &Device, tex: &ID3D11Texture2D, w: u32, h: u32) -> Result<()> {
+        self.read_regions(d, tex, w, h, None)
+    }
+
+    /// `read`, of only `regions` when the capture says what changed (DXGI): the rest of `buf` still holds the picture before, which is the
+    /// picture now there. The first read, a new size, or no regions read everything.
+    pub fn read_regions(&mut self, d: &Device, tex: &ID3D11Texture2D, w: u32, h: u32, regions: Option<&[crate::geom::Rect]>) -> Result<()> {
+        let same = matches!(self.staging, Some((_, sw, sh)) if sw == w && sh == h) && self.stride > 0;
+        if let (true, Some(regions)) = (same, regions) {
+            let staging = &self.staging.as_ref().expect("same size").0;
+            let bounds = crate::geom::Rect::new(0, 0, w as i32, h as i32);
+            let clipped: Vec<crate::geom::Rect> = regions.iter().filter_map(|r| r.intersect(bounds)).collect();
+            if clipped.is_empty() {
+                return Ok(());
+            }
+            unsafe {
+                for r in &clipped {
+                    let region = windows::Win32::Graphics::Direct3D11::D3D11_BOX { left: r.x as u32, top: r.y as u32, front: 0, right: r.right() as u32, bottom: r.bottom() as u32, back: 1 };
+                    d.ctx.CopySubresourceRegion(staging, 0, r.x as u32, r.y as u32, 0, tex, 0, Some(&region));
+                }
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                d.ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+                if mapped.RowPitch as usize == self.stride {
+                    let src = mapped.pData as *const u8;
+                    for r in &clipped {
+                        for y in r.y as usize..r.bottom() as usize {
+                            let at = y * self.stride + r.x as usize * 4;
+                            std::ptr::copy_nonoverlapping(src.add(at), self.buf.as_mut_ptr().add(at), r.w as usize * 4);
+                        }
+                    }
+                    d.ctx.Unmap(staging, 0);
+                    return Ok(());
+                }
+                d.ctx.Unmap(staging, 0);
+            }
+        }
         if !matches!(self.staging, Some((_, sw, sh)) if sw == w && sh == h) {
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: w,
