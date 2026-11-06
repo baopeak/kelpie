@@ -570,3 +570,70 @@ export interface RemoteEntry {
 
 /** What `stat` / `lstat` say about a path (`files::Meta`). */
 export type RemoteMeta = Omit<RemoteEntry, "name" | "owner" | "group" | "link_target" | "readable_name" | "hidden">;
+
+/** One end of a transfer: this computer (no `dest`) or a host. */
+export interface XferEnd {
+  dest?: string;
+}
+
+export type XferState = "queued" | "scanning" | "running" | "waiting" | "paused" | "reconnecting" | "interrupted" | "failed" | "done" | "cancelled";
+export type XferPolicy = "ask" | "replace" | "skip" | "keep_both" | "newer" | "skip_identical";
+export type XferChoice = "replace" | "skip" | "keep_both" | "newer" | "skip_identical" | "overwrite" | "save_copy" | "discard";
+
+/** A file waiting for the person's answer (`files::queue::Question`). */
+export interface XferQuestion {
+  id: number;
+  path: string;
+  src: RemoteMeta;
+  dst: RemoteMeta;
+  identical: boolean;
+  /** A file and a folder of the same name: only skip or keep both. */
+  kind_clash: boolean;
+  /** The target changed after it was approved, or since the file was opened for editing. */
+  changed: boolean;
+}
+
+/** A transfer job as the daemon reports it (`files::queue::Job`). */
+export interface XferJob {
+  id: string;
+  kind: "copy" | "delete" | "chmod";
+  src: XferEnd;
+  dst: XferEnd;
+  items: string[];
+  dst_dir: string;
+  conflict: XferPolicy;
+  preserve: boolean;
+  mode: number | null;
+  dirs_only_x: boolean;
+  expect: { size: number; mtime: number } | null;
+  state: XferState;
+  attempt: number;
+  next_s: number;
+  totals: { files: number; bytes: number; done_files: number; done_bytes: number; skipped: number; failed: number };
+  speed_bps: number;
+  eta_s: number | null;
+  current: string | null;
+  questions: XferQuestion[];
+  error: string | null;
+  failures: { path: string; error: string }[];
+  walk: { folder_links: number; broken_links: number; unreadable_names: number; special: number; unlistable: number };
+  /** Names the target could not hold, as [wanted, saved as]. */
+  renamed: [string, string][];
+  created: number;
+  updated: number;
+  finished: number | null;
+}
+
+export interface XferStart {
+  kind?: "copy" | "delete" | "chmod";
+  src: XferEnd;
+  dst?: XferEnd;
+  items: string[];
+  dst_dir?: string;
+  conflict?: XferPolicy;
+  preserve?: boolean;
+  mode?: number;
+  dirs_only_x?: boolean;
+  /** One file's upload replaces the target only while it is still this size and time (an edited file). */
+  expect?: { size: number; mtime: number };
+}

@@ -16,12 +16,24 @@ use super::{FsResult, Kind, Meta, RemoteFs};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Found {
     /// A folder to make on the target (path parts below the target folder), sent before its contents.
-    Dir { rel: Vec<String> },
+    Dir { path: String, rel: Vec<String> },
     File { path: String, rel: Vec<String>, meta: Meta },
+    /// A link itself, not followed ([`Links::Report`] only).
+    Link { path: String, rel: Vec<String> },
+}
+
+/// What happens to links on the way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Links {
+    /// A copy: links to files are followed, links to folders skipped (a picked link is followed).
+    Follow,
+    /// A delete or chmod: every link is reported as itself and never followed.
+    Report,
 }
 
 /// What the walk skipped, for the job's summary ("3 links to folders not followed").
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Skipped {
     pub folder_links: u64,
     pub broken_links: u64,
@@ -43,7 +55,7 @@ pub fn base_name(path: &str) -> &str {
 
 /// Walks `picked` on `fs`. Stops early (with what was skipped so far) when `cancel` is set or the receiver
 /// is gone. A picked item that cannot be read is an error; anything below it is counted instead.
-pub async fn walk(fs: &dyn RemoteFs, picked: &[String], tx: &mpsc::Sender<Found>, cancel: &AtomicBool) -> FsResult<Skipped> {
+pub async fn walk(fs: &dyn RemoteFs, picked: &[String], tx: &mpsc::Sender<Found>, cancel: &AtomicBool, links: Links) -> FsResult<Skipped> {
     let mut skipped = Skipped::default();
     let mut queue: VecDeque<(String, Vec<String>)> = VecDeque::new();
     macro_rules! send {
@@ -58,14 +70,15 @@ pub async fn walk(fs: &dyn RemoteFs, picked: &[String], tx: &mpsc::Sender<Found>
             return Ok(skipped);
         }
         let rel = vec![base_name(path).to_string()];
-        let meta = fs.stat(path).await?;
+        let meta = if links == Links::Report { fs.lstat(path).await? } else { fs.stat(path).await? };
         match meta.kind {
             Kind::File => send!(Found::File { path: path.clone(), rel, meta }),
             Kind::Dir => {
-                send!(Found::Dir { rel: rel.clone() });
+                send!(Found::Dir { path: path.clone(), rel: rel.clone() });
                 queue.push_back((path.clone(), rel));
             }
-            _ => skipped.special += 1,
+            Kind::Link => send!(Found::Link { path: path.clone(), rel }),
+            Kind::Other => skipped.special += 1,
         }
     }
     while let Some((dir, rel)) = queue.pop_front() {
@@ -87,10 +100,11 @@ pub async fn walk(fs: &dyn RemoteFs, picked: &[String], tx: &mpsc::Sender<Found>
             match e.meta.kind {
                 Kind::File => send!(Found::File { path, rel: sub, meta: e.meta }),
                 Kind::Dir => {
-                    send!(Found::Dir { rel: sub.clone() });
+                    send!(Found::Dir { path: path.clone(), rel: sub.clone() });
                     queue.push_back((path, sub));
                     skipped.max_queued = skipped.max_queued.max(queue.len());
                 }
+                Kind::Link if links == Links::Report => send!(Found::Link { path, rel: sub }),
                 Kind::Link => match fs.stat(&path).await {
                     Ok(target) if target.kind == Kind::File => send!(Found::File { path, rel: sub, meta: target }),
                     Ok(target) if target.kind == Kind::Dir => skipped.folder_links += 1,
@@ -114,7 +128,7 @@ mod tests {
         let picked: Vec<String> = picked.iter().map(|s| s.to_string()).collect();
         let cancel = AtomicBool::new(false);
         let fs2 = fs.clone();
-        let walker = tokio::spawn(async move { walk(&fs2, &picked, &tx, &cancel).await });
+        let walker = tokio::spawn(async move { walk(&fs2, &picked, &tx, &cancel, Links::Follow).await });
         let mut found = Vec::new();
         while let Some(f) = rx.recv().await {
             found.push(f);
@@ -126,7 +140,8 @@ mod tests {
         let mut v: Vec<String> = found
             .iter()
             .map(|f| match f {
-                Found::Dir { rel } => format!("{}/", rel.join("/")),
+                Found::Dir { rel, .. } => format!("{}/", rel.join("/")),
+                Found::Link { rel, .. } => format!("{}@", rel.join("/")),
                 Found::File { rel, .. } => rel.join("/"),
             })
             .collect();
@@ -185,7 +200,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let cancel = AtomicBool::new(false);
         let fs2 = fs.clone();
-        let walker = tokio::spawn(async move { walk(&fs2, &["/big".to_string()], &tx, &cancel).await });
+        let walker = tokio::spawn(async move { walk(&fs2, &["/big".to_string()], &tx, &cancel, Links::Follow).await });
         let mut files = 0;
         while let Some(f) = rx.recv().await {
             if matches!(f, Found::File { .. }) {
@@ -198,12 +213,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_delete_walk_reports_links_without_following_them() {
+        let fs = MemFs::new();
+        fs.put("/d/a.txt", b"a", 1);
+        fs.put("/elsewhere/keep.txt", b"k", 1);
+        fs.link("/d/to-elsewhere", "/elsewhere");
+        fs.link("/d/to-file", "/elsewhere/keep.txt");
+        let (tx, mut rx) = mpsc::channel(16);
+        let cancel = AtomicBool::new(false);
+        let fs2 = fs.clone();
+        let walker = tokio::spawn(async move { walk(&fs2, &["/d".to_string()], &tx, &cancel, Links::Report).await });
+        let mut found = Vec::new();
+        while let Some(f) = rx.recv().await {
+            found.push(f);
+        }
+        walker.await.unwrap().unwrap();
+        assert_eq!(rels(&found), ["d/", "d/a.txt", "d/to-elsewhere@", "d/to-file@"]);
+    }
+
+    #[tokio::test]
     async fn cancel_stops_the_walk() {
         let fs = MemFs::new();
         fs.put("/c/a/1", b"", 1);
         let (tx, _rx) = mpsc::channel(16);
         let cancel = AtomicBool::new(true);
-        assert_eq!(walk(&fs, &["/c".into()], &tx, &cancel).await.unwrap(), Skipped::default());
+        assert_eq!(walk(&fs, &["/c".into()], &tx, &cancel, Links::Follow).await.unwrap(), Skipped::default());
     }
 
     #[test]

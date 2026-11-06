@@ -2,7 +2,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { locale } from "./i18n";
-import type { AttachReply, BranchInfo, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, RemoteEntry, RemoteMeta, SessionInfo, SessionUsage, UsageReport, UsageTotals } from "./types";
+import type { AttachReply, BranchInfo, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, RemoteEntry, RemoteMeta, SessionInfo, SessionUsage, UsageReport, UsageTotals, XferChoice, XferJob, XferStart } from "./types";
 
 export const daemon = <T = unknown>(method: string, params: object = {}) =>
   invoke<T>("daemon_call", { method, params });
@@ -242,3 +242,14 @@ export const sftpChmod = (dest: string, paths: string[], mode: number) => daemon
 /** `""` lists the drives on Windows. */
 export const localList = (path: string, hidden = false) => daemon<RemoteEntry[]>("local.list", { path, hidden });
 export const localHome = () => daemon<{ path: string }>("local.home").then((r) => r.path);
+
+/** From this daemon API level the daemon runs the transfer queue (`xfer.*`, the `xfer.updated` / `xfer.removed` events). */
+export const XFER_API = 27;
+
+export const xferStart = (job: XferStart) => daemon<{ id: string }>("xfer.start", job).then((r) => r.id);
+/** `notice`: the saved transfer list could not be read (it was kept aside, or saving is off until a restart). */
+export const xferList = () => daemon<{ jobs: XferJob[]; notice: string | null }>("xfer.list");
+export const xferControl = (id: string, action: "pause" | "resume" | "cancel" | "retry" | "clear") => daemon<boolean>("xfer.control", { id, action });
+/** `all`: the choice also answers the rest of this transfer (never other transfers). */
+export const xferAnswer = (id: string, choice: XferChoice, all = false, question?: number) => daemon<boolean>("xfer.answer", { id, choice, all, question });
+export const xferClearFinished = () => daemon<boolean>("xfer.clear_finished");

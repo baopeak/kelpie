@@ -1594,6 +1594,39 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
   - `local.list {path, hidden}`, `local.home`.
 
   They are open to the user's and the app's connections only. Programs in sessions cannot call them, so an agent cannot use saved passwords through the daemon.
+- **Transfer queue** (`files/queue.rs`, API 27):
+  - **Jobs**: `copy`, `delete` and `chmod`, between this computer and a host, or host and host (through this computer).
+  - **Scheduling**: at most 3 run at once; the rest wait in order. A job copies 4 files at once, and a file of 8 MiB or more alone.
+  - **Walk** (`files/walk.rs`): streamed, so copying starts before a large folder is listed. Only the queue of folders still to list is held in memory.
+    - Links to files are followed. Links to folders are skipped and counted, so a loop cannot happen.
+    - Delete and chmod jobs report links as themselves and never follow them. A chmod skips links, because setting a link's mode would change its target.
+- **One file** (`files/copy.rs`):
+  - Data goes to `.<name>.kelpie-part` beside the target, through a bounded 8 MiB pipeline, with progress counted on bytes written.
+  - A resume continues from the partial's size when the job owns that partial (it is in the journal), the source has the same size and time as when it started, and the last 64 KiB match.
+  - Before the rename into place, the target is checked again: it must still be absent, or still have the size and time the person approved. Otherwise it is asked about again.
+  - A host without a one-step replace has the old file moved aside first, and put back if the new one cannot take its place. SFTP v3 has no compare-and-swap, so the check and the rename are milliseconds apart, not atomic.
+  - Cancel removes the partial; pause keeps it.
+  - Times and modes are kept (on Windows, times only).
+  - Names Windows cannot hold are mapped (`files/names.rs`) and reported as `renamed`. On a target that ignores case, two names from one job that differ only in case get "keep both" naming.
+- **Conflicts**:
+  - The policies are `ask`, `replace`, `skip`, `keep_both`, `newer` and `skip_identical`.
+  - With `ask`, the file waits on a question (`xfer.answer {id, choice, all}`) while the job's other files go on. `all` sets the policy for the rest of that job only.
+  - Folders merge. A file and a folder of the same name are never replaced: only skip or keep both.
+  - `expect {size, mtime}` on a one-file upload (an edited file) asks "changed on the server" when the target differs. The answers are `overwrite`, `save_copy` (`name (edited).ext`) or `discard`.
+- **Failures and restarts**:
+  - A lost connection is retried after 2, 5, 15, 30 and 60 s, for up to 5 minutes (state `reconnecting`, with `attempt` and `next_s`).
+  - A retry walks again: files already in place with the source's size and time count as done, and partials resume.
+  - After a daemon restart, unfinished jobs load as `interrupted`. The person resumes them; a restart is often an update, and the source may have changed.
+- **Journal** (`<data>/transfers.json`):
+  - Written atomically, on every state change and at most once a second for progress. Only the jobs are kept, with no per-file lists beyond 200 failures and 50 renames.
+  - Unknown fields are kept.
+  - A file that cannot be understood is copied aside (`transfers.json.damaged-<time>`). One that cannot be read at all turns saving off and is never written over; `xfer.list` reports it as `notice`.
+  - Finished jobs are kept for 7 days or 200 entries. Their partials are removed when they go.
+- **Methods and events**:
+  - `xfer.start` → `{id}`, `xfer.list`, `xfer.control {id, action: pause|resume|cancel|retry|clear}`, `xfer.answer`, `xfer.clear_finished`.
+  - `xfer.updated {job}` is sent on every change and at most 4 times a second for progress, with speed as an average over about 3 s. `xfer.removed {id}` is sent when a job is cleared.
+  - Programs in sessions neither call these methods nor see the events.
+- **Logs**: job id, kind, destinations, counts and error kinds. Never file contents or names.
 
 ## Features beyond sessions
 

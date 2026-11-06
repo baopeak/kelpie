@@ -1,5 +1,5 @@
-//! The daemon's file methods: browsing a host (`sftp.*`) or this computer (`local.*`). The app and (later)
-//! the phone call them; programs in sessions cannot (see `auth`).
+//! The daemon's file methods: browsing a host (`sftp.*`) or this computer (`local.*`), and the transfer
+//! queue (`xfer.*`). The app and (later) the phone call them; programs in sessions cannot (see `auth`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,12 +9,14 @@ use serde_json::{json, Value};
 
 use super::local_fs::LocalFs;
 use super::pool::Pool;
+use super::queue::Queue;
 use super::Emit;
 use super::sftp_fs::SftpFs;
 use super::{check_local_path, check_remote_path, Entry, FsError, RemoteFs};
 
 pub struct Files {
     pub pool: Arc<Pool>,
+    pub queue: Arc<Queue>,
 }
 
 fn s<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
@@ -37,13 +39,13 @@ fn visible(entries: Vec<Entry>, hidden: bool) -> Vec<Entry> {
 impl Files {
     pub fn new(exe: PathBuf, data_dir: PathBuf, emit: Emit) -> Arc<Files> {
         let pool = Arc::new(Pool::new(exe));
-        // The transfer queue will keep its journal in `data_dir` and send its events through `emit`.
-        let _ = (data_dir, emit);
-        Arc::new(Files { pool })
+        let queue = Queue::new(data_dir, pool.clone(), emit);
+        Arc::new(Files { pool, queue })
     }
 
-    /// Before the daemon exits: sessions end.
+    /// Before the daemon exits: running jobs are saved (they load as interrupted) and sessions end.
     pub fn shutdown(&self) {
+        self.queue.shutdown();
         self.pool.close_all();
     }
 
@@ -111,6 +113,7 @@ impl Files {
                 Ok(json!(visible(LocalFs.list(path).await.map_err(fs_err)?, flag(&p, "hidden"))))
             }
             "local.home" => Ok(json!({"path": LocalFs.realpath("~").await.map_err(fs_err)?})),
+            m if m.starts_with("xfer.") => self.queue.rpc(m, &p).await,
             other => bail!("unknown method {other}"),
         }
     }

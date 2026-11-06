@@ -37,7 +37,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// 25: the app lock (the phone's `lock_challenge`, `lock_enrol`, `lock_unlock`, `lock_now`, `lock_touch`, `locked` and `locked: true` in its `hello`, the `resume` secret on the ack of an unlock or enrolment and in its first sealed frame, the `desktop` state and `needs_desktop` refusal for a phone with no window to set up a passkey, and `recheck` refusing `input` and `key` during a dangerous request; `mobile.set_lock` and `mobile.reset_lock` from the verified app; `lock` in `mobile.status`) and the daemon's risk labels (`wait` on a screen frame, `chat_request_info`); an older daemon has none of it, so the app offers the lock's settings only at 25 and the phone page counts it as out of date below it.
 /// 26: the daemon browses hosts over SFTP and this computer (`sftp.list`, `sftp.stat`, `sftp.realpath`, `sftp.mkdir`, `sftp.rename`,
 /// `sftp.chmod`, `local.list`, `local.home`); an older daemon has none of them, so the app's file manager asks for a restart below 26.
-pub const API_LEVEL: u32 = 26;
+/// 27: the transfer queue (`xfer.start` with copy, delete and chmod jobs and an `expect` for an edited file's upload, `xfer.list`,
+/// `xfer.control`, `xfer.answer`, `xfer.clear_finished`; the `xfer.updated` and `xfer.removed` events; `<data>/transfers.json`); an
+/// older daemon has none of it, so the app's file manager asks for a restart below 27.
+pub const API_LEVEL: u32 = 27;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

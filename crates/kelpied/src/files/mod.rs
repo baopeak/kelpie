@@ -13,6 +13,7 @@ pub mod local_fs;
 pub mod mem_fs;
 pub mod names;
 pub mod pool;
+pub mod queue;
 pub mod service;
 pub mod sftp_fs;
 pub mod walk;
