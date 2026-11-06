@@ -158,3 +158,8 @@ Medians of 3 runs. Build clean, no fixes, no mode dropped.
 - The pipe-only test cannot isolate ssh.exe. Every writer, including ssh reading a file by itself with no pipe from Kelpie, gets 2–4 MB/s, which is below even the sftp CLI's 24 MB/s on the same fixture. That limit is the fixture's exec path (paramiko → Git Bash `cat`), not ssh.exe's stdin and not the writer.
 
 **What is still unproven**: why A1 through ssh.exe and the paramiko SFTP server uploads at about half the CLI's speed (12 vs 24 MB/s here, earlier 12 vs 23–70). The only parts left between the fast child-pipe result and the slow one are ssh.exe and the paramiko server. Telling them apart needs a non-Python SSH server, and none is available. That gap is the in-between case the rules hand back to the owner.
+
+## Decision (owner, 2026-11-06): A1
+russh-sftp over the system ssh, run in the daemon.
+- **Reason**: Kelpie's side is cleared: 767 MB/s in process, and 181–258 MB/s on the daemon's own process pipes. The remaining upload gap of about 2× was seen only against the Python test server, which is most likely its cause.
+- **Follow-up**: if a real OpenSSH server still shows A1 uploading about 2× slower than the `sftp` command, investigate again.

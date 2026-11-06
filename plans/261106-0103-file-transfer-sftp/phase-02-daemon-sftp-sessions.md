@@ -36,7 +36,8 @@ Give `kelpied` an SFTP client per host, spoken over the user's OpenSSH, with bro
 - `crates/kelpied/src/files/mod.rs`, with:
   - **`RemoteFs` trait**: `list(dir) -> Vec<Entry>`, `stat`, `lstat`, `readlink`, `realpath`, `mkdir`, `rename(from, to, overwrite)`, `remove_file`, `remove_dir`, `chmod`, `set_times`, `open_read(path, offset)`, `open_write(path, offset, create)`, `statvfs?`.
   - **`Entry`**: `{name, kind: file|dir|link|other, size, mtime, mode, uid, gid, owner?, group?, link_target?, readable_name: bool}`. `owner` and `group` come from the long name, best effort.
-  - **Impls**: `SftpFs` (the engine chosen in phase 1), `LocalFs` (tokio fs / `spawn_blocking`) and `MemFs` (tests).
+  - **Impls**: `SftpFs`, `LocalFs` (tokio fs / `spawn_blocking`) and `MemFs` (tests).
+  - **Engine** (decided after the spike): A1, `russh-sftp` 3.0.1 `SftpSession` over the ssh child's stdio, with 64 requests in flight. Its high-level listing drops the long name, so owner and group show as the attributes give them (names when the server sends them, else uid/gid). It has no `posix-rename`, so a replace moves the old file aside first (the path `files/copy.rs` already has).
   - **`files/pool.rs`**: one SFTP session per destination for browsing, started on first use.
     - Child: `ssh -F <cfg> -o NumberOfPasswordPrompts=1 -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=ERROR -s <dest> sftp` with the askpass environment.
     - Idle close after 5 min, and closed at daemon shutdown.
