@@ -238,10 +238,11 @@ describe("what Telegram carries", () => {
 describe("a new room after a phone is removed", () => {
   const relay = (patch: Partial<NonNullable<MobileStatus["relay"]>>) => status({ relay: { ...status().relay!, ...patch } });
 
-  it("is offered only while the relay is on and this computer has a room there", () => {
-    expect(offerNewRoom(relay({ on: true, room: true }))).toBe(true);
-    expect(offerNewRoom(relay({ on: false, room: true }))).toBe(false);
-    expect(offerNewRoom(relay({ on: true, room: false }))).toBe(false);
+  it("is offered only while the relay is on, this computer has a room there and keeps the key that makes one", () => {
+    expect(offerNewRoom(relay({ on: true, room: true, operator_key: true }))).toBe(true);
+    expect(offerNewRoom(relay({ on: false, room: true, operator_key: true }))).toBe(false);
+    expect(offerNewRoom(relay({ on: true, room: false, operator_key: true }))).toBe(false);
+    expect(offerNewRoom(relay({ on: true, room: true, operator_key: false })), "no registration key kept").toBe(false);
     expect(offerNewRoom(status({ relay: undefined }))).toBe(false);
     expect(offerNewRoom(null)).toBe(false);
   });

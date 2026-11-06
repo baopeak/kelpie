@@ -126,7 +126,8 @@ export function mobileSummary(s: MobileStatus, push: PushState | null) {
   };
 }
 
-/** Whether removing a phone offers a new room at the relay: the removed phone still knows the room's ticket, though the relay no longer lets it in. */
+/** Whether removing a phone offers a new room at the relay: the removed phone still knows the room's ticket, though the relay no longer lets it in.
+ *  Only while this computer keeps the registration key, which a new room needs: without it the person would verify only to be asked for the key. */
 export function offerNewRoom(s: MobileStatus | null | undefined): boolean {
-  return !!s?.relay?.on && !!s.relay.room;
+  return !!s?.relay?.on && !!s.relay.room && !!s.relay.operator_key;
 }
