@@ -784,8 +784,8 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
 A phone with `control` sees a monitor or one window of this computer as H.264 video and drives it (API 29, Windows; macOS later). The same rules as a
 pane's takeover: Tailscale or this computer's HTTPS address only (the relay never carries `control`), the grant on the desktop with the person's verification
 as the only confirmation, the lock and a revoke ending it at once. The video goes **over the phone's end-to-end encrypted link**, not WebRTC: no UDP socket,
-no STUN or TURN (owner decision 2026-11-06; WebRTC is a later stage, only if stalls over 250 ms p95 are measured). Code written, not yet built or measured: the
-phase file lists the spike checks owed.
+no STUN or TURN (owner decision 2026-11-06; WebRTC is a later stage, only if stalls over 250 ms p95 are measured; a WebTransport spike comes first,
+2026-11-07). Built and run end to end on one desktop; the phase file lists what is still owed and the measurement plan.
 
 ```
 phone ──link: screens · sc_start · sc_input · sc_text · sc_ack · sc_key · sc_stop · sc_rebind · sc_resume──▶ kelpied screen.rs ──provider (screen.*)──▶ app screen.rs ──stdin JSON──▶ kelpie-screen
@@ -798,14 +798,27 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   the picture); a one-slot mailbox (DXGI keeps only the newest picture; the WGC handler keeps only the newest frame and does no Direct3D: the stream's thread
   copies it, since a copy on the pool's thread under the mailbox's lock deadlocked with the stream holding the immediate context); BGRA → NV12 and scaling on the GPU (D3D11 video
   processor); Media Foundation H.264, the adapter's hardware encoder first (asynchronous, D3D11 surfaces), the inbox software encoder as the fallback, never
-  openh264: CBR with a buffer of about two frames, no B-frames, keyframes only when asked, `AVLowLatencyMode`, live bitrate. Every SPS it emits is rewritten
+  openh264: CBR with a buffer of about two frames, no B-frames, keyframes only when asked, `AVLowLatencyMode`, one reference, `QualityVsSpeed` towards speed,
+  live bitrate; each setting is read back after it is set, and the app's log names the encoder and what it refused or did not keep (`screen encoder`). One
+  frame is in the encoder at a time. Capture is paced as CRD's host paces it (`pace.rs`, its constants read in the raw Chromium source): a constant-rate
+  timer from the last capture's start, nothing scheduled while a frame is in the encoder, the top rung's rate for a second after any input (`BOOST_MS`), and
+  nothing queued: once due the stream takes the next change. A still picture is **topped off** in the codec on CRD's timer (`max(1.1 × interval, interval +
+  2 ms)`), the same picture encoded again so that CBR spends its bits refining it, until the encoder reports a quantizer of 10 or less, a pass comes out
+  under 200 bytes, or ten passes; crisp tiles follow only after it. An update more than 300 000 px larger than the largest of the last five that would take
+  more than a frame interval at 100 KB/MP (CRD's large-frame guard) is encoded at 40 % of the bitrate for that one frame, a coarser picture on time rather than a
+  late one. The encoder hears a new bitrate at once when it is a cut and only beyond +33 % when it is an increase (CRD's reconfiguration gate). DXGI
+  gives the changed region of a monitor as its dirty rectangles plus each move's source and destination (unmoved moves skipped, as WebRTC's duplicator
+  does): only that region is copied into the stream's picture and read back for the tiles; WGC (a window) gives none, so its cells are hashed. Every SPS it emits is rewritten
   with `bitstream_restriction` (`max_num_reorder_frames = 0`) so a decoder holds no frame (`sps.rs`), and every keyframe carries its SPS and PPS. Input with
   `SendInput` in the picture's pixels mapped through the target's place (`DWMWA_EXTENDED_FRAME_BOUNDS`, per-monitor DPI v2, absolute units over the virtual
   desktop, `geom.rs`). For a window target nothing goes anywhere but that window or a menu or dialog of its own process: a press that would land on another
   window over it is dropped and reported (`covered`), and **keys and text go only while the target, or a dialog it owns, is the foreground window**, never
   another top-level window of the same program (brought there once if it is not,
-  else refused as `not_front`, and `sc_text` answers not typed), so a password never goes into a window that took the focus meanwhile. The check comes
-  before each `SendInput` call, which cannot name a window: one that takes the focus between the two still gets those keys (a narrow race). A button a press left
+  else refused as `not_front`, and `sc_text` answers not typed), so a password never goes into a window that took the focus meanwhile. The focus is the
+  window Windows holds as foreground and the one its thread gives the keys to (`GetGUIThreadInfo`), looked at right before **every** `SendInput` call, one
+  typed unit (a character, Enter) per call; text that loses the focus partway stops at once and says so ("Stopped partway", with what was typed before). What
+  remains: `SendInput` cannot name a window, so a window that takes the focus in the microseconds between that look and the call gets that one unit, and a
+  program that routes keys among its own windows by itself (Tk does) is beyond what Windows reports. A button a press left
   held is released when the stream ends; input still queued when it stops is not done. A target the list would not offer (another virtual desktop, a tool
   window, the border) is refused at the start. The encoder's picture is at most the top rung, 1920×1080 (a 4K or 5K monitor is shown at 1080p, an ultrawide
   no wider than 1920; crisp tiles keep its text at the source's resolution); a rotated monitor is refused for now, and a mode change ends the stream
@@ -822,6 +835,7 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   which is how the page tells them apart on the link): video (key and unpaint-all flags, unpaint rectangles, `seq`, capture time, source and coded size, an
   Annex B access unit), a tile (PNG or JPEG q90, the `seq` it matches, its rectangle in source pixels), the cursor (shape, visible, position). On the local pipe
   app → daemon they are base64 in `provider.event`, as a pane's frames are; on the link they are binary (`Wire::send_bytes`). A message is at most 1000 KiB.
+  A video frame's capture time is when its picture was taken (ms since the stream started).
 - **Broker** (`crates/kelpied/src/screen.rs`): a hold keyed by device, link connection and provider connection, one screen at a time for one device, resting on
   `Mobile::grant`: input checks it every time and the hold's task ends within 250 ms (`revoked`). 15 s for the same device's next connection (`sc_rebind`),
   after which the helper sends a keyframe first; 10 minutes with no input ends it. New screens are refused at load L2+ and with under 20 % memory free
@@ -834,8 +848,11 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   is hidden, or its idle time running out) clears the grant like a revoke, with no grace, and the page ends its view at once.
 - **Flow on TCP**: nothing is lost on the link, only delayed, so frames are dropped before encoding, never after (a dropped P-frame would break every frame
   after it). The phone acknowledges each frame as it decodes (`sc_ack`); the broker forwards `{acked, rtt_ms, level}` (`screen.flow`, also once a second) and
-  the helper encodes only while fewer than 3 frames are in flight. The media lane (`mobile/lanes.rs`) holds 6 messages, behind everything else, and nothing of
-  it goes to a locked phone; when it is full or more than 512 KiB wait unacknowledged, video is dropped up to the next keyframe, asked for at most once a second.
+  the helper encodes only while fewer than 3 frames are in flight. **What the phone sends never waits for what goes to it**: the link's `Wire` sends from a
+  writer task of its own (`mobile/link.rs`), which seals each message as it writes it and takes the media lane (`mobile/lanes.rs`, 6 messages) only when no
+  other message waits, so a click, an acknowledgement or a heartbeat is read while a keyframe is on its way to a slow phone (one used to hold the connection's
+  task for most of a second), and a reply waits at most for the one media message being written. Nothing of the media lane goes to a locked phone (the writer
+  drops it); when it is full or more than 192 KiB wait unacknowledged, video is dropped up to the next keyframe, asked for at most once a second.
   **Lost frames never hold the stream** (`control::Flight`): `screen.flow` carries `dropped_through`, the last frame dropped, and the helper stops counting
   those as in flight; a keyframe request gives up every frame in flight; while a keyframe is owed but not yet allowed, nothing else is encoded, and once it is
   allowed a still window's last picture is encoded again (a window that does not change sends no frames, and input waits while a keyframe is owed); the phone
@@ -845,13 +862,17 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   nothing has been shown for 2 s, and asks for a fresh one; input onto a stale picture (a frame unacknowledged, or a keyframe owed, for 2 s) is not sent.
 - **Quality** (`control.rs`): one ladder, frames a second first, then size (30/20/15/10/8 fps at 100 %, then 8 fps 75 %, 6 and 4 fps 67 %, 4 fps 50 %; a window
   never under 540 lines). Three things move along it and the lowest wins: the encoder's own load (EMA of encode time over the frame interval, over 0.85 for 2 s
-  down, under 0.42 for 10 s up), the link (lag = the window of frames full or the round trip 150 ms over its minimum; 2 s of lag takes 25 % off the bitrate, 10
-  clean seconds add 10 %, an up-step undone within 10 s doubles the wait up to a minute; 150 kbps–4 Mbps, start 1.5), and the load level (L1 ≤ 1080p20, L2 ≤
+  down, under 0.42 for 10 s up), the link (queueing: the round trip's floor over the last 500 ms, counted from after the last cut, more than 50 ms over its
+  floor of 10 s cuts 15 % at once, and again half a second later only on what came after the cut; the window of frames full for a second cuts the same; 10
+  seconds with neither while frames go out add 10 %, and a still screen, which sends nothing, earns no increase; an up-step undone within 10 s doubles the
+  wait up to a minute; 150 kbps–4 Mbps, start 1.5), and the load level (L1 ≤ 1080p20, L2 ≤
   720p15, L3 ≤ 540p8; five minutes of L3 pause the stream until the person resumes it). The hardware encoder gives way to the software one (capped at 720p15)
   only when it fails, or is over 33 ms p95 for 5 s at the lowest rung, and the phone is told. Stats once a second: `sc_stats {fps, w, h, kbps, encode_ms_p95,
-  dropped, reason, degraded, level, encoder, idr_ratio}`. `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS` adds encode time to drive the ladder without a GPU.
+  dropped, reason, degraded, level, encoder, idr_ratio, crisp, stages}`, `stages` the helper's timings for the measurement plan (`control::Stages`: picture
+  taken → message out p50/p95, conversion p95, encoder p50, send interval p95, daemon queue → phone acknowledgement p50/p95, top-off passes, big frames,
+  frames held in the encoder, its first output's delay). `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS` adds encode time to drive the ladder without a GPU.
 - **Crisp text** (`tiles.rs`, `tile_image.rs`): the picture read back is hashed in 64×64 cells; cells still for 300 ms are sent once more as tiles of up to
-  8×4 cells, PNG, or JPEG q90 where PNG would be over a byte a pixel, at the source's size, within a byte budget of the video's rate (burst 512 KiB). A video
+  8×4 cells, PNG, or JPEG q90 where PNG would be over a byte a pixel, at the source's size, within a byte budget of the video's rate (burst 256 KiB), once the top-off of the video has ended. A video
   frame carries the rectangles of painted cells that changed, and the phone drops those tiles as it draws that frame, or as it skips it. A dropped video frame
   makes the helper paint every still cell again (`lost_tiles`, then unpaint-all), a frame not sent puts its unpaint back on the next one, and the phone refuses
   a tile whose region a later frame changed while its image was still being decoded. Tiles take at most half the video's rate. Off with *Crisp text* in Settings
@@ -864,7 +885,12 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   be seen or controlled from the user's session (that would need a SYSTEM service, a non-goal): the phone says so.
 - **On the phone** (`screen.ts`, `screen-view.tsx`): `VideoDecoder` probed first with `isConfigSupported` (a plain message when this browser has no H.264
   WebCodecs), configured in the `avc` format with an `avcC` description built from the keyframe's SPS and PPS and `optimizeForLatency`, one `decode()` per
-  frame, the newest frame drawn on `requestAnimationFrame` with the tiles and the cursor on a canvas. Trackpad (default) or direct touch, two-finger scroll,
+  frame, **no smoothing buffer**: a decoded frame is drawn as the decoder gives it, on a canvas asked for `desynchronized` (a low-latency canvas where the
+  browser offers one, which the page reports), and a delta the decoder is more than two frames behind on is skipped up to the next keyframe. The cursor the
+  finger moves is drawn at once (local echo); the computer's cursor messages, a round trip old, leave its position alone for 400 ms after a local move and
+  then follow it, a difference of 3 px or less taken as none. The page measures each frame (`FrameTimes`: inter-arrival and inter-present p50/p95/p99, gaps
+  over 100 and 250 ms, decoder time, receive → present, frames never shown), shown with the computer's stages in the debug view (tap the quality line) and
+  read by a test driver as `__kelpieScreenTimes()`. Trackpad (default) or direct touch, two-finger scroll,
   pinch zoom and pan of the view only, a key bar with Ctrl, Shift, Alt and the Windows key (`meta`, alone for Start or held), text with an answer of its
   own. The entry is in the inbox and in a session's view. Input older than 1 s by the
   computer's clock is dropped by the daemon and by the helper; 3 s without media or heartbeat dims the picture; frames that come and do not decode for 1 s
