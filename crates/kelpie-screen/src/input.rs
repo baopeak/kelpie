@@ -2,8 +2,8 @@
 //! (`checked_ops`) and turned by the helper into what `SendInput` takes (`key_events`, `text_events`). Coordinates are the source picture's
 //! pixels. None of it is logged anywhere.
 //!
-//! Keys are a fixed table (what an IDE, a dialog or a sign-in needs, with Ctrl, Shift and Alt). The Windows key is not in it (whether a phone
-//! may open Start, lock the computer with Win+L or switch desktops is the owner's call); Ctrl+Alt+Del cannot be sent by any program.
+//! Keys are a fixed table (what an IDE, a dialog or a sign-in needs, with Ctrl, Shift, Alt and the Windows key, alone for Start or held as
+//! `meta` for Win+E, Win+L and the like: owner decision 2026-11-06). Ctrl+Alt+Del cannot be sent by any program.
 
 use serde_json::{json, Value};
 
@@ -18,7 +18,7 @@ pub const QUEUE: usize = 256;
 pub const TTL_MS: u64 = 1000;
 
 pub const BUTTONS: &[&str] = &["left", "right", "middle"];
-pub const MODS: &[&str] = &["ctrl", "shift", "alt"];
+pub const MODS: &[&str] = &["ctrl", "shift", "alt", "meta"];
 
 /// `(name, virtual key, extended)`.
 const KEYS: &[(&str, u16, bool)] = &[
@@ -38,6 +38,8 @@ const KEYS: &[(&str, u16, bool)] = &[
     ("PageUp", 0x21, true),
     ("PageDown", 0x22, true),
     ("ContextMenu", 0x5D, true),
+    // The Windows key on its own: Start.
+    ("Meta", 0x5B, true),
 ];
 
 /// A named key: its virtual key and whether it is an extended one. Letters and digits (for shortcuts such as Ctrl+S) and F1–F12 too.
@@ -55,11 +57,13 @@ pub fn key_code(name: &str) -> Option<(u16, bool)> {
     }
 }
 
-fn mod_code(m: &str) -> Option<u16> {
+/// A modifier's virtual key and whether it is an extended one (the Windows key is).
+fn mod_code(m: &str) -> Option<(u16, bool)> {
     Some(match m {
-        "ctrl" => 0x11,
-        "shift" => 0x10,
-        "alt" => 0x12,
+        "ctrl" => (0x11, false),
+        "shift" => (0x10, false),
+        "alt" => (0x12, false),
+        "meta" => (0x5B, true),
         _ => return None,
     })
 }
@@ -126,11 +130,11 @@ pub enum KeyEvent {
 /// A key with modifiers: the modifiers down, the key down and up, the modifiers up in reverse.
 pub fn key_events(key: &str, mods: &[&str]) -> Vec<KeyEvent> {
     let Some((vk, extended)) = key_code(key) else { return vec![] };
-    let mods: Vec<u16> = mods.iter().filter_map(|m| mod_code(m)).collect();
-    let mut out: Vec<KeyEvent> = mods.iter().map(|&m| KeyEvent::Vk { vk: m, extended: false, up: false }).collect();
+    let mods: Vec<(u16, bool)> = mods.iter().filter_map(|m| mod_code(m)).collect();
+    let mut out: Vec<KeyEvent> = mods.iter().map(|&(m, ext)| KeyEvent::Vk { vk: m, extended: ext, up: false }).collect();
     out.push(KeyEvent::Vk { vk, extended, up: false });
     out.push(KeyEvent::Vk { vk, extended, up: true });
-    out.extend(mods.iter().rev().map(|&m| KeyEvent::Vk { vk: m, extended: false, up: true }));
+    out.extend(mods.iter().rev().map(|&(m, ext)| KeyEvent::Vk { vk: m, extended: ext, up: true }));
     out
 }
 
@@ -245,6 +249,7 @@ mod tests {
             json!([{"k": "key", "key": "a"}]),
             json!([{"k": "key", "key": "F13"}]),
             json!([{"k": "key", "key": "Delete", "mods": ["win"]}]),
+            json!([{"k": "key", "key": "Delete", "mods": ["ctrl", "shift", "alt", "meta", "ctrl"]}]),
             json!([{"k": "key", "key": "Delete", "mods": "ctrl"}]),
             json!([{"k": "wheel", "x": 1, "y": 1, "dx": 0}]),
             json!(vec![json!({"k": "move", "x": 1, "y": 1}); MAX_OPS + 1]),
@@ -261,6 +266,11 @@ mod tests {
         assert_eq!(key_events("ArrowLeft", &[]), [KeyEvent::Vk { vk: 0x25, extended: true, up: false }, KeyEvent::Vk { vk: 0x25, extended: true, up: true }]);
         assert_eq!(key_events("F12", &[]).len(), 2);
         assert!(key_events("Nope", &["ctrl"]).is_empty());
+        // The Windows key: alone it opens Start, held it is an extended modifier (Win+E).
+        let win = |up: bool| KeyEvent::Vk { vk: 0x5B, extended: true, up };
+        assert_eq!(key_events("Meta", &[]), [win(false), win(true)]);
+        assert_eq!(key_events("E", &["meta"]), [win(false), vk(0x45, false), vk(0x45, true), win(true)]);
+        assert_eq!(checked_ops(&json!([{"k": "key", "key": "L", "mods": ["meta"]}])).unwrap()[0]["mods"], json!(["meta"]));
         assert_eq!(key_code("0"), Some((0x30, false)));
         assert_eq!(key_code("F1"), Some((0x70, false)));
         assert_eq!(key_code("F0"), None);

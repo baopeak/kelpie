@@ -123,6 +123,9 @@ const UP_WAIT_MS: u64 = 10_000;
 const UP_WAIT_MAX_MS: u64 = 60_000;
 /// An up-step that held this long without a down-step resets the wait.
 const UP_HELD_MS: u64 = 30_000;
+/// Crisp tiles turn themselves off below this bitrate, and for this long after the bitrate was cut (owner decision 2026-11-06).
+pub const CRISP_MIN_KBPS: u32 = 1000;
+pub const CRISP_CALM_MS: u64 = 10_000;
 
 /// The bitrate the link takes, from what the phone acknowledges: lag (the window of frames full, or the round trip grown by queueing) for
 /// 2 s takes 25 % off at once; 10 s with none adds 10 %. An up-step undone within 10 s doubles the wait before the next (to a minute), so a
@@ -195,6 +198,12 @@ impl Bandwidth {
             return true;
         }
         false
+    }
+
+    /// Whether the link has room for crisp tiles on top of the video: at least `CRISP_MIN_KBPS`, no lag now, and no cut of the bitrate in the
+    /// last `CRISP_CALM_MS`. Measured, so it holds for any network: a phone page cannot tell cellular from Wi-Fi on iOS.
+    pub fn calm(&self, inflight: u32, now: u64) -> bool {
+        self.kbps >= CRISP_MIN_KBPS && !self.lagging(inflight) && self.last_down.is_none_or(|d| now.saturating_sub(d) >= CRISP_CALM_MS)
     }
 
     /// The rung the bitrate affords: 1080p30 → 1080p15 → 1080p8 → 75 % at 8 → 67 % at 4.
@@ -414,6 +423,11 @@ impl Controller {
         None
     }
 
+    /// Whether crisp tiles may go now (the person's switch aside): a calm link, and a machine not at L3.
+    pub fn crisp_ok(&self, inflight: u32, now: u64) -> bool {
+        !self.paused_for_load && self.level < 3 && self.bandwidth.calm(inflight, now)
+    }
+
     /// Whether a frame may be encoded now: the phone has room for it, and the rung's interval has passed since the last one.
     pub fn may_encode(&self, inflight: u32, since_last_ms: Option<u64>) -> bool {
         !self.paused_for_load && inflight < MAX_INFLIGHT && since_last_ms.is_none_or(|ms| ms as f64 + 0.5 >= self.interval_ms())
@@ -462,6 +476,8 @@ pub struct Report {
     pub encoder: &'static str,
     /// A keyframe's size over the mean other frame's, when both were seen.
     pub idr_ratio: Option<f64>,
+    /// Crisp tiles: on, off for now because the link is slow (`false`), or switched off in Settings (`None`).
+    pub crisp: Option<bool>,
 }
 
 impl Stats {
@@ -485,7 +501,7 @@ impl Stats {
     }
 
     /// The second's report, once a second has passed; the counters start again.
-    pub fn report(&mut self, now: u64, p: &Params, level: u8, software: bool) -> Option<Report> {
+    pub fn report(&mut self, now: u64, p: &Params, level: u8, software: bool, crisp: Option<bool>) -> Option<Report> {
         let span = now.saturating_sub(self.since);
         if span < 1000 {
             return None;
@@ -509,6 +525,7 @@ impl Stats {
             level,
             encoder: if software { "sw" } else { "hw" },
             idr_ratio,
+            crisp,
         };
         *self = Stats::new(now);
         Some(r)
@@ -648,6 +665,26 @@ mod tests {
     }
 
     #[test]
+    fn crisp_text_turns_itself_off_on_a_slow_or_lagging_link_and_back_on_once_it_is_calm() {
+        let mut c = Controller::new((1920, 1080), false, false, 0);
+        assert!(c.crisp_ok(0, 0), "1.5 Mbps to start: room for it");
+        assert!(!c.crisp_ok(MAX_INFLIGHT, 0), "the window full: lag");
+        // Two seconds of lag cut the bitrate: off for ten seconds after the cut, even with the link quiet again.
+        c.tick(MAX_INFLIGHT, 1000);
+        c.tick(MAX_INFLIGHT, 3000);
+        assert_eq!(c.bandwidth.kbps, 1125);
+        assert!(!c.crisp_ok(0, 3000 + CRISP_CALM_MS - 1));
+        assert!(c.crisp_ok(0, 3000 + CRISP_CALM_MS));
+        // A slow link (cellular, a weak Wi-Fi): below 1 Mbps, off whatever else.
+        c.bandwidth.kbps = 900;
+        assert!(!c.crisp_ok(0, 100_000));
+        c.bandwidth.kbps = 2000;
+        assert!(c.crisp_ok(0, 100_000));
+        c.set_level(3, 100_000);
+        assert!(!c.crisp_ok(0, 100_000), "a machine at L3 has no CPU for it");
+    }
+
+    #[test]
     fn the_bitrate_decides_the_rung_down_to_720p_at_4_fps() {
         let mut b = Bandwidth::new(0);
         let at = |b: &mut Bandwidth, k: u32| {
@@ -772,12 +809,13 @@ mod tests {
         }
         s.dropped_encoder = 2;
         let p = Params { fps: 30, w: 1920, h: 1080, kbps: 1500, reason: Reason::None, degraded: false };
-        assert!(s.report(999, &p, 0, false).is_none());
-        let r = s.report(1000, &p, 1, false).unwrap();
+        assert!(s.report(999, &p, 0, false, Some(true)).is_none());
+        let r = s.report(1000, &p, 1, false, Some(false)).unwrap();
         assert_eq!((r.fps, r.kbps, r.dropped, r.encoder, r.level), (30, (60_000 + 29 * 6_000) * 8 / 1000, 2, "hw", 1));
         assert_eq!(r.idr_ratio, Some(10.0));
         assert_eq!(r.encode_ms_p95, 8.0);
         assert_eq!(serde_json::to_value(&r).unwrap()["reason"], "none");
-        assert_eq!(s.report(1500, &p, 0, true), None, "counters started again");
+        assert_eq!(serde_json::to_value(&r).unwrap()["crisp"], false, "crisp text off for now");
+        assert_eq!(s.report(1500, &p, 0, true, None), None, "counters started again");
     }
 }

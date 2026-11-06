@@ -199,7 +199,9 @@ fn test_delay() -> Option<Duration> {
     std::env::var("KELPIE_SCREEN_TEST_ENCODE_DELAY_MS").ok()?.parse::<u64>().ok().filter(|ms| *ms > 0 && *ms <= 2000).map(Duration::from_millis)
 }
 
-fn open_source(d_for: &Opts) -> Result<(Device, Source, Rect, String), String> {
+/// The device, the capture, where the target is, its title (shown on the desktop and the phone) and, for a window, its program's file name (all
+/// the audit log records of it).
+fn open_source(d_for: &Opts) -> Result<(Device, Source, Rect, String, String), String> {
     match &d_for.target {
         TargetId::Monitor(name) => {
             let outputs = d3d::outputs().map_err(|e| e.to_string())?;
@@ -210,7 +212,7 @@ fn open_source(d_for: &Opts) -> Result<(Device, Source, Rect, String), String> {
             let device = Device::on(&adapter).map_err(|e| e.to_string())?;
             let tex = device.frame_texture(monitor.rect.w as u32, monitor.rect.h as u32).map_err(|e| e.to_string())?;
             let dxgi = Dxgi::new(&device, output, monitor.rect);
-            Ok((device, Source::Monitor(dxgi, tex), monitor.rect, format!("Screen {}", index + 1)))
+            Ok((device, Source::Monitor(dxgi, tex), monitor.rect, format!("Screen {}", index + 1), String::new()))
         }
         TargetId::Window { hwnd: h, pid } => {
             let win = hwnd(*h);
@@ -221,8 +223,9 @@ fn open_source(d_for: &Opts) -> Result<(Device, Source, Rect, String), String> {
             let adapter = d3d::adapter_at(rect.x + rect.w / 2, rect.y + rect.h / 2).map_err(|e| e.to_string())?;
             let device = Device::on(&adapter).map_err(|e| e.to_string())?;
             let wgc = Wgc::start(&device, win).map_err(|e| format!("this window cannot be captured: {e}"))?;
-            let title = targets_win::info(win).title.chars().take(120).collect();
-            Ok((device, Source::Window(wgc, *h, *pid), rect, title))
+            let info = targets_win::info(win);
+            let title = info.title.chars().take(120).collect();
+            Ok((device, Source::Window(wgc, *h, *pid), rect, title, info.exe))
         }
     }
 }
@@ -233,7 +236,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     }
     let _ = encode_mf::startup();
     let _mmcss = system::Mmcss::capture();
-    let (d, mut source, mut rect, title) = match open_source(&opts) {
+    let (d, mut source, mut rect, title, exe) = match open_source(&opts) {
         Ok(v) => v,
         Err(e) => {
             let _ = started.send(Err(e));
@@ -288,7 +291,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let (hk_tx, hk_rx) = channel();
     let label = format!("Shared with {} · {} stops it", opts.device, opts.hotkey_text);
     let border = Border::show(rect, &label, opts.hotkey, hk_tx);
-    let _ = started.send(Ok(json!({"kind": if window { "window" } else { "monitor" }, "title": title, "w": src.0, "h": src.1, "encoder": if encoder.hardware { "hw" } else { "sw" }, "encoder_name": encoder.name})));
+    let _ = started.send(Ok(json!({"kind": if window { "window" } else { "monitor" }, "title": title, "exe": exe, "w": src.0, "h": src.1, "encoder": if encoder.hardware { "hw" } else { "sw" }, "encoder_name": encoder.name})));
     emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": if encoder.hardware { "hw" } else { "sw" }, "name": encoder.name, "refused": encoder.refused}));
 
     let mut tracker = Tracker::default();
@@ -545,7 +548,8 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
             let rate = f64::from(params.kbps) * 1000.0 / 8.0;
             tile_tokens = (tile_tokens + rate * now.saturating_sub(tile_at) as f64 / 1000.0).min(TILE_BURST);
             tile_at = now;
-            if seq > 0 && !key_needed && !link_paused && readback.stride > 0 && tile_tokens > 32_768.0 && g.any_due(now) && g.size() == src {
+            // Off by itself while the link is slow or was just cut (`Controller::crisp_ok`): the video needs the room.
+            if seq > 0 && !key_needed && !link_paused && ctl.crisp_ok(seq.saturating_sub(acked), now) && readback.stride > 0 && tile_tokens > 32_768.0 && g.any_due(now) && g.size() == src {
                 for r in g.due(now, TILE_CELLS_AT_ONCE) {
                     match tile_image::encode(&readback.buf, readback.stride, r) {
                         Some((format, image)) if (image.len() as f64) <= tile_tokens => {
@@ -569,7 +573,8 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 let _ = out.send(wire::out_media(&opts.sc, &wire::cursor(shape, now_c.1, now_c.2, now_c.3)));
             }
         }
-        if let Some(r) = stats.report(now, &params, ctl.level(), ctl.software()) {
+        let crisp = opts.tiles.then(|| ctl.crisp_ok(seq.saturating_sub(acked), now));
+        if let Some(r) = stats.report(now, &params, ctl.level(), ctl.software(), crisp) {
             let mut v = serde_json::to_value(&r).unwrap_or_default();
             v["event"] = json!("stats");
             v["sc"] = json!(opts.sc);
