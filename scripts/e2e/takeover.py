@@ -425,8 +425,12 @@ async def scenario(run, d):
     frames = [m for m in phone.log[mark:] if m["type"] == "tk_frame"]
     check("a still page is captured once the stream is silent", any(m["meta"].get("captured") for m in frames), [m["meta"].get("captured") for m in frames][-6:])
     captured = [m["data"] for m in frames if m["meta"].get("captured")]
-    check("…and the same capture is not sent again", len(captured) == len(set(captured)), len(captured))
+    # A capture may show what an earlier one did when a screencast frame came between them (the phone showed that one since): only the frame right
+    # before a capture counts.
+    repeats = [i for i, (a, b) in enumerate(zip(frames, frames[1:])) if b["meta"].get("captured") and a["data"] == b["data"]]
+    check("…and a capture never repeats the frame just before it", not repeats, f"{len(captured)} captures, repeats at {repeats}")
     paused = [m for m in phone.log[mark:] if m["type"] == "tk_fhb" and m.get("paused")]
+    check("…and the stream never pauses on it, though the phone does not acknowledge a picture it has", not paused, len(paused))
     since = report_count()
     await phone.tap(tk, 150, 60)
     still = await asyncio.to_thread(until, lambda: reported("still", since), 5)
@@ -437,6 +441,7 @@ async def scenario(run, d):
     phone.ack_identical = True
     if SPIKE:
         await spike_hidden_still(phone, tk, w, pid)
+        tk = await spike_restart_still(phone, tk, label)
     await asyncio.to_thread(w.invoke, "browser_navigate", {"label": label, "url": f"http://127.0.0.1:{SITE_PORT}/login"})
     await asyncio.to_thread(until, lambda: "/login" in (w.invoke("browser_info", {"label": label}).get("ok") or {}).get("url", ""), 10)
     await asyncio.sleep(1.5)
@@ -614,7 +619,22 @@ async def spike_hidden_still(phone, tk, w, pid):
     after = await phone.frame(mark, lambda m: m["meta"].get("captured"), 5)
     print(f"SPIKE hidden still pane: still hidden {hidden_tab == other}; the click happened {bool(clicked)}; a capture showing it came: {after is not None}", flush=True)
     await asyncio.to_thread(w.js, "window.__kelpie.store.selectTab(arguments[0], arguments[1])", pid, tab)
+    # WebView2 keeps input sent to a hidden pane and runs it once the pane is shown, on whatever is there then: the app sends none.
+    late = await asyncio.to_thread(until, lambda: reported("still", since), 3, 0.05)
+    check("a tap made while the pane was hidden does not click once it is shown again", not late, late)
     await asyncio.sleep(1.5)
+
+
+async def spike_restart_still(phone, tk, label):
+    """Whether a screencast that starts on a still, visible page sends a first frame by itself (else only the capture fallback shows it). A new takeover
+    of the same pane starts one; its token is what the rest of the run uses."""
+    await phone.ask(type="tk_stop", tk=tk)
+    await asyncio.sleep(1)
+    mark = phone.mark()
+    started = await phone.ask(type="tk_start", pane=label, timeout=15)
+    first = await phone.frame(mark, timeout=3)
+    print(f"SPIKE a screencast started on a still, visible page sends a first frame by itself: {first is not None and not first['meta'].get('captured')} (first frame captured: {first and first['meta'].get('captured')})", flush=True)
+    return (started or {}).get("tk") or tk
 
 
 def refused(d, method, params):
