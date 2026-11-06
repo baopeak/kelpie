@@ -938,8 +938,28 @@ async fn send_text(ws: &mut Socket, msg: Value) -> Result<()> {
     ws.send(WsMessage::text(msg.to_string())).await.context("writing to the relay")
 }
 
-fn allow_message(m: &Mobile) -> Value {
-    json!({"t": "allow", "h": m.relay_allowed()})
+/// The allow-list to send now: what may come in, and while a device change waits its grace (`holding`) also what was sent last, so that a
+/// token given meanwhile is let in at once and a removed phone's stays until its session told it. Never more than the relay takes.
+fn list_now(allowed: Vec<String>, sent: &[String], holding: bool) -> Vec<String> {
+    let mut list = allowed;
+    if holding {
+        for h in sent {
+            if list.len() >= MAX_ALLOWED {
+                break;
+            }
+            if !list.contains(h) {
+                list.push(h.clone());
+            }
+        }
+    }
+    list
+}
+
+/// Sends `list` as the room's allow-list, and keeps it as the one sent.
+async fn send_list(ws: &mut Socket, list: Vec<String>, sent: &mut Vec<String>) -> Result<()> {
+    send_text(ws, json!({"t": "allow", "h": list})).await?;
+    *sent = list;
+    Ok(())
 }
 
 /// What a session sent, on its way to the relay: dropped when its slot has another holder by now.
@@ -973,7 +993,8 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify, ending: 
     let url = format!("{}/v1/desktop?t={ticket}&ts={ts}&sig={}", r.url, signature(&key, &room, ts));
     let mut ws = tokio::time::timeout(CONNECT_TIMEOUT, dial(&url)).await.map_err(|_| anyhow!("the relay did not answer in time"))??;
     // What the relay must know before it says which phones are there: who may be let in, and from what page.
-    send_text(&mut ws, allow_message(m)).await?;
+    let mut sent = Vec::new();
+    send_list(&mut ws, m.relay_allowed(), &mut sent).await?;
     if let Some(origin) = &r.origin {
         send_text(&mut ws, json!({"t": "origin", "o": origin})).await?;
     }
@@ -1023,20 +1044,18 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify, ending: 
             }
             _ = sleep_until_due(list_due) => {
                 list_due = None;
-                send_text(&mut ws, allow_message(m)).await?;
+                send_list(&mut ws, m.relay_allowed(), &mut sent).await?;
             }
             Some(text) = control_rx.recv() => ws.send(WsMessage::text(text)).await.context("writing to the relay")?,
-            // While a device change waits its grace, any other list waits with it: the list is read when it goes, so nothing is lost, and nothing
-            // closes a removed phone before its session told it.
+            // A new token goes at once; while a device change waits its grace, nothing sent was taken off yet (`list_now`), so no removed phone
+            // is closed before its session told it.
             _ = nudge.notified() => {
-                if list_due.is_none() {
-                    send_text(&mut ws, allow_message(m)).await?;
-                }
+                let list = list_now(m.relay_allowed(), &sent, list_due.is_some());
+                send_list(&mut ws, list, &mut sent).await?;
             }
             _ = refresh.tick() => {
-                if list_due.is_none() {
-                    send_text(&mut ws, allow_message(m)).await?;
-                }
+                let list = list_now(m.relay_allowed(), &sent, list_due.is_some());
+                send_list(&mut ws, list, &mut sent).await?;
             }
             _ = keepalive.tick() => {
                 if heard.elapsed() >= DEAD_AFTER {
@@ -1216,6 +1235,17 @@ mod tests {
         assert_eq!(said_on_ending(Some(&word("old", true)), "new"), None);
         assert_eq!(said_on_ending(Some(&word("old", false)), "new"), None);
         assert_eq!(said_on_ending(None, "old"), None);
+    }
+
+    #[test]
+    fn a_list_sent_during_a_removals_grace_adds_at_once_and_takes_nothing_off() {
+        let h = |c: char| c.to_string().repeat(64);
+        let sent = vec![h('a'), h('b')];
+        // b was removed, c was just given: c goes at once, b stays until the grace is over.
+        assert_eq!(list_now(vec![h('a'), h('c')], &sent, true), vec![h('a'), h('c'), h('b')]);
+        assert_eq!(list_now(vec![h('a'), h('c')], &sent, false), vec![h('a'), h('c')]);
+        let full: Vec<String> = (0..MAX_ALLOWED).map(|i| format!("{i:064x}")).collect();
+        assert_eq!(list_now(full.clone(), &sent, true).len(), MAX_ALLOWED, "never more than the relay takes");
     }
 
     #[test]
