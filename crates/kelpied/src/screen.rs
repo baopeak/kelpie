@@ -106,6 +106,16 @@ fn short(v: Option<&Value>, n: usize) -> String {
     v.and_then(Value::as_str).unwrap_or_default().chars().filter(|c| !c.is_control()).take(n).collect()
 }
 
+/// An executable's file name as the audit log has it (`Code.exe`): a name only, never a path, nothing else.
+fn program(v: Option<&Value>) -> String {
+    let name: String = short(v, 200).rsplit(['\\', '/']).next().unwrap_or_default().chars().filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ')).take(60).collect();
+    if name.trim().is_empty() {
+        "unknown program".into()
+    } else {
+        name
+    }
+}
+
 fn end_message(sc: &str, reason: &str) -> String {
     json!({"type": "sc_end", "sc": sc, "reason": reason, "server_ts": now_millis()}).to_string()
 }
@@ -220,7 +230,7 @@ impl Broker {
                 let n = |k: &str| s[k].as_f64().filter(|v| v.is_finite()).map_or(json!(null), |v| json!((v * 10.0).round() / 10.0));
                 let reason = s["reason"].as_str().filter(|r| matches!(*r, "none" | "cpu" | "bandwidth" | "load" | "encoder")).unwrap_or("none");
                 let encoder = s["encoder"].as_str().filter(|e| matches!(*e, "hw" | "sw")).unwrap_or("hw");
-                self.tell(&hold, json!({"type": "sc_stats", "sc": sc, "fps": n("fps"), "w": n("w"), "h": n("h"), "kbps": n("kbps"), "encode_ms_p95": n("encode_ms_p95"), "dropped": n("dropped"), "reason": reason, "degraded": s["degraded"].as_bool() == Some(true), "level": n("level"), "encoder": encoder, "idr_ratio": n("idr_ratio")}));
+                self.tell(&hold, json!({"type": "sc_stats", "sc": sc, "fps": n("fps"), "w": n("w"), "h": n("h"), "kbps": n("kbps"), "encode_ms_p95": n("encode_ms_p95"), "dropped": n("dropped"), "reason": reason, "degraded": s["degraded"].as_bool() == Some(true), "level": n("level"), "encoder": encoder, "idr_ratio": n("idr_ratio"), "crisp": s["crisp"].as_bool()}));
             }
             Some("encoder") => {
                 let encoder = params["encoder"].as_str().filter(|e| matches!(*e, "hw" | "sw")).unwrap_or("hw");
@@ -436,7 +446,9 @@ impl Broker {
         self.holds.lock().insert(sc.clone(), hold.clone());
         let title = short(started.get("title"), 80);
         let kind = if started["kind"] == "window" { "window" } else { "monitor" };
-        d.mobile.audit(phone.device, "screen_start", &format!("{kind}: {title}"));
+        // The program, never the window's title, which can name a document (owner decision 2026-11-06).
+        let what = if kind == "window" { format!("window: {}", program(started.get("exe"))) } else { "monitor".to_string() };
+        d.mobile.audit(phone.device, "screen_start", &what);
         tokio::spawn(watch(d.clone(), hold));
         let n = |k: &str| started[k].as_u64().unwrap_or(0).min(100_000);
         Ok(json!({"type": "ack", "result": "ok", "sc": sc, "kind": kind, "title": title, "w": n("w"), "h": n("h"), "encoder": if started["encoder"] == "sw" { "sw" } else { "hw" }}))
@@ -549,7 +561,7 @@ mod tests {
                             {"id": "nonsense", "kind": "window", "title": "x"},
                             {"id": "w:1:2", "kind": "toaster", "title": "x"},
                         ]}),
-                        Some("screen.start") => json!({"kind": "window", "title": "main.rs — kelpie", "w": 1200, "h": 800, "encoder": "hw"}),
+                        Some("screen.start") => json!({"kind": "window", "title": "main.rs — kelpie", "exe": "Code.exe", "w": 1200, "h": 800, "encoder": "hw"}),
                         _ => json!(true),
                     };
                     app.providers.reply(APP, &json!({"preq": id, "result": result}));
@@ -649,9 +661,10 @@ mod tests {
         r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "state", "state": "elevated"}));
         assert_eq!(r.next("sc_state").await.unwrap()["state"], "elevated");
         r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "state", "state": "<script>"}));
-        r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "stats", "stats": {"fps": 15, "w": 1280, "h": 720, "reason": "load", "degraded": true, "secret": "x"}}));
+        r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "stats", "stats": {"fps": 15, "w": 1280, "h": 720, "reason": "load", "degraded": true, "crisp": false, "secret": "x"}}));
         let stats = r.next("sc_stats").await.unwrap();
         assert_eq!((stats["fps"].as_f64(), stats["reason"].as_str(), stats.get("secret")), (Some(15.0), Some("load"), None));
+        assert_eq!(stats["crisp"], false, "crisp text off for now: the phone says so");
         // Input goes to the app with the computer's clock; stop from the phone tells the app; the audit log has the start, the end, nothing typed.
         r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "click", "x": 10, "y": 20}], "st": now_millis()})).await.unwrap();
         let input = r.told_now("screen.input").await;
@@ -660,7 +673,17 @@ mod tests {
         assert_eq!(r.next("sc_end").await.unwrap()["reason"], "phone");
         assert_eq!(r.told_now("screen.stop").await.len(), 1);
         let audit = r.d.mobile.audit_entries(20).to_string();
-        assert!(audit.contains("screen_start") && audit.contains("window: main.rs") && audit.contains("screen_stop") && !audit.contains("\"x\""), "{audit}");
+        assert!(audit.contains("screen_start") && audit.contains("window: Code.exe") && audit.contains("screen_stop") && !audit.contains("\"x\""), "{audit}");
+        assert!(!audit.contains("main.rs"), "never the window's title: {audit}");
+    }
+
+    #[test]
+    fn the_audit_log_names_a_program_by_its_file_name_only() {
+        assert_eq!(program(Some(&json!("Code.exe"))), "Code.exe");
+        assert_eq!(program(Some(&json!(r"C:\Users\me\AppData\Local\Programs\Code.exe"))), "Code.exe", "no path");
+        assert_eq!(program(Some(&json!("evil\u{7}<b>.exe"))), "evilb.exe");
+        assert_eq!(program(Some(&json!(""))), "unknown program");
+        assert_eq!(program(None), "unknown program");
     }
 
     #[tokio::test]

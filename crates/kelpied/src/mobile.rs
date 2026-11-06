@@ -2787,6 +2787,7 @@ impl Conn {
             Verb::LockTouch => self.daemon.mobile.lock_touch(&self.device, self.resume.as_deref()),
             // Carried out by the broker above.
             Verb::Panes | Verb::TkStart | Verb::TkInput | Verb::TkText | Verb::TkAck | Verb::TkStop | Verb::TkRebind => return Err(refuse("bad_request", "not here")),
+            Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume => return Err(refuse("bad_request", "not here")),
             Verb::ChatAnswer => {
                 let (_, chat) = self.chat(req)?;
                 let request_id = req.get("request_id").filter(|r| r.is_string() || r.is_number()).ok_or_else(|| refuse("bad_request", "missing request_id"))?;
@@ -7880,6 +7881,17 @@ mod tests {
         }
         // And the one place a phone connects registers a bounded queue.
         assert!(include_str!("mobile.rs").contains(concat!("bounded_client_channel(", "EVENT_QUEUE)")));
+    }
+
+    #[tokio::test]
+    async fn leaving_the_app_takes_every_control_grant_away_at_once() {
+        // What a screen or a takeover rests on: `lock_now` (the page hidden) clears it with no grace, and the brokers end within their 250 ms look.
+        let r = rig();
+        let screen = r.daemon.mobile.grant("phone");
+        let pane = r.daemon.mobile.grant("phone");
+        r.daemon.mobile.lock_now("phone");
+        assert!(!screen.load(Ordering::SeqCst) && !pane.load(Ordering::SeqCst));
+        assert!(r.daemon.mobile.grant("phone").load(Ordering::SeqCst), "a new grant after unlocking starts live");
     }
 
 }
