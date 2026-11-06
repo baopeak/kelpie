@@ -3453,7 +3453,7 @@ mod tests {
         };
         assert_eq!(transport_cap(Kind::Pwa, true, &secure(at("192.168.1.9:5000", true))), Permission::Control, "this computer's HTTPS page, at a name");
         assert_eq!(transport_cap(Kind::Pwa, true, &secure(Peer::behind_serve("127.0.0.1:5000".parse().unwrap()))), Permission::Control, "through Tailscale Serve");
-        assert_eq!(transport_cap(Kind::Pwa, true, &Peer::relayed(3, Some("https://desk.tail1234.ts.net:8443".into()))), Permission::Write, "never through the relay");
+        assert_eq!(transport_cap(Kind::Pwa, true, &Peer::relayed(crate::mobile::relay::slot_ip(3), Some("https://desk.tail1234.ts.net:8443".into()))), Permission::Write, "never through the relay");
         assert_eq!(transport_cap(Kind::Pwa, true, &Peer::behind_serve("127.0.0.1:5000".parse().unwrap())), Permission::Write, "a page that is not this computer's origin");
         assert_eq!(transport_cap(Kind::Pwa, true, &at("192.168.1.9:5000", false)), Permission::Read, "plain http on the LAN: the page could be swapped");
         assert_eq!(transport_cap(Kind::Pwa, true, &at("192.168.1.9:5000", true)), Permission::Write);

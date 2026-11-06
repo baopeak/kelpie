@@ -371,6 +371,10 @@ impl Broker {
                 let Some(data) = params["data"].as_str() else { return };
                 let meta = params.get("meta").filter(|m| m.is_object()).cloned().unwrap_or_else(|| json!({}));
                 let mut st = hold.state.lock();
+                // Paused, a frame that still comes is not kept: the resume asks for a fresh one, and this one would be older.
+                if st.paused {
+                    return;
+                }
                 if data.len() > MAX_FRAME_B64 {
                     st.ladder.too_big(Instant::now());
                     drop(st);
@@ -855,7 +859,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dropped_link_keeps_the_hold_for_the_same_device_for_a_while() {
-        let mut r = rig();
+        let r = rig();
         let tk = r.start().await;
         r.d.takeover.link_closed(1);
         let (out2, mut phone2) = mpsc::channel(16);
@@ -996,7 +1000,7 @@ mod tests {
             }
         }
         assert!(paused_beat, "the heartbeat says it is paused");
-        // A frame that comes now waits, and the hold sleeps meanwhile instead of going round every millisecond.
+        // A frame that comes now is not kept (the resume brings a fresh one), and the hold sleeps meanwhile instead of going round every millisecond.
         r.frame(&tk, "late");
         let hold = r.d.takeover.hold(&tk).unwrap();
         let before = hold.state.lock().wakes;
