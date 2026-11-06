@@ -711,7 +711,8 @@ async def spike_questions(phone, tk, w, pid, label):
         mark = phone.mark()
         since = report_count()
         await hide()
-        await asyncio.sleep(1.5)
+        # Long enough for WebView2 to stop rendering it (earlier runs saw a tap 3 s after hiding wait for the pane to show).
+        await asyncio.sleep(3)
         start_input(target, click(x, y))
         await asyncio.sleep(2)
         returned = await asyncio.to_thread(took)
@@ -777,9 +778,10 @@ async def spike_questions(phone, tk, w, pid, label):
     await asyncio.sleep(1.5)
     await phone.tap(tk, 140, 64)
     await asyncio.sleep(1.5)
+    covered = bool(reported("pclick", since))
     bring_up(probe)
     await asyncio.sleep(2)
-    print(f"SPIKE a phone tap on a window behind the main one clicks later: {bool(reported('pclick', since))}", flush=True)
+    print(f"SPIKE a phone tap on a window behind the main one: clicked while covered: {covered}; clicked only once brought up: {bool(reported('pclick', since)) and not covered}", flush=True)
     # Closed from its own page: the phone goes back to the pane.
     mark = phone.mark()
     await asyncio.to_thread(w.invoke, "browser_test_input", {"label": popup_label, "events": click(140, 144)})
