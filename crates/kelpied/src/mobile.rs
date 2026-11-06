@@ -455,16 +455,31 @@ struct Flood {
     noted: Option<Instant>,
 }
 
+/// Makes a place for `ip` in a table of addresses that may be full, `stale` naming what goes first; false when there is none. What comes
+/// through the relay never empties the table: its addresses are the relay's to give, so a relay address that finds the table full of others
+/// pushes out relay addresses only, or finds no place.
+fn place_for<V>(table: &mut HashMap<IpAddr, V>, ip: IpAddr, stale: impl Fn(&V) -> bool) -> bool {
+    if table.len() < LIMITER_ADDRESSES || table.contains_key(&ip) {
+        return true;
+    }
+    table.retain(|_, v| !stale(v));
+    if table.len() >= LIMITER_ADDRESSES {
+        if relay::is_slot_ip(ip) {
+            table.retain(|a, _| !relay::is_slot_ip(*a));
+        } else {
+            table.clear();
+        }
+    }
+    table.len() < LIMITER_ADDRESSES
+}
+
 /// Takes one from the bucket of `ip`, which fills at `rate` a second up to `burst`. False when it is empty. The table of addresses is
 /// bounded: a bucket that has filled up says nothing, and goes first.
 fn take_token(buckets: &Mutex<HashMap<IpAddr, SendBucket>>, ip: IpAddr, rate: f64, burst: f64) -> bool {
     let now = Instant::now();
     let mut buckets = buckets.lock();
-    if buckets.len() >= LIMITER_ADDRESSES && !buckets.contains_key(&ip) {
-        buckets.retain(|_, b| b.tokens + now.duration_since(b.at).as_secs_f64() * rate < burst);
-        if buckets.len() >= LIMITER_ADDRESSES {
-            buckets.clear();
-        }
+    if !place_for(&mut *buckets, ip, |b| b.tokens + now.duration_since(b.at).as_secs_f64() * rate >= burst) {
+        return false;
     }
     let b = buckets.entry(ip).or_insert(SendBucket { tokens: burst, at: now });
     b.tokens = (b.tokens + now.duration_since(b.at).as_secs_f64() * rate).min(burst);
@@ -1139,12 +1154,9 @@ impl Mobile {
     /// Counts a failed attempt; true when this one locks the address out.
     fn pairing_failed(&self, ip: IpAddr) -> bool {
         let mut by_ip = self.failures.lock();
-        if by_ip.len() >= LIMITER_ADDRESSES && !by_ip.contains_key(&ip) {
-            // Addresses whose failures all aged out go first; if the table is still full, it starts over.
-            by_ip.retain(|_, f| f.back().is_some_and(|t| t.elapsed() <= Duration::from_secs(60)));
-            if by_ip.len() >= LIMITER_ADDRESSES {
-                by_ip.clear();
-            }
+        // Addresses whose failures all aged out go first; if the table is still full, it starts over, but never for the relay's addresses.
+        if !place_for(&mut *by_ip, ip, |f| !f.back().is_some_and(|t| t.elapsed() <= Duration::from_secs(60))) {
+            return false;
         }
         let attempts = by_ip.entry(ip).or_default();
         attempts.push_back(Instant::now());
@@ -1606,8 +1618,9 @@ impl Mobile {
     pub fn disable(&self) {
         self.stop_all_grants();
         self.forget_all_locks();
-        // The relay hears last: what the sessions still say goes first (a removed phone's `revoked`), then nobody is let in there.
-        let _ = self.relay_wind_down(None);
+        // The relay hears last: what the sessions still say goes first (a removed phone's `revoked`), then nobody is let in there, also when
+        // the relay is out of reach now (it is told once it answers).
+        let _ = self.relay_wind_down(false);
         {
             let mut c = self.config.lock();
             c.enabled = false;
@@ -1663,7 +1676,7 @@ impl Mobile {
             all
         };
         // The room goes with the keys: its list and ticket would otherwise outlive them.
-        let _ = self.relay_wind_down(self.relay_room());
+        let _ = self.relay_wind_down(true);
         self.disable();
         for (_, p) in self.pending.lock().drain() {
             let _ = p.reply.send(None);

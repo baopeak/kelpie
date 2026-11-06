@@ -11,8 +11,8 @@
 //!   relay gets the tokens' hashes. The whole list goes first on every connection, before the relay says which phones are there: a
 //!   phone removed while the relay was away is closed before it reaches anything. A pairing QR code adds a single-use token derived
 //!   from its secret, for two minutes.
-//! - **Slots**: each phone socket feeds `link::accept` like a socket on `/link`, at an address of its own for the limits (`slot_ip`):
-//!   the same handshake budget, the same `mac1` check before any Diffie-Hellman. A slot serves only a device paired on a secure
+//! - **Slots**: each phone socket feeds `link::accept` like a socket on `/link`, at an address for the limits that goes with the token it
+//!   came in with (`phone_ip`): the same handshake budget, the same `mac1` check before any Diffie-Hellman. A slot serves only a device paired on a secure
 //!   origin, and only one that says `caps` with `ack` and `hb` (`link`).
 //! - **Liveness**: a keepalive every 20 s, which the relay answers without waking its room; nothing heard for 45 s and the connection
 //!   is made again, after a full-jitter backoff from 1 s to 60 s that starts over after 30 s up and when this machine's addresses change.
@@ -81,6 +81,19 @@ pub fn slot_ip(slot: u16) -> IpAddr {
 
 pub fn is_slot_ip(ip: IpAddr) -> bool {
     matches!(ip, IpAddr::V6(v6) if v6.segments()[..4] == [0x0100, 0, 0, 0])
+}
+
+/// The address a phone on the relay goes by for the limits: the one of the credential it came in with (`k` in `open`, the hash of its token or
+/// of its pairing token), also in 100::/64. A slot is new for every socket, so by slot nothing would ever add up; by credential what one phone
+/// does adds up wherever its sockets land, and costs no other phone. A relay that names none gives the slot's address.
+pub fn phone_ip(slot: u16, cred: Option<&str>) -> IpAddr {
+    match cred.filter(|k| k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit())) {
+        Some(k) => {
+            let group = |i: usize| u16::from_str_radix(&k[i * 4..i * 4 + 4], 16).unwrap_or(0);
+            IpAddr::V6(Ipv6Addr::new(0x0100, 0, 0, 0, group(0), group(1), group(2), group(3)))
+        }
+        None => slot_ip(slot),
+    }
 }
 
 /// The single-use token a pairing QR code lets into the room: `HKDF-SHA256(ikm = the code's secret, no salt, info = "kelpie-relay-pair")`.
@@ -169,17 +182,20 @@ pub enum Out {
     Kick(u16, u64, u16, String),
 }
 
+/// What comes for a slot from the relay: a phone's frame, or the code the phone closed its socket with.
+pub type Inbound = std::result::Result<Vec<u8>, u16>;
+
 /// One phone's socket at the relay, as `link` sees it.
 pub struct Slot {
     slot: u16,
     generation: u64,
-    frames: mpsc::Receiver<Vec<u8>>,
+    frames: mpsc::Receiver<Inbound>,
     out: mpsc::Sender<Out>,
 }
 
 impl Slot {
-    /// The phone's next frame; None once it left or the relay's connection ended.
-    pub async fn recv(&mut self) -> Option<Vec<u8>> {
+    /// The phone's next frame, or the code it closed with; None once it left or the relay's connection ended.
+    pub async fn recv(&mut self) -> Option<Inbound> {
         self.frames.recv().await
     }
 
@@ -196,12 +212,12 @@ impl Slot {
 #[derive(Default)]
 struct Slots {
     next: u64,
-    open: HashMap<u16, (u64, mpsc::Sender<Vec<u8>>)>,
+    open: HashMap<u16, (u64, mpsc::Sender<Inbound>)>,
 }
 
 impl Slots {
     /// A slot opened (again): an older holder's frames stop, and that session ends.
-    fn open(&mut self, slot: u16) -> (u64, mpsc::Receiver<Vec<u8>>) {
+    fn open(&mut self, slot: u16) -> (u64, mpsc::Receiver<Inbound>) {
         self.next += 1;
         let (tx, rx) = mpsc::channel(SLOT_QUEUE);
         self.open.insert(slot, (self.next, tx));
@@ -217,7 +233,14 @@ impl Slots {
         self.open.remove(&slot);
     }
 
-    fn sender(&self, slot: u16) -> Option<&mpsc::Sender<Vec<u8>>> {
+    /// The phone closed its socket: its session hears the code, then nothing more.
+    fn closed(&mut self, slot: u16, code: u16) {
+        if let Some((_, tx)) = self.open.remove(&slot) {
+            let _ = tx.try_send(Err(code));
+        }
+    }
+
+    fn sender(&self, slot: u16) -> Option<&mpsc::Sender<Inbound>> {
         self.open.get(&slot).map(|(_, tx)| tx)
     }
 }
@@ -249,14 +272,43 @@ struct Task {
 }
 
 /// How a connection ends when it is stopped.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone)]
 enum Ending {
-    /// At once (the relay turned off or moved).
+    /// At once (the relay turned off, or a word owed was said).
     Now,
-    /// After what the sessions still send (a removed phone's sealed `revoked`), with nobody let in from then on, and the room removed
-    /// when it is the one named.
-    Flush { drop: Option<String> },
+    /// After what the sessions still send (a removed phone's sealed `revoked`), then the room is told the last word: on this connection
+    /// when it is in that room, else on one of its own once the relay answers.
+    Flush(Option<Arc<LastWord>>),
 }
+
+/// What a room is told when this computer stops using it: that nobody comes in any more (phone access off, the kill switch), or that it goes
+/// (a reset, a new room). Kept with what enters that room, as it was when the word was decided: by then the settings may name another.
+struct LastWord {
+    url: String,
+    room: String,
+    ticket: String,
+    key: SigningKey,
+    drop: bool,
+}
+
+impl LastWord {
+    fn message(&self) -> Value {
+        if self.drop {
+            json!({"t": "drop"})
+        } else {
+            json!({"t": "allow", "h": []})
+        }
+    }
+}
+
+/// What a connection in `room` says as it ends gently: the last word when it is for this room, and nothing for another (a connection that came
+/// back in a new room meanwhile must not empty it).
+fn said_on_ending(last: Option<&LastWord>, room: &str) -> Option<Value> {
+    last.filter(|w| w.room == room).map(LastWord::message)
+}
+
+/// How long a word owed to a room is tried for when the relay does not answer. A room that never hears it expires unused anyway.
+const LAST_WORD_FOR: Duration = Duration::from_secs(24 * 3600);
 
 #[derive(Default, Clone)]
 struct Facts {
@@ -307,7 +359,7 @@ impl Runtime {
     }
 
     /// The tokens changed: the list goes to the relay again.
-    fn nudge(&self) {
+    pub(super) fn nudge(&self) {
         if let Some(t) = self.task.lock().as_ref() {
             t.nudge.notify_one();
         }
@@ -470,14 +522,29 @@ impl Mobile {
         self.relay.down(None);
     }
 
-    /// Ends the relay's connection gently (phone access off, the kill switch, a reset, a new room): what the sessions still send goes
-    /// first, then the relay lets nobody in, and `drop` names a room to remove. Returns the task, to wait for it.
-    pub(super) fn relay_wind_down(&self, drop: Option<String>) -> Option<tokio::task::JoinHandle<()>> {
+    /// Ends the relay's connection gently (phone access off, the kill switch, a reset): what the sessions still send goes first, then the
+    /// room this computer is in lets nobody in, or goes (`drop`), even when the relay is out of reach now. Returns the task, to wait for it.
+    pub(super) fn relay_wind_down(&self, drop: bool) -> Option<tokio::task::JoinHandle<()>> {
+        if self.relay.task.lock().is_none() {
+            return None;
+        }
+        self.relay_wind_down_with(self.relay_last_word(drop))
+    }
+
+    /// As `relay_wind_down`, with the word decided before (a new room: the old one goes).
+    fn relay_wind_down_with(&self, last: Option<LastWord>) -> Option<tokio::task::JoinHandle<()>> {
         let t = self.relay.task.lock().take()?;
-        *t.ending.lock() = Ending::Flush { drop };
+        *t.ending.lock() = Ending::Flush(last.map(Arc::new));
         t.stop.cancel();
         self.relay.down(None);
         Some(t.handle)
+    }
+
+    /// The last word for the room the settings name now: `drop` to remove it, else to let nobody in. None with no room, or no key to enter it.
+    fn relay_last_word(&self, drop: bool) -> Option<LastWord> {
+        let key = self.mac_key(false).ok().flatten()?;
+        let r = self.config.lock().relay.clone().filter(|r| store::relay_holds(r, &key))?;
+        Some(LastWord { url: r.url, room: r.room?, ticket: r.ticket?, key: self.room_key().ok().flatten()?, drop })
     }
 
     /// The room this computer has at the relay, as kept.
@@ -656,8 +723,9 @@ pub async fn recreate(daemon: Arc<Daemon>) -> Result<Value> {
     })
     .await
     .map_err(|_| anyhow!("that did not finish"))??;
-    let old_room = m.relay_room();
     let old_key = m.room_key()?;
+    // Decided now, while the settings still name the old room: it is removed once phones had time to hear of the new one.
+    let old_room = m.relay_last_word(true);
     m.keep_room_key(&room_key)?;
     let committed = (|| -> Result<()> {
         let key = m.mac_key(false)?.ok_or_else(|| anyhow!("the device key cannot be read now"))?;
@@ -680,8 +748,9 @@ pub async fn recreate(daemon: Arc<Daemon>) -> Result<Value> {
     m.relay.facts.lock().slow_since = None;
     readvertise(m);
     tokio::time::sleep(MOVE_GRACE).await;
-    // The old room is removed on its own connection, and that connection is gone before the next one opens the new room.
-    if let Some(old) = m.relay_wind_down(old_room) {
+    // The old room is removed on the old connection while it is in that room (else on one of its own), and that connection is gone before the
+    // next one opens the new room.
+    if let Some(old) = m.relay_wind_down_with(old_room) {
         let _ = tokio::time::timeout(Duration::from_secs(5), old).await;
     }
     follow(&daemon);
@@ -717,20 +786,30 @@ type Socket = tokio_tungstenite::WebSocketStream<Box<dyn Io>>;
 /// Resolves when the connection is to end at once; never for a gentle end, which the connection carries out itself.
 async fn cut_short(stop: &Generation, ending: &Mutex<Ending>) {
     stop.cancelled().await;
-    if *ending.lock() != Ending::Now {
+    if !matches!(*ending.lock(), Ending::Now) {
         std::future::pending::<()>().await;
     }
 }
 
 async fn run(daemon: Weak<Daemon>, stop: Arc<Generation>, nudge: Arc<Notify>, ending: Arc<Mutex<Ending>>) {
+    connect_until_stopped(&daemon, &stop, &nudge, &ending).await;
+    // Stopped gently with the word still owed: the connection was down, or in another room.
+    let owed = match &*ending.lock() {
+        Ending::Flush(Some(word)) => word.clone(),
+        _ => return,
+    };
+    say_last_word(&daemon, &owed).await;
+}
+
+async fn connect_until_stopped(daemon: &Weak<Daemon>, stop: &Generation, nudge: &Notify, ending: &Mutex<Ending>) {
     let mut attempt: u32 = 0;
     loop {
         let Some(d) = daemon.upgrade() else { return };
         let began = Instant::now();
         let ended = tokio::select! {
             biased;
-            _ = cut_short(&stop, &ending) => return,
-            ended = connection(&d, &stop, &nudge, &ending) => ended,
+            _ = cut_short(stop, ending) => return,
+            ended = connection(&d, stop, nudge, ending) => ended,
         };
         if stop.is_cancelled() {
             return;
@@ -763,6 +842,66 @@ async fn run(daemon: Weak<Daemon>, stop: Arc<Generation>, nudge: Arc<Notify>, en
     }
 }
 
+/// Tells a room its last word on a connection of its own, as soon as the relay answers: tried for a day at most, and no more once this computer is
+/// back in that room (its own connection then tells the room what holds) or the room is gone.
+async fn say_last_word(daemon: &Weak<Daemon>, word: &LastWord) {
+    let until = Instant::now() + LAST_WORD_FOR;
+    let mut attempt: u32 = 0;
+    loop {
+        let ts = {
+            let Some(d) = daemon.upgrade() else { return };
+            let m = &d.mobile;
+            let running = m.relay.task.lock().is_some();
+            if running && m.relay_room().as_deref() == Some(word.room.as_str()) {
+                return;
+            }
+            m.relay.next_ts()
+        };
+        let url = format!("{}/v1/desktop?t={}&ts={ts}&sig={}", word.url, word.ticket, signature(&word.key, &word.room, ts));
+        let said = async {
+            let mut ws = tokio::time::timeout(CONNECT_TIMEOUT, dial(&url)).await.map_err(|_| anyhow!("the relay did not answer in time"))??;
+            // The room reads a socket's messages in order, the close after the word.
+            send_text(&mut ws, word.message()).await?;
+            let _ = ws.close(None).await;
+            Ok::<(), anyhow::Error>(())
+        };
+        match said.await {
+            Ok(()) => return,
+            // No such room, or not this computer's to enter any more: nothing left to tell.
+            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == 403 || r.status == 404) => return,
+            Err(_) if Instant::now() >= until => return,
+            Err(_) => {}
+        }
+        attempt = attempt.saturating_add(1);
+        tokio::select! {
+            _ = tokio::time::sleep(backoff(attempt)) => {}
+            // A new network may reach the relay at once.
+            _ = listen::changed() => listen::settle().await,
+        }
+    }
+}
+
+/// The relay turned the desktop away: the HTTP status it gave, and whether the router said too many refusals came from this network.
+#[derive(Debug)]
+struct Refused {
+    status: u16,
+    attempts: bool,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.status {
+            403 => write!(f, "the relay refused this computer's signature"),
+            404 => write!(f, "the relay no longer has this computer's room: make a new room in Settings → Mobile"),
+            429 if self.attempts => write!(f, "the relay turns this network away for a few minutes: too many refused attempts came from it"),
+            429 => write!(f, "the room reached its monthly limit at the relay"),
+            s => write!(f, "the relay answered HTTP {s}"),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
+
 /// Dials the relay: TCP with no Nagle delay, TLS from the system's usual roots (`webpki-roots`, ring), then the WebSocket.
 async fn dial(url: &str) -> Result<Socket> {
     let uri: axum::http::Uri = url.parse().context("the relay's address")?;
@@ -787,12 +926,10 @@ async fn dial(url: &str) -> Result<Socket> {
     let config = tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(MAX_FRAME)).max_frame_size(Some(MAX_FRAME));
     match tokio_tungstenite::client_async_with_config(url, io, Some(config)).await {
         Ok((ws, _)) => Ok(ws),
-        Err(tungstenite::Error::Http(response)) => Err(match response.status().as_u16() {
-            403 => anyhow!("the relay refused this computer's signature"),
-            404 => anyhow!("the relay no longer has this computer's room: make a new room in Settings → Mobile"),
-            429 => anyhow!("the room reached its monthly limit at the relay"),
-            s => anyhow!("the relay answered HTTP {s}"),
-        }),
+        Err(tungstenite::Error::Http(response)) => {
+            let attempts = response.headers().get("x-kelpie-reason").is_some_and(|v| v.as_bytes() == b"attempts");
+            Err(Refused { status: response.status().as_u16(), attempts }.into())
+        }
         Err(e) => Err(e).context("the relay's WebSocket"),
     }
 }
@@ -862,16 +999,16 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify, ending: 
             biased;
             _ = stop.cancelled() => {
                 let wanted = ending.lock().clone();
-                if let Ending::Flush { drop } = wanted {
+                if let Ending::Flush(last) = wanted {
                     let until = tokio::time::Instant::now() + FLUSH;
                     while let Ok(Some(out)) = tokio::time::timeout_at(until, out_rx.recv()).await {
                         forward(&mut ws, &mut slots, out).await?;
                     }
-                    // A room that goes takes everything with it, and its phones hear that it is gone (4004); one that stays lets nobody in.
-                    if drop.as_deref() == Some(room.as_str()) {
-                        send_text(&mut ws, json!({"t": "drop"})).await?;
-                    } else {
-                        send_text(&mut ws, json!({"t": "allow", "h": []})).await?;
+                    // A room that goes takes everything with it, and its phones hear that it is gone (4004); one that stays lets nobody in. A word
+                    // for another room is said on a connection of its own (`run`).
+                    if let Some(word) = said_on_ending(last.as_deref(), &room) {
+                        send_text(&mut ws, word).await?;
+                        *ending.lock() = Ending::Now;
                     }
                 }
                 let _ = ws.close(None).await;
@@ -889,8 +1026,18 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify, ending: 
                 send_text(&mut ws, allow_message(m)).await?;
             }
             Some(text) = control_rx.recv() => ws.send(WsMessage::text(text)).await.context("writing to the relay")?,
-            _ = nudge.notified() => send_text(&mut ws, allow_message(m)).await?,
-            _ = refresh.tick() => send_text(&mut ws, allow_message(m)).await?,
+            // While a device change waits its grace, any other list waits with it: the list is read when it goes, so nothing is lost, and nothing
+            // closes a removed phone before its session told it.
+            _ = nudge.notified() => {
+                if list_due.is_none() {
+                    send_text(&mut ws, allow_message(m)).await?;
+                }
+            }
+            _ = refresh.tick() => {
+                if list_due.is_none() {
+                    send_text(&mut ws, allow_message(m)).await?;
+                }
+            }
             _ = keepalive.tick() => {
                 if heard.elapsed() >= DEAD_AFTER {
                     bail!("the relay stopped answering");
@@ -916,7 +1063,7 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify, ending: 
                     WsMessage::Binary(frame) if frame.len() >= 2 => {
                         let slot = u16::from_be_bytes([frame[0], frame[1]]);
                         // A phone that sends faster than its connection reads goes, rather than holding up the others.
-                        let full = slots.sender(slot).is_some_and(|tx| tx.try_send(frame[2..].to_vec()).is_err());
+                        let full = slots.sender(slot).is_some_and(|tx| tx.try_send(Ok(frame[2..].to_vec())).is_err());
                         if full {
                             slots.close(slot);
                             send_text(&mut ws, json!({"t": "kick", "s": slot, "c": super::SLOW_CONSUMER, "r": "slow"})).await?;
@@ -952,9 +1099,11 @@ fn on_control(d: &Arc<Daemon>, text: &str, slots: &mut Slots, out: &mpsc::Sender
             };
             let origin = d.mobile.relay_live().and_then(|r| r.origin);
             let carrier = Carrier::Relay(Slot { slot, generation, frames, out: out.clone() });
-            tokio::spawn(link::accept(d.clone(), carrier, running, Peer::relayed(slot, origin), true));
+            let ip = phone_ip(slot, v["k"].as_str());
+            tokio::spawn(link::accept(d.clone(), carrier, running, Peer::relayed(ip, origin), true));
         }
-        Some("close") => slots.close(slot),
+        // A relay from before codes were passed on says none: as if the socket dropped.
+        Some("close") => slots.closed(slot, v["c"].as_u64().and_then(|c| u16::try_from(c).ok()).unwrap_or(1005)),
         _ => {}
     }
 }
@@ -1003,10 +1152,10 @@ mod tests {
         for ip in ["127.0.0.1", "::1", "100.100.1.2", "fd7a:115c:a1e0::5", "192.168.1.9", "::"] {
             assert!(!is_slot_ip(ip.parse().unwrap()), "{ip}");
         }
-        let relayed = Peer::relayed(3, Some("https://desk.tail1234.ts.net:8443".into()));
+        let relayed = Peer::relayed(slot_ip(3), Some("https://desk.tail1234.ts.net:8443".into()));
         assert!(relayed.via_relay() && relayed.secure_origin);
         assert_eq!(relayed.ip(), slot_ip(3));
-        assert!(!Peer::relayed(3, None).secure_origin, "no origin registered: nothing to call secure");
+        assert!(!Peer::relayed(slot_ip(3), None).secure_origin, "no origin registered: nothing to call secure");
         assert!(!Peer::direct("192.168.1.9:5000".parse().unwrap(), true).via_relay());
         assert_eq!(super::super::transport_cap(Kind::Pwa, true, &relayed), Permission::Write);
     }
@@ -1035,6 +1184,46 @@ mod tests {
         assert!(!slots.current(7, second), "a closed slot takes nothing");
         let (third, _c) = slots.open(7);
         assert!(third > second, "generations are never reused");
+    }
+
+    #[test]
+    fn a_phone_on_the_relay_goes_by_its_credential_wherever_its_socket_lands() {
+        let (a, b) = ("ab".repeat(32), "cd".repeat(32));
+        assert_eq!(phone_ip(1, Some(&a)), phone_ip(9, Some(&a)), "one phone's sockets add up");
+        assert_ne!(phone_ip(1, Some(&a)), phone_ip(1, Some(&b)), "and cost no other phone");
+        assert!(is_slot_ip(phone_ip(1, Some(&a))) && listen::shown(phone_ip(1, Some(&a))) == "the relay");
+        for odd in [None, Some(""), Some("not hex"), Some(&a[..60])] {
+            assert_eq!(phone_ip(4, odd), slot_ip(4), "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn a_closed_slot_tells_its_session_the_phones_code_then_nothing() {
+        let mut slots = Slots::default();
+        let (_, mut frames) = slots.open(2);
+        slots.closed(2, link::ROUTE_LOST);
+        assert_eq!(frames.try_recv().unwrap(), Err(link::ROUTE_LOST));
+        assert!(frames.try_recv().is_err(), "the slot is gone");
+        assert!(slots.sender(2).is_none());
+    }
+
+    #[test]
+    fn a_connection_says_its_last_word_only_to_the_room_it_is_in() {
+        let word = |room: &str, drop: bool| LastWord { url: "wss://relay.example".into(), room: room.into(), ticket: format!("{room}.t"), key: SigningKey::from_slice(&[7u8; 32]).unwrap(), drop };
+        assert_eq!(said_on_ending(Some(&word("old", false)), "old"), Some(json!({"t": "allow", "h": []})));
+        assert_eq!(said_on_ending(Some(&word("old", true)), "old"), Some(json!({"t": "drop"})));
+        // Back in the new room meanwhile: the new room is neither emptied nor dropped, and the old one is told on a connection of its own.
+        assert_eq!(said_on_ending(Some(&word("old", true)), "new"), None);
+        assert_eq!(said_on_ending(Some(&word("old", false)), "new"), None);
+        assert_eq!(said_on_ending(None, "old"), None);
+    }
+
+    #[test]
+    fn a_relay_refusal_says_whose_it_is() {
+        let text = |status, attempts| Refused { status, attempts }.to_string();
+        assert!(text(429, true).contains("too many refused attempts"), "the router's, not the room's limit");
+        assert!(text(429, false).contains("monthly limit"));
+        assert!(text(404, false).contains("make a new room"));
     }
 
     #[test]

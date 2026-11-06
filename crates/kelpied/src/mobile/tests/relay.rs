@@ -12,10 +12,12 @@ const ORIGIN: &str = "https://desk.tail1234.ts.net:8443";
 const ROOM: &str = "abababababababababababababababab";
 type RelaySocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
-/// A relay that takes desktops and hands each one's socket to the test, with the address it asked for.
+/// A relay that takes desktops and hands each one's socket to the test, with the address it asked for. While `refuse` is set it turns every
+/// desktop away (503), as a relay out of reach would.
 struct FakeRelay {
     url: String,
     accepted: mpsc::Receiver<(String, RelaySocket)>,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
 }
 
 // The handshake callback's error type is tungstenite's own.
@@ -24,11 +26,19 @@ async fn fake_relay() -> FakeRelay {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let (tx, accepted) = mpsc::channel(4);
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refusing = refuse.clone();
     tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {
             let asked = Arc::new(Mutex::new(String::new()));
             let seen = asked.clone();
+            let refusing = refusing.clone();
             let callback = move |req: &Request, resp: Handshake| -> std::result::Result<Handshake, ErrorResponse> {
+                if refusing.load(Ordering::SeqCst) {
+                    let mut no = ErrorResponse::new(None);
+                    *no.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::SERVICE_UNAVAILABLE;
+                    return Err(no);
+                }
                 *seen.lock() = req.uri().to_string();
                 Ok(resp)
             };
@@ -38,7 +48,7 @@ async fn fake_relay() -> FakeRelay {
             }
         }
     });
-    FakeRelay { url, accepted }
+    FakeRelay { url, accepted, refuse }
 }
 
 fn room_key() -> p256::ecdsa::SigningKey {
@@ -325,6 +335,114 @@ async fn the_kill_switch_tells_relay_phones_first_then_lets_nobody_in() {
     let rest = until_closed(&mut ws).await;
     assert_eq!(rest.iter().rfind(|v| v["t"] == "allow"), Some(&json!({"t": "allow", "h": []})), "then nobody is let in: {rest:?}");
     assert!(!rest.iter().any(|v| v["t"] == "drop"), "turning off keeps the room");
+}
+
+#[tokio::test]
+async fn the_kill_switch_while_the_relay_is_out_of_reach_lets_nobody_in_once_it_answers() {
+    let mut fake = fake_relay().await;
+    let network = relay_rig(&fake, true, true).await;
+    let (_, ws) = desktop_socket(&mut fake).await;
+    // The relay goes out of reach: the connection drops, and the next ones are turned away.
+    fake.refuse.store(true, Ordering::SeqCst);
+    drop(ws);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    network.rig.daemon.mobile.revoke_all();
+    fake.refuse.store(false, Ordering::SeqCst);
+    let (asked, mut ws) = desktop_socket(&mut fake).await;
+    assert!(asked.starts_with(&format!("/v1/desktop?t={ROOM}.ticket&")), "signed into the same room: {asked}");
+    let said = until_closed(&mut ws).await;
+    assert_eq!(said.iter().rfind(|v| v["t"] == "allow"), Some(&json!({"t": "allow", "h": []})), "nobody is let in: {said:?}");
+    assert!(!said.iter().any(|v| v["t"] == "drop"), "and the room stays");
+    assert!(tokio::time::timeout(Duration::from_millis(1500), fake.accepted.recv()).await.is_err(), "said once, then nothing dials out");
+}
+
+/// A phone through the relay with a token: its session, and the hash the relay was told.
+async fn greeted_with_token(ws: &mut RelaySocket, network: &NetworkRig, slot: u16, others: &mut Vec<Value>) -> (kelpie_link::Session, String) {
+    let mut session = greeted(ws, network, slot, others).await;
+    assert!(hear(ws, slot, &mut session, others).await.unwrap()["endpoints"].is_array());
+    let given = hear(ws, slot, &mut session, others).await.unwrap();
+    assert_eq!(given["type"], "relay");
+    let hash = relay_side::token_hash(&kelpie_link::unb64(given["token"].as_str().unwrap()).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([hash])) && Instant::now() < deadline {
+        if let Some(WsMessage::Text(t)) = tokio::time::timeout(Duration::from_millis(200), ws.next()).await.ok().flatten().and_then(|m| m.ok()) {
+            others.push(serde_json::from_str(t.as_str()).unwrap());
+        }
+    }
+    assert!(others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([hash])), "{others:?}");
+    (session, hash)
+}
+
+#[tokio::test]
+async fn a_list_asked_for_just_after_a_removal_waits_until_the_removed_phone_heard_it() {
+    let mut fake = fake_relay().await;
+    let network = relay_rig(&fake, true, true).await;
+    let (_, mut ws) = desktop_socket(&mut fake).await;
+    next_text(&mut ws).await;
+    next_text(&mut ws).await;
+    let mut others = Vec::new();
+    let (mut session, _) = greeted_with_token(&mut ws, &network, 6, &mut others).await;
+    others.clear();
+    let m = &network.rig.daemon.mobile;
+    m.revoke("phone").unwrap();
+    // As another phone's new token would: the list is asked for at once.
+    m.relay.nudge();
+    loop {
+        let heard = hear(&mut ws, 6, &mut session, &mut others).await;
+        assert!(!others.iter().any(|v| v["t"] == "allow" && v["h"] == json!([])), "the list went first: {others:?}");
+        if let Err(code) = heard {
+            assert_eq!(code, NOT_PAIRED);
+            break;
+        }
+    }
+}
+
+/// A phone's first message on `slot`, which came in with `cred`, answered by the daemon; then the phone closes the socket with `code`.
+async fn answered_then_closed(ws: &mut RelaySocket, phone: &kelpie_link::Keypair, desktop: &[u8; 32], slot: u16, cred: &str, code: u16) {
+    ws.send(WsMessage::text(json!({"t": "open", "s": slot, "via": "token", "k": cred}).to_string())).await.unwrap();
+    let (_, first) = kelpie_link::Initiator::reconnect(phone, desktop).unwrap();
+    to_slot(ws, slot, &first).await;
+    assert!(matches!(for_slot(ws, slot, &mut Vec::new()).await, Some(ForSlot::Frame(_))), "the reply");
+    ws.send(WsMessage::text(json!({"t": "close", "s": slot, "c": code}).to_string())).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_relay_phone_whose_other_route_won_is_no_failed_attempt_and_a_silent_one_counts_against_its_token() {
+    let mut fake = fake_relay().await;
+    let network = relay_rig(&fake, true, true).await;
+    let (_, mut ws) = desktop_socket(&mut fake).await;
+    next_text(&mut ws).await;
+    next_text(&mut ws).await;
+    let d = network.rig.daemon.clone();
+    let desktop = d.mobile.link_key().unwrap().public;
+    let cred = "ab".repeat(32);
+    let ip = relay_side::phone_ip(0, Some(&cred));
+    let failures = || d.mobile.failures.lock().get(&ip).map_or(0, VecDeque::len);
+    // One phone's sockets, each on a slot of its own: answered, then closed with the phone's code, which the relay passes on.
+    answered_then_closed(&mut ws, &network.rig.phone, &desktop, 1, &cred, link::ROUTE_LOST).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(failures(), 0, "another route won: nothing held a place for nothing");
+    answered_then_closed(&mut ws, &network.rig.phone, &desktop, 2, &cred, 1000).await;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while failures() == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(failures(), 1, "counted against the token it came in with, not against its slot");
+}
+
+#[tokio::test]
+async fn the_relays_addresses_never_empty_the_lockouts_of_the_network() {
+    let r = rig();
+    let m = &r.daemon.mobile;
+    for i in 0..LIMITER_ADDRESSES {
+        m.pairing_failed(IpAddr::from([10, 1, (i / 256) as u8, (i % 256) as u8]));
+    }
+    for slot in 0..50 {
+        assert!(!m.pairing_failed(relay_side::slot_ip(slot)), "no place, and no lockout");
+    }
+    let failures = m.failures.lock();
+    assert_eq!(failures.len(), LIMITER_ADDRESSES);
+    assert!(failures.contains_key(&IpAddr::from([10, 1, 0, 0])), "every address from the network is still counted");
 }
 
 #[tokio::test]

@@ -76,10 +76,11 @@ impl Peer {
         Peer { addr, tls: true, through_serve: true, client: None, secure_origin: false, origin: None }
     }
 
-    /// A phone on one of the relay's slots. Its address is the slot's (`relay::slot_ip`), which no network address can be, and its page is at the origin the room
-    /// lets phones in from, which a browser cannot lie about. The relay could, and still has no session without the phone's keys.
-    pub fn relayed(slot: u16, origin: Option<String>) -> Peer {
-        Peer { addr: SocketAddr::new(super::relay::slot_ip(slot), 0), tls: false, through_serve: false, client: None, secure_origin: origin.is_some(), origin }
+    /// A phone on one of the relay's slots. Its address is the one `relay::phone_ip` gives, which no network address can be, and its page is at the origin the
+    /// room lets phones in from, which a browser cannot lie about. The relay could, and still has no session without the phone's keys.
+    pub fn relayed(ip: IpAddr, origin: Option<String>) -> Peer {
+        debug_assert!(super::relay::is_slot_ip(ip));
+        Peer { addr: SocketAddr::new(ip, 0), tls: false, through_serve: false, client: None, secure_origin: origin.is_some(), origin }
     }
 
     /// It came through the relay.
@@ -136,7 +137,13 @@ impl Carrier {
     pub async fn recv(&mut self) -> Option<Result<Message, axum::Error>> {
         match self {
             Carrier::Socket(ws) => ws.recv().await,
-            Carrier::Relay(slot) => slot.recv().await.map(|frame| Ok(Message::Binary(frame.into()))),
+            // The phone's close code comes in the relay's `close`, so a route that lost the race says so here too.
+            Carrier::Relay(slot) => slot.recv().await.map(|got| {
+                Ok(match got {
+                    Ok(frame) => Message::Binary(frame.into()),
+                    Err(code) => Message::Close(Some(CloseFrame { code, reason: "".into() })),
+                })
+            }),
         }
     }
 
@@ -327,7 +334,7 @@ pub fn held_silently(daemon: &Daemon, ip: IpAddr) {
 }
 
 /// A connection that got the reply and then said nothing sealed counts against its address, unless the phone closed it saying another of
-/// its routes won the race (`app/phone/src/link.ts`). Through the relay each socket has a slot number of its own, so such closes never add up there.
+/// its routes won the race (`app/phone/src/link.ts`). Through the relay the code comes in the relay's `close` (`relay::on_control`).
 fn silent_after_reply(daemon: &Daemon, ip: IpAddr, wire: &Wire) {
     if !wire.route_lost {
         held_silently(daemon, ip);

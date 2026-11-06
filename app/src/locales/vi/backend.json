@@ -5,6 +5,8 @@
   "the relay stopped taking registration keys from this network for today: too many wrong ones": "hôm nay relay ngừng nhận khóa đăng ký từ mạng này: đã có quá nhiều khóa sai",
   "the relay no longer has this computer's room: make a new room in Settings → Mobile": "relay không còn phòng của máy tính này: hãy tạo phòng mới trong Cài đặt → Di động",
   "the relay refused this computer's signature": "relay từ chối chữ ký của máy tính này",
+  "the relay turns this network away for a few minutes: too many refused attempts came from it": "relay tạm không nhận mạng này trong vài phút: đã có quá nhiều lần kết nối bị từ chối từ mạng này",
+  "the room reached its monthly limit at the relay": "phòng đã dùng hết hạn mức tháng này ở relay",
   "the relay stopped answering": "relay ngừng trả lời",
   "turn the relay on first": "hãy bật relay trước",
   "Jira is not connected (Settings → Integrations)":"Chưa kết nối Jira (Cài đặt → Tích hợp)",
