@@ -2954,6 +2954,7 @@ dependencies = [
  "aes-gcm",
  "alacritty_terminal",
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "block2",
