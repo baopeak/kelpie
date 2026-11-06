@@ -795,7 +795,8 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
 - **The helper** (`crates/kelpie-screen`, a workspace member that no default build makes): spawned by the app on the first viewer (`app/src-tauri/src/screen.rs`,
   like `kelpie-stt`), checked by its `hello {proto}`, stopped 30 s after the last viewer, shipped as an `externalBin`. Windows Graphics Capture for a window (the
   yellow border stays on Windows 10), DXGI Desktop Duplication for a monitor, the cursor left out (the phone draws it from cursor messages, so it never dirties
-  the picture); a one-slot mailbox (DXGI keeps only the newest picture; the WGC handler copies only the newest); BGRA → NV12 and scaling on the GPU (D3D11 video
+  the picture); a one-slot mailbox (DXGI keeps only the newest picture; the WGC handler keeps only the newest frame and does no Direct3D: the stream's thread
+  copies it, since a copy on the pool's thread under the mailbox's lock deadlocked with the stream holding the immediate context); BGRA → NV12 and scaling on the GPU (D3D11 video
   processor); Media Foundation H.264, the adapter's hardware encoder first (asynchronous, D3D11 surfaces), the inbox software encoder as the fallback, never
   openh264: CBR with a buffer of about two frames, no B-frames, keyframes only when asked, `AVLowLatencyMode`, live bitrate. Every SPS it emits is rewritten
   with `bitstream_restriction` (`max_num_reorder_frames = 0`) so a decoder holds no frame (`sps.rs`), and every keyframe carries its SPS and PPS. Input with
