@@ -187,8 +187,6 @@ mod tests {
     use super::*;
 
     struct Picture {
-        w: usize,
-        h: usize,
         stride: usize,
         px: Vec<u8>,
     }
@@ -197,7 +195,7 @@ mod tests {
         fn new(w: usize, h: usize) -> Picture {
             // A stride with padding, as a mapped texture has.
             let stride = w * 4 + 64;
-            Picture { w, h, stride, px: vec![0x20; stride * h] }
+            Picture { stride, px: vec![0x20; stride * h] }
         }
 
         fn set(&mut self, x: usize, y: usize, v: u8) {

@@ -411,7 +411,8 @@ async fn request(app: &AppHandle, method: &str, params: Value) -> Result<Value, 
                 }
             };
             let cancelled = {
-                let mut c = app.state::<Screens>().cancelled.lock();
+                let screens = app.state::<Screens>();
+                let mut c = screens.cancelled.lock();
                 let was = c.iter().any(|x| *x == sc);
                 c.retain(|x| *x != sc);
                 was

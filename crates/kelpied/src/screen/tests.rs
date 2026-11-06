@@ -337,7 +337,8 @@ async fn a_link_that_closes_during_a_start_leaves_a_screen_waiting_for_the_devic
     let (media, media_rx) = mpsc::channel(8);
     let dying = Phone { device: "phone", name: "Phone", conn: 5, out: &out, media: &media };
     let d = r.d.clone();
-    let starting = d.screen.phone_verb(&d, dying, "sc_start", &json!({"target": "w:66:7"}));
+    let req = json!({"target": "w:66:7"});
+    let starting = d.screen.phone_verb(&d, dying, "sc_start", &req);
     let closing = async {
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(out_rx);

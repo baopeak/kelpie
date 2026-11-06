@@ -32,7 +32,8 @@ pub fn process_of(h: HWND) -> u32 {
 }
 
 pub fn exists(h: HWND, pid: u32) -> bool {
-    unsafe { IsWindow(Some(h)).as_bool() } && process_of(h) == pid
+    let alive = unsafe { IsWindow(Some(h)).as_bool() };
+    alive && process_of(h) == pid
 }
 
 pub fn minimized(h: HWND) -> bool {
