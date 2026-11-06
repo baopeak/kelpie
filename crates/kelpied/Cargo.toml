@@ -23,6 +23,8 @@ uuid.workspace = true
 base64.workspace = true
 # The file ends of a transfer (files/) are trait objects: a host's SFTP session, this computer, a test double.
 async-trait = "0.1"
+# SFTP over the user's own `ssh -s sftp` (files/pool.rs); chosen by measurement (plans/reports/spike-261106-sftp-engine.md).
+russh-sftp = "=3.0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Mobile companion (LAN web app). TLS uses the ring provider only: aws-lc needs NASM.
 axum = { version = "0.8", features = ["ws"] }

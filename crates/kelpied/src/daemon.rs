@@ -151,6 +151,8 @@ pub struct Daemon {
     scheduled: ScheduledInputs,
     /// What the sessions run, looked at when the app asks (`process.*`).
     procs: crate::procs::Procs,
+    /// Browsing hosts and this computer, and the transfer queue (`sftp.*`, `local.*`, `xfer.*`).
+    pub files: Arc<crate::files::service::Files>,
     /// This daemon, for threads that outlive a call.
     me: std::sync::Weak<Daemon>,
 }
@@ -248,6 +250,13 @@ impl Daemon {
             });
             // Shared by the two that decide about alerts: phone access says who has them on, the notifier what is sent.
             let destinations = Destinations::new(&data_dir, secrets.clone(), Arc::new(NotifyHost(weak.clone())));
+            let files_owner = weak.clone();
+            let files_emit: crate::files::Emit =Arc::new(move |event: &str, params: Value| {
+                if let Some(d) = files_owner.upgrade() {
+                    d.broadcast(event, params);
+                }
+            });
+            let files = crate::files::service::Files::new(exe.clone(), data_dir.clone(), files_emit);
             Daemon {
                 sessions: RwLock::new(BTreeMap::new()),
                 next_handle: AtomicU32::new(1),
@@ -270,6 +279,7 @@ impl Daemon {
                 notifier: Notifier::with_destinations(&data_dir, secrets, destinations),
                 scheduled: ScheduledInputs::open(&data_dir),
                 procs: crate::procs::Procs::default(),
+                files,
                 me: weak,
                 data_dir,
                 exe,
@@ -1968,6 +1978,15 @@ impl Daemon {
                 return Ok(None);
             }
             m if m.starts_with("checkpoint.") => self.checkpoint_rpc(m, &params)?,
+            // Files answer when ssh and the host do: from their own task, so this client's other requests go on.
+            m if m.starts_with("sftp.") || m.starts_with("local.") || m.starts_with("xfer.") => {
+                let (files, tx, id, method) = (self.files.clone(), tx.clone(), id.clone(), m.to_string());
+                tokio::runtime::Handle::try_current()?.spawn(async move {
+                    let reply = rpc_answer(&id, files.rpc(&method, params).await);
+                    let _ = tx.send(json_out(&reply));
+                });
+                return Ok(None);
+            }
             "daemon.shutdown" => {
                 // A hand-over to a newer daemon: only when nothing runs any more (checked here,
                 // not from a session list the app read a moment ago).

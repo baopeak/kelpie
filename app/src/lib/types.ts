@@ -547,3 +547,26 @@ export interface AttachReply {
   rows: number;
   data: string; // base64
 }
+
+/** One name in a folder listing of a host (`sftp.list`) or of this computer (`local.list`). Mirrors `files::Entry`. */
+export interface RemoteEntry {
+  name: string;
+  kind: "file" | "dir" | "link" | "other";
+  size: number;
+  /** Seconds since the epoch. */
+  mtime: number;
+  /** Permission bits (`0o7777`); null on this computer under Windows. */
+  mode: number | null;
+  uid: number | null;
+  gid: number | null;
+  /** The owner's and group's names when the host sends them, else the uid / gid as text. */
+  owner: string | null;
+  group: string | null;
+  link_target: string | null;
+  /** False for a name that is not UTF-8 on the host: shown dimmed, never selected. */
+  readable_name: boolean;
+  hidden: boolean;
+}
+
+/** What `stat` / `lstat` say about a path (`files::Meta`). */
+export type RemoteMeta = Omit<RemoteEntry, "name" | "owner" | "group" | "link_target" | "readable_name" | "hidden">;

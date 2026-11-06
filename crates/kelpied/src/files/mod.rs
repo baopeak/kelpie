@@ -12,15 +12,18 @@ pub mod local_fs;
 #[cfg(test)]
 pub mod mem_fs;
 pub mod names;
+pub mod pool;
+pub mod service;
+pub mod sftp_fs;
 pub mod walk;
 
 use std::fmt;
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     File,
@@ -30,7 +33,7 @@ pub enum Kind {
 }
 
 /// What `stat` / `lstat` tell about a path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meta {
     pub kind: Kind,
     pub size: u64,
@@ -48,7 +51,7 @@ pub struct Entry {
     pub name: String,
     #[serde(flatten)]
     pub meta: Meta,
-    /// From the listing's long name (`ls -l` form), best effort.
+    /// The names when the host sends them, else the uid / gid as text.
     pub owner: Option<String>,
     pub group: Option<String>,
     pub link_target: Option<String>,
@@ -113,6 +116,9 @@ impl From<std::io::Error> for FsError {
 }
 
 pub type FsResult<T> = Result<T, FsError>;
+
+/// Sends an event to the daemon's clients (`xfer.updated`, `xfer.removed`).
+pub type Emit = std::sync::Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;
 
 /// An SFTP status (draft-ietf-secsh-filexfer-02 codes) as a plain message. `server` is the server's own text,
 /// kept when it says more than the code.
@@ -188,19 +194,6 @@ pub fn kind_from_mode(mode: u32) -> Kind {
     }
 }
 
-/// Owner and group from an `ls -l` style long name (`-rw-r--r--  1 deploy staff 1234 Jan  1 12:00 x`, GNU and
-/// BSD forms). Anything else gives `None`: servers may send any text there.
-pub fn parse_longname(line: &str) -> Option<(String, String)> {
-    let mut words = line.split_whitespace();
-    let perms = words.next()?;
-    let links = words.next()?;
-    let owner = words.next()?;
-    let group = words.next()?;
-    let size = words.next()?;
-    let perms_ok = perms.is_ascii() && perms.len() >= 10 && "-dlcbpsD".contains(&perms[..1]) && perms[1..10].chars().all(|c| "rwxsStTl-".contains(c));
-    (perms_ok && links.chars().all(|c| c.is_ascii_digit()) && size.chars().all(|c| c.is_ascii_digit() || c == ',')).then(|| (owner.to_string(), group.to_string()))
-}
-
 /// Whether a host name came through intact: the SFTP layer replaces bytes that are not UTF-8 with U+FFFD.
 pub fn readable_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('\u{FFFD}') && !name.contains('/') && name != "." && name != ".."
@@ -256,21 +249,6 @@ mod tests {
         assert_eq!(kind_from_mode(0o120777), Kind::Link);
         assert_eq!(kind_from_mode(0o020666), Kind::Other);
         assert_eq!(kind_from_mode(0o644), Kind::Other);
-    }
-
-    #[test]
-    fn long_names() {
-        let gnu = "-rw-r--r--    1 deploy   www-data     1234 Jan  1 12:00 index.html";
-        assert_eq!(parse_longname(gnu), Some(("deploy".into(), "www-data".into())));
-        let bsd = "drwxr-xr-x   12 me  staff  384 Nov  6 01:03 Projects";
-        assert_eq!(parse_longname(bsd), Some(("me".into(), "staff".into())));
-        let numeric = "lrwxrwxrwx 1 1000 1000 7 Mar  3  2024 link -> target";
-        assert_eq!(parse_longname(numeric), Some(("1000".into(), "1000".into())));
-        let sticky = "drwxrwxrwt 10 root root 4096 Nov  6 01:03 tmp";
-        assert_eq!(parse_longname(sticky), Some(("root".into(), "root".into())));
-        for garbage in ["", "index.html", "-rw-r--r-- x deploy staff 12", "hello world this is not ls", "-rw 1 a b 2", "ürw-r--r-- 1 a b 2"] {
-            assert_eq!(parse_longname(garbage), None, "{garbage:?}");
-        }
     }
 
     #[test]

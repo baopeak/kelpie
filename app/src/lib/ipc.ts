@@ -2,7 +2,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { locale } from "./i18n";
-import type { AttachReply, BranchInfo, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, SessionInfo, SessionUsage, UsageReport, UsageTotals } from "./types";
+import type { AttachReply, BranchInfo, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, RemoteEntry, RemoteMeta, SessionInfo, SessionUsage, UsageReport, UsageTotals } from "./types";
 
 export const daemon = <T = unknown>(method: string, params: object = {}) =>
   invoke<T>("daemon_call", { method, params });
@@ -224,3 +224,21 @@ export function b64ToBytes(b64: string): Uint8Array {
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
+
+
+/** From this daemon API level the daemon browses hosts over SFTP and this computer (`sftp.*`, `local.*`). */
+export const FILES_API = 26;
+
+export const sftpList = (dest: string, path: string, hidden = false) => daemon<RemoteEntry[]>("sftp.list", { dest, path, hidden });
+/** `lstat` is the path itself; `stat` follows a link (null when its target is gone). */
+export const sftpStat = (dest: string, path: string) => daemon<{ lstat: RemoteMeta; stat: RemoteMeta | null }>("sftp.stat", { dest, path });
+/** `~` (the default) is the login folder. */
+export const sftpRealpath = (dest: string, path = "~") => daemon<{ path: string }>("sftp.realpath", { dest, path }).then((r) => r.path);
+export const sftpMkdir = (dest: string, path: string) => daemon<boolean>("sftp.mkdir", { dest, path });
+/** Refuses an existing `to`. */
+export const sftpRename = (dest: string, from: string, to: string) => daemon<boolean>("sftp.rename", { dest, from, to });
+/** Not recursive: a recursive change is a transfer job (`xferStart` with kind `chmod`). */
+export const sftpChmod = (dest: string, paths: string[], mode: number) => daemon<boolean>("sftp.chmod", { dest, paths, mode });
+/** `""` lists the drives on Windows. */
+export const localList = (path: string, hidden = false) => daemon<RemoteEntry[]>("local.list", { path, hidden });
+export const localHome = () => daemon<{ path: string }>("local.home").then((r) => r.path);

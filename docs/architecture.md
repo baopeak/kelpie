@@ -1562,6 +1562,39 @@ task's run status is the Runs engine's.
 - **CLI** (`cli.rs`): `kelpied terminal list|read|send|wait`, `kelpied worktree get|set` and
   `kelpied review add|list` over the same RPCs.
 
+## File transfer (daemon)
+
+The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so a transfer outlives the window.
+- **Engine**: `russh-sftp` 3.0.1 speaks SFTP v3 over the stdio of the user's own OpenSSH:
+  `ssh -F <data>/ssh/config -o NumberOfPasswordPrompts=1 -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=ERROR -s <dest> sftp`.
+  - ssh runs with the daemon as its askpass (`kelpie_proto::ssh::askpass_env`, the saved host found by alias), so the user's config, ProxyJump, agent and saved passwords apply exactly as in a terminal.
+  - 64 requests are kept in flight.
+  - The choice was measured: `plans/reports/spike-261106-sftp-engine.md`.
+- **Shared launch helpers**: `kelpie_proto::ssh`, used by the app and the daemon alike:
+  - `program` (on Windows, `System32\OpenSSH` first);
+  - `config_path`;
+  - `askpass_env`;
+  - `host_id_for_alias`;
+  - `valid_dest` (aliases, `user@host` and bracketed IPv6 only; nothing that starts with `-`, no spaces, quotes or control characters). `TaskHost::validate` uses the same rule.
+- **Ends**: every end is a `RemoteFs`:
+  - `SftpFs` for a host;
+  - `LocalFs` for this computer (Windows' `""` is the list of drives; junctions count as links);
+  - `MemFs` in tests.
+
+  Host paths must be absolute and free of control characters. Names that are not UTF-8 arrive lossily from the crate (U+FFFD), so they are flagged `readable_name: false` and never selected or copied. The crate's listing has no long name: owner and group are the names when the server sends them, else the numbers.
+- **Sessions** (`files/pool.rs`):
+  - One browse session per destination, opened on first use and closed after 5 minutes unused.
+  - A session whose ssh ended is replaced on the next call, never in the middle of one.
+  - Transfer jobs open their own sessions.
+  - ssh's stderr (16 KiB) gives the error text, in `remote::exec`'s wording (`ssh <dest>: …`), so the app's host-key check still recognises an unknown key.
+  - The children are `kill_on_drop`. The spike showed ssh, and a ProxyJump's inner ssh, exit by themselves when the daemon dies and their pipes close.
+- **Methods** (API 26), answered from their own task:
+  - `sftp.list {dest, path, hidden}`, `sftp.stat` (`lstat` and the followed `stat`), `sftp.realpath` (`~` is the login folder);
+  - `sftp.mkdir`, `sftp.rename` (refuses an existing target), `sftp.chmod {paths, mode}` (not recursive);
+  - `local.list {path, hidden}`, `local.home`.
+
+  They are open to the user's and the app's connections only. Programs in sessions cannot call them, so an agent cannot use saved passwords through the daemon.
+
 ## Features beyond sessions
 
 | Area | Where | How |
