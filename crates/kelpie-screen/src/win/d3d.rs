@@ -86,7 +86,7 @@ impl Readback {
         Readback { staging: None, buf: Vec::new(), stride: 0 }
     }
 
-    /// Copies `tex` (BGRA, `w`×`h`) into `buf`, rows `stride` bytes apart.
+    /// Copies the top-left `w`×`h` of `tex` (BGRA, which may be larger: a monitor of an odd size) into `buf`, rows `stride` bytes apart.
     pub fn read(&mut self, d: &Device, tex: &ID3D11Texture2D, w: u32, h: u32) -> Result<()> {
         if !matches!(self.staging, Some((_, sw, sh)) if sw == w && sh == h) {
             let desc = D3D11_TEXTURE2D_DESC {
@@ -107,7 +107,8 @@ impl Readback {
         }
         let staging = &self.staging.as_ref().expect("made above").0;
         unsafe {
-            d.ctx.CopyResource(staging, tex);
+            let region = windows::Win32::Graphics::Direct3D11::D3D11_BOX { left: 0, top: 0, front: 0, right: w, bottom: h, back: 1 };
+            d.ctx.CopySubresourceRegion(staging, 0, 0, 0, 0, tex, 0, Some(&region));
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             d.ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
             let pitch = mapped.RowPitch as usize;

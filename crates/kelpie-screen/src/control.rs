@@ -140,11 +140,13 @@ pub struct Bandwidth {
     last_down: Option<u64>,
     last_up: Option<u64>,
     up_wait: u64,
+    /// Bytes on the wire for each byte of media (the link pads every message to a few sizes), smoothed.
+    wire: f64,
 }
 
 impl Bandwidth {
     pub fn new(now: u64) -> Bandwidth {
-        Bandwidth { kbps: START_KBPS, rtts: VecDeque::new(), srtt: None, lag_since: None, clean_since: now, last_down: None, last_up: None, up_wait: UP_WAIT_MS }
+        Bandwidth { kbps: START_KBPS, rtts: VecDeque::new(), srtt: None, lag_since: None, clean_since: now, last_down: None, last_up: None, up_wait: UP_WAIT_MS, wire: 1.0 }
     }
 
     /// A frame's round trip, from the daemon sending it to the phone's acknowledgement.
@@ -155,6 +157,19 @@ impl Bandwidth {
         }
         let r = f64::from(rtt_ms);
         self.srtt = Some(self.srtt.map_or(r, |s| s + 0.125 * (r - s)));
+    }
+
+    /// A media message of `raw` bytes went out as `wire` bytes (the daemon works it out from the link's padding).
+    pub fn on_wire(&mut self, raw: u64, wire: u64) {
+        if raw == 0 {
+            return;
+        }
+        let ratio = (wire as f64 / raw as f64).clamp(1.0, 4.0);
+        self.wire += 0.1 * (ratio - self.wire);
+    }
+
+    pub fn wire_factor(&self) -> f64 {
+        self.wire.clamp(1.0, 4.0)
     }
 
     pub fn queueing_ms(&self) -> Option<f64> {
@@ -257,6 +272,96 @@ impl KeyframeGate {
         self.last = Some(now);
         self.pending = false;
     }
+
+    /// A request waits for its second to be over.
+    pub fn waiting(&self) -> bool {
+        self.pending
+    }
+}
+
+/// The frames on their way to the phone and the keyframe owed, so that frames that are lost never hold the stream: the phone (or the daemon on its
+/// way) drops everything after a lost frame until a keyframe, so when a keyframe is asked for, or the daemon says it dropped frames, those frames
+/// will never be acknowledged and count as done. While a keyframe is owed but not yet allowed (at most one a second), no other frame is encoded:
+/// it would only be dropped.
+#[derive(Debug)]
+pub struct Flight {
+    seq: u32,
+    acked: u32,
+    key: bool,
+    gate: KeyframeGate,
+}
+
+impl Default for Flight {
+    fn default() -> Flight {
+        Flight { seq: 0, acked: 0, key: true, gate: KeyframeGate::default() }
+    }
+}
+
+impl Flight {
+    pub fn seq(&self) -> u32 {
+        self.seq
+    }
+
+    /// Frames sent and neither acknowledged nor given up.
+    pub fn inflight(&self) -> u32 {
+        self.seq.saturating_sub(self.acked)
+    }
+
+    /// The next frame is to be a keyframe.
+    pub fn wants_key(&self) -> bool {
+        self.key
+    }
+
+    /// A keyframe is owed and not yet allowed: encode nothing now.
+    pub fn gated(&self) -> bool {
+        !self.key && self.gate.waiting()
+    }
+
+    /// A frame goes out: its number.
+    pub fn sent(&mut self) -> u32 {
+        self.seq += 1;
+        self.seq
+    }
+
+    /// The encoder was handed a frame (a keyframe when `key`).
+    pub fn encoded(&mut self, key: bool, now: u64) {
+        if key {
+            self.key = false;
+            self.gate.made(now);
+        }
+    }
+
+    /// The phone acknowledged frame `seq` (and so every one before it).
+    pub fn acked(&mut self, seq: u32) {
+        self.acked = self.acked.max(seq.min(self.seq));
+    }
+
+    /// The daemon dropped every frame up to `seq`: none of them will be acknowledged.
+    pub fn dropped_through(&mut self, seq: u32) {
+        self.acked(seq);
+    }
+
+    /// The phone or the daemon asks for a keyframe: what is on its way is lost to it. The keyframe goes now, or once its second is over.
+    pub fn ask_key(&mut self, now: u64) {
+        self.acked = self.seq;
+        if self.gate.request(now) {
+            self.key = true;
+        }
+    }
+
+    /// Looked at in every turn: a keyframe that waited for its second goes now.
+    pub fn tick(&mut self, now: u64) {
+        if self.gate.due(now) {
+            self.key = true;
+            self.acked = self.seq;
+        }
+    }
+
+    /// A new connection, or a decoder that starts over: nothing before counts, a keyframe goes first.
+    pub fn restart(&mut self) {
+        self.acked = self.seq;
+        self.key = true;
+    }
 }
 
 // ---------- all of it ----------
@@ -283,6 +388,21 @@ pub struct Params {
     pub degraded: bool,
 }
 
+/// The ladder's top rung: the encoder's picture is never larger than this, whatever the source (a 4K or 5K monitor is shown at 1080p; the crisp
+/// tiles keep its text at the source's own resolution). 1920×1080 is H.264 level 4, which every encoder and phone decoder takes.
+pub const TOP_LINES: u32 = 1080;
+pub const TOP_WIDTH: u32 = 1920;
+
+/// The encoder's picture at most `max_lines` tall and never wider than `TOP_WIDTH` (an ultrawide monitor is shown smaller), even sides.
+fn fit(src: (u32, u32), scale: u8, min_lines: u32, max_lines: u32) -> (u32, u32) {
+    let (w, h) = geom::scaled(src.0, src.1, scale, min_lines, max_lines.min(TOP_LINES));
+    if w <= TOP_WIDTH || w == 0 {
+        return (w, h);
+    }
+    let h = ((u64::from(h) * u64::from(TOP_WIDTH) / u64::from(w)) as u32 & !1).max(2);
+    (TOP_WIDTH, h)
+}
+
 /// L3 this long pauses the stream until the person asks for it again.
 pub const L3_PAUSE_MS: u64 = 5 * 60 * 1000;
 const HW_SLOW_MS: f64 = 33.0;
@@ -300,7 +420,6 @@ pub enum Event {
 pub struct Controller {
     pub overuse: Overuse,
     pub bandwidth: Bandwidth,
-    pub keyframes: KeyframeGate,
     src: (u32, u32),
     window: bool,
     level: u8,
@@ -314,7 +433,7 @@ pub struct Controller {
 
 impl Controller {
     pub fn new(src: (u32, u32), window: bool, software: bool, now: u64) -> Controller {
-        Controller { overuse: Overuse::default(), bandwidth: Bandwidth::new(now), keyframes: KeyframeGate::default(), src, window, level: 0, software, l3_since: None, paused_for_load: false, hw_times: VecDeque::new(), hw_slow_since: None, asked_software: false }
+        Controller { overuse: Overuse::default(), bandwidth: Bandwidth::new(now), src, window, level: 0, software, l3_since: None, paused_for_load: false, hw_times: VecDeque::new(), hw_slow_since: None, asked_software: false }
     }
 
     pub fn set_source(&mut self, src: (u32, u32)) {
@@ -364,7 +483,7 @@ impl Controller {
         let r = RUNGS[at];
         let min_lines = if self.window { MIN_WINDOW_LINES } else { 0 };
         let mut reason = if at == 0 { Reason::None } else if self.overuse.rung >= self.bandwidth.rung() { Reason::Cpu } else { Reason::Bandwidth };
-        let (free_w, free_h) = geom::scaled(self.src.0, self.src.1, r.scale, min_lines, u32::MAX);
+        let (free_w, free_h) = fit(self.src, r.scale, min_lines, u32::MAX);
         let (mut fps, mut max_lines) = (r.fps, u32::MAX);
         let mut cap = |c: (u8, u32), why: Reason, fps: &mut u8, max_lines: &mut u32| {
             if c.0 < *fps || c.1 < free_h.min(*max_lines) {
@@ -379,9 +498,12 @@ impl Controller {
         if self.software {
             cap(SOFTWARE_CAP, Reason::Encoder, &mut fps, &mut max_lines);
         }
-        let (w, h) = if max_lines == u32::MAX { (free_w, free_h) } else { geom::scaled(self.src.0, self.src.1, r.scale, min_lines, max_lines) };
-        let kbps = if self.software { self.bandwidth.kbps.min(SOFTWARE_MAX_KBPS) } else { self.bandwidth.kbps };
-        let degraded = fps < 8 || h < (self.src.1 & !1);
+        let (w, h) = if max_lines == u32::MAX { (free_w, free_h) } else { fit(self.src, r.scale, min_lines, max_lines) };
+        // What goes on the wire is more than what the encoder makes (the link pads each message): the encoder is asked for less.
+        let link = (f64::from(self.bandwidth.kbps) / self.bandwidth.wire_factor()) as u32;
+        let kbps = if self.software { link.min(SOFTWARE_MAX_KBPS) } else { link }.max(MIN_KBPS / 2);
+        // Smaller than the top rung's own picture is "reduced"; a 4K monitor shown at 1080p is not.
+        let degraded = fps < 8 || h < fit(self.src, 100, min_lines, u32::MAX).1;
         Params { fps, w, h, kbps, reason, degraded }
     }
 
@@ -702,7 +824,7 @@ mod tests {
     fn load_caps_and_the_software_encoder_only_ever_lower_and_say_why() {
         let mut c = Controller::new((3840, 2160), false, false, 0);
         let p = c.params();
-        assert_eq!((p.fps, p.w, p.h, p.reason, p.degraded), (30, 3840, 2160, Reason::None, false));
+        assert_eq!((p.fps, p.w, p.h, p.reason, p.degraded), (30, 1920, 1080, Reason::None, false), "a 4K monitor at the top rung is 1080p, and not reduced");
         c.set_level(1, 0);
         let p = c.params();
         assert_eq!((p.fps, p.h, p.reason), (20, 1080, Reason::Load));
@@ -721,6 +843,73 @@ mod tests {
         c.set_level(1, 0);
         let p = c.params();
         assert_eq!((p.fps, p.h, p.reason), (8, 720, Reason::Cpu));
+    }
+
+    #[test]
+    fn a_5k_or_ultrawide_monitor_is_shown_within_the_top_rung() {
+        assert_eq!(fit((5120, 2880), 100, 0, u32::MAX), (1920, 1080), "5K: level 4 instead of no encoder at all");
+        assert_eq!(fit((5120, 1440), 100, 0, u32::MAX), (1920, 540), "ultrawide: no wider than 1920");
+        assert_eq!(fit((2560, 1440), 50, 0, u32::MAX), (1280, 720));
+        assert_eq!(fit((1366, 768), 100, 0, u32::MAX), (1366, 768), "smaller ones as they are");
+        let c = Controller::new((5120, 2880), false, false, 0);
+        assert!(!c.params().degraded);
+    }
+
+    #[test]
+    fn padding_on_the_wire_lowers_what_the_encoder_is_asked_for() {
+        let mut c = Controller::new((1920, 1080), false, false, 0);
+        assert_eq!(c.params().kbps, START_KBPS);
+        for _ in 0..200 {
+            c.bandwidth.on_wire(5_000, 10_000);
+        }
+        assert!((c.bandwidth.wire_factor() - 2.0).abs() < 0.01);
+        assert!((c.params().kbps as i64 - i64::from(START_KBPS / 2)).abs() <= 2, "{}", c.params().kbps);
+        c.bandwidth.on_wire(1, 100);
+        assert!(c.bandwidth.wire_factor() <= 4.0, "a ratio is held to 4");
+    }
+
+    #[test]
+    fn frames_lost_on_the_way_never_hold_the_stream() {
+        // A keyframe at 0 ms, then three deltas the daemon drops (its lane was full): nothing is acknowledged, so nothing more may be encoded.
+        let mut f = Flight::default();
+        let c = Controller::new((1920, 1080), false, false, 0);
+        assert!(f.wants_key());
+        f.sent();
+        f.encoded(true, 0);
+        f.acked(1);
+        for _ in 0..3 {
+            f.sent();
+            f.encoded(false, 0);
+        }
+        assert_eq!(f.inflight(), 3);
+        assert!(!c.may_encode(f.inflight(), Some(1000)), "the window is full");
+        // The daemon says what it dropped and asks for a keyframe within the keyframe's second: the frames are given up, and nothing but a
+        // keyframe is encoded, once its second is over.
+        f.dropped_through(4);
+        f.ask_key(500);
+        assert_eq!(f.inflight(), 0);
+        assert!(f.gated() && !f.wants_key(), "a delta now would only be dropped");
+        f.tick(999);
+        assert!(f.gated());
+        f.tick(1000);
+        assert!(f.wants_key() && !f.gated() && c.may_encode(f.inflight(), Some(1000)), "the next frame is a keyframe, and it may go");
+        f.sent();
+        f.encoded(true, 1000);
+        assert!(!f.wants_key());
+        // A phone whose decoder failed asks later: the keyframe goes at once, whatever is in flight.
+        for _ in 0..3 {
+            f.sent();
+        }
+        f.ask_key(5000);
+        assert!(f.wants_key() && f.inflight() == 0);
+        // An acknowledgement is never for a frame that was not sent.
+        let mut g = Flight::default();
+        g.sent();
+        g.acked(99);
+        assert_eq!(g.inflight(), 0);
+        g.sent();
+        g.restart();
+        assert!(g.wants_key() && g.inflight() == 0);
     }
 
     #[test]

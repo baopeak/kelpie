@@ -48,9 +48,10 @@ fn integrity(process: HANDLE) -> Option<u32> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(process, TOKEN_QUERY, &mut token).ok()?;
-        let mut buf = [0u8; 64];
+        // Aligned for `TOKEN_MANDATORY_LABEL` (pointer-sized fields): a byte buffer would not be.
+        let mut buf = [0u64; 8];
         let mut len = 0u32;
-        let got = GetTokenInformation(token, TokenIntegrityLevel, Some(buf.as_mut_ptr() as *mut _), buf.len() as u32, &mut len);
+        let got = GetTokenInformation(token, TokenIntegrityLevel, Some(buf.as_mut_ptr() as *mut _), std::mem::size_of_val(&buf) as u32, &mut len);
         let _ = CloseHandle(token);
         got.ok()?;
         let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);

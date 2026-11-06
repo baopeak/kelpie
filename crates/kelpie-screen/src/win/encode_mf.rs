@@ -20,8 +20,10 @@ use super::d3d::Device;
 
 const MF_VERSION_LITE: u32 = 0x0002_0070;
 
+/// Media Foundation, once for the helper's life (the process ending releases it).
 pub fn startup() -> Result<()> {
-    unsafe { MFStartup(MF_VERSION_LITE, MFSTARTUP_LITE) }
+    static STARTED: std::sync::OnceLock<std::result::Result<(), windows::core::HRESULT>> = std::sync::OnceLock::new();
+    STARTED.get_or_init(|| unsafe { MFStartup(MF_VERSION_LITE, MFSTARTUP_LITE) }.map_err(|e| e.code())).map_err(windows::core::Error::from)
 }
 
 pub struct Encoded {
@@ -43,6 +45,8 @@ pub struct Encoder {
     provides_samples: bool,
     out_size: u32,
     staging: Option<ID3D11Texture2D>,
+    /// Output the hardware encoder finished while it was being fed: `poll` returns it, never drops it.
+    pending: Vec<Encoded>,
     pub hardware: bool,
     pub name: String,
     pub w: u32,
@@ -111,7 +115,7 @@ impl Encoder {
     /// The hardware encoder if `hardware` and one works, else the software one.
     pub fn open(d: &Device, w: u32, h: u32, fps: u32, kbps: u32, hardware: bool) -> Result<Encoder> {
         let luid = unsafe { d.adapter.GetDesc1() }.ok().map(|desc| (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart));
-        let mut last = windows::core::Error::empty();
+        let mut last = windows::core::Error::new(windows::Win32::Foundation::E_FAIL, if hardware { "no hardware H.264 encoder works here" } else { "no software H.264 encoder works here" });
         for a in candidates(hardware, luid)? {
             match Encoder::with(d, a, w, h, fps, kbps, hardware) {
                 Ok(e) => return Ok(e),
@@ -157,6 +161,7 @@ impl Encoder {
             provides_samples: false,
             out_size: 0,
             staging: None,
+            pending: Vec::new(),
             hardware,
             name,
             w,
@@ -218,7 +223,10 @@ impl Encoder {
     /// Feeds one NV12 picture. False when the encoder has no room for it now (the frame is dropped and counted).
     pub fn encode(&mut self, d: &Device, nv12: &ID3D11Texture2D, time: i64, key: bool) -> Result<bool> {
         if self.hardware {
-            self.pump(&mut Vec::new())?;
+            let mut done = std::mem::take(&mut self.pending);
+            let pumped = self.pump(&mut done);
+            self.pending = done;
+            pumped?;
             if self.need_input == 0 {
                 return Ok(false);
             }
@@ -274,25 +282,29 @@ impl Encoder {
             d.ctx.CopyResource(staging, nv12);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             d.ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-            let buffer = MFCreateMemoryBuffer(len as u32)?;
-            let mut dst: *mut u8 = std::ptr::null_mut();
-            buffer.Lock(&mut dst, None, None)?;
-            let pitch = mapped.RowPitch as usize;
-            let src = mapped.pData as *const u8;
-            // Y: h rows; UV: h/2 rows, each w bytes, right below the Y plane in the mapping.
-            for row in 0..h + h / 2 {
-                std::ptr::copy_nonoverlapping(src.add(row * pitch), dst.add(row * w), w);
-            }
-            buffer.Unlock()?;
-            buffer.SetCurrentLength(len as u32)?;
+            // Whatever happens below, the staging texture is unmapped again.
+            let copied = (|| -> Result<IMFMediaBuffer> {
+                let buffer = MFCreateMemoryBuffer(len as u32)?;
+                let mut dst: *mut u8 = std::ptr::null_mut();
+                buffer.Lock(&mut dst, None, None)?;
+                let pitch = mapped.RowPitch as usize;
+                let src = mapped.pData as *const u8;
+                // Y: h rows; UV: h/2 rows, each w bytes, right below the Y plane in the mapping.
+                for row in 0..h + h / 2 {
+                    std::ptr::copy_nonoverlapping(src.add(row * pitch), dst.add(row * w), w);
+                }
+                buffer.Unlock()?;
+                buffer.SetCurrentLength(len as u32)?;
+                Ok(buffer)
+            })();
             d.ctx.Unmap(staging, 0);
-            Ok(buffer)
+            copied
         }
     }
 
     /// What the encoder has finished.
     pub fn poll(&mut self) -> Result<Vec<Encoded>> {
-        let mut out = Vec::new();
+        let mut out = std::mem::take(&mut self.pending);
         if self.hardware {
             self.pump(&mut out)?;
         } else {

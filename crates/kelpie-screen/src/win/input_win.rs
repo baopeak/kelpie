@@ -1,6 +1,12 @@
-//! The phone's input as `SendInput`: absolute mouse positions over the virtual desktop, buttons, the wheel, keys and Unicode text. A window
-//! target is brought to the front before its first click, and a click that would land on another window (one over it) is dropped and
-//! reported, never sent to whatever is there. `SendInput` reports fewer events than given when UIPI dropped them: that is said too.
+//! The phone's input as `SendInput`: absolute mouse positions over the virtual desktop, buttons, the wheel, keys and Unicode text.
+//!
+//! For a window target, nothing goes anywhere but that window (or a menu or dialog of its own process):
+//! - a press that would land on another window over it is dropped and reported (`Covered`);
+//! - keys and text go only while the target is the foreground window. If it is not, it is brought to the front once; if it still is not, they are
+//!   refused (`NotFront`) and the phone is told, so a password never goes into whatever window took the focus meanwhile.
+//!
+//! `SendInput` does not reduce its count when UIPI drops input into an elevated window (Microsoft documents this), so `Blocked` is rare: the
+//! `elevated` state (`states_win`) is the real signal.
 
 use serde_json::Value;
 use windows::Win32::Foundation::{HWND, POINT};
@@ -10,9 +16,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
     MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
-use windows::Win32::UI::WindowsAndMessaging::{BringWindowToTop, GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT, SW_RESTORE};
+use windows::Win32::UI::WindowsAndMessaging::{BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, SW_RESTORE};
 
-use super::targets_win::{minimized, window_rect};
+use super::targets_win::{minimized, process_of, window_rect};
 use crate::geom::{self, Rect};
 use crate::input::{key_events, text_events, KeyEvent};
 use crate::states::InputPolicy;
@@ -36,6 +42,8 @@ pub enum Outcome {
     Blocked,
     /// A click on a window target that another window covers there.
     Covered,
+    /// Keys or text for a window target that is not in front, and could not be brought there.
+    NotFront,
     /// The state allows none of it (locked, secure desktop, closed).
     Refused,
 }
@@ -87,12 +95,29 @@ fn bring_front(h: HWND) {
     }
 }
 
-/// Whether the screen point is on the window itself (or a child of it), not on one over it.
-fn lands_on(h: HWND, x: i32, y: i32) -> bool {
-    unsafe {
-        let at = WindowFromPoint(POINT { x, y });
-        !at.is_invalid() && GetAncestor(at, GA_ROOT) == h
+/// Whether a window belongs to the target: the target itself, or a menu, a dropdown or a dialog of its process (which are top-level windows
+/// of their own).
+fn of_target(h: HWND, w: HWND) -> bool {
+    !w.is_invalid() && (w == h || process_of(w) == process_of(h))
+}
+
+/// Whether the target (or a window of its own) has the keyboard focus.
+fn in_front(h: HWND) -> bool {
+    of_target(h, unsafe { GetForegroundWindow() })
+}
+
+/// The target in front, brought there once if it is not: false when it still is not.
+fn front(h: HWND) -> bool {
+    if in_front(h) && !minimized(h) {
+        return true;
     }
+    bring_front(h);
+    in_front(h) && !minimized(h)
+}
+
+/// Whether the screen point is on the target (or a window of its own), not on another window over it.
+fn lands_on(h: HWND, x: i32, y: i32) -> bool {
+    of_target(h, unsafe { WindowFromPoint(POINT { x, y }) })
 }
 
 fn at(op: &Value) -> (f64, f64) {
@@ -107,8 +132,8 @@ fn buttons(b: &str) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS) {
     }
 }
 
-/// Does the checked ops (`input::checked_ops`). `fronted` remembers that the window was brought to the front for this stream.
-pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, fronted: &mut bool) -> Outcome {
+/// Does the checked ops (`input::checked_ops`). `pressed` keeps the button held by a `down` not yet released, so that the stream's end can let go.
+pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Option<&'static str>) -> Outcome {
     if !policy.mouse && !policy.keys {
         return Outcome::Refused;
     }
@@ -119,6 +144,11 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, fronted: &mut bool)
             if !policy.keys {
                 outcome = Outcome::Refused;
                 continue;
+            }
+            if let Some(h) = g.window {
+                if !front(h) {
+                    return Outcome::NotFront;
+                }
             }
             let mods: Vec<&str> = op["mods"].as_array().map(|m| m.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
             let events: Vec<INPUT> = key_events(op["key"].as_str().unwrap_or_default(), &mods).into_iter().map(key).collect();
@@ -131,12 +161,12 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, fronted: &mut bool)
             outcome = Outcome::Refused;
             continue;
         }
+        let pressing = matches!(kind, "down" | "click");
         let rect = match g.window {
             Some(h) => {
-                let pressing = matches!(kind, "down" | "click");
-                if pressing && !*fronted {
+                // A press makes sure the target is in front (a minimized one is restored), every time: the focus may have moved since.
+                if pressing && !in_front(h) {
                     bring_front(h);
-                    *fronted = true;
                 }
                 match window_rect(h) {
                     Some(r) => r,
@@ -156,11 +186,21 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, fronted: &mut bool)
         let (nx, ny) = geom::to_absolute(x, y, g.desktop);
         let abs = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
         let mut events = vec![mouse(nx, ny, 0, abs)];
-        let b = op["b"].as_str().unwrap_or("left");
+        let b = match op["b"].as_str() {
+            Some("right") => "right",
+            Some("middle") => "middle",
+            _ => "left",
+        };
         let (down, up) = buttons(b);
         match kind {
-            "down" => events.push(mouse(0, 0, 0, down)),
-            "up" => events.push(mouse(0, 0, 0, up)),
+            "down" => {
+                events.push(mouse(0, 0, 0, down));
+                *pressed = Some(b);
+            }
+            "up" => {
+                events.push(mouse(0, 0, 0, up));
+                *pressed = None;
+            }
             "click" => {
                 for _ in 0..op["n"].as_u64().unwrap_or(1).clamp(1, 2) {
                     events.push(mouse(0, 0, 0, down));
@@ -186,20 +226,32 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, fronted: &mut bool)
     outcome
 }
 
-/// Types text into whatever has the keyboard focus (the target window, brought to the front first).
-pub fn type_text(text: &str, g: &Geometry, policy: InputPolicy, fronted: &mut bool) -> Outcome {
+/// Lets go of a button a `down` left held (the stream ended, or the release was dropped as late).
+pub fn release(pressed: &mut Option<&'static str>) {
+    if let Some(b) = pressed.take() {
+        let (_, up) = buttons(b);
+        send(&[mouse(0, 0, 0, up)]);
+    }
+}
+
+/// Types text into the target, which must be the foreground window (brought there once if it is not): `NotFront` otherwise, and nothing typed.
+pub fn type_text(text: &str, g: &Geometry, policy: InputPolicy) -> Outcome {
     if !policy.keys {
         return Outcome::Refused;
     }
     if let Some(h) = g.window {
-        if !*fronted {
-            bring_front(h);
-            *fronted = true;
+        if !front(h) {
+            return Outcome::NotFront;
         }
     }
     let events: Vec<INPUT> = text_events(text).into_iter().map(key).collect();
-    // In pieces: one call per few hundred events keeps a long text from stalling the input queue.
+    // In pieces: one call per few hundred events keeps a long text from stalling the input queue. The focus is checked again between them.
     for chunk in events.chunks(200) {
+        if let Some(h) = g.window {
+            if !in_front(h) {
+                return Outcome::NotFront;
+            }
+        }
         if !send(chunk) {
             return Outcome::Blocked;
         }

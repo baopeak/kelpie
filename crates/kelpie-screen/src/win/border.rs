@@ -47,8 +47,6 @@ pub struct Border {
     hwnd: Arc<Mutex<usize>>,
     rect: Arc<Mutex<Rect>>,
     thread: Option<JoinHandle<()>>,
-    /// Whether the stop hotkey could be registered (another program may hold it).
-    pub hotkey_ok: Arc<Mutex<Option<bool>>>,
 }
 
 unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -118,12 +116,14 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
 }
 
 impl Border {
-    /// Shows the border around `rect` (screen pixels) with `label` in its badge; the hotkey, if any, sends on `on_hotkey`.
-    pub fn show(rect: Rect, label: &str, hotkey: Option<Hotkey>, on_hotkey: Sender<()>) -> Border {
+    /// Shows the border around `rect` (screen pixels) with `label` in its badge, and registers the stop hotkey, which sends on `on_hotkey`. Returns
+    /// once the window exists: an error (no window, or the hotkey held by another program) means the screen must not be shared, since the desktop
+    /// would not show it or could not stop it.
+    pub fn show(rect: Rect, label: &str, hotkey: Hotkey, on_hotkey: Sender<()>) -> Result<Border, String> {
         let hwnd = Arc::new(Mutex::new(0usize));
         let shared = Arc::new(Mutex::new(rect));
-        let hotkey_ok = Arc::new(Mutex::new(None));
-        let (h, r, ok) = (hwnd.clone(), shared.clone(), hotkey_ok.clone());
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let (h, r) = (hwnd.clone(), shared.clone());
         let label = wide(label);
         let thread = std::thread::spawn(move || unsafe {
             STATE.with(|s| *s.borrow_mut() = Some(State { label, rect: r.clone(), hotkey: Some(on_hotkey) }));
@@ -146,24 +146,35 @@ impl Border {
                 Some(instance.into()),
                 None,
             ) else {
+                let _ = ready_tx.send(Err("the sharing border could not be shown".into()));
                 return;
             };
             *h.lock().unwrap() = win.0 as usize;
             let _ = SetLayeredWindowAttributes(win, KEY, 255, LWA_COLORKEY);
             let _ = SetWindowDisplayAffinity(win, WDA_EXCLUDEFROMCAPTURE);
             let _ = ShowWindow(win, SW_SHOWNOACTIVATE);
-            if let Some(k) = hotkey {
-                *ok.lock().unwrap() = Some(RegisterHotKey(Some(win), 1, HOT_KEY_MODIFIERS(k.mods) | MOD_NOREPEAT, u32::from(k.vk)).is_ok());
+            if RegisterHotKey(Some(win), 1, HOT_KEY_MODIFIERS(hotkey.mods) | MOD_NOREPEAT, u32::from(hotkey.vk)).is_err() {
+                let _ = DestroyWindow(win);
+                let _ = ready_tx.send(Err("another program holds the stop hotkey: pick another in Settings → Mobile".into()));
+                return;
             }
+            let _ = ready_tx.send(Ok(()));
             let mut msg = MSG::default();
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            // `GetMessageW` is -1 on an error, which is not a message: the loop ends then too.
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         });
-        Border { hwnd, rect: shared, thread: Some(thread), hotkey_ok }
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(())) => Ok(Border { hwnd, rect: shared, thread: Some(thread) }),
+            Ok(Err(e)) => {
+                let _ = thread.join();
+                Err(e)
+            }
+            Err(_) => Err("the sharing border did not appear".into()),
+        }
     }
-
     fn post(&self, msg: u32) {
         let h = *self.hwnd.lock().unwrap();
         if h != 0 {
