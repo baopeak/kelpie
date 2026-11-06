@@ -751,8 +751,13 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
   open it is what the phone sees. Closing it goes back to the pane; closing the pane closes its popups and ends its takeover. Any other new window still opens in the
   pane (owner decision, 2026-11-05).
 - **What WebView2 does, as measured (2026-11-06, Windows 10)**: a pane hidden behind another tab, and a popup window behind the main one, paint no
-  screencast frames. So while a pane is held the window brings its tab back to the front (`keepInFront`), and a stream silent for 1 s is captured
-  with `Page.captureScreenshot` at the step's quality and width every 500 ms until frames come again (`fallback`, `meta.captured`). `window.close()` in a popup
+  screencast frames. So right after the person switches away from the newest held pane, the window brings its tab back once (`keepInFront`,
+  `paneToBringBack`: one hold only, once per hold, never several against one another), and a stream silent for 1 s is captured with
+  `Page.captureScreenshot` at the step's quality and width (`fallback`, `meta.captured`): at the ladder's rate and no faster than twice a second, every 2 s
+  on a still page nobody touches, never while paused (the daemon pauses the app while the phone's link is down too), and never the same picture twice. The
+  phone acknowledges at once a frame identical to the one shown, and an acknowledgement while paused writes off what was counted as on its way, so a still
+  page cannot lock the stream. A start that finishes after the daemon gave up stops its screencast and is refused, and Stop on the desktop always takes the
+  banner down. `window.close()` in a popup
   makes wry destroy only its page view; the app closes the window with it, so the group goes back to the pane. `Create` inside the new-window handler works and
   `window.opener` holds. A popup's DevTools state starts over when it takes the opener's request, so its screencast starts again when its page has loaded.
   `Page.startScreencast` needs no `Page.enable`.

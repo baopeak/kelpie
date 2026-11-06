@@ -65,3 +65,19 @@ export function findPane(label: string, projects: Project[], workspace: (id: str
 export function offersControl(d: { kind: "app" | "pwa"; permission: string; may_control?: boolean }, api: number): boolean {
   return d.kind === "app" || d.permission === "control" || (api >= TAKEOVER_API && d.may_control === true);
 }
+
+/** A held pane as the window sees it: when its takeover started, and whether its tab is in front now. */
+export interface HeldPane {
+  paneId: string;
+  startedAt: number;
+  inFront: boolean;
+}
+
+/** Which held pane to bring back to the front now, if any: a hidden pane sends the phone nothing new from the screencast (captures stand in, less
+ *  often). Only the most recently started hold is ever brought forward, so that several holds never take the window from one another, and only
+ *  once per hold, right after the person switched away from it (`wasInFront`): a second switch away stays where the person put it. */
+export function paneToBringBack(holds: HeldPane[], wasInFront: Readonly<Record<string, boolean>>, broughtBack: ReadonlySet<string>): string | null {
+  const latest = holds.reduce<HeldPane | null>((a, h) => (!a || h.startedAt > a.startedAt ? h : a), null);
+  if (!latest || latest.inFront || broughtBack.has(latest.paneId) || wasInFront[latest.paneId] !== true) return null;
+  return latest.paneId;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findPane, hostOf, listPanes, offersControl } from "./takeover-panes";
+import { findPane, hostOf, listPanes, offersControl, paneToBringBack, type HeldPane } from "./takeover-panes";
 import { TAKEOVER_API } from "./attention";
 import type { LayoutNode, PaneKind, Project, Workspace } from "./types";
 
@@ -49,5 +49,45 @@ describe("who Settings offers control to", () => {
 
   it("keeps the choice for a device that has control, so that it can be lowered", () => {
     expect(offersControl({ kind: "pwa", permission: "control", may_control: false }, TAKEOVER_API)).toBe(true);
+  });
+});
+
+describe("keeping a held pane in front", () => {
+  /** Runs the window's rule over a sequence of what is in front, as its effect does: returns the panes it brought back, in order. */
+  function run(steps: HeldPane[][]): string[] {
+    let was: Record<string, boolean> = {};
+    const brought = new Set<string>();
+    const out: string[] = [];
+    for (const holds of steps) {
+      // What the window does after bringing a pane back: that pane is in front on the next run.
+      const shown = holds.map((h) => (out.length && out[out.length - 1] === h.paneId && brought.has(h.paneId) ? { ...h, inFront: true } : h));
+      const back = paneToBringBack(shown, was, brought);
+      was = Object.fromEntries(shown.map((h) => [h.paneId, h.inFront]));
+      if (back) {
+        brought.add(back);
+        out.push(back);
+      }
+    }
+    return out;
+  }
+
+  it("brings a single held pane back once, right after the person switched away, and then lets them", () => {
+    const inFront = [{ paneId: "a", startedAt: 1, inFront: true }];
+    const away = [{ paneId: "a", startedAt: 1, inFront: false }];
+    expect(run([inFront, away])).toEqual(["a"]);
+    expect(run([inFront, away, inFront, away, away, away]), "a second switch away stays").toEqual(["a"]);
+  });
+
+  it("does not bring a pane forward that was never in front since it was held", () => {
+    expect(paneToBringBack([{ paneId: "a", startedAt: 1, inFront: false }], {}, new Set())).toBeNull();
+  });
+
+  it("with two holds in different tabs brings only the newest forward, so the window never flips between them", () => {
+    // A in front and B behind, then the person goes to B, then back to A, many times: no switch is ever made for the older hold.
+    const step = (aFront: boolean): HeldPane[] => [{ paneId: "a", startedAt: 1, inFront: aFront }, { paneId: "b", startedAt: 2, inFront: !aFront }];
+    const steps = Array.from({ length: 50 }, (_, i) => step(i % 2 === 0));
+    const brought = run(steps);
+    expect(brought.every((p) => p === "b")).toBe(true);
+    expect(brought.length).toBeLessThanOrEqual(1);
   });
 });

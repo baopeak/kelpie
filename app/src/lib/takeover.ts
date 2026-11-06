@@ -8,12 +8,14 @@ import { onEvent } from "./ipc";
 import { browserState } from "./browser";
 import { store } from "./store";
 import { t } from "./i18n";
-import { browserLabelOf, findPane, listPanes } from "./takeover-panes";
+import { browserLabelOf, findPane, listPanes, paneToBringBack, type HeldPane } from "./takeover-panes";
 
 /** A pane a phone holds now, by pane id: the daemon's takeover id and the device's name. */
 export interface Held {
   tk: string;
   device: string;
+  /** When it started: of several holds only the newest is brought back to the front. */
+  startedAt: number;
 }
 
 export const [held, setHeld] = createRoot(() => createSignal<Readonly<Record<string, Held>>>({}));
@@ -52,12 +54,12 @@ async function onRequest(r: ProviderRequest) {
   const p = r.params as { tk: string; pane: string; device: string };
   const at = findPane(p.pane, projects, store.workspace);
   if (!at) return refuse(r.preq, t("That pane was closed on the computer."));
-  // The pane is brought to the front: a hidden page may send no frames. Nothing keeps it there if the person switches away.
+  // The pane is brought to the front: a hidden page sends no screencast frames (`keepInFront` brings it back once more if the person switches away).
   store.switchProject(at.projectId);
   store.focusPane(at.projectId, at.tabId, at.paneId);
   try {
     const started = await startWhenOpen(p.tk, p.pane, p.device, r.params);
-    setHeld((h) => ({ ...h, [at.paneId]: { tk: p.tk, device: p.device } }));
+    setHeld((h) => ({ ...h, [at.paneId]: { tk: p.tk, device: p.device, startedAt: Date.now() } }));
     store.notify(t("{device} took over a browser pane", { device: p.device }));
     return answer(r.preq, { title: browserState[at.paneId]?.title || started.host, host: started.host });
   } catch (e) {
@@ -65,9 +67,10 @@ async function onRequest(r: ProviderRequest) {
   }
 }
 
-/** The person pressed Stop on the computer. */
+/** The person pressed Stop on the computer. The banner goes whatever Rust answers: a takeover it no longer knows has nothing left to stop. */
 export async function stopTakeover(tk: string) {
   await invoke("browser_takeover_stop", { tk }).catch(() => {});
+  ended({ tk, reason: "desktop" });
 }
 
 function ended(e: { tk: string; reason: string }) {
@@ -82,25 +85,34 @@ function ended(e: { tk: string; reason: string }) {
   if (e.reason !== "desktop") store.notify(t("{device} no longer controls the browser pane", { device: x.device }));
 }
 
-/** A pane hidden behind another tab or project sends no frames (seen on WebView2): while a phone holds it, its tab is brought back to the front. */
+/** A pane hidden behind another tab or project sends no screencast frames (seen on WebView2; the app captures it instead, less often). Right after the
+ *  person switches away from the newest held pane its tab is brought back, once per hold, with one toast; a second switch away stays. */
 function keepInFront() {
+  let wasInFront: Record<string, boolean> = {};
+  const broughtBack = new Set<string>();
   createRoot(() =>
     createEffect(() => {
       const active = store.state.activeProject;
-      for (const paneId of Object.keys(held())) {
+      const holds: (HeldPane & { at: NonNullable<ReturnType<typeof findPane>> })[] = [];
+      for (const [paneId, h] of Object.entries(held())) {
         const at = findPane(browserLabelOf(paneId), store.state.projects, store.workspace);
-        if (!at || (active === at.projectId && store.workspace(at.projectId).activeTab === at.tabId)) continue;
-        queueMicrotask(() => {
-          store.switchProject(at.projectId);
-          store.focusPane(at.projectId, at.tabId, at.paneId);
-          store.notify(t("A phone controls this browser pane, so it stays in front until the takeover stops."));
-        });
-        return;
+        if (at) holds.push({ paneId, startedAt: h.startedAt, inFront: active === at.projectId && store.workspace(at.projectId).activeTab === at.tabId, at });
       }
+      for (const id of broughtBack) if (!held()[id]) broughtBack.delete(id);
+      const back = paneToBringBack(holds, wasInFront, broughtBack);
+      wasInFront = Object.fromEntries(holds.map((h) => [h.paneId, h.inFront]));
+      if (!back) return;
+      broughtBack.add(back);
+      const { at } = holds.find((h) => h.paneId === back)!;
+      // After this turn, not inside it: the switch re-runs this effect, which then finds the pane in front.
+      setTimeout(() => {
+        store.switchProject(at.projectId);
+        store.focusPane(at.projectId, at.tabId, at.paneId);
+        store.notify(t("A phone controls this browser pane, so it was brought back to the front once. Switch away again and the phone sees it less often."));
+      }, 0);
     }),
   );
 }
-
 let started = false;
 /** Listens for the daemon's requests (once). */
 export function initTakeover() {
