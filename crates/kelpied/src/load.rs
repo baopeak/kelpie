@@ -353,6 +353,14 @@ impl Load {
         }
     }
 
+    /// Free memory as the last second measured it (percent); none while the test hook pins the load, which stands for everything measured.
+    pub fn memory_free(&self) -> Option<f64> {
+        if forced().is_some() {
+            return None;
+        }
+        self.last.lock().reading.memory_free
+    }
+
     /// What the last second measured, for the `mobile.load` call.
     pub fn report(&self) -> Value {
         let (status, sample) = (self.status(), self.last.lock().clone());

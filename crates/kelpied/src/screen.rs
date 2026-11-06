@@ -492,7 +492,7 @@ impl Broker {
     async fn start(&self, d: &Arc<Daemon>, phone: &Phone<'_>, req: &Value) -> Result<Value, Refused> {
         let target = req["target"].as_str().filter(|t| kelpie_screen::targets::TargetId::parse(t).is_some()).ok_or_else(|| refused("bad_request", "missing target"))?.to_string();
         let level = d.mobile.load.level();
-        let free = d.mobile.load.report()["memory_free"].as_f64();
+        let free = d.mobile.load.memory_free();
         if level >= Level::L2 || free.is_some_and(|f| f < MIN_FREE_MEMORY) {
             return Err(refused("host_busy", "The computer is too busy to show its screen now. Try again in a moment."));
         }
