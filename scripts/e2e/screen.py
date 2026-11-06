@@ -19,7 +19,8 @@ The phone here is emulated: it gets the binary media messages and acknowledges e
 2. Two phones paired on the Tailscale origin with passkeys, unlocked, are given `control`; a phone that may only read and one that may type are
    refused the screen.
 3. The phone lists the test window, sees it (a keyframe with SPS and PPS first, numbered frames after), and the desktop shows who sees it.
-4. A click on the window's button, in the picture's pixels, reaches the window; a click with a stale clock does not; text goes into its field.
+4. A click on the window's button, in the picture's pixels, reaches the window; a click with a stale clock does not; text goes into its field;
+   with another window of the script's in front, text goes to the shared window or is refused, never into the other one.
 5. Stop with the hotkey, Stop on the phone and Stop on the desktop each end it; a revoke ends it within a second, and input after it does nothing;
    the phone locking (leaving the app) ends it within a second too.
 6. With the app closed, the phone is told to open Kelpie on the computer.
@@ -75,6 +76,7 @@ FQDN = ps.FAKE_TAILNET_NAME
 ORIGIN = f"{FQDN}:8443"
 TITLE = "Kelpie screen test " + secrets.token_hex(3)
 TYPED = "typed-" + secrets.token_hex(6)
+TYPED2 = "again-" + secrets.token_hex(6)
 EVENTS = os.path.join(WORK, "window-events.txt")
 
 results = []
@@ -128,6 +130,23 @@ button.place(x=40, y=40, width=200, height=80)
 field = tk.Entry(root)
 field.place(x=40, y=160, width=300, height=40)
 field.bind("<KeyRelease>", lambda e: note("field:" + field.get()))
+# A second window of another title that can take the focus, as a chat window would: what the phone types must never land in it.
+decoy = tk.Toplevel(root)
+decoy.title("Decoy " + title)
+decoy.geometry("300x120+760+160")
+decoy_field = tk.Entry(decoy)
+decoy_field.place(x=10, y=10, width=280, height=40)
+decoy_field.bind("<KeyRelease>", lambda e: note("decoy:" + decoy_field.get()))
+decoy.bind("<FocusIn>", lambda e: note("decoy-focused"))
+import os
+def poll():
+    if os.path.exists(events + ".raise"):
+        os.remove(events + ".raise")
+        decoy.lift()
+        decoy.focus_force()
+        decoy_field.focus_set()
+    root.after(100, poll)
+root.after(100, poll)
 def where():
     root.update_idletasks()
     note("button:%d,%d,%d,%d" % (button.winfo_rootx(), button.winfo_rooty(), button.winfo_width(), button.winfo_height()))
@@ -356,6 +375,16 @@ async def scenario(run, d):
     typed = await phone.ask(type="sc_text", sc=phone.sc, text=TYPED, st=now_ms())
     check("text goes with its own answer", (typed or {}).get("result") == "sent", typed and typed.get("type"))
     check("…and lands in the window's field", until(lambda: f"field:{TYPED}" in events(), 5))
+    # Another window takes the focus (a chat, a toast): typed text goes to the shared window, brought to the front, or is refused, never elsewhere.
+    with open(EVENTS + ".raise", "w") as f:
+        f.write("1")
+    until(lambda: "decoy-focused" in events(), 5)
+    again = await phone.ask(type="sc_text", sc=phone.sc, text=TYPED2, st=now_ms())
+    await asyncio.sleep(0.5)
+    landed = f"field:{TYPED2}" in events()
+    refused_front = (again or {}).get("code") == "not_front"
+    check("with another window in front, text goes to the shared window or is refused", (landed and (again or {}).get("result") == "sent") or (refused_front and not landed), (again or {}).get("code") or (again or {}).get("result"))
+    check("…and never into the window that took the focus", not any(e.startswith("decoy:") and TYPED2 in e for e in events()))
     # The window changed (the button, the field): its frames followed the first, numbered in order.
     seqs = [m["seq"] for m in phone.log[mark:] if m["type"] == "sc_media" and m["kind"] == "video"]
     check("frames follow the first, numbered in order", len(seqs) >= 2 and seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs[:20])
@@ -386,7 +415,7 @@ async def scenario(run, d):
     at = time.time()
     await call("mobile.revoke", {"id": device.id})
     gone = await asyncio.to_thread(until, lambda: not w.js("return !!document.querySelector('[data-screen-shared]')"), 5, 0.05)
-    check("a revoke ends it within a second", bool(gone) and time.time() - at < 1.5, f"{time.time() - at:.2f} s")
+    check("a revoke ends it within a second", bool(gone) and time.time() - at < 1.0, f"{time.time() - at:.2f} s")
     try:
         await phone.click(cx, cy)
     except Exception:  # noqa: BLE001 - the revoked phone's connection is closed
@@ -401,7 +430,7 @@ async def scenario(run, d):
     at = time.time()
     await spare.send(type="lock_now")
     gone = await asyncio.to_thread(until, lambda: not w.js("return !!document.querySelector('[data-screen-shared]')"), 5, 0.05)
-    check("the phone locking ends the screen within a second", bool(gone) and time.time() - at < 1.5, f"{time.time() - at:.2f} s")
+    check("the phone locking ends the screen within a second", bool(gone) and time.time() - at < 1.0, f"{time.time() - at:.2f} s")
     challenge = (await spare.ask(type="lock_challenge"))["lock"]["challenge"]
     unlocked = await spare.ask(type="lock_unlock", **spare_key.get(challenge))
     check("…and it can be unlocked again", (unlocked or {}).get("result") == "ok", unlocked and unlocked.get("type"))
@@ -419,6 +448,7 @@ async def scenario(run, d):
     program = os.path.basename(sys.executable)
     check("the audit log has the screens' starts, with the program shared, and their ends", "screen_start" in entries and program in entries and "screen_stop" in entries, program)
     check("…never the window's title", TITLE not in entries)
+    check("…and nothing typed, the second text included", TYPED2 not in entries)
     check("…and nothing typed", TYPED not in entries)
     leaked = []
     for root, _, files in os.walk(DATA):
