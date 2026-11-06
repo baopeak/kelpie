@@ -18,8 +18,14 @@ sign-in page and an OAuth consent window. Nothing typed into the page is printed
    verification; a phone that may only read and one that may type are refused takeover.
 3. The phone lists the pane, takes it over and gets frames; the desktop shows the banner. It types a user name and a password into the page and taps
    Sign in: the page sees the text and a trusted click. A tap sent with a stale clock reading clicks nothing.
+   The user name field is tapped through the page's own gesture and coordinate code (app/phone/src/takeover.ts, run by Node from
+   takeover_gestures.mjs on simulated pointer events against the real frame), the password goes straight after the tap that chose its field and
+   lands there, and a pinch sends nothing.
 4. The OAuth window (`window.open` with a size) opens as a window of its own: the frames come from it, a tap on Allow reaches it with
-   `window.opener` set, the opener hears it, and once it closes the frames come from the pane again. A link with `target=_blank` still opens in the pane.
+   `window.opener` set, the opener hears it, and once it closes the frames come from the pane again, under another window id. A link with
+   `target=_blank` still opens in the pane.
+   Then through a TCP fault proxy (net_fault_proxy.py): the same phone's new connection keeps the hold; taps sent while the link is frozen for 5 s
+   click nothing once it comes back; with 1 s round trips the newest frame stays under two round trips old.
 5. Stop on the desktop ends the takeover for the phone; a second one is ended from the phone; a third is ended by revoking the phone, within a second
    or two. The password is in no file of the daemon's data folder and in no audit entry.
 """
@@ -39,6 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import net_fault_proxy as nfp  # noqa: E402
 import phone_support as ps  # noqa: E402
 
 if len(sys.argv) < 3 or os.name != "nt":
@@ -98,6 +105,8 @@ LOGIN = """<!doctype html><html><head><title>Example Sign In</title>
 <input id="user" class="x" style="top:40px" autocomplete="off"><input id="pass" class="x" type="password" style="top:100px">
 <button id="signin" class="x" style="top:160px">Sign in</button><button id="oauth" class="x" style="top:220px">Continue with Example</button>
 <a id="blank" class="x" href="/page2" target="_blank" style="top:280px">Open in a new window</a>
+<div id="spin" style="position:absolute;left:300px;top:40px;width:20px;height:20px;background:#2d7ff9;animation:spin 1s linear infinite"></div>
+<style>@keyframes spin{to{transform:rotate(360deg)}}</style>
 <script>
 const report = (q) => fetch('/report?' + new URLSearchParams(q));
 document.getElementById('signin').addEventListener('click', (e) => report({login: document.getElementById('user').value + ':' + document.getElementById('pass').value, trusted: e.isTrusted}));
@@ -177,6 +186,35 @@ def now_ms():
     return int(time.time() * 1000)
 
 
+# The phone's screen as the page lays the picture out in it (CSS pixels of a 390 × 844 phone, below its header).
+SCREEN = {"left": 0, "top": 96, "width": 390, "height": 560}
+GESTURES = os.path.join(HERE, "takeover_gestures.mjs")
+
+
+def jpeg_size(b64):
+    """Width and height of a JPEG from its start-of-frame marker."""
+    import base64
+    data = base64.b64decode(b64)
+    i = 2
+    while i + 9 < len(data):
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker, length = data[i + 1], int.from_bytes(data[i + 2:i + 4], "big")
+        if marker in (0xC0, 0xC1, 0xC2):
+            return int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big")
+        i += 2 + length
+    raise ValueError("no frame size in the JPEG")
+
+
+def phone_gestures(spec):
+    """The ops the phone page's own code (app/phone/src/takeover.ts) makes of pointer events, through Node."""
+    out = subprocess.run(["node", "--experimental-transform-types", "--no-warnings", GESTURES], input=json.dumps(spec), capture_output=True, text=True, timeout=30)
+    if out.returncode:
+        raise RuntimeError("takeover_gestures.mjs: " + out.stderr[-500:])
+    return json.loads(out.stdout)
+
+
 class TkPhone(ps.Phone):
     """A phone that acknowledges takeover frames as it gets them, and keeps its app lock's window open."""
 
@@ -193,6 +231,9 @@ class TkPhone(ps.Phone):
                     m = self.log[seen]
                     seen += 1
                     if m["type"] == "tk_frame":
+                        # Input names the window of the frame it was mapped against, as the page does.
+                        self.window = m["meta"].get("window_id", 0)
+                        self.last_frame = m
                         await self.send(type="tk_ack", tk=m["tk"], seq=m["seq"])
                 if time.time() - touched > 20:
                     touched = time.time()
@@ -201,8 +242,33 @@ class TkPhone(ps.Phone):
         except Exception:  # noqa: BLE001 - the socket closed under it
             pass
 
+    window = 0
+    last_frame = None
+
     async def tap(self, tk, x, y, st=None):
-        await self.send(type="tk_input", tk=tk, ops=[{"k": "tap", "x": x, "y": y}], st=st if st is not None else now_ms())
+        await self.send(type="tk_input", tk=tk, ops=[{"k": "tap", "x": x, "y": y}], st=st if st is not None else now_ms(), w=self.window)
+
+    async def type_text(self, tk, text):
+        return await self.ask(type="tk_text", tk=tk, text=text, st=now_ms(), w=self.window)
+
+    async def touches(self, tk, events):
+        """Runs `events` (pointer events on the phone's screen, `SCREEN`) through the page's own gesture and coordinate code, against the last frame,
+        and sends what it made. Returns the ops."""
+        frame = self.last_frame
+        natural = jpeg_size(frame["data"])
+        ops = await asyncio.to_thread(phone_gestures, {"el": SCREEN, "natural": {"w": natural[0], "h": natural[1]}, "meta": frame["meta"], "events": events})
+        if ops:
+            await self.send(type="tk_input", tk=tk, ops=ops, st=now_ms(), w=self.window)
+        return ops
+
+    def screen_point(self, x, y):
+        """Where on the phone's screen page point (x, y) is drawn in the last frame (the inverse of the page's `toPage`, for choosing where to touch)."""
+        frame = self.last_frame
+        nw, nh = jpeg_size(frame["data"])
+        scale = min(SCREEN["width"] / nw, SCREEN["height"] / nh)
+        bw, bh = nw * scale, nh * scale
+        left, top = SCREEN["left"] + (SCREEN["width"] - bw) / 2, SCREEN["top"] + (SCREEN["height"] - bh) / 2
+        return left + x / frame["meta"]["deviceWidth"] * bw, top + y / frame["meta"]["deviceHeight"] * bh
 
     async def frame(self, since, pred=lambda m: True, timeout=10):
         return await self.wait(lambda m: m["type"] == "tk_frame" and pred(m), timeout, since)
@@ -295,12 +361,23 @@ async def scenario(run, d):
     await phone.tap(tk, 150, 178, st=now_ms() - 1500)
     await asyncio.sleep(1.0)
     check("a tap that came too late clicks nothing", not reported("login", since))
-    await phone.tap(tk, 150, 58)
-    typed = await phone.ask(type="tk_text", tk=tk, text=USER, st=now_ms())
+    # Through the page's own code: a finger on the phone's screen, mapped to the page by the frame it shows.
+    ux, uy = phone.screen_point(150, 58)
+    made = await phone.touches(tk, [{"type": "down", "id": 1, "x": ux, "y": uy, "t": 0}, {"type": "up", "id": 1, "x": ux, "y": uy, "t": 80}])
+    check("a touch on the user name field is a tap there", len(made) == 1 and made[0]["k"] == "tap" and abs(made[0]["x"] - 150) < 3 and abs(made[0]["y"] - 58) < 3, made)
+    typed = await phone.type_text(tk, USER)
+    # The password straight after the tap that chose its field: it must not overtake it.
     await phone.tap(tk, 150, 118)
-    secret = await phone.ask(type="tk_text", tk=tk, text=PASSWORD, st=now_ms())
+    secret = await phone.type_text(tk, PASSWORD)
     check("text goes with its own answer", (typed or {}).get("result") == "sent" and (secret or {}).get("result") == "sent", (typed, secret and secret.get("type")))
-    await phone.tap(tk, 150, 178)
+    px, py = phone.screen_point(150, 108)
+    pinch = [{"type": "down", "id": 1, "x": px, "y": py, "t": 0}, {"type": "down", "id": 2, "x": px + 40, "y": py + 40, "t": 10}]
+    for i in range(1, 12):
+        pinch += [{"type": "move", "id": 1, "x": px - i * 4, "y": py - i * 4, "t": 400 + 40 * i}, {"type": "move", "id": 2, "x": px + 40 + i * 4, "y": py + 40 + i * 4, "t": 400 + 40 * i}]
+    pinch += [{"type": "up", "id": 2, "x": px + 90, "y": py + 90, "t": 900}, {"type": "up", "id": 1, "x": px - 50, "y": py - 50, "t": 910}]
+    check("a pinch on the phone sends nothing to the page", await phone.touches(tk, pinch) == [])
+    sx, sy = phone.screen_point(150, 178)
+    await phone.touches(tk, [{"type": "down", "id": 3, "x": sx, "y": sy, "t": 0}, {"type": "up", "id": 3, "x": sx, "y": sy, "t": 70}])
     login = await asyncio.to_thread(until, lambda: reported("login", since), 5)
     check("the page signed in with what the phone typed", bool(login) and login[-1]["login"] == f"{USER}:{PASSWORD}")
     check("…with a trusted click", bool(login) and login[-1].get("trusted") == "true", login and login[-1].get("trusted"))
@@ -319,6 +396,36 @@ async def scenario(run, d):
     check("…and the page that opened it hears it", bool(granted) and granted[-1]["granted"] == "yes", granted)
     back = await phone.frame(mark, lambda m: m["meta"].get("window") == "pane", 10)
     check("once it closes, the frames come from the pane again", back is not None)
+    check("…under another window id, so input meant for the popup cannot land on the pane", back is not None and popup is not None and back["meta"].get("window_id") != popup["meta"].get("window_id"))
+
+    # ---------- a bad network: the phone's link through a fault proxy ----------
+    proxy = nfp.FaultProxy(serve_port)
+    proxy_port = await proxy.start()
+    slow = TkPhone(f"http://{ORIGIN}/", device, origin=f"https://{ORIGIN}", resume=enrolled["resume"], **{**held, "port": proxy_port})
+    await slow.open()
+    # The older connection is told it was replaced and ends: the hold waits for this one.
+    await ps.async_wait_for(lambda: phone.closed is not None, 5)
+    await asyncio.sleep(0.3)
+    rebound = await slow.ask(type="tk_rebind", tk=tk)
+    check("the same phone's new connection keeps the hold", (rebound or {}).get("type") == "ack", rebound)
+    await phone.close()
+    phone = slow
+    check("…and gets a fresh frame", await phone.frame(0, timeout=10) is not None)
+    since = report_count()
+    proxy.blackhole(5)
+    for _ in range(3):
+        await phone.tap(tk, 150, 178)
+        await asyncio.sleep(0.5)
+    await asyncio.sleep(6)
+    check("taps sent while the link froze for 5 s click nothing once it comes back", not reported("login", since))
+    proxy.latency = 0.5
+    await asyncio.sleep(3)
+    mark = phone.mark()
+    await asyncio.sleep(4)
+    ages = [m["_w"] * 1000 - m["server_ts"] for m in phone.log[mark:] if m["type"] == "tk_frame"]
+    check("with 1 s round trips the newest frame is never more than two round trips old: nothing queues", bool(ages) and max(ages) <= 2500, ages[-5:])
+    proxy.latency = 0
+    await asyncio.sleep(1)
     await phone.tap(tk, 150, 298)
     blank = await asyncio.to_thread(until, lambda: "/page2" in (w.invoke("browser_info", {"label": label}).get("ok") or {}).get("url", ""), 8)
     check("a target=_blank link still opens in the pane", bool(blank))
