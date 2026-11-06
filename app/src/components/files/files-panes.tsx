@@ -9,7 +9,7 @@ import { store } from "../../lib/store";
 import { vault, type SshHost } from "../../lib/ssh-hosts";
 import { joinPath, type PaneEnd } from "../../lib/file-pane";
 import { initTransfers, isFinished, jobList } from "../../lib/transfers";
-import type { RemoteEntry, XferStart } from "../../lib/types";
+import type { RemoteEntry, XferRoute, XferStart } from "../../lib/types";
 import { FilePane, type DragFiles, type PaneApi } from "./file-pane";
 import { TransferQueue } from "./transfer-queue";
 import { ConflictDialog } from "./conflict-dialog";
@@ -27,6 +27,9 @@ export function FilesPanes(props: { host: SshHost; onHostKey: () => void }) {
   const [active, setActive] = createSignal<Side>("right");
   const [error, setError] = createSignal<string | null>(null);
   const [perms, setPerms] = createSignal<{ dest: string; dir: string; entries: RemoteEntry[] } | null>(null);
+  /** Host to host: Auto (direct when the first host logs in to the second by itself) or always through this computer. */
+  const [route, setRoute] = createSignal<XferRoute>("auto");
+  const hostToHost = () => ends().left !== null && ends().right !== null && store.daemonApi() >= ipc.ROUTE_API;
   const apis: Partial<Record<Side, PaneApi>> = {};
   const boxes: Partial<Record<Side, HTMLDivElement>> = {};
   const other = (s: Side): Side => (s === "left" ? "right" : "left");
@@ -46,6 +49,7 @@ export function FilesPanes(props: { host: SshHost; onHostKey: () => void }) {
       items: from.names.map((n) => joinPath(from.end, from.dir, n)),
       dst_dir: dir,
       conflict: "ask",
+      ...(from.end !== null && dst !== null && hostToHost() ? { route: route() } : {}),
     };
     try {
       await ipc.xferStart(job);
@@ -130,6 +134,13 @@ export function FilesPanes(props: { host: SshHost; onHostKey: () => void }) {
             <button class="icon-btn" data-action="copy-right" title={t("Copy the selection to the right pane (F5)")} onClick={() => copyFrom("left")}><Icon name="forward" size={14} /></button>
             <button class="icon-btn" data-action="copy-left" title={t("Copy the selection to the left pane (F5)")} onClick={() => copyFrom("right")}><Icon name="back" size={14} /></button>
             <button class="icon-btn" data-action="swap-panes" title={t("Swap the panes")} onClick={() => setEnds({ left: ends().right, right: ends().left })}><Icon name="sync" size={14} /></button>
+            <Show when={hostToHost()}>
+              <select class="select files-route" data-field="route" value={route()} onChange={(e) => setRoute(e.currentTarget.value as XferRoute)}
+                title={t("Auto copies directly when the first host can log in to the second by itself (Kelpie never lends it your keys); otherwise the data goes through this computer")}>
+                <option value="auto">{t("Copy (Auto)")}</option>
+                <option value="relay">{t("Copy through this computer")}</option>
+              </select>
+            </Show>
           </div>
           {pane("right")}
         </div>

@@ -41,7 +41,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// `xfer.control`, `xfer.answer`, `xfer.clear_finished`; the `xfer.updated` and `xfer.removed` events; `<data>/transfers.json`; `transfers` in
 /// `daemon.info` and `daemon.shutdown` waiting for them under `if_idle` / `if_no_transfers`); an
 /// older daemon has none of it, so the app's file manager asks for a restart below 27.
-pub const API_LEVEL: u32 = 27;
+/// 28: host-to-host copies choose their route (`xfer.start` `route: auto|relay`; jobs report `route_used` and `route_reason`): direct when the
+/// first host logs in to the second by itself, else through this computer. An older daemon ignores `route` and copies through this
+/// computer, so the app offers the choice only at 28.
+pub const API_LEVEL: u32 = 28;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

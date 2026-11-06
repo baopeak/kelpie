@@ -15,7 +15,7 @@ const session: EditSession = {
 };
 
 const job = (over: Partial<XferJob>): XferJob => ({
-  id: "j", kind: "copy", src: {}, dst: { dest: "prod" }, items: [], dst_dir: "/srv/app", conflict: "ask", preserve: false, mode: null, dirs_only_x: false, expect: null, state: "done",
+  id: "j", kind: "copy", src: {}, dst: { dest: "prod" }, items: [], dst_dir: "/srv/app", conflict: "ask", preserve: false, mode: null, dirs_only_x: false, expect: null, route: "auto", route_used: null, route_reason: null, state: "done",
   attempt: 0, next_s: 0, totals: { files: 1, bytes: 1, done_files: 1, done_bytes: 1, skipped: 0, failed: 0 }, speed_bps: 0, eta_s: null, current: null, questions: [], error: null,
   failures: [], walk: { folder_links: 0, broken_links: 0, unreadable_names: 0, special: 0, unlistable: 0 }, renamed: [], created: 1, updated: 1, finished: 1, ...over,
 });

@@ -91,5 +91,11 @@
   "installing now would stop them. They can be resumed afterwards.": "cài ngay sẽ dừng chúng. Có thể tiếp tục chúng sau đó.",
   "Install when they finish": "Cài khi chúng xong",
   "Install anyway": "Vẫn cài",
-  "The new session daemon takes over once they have finished; Switch now in the notice stops them (they resume afterwards)": "Dịch vụ phiên mới tiếp quản khi chúng xong; Chuyển ngay trong thông báo sẽ dừng chúng (tiếp tục được sau đó)"
+  "The new session daemon takes over once they have finished; Switch now in the notice stops them (they resume afterwards)": "Dịch vụ phiên mới tiếp quản khi chúng xong; Chuyển ngay trong thông báo sẽ dừng chúng (tiếp tục được sau đó)",
+  "direct {a} → {b}": "trực tiếp {a} → {b}",
+  "through this computer: {reason}": "qua máy này: {reason}",
+  "through this computer": "qua máy này",
+  "Auto copies directly when the first host can log in to the second by itself (Kelpie never lends it your keys); otherwise the data goes through this computer": "Tự động sao chép trực tiếp khi host thứ nhất tự đăng nhập được vào host thứ hai (Kelpie không bao giờ cho nó mượn khoá của bạn); nếu không, dữ liệu đi qua máy này",
+  "Copy (Auto)": "Sao chép (Tự động)",
+  "Copy through this computer": "Sao chép qua máy này"
 }

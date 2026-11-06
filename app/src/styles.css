@@ -1342,7 +1342,8 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 /* Files tab: two panes, a transfer queue, dialogs (components/files/). */
 .files-tab { display: flex; flex-direction: column; gap: 10px; }
 .files-panes { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; align-items: stretch; }
-.files-mid { display: flex; flex-direction: column; justify-content: center; gap: 6px; }
+.files-mid { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; }
+.files-route { max-width: 128px; font-size: 11.5px; }
 .file-pane { border: 1px solid var(--border); border-radius: 9px; padding: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0; background: var(--bg-elev); }
 .file-pane.active { border-color: var(--accent); }
 .file-pane-bar { display: flex; align-items: center; gap: 6px; min-width: 0; }

@@ -2,14 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./ipc", () => ({ onEvent: vi.fn(), xferList: vi.fn() }));
 
-import { activeCount, applyJob, chipText, directionText, etaText, heldText, jobTitle, nextQuestion, progress, removeJob, speedText, stateText, updateMayInstall } from "./transfers";
+import { activeCount, applyJob, chipText, directionText, etaText, heldText, jobTitle, nextQuestion, progress, removeJob, routeText, speedText, stateText, updateMayInstall } from "./transfers";
 import type { XferJob, XferQuestion } from "./types";
 
 const meta = { kind: "file" as const, size: 1, mtime: 1, mode: 0o644, uid: null, gid: null };
 const q = (id: number): XferQuestion => ({ id, path: `/x/${id}`, src: meta, dst: meta, identical: false, kind_clash: false, changed: false });
 
 const job = (over: Partial<XferJob> = {}): XferJob => ({
-  id: "j", kind: "copy", src: {}, dst: { dest: "prod" }, items: ["C:\\a\\report.pdf"], dst_dir: "/srv", conflict: "ask", preserve: true, mode: null, dirs_only_x: false, expect: null,
+  id: "j", kind: "copy", src: {}, dst: { dest: "prod" }, items: ["C:\\a\\report.pdf"], dst_dir: "/srv", conflict: "ask", preserve: true, mode: null, dirs_only_x: false, expect: null, route: "auto", route_used: null, route_reason: null,
   state: "running", attempt: 0, next_s: 0, totals: { files: 1, bytes: 200, done_files: 0, done_bytes: 50, skipped: 0, failed: 0 }, speed_bps: 0, eta_s: null, current: null,
   questions: [], error: null, failures: [], walk: { folder_links: 0, broken_links: 0, unreadable_names: 0, special: 0, unlistable: 0 }, renamed: [], created: 1, updated: 1, finished: null, ...over,
 });
@@ -49,6 +49,16 @@ describe("words", () => {
     expect(directionText(job({ kind: "delete", src: { dest: "prod" } }))).toBe("delete on prod");
     expect(stateText(job({ state: "reconnecting", next_s: 5, attempt: 2 }))).toBe("Connection lost: trying again in 5 s (attempt 2)");
     expect(stateText(job({ state: "done", totals: { files: 3, bytes: 3, done_files: 2, done_bytes: 3, skipped: 0, failed: 1 } }))).toBe("Done, 1 could not be copied");
+  });
+});
+
+describe("host to host", () => {
+  it("says which way a copy went and why", () => {
+    const h2h = { src: { dest: "prod" }, dst: { dest: "backup" } };
+    expect(routeText(job({ ...h2h, route_used: "direct" }), (a) => a.toUpperCase())).toBe("direct PROD → BACKUP");
+    expect(routeText(job({ ...h2h, route_used: "relay", route_reason: "the first host has no login of its own on the second host" }))).toBe("through this computer: the first host has no login of its own on the second host");
+    expect(routeText(job({ ...h2h, route_used: null }))).toBeNull();
+    expect(routeText(job({ route_used: "relay" }))).toBeNull();
   });
 });
 

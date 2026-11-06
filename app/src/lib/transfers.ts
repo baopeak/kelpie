@@ -117,6 +117,13 @@ export function directionText(j: XferJob, label: (alias: string) => string = (a)
   return `${endName(j.src.dest, label)} → ${endName(j.dst.dest, label)}`;
 }
 
+/** Host to host: `direct prod → backup`, or `through this computer: <reason>`; nothing for other copies. */
+export function routeText(j: XferJob, label: (alias: string) => string = (a) => a): string | null {
+  if (!j.src.dest || !j.dst.dest || !j.route_used) return null;
+  if (j.route_used === "direct") return t("direct {a} → {b}", { a: label(j.src.dest), b: label(j.dst.dest) });
+  return j.route_reason ? t("through this computer: {reason}", { reason: j.route_reason }) : t("through this computer");
+}
+
 /** The question shown next: the oldest waiting job's first one (one at a time, never stacked). */
 export function nextQuestion(all: Jobs = jobs()): { job: XferJob; q: XferQuestion } | null {
   const waiting = Object.values(all)

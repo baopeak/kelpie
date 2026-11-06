@@ -22,11 +22,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
-use super::copy::{copy_file, decide, Control, Copied, Decision, FileCopy, Policy, Stop};
+use super::copy::{copy_file, decide, finish_partial, recover_aside, Control, Copied, Decision, FileCopy, Policy, Stop};
 use super::journal::{self, Journal, Loaded};
 use super::local_fs::LocalFs;
 use super::names::{keep_both, partial_name, with_suffix, windows_safe};
 use super::pool::Pool;
+use super::route::{self, Direct, Target};
 use super::sftp_fs::SftpFs;
 use super::walk::{walk, Found, Links, Skipped};
 use super::{check_local_path, check_remote_path, ErrKind, FsError, FsResult, Kind as FsKind, Meta, RemoteFs};
@@ -128,6 +129,17 @@ fn yes() -> bool {
     true
 }
 
+/// How a host-to-host copy travels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Route {
+    /// Direct when the first host can log in to the second by itself, else through this computer.
+    #[default]
+    Auto,
+    /// Always through this computer.
+    Relay,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
@@ -149,6 +161,13 @@ pub struct Job {
     pub dirs_only_x: bool,
     #[serde(default)]
     pub expect: Option<Expect>,
+    /// Host to host: how it should travel, how it did (`direct` / `relay`), and why when it did not go direct.
+    #[serde(default)]
+    pub route: Route,
+    #[serde(default)]
+    pub route_used: Option<String>,
+    #[serde(default)]
+    pub route_reason: Option<String>,
     pub state: State,
     #[serde(default)]
     pub attempt: u32,
@@ -317,6 +336,8 @@ pub struct Queue {
     live: Mutex<HashMap<String, Arc<Live>>>,
     slots: Arc<Semaphore>,
     claims: Mutex<HashSet<String>>,
+    /// Whether a first host can copy to a second by itself (cached).
+    probes: route::Probes,
     /// Off when the journal exists but could not be read: nothing is written over it.
     can_save: AtomicBool,
     notice: Mutex<Option<String>>,
@@ -390,6 +411,7 @@ impl Queue {
             live: Mutex::new(HashMap::new()),
             slots: Arc::new(Semaphore::new(MAX_RUNNING)),
             claims: Mutex::new(HashSet::new()),
+            probes: route::Probes::default(),
             can_save: AtomicBool::new(can_save),
             notice: Mutex::new(notice),
             dirty: AtomicBool::new(false),
@@ -620,6 +642,9 @@ impl Queue {
             mode,
             dirs_only_x: p.get("dirs_only_x").and_then(Value::as_bool).unwrap_or(false),
             expect,
+            route: serde_json::from_value(p.get("route").cloned().unwrap_or(json!("auto"))).map_err(|_| anyhow!("unknown route"))?,
+            route_used: None,
+            route_reason: None,
             state: State::Queued,
             attempt: 0,
             next_s: 0,
@@ -961,6 +986,7 @@ impl Queue {
             Err(e) => return Err(FsError::new(e.kind, format!("the target folder {}: {e}", job.dst_dir))),
         }
         let free = dst.free_space(&job.dst_dir).await.ok().flatten();
+        let direct = self.route_for(job).await;
         let (tx, mut rx) = mpsc::channel::<Found>(256);
         let walker = {
             let (src, items, live) = (src.clone(), job.items.clone(), live.clone());
@@ -1036,9 +1062,9 @@ impl Queue {
                         }
                         let permits = if meta.size >= BIG_FILE { FILES_AT_ONCE } else { 1 };
                         let Ok(permit) = files.clone().acquire_many_owned(permits).await else { break };
-                        let (me, live, src, dst, job, name) = (self.clone(), live.clone(), src.clone(), dst.clone(), job.clone(), rel.last().unwrap().clone());
+                        let (me, live, src, dst, job, name, direct) = (self.clone(), live.clone(), src.clone(), dst.clone(), job.clone(), rel.last().unwrap().clone(), direct.clone());
                         tasks.spawn(async move {
-                            let r = me.copy_one(&job, &live, src.as_ref(), dst.as_ref(), &path, &meta, &dir, &name, resumed).await;
+                            let r = me.copy_one(&job, &live, src.as_ref(), dst.as_ref(), &path, &meta, &dir, &name, resumed, direct.as_deref()).await;
                             drop(permit);
                             r
                         });
@@ -1207,7 +1233,7 @@ impl Queue {
 
     /// One file of a copy job. Errors that are not a lost connection are counted on the job, not returned.
     #[allow(clippy::too_many_arguments)]
-    async fn copy_one(&self, job: &Job, live: &Arc<Live>, src: &dyn RemoteFs, dst: &dyn RemoteFs, path: &str, meta: &Meta, dir: &str, name: &str, resumed: bool) -> FsResult<()> {
+    async fn copy_one(&self, job: &Job, live: &Arc<Live>, src: &dyn RemoteFs, dst: &dyn RemoteFs, path: &str, meta: &Meta, dir: &str, name: &str, resumed: bool, direct: Option<&Target>) -> FsResult<()> {
         let mut name = self.mapped_name(job, dst, name);
         let tag = tag(&job.id);
         self.count(&job.id, |j| j.current = Some(path.to_string()));
@@ -1312,7 +1338,12 @@ impl Queue {
                         });
                     }
                     let fc = FileCopy { src, src_path: path, dst, dst_dir: dir, dst_name: &name, tag: &tag, approved, resume: seen.is_some(), source_seen: seen, preserve: job.preserve };
-                    match copy_file(&fc, &live.ctl).await {
+                    // Direct when the route allows and the names fit an sftp batch line; else through this computer.
+                    let result = match (direct, &job.src.dest) {
+                        (Some(t), Some(a)) if route::reput_line(path, &partial).is_some() => self.direct_one(&fc, live, a, t, &partial).await,
+                        _ => copy_file(&fc, &live.ctl).await,
+                    };
+                    match result {
                         Ok(Copied::Done { warning, resumed_at, .. }) => {
                             live.not_needed.fetch_add(resumed_at, Ordering::Relaxed);
                             live.written.lock().insert(key);
@@ -1354,6 +1385,74 @@ impl Queue {
                 }
             }
         }
+    }
+
+    /// How a host-to-host copy travels this attempt (direct: B as A reaches it), recorded on the job with the reason.
+    async fn route_for(&self, job: &Job) -> Option<Arc<Target>> {
+        let (Some(a), Some(b)) = (&job.src.dest, &job.dst.dest) else { return None };
+        // Tests: in-memory hosts have no ssh to probe with.
+        #[cfg(test)]
+        let route = if self.test_ends.lock().contains_key(a) { Route::Relay } else { job.route };
+        #[cfg(not(test))]
+        let route = job.route;
+        let (used, reason, target) = match route {
+            Route::Relay => ("relay", Some("you chose to copy through this computer".to_string()), None),
+            Route::Auto => match self.probes.direct(self.pool.exe(), a, b).await {
+                Ok(t) => ("direct", None, Some(Arc::new(t))),
+                Err(reason) => ("relay", Some(reason), None),
+            },
+        };
+        tracing::info!(job = %job.id, route = used, "host to host");
+        self.update(&job.id, |j| {
+            j.route_used = Some(used.to_string());
+            j.route_reason = reason;
+        });
+        target
+    }
+
+    /// One file copied by host A itself (`sftp -b` on A, `reput` into B's partial), with progress read from the
+    /// partial's size through Kelpie's own session to B; then put in place as any copy is.
+    async fn direct_one(&self, fc: &FileCopy<'_>, live: &Arc<Live>, a: &str, b: &Target, partial: &str) -> FsResult<Copied> {
+        let src = fc.src.stat(fc.src_path).await?;
+        recover_aside(fc.dst, fc.dst_dir, fc.dst_name, fc.tag, &src).await?;
+        if !fc.resume || fc.source_seen.is_some_and(|s| s != (src.size, src.mtime)) {
+            // A fresh partial: made new and owner-only here, so `reput` writes into it from 0.
+            fc.dst.open_write(partial, 0, true).await?.finish(false).await?;
+        }
+        let mut last = fc.dst.lstat(partial).await.map(|m| m.size).unwrap_or(0);
+        let offset = last;
+        live.ctl.bytes.fetch_add(last, Ordering::Relaxed);
+        let line = route::reput_line(fc.src_path, partial).ok_or_else(|| FsError::invalid("the name does not fit a batch line"))?;
+        let exe = self.pool.exe();
+        let mut run = Direct::start(exe, a, b, &line).await?;
+        let finished = loop {
+            tokio::select! {
+                r = run.wait() => break r,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    if let Ok(m) = fc.dst.lstat(partial).await {
+                        let d = m.size.saturating_sub(last);
+                        live.ctl.bytes.fetch_add(d, Ordering::Relaxed);
+                        live.ctl.written.fetch_add(d, Ordering::Relaxed);
+                        last = last.max(m.size);
+                    }
+                }
+                _ = live.ctl.wake.notified() => {}
+            }
+            if let Some(stop) = live.ctl.stop() {
+                run.stop(exe, a).await;
+                if stop == Stop::Cancel {
+                    let _ = fc.dst.remove_file(partial).await;
+                }
+                return Ok(Copied::Stopped(stop));
+            }
+        };
+        finished?;
+        if let Ok(m) = fc.dst.lstat(partial).await {
+            let d = m.size.saturating_sub(last);
+            live.ctl.bytes.fetch_add(d, Ordering::Relaxed);
+            live.ctl.written.fetch_add(d, Ordering::Relaxed);
+        }
+        finish_partial(fc, &src, partial, offset).await
     }
 
     async fn drop_partial(&self, job: &Job, dst: &dyn RemoteFs, partial: &str) {
@@ -1833,6 +1932,19 @@ mod tests {
         assert_eq!(j.totals.failed, 1, "{j:?}");
         assert!(j.failures[0].error.contains("keeps changing"));
         assert_eq!(r.b.read("/dst/log.txt").unwrap(), b"live");
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_host_to_host_copy_says_how_it_travelled() {
+        let r = rig("route");
+        r.a.put("/s/x", b"x", 1);
+        r.b.mkdir_all("/dst");
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s/x"], "dst_dir": "/dst", "route": "relay"})).await;
+        let j = until(&r, &id, |j| j.state.finished()).await;
+        assert_eq!((j.route, j.route_used.as_deref(), j.route_reason.as_deref()), (Route::Relay, Some("relay"), Some("you chose to copy through this computer")));
+        assert_eq!(r.b.read("/dst/x").unwrap(), b"x");
+        assert!(r.q.rpc("xfer.start", &json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s/x"], "dst_dir": "/dst", "route": "teleport"})).await.is_err());
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 

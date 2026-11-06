@@ -233,6 +233,11 @@ impl Pool {
         Ok(c)
     }
 
+    /// This daemon (ssh's askpass).
+    pub fn exe(&self) -> &std::path::Path {
+        &self.exe
+    }
+
     /// A session of its own for a transfer job; it closes when the job drops it.
     pub async fn transfer(&self, dest: &str) -> FsResult<Arc<Conn>> {
         Conn::open(dest, &self.exe).await

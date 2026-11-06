@@ -1631,7 +1631,17 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
   - `xfer.start` → `{id}`, `xfer.list`, `xfer.control {id, action: pause|resume|cancel|retry|clear}`, `xfer.answer`, `xfer.clear_finished`.
   - `xfer.updated {job}` is sent on every change and at most 4 times a second for progress, with speed as an average over about 3 s. `xfer.removed {id}` is sent when a job is cleared.
   - Programs in sessions neither call these methods nor see the events.
-- **Hand-overs wait**: `daemon.info` reports `transfers` (running or waiting to run). `daemon.shutdown` with `if_idle` or `if_no_transfers` answers `{waiting_for_transfers: n}` instead of stopping while any run. The app holds the switch to a newer daemon, and an update that has to stop the daemon, with a *Waiting for N file transfers* notice. *Switch anyway* / *Install anyway* stops them, and they load as interrupted, with Resume.
+- **Host to host** (`files/route.rs`, API 28): `xfer.start {route: auto|relay}`; jobs report `route_used` and `route_reason`.
+  - **Probe** (Auto only, cached per (A, B) for 10 minutes): the ssh to A always has `-o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes`.
+    - A fixed script runs there with quoted positional values: `sftp` and `ssh` must exist, and `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -p <port> -l <user> <hostname> true` must work.
+    - B's hostname, port and user are what this computer's ssh uses for B (`ssh -G`), so A logs in as the same user Kelpie does.
+    - Exit codes and ssh's words become the one-line reason for relaying. A failure of the ssh to A itself is not cached.
+  - **Direct copy**, per file: `sh -c 'echo $$; exec sftp -q -b - -o BatchMode=yes …' kelpie <port> <user> <hostname>` on A, fed `reput "<src>" "<B's partial>"`, which also resumes.
+    - The partial is first made owner-only through Kelpie's own session to B, and progress is its size read through that session once a second.
+    - Cancel kills the echoed PID on A. The re-check, rename and times use Kelpie's B session, as in every copy.
+    - Names that would need more than plain double quotes in a batch line (`"`, `\`, glob characters, controls) go through this computer.
+  - **Relay**: phase 3's copy, with `SftpFs(A)` as the source and `SftpFs(B)` as the sink, nothing staged on disk.
+  - **Never**: Kelpie never sets agent forwarding, never writes to B as another user, and never accepts a host key on A.- **Hand-overs wait**: `daemon.info` reports `transfers` (running or waiting to run). `daemon.shutdown` with `if_idle` or `if_no_transfers` answers `{waiting_for_transfers: n}` instead of stopping while any run. The app holds the switch to a newer daemon, and an update that has to stop the daemon, with a *Waiting for N file transfers* notice. *Switch anyway* / *Install anyway* stops them, and they load as interrupted, with Resume.
 - **Recursive chmod**: *x for folders only* gives folders x wherever they have r; files keep their own x bits.
 - **Logs**: job id, kind, destinations, counts and error kinds. Never file contents or names.
 

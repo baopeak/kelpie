@@ -577,6 +577,8 @@ export interface XferEnd {
 }
 
 export type XferState = "queued" | "scanning" | "running" | "waiting" | "paused" | "reconnecting" | "interrupted" | "failed" | "done" | "cancelled";
+/** Host to host: direct when the first host logs in to the second by itself, else through this computer ("relay"). */
+export type XferRoute = "auto" | "relay";
 export type XferPolicy = "ask" | "replace" | "skip" | "keep_both" | "newer" | "skip_identical";
 export type XferChoice = "replace" | "skip" | "keep_both" | "newer" | "skip_identical" | "overwrite" | "save_copy" | "discard";
 
@@ -606,6 +608,10 @@ export interface XferJob {
   mode: number | null;
   dirs_only_x: boolean;
   expect: { size: number; mtime: number } | null;
+  /** Host to host: how it should travel, how it did, and why it did not go direct. */
+  route: XferRoute;
+  route_used: "direct" | "relay" | null;
+  route_reason: string | null;
   state: XferState;
   attempt: number;
   next_s: number;
@@ -636,4 +642,5 @@ export interface XferStart {
   dirs_only_x?: boolean;
   /** One file's upload replaces the target only while it is still this size and time (an edited file). */
   expect?: { size: number; mtime: number };
+  route?: XferRoute;
 }

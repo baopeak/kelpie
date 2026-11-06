@@ -79,11 +79,11 @@ Strictly sequential. Desktop first, then server ↔ server, then the phone (owne
 | # | Phase | Effort | Depends on | API | Status |
 |---|---|---|---|---|---|
 | 1 | [SFTP engine spike and gate](phase-01-sftp-engine-spike.md) | 1d | none | none | done: A1 ([report](../reports/spike-261106-sftp-engine.md)) |
-| 2 | [Daemon SFTP sessions, local listing, shared ssh helpers](phase-02-daemon-sftp-sessions.md) | 3d | 1 | next free | pending |
-| 3 | [Transfer queue: progress, cancel, conflicts, resume](phase-03-transfer-queue-resume.md) | 4d | 2 | next free | pending |
-| 4 | [Two-pane Files tab, queue panel, permissions](phase-04-two-pane-files-ui.md) | 4d | 3 | none | pending |
-| 5 | [Edit remote files (Kelpie editor, external editor)](phase-05-edit-remote-files.md) | 2d | 4 | none | pending |
-| 6 | [Server ↔ server copy (direct or through this computer)](phase-06-server-to-server.md) | 3d | 3, 4 | next free | pending |
+| 2 | [Daemon SFTP sessions, local listing, shared ssh helpers](phase-02-daemon-sftp-sessions.md) | 3d | 1 | next free | written, review fixed for 2–3; not yet built |
+| 3 | [Transfer queue: progress, cancel, conflicts, resume](phase-03-transfer-queue-resume.md) | 4d | 2 | next free | written, review fixed for 2–3; not yet built |
+| 4 | [Two-pane Files tab, queue panel, permissions](phase-04-two-pane-files-ui.md) | 4d | 3 | none | written, review fixed for 2–3; not yet built |
+| 5 | [Edit remote files (Kelpie editor, external editor)](phase-05-edit-remote-files.md) | 2d | 4 | none | written, review fixed for 2–3; not yet built |
+| 6 | [Server ↔ server copy (direct or through this computer)](phase-06-server-to-server.md) | 3d | 3, 4 | next free | written, review fixed for 2–3; not yet built |
 | 7 | [Phone files: daemon verbs, roots, binary link data](phase-07-phone-file-link.md) | 4d | 3, 6; **phone plan 3–3d, 4 merged**; after phone 7 | next free + phone caps | pending |
 | 8 | [Phone files UI and desktop settings](phase-08-phone-files-ui.md) | 3d | 7 | none | pending |
 

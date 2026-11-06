@@ -4,7 +4,7 @@ import { For, Show } from "solid-js";
 import { t } from "../../lib/i18n";
 import * as ipc from "../../lib/ipc";
 import { formatSize } from "../../lib/file-pane";
-import { directionText, etaText, isActive, isFinished, jobList, jobTitle, progress, speedText, stateText, transferNotice } from "../../lib/transfers";
+import { directionText, etaText, isActive, isFinished, jobList, jobTitle, progress, routeText, speedText, stateText, transferNotice } from "../../lib/transfers";
 import type { XferJob } from "../../lib/types";
 
 export function TransferQueue(props: { label: (alias: string) => string }) {
@@ -32,6 +32,7 @@ export function TransferQueue(props: { label: (alias: string) => string }) {
               <div class="transfer-job-line">
                 <span class="transfer-job-title" title={j.items.join("\n")}>{jobTitle(j)}</span>
                 <span class="muted-inline">{directionText(j, props.label)}</span>
+                <Show when={routeText(j, props.label)}>{(r) => <span class="muted-inline" data-route={j.route_used ?? ""}>{r()}</span>}</Show>
                 <span class="spacer" />
                 <Show when={j.kind === "copy" && j.totals.bytes}>
                   <span class="muted-inline">{formatSize(j.totals.done_bytes)} / {formatSize(j.totals.bytes)}</span>

@@ -197,7 +197,6 @@ pub async fn copy_file(c: &FileCopy<'_>, ctl: &Control) -> FsResult<Copied> {
         return Err(FsError::invalid(format!("{} is not a file", c.src_path)));
     }
     let partial = c.dst.join(c.dst_dir, &partial_name(c.dst_name, c.tag));
-    let target = c.dst.join(c.dst_dir, c.dst_name);
     recover_aside(c.dst, c.dst_dir, c.dst_name, c.tag, &src).await?;
     let offset = resume_offset(c, &src, &partial).await?;
     ctl.bytes.fetch_add(offset, Ordering::Relaxed);
@@ -219,6 +218,15 @@ pub async fn copy_file(c: &FileCopy<'_>, ctl: &Control) -> FsResult<Copied> {
         return Ok(Copied::Stopped(stop));
     }
     closed?;
+    finish_partial(c, &src, &partial, offset).await
+}
+
+/// Puts a complete partial in place: checks its size and the source again, then the target (absent, or what was
+/// approved), renames, and keeps times and mode. Also the end of a direct host-to-host copy.
+pub async fn finish_partial(c: &FileCopy<'_>, src: &Meta, partial: &str, offset: u64) -> FsResult<Copied> {
+    let src = src.clone();
+    let partial = partial.to_string();
+    let target = c.dst.join(c.dst_dir, c.dst_name);
     let have = c.dst.lstat(&partial).await?.size;
     let after = c.src.stat(c.src_path).await?;
     if have != src.size || (after.size, after.mtime) != (src.size, src.mtime) {

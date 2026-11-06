@@ -245,6 +245,8 @@ export const localHome = () => daemon<{ path: string }>("local.home").then((r) =
 
 /** From this daemon API level the daemon runs the transfer queue (`xfer.*`, the `xfer.updated` / `xfer.removed` events). */
 export const XFER_API = 27;
+/** From this daemon API level a host-to-host copy may go direct (`route: "auto"`); below it, it goes through this computer. */
+export const ROUTE_API = 28;
 
 export const xferStart = (job: XferStart) => daemon<{ id: string }>("xfer.start", job).then((r) => r.id);
 /** `notice`: the saved transfer list could not be read (it was kept aside, or saving is off until a restart). */
