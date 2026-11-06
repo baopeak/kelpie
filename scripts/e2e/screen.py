@@ -130,21 +130,15 @@ button.place(x=40, y=40, width=200, height=80)
 field = tk.Entry(root)
 field.place(x=40, y=160, width=300, height=40)
 field.bind("<KeyRelease>", lambda e: note("field:" + field.get()))
-# A second window of another title that can take the focus, as a chat window would: what the phone types must never land in it.
-decoy = tk.Toplevel(root)
-decoy.title("Decoy " + title)
-decoy.geometry("300x120+760+160")
-decoy_field = tk.Entry(decoy)
-decoy_field.place(x=10, y=10, width=280, height=40)
-decoy_field.bind("<KeyRelease>", lambda e: note("decoy:" + decoy_field.get()))
-decoy.bind("<FocusIn>", lambda e: note("decoy-focused"))
 import os
+# A bar that moves while asked to (`.animate`): a picture that changes every frame, for what encoding costs.
+bar = tk.Frame(root, bg="#d04020")
 def poll():
-    if os.path.exists(events + ".raise"):
-        os.remove(events + ".raise")
-        decoy.lift()
-        decoy.focus_force()
-        decoy_field.focus_set()
+
+    if os.path.exists(events + ".animate"):
+        bar.place(x=(bar.winfo_x() + 9) % 480, y=240, width=40, height=40)
+        root.after(16, poll)
+        return
     root.after(100, poll)
 root.after(100, poll)
 def where():
@@ -152,6 +146,26 @@ def where():
     note("button:%d,%d,%d,%d" % (button.winfo_rootx(), button.winfo_rooty(), button.winfo_width(), button.winfo_height()))
     note("field:@%d,%d,%d,%d" % (field.winfo_rootx(), field.winfo_rooty(), field.winfo_width(), field.winfo_height()))
 root.after(500, where)
+root.mainloop()
+'''
+
+# Another program's window that takes the focus, as a chat window or a toast would: what the phone types must never land in it. A program of
+# its own: two windows of one Tk program share Tk's own idea of the focus, which sends keys to the other one while Windows says the first has them.
+DECOY = r'''
+import ctypes, sys, tkinter as tk
+ctypes.windll.shcore.SetProcessDpiAwareness(2)
+title, events = sys.argv[1], sys.argv[2]
+def note(line):
+    with open(events, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+root = tk.Tk()
+root.title(title)
+root.geometry("300x120+760+160")
+field = tk.Entry(root)
+field.place(x=10, y=10, width=280, height=40)
+field.bind("<KeyRelease>", lambda e: note("decoy:" + field.get()))
+root.bind("<FocusIn>", lambda e: note("decoy-focused"))
+root.after(200, field.focus_set)
 root.mainloop()
 '''
 
@@ -181,6 +195,50 @@ def frame_bounds(hwnd):
     r = RECT()
     ctypes.windll.dwmapi.DwmGetWindowAttribute(wt.HWND(hwnd), 9, ctypes.byref(r), ctypes.sizeof(r))  # DWMWA_EXTENDED_FRAME_BOUNDS
     return r.left, r.top, r.right - r.left, r.bottom - r.top
+
+
+def cursor():
+    """Where the pointer is, in physical pixels whatever this process's DPI awareness."""
+    p = wt.POINT()
+    ctypes.windll.user32.GetPhysicalCursorPos(ctypes.byref(p))
+    return p.x, p.y
+
+
+def helper_cpu(seconds):
+    """The screen helper's CPU over `seconds`, as a share of one core, or None without psutil."""
+    try:
+        import psutil
+    except ImportError:
+        return None
+    for p in psutil.process_iter(["exe"]):
+        if (p.info.get("exe") or "").lower() == helper.lower():
+            p.cpu_percent(None)
+            time.sleep(seconds)
+            return p.cpu_percent(None)
+    return None
+
+
+def to_front(hwnd):
+    """Brings a window to the front from this process, as the screen helper does: attached for a moment to the thread in front."""
+    u = ctypes.windll.user32
+    fg = u.GetForegroundWindow()
+    them, me = u.GetWindowThreadProcessId(fg, None), ctypes.windll.kernel32.GetCurrentThreadId()
+    attached = bool(them) and u.AttachThreadInput(me, them, True)
+    u.BringWindowToTop(hwnd)
+    u.SetForegroundWindow(hwnd)
+    if attached:
+        u.AttachThreadInput(me, them, False)
+    return True
+
+
+def why_not(phone):
+    """What the phone was told, where the pointer is and what is in front: for a click or text that did not land."""
+    u = ctypes.windll.user32
+    buf = ctypes.create_unicode_buffer(120)
+    u.GetWindowTextW(u.GetForegroundWindow(), buf, 120)
+    states = [m.get("state") for m in phone.log if m["type"] == "sc_state"]
+    front = "the test window" if buf.value == TITLE else "the decoy" if buf.value == "Decoy " + TITLE else "Kelpie" if buf.value.startswith("Kelpie") else "another window"
+    return f"states {states[-6:]}, pointer {cursor()}, in front: {front}"
 
 
 def press_hotkey():
@@ -244,6 +302,9 @@ class ScreenPhone(ps.Phone):
                     self.log.append(m)
                     if m["kind"] == "video" and getattr(self, "sc", None):
                         await self.send(type="sc_ack", sc=self.sc, seq=m["seq"])
+                    elif m["kind"] == "video":
+                        # Before the start's answer (the picture can overtake it): acknowledged once the screen is known, as the page does.
+                        self.early = max(getattr(self, "early", 0), m["seq"])
                     continue
                 m = json.loads(whole)
                 m["_t"] = time.monotonic()
@@ -344,8 +405,12 @@ async def scenario(run, d):
     async def see(p=None):
         p = p or phone
         mark = p.mark()
+        p.sc, p.early = None, 0
         started = await p.ask(type="sc_start", target=target["id"], timeout=20)
         p.sc = (started or {}).get("sc")
+        if p.sc and getattr(p, "early", 0):
+            await p.send(type="sc_ack", sc=p.sc, seq=p.early)
+        p.early = 0
         first = await p.media(mark, lambda m: m["kind"] == "video", 15)
         return started, first, mark
 
@@ -368,26 +433,58 @@ async def scenario(run, d):
     await asyncio.sleep(1.0)
     check("a click that came too late clicks nothing", "clicked" not in events())
     await phone.click(cx, cy)
-    check("a click on the button in the picture's pixels presses it", until(lambda: "clicked" in events(), 5))
+    check("a click on the button in the picture's pixels presses it", until(lambda: "clicked" in events(), 5), why_not(phone))
     ex, ey, ew, eh = geometry("field:@")
     await phone.click(*to_source(ex + ew // 2, ey + eh // 2))
     await asyncio.sleep(0.3)
     typed = await phone.ask(type="sc_text", sc=phone.sc, text=TYPED, st=now_ms())
     check("text goes with its own answer", (typed or {}).get("result") == "sent", typed and typed.get("type"))
-    check("…and lands in the window's field", until(lambda: f"field:{TYPED}" in events(), 5))
+    check("…and lands in the window's field", until(lambda: f"field:{TYPED}" in events(), 5), why_not(phone))
     # Another window takes the focus (a chat, a toast): typed text goes to the shared window, brought to the front, or is refused, never elsewhere.
-    with open(EVENTS + ".raise", "w") as f:
-        f.write("1")
-    until(lambda: "decoy-focused" in events(), 5)
+    spawn("decoy", [sys.executable, "-c", DECOY, "Decoy " + TITLE, EVENTS])
+    decoy = until(lambda: ctypes.windll.user32.FindWindowW(None, "Decoy " + TITLE), 10)
+    in_front = until(lambda: to_front(decoy) and ctypes.windll.user32.GetForegroundWindow() == decoy, 5)
+    check("the other window has taken the focus", in_front)
     again = await phone.ask(type="sc_text", sc=phone.sc, text=TYPED2, st=now_ms())
-    await asyncio.sleep(0.5)
-    landed = f"field:{TYPED2}" in events()
+    await asyncio.to_thread(until, lambda: any(e.startswith("field:") and e.endswith(TYPED2) for e in events()), 2)
+    # The field already holds the first text: the second goes after it.
+    landed = any(e.startswith("field:") and e.endswith(TYPED2) for e in events())
     refused_front = (again or {}).get("code") == "not_front"
     check("with another window in front, text goes to the shared window or is refused", (landed and (again or {}).get("result") == "sent") or (refused_front and not landed), (again or {}).get("code") or (again or {}).get("result"))
     check("…and never into the window that took the focus", not any(e.startswith("decoy:") and TYPED2 in e for e in events()))
     # The window changed (the button, the field): its frames followed the first, numbered in order.
     seqs = [m["seq"] for m in phone.log[mark:] if m["type"] == "sc_media" and m["kind"] == "video"]
     check("frames follow the first, numbered in order", len(seqs) >= 2 and seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs[:20])
+
+    # The picture's first and last pixel are the window's corners on the screen: no rounding off its edge, whatever the scaling.
+    src = first["src"] if first else (sw, sh)
+    print(f"SPIKE picture {src[0]}x{src[1]} (coded {first['coded'][0]}x{first['coded'][1]}), start said {sw}x{sh}, DWM frame {fw}x{fh}" if first else "SPIKE no first frame", flush=True)
+    for sx, sy in ((0, 0), (sw - 1, sh - 1)):
+        await phone.send(type="sc_input", sc=phone.sc, ops=[{"k": "move", "x": sx, "y": sy}], st=now_ms())
+        want = (fx + round(sx * fw / max(sw, 1)), fy + round(sy * fh / max(sh, 1)))
+        got = await asyncio.to_thread(until, lambda: (lambda c: c if abs(c[0] - want[0]) <= 1 and abs(c[1] - want[1]) <= 1 else None)(cursor()), 3, 0.05)
+        check(f"the picture's pixel {sx},{sy} is the window's corner on the screen", got is not None, f"want {want}, pointer at {cursor()}")
+
+    # What encoding a picture that changes every frame costs (printed, not checked: it depends on the machine).
+    mark = phone.mark()
+    with open(EVENTS + ".animate", "w") as f:
+        f.write("1")
+    await asyncio.sleep(1.5)
+    await phone.send(type="sc_key", sc=phone.sc)
+    cpu = await asyncio.to_thread(helper_cpu, 5)
+    os.remove(EVENTS + ".animate")
+    moving = [m for m in phone.log[mark:] if m["type"] == "sc_media" and m["kind"] == "video"]
+    keys = [m["_size"] for m in moving if m["key"]]
+    deltas = sorted(m["_size"] for m in moving if not m["key"])
+    span = (moving[-1]["_t"] - moving[0]["_t"]) if len(moving) > 1 else 0
+    stats = [m for m in phone.log[mark:] if m["type"] == "sc_stats"]
+    print(f"SPIKE moving picture: {len(moving)} frames in {span:.1f} s, keyframes {keys} bytes, P-frames median {deltas[len(deltas) // 2] if deltas else 0} max {deltas[-1] if deltas else 0} bytes", flush=True)
+    print(f"SPIKE helper CPU {cpu if cpu is None else round(cpu)} % of one core", flush=True)
+    if stats:
+        s = stats[-1]
+        print(f"SPIKE stats: {s.get('fps')} fps, {s.get('w')}x{s.get('h')}, {s.get('kbps')} kbps, encode p95 {s.get('encode_ms_p95')} ms, encoder {s.get('encoder')}, reason {s.get('reason')}, crisp {s.get('crisp')}", flush=True)
+    told = [(m["type"], m.get("state") or m.get("reason") or m.get("code")) for m in phone.log if m["type"] in ("sc_end", "sc_state", "error")]
+    check("a picture that changes keeps coming while it changes", len(moving) >= 20, f"{len(moving)} frames; the phone was told {told[-8:]}")
 
     # ---------- 5. ending it ----------
     mark = phone.mark()
@@ -490,6 +587,7 @@ def main():
             except Exception:  # noqa: BLE001
                 pass
         stop("window")
+        stop("decoy")
         stop("driver")
         assert os.environ["KELPIE_ENDPOINT"].startswith("kelpie-screen-")
         d.stop()
