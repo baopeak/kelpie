@@ -80,6 +80,8 @@ struct Held {
     token: Option<i64>,
     input: mpsc::Sender<Queued>,
     pressed: Pressed,
+    /// When the last screencast frame came (ms): a page that sends none (hidden, or a window behind another) is captured instead (`fallback`).
+    last_frame: Arc<AtomicU64>,
 }
 
 /// A frame as WebView2 handed it: takeover, generation, the event's JSON.
@@ -140,6 +142,7 @@ fn event(app: &AppHandle, params: Value) {
         let _ = c.notify("provider.event", params);
     }
 }
+
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -222,8 +225,9 @@ pub async fn browser_takeover_start(app: AppHandle, tk: String, label: String, b
     let (input, rx) = mpsc::channel(QUEUE);
     let pressed: Pressed = Arc::new(Mutex::new(None));
     let generation = state.generation.fetch_add(1, Ordering::Relaxed) + 1;
-    state.held.lock().insert(tk.clone(), Held { pane: label.clone(), target, banner: banner.chars().take(80).collect(), settings: Settings::from(&settings), paused: false, generation, token: None, input, pressed: pressed.clone() });
+    state.held.lock().insert(tk.clone(), Held { pane: label.clone(), target, banner: banner.chars().take(80).collect(), settings: Settings::from(&settings), paused: false, generation, token: None, input, pressed: pressed.clone(), last_frame: Arc::new(AtomicU64::new(now_ms())) });
     tauri::async_runtime::spawn(inputs(app.clone(), tk.clone(), rx, pressed));
+    tauri::async_runtime::spawn(fallback(app.clone(), tk.clone()));
     if let Err(e) = stream_on(&app, &tk).await {
         state.held.lock().remove(&tk);
         return Err(e);
@@ -316,8 +320,27 @@ pub(super) fn retarget(app: &AppHandle, pane: &str) {
         };
         release(&app, &old.0, &old.2).await;
         stream_off(&app, &old.0, old.1).await;
-        let _ = stream_on(&app, &tk).await;
+        // A popup that has just been made may not take it yet: tried again a few times, and once more when its page has loaded (`popup_loaded`).
+        for _ in 0..10 {
+            if stream_on(&app, &tk).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
         retitle_popups(&app, &pane);
+    });
+}
+
+/// A popup's page finished loading: if it is what the phone sees, its screencast starts again there.
+pub(super) fn popup_loaded(app: &AppHandle, pane: &str, popup: &str) {
+
+    let Some(tk) = app.state::<Takeovers>().tk_of_pane(pane) else { return };
+    if app.state::<Takeovers>().target(&tk, None).as_deref() != Some(popup) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = stream_on(&app, &tk).await;
     });
 }
 
@@ -361,14 +384,20 @@ async fn set(app: &AppHandle, tk: &str, params: &Value) {
 }
 
 /// Attaches the frame receiver to the takeover's target and starts its screencast.
+/// Attaches the frame receiver (once per target) and starts the screencast: again on a page that has loaded since, which a new popup's has (its
+/// DevTools state starts over when it takes the opener's request).
 async fn stream_on(app: &AppHandle, tk: &str) -> CmdResult<()> {
     let state = app.state::<Takeovers>();
-    let (target, generation, settings) = {
+    let (target, generation, settings, subscribed) = {
         let held = state.held.lock();
         let h = held.get(tk).ok_or("that takeover has ended")?;
-        (h.target.clone(), h.generation, h.settings)
+        (h.target.clone(), h.generation, h.settings, h.token.is_some())
     };
     let wv = app.get_webview(&target).ok_or_else(|| format!("no browser {target}"))?;
+    if subscribed {
+        let _ = cdp(&wv, "Page.stopScreencast", json!({})).await;
+        return cdp(&wv, "Page.startScreencast", settings.screencast()).await.map(|_| ());
+    }
     let token = subscribe(&wv, frame_sink(app), tk.to_string(), generation).await?;
     let current = {
         let mut held = state.held.lock();
@@ -422,8 +451,45 @@ async fn frames(app: AppHandle, mut rx: mpsc::UnboundedReceiver<(String, u64, St
         let mut meta = v.get_mut("metadata").map(Value::take).unwrap_or_else(|| json!({}));
         meta["window"] = json!(if target.contains("-popup-") { "popup" } else { "pane" });
         meta["window_id"] = json!(generation);
+        if let Some(h) = app.state::<Takeovers>().held.lock().get(&tk) {
+            h.last_frame.store(now_ms(), Ordering::Relaxed);
+        }
         let data = v.get_mut("data").map(Value::take).unwrap_or(Value::Null);
         event(&app, json!({"kind": "frame", "tk": tk, "data": data, "meta": meta}));
+    }
+}
+
+/// How long a stream may stay silent before the page is captured instead, and how often then.
+const STARVED_MS: u64 = 1000;
+const CAPTURE_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A page the screencast sends nothing from (WebView2 paints no frames for a pane that is hidden or a window another covers) is captured with
+/// `Page.captureScreenshot` instead, at the step's quality and width, until frames come again. Frames are what the screen shows, so a page that
+/// does not change sends nothing either: a capture is then the same picture again, at most every `CAPTURE_EVERY`.
+async fn fallback(app: AppHandle, tk: String) {
+    loop {
+        tokio::time::sleep(CAPTURE_EVERY).await;
+        let Some((target, generation, settings, paused, last)) = app.state::<Takeovers>().held.lock().get(&tk).map(|h| (h.target.clone(), h.generation, h.settings, h.paused, h.last_frame.load(Ordering::Relaxed))) else { return };
+        if paused || now_ms().saturating_sub(last) < STARVED_MS {
+            continue;
+        }
+        let Some(wv) = app.get_webview(&target) else { continue };
+        let Ok(metrics) = cdp(&wv, "Page.getLayoutMetrics", json!({})).await else { continue };
+        let view = &metrics["cssVisualViewport"];
+        let (width, height) = (view["clientWidth"].as_f64().unwrap_or(0.0), view["clientHeight"].as_f64().unwrap_or(0.0));
+        if width < 1.0 || height < 1.0 {
+            continue;
+        }
+        let scale = (f64::from(settings.max_width) / width).min(1.0);
+        let shot = cdp(&wv, "Page.captureScreenshot", json!({"format": "jpeg", "quality": settings.quality, "clip": {"x": view["pageX"].as_f64().unwrap_or(0.0), "y": view["pageY"].as_f64().unwrap_or(0.0), "width": width, "height": height, "scale": scale}})).await;
+        let Ok(mut shot) = shot else { continue };
+        // Still the window it was taken of, and still no screencast frame meanwhile.
+        let current = app.state::<Takeovers>().held.lock().get(&tk).is_some_and(|h| h.generation == generation && h.last_frame.load(Ordering::Relaxed) == last);
+        if !current {
+            continue;
+        }
+        let meta = json!({"deviceWidth": width, "deviceHeight": height, "offsetTop": 0, "pageScaleFactor": 1, "window": if target.contains("-popup-") { "popup" } else { "pane" }, "window_id": generation, "captured": true});
+        event(&app, json!({"kind": "frame", "tk": tk, "data": shot.get_mut("data").map(Value::take).unwrap_or(Value::Null), "meta": meta}));
     }
 }
 

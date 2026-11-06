@@ -3,12 +3,12 @@
 // panes there are, bring the pane taken over to the front and keep it there, show who controls it with a Stop button (browser-pane.tsx), and say
 // when it ends. The daemon's requests come as `provider-request` events and are answered with `provider_reply`.
 import { invoke } from "@tauri-apps/api/core";
-import { createRoot, createSignal } from "solid-js";
+import { createEffect, createRoot, createSignal } from "solid-js";
 import { onEvent } from "./ipc";
 import { browserState } from "./browser";
 import { store } from "./store";
 import { t } from "./i18n";
-import { findPane, listPanes } from "./takeover-panes";
+import { browserLabelOf, findPane, listPanes } from "./takeover-panes";
 
 /** A pane a phone holds now, by pane id: the daemon's takeover id and the device's name. */
 export interface Held {
@@ -82,11 +82,31 @@ function ended(e: { tk: string; reason: string }) {
   if (e.reason !== "desktop") store.notify(t("{device} no longer controls the browser pane", { device: x.device }));
 }
 
+/** A pane hidden behind another tab or project sends no frames (seen on WebView2): while a phone holds it, its tab is brought back to the front. */
+function keepInFront() {
+  createRoot(() =>
+    createEffect(() => {
+      const active = store.state.activeProject;
+      for (const paneId of Object.keys(held())) {
+        const at = findPane(browserLabelOf(paneId), store.state.projects, store.workspace);
+        if (!at || (active === at.projectId && store.workspace(at.projectId).activeTab === at.tabId)) continue;
+        queueMicrotask(() => {
+          store.switchProject(at.projectId);
+          store.focusPane(at.projectId, at.tabId, at.paneId);
+          store.notify(t("A phone controls this browser pane, so it stays in front until the takeover stops."));
+        });
+        return;
+      }
+    }),
+  );
+}
+
 let started = false;
 /** Listens for the daemon's requests (once). */
 export function initTakeover() {
   if (started) return;
   started = true;
+  keepInFront();
   void onEvent<ProviderRequest>("provider-request", (r) => void onRequest(r));
   void onEvent<{ tk: string; reason: string }>("takeover-ended", ended);
   void onEvent<{ event: string; params: { kind?: string } }>("daemon-event", (m) => {

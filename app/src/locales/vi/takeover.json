@@ -29,5 +29,6 @@
   "Not sent: check the page, then type it again.": "Chưa gửi: hãy kiểm tra trang rồi gõ lại.",
   "Takeover ended": "Đã kết thúc tiếp quản",
   "Browser pane": "Khung trình duyệt",
-  "The last picture could not be shown: what you see may be behind the page.": "Không hiển thị được hình gần nhất: những gì bạn thấy có thể chậm hơn trang."
+  "The last picture could not be shown: what you see may be behind the page.": "Không hiển thị được hình gần nhất: những gì bạn thấy có thể chậm hơn trang.",
+  "A phone controls this browser pane, so it stays in front until the takeover stops.": "Một điện thoại đang điều khiển khung trình duyệt này, nên nó luôn ở phía trước cho đến khi dừng tiếp quản."
 }

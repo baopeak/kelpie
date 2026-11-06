@@ -78,12 +78,38 @@ fn open_popup(app: &AppHandle, pane: &str, url: &Url, features: NewWindowFeature
         .title(url.host_str().unwrap_or_default())
         .on_navigation(|u| u.host_str() != Some(SENTINEL_HOST) && matches!(u.scheme(), "http" | "https" | "about" | "data" | "blob"))
         .on_new_window(|_, _| NewWindowResponse::Deny)
+        .on_page_load({
+            let (app, pane) = (app.clone(), pane.to_string());
+            move |w, payload| {
+                if matches!(payload.event(), PageLoadEvent::Finished) {
+                    takeover::popup_loaded(&app, &pane, w.label());
+                }
+            }
+        })
         .on_document_title_changed(move |w, title| {
             title_app.state::<Browsers>().popup_titles.lock().unwrap().insert(title_label.clone(), title.clone());
             let _ = w.set_title(&title_app.state::<Takeovers>().popup_title(&title_pane, &title));
         })
         .build()
         .ok()?;
+    // `window.close()` in the page: wry destroys only the page's own view and leaves the window; the window goes with it here, so the group and the
+    // phone go back to the pane.
+    #[cfg(windows)]
+    {
+        let (close_app, close_label) = (app.clone(), label.clone());
+        let _ = window.with_webview(move |pv| unsafe {
+            if let Ok(core) = pv.controller().CoreWebView2() {
+                let mut token = 0i64;
+                let handler = webview2_com::WindowCloseRequestedEventHandler::create(Box::new(move |_, _| {
+                    if let Some(w) = close_app.get_webview_window(&close_label) {
+                        let _ = w.close();
+                    }
+                    Ok(())
+                }));
+                let _ = core.add_WindowCloseRequested(&handler, &mut token);
+            }
+        });
+    }
     state.popups.lock().unwrap().entry(pane.to_string()).or_default().push(label.clone());
     let (gone_app, gone_pane) = (app.clone(), pane.to_string());
     window.on_window_event(move |e| {
