@@ -229,7 +229,16 @@ export class TakeoverSession {
   private watchTimer: unknown = null;
   private heardAt = 0;
 
-  constructor(private port: TakeoverPort, private changed: (s: TakeoverState | null) => void, private t: (s: string) => string = (s) => s) {}
+  private port: TakeoverPort;
+  private changed: (s: TakeoverState | null) => void;
+  private t: (s: string) => string;
+
+  // Fields set in the body rather than as parameter properties: this file also runs as plain JavaScript once its types are stripped (scripts/e2e).
+  constructor(port: TakeoverPort, changed: (s: TakeoverState | null) => void, t: (s: string) => string = (s) => s) {
+    this.port = port;
+    this.changed = changed;
+    this.t = t;
+  }
 
   private set(next: TakeoverState | null) {
     this.state = next;

@@ -52,6 +52,9 @@ if len(sys.argv) < 3 or os.name != "nt":
     raise SystemExit(__doc__)
 scratch = os.path.abspath(sys.argv[1])
 app = os.path.abspath(sys.argv[2])
+# `--spike`: also measure what the spike asks (input latency, frame age and size, the WebView's CPU with and without a stream, frames from a hidden
+# pane) and print it; nothing measured is a check.
+SPIKE = "--spike" in sys.argv
 kelpied = os.path.join(os.path.dirname(app), "kelpied.exe")
 os.makedirs(scratch, exist_ok=True)
 WORK = os.path.join(scratch, f"takeover-{os.getpid()}")
@@ -105,6 +108,7 @@ LOGIN = """<!doctype html><html><head><title>Example Sign In</title>
 <input id="user" class="x" style="top:40px" autocomplete="off"><input id="pass" class="x" type="password" style="top:100px">
 <button id="signin" class="x" style="top:160px">Sign in</button><button id="oauth" class="x" style="top:220px">Continue with Example</button>
 <a id="blank" class="x" href="/page2" target="_blank" style="top:280px">Open in a new window</a>
+<div id="probe" class="x" style="top:340px;background:#ddd"></div>
 <div id="spin" style="position:absolute;left:300px;top:40px;width:20px;height:20px;background:#2d7ff9;animation:spin 1s linear infinite"></div>
 <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
 <script>
@@ -112,6 +116,7 @@ const report = (q) => fetch('/report?' + new URLSearchParams(q));
 document.getElementById('signin').addEventListener('click', (e) => report({login: document.getElementById('user').value + ':' + document.getElementById('pass').value, trusted: e.isTrusted}));
 document.getElementById('oauth').addEventListener('click', () => window.open('/oauth', 'oauth', 'width=480,height=520'));
 window.addEventListener('message', (e) => report({granted: String(e.data)}));
+document.getElementById('probe').addEventListener('click', (e) => { e.target.style.background = e.target.style.background === 'red' ? '#ddd' : 'red'; report({probe: Date.now(), trusted: e.isTrusted}); });
 </script></body></html>"""
 OAUTH = """<!doctype html><html><head><title>Example consent</title><style>body{margin:0} #allow{position:absolute;left:40px;top:40px;width:200px;height:48px}</style></head>
 <body><button id="allow">Allow</button><script>
@@ -209,10 +214,12 @@ def jpeg_size(b64):
 
 def phone_gestures(spec):
     """The ops the phone page's own code (app/phone/src/takeover.ts) makes of pointer events, through Node."""
-    out = subprocess.run(["node", "--experimental-transform-types", "--no-warnings", GESTURES], input=json.dumps(spec), capture_output=True, text=True, timeout=30)
-    if out.returncode:
-        raise RuntimeError("takeover_gestures.mjs: " + out.stderr[-500:])
-    return json.loads(out.stdout)
+    # Node strips the types itself from 23.6 on; before that it takes the flag. Either way nothing else of the file changes.
+    for flags in ([], ["--experimental-strip-types"]):
+        out = subprocess.run(["node", "--no-warnings", *flags, GESTURES], input=json.dumps(spec), capture_output=True, text=True, timeout=30)
+        if out.returncode == 0:
+            return json.loads(out.stdout)
+    raise RuntimeError("takeover_gestures.mjs: " + out.stderr[-500:])
 
 
 class TkPhone(ps.Phone):
@@ -231,9 +238,6 @@ class TkPhone(ps.Phone):
                     m = self.log[seen]
                     seen += 1
                     if m["type"] == "tk_frame":
-                        # Input names the window of the frame it was mapped against, as the page does.
-                        self.window = m["meta"].get("window_id", 0)
-                        self.last_frame = m
                         await self.send(type="tk_ack", tk=m["tk"], seq=m["seq"])
                 if time.time() - touched > 20:
                     touched = time.time()
@@ -242,8 +246,16 @@ class TkPhone(ps.Phone):
         except Exception:  # noqa: BLE001 - the socket closed under it
             pass
 
-    window = 0
-    last_frame = None
+    @property
+    def last_frame(self):
+        """The newest frame the phone has: what it shows, and what input is mapped against."""
+        return next((m for m in reversed(self.log) if m["type"] == "tk_frame"), None)
+
+    @property
+    def window(self):
+        """The window id of the newest frame: input names it, as the page does."""
+        frame = self.last_frame
+        return frame["meta"].get("window_id", 0) if frame else 0
 
     async def tap(self, tk, x, y, st=None):
         await self.send(type="tk_input", tk=tk, ops=[{"k": "tap", "x": x, "y": y}], st=st if st is not None else now_ms(), w=self.window)
@@ -296,7 +308,7 @@ async def scenario(run, d):
     audit = await call("mobile.audit", {"limit": 20})
     check("…and the audit log has it", any(e["action"] == "provider_refused" for e in audit["entries"]), audit)
     plain = await asyncio.to_thread(lambda: refused(ps.kc.Conn(), "provider.register", {"kind": "browser"}))
-    check("the plain user token cannot provide panes", "needs the Kelpie app" in (plain or ""), plain)
+    check("the plain user token cannot provide panes", "Kelpie app" in (plain or ""), plain)
 
     # ---------- a browser pane with the sign-in page ----------
     proj = os.path.join(WORK, "proj")
@@ -346,6 +358,8 @@ async def scenario(run, d):
         await other.close()
 
     # ---------- 3. take over, sign in ----------
+    if SPIKE:
+        print(f"SPIKE webview cpu without a stream: {await asyncio.to_thread(webview_cpu, 5)}% of a core", flush=True)
     panes = await phone.ask(type="panes")
     check("the phone lists the pane", any(p["pane"] == label and p["host"] == f"127.0.0.1:{SITE_PORT}" for p in (panes or {}).get("panes", [])), panes)
     mark = phone.mark()
@@ -382,12 +396,16 @@ async def scenario(run, d):
     check("the page signed in with what the phone typed", bool(login) and login[-1]["login"] == f"{USER}:{PASSWORD}")
     check("…with a trusted click", bool(login) and login[-1].get("trusted") == "true", login and login[-1].get("trusted"))
 
+    if SPIKE:
+        await spike(phone, tk, w, pid)
+
     # ---------- 4. the OAuth window ----------
     since = report_count()
     mark = phone.mark()
     await phone.tap(tk, 150, 238)
     popup = await phone.frame(mark, lambda m: m["meta"].get("window") == "popup", 15)
-    check("the OAuth window opens as its own, and the phone sees it", popup is not None, phone.log[-1:] if phone.log else None)
+    seen = {"popup": w.invoke("browser_info", {"label": label + "-popup-1"}), "pane": (w.invoke("browser_info", {"label": label}).get("ok") or {}).get("url"), "frames": [(m["meta"].get("window"), m["meta"].get("window_id")) for m in phone.log[mark:] if m["type"] == "tk_frame"][-3:]}
+    check("the OAuth window opens as its own, and the phone sees it", popup is not None, seen)
     mark = phone.mark()
     await phone.tap(tk, 140, 64)
     opener = await asyncio.to_thread(until, lambda: reported("opener", since), 8)
@@ -466,6 +484,68 @@ async def scenario(run, d):
             except OSError:
                 pass
     check("the password is in no file of the daemon's data folder", not leaked, leaked)
+
+
+def webview_cpu(seconds):
+    """CPU (percent of one core) of the app's WebView2 processes over `seconds`."""
+    import psutil
+    procs = []
+    for p in psutil.process_iter(["exe", "name"]):
+        if p.info["exe"] and os.path.normcase(p.info["exe"]) == os.path.normcase(app):
+            procs += [c for c in p.children(recursive=True) if c.name().lower() == "msedgewebview2.exe"]
+
+    def total():
+        t = 0.0
+        for c in procs:
+            try:
+                ct = c.cpu_times()
+                t += ct.user + ct.system
+            except Exception:  # noqa: BLE001 - gone meanwhile
+                pass
+        return t
+
+    t0, w0 = total(), time.time()
+    time.sleep(seconds)
+    return round((total() - t0) / (time.time() - w0) * 100, 1)
+
+
+def pct(values, q):
+    v = sorted(values)
+    return v[min(len(v) - 1, int(len(v) * q))] if v else None
+
+
+async def spike(phone, tk, w, pid):
+    """What the spike asks, measured on this machine and printed (`SPIKE ...`)."""
+    # Tap → the page's click handler, by the one clock both share.
+    latencies = []
+    for _ in range(20):
+        since = report_count()
+        sent = time.time() * 1000
+        await phone.tap(tk, 90, 355)
+        got = await asyncio.to_thread(until, lambda: reported("probe", since), 3, 0.01)
+        if got:
+            latencies.append(int(got[-1]["probe"]) - sent)
+        await asyncio.sleep(0.15)
+    print(f"SPIKE tap->click ms: n={len(latencies)} p50={pct(latencies, 0.5):.0f} p95={pct(latencies, 0.95):.0f} trusted={all(r.get('trusted') == 'true' for r in reported('probe'))}", flush=True)
+    # Frames as they come: how old the newest is when it arrives, and how large.
+    mark = phone.mark()
+    await asyncio.sleep(5)
+    frames = [m for m in phone.log[mark:] if m["type"] == "tk_frame"]
+    ages = [m["_w"] * 1000 - m["server_ts"] for m in frames]
+    sizes = [len(m["data"]) * 3 // 4 for m in frames]
+    print(f"SPIKE frames in 5 s: {len(frames)}; age ms p50={pct(ages, 0.5)} p95={pct(ages, 0.95)}; jpeg bytes p50={pct(sizes, 0.5)} max={max(sizes) if sizes else None}; meta={frames[-1]['meta'] if frames else None}", flush=True)
+    # The WebView's CPU with the stream on, then with the pane hidden behind another tab (and whether frames still come from it).
+    on = await asyncio.to_thread(webview_cpu, 5)
+    print(f"SPIKE webview cpu with the stream: {on}% of a core", flush=True)
+    tab = await asyncio.to_thread(w.js, "const s = window.__kelpie.store; const ws = s.workspace(arguments[0]); return ws.activeTab;", pid)
+    await asyncio.to_thread(w.js, "window.__kelpie.browser.openBrowser('about:blank', 'tab', arguments[0])", pid)
+    await asyncio.sleep(1)
+    mark = phone.mark()
+    await asyncio.sleep(4)
+    hidden = [m for m in phone.log[mark:] if m["type"] == "tk_frame"]
+    print(f"SPIKE frames in 4 s with the pane hidden behind another tab: {len(hidden)}", flush=True)
+    await asyncio.to_thread(w.js, "window.__kelpie.store.selectTab(arguments[0], arguments[1])", pid, tab)
+    await asyncio.sleep(1)
 
 
 def refused(d, method, params):
