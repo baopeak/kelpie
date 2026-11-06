@@ -27,7 +27,7 @@ dependencies: [3, 3a, 3c, 7]
 - `windows-capture` is **not** used: its D3D11 texture hand-off is unconfirmed in the research, and the capture texture must stay on the encoder's own device. Raw WGC/DXGI through the `windows` crate (0.62, the app's version) instead.
 - Daemon: `crates/kelpied/src/screen.rs` (broker: holds, grants, rebind, idle, media forwarding with an IDR-on-overflow rule, input TTL); small edits to `mobile.rs` (a media lane), `mobile/link.rs` (`Wire::send_bytes`), `mobile/lanes.rs`, `mobile/verbs.rs`, `provider.rs` (`screen` kind), `server.rs`, `daemon.rs`, `kelpie-proto` (API 29).
 - App: `app/src-tauri/src/screen.rs` (spawn, version handshake, idle exit 30 s, provider requests), the status-bar indicator, the stop hotkey setting. Phone: `screen.ts` (logic, tested), `screen-view.tsx`.
-- **Not built in this pass** (left for after the first build and the spike): the helper's RSS alarm (300 MB ⇒ restart the stream once); the 1 fps repeat frame when capture stalls (a still screen sends nothing by design, and the 1 Hz `sc_fhb` keeps the phone from counting it frozen); a hard cap of 2 frames inside a hardware MFT (the stream feeds only on `METransformNeedInput` and at most 3 frames are in flight to the phone); an IDR size cap (measured as `idr_ratio`, not enforced: MF has no direct knob); the optional clipboard-paste mode. The integration test (`tests/software_encode.rs`) is ignored until the runners' D3D11 video processor is confirmed.
+- **Not built in this pass** (left for after the first build and the spike): the helper's RSS alarm (300 MB ⇒ restart the stream once); the 1 fps repeat frame when capture stalls (a still screen sends nothing by design, and the 1 Hz `sc_fhb` keeps the phone from counting it frozen); a hard cap of 2 frames inside a hardware MFT (the stream feeds only on `METransformNeedInput` and at most 3 frames are in flight to the phone); an IDR size cap (measured as `idr_ratio`, not enforced: MF has no direct knob). The clipboard-paste mode is not wanted for now (owner, 2026-11-06). The integration test (`tests/software_encode.rs`) is ignored until the runners' D3D11 video processor is confirmed.
 
 ## Overview
 View and control a monitor or a single window (an IDE, the app under test, a dialog) from the phone with low latency. A helper
@@ -55,7 +55,7 @@ kelpie-screen: WGC (window) | DXGI duplication (monitor) → texture pool (4) �
   - Transport: binary messages on the phone's kelpie-link session (≤ 1 MiB each; tiles split to ≤ 256 KiB); JSON for state, stats, heartbeat and end.
   - Input: closed op set (`move`, `down`, `up`, `click`, `wheel`, `key` with modifiers, `text`); `SendInput` (`KEYEVENTF_UNICODE` text, VK keys, `MOUSEEVENTF_ABSOLUTE|VIRTUALDESK`); per-monitor DPI v2; window targets via `DWMWA_EXTENDED_FRAME_BOUNDS`, brought to front before the first click, and a click that would land on another window is dropped and reported (`covered`).
   - States reported, never a silent freeze: secure desktop (UAC/lock/login), session locked, elevated foreground (UIPI drops input), target minimized/closed/covered.
-  - Safety: `control` permission (phase 7 rule above); always-on-top border + badge excluded from capture, and the status-bar indicator with Stop; global stop hotkey (default Ctrl+Alt+Shift+K, set in Settings → Mobile); idle auto-stop 10 min; audit start/stop/target (never input).
+  - Safety: `control` permission (phase 7 rule above); always-on-top border + badge excluded from capture, and the status-bar indicator with Stop; global stop hotkey (default Ctrl+Alt+Shift+K, changeable in Settings → Mobile, always on); idle auto-stop 10 min; audit start/stop and the target's program name or `monitor` (never the title, never input).
   - **Grant lifetime** [RT-12]: hold keyed `(device key, link connection, app provider client)`; revoke/downgrade/lock/provider loss ⇒ helper `stop` and input refused at once, the hold gone in < 1 s; a dropped link keeps the hold 15 s for the same device's next connection only.
   - Phone: canvas, trackpad (default) / direct-touch modes, pinch zoom/pan, long-press right click, two-finger scroll, shared key bar with modifiers, text box, quality line (`720p · 15 fps · reduced: computer busy`), debug overlay (decode ms, queue, rtt), plain "this phone cannot show the screen" when WebCodecs H.264 is missing.
   - Helper lifecycle: app spawns on first viewer, stdin JSON lines in and framed stdout out, exits 30 s after the last viewer; version handshake (`hello {proto}`); above-normal priority and EcoQoS opt-out while streaming, MMCSS "Capture" on capture/encode threads; shipped as `externalBin` next to the app.
@@ -123,8 +123,16 @@ kelpie-screen: WGC (window) | DXGI duplication (monitor) → texture pool (4) �
 - [ ] Desktop always shows sharing + stop; revoke ends control within 1 s.
 - [ ] Text in an IDE is crisp within a second of it standing still.
 
-## Open product questions (for the owner; not decided here)
-See the report. In short: one screen viewer at a time or several; an extra per-session desktop prompt for the whole desktop (more than a pane); the optional clipboard-paste mode; whether Win+L / Ctrl+Esc style system keys are allowed; paint-over on by default on metered links; whether the hotkey may be turned off.
+## Owner answers (2026-11-06), applied
+1. One viewer at a time (`sc_taken` for another device).
+2. No extra desktop prompt: the `control` grant with OS verification is the confirmation, as in phase 7.
+3. The key bar has the Windows key: `Meta` alone (Start) and `meta` as a modifier (Win+E, Win+L) (`input.rs`, test `a_key_with_modifiers_presses_them_around_it`).
+4. No clipboard-paste mode for now.
+5. Crisp text on by default, and off by itself while the link is slow (under 1 Mbps, lagging, within 10 s of a bitrate cut) or the machine is at L3, cellular included since it is measured (`Controller::crisp_ok`, test `crisp_text_turns_itself_off_on_a_slow_or_lagging_link_and_back_on_once_it_is_calm`); `sc_stats.crisp` tells the phone, which says *crisp text off: slow connection*.
+6. The stop hotkey is always on: it can be changed, never turned off.
+7. The audit log records only the program's file name (`window: Code.exe`) or `monitor`, never the window's title (test `the_audit_log_names_a_program_by_its_file_name_only`).
+8. Leaving the phone app locks it and ends the screen at once, no grace: the daemon's `lock_now` clears the grant (test `leaving_the_app_takes_every_control_grant_away_at_once`) and the page ends its view (`ScreenSession::locked`); e2e checks it within a second.
+9. *See the computer's screen* is in the inbox as well as a session's view.
 
 ## Risk Assessment
 - AMD/Intel MFT ignore low-latency props; signal: encode > 15 ms or frames held; response: per-vendor table or SW MFT at lower resolution.

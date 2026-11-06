@@ -802,7 +802,7 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   `SendInput` in the picture's pixels mapped through the target's place (`DWMWA_EXTENDED_FRAME_BOUNDS`, per-monitor DPI v2, absolute units over the virtual
   desktop, `geom.rs`); a window target is brought to the front before its first click, and a click that would land on a window over it is dropped and reported.
   An always-on-top border and badge (who sees it, the stop hotkey) are drawn around what is shared and left out of every capture (`WDA_EXCLUDEFROMCAPTURE`);
-  the stop hotkey (default Ctrl+Alt+Shift+K, Settings → Mobile) is `RegisterHotKey` on that window's thread. Above-normal priority and no EcoQoS while it
+  the stop hotkey (default Ctrl+Alt+Shift+K, Settings → Mobile; always on, it cannot be turned off) is `RegisterHotKey` on that window's thread. Above-normal priority and no EcoQoS while it
   streams, MMCSS "Capture" on its threads. The decisions are pure modules tested without a GPU (`geom`, `targets`, `states`, `control`, `tiles`, `sps`, `wire`,
   `input`); the native code is in `win/`, one API per module.
 - **Media messages** (`kelpie-screen/src/wire.rs`, read by `app/phone/src/screen.ts`): binary, little-endian, first byte `0x01` (no JSON message starts with it,
@@ -813,7 +813,9 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   `Mobile::grant`: input checks it every time and the hold's task ends within 250 ms (`revoked`). 15 s for the same device's next connection (`sc_rebind`),
   after which the helper sends a keyframe first; 10 minutes with no input ends it. New screens are refused at load L2+ and with under 20 % memory free
   (`host_busy`), without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper
-  are checked again (known ids and kinds, short titles). The audit log has `screen_start` (kind and title) and `screen_stop` (why); **no input is logged**.
+  are checked again (known ids and kinds, short titles). The audit log has `screen_start` (`monitor`, or `window:` and the program's file name such as
+  `Code.exe`, never the window's title, which can name a document) and `screen_stop` (why); **no input is logged**. The phone locking (`lock_now` when its page
+  is hidden, or its idle time running out) clears the grant like a revoke, with no grace, and the page ends its view at once.
 - **Flow on TCP**: nothing is lost on the link, only delayed, so frames are dropped before encoding, never after (a dropped P-frame would break every frame
   after it). The phone acknowledges each frame as it decodes (`sc_ack`); the broker forwards `{acked, rtt_ms, level}` (`screen.flow`, also once a second) and
   the helper encodes only while fewer than 3 frames are in flight. The media lane (`mobile/lanes.rs`) holds 6 messages, behind everything else, and nothing of
@@ -827,7 +829,9 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   dropped, reason, degraded, level, encoder, idr_ratio}`. `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS` adds encode time to drive the ladder without a GPU.
 - **Crisp text** (`tiles.rs`, `tile_image.rs`): the picture read back is hashed in 64×64 cells; cells still for 300 ms are sent once more as tiles of up to
   8×4 cells, PNG, or JPEG q90 where PNG would be over a byte a pixel, at the source's size, within a byte budget of the video's rate (burst 512 KiB). A video
-  frame carries the rectangles of painted cells that changed, and the phone drops those tiles as it draws that frame. Off with *Crisp text* in Settings.
+  frame carries the rectangles of painted cells that changed, and the phone drops those tiles as it draws that frame. Off with *Crisp text* in Settings
+  (on by default), and off by itself while the link is slow: under 1 Mbps, lagging, or within 10 s of a bitrate cut, and at L3 (`Controller::crisp_ok`).
+  It is measured, so cellular counts like any slow link (an iPhone page cannot tell cellular from Wi-Fi); `sc_stats.crisp` says so (`false`).
 - **States, never a silent freeze** (`states.rs`): four looks a second at the input desktop (`OpenInputDesktop`: the secure desktop of UAC and the lock screen
   cannot be opened from the user's session), the session's lock (`WTSSessionInfoEx`), the integrity level of the window in front or of the target, and the
   target window (closed, minimized); a change held for two looks is told (`sc_state`), a lock or a secure desktop at once. What input may do follows: nothing on a
@@ -836,7 +840,8 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
 - **On the phone** (`screen.ts`, `screen-view.tsx`): `VideoDecoder` probed first with `isConfigSupported` (a plain message when this browser has no H.264
   WebCodecs), configured in the `avc` format with an `avcC` description built from the keyframe's SPS and PPS and `optimizeForLatency`, one `decode()` per
   frame, the newest frame drawn on `requestAnimationFrame` with the tiles and the cursor on a canvas. Trackpad (default) or direct touch, two-finger scroll,
-  pinch zoom and pan of the view only, a key bar with Ctrl, Shift and Alt (no Windows key), text with an answer of its own. Input older than 1 s by the
+  pinch zoom and pan of the view only, a key bar with Ctrl, Shift, Alt and the Windows key (`meta`, alone for Start or held), text with an answer of its
+  own. The entry is in the inbox and in a session's view. Input older than 1 s by the
   computer's clock is dropped by the daemon and by the helper; 3 s without media or heartbeat dims the picture; frames that come and do not decode for 1 s
   ask for a keyframe.
 
