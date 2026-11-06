@@ -85,15 +85,14 @@ impl DaemonClient {
                     // tokens answers with an error the read loop ignores.
                     if let Some(token) = kelpie_proto::read_user_token(&endpoint) {
                         let _ = out_tx.send(Frame::json(&json!({"id": "auth", "method": "auth", "params": {"token": token, "client": "app"}})).encode());
-                        // This window provides its browser panes to a phone that takes one over (Windows: the WebView2 DevTools protocol). The daemon takes
-                        // that from the verified app only; an older one has no such method, and the read loop ignores the error.
-                        if cfg!(windows) {
-                            let _ = out_tx.send(Frame::json(&json!({"id": "provider", "method": "provider.register", "params": {"kind": "browser"}})).encode());
-                        }
                     }
                     *self.out.lock() = Some(out_tx);
                     self.connected.store(true, Ordering::SeqCst);
                     self.connected_notify.notify_waiters();
+                    // This window provides its browser panes to a phone that takes one over (Windows: the WebView2 DevTools protocol).
+                    if cfg!(windows) {
+                        tauri::async_runtime::spawn(self.clone().register_provider());
+                    }
                     let _ = self.app.emit("daemon-status", json!({"connected": true}));
                     let writer = tauri::async_runtime::spawn(async move {
                         while let Some(mut bytes) = out_rx.recv().await {
@@ -122,6 +121,21 @@ impl DaemonClient {
                 }
             }
         }
+    }
+
+    /// Registers this connection as the daemon's provider of browser panes. The daemon takes that from the verified app only, and hands it over at
+    /// once from this app's own connection before; while something else holds it this tries again a few times, further apart each time. An older
+    /// daemon has no such method, and a connection that goes ends the tries (the next one starts its own).
+    async fn register_provider(self: Arc<Self>) {
+        for wait_ms in [0u64, 500, 1000, 2000, 4000, 8000] {
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+            match self.call("provider.register", json!({"kind": "browser"})).await {
+                Ok(_) => return,
+                Err(e) if e.to_string().contains("already provides") => continue,
+                Err(_) => return,
+            }
+        }
+        tracing::warn!("another program provides browser panes to phones: takeover from a phone is off until Kelpie reconnects");
     }
 
     fn on_disconnect(&self) {

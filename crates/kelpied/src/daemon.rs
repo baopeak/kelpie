@@ -993,10 +993,9 @@ impl Daemon {
     }
 
     pub fn unregister_client(&self, id: u64) {
-        // The app's requests in flight are answered now, and the phones that held its panes let go of them.
-        if !self.providers.client_gone(id).is_empty() {
-            self.takeover.provider_gone(self, id);
-        }
+        // The app's requests in flight are answered now, and the phones that held its panes let go of them (the read loop did, unless this connection
+        // never had one).
+        self.provider_gone(id);
         self.clients.lock().remove(&id);
         self.client_roles.lock().remove(&id);
         self.auto_rt.drop_client(id);
@@ -1007,6 +1006,33 @@ impl Daemon {
             if let Entry::Chat(c) = entry {
                 c.client_gone(id);
             }
+        }
+    }
+
+    /// `provider.register` (the verified app only, `auth::APP_ONLY`; taken on the connection's read loop, which knows its peer's process): it provides
+    /// browser panes to phones that take one over. The same app process on a new connection takes over from its old one, whose holds end. Anything else
+    /// that asks while one provides is refused, the audit log has it and the desktop hears of it.
+    pub fn provider_register(&self, client: u64, role: &crate::auth::Role, pid: Option<u32>, params: &Value, tx: &ClientTx) -> Result<Value> {
+        let kind = param(params, "kind")?.as_str().unwrap_or_default();
+        match self.providers.register(client, role, kind, pid, tx)? {
+            crate::provider::Registration::Registered => Ok(json!({"registered": true})),
+            crate::provider::Registration::Replaced(old) => {
+                self.takeover.provider_gone(self, old);
+                Ok(json!({"registered": true}))
+            }
+            crate::provider::Registration::Taken => {
+                self.mobile.audit("-", "provider_refused", kind);
+                self.broadcast("provider.refused", json!({"kind": kind}));
+                bail!("another connection already provides {kind}")
+            }
+        }
+    }
+
+    /// `client` stops being the app (its connection ended, or it said it is something else): what it provided is free, and the phones that held its
+    /// panes let go of them.
+    pub fn provider_gone(&self, client: u64) {
+        if !self.providers.client_gone(client).is_empty() {
+            self.takeover.provider_gone(self, client);
         }
     }
 
@@ -1808,19 +1834,7 @@ impl Daemon {
                 write_atomic(&self.data_dir.join("custom-agents.json"), &serde_json::to_vec_pretty(&defs)?)?;
                 json!(true)
             }
-            // The verified app only (`auth::APP_ONLY`): it provides browser panes to phones that take one over. A second one is refused and the desktop hears of it.
-            "provider.register" => {
-                let role = self.client_roles.lock().get(&client).cloned().unwrap_or(crate::auth::Role::Anonymous);
-                let kind = param(&params, "kind")?.as_str().unwrap_or_default();
-                match self.providers.register(client, &role, kind, tx)? {
-                    crate::provider::Registration::Registered => json!({"registered": true}),
-                    crate::provider::Registration::Taken => {
-                        self.mobile.audit("-", "provider_refused", kind);
-                        self.broadcast("provider.refused", json!({"kind": kind}));
-                        bail!("another connection already provides {kind}")
-                    }
-                }
-            }
+
             "mobile.status" => self.mobile.status(self.client_roles.lock().get(&client) == Some(&crate::auth::Role::App)),
             "mobile.load" => {
                 if params.get("reset").and_then(Value::as_bool) == Some(true) {
