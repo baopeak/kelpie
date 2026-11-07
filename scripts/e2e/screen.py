@@ -130,11 +130,25 @@ button.place(x=40, y=40, width=200, height=80)
 field = tk.Entry(root)
 field.place(x=40, y=160, width=300, height=40)
 field.bind("<KeyRelease>", lambda e: note("field:" + field.get()))
+# A second window of the same program (as a second document of an IDE would be): the phone does not see it, so nothing typed goes into it. It
+# takes the focus for Windows too when asked (`.raise`): Tk alone only moves its own idea of the focus, which no other program can see.
+same = tk.Toplevel(root)
+same.title("Same " + title)
+same.geometry("300x120+760+340")
+same_field = tk.Entry(same)
+same_field.place(x=10, y=10, width=280, height=40)
+same_field.bind("<KeyRelease>", lambda e: note("same:" + same_field.get()))
 import os
 # A bar that moves while asked to (`.animate`): a picture that changes every frame, for what encoding costs.
 bar = tk.Frame(root, bg="#d04020")
 def poll():
-
+    if os.path.exists(events + ".raise"):
+        os.remove(events + ".raise")
+        same.lift()
+        same.focus_force()
+        same_field.focus_set()
+        ctypes.windll.user32.SetForegroundWindow(ctypes.windll.user32.GetAncestor(same.winfo_id(), 2))
+        note("same-focused")
     if os.path.exists(events + ".animate"):
         bar.place(x=(bar.winfo_x() + 9) % 480, y=240, width=40, height=40)
         root.after(16, poll)
@@ -166,6 +180,20 @@ field.place(x=10, y=10, width=280, height=40)
 field.bind("<KeyRelease>", lambda e: note("decoy:" + field.get()))
 root.bind("<FocusIn>", lambda e: note("decoy-focused"))
 root.after(200, field.focus_set)
+# Asked to (`.own` holds the shared window's handle): this window names the shared window as its owner, as a credential prompt or another
+# program's file picker does. Windows lets any program do it; the phone still must not type into it.
+import os
+def own():
+    path = events + ".own"
+    if os.path.exists(path):
+        owner = int(open(path).read())
+        os.remove(path)
+        me = ctypes.windll.user32.GetAncestor(root.winfo_id(), 2)
+        ctypes.windll.user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        ctypes.windll.user32.SetWindowLongPtrW(me, -8, owner)  # GWLP_HWNDPARENT: the owner
+        note("decoy-owned")
+    root.after(100, own)
+root.after(100, own)
 root.mainloop()
 '''
 
@@ -452,6 +480,29 @@ async def scenario(run, d):
     refused_front = (again or {}).get("code") == "not_front"
     check("with another window in front, text goes to the shared window or is refused", (landed and (again or {}).get("result") == "sent") or (refused_front and not landed), (again or {}).get("code") or (again or {}).get("result"))
     check("…and never into the window that took the focus", not any(e.startswith("decoy:") and TYPED2 in e for e in events()))
+    # A second window of the same program takes the focus: the phone does not see it, so nothing goes into it either.
+    typed3 = "same-" + secrets.token_hex(6)
+    with open(EVENTS + ".raise", "w") as f:
+        f.write("1")
+    until(lambda: "same-focused" in events(), 5)
+    third = await phone.ask(type="sc_text", sc=phone.sc, text=typed3, st=now_ms())
+    await asyncio.to_thread(until, lambda: any(e.startswith("field:") and e.endswith(typed3) for e in events()), 2)
+    landed3 = any(e.startswith("field:") and e.endswith(typed3) for e in events())
+    check("with another window of the same program in front, text goes to the shared window or is refused", (landed3 and (third or {}).get("result") == "sent") or ((third or {}).get("code") == "not_front" and not landed3), (third or {}).get("code") or (third or {}).get("result"))
+    check("…and never into that window", not any(e.startswith("same:") and typed3 in e for e in events()))
+    # Another program's window that names the shared window as its owner (a credential prompt does): refused, with the hint to share the whole
+    # monitor, and nothing typed into it.
+    with open(EVENTS + ".own", "w") as f:
+        f.write(str(hwnd))
+    owned = until(lambda: "decoy-owned" in events(), 5)
+    in_front = until(lambda: to_front(decoy) and ctypes.windll.user32.GetForegroundWindow() == decoy, 5)
+    check("another program's window owned by the shared one is in front", owned and in_front)
+    typed4 = "owned-" + secrets.token_hex(6)
+    fourth = await phone.ask(type="sc_text", sc=phone.sc, text=typed4, st=now_ms())
+    await asyncio.sleep(0.5)
+    check("text is refused while another program's owned window is in front, with the hint", (fourth or {}).get("code") == "covered" and "Share the whole monitor" in (fourth or {}).get("message", ""), fourth and (fourth.get("code"), fourth.get("message")))
+    check("…and nothing is typed into it", not any(e.startswith("decoy:") and typed4 in e for e in events()))
+    stop("decoy")
     # The window changed (the button, the field): its frames followed the first, numbered in order.
     seqs = [m["seq"] for m in phone.log[mark:] if m["type"] == "sc_media" and m["kind"] == "video"]
     check("frames follow the first, numbered in order", len(seqs) >= 2 and seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs[:20])
