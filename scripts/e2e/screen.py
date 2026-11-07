@@ -265,8 +265,14 @@ def why_not(phone):
     buf = ctypes.create_unicode_buffer(120)
     u.GetWindowTextW(u.GetForegroundWindow(), buf, 120)
     states = [m.get("state") for m in phone.log if m["type"] == "sc_state"]
-    front = "the test window" if buf.value == TITLE else "the decoy" if buf.value == "Decoy " + TITLE else "Kelpie" if buf.value.startswith("Kelpie") else "another window"
-    return f"states {states[-6:]}, pointer {cursor()}, in front: {front}"
+    front = "the test window" if buf.value == TITLE else "the decoy" if buf.value == "Decoy " + TITLE else "the same program's second window" if buf.value == "Same " + TITLE else "Kelpie" if buf.value.startswith("Kelpie") else "another window"
+    # What the phone got lately: frames and tiles in the last 3 s, keyframes among them, and the computer's last word on the rate.
+    recent = [m for m in phone.log if m.get("_t", 0) > time.monotonic() - 3]
+    media = [m for m in recent if m["type"] == "sc_media"]
+    stats = [m for m in phone.log if m["type"] == "sc_stats"]
+    last = stats[-1] if stats else {}
+    seen = f"video {sum(1 for m in media if m['kind'] == 'video')} (keys {sum(1 for m in media if m['kind'] == 'video' and m['key'])}), tiles {sum(1 for m in media if m['kind'] == 'tile')}, stats fps {last.get('fps')} kbps {last.get('kbps')} reason {last.get('reason')} rtt p95 {(last.get('stages') or {}).get('ack_rtt_ms_p95')}"
+    return f"states {states[-6:]}, pointer {cursor()}, in front: {front}; last 3 s: {seen}"
 
 
 def press_hotkey():
