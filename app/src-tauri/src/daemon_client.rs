@@ -126,29 +126,25 @@ impl DaemonClient {
     /// Registers this connection as the daemon's provider of browser panes and of the screen (through the helper this app runs, `screen`). The daemon
     /// takes that from the verified app only, and hands it over at once from this app's own connection before; while something else holds a kind this
     /// tries again a few times, further apart each time. An older daemon has no such method, and a connection that goes ends the tries (the next one
-    /// starts its own).
+    /// starts its own). Each kind tries on its own, so one held by another program never holds back the other.
     async fn register_provider(self: Arc<Self>) {
-        for kind in ["browser", "screen"] {
-            let mut done = false;
-            for wait_ms in [0u64, 500, 1000, 2000, 4000, 8000] {
-                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-                match self.call("provider.register", json!({"kind": kind})).await {
-                    Ok(_) => {
-                        done = true;
-                        break;
-                    }
-                    Err(e) if e.to_string().contains("already provides") => continue,
-                    // An older daemon (no such kind, or no providers at all): nothing to wait for.
-                    Err(_) => {
-                        done = true;
-                        break;
-                    }
-                }
-            }
-            if !done {
-                tracing::warn!("another program provides {kind} to phones: it is off from a phone until Kelpie reconnects");
+        let tries: Vec<_> = ["browser", "screen"].into_iter().map(|kind| tauri::async_runtime::spawn(self.clone().register_kind(kind))).collect();
+        for t in tries {
+            let _ = t.await;
+        }
+    }
+
+    async fn register_kind(self: Arc<Self>, kind: &'static str) {
+        for wait_ms in [0u64, 500, 1000, 2000, 4000, 8000] {
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+            match self.call("provider.register", json!({"kind": kind})).await {
+                Ok(_) => return,
+                Err(e) if e.to_string().contains("already provides") => continue,
+                // An older daemon (no such kind, or no providers at all): nothing to wait for.
+                Err(_) => return,
             }
         }
+        tracing::warn!("another program provides {kind} to phones: it is off from a phone until Kelpie reconnects");
     }
 
     fn on_disconnect(&self) {
