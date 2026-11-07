@@ -10,6 +10,8 @@ enum Start {
     Fail,
     /// After this many milliseconds.
     Slow(u64),
+    /// As the real helper does: a frame streamed under the new screen first, then the answer after this many milliseconds.
+    StreamsFirst(u64),
 }
 
 struct Rig {
@@ -40,6 +42,7 @@ fn rig_with(lane: usize, start: Start) -> Rig {
             if let Some(id) = m["preq"].as_u64() {
                 let (app, method) = (app.clone(), m["method"].as_str().unwrap_or_default().to_string());
                 let typed = m["params"]["text"].as_str().unwrap_or_default().to_string();
+                let sc = m["params"]["sc"].as_str().unwrap_or_default().to_string();
                 tokio::spawn(async move {
                     let answer = match method.as_str() {
                         "screen.targets" => json!({"result": {"targets": [
@@ -54,6 +57,12 @@ fn rig_with(lane: usize, start: Start) -> Rig {
                                 Start::Ok => ok,
                                 Start::Fail => json!({"error": {"message": "that window was closed"}}),
                                 Start::Slow(ms) => {
+                                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                                    ok
+                                }
+                                Start::StreamsFirst(ms) => {
+                                    let frame = base64::engine::general_purpose::STANDARD.encode(video(1, true, 100));
+                                    app.screen.on_event(&app, APP, &json!({"sc": sc, "kind": "media", "data": frame}));
                                     tokio::time::sleep(Duration::from_millis(ms)).await;
                                     ok
                                 }
@@ -569,4 +578,17 @@ async fn an_acknowledgement_is_never_taken_past_the_frames_sent() {
     r.verb("sc_ack", json!({"sc": sc, "seq": 999})).await.unwrap();
     let flow = r.told_now("screen.flow").await;
     assert_eq!(flow.last().unwrap()["acked"], 1, "{flow:?}");
+}
+#[tokio::test]
+async fn frames_that_come_before_the_hold_exists_bring_a_keyframe_request_once_it_does() {
+    // The helper streams as soon as it starts: its first frame reaches the daemon while the app's answer is still on its way, and is dropped.
+    let r = rig_with(8, Start::StreamsFirst(200));
+    let sc = r.start().await;
+    let asked = r.told_now("screen.keyframe").await;
+    assert_eq!(asked.len(), 1, "a keyframe asked for as soon as the hold exists: {asked:?}");
+    assert_eq!(asked[0]["sc"], sc.as_str());
+    // A start that streamed nothing first asks for nothing.
+    let quiet = rig();
+    quiet.start().await;
+    assert!(quiet.told_now("screen.keyframe").await.is_empty());
 }

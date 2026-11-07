@@ -122,6 +122,10 @@ pub struct Broker {
     holds: Mutex<HashMap<String, Arc<Hold>>>,
     /// A start under way: the screen is reserved for it.
     starting: Mutex<bool>,
+    /// Screens whose media came before their hold existed (the helper streams as soon as it starts, before the app's answer reaches the
+    /// daemon): those frames were dropped unseen, so when the hold is made a keyframe is asked for at once. Without it the helper would count
+    /// them as in flight for good, encode nothing more, and the hold would hold the phone's input back waiting for a keyframe nobody asked for.
+    orphans: Mutex<VecDeque<String>>,
 }
 
 /// The screen reserved for a start, until it is dropped.
@@ -290,7 +294,18 @@ impl Broker {
     /// `provider.event` from `client`: media, a state, the stats, or a stream the helper ended. Only the hold's own provider is heard.
     pub fn on_event(&self, d: &Daemon, client: u64, params: &Value) {
         let sc = params["sc"].as_str().unwrap_or_default();
-        let Some(hold) = self.hold(sc).filter(|h| h.provider == client) else { return };
+        let Some(hold) = self.hold(sc).filter(|h| h.provider == client) else {
+            if params["kind"] == "media" && *self.starting.lock() {
+                let mut orphans = self.orphans.lock();
+                if !orphans.iter().any(|s| s == sc) {
+                    orphans.push_back(sc.to_string());
+                    while orphans.len() > 8 {
+                        orphans.pop_front();
+                    }
+                }
+            }
+            return;
+        };
         match params["kind"].as_str() {
             Some("media") => {
                 let Some(bytes) = params["data"].as_str().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok()) else { return };
@@ -585,6 +600,17 @@ impl Broker {
         });
         let hold = Arc::new(Hold { sc: sc.clone(), device: phone.device.to_string(), provider, grant, ended: AtomicBool::new(false), wake: Notify::new(), state: Mutex::new(state) });
         self.holds.lock().insert(sc.clone(), hold.clone());
+        // Frames that came before this hold were dropped unseen: the helper gives them up with a keyframe asked for now.
+        let lost = {
+            let mut orphans = self.orphans.lock();
+            let before = orphans.len();
+            orphans.retain(|s| *s != sc);
+            orphans.len() != before
+        };
+        if lost {
+            let mut st = hold.state.lock();
+            self.ask_key(d, &hold, &mut st);
+        }
         if let Some(params) = pause {
             d.providers.notify("screen", "screen.pause", params);
         }
@@ -593,6 +619,10 @@ impl Broker {
         // The program, never the window's title, which can name a document.
         let what = if kind == "window" { format!("window: {}", program(started.get("exe"))) } else { "monitor".to_string() };
         d.mobile.audit(phone.device, "screen_start", &what);
+        // Which encoder, and which low-latency settings it refused or did not keep (the per-vendor table): its own report may come before the
+        // hold exists, so the start's answer says it too.
+        let refused: Vec<String> = started["refused"].as_array().map(|a| a.iter().take(16).filter_map(|s| s.as_str()).map(|s| s.chars().filter(|c| !c.is_control()).take(60).collect()).collect()).unwrap_or_default();
+        tracing::info!(encoder = %short(started.get("encoder_name"), 80), kind = %short(started.get("encoder"), 4), refused = ?refused, "screen encoder");
         tokio::spawn(watch(d.clone(), hold));
         let n = |k: &str| started[k].as_u64().unwrap_or(0).min(100_000);
         Ok(json!({"type": "ack", "result": "ok", "sc": sc, "kind": kind, "title": title, "w": n("w"), "h": n("h"), "encoder": if started["encoder"] == "sw" { "sw" } else { "hw" }}))
