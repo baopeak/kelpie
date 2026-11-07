@@ -286,8 +286,12 @@ pub async fn run_on(exe: &std::path::Path, a: &str, command: &str, timeout: Dura
 
 /// Stops a copier on A, only while that process id is still an `sftp` (a reused id is left alone).
 pub fn kill_command(pid: u32) -> String {
-    format!("case \"$(ps -p {pid} -o comm= 2>/dev/null)\" in *sftp*) kill {pid}; sleep 1; case \"$(ps -p {pid} -o comm= 2>/dev/null)\" in *sftp*) kill -9 {pid};; esac;; esac; true")
+    format!("sh -c {} kelpie {pid}", q(KILL))
 }
+
+/// Stops the copier `$1` on A only while it is still `sftp`. Plain `ps -p` (no `-o`): Git for Windows' and BusyBox's
+/// `ps` know no `-o`, and every one prints the command in its row.
+const KILL: &str = r#"still() { ps -p "$1" 2>/dev/null | tail -n +2 | grep -q sftp; }; still "$1" || exit 0; kill "$1"; sleep 1; still "$1" && kill -9 "$1"; exit 0"#;
 
 pub async fn kill_on(exe: &std::path::Path, a: &str, pid: u32) -> bool {
     matches!(run_on(exe, a, &kill_command(pid), Duration::from_secs(20)).await, Ok((Some(0), _)))
@@ -547,7 +551,8 @@ mod tests {
         assert_eq!(find_pid("  kelpie-pid 7 "), Some(7));
         assert_eq!(find_pid("kelpie-pid x"), None);
         let k = kill_command(4242);
-        assert!(k.contains("ps -p 4242") && k.contains("*sftp*"), "only while it is still sftp: {k}");
+        assert!(k.starts_with("sh -c '") && k.ends_with("' kelpie 4242"), "the pid only as a parameter: {k}");
+        assert!(KILL.contains(r#"ps -p "$1""#) && KILL.contains("grep -q sftp") && !KILL.contains(" -o "), "only while it is still sftp, with any ps: {k}");
     }
 
     #[test]

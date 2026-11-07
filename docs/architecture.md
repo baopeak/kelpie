@@ -1566,7 +1566,8 @@ task's run status is the Runs engine's.
 
 The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so a transfer outlives the window.
 - **Engine**: `russh-sftp` 3.0.1 speaks SFTP v3 over the stdio of the user's own OpenSSH:
-  `ssh -F <data>/ssh/config -o NumberOfPasswordPrompts=1 -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=ERROR -s <dest> sftp`.
+  `ssh -F <data>/ssh/config -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o Tunnel=no -o RemoteCommand=none -o PermitLocalCommand=no -o NumberOfPasswordPrompts=1 -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=ERROR -s <dest> sftp`.
+  - A file session never forwards: the host's agent, X11 and port forwards stay with its terminals (a port forward bound twice would fail), and a configured remote command would replace the subsystem.
   - ssh runs with the daemon as its askpass (`kelpie_proto::ssh::askpass_env`, the saved host found by alias), so the user's config, ProxyJump, agent and saved passwords apply exactly as in a terminal.
   - 64 requests are kept in flight.
   - The choice was measured: `plans/reports/spike-261106-sftp-engine.md`.
@@ -1645,7 +1646,7 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
     - **Same machine**: the script lists the keys A's known hosts hold for B (`ssh-keygen -F`). Every one must be a key this computer trusts for B (its known-hosts files, under B's host-key alias when set), so A can only have logged in to this computer's B, before any data leaves.
     - B's hostname, port and user are what this computer's ssh uses for B (`ssh -G`), so A logs in as the same user Kelpie does.
     - Exit codes and ssh's words become the one-line reason for relaying. A failure of the ssh to A itself is not cached.
-  - **Direct copy**: one `sh -c 'echo "kelpie-pid $$"; exec sftp -q -b - …' kelpie <port> <user> <host>` on A per job (started again every 50 files; the pid is found past any login banner), fed per file `-put` (a fresh partial) or `-reput` (to continue one) and a `!echo` marker. A partial already complete (an empty file included) needs no sftp. The partial goes through the same resume checks as any copy (the job's own, a regular file, the tail). A copier an attempt left on A is stopped by its pid, only while it is still `sftp`, before the next starts.
+  - **Direct copy**: one `sh -c 'echo "kelpie-pid $$"; exec sftp -q -b - …' kelpie <port> <user> <host>` on A per job (started again every 50 files; the pid is found past any login banner), fed per file `-put` (a fresh partial) or `-reput` (to continue one) and a `!echo` marker. A partial already complete (an empty file included) needs no sftp. The partial goes through the same resume checks as any copy (the job's own, a regular file, the tail). A copier an attempt left on A is stopped by its pid, only while it is still `sftp` (plain `ps -p`, which every `ps` knows, Git for Windows' included), before the next starts. A cancelled copy's partial on B is removed once B lets go of it (a Windows server cannot remove an open file), else by the job's cleanup.
     - The partial is first made owner-only through Kelpie's own session to B, and progress is its size read through that session once a second.
     - Cancel kills the echoed PID on A. The re-check, rename and times use Kelpie's B session, as in every copy.
     - Names that would need more than plain double quotes in a batch line (`"`, `\`, glob characters, controls) go through this computer.

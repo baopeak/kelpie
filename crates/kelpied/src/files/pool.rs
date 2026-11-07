@@ -74,7 +74,12 @@ impl AsyncWrite for Stdio2 {
 /// The arguments of the ssh child for `dest` (after the program).
 pub fn ssh_args(config: &std::path::Path, dest: &str) -> Vec<String> {
     let mut args = vec!["-F".to_string(), config.to_string_lossy().into_owned()];
-    for o in ["NumberOfPasswordPrompts=1", "ConnectTimeout=15", "ServerAliveInterval=15", "ServerAliveCountMax=3", "LogLevel=ERROR"] {
+    // A file session needs no forwarding: the host's agent, X11 and port forwards stay with its terminals (a forward
+    // bound twice would even fail), and a configured remote command would replace the subsystem.
+    for o in [
+        "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "Tunnel=no", "RemoteCommand=none", "PermitLocalCommand=no",
+        "NumberOfPasswordPrompts=1", "ConnectTimeout=15", "ServerAliveInterval=15", "ServerAliveCountMax=3", "LogLevel=ERROR",
+    ] {
         args.push("-o".into());
         args.push(o.into());
     }
@@ -319,6 +324,9 @@ mod tests {
         assert_eq!(args[..2], ["-F", "/d/ssh/config"]);
         assert!(args.windows(2).any(|w| w == ["-o", "NumberOfPasswordPrompts=1"]));
         assert!(args.windows(2).any(|w| w == ["-o", "ServerAliveInterval=15"]));
+        for o in ["ForwardAgent=no", "ClearAllForwardings=yes", "RemoteCommand=none"] {
+            assert!(args.windows(2).any(|w| w == ["-o", o]), "{o}");
+        }
         assert_eq!(args[args.len() - 3..], ["-s", "deploy@prod", "sftp"]);
     }
 

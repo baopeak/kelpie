@@ -945,6 +945,8 @@ impl Queue {
                         j.speed_bps = 0;
                         j.eta_s = None;
                         j.totals.done_bytes = j.totals.done_bytes.max(live.ctl.bytes.load(Ordering::Relaxed));
+                        // A lost connection it recovered from is no longer its error.
+                        j.error = None;
                         // A done job is never resumed: what it kept for that goes.
                         j.names.clear();
                         j.asides.clear();
@@ -1522,12 +1524,8 @@ impl Queue {
                             return Err(FsError::new(ErrKind::Other, format!("not enough free space on the target ({free} bytes free when the transfer started)")));
                         }
                         Ok(Copied::Stopped(Stop::Pause)) => return Ok(()),
-                        Ok(Copied::Stopped(Stop::Cancel)) => {
-                            self.count(&job.id, |j| {
-                                j.partials.remove(&partial);
-                            });
-                            return Ok(());
-                        }
+                        // Cancel: the partial stays in the journal until the job's cleanup has removed it too.
+                        Ok(Copied::Stopped(Stop::Cancel)) => return Ok(()),
                         Err(e) if e.kind == ErrKind::Connection => return Err(e),
                         Err(e) => {
                             // A file that failed for another reason is not resumed: its partial goes.
@@ -1611,7 +1609,14 @@ impl Queue {
                 if let Some(stop) = live.ctl.stop() {
                     self.stop_copier(live, guard.take(), a).await;
                     if stop == Stop::Cancel {
-                        let _ = fc.dst.remove_file(partial).await;
+                        // B may hold the stopped copier's file open for a moment (a Windows server cannot remove an
+                        // open file): tried for a few seconds, then left to the job's cleanup.
+                        for _ in 0..20 {
+                            match fc.dst.remove_file(partial).await {
+                                Err(e) if !matches!(e.kind, ErrKind::NotFound | ErrKind::Connection) => tokio::time::sleep(Duration::from_millis(250)).await,
+                                _ => break,
+                            }
+                        }
                     }
                     return Ok(Copied::Stopped(stop));
                 }
@@ -1765,8 +1770,9 @@ fn file_error(done: Result<FsResult<()>, tokio::task::JoinError>) -> Option<FsEr
     }
 }
 
-/// A job's task: when it ends without finishing (a panic), the job fails instead of staying "running" forever, holding
-/// updates and refusing resume and cancel.
+/// A job's task: when it panics, the job fails instead of staying "running" forever, holding updates and refusing
+/// resume and cancel. A task dropped unfinished because the daemon exits is not a failure: the job was saved as it
+/// was and loads as interrupted.
 struct Ending {
     q: Arc<Queue>,
     id: String,
@@ -1776,7 +1782,7 @@ struct Ending {
 impl Drop for Ending {
     fn drop(&mut self) {
         self.q.live.lock().remove(&self.id);
-        if !self.normal {
+        if !self.normal && std::thread::panicking() {
             tracing::warn!(job = %self.id, "transfer task ended unexpectedly");
             self.q.fail(&self.id, &FsError::new(ErrKind::Other, "the transfer stopped unexpectedly"));
         }
@@ -2390,6 +2396,22 @@ mod tests {
         r.q.rpc("xfer.control", &json!({"id": id, "action": "pause"})).await.unwrap();
         until(&r, &id, |j| j.state == State::Paused).await;
         assert_eq!(r.q.active_count(), 1, "a paused one does not");
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_job_task_fails_its_job_only_when_it_panics() {
+        let r = rig("ending");
+        let id = r.q.queue_for_test();
+        // The daemon exiting drops unfinished tasks: the job keeps its state and loads as interrupted.
+        drop(Ending { q: r.q.clone(), id: id.clone(), normal: false });
+        assert_eq!(r.q.get(&id).unwrap().state, State::Queued);
+        let (q, id2) = (r.q.clone(), id.clone());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _ending = Ending { q, id: id2, normal: false };
+            panic!("a bug in a transfer task (test)");
+        }));
+        assert_eq!(r.q.get(&id).unwrap().state, State::Failed, "never left running forever");
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 
