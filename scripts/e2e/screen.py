@@ -467,17 +467,19 @@ async def scenario(run, d):
     await asyncio.sleep(1.0)
     check("a click that came too late clicks nothing", "clicked" not in events())
     await phone.click(cx, cy)
-    check("a click on the button in the picture's pixels presses it", until(lambda: "clicked" in events(), 5), why_not(phone))
+    # Every wait while a screen streams runs off the event loop: a blocked loop stops this phone reading and acknowledging, which the computer
+    # rightly takes for a stalled link and cuts the rate for (the "early bandwidth cut" seen in half the runs).
+    check("a click on the button in the picture's pixels presses it", await asyncio.to_thread(until, lambda: "clicked" in events(), 5), why_not(phone))
     ex, ey, ew, eh = geometry("field:@")
     await phone.click(*to_source(ex + ew // 2, ey + eh // 2))
     await asyncio.sleep(0.3)
     typed = await phone.ask(type="sc_text", sc=phone.sc, text=TYPED, st=now_ms())
     check("text goes with its own answer", (typed or {}).get("result") == "sent", typed and typed.get("type"))
-    check("…and lands in the window's field", until(lambda: f"field:{TYPED}" in events(), 5), why_not(phone))
+    check("…and lands in the window's field", await asyncio.to_thread(until, lambda: f"field:{TYPED}" in events(), 5), why_not(phone))
     # Another window takes the focus (a chat, a toast): typed text goes to the shared window, brought to the front, or is refused, never elsewhere.
     spawn("decoy", [sys.executable, "-c", DECOY, "Decoy " + TITLE, EVENTS])
-    decoy = until(lambda: ctypes.windll.user32.FindWindowW(None, "Decoy " + TITLE), 10)
-    in_front = until(lambda: to_front(decoy) and ctypes.windll.user32.GetForegroundWindow() == decoy, 5)
+    decoy = await asyncio.to_thread(until, lambda: ctypes.windll.user32.FindWindowW(None, "Decoy " + TITLE), 10)
+    in_front = await asyncio.to_thread(until, lambda: to_front(decoy) and ctypes.windll.user32.GetForegroundWindow() == decoy, 5)
     check("the other window has taken the focus", in_front)
     again = await phone.ask(type="sc_text", sc=phone.sc, text=TYPED2, st=now_ms())
     await asyncio.to_thread(until, lambda: any(e.startswith("field:") and e.endswith(TYPED2) for e in events()), 2)
@@ -490,10 +492,10 @@ async def scenario(run, d):
     typed3 = "same-" + secrets.token_hex(6)
     with open(EVENTS + ".raise", "w") as f:
         f.write("1")
-    until(lambda: "same-focused" in events(), 5)
-    same = until(lambda: ctypes.windll.user32.FindWindowW(None, "Same " + TITLE), 5)
+    await asyncio.to_thread(until, lambda: "same-focused" in events(), 5)
+    same = await asyncio.to_thread(until, lambda: ctypes.windll.user32.FindWindowW(None, "Same " + TITLE), 5)
     # In front for Windows too (Tk's own call may meet the foreground lock): checked, so a refused change fails here rather than passing below.
-    same_in_front = bool(same) and until(lambda: to_front(same) and ctypes.windll.user32.GetForegroundWindow() == same, 5)
+    same_in_front = bool(same) and await asyncio.to_thread(until, lambda: to_front(same) and ctypes.windll.user32.GetForegroundWindow() == same, 5)
     check("the same program's second window has taken the focus", same_in_front)
     third = await phone.ask(type="sc_text", sc=phone.sc, text=typed3, st=now_ms())
     await asyncio.to_thread(until, lambda: any(e.startswith("field:") and e.endswith(typed3) for e in events()), 2)
@@ -504,15 +506,15 @@ async def scenario(run, d):
     # monitor, and nothing typed into it.
     with open(EVENTS + ".own", "w") as f:
         f.write(str(hwnd))
-    owned = until(lambda: "decoy-owned" in events(), 5)
-    in_front = until(lambda: to_front(decoy) and ctypes.windll.user32.GetForegroundWindow() == decoy, 5)
+    owned = await asyncio.to_thread(until, lambda: "decoy-owned" in events(), 5)
+    in_front = await asyncio.to_thread(until, lambda: to_front(decoy) and ctypes.windll.user32.GetForegroundWindow() == decoy, 5)
     check("another program's window owned by the shared one is in front", owned and in_front)
     typed4 = "owned-" + secrets.token_hex(6)
     fourth = await phone.ask(type="sc_text", sc=phone.sc, text=typed4, st=now_ms())
     await asyncio.sleep(0.5)
     check("text is refused while another program's owned window is in front, with the hint", (fourth or {}).get("code") == "covered" and "Share the whole monitor" in (fourth or {}).get("message", ""), fourth and (fourth.get("code"), fourth.get("message")))
     check("…and nothing is typed into it", not any(e.startswith("decoy:") and typed4 in e for e in events()))
-    stop("decoy")
+    await asyncio.to_thread(stop, "decoy")
     # The window changed (the button, the field): its frames followed the first, numbered in order.
     seqs = [m["seq"] for m in phone.log[mark:] if m["type"] == "sc_media" and m["kind"] == "video"]
     check("frames follow the first, numbered in order", len(seqs) >= 2 and seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs[:20])
@@ -557,6 +559,10 @@ async def scenario(run, d):
         print(f"SPIKE DXGI first frame all dirty by its own metadata: {((seen or {}).get('stages') or {}).get('dxgi_first_full')}", flush=True)
         await phone.ask(type="sc_stop", sc=phone.sc)
         await see()
+    # On loopback the link controller has nothing to cut for: the first screen's stats say how many cuts it made (`stages.link_cuts`).
+    first_end = next((i for i, m in enumerate(phone.log) if m["type"] == "sc_end"), len(phone.log))
+    cuts = [(m.get("stages") or {}).get("link_cuts") for m in phone.log[:first_end] if m["type"] == "sc_stats"]
+    check("the bitrate is never cut on loopback", bool(cuts) and all(c == 0 for c in cuts if c is not None), cuts[-10:])
     told = [(m["type"], m.get("state") or m.get("reason") or m.get("code")) for m in phone.log if m["type"] in ("sc_end", "sc_state", "error")]
     check("a picture that changes keeps coming while it changes", len(moving) >= 20, f"{len(moving)} frames; the phone was told {told[-8:]}")
 
