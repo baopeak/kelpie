@@ -1497,10 +1497,9 @@ counts as the user's consent. Rules live in `crates/kelpied/src/subs.rs` (pure, 
   prompt is still pending: for Claude and Codex children only when a turn really ends (Claude `Stop` /
   `StopFailure`, Codex `agent-turn-complete`) after at least 3 s of work; for other agents, and for a
   Claude/Codex child whose hooks have not been seen, after 30 s of continuous quiet that follows real
-  work (120 s for such a Codex child, which can think silently through its first turn). An explicit `done`/`failed` report suppresses it until the next submitted input (Enter, Kelpie's
+  work (120 s for such a Codex child, which can think silently through its first turn). An explicit `done`, `failed`, `blocked` or `needs_user` report suppresses it until the next submitted input (Enter, Kelpie's
   own delivered mail included; terminal replies, mouse and cursor keys are not input) or hook turn start
-  (`sync_turn`); `progress`, `blocked` and `needs_user`
-  do not. The mail says the child may still be working and that only its own report means done.
+  (`sync_turn`); only `progress` does not. The mail says the child may still be working and that only its own report means done.
   Reports update the row (`auto: true` for automatic ones) and mail the parent unless it is gone.
   Done/failed reports, run-task verdicts and closes feed `sub-stats.json` (last 500, one per session),
   shown as `agent.presets[].outcomes`.

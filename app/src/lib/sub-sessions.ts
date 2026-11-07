@@ -78,6 +78,15 @@ export type ChildState = "waiting" | "error" | "working" | "done" | "idle" | "ex
 /** Worst first: a child that needs the user beats one that failed, one that works, one finished and unread, one that idles. */
 const RANK: Record<ChildState, number> = { waiting: 5, error: 4, working: 3, done: 2, idle: 1, exited: 0 };
 
+/** A quiet child's state with what it last reported: one that said it needs the user or is blocked counts as waiting for the user,
+ *  one that said it failed as an error. A child that works, waits, failed or exited already shows its own state, and a report that
+ *  is stale (it went on working since) must not override it. */
+export function stateWithReport(base: ChildState, report: string | undefined): ChildState {
+  if (base !== "idle" && base !== "done") return base;
+  if (report === "needs_user" || report === "blocked") return "waiting";
+  return report === "failed" ? "error" : base;
+}
+
 export interface SubtreeSummary {
   /** Everything below the session (children, their children…). */
   count: number;

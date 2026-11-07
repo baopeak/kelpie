@@ -47,7 +47,7 @@ export function focusFirstSubRequest() {
   showPostponed();
   // After the cards are drawn; a button is disabled for a moment after its card appears, so the card itself is the fallback.
   setTimeout(() => {
-    const card = document.querySelector<HTMLElement>(".sub-cards [data-sub-request]");
+    const card = document.querySelector<HTMLElement>("[data-sub-request]");
     (card?.querySelector<HTMLElement>("[data-sub-primary]:not(:disabled)") ?? card)?.focus();
   }, 0);
 }

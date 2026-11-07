@@ -382,5 +382,7 @@
   "one needs you": "có phiên cần bạn",
   "one failed": "có phiên bị lỗi",
   "one is working": "có phiên đang làm",
-  "one finished, unread": "có phiên đã xong, chưa đọc"
+  "one finished, unread": "có phiên đã xong, chưa đọc",
+  "Reported: needs you": "Phiên báo: cần bạn",
+  "Reported: failed": "Phiên báo: bị lỗi"
 }

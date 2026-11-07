@@ -77,3 +77,45 @@ Notes: `switching` is an extra field on the session wire row (skipped when false
 Status: DONE
 Summary: All fix-round items are implemented as decided (H1, H2, M1 without the alias map, M2, M3, six lows) and all checks pass.
 Concerns/Blockers: Old handles/ids are not aliased after a switch (names are; the parent is told the new handle by mail); nothing was exercised in the real app.
+
+## Real-app check fixes
+
+Checks: `cargo test -p kelpied -j 2 -- --skip notify::destinations` 899 passed, 0 failed; clippy `--tests -D warnings` clean; `pnpm typecheck` clean; `pnpm test` 1527 passed; `pnpm i18n:check` 0 missing (no new strings). Not looked at in the real app (no tauri dev).
+
+1. **Explicit reports keep the row (daemon).** `sub.report` now marks the turn as reported for every status except `progress` (done, failed, blocked, needs_user), in `sub_rpc.rs`. The automatic idle report and its mail stay silent until the next submitted input or hook turn start. An automatic wait-for-user or exit still replaces the row (news). Test renamed `any_explicit_report_but_a_progress_note_counts_as_having_reported_the_turn` (blocked and needs_user now mail 0 idle reports). `docs/architecture.md` "Automatic reports" sentence updated: only `progress` does not suppress.
+2. **Badge uses the reports.** New pure `stateWithReport(base, report)`: a quiet (idle / finished-unread) child that last reported needs_user or blocked counts as waiting, failed as error; a working, waiting, failed or exited child keeps its own state so a stale report cannot override it. The badge colour, glyph and aria-label/tooltip ("one needs you", "one failed") follow. Unit test.
+3. **Cards hidden while Activity is open**: `SubRequestCards` checks `isCovering("inbox")` (new `isCovering` in `lib/overlays.ts`, the status bar already registers the panel there); they return on close. The shortcut now focuses the first `[data-sub-request]` card wherever it is (the inbox copy while the panel is open).
+4. **Nested rows**: the relative time is hidden on nested rows (CSS, `.age:not(.state-label)`; "needs you" labels stay) and every row's tooltip now ends with the age; indent cut (6px margin, 5px padding), tighter row gap/padding. Not re-checked on screen in EN/VI.
+5. **Approval card**: "Later" is a small underlined text button at the card's top right (absolutely placed), last in DOM and tab order after Deny, with the same 500 ms arming; the title reserves room for it so the four action buttons are on their own row(s).
+
+Status: DONE_WITH_CONCERNS
+Summary: All five follow-up fixes are implemented with tests and the full checks are green.
+Concerns/Blockers: Items 3-5 are CSS/layout and were not re-verified visually; please re-run the screenshot pass (nested names in EN/VI, the card with "Later").
+
+## Fix round 2 (review "Round 3" + second real-app check)
+
+Checks: `cargo test -p kelpied -j 2 -- --skip notify::destinations` 901 passed, 0 failed; clippy `--tests -D warnings` clean; `pnpm typecheck` clean; `pnpm test` 1527 passed; `pnpm i18n:check` 0 missing. Not looked at in the real app.
+
+- **R3-1** Chat sessions have `turn_count`, bumped where a user turn is written (`observe_written` for window lines, `commit_turn` for queued and daemon-built turns); permission answers, interrupts and other lines do not count. `sync_turn` feeds it as `turn_seq` for `Entry::Chat`. Test: a chat child reports `blocked`, goes quiet (no idle report), a permission answer and an interrupt change nothing, then a user turn is written: the idle report and row come back.
+- **R3-2** `ChildWatch::sync_turn` returns whether a new turn began; the daemon then clears a `blocked`/`needs_user` row report (done/failed stay). In `sub.report` the sync now runs before the row is set, so the report just made is never wiped. Tests: blocked/needs_user cleared, done/failed kept, a report made right after input survives.
+- **R3-3** Duplicate CSS block removed. Correction to my earlier notes: "Later" is NOT delayed by the 500 ms arming (it only hides the card; it is disabled while an answer is in flight). The other four buttons are armed after 500 ms.
+- **Parent row name**: rows with children hide the age column (tooltip keeps it), badge is more compact, badge glyph 10 px.
+- **Shared "needs you" rule**: `reportedState(s)` in `sidebar.tsx` (= `sessionState` + `stateWithReport`) is used by the dot, the row class/label, the badge, the project counts and attention filter, and the status bar's "N need you"/bell (each session counted once; a parent is not counted for its child). The dot tooltip says "Reported: needs you / failed" when the state comes from the report.
+- **Activity duplicate**: the Activity entry of an open request is hidden from the list while the request is open (`store.pendingEntries`), and shown (read) as history afterwards.
+- **Agent label**: the Activity entry uses the display label (`kindInfo`), and the daemon's `session_tag` (used in parent mail, request `from_label`, messages) now says "Claude Code"/"Fake agent"-style labels instead of the raw id; two tests updated to expect the label.
+
+Status: DONE_WITH_CONCERNS
+Summary: R3-1, R3-2, R3-3 and the four lows from the second app check are implemented with tests; all checks pass.
+Concerns/Blockers: Layout changes (parent name room, badge size) are CSS-only and not re-verified on screen.
+
+## R4-1: one "needs you" rule everywhere
+
+Checks: `pnpm typecheck` clean, `pnpm test` 1528 passed (1 new), `pnpm i18n:check` 0 missing. No Rust changes (R4-2 left alone).
+
+- New pure `lib/session-state.ts`: `sessionState`, `reportedState` and `needsYou(s)` (1 = waits on a prompt, 2 = quiet sub-session whose report is needs_user/blocked, 0 = neither). `sidebar.tsx` re-exports `sessionState`/`reportedState`/`SessionState`, so existing imports and the status bar keep working.
+- `waitingSessions` (attention.ts) now returns both kinds: real prompts first (longest wait first), then reported ones (oldest report first). That feeds "Next session waiting for you" (`nextWaiting`), the "Answer waiting session" command (its `when` too), the Activity "Needs you" group and the dashboard's "Needs you" column. The palette's "Needs attention" list and the board card's attention count use `needsYou(s) > 0 || unread`. The dashboard's quick-answer button shows only for a real prompt.
+- Test: prompt first, then blocked/needs_user ordered by report time; done reports, working children and closed ones excluded; `nextWaiting` cycles through them.
+
+Status: DONE
+Summary: The waiting-session command, palette list, board and dashboard now use the same needs-you rule as the status bar (prompts first, then reported needs_user/blocked).
+Concerns/Blockers: none; not looked at in the real app.

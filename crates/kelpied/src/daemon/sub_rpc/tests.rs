@@ -130,7 +130,7 @@ fn a_report_shows_on_the_row_and_goes_to_the_parent_that_reads_or_receives_it() 
     let peek = d.sub_rpc("sub.inbox", &json!({"session_id": "p"})).unwrap();
     let mail = &peek["mails"][0];
     assert_eq!((mail["kind"].clone(), mail["status"].clone()), (json!("report"), json!("done")));
-    assert_eq!(mail["from_label"], "sub-session \"c\" (codex, #2)");
+    assert_eq!(mail["from_label"], format!("sub-session \"c\" ({}, #2)", agents::preset_for("codex").unwrap().label), "the agent's name, not its id");
     assert_eq!(d.sub_rpc("sub.inbox", &json!({"session_id": "p"})).unwrap()["mails"].as_array().unwrap().len(), 1, "reading does not take");
     assert_eq!(d.sub_rpc("sub.inbox", &json!({"session_id": "p", "take": true})).unwrap()["mails"].as_array().unwrap().len(), 1);
     assert!(d.sub_rpc("sub.inbox", &json!({"session_id": "p", "take": true})).unwrap()["mails"].as_array().unwrap().is_empty());
@@ -252,8 +252,8 @@ fn terminal_replies_and_keys_that_submit_nothing_do_not_begin_a_turn() {
 }
 
 #[test]
-fn only_a_verdict_counts_as_having_reported_the_turn() {
-    for (status, mailed) in [("progress", 1), ("blocked", 1), ("needs_user", 1), ("done", 0), ("failed", 0)] {
+fn any_explicit_report_but_a_progress_note_counts_as_having_reported_the_turn() {
+    for (status, mailed) in [("progress", 1), ("blocked", 0), ("needs_user", 0), ("done", 0), ("failed", 0)] {
         let (d, dir) = daemon("sub-verdict");
         add(&d, 1, "p", "claude", None);
         add(&d, 2, "c", "codex", Some(("p", 1)));
@@ -515,7 +515,7 @@ fn a_message_goes_to_an_agent_that_runs_and_not_to_a_shell_or_oneself() {
     send(None, "b", "from a script of the user").unwrap();
     let mails = d.sub_rpc("sub.inbox", &json!({"session_id": "b"})).unwrap();
     let labels: Vec<&str> = mails["mails"].as_array().unwrap().iter().map(|m| m["from_label"].as_str().unwrap()).collect();
-    assert_eq!(labels, ["session \"a\" (claude, #1)", "a program run by the user"]);
+    assert_eq!(labels, ["session \"a\" (Claude Code, #1)", "a program run by the user"], "the agent's name, not its id");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -588,7 +588,7 @@ fn a_request_for_an_installed_agent_is_shown_to_the_user_and_a_denial_answers_th
     let request = &pending[0];
     assert_eq!((request["agent"].clone(), request["name"].clone(), request["worktree"].clone()), (json!(agent), json!("fix"), json!(true)));
     assert_eq!(request["task"].as_str().unwrap().chars().count(), subs::TASK_PREVIEW);
-    assert_eq!(request["from_label"], "session \"p\" (claude, #1)");
+    assert_eq!(request["from_label"], "session \"p\" (Claude Code, #1)");
     let seen = decoded(&mut user_rx);
     assert!(seen.iter().any(|e| e["event"] == "sub.request" && e["params"]["id"] == request["id"]), "{seen:?}");
     assert!(decoded(&mut program_rx).iter().all(|e| e["event"] != "sub.request"));
@@ -1358,6 +1358,85 @@ fn a_view_switch_is_not_reported_as_an_exit_unless_it_never_happens() {
     assert_eq!(mail.len(), 1, "reported now");
     assert_eq!(mail[0].status.as_deref(), Some("exited"));
     assert!(!child.spec.lock().switching);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_chat_child_reports_idle_again_after_a_new_turn_and_its_old_question_leaves_the_row() {
+    let (d, dir) = daemon("sub-chat-turns");
+    add(&d, 1, "p", "claude", None);
+    let chat = crate::chat::ChatSession::new(2, SessionSpec { id: "c".into(), kind: "claude".into(), cwd: ".".into(), parent: Some("p".into()), depth: 1, ..Default::default() });
+    let _stdin = chat.live_for_test();
+    d.insert_for_test(Entry::Chat(chat.clone()));
+    let entry = d.by_id("c").unwrap();
+    let t0 = Instant::now() - Duration::from_secs(300);
+    let s = Duration::from_secs;
+    let info = |status: Status| {
+        let mut i = entry.info();
+        i.status = status;
+        i
+    };
+    d.sub_status_changed(&entry, &info(Status::Working), t0);
+    d.sub_rpc("sub.report", &json!({"session_id": "c", "status": "blocked", "summary": "which db?"})).unwrap();
+    assert_eq!(chat.spec.lock().report.as_ref().unwrap().status, "blocked");
+    // The turn goes quiet: the explicit report holds, no idle report.
+    d.sub_status_changed(&entry, &info(Status::Idle), t0 + s(20));
+    d.sub_quiet_check(t0 + s(60));
+    assert!(idle_mails(&d, "p").is_empty());
+    // Permission answers and an interrupt are not turns.
+    chat.input(b"{\"type\":\"control_response\",\"response\":{\"request_id\":\"r1\",\"subtype\":\"success\"}}
+".to_vec());
+    chat.input(b"{\"type\":\"control_request\",\"request_id\":\"i1\",\"request\":{\"subtype\":\"interrupt\"}}
+".to_vec());
+    assert_eq!(chat.turn_count(), 0);
+    d.sub_status_changed(&entry, &info(Status::Working), t0 + s(70));
+    assert_eq!(chat.spec.lock().report.as_ref().map(|r| r.status.as_str()), Some("blocked"), "still the same turn");
+    // The parent answers: a user turn is written. The question is no longer news, and the next quiet is reported again.
+    chat.input(b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"use sqlite\"}}
+".to_vec());
+    assert_eq!(chat.turn_count(), 1);
+    d.sub_status_changed(&entry, &info(Status::Working), t0 + s(80));
+    assert!(chat.spec.lock().report.is_none(), "an answered question leaves the row");
+    // The agent finishes the turn it was given.
+    chat.ingest_for_test(json!({"type": "assistant", "message": {}}).to_string());
+    chat.ingest_for_test(json!({"type": "result", "subtype": "success"}).to_string());
+    chat.tick(Instant::now());
+    d.sub_status_changed(&entry, &info(Status::Idle), t0 + s(100));
+    d.sub_quiet_check(t0 + s(140));
+    assert_eq!(idle_mails(&d, "p").len(), 1);
+    assert_eq!(chat.spec.lock().report.as_ref().unwrap().status, "idle");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_new_turn_clears_a_blocked_row_but_not_a_verdict_and_not_the_report_just_made() {
+    for (status, kept) in [("blocked", false), ("needs_user", false), ("done", true), ("failed", true)] {
+        let (d, dir) = daemon("sub-stale-question");
+        add(&d, 1, "p", "claude", None);
+        let (child, _) = add(&d, 2, "c", "codex", Some(("p", 1)));
+        let entry = d.by_id("c").unwrap();
+        let t0 = Instant::now() - Duration::from_secs(120);
+        let mut working = entry.info();
+        working.status = Status::Working;
+        d.sub_status_changed(&entry, &working, t0);
+        d.sub_rpc("sub.report", &json!({"session_id": "c", "status": status, "summary": "so far"})).unwrap();
+        // Answered: input is submitted and the agent starts on it (a short turn that never reports by itself).
+        child.input(b"go on\r".to_vec());
+        d.sub_status_changed(&entry, &working, t0 + Duration::from_secs(10));
+        assert_eq!(child.spec.lock().report.is_some(), kept, "{status}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    // A report made in a new turn is not wiped by that turn's own start being noticed late.
+    let (d, dir) = daemon("sub-report-after-input");
+    add(&d, 1, "p", "claude", None);
+    let (child, _) = add(&d, 2, "c", "codex", Some(("p", 1)));
+    let entry = d.by_id("c").unwrap();
+    let mut working = entry.info();
+    working.status = Status::Working;
+    d.sub_status_changed(&entry, &working, Instant::now() - Duration::from_secs(60));
+    child.input(b"next\r".to_vec());
+    d.sub_rpc("sub.report", &json!({"session_id": "c", "status": "blocked", "summary": "need a key"})).unwrap();
+    assert_eq!(child.spec.lock().report.as_ref().unwrap().status, "blocked");
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -807,7 +807,8 @@ impl ChildWatch {
     /// session (the user's keystrokes, a prompt or mail Kelpie delivers: `input`, when it last was) or a turn its hooks began
     /// (`turn_seq`). Until then what the session said about its turn holds: an explicit report still stands, and the idle report
     /// it made unnecessary stays unnecessary. Called with the session's current markers before anything is decided about it.
-    pub fn sync_turn(&mut self, sid: &str, input: Option<Instant>, turn_seq: u64, now: Instant) {
+    /// True when a new turn began since the last call.
+    pub fn sync_turn(&mut self, sid: &str, input: Option<Instant>, turn_seq: u64, now: Instant) -> bool {
         let w = self.map.entry(sid.to_string()).or_default();
         let known = std::mem::replace(&mut w.synced, true);
         let changed = w.input != input || w.turn_seq != turn_seq;
@@ -822,6 +823,7 @@ impl ChildWatch {
                 w.turn_began.get_or_insert(now);
             }
         }
+        known && changed
     }
 
     /// The agent announced that a turn ended (a signal, not a guess). Reported when real work was seen and the agent did not

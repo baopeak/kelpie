@@ -7,6 +7,7 @@ import { kindInfo } from "../lib/agents";
 import { t } from "../lib/i18n";
 import { folderName, postponeRequest, shownRequests, type SubDecision, type SubRequest } from "../lib/sub-sessions";
 import { confirmDialog } from "../lib/confirm-dialog";
+import { isCovering } from "../lib/overlays";
 import { answerSubRequest } from "../lib/sub-session-actions";
 import { KindGlyph } from "./icons";
 
@@ -62,7 +63,7 @@ export function SubRequestCard(props: { request: SubRequest; inbox?: boolean }) 
         <button class="btn" disabled={off()} onClick={() => void answer("always")} title={t("No session asks any more. You can change this in Settings → Agents → Sub-sessions.")}>{t("Always allow")}</button>
         <button class="btn danger" disabled={off()} onClick={() => void answer("deny")}>{t("Deny")}</button>
         <Show when={!props.inbox}>
-          <button class="btn" disabled={busy()} onClick={() => postponeRequest(r().id)} title={t("Hide this card; the request stays in Activity (the bell in the status bar) until you answer it or it runs out of time.")}>{t("Later")}</button>
+          <button class="sub-later" disabled={busy()} onClick={() => postponeRequest(r().id)} title={t("Hide this card; the request stays in Activity (the bell in the status bar) until you answer it or it runs out of time.")}>{t("Later")}</button>
         </Show>
       </div>
     </section>
@@ -74,7 +75,7 @@ export function SubRequestCards() {
   const shown = () => shownRequests().slice(0, MAX_CARDS);
   const more = () => Math.max(0, shownRequests().length - MAX_CARDS);
   return (
-    <Show when={shownRequests().length}>
+    <Show when={shownRequests().length && !isCovering("inbox")}>
       <div class="sub-cards" role="region" aria-live="polite" aria-label={t("Sub-session requests")}>
         <For each={shown()}>{(r) => <SubRequestCard request={r} />}</For>
         <Show when={more()}>

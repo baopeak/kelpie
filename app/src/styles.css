@@ -1569,3 +1569,17 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .sub-cards-more { align-self: flex-end; border: 0; background: var(--bg-elev-2); color: var(--text-dim); border-radius: 8px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; box-shadow: 0 4px 12px rgb(var(--shadow-rgb) / calc(.4 * var(--shadow-k))); }
 .sub-cards-more:hover { color: var(--text); }
 .inbox .sub-card { margin: 4px 10px; box-shadow: none; }
+/* Nested rows give the name the room: smaller indent, no age (it is in the tooltip). */
+.sub-list { margin-left: 6px; padding-left: 5px; }
+.sub-list .session-row { gap: 5px; padding-left: 5px; padding-right: 6px; }
+.sub-list .session-row .age:not(.state-label) { display: none; }
+/* "Later" sits at the card's top right (last in the tab order, after Deny). */
+.sub-card { position: relative; }
+.sub-card-title { padding-right: 52px; }
+.sub-later { position: absolute; top: 8px; right: 10px; border: 0; background: transparent; color: var(--text-dim); font: inherit; font-size: 12px; text-decoration: underline; cursor: pointer; padding: 2px 4px; border-radius: 4px; }
+.sub-later:hover:not(:disabled) { color: var(--text); }
+.sub-later:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sub-later:disabled { opacity: .5; cursor: default; }
+/* A parent's name has priority over its age; the badge is compact. */
+.session-row.has-kids .age:not(.state-label) { display: none; }
+.sub-badge { min-width: 15px; padding: 0 4px; gap: 2px; }

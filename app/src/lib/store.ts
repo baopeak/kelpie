@@ -13,7 +13,7 @@ import { allPanes, autoGrid, buildGrid, cellCount, equalize, findPane, fromTempl
 import { basename, isMac, normPath, uid } from "./platform";
 import { projectColors } from "./theme";
 import { disposeView, peekView, resetStreams, setInputFanout } from "./terminal-host";
-import { CORE_AGENTS, isAgentKind, kindShortName, loadAgentPresets, presetFor } from "./agents";
+import { CORE_AGENTS, isAgentKind, kindInfo, kindShortName, loadAgentPresets, presetFor } from "./agents";
 import type { SettingsSection } from "./settings-catalog";
 import { accountEnv, accountHomes, sessionHome } from "./accounts";
 import { closeBrowser } from "./browser";
@@ -272,6 +272,8 @@ function createAppStore() {
 
   /** Inbox entry of each open request, to mark it read when the request is gone. */
   const requestInbox = new Map<string, string>();
+  /** The Activity entries of requests still open: the panel lists the request itself, so it does not list these as well. */
+  const [pendingEntries, setPendingEntries] = createSignal<string[]>([]);
 
   /** An open request is in the Activity feed (kept when the window is hidden or closed); `notifyUser` also raises a desktop
    *  notification when the window is not looking. */
@@ -280,15 +282,20 @@ function createAppStore() {
     const asker = sessions[r.session];
     const who = asker ? sessionLabel(asker) : r.from_label || t("A session");
     const title = t("{name} wants to open a sub-session", { name: who });
-    const body = [r.agent, folderName(r.cwd), r.worktree ? t("new worktree") : "", r.skips_prompts ? t("runs without asking") : ""].filter(Boolean).join(" · ") + (r.task ? ` — ${r.task.replace(/\s+/g, " ").slice(0, 120)}` : "");
-    requestInbox.set(r.id, addInbox({ kind: "waiting", title, body, sessionId: asker?.id, projectId: asker?.project_id ?? undefined }));
+    const body = [kindInfo(r.agent).label, folderName(r.cwd), r.worktree ? t("new worktree") : "", r.skips_prompts ? t("runs without asking") : ""].filter(Boolean).join(" · ") + (r.task ? ` — ${r.task.replace(/\s+/g, " ").slice(0, 120)}` : "");
+    const item = addInbox({ kind: "waiting", title, body, sessionId: asker?.id, projectId: asker?.project_id ?? undefined });
+    requestInbox.set(r.id, item);
+    setPendingEntries((l) => [...l, item]);
     if (notifyUser && !document.hasFocus()) void desktopNotify(title, body, "waiting");
   }
 
   function requestGone(id: string) {
     const item = requestInbox.get(id);
     requestInbox.delete(id);
-    if (item) markInbox(item);
+    if (item) {
+      markInbox(item);
+      setPendingEntries((l) => l.filter((x) => x !== item));
+    }
   }
 
   /** The requests open now and the policy, read when the window connects (a request asked while it was away is still open). */
@@ -1666,7 +1673,7 @@ function createAppStore() {
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
     registryAgent, settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
-    daemonNeedsSwitch, switchDaemon, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting, sessionTree,
+    pendingEntries, daemonNeedsSwitch, switchDaemon, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting, sessionTree,
     notesFor, addNote, removeNotes, noteKeyFor, clearNotesAt, promptsFor, rememberPrompt, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
     newFloating, toggleFloating, selectFloating, closeFloating,
   };

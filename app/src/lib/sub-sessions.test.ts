@@ -12,6 +12,7 @@ import {
   showPostponed,
   shownRequests,
   reduceRequests,
+  stateWithReport,
   sessionDepthTree,
   subRequests,
   subtreeSummary,
@@ -224,5 +225,18 @@ describe("policy and small helpers", () => {
     expect(folderName("/home/me/proj/")).toBe("proj");
     expect(folderName("/")).toBe("/");
     expect(folderName("repo")).toBe("repo");
+  });
+});
+
+describe("a quiet child's state with its report", () => {
+  it("counts needs_user and blocked as waiting and failed as an error, only while it is quiet", () => {
+    for (const quiet of ["idle", "done"] as const) {
+      expect(stateWithReport(quiet, "needs_user")).toBe("waiting");
+      expect(stateWithReport(quiet, "blocked")).toBe("waiting");
+      expect(stateWithReport(quiet, "failed")).toBe("error");
+      expect(stateWithReport(quiet, "done")).toBe(quiet);
+      expect(stateWithReport(quiet, undefined)).toBe(quiet);
+    }
+    for (const live of ["working", "waiting", "error", "exited"] as const) expect(stateWithReport(live, "needs_user")).toBe(live);
   });
 });

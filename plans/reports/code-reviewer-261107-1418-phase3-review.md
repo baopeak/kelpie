@@ -286,3 +286,203 @@ Remaining: Critical 0, High 0, Medium 0, Low 3 (N1, N2, N3).
 
 Status: DONE
 Summary: Round 1 fixes verified (H1, H2, M1, M2, M3, L1-L6). All suites pass. Three new Low items, none blocking.
+
+---
+
+# Round 3 (the "Real-app check fixes", uncommitted on top of de9d485)
+
+Checks:
+- `cargo test -p kelpied -j 2 -- --skip notify::destinations`: 899 passed, 0 failed, 3 ignored.
+- `pnpm typecheck`: clean.
+- `pnpm test`: 1527 passed (82 files).
+- `pnpm i18n:check`: 0 missing.
+
+Nothing was run against a real daemon or the real app.
+
+Round 2's N1 is fixed (in de9d485): while `switching` is set, every automatic report is skipped (`sub_rpc.rs:599-601`), and so is the hook-driven `sub_turn_ended` (`sub_rpc.rs:627`).
+
+## The five items
+
+| Item | Verdict |
+|---|---|
+| (1) Explicit reports other than `progress` suppress the idle report | Correct for terminal children: `sub.report` calls `sync_turn` first and then `explicit()` (`sub_rpc.rs:501-505`), and the next submitted input or hook turn resets it (`subs.rs:816-818`). The docs match. **Not correct for children in chat view: see R3-1.** |
+| (2) Badge uses the children's reports | `stateWithReport` changes only a quiet child (`idle` or `done`), so a working, waiting, failed or exited child keeps its own state. **Stale reports: see R3-1** (permanent for chat children) **and R3-2** (short terminal turns). |
+| (3) Cards hidden while Activity is open | Correct. `status-bar.tsx:17` registers `inbox` in the covering set, and `isCovering` reads it. When the panel closes, the cards come back and wait 500 ms again before their buttons work. The shortcut finds the copy in the panel (`[data-sub-request]`) while the panel is open. |
+| (4) Nested rows: no relative time, tighter indent | Correct. The rule is limited to `.sub-list` and to ages that are not state labels, so "needs you" and "error" still show. Every row's tooltip now ends with its age, which changes with the 30 s tick (cheap). **The CSS block is in the file twice: see R3-3.** |
+| (5) "Later" as a small text button | Placed absolutely inside the now `position: relative` card, last in the DOM and tab order, with a focus ring. **It is not delayed by 500 ms**, despite what the report says: it has `disabled={busy()}`, not `off()` (`sub-request-card.tsx:66`). Harmless, because "Later" only hides the card and the request stays in Activity. Noted in R3-3. |
+
+## On the earlier P4-2 concern (a child reports `blocked`, then quietly finishes the same turn)
+
+I accept it, for these reasons:
+- The parent already has the child's own `blocked` mail, which says why it stopped. An idle hint for the same turn would add nothing.
+- A parent in `kelpie_wait` still returns when the child stops working, because `wait_outcome` looks at status, not mail.
+- A real wait for the user (`Status::Waiting`) is still reported automatically.
+
+What remains is an agent that reports `blocked`, gets itself unstuck and finishes without reporting `done`. Its row and badge stay on "blocked" until its next turn. The brief tells agents to report `done`, so this is acceptable.
+
+## New findings
+
+### R3-1 (Medium). For a child in chat view, an explicit report never expires: no more idle reports, a stale row, and now a permanently amber badge
+
+- **Where:**
+  - `crates/kelpied/src/daemon/sub_rpc.rs:610-616`: `sync_turn` passes `(None, 0)` for `Entry::Chat`.
+  - `crates/kelpied/src/subs.rs:810-825`: `explicit` is reset only when `input` or `turn_seq` changes. `subs.rs:817` is the only place it is reset.
+- **How it goes:**
+  1. A child switched to chat view (the supported switch path) calls `sub.report blocked` (or `needs_user`, `done`, `failed`).
+  2. Its markers never change, so `explicit` stays true until the session closes.
+  3. `ChildWatch::quiet` returns nothing for every later turn (`subs.rs:866`, `w.worked && !w.explicit`). A chat child is judged by quiet time, because `hooked` is false for `Entry::Chat` (`sub_rpc.rs:652`). So the parent gets no "finished its turn" hint again.
+  4. `report_auto` leaves the row as it is for an idle report (`sub_rpc.rs:677`).
+  5. With item (2), a chat child whose last report was `blocked` or `needs_user` shows "waiting / one needs you" on its parent's badge every time it is quiet, even after it was steered and did more work.
+  6. A chat child whose last report was `done` stays in *Close finished sub-sessions* after it has started new work and gone idle again.
+- **History:** this existed for `done`/`failed` since de9d485. This round widens it to `blocked`/`needs_user`, and item (2) makes it show as a false "needs you".
+- **Fix:** give chat sessions a turn marker for `sync_turn`. The chat already sees each turn line in `observe_written` (`Written::Turn`) and in `commit_turn`. Add a counter there, and pass it as `turn_seq` for `Entry::Chat`. Do not use `activity.last_input`, which permission answers and interrupts also update. Add a test: chat child, `sub.report blocked`, a turn line, quiet, and the idle report and row come back.
+
+### R3-2 (Low). A stale `blocked`/`needs_user` survives a short terminal turn
+
+- **Where:** `crates/kelpied/src/subs.rs:831-833` and `864-866`. The idle report needs `worked`, meaning the turn lasted at least `MIN_WORK` (3 s).
+- **Scenario:**
+  1. A terminal child reports `blocked`.
+  2. The parent answers it. A new input resets `explicit`.
+  3. The child replies in under 3 s and goes idle without reporting.
+  4. No automatic report replaces the row, so the badge keeps showing it as waiting for the user.
+- **Fix:** when `sync_turn` sees a new turn begin, clear a row report of `blocked` or `needs_user`. Those describe a turn that has now moved on, unlike a verdict, which can stay. Doing it on the daemon side also corrects `kelpie_list` for the parent agent.
+
+### R3-3 (Low). Small leftovers
+
+- `app/src/styles.css`: the 11-line block that starts "Nested rows give the name the room" (with `.sub-later`) appears twice, at lines 1572 and 1583. Delete one copy.
+- `sub-request-card.tsx:66`: "Later" is not delayed by 500 ms, unlike what the report says. Either change the report's sentence or use `disabled={off()}`. I would keep it working at once: it is harmless and lets the user get the card out of the way fast.
+
+## Round 3 status
+
+- (1), (3) and (4) are correct as made.
+- (2) is correct for terminal children.
+- (5) is correct except the arming claim.
+- The chat-view gap (R3-1) is a Medium: a false "needs you" badge and lost idle reports after a child is switched to chat view.
+
+Remaining: Critical 0, High 0, Medium 1 (R3-1), Low 2 (R3-2, R3-3), plus round 2's N2 and N3 (Low, informational).
+
+**Not ready to commit until R3-1 is fixed.** Alternatively, the coordinator can accept it as a known limit for chat-view children, since it existed before for `done`/`failed`. If R3-1 is fixed (with the test), the rest is Low and the change is ready to commit.
+
+Status: DONE_WITH_CONCERNS
+Summary: The five fixes are correct for terminal children. In chat view, a child's explicit report never expires (pre-existing, now wider), which leaves a stale row, lost idle hints and a false "needs you" badge.
+
+---
+
+# Round 4 (the developer's "Fix round 2", uncommitted on top of de9d485)
+
+Checks:
+- `cargo test -p kelpied -j 2 -- --skip notify::destinations`: 901 passed, 0 failed, 3 ignored.
+- `pnpm typecheck`: clean.
+- `pnpm test`: 1527 passed (82 files).
+- `pnpm i18n:check`: 0 missing.
+
+Nothing was run against a real daemon or the real app.
+
+## Round 3 findings
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| R3-1 | Fixed | `ChatSession.turn_count` goes up in exactly two places, both only for turn lines: `observe_written` on `Written::Turn` (`chat.rs:1006-1007`, the lines the window writes) and `commit_turn` when `turn \|\| turn_line` (`chat.rs:1153-1154`). `commit_turn` covers queued desktop turns, phone messages and Kelpie mail turns (`write_plain` calls `commit_turn(turn: true)`). Each turn is counted once: `commit_turn` does not call `observe_written`, and `input` does not call `commit_turn`. Permission answers, interrupts and `/new` or `/clear` (when they are not turn lines) do not count. `sync_turn` passes the counter as `turn_seq` for `Entry::Chat`. The test covers a `blocked` report, then a permission answer and an interrupt (no change), then a user turn, then the idle report again. |
+| R3-2 | Fixed | When `ChildWatch::sync_turn` sees a new turn begin, it returns true and the daemon clears a row report of `blocked` or `needs_user` (`sub_rpc.rs`). `done` and `failed` stay. `sub.report` now runs `sync_turn` before it records the report, so a report made right after an input is not wiped. This also clears an automatic `needs_user` once the user's answer is submitted, which is correct. Three tests. |
+| R3-3 | Fixed | `styles.css` has the block once. "Later" stays usable at once (`disabled={busy()}`), and the developer report now says so. |
+
+## Your questions
+
+### Do the attention counts that now include reported states feed anything else? Can they notify twice?
+
+No. `reportedState` is used only in the window:
+- `sidebar.tsx`: the dot, the row, the badge, the project counts and the attention filter.
+- `status-bar.tsx:45`: the "N need you" count. That item opens the dashboard; it triggers nothing.
+
+Desktop notifications come from status transitions in `store.ts:374`, which still read `next.status`. Phone sync, the daemon's notifier and destinations all use the daemon's own status. I found no tray or taskbar badge in the app (no `setBadge` or overlay icon). So a reported state never raises a second notification.
+
+The count is per session, and a parent's badge does not add to the project or status-bar totals, so nothing is counted twice.
+
+### Is the chat turn counter bumped only on user turns, including queued and mail turns?
+
+Yes, as shown under R3-1. One more effect: a Codex `turn/steer` while a turn is running counts as a turn line. It resets the turn and clears a `blocked` row, which is right, because a steer is new input from someone.
+
+### Did anything parse the raw id that `session_tag` used to contain?
+
+No. `from_label` is display-only everywhere:
+- mail lines: `subs.rs:562`, `mcp.rs:637`;
+- the request card and Activity fallback: `sub-request-card.tsx:28`, `store.ts:283`;
+- the request's `from_label`.
+
+The app identifies sessions by `request.session` and `mail.from_id`, never by the label. The tests that compared labels were updated.
+
+## New findings
+
+### R4-1 (Low). "N need you" counts sessions that the waiting-session commands skip
+
+- **Where:**
+  - `status-bar.tsx:45` and the sidebar now count a quiet child whose last report was `blocked` or `needs_user` as waiting.
+  - These still use raw status, through `waitingSessions` (`attention.ts:28`, `alive && status === "waiting"`): `attention.next` (`revealNextWaiting`, `store.ts:234-238`), `attention.answer` (`commands.ts:92`), the palette's attention list (`palette.tsx:180`) and the board (`board.tsx:44`).
+- **Effect:** the bar can say "1 need you" while "Next Session Waiting for You" answers "No session is waiting for you".
+- **Fix:** have `nextWaiting` and the palette's attention list also include `reportedState === "waiting"` (sorted after real prompts, by `report.at`). `attention.answer` should stay on real prompts, because those are the ones the quick-answer popover can answer.
+
+### R4-2 (Low). Agent labels from plugins reach mail without `label_text`
+
+- **Where:** `crates/kelpied/src/daemon/sub_rpc.rs:166-174`. `kind_label` is a preset's `label`. For plugin agents that is free text from `agent.set_custom`, which checks the id but not the label (`agents.rs:130-141`). The session name goes through `subs::label_text`; `kind_label` does not.
+- **Effect:** control characters are removed when the mail is typed (`session::typed_text`). A newline survives, though. A plugin label with a newline can start what looks like a new line, for example a fake "From the user:" line, in the paste typed into a parent agent.
+- **Who can do it:** only the user's own plugins can set it, so the risk is low.
+- **Fix:** use `subs::label_text(kind_label)` in `session_tag`.
+
+## Round 4 status
+
+- R3-1, R3-2 and R3-3 are fixed and tested.
+- The new "needs you" rule raises no extra notifications and has no consumers outside the window.
+- The `session_tag` change breaks nothing.
+
+Remaining: Critical 0, High 0, Medium 0, Low 2 (R4-1, R4-2), plus round 2's N2 and N3 (informational).
+
+**Ready to commit.**
+
+Status: DONE
+Summary: All Round 3 findings are fixed and verified. Two new Low items: the waiting-session commands disagree with the "need you" count, and plugin labels are not passed through `label_text`. Nothing blocks the commit.
+
+---
+
+# Round 5 (R4-1 and R4-2 only)
+
+Checks:
+- `pnpm typecheck`: clean.
+- `pnpm test`: 1528 passed (82 files).
+
+I did not rerun the Rust suite. The R4-2 change is one line and covered by the existing label tests, which were run by the developer.
+
+## R4-1: fixed
+
+- `lib/session-state.ts` is pure:
+  - `sessionState` is the same rule as before;
+  - `reportedState` adds the child's report to it;
+  - `needsYou` returns 1 for a real prompt, 2 for a reported `needs_user`/`blocked`, 0 otherwise.
+  - It imports only the pure `stateWithReport` and types, so there is no import cycle.
+- `waitingSessions` lists real prompts first (longest wait first), then reported ones (oldest report first). So `nextWaiting` and the Activity "Needs you" group now agree with the status bar. The dashboard's "Needs you" column, the palette's attention list and the board's count use the same rule.
+- **Quick answer stays on real prompts:**
+  - The dashboard's Answer button now also requires `s.status === "waiting"` (`dashboard.tsx:68`).
+  - `attention.answer` can now pick a reported child only when no real prompt exists, because of the sort order. Even then `openAnswer` requires `waiting_since` and otherwise only shows the session (`store.ts:225-230`). So no text is ever typed into a session that is only quiet.
+- **Lists:** Activity shows the project name where a real prompt would show "waiting N s" (`inbox.tsx:61`). The dashboard falls back to the creation time (`dashboard.tsx:65`). Nothing breaks.
+
+## R4-2: fixed
+
+`session_tag` now passes `kind_label` through `subs::label_text`. That turns newlines and quotes into spaces and cuts the label at 60 characters. The label is only shown, and nothing parses it.
+
+## New finding
+
+### R5-1 (Low). A reported child appears twice on the dashboard
+
+- **Where:** `app/src/components/dashboard.tsx:14-18`.
+- **Detail:** the "Needs you" column now lists quiet children that reported `blocked` or `needs_user` (through `waitingSessions`). The "Done · unread" and "Idle / exited" columns still use raw status, so the same child also shows in one of them.
+- **Fix:** add `&& needsYou(s) === 0` to the tests of those two columns.
+
+## Round 5 status
+
+R4-1 and R4-2 are fixed, with no regressions in these two changes.
+
+Remaining: Critical 0, High 0, Medium 0, Low 1 (R5-1), plus round 2's N2 and N3 (informational).
+
+**Ready to commit.**
+
+Status: DONE
+Summary: R4-1 and R4-2 verified. Quick answer still acts only on real prompts. One cosmetic Low: a reported child shows twice on the dashboard.

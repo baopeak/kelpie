@@ -16,3 +16,4 @@ export function setCovering(key: string, on: boolean) {
 }
 
 export const anyCovering = () => open().size > 0;
+export const isCovering = (key: string) => open().has(key);

@@ -18,7 +18,7 @@ export function InboxPanel(props: { onClose: () => void }) {
   const [query, setQuery] = createSignal("");
   const items = createMemo(() => {
     const q = query().trim().toLowerCase();
-    return (store.state.inbox ?? []).filter((i) => (filter() === "all" || !i.read) && (!q || `${i.title} ${i.body}`.toLowerCase().includes(q)));
+    return (store.state.inbox ?? []).filter((i) => !store.pendingEntries().includes(i.id) && (filter() === "all" || !i.read) && (!q || `${i.title} ${i.body}`.toLowerCase().includes(q)));
   });
   // Working agents stay on top: the feed is for catching up on everything else.
   const working = createMemo(() => Object.values(store.sessions).filter((s) => s.alive && s.status === "working" && s.kind !== "shell"));

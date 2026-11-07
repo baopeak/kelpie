@@ -166,12 +166,14 @@ impl Daemon {
         let kind_label = agents::preset_for(&spec.kind).map_or(spec.kind.as_str(), |p| p.label);
         let name = notify::session_label(spec.name.as_deref(), info.title.as_deref(), &spec.kind, kind_label, spec.remote.as_ref().map(|r| r.dest.as_str()));
         let name = subs::label_text(&name);
+        // A plugin agent's label is free text: like the name, it is typed into another agent, so no new lines or quotes.
+        let kind_label = subs::label_text(kind_label);
         if spec.parent.is_some() {
-            return format!("sub-session \"{name}\" ({}, #{})", spec.kind, info.handle);
+            return format!("sub-session \"{name}\" ({kind_label}, #{})", info.handle);
         }
         match spec.project_id.as_deref().and_then(|p| self.mobile.project_name(p)) {
             Some(project) => format!("session \"{name}\" (project {}, #{})", subs::label_text(&project), info.handle),
-            None => format!("session \"{name}\" ({}, #{})", spec.kind, info.handle),
+            None => format!("session \"{name}\" ({kind_label}, #{})", info.handle),
         }
     }
 
@@ -494,13 +496,15 @@ impl Daemon {
             let mail = NewMail { from_id: sid.clone(), from_label: self.session_tag(&info), kind: MailKind::Report, status: Some(status.to_string()), text: summary.clone() };
             self.subs.mail.lock().add(&parent_info.spec.id, mail, Instant::now(), now_millis(), true).map_err(|e| anyhow!(e))?;
         }
+        // First: a turn that began since the last look clears an old question from the row, and must not clear this report.
+        self.sync_turn(&entry, Instant::now());
         self.set_report(&entry, SubReport { status: status.to_string(), summary: subs::cut(&summary, subs::MAX_ROW_SUMMARY), at: now_millis(), auto: false });
         if matches!(status, "done" | "failed") {
             self.record_sub_outcome(&info.spec, status, true);
         }
-        self.sync_turn(&entry, Instant::now());
-        // Only a verdict means the turn has been reported on; progress, blocked and needs_user are not its end.
-        if matches!(status, "done" | "failed") {
+        // Anything but a progress note says where the turn stands (done, failed, blocked, needs_user): the row keeps it and the
+        // quiet report that would follow stays silent until the next input or turn.
+        if status != "progress" {
             self.subs.watch.lock().explicit(&sid);
         }
         Ok(json!({"delivered_to": parent_info.map(|p| self.session_tag(&p))}))
@@ -609,9 +613,22 @@ impl Daemon {
     fn sync_turn(&self, entry: &Entry, now: Instant) {
         let (input, turns) = match entry {
             Entry::Term(s) => (s.last_submit(), s.turn_seq()),
-            Entry::Chat(_) => (None, 0),
+            Entry::Chat(c) => (None, c.turn_count()),
         };
-        self.subs.watch.lock().sync_turn(&entry.spec().id, input, turns, now);
+        let began = self.subs.watch.lock().sync_turn(&entry.spec().id, input, turns, now);
+        // A question the session put to its parent (blocked, needs_user) was answered, or at least a new turn is under way: that is no
+        // longer news. A verdict (done, failed) stays until it is replaced.
+        if began {
+            let lock = match entry {
+                Entry::Term(s) => &s.spec,
+                Entry::Chat(c) => &c.spec,
+            };
+            let mut spec = lock.lock();
+            if spec.report.as_ref().is_some_and(|r| matches!(r.status.as_str(), "blocked" | "needs_user")) {
+                spec.report = None;
+                self.meta_dirty.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Agents that announce the end of a turn themselves (Claude's hooks, Codex's notify): their idleness is reported on that

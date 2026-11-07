@@ -3,6 +3,7 @@ import { store } from "../lib/store";
 import { Icon } from "./icons";
 import { MemoryMeter, UsageMeters } from "./usage-meter";
 import { InboxPanel } from "./inbox";
+import { reportedState } from "./sidebar";
 import { setCovering } from "../lib/overlays";
 import { activeRuns } from "../lib/runs";
 import { available, whenIdle } from "../lib/updater";
@@ -40,7 +41,8 @@ export function StatusBar() {
       if (!s.alive) continue;
       alive++;
       if (s.status === "working") working++;
-      if (s.status === "waiting") waiting++;
+      // The sidebar's own rule: a session waiting on a prompt, or a quiet sub-session that reported it needs you or is blocked. Once each.
+      if (reportedState(s) === "waiting") waiting++;
     }
     return { alive, working, waiting };
   });

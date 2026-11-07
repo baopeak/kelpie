@@ -15,6 +15,7 @@ import { KeyHints } from "./key-hints";
 import { StatusDot, STATUS_WORDS } from "./sidebar";
 import { openWorktreeDialog } from "./worktree-dialog";
 import type { Project, SessionInfo } from "../lib/types";
+import { needsYou } from "../lib/session-state";
 import { t, msg } from "../lib/i18n";
 
 export type SearchScope = "all" | "commands" | "sessions" | "files" | "settings" | "history";
@@ -177,7 +178,7 @@ export function Palette(props: { scope: SearchScope }) {
         else if (r.kind === "file" && r.projectId === store.state.activeProject) recent.push(fileItem(r.projectId, r.id));
       }
       if (recent.length) out.push({ title: t("Recent"), items: recent });
-      const attention = Object.values(store.sessions).filter((s) => s.alive && (s.status === "waiting" || s.unread));
+      const attention = Object.values(store.sessions).filter((s) => s.alive && (needsYou(s) > 0 || s.unread));
       if (attention.length) out.push({ title: t("Needs attention"), items: attention.map((s) => sessionItem(s)) });
       out.push({ title: t("Commands"), items: commandItems("").slice(0, 6) });
       return out;

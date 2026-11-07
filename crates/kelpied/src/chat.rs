@@ -124,6 +124,9 @@ struct Inner {
     /// The `kelpie` MCP server added, by the daemon, to the `mcpServers` of every ACP call that opens a conversation (it holds
     /// this session's token, which never passes through the window).
     acp_mcp: Option<Value>,
+    /// User turns written to the agent (a message that starts a turn, whoever built it). Permission answers, interrupts and other
+    /// lines are not turns. Sub-sessions' reports are judged turn by turn (see `ChildWatch::sync_turn`).
+    turn_count: u64,
 }
 
 /// The ACP calls that open a conversation and carry the agent's `mcpServers`.
@@ -674,6 +677,7 @@ impl ChatSession {
                 perm_skip: false,
                 perm_bypass: false,
                 acp_mcp: None,
+                turn_count: 0,
             }),
         })
     }
@@ -1000,6 +1004,7 @@ impl ChatSession {
             }
             match turns::written(dialect, &v) {
                 Written::Turn { req } => {
+                    g.turn_count += 1;
                     // Somebody else's message (the queue's own are committed elsewhere): the user is talking to it again.
                     g.q.mail_hold = false;
                     if g.q.flight.is_none() {
@@ -1146,6 +1151,7 @@ impl ChatSession {
         // A message that starts a turn is logged ahead of the write, so the log shows it whoever built the
         // line and whether or not the agent echoes it. A command the window runs itself is not a message.
         if turn || turn_line {
+            g.turn_count += 1;
             let sent = json!({
                 "type": "kelpie_sent", "qid": entry.qid, "cid": entry.cid, "by": kind(&entry.by), "name": entry.by.name,
                 "text": queue::clip(&entry.text, SENT_TEXT_MAX), "images": entry.images,
@@ -1431,6 +1437,11 @@ impl ChatSession {
             Some(server) => bytes.split_inclusive(|b| *b == b'\n').flat_map(|line| with_mcp_server(line, server).unwrap_or_else(|| line.to_vec())).collect(),
             None => bytes.to_vec(),
         }
+    }
+
+    /// How many user turns have been written to the agent so far.
+    pub fn turn_count(&self) -> u64 {
+        self.inner.lock().turn_count
     }
 
     /// Adds the MCP server `server` (ACP's stdio shape) to every `session/new`, `session/load` and `session/resume` written to
