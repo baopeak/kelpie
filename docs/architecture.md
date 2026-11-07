@@ -811,15 +811,21 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   does): only that region is copied into the stream's picture and read back for the tiles; WGC (a window) gives none, so its cells are hashed. Every SPS it emits is rewritten
   with `bitstream_restriction` (`max_num_reorder_frames = 0`) so a decoder holds no frame (`sps.rs`), and every keyframe carries its SPS and PPS. Input with
   `SendInput` in the picture's pixels mapped through the target's place (`DWMWA_EXTENDED_FRAME_BOUNDS`, per-monitor DPI v2, absolute units over the virtual
-  desktop, `geom.rs`). For a window target nothing goes anywhere but that window or a menu or dialog of its own process: a press that would land on another
-  window over it is dropped and reported (`covered`), and **keys and text go only while the target, or a dialog it owns, is the foreground window**, never
-  another top-level window of the same program (brought there once if it is not,
-  else refused as `not_front`, and `sc_text` answers not typed), so a password never goes into a window that took the focus meanwhile. The focus is the
+  desktop, `geom.rs`). For a window target nothing goes anywhere but that window or a dialog, menu or dropdown of its own (`input::keys_reach`,
+  `press_reach`): a press that would land on another window over it, a second window of the same program included (the phone does not see it), is dropped
+  and reported (`covered`), and **keys and text go only while the target, or a dialog of its own process that it owns, is the foreground window**, never
+  another top-level window of the same program, and never a window of **another process** that names the target as its owner (a credential prompt,
+  another program's file picker: Windows lets any program do so): that is refused as `covered_dialog`, and the phone says to share the whole monitor to
+  type into it (owner decision 2026-11-07). Otherwise the target is brought to the front once if it is not (if it still is not, they are
+  refused as `not_front`, and `sc_text` answers not typed), so a password never goes into a window that took the focus meanwhile. The focus is the
   window Windows holds as foreground and the one its thread gives the keys to (`GetGUIThreadInfo`), looked at right before **every** `SendInput` call, one
   typed unit (a character, Enter) per call; text that loses the focus partway stops at once and says so ("Stopped partway", with what was typed before). What
   remains: `SendInput` cannot name a window, so a window that takes the focus in the microseconds between that look and the call gets that one unit, and a
   program that routes keys among its own windows by itself (Tk does) is beyond what Windows reports. A button a press left
-  held is released when the stream ends; input still queued when it stops is not done. A target the list would not offer (another virtual desktop, a tool
+  held is released when the stream ends; input still queued when it stops is not done. Input the daemon drops (late, onto a stale picture, over the
+  rate) sends nothing, except one `release` with no place, and only while a press is outstanding, so a drag is never left held and a flood of late `up`s
+  moves nothing. A stream that panics ends (`failed`) with its input thread stopped before its border and hotkey go; a graphics driver that restarted
+  is found after 20 failed captures or conversions in a row (`GetDeviceRemovedReason`) and ends it as `device_lost`. A target the list would not offer (another virtual desktop, a tool
   window, the border) is refused at the start. The encoder's picture is at most the top rung, 1920×1080 (a 4K or 5K monitor is shown at 1080p, an ultrawide
   no wider than 1920; crisp tiles keep its text at the source's resolution); a rotated monitor is refused for now, and a mode change ends the stream
   (`display_changed`).
@@ -839,7 +845,7 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
 - **Broker** (`crates/kelpied/src/screen.rs`): a hold keyed by device, link connection and provider connection, one screen at a time for one device, resting on
   `Mobile::grant`: input checks it every time and the hold's task ends within 250 ms (`revoked`). 15 s for the same device's next connection (`sc_rebind`),
   after which the helper sends a keyframe first; 10 minutes with no input ends it. New screens are refused at load L2+ and with under 20 % memory free
-  (`host_busy`; the `KELPIE_LOAD_FORCE` test hook stands for the memory too), without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper
+  (`host_busy`; the `KELPIE_LOAD_FORCE` test hook stands for the memory too, in a debug build or an e2e run only, never in a release daemon), without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper
   are checked again (known ids and kinds, short titles). A start reserves the screen for its whole length: a second start meanwhile, by any device, is
   refused as in use (`sc_taken`), and the first holder keeps it; a failed or timed-out start tells the app to stop; a link that closes during a start leaves a
   hold that waits for the device's next connection. A hold also rests on the record as it is now (`control_held`, looked at again by its task), takes at most
@@ -855,7 +861,8 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   drops it); when it is full or more than 192 KiB wait unacknowledged, video is dropped up to the next keyframe, asked for at most once a second.
   **Lost frames never hold the stream** (`control::Flight`): `screen.flow` carries `dropped_through`, the last frame dropped, and the helper stops counting
   those as in flight; a keyframe request gives up every frame in flight; while a keyframe is owed but not yet allowed, nothing else is encoded, and once it is
-  allowed a still window's last picture is encoded again (a window that does not change sends no frames, and input waits while a keyframe is owed); the phone
+  allowed a still window's last picture is encoded again, at most once a second whatever owes it (a window that does not change sends no frames, and input
+  waits while a keyframe is owed); an acknowledgement is never taken past the highest frame sent; the phone
   acknowledges frames it skips or its decoder fails on. A tile or the cursor goes only while the lane has 3 places free, so it never takes video's room.
   `screen.flow` also carries the bytes the media took on the wire (the link pads each message to a few sizes: a 5 KB frame goes as 16 KB), and the encoder is
   asked for the link's rate divided by that factor. The phone calls its picture **stuck** when the computer says it sends frames, the heartbeat goes on and
