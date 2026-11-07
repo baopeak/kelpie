@@ -794,6 +794,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         unpaint = v.unpaint;
                         unpaint_all = v.unpaint_all;
                         ctl.bandwidth.kbps = (ctl.bandwidth.kbps * 3 / 4).max(MIN_KBPS);
+                        ctl.bandwidth.cuts_total += 1;
                         flight.ask_key(now);
                         stats.dropped_link += 1;
                         continue;
@@ -847,6 +848,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
             }
         }
         let crisp = opts.tiles.then(|| ctl.crisp_ok(flight.inflight(), now));
+        stats.link_cuts = ctl.bandwidth.cuts_total;
         if let Some(r) = stats.report_with(now, &params, ctl.level(), ctl.software(), crisp, encoder.held(), encoder.first_output_ms) {
             let mut v = serde_json::to_value(&r).unwrap_or_default();
             v["event"] = json!("stats");

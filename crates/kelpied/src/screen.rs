@@ -182,7 +182,7 @@ const STATES: &[&str] = &["live", "locked", "secure_desktop", "closed", "minimiz
 
 /// A target as the phone is told it: only known fields, short strings.
 /// The stage timings a stats event may carry (`kelpie_screen::control::Stages`).
-const STAGE_FIELDS: &[&str] = &["capture_to_send_ms_p50", "capture_to_send_ms_p95", "convert_ms_p95", "encode_ms_p50", "send_interval_ms_p95", "ack_rtt_ms_p50", "ack_rtt_ms_p95", "top_off", "big_frames", "held", "first_output_ms", "dxgi_first_full"];
+const STAGE_FIELDS: &[&str] = &["capture_to_send_ms_p50", "capture_to_send_ms_p95", "convert_ms_p95", "encode_ms_p50", "send_interval_ms_p95", "ack_rtt_ms_p50", "ack_rtt_ms_p95", "top_off", "big_frames", "held", "first_output_ms", "dxgi_first_full", "link_cuts"];
 
 fn target_row(t: &Value) -> Option<Value> {
     let id = t["id"].as_str().filter(|s| kelpie_screen::targets::TargetId::parse(s).is_some())?;

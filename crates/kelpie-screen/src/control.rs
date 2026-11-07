@@ -166,13 +166,15 @@ pub struct Bandwidth {
     cut_floor: Option<u32>,
     /// When the queueing cuts of the last `CUT_WINDOW_MS` were made.
     cuts: VecDeque<u64>,
+    /// Every cut since the stream started, whatever made it (the stats' `link_cuts`: on a link with nothing to cut for, it stays 0).
+    pub cuts_total: u32,
     /// Bytes on the wire for each byte of media (the link pads every message to a few sizes), smoothed.
     wire: f64,
 }
 
 impl Bandwidth {
     pub fn new(now: u64) -> Bandwidth {
-        Bandwidth { kbps: START_KBPS, rtts: VecDeque::new(), full_since: None, clean_since: now, last_down: None, last_up: None, up_wait: UP_WAIT_MS, last_sent: None, cut_floor: None, cuts: VecDeque::new(), wire: 1.0 }
+        Bandwidth { kbps: START_KBPS, rtts: VecDeque::new(), full_since: None, clean_since: now, last_down: None, last_up: None, up_wait: UP_WAIT_MS, last_sent: None, cut_floor: None, cuts: VecDeque::new(), cuts_total: 0, wire: 1.0 }
     }
 
     /// A new connection (the phone came back, maybe by another route: LAN to relay, Wi-Fi to LTE): the round trips before say nothing about it.
@@ -294,6 +296,7 @@ impl Bandwidth {
                 self.last_down = Some(now);
                 if next != self.kbps {
                     self.kbps = next;
+                    self.cuts_total += 1;
                     return true;
                 }
             }
@@ -696,6 +699,8 @@ pub struct Stats {
     pub big_frames: u32,
     /// Whether DXGI's first frame after a duplication was made said everything changed (1) or not (0): kept from one report to the next.
     pub dxgi_first_full: Option<u8>,
+    /// The link controller's cuts since the stream started (`Bandwidth::cuts_total`), set before each report.
+    pub link_cuts: u32,
 }
 
 /// Where a frame's time went in the helper over the last second (ms), for the measurement plan: from the picture being taken to its message
@@ -716,6 +721,7 @@ pub struct Stages {
     pub held: u64,
     pub first_output_ms: Option<f64>,
     pub dxgi_first_full: Option<u8>,
+    pub link_cuts: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -823,6 +829,7 @@ impl Stats {
                 held,
                 first_output_ms: round1(first_output_ms),
                 dxgi_first_full: self.dxgi_first_full,
+                link_cuts: self.link_cuts,
             },
         };
         let (last_send, dxgi_first_full) = (self.last_send, self.dxgi_first_full);
@@ -912,6 +919,7 @@ mod tests {
         assert!(!b.tick(3, 2500), "not again within a second");
         assert!(b.tick(3, 3000));
         assert_eq!(b.kbps, 1083);
+        assert_eq!(b.cuts_total, 2, "every cut counted, for the stats");
         let mut t = 3500;
         let up = loop {
             b.on_sent(t);
@@ -1004,6 +1012,28 @@ mod tests {
             t += 33;
         }
         assert!(cuts <= MAX_CUTS, "{cuts}");
+    }
+
+    /// What loopback looks like: every frame acknowledged within 2 ms, at 30 fps, with stills and bursts. Nothing to cut for: a cut here is a
+    /// false one (the e2e's "early bandwidth cut" was its own phone not reading while the test waited on the event loop, not this).
+    #[test]
+    fn a_link_that_answers_every_frame_at_once_is_never_cut() {
+        let mut b = Bandwidth::new(0);
+        let (mut inflight, mut t) = (0u32, 0u64);
+        while t < 120_000 {
+            // A still second in every five (nothing sent), else a frame every 33 ms, acknowledged 1-2 ms later.
+            if (t / 1000) % 5 != 4 {
+                b.on_sent(t);
+                inflight += 1;
+                b.tick(inflight, t);
+                b.on_ack(1 + (t % 2) as u32, t + 2);
+                inflight -= 1;
+            }
+            b.tick(inflight, t + 2);
+            t += 33;
+        }
+        assert_eq!(b.cuts_total, 0, "{} kbps", b.kbps);
+        assert!(b.kbps >= START_KBPS, "and it may rise: {} kbps", b.kbps);
     }
 
     #[test]
@@ -1254,6 +1284,7 @@ mod tests {
         }
         s.top_off = 4;
         s.dxgi_first_full = Some(1);
+        s.link_cuts = 0;
         let p = Params { fps: 30, w: 1920, h: 1080, kbps: 1500, reason: Reason::None, degraded: false };
         assert!(s.report(999, &p, 0, false, Some(true)).is_none());
         let r = s.report(1000, &p, 1, false, Some(false)).unwrap();
