@@ -64,7 +64,7 @@ const fn preset(id: &'static str, label: &'static str, bin: &'static str) -> Pre
 pub const PRESETS: &[Preset] = &[
     Preset { yolo: &["--dangerously-skip-permissions"], resume_latest: &["--continue"], prompt: PromptMode::Argv, ..preset("claude", "Claude Code", "claude") },
     Preset { yolo: &["--dangerously-bypass-approvals-and-sandbox"], resume_latest: &["resume", "--last"], prompt: PromptMode::Argv, ..preset("codex", "Codex", "codex") },
-    Preset { resume_latest: &["--continue"], prompt: PromptMode::Argv, ..preset("omp", "OMP", "omp") },
+    Preset { yolo: &["--auto-approve"], resume_latest: &["--continue"], prompt: PromptMode::Argv, ..preset("omp", "OMP", "omp") },
     Preset { yolo: &["--yolo"], resume_latest: &["--resume", "latest"], prompt: PromptMode::Flag("-i"), ..preset("gemini", "Gemini", "gemini") },
     Preset { yolo: &["--yolo"], resume_latest: &["--continue"], prompt: PromptMode::Argv, ..preset("cursor", "Cursor CLI", "cursor-agent") },
     Preset { resume_latest: &["--continue"], prompt: PromptMode::Flag("--prompt"), ..preset("opencode", "OpenCode", "opencode") },

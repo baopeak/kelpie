@@ -70,6 +70,9 @@ pub enum Origin {
     /// The window that queued it builds the line when it is the entry's turn (`client` is its
     /// connection); `rich` entries carry what only that window can build (pictures).
     Desktop { client: u64, rich: bool },
+    /// Mail from another session (sub-sessions). The daemon builds the line like a phone's, but it is not a phone's: it is not
+    /// counted against a device, not dropped when phone access goes off, and it never ends the wait a Stop asked for.
+    Kelpie,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +147,8 @@ pub enum Refused {
     NeedsDesktop,
     /// The device may not send (any more).
     ReadOnly,
+    /// The user stopped the chat and its queue waits: mail from a session does not end that wait.
+    Paused,
 }
 
 impl Refused {
@@ -156,6 +161,7 @@ impl Refused {
             Refused::QueueFull => "queue_full",
             Refused::NeedsDesktop => "command_needs_desktop",
             Refused::ReadOnly => "read_only",
+            Refused::Paused => "paused",
         }
     }
 
@@ -168,6 +174,7 @@ impl Refused {
             Refused::QueueFull => "Too many messages are waiting for this chat.",
             Refused::NeedsDesktop => "This command runs only on the computer.",
             Refused::ReadOnly => "This device may read but not type.",
+            Refused::Paused => "This chat is stopped and its queue is waiting.",
         }
     }
 }
@@ -186,6 +193,8 @@ pub struct Queue {
     pub items: VecDeque<Entry>,
     /// Stopping means wait: nothing goes out until the user sends again or resumes.
     pub paused: bool,
+    /// The user pressed Stop: mail from a session waits until they send something or resume, even with nothing queued.
+    pub mail_hold: bool,
     /// The chat is being handed to a terminal: nothing goes out and nothing new comes in.
     pub held: bool,
     pub flight: Option<InFlight>,
@@ -211,7 +220,7 @@ impl Default for Queue {
 
 impl Queue {
     pub fn new() -> Queue {
-        Queue { items: VecDeque::new(), paused: false, held: false, flight: None, seen: HashMap::new(), order: VecDeque::new(), next: 0, spare_interrupt: None, last_stop: None, stopped_at: None, released: false }
+        Queue { items: VecDeque::new(), paused: false, mail_hold: false, held: false, flight: None, seen: HashMap::new(), order: VecDeque::new(), next: 0, spare_interrupt: None, last_stop: None, stopped_at: None, released: false }
     }
 
     fn forget_old(&mut self, now: Instant) {
@@ -257,6 +266,13 @@ impl Queue {
         }
         self.items.push_back(Entry { qid: qid.clone(), cid: new.cid, by: new.by, text: new.text, images: new.images, origin: new.origin, at, offered: None, declined: false, retry_at: None, first_offer: None, waiting_window: false, orphaned: false });
         Ok((qid, ahead))
+    }
+
+    /// Mail from sessions waits behind what a person sends: the user's words first, whatever came in between.
+    pub fn mail_to_back(&mut self) {
+        let (mail, rest): (VecDeque<Entry>, VecDeque<Entry>) = self.items.drain(..).partition(|e| e.origin == Origin::Kelpie);
+        self.items = rest;
+        self.items.extend(mail);
     }
 
     /// Records what became of an entry (it may already have left the queue).
@@ -345,7 +361,7 @@ impl Queue {
             .map(|e| {
                 json!({
                     "qid": e.qid, "cid": e.cid, "by": {"id": e.by.id, "name": e.by.name},
-                    "kind": if e.origin == Origin::Phone { "phone" } else { "desktop" },
+                    "kind": match e.origin { Origin::Phone => "phone", Origin::Kelpie => "kelpie", Origin::Desktop { .. } => "desktop" },
                     "text": clip(&e.text, EVENT_TEXT), "at": e.at, "needs_window": e.waiting_window,
                 })
             })

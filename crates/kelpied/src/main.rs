@@ -43,6 +43,7 @@ mod scheduled_input;
 mod server;
 mod session;
 mod status;
+mod subs;
 mod user_presence;
 mod vt;
 

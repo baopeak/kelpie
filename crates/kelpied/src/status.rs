@@ -46,6 +46,10 @@ pub struct Activity {
     /// The last keystroke that went to the prompt line (not to a permission dialog or question): what
     /// a typed "continue" would be appended to.
     pub last_draft: Option<Instant>,
+    /// The last keystroke that edits the prompt line (not a cursor key), and the last Enter. A draft waits when the first is
+    /// later than the second and than the turn start.
+    pub last_edit: Option<Instant>,
+    pub last_enter: Option<Instant>,
     /// When the failure was reported.
     pub failed_at: Option<Instant>,
     /// A report of this agent came with the session's token: reports without one are then ignored
@@ -76,7 +80,7 @@ pub struct Activity {
 
 impl Default for Activity {
     fn default() -> Self {
-        Activity { alive: true, last_output: None, burst_start: None, last_input: None, last_typed: None, last_draft: None, failed_at: None, verified_hooks: false, bell: None, hook: None, failed: false, limited: false, turn_started: None, turn_seq: 0, limit_dead: false, hooks_report_start: false, screen_prompt: None }
+        Activity { alive: true, last_output: None, burst_start: None, last_input: None, last_typed: None, last_draft: None, last_edit: None, last_enter: None, failed_at: None, verified_hooks: false, bell: None, hook: None, failed: false, limited: false, turn_started: None, turn_seq: 0, limit_dead: false, hooks_report_start: false, screen_prompt: None }
     }
 }
 
@@ -120,6 +124,12 @@ impl Activity {
     /// The failure just reported was the usage limit.
     pub fn on_limit(&mut self) {
         self.limited = self.failed && !self.limit_dead;
+    }
+
+    /// The prompt line was edited after the last Enter and after the last turn began: a draft may wait there, and an Enter would
+    /// send it. Cursor keys do not make a draft; an Enter, with or without hooks, ends one.
+    pub fn draft_waiting(&self) -> bool {
+        self.last_edit.is_some_and(|d| self.last_enter.is_none_or(|e| d > e) && self.turn_started.is_none_or(|t| d > t))
     }
 
     /// Still stopped by the usage limit, and nothing was typed since the failed turn began (the

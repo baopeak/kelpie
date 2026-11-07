@@ -70,6 +70,31 @@ pub struct SessionSpec {
     /// scripting setting (see `auth`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restricted: bool,
+    /// The session that opened this one with `sub.spawn`. Kept after that session is closed (history):
+    /// a parent that is gone makes this a top-level session for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// How many sessions are above this one (0 = opened by a person).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub depth: u8,
+    /// The last thing this session reported to its parent, by itself or noticed by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<SubReport>,
+}
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
+}
+
+/// A sub-session's last report: what its row shows. `auto` marks one the daemon worked out from the
+/// session's state (waiting, idle after work, exited) instead of the agent saying it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubReport {
+    pub status: String,
+    pub summary: String,
+    pub at: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
 }
 
 /// Where a remote session runs: an ssh destination (`user@host` or a `~/.ssh/config` alias).
@@ -207,6 +232,14 @@ pub enum ClientTx {
 pub struct Closed;
 
 impl ClientTx {
+    /// The client's connection is gone: nothing sent to it will be read.
+    pub fn is_closed(&self) -> bool {
+        match self {
+            ClientTx::Unbounded(tx) => tx.is_closed(),
+            ClientTx::Bounded { tx, .. } => tx.is_closed(),
+        }
+    }
+
     pub fn send(&self, message: Outgoing) -> Result<(), Closed> {
         match self {
             ClientTx::Unbounded(tx) => tx.send(message).map_err(|_| Closed),
@@ -253,6 +286,15 @@ impl By {
 
     pub fn is_desktop(&self) -> bool {
         self.id == "desktop"
+    }
+
+    /// Mail from another session (sub-sessions).
+    pub fn kelpie() -> By {
+        By { id: "kelpie".into(), name: "Kelpie".into() }
+    }
+
+    pub fn is_kelpie(&self) -> bool {
+        self.id == "kelpie"
     }
 }
 
@@ -365,6 +407,8 @@ struct Inner {
     wait_requests: Vec<crate::mobile::risk::Request>,
     /// Counts what was typed into the terminal, and what the count was when the list above last changed by a request coming or going (`typing_may_approve_danger`).
     typed_count: u64,
+    /// The last key typed was a backslash (an Enter right after it starts a new line).
+    after_backslash: bool,
     typed_when_requests_changed: u64,
     /// The last waits answered, newest last (see `RESOLVED_KEPT`), by their `waiting_since`.
     resolved: VecDeque<(u64, Resolution)>,
@@ -445,6 +489,7 @@ impl Session {
                 answered_wait: false,
                 wait_requests: Vec::new(),
                 typed_count: 0,
+                after_backslash: false,
                 typed_when_requests_changed: 0,
                 resolved: VecDeque::new(),
                 answered_now: None,
@@ -691,7 +736,19 @@ impl Session {
             // Keys that answer a permission prompt or a question go to that dialog, not to the prompt line.
             if !matches!(g.activity.hook, Some((Status::Waiting, _))) {
                 g.activity.last_draft = Some(now);
+                // A cursor key or other escape sequence edits nothing; a bracketed paste and Alt+Enter (a new line) do.
+                // (Backspace and Ctrl+U count as edits too: an erased draft holds mail until the next Enter, which errs
+                // towards waiting, never towards sending after somebody's words.)
+                if bytes.starts_with(b"\x1b[200~") || bytes == b"\x1b\r" || bytes.first() != Some(&0x1b) {
+                    g.activity.last_edit = Some(now);
+                }
             }
+            // Enter submits, except inside a paste, as Alt+Enter, or right after a backslash (both start a new line).
+            let submits = !bytes.starts_with(b"\x1b") && bytes.iter().position(|b| *b == b'\r').is_some_and(|i| if i == 0 { !g.after_backslash } else { bytes[i - 1] != b'\\' });
+            if submits {
+                g.activity.last_enter = Some(now);
+            }
+            g.after_backslash = bytes.last() == Some(&b'\\');
         }
         if !is_focus_report(&bytes) {
             if g.screen_prompt.is_some() {
@@ -875,7 +932,20 @@ impl Session {
     /// written under one lock, like [`Self::answer`]). Returns when it was typed, for the Enter that follows.
     /// Not when something was typed within `quiet` (it may be somebody's half-written message).
     pub fn type_when_idle(&self, text: &str, quiet: Duration) -> Option<Instant> {
+        self.type_idle(text, quiet, false)
+    }
+
+    /// [`Self::type_when_idle`] for mail from another session, which also waits while the user has a draft in the prompt
+    /// (Enter would send it together with the mail) and while the first prompt is still to be typed.
+    pub fn type_mail_when_idle(&self, text: &str, quiet: Duration) -> Option<Instant> {
+        self.type_idle(text, quiet, true)
+    }
+
+    fn type_idle(&self, text: &str, quiet: Duration, mail: bool) -> Option<Instant> {
         let mut g = self.inner.lock();
+        if mail && (g.pending_prompt.is_some() || g.activity.draft_waiting()) {
+            return None;
+        }
         if g.pty.is_none() || g.activity.status(Instant::now()) != Status::Idle || g.activity.last_typed.is_some_and(|t| t.elapsed() < quiet) {
             return None;
         }
@@ -1459,6 +1529,16 @@ pub(crate) mod fake {
             g.activity.on_output(now);
         }
         session.tick(now);
+    }
+
+    /// The user typed into the prompt line `draft_ago` ago and pressed Enter `enter_ago` ago (never, for `None`).
+    pub fn typed_draft(session: &Session, draft_ago: Duration, enter_ago: Option<Duration>) {
+        let now = Instant::now();
+        let mut g = session.inner.lock();
+        g.activity.last_typed = now.checked_sub(draft_ago);
+        g.activity.last_draft = now.checked_sub(draft_ago);
+        g.activity.last_edit = now.checked_sub(draft_ago);
+        g.activity.last_enter = enter_ago.and_then(|t| now.checked_sub(t));
     }
 
     pub fn lock_is_held(session: &Session) -> bool {
