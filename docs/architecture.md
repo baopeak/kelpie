@@ -799,19 +799,24 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   copies it, since a copy on the pool's thread under the mailbox's lock deadlocked with the stream holding the immediate context); BGRA → NV12 and scaling on the GPU (D3D11 video
   processor); Media Foundation H.264, the adapter's hardware encoder first (asynchronous, D3D11 surfaces), the inbox software encoder as the fallback, never
   openh264: CBR with a buffer of about two frames, no B-frames, keyframes only when asked, `AVLowLatencyMode`, one reference, `QualityVsSpeed` towards speed,
-  live bitrate; each setting is read back after it is set, and the app's log names the encoder and what it refused or did not keep (`screen encoder`). One
-  frame is in the encoder at a time. Capture is paced as CRD's host paces it (`pace.rs`, its constants read in the raw Chromium source): a constant-rate
-  timer from the last capture's start, nothing scheduled while a frame is in the encoder, the top rung's rate for a second after any input (`BOOST_MS`), and
-  nothing queued: once due the stream takes the next change. A still picture is **topped off** in the codec on CRD's timer (`max(1.1 × interval, interval +
-  2 ms)`), the same picture encoded again so that CBR spends its bits refining it, until the encoder reports a quantizer of 10 or less, a pass comes out
-  under 200 bytes, or ten passes; crisp tiles follow only after it. An update more than 300 000 px larger than the largest of the last five that would take
-  more than a frame interval at 100 KB/MP (CRD's large-frame guard) is encoded at 40 % of the bitrate for that one frame, a coarser picture on time rather than a
-  late one. The encoder hears a new bitrate at once when it is a cut and only beyond +33 % when it is an increase (CRD's reconfiguration gate). DXGI
-  gives the changed region of a monitor as its dirty rectangles plus each move's source and destination (unmoved moves skipped, as WebRTC's duplicator
-  does): only that region is copied into the stream's picture and read back for the tiles; WGC (a window) gives none, so its cells are hashed. Every SPS it emits is rewritten
+  live bitrate; each setting is read back after it is set, and the daemon's log names the encoder, what it refused or did not keep and its first output's
+  delay (`screen encoder`). One frame is in the encoder at a time unless the encoder asks for another (the hardware encoder's `METransformNeedInput`, or
+  the software one needing more input with a frame inside): one that does not honour low latency gives a frame back only once the next is in, and is fed
+  at the rate instead of waiting a second for its frame to be given up on. Capture is paced as CRD's host paces it (`pace.rs`, its constants read in the
+  raw Chromium source): a constant-rate timer from the last capture's start, and nothing queued: once due the stream takes the next change. There is no
+  boost after input: CRD boosts from a low idle rate, and a still screen here sends nothing, so a boost could only override the link's and the encoder's own
+  rate. A still picture is **topped off** in the codec on CRD's timer (`max(1.1 × interval, interval + 2 ms)`), the same picture encoded again so that CBR
+  spends its bits refining it, until the encoder reports a quantizer of 10 or less, a pass comes out under 200 bytes, or ten passes; a change under four
+  64×64 cells (a caret) starts none; crisp tiles follow only after it. An update or a keyframe more than 300 000 px larger than the largest of the last five
+  that would take more than a frame interval at 100 KB/MP (CRD's large-frame guard) is encoded at 40 % of the bitrate for that one frame, a coarser picture on
+  time rather than a late one, the bitrate set back however that frame leaves the encoder. The encoder hears a new bitrate at once when it is a cut and
+  only beyond +33 % when it is an increase (CRD's reconfiguration gate). DXGI gives the changed region of a monitor as its dirty rectangles plus each move's
+  source and destination (unmoved moves skipped, as WebRTC's duplicator does): the whole picture is copied on the GPU every frame, and only that region is
+  read back for the tiles (the first frame after the duplication is made again, and after a failed readback, count as all changed); WGC (a window) gives
+  none, so its cells are hashed. The device is asked four times a second whether it was removed. Every SPS it emits is rewritten
   with `bitstream_restriction` (`max_num_reorder_frames = 0`) so a decoder holds no frame (`sps.rs`), and every keyframe carries its SPS and PPS. Input with
   `SendInput` in the picture's pixels mapped through the target's place (`DWMWA_EXTENDED_FRAME_BOUNDS`, per-monitor DPI v2, absolute units over the virtual
-  desktop, `geom.rs`). For a window target nothing goes anywhere but that window or a dialog, menu or dropdown of its own (`input::keys_reach`,
+  desktop, `geom.rs`). For a window target nothing goes anywhere but that window or a dialog, menu (`#32768`) or dropdown list (`ComboLBox`) of its own (`input::keys_reach`,
   `press_reach`): a press that would land on another window over it, a second window of the same program included (the phone does not see it), is dropped
   and reported (`covered`), and **keys and text go only while the target, or a dialog of its own process that it owns, is the foreground window**, never
   another top-level window of the same program, and never a window of **another process** that names the target as its owner (a credential prompt,
@@ -822,7 +827,9 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   typed unit (a character, Enter) per call; text that loses the focus partway stops at once and says so ("Stopped partway", with what was typed before). What
   remains: `SendInput` cannot name a window, so a window that takes the focus in the microseconds between that look and the call gets that one unit, and a
   program that routes keys among its own windows by itself (Tk does) is beyond what Windows reports. A button a press left
-  held is released when the stream ends; input still queued when it stops is not done. Input the daemon drops (late, onto a stale picture, over the
+  held is released when the stream ends; input still queued when it stops is not done. A drag stays over what the phone sees: a move onto another window
+  holds the pointer at the last point on the shared one, and an `up` there lets go at that point (`input::drag_step`), so nothing is dropped into a window
+  the phone cannot see. Input the daemon drops (late, onto a stale picture, over the
   rate) sends nothing, except one `release` with no place, and only while a press is outstanding, so a drag is never left held and a flood of late `up`s
   moves nothing. A stream that panics ends (`failed`) with its input thread stopped before its border and hotkey go; a graphics driver that restarted
   is found after 20 failed captures or conversions in a row (`GetDeviceRemovedReason`) and ends it as `device_lost`. A target the list would not offer (another virtual desktop, a tool
@@ -855,10 +862,13 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
 - **Flow on TCP**: nothing is lost on the link, only delayed, so frames are dropped before encoding, never after (a dropped P-frame would break every frame
   after it). The phone acknowledges each frame as it decodes (`sc_ack`); the broker forwards `{acked, rtt_ms, level}` (`screen.flow`, also once a second) and
   the helper encodes only while fewer than 3 frames are in flight. **What the phone sends never waits for what goes to it**: the link's `Wire` sends from a
-  writer task of its own (`mobile/link.rs`), which seals each message as it writes it and takes the media lane (`mobile/lanes.rs`, 6 messages) only when no
-  other message waits, so a click, an acknowledgement or a heartbeat is read while a keyframe is on its way to a slow phone (one used to hold the connection's
-  task for most of a second), and a reply waits at most for the one media message being written. Nothing of the media lane goes to a locked phone (the writer
-  drops it); when it is full or more than 192 KiB wait unacknowledged, video is dropped up to the next keyframe, asked for at most once a second.
+  writer task of its own (`mobile/link.rs`), which seals each message as it writes it and takes, in this order, control messages (replies, the lock,
+  heartbeats, and the screen's own `sc_state`, `sc_stats`, `sc_fhb` and `sc_end`, which have a lane of their own), bulk (the connection's task moves bulk only
+  while the writer has room for it, so it never waits there) and the media lane (`mobile/lanes.rs`, 6 messages). So a click, an acknowledgement or a
+  heartbeat is read while a keyframe is on its way to a slow phone (one used to hold the connection's task for most of a second), a reply waits at most for
+  the one message being written, and a writer that stops (the socket gone, a message over `SLOW_AFTER`) ends the connection at once. Nothing of the media
+  lane goes to a locked phone (the writer drops it, by a flag set wherever the lock is); when it is full or more than 192 KiB wait unacknowledged, video is
+  dropped up to the next keyframe, asked for at most once a second.
   **Lost frames never hold the stream** (`control::Flight`): `screen.flow` carries `dropped_through`, the last frame dropped, and the helper stops counting
   those as in flight; a keyframe request gives up every frame in flight; while a keyframe is owed but not yet allowed, nothing else is encoded, and once it is
   allowed a still window's last picture is encoded again, at most once a second whatever owes it (a window that does not change sends no frames, and input
@@ -870,7 +880,9 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
 - **Quality** (`control.rs`): one ladder, frames a second first, then size (30/20/15/10/8 fps at 100 %, then 8 fps 75 %, 6 and 4 fps 67 %, 4 fps 50 %; a window
   never under 540 lines). Three things move along it and the lowest wins: the encoder's own load (EMA of encode time over the frame interval, over 0.85 for 2 s
   down, under 0.42 for 10 s up), the link (queueing: the round trip's floor over the last 500 ms, counted from after the last cut, more than 50 ms over its
-  floor of 10 s cuts 15 % at once, and again half a second later only on what came after the cut; the window of frames full for a second cuts the same; 10
+  floor of 10 s cuts 15 % at once; after a cut a floor that rose further cuts again half a second later, one that fell is a queue draining, and one that
+  held for a second is a new base (another route, a slower decoder), taken as the floor rather than cut for; three queueing cuts in ten seconds at most, and
+  a new connection forgets the round trips before it; the window of frames full for a second cuts the same; 10
   seconds with neither while frames go out add 10 %, and a still screen, which sends nothing, earns no increase; an up-step undone within 10 s doubles the
   wait up to a minute; 150 kbps–4 Mbps, start 1.5), and the load level (L1 ≤ 1080p20, L2 ≤
   720p15, L3 ≤ 540p8; five minutes of L3 pause the stream until the person resumes it). The hardware encoder gives way to the software one (capped at 720p15)
@@ -893,9 +905,10 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
 - **On the phone** (`screen.ts`, `screen-view.tsx`): `VideoDecoder` probed first with `isConfigSupported` (a plain message when this browser has no H.264
   WebCodecs), configured in the `avc` format with an `avcC` description built from the keyframe's SPS and PPS and `optimizeForLatency`, one `decode()` per
   frame, **no smoothing buffer**: a decoded frame is drawn as the decoder gives it, on a canvas asked for `desynchronized` (a low-latency canvas where the
-  browser offers one, which the page reports), and a delta the decoder is more than two frames behind on is skipped up to the next keyframe. The cursor the
-  finger moves is drawn at once (local echo); the computer's cursor messages, a round trip old, leave its position alone for 400 ms after a local move and
-  then follow it, a difference of 3 px or less taken as none. The page measures each frame (`FrameTimes`: inter-arrival and inter-present p50/p95/p99, gaps
+  browser offers one, which the page reports), and a delta is skipped up to the next keyframe only when the decoder is behind its own usual queue by more
+  than two for three deltas in a row (`Backlog`: some Android decoders always keep a few). The cursor the finger moves is drawn at once (local echo); the
+  computer's cursor messages, a round trip old, leave its position alone for 400 ms after a local move and then follow it, a difference of 3 px or less
+  taken as none; a trackpad tap clicks where the cursor is drawn (`followHostCursor`), never at an older position. The page measures each frame (`FrameTimes`: inter-arrival and inter-present p50/p95/p99, gaps
   over 100 and 250 ms, decoder time, receive → present, frames never shown), shown with the computer's stages in the debug view (tap the quality line) and
   read by a test driver as `__kelpieScreenTimes()`. Trackpad (default) or direct touch, two-finger scroll,
   pinch zoom and pan of the view only, a key bar with Ctrl, Shift, Alt and the Windows key (`meta`, alone for Start or held), text with an answer of its
