@@ -21,7 +21,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GUITHREADINFO, SW_RESTORE,
+    BringWindowToTop, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindow, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT, GUITHREADINFO, GW_OWNER, SW_RESTORE,
 };
 
 use super::targets_win::{minimized, window_rect};
@@ -103,6 +103,24 @@ fn bring_front(h: HWND) {
     }
 }
 
+/// Whether `h` is somewhere up `w`'s owner chain. `GW_OWNER`, step by step: `GetAncestor(GA_ROOTOWNER)` follows an owner only for a popup
+/// window, so an ordinary top-level window of another program that names the target as owner would look unowned (found on the built app).
+fn owned_by(w: HWND, h: HWND) -> bool {
+    let mut at = w;
+    for _ in 0..16 {
+        match unsafe { GetWindow(at, GW_OWNER) } {
+            Ok(owner) if !owner.is_invalid() => {
+                if owner == h {
+                    return true;
+                }
+                at = owner;
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// What `w` (any window: a child is taken at its top-level window) is to the target `h`.
 fn facts(h: HWND, w: HWND) -> WindowFacts {
     if w.is_invalid() {
@@ -119,7 +137,7 @@ fn facts(h: HWND, w: HWND) -> WindowFacts {
         let class = String::from_utf16_lossy(&class[..n.min(class.len())]);
         WindowFacts {
             is_target: root == h,
-            owned_by_target: root != h && GetAncestor(root, GA_ROOTOWNER) == h,
+            owned_by_target: root != h && owned_by(root, h),
             same_process: pid_w != 0 && pid_w == pid_h,
             same_thread: thread_w != 0 && thread_w == thread_h,
             menu: class == "#32768" || class == "ComboLBox",
