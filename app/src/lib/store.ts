@@ -1,6 +1,6 @@
 // Central app state. Fine-grained Solid stores: a status change on one of 20 sessions
 // re-renders only the dots/cards bound to that session.
-import { createRoot, createSignal } from "solid-js";
+import { createMemo, createRoot, createSignal } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -13,7 +13,7 @@ import { allPanes, autoGrid, buildGrid, cellCount, equalize, findPane, fromTempl
 import { basename, isMac, normPath, uid } from "./platform";
 import { projectColors } from "./theme";
 import { disposeView, peekView, resetStreams, setInputFanout } from "./terminal-host";
-import { CORE_AGENTS, isAgentKind, kindShortName, loadAgentPresets, presetFor } from "./agents";
+import { CORE_AGENTS, isAgentKind, kindInfo, kindShortName, loadAgentPresets, presetFor } from "./agents";
 import type { SettingsSection } from "./settings-catalog";
 import { accountEnv, accountHomes, sessionHome } from "./accounts";
 import { closeBrowser } from "./browser";
@@ -22,6 +22,7 @@ import { agentFolder, agentsAt, hostOf, isHostKeyError, layoutTarget, layoutTarg
 import { confirmRootStart } from "./root-user";
 import type { WorkStatus, AgentProfile, AppState, BranchInfo, InboxItem, LayoutNode, LayoutTemplate, Pane, Project, ProjectHost, RecentItem, ReviewNote, SessionInfo, SessionKind, SessionTarget, Settings, Tab, Workspace, WorkspaceMeta } from "./types";
 import { confirmDialog } from "./confirm-dialog";
+import { SUB_SESSIONS_API, buildSessionTree, dispatchRequest, folderName, setSubPolicy, subRequests, toSubPolicy, toSubRequest, type SubRequest } from "./sub-sessions";
 import { remember } from "./prompt-history";
 import { defaultSettings } from "./default-settings";
 import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
@@ -265,11 +266,63 @@ function createAppStore() {
     setSessions(reconcile(map));
   }
 
+  // ---------- sub-sessions ----------
+  /** Which sessions nest under which. Read only through `parent` and the list of ids, so a status tick re-runs nothing here. */
+  const sessionTree = createMemo(() => buildSessionTree(Object.values(sessions)));
+
+  /** Inbox entry of each open request, to mark it read when the request is gone. */
+  const requestInbox = new Map<string, string>();
+  /** The Activity entries of requests still open: the panel lists the request itself, so it does not list these as well. */
+  const [pendingEntries, setPendingEntries] = createSignal<string[]>([]);
+
+  /** An open request is in the Activity feed (kept when the window is hidden or closed); `notifyUser` also raises a desktop
+   *  notification when the window is not looking. */
+  function announceRequest(r: SubRequest, notifyUser: boolean) {
+    if (requestInbox.has(r.id)) return;
+    const asker = sessions[r.session];
+    const who = asker ? sessionLabel(asker) : r.from_label || t("A session");
+    const title = t("{name} wants to open a sub-session", { name: who });
+    const body = [kindInfo(r.agent).label, folderName(r.cwd), r.worktree ? t("new worktree") : "", r.skips_prompts ? t("runs without asking") : ""].filter(Boolean).join(" · ") + (r.task ? ` — ${r.task.replace(/\s+/g, " ").slice(0, 120)}` : "");
+    const item = addInbox({ kind: "waiting", title, body, sessionId: asker?.id, projectId: asker?.project_id ?? undefined });
+    requestInbox.set(r.id, item);
+    setPendingEntries((l) => [...l, item]);
+    if (notifyUser && !document.hasFocus()) void desktopNotify(title, body, "waiting");
+  }
+
+  function requestGone(id: string) {
+    const item = requestInbox.get(id);
+    requestInbox.delete(id);
+    if (item) {
+      markInbox(item);
+      setPendingEntries((l) => l.filter((x) => x !== item));
+    }
+  }
+
+  /** The requests open now and the policy, read when the window connects (a request asked while it was away is still open). */
+  async function loadSubState() {
+    if (daemonApi() < SUB_SESSIONS_API) {
+      setSubPolicy(null);
+      return;
+    }
+    const asked = Date.now();
+    const [pending, policy] = await Promise.all([ipc.subPending().catch(() => null), ipc.subPolicyGet().catch(() => null)]);
+    setSubPolicy(toSubPolicy(policy));
+    if (!pending) return;
+    const list = pending.map(toSubRequest).filter((r): r is SubRequest => !!r);
+    // A request that came while the question was on its way is newer than the list: kept.
+    dispatchRequest({ type: "replace", list, keepFrom: asked });
+    for (const r of list) announceRequest(r, true);
+    // Requests the list left out are over (timed out, or the daemon restarted): their Activity entries are read.
+    for (const id of [...requestInbox.keys()]) if (!subRequests().some((r) => r.id === id)) requestGone(id);
+  }
+
   // ---------- inbox (notifications & activity) ----------
-  function addInbox(item: Omit<InboxItem, "id" | "at" | "read">) {
+  function addInbox(item: Omit<InboxItem, "id" | "at" | "read">): string {
+    const id = uid();
     update((s) => {
-      s.inbox = [{ ...item, id: uid(), at: Date.now(), read: false }, ...(s.inbox ?? [])].slice(0, MAX_INBOX);
+      s.inbox = [{ ...item, id, at: Date.now(), read: false }, ...(s.inbox ?? [])].slice(0, MAX_INBOX);
     });
+    return id;
   }
 
   function markInbox(id: string | "all", read = true) {
@@ -340,6 +393,17 @@ function createAppStore() {
   function onDaemonEvent(msg: { event: string; params: any }) {
     const p = msg.params;
     switch (msg.event) {
+      case "sub.request": {
+        const r = toSubRequest(p);
+        if (r && dispatchRequest({ type: "request", request: r })) announceRequest(r, true);
+        break;
+      }
+      case "sub.request_done":
+        if (typeof p?.id === "string") {
+          dispatchRequest({ type: "done", id: p.id });
+          requestGone(p.id);
+        }
+        break;
       case "session.updated": {
         const prev = sessions[p.id];
         setSessions(p.id, reconcile(p as SessionInfo));
@@ -1515,6 +1579,7 @@ function createAppStore() {
     void ipc.daemon("daemon.set_awake", { mode: state.settings.keepAwake ?? "off" }).catch(() => {});
     void ipc.daemon("daemon.set_priority", { enabled: state.settings.prioritizeVisible ?? true }).catch(() => {});
     void ipc.daemon("daemon.set_policy", { agents_control_others: state.settings.agentsScripting ?? true }).catch(() => {});
+    void loadSubState();
     resumeInterrupted();
   }
 
@@ -1608,7 +1673,7 @@ function createAppStore() {
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
     registryAgent, settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
-    daemonNeedsSwitch, switchDaemon, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting,
+    pendingEntries, daemonNeedsSwitch, switchDaemon, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting, sessionTree,
     notesFor, addNote, removeNotes, noteKeyFor, clearNotesAt, promptsFor, rememberPrompt, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
     newFloating, toggleFloating, selectFloating, closeFloating,
   };

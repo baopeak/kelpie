@@ -10,6 +10,7 @@ import { ReviewBody } from "./review-card";
 import { moveToStatus } from "../lib/review-queue";
 import type { Project, WorkStatus } from "../lib/types";
 import { t, msg } from "../lib/i18n";
+import { needsYou } from "../lib/session-state";
 
 const COLUMNS: { id: WorkStatus; label: string }[] = [
   { id: "todo", label: msg("Todo") },
@@ -41,7 +42,7 @@ function Card(props: { project: Project; ghost?: boolean; onPointerDown?: (e: Po
   const sessions = createMemo(() => Object.values(store.sessions).filter((s) => s.project_id === props.project.id && s.alive));
   const parent = () => store.state.projects.find((p) => p.id === props.project.parentId);
   const info = () => store.projectInfo[props.project.id];
-  const attention = () => sessions().filter((s) => s.status === "waiting" || s.unread).length;
+  const attention = () => sessions().filter((s) => needsYou(s) > 0 || s.unread).length;
   return (
     <div
       class={`board-card${props.ghost ? " ghost" : ""}${store.state.activeProject === props.project.id ? " current" : ""}`}

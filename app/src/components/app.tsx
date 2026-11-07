@@ -29,6 +29,7 @@ import { HostsPage } from "./hosts-page";
 import { initSshHosts, vault } from "../lib/ssh-hosts";
 import { MobileApprovals } from "./settings/mobile-settings";
 import { ChatWaitNotice } from "./chat-wait-notice";
+import { SubRequestCards } from "./sub-request-card";
 import { daemon as daemonCall } from "../lib/ipc";
 import { loadSshConfigPath, remoteConfigure } from "../lib/remote";
 import { initRuns } from "../lib/runs";
@@ -192,6 +193,7 @@ export function App() {
       <ImageLightbox />
       <LayoutMenuHost />
       <MobileApprovals />
+      <SubRequestCards />
       <Tips />
       <HoverHints />
       <Show when={store.toast()}>

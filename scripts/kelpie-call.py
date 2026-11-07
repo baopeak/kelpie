@@ -73,14 +73,21 @@ class Conn:
         if token:
             self.call("auth", {"token": token})
 
+    def read_exact(self, n):
+        """n bytes or an error: a pipe read may return fewer, and an empty read means the daemon went away."""
+        buf = b""
+        while len(buf) < n:
+            chunk = self.read(n - len(buf))
+            if not chunk:
+                raise OSError("the daemon closed the connection")
+            buf += chunk
+        return buf
+
     def frame(self):
-        hdr = self.read(5)
+        hdr = self.read_exact(5)
         (length,) = struct.unpack("<I", hdr[:4])
         kind = hdr[4]
-        body = b""
-        while len(body) < length - 1:
-            body += self.read(length - 1 - len(body))
-        return kind, body
+        return kind, self.read_exact(length - 1) if length > 1 else b""
 
     def call(self, method, params=None):
         # Test and dev scripts run next to the user's real Kelpie: a call that stops sessions

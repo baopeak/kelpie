@@ -351,3 +351,219 @@ pub async fn run(args: &[String]) -> Result<()> {
     }
     Ok(())
 }
+
+const SUB_USAGE: &str = "\
+usage: kelpied sub <command> [--json]
+  agents                                        installed agents to open, with how earlier sub-sessions fared
+  spawn <agent> \"<task>\" [--name N] [--cwd DIR] [--worktree] [--model M]
+  list [--all]                                  your sub-sessions (--all: every session)
+  send <session> <text…>                        message a session (delivered when it is idle)
+  read <session> [--lines N]                    the end of a session's screen
+  wait [<session>…] [--timeout-s N]             until you have mail or a sub-session stops working
+  report <status> <summary…>                    to the session that opened you: progress|done|failed|blocked|needs_user
+  inbox                                         take the mail waiting for you
+  close <session>                               close a sub-session you opened
+<session> is a handle, an id or a name. Run inside a session started by Kelpie.";
+
+/// The options of a command that ends in free text (`spawn`, `send`, `report`): `fixed` words come first (the agent, the session,
+/// the status), then the text. Options are read before the text, or after it when the text is one argument (a quoted one), so
+/// `--json` or `--name` inside an unquoted sentence stay words; `--` ends the options explicitly.
+fn text_command(args: &mut Vec<String>, fixed: usize, valued: &[&str], flags: &[&str]) -> Result<(Vec<String>, String, serde_json::Map<String, Value>)> {
+    let mut opts = serde_json::Map::new();
+    // One option at the head of `rest`, if it is one. `Ok(false)`: not an option; `Err`: a value is missing.
+    let head = |rest: &mut Vec<String>, opts: &mut serde_json::Map<String, Value>| -> Result<bool> {
+        let Some(first) = rest.first().cloned() else { return Ok(false) };
+        if flags.contains(&first.as_str()) {
+            opts.insert(first.trim_start_matches('-').into(), json!(true));
+            rest.remove(0);
+        } else if valued.contains(&first.as_str()) {
+            anyhow::ensure!(rest.len() > 1, "{first} needs a value");
+            opts.insert(first.trim_start_matches('-').into(), json!(rest[1]));
+            rest.drain(..2);
+        } else {
+            return Ok(false);
+        }
+        Ok(true)
+    };
+    let mut rest = std::mem::take(args);
+    let mut lead = Vec::new();
+    let mut explicit_end = false;
+    while lead.len() < fixed || !explicit_end {
+        if rest.first().is_some_and(|a| a == "--") {
+            rest.remove(0);
+            explicit_end = true;
+            if lead.len() >= fixed {
+                break;
+            }
+            continue;
+        }
+        if head(&mut rest, &mut opts)? {
+            continue;
+        }
+        if lead.len() < fixed && !rest.is_empty() {
+            lead.push(rest.remove(0));
+            continue;
+        }
+        break;
+    }
+    if !explicit_end && rest.len() > 1 {
+        // Options after a single quoted text argument.
+        let mut tail = rest.clone();
+        let mut trailing = serde_json::Map::new();
+        let text = tail.remove(0);
+        while !tail.is_empty() && head(&mut tail, &mut trailing).unwrap_or(false) {}
+        if tail.is_empty() {
+            opts.extend(trailing);
+            rest = vec![text];
+        }
+    }
+    Ok((lead, rest.join(" "), opts))
+}
+
+/// `kelpied sub …` as the tool and arguments it stands for (`mcp::run_tool`), and whether to print JSON.
+fn parse_sub(args: &[String]) -> Result<(&'static str, Value, bool)> {
+    let mut args = args.to_vec();
+    // `--json` before the command name works for every command; the others read it anywhere, the text ones as an option.
+    let mut json_out = false;
+    while args.first().is_some_and(|a| a == "--json") {
+        args.remove(0);
+        json_out = true;
+    }
+    let sub = if args.is_empty() { String::new() } else { args.remove(0) };
+    let usage = |what: &str| anyhow!("usage: kelpied sub {what}");
+    let number = |v: Option<String>, flag: &str| v.map(|n| n.parse::<u64>().map_err(|_| anyhow!("{flag} takes a whole number"))).transpose();
+    let parsed = match sub.as_str() {
+        "spawn" => {
+            let text = "spawn [--name N] [--cwd DIR] [--worktree] [--model M] <agent> \"<task>\"";
+            let (lead, task, mut opts) = text_command(&mut args, 1, &["--name", "--cwd", "--model"], &["--worktree", "--json"])?;
+            json_out |= opts.remove("json").is_some();
+            if lead.is_empty() || task.is_empty() {
+                return Err(usage(text));
+            }
+            opts.insert("agent".into(), json!(lead[0]));
+            opts.insert("task".into(), json!(task));
+            ("kelpie_spawn", Value::Object(opts))
+        }
+        "send" => {
+            let (lead, text, mut opts) = text_command(&mut args, 1, &[], &["--json"])?;
+            json_out |= opts.remove("json").is_some();
+            if lead.is_empty() || text.is_empty() {
+                return Err(usage("send <session> <text…>"));
+            }
+            ("kelpie_message", json!({"to": lead[0], "text": text}))
+        }
+        "report" => {
+            let (lead, summary, mut opts) = text_command(&mut args, 1, &[], &["--json"])?;
+            json_out |= opts.remove("json").is_some();
+            if lead.is_empty() || summary.is_empty() {
+                return Err(usage("report <progress|done|failed|blocked|needs_user> <summary…>"));
+            }
+            ("kelpie_report", json!({"status": lead[0], "summary": summary}))
+        }
+        other => {
+            json_out |= take_flag(&mut args, "--json");
+            match other {
+                "list" => ("kelpie_sessions", json!({"scope": if take_flag(&mut args, "--all") { "all" } else { "children" }})),
+                "read" => {
+                    let lines = number(take_opt(&mut args, "--lines"), "--lines")?;
+                    let session = args.first().ok_or_else(|| usage("read <session> [--lines N]"))?;
+                    ("kelpie_read", json!({"session": session, "lines": lines}))
+                }
+                "wait" => {
+                    let timeout = number(take_opt(&mut args, "--timeout-s"), "--timeout-s")?;
+                    ("kelpie_wait", json!({"sessions": args, "timeout_s": timeout}))
+                }
+                "agents" => ("kelpie_agents", json!({})),
+                "inbox" => ("kelpie_inbox", json!({})),
+                "close" => ("kelpie_close", json!({"session": args.first().ok_or_else(|| usage("close <session>"))?})),
+                _ => bail!("{SUB_USAGE}\n\n{}", crate::sub_guide::GUIDE),
+            }
+        }
+    };
+    Ok((parsed.0, parsed.1, json_out))
+}
+
+/// `kelpied sub …`: the sub-session operations of the MCP tools, for agents without them and for scripts. The text is the tools'.
+pub async fn sub(args: &[String]) -> Result<()> {
+    if args.iter().all(|a| a == "--json") || matches!(args.first().map(String::as_str), Some("help" | "--help" | "-h")) {
+        println!("{SUB_USAGE}\n\n{}", crate::sub_guide::GUIDE);
+        return Ok(());
+    }
+    let (tool, params, json_out) = parse_sub(args)?;
+    let mut live = crate::mcp::Live::connect(false).await?;
+    let out = crate::mcp::run_tool(&mut live, tool, &params).await;
+    if out.is_error {
+        bail!("{}", out.text);
+    }
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&out.data)?);
+    } else {
+        println!("{}", out.text);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(line: &str) -> Result<(&'static str, Value, bool)> {
+        parse_sub(&line.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn sub_commands_map_to_the_tools() {
+        assert_eq!(parse("agents --json").unwrap(), ("kelpie_agents", json!({}), true));
+        assert_eq!(
+            words(&["spawn", "codex", "fix the login", "--name", "login", "--cwd", "src", "--worktree", "--model", "gpt-x"]).unwrap(),
+            ("kelpie_spawn", json!({"agent": "codex", "task": "fix the login", "name": "login", "cwd": "src", "worktree": true, "model": "gpt-x"}), false)
+        );
+        assert_eq!(parse("list").unwrap().1, json!({"scope": "children"}));
+        assert_eq!(parse("list --all").unwrap().1, json!({"scope": "all"}));
+        assert_eq!(parse("send 3 please rebase now").unwrap(), ("kelpie_message", json!({"to": "3", "text": "please rebase now"}), false));
+        assert_eq!(parse("read api --lines 40").unwrap().1, json!({"session": "api", "lines": 40}));
+        assert_eq!(parse("wait a b --timeout-s 90").unwrap().1, json!({"sessions": ["a", "b"], "timeout_s": 90}));
+        assert_eq!(parse("wait").unwrap().1, json!({"sessions": [], "timeout_s": null}));
+        assert_eq!(parse("report done all tests pass").unwrap(), ("kelpie_report", json!({"status": "done", "summary": "all tests pass"}), false));
+        assert_eq!(parse("inbox").unwrap().0, "kelpie_inbox");
+        assert_eq!(parse("close 4").unwrap().1, json!({"session": "4"}));
+    }
+
+
+    fn words(args: &[&str]) -> Result<(&'static str, Value, bool)> {
+        parse_sub(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn words_that_look_like_options_inside_the_text_stay_words() {
+        // An unquoted sentence is all text.
+        assert_eq!(parse("report done fixed --json output").unwrap(), ("kelpie_report", json!({"status": "done", "summary": "fixed --json output"}), false));
+        assert_eq!(parse("send 3 use --name carefully --cwd").unwrap().1, json!({"to": "3", "text": "use --name carefully --cwd"}));
+        assert_eq!(parse("spawn codex fix --worktree handling in git").unwrap().1, json!({"agent": "codex", "task": "fix --worktree handling in git"}));
+        // Options before the text, or after one quoted text.
+        assert_eq!(
+            words(&["spawn", "--name", "login", "--worktree", "codex", "fix the login"]).unwrap().1,
+            json!({"name": "login", "worktree": true, "agent": "codex", "task": "fix the login"})
+        );
+        assert_eq!(
+            words(&["spawn", "codex", "fix the login", "--model", "gpt-x", "--cwd", "src", "--json"]).unwrap(),
+            ("kelpie_spawn", json!({"model": "gpt-x", "cwd": "src", "agent": "codex", "task": "fix the login"}), true)
+        );
+        assert_eq!(words(&["spawn", "codex", "--name", "n", "do it"]).unwrap().1["name"], "n");
+        // `--` ends the options.
+        assert_eq!(words(&["report", "done", "--", "--json", "was", "fine"]).unwrap(), ("kelpie_report", json!({"status": "done", "summary": "--json was fine"}), false));
+        assert!(words(&["--json", "list"]).unwrap().2);
+        assert!(words(&["spawn", "codex", "task", "--name"]).is_ok(), "a lone --name after words is text");
+        assert!(words(&["spawn", "--name"]).is_err());
+    }
+
+    #[test]
+    fn sub_arguments_are_checked() {
+        for bad in ["spawn codex", "send 3", "read", "read x --lines many", "report done", "close", "wait --timeout-s soon"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        let help = parse("").unwrap_err().to_string();
+        assert!(help.contains("usage: kelpied sub") && help.contains(crate::sub_guide::GUIDE), "{help}");
+        assert!(parse("--help").unwrap_err().to_string().contains("usage: kelpied sub"));
+    }
+}

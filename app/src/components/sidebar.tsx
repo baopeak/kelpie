@@ -25,19 +25,13 @@ import type { Project, SessionInfo } from "../lib/types";
 import { t, msg } from "../lib/i18n";
 import { openHosts } from "./hosts-page";
 import { confirmDialog } from "../lib/confirm-dialog";
+import { childrenOfSession, foldedParents, subtreeSummary, toggleParentFold } from "../lib/sub-sessions";
+import { reportedState, sessionState, type SessionState } from "../lib/session-state";
+import { closeFinishedSubSessions, finishedOf } from "../lib/sub-session-actions";
 
 export const STATUS_WORDS = { idle: msg("idle"), working: msg("working"), waiting: msg("waiting"), exited: msg("exited") } as const;
 
-/** What a session shows at a glance; each state has its own shape so color is never the only cue. */
-export type SessionState = "waiting" | "error" | "working" | "done" | "idle" | "exited";
-
-export function sessionState(s: SessionInfo): SessionState {
-  if (!s.alive) return s.failed ? "error" : "exited";
-  if (s.status === "waiting") return "waiting";
-  if (s.status === "working") return "working";
-  if (s.failed) return "error";
-  return s.unread ? "done" : "idle";
-}
+export { sessionState, reportedState, type SessionState } from "../lib/session-state";
 
 /** States that ask for the user: they get a glyph, a brighter row and (for the first two) a word. */
 const GLYPH: Partial<Record<SessionState, string>> = { waiting: "alert", error: "close", done: "check" };
@@ -52,10 +46,18 @@ function stateTitle(s: SessionInfo) {
   }
 }
 
+/** The dot's tooltip: the state, and when it comes from the session's own report, say so. */
+function reportedTitle(s: SessionInfo) {
+  const own = sessionState(s);
+  const shown = reportedState(s);
+  if (shown === own) return stateTitle(s);
+  return shown === "waiting" ? t("Reported: needs you") : t("Reported: failed");
+}
+
 export function StatusDot(props: { s: SessionInfo }) {
-  const state = () => sessionState(props.s);
+  const state = () => reportedState(props.s);
   return (
-    <span class={`dot ${state()}`} title={stateTitle(props.s)}>
+    <span class={`dot ${state()}`} title={reportedTitle(props.s)}>
       <Show when={GLYPH[state()]}>{(g) => <Icon name={g()} size={8} />}</Show>
     </span>
   );
@@ -113,6 +115,19 @@ function projectSessions(projectId: string): SessionInfo[] {
     .sort((a, b) => at(a) - at(b) || a.created_at - b.created_at);
 }
 
+/** A session that renders under its parent's row instead of in its project's list. A parent shown nowhere in the sidebar (the
+ *  floating terminal's sessions) does not take its children with it: they stay where they would be. */
+const isNested = (s: SessionInfo) => {
+  const parent = store.sessionTree().nested.get(s.id);
+  if (!parent || store.state.floating?.sessions.includes(parent)) return false;
+  // Under a parent of another project it would sit in a list that project's filters and folds can hide: it stays in its own.
+  return (store.sessions[parent]?.project_id ?? null) === (s.project_id ?? null);
+};
+
+/** The sessions listed directly under a project: its own, less the sub-sessions shown under their parents. (Counts, filters and
+ *  the "recent" order look at all of them: a sub-session that needs you still lights its project.) */
+const projectRows = (projectId: string) => projectSessions(projectId).filter((s) => !isNested(s));
+
 const lastActivity = (projectId: string) =>
   projectSessions(projectId).reduce((m, s) => Math.max(m, s.last_activity || s.created_at), 0);
 
@@ -136,6 +151,8 @@ function sessionMenu(s: SessionInfo): MenuItem[] {
   if (s.alive && supportsChat(s.kind) && !s.remote) {
     items.push(s.chat ? { label: t("Continue in terminal (TUI)"), run: () => void inPane(s, switchToTerminal) } : { label: t("Continue in chat view"), run: () => void inPane(s, switchToChat) });
   }
+  const finished = finishedOf(s);
+  if (finished.length) items.push(null, { label: t("Close finished sub-sessions ({n})", { n: finished.length }), run: () => void closeFinishedSubSessions(s) });
   const conv = conversationCommands(s);
   if (conv) {
     items.push(null, { label: t("Compact conversation"), run: () => void runConversationCommand(s, "compact") });
@@ -251,15 +268,63 @@ function projectMenu(p: Project): MenuItem[] {
   ];
 }
 
-function SessionRow(props: { s: SessionInfo }) {
-  const state = () => sessionState(props.s);
+/** What the worst state below a parent is called in its badge (the quiet ones need no words). */
+const SUB_STATE_WORDS: Partial<Record<SessionState, string>> = { waiting: msg("one needs you"), error: msg("one failed"), working: msg("one is working"), done: msg("one finished, unread") };
+
+/** The sessions opened by `id`'s agent, oldest first (same array while the set is the same, so a status tick rebuilds nothing). */
+const subChildren = (id: () => string) => createMemo<SessionInfo[]>((prev) => sameList(prev, childrenOfSession(store.sessionTree(), id()).filter(isNested)));
+
+/** A parent's compact summary: how many sessions are below it and the worst state among them. */
+function SubBadge(props: { id: string }) {
+  const sum = createMemo(() => subtreeSummary(store.sessionTree(), props.id, reportedState));
+  // Colour is never the only cue: the worst state is also said in words (for a screen reader and the tooltip) and, when it asks for
+  // the user, drawn as its glyph.
+  const label = () => {
+    const n = sum().count;
+    const what = n === 1 ? t("1 sub-session") : t("{n} sub-sessions", { n });
+    const state = SUB_STATE_WORDS[sum().worst];
+    return state ? `${what}: ${t(state)}` : what;
+  };
+  return (
+    <Show when={sum().count}>
+      <span class={`sub-badge ${sum().worst}`} title={label()} aria-label={label()} role="img">
+        <Show when={GLYPH[sum().worst]}>{(g) => <Icon name={g()} size={10} />}</Show>
+        {sum().count}
+      </span>
+    </Show>
+  );
+}
+
+/** A session's row and, indented under it behind a thin guide line, the sessions it opened (to any depth). */
+function SessionNode(props: { s: SessionInfo }) {
+  const kids = subChildren(() => props.s.id);
+  return (
+    <>
+      <SessionRow s={props.s} hasKids={kids().length > 0} />
+      <Show when={kids().length && !foldedParents[props.s.id]}>
+        <div class="sub-list" role="group" aria-label={t("Sub-sessions of {name}", { name: sessionLabel(props.s) })}>
+          <For each={kids()}>{(c) => <SessionNode s={c} />}</For>
+        </div>
+      </Show>
+    </>
+  );
+}
+
+function SessionRow(props: { s: SessionInfo; hasKids?: boolean }) {
+  const state = () => reportedState(props.s);
   return (
     <div
-      class={`session-row ${state()}${store.isSessionVisible(props.s.id) ? " visible" : ""}`}
+      class={`session-row ${state()}${props.hasKids ? " has-kids" : ""}${store.isSessionVisible(props.s.id) ? " visible" : ""}`}
       onClick={() => store.revealSession(props.s.id)}
       onContextMenu={(e) => openContextMenu(e, sessionMenu(props.s))}
-      title={[props.s.title, props.s.model, props.s.cwd].filter(Boolean).join("\n")}
+      title={[props.s.title, props.s.model, props.s.cwd, relTimeShort(props.s.last_activity || props.s.created_at, now())].filter(Boolean).join("\n")}
     >
+      <Show when={props.hasKids}>
+        <button class="chev sub-chev" title={foldedParents[props.s.id] ? t("Show sub-sessions") : t("Hide sub-sessions")} aria-expanded={!foldedParents[props.s.id]}
+          onClick={(e) => { e.stopPropagation(); toggleParentFold(props.s.id); }}>
+          <Icon name={foldedParents[props.s.id] ? "chevronRight" : "chevronDown"} size={10} />
+        </button>
+      </Show>
       <StatusDot s={props.s} />
       <KindGlyph kind={props.s.kind} size={14} />
       <span class="session-text">
@@ -270,6 +335,7 @@ function SessionRow(props: { s: SessionInfo }) {
           <span class="model">{[props.s.model && shortModel(props.s.model), sessionAccount(props.s)?.label].filter(Boolean).join(" · ")}</span>
         </Show>
       </span>
+      <Show when={props.hasKids}><SubBadge id={props.s.id} /></Show>
       <ContextRing s={props.s} />
       <Show when={LABEL[state()]} fallback={<span class="age">{relTimeShort(props.s.last_activity || props.s.created_at, now())}</span>}>
         {(label) => <span class={`age state-label ${state()}`}>{t(label())}</span>}
@@ -284,10 +350,12 @@ function ProjectRow(props: { project: Project }) {
   const children = createMemo<Project[]>((prev) => sameList(prev, store.childrenOf(props.project.id)));
   const active = () => store.state.activeProject === props.project.id;
   const sessions = createMemo(() => projectSessions(props.project.id));
+  /** The rows listed under the project: its sessions that are not shown under a parent. */
+  const rows = createMemo<SessionInfo[]>((prev) => sameList(prev, projectRows(props.project.id)));
   const counts = createMemo(() => {
     let working = 0, waiting = 0, unread = 0, error = 0;
     for (const s of sessions()) {
-      const state = sessionState(s);
+      const state = reportedState(s);
       if (state === "waiting") waiting++;
       else if (state === "error") error++;
       else if (state === "working") working++;
@@ -366,9 +434,9 @@ function ProjectRow(props: { project: Project }) {
           <span class={`mini-dot ${counts().waiting ? "waiting" : counts().error ? "error" : "unread"}`} />
         </Show>
       </div>
-      <Show when={!collapsedSidebar() && !folded() && sessions().length}>
+      <Show when={!collapsedSidebar() && !folded() && rows().length}>
         <div class="session-list">
-          <For each={sessions()}>{(s) => <SessionRow s={s} />}</For>
+          <For each={rows()}>{(s) => <SessionNode s={s} />}</For>
         </div>
       </Show>
       <Show when={!collapsedSidebar() && !folded() && children().length}>
@@ -398,7 +466,7 @@ export function Sidebar() {
     if (filter !== "all") {
       list = list.filter((p) =>
         family(p).includes(store.state.activeProject ?? "") ||
-        family(p).some((id) => projectSessions(id).some((s) => (filter === "running" ? s.alive : ["waiting", "error", "done"].includes(sessionState(s))))),
+        family(p).some((id) => projectSessions(id).some((s) => (filter === "running" ? s.alive : ["waiting", "error", "done"].includes(reportedState(s))))),
       );
     }
     if (store.state.settings.projectSort === "recent") list.sort((a, b) => Math.max(...family(b).map(lastActivity)) - Math.max(...family(a).map(lastActivity)));
@@ -408,7 +476,7 @@ export function Sidebar() {
   const orphans = createMemo<SessionInfo[]>((prev) => {
     const known = new Set(store.state.projects.map((p) => p.id));
     const floating = new Set(store.state.floating?.sessions ?? []);
-    const list = Object.values(store.sessions).filter((s) => (!s.project_id || !known.has(s.project_id)) && !floating.has(s.id)).sort((a, b) => a.created_at - b.created_at);
+    const list = Object.values(store.sessions).filter((s) => (!s.project_id || !known.has(s.project_id)) && !floating.has(s.id) && !isNested(s)).sort((a, b) => a.created_at - b.created_at);
     return sameList(prev, list);
   });
   const cycleFilter = () => {
@@ -448,7 +516,7 @@ export function Sidebar() {
         <Show when={!collapsed() && orphans().length}>
           <div class="section-label other-label">{t("Other sessions")}</div>
           <div class="session-list">
-            <For each={orphans()}>{(s) => <SessionRow s={s} />}</For>
+            <For each={orphans()}>{(s) => <SessionNode s={s} />}</For>
           </div>
         </Show>
         <Show when={collapsed()}>

@@ -3,6 +3,7 @@
 // screen (menus, yes/no — agents without hooks show nothing else), with `waiting_since`.
 import { createSignal } from "solid-js";
 import type { SessionInfo } from "./types";
+import { needsYou } from "./session-state";
 
 /** Daemon API level that brings `waiting_since`, prompts in `session.read` and `session.answer`. */
 export const ANSWER_API = 7;
@@ -22,11 +23,22 @@ export const CHAT_QUEUE_API = 21;
 /** Whether a daemon at level `api` owns the queue. A lower level has no `chat.send`, however close the number. */
 export const daemonOwnsQueue = (api: number) => api >= CHAT_QUEUE_API;
 
-/** Live sessions waiting on the user, the longest wait first (unknown start times last). */
+/** Live sessions that need the user, the same ones the status bar counts: those waiting on a prompt first, the longest wait first
+ *  (unknown start times last), then quiet sub-sessions that reported they need you or are blocked, the oldest report first. */
 export function waitingSessions(sessions: SessionInfo[]): SessionInfo[] {
+  const kind = new Map<string, 1 | 2>();
+  for (const s of sessions) {
+    const k = needsYou(s);
+    if (k) kind.set(s.id, k);
+  }
   return sessions
-    .filter((s) => s.alive && s.status === "waiting")
-    .sort((a, b) => (a.waiting_since ?? Number.MAX_SAFE_INTEGER) - (b.waiting_since ?? Number.MAX_SAFE_INTEGER) || a.created_at - b.created_at);
+    .filter((s) => kind.has(s.id))
+    .sort((a, b) =>
+      kind.get(a.id)! - kind.get(b.id)! ||
+      (kind.get(a.id) === 1
+        ? (a.waiting_since ?? Number.MAX_SAFE_INTEGER) - (b.waiting_since ?? Number.MAX_SAFE_INTEGER)
+        : (a.report?.at ?? 0) - (b.report?.at ?? 0)) ||
+      a.created_at - b.created_at);
 }
 
 /** The waiting session after `currentId` in that order, wrapping around; the first when the

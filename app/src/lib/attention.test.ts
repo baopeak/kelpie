@@ -12,6 +12,14 @@ describe("attention", () => {
     expect(waitingSessions(list).map((x) => x.id)).toEqual(["c", "a", "e"]);
   });
 
+  it("lists quiet sub-sessions that reported they need you after the real prompts, as the status bar counts them", () => {
+    const kid = (id: string, report: string | undefined, at: number, extra: Record<string, unknown> = {}) =>
+      ({ id, status: "idle", alive: true, created_at: at, unread: false, report: report ? { status: report, summary: "", at } : undefined, ...extra }) as unknown as SessionInfo;
+    const mixed = [kid("late", "needs_user", 50), kid("old", "blocked", 10), kid("done", "done", 5), kid("working", "blocked", 1, { status: "working" }), s("prompt", "waiting", 900), kid("gone", "blocked", 2, { alive: false })];
+    expect(waitingSessions(mixed).map((x) => x.id)).toEqual(["prompt", "old", "late"]);
+    expect(nextWaiting(mixed, "prompt")?.id).toBe("old");
+  });
+
   it("cycles through them", () => {
     expect(nextWaiting(list, null)?.id).toBe("c");
     expect(nextWaiting(list, "c")?.id).toBe("a");
