@@ -459,7 +459,8 @@ fn sink(count: usize, status: u16) -> (String, mpsc::Receiver<Request>) {
     let addr = format!("http://{}", listener.local_addr().unwrap());
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        for _ in 0..count {
+        let mut answered = 0;
+        while answered < count {
             let Ok((mut stream, _)) = listener.accept() else { return };
             let mut buf = Vec::new();
             let mut chunk = [0u8; 4096];
@@ -475,6 +476,13 @@ fn sink(count: usize, status: u16) -> (String, mpsc::Receiver<Request>) {
             };
             let Some(body_at) = body_at else { continue };
             let head = String::from_utf8_lossy(&buf[..body_at]).to_string();
+            // Every channel sends a POST. Anything else is another program on this machine looking for a web page on a
+            // local port (Kelpie's own browser probe does): it is answered 404 and not counted.
+            if !head.starts_with("POST ") {
+                let _ = stream.write_all(b"HTTP/1.1 404 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                continue;
+            }
+            answered += 1;
             let header = |name: &str| head.lines().find_map(|l| l.to_lowercase().strip_prefix(&format!("{name}:")).map(|v| v.trim().to_string()));
             let len: usize = header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
             while buf.len() < body_at + len {

@@ -71,6 +71,12 @@ impl PushService {
         };
         let Some(body_at) = found else { return };
         let head = String::from_utf8_lossy(&buf[..body_at]).to_string();
+        // Every destination sends a POST. Anything else is another program on this machine looking for a web page on a
+        // local port (Kelpie's own browser probe does): it is answered 404 and neither counted nor given a scripted answer.
+        if !head.starts_with("POST ") {
+            let _ = stream.write_all(b"HTTP/1.1 404 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
         let headers: HashMap<String, String> = head.lines().skip(1).filter_map(|l| l.split_once(':')).map(|(k, v)| (k.to_lowercase(), v.trim().to_string())).collect();
         let len: usize = headers.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
         while buf.len() < body_at + len {
