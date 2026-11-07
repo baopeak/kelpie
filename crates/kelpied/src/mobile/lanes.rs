@@ -34,12 +34,17 @@ const EXCUSE_LIMIT: Duration = Duration::from_secs(600);
 /// Binary media messages of a screen the phone sees (`screen`), behind everything else: a few frames, and
 /// a full lane drops video up to the next keyframe (the screen broker's rule) rather than making anything wait.
 const MEDIA_CAPACITY: usize = 6;
+/// A screen's control messages waiting: a few a second at most; one that finds no room is dropped (the next replaces it).
+const CTL_CAPACITY: usize = 16;
 
 /// The bulk lane's two ends (the writer owns the receiving one), the media lane's, and the signal that
 /// something decided the consumer is too slow.
 pub struct Lanes {
     pub bulk: mpsc::Sender<String>,
     pub bulk_rx: mpsc::Receiver<String>,
+    /// A screen's own messages (`sc_state`, `sc_stats`, `sc_fhb`, `sc_end`): the writer's control queue, never behind the bulk lane or media.
+    pub ctl: mpsc::Sender<String>,
+    pub ctl_rx: mpsc::Receiver<String>,
     pub media: mpsc::Sender<Vec<u8>>,
     pub media_rx: mpsc::Receiver<Vec<u8>>,
     /// Fires when something decided the consumer is too slow.
@@ -48,8 +53,9 @@ pub struct Lanes {
 
 pub fn lanes() -> Lanes {
     let (bulk, bulk_rx) = mpsc::channel(BULK_CAPACITY);
+    let (ctl, ctl_rx) = mpsc::channel(CTL_CAPACITY);
     let (media, media_rx) = mpsc::channel(MEDIA_CAPACITY);
-    Lanes { bulk, bulk_rx, media, media_rx, slow: Arc::new(Notify::new()) }
+    Lanes { bulk, bulk_rx, ctl, ctl_rx, media, media_rx, slow: Arc::new(Notify::new()) }
 }
 
 /// Whether the phone on the other end is there. Anything it sends counts; the daemon asks (`Beat::Ping`)

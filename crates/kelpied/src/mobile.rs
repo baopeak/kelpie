@@ -2288,6 +2288,10 @@ struct Conn {
     out: mpsc::Sender<String>,
     /// Where a screen's binary media waits for the socket, behind everything else (`screen`).
     media: mpsc::Sender<Vec<u8>>,
+    /// Where a screen's own messages wait: the writer's control queue, ahead of the bulk lane and media (`lanes::Lanes::ctl`).
+    ctl: mpsc::Sender<String>,
+    /// Whether this phone is locked, for the wire's writer: set wherever `locked` is, so not one media message follows the `locked` message.
+    media_locked: Arc<AtomicBool>,
     /// Terminal sessions followed, by session id.
     followed: HashMap<String, Followed>,
     /// Chat sessions watched.
@@ -2530,7 +2534,7 @@ impl Conn {
             return Err(refuse("no_control", "This device may not take control. Allow it in Kelpie → Settings → Mobile."));
         }
         if verb.screen() {
-            let phone = crate::screen::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.out, media: &self.media };
+            let phone = crate::screen::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.ctl, media: &self.media };
             return self.daemon.screen.phone_verb(&self.daemon, phone, name, req).await.map_err(|r| refuse(r.code, r.message));
         }
         if verb.takeover() {
@@ -2834,6 +2838,7 @@ impl Conn {
         let m = &daemon.mobile;
         let gate = m.lock_gate(&self.device, self.lock_path, self.resume.as_deref());
         self.locked = gate == Gate::Locked;
+        self.media_locked.store(self.locked, Ordering::SeqCst);
         self.lock_told = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
         let cap = if gate == Gate::ReadOnly { self.cap.min(Permission::Read) } else { self.cap };
         // Control only while it holds (`Mobile::control_now`): the phone offers takeover from what it hears here.
@@ -2877,6 +2882,7 @@ impl Conn {
         self.lock_told = state;
         if !self.locked {
             self.locked = true;
+        self.media_locked.store(true, Ordering::SeqCst);
             m.stop_grants(&self.device);
             self.lock_down();
         }
@@ -2934,7 +2940,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     let waiting = Arc::new(AtomicUsize::new(0));
     daemon.mobile.waiting.lock().insert(id, waiting.clone());
     let mut conn = Conn {
-        daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(), media: lanes.media.clone(),
+        daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(), media: lanes.media.clone(), ctl: lanes.ctl.clone(), media_locked: Arc::new(AtomicBool::new(false)),
         followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(), chat_at: HashMap::new(), waiting, overflowed,
         cap, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, lock_path, secure_page, resume: first["resume"].as_str().filter(|r| r.len() <= 64).map(str::to_string), locked: false, lock_told: "",
         relay_offer: daemon.mobile.relay_grant(&device, &first), _phone: Some(daemon.mobile.load.phone()),
@@ -2944,7 +2950,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     if let Some((_, older)) = daemon.mobile.connections.lock().insert(device.id.clone(), (id, replaced.clone())) {
         older.notify_one();
     }
-    let mut wires = Wires { bulk_rx: lanes.bulk_rx, media_rx: Some(lanes.media_rx), slow: lanes.slow, dirty, replaced };
+    let mut wires = Wires { bulk_rx: lanes.bulk_rx, ctl_rx: lanes.ctl_rx, media_rx: Some(lanes.media_rx), slow: lanes.slow, dirty, replaced };
     // Dropping serve cancels an in-flight request/send, then the common cleanup still runs.
     tokio::select! {
         biased;
@@ -2977,6 +2983,8 @@ fn acknowledges(first: Option<&Value>) -> bool {
 /// What a connection waits on besides its socket.
 struct Wires {
     bulk_rx: mpsc::Receiver<String>,
+    /// A screen's own messages, for the writer's control queue.
+    ctl_rx: mpsc::Receiver<String>,
     /// A screen's media, handed to the wire's writer when the connection is served (`Wire::attach_media`).
     media_rx: Option<mpsc::Receiver<Vec<u8>>>,
     /// Something decided this phone cannot take what it is sent.
@@ -3079,10 +3087,9 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
         }
     }
     // A screen's media goes from the wire's own writer, behind every other message, and none of it to a locked phone: the writer reads
-    // `media_locked`, which follows `conn.locked`.
-    let media_locked = Arc::new(AtomicBool::new(conn.locked));
+    // `media_locked`, which is set wherever `conn.locked` is.
     if let Some(media) = wires.media_rx.take() {
-        if !wire.attach_media(media, media_locked.clone()).await {
+        if !wire.attach_media(media, conn.media_locked.clone()).await {
             return;
         }
     }
@@ -3091,7 +3098,6 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
     let mut tick = tokio::time::interval(lanes::TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        media_locked.store(conn.locked, Ordering::SeqCst);
         // Also check synchronously: a busy socket can keep this future ready without yielding.
         if generation.is_cancelled() {
             return;
@@ -3132,6 +3138,8 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                     }
                 }
             }
+            // The writer stopped (the socket is gone, or a message took longer than it may): this connection is over, whatever it is reading.
+            _ = &mut wire.dead => return,
             _ = wires.slow.notified() => {
                 wire.close(SLOW_CONSUMER, "slow_consumer").await;
                 return;
@@ -3236,9 +3244,16 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                     }
                 }
             }
-            // What was on its way when the phone was locked goes no further.
-            Some(msg) = wires.bulk_rx.recv() => {
+            // A screen's own messages, on the writer's control queue: never behind the bulk lane or media.
+            Some(msg) = wires.ctl_rx.recv() => {
                 if !conn.locked && !wire.send(&msg).await {
+                    return;
+                }
+            }
+            // What was on its way when the phone was locked goes no further. Taken only while the writer's bulk queue has room, so this task
+            // never waits on it and goes on reading the phone.
+            Some(msg) = wires.bulk_rx.recv(), if wire.bulk_room() => {
+                if !conn.locked && !wire.send_bulk(&msg) {
                     return;
                 }
             }
@@ -3611,7 +3626,7 @@ mod tests {
         let (tx, _rx, overflowed) = bounded_client_channel(8);
         let (out_tx, out) = mpsc::channel(16);
         let conn = Conn {
-            daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, media: mpsc::channel(4).0, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
+            daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, media: mpsc::channel(4).0, ctl: mpsc::channel(4).0, media_locked: Arc::new(AtomicBool::new(false)), followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
             chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         };
         Rig { daemon, conn, out, term, typed, chat, phone }
@@ -5274,7 +5289,7 @@ mod tests {
         let (tx, _rx, overflowed) = bounded_client_channel(8);
         let (out, _out_rx) = mpsc::channel(16);
         Conn {
-            daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, media: mpsc::channel(4).0, followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
+            daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, media: mpsc::channel(4).0, ctl: mpsc::channel(4).0, media_locked: Arc::new(AtomicBool::new(false)), followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
             chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         }
     }

@@ -233,18 +233,25 @@ enum Outgoing {
     Close(u16, &'static str, oneshot::Sender<()>),
 }
 
-/// Messages waiting for the writer, at most: a sender waits for room (`SLOW_AFTER` at most) once they are there.
-const WRITER_QUEUE: usize = 8;
+/// Control messages waiting for the writer (replies, the lock, heartbeats, a screen's state and stats), at most: a sender waits for room
+/// (`SLOW_AFTER` at most) once they are there, which a phone that reads takes long to reach.
+const WRITER_QUEUE: usize = 64;
+/// Bulk messages waiting for the writer (the session list, chats): the connection's task moves bulk only while there is room, so it never
+/// waits on it.
+const BULK_QUEUE: usize = 8;
 
 /// A carrier with an established kelpie-link session. **What comes in never waits for what goes out**: a writer task of its own sends, so
 /// that a large frame of a screen on its way to a slow phone (a keyframe takes most of a second at 1.5 Mbps) does not hold back the phone's
-/// clicks and acknowledgements, which the connection's task reads meanwhile. The writer seals each message as it sends it and takes the
-/// screen's media only when no other message waits, so a message waits at most for the one media message being written.
+/// clicks and acknowledgements, which the connection's task reads meanwhile. The writer seals each message as it sends it and takes, in this
+/// order, control messages (`send`), bulk (`send_bulk`) and the screen's media, so a reply waits at most for the one message being written.
 pub struct Wire {
     pub ws: CarrierRx,
     session: Arc<parking_lot::Mutex<kelpie_link::Session>>,
     out: mpsc::Sender<Outgoing>,
+    bulk: mpsc::Sender<Vec<u8>>,
     writer: tokio::task::JoinHandle<()>,
+    /// Resolves (with an error) once the writer has stopped: the connection is over, and its task hears it at once.
+    pub dead: oneshot::Receiver<()>,
     /// The phone closed it saying another route won the race (`ROUTE_LOST`).
     pub route_lost: bool,
 }
@@ -280,8 +287,10 @@ impl Wire {
         };
         let session = Arc::new(parking_lot::Mutex::new(session));
         let (out, queue) = mpsc::channel(WRITER_QUEUE);
-        let writer = tokio::spawn(write(tx, session.clone(), queue));
-        Wire { ws: rx, session, out, writer, route_lost: false }
+        let (bulk, bulk_queue) = mpsc::channel(BULK_QUEUE);
+        let (alive, dead) = oneshot::channel();
+        let writer = tokio::spawn(write(tx, session.clone(), queue, bulk_queue, alive));
+        Wire { ws: rx, session, out, bulk, writer, dead, route_lost: false }
     }
 
     /// The session, for what is not sending or opening (its pairing code, padding, reassembly).
@@ -299,6 +308,17 @@ impl Wire {
     /// A binary message: a screen's media (`screen`) starts with a byte no JSON message starts with (`kelpie_screen::wire::MEDIA`).
     pub async fn send_bytes(&mut self, msg: &[u8]) -> bool {
         matches!(tokio::time::timeout(SLOW_AFTER, self.out.send(Outgoing::Message(msg.to_vec()))).await, Ok(Ok(())))
+    }
+
+    /// Queues a bulk message, behind control messages; false when the connection is over. It never waits: the caller moves bulk only while
+    /// `bulk_room` says there is room, and a message that finds none anyway is dropped (the bulk lane's own limit decides a phone is slow).
+    pub fn send_bulk(&mut self, msg: &str) -> bool {
+        !matches!(self.bulk.try_send(msg.as_bytes().to_vec()), Err(mpsc::error::TrySendError::Closed(_)))
+    }
+
+    /// Whether the writer's bulk queue has room now.
+    pub fn bulk_room(&self) -> bool {
+        self.bulk.capacity() > 0
     }
 
     /// Hands the screen's media lane to the writer: sent behind every other message, and dropped while `locked` is set.
@@ -353,9 +373,9 @@ impl Wire {
     }
 }
 
-/// The writer: messages first, in order, then the screen's media when nothing else waits. Each message is sealed as it goes and must be on
+/// The writer: control messages first, in order, then bulk, then the screen's media when nothing else waits. Each message is sealed as it goes and must be on
 /// the socket within `SLOW_AFTER`; a socket that takes longer, or is gone, ends the writer, and with it the connection.
-async fn write(mut tx: CarrierTx, session: Arc<parking_lot::Mutex<kelpie_link::Session>>, mut queue: mpsc::Receiver<Outgoing>) {
+async fn write(mut tx: CarrierTx, session: Arc<parking_lot::Mutex<kelpie_link::Session>>, mut queue: mpsc::Receiver<Outgoing>, mut bulk: mpsc::Receiver<Vec<u8>>, _alive: oneshot::Sender<()>) {
     let mut media: Option<(mpsc::Receiver<Vec<u8>>, Arc<AtomicBool>)> = None;
     loop {
         let next = tokio::select! {
@@ -364,6 +384,7 @@ async fn write(mut tx: CarrierTx, session: Arc<parking_lot::Mutex<kelpie_link::S
                 Some(o) => o,
                 None => return,
             },
+            Some(b) = bulk.recv() => Outgoing::Message(b),
             Some(m) = async { media.as_mut()?.0.recv().await }, if media.is_some() => {
                 if media.as_ref().is_some_and(|(_, locked)| locked.load(Ordering::SeqCst)) {
                     continue;
@@ -710,5 +731,68 @@ mod tests {
         // Closing goes after what was queued, and the writer is done.
         wire.close(1000, "").await;
         assert!(!wire.send("after").await, "a closed wire takes nothing more");
+    }
+}
+#[cfg(test)]
+mod queue_tests {
+    use super::super::relay::{Inbound, Out, Slot};
+    use super::*;
+
+    fn sessions() -> (kelpie_link::Session, kelpie_link::Session) {
+        let (desktop, phone) = (kelpie_link::Keypair::generate().unwrap(), kelpie_link::Keypair::generate().unwrap());
+        let (init, first) = kelpie_link::Initiator::reconnect(&phone, &desktop.public).unwrap();
+        let (ours, reply) = kelpie_link::read_first(&desktop, &first, &[]).unwrap().accept().unwrap();
+        (ours, init.finish(&reply).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_reply_goes_before_bulk_behind_a_large_keyframe_and_the_connection_never_waits_on_bulk() {
+        let (ours, mut phone) = sessions();
+        let (_frames_tx, frames_rx) = mpsc::channel::<Inbound>(8);
+        let (out_tx, mut out_rx) = mpsc::channel::<Out>(1);
+        let mut wire = Wire::new(Carrier::Relay(Slot::for_test(frames_rx, out_tx)), ours);
+        let (media_tx, media_rx) = mpsc::channel(6);
+        let mut keyframe = vec![0x01u8];
+        keyframe.resize(300_000, 7);
+        media_tx.try_send(keyframe.clone()).unwrap();
+        assert!(wire.attach_media(media_rx, Arc::new(AtomicBool::new(false))).await);
+        // The writer starts on the keyframe and waits on the slow phone, part of it written.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Bulk fills its queue without the connection ever waiting on it; a reply goes on the control queue.
+        let mut taken = 0;
+        while wire.bulk_room() {
+            assert!(wire.send_bulk(&format!("bulk {taken}")));
+            taken += 1;
+        }
+        assert_eq!(taken, BULK_QUEUE, "room is said, and kept to");
+        assert!(wire.send("reply").await);
+        let mut got = Vec::new();
+        for _ in 0..200 {
+            while let Ok(Out::Frame(_, _, frame)) = out_rx.try_recv() {
+                if let Some(msg) = phone.open(&frame, now()).unwrap() {
+                    got.push(msg);
+                }
+            }
+            if got.len() >= 2 + BULK_QUEUE {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(got[0], keyframe, "the message being written is finished first");
+        assert_eq!(got[1], b"reply".to_vec(), "then the reply, ahead of every bulk message");
+        assert_eq!(got[2], b"bulk 0".to_vec());
+    }
+
+    #[tokio::test]
+    async fn the_connection_hears_at_once_that_the_writer_stopped() {
+        let (ours, _phone) = sessions();
+        let (_frames_tx, frames_rx) = mpsc::channel::<Inbound>(8);
+        let (out_tx, out_rx) = mpsc::channel::<Out>(1);
+        let mut wire = Wire::new(Carrier::Relay(Slot::for_test(frames_rx, out_tx)), ours);
+        // The relay's side is gone: the next write fails and the writer stops.
+        drop(out_rx);
+        assert!(wire.send("anything").await);
+        assert!(tokio::time::timeout(Duration::from_secs(1), &mut wire.dead).await.is_ok(), "heard without another send");
+        assert!(!wire.send("after").await, "and nothing more is taken");
     }
 }
