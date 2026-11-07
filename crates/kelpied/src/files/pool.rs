@@ -237,10 +237,13 @@ fn status_number(code: &russh_sftp::protocol::StatusCode) -> u32 {
     }
 }
 
+/// A destination's browse session, opened once at a time.
+type BrowseSlot = Arc<tokio::sync::Mutex<Option<Arc<Conn>>>>;
+
 /// The browse sessions, one per destination.
 pub struct Pool {
     exe: PathBuf,
-    browse: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<Arc<Conn>>>>>>,
+    browse: Mutex<HashMap<String, BrowseSlot>>,
     reaper: std::sync::Once,
 }
 

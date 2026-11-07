@@ -154,7 +154,7 @@ pub trait RemoteFs: Send + Sync {
     async fn list(&self, dir: &str) -> FsResult<Vec<Entry>>;
     async fn stat(&self, path: &str) -> FsResult<Meta>;
     async fn lstat(&self, path: &str) -> FsResult<Meta>;
-    async fn readlink(&self, path: &str) -> FsResult<String>;
+
     /// `.` (or `~`) is the login folder on a host, the home folder here.
     async fn realpath(&self, path: &str) -> FsResult<String>;
     async fn mkdir(&self, path: &str) -> FsResult<()>;

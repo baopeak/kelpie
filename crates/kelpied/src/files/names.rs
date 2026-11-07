@@ -44,13 +44,14 @@ pub fn with_suffix(name: &str, suffix: &str) -> String {
     }
 }
 
-/// The first `name (n)` (n ≥ 2) that `taken` does not hold. On a case-insensitive target `taken` compares
-/// with [`same_name`], so a name that differs only in case counts as taken.
+/// The first `name (n)` (n ≥ 2) that `taken` does not hold. On a case-insensitive target `taken` compares without
+/// case, so a name that differs only in case counts as taken.
 pub fn keep_both(name: &str, taken: impl Fn(&str) -> bool) -> String {
     (2..).map(|n| numbered(name, n)).find(|c| !taken(c)).expect("an unused name")
 }
 
 /// Whether two names are the same file on a target that is (or is not) case-insensitive.
+#[cfg(test)]
 pub fn same_name(a: &str, b: &str, case_insensitive: bool) -> bool {
     if case_insensitive {
         a.to_lowercase() == b.to_lowercase()

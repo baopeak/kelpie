@@ -127,9 +127,6 @@ impl RemoteFs for LocalFs {
         Ok(meta_of(&tokio::fs::symlink_metadata(path).await?))
     }
 
-    async fn readlink(&self, path: &str) -> FsResult<String> {
-        Ok(path_string(&tokio::fs::read_link(path).await?))
-    }
 
     async fn realpath(&self, path: &str) -> FsResult<String> {
         if matches!(path, "" | "." | "~") {

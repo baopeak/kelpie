@@ -671,7 +671,8 @@ mod tests {
             ctl.halted.store(true, Ordering::Relaxed);
             ctl.wake.notify_waiters();
         };
-        let (out, ()) = tokio::join!(copy_file(&job(&src, &dst, None), &ctl), halter);
+        let fc = job(&src, &dst, None);
+        let (out, ()) = tokio::join!(copy_file(&fc, &ctl), halter);
         assert_eq!(out.unwrap(), Copied::Stopped(Stop::Pause), "stopped as on a pause, never \"the source changed\"");
         assert_eq!(dst.read(partial).unwrap(), data(800_000)[..300_000], "kept whole for the resume");
     }

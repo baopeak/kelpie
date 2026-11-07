@@ -95,7 +95,8 @@ pub fn outer_args(config: &std::path::Path, a: &str) -> Vec<String> {
 
 /// Exit code of the probe script when A has no `sftp`, `ssh` or `ssh-keygen` of its own.
 const NO_CLIENT: i32 = 41;
-/// The probe's ssh to B failed (its own 255, renumbered so it never looks like the ssh to A failing).
+/// The probe's ssh to B failed (its own 255, renumbered so it never looks like the ssh to A failing); its words say why.
+#[cfg(test)]
 const NO_LOGIN: i32 = 42;
 const KEYS_MARK: &str = "kelpie-keys";
 
@@ -292,9 +293,12 @@ pub async fn kill_on(exe: &std::path::Path, a: &str, pid: u32) -> bool {
     matches!(run_on(exe, a, &kill_command(pid), Duration::from_secs(20)).await, Ok((Some(0), _)))
 }
 
+/// When a probe ran, and B's target or the reason A cannot copy to it directly.
+type Probed = (Instant, Result<Target, String>);
+
 /// Probe results per (A, B).
 #[derive(Default)]
-pub struct Probes(Mutex<HashMap<(String, String), (Instant, Result<Target, String>)>>);
+pub struct Probes(Mutex<HashMap<(String, String), Probed>>);
 
 impl Probes {
     /// B's target when A can copy to it directly, else the reason it cannot; cached for 10 minutes.

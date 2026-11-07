@@ -1718,7 +1718,7 @@ impl Queue {
             (Ok(s), None) => s,
         };
         // Folders only after a complete walk (a lost connection mid-walk left some unvisited), deepest first.
-        dirs.sort_by(|a, b| b.0.cmp(&a.0));
+        dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
         for (_, path) in dirs {
             if let Some(stop) = Self::halted(live) {
                 return Ok(stop);
@@ -2040,7 +2040,7 @@ mod tests {
         let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/src/x"], "dst_dir": "/nowhere", "conflict": "replace"})).await;
         until(&r, &id, |j| j.state.finished()).await;
         // As if the daemon stopped while it ran.
-        let mut saved = journal_until(&r, |v| v["jobs"][0]["state"] == "done").await;
+        let mut saved = journal_until(&r, |v| v["jobs"][0]["finished"].is_number()).await;
         saved["jobs"][0]["state"] = json!("running");
         std::fs::write(r.dir.join("transfers.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
         let again = Queue::new(r.dir.clone(), Arc::new(Pool::new(PathBuf::from("kelpied"))), Arc::new(|_: &str, _: Value| {}));
@@ -2301,14 +2301,16 @@ mod tests {
         r.b.put("/dst/log.txt", b"live", 5);
         r.b.bump_mtime_on_lstat("/dst/log.txt");
         let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/s/log.txt"], "dst_dir": "/dst", "conflict": "replace"})).await;
-        // Every re-check finds it changed: asked each time, then the file fails.
+        // Every re-check finds it changed: asked each time (a new question each time), then the file fails.
+        let mut answered = 0;
         for _ in 0..10 {
-            let j = until(&r, &id, |j| !j.questions.is_empty() || j.state.finished()).await;
+            let j = until(&r, &id, |j| j.questions.first().is_some_and(|q| q.id > answered) || j.state.finished()).await;
             if j.state.finished() {
                 break;
             }
             assert!(j.questions[0].changed, "a changed target is asked about, never decided by policy");
-            let _ = r.q.rpc("xfer.answer", &json!({"id": id, "choice": "replace"})).await;
+            answered = j.questions[0].id;
+            r.q.rpc("xfer.answer", &json!({"id": id, "choice": "replace", "question": answered})).await.unwrap();
         }
         let j = until(&r, &id, |j| j.state.finished()).await;
         assert_eq!(j.totals.failed, 1, "{j:?}");

@@ -81,10 +81,6 @@ impl RemoteFs for SftpFs {
         c.sftp.symlink_metadata(path).await.map(|a| meta_of(&a)).map_err(|e| c.error(e))
     }
 
-    async fn readlink(&self, path: &str) -> FsResult<String> {
-        let c = self.c();
-        c.sftp.read_link(path).await.map_err(|e| c.error(e))
-    }
 
     async fn realpath(&self, path: &str) -> FsResult<String> {
         let c = self.c();

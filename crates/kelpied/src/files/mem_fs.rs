@@ -340,15 +340,6 @@ impl RemoteFs for MemFs {
         s.nodes.get(&p).map(|n| MemFs::shown(&s, MemFs::meta(n))).ok_or_else(|| not_found(path))
     }
 
-    async fn readlink(&self, path: &str) -> FsResult<String> {
-        let s = self.0.lock();
-        let p = MemFs::resolve_parent(&s, path)?;
-        match &s.nodes.get(&p).ok_or_else(|| not_found(path))?.body {
-            Body::Link(t) => Ok(t.clone()),
-            _ => Err(FsError::invalid("not a link")),
-        }
-    }
-
     async fn realpath(&self, path: &str) -> FsResult<String> {
         if matches!(path, "" | "." | "~") {
             return Ok(HOME.into());
