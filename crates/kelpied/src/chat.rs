@@ -659,7 +659,8 @@ impl ChatSession {
         rx
     }
 
-    pub fn spawn(self: &Arc<Self>, argv: &[String]) -> Result<()> {
+    /// `env`: extra variables of the process (`KELPIE_CLI`), set before the spec's own.
+    pub fn spawn(self: &Arc<Self>, argv: &[String], env: &[(String, String)]) -> Result<()> {
         let spec = self.spec.lock().clone();
         let mut cmd = tokio::process::Command::new(&argv[0]);
         cmd.args(&argv[1..])
@@ -673,7 +674,10 @@ impl ChatSession {
         if std::path::Path::new(&spec.cwd).is_dir() {
             cmd.current_dir(&spec.cwd);
         }
-        for (k, v) in &spec.env {
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        for (k, v) in spec.env.iter().filter(|(k, _)| !crate::session::is_injected_env(k)) {
             cmd.env(k, v);
         }
         #[cfg(windows)]

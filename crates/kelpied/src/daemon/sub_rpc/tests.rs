@@ -142,6 +142,72 @@ fn a_report_shows_on_the_row_and_goes_to_the_parent_that_reads_or_receives_it() 
 }
 
 #[test]
+fn a_request_whose_program_was_interrupted_is_withdrawn_and_a_later_allow_starts_nothing() {
+    let Some(agent) = agents::installed_presets().first().copied() else { return };
+    let (d, dir) = daemon("sub-hangup");
+    add(&d, 1, "p", "claude", None);
+    let (user_tx, mut user_rx) = crate::session::client_channel();
+    d.register_client(7, user_tx.clone());
+    d.set_client_role(7, &Role::User);
+    let (program_tx, program_rx) = crate::session::client_channel();
+    let folder = dir.to_string_lossy().into_owned();
+    let asked = d.dispatch(8, &program_tx, &json!(5), "sub.spawn", json!({"session_id": "p", "agent": agent, "task": "t", "cwd": folder})).unwrap();
+    assert!(asked.is_none());
+    let request = d.subs.pending.lock().list()[0].id.clone();
+    // The program is interrupted: its connection closes.
+    drop(program_rx);
+    drop(program_tx);
+    let started = Instant::now();
+    while !d.subs.pending.lock().list().is_empty() {
+        assert!(started.elapsed() < Duration::from_secs(10), "the request stayed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(call(&d, "sub.answer", json!({"id": request, "decision": "once"})).is_err(), "nothing left to allow");
+    std::thread::sleep(Duration::from_millis(300));
+    let events = decoded(&mut user_rx);
+    assert!(events.iter().any(|e| e["event"] == "sub.request_done" && e["params"]["decision"] == "cancelled"), "{events:?}");
+    assert_eq!(d.list().len(), 1, "no child was started");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn finished_sub_sessions_are_recorded_once_and_shown_with_the_agent_presets() {
+    let (d, dir) = daemon("sub-stats");
+    add(&d, 1, "p", "claude", None);
+    add(&d, 2, "c", "codex", Some(("p", 1)));
+    add(&d, 3, "g", "codex", Some(("p", 1)));
+    d.sub_rpc("sub.report", &json!({"session_id": "c", "status": "progress", "summary": "x"})).unwrap();
+    assert!(d.subs.stats.by_agent().is_empty(), "progress is not an end");
+    d.sub_rpc("sub.report", &json!({"session_id": "c", "status": "done", "summary": "x"})).unwrap();
+    d.close(2).unwrap();
+    d.close(3).unwrap();
+    d.close(1).unwrap();
+    // c: done (the close after it adds nothing); g: closed; p opened by no one: not counted.
+    let stats = d.subs.stats.by_agent();
+    assert_eq!(stats.len(), 1);
+    assert_eq!((stats[0].agent.as_str(), stats[0].count, stats[0].judged, stats[0].done_share), ("codex", 2, 1, Some(1.0)));
+    let presets = call(&d, "agent.presets", json!({})).unwrap();
+    let codex = presets.as_array().unwrap().iter().find(|p| p["id"] == "codex").unwrap();
+    assert_eq!(codex["outcomes"]["count"], 2);
+    assert!(presets.as_array().unwrap().iter().find(|p| p["id"] == "claude").unwrap()["outcomes"].is_null());
+    // The record is kept for the next start.
+    let again = Daemon::with_secrets(dir.clone(), PathBuf::from("kelpied"), notify::Memory::new());
+    assert_eq!(again.subs.stats.by_agent()[0].count, 2);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn new_sessions_get_the_tools_only_while_the_policy_is_not_off() {
+    let (d, dir) = daemon("sub-tools-policy");
+    assert!(d.sub_tools_on());
+    call(&d, "daemon.set_policy", json!({"sub_sessions": "off"})).unwrap();
+    assert!(!d.sub_tools_on());
+    call(&d, "daemon.set_policy", json!({"sub_sessions": "allow"})).unwrap();
+    assert!(d.sub_tools_on());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn mail_is_typed_into_an_idle_session_as_one_paste_with_its_own_enter() {
     let (d, dir) = daemon("sub-deliver");
     let (_parent, typed) = add(&d, 1, "p", "claude", None);

@@ -273,7 +273,7 @@ impl Daemon {
                 deliver_review: Mutex::new(HashMap::new()),
                 notifier: Notifier::with_destinations(&data_dir, secrets, destinations),
                 scheduled: ScheduledInputs::open(&data_dir),
-                subs: crate::subs::Subs::new(policy.sub),
+                subs: crate::subs::Subs::new(policy.sub).with_stats_file(data_dir.join("sub-stats.json")),
                 procs: crate::procs::Procs::default(),
                 me: weak,
                 data_dir,
@@ -300,10 +300,10 @@ impl Daemon {
     /// What `restart` resumes: the known conversation, else (agents that report no id) the
     /// folder's most recent one.
     /// The command line of a session: local, or over SSH for a remote one.
-    fn launch_for(spec: &SessionSpec, resume: Resume, prompt: Option<&str>, exe: &std::path::Path, data_dir: &std::path::Path) -> Result<agents::Launch> {
+    fn launch_for(spec: &SessionSpec, resume: Resume, prompt: Option<&str>, exe: &std::path::Path, data_dir: &std::path::Path, sub_tools: bool) -> Result<agents::Launch> {
         match &spec.remote {
             Some(r) => agents::build_remote_launch(&spec.kind, &spec.args, resume, prompt, r, &spec.cwd, &spec.id),
-            None => agents::build_launch(&spec.kind, &spec.args, resume, prompt, exe, data_dir),
+            None => agents::build_launch(&spec.kind, &spec.args, resume, prompt, exe, data_dir, sub_tools),
         }
     }
 
@@ -813,6 +813,7 @@ impl Daemon {
 
     /// Keeps the end of a finished task's output when its agent reported no summary.
     fn capture_task(&self, run_id: &str, task_id: &str, session: &str) {
+        self.record_task_outcome(run_id, task_id, session);
         let tail = match self.by_id(session) {
             Some(Entry::Term(s)) => s.text_tail(40),
             _ => return,
@@ -1134,9 +1135,14 @@ impl Daemon {
             // A chat switched to bypass is started again with the flag in this command line, not in `args`.
             let yolo = agents::preset_for(&spec.kind).map_or(&[][..], |p| p.yolo);
             let (skips, bypass) = crate::subs::launch_permissions(&spec.kind, yolo, &argv);
+            // Kelpie's sub-session tools, while the policy allows them. The permission check above looks at the command line as the
+            // app sent it: what is added here is not a permission.
+            let tools = self.sub_tools_on() && spec.remote.is_none();
+            let argv = if tools { agents::chat_with_sub_tools(argv, &self.exe, &self.data_dir)? } else { argv };
+            let env = if tools { vec![("KELPIE_CLI".to_string(), self.exe.to_string_lossy().into_owned())] } else { Vec::new() };
             let chat = ChatSession::new(handle, spec);
             chat.set_launch_permissions(skips, bypass);
-            chat.spawn(&agents::platform_argv(argv)?)?;
+            chat.spawn(&agents::platform_argv(argv)?, &env)?;
             Entry::Chat(chat)
         } else {
             let fresh = Self::preset_conversation(&mut spec);
@@ -1145,7 +1151,7 @@ impl Daemon {
                 Some(_) => Self::resume_for(&spec),
                 None => Resume::None,
             };
-            let launch = Self::launch_for(&spec, resume, p.prompt.as_deref(), &self.exe, &self.data_dir)?;
+            let launch = Self::launch_for(&spec, resume, p.prompt.as_deref(), &self.exe, &self.data_dir, self.sub_tools_on())?;
             let session = Session::new(handle, spec, p.cols, p.rows);
             session.spawn(&launch)?;
             Entry::Term(session)
@@ -1172,7 +1178,7 @@ impl Daemon {
             }
             spec.clone()
         };
-        let launch = Self::launch_for(&spec, Self::resume_for(&spec), None, &self.exe, &self.data_dir)?;
+        let launch = Self::launch_for(&spec, Self::resume_for(&spec), None, &self.exe, &self.data_dir, self.sub_tools_on())?;
         self.drop_timer(&spec.id, "restarted");
         // The program starts below the old output, which stays readable above it. A resumed agent
         // redraws only the latest part of its conversation (Claude Code shows about a screenful),
@@ -1190,6 +1196,7 @@ impl Daemon {
     pub fn close(&self, handle: u32) -> Result<()> {
         let entry = self.sessions.write().remove(&handle).ok_or_else(|| anyhow!("no session {handle}"))?;
         self.notifier.forget(handle);
+        self.record_sub_close(&entry);
         // Its mail, grants and the requests it was waiting on go; its children stay (they keep `parent` as history).
         for request in self.subs.forget(&entry.spec().id) {
             self.broadcast("sub.request_done", json!({"id": request, "decision": "cancelled"}));
@@ -1767,6 +1774,7 @@ impl Daemon {
             "session.set_env_restart" => serde_json::to_value(self.set_env_restart(handle_of(&params)?, params.get("env").unwrap_or(&Value::Null))?)?,
             "agent.presets" => {
                 let installed = agents::installed_presets();
+                let outcomes = self.subs.stats.by_agent();
                 json!(agents::all_presets()
                     .into_iter()
                     .map(|p| json!({
@@ -1777,6 +1785,8 @@ impl Daemon {
                         "resume_latest": !p.resume_latest.is_empty(),
                         "acp": p.acp,
                         "installed": installed.contains(&p.id),
+                        // How this agent fared as a sub-session (null before any finished): routing hints.
+                        "outcomes": outcomes.iter().find(|s| s.agent == p.id),
                     }))
                     .collect::<Vec<_>>())
             }

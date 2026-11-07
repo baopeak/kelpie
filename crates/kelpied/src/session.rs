@@ -449,6 +449,12 @@ pub struct Session {
 /// How stale a broadcast `last_activity` may get while a session keeps printing.
 pub const ACTIVITY_REBROADCAST_MS: u64 = 30_000;
 
+/// Variables Kelpie sets for the session itself: a session's own `env` cannot replace them (a stray entry would silently break
+/// the sub-session tools or point them at another session).
+pub fn is_injected_env(key: &str) -> bool {
+    matches!(key, "KELPIE_SESSION_ID" | "KELPIE_SESSION_TOKEN" | "KELPIE_SESSION_ENDPOINT" | "KELPIE_CLI")
+}
+
 pub fn now_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -522,7 +528,10 @@ impl Session {
         cmd.env("KELPIE_SESSION_ID", &spec.id);
         cmd.env(kelpie_proto::SESSION_TOKEN_ENV, crate::auth::session_token(&spec.id));
         cmd.env(kelpie_proto::SESSION_ENDPOINT_ENV, kelpie_proto::endpoint_key(&kelpie_proto::endpoint()));
-        for (k, v) in &spec.env {
+        for (k, v) in &launch.env {
+            cmd.env(k, v);
+        }
+        for (k, v) in spec.env.iter().filter(|(k, _)| !is_injected_env(k)) {
             cmd.env(k, v);
         }
         let mut child = pair.slave.spawn_command(cmd).with_context(|| format!("spawn {:?}", launch.argv))?;

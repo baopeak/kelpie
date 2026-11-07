@@ -17,6 +17,8 @@ pub struct Launch {
     /// First prompt to type once the program is ready (agents that take no prompt argument,
     /// startup commands of shells).
     pub typed_prompt: Option<TypedPrompt>,
+    /// Extra environment of the process, set before the session's own `env` (`KELPIE_CLI` while sub-sessions are on).
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -426,7 +428,7 @@ pub fn build_remote_launch(kind: &str, user_args: &[String], resume: Resume, pro
     }
     argv.extend(["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=4"].map(str::to_string));
     argv.extend([remote.dest.clone(), "--".into(), format!(r#"exec "${{SHELL:-/bin/sh}}" -lc {}"#, sh_quote(&body))]);
-    Ok(Launch { argv: wrap_for_platform(argv)?, typed_prompt })
+    Ok(Launch { argv: wrap_for_platform(argv)?, typed_prompt, env: Vec::new() })
 }
 
 /// Windows' own OpenSSH client when present (as the app uses): one from Git Bash earlier on PATH
@@ -456,29 +458,50 @@ pub enum Resume<'a> {
 
 /// Builds the argv for `kind`. `user_args` are extra flags from the user/profile; `prompt` is
 /// an optional first message (typed once the agent is ready when resuming or too long).
-pub fn build_launch(
+pub fn build_launch(kind: &str, user_args: &[String], resume: Resume, prompt: Option<&str>, hook_exe: &Path, data_dir: &Path, sub_tools: bool) -> Result<Launch> {
+    build_launch_with(kind, user_args, resume, prompt, hook_exe, data_dir, sub_tools, wrap_for_platform)
+}
+
+/// [`build_launch`] with the final step (how the platform starts the program) given, so tests need no agent installed.
+#[allow(clippy::too_many_arguments)]
+fn build_launch_with(
     kind: &str,
     user_args: &[String],
     resume: Resume,
     prompt: Option<&str>,
     hook_exe: &Path,
     data_dir: &Path,
+    sub_tools: bool,
+    wrap: fn(Vec<String>) -> Result<Vec<String>>,
 ) -> Result<Launch> {
+    // Every session can run the sub-session CLI; Claude and Codex also get the tools (below).
+    let env: Vec<(String, String)> = if sub_tools { vec![("KELPIE_CLI".into(), hook_exe.to_string_lossy().into_owned())] } else { Vec::new() };
     // Shells and plain commands take `prompt` as a startup command, typed as plain keys.
     let startup = || prompt.filter(|t| !t.trim().is_empty()).map(|t| TypedPrompt { text: t.to_string(), paste: false });
     let mut argv: Vec<String> = match kind {
-        "shell" => return Ok(Launch { argv: if user_args.is_empty() { default_shell() } else { resolve(user_args)? }, typed_prompt: startup() }),
+        "shell" => return Ok(Launch { argv: if user_args.is_empty() { default_shell() } else { resolve(user_args)? }, typed_prompt: startup(), env }),
         "custom" => {
             anyhow::ensure!(!user_args.is_empty(), "custom session needs a command");
-            return Ok(Launch { argv: wrap_for_platform(user_args.to_vec())?, typed_prompt: startup() });
+            return Ok(Launch { argv: wrap_for_platform(user_args.to_vec())?, typed_prompt: startup(), env });
         }
         "claude" => {
-            let settings = write_claude_hook_settings(hook_exe, data_dir)?;
-            vec!["claude".to_string(), "--settings".into(), settings.to_string_lossy().into_owned()]
+            let settings = write_claude_hook_settings(hook_exe, data_dir, sub_tools)?;
+            let mut argv = vec!["claude".to_string()];
+            if sub_tools {
+                // First: `--mcp-config` takes every argument up to the next flag, so the prompt must not follow it.
+                let mcp = write_claude_mcp_config(hook_exe, data_dir)?;
+                argv.extend(["--mcp-config".to_string(), mcp.to_string_lossy().into_owned()]);
+            }
+            argv.extend(["--settings".to_string(), settings.to_string_lossy().into_owned()]);
+            argv
         }
         "codex" => {
             let exe = hook_exe.to_string_lossy().replace('\\', "/");
-            vec!["codex".to_string(), "-c".into(), format!("notify=['{exe}','hook','codex']")]
+            let mut argv = vec!["codex".to_string(), "-c".into(), format!("notify=['{exe}','hook','codex']")];
+            if sub_tools {
+                argv.extend(codex_mcp_args(&exe));
+            }
+            argv
         }
         other => {
             let p = preset_for(other).ok_or_else(|| anyhow::anyhow!("unknown session kind {other}"))?;
@@ -502,7 +525,7 @@ pub fn build_launch(
             _ => typed_prompt = Some(TypedPrompt { text: text.to_string(), paste: true }),
         }
     }
-    Ok(Launch { argv: wrap_for_platform(argv)?, typed_prompt })
+    Ok(Launch { argv: wrap(argv)?, typed_prompt, env })
 }
 
 /// The arguments that pick the conversation: `codex resume <id>`, `--resume <id>`, Claude's
@@ -528,7 +551,10 @@ pub fn claude_args_pick_conversation(args: &[String]) -> bool {
 
 /// Claude Code merges `--settings` hooks with the user's own settings, so we never touch
 /// `~/.claude/settings.json`. One command handles every event (name comes in the payload).
-fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path) -> Result<PathBuf> {
+///
+/// `allow_kelpie_tools` also allows Kelpie's own MCP tools: Kelpie asks the user (sub-session policy), so Claude must not
+/// ask a second time. It is a file of its own, so a running session never sees its rules change when the policy is switched.
+fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path, allow_kelpie_tools: bool) -> Result<PathBuf> {
     let exe = hook_exe.to_string_lossy().replace('\\', "/");
     let command = format!("\"{exe}\" hook claude");
     let entry = serde_json::json!([{ "hooks": [{ "type": "command", "command": command, "timeout": 5 }] }]);
@@ -548,14 +574,87 @@ fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path) -> Result<PathBu
     ] {
         hooks.insert(event.into(), entry.clone());
     }
-    let settings = serde_json::json!({ "hooks": hooks });
-    let path = data_dir.join("claude-hooks.json");
-    let body = serde_json::to_vec_pretty(&settings)?;
-    if std::fs::read(&path).ok().as_deref() != Some(&body[..]) {
-        std::fs::create_dir_all(data_dir)?;
-        crate::persist::write_atomic(&path, &body).with_context(|| format!("write {}", path.display()))?;
+    let mut settings = serde_json::json!({ "hooks": hooks });
+    let name = if allow_kelpie_tools {
+        settings["permissions"] = serde_json::json!({ "allow": [KELPIE_MCP_RULE] });
+        "claude-hooks-sub.json"
+    } else {
+        "claude-hooks.json"
+    };
+    write_if_changed(&data_dir.join(name), &serde_json::to_vec_pretty(&settings)?)
+}
+
+/// Claude's permission rule that covers every tool of the `kelpie` MCP server.
+const KELPIE_MCP_RULE: &str = "mcp__kelpie";
+
+/// Claude Code's MCP configuration with Kelpie's sub-session server. No `env` block: Claude passes its own environment
+/// (`KELPIE_SESSION_ID`, `_TOKEN`, `_ENDPOINT`) to a stdio server, so the token is never written to disk.
+fn write_claude_mcp_config(hook_exe: &Path, data_dir: &Path) -> Result<PathBuf> {
+    let exe = hook_exe.to_string_lossy().replace('\\', "/");
+    let config = serde_json::json!({ "mcpServers": { "kelpie": { "command": exe, "args": ["mcp"] } } });
+    write_if_changed(&data_dir.join("claude-mcp.json"), &serde_json::to_vec_pretty(&config)?)
+}
+
+/// A TOML basic string.
+fn toml_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
     }
-    Ok(path)
+    out.push('"');
+    out
+}
+
+/// Codex's `-c` overrides for the `kelpie` MCP server. Codex gives a stdio server only a small environment, so the
+/// session's variables are named (`env_vars`): by name, never by value; `KELPIE_ENDPOINT` so that a daemon with an endpoint of its own is the one reached. `kelpie_wait` may block for half an hour,
+/// which Codex's default tool timeout (60 s) would cut.
+fn codex_mcp_args(exe: &str) -> Vec<String> {
+    [
+        format!("mcp_servers.kelpie.command={}", toml_string(exe)),
+        "mcp_servers.kelpie.args=[\"mcp\"]".to_string(),
+        "mcp_servers.kelpie.env_vars=[\"KELPIE_SESSION_ID\",\"KELPIE_SESSION_TOKEN\",\"KELPIE_SESSION_ENDPOINT\",\"KELPIE_ENDPOINT\",\"KELPIE_DATA_DIR\",\"XDG_DATA_HOME\"]".to_string(),
+        "mcp_servers.kelpie.tool_timeout_sec=1900".to_string(),
+        // Kelpie asks the user itself (sub-session policy); Codex must not ask a second time.
+        "mcp_servers.kelpie.default_tools_approval_mode=\"approve\"".to_string(),
+    ]
+    .into_iter()
+    .flat_map(|c| ["-c".to_string(), c])
+    .collect()
+}
+
+/// A chat's command line with Kelpie's sub-session tools: Claude's stream-json process gets the MCP configuration and a settings
+/// file that only allows `mcp__kelpie` (not the terminal's hook settings, which would report a terminal's status for a chat; and no
+/// `--allowedTools`, which would make the chat count as one that skips prompts); Codex's app-server gets the `-c` overrides. Any
+/// other command line (the ACP agents, which the app configures itself) is returned as it was.
+pub fn chat_with_sub_tools(mut argv: Vec<String>, hook_exe: &Path, data_dir: &Path) -> Result<Vec<String>> {
+    let program = argv.first().map(|a| Path::new(a).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()).unwrap_or_default();
+    let exe = hook_exe.to_string_lossy().replace('\\', "/");
+    if program == "claude" && argv.iter().any(|a| a == "stream-json") {
+        let mcp = write_claude_mcp_config(hook_exe, data_dir)?;
+        let settings = write_if_changed(&data_dir.join("claude-chat-sub.json"), &serde_json::to_vec_pretty(&serde_json::json!({ "permissions": { "allow": [KELPIE_MCP_RULE] } }))?)?;
+        let flags = ["--mcp-config".to_string(), mcp.to_string_lossy().into_owned(), "--settings".to_string(), settings.to_string_lossy().into_owned()];
+        argv.splice(1..1, flags);
+    } else if program == "codex" && argv.get(1).is_some_and(|a| a == "app-server") {
+        argv.splice(2..2, codex_mcp_args(&exe));
+    }
+    Ok(argv)
+}
+
+
+/// Writes `body` unless the file already holds it (atomically: a reader never sees half of it).
+fn write_if_changed(path: &Path, body: &[u8]) -> Result<PathBuf> {
+    if std::fs::read(path).ok().as_deref() != Some(body) {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        crate::persist::write_atomic(path, body).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(path.to_path_buf())
 }
 
 /// Platform-correct argv for a non-PTY child (chat mode) or a PTY agent.
@@ -696,7 +795,7 @@ mod tests {
     #[test]
     fn claude_is_told_to_report_what_ends_a_request() {
         let dir = std::env::temp_dir().join(format!("kelpie-hooks-events-{}", uuid::Uuid::new_v4()));
-        let path = write_claude_hook_settings(Path::new("/fixture/kelpied"), &dir).unwrap();
+        let path = write_claude_hook_settings(Path::new("/fixture/kelpied"), &dir, false).unwrap();
         let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         for event in ["PermissionRequest", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop"] {
             assert!(settings["hooks"].get(event).is_some(), "{event}");
@@ -709,7 +808,7 @@ mod tests {
         use std::sync::{atomic::{AtomicUsize, Ordering}, Barrier};
 
         let dir = std::env::temp_dir().join(format!("kelpie-hooks-atomic-{}", uuid::Uuid::new_v4()));
-        let path = write_claude_hook_settings(Path::new("/fixture/initial/kelpied"), &dir).unwrap();
+        let path = write_claude_hook_settings(Path::new("/fixture/initial/kelpied"), &dir, false).unwrap();
         let start = Barrier::new(3);
         let done = AtomicUsize::new(0);
         let mut incomplete = false;
@@ -720,7 +819,7 @@ mod tests {
                     start.wait();
                     for revision in 0..128 {
                         let exe = PathBuf::from(format!("/fixture/{writer}/{revision}/kelpied"));
-                        write_claude_hook_settings(&exe, dir).unwrap();
+                        write_claude_hook_settings(&exe, dir, false).unwrap();
                     }
                     done.fetch_add(1, Ordering::Release);
                 });
@@ -984,14 +1083,147 @@ mod custom_tests {
         let p = preset_for("acme-bot").unwrap();
         assert_eq!((p.bin, p.launch, p.resume_latest), (bin, &["chat"][..], &["--continue"][..]));
         let dir = std::env::temp_dir();
-        let l = build_launch("acme-bot", &[], Resume::None, Some("do it"), Path::new("kelpied"), &dir).unwrap();
+        let l = build_launch("acme-bot", &[], Resume::None, Some("do it"), Path::new("kelpied"), &dir, false).unwrap();
         let j = command_line(&l.argv);
         assert!(j.contains("chat --ask do it"), "{j}");
-        let l = build_launch("acme-bot", &[], Resume::Latest, None, Path::new("kelpied"), &dir).unwrap();
+        let l = build_launch("acme-bot", &[], Resume::Latest, None, Path::new("kelpied"), &dir, false).unwrap();
         assert!(command_line(&l.argv).contains("chat --continue"));
         assert!(set_custom(&[AgentDef { id: "claude".into(), ..def.clone() }]).is_err(), "built-in ids are taken");
         assert!(set_custom(&[AgentDef { id: "a b".into(), ..def }]).is_err());
         set_custom(&[]).unwrap();
         assert!(preset_for("acme-bot").is_none());
+    }
+}
+
+#[cfg(test)]
+mod sub_tool_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn data_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("kelpie-sub-tools-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// Windows resolves the program on PATH and Unix goes through a login shell: neither is what is checked here.
+    fn plain(argv: Vec<String>) -> Result<Vec<String>> {
+        Ok(argv)
+    }
+
+    fn launch(kind: &str, args: &[&str], prompt: Option<&str>, exe: &str, dir: &Path, on: bool) -> Launch {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        build_launch_with(kind, &args, Resume::None, prompt, Path::new(exe), dir, on, plain).unwrap()
+    }
+
+    #[test]
+    fn claude_gets_the_tools_and_an_allow_rule_only_while_sub_sessions_are_on() {
+        let dir = data_dir();
+        let off = launch("claude", &["--model", "x"], Some("hi"), "/opt/kel pie/kelpied", &dir, false);
+        assert_eq!(off.argv, ["claude", "--settings", &dir.join("claude-hooks.json").to_string_lossy(), "--model", "x", "hi"]);
+        assert!(off.env.is_empty());
+        let settings: Value = serde_json::from_slice(&std::fs::read(dir.join("claude-hooks.json")).unwrap()).unwrap();
+        assert!(settings.get("permissions").is_none());
+        assert!(!dir.join("claude-mcp.json").exists());
+
+        let on = launch("claude", &["--model", "x"], Some("hi"), "/opt/kel pie/kelpied", &dir, true);
+        // `--mcp-config` first: it takes every argument up to the next flag, the prompt among them.
+        assert_eq!(
+            on.argv,
+            ["claude", "--mcp-config", &dir.join("claude-mcp.json").to_string_lossy(), "--settings", &dir.join("claude-hooks-sub.json").to_string_lossy(), "--model", "x", "hi"]
+        );
+        assert_eq!(on.env, [("KELPIE_CLI".to_string(), "/opt/kel pie/kelpied".to_string())]);
+        let mcp: Value = serde_json::from_slice(&std::fs::read(dir.join("claude-mcp.json")).unwrap()).unwrap();
+        assert_eq!(mcp, serde_json::json!({"mcpServers": {"kelpie": {"command": "/opt/kel pie/kelpied", "args": ["mcp"]}}}));
+        assert!(mcp.to_string().find("TOKEN").is_none(), "no secret, no env block: Claude passes its environment on");
+        let settings: Value = serde_json::from_slice(&std::fs::read(dir.join("claude-hooks-sub.json")).unwrap()).unwrap();
+        assert_eq!(settings["permissions"]["allow"], serde_json::json!(["mcp__kelpie"]));
+        assert!(settings["hooks"]["Stop"].is_array());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_gets_the_server_by_override_with_the_session_variables_by_name() {
+        let dir = data_dir();
+        let off = launch("codex", &[], None, "C:\\Program Files\\Kelpie\\kelpied.exe", &dir, false);
+        assert_eq!(off.argv, ["codex", "-c", "notify=['C:/Program Files/Kelpie/kelpied.exe','hook','codex']"]);
+        let on = launch("codex", &["--model", "m"], Some("go"), "C:\\Program Files\\Kelpie\\kelpied.exe", &dir, true);
+        let expected = [
+            "codex",
+            "-c",
+            "notify=['C:/Program Files/Kelpie/kelpied.exe','hook','codex']",
+            "-c",
+            "mcp_servers.kelpie.command=\"C:/Program Files/Kelpie/kelpied.exe\"",
+            "-c",
+            "mcp_servers.kelpie.args=[\"mcp\"]",
+            "-c",
+            "mcp_servers.kelpie.env_vars=[\"KELPIE_SESSION_ID\",\"KELPIE_SESSION_TOKEN\",\"KELPIE_SESSION_ENDPOINT\",\"KELPIE_ENDPOINT\",\"KELPIE_DATA_DIR\",\"XDG_DATA_HOME\"]",
+            "-c",
+            "mcp_servers.kelpie.tool_timeout_sec=1900",
+            "-c",
+            "mcp_servers.kelpie.default_tools_approval_mode=\"approve\"",
+            "--model",
+            "m",
+            "go",
+        ];
+        assert_eq!(on.argv, expected);
+        assert_eq!(on.env[0].0, "KELPIE_CLI");
+    }
+
+    #[test]
+    fn other_agents_and_shells_get_the_cli_variable_only() {
+        let dir = data_dir();
+        let gemini = launch("gemini", &[], None, "/k/kelpied", &dir, true);
+        assert_eq!(gemini.argv, ["gemini"]);
+        assert_eq!(gemini.env, [("KELPIE_CLI".to_string(), "/k/kelpied".to_string())]);
+        let shell = launch("shell", &[], None, "/k/kelpied", &dir, true);
+        assert_eq!(shell.env.len(), 1);
+        assert!(launch("gemini", &[], None, "/k/kelpied", &dir, false).env.is_empty());
+    }
+
+    #[test]
+    fn chats_of_claude_and_codex_get_the_tools_and_other_chats_are_left_alone() {
+        let dir = data_dir();
+        let exe = Path::new("/opt/kelpie/kelpied");
+        let own = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let claude = own(&["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "x"]);
+        let out = chat_with_sub_tools(claude.clone(), exe, &dir).unwrap();
+        let mcp = dir.join("claude-mcp.json").to_string_lossy().into_owned();
+        let settings = dir.join("claude-chat-sub.json").to_string_lossy().into_owned();
+        assert_eq!(&out[..5], ["claude", "--mcp-config", &mcp, "--settings", &settings].map(str::to_string));
+        assert_eq!(out[5..], claude[1..]);
+        let rules: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(rules, serde_json::json!({"permissions": {"allow": ["mcp__kelpie"]}}), "no hooks of the terminal's status, only the rule");
+        assert!(!out.iter().any(|a| a == "--allowedTools"));
+        // The rule is not a bypass: the permission classifier sees the same thing before and after.
+        assert_eq!(crate::subs::launch_permissions("claude", &[], &out), crate::subs::launch_permissions("claude", &[], &claude));
+
+        let codex = chat_with_sub_tools(own(&["codex", "app-server", "-c", "model=\"m\""]), exe, &dir).unwrap();
+        assert_eq!(&codex[..3], ["codex", "app-server", "-c"]);
+        assert!(codex[3].starts_with("mcp_servers.kelpie.command=\"/opt/kelpie/kelpied\""), "{codex:?}");
+        assert_eq!(codex[codex.len() - 2..], ["-c".to_string(), "model=\"m\"".to_string()]);
+        assert!(codex.iter().any(|a| a.starts_with("mcp_servers.kelpie.default_tools_approval_mode")));
+
+        // ACP agents are configured by the app; a Claude or Codex command that is not the chat protocol is not touched either.
+        for other in [own(&["gemini", "--experimental-acp"]), own(&["claude", "--version"]), own(&["codex", "exec"])] {
+            assert_eq!(chat_with_sub_tools(other.clone(), exe, &dir).unwrap(), other);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toml_strings_are_escaped() {
+        assert_eq!(toml_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert_eq!(toml_string("tab\there"), "\"tab\\u0009here\"");
+    }
+
+    #[test]
+    fn the_mcp_config_is_written_once_and_atomically_replaced_when_the_program_moves() {
+        let dir = data_dir();
+        let path = write_claude_mcp_config(Path::new("/a/kelpied"), &dir).unwrap();
+        let first = std::fs::metadata(&path).unwrap().modified().unwrap();
+        write_claude_mcp_config(Path::new("/a/kelpied"), &dir).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), first, "same content: not written again");
+        write_claude_mcp_config(Path::new("/b/kelpied"), &dir).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("/b/kelpied"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

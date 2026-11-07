@@ -331,8 +331,13 @@ impl Daemon {
         self.broadcast("sub.request", serde_json::to_value(&request)?);
         let (me, tx, id, request_id, caller_id) = (self.clone(), tx.clone(), id.clone(), request.id.clone(), caller_id.to_string());
         let started = std::thread::Builder::new().name("kelpie-sub-ask".into()).spawn(move || {
-            let outcome = subs::wait_for_answer(&me.subs.pending, &request_id, &rx, subs::ASK_TIMEOUT);
+            let outcome = subs::wait_for_answer(&me.subs.pending, &request_id, &rx, subs::ASK_TIMEOUT, &|| tx.is_closed());
             let result = match outcome {
+                // Interrupted by its program: the card goes away and nothing is started, whatever the user does next.
+                Waited::CallerGone => {
+                    me.broadcast("sub.request_done", json!({"id": request_id, "decision": "cancelled"}));
+                    return;
+                }
                 Waited::Decided(Decision::Deny) => Err(anyhow!("the user denied this sub-session in Kelpie")),
                 // The caller hung up while waiting: starting a session nobody can learn about would only cost.
                 Waited::Decided(_) if tx.is_closed() => Err(anyhow!("the program that asked is gone")),
@@ -490,6 +495,9 @@ impl Daemon {
             self.subs.mail.lock().add(&parent_info.spec.id, mail, Instant::now(), now_millis(), true).map_err(|e| anyhow!(e))?;
         }
         self.set_report(&entry, SubReport { status: status.to_string(), summary: subs::cut(&summary, subs::MAX_ROW_SUMMARY), at: now_millis(), auto: false });
+        if matches!(status, "done" | "failed") {
+            self.record_sub_outcome(&info.spec, status, true);
+        }
         self.subs.watch.lock().explicit(&sid);
         Ok(json!({"delivered_to": parent_info.map(|p| self.session_tag(&p))}))
     }
@@ -538,12 +546,49 @@ impl Daemon {
         self.meta_dirty.store(true, Ordering::Relaxed);
     }
 
+    /// Whether a new session gets the sub-session tools: while the policy allows sub-sessions at all.
+    pub(super) fn sub_tools_on(&self) -> bool {
+        self.subs.policy.read().mode != Mode::Off
+    }
+
+    /// How a sub-session ended, for the routing hints. The first end counts (a session closed after it reported done is `done`);
+    /// a session no one opened is not a sub-session. `judged`: the work itself gave a verdict (a report of done or failed, a run
+    /// task's end). Its time is what the daemon watched it work; a restart's downtime is not in it.
+    pub(super) fn record_sub_outcome(&self, spec: &SessionSpec, status: &str, judged: bool) {
+        if spec.parent.is_some() {
+            let minutes = self.subs.births.lock().get(&spec.id).map(|born| born.elapsed().as_secs_f64() / 60.0);
+            self.subs.stats.record(&spec.id, &spec.kind, status, judged, minutes);
+        }
+    }
+
+    /// A sub-session is being closed. Its agent having exited or the user closing it says nothing about the work, so it has no
+    /// verdict unless it gave one before. An exit alone is not recorded: a restart or a daemon update makes one too.
+    pub(super) fn record_sub_close(&self, entry: &Entry) {
+        let info = entry.info();
+        let status = if info.status == crate::status::Status::Exited { "exited" } else { "closed" };
+        self.record_sub_outcome(&info.spec, status, false);
+    }
+
+    /// A run task ended: done or failed is a verdict on the sub-session it ran in.
+    pub(super) fn record_task_outcome(&self, run_id: &str, task_id: &str, session: &str) {
+        let status = self.runs.lock().get(run_id).and_then(|r| r.tasks.iter().find(|t| t.id == task_id).map(|t| t.status));
+        let status = match status {
+            Some(TaskStatus::Done) => "done",
+            Some(TaskStatus::Failed) => "failed",
+            _ => return,
+        };
+        if let Some(entry) = self.by_id(session) {
+            self.record_sub_outcome(&entry.spec(), status, true);
+        }
+    }
+
     // ---------- reports the daemon works out ----------
 
     /// A sub-session's status changed (from the ticker): waiting for the user, idle after work, or exited
     /// goes to its row and, while the parent is there, to the parent's mail. No model is asked.
     pub(super) fn sub_status_changed(&self, entry: &Entry, info: &SessionInfo, now: Instant) {
         let sid = &info.spec.id;
+        self.subs.births.lock().entry(sid.clone()).or_insert(now);
         let Some(auto) = self.subs.watch.lock().observe(sid, info.status, now) else { return };
         let detail = match (&auto, entry) {
             (Auto::NeedsUser, Entry::Term(s)) => s.screen_prompt().and_then(|p| p.question).filter(|q| !q.trim().is_empty()).unwrap_or_else(|| subs::tail_lines(&s.text_tail(40), 3)),
