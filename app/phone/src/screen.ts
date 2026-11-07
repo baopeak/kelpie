@@ -331,6 +331,41 @@ export function reconcileCursor(drawn: CursorPos, host: CursorPos, now: number, 
   return echoing || close ? { ...host, x: drawn.x, y: drawn.y } : host;
 }
 
+/** A computer cursor message, as the page takes it: the cursor drawn (`reconcileCursor`), and, with no finger down, the point a trackpad tap
+ *  clicks, which is always where the cursor is drawn (never the message's own position, which a local echo may be ahead of). */
+export function followHostCursor(drawn: CursorPos, tapAt: { x: number; y: number }, host: CursorPos, now: number, echoedAt: number, idle: boolean) {
+  const next = reconcileCursor(drawn, host, now, echoedAt);
+  return { drawn: next, tapAt: idle ? { x: next.x, y: next.y } : tapAt };
+}
+/** A decoder this many chunks behind its own usual queue is behind. */
+export const BACKLOG_OVER = 2;
+/** Its usual queue: the least seen over this long (some Android decoders always keep two or three). */
+export const BACKLOG_WINDOW_MS = 2000;
+/** Behind for this many deltas in a row: skipped to the next keyframe. */
+export const BACKLOG_RUN = 3;
+
+/** Whether the decoder is far enough behind to skip deltas up to the next keyframe (a newer picture is better than a late one). The threshold
+ *  follows the decoder: more than `BACKLOG_OVER` over the least queue it kept lately, and for `BACKLOG_RUN` deltas in a row, so a decoder that
+ *  always holds a few chunks is not made to ask for a keyframe every second. */
+export class Backlog {
+  private seen: { at: number; size: number }[] = [];
+  private run = 0;
+
+  /** A delta arrives at `at` with `size` chunks waiting in the decoder: true to skip it. */
+  skip(size: number, at: number): boolean {
+    this.seen.push({ at, size });
+    while (this.seen.length && at - this.seen[0].at > BACKLOG_WINDOW_MS) this.seen.shift();
+    const usual = Math.min(...this.seen.map((s) => s.size));
+    this.run = size > Math.max(BACKLOG_OVER, usual + BACKLOG_OVER) ? this.run + 1 : 0;
+    return this.run >= BACKLOG_RUN;
+  }
+
+  /** A keyframe: the run starts again. */
+  reset() {
+    this.run = 0;
+  }
+}
+
 /** Intervals longer than these count as gaps (the second is the threshold that decides on another transport). */
 export const GAP_MS = [100, 250] as const;
 /** How many of the latest frames the timings keep. */
@@ -360,6 +395,8 @@ export class FrameTimes {
   private lastArrival: number | null = null;
   private lastPresent: number | null = null;
   dropped = 0;
+  /** Deltas skipped because the decoder was behind (`Backlog`). */
+  backlogSkips = 0;
 
   private keep(list: number[], v: number) {
     list.push(v);
@@ -412,6 +449,7 @@ export class FrameTimes {
       presentGaps: gaps(this.presents),
       gapThresholdsMs: [...GAP_MS],
       dropped: this.dropped,
+      backlogSkips: this.backlogSkips,
     };
   }
 }

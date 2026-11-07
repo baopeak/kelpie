@@ -4,7 +4,7 @@
 // Nothing waits to be shown: a decoded frame is drawn as it comes out of the decoder (no smoothing buffer), on a low-latency canvas where the
 // browser offers one, and a frame the decoder is too far behind for is skipped. The cursor the finger moves is drawn at once (local echo).
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { avcChunk, canDecode, clampView, fitView, FrameTimes, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, reconcileCursor, remoteText, sameSetup, setupFor, toClient, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
+import { avcChunk, Backlog, canDecode, clampView, fitView, FrameTimes, followHostCursor, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
 import { connected, onScreenMedia, remoteScreen, remoteScreens } from "./phone-state";
 import { t } from "./i18n";
 
@@ -101,6 +101,7 @@ function Live() {
   // When the finger last moved the cursor: the computer's cursor messages (a round trip old) leave its position alone for a moment.
   let echoedAt = -Infinity;
   const times = new FrameTimes();
+  const backlog = new Backlog();
   // For the measurement plan: what the phone saw, read from the page (a debugging console or a test driver).
   (globalThis as { __kelpieScreenTimes?: () => unknown }).__kelpieScreenTimes = () => ({ ...times.snapshot(), desynchronized: lowLatency() });
   // Asked for once, before any other drawing: a canvas the browser may show without waiting for the next composited frame.
@@ -197,9 +198,10 @@ function Live() {
     const m = parseMedia(bytes);
     if (!m) return;
     if (m.kind === "cursor") {
-      cursor = reconcileCursor(cursor, { shape: m.shape, visible: m.visible, x: m.x, y: m.y }, performance.now(), echoedAt);
-      // With no finger down, a tap clicks where the computer's cursor is drawn, wherever the desk or a program moved it.
-      if (gestures.idle()) gestures.cursor = { x: m.x, y: m.y };
+      // With no finger down, a tap clicks where the cursor is drawn (the computer's place once the echo is over), never elsewhere.
+      const followed = followHostCursor(cursor, gestures.cursor, { shape: m.shape, visible: m.visible, x: m.x, y: m.y }, performance.now(), echoedAt, gestures.idle());
+      cursor = followed.drawn;
+      gestures.cursor = followed.tapAt;
       return redraw();
     }
     if (m.kind === "tile") {
@@ -224,10 +226,12 @@ function Live() {
       redraw();
     };
     if (!decoder || decoder.state !== "configured" || skipToKey) return skip();
-    // Far behind (more than two waiting): a newer picture is better than a late one, and frames after a dropped one cannot be decoded, so
-    // everything waits for a keyframe.
-    if (decoder.decodeQueueSize > 2 && !m.key) {
+    // Far behind for this decoder (`Backlog`): a newer picture is better than a late one, and frames after a dropped one cannot be decoded,
+    // so everything waits for a keyframe.
+    if (m.key) backlog.reset();
+    else if (backlog.skip(decoder.decodeQueueSize, performance.now())) {
       skipToKey = true;
+      times.backlogSkips++;
       return skip();
     }
     pending.set(m.seq, { unpaint: m.unpaint, unpaintAll: m.unpaintAll, srcW: m.srcW, srcH: m.srcH });

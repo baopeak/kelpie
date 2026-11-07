@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   avcC,
   avcChunk,
+  Backlog,
+  BACKLOG_RUN,
+  followHostCursor,
   CURSOR_ECHO_MS,
   CURSOR_SNAP_PX,
   FrameTimes,
@@ -516,5 +519,41 @@ describe("what the phone measures of each frame", () => {
     t.arrival(21, 2000);
     t.arrival(100, 2100);
     expect(t.snapshot().dropped).toBe(2);
+  });
+});
+describe("a trackpad tap after the finger moved the cursor", () => {
+  it("clicks where the cursor is drawn, not where a message a round trip old says it was", () => {
+    // The finger moved the cursor to 500 and lifted: the echo draws it there.
+    let drawn = { shape: 0, visible: true, x: 500, y: 300 };
+    let tapAt = { x: 500, y: 300 };
+    // The computer's message, a round trip old, still says 440.
+    ({ drawn, tapAt } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 440, y: 300 }, 1100, 1000, true));
+    expect(drawn.x).toBe(500);
+    expect(tapAt, "the tap goes where the cursor is drawn").toEqual({ x: 500, y: 300 });
+    // Once the echo is over, the computer's place is drawn, and the tap follows it there.
+    ({ drawn, tapAt } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 520, y: 310 }, 2000, 1000, true));
+    expect([drawn.x, tapAt.x]).toEqual([520, 520]);
+    // With a finger down the gesture's own point is not touched.
+    ({ tapAt } = followHostCursor(drawn, { x: 7, y: 8 }, { shape: 0, visible: true, x: 600, y: 600 }, 5000, 1000, false));
+    expect(tapAt).toEqual({ x: 7, y: 8 });
+  });
+});
+
+describe("a decoder that is behind", () => {
+  it("is skipped to the next keyframe only past its own usual queue, for several deltas in a row", () => {
+    const b = new Backlog();
+    // An Android decoder that always keeps three chunks: never behind.
+    let skips = 0;
+    for (let i = 0; i < 100; i++) if (b.skip(3, i * 33)) skips++;
+    expect(skips).toBe(0);
+    // It falls behind for real: skipped once the run is long enough.
+    const run = [6, 7, 8].map((n, i) => b.skip(n, 4000 + i * 33));
+    expect(run).toEqual(Array.from({ length: BACKLOG_RUN }, (_, i) => i === BACKLOG_RUN - 1));
+    b.reset();
+    expect(b.skip(8, 4200), "a keyframe starts the run again").toBe(false);
+    // A decoder that keeps none: three waiting for three deltas is behind.
+    const c = new Backlog();
+    c.skip(0, 0);
+    expect([3, 3, 3].map((n, i) => c.skip(n, 10 + i * 33))).toEqual([false, false, true]);
   });
 });
