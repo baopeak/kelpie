@@ -1,10 +1,13 @@
 //! The phone's input as `SendInput`: absolute mouse positions over the virtual desktop, buttons, the wheel, keys and Unicode text.
 //!
-//! For a window target, nothing goes anywhere but that window:
-//! - a press that would land on another program's window over it is dropped and reported (`Covered`); its own menus and dropdowns take it;
-//! - keys and text go only while the target, or a dialog it owns, is the foreground window. If not (another program, or another window of the
-//!   same one), it is brought to the front once; if it still is not, they are refused (`NotFront`) and the phone is told, so a password never goes
-//!   into whatever window took the focus meanwhile.
+//! For a window target, nothing goes anywhere but that window (`input::keys_reach`, `input::press_reach` decide from what this reads):
+//! - a press that would land on another window over it, a second window of the same program included (the phone does not see it), is dropped
+//!   and reported (`Covered`); the target's own menus and dropdowns take it;
+//! - keys and text go only while the target, or a dialog **of its own process** that it owns, is the foreground window and holds the keys. If
+//!   not, it is brought to the front once; if it still is not, they are refused (`NotFront`) and the phone is told, so a password never goes into
+//!   whatever window took the focus meanwhile;
+//! - a dialog of **another** process that the target owns (a credential prompt, another program's file picker: Windows lets any program name
+//!   a window as owner) takes neither keys nor clicks (`ForeignDialog`): the phone is told to share the whole monitor to use it.
 //!
 //! `SendInput` does not reduce its count when UIPI drops input into an elevated window (Microsoft documents this), so `Blocked` is rare: the
 //! `elevated` state (`states_win`) is the real signal.
@@ -18,12 +21,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GUITHREADINFO, SW_RESTORE,
+    BringWindowToTop, GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongPtrW, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GUITHREADINFO, GWL_STYLE, SW_RESTORE, WS_POPUP,
 };
 
-use super::targets_win::{minimized, process_of, window_rect};
+use super::targets_win::{minimized, window_rect};
 use crate::geom::{self, Rect};
-use crate::input::{key_events, text_events, KeyEvent};
+use crate::input::{key_events, keys_reach, press_reach, text_events, KeyEvent, Reach, WindowFacts};
 use crate::states::InputPolicy;
 
 /// Where input goes now.
@@ -47,6 +50,8 @@ pub enum Outcome {
     Covered,
     /// Keys or text for a window target that is not in front, and could not be brought there.
     NotFront,
+    /// Another process's dialog, owned by the target, is in front of it or under the press.
+    ForeignDialog,
     /// The state allows none of it (locked, secure desktop, closed).
     Refused,
 }
@@ -98,54 +103,87 @@ fn bring_front(h: HWND) {
     }
 }
 
-/// Whether a window belongs to the target: the target itself, or a menu, a dropdown or a dialog of its process (which are top-level windows
-/// of their own).
-fn of_target(h: HWND, w: HWND) -> bool {
-    !w.is_invalid() && (w == h || process_of(w) == process_of(h))
+/// What `w` (any window: a child is taken at its top-level window) is to the target `h`.
+fn facts(h: HWND, w: HWND) -> WindowFacts {
+    if w.is_invalid() {
+        return WindowFacts::default();
+    }
+    unsafe {
+        let root = GetAncestor(w, GA_ROOT);
+        let root = if root.is_invalid() { w } else { root };
+        let (mut pid_w, mut pid_h) = (0u32, 0u32);
+        let thread_w = GetWindowThreadProcessId(root, Some(&mut pid_w));
+        let thread_h = GetWindowThreadProcessId(h, Some(&mut pid_h));
+        let style = GetWindowLongPtrW(root, GWL_STYLE) as u32;
+        WindowFacts {
+            is_target: root == h,
+            owned_by_target: root != h && GetAncestor(root, GA_ROOTOWNER) == h,
+            same_process: pid_w != 0 && pid_w == pid_h,
+            same_thread: thread_w != 0 && thread_w == thread_h,
+            popup: style & WS_POPUP.0 != 0,
+        }
+    }
 }
 
-/// Whether a window in front is the target or one it owns (its dialogs): another top-level window of the same program (a second document, a
-/// chat window) is not, so what the phone types never goes into a window it does not see.
-fn owned_by_target(h: HWND, w: HWND) -> bool {
-    !w.is_invalid() && (w == h || unsafe { GetAncestor(w, GA_ROOTOWNER) } == h)
-}
-
-/// Whether the target (or a dialog of its own) has the keyboard focus: the window in front is, and so is the one its thread gives the keys to,
-/// which moves only once that thread has taken the activation (two windows of one program share a thread).
-fn in_front(h: HWND) -> bool {
+/// Where keys go now, for the target: the window in front, and the one its thread gives the keys to, which moves only once that thread has
+/// taken the activation (two windows of one program share a thread). The worse of the two.
+fn keys_now(h: HWND) -> Reach {
     let fg = unsafe { GetForegroundWindow() };
-    if !owned_by_target(h, fg) {
-        return false;
+    let in_front = keys_reach(facts(h, fg));
+    if in_front != Reach::Yes {
+        return in_front;
     }
     let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
     let thread = unsafe { GetWindowThreadProcessId(fg, None) };
     if thread == 0 || unsafe { GetGUIThreadInfo(thread, &mut info) }.is_err() {
-        return false;
+        return Reach::Other;
     }
-    info.hwndFocus.is_invalid() || owned_by_target(h, unsafe { GetAncestor(info.hwndFocus, GA_ROOT) })
+    if info.hwndFocus.is_invalid() {
+        return Reach::Yes;
+    }
+    keys_reach(facts(h, info.hwndFocus))
 }
 
-/// The target in front, brought there once if it is not (and given a moment to take the keys): false when it still is not.
-fn front(h: HWND) -> bool {
-    if in_front(h) && !minimized(h) {
-        return true;
+/// Whether the target (or a dialog of its own) has the keyboard focus.
+fn in_front(h: HWND) -> bool {
+    keys_now(h) == Reach::Yes
+}
+
+/// The target in front, brought there once if it is not (and given a moment to take the keys). A dialog of another process in front stays
+/// there (the target is under it): said at once.
+fn front(h: HWND) -> Reach {
+    match keys_now(h) {
+        Reach::Yes if !minimized(h) => return Reach::Yes,
+        Reach::ForeignDialog => return Reach::ForeignDialog,
+        _ => {}
     }
     bring_front(h);
     for _ in 0..FRONT_WAIT_STEPS {
-        if in_front(h) && !minimized(h) {
-            return true;
+        match keys_now(h) {
+            Reach::Yes if !minimized(h) => return Reach::Yes,
+            Reach::ForeignDialog => return Reach::ForeignDialog,
+            _ => {}
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    false
+    Reach::Other
 }
 
 /// How long `front` waits for the target to take the keys after bringing it there: 15 × 20 ms.
 const FRONT_WAIT_STEPS: u32 = 15;
 
-/// Whether the screen point is on the target (or a window of its own), not on another window over it.
-fn lands_on(h: HWND, x: i32, y: i32) -> bool {
-    of_target(h, unsafe { WindowFromPoint(POINT { x, y }) })
+/// What a refusal to type says: a dialog of another process, or the target not in front.
+fn refusal(r: Reach) -> Outcome {
+    if r == Reach::ForeignDialog {
+        Outcome::ForeignDialog
+    } else {
+        Outcome::NotFront
+    }
+}
+
+/// Whether a press at the screen point lands on the target (or its own dialog, menu or dropdown), not on another window over it.
+fn lands_on(h: HWND, x: i32, y: i32) -> Reach {
+    press_reach(facts(h, unsafe { WindowFromPoint(POINT { x, y }) }))
 }
 
 fn at(op: &Value) -> (f64, f64) {
@@ -163,27 +201,38 @@ fn buttons(b: &str) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS) {
 /// Does the checked ops (`input::checked_ops`). `pressed` keeps the button held by a `down` not yet released, so that the stream's end can let go.
 pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Option<&'static str>) -> Outcome {
     if !policy.mouse && !policy.keys {
+        // Nothing allowed now: a held button is still let go.
+        if ops.iter().any(|op| op["k"] == "release" || op["k"] == "up") {
+            release(pressed);
+        }
         return Outcome::Refused;
     }
     let mut outcome = Outcome::Done;
     for op in ops {
         let kind = op["k"].as_str().unwrap_or_default();
+        // Letting go of a held button, where the pointer is: always allowed, never a move.
+        if kind == "release" {
+            release(pressed);
+            continue;
+        }
         if kind == "key" {
             if !policy.keys {
                 outcome = Outcome::Refused;
                 continue;
             }
             if let Some(h) = g.window {
-                if !front(h) {
-                    return Outcome::NotFront;
+                let r = front(h);
+                if r != Reach::Yes {
+                    return refusal(r);
                 }
             }
             let mods: Vec<&str> = op["mods"].as_array().map(|m| m.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
             let events: Vec<INPUT> = key_events(op["key"].as_str().unwrap_or_default(), &mods).into_iter().map(key).collect();
             // Looked at again right before the call: the focus may have moved while the events were made.
             if let Some(h) = g.window {
-                if !in_front(h) {
-                    return Outcome::NotFront;
+                let r = keys_now(h);
+                if r != Reach::Yes {
+                    return refusal(r);
                 }
             }
             if !send(&events) {
@@ -212,9 +261,18 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
         let (sx, sy) = at(op);
         let (x, y) = geom::source_to_screen(sx, sy, g.src.0, g.src.1, rect);
         if let Some(h) = g.window {
-            if matches!(kind, "down" | "click" | "wheel") && !lands_on(h, x, y) {
-                outcome = Outcome::Covered;
-                continue;
+            if matches!(kind, "down" | "click" | "wheel") {
+                match lands_on(h, x, y) {
+                    Reach::Yes => {}
+                    Reach::ForeignDialog => {
+                        outcome = Outcome::ForeignDialog;
+                        continue;
+                    }
+                    Reach::Other => {
+                        outcome = Outcome::Covered;
+                        continue;
+                    }
+                }
             }
         }
         let (nx, ny) = geom::to_absolute(x, y, g.desktop);
@@ -283,15 +341,17 @@ pub fn type_text(text: &str, g: &Geometry, policy: InputPolicy) -> (Outcome, usi
         return (Outcome::Refused, 0);
     }
     if let Some(h) = g.window {
-        if !front(h) {
-            return (Outcome::NotFront, 0);
+        let r = front(h);
+        if r != Reach::Yes {
+            return (refusal(r), 0);
         }
     }
     let events: Vec<INPUT> = text_events(text).into_iter().map(key).collect();
     for (typed, unit) in events.chunks(TEXT_BATCH).enumerate() {
         if let Some(h) = g.window {
-            if !in_front(h) {
-                return (Outcome::NotFront, typed);
+            let r = keys_now(h);
+            if r != Reach::Yes {
+                return (refusal(r), typed);
             }
         }
         if !send(unit) {

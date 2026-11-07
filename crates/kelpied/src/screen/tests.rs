@@ -39,6 +39,7 @@ fn rig_with(lane: usize, start: Start) -> Rig {
             let m: Value = serde_json::from_slice(&o.data[5..]).unwrap();
             if let Some(id) = m["preq"].as_u64() {
                 let (app, method) = (app.clone(), m["method"].as_str().unwrap_or_default().to_string());
+                let typed = m["params"]["text"].as_str().unwrap_or_default().to_string();
                 tokio::spawn(async move {
                     let answer = match method.as_str() {
                         "screen.targets" => json!({"result": {"targets": [
@@ -58,7 +59,13 @@ fn rig_with(lane: usize, start: Start) -> Rig {
                                 }
                             }
                         }
-                        "screen.text" => json!({"result": true}),
+                        // What the helper answers when the focus is elsewhere: by what is typed, so a test picks the case.
+                        "screen.text" => match typed.as_str() {
+                            "elsewhere" => json!({"error": {"message": "not_front: the shared window is not in front on the computer, so nothing was typed"}}),
+                            "moved" => json!({"error": {"message": "not_front_partial: another window took the focus after 3 characters; the rest was not typed"}}),
+                            "dialog" => json!({"error": {"message": "covered_dialog: a dialog of another program is in front of the shared window, so nothing was typed"}}),
+                            _ => json!({"result": true}),
+                        },
                         _ => json!({"result": true}),
                     };
                     let mut reply = answer;
@@ -475,18 +482,45 @@ async fn only_the_hold_s_own_provider_is_heard_and_what_it_ends_is_ended() {
 }
 
 #[tokio::test]
-async fn a_release_goes_even_when_the_rest_of_its_late_message_is_dropped() {
+async fn a_press_is_let_go_when_its_late_up_is_dropped_but_the_pointer_does_not_move() {
+    let r = rig();
+    let sc = r.start().await;
+    r.send(&sc, &video(1, true, 100));
+    r.verb("sc_ack", json!({"sc": sc, "seq": 1})).await.unwrap();
+    // A drag starts on the picture as it is.
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "down", "x": 10, "y": 10, "b": "left"}], "st": now_millis()})).await.unwrap();
+    assert_eq!(r.told_now("screen.input").await.len(), 1);
+    // Its end comes too late: dropped, but the button is let go where the pointer is.
+    let old = now_millis() - 1500;
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "move", "x": 1, "y": 1}, {"k": "up", "x": 2, "y": 2, "b": "left"}], "st": old})).await.unwrap();
+    let sent = r.told_now("screen.input").await;
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1]["ops"], json!([{"k": "release"}]), "a release with no place: a stale picture never says where the pointer goes");
+    // Nothing is held now: another late up sends nothing.
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "up", "x": 2, "y": 2}], "st": old})).await.unwrap();
+    assert_eq!(r.told_now("screen.input").await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_flood_of_late_ups_is_one_release_at_most_and_none_without_a_press() {
     let r = rig();
     let sc = r.start().await;
     r.send(&sc, &video(1, true, 100));
     r.verb("sc_ack", json!({"sc": sc, "seq": 1})).await.unwrap();
     let old = now_millis() - 1500;
-    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "move", "x": 1, "y": 1}, {"k": "up", "x": 2, "y": 2, "b": "left"}], "st": old})).await.unwrap();
+    let ups: Vec<Value> = (0..32).map(|i| json!({"k": "up", "x": i, "y": i})).collect();
+    for _ in 0..50 {
+        r.verb("sc_input", json!({"sc": sc, "ops": ups, "st": old})).await.unwrap();
+    }
+    assert!(r.told_now("screen.input").await.is_empty(), "no press outstanding: nothing at all");
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "down", "x": 10, "y": 10}], "st": now_millis()})).await.unwrap();
+    for _ in 0..50 {
+        r.verb("sc_input", json!({"sc": sc, "ops": ups, "st": old})).await.unwrap();
+    }
     let sent = r.told_now("screen.input").await;
-    assert_eq!(sent.len(), 1);
-    let ops = sent[0]["ops"].as_array().unwrap();
-    assert_eq!(ops.len(), 1, "only the release: a mouse button is never left pressed on the computer");
-    assert_eq!(ops[0]["k"], "up");
+    assert_eq!(sent.len(), 2, "the press, then one release: {sent:?}");
+    assert_eq!(sent[1]["ops"], json!([{"k": "release"}]));
+    assert!(sent[1]["ops"][0].get("x").is_none() && sent[1]["ops"][0].get("y").is_none());
 }
 
 #[tokio::test]
@@ -500,4 +534,39 @@ async fn pauses_and_resumes_are_numbered_so_that_an_older_one_arriving_late_is_i
     let versions: Vec<u64> = told.iter().map(|p| p["v"].as_u64().unwrap()).collect();
     assert_eq!(versions, [1, 2, 3], "{told:?}");
     assert_eq!(told.last().unwrap()["paused"], true, "the newest says pause");
+}
+#[tokio::test]
+async fn typing_the_focus_refused_says_why_to_the_phone() {
+    let r = rig();
+    let sc = r.start().await;
+    let refusal = |text: &'static str| {
+        let (d, sc) = (r.d.clone(), sc.clone());
+        let (out, media) = (r.out.clone(), r.media.clone());
+        async move {
+            let phone = Phone { device: "phone", name: "Phone", conn: 1, out: &out, media: &media };
+            d.screen.phone_verb(&d, phone, "sc_text", &json!({"sc": sc, "text": text, "st": now_millis()})).await.unwrap_err()
+        }
+    };
+    let e = refusal("elsewhere").await;
+    assert_eq!(e.code, "not_front");
+    assert!(e.message.starts_with("Not typed"), "{}", e.message);
+    let e = refusal("moved").await;
+    assert_eq!(e.code, "not_front");
+    assert!(e.message.starts_with("Stopped partway"), "part of it went: the phone does not say nothing was typed ({})", e.message);
+    let e = refusal("dialog").await;
+    assert_eq!(e.code, "covered");
+    assert!(e.message.contains("Share the whole monitor to type into this dialog"), "{}", e.message);
+    assert_eq!(r.verb("sc_text", json!({"sc": sc, "text": "fine", "st": now_millis()})).await.unwrap().unwrap()["result"], "sent");
+}
+
+#[tokio::test]
+async fn an_acknowledgement_is_never_taken_past_the_frames_sent() {
+    let mut r = rig();
+    let sc = r.start().await;
+    r.send(&sc, &video(1, true, 100));
+    r.frames();
+    // A number from a stream before this one (its frames were still on their way while this one started).
+    r.verb("sc_ack", json!({"sc": sc, "seq": 999})).await.unwrap();
+    let flow = r.told_now("screen.flow").await;
+    assert_eq!(flow.last().unwrap()["acked"], 1, "{flow:?}");
 }

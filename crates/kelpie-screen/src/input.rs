@@ -73,7 +73,8 @@ fn number(v: &Value, key: &str, lo: f64, hi: f64) -> Option<f64> {
 }
 
 /// The phone's input as the helper takes it, or None: a closed set of operations with numbers in range, refused whole if one is not.
-/// `move {x,y}`, `down`/`up {x,y,b}`, `click {x,y,b,n}`, `wheel {x,y,dx,dy}` (dx/dy in notches of 120), `key {key, mods}`.
+/// `move {x,y}`, `down`/`up {x,y,b}`, `click {x,y,b,n}`, `wheel {x,y,dx,dy}` (dx/dy in notches of 120), `key {key, mods}`, and `release`, which lets go
+/// of a button held by a `down` where the pointer is, without moving it (what the daemon sends for an `up` it drops as late).
 pub fn checked_ops(ops: &Value) -> Option<Vec<Value>> {
     let ops = ops.as_array().filter(|o| !o.is_empty() && o.len() <= MAX_OPS)?;
     ops.iter()
@@ -109,10 +110,67 @@ pub fn checked_ops(ops: &Value) -> Option<Vec<Value>> {
                     mods.dedup();
                     json!({"k": "key", "key": key, "mods": mods})
                 }
+                "release" => json!({"k": "release"}),
                 _ => return None,
             })
         })
         .collect()
+}
+
+/// What a window is to a shared window target, from what Windows says about it (`win::input_win` reads it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowFacts {
+    /// Its top-level window is the target.
+    pub is_target: bool,
+    /// Its owner chain ends at the target (a dialog, an owned popup), and it is not the target itself.
+    pub owned_by_target: bool,
+    /// Same process as the target.
+    pub same_process: bool,
+    /// Same thread as the target.
+    pub same_thread: bool,
+    /// A popup window (`WS_POPUP`: a menu, a dropdown list).
+    pub popup: bool,
+}
+
+/// Whether input may go to a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    Yes,
+    /// A dialog another process made and gave the target as owner: not the shared window's, and the phone does not see it (owner decision
+    /// 2026-11-07: typing goes only into the shared window and dialogs of its own process).
+    ForeignDialog,
+    /// Another window: not in front (keys), or over the target (a press).
+    Other,
+}
+
+/// Where keys may go: the target, or a dialog of its own process that it owns. Another top-level window of the same program (a second
+/// document window) is `Other`, and so is anything else; a dialog of another process that the target owns is `ForeignDialog`.
+pub fn keys_reach(f: WindowFacts) -> Reach {
+    if f.is_target || (f.owned_by_target && f.same_process) {
+        Reach::Yes
+    } else if f.owned_by_target {
+        Reach::ForeignDialog
+    } else {
+        Reach::Other
+    }
+}
+
+/// Where a press may land: where keys may go, and a popup of the target's own thread (its menus and dropdown lists, separate top-level
+/// windows). A second window of the same program over the shared one, which the phone cannot see (the capture shows the target alone), is
+/// `Other`: the press is dropped as covered.
+pub fn press_reach(f: WindowFacts) -> Reach {
+    match keys_reach(f) {
+        Reach::Other if f.same_thread && f.popup => Reach::Yes,
+        r => r,
+    }
+}
+/// Whether a button is held after `ops`, given whether one was before: a `down` holds one, an `up`, a `click` or a `release` lets it go.
+pub fn held_after(held: bool, ops: &[Value]) -> bool {
+    ops.iter().fold(held, |held, op| match op["k"].as_str() {
+        Some("down") => true,
+        Some("up" | "click" | "release") => false,
+        _ => held,
+    })
 }
 
 /// Text to type, if it may be typed: not empty, not too long, no control characters but new lines and tabs.
@@ -218,6 +276,35 @@ pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn keys_go_only_to_the_target_and_its_own_dialogs_and_presses_also_to_its_own_menus() {
+        let target = WindowFacts { is_target: true, same_process: true, same_thread: true, ..Default::default() };
+        let own_dialog = WindowFacts { owned_by_target: true, same_process: true, ..Default::default() };
+        let foreign_dialog = WindowFacts { owned_by_target: true, same_process: false, ..Default::default() };
+        let second_window = WindowFacts { same_process: true, same_thread: true, ..Default::default() };
+        let own_menu = WindowFacts { same_process: true, same_thread: true, popup: true, ..Default::default() };
+        let other_program = WindowFacts::default();
+        assert_eq!(keys_reach(target), Reach::Yes);
+        assert_eq!(keys_reach(own_dialog), Reach::Yes, "a Save As of the shared program");
+        assert_eq!(keys_reach(foreign_dialog), Reach::ForeignDialog, "another process's window the target owns: a credential prompt, or anything that named it as owner");
+        assert_eq!(keys_reach(second_window), Reach::Other, "another top-level window of the same program");
+        assert_eq!(keys_reach(own_menu), Reach::Other, "keys go to the window that has the focus, never to a menu as such");
+        assert_eq!(keys_reach(other_program), Reach::Other);
+        assert_eq!(press_reach(own_menu), Reach::Yes, "its own menus and dropdowns take clicks");
+        assert_eq!(press_reach(second_window), Reach::Other, "a window the phone does not see takes no click");
+        assert_eq!(press_reach(foreign_dialog), Reach::ForeignDialog);
+        assert_eq!(press_reach(WindowFacts { popup: true, ..Default::default() }), Reach::Other, "another program's popup");
+    }
+    #[test]
+    fn a_release_has_no_place_and_a_held_button_is_followed_through_the_ops() {
+        assert_eq!(checked_ops(&json!([{"k": "release", "x": 5, "y": 6}])).unwrap(), [json!({"k": "release"})], "no coordinates go with it");
+        let ops = |v: Value| checked_ops(&v).unwrap();
+        assert!(held_after(false, &ops(json!([{"k": "down", "x": 1, "y": 1}, {"k": "move", "x": 2, "y": 2}]))));
+        assert!(!held_after(true, &ops(json!([{"k": "up", "x": 2, "y": 2}]))));
+        assert!(!held_after(false, &ops(json!([{"k": "click", "x": 1, "y": 1}]))), "a click lets go of what it pressed");
+        assert!(!held_after(true, &ops(json!([{"k": "release"}]))));
+        assert!(held_after(true, &ops(json!([{"k": "move", "x": 3, "y": 3}]))));
+    }
     #[test]
     fn only_input_a_screen_takes_goes_and_a_bad_op_refuses_the_message() {
         let ok = json!([

@@ -55,6 +55,9 @@ pub enum State {
     Elevated,
     /// Another window is over the target where it was clicked.
     Covered,
+    /// A dialog another program made and gave the shared window as its owner (a credential prompt, another program's file picker) is in
+    /// front: the phone does not see it, so nothing is typed or clicked into it; the person can share the whole monitor to use it.
+    CoveredByDialog,
 }
 
 impl State {
@@ -67,12 +70,13 @@ impl State {
             State::Minimized => "minimized",
             State::Elevated => "elevated",
             State::Covered => "covered",
+            State::CoveredByDialog => "covered_dialog",
         }
     }
 
     /// Whether the picture can still change: frames are expected (and the phone should not count their absence as a freeze).
     pub fn picture_moves(self) -> bool {
-        matches!(self, State::Live | State::Elevated | State::Covered)
+        matches!(self, State::Live | State::Elevated | State::Covered | State::CoveredByDialog)
     }
 
     /// Whether the stream ends rather than waits.
@@ -115,7 +119,7 @@ pub struct InputPolicy {
 /// that window and be dropped. An elevated window target takes nothing. A minimized window is restored by a click (the native side does it).
 pub fn input_policy(state: State, window_target: bool) -> InputPolicy {
     match state {
-        State::Live | State::Covered => InputPolicy { mouse: true, keys: true },
+        State::Live | State::Covered | State::CoveredByDialog => InputPolicy { mouse: true, keys: true },
         State::Elevated if !window_target => InputPolicy { mouse: true, keys: false },
         State::Minimized => InputPolicy { mouse: true, keys: false },
         _ => InputPolicy { mouse: false, keys: false },
@@ -164,6 +168,14 @@ impl Tracker {
         (self.told == State::Live).then(|| {
             self.told = State::Covered;
             State::Covered
+        })
+    }
+
+    /// Keys or a click were refused because another program's dialog, owned by the target, is in front. Cleared like `Covered`.
+    pub fn covered_by_dialog(&mut self) -> Option<State> {
+        matches!(self.told, State::Live | State::Covered).then(|| {
+            self.told = State::CoveredByDialog;
+            State::CoveredByDialog
         })
     }
 }

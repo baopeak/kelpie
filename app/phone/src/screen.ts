@@ -706,6 +706,8 @@ export function endedText(reason: string, t: (s: string) => string): string {
       return t("The screen's size or orientation changed on the computer. See it again.");
     case "failed":
       return t("The screen could not be started.");
+    case "device_lost":
+      return t("The computer's graphics driver restarted, which ended the screen. See it again.");
     case "encoder_failed":
       return t("The computer could not encode its screen.");
     case "app_closed":
@@ -729,6 +731,8 @@ export function remoteText(remote: string, t: (s: string) => string): string | n
       return t("An app running as administrator is in front: Windows does not let Kelpie type into it.");
     case "covered":
       return t("Another window is over this one where you tapped: the tap was not sent.");
+    case "covered_dialog":
+      return t("A dialog of another program is in front of the shared window, and this phone cannot see it. Share the whole monitor to type into this dialog.");
     case "not_front":
       return t("The shared window is not in front on the computer, so keys and text were not sent. Tap it to bring it to the front.");
     case "blocked":
@@ -774,6 +778,7 @@ export class ScreenSession {
   /** The last frame that came before the start's answer (the picture can overtake it): acknowledged once the screen's id is known, or the
    *  computer would count it in flight, and hold the phone's input back, until a later frame came. */
   private early = 0;
+  private earlyKey = false;
   private keyAskedAt = 0;
 
   constructor(private port: ScreenPort, private changed: (s: ScreenState | null) => void, private t: (s: string) => string = (s) => s) {}
@@ -804,6 +809,7 @@ export class ScreenSession {
     if (this.state?.phase !== "pick") return;
     this.patch({ phase: "starting", message: null });
     this.early = 0;
+    this.earlyKey = false;
     const r = await this.port.start(target);
     if (this.phase() !== "starting") return;
     if (r.t !== "ack" || !r.sc) {
@@ -815,6 +821,11 @@ export class ScreenSession {
     this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", encoder: r.encoder ?? "hw" });
     if (this.early) this.port.ack(r.sc, this.early);
     this.early = 0;
+    if (this.earlyKey) {
+      this.earlyKey = false;
+      this.keyAskedAt = now;
+      this.port.keyframe(r.sc);
+    }
     this.watch();
   }
 
@@ -860,6 +871,8 @@ export class ScreenSession {
   /** The decoder failed or was reset: a keyframe, at most once a second. */
   needKeyframe() {
     const now = this.port.now();
+    // Asked for before the start's answer: sent with the early acknowledgement once the screen is known.
+    if (!this.state?.sc && this.state?.phase === "starting") this.earlyKey = true;
     if (!this.state?.sc || now - this.keyAskedAt < 1000) return;
     this.keyAskedAt = now;
     this.port.keyframe(this.state.sc);

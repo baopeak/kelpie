@@ -315,6 +315,8 @@ describe("one screen from the phone", () => {
     expect(r.s.state?.remote, "another screen's word changes nothing").toBe("live");
     r.s.onMessage({ type: "sc_state", sc: "sc1", state: "secure_desktop" });
     expect(remoteText(r.s.state!.remote, (x) => x)).toContain("UAC");
+    r.s.onMessage({ type: "sc_state", sc: "sc1", state: "covered_dialog" });
+    expect(remoteText(r.s.state!.remote, (x) => x), "another program's dialog over the shared window").toContain("Share the whole monitor to type into this dialog");
     await r.s.stop();
     expect(r.s.state?.phase).toBe("ended");
   });
@@ -327,8 +329,10 @@ describe("one screen from the phone", () => {
     r.s.decoded(1);
     r.s.skipped(2);
     expect(r.acks).toEqual([]);
+    expect(r.keyframes, "the skipped frame asks for a keyframe: nothing to ask it of yet").toEqual([]);
     await starting;
     expect(r.acks, "the last of them, so the computer does not count them in flight").toEqual([2]);
+    expect(r.keyframes.length, "and the keyframe it asked for goes with it").toBe(1);
     r.s.decoded(3);
     expect(r.acks).toEqual([2, 3]);
   });

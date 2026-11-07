@@ -89,6 +89,10 @@ struct State {
     raw: u64,
     wire: u64,
     inputs: (Instant, u32),
+    /// A `down` went to the app and no `up` after it: the one thing a dropped message may still send is a `release`.
+    held: bool,
+    /// The highest video frame sent to the phone: an acknowledgement is never taken past it (a frame of a stream before could carry more).
+    last_seq: u32,
     level: Level,
     idle: Duration,
     rebind: Duration,
@@ -168,9 +172,9 @@ fn end_message(sc: &str, reason: &str) -> String {
 }
 
 /// Why a stream ended, as the phone knows the words.
-const END_REASONS: &[&str] = &["hotkey", "closed", "desktop", "encoder_failed", "app_closed", "replaced", "display_changed", "failed"];
+const END_REASONS: &[&str] = &["hotkey", "closed", "desktop", "encoder_failed", "app_closed", "replaced", "display_changed", "failed", "device_lost"];
 /// What the helper says about the picture, as the phone knows the words.
-const STATES: &[&str] = &["live", "locked", "secure_desktop", "closed", "minimized", "elevated", "covered", "paused_load", "blocked", "not_front"];
+const STATES: &[&str] = &["live", "locked", "secure_desktop", "closed", "minimized", "elevated", "covered", "covered_dialog", "paused_load", "blocked", "not_front"];
 
 /// A target as the phone is told it: only known fields, short strings.
 /// The stage timings a stats event may carry (`kelpie_screen::control::Stages`).
@@ -372,6 +376,7 @@ impl Broker {
                 st.wire += wire_len(len) as u64;
                 if video {
                     st.sent.push_back((peek.seq, Instant::now(), len));
+                    st.last_seq = st.last_seq.max(peek.seq);
                     st.unacked += len;
                     if peek.key {
                         st.need_key = false;
@@ -414,6 +419,8 @@ impl Broker {
                 let seq = req["seq"].as_u64().filter(|s| *s <= u64::from(u32::MAX)).ok_or_else(|| refused("bad_request", "missing seq"))? as u32;
                 let rtt = {
                     let mut st = hold.state.lock();
+                    // Never past what was sent: a frame of an earlier stream, acknowledged while this one started, could carry a higher number.
+                    let seq = seq.min(st.last_seq);
                     let mut rtt = None;
                     while let Some(&(s, at, len)) = st.sent.front() {
                         if s > seq {
@@ -437,17 +444,23 @@ impl Broker {
                 // Late input, input onto a stale picture, or more than a phone needs is dropped without a word: the phone already shows it as not live.
                 let stale = Self::stale(&hold.state.lock());
                 if !kelpie_screen::input::fresh(req["st"].as_u64(), now_millis()) || stale || !Self::input_allowed(&hold) {
-                    // A release goes all the same, so a mouse button is never left pressed on the computer (keys go down and up in one message).
-                    let releases: Vec<Value> = ops.into_iter().filter(|op| op["k"] == "up").collect();
-                    if !releases.is_empty() && hold.live() {
-                        d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": releases, "t": now_millis()}));
+                    // A button pressed before is let go all the same, so it is never left pressed on the computer (keys go down and up in one
+                    // message): one `release` at most, with no place (the pointer does not move to where a stale picture put it), and only
+                    // while a press is outstanding, so a flood of late `up`s is one release or nothing.
+                    let release = ops.iter().any(|op| op["k"] == "up" || op["k"] == "release") && std::mem::take(&mut hold.state.lock().held);
+                    if release && hold.live() {
+                        d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": [{"k": "release"}], "t": now_millis()}));
                     }
                     return Ok(None);
                 }
                 if !hold.live() {
                     return Err(refused("sc_gone", "That screen has ended."));
                 }
-                hold.state.lock().last_input = Instant::now();
+                {
+                    let mut st = hold.state.lock();
+                    st.last_input = Instant::now();
+                    st.held = kelpie_screen::input::held_after(st.held, &ops);
+                }
                 d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": ops, "t": now_millis()}));
                 Ok(None)
             }
@@ -464,6 +477,7 @@ impl Broker {
                 match d.providers.request("screen", "screen.text", json!({"sc": hold.sc, "text": text, "t": now_millis()})).await {
                     Ok(_) => Ok(Some(json!({"type": "ack", "result": "sent"}))),
                     // The helper types only into the shared window, in front: anywhere else, nothing is typed, and the phone says so.
+                    Err(e) if e.to_string().starts_with("covered_dialog") => Err(refused("covered", "Not typed: a dialog of another program is in front of the shared window, and this phone cannot see it. Share the whole monitor to type into this dialog.")),
                     Err(e) if e.to_string().starts_with("not_front_partial") => Err(refused("not_front", "Stopped partway: another window took the focus on the computer. Check what was typed before typing again.")),
                     Err(e) if e.to_string().starts_with("not_front") => Err(refused("not_front", "Not typed: the shared window is not in front on the computer. Tap it, then type again.")),
                     Err(e) => Err(refused("not_sent", format!("Not sent: {e}. Check the screen, then type it again."))),
@@ -556,6 +570,8 @@ impl Broker {
             idle: IDLE_STOP,
             rebind: REBIND_WINDOW,
             version: 0,
+            held: false,
+            last_seq: 0,
         };
         // The link closed while the app was starting: the hold waits for the same device's next connection, like one whose link dropped.
         let link_gone = phone.out.is_closed() || phone.media.is_closed();
