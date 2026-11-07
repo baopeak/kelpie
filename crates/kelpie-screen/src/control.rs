@@ -122,7 +122,7 @@ const QUEUE_LAG_MS: f64 = 50.0;
 const TREND_WINDOW_MS: u64 = 500;
 /// Samples the recent floor needs: one late acknowledgement is not a trend.
 const TREND_MIN_SAMPLES: usize = 3;
-/// The window of frames full this long is a cut too.
+/// The link's window of frames full this long, as the daemon saw it, is a cut too; and this much longer again for each cut after.
 const FULL_FOR_MS: u64 = 1000;
 /// A cut keeps this share (percent): at once, as GCC's multiplicative decrease does.
 const CUT_PERCENT: u32 = 85;
@@ -148,15 +148,21 @@ pub const CRISP_CALM_MS: u64 = 10_000;
 /// after the last cut, above its floor over ten seconds by more than 50 ms) cuts 15 % at once; after a cut, a floor that rose further cuts
 /// again half a second later, one that fell is a queue draining, and one that held for a second is a new base (another route, a slower
 /// decoder), taken as the floor instead of being cut for; three queueing cuts in ten seconds at most, and a new connection forgets the round
-/// trips before it. The window of frames **full** for a second cuts the same. Ten seconds with neither, while frames are being
-/// sent, add 10 %; an application-limited stream (a still screen) earns no increase, so a rate is never raised on no evidence and motion that
-/// resumes after a pause starts from the last rate the link carried. An up-step undone within 10 s doubles the wait before the next (to a
-/// minute), so a link that cannot hold a rate is not pushed to it every few seconds.
+/// trips before it. The link's window of frames **full** for a second cuts the same: full as the daemon sees it (`on_link_window`, frames it
+/// queued for the phone and has no acknowledgement for), never as the helper counts it, since the helper's own count also holds the way to the
+/// daemon and back and its own loop, which on a busy computer (a game, a build) are slow while the link is not: that slowness is the encoder
+/// controller's (`Overuse`) and the window's gate (`Controller::may_encode`), not a cut. Ten seconds with neither, while frames are being
+/// sent, add 10 %; an application-limited stream (a still screen, or frames held up on this computer) earns no increase, so a rate is never
+/// raised on no evidence and motion that resumes after a pause starts from the last rate the link carried. An up-step undone within 10 s
+/// doubles the wait before the next (to a minute), so a link that cannot hold a rate is not pushed to it every few seconds. Every cut is kept
+/// with what its rule saw (`Cut`), for the daemon's log and the stats.
 #[derive(Debug)]
 pub struct Bandwidth {
     pub kbps: u32,
     rtts: VecDeque<(u64, u32)>,
-    full_since: Option<u64>,
+    /// How long the daemon last said the link's window had been full (ms), and that figure when the window last made a cut.
+    link_full_ms: u64,
+    window_cut_at: Option<u64>,
     clean_since: u64,
     last_down: Option<u64>,
     last_up: Option<u64>,
@@ -166,15 +172,113 @@ pub struct Bandwidth {
     cut_floor: Option<u32>,
     /// When the queueing cuts of the last `CUT_WINDOW_MS` were made.
     cuts: VecDeque<u64>,
-    /// Every cut since the stream started, whatever made it (the stats' `link_cuts`: on a link with nothing to cut for, it stays 0).
-    pub cuts_total: u32,
+    /// Every cut since the stream started, by rule (the stats' `link_cuts`: on a link with nothing to cut for, they stay 0).
+    pub cut_counts: CutCounts,
+    /// The cuts not yet taken for the stats (`take_cuts`), at most `MAX_CUT_LOG`.
+    cut_log: Vec<Cut>,
     /// Bytes on the wire for each byte of media (the link pads every message to a few sizes), smoothed.
     wire: f64,
 }
 
+/// Which rule cut the bitrate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutRule {
+    /// The round trip's recent floor rose over its ten-second floor.
+    Queueing,
+    /// The link's window of frames was full, as the daemon saw it.
+    Window,
+    /// A frame came out too large for one message.
+    Size,
+}
+
+/// A cut, with what its rule saw: the daemon logs each one, and the stats carry the last.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Cut {
+    pub rule: CutRule,
+    pub from_kbps: u32,
+    pub to_kbps: u32,
+    /// The round trip's floor over the last half second and over ten seconds (ms), when there were samples.
+    pub rtt_recent_ms: Option<u32>,
+    pub rtt_base_ms: Option<u32>,
+    /// How long the daemon had seen the link's window full (ms).
+    pub link_full_ms: u64,
+    /// The frames the helper counted in flight: its own count, which takes in this computer's part of the way.
+    pub inflight: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CutCounts {
+    pub queueing: u32,
+    pub window: u32,
+    pub size: u32,
+}
+
+impl CutCounts {
+    pub fn total(&self) -> u32 {
+        self.queueing + self.window + self.size
+    }
+}
+
+/// Cuts kept for the next stats (a second) at most: the rules cut far less often than this.
+const MAX_CUT_LOG: usize = 16;
+
 impl Bandwidth {
     pub fn new(now: u64) -> Bandwidth {
-        Bandwidth { kbps: START_KBPS, rtts: VecDeque::new(), full_since: None, clean_since: now, last_down: None, last_up: None, up_wait: UP_WAIT_MS, last_sent: None, cut_floor: None, cuts: VecDeque::new(), cuts_total: 0, wire: 1.0 }
+        Bandwidth {
+            kbps: START_KBPS,
+            rtts: VecDeque::new(),
+            link_full_ms: 0,
+            window_cut_at: None,
+            clean_since: now,
+            last_down: None,
+            last_up: None,
+            up_wait: UP_WAIT_MS,
+            last_sent: None,
+            cut_floor: None,
+            cuts: VecDeque::new(),
+            cut_counts: CutCounts::default(),
+            cut_log: Vec::new(),
+            wire: 1.0,
+        }
+    }
+
+    /// The bitrate goes to `to` for `rule`, and the cut is kept with what was seen. False when it was already there (the floor).
+    fn cut_to(&mut self, to: u32, rule: CutRule, inflight: u32) -> bool {
+        if to == self.kbps {
+            return false;
+        }
+        let base = self.rtts.iter().map(|(_, r)| *r).min();
+        let cut = Cut { rule, from_kbps: self.kbps, to_kbps: to, rtt_recent_ms: self.recent_floor(), rtt_base_ms: base, link_full_ms: self.link_full_ms, inflight };
+        self.kbps = to;
+        match rule {
+            CutRule::Queueing => self.cut_counts.queueing += 1,
+            CutRule::Window => self.cut_counts.window += 1,
+            CutRule::Size => self.cut_counts.size += 1,
+        }
+        if self.cut_log.len() < MAX_CUT_LOG {
+            self.cut_log.push(cut);
+        }
+        true
+    }
+
+    /// A frame too large for one message: a quarter off at once (the frame was not sent).
+    pub fn cut_for_size(&mut self, inflight: u32) {
+        self.cut_to((self.kbps * 3 / 4).max(MIN_KBPS), CutRule::Size, inflight);
+    }
+
+    /// The cuts since the last call, oldest first.
+    pub fn take_cuts(&mut self) -> Vec<Cut> {
+        std::mem::take(&mut self.cut_log)
+    }
+
+    /// What the daemon says of the link's window with each flow: how long it has been full (0: it is not). A figure lower than the one the
+    /// last window cut was made at is a new spell of it.
+    pub fn on_link_window(&mut self, full_ms: u64) {
+        self.link_full_ms = full_ms;
+        if self.window_cut_at.is_some_and(|at| full_ms < at) {
+            self.window_cut_at = None;
+        }
     }
 
     /// A new connection (the phone came back, maybe by another route: LAN to relay, Wi-Fi to LTE): the round trips before say nothing about it.
@@ -271,38 +375,31 @@ impl Bandwidth {
         inflight >= MAX_INFLIGHT || self.queueing_ms().is_some_and(|q| q > QUEUE_LAG_MS)
     }
 
-    /// Looked at in every turn with the frames in flight now. True when the bitrate changed.
+    /// Looked at in every turn with the frames in flight now, as the helper counts them. True when the bitrate changed.
     pub fn tick(&mut self, inflight: u32, now: u64) -> bool {
         let queueing = self.queueing_ms().is_some_and(|q| q > QUEUE_LAG_MS);
         let queue_cut = self.queue_cut_due(now);
-        let full = inflight >= MAX_INFLIGHT;
-        if full {
-            self.full_since.get_or_insert(now);
-        } else {
-            self.full_since = None;
-        }
-        if queueing || full {
+        let link_full = self.link_full_ms >= FULL_FOR_MS;
+        // A second of it, and a second more of the same spell for each cut after the first.
+        let window_cut = self.link_full_ms >= self.window_cut_at.map_or(FULL_FOR_MS, |at| at + FULL_FOR_MS);
+        if queueing || link_full {
             self.clean_since = now;
-            let since = self.full_since.unwrap_or(now);
-            let due = queue_cut || (full && now.saturating_sub(since) >= FULL_FOR_MS);
-            if due {
+            if queue_cut || window_cut {
                 if self.last_up.is_some_and(|u| now.saturating_sub(u) < UP_WAIT_MS) {
                     self.up_wait = (self.up_wait * 2).min(UP_WAIT_MAX_MS);
                 }
-                let next = (self.kbps * CUT_PERCENT / 100).max(MIN_KBPS);
-                if full {
-                    self.full_since = Some(now);
+                if link_full {
+                    self.window_cut_at = Some(self.link_full_ms);
                 }
                 self.last_down = Some(now);
-                if next != self.kbps {
-                    self.kbps = next;
-                    self.cuts_total += 1;
-                    return true;
-                }
+                let rule = if queue_cut { CutRule::Queueing } else { CutRule::Window };
+                return self.cut_to((self.kbps * CUT_PERCENT / 100).max(MIN_KBPS), rule, inflight);
             }
             return false;
         }
-        if self.app_limited(now) {
+        // The helper's own window full while the link's is not: frames wait on this computer, which says nothing of what the link carries.
+        // No cut, and no increase either.
+        if inflight >= MAX_INFLIGHT || self.app_limited(now) {
             self.clean_since = now;
             return false;
         }
@@ -699,8 +796,11 @@ pub struct Stats {
     pub big_frames: u32,
     /// Whether DXGI's first frame after a duplication was made said everything changed (1) or not (0): kept from one report to the next.
     pub dxgi_first_full: Option<u8>,
-    /// The link controller's cuts since the stream started (`Bandwidth::cuts_total`), set before each report.
-    pub link_cuts: u32,
+    /// The link controller's cuts since the stream started (`Bandwidth::cut_counts`), set before each report.
+    pub link_cuts: CutCounts,
+    /// The cuts since the last report (`cut`), and the last one ever, kept from one report to the next.
+    cuts: Vec<Cut>,
+    last_cut: Option<Cut>,
 }
 
 /// Where a frame's time went in the helper over the last second (ms), for the measurement plan: from the picture being taken to its message
@@ -721,7 +821,15 @@ pub struct Stages {
     pub held: u64,
     pub first_output_ms: Option<f64>,
     pub dxgi_first_full: Option<u8>,
+    /// The bitrate's cuts since the stream started, in all and by rule, and what the last one saw: the round trip's recent floor over its
+    /// ten-second floor, how long the daemon had seen the link's window full, and the frames the helper counted in flight.
     pub link_cuts: u32,
+    pub link_cuts_queueing: u32,
+    pub link_cuts_window: u32,
+    pub link_cuts_size: u32,
+    pub last_cut_queueing_ms: Option<u32>,
+    pub last_cut_link_full_ms: Option<u64>,
+    pub last_cut_inflight: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -742,6 +850,9 @@ pub struct Report {
     /// Crisp tiles: on, off for now because the link is slow (`false`), or switched off in Settings (`None`).
     pub crisp: Option<bool>,
     pub stages: Stages,
+    /// Each cut of the bitrate since the last report, with what its rule saw: the daemon logs them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cuts: Vec<Cut>,
 }
 
 impl Stats {
@@ -775,6 +886,14 @@ impl Stats {
                 self.send_intervals.push(now.saturating_sub(last) as f64);
             }
         }
+    }
+
+    /// A cut of the bitrate, for the next report.
+    pub fn cut(&mut self, c: Cut) {
+        if self.cuts.len() < MAX_CUT_LOG {
+            self.cuts.push(c.clone());
+        }
+        self.last_cut = Some(c);
     }
 
     /// The phone acknowledged a frame `rtt_ms` after the daemon queued it.
@@ -829,13 +948,21 @@ impl Stats {
                 held,
                 first_output_ms: round1(first_output_ms),
                 dxgi_first_full: self.dxgi_first_full,
-                link_cuts: self.link_cuts,
+                link_cuts: self.link_cuts.total(),
+                link_cuts_queueing: self.link_cuts.queueing,
+                link_cuts_window: self.link_cuts.window,
+                link_cuts_size: self.link_cuts.size,
+                last_cut_queueing_ms: self.last_cut.as_ref().and_then(|c| c.rtt_recent_ms.zip(c.rtt_base_ms)).map(|(recent, base)| recent.saturating_sub(base)),
+                last_cut_link_full_ms: self.last_cut.as_ref().map(|c| c.link_full_ms),
+                last_cut_inflight: self.last_cut.as_ref().map(|c| c.inflight),
             },
+            cuts: std::mem::take(&mut self.cuts),
         };
-        let (last_send, dxgi_first_full) = (self.last_send, self.dxgi_first_full);
+        let (last_send, dxgi_first_full, last_cut) = (self.last_send, self.dxgi_first_full, self.last_cut.take());
         *self = Stats::new(now);
         self.last_send = last_send;
         self.dxgi_first_full = dxgi_first_full;
+        self.last_cut = last_cut;
         Some(r)
     }
 }
@@ -910,16 +1037,25 @@ mod tests {
 
     #[test]
     fn a_full_window_for_a_second_takes_fifteen_percent_off_and_ten_seconds_of_sending_add_a_tenth() {
+        // The daemon says how long the link's window has been full with each flow.
         let mut b = Bandwidth::new(0);
         acks(&mut b, 40, 0, 1000);
-        assert!(!b.tick(3, 1000), "lag starts");
-        assert!(!b.tick(3, 1500));
-        assert!(b.tick(3, 2000), "a second of it");
+        let window = |b: &mut Bandwidth, full_ms: u64, t: u64| {
+            b.on_link_window(full_ms);
+            b.tick(3, t)
+        };
+        assert!(!window(&mut b, 0, 1000), "lag starts");
+        assert!(!window(&mut b, 500, 1500));
+        assert!(window(&mut b, 1000, 2000), "a second of it");
         assert_eq!(b.kbps, 1275);
-        assert!(!b.tick(3, 2500), "not again within a second");
-        assert!(b.tick(3, 3000));
+        assert!(!window(&mut b, 1500, 2500), "not again within a second");
+        assert!(window(&mut b, 2000, 3000));
         assert_eq!(b.kbps, 1083);
-        assert_eq!(b.cuts_total, 2, "every cut counted, for the stats");
+        assert_eq!((b.cut_counts.window, b.cut_counts.total()), (2, 2), "every cut counted by its rule, for the stats");
+        let cuts = b.take_cuts();
+        assert_eq!(cuts.iter().map(|c| (c.rule, c.from_kbps, c.to_kbps, c.link_full_ms, c.inflight)).collect::<Vec<_>>(), [(CutRule::Window, 1500, 1275, 1000, 3), (CutRule::Window, 1275, 1083, 2000, 3)], "with what the rule saw");
+        assert!(b.take_cuts().is_empty(), "each taken once");
+        b.on_link_window(0);
         let mut t = 3500;
         let up = loop {
             b.on_sent(t);
@@ -940,13 +1076,51 @@ mod tests {
         let mut t = 0;
         while b2.kbps > MIN_KBPS {
             t += 1000;
+            b2.on_link_window(t);
             b2.tick(3, t);
             if t > 10_000_000 {
                 panic!("never reached the floor");
             }
         }
         assert_eq!(b2.kbps, MIN_KBPS);
+        b2.on_link_window(t + 1000);
         assert!(!b2.tick(3, t + 1000), "no lower than the floor");
+    }
+
+    /// A busy computer (a game, a build) with a perfect link: the helper's loop turns slowly and hears the daemon's flows late and in bunches,
+    /// so its own count of frames in flight sits at the window for seconds at a time, while the daemon sees every frame acknowledged within
+    /// 2 ms and its window never full. That is this computer's slowness, not the link's: never a bandwidth cut.
+    #[test]
+    fn a_slow_helper_on_a_perfect_link_is_never_cut() {
+        let mut b = Bandwidth::new(0);
+        let (mut t, mut heard_at, mut owed) = (0u64, 0u64, Vec::<u32>::new());
+        while t < 120_000 {
+            // A frame goes out every 70 ms (a slow encoder); the daemon has it acknowledged 1-2 ms later.
+            b.on_sent(t);
+            owed.push(1 + (t % 2) as u32);
+            // The flows reach the helper only every 1.5 s (its stdin unread while the loop is stuck in a slow capture or encode).
+            if t.saturating_sub(heard_at) >= 1500 {
+                heard_at = t;
+                for rtt in owed.drain(..) {
+                    b.on_ack(rtt, t);
+                    b.on_link_window(0);
+                }
+            }
+            let inflight = owed.len().min(MAX_INFLIGHT as usize) as u32;
+            b.tick(inflight, t);
+            t += 70;
+        }
+        let cuts = b.take_cuts();
+        assert!(cuts.is_empty() && b.cut_counts == CutCounts::default(), "{cuts:?}");
+        assert_eq!(b.kbps, START_KBPS, "and no increase on what a held-up stream cannot show either");
+        // A figure the daemon gave once is not repeated by the helper's clock: a flow that said a second, then none, is one cut, not one a second.
+        let mut c = Bandwidth::new(0);
+        c.on_link_window(1200);
+        assert!(c.tick(3, 1000));
+        for t in (1100..10_000).step_by(100) {
+            assert!(!c.tick(3, t), "no news from the daemon: no more cuts");
+        }
+        assert_eq!(c.cut_counts.window, 1);
     }
 
     #[test]
@@ -1032,7 +1206,7 @@ mod tests {
             b.tick(inflight, t + 2);
             t += 33;
         }
-        assert_eq!(b.cuts_total, 0, "{} kbps", b.kbps);
+        assert_eq!(b.cut_counts.total(), 0, "{} kbps", b.kbps);
         assert!(b.kbps >= START_KBPS, "and it may rise: {} kbps", b.kbps);
     }
 
@@ -1055,7 +1229,10 @@ mod tests {
         while t < 300_000 {
             let was = b.kbps;
             b.on_sent(t);
-            let changed = b.tick(if t < lag_until { 3 } else { 0 }, t);
+            // The lag is the link's: the daemon sees its window full from the up-step on.
+            let lagging = t < lag_until;
+            b.on_link_window(if lagging { t + 1500 - lag_until } else { 0 });
+            let changed = b.tick(if lagging { 3 } else { 0 }, t);
             if changed && b.kbps > was {
                 lag_until = t + 1500;
             } else if changed && b.kbps < was {
@@ -1072,9 +1249,11 @@ mod tests {
         let mut c = Controller::new((1920, 1080), false, false, 0);
         assert!(c.crisp_ok(0, 0), "1.5 Mbps to start: room for it");
         assert!(!c.crisp_ok(MAX_INFLIGHT, 0), "the window full: lag");
-        // A second of lag cuts the bitrate: off for ten seconds after the cut, even with the link quiet again.
+        // A second of lag on the link cuts the bitrate: off for ten seconds after the cut, even with the link quiet again.
         c.tick(MAX_INFLIGHT, 1000);
+        c.bandwidth.on_link_window(1000);
         c.tick(MAX_INFLIGHT, 2000);
+        c.bandwidth.on_link_window(0);
         assert_eq!(c.bandwidth.kbps, 1275);
         assert!(!c.crisp_ok(0, 2000 + CRISP_CALM_MS - 1));
         assert!(c.crisp_ok(0, 2000 + CRISP_CALM_MS));
@@ -1284,7 +1463,8 @@ mod tests {
         }
         s.top_off = 4;
         s.dxgi_first_full = Some(1);
-        s.link_cuts = 0;
+        s.link_cuts = CutCounts { queueing: 0, window: 1, size: 0 };
+        s.cut(Cut { rule: CutRule::Window, from_kbps: 1500, to_kbps: 1275, rtt_recent_ms: Some(32), rtt_base_ms: Some(30), link_full_ms: 1020, inflight: 3 });
         let p = Params { fps: 30, w: 1920, h: 1080, kbps: 1500, reason: Reason::None, degraded: false };
         assert!(s.report(999, &p, 0, false, Some(true)).is_none());
         let r = s.report(1000, &p, 1, false, Some(false)).unwrap();
@@ -1296,9 +1476,16 @@ mod tests {
         let st = &r.stages;
         assert_eq!((st.capture_to_send_ms_p50, st.capture_to_send_ms_p95, st.convert_ms_p95, st.send_interval_ms_p95), (Some(45.0), Some(49.0), Some(2.0), Some(33.0)));
         assert_eq!((st.ack_rtt_ms_p50, st.ack_rtt_ms_p95, st.top_off, st.held), (Some(70.0), Some(80.0), 4, 0));
+        // Which rule cut, and what it saw: by rule in the stages, each cut once in the report for the daemon's log.
+        assert_eq!((st.link_cuts, st.link_cuts_window, st.link_cuts_queueing, st.link_cuts_size), (1, 1, 0, 0));
+        assert_eq!((st.last_cut_queueing_ms, st.last_cut_link_full_ms, st.last_cut_inflight), (Some(2), Some(1020), Some(3)));
+        assert_eq!(serde_json::to_value(&r).unwrap()["cuts"][0]["rule"], "window");
         assert_eq!(s.report(1500, &p, 0, true, None), None, "counters started again");
         s.timing(2000, 10.0, 1.0);
-        let later = s.report(2000, &p, 0, false, None).unwrap().stages;
+        let later = s.report(2000, &p, 0, false, None).unwrap();
+        assert!(later.cuts.is_empty() && serde_json::to_value(&later).unwrap().get("cuts").is_none(), "each cut is reported once");
+        assert_eq!(later.stages.last_cut_link_full_ms, Some(1020), "the last cut's figures stay");
+        let later = later.stages;
         assert_eq!(later.send_interval_ms_p95, Some(1043.0), "the interval carries on from the last frame before the report");
         assert_eq!(later.dxgi_first_full, Some(1), "said once, kept in every report after");
     }

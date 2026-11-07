@@ -382,7 +382,7 @@ pub fn provider_message(app: &AppHandle, msg: Value) {
     let sc = params["sc"].clone();
     match note {
         "screen.input" => send(&h, json!({"cmd": "input", "sc": sc, "ops": params["ops"], "t": params["t"]})),
-        "screen.flow" => send(&h, json!({"cmd": "flow", "sc": sc, "acked": params["acked"], "dropped_through": params["dropped_through"], "rtt_ms": params["rtt_ms"], "level": params["level"], "lost_tiles": params["lost_tiles"], "raw": params["raw"], "wire": params["wire"]})),
+        "screen.flow" => send(&h, json!({"cmd": "flow", "sc": sc, "acked": params["acked"], "dropped_through": params["dropped_through"], "rtt_ms": params["rtt_ms"], "level": params["level"], "lost_tiles": params["lost_tiles"], "raw": params["raw"], "wire": params["wire"], "link_full_ms": params["link_full_ms"]})),
         "screen.keyframe" => send(&h, json!({"cmd": "keyframe", "sc": sc})),
         "screen.pause" => {
             let take = sc.as_str().is_some_and(|sc| app.state::<Screens>().viewers.lock().get_mut(sc).is_none_or(|v| newer(&mut v.pause_v, params["v"].as_u64())));

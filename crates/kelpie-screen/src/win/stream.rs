@@ -68,7 +68,8 @@ fn emit(out: &SyncSender<Vec<u8>>, v: Value) {
 }
 
 enum Cmd {
-    Flow { acked: u32, rtt_ms: u32, level: u8, lost_tiles: bool, dropped_through: u32, raw: u64, wire: u64 },
+    /// `link_full_ms`: how long the daemon has seen the link's window full (`Bandwidth::on_link_window`).
+    Flow { acked: u32, rtt_ms: u32, level: u8, lost_tiles: bool, dropped_through: u32, raw: u64, wire: u64, link_full_ms: u64 },
     Keyframe,
     Pause(bool),
     ResumeLoad,
@@ -252,6 +253,7 @@ impl Host {
                     dropped_through: n("dropped_through") as u32,
                     raw: n("raw"),
                     wire: n("wire"),
+                    link_full_ms: n("link_full_ms").min(3_600_000),
                 });
                 None
             }
@@ -424,8 +426,9 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         loop {
             match cmds.try_recv() {
                 Ok(Cmd::Stop(r)) => break 'stream r,
-                Ok(Cmd::Flow { acked, rtt_ms, level, lost_tiles, dropped_through, raw, wire }) => {
+                Ok(Cmd::Flow { acked, rtt_ms, level, lost_tiles, dropped_through, raw, wire, link_full_ms }) => {
                     flight.acked(acked);
+                    ctl.bandwidth.on_link_window(link_full_ms);
                     // Frames the daemon dropped will never be acknowledged: they no longer count as in flight.
                     flight.dropped_through(dropped_through);
                     if rtt_ms > 0 {
@@ -793,8 +796,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         // Too large for one message: not sent. Its unpaint goes with the next frame, less bitrate, and a keyframe.
                         unpaint = v.unpaint;
                         unpaint_all = v.unpaint_all;
-                        ctl.bandwidth.kbps = (ctl.bandwidth.kbps * 3 / 4).max(MIN_KBPS);
-                        ctl.bandwidth.cuts_total += 1;
+                        ctl.bandwidth.cut_for_size(flight.inflight());
                         flight.ask_key(now);
                         stats.dropped_link += 1;
                         continue;
@@ -848,7 +850,10 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
             }
         }
         let crisp = opts.tiles.then(|| ctl.crisp_ok(flight.inflight(), now));
-        stats.link_cuts = ctl.bandwidth.cuts_total;
+        for c in ctl.bandwidth.take_cuts() {
+            stats.cut(c);
+        }
+        stats.link_cuts = ctl.bandwidth.cut_counts;
         if let Some(r) = stats.report_with(now, &params, ctl.level(), ctl.software(), crisp, encoder.held(), encoder.first_output_ms) {
             let mut v = serde_json::to_value(&r).unwrap_or_default();
             v["event"] = json!("stats");

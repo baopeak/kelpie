@@ -882,14 +882,20 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   down, under 0.42 for 10 s up), the link (queueing: the round trip's floor over the last 500 ms, counted from after the last cut, more than 50 ms over its
   floor of 10 s cuts 15 % at once; after a cut a floor that rose further cuts again half a second later, one that fell is a queue draining, and one that
   held for a second is a new base (another route, a slower decoder), taken as the floor rather than cut for; three queueing cuts in ten seconds at most, and
-  a new connection forgets the round trips before it; the window of frames full for a second cuts the same; 10
-  seconds with neither while frames go out add 10 %, and a still screen, which sends nothing, earns no increase; an up-step undone within 10 s doubles the
+  a new connection forgets the round trips before it; the link's window of frames full for a second cuts the same, full as the daemon counts it, from a
+  frame leaving for the phone to its acknowledgement arriving (`screen.flow`'s `link_full_ms`, sent at every look of the hold's task while it is full), never
+  as the helper counts it, since the helper's count also holds the way through the app and its own loop, which a busy computer (a game, a build) slows while
+  the link is fine: that slowness is the encoder's controller and the window's gate, never a bandwidth cut; 10
+  seconds with neither while frames go out add 10 %, and a still screen, or frames held up on this computer, earn no increase; an up-step undone within 10 s doubles the
   wait up to a minute; 150 kbps–4 Mbps, start 1.5), and the load level (L1 ≤ 1080p20, L2 ≤
   720p15, L3 ≤ 540p8; five minutes of L3 pause the stream until the person resumes it). The hardware encoder gives way to the software one (capped at 720p15)
   only when it fails, or is over 33 ms p95 for 5 s at the lowest rung, and the phone is told. Stats once a second: `sc_stats {fps, w, h, kbps, encode_ms_p95,
   dropped, reason, degraded, level, encoder, idr_ratio, crisp, stages}`, `stages` the helper's timings for the measurement plan (`control::Stages`: picture
   taken → message out p50/p95, conversion p95, encoder p50, send interval p95, daemon queue → phone acknowledgement p50/p95, top-off passes, big frames,
-  frames held in the encoder, its first output's delay). `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS` adds encode time to drive the ladder without a GPU.
+  frames held in the encoder, its first output's delay, the bitrate's cuts in all and by rule (`queueing`, `window`, `size`: a frame too large for one
+  message) with what the last one saw). Each cut also goes with the stats to the daemon, which logs it (`screen bandwidth cut`, its rule, the rates, the
+  round trip's recent and ten-second floors, how long the link's window was full, the helper's own count in flight).
+  `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS` adds encode time to drive the ladder without a GPU.
 - **Crisp text** (`tiles.rs`, `tile_image.rs`): the picture read back is hashed in 64×64 cells; cells still for 300 ms are sent once more as tiles of up to
   8×4 cells, PNG, or JPEG q90 where PNG would be over a byte a pixel, at the source's size, within a byte budget of the video's rate (burst 256 KiB), once the top-off of the video has ended. A video
   frame carries the rectangles of painted cells that changed, and the phone drops those tiles as it draws that frame, or as it skips it. A dropped video frame

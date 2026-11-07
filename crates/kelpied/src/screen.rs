@@ -11,9 +11,10 @@
 //!   device's next connection only (the same connection asking again is no change). **One screen at a time**: a start reserves the screen for
 //!   its whole length, so a second one that comes meanwhile is refused as in use, and the first holder keeps it.
 //! - **Flow:** the link is TCP, so nothing is lost and nothing should pile up. The helper encodes only while fewer than 3 frames wait for the
-//!   phone's acknowledgement (`sc_ack`, forwarded with its round trip as `screen.flow`). Should the lane still be full, or more than
-//!   `MAX_UNACKED_BYTES` wait, video is dropped up to the next keyframe, which is asked for at most once a second: a decoder given a frame
-//!   whose reference never came would show garbage. **What is dropped is said**: `screen.flow` carries `dropped_through`, so the helper never
+//!   phone's acknowledgement (`sc_ack`, forwarded with its round trip as `screen.flow`, which also says how long the link's window has been full,
+//!   counted here: the helper's bitrate is cut for that, never for its own count, which holds this computer's part of the way). Should the
+//!   lane still be full, or more than `MAX_UNACKED_BYTES` wait, video is dropped up to the next keyframe, which is asked for at most once a
+//!   second: a decoder given a frame whose reference never came would show garbage. **What is dropped is said**: `screen.flow` carries `dropped_through`, so the helper never
 //!   waits for an acknowledgement that cannot come, and `lost_tiles`, since a dropped frame may have carried the unpaint of a crisp tile.
 //!   Tiles and the cursor go only while the lane has room for video beside them. `screen.flow` also carries the bytes on the wire for the bytes
 //!   of media (the link pads every message), so the encoder is asked for what the link really carries.
@@ -73,6 +74,9 @@ struct State {
     gone_at: Option<Instant>,
     /// Video frames sent and not acknowledged: number, when, size.
     sent: VecDeque<(u32, Instant, usize)>,
+    /// Since when the link's window has been full (`note_window`): what the helper's controller cuts for, measured here, where frames
+    /// leave for the phone and its acknowledgements arrive, so that neither the way to the helper nor its own loop counts as the link.
+    full_since: Option<Instant>,
     unacked: usize,
     acked: u32,
     /// The last video frame dropped here: the helper hears it, and stops counting those frames as in flight.
@@ -182,7 +186,10 @@ const STATES: &[&str] = &["live", "locked", "secure_desktop", "closed", "minimiz
 
 /// A target as the phone is told it: only known fields, short strings.
 /// The stage timings a stats event may carry (`kelpie_screen::control::Stages`).
-const STAGE_FIELDS: &[&str] = &["capture_to_send_ms_p50", "capture_to_send_ms_p95", "convert_ms_p95", "encode_ms_p50", "send_interval_ms_p95", "ack_rtt_ms_p50", "ack_rtt_ms_p95", "top_off", "big_frames", "held", "first_output_ms", "dxgi_first_full", "link_cuts"];
+const STAGE_FIELDS: &[&str] = &[
+    "capture_to_send_ms_p50", "capture_to_send_ms_p95", "convert_ms_p95", "encode_ms_p50", "send_interval_ms_p95", "ack_rtt_ms_p50", "ack_rtt_ms_p95", "top_off", "big_frames", "held", "first_output_ms", "dxgi_first_full",
+    "link_cuts", "link_cuts_queueing", "link_cuts_window", "link_cuts_size", "last_cut_queueing_ms", "last_cut_link_full_ms", "last_cut_inflight",
+];
 
 fn target_row(t: &Value) -> Option<Value> {
     let id = t["id"].as_str().filter(|s| kelpie_screen::targets::TargetId::parse(s).is_some())?;
@@ -269,10 +276,20 @@ impl Broker {
         }
     }
 
+    /// The link's window is full from when `MAX_INFLIGHT` video frames sent from here wait for the phone, until fewer do.
+    fn note_window(st: &mut State) {
+        if st.sent.len() >= kelpie_screen::control::MAX_INFLIGHT as usize {
+            st.full_since.get_or_insert_with(Instant::now);
+        } else {
+            st.full_since = None;
+        }
+    }
+
     fn set_gone(st: &mut State) {
         st.conn = None;
         st.gone_at = Some(Instant::now());
         st.sent.clear();
+        st.full_since = None;
         st.unacked = 0;
         st.need_key = true;
         st.need_key_since = Instant::now();
@@ -323,6 +340,12 @@ impl Broker {
                 let encoder = s["encoder"].as_str().filter(|e| matches!(*e, "hw" | "sw")).unwrap_or("hw");
                 // The stages' timings for the measurement plan (`kelpie_screen::control::Stages`): known numbers only.
                 let stages: serde_json::Map<String, Value> = STAGE_FIELDS.iter().map(|k| (k.to_string(), s["stages"][*k].as_f64().filter(|v| v.is_finite() && *v >= 0.0).map_or(json!(null), |v| json!((v * 10.0).round() / 10.0)))).collect();
+                // Each cut of the bitrate, with the rule that made it and what it saw: why a stream got worse, in the daemon's log.
+                for c in s["cuts"].as_array().into_iter().flatten().take(16) {
+                    let Some(rule) = c["rule"].as_str().filter(|r| matches!(*r, "queueing" | "window" | "size")) else { continue };
+                    let n = |k: &str| c[k].as_u64();
+                    tracing::info!(sc, rule, from_kbps = ?n("from_kbps"), to_kbps = ?n("to_kbps"), rtt_recent_ms = ?n("rtt_recent_ms"), rtt_base_ms = ?n("rtt_base_ms"), link_full_ms = ?n("link_full_ms"), inflight = ?n("inflight"), "screen bandwidth cut");
+                }
                 self.tell(&hold, json!({"type": "sc_stats", "sc": sc, "fps": n("fps"), "w": n("w"), "h": n("h"), "kbps": n("kbps"), "encode_ms_p95": n("encode_ms_p95"), "dropped": n("dropped"), "reason": reason, "degraded": s["degraded"].as_bool() == Some(true), "level": n("level"), "encoder": encoder, "idr_ratio": n("idr_ratio"), "crisp": s["crisp"].as_bool(), "stages": stages}));
             }
             Some("encoder") => {
@@ -395,6 +418,7 @@ impl Broker {
                 st.wire += wire_len(len) as u64;
                 if video {
                     st.sent.push_back((peek.seq, Instant::now(), len));
+                    Self::note_window(&mut st);
                     st.last_seq = st.last_seq.max(peek.seq);
                     st.unacked += len;
                     if peek.key {
@@ -418,7 +442,8 @@ impl Broker {
             let mut st = hold.state.lock();
             let lost_tiles = std::mem::take(&mut st.lost_tiles);
             let (raw, wire) = (std::mem::take(&mut st.raw), std::mem::take(&mut st.wire));
-            json!({"sc": hold.sc, "acked": st.acked, "dropped_through": st.dropped_through, "rtt_ms": rtt_ms, "level": st.level.number(), "lost_tiles": lost_tiles, "raw": raw, "wire": wire})
+            let link_full_ms = st.full_since.map_or(0, |s| s.elapsed().as_millis() as u64);
+            json!({"sc": hold.sc, "acked": st.acked, "dropped_through": st.dropped_through, "rtt_ms": rtt_ms, "level": st.level.number(), "lost_tiles": lost_tiles, "raw": raw, "wire": wire, "link_full_ms": link_full_ms})
         };
         d.providers.notify("screen", "screen.flow", msg);
     }
@@ -451,6 +476,7 @@ impl Broker {
                             rtt = Some(at.elapsed().as_millis() as u64);
                         }
                     }
+                    Self::note_window(&mut st);
                     st.acked = st.acked.max(seq);
                     rtt
                 };
@@ -573,6 +599,7 @@ impl Broker {
             conn: Some((phone.conn, phone.out.clone(), phone.media.clone())),
             gone_at: None,
             sent: VecDeque::new(),
+            full_since: None,
             unacked: 0,
             acked: 0,
             dropped_through: 0,
@@ -644,6 +671,7 @@ impl Broker {
             st.conn = Some((phone.conn, phone.out.clone(), phone.media.clone()));
             st.gone_at = None;
             st.sent.clear();
+            st.full_since = None;
             st.unacked = 0;
             st.need_key = true;
             st.need_key_since = Instant::now();
@@ -698,7 +726,8 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
         if let Some(reason) = ending {
             return d.screen.end(&d, &hold.sc, reason, true);
         }
-        if beat {
+        // While the link's window is full no acknowledgement brings a flow: the helper hears how long it has been full at every look.
+        if beat || hold.state.lock().full_since.is_some() {
             d.screen.flow(&d, &hold, 0);
         }
     }

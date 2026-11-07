@@ -561,8 +561,11 @@ async def scenario(run, d):
         await see()
     # On loopback the link controller has nothing to cut for: the first screen's stats say how many cuts it made (`stages.link_cuts`).
     first_end = next((i for i, m in enumerate(phone.log) if m["type"] == "sc_end"), len(phone.log))
-    cuts = [(m.get("stages") or {}).get("link_cuts") for m in phone.log[:first_end] if m["type"] == "sc_stats"]
-    check("the bitrate is never cut on loopback", bool(cuts) and all(c == 0 for c in cuts if c is not None), cuts[-10:])
+    first_stages = [m.get("stages") or {} for m in phone.log[:first_end] if m["type"] == "sc_stats"]
+    cuts = [s.get("link_cuts") for s in first_stages]
+    # Which rule cut and what it saw, when one did (the daemon's log has each cut).
+    why = {k: v for k, v in (first_stages[-1] if first_stages else {}).items() if k.startswith(("link_cuts_", "last_cut_"))}
+    check("the bitrate is never cut on loopback", bool(cuts) and all(c == 0 for c in cuts if c is not None), f"{cuts[-10:]} {why}")
     told = [(m["type"], m.get("state") or m.get("reason") or m.get("code")) for m in phone.log if m["type"] in ("sc_end", "sc_state", "error")]
     check("a picture that changes keeps coming while it changes", len(moving) >= 20, f"{len(moving)} frames; the phone was told {told[-8:]}")
 
@@ -620,11 +623,12 @@ async def scenario(run, d):
     check("with the app closed, the phone is told to open Kelpie", (reply or {}).get("code") == "no_app" and "Open Kelpie" in (reply or {}).get("message", ""), reply)
     await spare.close()
 
-    # Which encoder this machine used, and the low-latency settings it refused or did not keep (the review's open question): the daemon's log.
+    # Which encoder this machine used, and the low-latency settings it refused or did not keep (the review's open question), and each cut of
+    # the bitrate with the rule that made it: the daemon's log.
     try:
         with open(os.path.join(DATA, "logs", "kelpied.log"), encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                if "screen encoder" in line:
+                if "screen encoder" in line or "screen bandwidth cut" in line:
                     print("SPIKE " + line.strip()[-400:], flush=True)
     except OSError as e:
         print(f"SPIKE no daemon log: {e}", flush=True)

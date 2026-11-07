@@ -183,12 +183,14 @@ async fn targets_come_from_the_app_checked_and_the_stream_goes_on_the_media_lane
     r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "state", "state": "elevated"}));
     assert_eq!(r.next("sc_state").await.unwrap()["state"], "elevated");
     r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "state", "state": "<script>"}));
-    r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "stats", "stats": {"fps": 15, "w": 1280, "h": 720, "reason": "load", "degraded": true, "crisp": false, "secret": "x", "stages": {"capture_to_send_ms_p95": 41.26, "top_off": 3, "convert_ms_p95": "a lot", "secret": 7}}}));
+    r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "stats", "stats": {"fps": 15, "w": 1280, "h": 720, "reason": "load", "degraded": true, "crisp": false, "secret": "x", "stages": {"capture_to_send_ms_p95": 41.26, "top_off": 3, "convert_ms_p95": "a lot", "secret": 7, "link_cuts_window": 1, "last_cut_link_full_ms": 1020}, "cuts": [{"rule": "window", "from_kbps": 1500, "to_kbps": 1275, "link_full_ms": 1020, "inflight": 3}, {"rule": "<b>"}]}}));
     let stats = r.next("sc_stats").await.unwrap();
     assert_eq!((stats["fps"].as_f64(), stats["reason"].as_str(), stats.get("secret")), (Some(15.0), Some("load"), None));
     assert_eq!(stats["crisp"], false, "crisp text off for now: the phone says so");
     let stages = &stats["stages"];
     assert_eq!((stages["capture_to_send_ms_p95"].as_f64(), stages["top_off"].as_f64(), &stages["convert_ms_p95"], stages.get("secret")), (Some(41.3), Some(3.0), &json!(null), None), "the stages' timings: known numbers only");
+    assert_eq!((stages["link_cuts_window"].as_f64(), stages["last_cut_link_full_ms"].as_f64()), (Some(1.0), Some(1020.0)), "which rule cut, and what it saw");
+    assert!(stats.get("cuts").is_none(), "the cuts themselves go to the daemon's log");
     // Input goes to the app with the computer's clock; stop from the phone tells the app; the audit log has the start, the end, nothing typed.
     r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "click", "x": 10, "y": 20}], "st": now_millis()})).await.unwrap();
     let input = r.told_now("screen.input").await;
@@ -579,6 +581,28 @@ async fn an_acknowledgement_is_never_taken_past_the_frames_sent() {
     let flow = r.told_now("screen.flow").await;
     assert_eq!(flow.last().unwrap()["acked"], 1, "{flow:?}");
 }
+
+/// The window the helper's controller cuts for is the link's, counted here from a frame leaving for the phone to its acknowledgement
+/// arriving: frames the helper is still getting to the daemon, or acknowledgements on their way back to a busy helper, are not in it.
+#[tokio::test]
+async fn the_helper_hears_how_long_the_link_s_window_has_been_full_as_counted_here() {
+    let r = rig();
+    let sc = r.start().await;
+    r.send(&sc, &video(1, true, 100));
+    r.send(&sc, &video(2, false, 100));
+    r.verb("sc_ack", json!({"sc": sc, "seq": 2})).await.unwrap();
+    assert_eq!(r.told_now("screen.flow").await.last().unwrap()["link_full_ms"], 0, "every frame answered: not full");
+    for seq in 3..=5 {
+        r.send(&sc, &video(seq, false, 100));
+    }
+    // Three wait for the phone: with no acknowledgement to bring a flow, the hold's task says how long at each look.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let full = r.told("screen.flow").last().unwrap()["link_full_ms"].as_u64().unwrap();
+    assert!((250..=1000).contains(&full), "{full} ms");
+    r.verb("sc_ack", json!({"sc": sc, "seq": 3})).await.unwrap();
+    assert_eq!(r.told_now("screen.flow").await.last().unwrap()["link_full_ms"], 0, "one answered: the window has room again");
+}
+
 #[tokio::test]
 async fn frames_that_come_before_the_hold_exists_bring_a_keyframe_request_once_it_does() {
     // The helper streams as soon as it starts: its first frame reaches the daemon while the app's answer is still on its way, and is dropped.
