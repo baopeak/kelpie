@@ -485,6 +485,10 @@ async def scenario(run, d):
     with open(EVENTS + ".raise", "w") as f:
         f.write("1")
     until(lambda: "same-focused" in events(), 5)
+    same = until(lambda: ctypes.windll.user32.FindWindowW(None, "Same " + TITLE), 5)
+    # In front for Windows too (Tk's own call may meet the foreground lock): checked, so a refused change fails here rather than passing below.
+    same_in_front = bool(same) and until(lambda: to_front(same) and ctypes.windll.user32.GetForegroundWindow() == same, 5)
+    check("the same program's second window has taken the focus", same_in_front)
     third = await phone.ask(type="sc_text", sc=phone.sc, text=typed3, st=now_ms())
     await asyncio.to_thread(until, lambda: any(e.startswith("field:") and e.endswith(typed3) for e in events()), 2)
     landed3 = any(e.startswith("field:") and e.endswith(typed3) for e in events())
@@ -536,6 +540,17 @@ async def scenario(run, d):
         print(f"SPIKE stats: {s.get('fps')} fps, {s.get('w')}x{s.get('h')}, {s.get('kbps')} kbps, encode p95 {s.get('encode_ms_p95')} ms, encoder {s.get('encoder')}, reason {s.get('reason')}, crisp {s.get('crisp')}", flush=True)
         print(f"SPIKE stages: {json.dumps(s.get('stages'))}", flush=True)
     check("the computer reports its stages' timings for the measurement plan", bool(stats) and isinstance(stats[-1].get('stages'), dict) and 'capture_to_send_ms_p95' in stats[-1]['stages'], stats[-1].get('stages') if stats else None)
+    # Whether DXGI's first frame after its duplication is made says by itself that everything changed (the review's open question): a monitor
+    # shared briefly; only the frames' headers are kept here, never their pictures.
+    monitor = next((r for r in rows if r["kind"] == "monitor"), None)
+    if monitor:
+        mark_m = phone.mark()
+        on_monitor = await phone.ask(type="sc_start", target=monitor["id"], timeout=20)
+        phone.sc = (on_monitor or {}).get("sc")
+        seen = await phone.wait(lambda m: m["type"] == "sc_stats" and (m.get("stages") or {}).get("dxgi_first_full") is not None, 8, mark_m)
+        print(f"SPIKE DXGI first frame all dirty by its own metadata: {((seen or {}).get('stages') or {}).get('dxgi_first_full')}", flush=True)
+        await phone.ask(type="sc_stop", sc=phone.sc)
+        await see()
     told = [(m["type"], m.get("state") or m.get("reason") or m.get("code")) for m in phone.log if m["type"] in ("sc_end", "sc_state", "error")]
     check("a picture that changes keeps coming while it changes", len(moving) >= 20, f"{len(moving)} frames; the phone was told {told[-8:]}")
 
@@ -592,6 +607,15 @@ async def scenario(run, d):
     reply = await spare.ask(type="screens", timeout=10)
     check("with the app closed, the phone is told to open Kelpie", (reply or {}).get("code") == "no_app" and "Open Kelpie" in (reply or {}).get("message", ""), reply)
     await spare.close()
+
+    # Which encoder this machine used, and the low-latency settings it refused or did not keep (the review's open question): the daemon's log.
+    try:
+        with open(os.path.join(DATA, "logs", "kelpied.log"), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "screen encoder" in line:
+                    print("SPIKE " + line.strip()[-400:], flush=True)
+    except OSError as e:
+        print(f"SPIKE no daemon log: {e}", flush=True)
 
     # ---------- 7. what is kept ----------
     entries = json.dumps((await call("mobile.audit", {"limit": 200}))["entries"])
