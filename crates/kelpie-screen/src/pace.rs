@@ -258,7 +258,7 @@ mod tests {
         p.done();
         assert_eq!(p.due_in(100.0, 40, false), Some(60), "anchored to the last start, not to when it finished");
         assert_eq!(p.due_in(100.0, 150, false), Some(0), "late is now, never queued up");
-        assert_eq!(p.due_in(0.2, 1, false), Some(1), "never under CRD's 1 ms floor");
+        assert_eq!(p.due_in(0.2, 0, false), Some(1), "never under CRD's 1 ms floor");
         p.started(10);
         p.clear();
         assert!(!p.pending(), "a new encoder holds nothing");
