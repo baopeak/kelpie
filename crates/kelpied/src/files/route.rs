@@ -294,7 +294,14 @@ pub const CANNOT_CHECK: i32 = 3;
 /// Whether A confirmed the copier `pid` is stopped (or was not ours any more). A lost connection, a failure, or a host
 /// that cannot tell ([`CANNOT_CHECK`]) is not a confirmation: the pid stays to stop later.
 pub async fn kill_on(exe: &std::path::Path, a: &str, pid: u32) -> bool {
-    matches!(run_on(exe, a, &kill_command(pid), Duration::from_secs(20)).await, Ok((Some(0), _)))
+    match run_on(exe, a, &kill_command(pid), Duration::from_secs(20)).await {
+        Ok((Some(0), _)) => true,
+        Ok((Some(CANNOT_CHECK), _)) => {
+            tracing::warn!("the first host cannot tell which program a process runs: a direct copier may still run there");
+            false
+        }
+        _ => false,
+    }
 }
 
 /// When a probe ran, and B's target or the reason A cannot copy to it directly.

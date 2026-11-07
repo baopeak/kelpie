@@ -564,7 +564,9 @@ impl Queue {
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         rt.spawn(async move {
             // Each partial with the old file a cut replace left aside (if the journal recorded one); only the job's own.
-            let mut by_end: BTreeMap<Option<String>, Vec<(String, String, Option<String>)>> = BTreeMap::new();
+            // (job id, partial, moved-aside file) by destination.
+            type Removal = (String, String, Option<String>);
+            let mut by_end: BTreeMap<Option<String>, Vec<Removal>> = BTreeMap::new();
             for j in jobs {
                 let t = tag(&j.id);
                 let mut asides = j.asides;
