@@ -39,6 +39,7 @@ import http.client
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1355,12 +1356,18 @@ for n in (1, 2, 3):
     config_before = daemon(d, "notify.get")["config"]
     daemon(d, "notify.set", {"config": {**config_before, "ntfy": {"enabled": False, "server": "http://127.0.0.1:9"}}})
     channel = lambda name: daemon(d, "notify.get")["config"][name]["enabled"]  # noqa: E731
-    fail_set = "window.__realInvoke = window.__TAURI_INTERNALS__.invoke; window.__TAURI_INTERNALS__.invoke = (c, a, o) => (a?.method === 'notify.set' ? Promise.reject(new Error('refused for this test')) : window.__realInvoke(c, a, o));"
-    d.js(fail_set)
-    flip("mobile-ntfy")
-    shown = d.wait("return [...document.querySelectorAll('.settings-section .form-note.error')].some((e) => e.textContent.includes('refused for this test'))", 10)
-    d.js("window.__TAURI_INTERNALS__.invoke = window.__realInvoke;")
-    run.check("a change that fails shows the error and leaves the switch off", bool(shown) and not switch_on("mobile-ntfy") and not channel("ntfy"))
+    # A change the daemon cannot save: this run's own notify.json made read-only, which its atomic replace cannot overwrite. (The page's
+    # `invoke` cannot be swapped for a failing one: Tauri defines it, and the object holding it, read-only.)
+    notify_file = os.path.join(ISOLATED["KELPIE_DATA_DIR"], "notify.json")
+    errors = "[...document.querySelectorAll('.settings-section .form-note.error')].map((e) => e.textContent).filter((t) => t.trim())"
+    errors_before = len(d.js(f"return {errors}"))
+    os.chmod(notify_file, stat.S_IREAD)
+    try:
+        flip("mobile-ntfy")
+        shown = d.wait(f"const now = {errors}; return now.length > {errors_before} ? now : null", 10)
+    finally:
+        os.chmod(notify_file, stat.S_IREAD | stat.S_IWRITE)
+    run.check("a change that fails shows the error and leaves the switch off", bool(shown) and not switch_on("mobile-ntfy") and not channel("ntfy"), shown)
     flip("mobile-ntfy")
     run.check("ntfy turns on through the same settings as Notifications", bool(wait(lambda: channel("ntfy") is True, 10)) and daemon(d, "notify.get")["config"]["ntfy"]["server"] == "http://127.0.0.1:9", str(daemon(d, "notify.get")["config"]["ntfy"]))
     run.check("…which made its topic, as there", daemon(d, "notify.get")["secrets"]["ntfy_topic"] is True)
