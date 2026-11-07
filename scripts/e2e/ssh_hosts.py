@@ -280,7 +280,8 @@ try:
     d.click("[data-host=test-box]")
     d.click("[data-action=check]")
     agents = wait(lambda: text_of("[data-host-check]"), 30) or ""
-    if "Claude Code" in agents:
+    # "Install Claude Code" names it too: only a host check that lists it as found starts it.
+    if "Claude Code" in agents.replace("Install Claude Code", ""):
         d.click("[data-action=claude]")
         c = wait(lambda: next((s for s in daemon(d, "session.list") if s["kind"] == "claude" and (s.get("remote") or {}).get("dest") == "test-box"), None), 30)
         run.check("Claude Code starts on the host (in tmux when it has one)", c is not None, agents)
