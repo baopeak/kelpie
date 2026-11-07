@@ -108,7 +108,11 @@ impl Readback {
                     d.ctx.CopySubresourceRegion(staging, 0, r.x as u32, r.y as u32, 0, tex, 0, Some(&region));
                 }
                 let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-                d.ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+                // A failed map leaves the staging copy ahead of `buf`: the next read is a whole one.
+                if let Err(e) = d.ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) {
+                    self.stride = 0;
+                    return Err(e);
+                }
                 if mapped.RowPitch as usize == self.stride {
                     let src = mapped.pData as *const u8;
                     for r in &clipped {

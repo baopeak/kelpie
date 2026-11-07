@@ -30,6 +30,11 @@ pub struct Dxgi {
     output: IDXGIOutput1,
     dup: Option<IDXGIOutputDuplication>,
     pub rect: Rect,
+    /// A duplication was made (again): its first frame counts as all changed.
+    fresh: bool,
+    /// Whether the first frame of the last duplication made said by itself that everything changed (its dirty rectangles cover the output):
+    /// taken by the stream for its stats once, to learn whether DXGI does so on this machine.
+    pub first_full: Option<bool>,
 }
 
 impl Dxgi {
@@ -38,7 +43,7 @@ impl Dxgi {
         if desc.Rotation != DXGI_MODE_ROTATION_IDENTITY && desc.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED {
             return Err("a rotated screen cannot be shown yet: pick one of its windows instead".into());
         }
-        let mut me = Dxgi { output, dup: None, rect };
+        let mut me = Dxgi { output, dup: None, rect, fresh: true, first_full: None };
         let _ = me.reopen(d);
         Ok(me)
     }
@@ -54,6 +59,7 @@ impl Dxgi {
     fn reopen(&mut self, d: &Device) -> Result<()> {
         self.dup = None;
         self.dup = Some(unsafe { self.output.DuplicateOutput(&d.device)? });
+        self.fresh = true;
         Ok(())
     }
 
@@ -89,20 +95,20 @@ impl Dxgi {
             let dirty = self.dirty_rects(dup, info.TotalMetadataBufferSize);
             match resource.and_then(|r| r.cast::<ID3D11Texture2D>().ok()) {
                 Some(tex) => {
-                    // `into` may be a little smaller (a monitor of an odd size, made even for the encoder): only its own size counts. It
-                    // keeps the picture between frames, so only what changed is copied into it (all of it when DXGI does not say).
+                    // The whole picture is copied into `into`, on the GPU (cheap), as WebRTC's duplicator copies it: what changed is said
+                    // (`dirty`) for the tiles' readback and hashing only, so a region the metadata missed never leaves stale pixels in the video.
+                    // `into` may be a little smaller (a monitor of an odd size, made even for the encoder): only its own size counts.
                     let mut desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
                     unsafe { into.GetDesc(&mut desc) };
-                    let bounds = Rect::new(0, 0, desc.Width as i32, desc.Height as i32);
-                    let regions: Vec<Rect> = match &dirty {
-                        Some(rects) => rects.iter().filter_map(|r| r.intersect(bounds)).collect(),
-                        None => vec![bounds],
-                    };
-                    for r in &regions {
-                        let region = windows::Win32::Graphics::Direct3D11::D3D11_BOX { left: r.x as u32, top: r.y as u32, front: 0, right: r.right() as u32, bottom: r.bottom() as u32, back: 1 };
-                        unsafe { d.ctx.CopySubresourceRegion(into, 0, r.x as u32, r.y as u32, 0, &tex, 0, Some(&region)) };
+                    let region = windows::Win32::Graphics::Direct3D11::D3D11_BOX { left: 0, top: 0, front: 0, right: desc.Width, bottom: desc.Height, back: 1 };
+                    unsafe { d.ctx.CopySubresourceRegion(into, 0, 0, 0, 0, &tex, 0, Some(&region)) };
+                    // The first frame of a duplication made again (after UAC, the lock screen) counts as all changed: the desktop may have
+                    // changed while there was none, whatever its metadata says.
+                    if self.fresh {
+                        let all = u64::from(desc.Width) * u64::from(desc.Height);
+                        self.first_full = Some(dirty.as_ref().is_none_or(|d| crate::pace::area(d) >= all));
                     }
-                    Grab::Frame { dirty }
+                    Grab::Frame { dirty: crate::geom::after_reopen(&mut self.fresh, dirty) }
                 }
                 None => Grab::Timeout,
             }

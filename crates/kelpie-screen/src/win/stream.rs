@@ -2,19 +2,20 @@
 //!
 //! A stream is two threads. The **stream thread** owns the device, the capture, the converter and the encoder: it looks at the machine four
 //! times a second (states, the window's place, the border), takes the newest picture when the phone has room and the pacer says so
-//! (`pace::Pacer`: a constant-rate timer from the last capture's start, one frame in the encoder at a time, the top rung's rate for a second
-//! after input), encodes it, rewrites the SPS (`sps`), sends video, paint-over tiles (`tiles`) and the cursor, and once a second the stats
-//! with the stages' timings. A still picture is topped off in the codec first (`pace::TopOff`), and only then painted over with tiles; an
-//! update too large to arrive in time is encoded at a one-frame bitrate dip (`pace::BigFrame`). The **input thread** does the phone's input
+//! (`pace::Pacer`: a constant-rate timer from the last capture's start, one frame in the encoder unless it asks for another), encodes it,
+//! rewrites the SPS (`sps`), sends video, paint-over tiles (`tiles`) and the cursor, and once a second the stats with the stages' timings,
+//! and asks the device four times a second whether it was removed. A still picture is topped off in the codec first (`pace::TopOff`, not for
+//! a caret's few pixels), and only then painted over with tiles; an update or a keyframe too large to arrive in time is encoded at a one-frame
+//! bitrate dip (`pace::BigFrame`), undone however that frame leaves the encoder (`pace::Dip`). The **input thread** does the phone's input
 //! as it comes, so that encoding never delays a click; it reads the target's place and what the state allows from what the stream thread
-//! last wrote, and counts what it did, which boosts the capture rate.
+//! last wrote.
 //!
 //! Frames lost on the way never hold the stream (`control::Flight`): a keyframe request, or the daemon saying what it dropped, gives up the
 //! frames in flight. A frame that is not sent after all (too large) puts its unpaint rectangles back, so a crisp tile is never left over a
 //! change. Sharing does not start without the border and the stop hotkey.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -35,7 +36,7 @@ use super::states_win::Looker;
 use super::targets_win::{self, hwnd};
 use super::{system, wall_ms};
 use crate::control::{Controller, Event, Flight, Params, Stats, MIN_KBPS};
-use crate::pace::{self, BigFrame, EncoderRate, Pacer, ReencodeGate, TopOff, BIG_FRAME_PERCENT};
+use crate::pace::{self, BigFrame, Dip, EncoderRate, Pacer, ReencodeGate, TopOff, BIG_FRAME_PERCENT};
 use crate::geom::{self, Rect};
 use crate::input::{fresh, parse_hotkey, Hotkey, QUEUE};
 use crate::sps;
@@ -113,6 +114,8 @@ struct InEncoder {
     captured: u64,
     convert_ms: f64,
     pass: bool,
+    /// The pixels its picture changed (all of it for a keyframe): a small change does not start a top-off.
+    area: u64,
 }
 
 unsafe impl Send for Shared {}
@@ -382,12 +385,11 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let mut desktop = geom::virtual_desktop(&d3d::monitors());
     let shared = Arc::new(Mutex::new(Shared { geometry: Geometry { window: window_handle.map(|(h, _)| h), rect, src, desktop }, policy: input_policy(State::Live, window) }));
     let (outcome_tx, outcome_rx) = channel::<Outcome>();
-    // Input done, counted by the input thread: each one boosts the capture rate (`pace::Pacer::boost`).
-    let inputs = Arc::new(AtomicU64::new(0));
+
     // Declared after the border: on the way out, normal or a panic, the input thread is stopped and joined before the border and its hotkey go.
     let input_guard = {
-        let (shared, out, stopping, inputs) = (shared.clone(), out.clone(), stopping.clone(), inputs.clone());
-        InputGuard { stopping: stopping.clone(), thread: Some(std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping, inputs))) }
+        let (shared, out, stopping) = (shared.clone(), out.clone(), stopping.clone());
+        InputGuard { stopping: stopping.clone(), thread: Some(std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping))) }
     };
     let _ = started.send(Ok(json!({"kind": if window { "window" } else { "monitor" }, "title": title, "exe": exe, "w": src.0, "h": src.1, "encoder": if encoder.hardware { "hw" } else { "sw" }, "encoder_name": encoder.name})));
     emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": if encoder.hardware { "hw" } else { "sw" }, "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms}));
@@ -402,9 +404,8 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let mut top_off = TopOff::default();
     let mut big = BigFrame::default();
     let mut rate = EncoderRate::new(params.kbps);
-    // A big frame's bitrate dip: the frame's time, and the bitrate to go back to once it is out.
-    let mut dip: Option<(i64, u32)> = None;
-    let mut seen_inputs = 0u64;
+    // A big frame's bitrate dip, undone however that frame leaves the encoder.
+    let mut dip = Dip::default();
     let mut in_encoder: VecDeque<InEncoder> = VecDeque::new();
     let mut link_paused = false;
     let (mut unpaint, mut unpaint_all) = (Vec::<Rect>::new(), false);
@@ -482,15 +483,13 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 _ => {}
             }
         }
-        // Input was done: the capture rate is boosted for a while, so that what it changed shows at once.
-        let done_inputs = inputs.load(Ordering::SeqCst);
-        if done_inputs != seen_inputs {
-            seen_inputs = done_inputs;
-            pacer.boost(now);
-        }
         // Four times a second: the states, the window's place; every two seconds, the monitors.
         if last_look.elapsed() >= LOOK_EVERY {
             last_look = Instant::now();
+            // A graphics driver that restarted took the device: found within a look, even when no frame comes to fail.
+            if unsafe { d.device.GetDeviceRemovedReason() }.is_err() {
+                break 'stream "device_lost".to_string();
+            }
             if let Some(s) = tracker.look(&looker.look(window_handle), window) {
                 emit(&out, json!({"event": "state", "sc": opts.sc, "state": s.name()}));
                 if s.ends() {
@@ -536,15 +535,15 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         ps.seed(h);
                     }
                     in_encoder.clear();
-                    pacer.done();
+                    pacer.clear();
                     top_off.stop();
                     rate = EncoderRate::new(next.kbps);
-                    dip = None;
+                    dip.clear();
                     flight.restart();
                 }
                 _ => break 'stream "encoder_failed".to_string(),
             }
-        } else if dip.is_none() {
+        } else if !dip.active() {
             if let Some(k) = rate.next(next.kbps) {
                 encoder.set_bitrate(k);
             }
@@ -555,7 +554,11 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         // stalled behind a game on the GPU is slow, not instant, and may give way to the software one.
         let mut stalled = false;
         while in_encoder.front().is_some_and(|f| f.began.elapsed() > Duration::from_secs(1)) {
-            in_encoder.pop_front();
+            if let Some(gone) = in_encoder.pop_front() {
+                if let Some(back) = dip.left(gone.time) {
+                    encoder.set_bitrate(back);
+                }
+            }
             pacer.done();
             stalled |= ctl.on_encoded(1000.0, now) == Some(Event::UseSoftware);
         }
@@ -564,15 +567,15 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 encoder = sw;
                 ctl.set_software(true);
                 in_encoder.clear();
-                pacer.done();
+                pacer.clear();
                 rate = EncoderRate::new(params.kbps);
-                dip = None;
+                dip.clear();
                 flight.restart();
                 emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms, "why": "slow"}));
             }
         }
         let interval = ctl.interval_ms();
-        let due = pacer.due_in(interval, ctl.boost_interval_ms(), now);
+        let due = pacer.due_in(interval, now, encoder.asks_for_input());
         // Room for a frame on the link, nothing gating a keyframe, a picture that may move: then the pacer says when.
         let ready = !link_paused && !flight.gated() && tracker.state().picture_moves() && ctl.may_encode(flight.inflight(), None);
         let may = ready && due == Some(0);
@@ -597,7 +600,12 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         } else {
             match &mut source {
                 Source::Monitor(dxgi, tex) => match dxgi.grab(&d, wait_ms as u32, tex) {
-                    capture_dxgi::Grab::Frame { dirty } => Some((tex.clone(), dirty)),
+                    capture_dxgi::Grab::Frame { dirty } => {
+                        if let Some(full) = dxgi.first_full.take() {
+                            stats.dxgi_first_full = Some(u8::from(full));
+                        }
+                        Some((tex.clone(), dirty))
+                    }
                     capture_dxgi::Grab::Changed => break 'stream "display_changed".to_string(),
                     capture_dxgi::Grab::Unavailable => {
                         failures += 1;
@@ -619,10 +627,10 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                                     conv = c;
                                     encoder = e;
                                     in_encoder.clear();
-                                    pacer.done();
+                                    pacer.clear();
                                     top_off.stop();
                                     rate = EncoderRate::new(params.kbps);
-                                    dip = None;
+                                    dip.clear();
                                     flight.restart();
                                 }
                                 _ => break 'stream "encoder_failed".to_string(),
@@ -689,9 +697,12 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 let key = flight.wants_key();
                 // Too large to arrive in time at this bitrate: a coarser frame now, not a late one (CRD's guard), with the bitrate back once
                 // it is out. A keyframe and a top-off pass are what they are.
-                if !key && !pass && dip.is_none() && big.check(area, params.kbps, interval) {
+                // A keyframe is the whole picture: guarded too, so that no media message takes most of the link for long (a reply waits for at
+                // most the one being written).
+                let area = if key { u64::from(src.0) * u64::from(src.1) } else { area };
+                if !pass && !dip.active() && big.check(area, params.kbps, interval) {
                     encoder.set_bitrate((params.kbps * BIG_FRAME_PERCENT / 100).max(MIN_KBPS));
-                    dip = Some((time, rate.applied));
+                    dip.start(time, rate.applied);
                     stats.big_frames += 1;
                 }
                 let began = Instant::now();
@@ -702,18 +713,25 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         }
                         pacer.started(now);
                         flight.encoded(key, now);
-                        in_encoder.push_back(InEncoder { time, began, captured: now, convert_ms, pass });
+                        in_encoder.push_back(InEncoder { time, began, captured: now, convert_ms, pass, area });
                         while in_encoder.len() > 8 {
-                            in_encoder.pop_front();
+                            if let Some(gone) = in_encoder.pop_front() {
+                                if let Some(back) = dip.left(gone.time) {
+                                    encoder.set_bitrate(back);
+                                }
+                            }
                         }
                     }
                     Ok(false) => {
                         // No room in the encoder now: a moment for it, not a spin.
                         stats.dropped_encoder += 1;
                         std::thread::sleep(Duration::from_millis(ENCODER_POLL_MS));
-                        if dip.is_some_and(|(t, _)| t == time) {
-                            encoder.set_bitrate(rate.applied);
-                            dip = None;
+                        if let Some(back) = dip.left(time) {
+                            encoder.set_bitrate(back);
+                        }
+                        // A top-off pass the encoder had no room for counts as one, so a pass is never tried again on every turn.
+                        if pass {
+                            top_off.passed(now, interval, usize::MAX, None);
                         }
                     }
                     Err(_) => {
@@ -723,9 +741,9 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                                 encoder = e;
                                 ctl.set_software(true);
                                 in_encoder.clear();
-                                pacer.done();
+                                pacer.clear();
                                 rate = EncoderRate::new(params.kbps);
-                                dip = None;
+                                dip.clear();
                                 flight.restart();
                                 emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms, "why": "failed"}));
                                 continue;
@@ -746,20 +764,17 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                     // Output that matches no frame given (one already counted as a second's stall) is not timed: it would read as instant.
                     let measured = entry.as_ref().map(|f| f.began.elapsed().as_secs_f64() * 1000.0 + delay.map_or(0.0, |d| d.as_secs_f64() * 1000.0));
                     let encode_ms = measured.unwrap_or(0.0);
-                    if let Some((t, back)) = dip {
-                        if t == e.time {
-                            encoder.set_bitrate(back);
-                            dip = None;
-                        }
+                    if let Some(back) = dip.left(e.time) {
+                        encoder.set_bitrate(back);
                     }
                     if let Some(Event::UseSoftware) = measured.and_then(|ms| ctl.on_encoded(ms, now)) {
                         if let Ok(sw) = Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false) {
                             encoder = sw;
                             ctl.set_software(true);
                             in_encoder.clear();
-                            pacer.done();
+                            pacer.clear();
                             rate = EncoderRate::new(params.kbps);
-                            dip = None;
+                            dip.clear();
                             flight.restart();
                             emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms, "why": "slow"}));
                             break;
@@ -794,7 +809,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         stats.top_off += 1;
                         top_off.passed(sent_at, interval, msg.len(), e.qp);
                     } else {
-                        top_off.changed(sent_at, interval, e.qp);
+                        top_off.changed(sent_at, interval, e.qp, entry.as_ref().map_or(u64::MAX, |f| f.area));
                     }
                 }
             }
@@ -851,9 +866,9 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
 
 /// The phone's input, in the order it came, as long as it is fresh, the stream is not stopping and the state allows it. A button a `down` left
 /// pressed is released when it ends.
-fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Sender<Outcome>, out: SyncSender<Vec<u8>>, stopping: Arc<AtomicBool>, inputs: Arc<AtomicU64>) {
+fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Sender<Outcome>, out: SyncSender<Vec<u8>>, stopping: Arc<AtomicBool>) {
     let _mmcss = system::Mmcss::capture();
-    let mut pressed: Option<&'static str> = None;
+    let mut pressed: Option<input_win::Held> = None;
     loop {
         let cmd = match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(c) => c,
@@ -886,7 +901,6 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
                     continue;
                 }
                 let o = input_win::run(&ops, &g, p, &mut pressed);
-                inputs.fetch_add(1, Ordering::SeqCst);
                 if o != Outcome::Done {
                     let _ = outcomes.send(o);
                 }
@@ -914,7 +928,6 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
                         _ => json!({"id": id, "err": "typing is not possible in this state"}),
                     }
                 };
-                inputs.fetch_add(1, Ordering::SeqCst);
                 emit(&out, reply);
             }
         }

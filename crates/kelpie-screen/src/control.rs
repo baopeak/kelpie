@@ -133,13 +133,22 @@ const UP_WAIT_MAX_MS: u64 = 60_000;
 const UP_HELD_MS: u64 = 30_000;
 /// No frame sent for this long: the stream is application-limited (a still screen), which says nothing about what the link carries.
 const IDLE_AFTER_MS: u64 = 1000;
+/// After a cut, the round trip's floor is looked at again this long after: one that held within `SHIFT_TOLERANCE_MS` is a new base (another
+/// route, a slower decoder), not a queue, and becomes the floor; one that fell is a queue draining (no cut); only one that rose further cuts.
+const SHIFT_AFTER_MS: u64 = 1000;
+const SHIFT_TOLERANCE_MS: u32 = 15;
+/// Queueing cuts at most this many in `CUT_WINDOW_MS`, whatever the round trips say.
+const MAX_CUTS: usize = 3;
+const CUT_WINDOW_MS: u64 = 10_000;
 /// Crisp tiles turn themselves off below this bitrate, and for this long after the bitrate was cut (owner decision 2026-11-06).
 pub const CRISP_MIN_KBPS: u32 = 1000;
 pub const CRISP_CALM_MS: u64 = 10_000;
 
 /// The bitrate the link takes, from what the phone acknowledges. **Queueing** (the round trip's floor over the last half second, counted from
-/// after the last cut, above its floor over ten seconds by more than 50 ms) cuts 15 % at once, and again half a second later only if it still
-/// holds on what came after the cut; the window of frames **full** for a second cuts the same. Ten seconds with neither, while frames are being
+/// after the last cut, above its floor over ten seconds by more than 50 ms) cuts 15 % at once; after a cut, a floor that rose further cuts
+/// again half a second later, one that fell is a queue draining, and one that held for a second is a new base (another route, a slower
+/// decoder), taken as the floor instead of being cut for; three queueing cuts in ten seconds at most, and a new connection forgets the round
+/// trips before it. The window of frames **full** for a second cuts the same. Ten seconds with neither, while frames are being
 /// sent, add 10 %; an application-limited stream (a still screen) earns no increase, so a rate is never raised on no evidence and motion that
 /// resumes after a pause starts from the last rate the link carried. An up-step undone within 10 s doubles the wait before the next (to a
 /// minute), so a link that cannot hold a rate is not pushed to it every few seconds.
@@ -153,13 +162,70 @@ pub struct Bandwidth {
     last_up: Option<u64>,
     up_wait: u64,
     last_sent: Option<u64>,
+    /// The round trip's recent floor when the last queueing cut was made, while that queue is being watched.
+    cut_floor: Option<u32>,
+    /// When the queueing cuts of the last `CUT_WINDOW_MS` were made.
+    cuts: VecDeque<u64>,
     /// Bytes on the wire for each byte of media (the link pads every message to a few sizes), smoothed.
     wire: f64,
 }
 
 impl Bandwidth {
     pub fn new(now: u64) -> Bandwidth {
-        Bandwidth { kbps: START_KBPS, rtts: VecDeque::new(), full_since: None, clean_since: now, last_down: None, last_up: None, up_wait: UP_WAIT_MS, last_sent: None, wire: 1.0 }
+        Bandwidth { kbps: START_KBPS, rtts: VecDeque::new(), full_since: None, clean_since: now, last_down: None, last_up: None, up_wait: UP_WAIT_MS, last_sent: None, cut_floor: None, cuts: VecDeque::new(), wire: 1.0 }
+    }
+
+    /// A new connection (the phone came back, maybe by another route: LAN to relay, Wi-Fi to LTE): the round trips before say nothing about it.
+    pub fn new_route(&mut self) {
+        self.rtts.clear();
+        self.cut_floor = None;
+    }
+
+    /// The round trip's floor over the last `TREND_WINDOW_MS`, counted from after the last cut, with enough samples to be a trend.
+    fn recent_floor(&self) -> Option<u32> {
+        let latest = self.rtts.back()?.0;
+        let from = latest.saturating_sub(TREND_WINDOW_MS).max(self.last_down.map_or(0, |d| d + 1));
+        let recent: Vec<u32> = self.rtts.iter().filter(|(t, _)| *t >= from).map(|(_, r)| *r).collect();
+        (recent.len() >= TREND_MIN_SAMPLES).then(|| recent.into_iter().min()).flatten()
+    }
+
+    /// Whether the queueing seen now is worth a cut: half a second after the last one; once a cut's floor has held for a second it is a new
+    /// base (the floor is taken again from what came after the cut, and nothing is cut); a floor that fell is a queue draining; at most
+    /// `MAX_CUTS` in `CUT_WINDOW_MS`.
+    fn queue_cut_due(&mut self, now: u64) -> bool {
+        match self.queueing_ms() {
+            Some(q) if q > QUEUE_LAG_MS => {}
+            // No queue any more: the last cut's queue is over.
+            Some(_) => {
+                self.cut_floor = None;
+                return false;
+            }
+            // Nothing to tell yet (no samples since the cut): wait.
+            None => return false,
+        }
+        if self.last_down.is_some_and(|d| now.saturating_sub(d) < TREND_WINDOW_MS) {
+            return false;
+        }
+        let Some(recent) = self.recent_floor() else { return false };
+        if let (Some(before), Some(down)) = (self.cut_floor, self.last_down) {
+            if recent + SHIFT_TOLERANCE_MS < before {
+                return false;
+            }
+            if recent <= before + SHIFT_TOLERANCE_MS {
+                if now.saturating_sub(down) >= SHIFT_AFTER_MS {
+                    self.rtts.retain(|(t, _)| *t > down);
+                    self.cut_floor = None;
+                }
+                return false;
+            }
+        }
+        self.cuts.retain(|t| now.saturating_sub(*t) < CUT_WINDOW_MS);
+        if self.cuts.len() >= MAX_CUTS {
+            return false;
+        }
+        self.cut_floor = Some(recent);
+        self.cuts.push_back(now);
+        true
     }
 
     /// A frame's round trip, from the daemon sending it to the phone's acknowledgement.
@@ -196,13 +262,7 @@ impl Bandwidth {
     /// The queueing delay now: the floor of the round trips of the last `TREND_WINDOW_MS` (after the last cut) over the floor of ten seconds.
     pub fn queueing_ms(&self) -> Option<f64> {
         let base = self.rtts.iter().map(|(_, r)| *r).min()?;
-        let latest = self.rtts.back()?.0;
-        let from = latest.saturating_sub(TREND_WINDOW_MS).max(self.last_down.map_or(0, |d| d + 1));
-        let recent: Vec<u32> = self.rtts.iter().filter(|(t, _)| *t >= from).map(|(_, r)| *r).collect();
-        if recent.len() < TREND_MIN_SAMPLES {
-            return None;
-        }
-        Some(f64::from(recent.iter().min()? - base))
+        Some(f64::from(self.recent_floor()? - base))
     }
 
     pub fn lagging(&self, inflight: u32) -> bool {
@@ -212,6 +272,7 @@ impl Bandwidth {
     /// Looked at in every turn with the frames in flight now. True when the bitrate changed.
     pub fn tick(&mut self, inflight: u32, now: u64) -> bool {
         let queueing = self.queueing_ms().is_some_and(|q| q > QUEUE_LAG_MS);
+        let queue_cut = self.queue_cut_due(now);
         let full = inflight >= MAX_INFLIGHT;
         if full {
             self.full_since.get_or_insert(now);
@@ -221,7 +282,7 @@ impl Bandwidth {
         if queueing || full {
             self.clean_since = now;
             let since = self.full_since.unwrap_or(now);
-            let due = (queueing && self.last_down.is_none_or(|d| now.saturating_sub(d) >= TREND_WINDOW_MS)) || (full && now.saturating_sub(since) >= FULL_FOR_MS);
+            let due = queue_cut || (full && now.saturating_sub(since) >= FULL_FOR_MS);
             if due {
                 if self.last_up.is_some_and(|u| now.saturating_sub(u) < UP_WAIT_MS) {
                     self.up_wait = (self.up_wait * 2).min(UP_WAIT_MAX_MS);
@@ -552,19 +613,6 @@ impl Controller {
         1000.0 / f64::from(self.params().fps.max(1))
     }
 
-    /// The interval while input is being answered (`pace::Pacer::boost`): the top rung's, within the load and software caps only. The link is
-    /// still protected by the frames in flight (`MAX_INFLIGHT`) and the encoder by its one frame at a time.
-    pub fn boost_interval_ms(&self) -> f64 {
-        let mut fps = RUNGS[0].fps;
-        if let Some((cap, _)) = load_cap(self.level) {
-            fps = fps.min(cap);
-        }
-        if self.software {
-            fps = fps.min(SOFTWARE_CAP.0);
-        }
-        (1000.0 / f64::from(fps.max(1))).min(self.interval_ms())
-    }
-
     /// A frame was encoded in `encode_ms`.
     pub fn on_encoded(&mut self, encode_ms: f64, now: u64) -> Option<Event> {
         let interval = self.interval_ms();
@@ -646,6 +694,8 @@ pub struct Stats {
     last_send: Option<u64>,
     pub top_off: u32,
     pub big_frames: u32,
+    /// Whether DXGI's first frame after a duplication was made said everything changed (1) or not (0): kept from one report to the next.
+    pub dxgi_first_full: Option<u8>,
 }
 
 /// Where a frame's time went in the helper over the last second (ms), for the measurement plan: from the picture being taken to its message
@@ -665,6 +715,7 @@ pub struct Stages {
     pub big_frames: u32,
     pub held: u64,
     pub first_output_ms: Option<f64>,
+    pub dxgi_first_full: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -771,11 +822,13 @@ impl Stats {
                 big_frames: self.big_frames,
                 held,
                 first_output_ms: round1(first_output_ms),
+                dxgi_first_full: self.dxgi_first_full,
             },
         };
-        let last_send = self.last_send;
+        let (last_send, dxgi_first_full) = (self.last_send, self.dxgi_first_full);
         *self = Stats::new(now);
         self.last_send = last_send;
+        self.dxgi_first_full = dxgi_first_full;
         Some(r)
     }
 }
@@ -889,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn a_queue_that_grows_is_cut_at_once_and_again_only_on_what_came_after_the_cut() {
+    fn a_queue_that_grows_is_cut_at_once_and_again_only_if_it_grows_after_the_cut() {
         let mut b = Bandwidth::new(0);
         acks(&mut b, 30, 0, 2000);
         assert!(!b.lagging(1));
@@ -901,10 +954,12 @@ mod tests {
         assert!(b.tick(1, 2600), "half a second of queueing: cut now");
         assert_eq!(b.kbps, 1275);
         assert!(!b.tick(1, 2700), "nothing came after the cut yet");
-        acks(&mut b, 120, 2633, 3000);
+        // It goes on growing after the cut: cut again, half a second on.
+        acks(&mut b, 200, 2633, 3000);
         assert!(!b.tick(1, 3000), "half a second between cuts");
-        assert!(b.tick(1, 3100), "still queueing on what came after the cut");
+        assert!(b.tick(1, 3100), "growing still, on what came after the cut");
         assert_eq!(b.kbps, 1083);
+        // It drains: no more cuts.
         acks(&mut b, 35, 3133, 3700);
         assert!(!b.tick(1, 3700), "the queue drained: no more cuts");
         assert!(!b.tick(1, 4500));
@@ -916,17 +971,51 @@ mod tests {
     }
 
     #[test]
-    fn queueing_delay_counts_as_lag_even_with_room_in_the_window() {
+    fn a_round_trip_that_steps_up_and_stays_is_a_new_base_not_a_queue_to_cut_for_minutes() {
+        // Another route (LAN to the relay, Wi-Fi to LTE), or a phone's decoder that got slower: 30 ms, then 90 ms for good.
         let mut b = Bandwidth::new(0);
         acks(&mut b, 30, 0, 2000);
-        assert!(!b.lagging(1));
-        acks(&mut b, 400, 2000, 5000);
-        assert!(b.queueing_ms().unwrap() > QUEUE_LAG_MS && b.lagging(1));
-        // The smallest round trip ages out of its window: a link that is slow for good is no longer "queueing".
-        acks(&mut b, 400, 5000, 20_000);
-        assert!(!b.lagging(1), "{:?}", b.queueing_ms());
+        let (mut cuts, mut t, mut next_tick) = (0, 2000u64, 2000u64);
+        while t < 30_000 {
+            b.on_ack(90, t);
+            if t >= next_tick {
+                next_tick += 100;
+                if b.tick(1, t) {
+                    cuts += 1;
+                }
+            }
+            t += 33;
+        }
+        assert!(cuts <= 2, "{cuts} cuts for a step that held: the floor is taken again, not cut to the bottom");
+        assert!(b.kbps >= START_KBPS * 70 / 100, "{} kbps", b.kbps);
+        // Cuts are bounded whatever the round trips say: a link that keeps rising is cut three times in ten seconds at most.
+        let mut c = Bandwidth::new(0);
+        acks(&mut c, 30, 0, 2000);
+        let (mut rtt, mut t, mut cuts, mut next_tick) = (100u32, 2000u64, 0, 2000u64);
+        while t < 12_000 {
+            c.on_ack(rtt, t);
+            rtt += 2;
+            if t >= next_tick {
+                next_tick += 100;
+                if c.tick(1, t) {
+                    cuts += 1;
+                }
+            }
+            t += 33;
+        }
+        assert!(cuts <= MAX_CUTS, "{cuts}");
     }
 
+    #[test]
+    fn a_new_connection_forgets_the_round_trips_of_the_one_before() {
+        let mut b = Bandwidth::new(0);
+        acks(&mut b, 30, 0, 2000);
+        b.new_route();
+        // The new route is 90 ms: its floor, not the old 30 ms, is the base.
+        acks(&mut b, 90, 2000, 3000);
+        assert_eq!(b.queueing_ms(), Some(0.0));
+        assert!(!b.tick(1, 3000));
+    }
     #[test]
     fn a_link_that_cannot_hold_a_rate_is_not_pushed_to_it_more_than_three_times_a_minute() {
         // Every up-step brings lag at once (10 % loss on cellular): count down-after-up cycles over five minutes.
@@ -1164,6 +1253,7 @@ mod tests {
             s.ack(60 + (i % 3) as u32 * 10);
         }
         s.top_off = 4;
+        s.dxgi_first_full = Some(1);
         let p = Params { fps: 30, w: 1920, h: 1080, kbps: 1500, reason: Reason::None, degraded: false };
         assert!(s.report(999, &p, 0, false, Some(true)).is_none());
         let r = s.report(1000, &p, 1, false, Some(false)).unwrap();
@@ -1177,6 +1267,8 @@ mod tests {
         assert_eq!((st.ack_rtt_ms_p50, st.ack_rtt_ms_p95, st.top_off, st.held), (Some(70.0), Some(80.0), 4, 0));
         assert_eq!(s.report(1500, &p, 0, true, None), None, "counters started again");
         s.timing(2000, 10.0, 1.0);
-        assert_eq!(s.report(2000, &p, 0, false, None).unwrap().stages.send_interval_ms_p95, Some(1043.0), "the interval carries on from the last frame before the report");
+        let later = s.report(2000, &p, 0, false, None).unwrap().stages;
+        assert_eq!(later.send_interval_ms_p95, Some(1043.0), "the interval carries on from the last frame before the report");
+        assert_eq!(later.dxgi_first_full, Some(1), "said once, kept in every report after");
     }
 }

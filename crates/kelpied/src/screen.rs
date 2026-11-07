@@ -178,7 +178,7 @@ const STATES: &[&str] = &["live", "locked", "secure_desktop", "closed", "minimiz
 
 /// A target as the phone is told it: only known fields, short strings.
 /// The stage timings a stats event may carry (`kelpie_screen::control::Stages`).
-const STAGE_FIELDS: &[&str] = &["capture_to_send_ms_p50", "capture_to_send_ms_p95", "convert_ms_p95", "encode_ms_p50", "send_interval_ms_p95", "ack_rtt_ms_p50", "ack_rtt_ms_p95", "top_off", "big_frames", "held", "first_output_ms"];
+const STAGE_FIELDS: &[&str] = &["capture_to_send_ms_p50", "capture_to_send_ms_p95", "convert_ms_p95", "encode_ms_p50", "send_interval_ms_p95", "ack_rtt_ms_p50", "ack_rtt_ms_p95", "top_off", "big_frames", "held", "first_output_ms", "dxgi_first_full"];
 
 fn target_row(t: &Value) -> Option<Value> {
     let id = t["id"].as_str().filter(|s| kelpie_screen::targets::TargetId::parse(s).is_some())?;
@@ -312,6 +312,10 @@ impl Broker {
             }
             Some("encoder") => {
                 let encoder = params["encoder"].as_str().filter(|e| matches!(*e, "hw" | "sw")).unwrap_or("hw");
+                // Which encoder, and which low-latency settings it refused or did not keep: in the daemon's log, for the per-vendor table.
+                let name = short(params.get("name"), 80);
+                let refused: Vec<String> = params["refused"].as_array().map(|a| a.iter().take(16).filter_map(|s| s.as_str()).map(|s| s.chars().filter(|c| !c.is_control()).take(60).collect()).collect()).unwrap_or_default();
+                tracing::info!(encoder = %name, kind = encoder, refused = ?refused, first_output_ms = ?params["first_output_ms"].as_f64(), "screen encoder");
                 self.tell(&hold, json!({"type": "sc_state", "sc": sc, "encoder": encoder, "state": "encoder"}));
             }
             Some("ended") => {

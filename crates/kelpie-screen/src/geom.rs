@@ -171,10 +171,26 @@ pub fn updated_region(dirty: &[Rect], moves: &[(i32, i32, Rect)]) -> Vec<Rect> {
     out
 }
 
+/// What changed in a frame of a desktop duplication that may just have been made (again): the first frame after that counts as all changed
+/// (None), whatever its metadata says, since the desktop may have changed while there was no duplication (UAC, the lock screen).
+pub fn after_reopen(fresh: &mut bool, dirty: Option<Vec<Rect>>) -> Option<Vec<Rect>> {
+    if std::mem::take(fresh) {
+        None
+    } else {
+        dirty
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_first_frame_after_the_duplication_is_made_again_counts_as_all_changed() {
+        let mut fresh = true;
+        let small = Some(vec![Rect::new(0, 0, 10, 10)]);
+        assert_eq!(after_reopen(&mut fresh, small.clone()), None, "whatever its metadata says");
+        assert_eq!(after_reopen(&mut fresh, small.clone()), small, "then what DXGI says");
+    }
     #[test]
     fn a_scroll_updates_where_the_pixels_came_from_and_went_and_an_unmoved_move_nothing() {
         let dirty = [Rect::new(0, 900, 1920, 180), Rect::new(5, 5, 0, 10)];

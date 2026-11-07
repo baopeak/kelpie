@@ -128,8 +128,10 @@ pub struct WindowFacts {
     pub same_process: bool,
     /// Same thread as the target.
     pub same_thread: bool,
-    /// A popup window (`WS_POPUP`: a menu, a dropdown list).
-    pub popup: bool,
+    /// A menu or a dropdown list (class `#32768` or `ComboLBox`): the only top-level windows of the target's thread that take a press without
+    /// being the target or its own dialog. A frameless window (any `WS_POPUP`, as Qt and WPF make them) is not one: it may be another window
+    /// the phone does not see.
+    pub menu: bool,
 }
 
 /// Whether input may go to a window.
@@ -155,13 +157,37 @@ pub fn keys_reach(f: WindowFacts) -> Reach {
     }
 }
 
-/// Where a press may land: where keys may go, and a popup of the target's own thread (its menus and dropdown lists, separate top-level
-/// windows). A second window of the same program over the shared one, which the phone cannot see (the capture shows the target alone), is
-/// `Other`: the press is dropped as covered.
+/// Where a press may land: where keys may go, and a menu or dropdown list of the target's own thread (separate top-level windows). A second
+/// window of the same program over the shared one, which the phone cannot see (the capture shows the target alone), is `Other`: the press is
+/// dropped as covered.
 pub fn press_reach(f: WindowFacts) -> Reach {
     match keys_reach(f) {
-        Reach::Other if f.same_thread && f.popup => Reach::Yes,
+        Reach::Other if f.same_thread && f.menu => Reach::Yes,
         r => r,
+    }
+}
+
+/// What a move or an `up` does while a button is held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragStep {
+    /// Goes where it says.
+    Go,
+    /// A move onto what the phone does not see: the pointer stays at the last point that was on the shared window.
+    Hold,
+    /// An `up` onto what the phone does not see: the button is let go at the last point that was on the shared window, so a drag never drops
+    /// text or a file into a window the phone cannot see.
+    ReleaseAtLastSafe,
+}
+
+/// A move or an `up` (`kind`) with a button `held`, at a point `reach` says where it would land.
+pub fn drag_step(kind: &str, held: bool, reach: Reach) -> DragStep {
+    if !held || reach == Reach::Yes {
+        return DragStep::Go;
+    }
+    match kind {
+        "move" => DragStep::Hold,
+        "up" => DragStep::ReleaseAtLastSafe,
+        _ => DragStep::Go,
     }
 }
 /// Whether a button is held after `ops`, given whether one was before: a `down` holds one, an `up`, a `click` or a `release` lets it go.
@@ -282,7 +308,7 @@ mod tests {
         let own_dialog = WindowFacts { owned_by_target: true, same_process: true, ..Default::default() };
         let foreign_dialog = WindowFacts { owned_by_target: true, same_process: false, ..Default::default() };
         let second_window = WindowFacts { same_process: true, same_thread: true, ..Default::default() };
-        let own_menu = WindowFacts { same_process: true, same_thread: true, popup: true, ..Default::default() };
+        let own_menu = WindowFacts { same_process: true, same_thread: true, menu: true, ..Default::default() };
         let other_program = WindowFacts::default();
         assert_eq!(keys_reach(target), Reach::Yes);
         assert_eq!(keys_reach(own_dialog), Reach::Yes, "a Save As of the shared program");
@@ -293,7 +319,19 @@ mod tests {
         assert_eq!(press_reach(own_menu), Reach::Yes, "its own menus and dropdowns take clicks");
         assert_eq!(press_reach(second_window), Reach::Other, "a window the phone does not see takes no click");
         assert_eq!(press_reach(foreign_dialog), Reach::ForeignDialog);
-        assert_eq!(press_reach(WindowFacts { popup: true, ..Default::default() }), Reach::Other, "another program's popup");
+        assert_eq!(press_reach(WindowFacts { menu: true, ..Default::default() }), Reach::Other, "another program's menu");
+        let frameless = WindowFacts { same_process: true, same_thread: true, menu: false, ..Default::default() };
+        assert_eq!(press_reach(frameless), Reach::Other, "a frameless window of the same program (WPF, Qt) is not a menu: the phone may not see it");
+    }
+
+    #[test]
+    fn a_drag_never_drops_where_the_phone_does_not_see() {
+        assert_eq!(drag_step("move", true, Reach::Yes), DragStep::Go);
+        assert_eq!(drag_step("move", true, Reach::Other), DragStep::Hold, "the pointer stays on the shared window");
+        assert_eq!(drag_step("up", true, Reach::Other), DragStep::ReleaseAtLastSafe, "let go at the last safe point, not over the covering window");
+        assert_eq!(drag_step("up", true, Reach::ForeignDialog), DragStep::ReleaseAtLastSafe);
+        assert_eq!(drag_step("move", false, Reach::Other), DragStep::Go, "no button held: a move is only a move");
+        assert_eq!(drag_step("up", true, Reach::Yes), DragStep::Go);
     }
     #[test]
     fn a_release_has_no_place_and_a_held_button_is_followed_through_the_ops() {

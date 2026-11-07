@@ -67,6 +67,8 @@ pub struct Encoder {
     first_in: Option<std::time::Instant>,
     /// From the first frame given to the first frame back, ms.
     pub first_output_ms: Option<f64>,
+    /// The software encoder said it needs more input with a frame inside it (it holds one until the next comes).
+    starved: bool,
 }
 
 // The MFT is used from the stream's thread only.
@@ -185,6 +187,7 @@ impl Encoder {
             delivered: 0,
             first_in: None,
             first_output_ms: None,
+            starved: false,
         };
         // What must be set before the output type.
         me.set_flag("low latency", &CODECAPI_AVLowLatencyMode, true);
@@ -250,6 +253,17 @@ impl Encoder {
         self.submitted.saturating_sub(self.delivered)
     }
 
+    /// Whether the encoder asks for another frame now (`pace::Pacer::due_in`): the hardware encoder's `METransformNeedInput` not yet answered,
+    /// or the software one having said it needs more input while it holds a frame. One that does not honour low latency gives a frame back only
+    /// once the next is in, and asks for it; this is how it is fed at the rate instead of waiting for the frame to be given up on.
+    pub fn asks_for_input(&self) -> bool {
+        if self.hardware {
+            self.need_input > 0
+        } else {
+            self.starved && self.held() > 0
+        }
+    }
+
     pub fn set_bitrate(&mut self, kbps: u32) {
         let fps = self.fps.max(1);
         if let Some(c) = &self.codec {
@@ -294,6 +308,7 @@ impl Encoder {
             self.need_input -= 1;
         }
         self.submitted += 1;
+        self.starved = false;
         self.first_in.get_or_insert_with(std::time::Instant::now);
         Ok(true)
     }
@@ -395,7 +410,10 @@ impl Encoder {
         drop(unsafe { ManuallyDrop::take(&mut buffers[0].pEvents) });
         match result {
             Ok(()) => {}
-            Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+            Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                self.starved = true;
+                return Ok(None);
+            }
             Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
                 unsafe {
                     let t = self.mft.GetOutputAvailableType(self.out_id, 0)?;
@@ -413,6 +431,7 @@ impl Encoder {
             // Bits 0-15 are the default QP (the layout `CODECAPI_AVEncVideoEncodeQP` documents).
             let qp = sample.GetUINT64(&MFSampleExtension_VideoEncodeQP).ok().map(|v| (v & 0xffff) as u32).filter(|q| *q <= 51);
             self.delivered += 1;
+            self.starved = false;
             if self.first_output_ms.is_none() {
                 self.first_output_ms = self.first_in.map(|at| at.elapsed().as_secs_f64() * 1000.0);
             }

@@ -21,12 +21,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetAncestor, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongPtrW, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GUITHREADINFO, GWL_STYLE, SW_RESTORE, WS_POPUP,
+    BringWindowToTop, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GUITHREADINFO, SW_RESTORE,
 };
 
 use super::targets_win::{minimized, window_rect};
 use crate::geom::{self, Rect};
-use crate::input::{key_events, keys_reach, press_reach, text_events, KeyEvent, Reach, WindowFacts};
+use crate::input::{drag_step, key_events, keys_reach, press_reach, text_events, DragStep, KeyEvent, Reach, WindowFacts};
 use crate::states::InputPolicy;
 
 /// Where input goes now.
@@ -114,13 +114,15 @@ fn facts(h: HWND, w: HWND) -> WindowFacts {
         let (mut pid_w, mut pid_h) = (0u32, 0u32);
         let thread_w = GetWindowThreadProcessId(root, Some(&mut pid_w));
         let thread_h = GetWindowThreadProcessId(h, Some(&mut pid_h));
-        let style = GetWindowLongPtrW(root, GWL_STYLE) as u32;
+        let mut class = [0u16; 32];
+        let n = GetClassNameW(root, &mut class).max(0) as usize;
+        let class = String::from_utf16_lossy(&class[..n.min(class.len())]);
         WindowFacts {
             is_target: root == h,
             owned_by_target: root != h && GetAncestor(root, GA_ROOTOWNER) == h,
             same_process: pid_w != 0 && pid_w == pid_h,
             same_thread: thread_w != 0 && thread_w == thread_h,
-            popup: style & WS_POPUP.0 != 0,
+            menu: class == "#32768" || class == "ComboLBox",
         }
     }
 }
@@ -199,7 +201,7 @@ fn buttons(b: &str) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS) {
 }
 
 /// Does the checked ops (`input::checked_ops`). `pressed` keeps the button held by a `down` not yet released, so that the stream's end can let go.
-pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Option<&'static str>) -> Outcome {
+pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Option<Held>) -> Outcome {
     if !policy.mouse && !policy.keys {
         // Nothing allowed now: a held button is still let go.
         if ops.iter().any(|op| op["k"] == "release" || op["k"] == "up") {
@@ -260,7 +262,29 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
         };
         let (sx, sy) = at(op);
         let (x, y) = geom::source_to_screen(sx, sy, g.src.0, g.src.1, rect);
+        let abs = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
         if let Some(h) = g.window {
+            // A drag goes only over what the phone sees: a move onto another window holds the pointer at the last point on the shared one, and
+            // an `up` there lets go at that point, so nothing is dropped into a window the phone cannot see.
+            if matches!(kind, "move" | "up") && pressed.is_some() {
+                match drag_step(kind, true, lands_on(h, x, y)) {
+                    DragStep::Go => {}
+                    DragStep::Hold => {
+                        outcome = Outcome::Covered;
+                        continue;
+                    }
+                    DragStep::ReleaseAtLastSafe => {
+                        if let Some(held) = pressed.take() {
+                            let (_, up) = buttons(held.button);
+                            if !send(&[mouse(held.last.0, held.last.1, 0, abs), mouse(0, 0, 0, up)]) {
+                                return Outcome::Blocked;
+                            }
+                        }
+                        outcome = Outcome::Covered;
+                        continue;
+                    }
+                }
+            }
             if matches!(kind, "down" | "click" | "wheel") {
                 match lands_on(h, x, y) {
                     Reach::Yes => {}
@@ -276,7 +300,6 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
             }
         }
         let (nx, ny) = geom::to_absolute(x, y, g.desktop);
-        let abs = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
         let mut events = vec![mouse(nx, ny, 0, abs)];
         let b = match op["b"].as_str() {
             Some("right") => "right",
@@ -287,7 +310,12 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
         match kind {
             "down" => {
                 events.push(mouse(0, 0, 0, down));
-                *pressed = Some(b);
+                *pressed = Some(Held { button: b, last: (nx, ny) });
+            }
+            "move" => {
+                if let Some(held) = pressed.as_mut() {
+                    held.last = (nx, ny);
+                }
             }
             "up" => {
                 events.push(mouse(0, 0, 0, up));
@@ -318,10 +346,17 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
     outcome
 }
 
-/// Lets go of a button a `down` left held (the stream ended, or the release was dropped as late).
-pub fn release(pressed: &mut Option<&'static str>) {
-    if let Some(b) = pressed.take() {
-        let (_, up) = buttons(b);
+/// A button a `down` holds, and the last point (`SendInput`'s absolute units) the pointer was at on the shared window while it did.
+#[derive(Clone, Copy, Debug)]
+pub struct Held {
+    pub button: &'static str,
+    pub last: (i32, i32),
+}
+
+/// Lets go of a button a `down` left held where the pointer is (the stream ended, or the release was dropped as late).
+pub fn release(pressed: &mut Option<Held>) {
+    if let Some(held) = pressed.take() {
+        let (_, up) = buttons(held.button);
         send(&[mouse(0, 0, 0, up)]);
     }
 }
