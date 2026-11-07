@@ -858,6 +858,9 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 /* ---------- pane tools ---------- */
 .pane-tools { position: absolute; top: 6px; right: 10px; z-index: 8; display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgba(22,26,35,.92); border: 1px solid var(--border-strong); opacity: 0; transition: opacity .12s; pointer-events: none; }
 .pane:hover > .pane-tools { opacity: 1; pointer-events: auto; }
+/* The sub-sessions strip runs under the tools' corner: while the pointer is on it, the tools step aside so its
+   right-hand actions (Close finished) can be clicked. */
+.pane:has(.sub-strip:hover) > .pane-tools { opacity: 0; pointer-events: none; }
 .pane-tools .icon-btn { width: 28px; height: 28px; }
 
 /* ---------- sidebar (rich) ---------- */
