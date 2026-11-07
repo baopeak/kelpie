@@ -105,4 +105,12 @@ Next free API level. Older app: the param is ignored and `relay` is the behaviou
 | The probe adds latency to each copy | M × L | 10 min cache; at most 5 s timeout; a relay start never waits for a probe on retry |
 | The person expected direct to be faster but it is relay | M × L | The reason is shown in one line |
 
+## Owed to a real-host test
+
+The e2e runs host A as Git Bash on Windows through the Python fixture, so these were not checked on a real host:
+
+1. **BusyBox (Alpine A):** does `ps` reject `-p`? The stop no longer depends on it: it reads `/proc/<pid>/cmdline` first. Two things still need a check on Alpine: that `/proc` path works, and that a host without `/proc` and `ps -o` exits 3, so the job says the copier could not be confirmed stopped.
+2. **Git for Windows as A:** `exec sftp` behind an MSYS pid. Does `kill <msys pid>` end the native `sftp.exe`, or only its MSYS stub? On the fixture, `/usr/bin/sftp` was the MSYS program and the kill ended it. A real Git for Windows sshd setup should confirm this.
+3. **ControlMaster:** check against a host whose config sets `ControlMaster auto` with `ControlPersist`. File sessions must open their own connection and leave no background master, and a terminal opened afterwards must still forward the agent.
+
 **Rollback**: revert. Jobs fall back to relay only (phase 3 already supports host ↔ host as two `SftpFs` if the UI offers it).

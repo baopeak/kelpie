@@ -551,8 +551,10 @@ impl Queue {
         before.into_iter().filter(|b| !jobs.iter().any(|j| j.id == b.id)).collect()
     }
 
-    /// Removes the partials of jobs that are gone, one host after another, and puts back an old file a stopped
-    /// replace left only under its moved-aside name.
+    /// Removes the partials of cancelled or finished jobs, one host after another, and puts back an old file a stopped
+    /// replace left only under its moved-aside name. A job still listed drops a partial from its journal only once the
+    /// partial is gone, so one that could not be removed (a host still holding it open, a daemon exit first) is tried
+    /// again when the job is cleared or pruned.
     fn remove_partials(self: &Arc<Self>, jobs: Vec<Job>) {
         let jobs: Vec<Job> = jobs.into_iter().filter(|j| !j.partials.is_empty()).collect();
         if jobs.is_empty() {
@@ -562,25 +564,35 @@ impl Queue {
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         rt.spawn(async move {
             // Each partial with the old file a cut replace left aside (if the journal recorded one); only the job's own.
-            let mut by_end: BTreeMap<Option<String>, Vec<(String, Option<String>)>> = BTreeMap::new();
+            let mut by_end: BTreeMap<Option<String>, Vec<(String, String, Option<String>)>> = BTreeMap::new();
             for j in jobs {
                 let t = tag(&j.id);
                 let mut asides = j.asides;
                 let list = by_end.entry(j.dst.dest.clone()).or_default();
                 for p in j.partials.into_keys().filter(|p| owns(&t, p)) {
                     let aside = asides.remove(&p).filter(|a| owns(&t, a));
-                    list.push((p, aside));
+                    list.push((j.id.clone(), p, aside));
                 }
             }
             for (dest, partials) in by_end {
                 let Ok(fs) = me.end(&End { dest }).await else { continue };
-                for (p, aside) in partials {
-                    let _ = fs.remove_file(&p).await;
-                    if let Some(a) = aside {
-                        restore_aside(fs.as_ref(), &p, &a).await;
+                for (id, p, aside) in partials {
+                    let gone = match fs.remove_file(&p).await {
+                        Ok(()) => true,
+                        Err(e) => e.kind == ErrKind::NotFound,
+                    };
+                    if let Some(a) = &aside {
+                        restore_aside(fs.as_ref(), &p, a).await;
+                    }
+                    if gone {
+                        me.count(&id, |j| {
+                            j.partials.remove(&p);
+                            j.asides.remove(&p);
+                        });
                     }
                 }
             }
+            me.save();
         });
     }
 
@@ -749,7 +761,6 @@ impl Queue {
                     self.update(id, |j| {
                         j.state = State::Cancelled;
                         j.finished = Some(now());
-                        j.partials.clear();
                     });
                     self.remove_partials(vec![job]);
                 }
@@ -917,7 +928,7 @@ impl Queue {
         let mut best = 0u64;
         loop {
             if let Some(stop) = Self::halted(&live) {
-                return self.finish_stopped(id, stop);
+                return self.finish_stopped(id, stop, &live);
             }
             self.update(id, |j| {
                 j.state = State::Scanning;
@@ -955,7 +966,7 @@ impl Queue {
                         tracing::info!(job = %id, files = j.totals.done_files, bytes = j.totals.done_bytes, failed = j.totals.failed, "transfer done");
                     }
                 }
-                Ok(stop) => self.finish_stopped(id, stop),
+                Ok(stop) => self.finish_stopped(id, stop, &live),
                 Err(e) if e.kind == ErrKind::Connection => {
                     // Bytes the target holds (resumed from, complete, written and closed), never writes still on
                     // their way: a host that refuses them (a full disk) would otherwise look like progress forever.
@@ -1009,18 +1020,23 @@ impl Queue {
         });
     }
 
-    /// Paused (partials kept for the resume) or cancelled (partials removed).
-    fn finish_stopped(self: &Arc<Self>, id: &str, stop: Outcome) {
+    /// Paused (partials kept for the resume) or cancelled (partials removed). A direct copier the first host could
+    /// not be told to stop is said on the job: the stop is not a clean one.
+    fn finish_stopped(self: &Arc<Self>, id: &str, stop: Outcome, live: &Live) {
         let cancelled = matches!(stop, Outcome::Cancelled);
+        let unstopped: Vec<u32> = live.stale_pids.lock().clone();
         let job = self.update(id, |j| {
             j.state = if cancelled { State::Cancelled } else { State::Paused };
             j.finished = cancelled.then(now);
             j.questions.clear();
             j.speed_bps = 0;
             j.eta_s = None;
+            if !unstopped.is_empty() {
+                let pids = unstopped.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+                j.error = Some(format!("the copy on {} could not be confirmed stopped (process {pids}): it may still be writing", j.src.dest.as_deref().unwrap_or("the first host")));
+            }
         });
         if let (true, Some(j)) = (cancelled, job) {
-            self.update(id, |j| j.partials.clear());
             self.remove_partials(vec![j]);
         }
     }
@@ -1524,7 +1540,8 @@ impl Queue {
                             return Err(FsError::new(ErrKind::Other, format!("not enough free space on the target ({free} bytes free when the transfer started)")));
                         }
                         Ok(Copied::Stopped(Stop::Pause)) => return Ok(()),
-                        // Cancel: the partial stays in the journal until the job's cleanup has removed it too.
+                        // Cancel: the partial stays in the journal until the job's cleanup has removed it from the host;
+                        // one it could not remove stays listed for a later try.
                         Ok(Copied::Stopped(Stop::Cancel)) => return Ok(()),
                         Err(e) if e.kind == ErrKind::Connection => return Err(e),
                         Err(e) => {
@@ -2021,6 +2038,49 @@ mod tests {
         }
         assert!(!r.b.exists(&partial(&id, "/dst", "big.bin")));
         assert!(!r.b.exists("/dst/big.bin"));
+        until(&r, &id, |j| j.partials.is_empty()).await;
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_partial_leaves_the_journal_only_once_it_is_gone() {
+        let r = rig("cancelkeep");
+        r.a.put("/src/big.bin", &data(1 << 20), 10);
+        r.b.mkdir_all("/dst");
+        r.a.fail_reads_after(Some(300_000));
+        let id = start(&r, json!({"src": {"dest": "a"}, "dst": {"dest": "b"}, "items": ["/src/big.bin"], "dst_dir": "/dst"})).await;
+        until(&r, &id, |j| j.state == State::Reconnecting).await;
+        let p = partial(&id, "/dst", "big.bin");
+        // The second host still holds the file (a Windows server and a copier that did not stop).
+        r.b.refuse_remove(&p, true);
+        r.q.rpc("xfer.control", &json!({"id": id, "action": "cancel"})).await.unwrap();
+        until(&r, &id, |j| j.state == State::Cancelled).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(r.b.exists(&p));
+        assert!(r.q.get(&id).unwrap().partials.contains_key(&p), "kept in the journal for a later try");
+        // Clearing the job tries again.
+        r.b.refuse_remove(&p, false);
+        r.q.rpc("xfer.control", &json!({"id": id, "action": "clear"})).await.unwrap();
+        for _ in 0..100 {
+            if !r.b.exists(&p) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!r.b.exists(&p));
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+
+    #[tokio::test]
+    async fn a_stop_the_first_host_could_not_confirm_is_said_on_the_job() {
+        let r = rig("unstopped");
+        let id = r.q.queue_for_test();
+        let live = Live::default();
+        live.stale_pids.lock().push(4242);
+        r.q.finish_stopped(&id, Outcome::Cancelled, &live);
+        let j = r.q.get(&id).unwrap();
+        assert_eq!(j.state, State::Cancelled);
+        assert!(j.error.as_deref().unwrap_or_default().contains("could not be confirmed stopped (process 4242)"), "{j:?}");
         let _ = std::fs::remove_dir_all(&r.dir);
     }
 

@@ -81,14 +81,7 @@ pub fn q(s: &str) -> String {
 /// The ssh options for the connection to A (before the destination): Kelpie's terminal options, no terminal, and
 /// never any forwarding, tunnel or extra command, whatever the host's config says.
 pub fn outer_args(config: &std::path::Path, a: &str) -> Vec<String> {
-    let mut args = vec!["-F".to_string(), config.to_string_lossy().into_owned(), "-T".to_string()];
-    for o in [
-        "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "Tunnel=no", "RequestTTY=no", "RemoteCommand=none", "PermitLocalCommand=no", "NumberOfPasswordPrompts=1",
-        "ConnectTimeout=15", "ServerAliveInterval=15", "ServerAliveCountMax=3", "LogLevel=ERROR",
-    ] {
-        args.push("-o".into());
-        args.push(o.into());
-    }
+    let mut args = super::pool::base_args(config);
     args.push(a.to_string());
     args
 }
@@ -102,7 +95,7 @@ const KEYS_MARK: &str = "kelpie-keys";
 
 /// The probe, run on A as `sh -c <script> kelpie <hostname> <port> <user> <known-hosts name>`: values travel as
 /// positional parameters, never inside the script. One line: csh and tcsh login shells refuse newlines in quotes.
-pub const PROBE: &str = r#"command -v sftp >/dev/null 2>&1 && command -v ssh >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1 || exit 41; err=$(ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -p "$2" -l "$3" "$1" true 2>&1 >/dev/null); code=$?; [ "$code" -eq 255 ] && code=42; printf '%s\n' "$err"; echo kelpie-keys; ssh-keygen -F "$4" 2>/dev/null; exit $code"#;
+pub const PROBE: &str = r#"command -v sftp >/dev/null 2>&1 && command -v ssh >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1 || exit 41; err=$(ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o RequestTTY=no -o ControlMaster=no -o ControlPath=none -p "$2" -l "$3" "$1" true 2>&1 >/dev/null); code=$?; [ "$code" -eq 255 ] && code=42; printf '%s\n' "$err"; echo kelpie-keys; ssh-keygen -F "$4" 2>/dev/null; exit $code"#;
 
 pub fn probe_command(t: &Target) -> String {
     format!("sh -c {} kelpie {} {} {} {}", q(PROBE), q(&t.hostname), q(&t.port.to_string()), q(&t.user), q(&t.known_hosts_name()))
@@ -172,7 +165,7 @@ pub fn batch_quote(path: &str) -> Option<String> {
 
 /// The direct copier, run on A as `sh -c <script> kelpie <port> <user> <host>`: says its process id, then becomes
 /// `sftp` in batch mode reading commands from stdin. One line (see `PROBE`).
-pub const DIRECT: &str = r#"echo "kelpie-pid $$"; exec sftp -q -b - -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -P "$1" "$2@$3""#;
+pub const DIRECT: &str = r#"echo "kelpie-pid $$"; exec sftp -q -b - -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o RequestTTY=no -o ControlMaster=no -o ControlPath=none -P "$1" "$2@$3""#;
 
 pub fn direct_command(t: &Target) -> String {
     format!("sh -c {} kelpie {} {} {}", q(DIRECT), q(&t.port.to_string()), q(&t.user), q(&t.host_for_sftp()))
@@ -289,10 +282,17 @@ pub fn kill_command(pid: u32) -> String {
     format!("sh -c {} kelpie {pid}", q(KILL))
 }
 
-/// Stops the copier `$1` on A only while it is still `sftp`. Plain `ps -p` (no `-o`): Git for Windows' and BusyBox's
-/// `ps` know no `-o`, and every one prints the command in its row.
-const KILL: &str = r#"still() { ps -p "$1" 2>/dev/null | tail -n +2 | grep -q sftp; }; still "$1" || exit 0; kill "$1"; sleep 1; still "$1" && kill -9 "$1"; exit 0"#;
+/// Stops the copier `$1` on A only while its program is exactly `sftp` (argv[0]'s base name): never `sftp-server`, an
+/// `ssh … -s sftp`, or another command that mentions sftp. The name comes from `/proc/<pid>/cmdline` where there is a
+/// `/proc` (Linux, BusyBox included; Git for Windows / MSYS), else from `ps -o comm= -p` (macOS, the BSDs). A host
+/// where neither works exits [`CANNOT_CHECK`]: the copier is not known to be stopped, so its pid stays to stop later.
+const KILL: &str = r#"if [ -r /proc/self/cmdline ]; then how=proc; elif ps -o comm= -p $$ >/dev/null 2>&1; then how=ps; else exit 3; fi; still() { if [ "$how" = proc ]; then n=$(tr '\0' '\n' 2>/dev/null < "/proc/$1/cmdline" | head -n 1); else n=$(ps -o comm= -p "$1" 2>/dev/null | head -n 1); fi; n=$(echo $n); [ "${n##*/}" = sftp ]; }; still "$1" || exit 0; kill "$1"; sleep 1; still "$1" && kill -9 "$1"; exit 0"#;
 
+/// The kill script's exit when A can tell no process's program (no `/proc`, no `ps -o`).
+pub const CANNOT_CHECK: i32 = 3;
+
+/// Whether A confirmed the copier `pid` is stopped (or was not ours any more). A lost connection, a failure, or a host
+/// that cannot tell ([`CANNOT_CHECK`]) is not a confirmation: the pid stays to stop later.
 pub async fn kill_on(exe: &std::path::Path, a: &str, pid: u32) -> bool {
     matches!(run_on(exe, a, &kill_command(pid), Duration::from_secs(20)).await, Ok((Some(0), _)))
 }
@@ -474,7 +474,7 @@ mod tests {
     fn the_ssh_to_the_first_host_never_forwards_or_opens_a_terminal() {
         let args = outer_args(std::path::Path::new("/d/ssh/config"), "a-host");
         assert!(args.contains(&"-T".to_string()));
-        for o in ["ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "Tunnel=no", "RequestTTY=no", "RemoteCommand=none", "PermitLocalCommand=no"] {
+        for o in ["ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "Tunnel=no", "RequestTTY=no", "RemoteCommand=none", "PermitLocalCommand=no", "ControlMaster=no", "ControlPath=none"] {
             assert!(args.windows(2).any(|w| w == ["-o", o]), "{o}");
         }
         assert_eq!(args.last().unwrap(), "a-host");
@@ -490,6 +490,7 @@ mod tests {
         assert!(direct_command(&t).ends_with(" kelpie '2222' 'deploy' '10.0.0.5'"));
         for s in [PROBE, DIRECT] {
             assert!(s.contains("ForwardAgent=no") && s.contains("ClearAllForwardings=yes") && s.contains("StrictHostKeyChecking=yes"));
+            assert!(s.contains("RequestTTY=no") && s.contains("ControlMaster=no") && s.contains("ControlPath=none"), "no terminal, a connection of its own");
         }
         // IPv6 for sftp in brackets; known_hosts names without them.
         let v6 = Target { hostname: "fe80::1".into(), port: 22, user: "u".into() };
@@ -552,7 +553,8 @@ mod tests {
         assert_eq!(find_pid("kelpie-pid x"), None);
         let k = kill_command(4242);
         assert!(k.starts_with("sh -c '") && k.ends_with("' kelpie 4242"), "the pid only as a parameter: {k}");
-        assert!(KILL.contains(r#"ps -p "$1""#) && KILL.contains("grep -q sftp") && !KILL.contains(" -o "), "only while it is still sftp, with any ps: {k}");
+        assert!(KILL.contains("/proc/$1/cmdline") && KILL.contains("ps -o comm= -p") && KILL.contains(r#"[ "${n##*/}" = sftp ]"#), "only while its program is sftp: {k}");
+        assert!(KILL.contains(&format!("exit {CANNOT_CHECK}")) && !KILL.contains('\n'), "a host that cannot tell says so, on one line");
     }
 
     #[test]

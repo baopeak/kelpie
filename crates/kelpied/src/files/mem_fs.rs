@@ -56,6 +56,8 @@ struct State {
     opened: Vec<(String, u64)>,
     /// `realpath` fails (a server or drive that cannot say).
     realpath_fails: bool,
+    /// Removing these fails, as a Windows server refuses a file it still holds open.
+    refuse_remove: std::collections::HashSet<String>,
     now: u64,
 }
 
@@ -93,6 +95,7 @@ impl MemFs {
             no_modes: false,
             opened: Vec::new(),
             realpath_fails: false,
+            refuse_remove: Default::default(),
             now: 1_700_000_000,
         })));
         fs.0.lock().nodes.insert("/".into(), Node { body: Body::Dir, mtime: 0, mode: 0o755 });
@@ -175,6 +178,16 @@ impl MemFs {
     pub fn without_realpath(self) -> Self {
         self.0.lock().realpath_fails = true;
         self
+    }
+
+    /// Removing `path` fails (`true`) or works again.
+    pub fn refuse_remove(&self, path: &str, refuse: bool) {
+        let mut s = self.0.lock();
+        if refuse {
+            s.refuse_remove.insert(path.into());
+        } else {
+            s.refuse_remove.remove(path);
+        }
     }
 
     /// The offsets `path` was opened for reading at, in order.
@@ -392,6 +405,9 @@ impl RemoteFs for MemFs {
 
     async fn remove_file(&self, path: &str) -> FsResult<()> {
         let mut s = self.0.lock();
+        if s.refuse_remove.contains(path) {
+            return Err(FsError::new(ErrKind::Denied, "the file is in use (test)"));
+        }
         match s.nodes.get(path).map(|n| &n.body) {
             None => Err(not_found(path)),
             Some(Body::Dir) => Err(FsError::invalid("is a folder")),
