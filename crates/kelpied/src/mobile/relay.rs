@@ -207,6 +207,12 @@ impl Slot {
         let _ = self.out.send(Out::Kick(self.slot, self.generation, code, reason)).await;
     }
 
+    /// A slot of no relay, for tests of what is carried over one.
+    #[cfg(test)]
+    pub fn for_test(frames: mpsc::Receiver<Inbound>, out: mpsc::Sender<Out>) -> Slot {
+        Slot { slot: 1, generation: 1, frames, out }
+    }
+
     /// What sends for this slot, for a writer of its own (`link::Wire`), while this keeps receiving.
     pub fn sender(&self) -> SlotSender {
         SlotSender { slot: self.slot, generation: self.generation, out: self.out.clone() }

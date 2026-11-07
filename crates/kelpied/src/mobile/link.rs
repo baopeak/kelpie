@@ -638,3 +638,77 @@ async fn reconnect(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generat
     }
     super::client(daemon, wire, generation, device, peer, browser, said).await;
 }
+#[cfg(test)]
+mod tests {
+    use super::super::relay::{Inbound, Out, Slot};
+    use super::*;
+
+    /// The daemon's session and the phone's, after a reconnect handshake.
+    fn sessions() -> (kelpie_link::Session, kelpie_link::Session) {
+        let (desktop, phone) = (kelpie_link::Keypair::generate().unwrap(), kelpie_link::Keypair::generate().unwrap());
+        let (init, first) = kelpie_link::Initiator::reconnect(&phone, &desktop.public).unwrap();
+        let (ours, reply) = kelpie_link::read_first(&desktop, &first, &[]).unwrap().accept().unwrap();
+        (ours, init.finish(&reply).unwrap())
+    }
+
+    /// What the phone gets, opened, as far as it has come.
+    fn received(phone: &mut kelpie_link::Session, out: &mut mpsc::Receiver<Out>) -> Vec<Vec<u8>> {
+        let mut got = Vec::new();
+        while let Ok(Out::Frame(_, _, frame)) = out.try_recv() {
+            if let Some(msg) = phone.open(&frame, now()).unwrap() {
+                got.push(msg);
+            }
+        }
+        got
+    }
+
+    #[tokio::test]
+    async fn messages_go_before_media_none_to_a_locked_phone_and_what_the_phone_sends_is_read_while_the_writer_waits() {
+        let (ours, mut phone) = sessions();
+        let (frames_tx, frames_rx) = mpsc::channel::<Inbound>(8);
+        // Room for one frame: the writer waits on a slow phone until the test takes what it wrote.
+        let (out_tx, mut out_rx) = mpsc::channel::<Out>(1);
+        let mut wire = Wire::new(Carrier::Relay(Slot::for_test(frames_rx, out_tx)), ours);
+        let (media_tx, media_rx) = mpsc::channel(6);
+        let locked = Arc::new(AtomicBool::new(false));
+        media_tx.try_send(b"\x01first frame".to_vec()).unwrap();
+        assert!(wire.attach_media(media_rx, locked.clone()).await);
+        assert!(wire.send("one").await && wire.send("two").await);
+        // The writer is held by the phone's slow side: the connection still reads what the phone sends meanwhile.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for frame in phone.seal(br#"{"type":"sc_input"}"#).unwrap() {
+            frames_tx.send(Ok(frame)).await.unwrap();
+        }
+        let msg = tokio::time::timeout(Duration::from_secs(1), wire.ws.recv()).await.expect("read while the writer waits").unwrap().unwrap();
+        assert!(matches!(wire.open(msg), Opened::Text(t) if t.contains("sc_input")));
+        // In order: the messages, then the media that waited behind them.
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            got.extend(received(&mut phone, &mut out_rx));
+            if got.len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(got, [b"one".to_vec(), b"two".to_vec(), b"\x01first frame".to_vec()]);
+        // A locked phone gets no media; messages still go.
+        locked.store(true, Ordering::SeqCst);
+        media_tx.try_send(b"\x01while locked".to_vec()).unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(wire.send("three").await);
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            got.extend(received(&mut phone, &mut out_rx));
+            if !got.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(got, [b"three".to_vec()]);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(received(&mut phone, &mut out_rx).is_empty(), "nothing of the media lane to a locked phone");
+        // Closing goes after what was queued, and the writer is done.
+        wire.close(1000, "").await;
+        assert!(!wire.send("after").await, "a closed wire takes nothing more");
+    }
+}
