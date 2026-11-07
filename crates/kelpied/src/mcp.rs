@@ -542,7 +542,7 @@ pub fn session_rows(list: &[Value], me: &str, scope: &str) -> Result<Vec<Value>,
             let name = Some(str_of(s, "name")).filter(|n| !n.is_empty()).unwrap_or(str_of(s, "title"));
             json!({
                 "handle": s["handle"], "id": s["id"], "name": name, "agent": s["kind"], "project_folder": s["cwd"],
-                "status": s["status"], "parent": parent.unwrap_or(Value::Null),
+                "status": if s["switching"].as_bool() == Some(true) { json!("switching") } else { s["status"].clone() }, "parent": parent.unwrap_or(Value::Null),
                 "last_report": s.get("report").filter(|r| r.is_object()).map(|r| json!({"status": r["status"], "summary": r["summary"], "automatic": r["auto"]})).unwrap_or(Value::Null),
             })
         })
@@ -619,7 +619,8 @@ pub fn wait_outcome(watched: &[(String, String)], seen_working: &mut HashSet<Str
     if watched.iter().any(|(_, status)| status == "exited") {
         return Some("a sub-session exited");
     }
-    if watched.iter().any(|(id, status)| status != "working" && seen_working.contains(id)) {
+    // A session the app is moving to the other view is neither stopped nor done: its replacement tells the parent by mail.
+    if watched.iter().any(|(id, status)| status != "working" && status != "switching" && seen_working.contains(id)) {
         return Some("a sub-session stopped working");
     }
     if elapsed >= IDLE_GRACE && seen_working.is_empty() {

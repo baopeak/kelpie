@@ -54,7 +54,7 @@ branch: feat/sub-sessions (worktree D:\kelpie-subsessions, off origin/master 7b9
 |---|---|---|---|---|
 | 1 | [Daemon core: lineage, sub.* RPCs, policy, approvals, mailbox, delivery, caps](phase-01-daemon-core.md) | 2d | — | completed (edc1076) |
 | 2 | [Agent surface: `kelpied mcp`, `kelpied sub`, launch injection, child brief, hints](phase-02-agent-surface.md) | 1.5d | 1 | completed |
-| 3 | [App UI: tree, children strip, approval card, settings, i18n](phase-03-app-ui.md) | 1.5d | 1 | pending |
+| 3 | [App UI: tree, children strip, approval card, settings, i18n](phase-03-app-ui.md) | 1.5d | 1 | completed |
 | 4 | [Docs, end-to-end and real-agent check](phase-04-docs-e2e.md) | 1d | 2, 3 | pending |
 
 Sequential, one phase at a time; each: implement → tests → code review → fix until no blocker → local commit.

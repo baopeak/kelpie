@@ -38,6 +38,23 @@ export interface SessionInfo {
   interrupted: boolean;
   /** Runs on another machine over SSH. */
   remote?: { dest: string; port?: number; config?: string; tmux: boolean } | null;
+  /** The session whose agent opened this one with Kelpie's sub-session tools (daemon API 30+; absent: nobody's sub-session). */
+  parent?: string;
+  /** How many sessions are above it (0 or absent: none). */
+  depth?: number;
+  /** What it last reported to its parent (absent until it does). */
+  report?: SubReport;
+}
+
+/** A sub-session's last report: what its row shows. `auto`: Kelpie worked it out from the session's state (waiting for the user,
+ *  idle after work, exited) instead of the agent saying it. */
+export interface SubReport {
+  /** progress | blocked | needs_user | done | failed from the agent; also idle | exited when `auto`. */
+  status: string;
+  summary: string;
+  /** Wall-clock ms. */
+  at: number;
+  auto?: boolean;
 }
 
 export type WorkStatus = "todo" | "progress" | "review" | "done";

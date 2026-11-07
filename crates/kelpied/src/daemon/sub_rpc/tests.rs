@@ -536,7 +536,7 @@ fn session_create_from_a_session_is_a_capped_sub_session_and_the_users_is_unchan
         assert!(why.contains("agent sessions only"), "{why}");
     }
     assert!(create(7, json!({"cwd": folder})).contains("agent sessions only"), "shell is the default kind");
-    for (key, value) in [("id", json!("p")), ("env", json!({"A": "b"})), ("chat_argv", json!(["x"])), ("remote", json!({"dest": "h"})), ("agent_session_id", json!("c1"))] {
+    for (key, value) in [("id", json!("p")), ("env", json!({"A": "b"})), ("chat_argv", json!(["x"])), ("remote", json!({"dest": "h"})), ("agent_session_id", json!("c1")), ("lineage_from", json!("p"))] {
         let mut params = json!({"kind": "codex", "cwd": folder});
         params[key] = value;
         d.subs.policy.write().mode = Mode::Allow;
@@ -1030,3 +1030,89 @@ fn a_run_of_a_session_at_the_deepest_level_is_refused_and_the_user_adopts_an_orp
     assert_eq!(retry(8), None);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_session_that_replaces_another_takes_its_place_among_the_sub_sessions() {
+    let (d, dir) = daemon("sub-lineage");
+    add(&d, 1, "parent", "claude", None);
+    let (old, _) = add(&d, 2, "old", "claude", Some(("parent", 1)));
+    let report = crate::session::SubReport { status: "done".into(), summary: "fixed it".into(), at: 5, auto: false };
+    old.spec.lock().report = Some(report.clone());
+    add(&d, 3, "grandchild", "codex", Some(("old", 2)));
+    add(&d, 4, "sibling", "codex", Some(("parent", 1)));
+    let (new, _) = add(&d, 5, "new", "claude", None);
+    d.subs.mail.lock().add("old", mail_from("for you"), Instant::now(), 1, false).unwrap();
+    d.subs.grant("old");
+
+    // What the new session is given at creation, and what the old one stops being.
+    let place = crate::daemon::place_among_subs(None, Some(&old.spec.lock().clone()));
+    assert_eq!(place, (Some("parent".to_string()), 1, Some(report)));
+    assert_eq!(crate::daemon::place_among_subs(Some(("p".into(), 2)), Some(&old.spec.lock().clone())), (Some("p".to_string()), 2, None), "a spawn's own lineage wins");
+    assert_eq!(crate::daemon::place_among_subs(None, None), (None, 0, None));
+
+    // An automatic report (the exit that the stop of the switch makes) describes the old process and is not carried.
+    let exited = crate::session::SubReport { status: "exited".into(), summary: "exited with code 1".into(), at: 6, auto: true };
+    old.spec.lock().report = Some(exited);
+    assert_eq!(crate::daemon::place_among_subs(None, Some(&old.spec.lock().clone())).2, None, "only what the agent said itself");
+    old.spec.lock().report = Some(crate::session::SubReport { status: "done".into(), summary: "fixed it".into(), at: 5, auto: false });
+    // A run the old session made.
+    let run = crate::runs::build_run(
+        crate::runs::NewRun {
+            name: "R".into(), objective: "o".into(), cwd: ".".into(), project_id: None, idle_done_secs: Some(60), materialize: None,
+            tasks: vec![crate::runs::NewTask { id: Some("a".into()), title: "a".into(), prompt: "do a".into(), kind: None, args: vec![], env: Default::default(), deps: vec![], approve: false, worktree: false, host: None }],
+        },
+        "r1".into(),
+        0,
+    );
+    let mut run = run.unwrap();
+    run.creator = Some("old".into());
+    d.runs.lock().list.push(run);
+
+    d.hand_over_lineage("old", &new.info());
+    assert_eq!(d.runs.lock().get("r1").and_then(|r| r.creator.clone()).as_deref(), Some("new"), "its runs go on with the new session");
+    let note = d.subs.mail.lock().peek("parent").0;
+    assert_eq!(note.len(), 1, "the parent is told once");
+    assert!(note[0].text.contains(&format!("#{}", new.handle)) && note[0].text.contains("#2 is closed"), "{}", note[0].text);
+    let parent_of = |id: &str| d.by_id(id).unwrap().spec().parent;
+    assert_eq!(parent_of("grandchild").as_deref(), Some("new"), "its children follow");
+    assert_eq!(parent_of("sibling").as_deref(), Some("parent"), "the others stay where they are");
+    let old_spec = d.by_id("old").unwrap().spec();
+    assert_eq!((old_spec.parent, old_spec.depth, old_spec.report), (None, 0, None), "the old one is nobody's sub-session now");
+    assert!(new.spec.lock().parent.is_none(), "the new session's own place is set when it is created, not here");
+    assert_eq!(d.subs.mail.lock().peek("new").0.len(), 1);
+    assert!(d.subs.granted("new") && !d.subs.granted("old"));
+    // The new session is the parent now: it may close its child, the old one may not.
+    assert!(d.is_descendant("new", &d.by_id("grandchild").unwrap().spec()));
+    assert!(!d.is_descendant("old", &d.by_id("grandchild").unwrap().spec()));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_view_switch_is_not_reported_as_an_exit_unless_it_never_happens() {
+    let (d, dir) = daemon("sub-switch");
+    add(&d, 1, "parent", "claude", None);
+    let (child, _) = add(&d, 2, "kid", "codex", Some(("parent", 1)));
+    // The app says the stop is a switch, before it stops the process.
+    call(&d, "session.update", json!({"handle": 2, "handover": true})).unwrap();
+    assert!(child.spec.lock().switching);
+    let now = Instant::now();
+    d.subs.watch.lock().observe("kid", Status::Working, now);
+    fake::exit(&child);
+    child.tick(now);
+    let entry = d.by_id("kid").unwrap();
+    let info = entry.info();
+    assert!(!info.alive && info.spec.switching);
+    d.sub_status_changed(&entry, &info, now);
+    assert!(d.subs.mail.lock().peek("parent").0.is_empty(), "no exit is mailed to the parent");
+    assert!(child.spec.lock().report.is_none(), "and none is put on the row");
+    // The replacement does not come: after the grace period the exit is reported as it would have been.
+    assert!(d.subs.due_handovers(now).is_empty(), "not before the time");
+    d.subs.set_handover("kid", true, now - subs::HANDOVER_GRACE);
+    d.flush_handovers();
+    let mail = d.subs.mail.lock().peek("parent").0;
+    assert_eq!(mail.len(), 1, "reported now");
+    assert_eq!(mail[0].status.as_deref(), Some("exited"));
+    assert!(!child.spec.lock().switching);
+    let _ = std::fs::remove_dir_all(dir);
+}
+

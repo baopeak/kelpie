@@ -645,6 +645,29 @@ pub fn chat_with_sub_tools(mut argv: Vec<String>, hook_exe: &Path, data_dir: &Pa
     Ok(argv)
 }
 
+/// Kelpie's MCP server as an ACP agent is told about one (`McpServer` of the stdio kind), for the daemon to add to the
+/// `mcpServers` of the agent's `session/new`. The session's variables go in by value: an ACP agent's own environment is not
+/// known to reach its MCP servers. `inherited` are the variables of the daemon's own environment that tell the tool where the
+/// daemon is (`KELPIE_ENDPOINT`, `KELPIE_DATA_DIR`, `XDG_DATA_HOME`), as Codex's `env_vars` names them.
+pub fn acp_mcp_server(exe: &Path, session_id: &str, token: &str, endpoint_key: &str, inherited: &[(String, String)]) -> serde_json::Value {
+    let mut env = vec![
+        ("KELPIE_SESSION_ID".to_string(), session_id.to_string()),
+        (kelpie_proto::SESSION_TOKEN_ENV.to_string(), token.to_string()),
+        (kelpie_proto::SESSION_ENDPOINT_ENV.to_string(), endpoint_key.to_string()),
+    ];
+    env.extend(inherited.iter().cloned());
+    serde_json::json!({
+        "name": "kelpie",
+        "command": exe.to_string_lossy(),
+        "args": ["mcp"],
+        "env": env.into_iter().map(|(name, value)| serde_json::json!({"name": name, "value": value})).collect::<Vec<_>>(),
+    })
+}
+
+/// The variables of this daemon's environment that [`acp_mcp_server`] hands on.
+pub fn daemon_location_env() -> Vec<(String, String)> {
+    ["KELPIE_ENDPOINT", "KELPIE_DATA_DIR", "XDG_DATA_HOME"].iter().filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k.to_string(), v))).collect()
+}
 
 /// Writes `body` unless the file already holds it (atomically: a reader never sees half of it).
 fn write_if_changed(path: &Path, body: &[u8]) -> Result<PathBuf> {
@@ -1225,5 +1248,15 @@ mod sub_tool_tests {
         write_claude_mcp_config(Path::new("/b/kelpied"), &dir).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains("/b/kelpied"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_acp_server_carries_the_session_by_value_and_where_the_daemon_is() {
+        let inherited = vec![("KELPIE_ENDPOINT".to_string(), "kelpie-dev".to_string())];
+        let server = acp_mcp_server(Path::new("C:/k/kelpied.exe"), "sid", "tok", "ep", &inherited);
+        assert_eq!((server["name"].clone(), server["args"].clone()), (serde_json::json!("kelpie"), serde_json::json!(["mcp"])));
+        assert_eq!(server["command"], "C:/k/kelpied.exe");
+        let env: Vec<(&str, &str)> = server["env"].as_array().unwrap().iter().map(|e| (e["name"].as_str().unwrap(), e["value"].as_str().unwrap())).collect();
+        assert_eq!(env, [("KELPIE_SESSION_ID", "sid"), ("KELPIE_SESSION_TOKEN", "tok"), ("KELPIE_SESSION_ENDPOINT", "ep"), ("KELPIE_ENDPOINT", "kelpie-dev")]);
     }
 }

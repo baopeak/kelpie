@@ -190,6 +190,21 @@ struct CreateParams {
     /// Its programs may act only on this session through `kelpied` (see `auth`).
     #[serde(default)]
     restricted: bool,
+    /// The session this one replaces (a conversation moved between terminal and chat view): it takes over that session's place
+    /// among the sub-sessions. Only the user's connections can set it (a program in a session cannot, see `parse_create`).
+    #[serde(default)]
+    lineage_from: Option<String>,
+}
+
+/// Where a new session stands among the sub-sessions (parent, depth, last report): the lineage the daemon gives a spawn, else that
+/// of the session it replaces, else none.
+fn place_among_subs(lineage: Option<(String, u8)>, replaced: Option<&SessionSpec>) -> (Option<String>, u8, Option<crate::session::SubReport>) {
+    match (lineage, replaced) {
+        (Some((parent, depth)), _) => (Some(parent), depth, None),
+        // Only what the agent said itself: an automatic report (an exit from the stop of the switch, say) describes the old process.
+        (None, Some(old)) => (old.parent.clone(), old.depth, old.report.clone().filter(|r| !r.auto)),
+        (None, None) => (None, 0, None),
+    }
 }
 
 fn default_kind() -> String {
@@ -1069,7 +1084,7 @@ impl Daemon {
         for saved in self.store.load_sessions() {
             let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
             if saved.chat {
-                let chat = ChatSession::new(handle, saved.spec.clone());
+                let chat = ChatSession::new(handle, SessionSpec { switching: false, ..saved.spec.clone() });
                 if saved.alive {
                     chat.mark_interrupted(saved.last_activity);
                 }
@@ -1077,7 +1092,7 @@ impl Daemon {
                 self.sessions.write().insert(handle, Entry::Chat(chat));
                 continue;
             }
-            let session = Session::new(handle, saved.spec.clone(), saved.cols, saved.rows);
+            let session = Session::new(handle, SessionSpec { switching: false, ..saved.spec.clone() }, saved.cols, saved.rows);
             if let Some(snapshot) = self.store.load_snapshot(&saved.spec.id) {
                 session.ingest(&snapshot);
                 if saved.alive {
@@ -1103,6 +1118,10 @@ impl Daemon {
     fn create_inner(&self, params: Value, lineage: Option<(String, u8)>) -> Result<SessionInfo> {
         let p: CreateParams = serde_json::from_value(params).context("session.create params")?;
         let model = model_from_args(&p.args);
+        // What the replaced session was among the sub-sessions: the daemon's own lineage for a spawn wins, and an id it does not
+        // know carries nothing.
+        let replaced = p.lineage_from.as_deref().filter(|_| lineage.is_none()).and_then(|id| self.by_id(id)).map(|e| e.spec());
+        let place = place_among_subs(lineage, replaced.as_ref());
         let mut spec = SessionSpec {
             id: p.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             project_id: p.project_id,
@@ -1116,9 +1135,10 @@ impl Daemon {
             created_at: now_millis(),
             remote: p.remote,
             restricted: p.restricted,
-            parent: lineage.as_ref().map(|(parent, _)| parent.clone()),
-            depth: lineage.map_or(0, |(_, depth)| depth),
-            report: None,
+            parent: place.0,
+            depth: place.1,
+            report: place.2,
+            switching: false,
         };
         if self.by_id(&spec.id).is_some() {
             bail!("session id {} already exists", spec.id);
@@ -1140,8 +1160,15 @@ impl Daemon {
             let tools = self.sub_tools_on() && spec.remote.is_none();
             let argv = if tools { agents::chat_with_sub_tools(argv, &self.exe, &self.data_dir)? } else { argv };
             let env = if tools { vec![("KELPIE_CLI".to_string(), self.exe.to_string_lossy().into_owned())] } else { Vec::new() };
+            let spec_id = spec.id.clone();
             let chat = ChatSession::new(handle, spec);
             chat.set_launch_permissions(skips, bypass);
+            // An ACP agent is told about Kelpie's tools in the conversation it opens: the daemon adds the server to that call.
+            if tools {
+                let token = crate::auth::session_token(&spec_id);
+                let key = kelpie_proto::endpoint_key(&kelpie_proto::endpoint());
+                chat.set_acp_mcp(Some(agents::acp_mcp_server(&self.exe, &spec_id, &token, &key, &agents::daemon_location_env())));
+            }
             chat.spawn(&agents::platform_argv(argv)?, &env)?;
             Entry::Chat(chat)
         } else {
@@ -1158,11 +1185,61 @@ impl Daemon {
         };
         let info = entry.info();
         self.sessions.write().insert(handle, entry);
+        if let Some(old) = &replaced {
+            self.hand_over_lineage(&old.id, &info);
+        }
         self.meta_dirty.store(true, Ordering::Relaxed);
         self.notifier.seed(&info);
         self.broadcast("session.updated", serde_json::to_value(&info)?);
         self.checkpoint_baseline(&info.spec, "spawn");
         Ok(info)
+    }
+
+    /// Session `new` replaces `old` (the same conversation, in the other view): its sub-sessions now belong to `new`, its mail and
+    /// its "allow for this session" follow, and `old` is no longer anybody's sub-session (its own end must not be reported to its
+    /// parent, nor count as a sub-session's end). The next tick tells the apps about the children's new parent.
+    fn hand_over_lineage(&self, old: &str, new_info: &SessionInfo) {
+        let new = new_info.spec.id.as_str();
+        let entries: Vec<Entry> = self.sessions.read().values().cloned().collect();
+        let mut was: Option<(u32, Option<String>)> = None;
+        for entry in entries {
+            let (lock, handle) = match &entry {
+                Entry::Term(s) => (&s.spec, s.handle),
+                Entry::Chat(c) => (&c.spec, c.handle),
+            };
+            let mut spec = lock.lock();
+            if spec.id == old {
+                was = Some((handle, spec.parent.take()));
+                spec.depth = 0;
+                spec.report = None;
+                spec.switching = false;
+            } else if spec.parent.as_deref() == Some(old) && spec.id != new {
+                spec.parent = Some(new.to_string());
+            }
+        }
+        // Runs the old session made go on with the new one as their creator (their gate looks the creator up).
+        let moved: Vec<String> = {
+            let mut runs = self.runs.lock();
+            runs.list.iter_mut().filter(|r| r.creator.as_deref() == Some(old)).map(|r| {
+                r.creator = Some(new.to_string());
+                r.id.clone()
+            }).collect()
+        };
+        self.runs_changed(&moved);
+        self.subs.transfer(old, new);
+        self.subs.end_handover(old);
+        // The parent is told once, and in words: its handle for this child is the old one, which is closed now.
+        if let Some((old_handle, Some(parent))) = was {
+            if let Some(parent) = self.by_id(&parent) {
+                let view = if new_info.chat { "chat view" } else { "terminal" };
+                let text = format!("continues in the {view} as #{} (the same conversation); #{old_handle} is closed. Use #{} or its name from now on.", new_info.handle, new_info.handle);
+                let mail = crate::subs::NewMail { from_id: new.to_string(), from_label: self.session_tag(new_info), kind: crate::subs::MailKind::Report, status: Some("continues".into()), text };
+                if let Err(e) = self.subs.mail.lock().add(&parent.spec().id, mail, Instant::now(), now_millis(), false) {
+                    tracing::debug!("hand-over note not queued: {e}");
+                }
+            }
+        }
+        self.meta_dirty.store(true, Ordering::Relaxed);
     }
 
     pub fn restart(&self, handle: u32) -> Result<SessionInfo> {
@@ -1228,6 +1305,11 @@ impl Daemon {
             }
             if let Some(id) = params.get("agent_session_id") {
                 spec.agent_session_id = id.as_str().map(str::to_string);
+            }
+            // The app is about to stop this session to continue its conversation in the other view (see `SessionSpec::switching`).
+            if let Some(on) = params.get("handover").and_then(Value::as_bool) {
+                spec.switching = on;
+                self.subs.set_handover(&spec.id, on, Instant::now());
             }
             if let Some(args) = params.get("args").and_then(Value::as_array) {
                 spec.args = args.iter().filter_map(|a| a.as_str().map(str::to_string)).collect();
@@ -1532,6 +1614,7 @@ impl Daemon {
             if now.duration_since(last_mail_tick) >= Duration::from_secs(1) {
                 last_mail_tick = now;
                 self.deliver_mail();
+                self.flush_handovers();
             }
             for item in self.scheduled.take_due(now_millis()) {
                 self.fire_scheduled(item);

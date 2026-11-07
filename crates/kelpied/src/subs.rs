@@ -56,6 +56,8 @@ pub const MAX_TASK: usize = 16_000;
 pub const MAX_ROW_SUMMARY: usize = 600;
 /// The most `sub_max` can be set to.
 pub const MAX_SUB_CAP: u32 = 64;
+/// How long a session may be marked as being switched between views before its stop is reported as an exit after all.
+pub const HANDOVER_GRACE: Duration = Duration::from_secs(15);
 
 // ---------- policy ----------
 
@@ -513,6 +515,32 @@ impl Mailboxes {
         }
     }
 
+    /// Session `to` takes the place of `from` (the same conversation in the other view): what waits for `from` waits for `to`
+    /// now, ahead of anything already there, and what `from` sent is `to`'s.
+    pub fn rename(&mut self, from: &str, to: &str) {
+        if let Some(mut old) = self.boxes.remove(from) {
+            let inbox = self.boxes.entry(to.to_string()).or_default();
+            old.mails.append(&mut inbox.mails);
+            old.dropped += inbox.dropped;
+            old.recent.append(&mut inbox.recent);
+            for (sender, times) in std::mem::take(&mut inbox.rate) {
+                old.rate.entry(sender).or_default().extend(times);
+            }
+            *inbox = old;
+        }
+        for b in self.boxes.values_mut() {
+            for mail in b.mails.iter_mut().filter(|m| m.from_id == from) {
+                mail.from_id = to.to_string();
+            }
+            for (sender, _, _) in b.recent.iter_mut().filter(|(s, _, _)| s == from) {
+                *sender = to.to_string();
+            }
+            if let Some(times) = b.rate.remove(from) {
+                b.rate.entry(to.to_string()).or_default().extend(times);
+            }
+        }
+    }
+
     /// The session is closed: its mail goes, and what it sent no longer counts against anyone.
     pub fn forget(&mut self, id: &str) {
         self.boxes.remove(id);
@@ -789,6 +817,8 @@ pub struct Subs {
     granted: Mutex<HashSet<String>>,
     /// Spawns approved and under way, per caller: they count against the caps before the session exists.
     slots: Mutex<HashMap<String, usize>>,
+    /// Sessions the app is switching between views, and when the switch is given up on.
+    handovers: Mutex<HashMap<String, Instant>>,
     /// Held while `policy.json` is written, so two writers cannot leave the older snapshot last.
     pub policy_file: Mutex<()>,
 }
@@ -822,6 +852,7 @@ impl Subs {
             births: Mutex::new(HashMap::new()),
             granted: Mutex::new(HashSet::new()),
             slots: Mutex::new(HashMap::new()),
+            handovers: Mutex::new(HashMap::new()),
             policy_file: Mutex::new(()),
         }
     }
@@ -860,12 +891,49 @@ impl Subs {
         Ok(Slot { subs: self, caller: caller.to_string() })
     }
 
+    /// Session `to` replaces `from` (the same conversation moved between terminal and chat view): its mail, its "allow for this
+    /// session" and the time its work is counted from are now `to`'s. `from` keeps nothing, so closing it afterwards takes nothing
+    /// of `to` with it. Its open requests stay with it: they die with the process that asked.
+    pub fn transfer(&self, from: &str, to: &str) {
+        self.mail.lock().rename(from, to);
+        self.watch.lock().forget(from);
+        if self.granted.lock().remove(from) {
+            self.granted.lock().insert(to.to_string());
+        }
+        let mut births = self.births.lock();
+        if let Some(born) = births.remove(from) {
+            births.insert(to.to_string(), born);
+        }
+    }
+
+    /// The app is about to stop `session` to continue its conversation in the other view (`on`), or says it did not happen.
+    pub fn set_handover(&self, session: &str, on: bool, now: Instant) {
+        // Off is "it did not happen": looked at on the next tick, which reports the exit if the process did stop.
+        self.handovers.lock().insert(session.to_string(), if on { now + HANDOVER_GRACE } else { now });
+    }
+
+    /// The switch of `session` happened: nothing is waited for any more.
+    pub fn end_handover(&self, session: &str) {
+        self.handovers.lock().remove(session);
+    }
+
+    /// Switches whose time ran out (no replacement session came): removed and returned. One lock, and nothing when none is open.
+    pub fn due_handovers(&self, now: Instant) -> Vec<String> {
+        let mut h = self.handovers.lock();
+        let due: Vec<String> = h.iter().filter(|(_, until)| **until <= now).map(|(id, _)| id.clone()).collect();
+        for id in &due {
+            h.remove(id);
+        }
+        due
+    }
+
     /// A session was closed: everything held for it goes. Returns the ids of its requests that were cancelled.
     pub fn forget(&self, session: &str) -> Vec<String> {
         self.mail.lock().forget(session);
         self.watch.lock().forget(session);
         self.granted.lock().remove(session);
         self.births.lock().remove(session);
+        self.handovers.lock().remove(session);
         self.pending.lock().forget_session(session)
     }
 }
@@ -1358,5 +1426,41 @@ mod tests {
         assert!(brief.contains("Task:\ndo x"));
         // Both shells: PowerShell does not know `$KELPIE_CLI` as an environment variable.
         assert!(brief.contains("\"$KELPIE_CLI\" sub report") && brief.contains("& $env:KELPIE_CLI sub report"), "{brief}");
+    }
+
+    #[test]
+    fn a_replacing_session_takes_over_the_mail_and_what_the_old_one_sent() {
+        let mut boxes = Mailboxes::default();
+        let now = Instant::now();
+        boxes.add("old", message("kid", "first"), now, 1, true).unwrap();
+        boxes.add("old", message("kid", "second"), now, 2, true).unwrap();
+        // The old session wrote to its parent, and a sibling's mail waits there already.
+        boxes.add("parent", mail("old", "done"), now, 3, true).unwrap();
+        boxes.add("new", message("kid", "third"), now, 4, true).unwrap();
+        boxes.rename("old", "new");
+        let (mails, _) = boxes.peek("new");
+        assert_eq!(mails.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["first", "second", "third"], "the old mail first, in order");
+        assert!(boxes.peek("old").0.is_empty());
+        assert_eq!(boxes.peek("parent").0[0].from_id, "new", "what it sent is the new session's");
+        // Its rate and dedupe record follow: the same text from the same sender is still a duplicate.
+        assert_eq!(boxes.add("parent", mail("new", "done"), now, 5, true), Ok(Added::Duplicate));
+        // A rename of a session without a box changes nothing.
+        boxes.rename("nobody", "new");
+        assert_eq!(boxes.peek("new").0.len(), 3);
+    }
+
+    #[test]
+    fn a_transfer_moves_the_grant_and_the_birth_and_leaves_nothing_behind() {
+        let subs = Subs::new(SubPolicy::default());
+        subs.grant("old");
+        subs.births.lock().insert("old".into(), Instant::now());
+        subs.mail.lock().add("old", message("kid", "hi"), Instant::now(), 1, true).unwrap();
+        subs.transfer("old", "new");
+        assert!(subs.granted("new") && !subs.granted("old"));
+        assert!(subs.births.lock().contains_key("new") && !subs.births.lock().contains_key("old"));
+        assert_eq!(subs.mail.lock().peek("new").0.len(), 1);
+        // Closing the old one afterwards takes nothing of the new one with it.
+        assert!(subs.forget("old").is_empty());
+        assert!(subs.granted("new") && subs.mail.lock().peek("new").0.len() == 1);
     }
 }

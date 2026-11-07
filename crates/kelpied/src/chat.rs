@@ -121,6 +121,41 @@ struct Inner {
     /// `perm_skip`: it may act without asking (any of the ways); `perm_bypass`: full bypass, nothing asked and no sandbox.
     perm_skip: bool,
     perm_bypass: bool,
+    /// The `kelpie` MCP server added, by the daemon, to the `mcpServers` of every ACP call that opens a conversation (it holds
+    /// this session's token, which never passes through the window).
+    acp_mcp: Option<Value>,
+}
+
+/// The ACP calls that open a conversation and carry the agent's `mcpServers`.
+const ACP_OPENERS: [&str; 3] = ["session/new", "session/load", "session/resume"];
+
+/// `line` (one JSON-RPC line, its newline kept) with `server` added to `params.mcpServers` when the line opens an ACP
+/// conversation. `None` when it is anything else, when the list already holds a server of that name (the app's own wins), or when
+/// `mcpServers` is not a list: such a line is written as it came.
+fn with_mcp_server(line: &[u8], server: &Value) -> Option<Vec<u8>> {
+    let head = String::from_utf8_lossy(&line[..line.len().min(300)]);
+    if !ACP_OPENERS.iter().any(|m| head.contains(m)) {
+        return None;
+    }
+    let end = line.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |i| i + 1);
+    let mut v: Value = serde_json::from_slice(&line[..end]).ok()?;
+    if !ACP_OPENERS.contains(&v.get("method")?.as_str()?) {
+        return None;
+    }
+    let params = v.get_mut("params")?.as_object_mut()?;
+    let list = params.entry("mcpServers").or_insert(Value::Null);
+    if list.is_null() {
+        *list = json!([]);
+    }
+    let list = list.as_array_mut()?;
+    let name = server.get("name").and_then(Value::as_str);
+    if list.iter().any(|s| s.get("name").and_then(Value::as_str) == name) {
+        return None;
+    }
+    list.push(server.clone());
+    let mut out = serde_json::to_vec(&v).ok()?;
+    out.push(b'\n');
+    Some(out)
 }
 
 /// `chat.request_info`: what a phone's card says about a request. Worked out only when a phone is there to read it.
@@ -638,6 +673,7 @@ impl ChatSession {
                 built: 0,
                 perm_skip: false,
                 perm_bypass: false,
+                acp_mcp: None,
             }),
         })
     }
@@ -1118,7 +1154,7 @@ impl ChatSession {
         }
         if let Some(stdin) = &g.stdin {
             for line in &lines {
-                let _ = stdin.send(format!("{line}\n").into_bytes());
+                let _ = stdin.send(Self::for_agent(g.acp_mcp.as_ref(), format!("{line}\n").as_bytes()));
             }
         }
         g.activity.last_input = Some(now);
@@ -1387,6 +1423,23 @@ impl ChatSession {
         g.perm_bypass = bypass;
     }
 
+    /// What is written to the agent's stdin for the lines the window built: the same lines, with Kelpie's MCP server added to
+    /// the calls that open an ACP conversation. Every writer of window-built lines (`input`, `commit_turn`: `/new` and `/clear`
+    /// open a conversation inside a queued turn) goes through here.
+    fn for_agent(server: Option<&Value>, bytes: &[u8]) -> Vec<u8> {
+        match server {
+            Some(server) => bytes.split_inclusive(|b| *b == b'\n').flat_map(|line| with_mcp_server(line, server).unwrap_or_else(|| line.to_vec())).collect(),
+            None => bytes.to_vec(),
+        }
+    }
+
+    /// Adds the MCP server `server` (ACP's stdio shape) to every `session/new`, `session/load` and `session/resume` written to
+    /// this chat's agent, whatever the window put in `mcpServers`. Only for an ACP agent; the others have their own way in.
+    pub fn set_acp_mcp(&self, server: Option<Value>) {
+        let mut g = self.inner.lock();
+        g.acp_mcp = server.filter(|_| g.dialect == Dialect::Acp);
+    }
+
     /// Stops the turn that runs: the dialect's interrupt line, and for ACP a cancelled answer to
     /// every question the agent has open (so every card closes). A queue with messages in it then
     /// waits. `by` is who asked.
@@ -1645,6 +1698,7 @@ impl ChatSession {
         g.activity.last_input = Some(now);
         g.last_activity = crate::session::now_millis();
         let before = Self::shape(&g);
+        let bytes = Self::for_agent(g.acp_mcp.as_ref(), &bytes);
         let (bytes, answers) = Self::keep_unanswered(&mut g, self.handle, &self.spec.lock().id, bytes);
         self.observe_written(&mut g, &bytes, now);
         if let Some(stdin) = g.stdin.as_ref().filter(|_| !bytes.is_empty()) {
@@ -3842,5 +3896,102 @@ mod tests {
         let (claude, mut cstdin) = live();
         claude.ingest_line(json!({"type": "control_request", "request_id": "h", "request": {"subtype": "hook_callback"}}).to_string());
         assert!(written_lines(&mut cstdin).is_empty());
+    }
+
+    fn acp_chat() -> (Arc<ChatSession>, Stdin) {
+        let c = ChatSession::new(8, SessionSpec { id: "acp-1".into(), kind: "gemini".into(), cwd: ".".into(), ..Default::default() });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        c.inner.lock().stdin = Some(tx);
+        (c, rx)
+    }
+
+    fn kelpie_server() -> Value {
+        json!({"name": "kelpie", "command": "kelpied", "args": ["mcp"], "env": [{"name": "KELPIE_SESSION_ID", "value": "acp-1"}]})
+    }
+
+    fn sent(rx: &mut Stdin) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            for line in String::from_utf8(bytes).unwrap().lines() {
+                out.push(serde_json::from_str(line).unwrap());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_daemon_adds_the_kelpie_server_to_the_calls_that_open_an_acp_conversation() {
+        let (c, mut rx) = acp_chat();
+        c.set_acp_mcp(Some(kelpie_server()));
+        let open = |method: &str, extra: Value| {
+            let mut params = json!({"cwd": ".", "mcpServers": []});
+            params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            format!("{}\n", json!({"jsonrpc": "2.0", "id": "a", "method": method, "params": params}))
+        };
+        for (method, extra) in [("session/new", json!({})), ("session/load", json!({"sessionId": "s1"})), ("session/resume", json!({"sessionId": "s1"}))] {
+            c.input(open(method, extra).into_bytes());
+            let lines = sent(&mut rx);
+            assert_eq!(lines.len(), 1, "{method}");
+            assert_eq!(lines[0]["method"], method);
+            assert_eq!(lines[0]["params"]["mcpServers"], json!([kelpie_server()]), "{method}");
+            assert_eq!(lines[0]["params"]["cwd"], ".", "the rest of the call is untouched");
+        }
+        // The window's own servers stay, and a missing or null list becomes one.
+        c.input(format!("{}\n", json!({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {"cwd": ".", "mcpServers": [{"name": "mine"}]}})).into_bytes());
+        c.input(format!("{}\n", json!({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "."}})).into_bytes());
+        c.input(format!("{}\n", json!({"jsonrpc": "2.0", "id": 3, "method": "session/new", "params": {"cwd": ".", "mcpServers": null}})).into_bytes());
+        let lines = sent(&mut rx);
+        assert_eq!(lines[0]["params"]["mcpServers"], json!([{"name": "mine"}, kelpie_server()]));
+        assert_eq!(lines[1]["params"]["mcpServers"], json!([kelpie_server()]));
+        assert_eq!(lines[2]["params"]["mcpServers"], json!([kelpie_server()]));
+        // Two lines in one write: only the opener changes; every other line is written as it came.
+        let prompt = r#"{"jsonrpc":"2.0",  "id":"p","method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}"#;
+        c.input(format!("{prompt}\n{}", open("session/new", json!({}))).into_bytes());
+        let raw = String::from_utf8(rx.try_recv().unwrap()).unwrap();
+        assert!(raw.starts_with(&format!("{prompt}\n")), "{raw}");
+        assert!(raw.contains("\"name\":\"kelpie\""));
+    }
+
+    #[test]
+    fn nothing_is_added_when_off_when_the_app_has_its_own_or_for_other_dialects() {
+        // No server set (policy off at creation): written as it came, byte for byte.
+        let (c, mut rx) = acp_chat();
+        let line = r#"{"jsonrpc":"2.0","id":"a","method":"session/new","params":{"cwd":".","mcpServers":[]}}"#.to_string() + "\n";
+        c.input(line.clone().into_bytes());
+        assert_eq!(rx.try_recv().unwrap(), line.clone().into_bytes());
+        // A server of that name already there: the app's wins, nothing is added twice.
+        c.set_acp_mcp(Some(kelpie_server()));
+        let own = r#"{"jsonrpc":"2.0","id":"a","method":"session/new","params":{"cwd":".","mcpServers":[{"name":"kelpie","command":"mine"}]}}"#.to_string() + "\n";
+        c.input(own.clone().into_bytes());
+        assert_eq!(rx.try_recv().unwrap(), own.into_bytes());
+        // Not a list: left alone.
+        let odd = r#"{"jsonrpc":"2.0","id":"a","method":"session/new","params":{"cwd":".","mcpServers":"x"}}"#.to_string() + "\n";
+        c.input(odd.clone().into_bytes());
+        assert_eq!(rx.try_recv().unwrap(), odd.into_bytes());
+        // Claude and Codex have their own way in: the setter ignores them.
+        let (claude, mut crx) = chat();
+        claude.set_acp_mcp(Some(kelpie_server()));
+        claude.input(line.clone().into_bytes());
+        assert_eq!(crx.try_recv().unwrap(), line.into_bytes());
+        // A method that merely mentions an opener is not one.
+        assert!(with_mcp_server(br#"{"method":"session/prompt","params":{"prompt":[{"type":"text","text":"session/new"}]}}"#, &kelpie_server()).is_none());
+    }
+
+    #[test]
+    fn new_and_clear_inside_a_queued_turn_open_the_conversation_with_kelpie_too() {
+        let (c, mut rx) = acp_chat();
+        c.set_acp_mcp(Some(kelpie_server()));
+        let entry = queue::Entry {
+            qid: "q1".into(), cid: "c1".into(), by: By::desktop(), text: "/new".into(), images: vec![], origin: Origin::Desktop { client: 1, rich: false },
+            at: 1, offered: None, declined: false, retry_at: None, first_offer: None, waiting_window: false, orphaned: false,
+        };
+        let line = json!({"jsonrpc": "2.0", "id": "kelpie-new", "method": "session/new", "params": {"cwd": ".", "mcpServers": []}}).to_string();
+        {
+            let mut g = c.inner.lock();
+            c.commit_turn(&mut g, entry, vec![line], false, Instant::now());
+        }
+        let lines = sent(&mut rx);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["params"]["mcpServers"], json!([kelpie_server()]));
     }
 }

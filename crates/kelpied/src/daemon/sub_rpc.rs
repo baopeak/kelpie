@@ -161,7 +161,7 @@ impl Daemon {
     // ---------- naming ----------
 
     /// A session as another session's prompt names it: `sub-session "fix-1" (codex, #12)`.
-    fn session_tag(&self, info: &SessionInfo) -> String {
+    pub(super) fn session_tag(&self, info: &SessionInfo) -> String {
         let spec = &info.spec;
         let kind_label = agents::preset_for(&spec.kind).map_or(spec.kind.as_str(), |p| p.label);
         let name = notify::session_label(spec.name.as_deref(), info.title.as_deref(), &spec.kind, kind_label, spec.remote.as_ref().map(|r| r.dest.as_str()));
@@ -251,7 +251,7 @@ impl Daemon {
     fn parse_create(&self, params: &Value, caller: &SessionSpec, known: &[&str], installed: &[&str]) -> Result<SpawnPlan> {
         anyhow::ensure!(caller.remote.is_none(), "a session on another machine cannot open sessions");
         let obj = params.as_object().ok_or_else(|| anyhow!("session.create: params must be an object"))?;
-        for key in ["id", "env", "chat_argv", "remote", "agent_session_id"] {
+        for key in ["id", "env", "chat_argv", "remote", "agent_session_id", "lineage_from"] {
             if obj.get(key).is_some_and(is_set) {
                 bail!("session.create from a program in a session cannot set `{key}`");
             }
@@ -590,6 +590,17 @@ impl Daemon {
         let sid = &info.spec.id;
         self.subs.births.lock().entry(sid.clone()).or_insert(now);
         let Some(auto) = self.subs.watch.lock().observe(sid, info.status, now) else { return };
+        // Stopped by the app to continue in the other view: the new session says what it is, and nothing it does on the way out
+        // (going idle as it stops, exiting) is reported. If the switch does not happen, `flush_handovers` reports the exit later.
+        if info.spec.switching {
+            return;
+        }
+        self.report_auto(entry, info, auto, now);
+    }
+
+    /// Puts an automatic report on the row of `info` and, while the parent is there, in the parent's mail.
+    fn report_auto(&self, entry: &Entry, info: &SessionInfo, auto: Auto, now: Instant) {
+        let sid = &info.spec.id;
         let detail = match (&auto, entry) {
             (Auto::NeedsUser, Entry::Term(s)) => s.screen_prompt().and_then(|p| p.question).filter(|q| !q.trim().is_empty()).unwrap_or_else(|| subs::tail_lines(&s.text_tail(40), 3)),
             (Auto::Idle, Entry::Term(s)) => subs::tail_lines(&s.text_tail(40), subs::TAIL_LINES),
@@ -605,6 +616,22 @@ impl Daemon {
         // The daemon's own reports are not held to the rate a program is: they follow the child's status, which changes slowly.
         if let Err(e) = self.subs.mail.lock().add(&parent.spec().id, mail, now, now_millis(), false) {
             tracing::debug!("sub-session report not queued: {e}");
+        }
+    }
+
+    /// Switches between views that were not completed in time (called every second by the ticker): the session stays as it is,
+    /// and if it did stop, its exit is reported now, as it would have been.
+    pub(super) fn flush_handovers(&self) {
+        for id in self.subs.due_handovers(Instant::now()) {
+            let Some(entry) = self.by_id(&id) else { continue };
+            match &entry {
+                Entry::Term(s) => s.spec.lock().switching = false,
+                Entry::Chat(c) => c.spec.lock().switching = false,
+            }
+            let info = entry.info();
+            if !info.alive && info.spec.parent.is_some() {
+                self.report_auto(&entry, &info, Auto::Exited, Instant::now());
+            }
         }
     }
 

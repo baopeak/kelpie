@@ -80,6 +80,10 @@ pub struct SessionSpec {
     /// The last thing this session reported to its parent, by itself or noticed by the daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<SubReport>,
+    /// The app is moving this session's conversation to the other view (terminal or chat): its process is about to stop and a new
+    /// session takes its place. Transient (cleared when the daemon starts); while it holds, the stop is not reported as an exit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub switching: bool,
 }
 
 fn is_zero(n: &u8) -> bool {
@@ -1495,6 +1499,13 @@ pub(crate) mod fake {
             g.activity = Activity { alive: true, ..Default::default() };
         }
         (session, Typed(rx))
+    }
+
+    /// The process ended: the session is no longer alive.
+    pub fn exit(session: &Session) {
+        let mut g = session.inner.lock();
+        g.pty = None;
+        g.activity.alive = false;
     }
 
     pub struct Typed(std::sync::mpsc::Receiver<Ctl>);

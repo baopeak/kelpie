@@ -531,3 +531,21 @@ async fn bad_lines_are_answered_and_the_server_reads_on() {
         })
         .await;
 }
+
+#[test]
+fn a_session_being_switched_between_views_ends_no_wait() {
+    let s = |id: &str, status: &str| (id.to_string(), status.to_string());
+    let mut seen = HashSet::new();
+    assert_eq!(wait_outcome(&[s("a", "working")], &mut seen, false, Duration::from_secs(1), Duration::from_secs(60)), None);
+    assert_eq!(wait_outcome(&[s("a", "switching")], &mut seen, false, Duration::from_secs(2), Duration::from_secs(60)), None, "not stopped, not exited");
+    let row = |extra: Value| {
+        let mut s = json!({"handle": 2, "id": "a", "name": "kid", "kind": "codex", "cwd": "/w", "status": "exited", "parent": "p"});
+        s.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        s
+    };
+    let list = vec![json!({"handle": 1, "id": "p", "name": "p", "kind": "claude", "cwd": "/w", "status": "idle"}), row(json!({"switching": true}))];
+    assert_eq!(session_rows(&list, "p", "children").unwrap()[0]["status"], "switching");
+    let list = vec![json!({"handle": 1, "id": "p", "name": "p", "kind": "claude", "cwd": "/w", "status": "idle"}), row(json!({}))];
+    assert_eq!(session_rows(&list, "p", "children").unwrap()[0]["status"], "exited");
+}
+

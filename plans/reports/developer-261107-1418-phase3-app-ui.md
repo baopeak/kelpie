@@ -1,0 +1,79 @@
+# Phase 3 (app UI) + carried daemon items - implementation report
+
+Worktree `D:\kelpie-subsessions`, branch `feat/sub-sessions`. Nothing committed. No app run, no daemon started (phase 4).
+
+## By requirement (phase-03-app-ui.md)
+1. **Types/IPC**: `SessionInfo.parent/depth/report` + `SubReport` (types.ts); `ipc.subAnswer`, `subPending`, `subPolicyGet`, `subPolicySet`, `CreateSession.lineage_from` (ipc.ts); `SUB_SESSIONS_API = 30` in `lib/sub-sessions.ts`. `daemon_call` needed no change (only the phone-approval methods are blocked there), so no Rust bridge edit.
+2. **Sidebar tree**: a session whose parent is a known session renders under the parent's row (`.sub-list`: indent + 1px guide line, any depth, recursive `SessionNode`); not in its project list. Parent row: fold chevron (state in-memory, `foldedParents`, never persisted) and a count badge (all descendants) coloured by the worst state: waiting > failed > working > finished-unread > idle. Orphan (parent gone / loop / self-parent) stays in its project list. Project counts, filters and "recent" sort still read ALL project sessions, so a waiting child still lights its project badge. A parent that is a floating-terminal session (not in the sidebar) does not swallow its children.
+3. **Children strip** (`sub-sessions-strip.tsx`, under the pane header, terminal and chat panes, also for a lone pane without header): chips = status dot, agent glyph, name, last report word; tooltip = name, report word, age, summary; click = `store.revealSession` (same as a sidebar click). 5 chips then `+N` (opens a menu with the rest). *Close finished* link, plus right-click on the strip and the sidebar row menu, all through `closeFinishedSubSessions` (confirm lists the sessions; "folders and worktrees are kept"; re-checks each child just before closing).
+4. **Child header link**: same bar, "Sub-session of <parent>" (click = parent).
+5. **Approval card** (`sub-request-card.tsx`): fixed bottom-right stack, max 3 cards (then "N more waiting: open Activity"), `role=group`, `aria-live=polite` region, Allow once / Allow for this session / Always allow / Deny, native buttons (Tab reachable, visible focus ring), busy-disabled while the answer is in flight. `skips_prompts` shows a red-bordered `role=alert` block ("It will run without asking before it acts. <parent> runs with permission checks off..."). Survives a hidden window: the queue is a signal, the same cards are listed in the Activity panel group "Sub-session requests", an inbox history item is added (marked read when `sub.request_done` arrives) and a desktop notification is raised when the window is not focused. On connect `sub.pending` replaces the queue (a request asked while the window was away). Removed on `sub.request_done` (answered anywhere, timeout, cancelled) and by a late-event-safe reducer (a closed id is never resurrected by a stale list).
+6. **Settings -> Agents -> Sub-sessions** (two catalog entries, searchable): mode Off / Ask / Allow (Allow asks a confirm), "running at once" Auto (shows N for this computer from `sub_auto_max`) or Set 1-16 (validated, integer only), note about agents started earlier, link to the user-guide `#sub-sessions`. Below API 30 the controls are replaced by "The running session daemon is older..." with the existing switch offer (`store.switchDaemon`, button "Restart the session daemon"). The daemon owns the values (`policy.json`); the app reads on connect/page open and shows what the daemon answers.
+7. **i18n**: 50 new keys in `locales/vi/{settings,shell}.json`; `pnpm i18n:check` 0 missing.
+
+## Carried items
+1. **Lineage across mode switch** (daemon + app). `session.create {lineage_from: <old id>}`: honoured only on the user path (`dispatch` -> `create`); `parse_create` (program in a session) refuses the key ("cannot set `lineage_from`", added to the existing refusal loop and test). In `create_inner`: the new session is created with the old one's parent/depth/report (an unknown id carries nothing; the daemon's own spawn lineage wins), then `hand_over_lineage(old, new)`: children of old get `parent = new` (the ticker tells the apps), old becomes nobody's sub-session (parent/depth/report cleared, so its end is not reported to the parent and not counted as a sub-session outcome), and `Subs::transfer` moves the mailbox (ahead of anything already there; `from_id`, rate and dedupe records follow), the "allow for this session" grant and the birth time. `mode-switch.ts` passes `lineage_from` at all three replace points (to chat, to terminal, resume/bypass restart via `replaceChat`). No API bump (30 is unreleased); an older daemon ignores the field.
+2. **ACP chats get the kelpie MCP server, daemon-side.** `ChatSession::input` (the single path every app-written line takes: `Frame::Input` and `session.input`, user roles only) rewrites `session/new`, `session/load` and `session/resume` of an ACP chat: appends `{name:"kelpie", command:<kelpied>, args:["mcp"], env:[{name,value}...]}` to `params.mcpServers` (missing/null becomes a list; a server of that name already there wins; a non-list is left alone; every other line is written byte for byte). Env by value: `KELPIE_SESSION_ID/TOKEN/ENDPOINT` from the session plus `KELPIE_ENDPOINT/KELPIE_DATA_DIR/XDG_DATA_HOME` when set in the daemon's own environment (same set Codex gets). The token never reaches the webview. Set in `create_inner` only when the sub-session policy is not off and the chat is local (same condition as the Claude/Codex injection); `set_acp_mcp` ignores Claude/Codex dialects.
+
+## Files
+- Rust: `crates/kelpied/src/{daemon.rs, subs.rs, chat.rs, agents.rs, daemon/sub_rpc.rs, daemon/sub_rpc/tests.rs}`.
+- App modified: `lib/{types,ipc,store,settings-catalog}.ts`, `chat/mode-switch.ts`, `components/{sidebar,pane-view,inbox,app}.tsx`, `components/settings/agent-settings.tsx`, `styles.css`, `locales/vi/{settings,shell}.json`.
+- App new: `lib/sub-sessions.ts` (+ `.test.ts`), `lib/sub-session-actions.ts`, `components/sub-sessions-strip.tsx`, `components/sub-request-card.tsx`.
+
+## Tests
+- `cargo test -p kelpied -j 2 -- --skip notify::destinations`: 884 passed, 0 failed, 3 ignored (6 new: ACP injection x2 in `chat.rs`, mailbox rename + transfer in `subs.rs`, `acp_mcp_server` shape in `agents.rs`, daemon-level lineage hand-over in `sub_rpc/tests.rs`; `lineage_from` added to the session-create refusal loop). `cargo clippy -p kelpied --tests -j 2 -- -D warnings`: clean.
+- `pnpm typecheck` clean; `pnpm test` 1523 passed (14 new in `sub-sessions.test.ts`: tree incl. orphans/loops/self-parent/300-deep chain, depth, worst-state ranking, close-finished selection, request reducer incl. late list after an answer, wire parsing, policy parsing, max parsing, folder names); `pnpm i18n:check` 0 missing.
+- Not covered by unit tests (needs the real app, phase 4): the rendering of the tree/strip/cards, the focus ring/keyboard path, the `lineage_from` end to end with real processes (`create_inner` spawns), a real ACP agent honouring the injected server.
+
+## Deviations
+- Pure tree helpers live in `lib/sub-sessions.ts` (`buildSessionTree`, `childrenOfSession`, `sessionDepthTree`, `subtreeSummary`, `finishedChildren`), not `store.ts`, so vitest can import them without Tauri; `store.sessionTree()` is the memoised instance. Extra files vs the spec: `lib/sub-session-actions.ts` (avoids a sidebar <-> strip import cycle), and small edits to `app.tsx` (mount the card stack), `inbox.tsx` (live group), `mode-switch.ts` (carried item).
+- `addInbox` now returns the new item id (used to mark the request's inbox entry read).
+- Two catalog entries (mode, max) instead of one.
+- Fold state is in-memory (resets on reload), not persisted in `app-state.json`.
+- Policy is not an app setting: no `Settings` field, no push on connect (the daemon's `policy.json` is the source of truth); `onConnected` only reads it.
+- The `sub.request` payload names the asking session `session` (daemon `Request`); the reducer also accepts `from`.
+- ACP permission prompts for kelpie tools are NOT auto-approved in `acp-adapter.ts` (the phase-2 note asked for it). A permission request does not say which MCP server a tool belongs to, so matching by title would let any tool named like ours skip the user's prompt. Result: an ACP agent may ask once per kelpie tool in its own permission card, in addition to Kelpie's spawn card. Say if you want the narrower rule anyway.
+
+## Behaviour to know
+- The policy decision for the ACP injection is taken at chat creation (like the Claude/Codex argv injection): turning the policy off later does not strip the server from an ACP chat already running; the daemon then refuses every `sub.*` call ("turned off").
+- A terminal/chat switch stops the old process first, so the old session's exit may already have mailed the parent one automatic "exited" report before `lineage_from` is applied. Not suppressed (would need the app to announce the switch before stopping).
+- A pending ask belongs to the process that asked: it is not moved on a switch (that process is gone; the daemon cancels it when the old session closes). `kelpie_wait` calls in flight in a parent that is switched also die with its process.
+- A run task whose session is switched between views is not re-pointed in the run engine (not touched by this work).
+
+## Open questions
+1. User guide anchor: the settings link goes to `.../docs/user-guide.md#sub-sessions`; phase 4 must add a "Sub-sessions" heading (and document `lineage_from`, the ACP injection, the new Settings rows).
+2. Keep "Always allow" as one click on the card? It flips the global policy to allow (same as the daemon's meaning); the title says so and Settings shows it.
+3. Should a shortcut/palette command focus the first request card? Cards are reachable by Tab (last in DOM order, so Shift+Tab from the page start) but there is no dedicated key.
+
+## How it looks
+Sidebar: under a project, a parent row gets a small chevron before its status dot and a small round count badge near its right side (grey for idle, teal working, amber when a child waits for you, red for a failed one); its children appear below, indented 12px behind a thin vertical line, each a normal session row, recursively. In the pane: a slim 28px bar under the header reading "Sub-sessions" then rounded chips (dot, agent logo, name, "done" / "blocked" / "needs you"), a "+2" chip if more than five, and a "Close finished" link at the right; a child's bar starts with "Sub-session of **Parent**". The approval card is a rounded panel with an accent left border bottom-right: "**Claude · main** wants to open a sub-session", a line with the agent, folder and chips (new worktree, model), the task in a grey box clamped to three lines, a red warning box when the opener runs without permission checks, then the four buttons (Allow once is the filled one, Deny red).
+
+Status: DONE_WITH_CONCERNS
+Summary: Phase 3 UI (tree, strip, parent link, approval cards + inbox, settings with API gate, vi strings) and both carried daemon items (`lineage_from` hand-over, daemon-side ACP MCP injection) are implemented; typecheck, 1523 frontend tests, i18n check, 884 Rust tests and clippy are clean.
+Concerns/Blockers: Nothing was rendered in the real app (phase 4); ACP kelpie-tool permission prompts are deliberately not auto-approved; a parent may get one automatic "exited" report for the old session on a view switch.
+
+## Fix round 1
+
+Checks: `cargo test -p kelpied -j 2 -- --skip notify::destinations` 887 passed, 0 failed; `cargo clippy -p kelpied --tests -j 2 -- -D warnings` clean; `pnpm typecheck` clean; `pnpm test` 1526 passed; `pnpm i18n:check` 0 missing.
+
+| Item | Done |
+|---|---|
+| H1 | One helper `ChatSession::for_agent(server, bytes)` adds the kelpie server to `session/new|load|resume`; used by `input` and `commit_turn` (the `chat.write_turn` path that `/new` and `/clear` take). The other stdin writers (interrupt, answers, refusals) never carry those methods. Test: a `/new` line committed as a queued turn gets the server. |
+| H2 | `place_among_subs` carries only an agent's own report (`!auto`). Test with an automatic `exited` report. |
+| M1 | `session.update {handle, handover: true|false}` (user-only: `session.update` is not in any session role's list). Sets transient `SessionSpec.switching` (cleared at daemon start) and a 15 s deadline in `Subs`. While it holds, an automatic exit sets no row report and queues no mail (`sub_status_changed` -> `report_auto`); `flush_handovers` (the existing 1 s tick) clears expired/aborted marks and, if the process did stop and no replacement came, sends the normal exit report. `handover: false` ("it did not happen") is handled the same way on the next tick. `session_rows` shows status `switching` and `wait_outcome` does not end a wait on it. `hand_over_lineage` clears the mark and mails the parent one note: "continues in the chat view|terminal as #N (the same conversation); #M is closed. Use #N or its name from now on." The app calls it before the stop in `doSwitchToChat`, `doSwitchToTerminal` and `restartInBypass`, and clears it when the stop or the create fails (`resumeChat` needs nothing). Tests: no mail/report while switching, the report after the grace period, the note to the parent, `switching` status in rows/wait. **Alias map not built**: names keep working after a switch; the old handle/id does not, and the note tells the parent the new handle (an alias would need a new RPC for the client-side `resolve` in `kelpied mcp`). |
+| M2 | `hand_over_lineage` re-points `Run::creator == old` to the new session and saves/broadcasts the runs (`runs_changed`). Test. |
+| M3 | Buttons enabled 500 ms after a card mounts (per card; the inbox copy too); "Always allow" asks `confirmDialog` with the Settings wording; "Later" hides that card (`postponeRequest`), the request stays in the Activity group (which has no Later button) and in the inbox. |
+| L1 | `replace` takes `keepFrom` (when the question was sent) and keeps requests asked at or after it; after a connect every request whose Activity entry is no longer listed is `requestGone` (marked read). |
+| L2 | Command "Review sub-session request" (`sub.review`, `Ctrl/Cmd+Shift+A`, checked free against the registry for both platforms; only enabled with an open request) un-hides "Later" cards and focuses the first card's Allow once button (the card itself while the buttons are still in their first 500 ms). |
+| L3 | `finishedChildren(children, tree)` leaves out a child with a running descendant (`hasLiveDescendant`); the action uses the tree. Test. |
+| L4 | Badge has `role=img` + `aria-label`/tooltip with the worst state in words ("3 sub-sessions: one needs you") and the state glyph for waiting/failed/finished. |
+| L5 | A child nests under its parent only when both have the same `project_id`; otherwise it stays in its own project (children of a row are filtered the same way). |
+| L6 | Vietnamese: "Cho phép trong phiên này", "đang bị kẹt", "Phiên con sẽ hành động mà không hỏi bạn trước." |
+
+Files added to this round: `session.rs` (`switching`, test helper `fake::exit`), `subs.rs`, `daemon.rs`, `daemon/sub_rpc.rs` (+tests), `chat.rs`, `mcp.rs` (+tests), `lib/commands.ts`, `lib/sub-sessions.ts` (+test), `lib/sub-session-actions.ts`, `lib/store.ts`, `chat/mode-switch.ts`, `components/{sub-request-card,sidebar,inbox}.tsx`, vi `shell.json`.
+
+Notes: `switching` is an extra field on the session wire row (skipped when false). A parent waiting with an explicit `sessions` list on a switched child ends on the "continues" mail (the old id leaves the list), not on a false exit.
+
+Status: DONE
+Summary: All fix-round items are implemented as decided (H1, H2, M1 without the alias map, M2, M3, six lows) and all checks pass.
+Concerns/Blockers: Old handles/ids are not aliased after a switch (names are; the parent is told the new handle by mail); nothing was exercised in the real app.
