@@ -85,4 +85,58 @@ Real Claude 2.1.319, `claude -p --mcp-config ... --strict-mcp-config --allowedTo
 
 Status: DONE_WITH_CONCERNS
 Summary: All review items fixed (M1-M3, m1-m6, real nits), chat injection done for Claude stream-json and Codex app-server chats, Claude's tool timeout measured above 700 s.
-Concerns/Blockers: ACP chats still need the app side (phase 3); a cancel in the one round trip between the daemon taking mail and the reply can still lose that mail; a real spawn against a live daemon remains for phase 4.
+Concerns/Blockers (fix round 1): ACP chats still need the app side (phase 3); a cancel in the one round trip between the daemon taking mail and the reply can still lose that mail; a real spawn against a live daemon remains for phase 4.
+
+## Phase 4 fix: idle reports
+
+Cause (F1): `ChildWatch::observe` turned any Working to Idle change after 3 s of output into an `idle` report, but an agent's output also goes quiet at start-up and between tool calls.
+
+Fix, as decided (`subs.rs`, `daemon/sub_rpc.rs`, `daemon.rs`, `session.rs`, `sub_guide.rs`):
+1. **Agents with a turn-end signal (kind claude or codex)**: `observe` never reports idleness any more. The report comes from `Daemon::hook` when Claude sends `Stop`/`StopFailure` or Codex sends `agent-turn-complete`: `sub_turn_ended` -> `ChildWatch::turn_ended`. It reports only if the turn really had work behind it (turn begun at least 3 s earlier; this also drops a background-thread notify with no work) and the child did not report by itself in the turn; at most once per turn. These kinds never get the quiet report (`settle_quiet`). Consequence: a Claude or Codex child whose hooks never arrive reports no idle at all (its explicit report, waiting and exit reports still work).
+2. **Other agents**: `ChildWatch::quiet`, asked once a second from the mail tick (`sub_quiet_check`, one lock when nothing is quiet): after real work, continuously idle for `QUIET_IDLE` = 30 s (field `quiet`, `ChildWatch::with_quiet` for tests), never while the first prompt is still to be typed (`Session::first_prompt_pending`, nothing is used up while held), once per idle spell (more work starts a new one), and not if the child reported by itself.
+3. **Wording**: the automatic idle mail and row now say "went quiet or finished a turn without reporting. It may still be working: only its own kelpie_report says it is done. Look at its screen (kelpie_read) before you send it work again". The guide has a new rule: automatic notices are hints; wait for the explicit report or `kelpie_read` first; never re-send a task because of such a notice.
+4. Waiting (`needs_user`) and exit reports are unchanged (tested for both kinds).
+
+Tests: `subs.rs` (turn-end signal vs quiet, short burst, background signal without work, explicit report, once per turn; hookless: 29 s not enough, spell broken by more work, hold while start-up, once per spell, next cycle; no work / explicit / exit) and `sub_rpc` (Codex-like session with Waiting -> Working -> Idle -> Working -> Idle start-up pattern: nothing mailed, even after a long quiet, then exactly one report on `agent-turn-complete` through `Daemon::hook`; hookless session: nothing at 29 s, nothing while the first prompt is pending, one report after, none again; needs_user and exited for both kinds). Existing automatic-report test now uses the turn-end signal.
+
+Run: `cargo test -p kelpie-proto -p kelpied -j 2 -- --skip notify::destinations` = 29 + 895 passed, 0 failed (one test assertion fixed after the first run). `cargo clippy -p kelpied --tests -j 2 -- -D warnings` clean. Real agents were not re-run.
+
+Notes: `scripts/e2e/sub_sessions.py` was not touched; if it expects an automatic idle mail from a stand-in, that now arrives after 30 s of quiet (hookless kinds) or on a hook (claude/codex). The first run hung on a lock taken twice (the temporary guard of `if let ... = watch.lock().quiet(..)` lived through `report_auto`); fixed by binding the result first.
+
+Status: DONE
+Summary: Automatic idle reports now come only from a real turn-end signal (Claude/Codex) or after 30 s of unbroken quiet (others, never during start-up), with wording that says the child may still be working; tests and clippy pass.
+Concerns/Blockers: a Claude or Codex child whose hooks never arrive gets no automatic idle report; real-agent rerun left to the tester.
+
+### F1b: an explicit report must hold through a flickering screen
+
+Cause: `ChildWatch::observe` cleared `explicit` on every change to Working, so a screen that flickered Working -> Idle -> Working after the child's `kelpie_report done` let the later `agent-turn-complete` send an idle mail.
+
+Fix (`subs.rs`, `daemon/sub_rpc.rs`, `session.rs`):
+- `observe` no longer touches `explicit`. A new turn begins only in `ChildWatch::sync_turn(sid, input, turn_seq, now)`: the session's `last_input()` (user keystrokes, a prompt or mail Kelpie typed in; this is the boundary for Codex, which has no turn-start hook) or its hook turn counter `turn_seq()` (Claude's `UserPromptSubmit`) changed since the last look. Then `explicit` and the settled-quiet flag are cleared and the idle clock restarts; a session that was already Working gets its turn start set then.
+- The daemon syncs before it decides anything about a session: in `sub_status_changed`, `sub_turn_ended`, `sub_quiet_check` (per candidate) and in `sub.report` before `explicit` is noted (so an input that came earlier cannot wipe the report just made).
+- The hookless quiet report follows the same rule: an explicit report suppresses it until new input arrives.
+- Chat children give no markers (`None`, 0).
+- `ChildWatch::with_quiet` is `#[cfg(test)]` (the dead-code warning is gone).
+
+Tests: `a_report_of_its_own_holds_through_a_flickering_screen_until_new_input` (hook agent: report, Idle/Working/Idle/Working flicker, turn-complete gives nothing; a prompt or a hook turn begins the next turn, which is reported; hookless agent: no quiet report after an explicit one until new input) and the daemon-level `no_idle_mail_follows_a_child_that_reported_done_however_its_screen_flickers` (Codex-like child: `sub.report done`, flicker via `sub_status_changed`, `Daemon::hook` turn-complete: the parent has only the `done` mail, the row keeps the child's words; a delivered prompt then makes the next turn-complete report). The earlier turn-end test now begins its next turn with `sync_turn`.
+
+Run: `cargo test -p kelpie-proto -p kelpied -j 2 -- --skip notify::destinations` = 29 + 894 passed, 0 failed; `cargo clippy -p kelpied --tests -j 2 -- -D warnings` clean. Real agents not re-run. Note: one build in this round ran without `CARGO_TARGET_DIR` and left a build folder `D:\kelpie-subsessions\target` (git-ignored; a hook here blocks me from deleting a path named `target`, so the owner may delete it).
+
+Status: DONE
+Summary: An explicit report now stands until new input (typed text, delivered prompt/mail) or a hook turn start; screen flicker no longer re-arms the automatic idle mail, for hook and hookless agents; `with_quiet` warning gone.
+Concerns/Blockers: stray `D:\kelpie-subsessions\target` build folder (see above); real-agent rerun left to the tester.
+
+## Phase 4 review fixes
+
+- **P4-1** The turn boundary is now `Session::last_submit()` = `activity.last_enter` (an Enter that submits: a prompt, or the Enter that ends the mail Kelpie typed), not `last_input`. Terminal replies (cursor position, device attributes), focus and mouse reports, cursor keys and plain typing no longer re-arm an explicit report. Test: report done, those inputs, flicker, turn-complete: only the `done` mail; then `next task\r` begins a new turn which is reported.
+- **P4-2** Only `done` and `failed` set the reported-this-turn flag (`sub_report`); `progress`, `blocked` and `needs_user` do not. Test over all five statuses.
+- **P4-3** `sub_quiet_check` settles Claude and Codex children only when `hooks_seen()`; otherwise they use the quiet path. Claude: 30 s. Codex: four times as long (120 s, `ChildWatch::quiet` has a `times` argument), because before its first turn ends Codex has sent no hook and may think silently for a while; this is a deviation from "30 s" for Codex, chosen to avoid bringing F1 back on a first turn. Tests: claude 31 s reports / 20 s does not; codex 31 s does not / 121 s does; Claude with SessionStart heard says nothing.
+- **Nit 1 (done, cheap)** `Activity::hook_turn_in_progress`: Claude with a Working hook not yet ended, or Codex with an Enter submitted after the last announced end. `type_mail_when_idle` refuses while it holds (cap 10 minutes, so an interrupted turn that never announces its end does not block mail for good); the mail stays queued and `kelpie_wait` still reads it. Tests in `status.rs` and a daemon test (waits mid-turn, goes once the end is announced).
+- **Nit 3** `scripts/e2e/sub_sessions.py`: temp paths in the PowerShell lines go through `psq()` (single-quote literal with doubled quotes).
+- Earlier F1b test helper now sets `last_enter` (`set_last_submit_for_test`).
+
+Run: `cargo test -p kelpie-proto -p kelpied -j 2 -- --skip notify::destinations` = 29 + 899 passed, 0 failed; `cargo clippy -p kelpied --tests -j 2 -- -D warnings` clean (all with `CARGO_TARGET_DIR=/d/kelpie-subsessions-target`). `python scripts/e2e/sub_sessions.py <rebuilt kelpied.exe>` (own endpoint `kelpie-sub-e2e`, temp data dir, stops only its own PID): 42/42 passed. Not touched: `docs/`.
+
+Status: DONE
+Summary: Turn boundary is a submitted Enter, only done/failed mark a turn reported, hookless-by-fact Claude/Codex children fall back to the quiet path (Codex at 120 s), mail waits mid-turn for hook agents, and the e2e PowerShell quoting is fixed; tests, clippy and the 42-check e2e pass.
+Concerns/Blockers: Codex fallback uses 120 s instead of 30 s (deliberate); a Claude Esc-interrupted turn blocks mail for up to 10 minutes.

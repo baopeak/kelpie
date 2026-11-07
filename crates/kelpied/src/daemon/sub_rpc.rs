@@ -498,7 +498,11 @@ impl Daemon {
         if matches!(status, "done" | "failed") {
             self.record_sub_outcome(&info.spec, status, true);
         }
-        self.subs.watch.lock().explicit(&sid);
+        self.sync_turn(&entry, Instant::now());
+        // Only a verdict means the turn has been reported on; progress, blocked and needs_user are not its end.
+        if matches!(status, "done" | "failed") {
+            self.subs.watch.lock().explicit(&sid);
+        }
         Ok(json!({"delivered_to": parent_info.map(|p| self.session_tag(&p))}))
     }
 
@@ -589,6 +593,7 @@ impl Daemon {
     pub(super) fn sub_status_changed(&self, entry: &Entry, info: &SessionInfo, now: Instant) {
         let sid = &info.spec.id;
         self.subs.births.lock().entry(sid.clone()).or_insert(now);
+        self.sync_turn(entry, now);
         let Some(auto) = self.subs.watch.lock().observe(sid, info.status, now) else { return };
         // Stopped by the app to continue in the other view: the new session says what it is, and nothing it does on the way out
         // (going idle as it stops, exiting) is reported. If the switch does not happen, `flush_handovers` reports the exit later.
@@ -596,6 +601,66 @@ impl Daemon {
             return;
         }
         self.report_auto(entry, info, auto, now);
+    }
+
+    /// Tells the watch what the session has taken as input and how many turns its hooks began: a new turn begins there, and not
+    /// on a screen that flickers (see `ChildWatch::sync_turn`). Done before anything is decided about the session, and before its
+    /// own report is noted, so an input that came earlier cannot wipe the report.
+    fn sync_turn(&self, entry: &Entry, now: Instant) {
+        let (input, turns) = match entry {
+            Entry::Term(s) => (s.last_submit(), s.turn_seq()),
+            Entry::Chat(_) => (None, 0),
+        };
+        self.subs.watch.lock().sync_turn(&entry.spec().id, input, turns, now);
+    }
+
+    /// Agents that announce the end of a turn themselves (Claude's hooks, Codex's notify): their idleness is reported on that
+    /// signal only; for the others it is a guess (`sub_quiet_check`).
+    fn has_turn_end_signal(kind: &str) -> bool {
+        matches!(kind, "claude" | "codex")
+    }
+
+    /// A hook report said a turn ended (`Stop`, `StopFailure`, `agent-turn-complete`) in a sub-session.
+    pub(super) fn sub_turn_ended(&self, entry: &Entry, now: Instant) {
+        let info = entry.info();
+        if info.spec.parent.is_none() || info.spec.switching {
+            return;
+        }
+        self.sync_turn(entry, now);
+        let Some(auto) = self.subs.watch.lock().turn_ended(&info.spec.id, now) else { return };
+        self.report_auto(entry, &info, auto, now);
+    }
+
+    /// Called every second: a sub-session of an agent without a turn-end signal that has been idle long enough, without a break,
+    /// is reported as gone quiet, once. Not while its first prompt is still to be typed. Nothing but one lock when none is quiet.
+    pub(super) fn sub_quiet_check(&self, now: Instant) {
+        let candidates = self.subs.watch.lock().quiet_candidates(now);
+        for sid in candidates {
+            let Some(entry) = self.by_id(&sid) else { continue };
+            let info = entry.info();
+            if info.spec.parent.is_none() {
+                self.subs.watch.lock().settle_quiet(&sid);
+                continue;
+            }
+            // An agent that announces its turns does so through hooks. One whose hooks have not been heard from (turned off, timed
+            // out, or Codex before its first turn ends) is judged by its quiet like the others; Codex, which may be silent for
+            // long while it thinks before it announces anything, is given four times as long.
+            let hooked = matches!(&entry, Entry::Term(s) if s.hooks_seen());
+            if Self::has_turn_end_signal(&info.spec.kind) && hooked {
+                self.subs.watch.lock().settle_quiet(&sid);
+                continue;
+            }
+            let times = if Self::has_turn_end_signal(&info.spec.kind) && info.spec.kind == "codex" { 4 } else { 1 };
+            let hold = matches!(&entry, Entry::Term(s) if s.first_prompt_pending());
+            if info.status != Status::Idle || info.spec.switching {
+                continue;
+            }
+            self.sync_turn(&entry, now);
+            let quiet = self.subs.watch.lock().quiet(&sid, now, hold, times);
+            if let Some(auto) = quiet {
+                self.report_auto(&entry, &info, auto, now);
+            }
+        }
     }
 
     /// Puts an automatic report on the row of `info` and, while the parent is there, in the parent's mail.

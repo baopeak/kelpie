@@ -32,6 +32,8 @@ const ECHO_WINDOW: Duration = Duration::from_millis(300);
 const BELL_REACTION_WINDOW: Duration = Duration::from_secs(1);
 /// A hook state older than this, while output keeps flowing, stops overriding activity.
 const HOOK_STALE: Duration = Duration::from_secs(120);
+/// A turn its hooks say is under way keeps mail waiting this long at most (an interrupted turn may never be announced as over).
+const MAIL_TURN_CAP: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone)]
 pub struct Activity {
@@ -124,6 +126,21 @@ impl Activity {
     /// The failure just reported was the usage limit.
     pub fn on_limit(&mut self) {
         self.limited = self.failed && !self.limit_dead;
+    }
+
+    /// A turn that the agent's hooks bracket is under way: Claude reported work and not yet its end; Codex, which announces only
+    /// the end of a turn, was sent a prompt (an Enter) after the last end it announced. Its screen going quiet in between is not
+    /// an invitation for mail, whatever `status` guesses from the output. False for an agent that never reported a hook.
+    pub fn hook_turn_in_progress(&self, now: Instant) -> bool {
+        let since = match self.hook {
+            Some((Status::Working, at)) => at,
+            Some((Status::Idle, at)) if !self.hooks_report_start => match self.last_enter {
+                Some(enter) if enter > at => enter,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        now.duration_since(since) < MAIL_TURN_CAP
     }
 
     /// The prompt line was edited after the last Enter and after the last turn began: a draft may wait there, and an Enter would
@@ -255,6 +272,27 @@ mod tests {
         }
         assert_eq!(a.status(t0 + Duration::from_millis(1000)), Status::Working);
         assert_eq!(a.status(t0 + Duration::from_millis(4000)), Status::Idle);
+    }
+
+    #[test]
+    fn a_turn_its_hooks_bracket_is_in_progress_from_its_start_to_its_announced_end() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        // Never heard from: unknown, so not in progress.
+        assert!(!Activity::default().hook_turn_in_progress(t0));
+        // Codex: an end announced, then a prompt submitted: under way until the next end.
+        let mut codex = Activity { hook: Some((Status::Idle, t0)), last_enter: Some(t0 + s(5)), ..Default::default() };
+        assert!(codex.hook_turn_in_progress(t0 + s(30)));
+        codex.hook = Some((Status::Idle, t0 + s(40)));
+        assert!(!codex.hook_turn_in_progress(t0 + s(41)));
+        // Nothing submitted since the last end; or the turn never announced its end for ten minutes.
+        assert!(!Activity { hook: Some((Status::Idle, t0)), last_enter: Some(t0 - s(5)), ..Default::default() }.hook_turn_in_progress(t0 + s(1)));
+        assert!(!codex.hook_turn_in_progress(t0 + s(40 + 601)) && Activity { hook: Some((Status::Idle, t0)), last_enter: Some(t0 + s(5)), ..Default::default() }.hook_turn_in_progress(t0 + s(500)));
+        assert!(!Activity { hook: Some((Status::Idle, t0)), last_enter: Some(t0 + s(5)), ..Default::default() }.hook_turn_in_progress(t0 + s(700)));
+        // Claude: work reported and not yet its end; its Idle after a Stop is over.
+        let claude = Activity { hook: Some((Status::Working, t0)), hooks_report_start: true, ..Default::default() };
+        assert!(claude.hook_turn_in_progress(t0 + s(10)));
+        assert!(!Activity { hook: Some((Status::Idle, t0)), hooks_report_start: true, last_enter: Some(t0 + s(5)), ..Default::default() }.hook_turn_in_progress(t0 + s(10)));
     }
 
     #[test]

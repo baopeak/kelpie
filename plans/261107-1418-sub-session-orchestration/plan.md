@@ -1,7 +1,7 @@
 ---
 title: "Sub-session orchestration"
 description: "An agent in a Kelpie session opens child sessions (any installed agent CLI), steers them, gets their reports pushed back and messages sessions of other projects; shown as a tree under the parent."
-status: in-progress
+status: completed
 priority: P1
 effort: "~6d"
 tags: [multi-agent, orchestration, daemon, mcp, ux]
@@ -55,7 +55,7 @@ branch: feat/sub-sessions (worktree D:\kelpie-subsessions, off origin/master 7b9
 | 1 | [Daemon core: lineage, sub.* RPCs, policy, approvals, mailbox, delivery, caps](phase-01-daemon-core.md) | 2d | — | completed (edc1076) |
 | 2 | [Agent surface: `kelpied mcp`, `kelpied sub`, launch injection, child brief, hints](phase-02-agent-surface.md) | 1.5d | 1 | completed |
 | 3 | [App UI: tree, children strip, approval card, settings, i18n](phase-03-app-ui.md) | 1.5d | 1 | completed |
-| 4 | [Docs, end-to-end and real-agent check](phase-04-docs-e2e.md) | 1d | 2, 3 | pending |
+| 4 | [Docs, end-to-end and real-agent check](phase-04-docs-e2e.md) | 1d | 2, 3 | completed |
 
 Sequential, one phase at a time; each: implement → tests → code review → fix until no blocker → local commit.
 

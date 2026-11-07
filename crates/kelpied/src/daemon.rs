@@ -1384,6 +1384,10 @@ impl Daemon {
             if hook_event_limited(event, &payload) {
                 session.set_limited();
             }
+            // The one signal that a sub-session's turn really ended.
+            if matches!((agent, event), ("claude", "Stop" | "StopFailure") | ("codex", "agent-turn-complete")) {
+                self.sub_turn_ended(&Entry::Term(session.clone()), Instant::now());
+            }
         }
         // The app reads the conversation's usage when a turn moves on (it debounces).
         if !event.is_empty() {
@@ -1614,6 +1618,7 @@ impl Daemon {
             if now.duration_since(last_mail_tick) >= Duration::from_secs(1) {
                 last_mail_tick = now;
                 self.deliver_mail();
+                self.sub_quiet_check(now);
                 self.flush_handovers();
             }
             for item in self.scheduled.take_due(now_millis()) {

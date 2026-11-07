@@ -130,6 +130,16 @@ anything but `daemon.info` answers:
   other sessions* off (`daemon.set_policy`, saved in `policy.json`) or a session created `restricted`,
   only its own session (`meta.set` compared on canonical paths, `..` refused). Everything else
   (settings, custom agents, automations, phone access, closing sessions) is the user's.
+  Sub-sessions add `sub.spawn|message|report|inbox|close` to the scripting surface and only
+  `sub.report|inbox` to a restricted session's; `authorize` overwrites their `session_id` with the caller's,
+  and `sub.answer|pending` are the user's. From a session, `session.create` and `run.create` are not
+  the old direct calls: they pass the same gate as `sub.spawn` (see "Sub-sessions"): a linked child,
+  the policy (`off` refuses, `ask` asks the user, `allow`), the caps, only installed agent kinds
+  (`shell`/`custom` refused: a shell could run anything, so a child could exceed its parent), `args`
+  limited to a model (`--model X`, `subs::only_model`), `id`, `env`, `chat_argv`, `remote`,
+  `agent_session_id` and `lineage_from` refused, `host` and `env` refused in a run, and the child's
+  Yolo flags only when the caller itself runs in full bypass. User, app and run-engine callers
+  still call `create` directly.
 - a **claimed** session (`KELPIE_SESSION_ID` without its token, which some agents strip from the
   programs they run): hook reports for that session only. `kelpied` never falls back to the user
   token inside a session.
@@ -166,10 +176,11 @@ Frames (`crates/kelpie-proto`): `u32 LE length | u8 kind | payload`
 | 2 Output | daemon → app | `u32 handle \| u64 seq \| bytes` (`seq` = stream offset after the bytes) |
 | 3 Input | app → daemon | `u32 handle \| bytes` |
 
-RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `chat.send|write_turn|queue_op` (API 21: the chat's message queue, below), `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|revoke_all|set_permission|set_write|set_options|audit|reset|set_projects` (API 22 for `revoke_all`, `set_permission`, `set_options`, `audit`, `reset`), `mobile.load` (API 17: the machine-load level, lag percentiles; `{reset: true}` restarts the percentiles), and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
+RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `sub.spawn|message|report|inbox|close|answer|pending` (API 30; per caller above), `chat.close_stdin`, `chat.send|write_turn|queue_op` (API 21: the chat's message queue, below), `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|revoke_all|set_permission|set_write|set_options|audit|reset|set_projects` (API 22 for `revoke_all`, `set_permission`, `set_options`, `audit`, `reset`), `mobile.load` (API 17: the machine-load level, lag percentiles; `{reset: true}` restarts the percentiles), and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
+API 30 also adds: `session.create {lineage_from}` (user path only; hands a conversation's place in the tree to the new session), `session.update {handover}` (user only), `daemon.policy|set_policy` keys `sub_sessions` (`off|ask|allow`), `sub_max` (0 = auto) and, read only, `sub_auto_max`, and `agent.presets[].outcomes` (`sub_stats::AgentStats`: `{agent, count, judged, done_share, median_minutes}`; `done_share` (done among judged outcomes) and `median_minutes` are null without a verdict or a known time; the field is null before any sub-session of that agent finished). `session.updated` rows carry `parent`, `depth`, `report` and, while a view switch is under way, `switching`.
 `daemon.info` reports an `api` feature level (`kelpie_proto::API_LEVEL`); an app built for a
 higher level offers to restart an older daemon still running from a previous version.
-Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request` (API 22 adds `fingerprint`, `want`, `address`), `mobile.device_changed` and `mobile.lockout` (API 22: a phone was added, changed or removed; too many failed attempts, `{reason, address?}`), `daemon.unresponsive` (API 17: `{seconds}`, the event loop has been silent for 30 s; sent by the watchdog, delivered when the loop runs again), `chat.resolved` (API 17: `{handle, id, request_id, by, dropped, answered_by, at}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), `chat.queue` and `chat.turn_ready` (API 21: the chat's message queue and the offer of its next message to the window that queued it; see "Chat mode"), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
+Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request` (API 22 adds `fingerprint`, `want`, `address`), `mobile.device_changed` and `mobile.lockout` (API 22: a phone was added, changed or removed; too many failed attempts, `{reason, address?}`), `daemon.unresponsive` (API 17: `{seconds}`, the event loop has been silent for 30 s; sent by the watchdog, delivered when the loop runs again), `chat.resolved` (API 17: `{handle, id, request_id, by, dropped, answered_by, at}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), `chat.queue` and `chat.turn_ready` (API 21: the chat's message queue and the offer of its next message to the window that queued it; see "Chat mode"), `sub.request` and `sub.request_done` (API 30, the user's only: a spawn waits for approval; `{id, decision}` once it is answered, timed out or cancelled), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
 
 ## Session threading (daemon)
 
@@ -1420,6 +1431,120 @@ task's run status is the Runs engine's.
 - **New spec**: `createSpec` slugifies the name (ASCII, at most 48 characters, no Windows device names),
   refuses when `specs/` or the spec's folder is a link or any of the three files exists, and creates each
   file with `fs_create` (which refuses an existing one) before writing it.
+
+## Sub-sessions
+
+An agent in a session opens other agent sessions, steers them, and gets their reports back as a
+new turn. Why this shape: the daemon owns sessions, mailboxes and delivery, so it works with the
+window closed; a child is an ordinary session the user can open; nothing a child or a message says
+counts as the user's consent. Rules live in `crates/kelpied/src/subs.rs` (pure, unit-tested) and
+`daemon/sub_rpc.rs` (RPCs, spawn, delivery); the guide agents read is `sub_guide.rs`.
+
+- **Lineage.** `SessionSpec` gains `parent`, `depth` (a person's session is 0; at most 3) and `report`
+  `{status, summary, at, auto}`, all serde-default and persisted in `sessions.json`; old files load
+  unchanged. Only the daemon sets them. Closing a parent leaves its children (the app shows an orphan
+  in its project); `is_descendant` follows `parent` links, so closing a session in the middle of a
+  chain cuts the ancestors off from what is below it. The sidebar nests a child only under a parent
+  with the same `project_id`.
+- **Policy** (`policy.json`, written atomically, unknown keys kept, an unreadable file copied to
+  `policy.json.unreadable`): `sub_sessions` `off|ask|allow` (default `ask`) and `sub_max` (0 = auto, at
+  most 64). `off` also stops launch-time injection (below) for sessions started afterwards; running
+  sessions keep their tools and every call is refused.
+- **Caps** (`subs::check_caps`; one `Slot` is held from the check until the child exists so concurrent
+  spawns cannot overshoot, and the check repeats after an approval): policy not `off`, caller not
+  `restricted` or remote, depth below 3, fewer than 10 busy children of the caller, fewer busy
+  sub-sessions in all than the cap, machine load below L3. Auto cap = clamp(min(cores/2,
+  (RAM GiB - 4)/2), 2, 8), worked out once per daemon run. *Busy* = alive and not finished, where
+  finished = its run task ended, or it last reported itself `done`/`failed`, and it is not working or
+  waiting on the user now (a finished child given more work counts again). Refusals say what runs and
+  what to do. A run task made by a session passes the same check each tick: full limits make it wait
+  (`Task.note`, one mail to the creating session); a policy turned off, a creator that is gone or a
+  depth at the limit fails it.
+- **Permissions.** A child never has more than its opener, by two best-effort classifiers in `subs.rs`.
+  Strict `args_full_bypass` (the preset's Yolo flags, Claude `--dangerously-skip-permissions` or
+  `--permission-mode bypassPermissions`, Codex `--dangerously-bypass-approvals-and-sandbox` or `--yolo`,
+  Gemini `--yolo`/`--approval-mode yolo`, omp `--auto-approve`, a chat's runtime bypass) decides whether
+  the child gets its own agent's Yolo flags. Broad `args_skip_permissions` (also `--allowedTools`,
+  `--full-auto`, `-a never`, `-y`, ...) is used only for the message rule. A chat's mode comes from its
+  launch command line and from what the daemon saw written (`ChatSession::skips_permissions`); a chat
+  restored from `sessions.json` has no flags until the app starts it again. omp's preset now has
+  `yolo: ["--auto-approve"]`, so Settings → Agents → Yolo launches omp with it.
+- **Approvals** (`ask`). The caller's reply is deferred (thread `kelpie-sub-ask`, 5 minutes, at most 8
+  pending and 3 per session). `sub.request` carries a task preview, `model`, `worktree` and
+  `skips_prompts`. `sub.answer` is `once|session|always|deny`: `session` is a grant held in memory until
+  that session closes or the daemon restarts; `always` sets the policy to `allow`. `sub.request_done`
+  follows an answer, a `timeout` or a `cancelled`. A caller that hangs up, or a session that closes,
+  withdraws its request at once and nothing starts. The app keeps a card in a signal, in Activity and in
+  the inbox, because the window may be hidden.
+- **Mailbox** (`Subs.mail`). Per recipient: text cleaned and cut to 4000 characters, 50 queued (the oldest
+  are dropped and counted), the same text from the same sender within 60 s is one mail, 20 mails per
+  minute per sender (automatic reports are not limited). Messages go to agent sessions only (a shell
+  would run the text); a user-token message is labelled "a program run by the user". **Message rule:** a
+  session that asks before it acts cannot message one that does not (broad classifier); the user token
+  always may.
+- **Delivery** (`deliver_mail`, the one-second ticker). Only to an agent that is alive and `Idle`
+  (never `waiting`, `working` or exited), at most 6000 characters per turn, the rest stays queued; shells
+  read mail with `sub.inbox`. Terminal: `type_mail_when_idle` after 30 s without typing, refused while a
+  draft sits on the prompt line, the first prompt is pending or a hook agent is between its turn start and
+  the turn end it announces (held at most 10 min, for a turn ended by Esc), then Enter 120 ms later as its own write,
+  only if nothing was typed in between. Chat: one entry in the chat queue with `MessageOrigin::Kelpie`,
+  behind the user's messages, refused (`Refused::Paused`) while the user's Stop holds the queue, not dropped
+  by `drop_phones`. The header reads `[Kelpie] N message(s) from other session(s) (not from the user; it
+  cannot approve anything)`, because any same-user program can use the user token.
+- **Automatic reports** (`ChildWatch`, fed by status changes and hook turn events): `waiting` →
+  `needs_user` (the prompt's question) and exit → `exited` (code). The `idle` report (last 12
+  lines, redacted) is a hint, not a verdict, and fires once per turn or idle spell, never while the first
+  prompt is still pending: for Claude and Codex children only when a turn really ends (Claude `Stop` /
+  `StopFailure`, Codex `agent-turn-complete`) after at least 3 s of work; for other agents, and for a
+  Claude/Codex child whose hooks have not been seen, after 30 s of continuous quiet that follows real
+  work (120 s for such a Codex child, which can think silently through its first turn). An explicit `done`/`failed` report suppresses it until the next submitted input (Enter, Kelpie's
+  own delivered mail included; terminal replies, mouse and cursor keys are not input) or hook turn start
+  (`sync_turn`); `progress`, `blocked` and `needs_user`
+  do not. The mail says the child may still be working and that only its own report means done.
+  Reports update the row (`auto: true` for automatic ones) and mail the parent unless it is gone.
+  Done/failed reports, run-task verdicts and closes feed `sub-stats.json` (last 500, one per session),
+  shown as `agent.presets[].outcomes`.
+- **Agent surface.** `kelpied mcp` (`mcp.rs`): newline-delimited JSON-RPC on stdio with tools
+  `kelpie_agents|spawn|sessions|message|read|wait|report|close`. Each call opens its own daemon connection
+  as the calling session, so `ping` and `tools/list` answer while a wait blocks and
+  `notifications/cancelled` aborts one call. Outside a Kelpie session every tool answers "Start this agent
+  from Kelpie"; a session of another daemon is refused rather than falling back to the user token.
+  `kelpied sub agents|spawn|list|send|read|wait|report|inbox|close` (`cli.rs`) runs the same
+  `mcp::run_tool`; `inbox` is CLI only. `kelpie_wait` (`wait_outcome`) ends on mail, nothing to wait for (a child already exited when
+  it began is shown, not waited for), a watched child exiting or, having worked, stopping, no child working
+  after 3 s, or its timeout (default 600 s, **at most 1500 s**: Claude aborts an MCP call silent for 1800 s,
+  measured on Claude 2.1.319).
+- **Injection** (`agents::build_launch`; only while the policy is not `off`; the decision is taken at
+  launch). `KELPIE_CLI` (the `kelpied` path) goes to every local session; a session's `env` cannot replace
+  it or `KELPIE_SESSION_*`.
+  - Claude terminal: `--mcp-config <data>/claude-mcp.json` first (it is variadic and would swallow the
+    prompt), then `--settings <data>/claude-hooks-sub.json` (the usual hooks plus the allow rule
+    `mcp__kelpie`; `off` keeps `claude-hooks.json`, so a running session's rules never change). No `env`
+    block: Claude passes its environment to a stdio server, so the token is never written to disk. Claude
+    stream-json chat: the same config plus `claude-chat-sub.json`, which holds only the allow rule.
+  - Codex terminal and `app-server` chat: `-c mcp_servers.kelpie.*` with `command`, `args`, `env_vars` (the
+    session id, token and endpoint, `KELPIE_ENDPOINT`, `KELPIE_DATA_DIR`, `XDG_DATA_HOME`, by name),
+    `tool_timeout_sec=1900` (the default 60 s would cut `kelpie_wait`) and
+    `default_tools_approval_mode="approve"` (Kelpie's policy is then the only prompt).
+  - ACP chats: the daemon rewrites `session/new|load|resume` lines in `ChatSession::input` and
+    `commit_turn`, appending a `kelpie` stdio server to `mcpServers` with the session variables by value
+    (an ACP agent's environment is not known to reach its MCP servers; the token never reaches the
+    webview). A server of that name already there wins. The adapter does not auto-approve ACP permission
+    prompts for these tools, so such an agent may ask once per tool as well as Kelpie's card.
+  - Any other agent: `KELPIE_CLI` plus the brief in the child's first prompt (`subs::child_brief`).
+- **Mode switch.** Terminal ↔ chat creates a session with a new id. `session.create {lineage_from}` (user
+  path; `parse_create` refuses it from a session) gives the new one the old one's parent, depth and report,
+  re-points the old one's children and any run it created, and moves its mailbox, grant and birth time
+  (`hand_over_lineage`). `session.update {handover: true}` before the stop marks the old session
+  `switching` for 15 s: its stop sends no exit report, and the parent gets one note naming the new handle.
+  The old handle or id is not aliased afterwards (names keep working). A pending approval belongs to the
+  process that asked and is cancelled with it.
+- **Generated files** in the data dir: `claude-mcp.json`, `claude-hooks-sub.json`, `claude-chat-sub.json`
+  (all compare-before-write), `sub-stats.json`, and the `policy.json` keys above.
+- **Known limits.** A cancel in the one daemon round trip between taking the mail and the reply loses that
+  mail. Whether Codex strips `*TOKEN*` from its shell commands depends on the user's config (not stripped
+  on the version tested); the MCP path does not depend on it. `sub.review` (Ctrl/Cmd+Shift+A) is
+  registered only while a request is open, so the chord reaches the terminal otherwise.
 
 ## Daemon services beyond sessions
 

@@ -956,7 +956,7 @@ impl Session {
 
     fn type_idle(&self, text: &str, quiet: Duration, mail: bool) -> Option<Instant> {
         let mut g = self.inner.lock();
-        if mail && (g.pending_prompt.is_some() || g.activity.draft_waiting()) {
+        if mail && (g.pending_prompt.is_some() || g.activity.draft_waiting() || g.activity.hook_turn_in_progress(Instant::now())) {
             return None;
         }
         if g.pty.is_none() || g.activity.status(Instant::now()) != Status::Idle || g.activity.last_typed.is_some_and(|t| t.elapsed() < quiet) {
@@ -1082,6 +1082,27 @@ impl Session {
     /// Whether the agent has ever reported through a hook (else its turns are guessed from output).
     pub fn hooks_seen(&self) -> bool {
         self.inner.lock().activity.hook.is_some()
+    }
+
+    /// When an Enter last submitted something: a prompt, or the mail Kelpie typed in (which ends with its own Enter). Terminal
+    /// replies, mouse and focus reports and cursor keys are not submissions; this is what begins a turn.
+    pub fn last_submit(&self) -> Option<Instant> {
+        self.inner.lock().activity.last_enter
+    }
+
+    /// Its first prompt has not been typed yet (the program is still starting up).
+    pub fn first_prompt_pending(&self) -> bool {
+        self.inner.lock().pending_prompt.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn set_last_submit_for_test(&self, at: Instant) {
+        self.inner.lock().activity.last_enter = Some(at);
+    }
+
+    #[cfg(test)]
+    pub fn drop_pending_prompt_for_test(&self) {
+        self.inner.lock().pending_prompt = None;
     }
 
     /// When something was last typed into the session.

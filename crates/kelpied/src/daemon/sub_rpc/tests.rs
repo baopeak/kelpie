@@ -141,6 +141,247 @@ fn a_report_shows_on_the_row_and_goes_to_the_parent_that_reads_or_receives_it() 
     let _ = std::fs::remove_dir_all(dir);
 }
 
+fn idle_mails(d: &Arc<Daemon>, to: &str) -> Vec<Value> {
+    let mails = d.sub_rpc("sub.inbox", &json!({"session_id": to, "take": true})).unwrap();
+    mails["mails"].as_array().unwrap().iter().filter(|m| m["status"] == "idle").cloned().collect()
+}
+
+#[test]
+fn a_codex_like_child_is_reported_idle_on_its_turn_end_signal_and_not_on_going_quiet() {
+    let (d, dir) = daemon("sub-idle-signal");
+    add(&d, 1, "p", "claude", None);
+    let (child, _) = add(&d, 2, "c", "codex", Some(("p", 1)));
+    let entry = d.by_id("c").unwrap();
+    let info = |status: Status| {
+        let mut i = d.by_id("c").unwrap().info();
+        i.status = status;
+        i
+    };
+    let t0 = Instant::now() - Duration::from_secs(120);
+    let s = Duration::from_secs;
+    // Start-up, then a quiet moment between two steps of the turn: three "idle"s, as the real run saw, and none is mailed.
+    for (status, at) in [(Status::Waiting, 0), (Status::Working, 5), (Status::Idle, 9), (Status::Working, 12), (Status::Idle, 20), (Status::Working, 22), (Status::Idle, 40)] {
+        d.sub_status_changed(&entry, &info(status), t0 + s(at));
+    }
+    d.sub_quiet_check(t0 + s(115));
+    assert!(idle_mails(&d, "p").is_empty(), "no signal, no report, however long the quiet");
+    assert!(child.spec.lock().report.as_ref().is_none_or(|r| r.status != "idle"));
+    // Codex's notify: the turn really ended.
+    d.hook(&json!({"session_id": "c", "agent": "codex", "verified": true, "payload": {"type": "agent-turn-complete"}})).unwrap();
+    let mails = idle_mails(&d, "p");
+    assert_eq!(mails.len(), 1, "{mails:?}");
+    let text = mails[0]["text"].as_str().unwrap();
+    assert!(text.contains("went quiet or finished a turn without reporting") && text.contains("may still be working") && text.contains("only its own kelpie_report says it is done"), "{text}");
+    assert_eq!(child.spec.lock().report.as_ref().unwrap().status, "idle");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn no_idle_mail_follows_a_child_that_reported_done_however_its_screen_flickers() {
+    let (d, dir) = daemon("sub-idle-flicker");
+    add(&d, 1, "p", "claude", None);
+    let (child, _) = add(&d, 2, "c", "codex", Some(("p", 1)));
+    let entry = d.by_id("c").unwrap();
+    let info = |status: Status| {
+        let mut i = d.by_id("c").unwrap().info();
+        i.status = status;
+        i
+    };
+    let t0 = Instant::now() - Duration::from_secs(120);
+    let s = Duration::from_secs;
+    d.sub_status_changed(&entry, &info(Status::Working), t0);
+    // The child reports done, then its hooks run: the screen goes Idle -> Working -> Idle -> Working.
+    d.sub_rpc("sub.report", &json!({"session_id": "c", "status": "done", "summary": "wrote hello.txt"})).unwrap();
+    for (status, at) in [(Status::Idle, 20), (Status::Working, 21), (Status::Idle, 30), (Status::Working, 31)] {
+        d.sub_status_changed(&entry, &info(status), t0 + s(at));
+    }
+    d.hook(&json!({"session_id": "c", "agent": "codex", "verified": true, "payload": {"type": "agent-turn-complete"}})).unwrap();
+    let mails = d.sub_rpc("sub.inbox", &json!({"session_id": "p", "take": true})).unwrap();
+    let statuses: Vec<&str> = mails["mails"].as_array().unwrap().iter().map(|m| m["status"].as_str().unwrap()).collect();
+    assert_eq!(statuses, ["done"], "only its own report");
+    let row = child.spec.lock().report.clone().unwrap();
+    assert_eq!((row.status.as_str(), row.auto), ("done", false), "and its words stay on the row");
+    // A prompt delivered to it begins a new turn: that one is reported.
+    child.set_last_submit_for_test(Instant::now());
+    d.sub_status_changed(&entry, &info(Status::Working), t0 + s(40));
+    d.hook(&json!({"session_id": "c", "agent": "codex", "verified": true, "payload": {"type": "agent-turn-complete"}})).unwrap();
+    assert_eq!(idle_mails(&d, "p").len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn flicker_then_turn_end(d: &Arc<Daemon>, entry: &Entry, t0: Instant) {
+    let info = |status: Status| {
+        let mut i = entry.info();
+        i.status = status;
+        i
+    };
+    let s = Duration::from_secs;
+    for (status, at) in [(Status::Idle, 20), (Status::Working, 21), (Status::Idle, 30), (Status::Working, 31)] {
+        d.sub_status_changed(entry, &info(status), t0 + s(at));
+    }
+    d.hook(&json!({"session_id": entry.spec().id, "agent": "codex", "verified": true, "payload": {"type": "agent-turn-complete"}})).unwrap();
+}
+
+#[test]
+fn terminal_replies_and_keys_that_submit_nothing_do_not_begin_a_turn() {
+    let (d, dir) = daemon("sub-turn-input");
+    add(&d, 1, "p", "claude", None);
+    let (child, _) = add(&d, 2, "c", "codex", Some(("p", 1)));
+    let entry = d.by_id("c").unwrap();
+    let t0 = Instant::now() - Duration::from_secs(120);
+    let mut working = entry.info();
+    working.status = Status::Working;
+    d.sub_status_changed(&entry, &working, t0);
+    d.sub_rpc("sub.report", &json!({"session_id": "c", "status": "done", "summary": "ok"})).unwrap();
+    // The terminal answers the agent's queries by itself, the window sends focus and mouse reports, a cursor key is pressed.
+    for bytes in [&b"\x1b[12;40R"[..], b"\x1b[?62;4c", b"\x1b[I", b"\x1b[<0;10;5M", b"\x1b[A", b"abc"] {
+        child.input(bytes.to_vec());
+    }
+    assert!(child.last_submit().is_none(), "nothing was submitted");
+    flicker_then_turn_end(&d, &entry, t0);
+    let mails = d.sub_rpc("sub.inbox", &json!({"session_id": "p", "take": true})).unwrap();
+    let statuses: Vec<&str> = mails["mails"].as_array().unwrap().iter().map(|m| m["status"].as_str().unwrap()).collect();
+    assert_eq!(statuses, ["done"]);
+    // An Enter that submits (a prompt, or the one that ends mail Kelpie typed) begins the next turn.
+    child.input(b"next task\r".to_vec());
+    assert!(child.last_submit().is_some());
+    d.sub_status_changed(&entry, &working, t0 + Duration::from_secs(40));
+    d.hook(&json!({"session_id": "c", "agent": "codex", "verified": true, "payload": {"type": "agent-turn-complete"}})).unwrap();
+    assert_eq!(idle_mails(&d, "p").len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn only_a_verdict_counts_as_having_reported_the_turn() {
+    for (status, mailed) in [("progress", 1), ("blocked", 1), ("needs_user", 1), ("done", 0), ("failed", 0)] {
+        let (d, dir) = daemon("sub-verdict");
+        add(&d, 1, "p", "claude", None);
+        add(&d, 2, "c", "codex", Some(("p", 1)));
+        let entry = d.by_id("c").unwrap();
+        let t0 = Instant::now() - Duration::from_secs(120);
+        let mut working = entry.info();
+        working.status = Status::Working;
+        d.sub_status_changed(&entry, &working, t0);
+        d.sub_rpc("sub.report", &json!({"session_id": "c", "status": status, "summary": "so far"})).unwrap();
+        flicker_then_turn_end(&d, &entry, t0);
+        assert_eq!(idle_mails(&d, "p").len(), mailed, "{status}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn a_claude_or_codex_child_whose_hooks_never_came_is_judged_by_its_quiet() {
+    let t0 = Instant::now() - Duration::from_secs(1000);
+    let s = Duration::from_secs;
+    for (kind, quiet, expected) in [("claude", 31, 1), ("claude", 20, 0), ("codex", 31, 0), ("codex", 121, 1)] {
+        let (d, dir) = daemon("sub-nohooks");
+        add(&d, 1, "p", "claude", None);
+        let (_, _) = add(&d, 2, "c", kind, Some(("p", 1)));
+        let entry = d.by_id("c").unwrap();
+        let info = |status: Status| {
+            let mut i = entry.info();
+            i.status = status;
+            i
+        };
+        d.sub_status_changed(&entry, &info(Status::Working), t0);
+        d.sub_status_changed(&entry, &info(Status::Idle), t0 + s(10));
+        d.sub_quiet_check(t0 + s(10 + quiet));
+        assert_eq!(idle_mails(&d, "p").len(), expected, "{kind} after {quiet} s");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    // Once its hooks have been heard from, the quiet says nothing for Claude.
+    let (d, dir) = daemon("sub-hooks-seen");
+    add(&d, 1, "p", "claude", None);
+    let (_, _) = add(&d, 2, "c", "claude", Some(("p", 1)));
+    d.hook(&json!({"session_id": "c", "agent": "claude", "verified": true, "payload": {"hook_event_name": "SessionStart"}})).unwrap();
+    let entry = d.by_id("c").unwrap();
+    let info = |status: Status| {
+        let mut i = entry.info();
+        i.status = status;
+        i
+    };
+    d.sub_status_changed(&entry, &info(Status::Working), t0);
+    d.sub_status_changed(&entry, &info(Status::Idle), t0 + s(10));
+    d.sub_quiet_check(t0 + s(500));
+    assert!(idle_mails(&d, "p").is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mail_is_not_typed_into_a_hook_agent_between_its_prompt_and_its_turn_end() {
+    let (d, dir) = daemon("sub-mail-midturn");
+    let (parent, typed) = add(&d, 1, "p", "claude", None);
+    add(&d, 2, "c", "codex", Some(("p", 1)));
+    d.subs.mail.lock().add("p", mail_from("hello"), Instant::now(), 1, true).unwrap();
+    // Codex announced the end of a turn, then was sent a prompt: its screen may go quiet (status Idle), but the turn is not over.
+    parent.set_hook_status(Status::Idle, false);
+    std::thread::sleep(Duration::from_millis(20));
+    fake::typed_draft(&parent, Duration::from_secs(90), Some(Duration::ZERO));
+    d.deliver_mail();
+    assert!(typed.next_within(300).is_none(), "mid-turn: the mail waits");
+    assert_eq!(d.subs.mail.lock().recipients().len(), 1);
+    // The turn ends: the mail may go.
+    parent.set_hook_status(Status::Idle, false);
+    d.deliver_mail();
+    assert!(typed.next_within(1000).is_some());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_child_without_a_signal_is_reported_once_after_thirty_quiet_seconds_and_never_while_it_starts() {
+    let (d, dir) = daemon("sub-idle-quiet");
+    add(&d, 1, "p", "claude", None);
+    let (child, _) = add(&d, 2, "g", "gemini", Some(("p", 1)));
+    let entry = d.by_id("g").unwrap();
+    let info = |status: Status| {
+        let mut i = d.by_id("g").unwrap().info();
+        i.status = status;
+        i
+    };
+    let t0 = Instant::now() - Duration::from_secs(300);
+    let s = Duration::from_secs;
+    d.sub_status_changed(&entry, &info(Status::Working), t0);
+    d.sub_status_changed(&entry, &info(Status::Idle), t0 + s(10));
+    // Quiet for less than 30 s: nothing. The first prompt still to be typed: nothing, however long.
+    d.sub_quiet_check(t0 + s(39));
+    assert!(idle_mails(&d, "p").is_empty());
+    child.queue_prompt(crate::agents::TypedPrompt { text: "go".into(), paste: true });
+    d.sub_quiet_check(t0 + s(100));
+    assert!(idle_mails(&d, "p").is_empty(), "start-up is not a finished turn");
+    // The prompt has been typed (here: dropped) and the agent has been quiet for the time: one report.
+    child.drop_pending_prompt_for_test();
+    d.sub_quiet_check(t0 + s(101));
+    let mails = idle_mails(&d, "p");
+    assert_eq!(mails.len(), 1);
+    assert!(mails[0]["text"].as_str().unwrap().contains("went quiet or finished a turn without reporting"));
+    d.sub_quiet_check(t0 + s(200));
+    assert!(idle_mails(&d, "p").is_empty(), "once per quiet spell");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_waiting_and_exit_reports_are_unchanged_for_both_kinds() {
+    let (d, dir) = daemon("sub-idle-others");
+    add(&d, 1, "p", "claude", None);
+    for (handle, id, kind) in [(2, "c", "codex"), (3, "g", "gemini")] {
+        let (_, _) = add(&d, handle, id, kind, Some(("p", 1)));
+        let entry = d.by_id(id).unwrap();
+        let info = |status: Status| {
+            let mut i = d.by_id(id).unwrap().info();
+            i.status = status;
+            i
+        };
+        let t0 = Instant::now();
+        d.sub_status_changed(&entry, &info(Status::Working), t0);
+        d.sub_status_changed(&entry, &info(Status::Waiting), t0 + Duration::from_secs(1));
+        d.sub_status_changed(&entry, &info(Status::Exited), t0 + Duration::from_secs(2));
+    }
+    let mails = d.sub_rpc("sub.inbox", &json!({"session_id": "p"})).unwrap();
+    let statuses: Vec<&str> = mails["mails"].as_array().unwrap().iter().map(|m| m["status"].as_str().unwrap()).collect();
+    assert_eq!(statuses, ["needs_user", "exited", "needs_user", "exited"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn a_request_whose_program_was_interrupted_is_withdrawn_and_a_later_allow_starts_nothing() {
     let Some(agent) = agents::installed_presets().first().copied() else { return };
@@ -413,13 +654,17 @@ fn an_automatic_report_follows_the_child_to_its_row_and_its_parent() {
     let entry = d.by_id("c").unwrap();
     let t0 = Instant::now();
     d.sub_status_changed(&entry, &info(Status::Working, None), t0);
+    // The idle status alone says nothing; the agent's own turn-end signal does.
     d.sub_status_changed(&entry, &info(Status::Idle, None), t0 + Duration::from_secs(10));
+    assert!(child.spec.lock().report.is_none());
+    d.sub_turn_ended(&entry, t0 + Duration::from_secs(10));
     let row = child.spec.lock().report.clone().unwrap();
     assert_eq!((row.status.as_str(), row.auto), ("idle", true));
     // The agent speaks for itself in the next turn: its words stay on the row when the daemon sees the turn end.
     d.sub_status_changed(&entry, &info(Status::Working, None), t0 + Duration::from_secs(20));
     d.sub_rpc("sub.report", &json!({"session_id": "c", "status": "done", "summary": "merged"})).unwrap();
     d.sub_status_changed(&entry, &info(Status::Idle, None), t0 + Duration::from_secs(30));
+    d.sub_turn_ended(&entry, t0 + Duration::from_secs(30));
     d.sub_status_changed(&entry, &info(Status::Exited, Some(1)), t0 + Duration::from_secs(31));
     // Going idle after it reported leaves its words on the row; the exit is news and replaces them.
     let row = child.spec.lock().report.clone().unwrap();

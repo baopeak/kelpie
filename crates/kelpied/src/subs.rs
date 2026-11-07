@@ -728,21 +728,46 @@ impl Auto {
 #[derive(Default)]
 struct Watch {
     last: Option<Status>,
-    /// When the turn in progress began (kept across a wait for the user).
-    working_since: Option<Instant>,
+    /// When the turn in progress began (kept across a wait for the user and across quiet moments; cleared when it is reported).
+    turn_began: Option<Instant>,
     /// It reported by itself since the turn began.
     explicit: bool,
     exited: bool,
+    /// Since when it has been idle without a break, and whether that turn lasted long enough to be work.
+    idle_since: Option<Instant>,
+    worked: bool,
+    /// This quiet spell is dealt with (reported, or the agent has a turn-end signal and needs no guess).
+    idle_settled: bool,
+    /// What the session had last taken as input, and how many turns its hooks had begun, when the turn in progress was last synced.
+    input: Option<Instant>,
+    turn_seq: u64,
+    synced: bool,
 }
 
+/// How long a child without a turn-end signal must stay idle, without a break, before it is reported as gone quiet.
+pub const QUIET_IDLE: Duration = Duration::from_secs(30);
+
 /// Follows the sub-sessions' statuses from the ticker's changes and says when one is worth a report.
+///
+/// A status that goes quiet is a guess: an agent is silent between tool calls and while it starts. So `observe` never reports
+/// idleness. Agents that announce the end of a turn (Claude's `Stop`, Codex's `agent-turn-complete`) are reported by
+/// [`ChildWatch::turn_ended`] when that signal arrives; the others by [`ChildWatch::quiet`] after a long unbroken quiet.
 #[derive(Default)]
 pub struct ChildWatch {
     map: HashMap<String, Watch>,
+    /// Quiet needed by [`ChildWatch::quiet`]; [`QUIET_IDLE`] when unset.
+    quiet: Option<Duration>,
 }
 
 impl ChildWatch {
+    /// A watch with its own quiet time (tests).
+    #[cfg(test)]
+    pub fn with_quiet(quiet: Duration) -> ChildWatch {
+        ChildWatch { map: HashMap::new(), quiet: Some(quiet) }
+    }
+
     /// One status of session `sid`. Only a change of status says anything; the same status again is silent.
+    /// Reports a wait for the user and an exit; never idleness.
     pub fn observe(&mut self, sid: &str, status: Status, now: Instant) -> Option<Auto> {
         let w = self.map.entry(sid.to_string()).or_default();
         let prev = w.last.replace(status);
@@ -754,22 +779,90 @@ impl ChildWatch {
         }
         match status {
             Status::Working => {
+                w.idle_since = None;
+                w.idle_settled = false;
                 if !matches!(prev, Some(Status::Waiting)) {
-                    w.working_since = Some(now);
-                    w.explicit = false;
+                    w.turn_began.get_or_insert(now);
                 }
                 None
             }
-            Status::Waiting => Some(Auto::NeedsUser),
+            Status::Waiting => {
+                w.idle_since = None;
+                Some(Auto::NeedsUser)
+            }
             Status::Idle => {
-                let worked = w.working_since.take().is_some_and(|t| now.duration_since(t) >= MIN_WORK);
-                (matches!(prev, Some(Status::Working | Status::Waiting)) && worked && !w.explicit).then_some(Auto::Idle)
+                w.worked = w.turn_began.is_some_and(|t| now.duration_since(t) >= MIN_WORK);
+                w.idle_since = Some(now);
+                None
             }
             Status::Exited => {
-                w.working_since = None;
+                w.turn_began = None;
+                w.idle_since = None;
                 if std::mem::replace(&mut w.exited, true) { None } else { Some(Auto::Exited) }
             }
         }
+    }
+
+    /// Where a new turn begins. A screen that flickers between working and idle is not one; input is: something typed into the
+    /// session (the user's keystrokes, a prompt or mail Kelpie delivers: `input`, when it last was) or a turn its hooks began
+    /// (`turn_seq`). Until then what the session said about its turn holds: an explicit report still stands, and the idle report
+    /// it made unnecessary stays unnecessary. Called with the session's current markers before anything is decided about it.
+    pub fn sync_turn(&mut self, sid: &str, input: Option<Instant>, turn_seq: u64, now: Instant) {
+        let w = self.map.entry(sid.to_string()).or_default();
+        let known = std::mem::replace(&mut w.synced, true);
+        let changed = w.input != input || w.turn_seq != turn_seq;
+        w.input = input;
+        w.turn_seq = turn_seq;
+        if known && changed {
+            w.explicit = false;
+            w.idle_settled = false;
+            w.idle_since = None;
+            // Already working when the prompt came (no idle seen in between): this turn begins now.
+            if w.last == Some(Status::Working) {
+                w.turn_began.get_or_insert(now);
+            }
+        }
+    }
+
+    /// The agent announced that a turn ended (a signal, not a guess). Reported when real work was seen and the agent did not
+    /// report by itself in this turn.
+    pub fn turn_ended(&mut self, sid: &str, now: Instant) -> Option<Auto> {
+        let w = self.map.get_mut(sid)?;
+        let worked = w.turn_began.take().is_some_and(|t| now.duration_since(t) >= MIN_WORK);
+        w.idle_settled = true;
+        (worked && !w.explicit).then_some(Auto::Idle)
+    }
+
+    /// Sessions that have been quiet long enough for [`ChildWatch::quiet`] to be asked about them.
+    pub fn quiet_candidates(&self, now: Instant) -> Vec<String> {
+        let quiet = self.quiet.unwrap_or(QUIET_IDLE);
+        self.map
+            .iter()
+            .filter(|(_, w)| w.last == Some(Status::Idle) && !w.idle_settled && w.idle_since.is_some_and(|t| now.duration_since(t) >= quiet))
+            .map(|(sid, _)| sid.clone())
+            .collect()
+    }
+
+    /// An agent with a turn-end signal needs no guess: its quiet spell is not reported.
+    pub fn settle_quiet(&mut self, sid: &str) {
+        if let Some(w) = self.map.get_mut(sid) {
+            w.idle_settled = true;
+        }
+    }
+
+    /// A session without a turn-end signal that has been idle without a break for the quiet time after real work, once per spell.
+    /// `times`: how many times the quiet time it must have lasted (an agent that may still announce its turns is given longer).
+    /// `hold`: its first prompt is not typed yet, so its quiet is the start-up's, and nothing is said.
+    pub fn quiet(&mut self, sid: &str, now: Instant, hold: bool, times: u32) -> Option<Auto> {
+        let quiet = self.quiet.unwrap_or(QUIET_IDLE) * times.max(1);
+        let w = self.map.get_mut(sid)?;
+        let long_enough = w.last == Some(Status::Idle) && w.idle_since.is_some_and(|t| now.duration_since(t) >= quiet);
+        if hold || !long_enough || w.idle_settled {
+            return None;
+        }
+        w.idle_settled = true;
+        w.turn_began = None;
+        (w.worked && !w.explicit).then_some(Auto::Idle)
     }
 
     /// The session reported by itself: its turn's idle report is not needed.
@@ -789,11 +882,12 @@ impl ChildWatch {
 
 /// The mail text of an automatic report; `detail` is the question (waiting) or the end of the screen (idle).
 pub fn auto_text(auto: &Auto, detail: &str, exit_code: Option<i32>) -> String {
+    const IDLE: &str = "went quiet or finished a turn without reporting. It may still be working: only its own kelpie_report says it is done. Look at its screen (kelpie_read) before you send it work again";
     match auto {
         Auto::NeedsUser if detail.trim().is_empty() => "is waiting for the user to answer in Kelpie; you cannot answer for them".into(),
         Auto::NeedsUser => format!("is waiting for the user to answer in Kelpie; you cannot answer for them: {}", detail.trim()),
-        Auto::Idle if detail.trim().is_empty() => "finished its turn and is idle".into(),
-        Auto::Idle => format!("finished its turn and is idle. The end of its screen:\n{}", detail.trim()),
+        Auto::Idle if detail.trim().is_empty() => format!("{IDLE}."),
+        Auto::Idle => format!("{IDLE}. The end of its screen:\n{}", detail.trim()),
         Auto::Exited => match exit_code {
             Some(code) => format!("exited with code {code}"),
             None => "exited".into(),
@@ -1352,33 +1446,139 @@ mod tests {
         assert_eq!(w.observe("c", Status::Working, t0), None);
         assert_eq!(w.observe("c", Status::Waiting, t0 + Duration::from_secs(1)), Some(Auto::NeedsUser));
         assert_eq!(w.observe("c", Status::Waiting, t0 + Duration::from_secs(2)), None, "the same wait is one report");
-        // Answered, it works on; the turn that began before the wait is the one that ends.
+        // Answered, it works on; the turn that began before the wait is the one that ends. Going quiet is not an end.
         assert_eq!(w.observe("c", Status::Working, t0 + Duration::from_secs(5)), None);
-        assert_eq!(w.observe("c", Status::Idle, t0 + Duration::from_secs(9)), Some(Auto::Idle));
+        assert_eq!(w.observe("c", Status::Idle, t0 + Duration::from_secs(9)), None);
+        assert_eq!(w.turn_ended("c", t0 + Duration::from_secs(9)), Some(Auto::Idle));
     }
 
     #[test]
-    fn a_child_going_idle_after_real_work_is_reported_unless_it_reported_itself() {
+    fn an_agent_with_a_turn_end_signal_is_reported_on_that_signal_and_never_on_going_quiet() {
         let mut w = ChildWatch::default();
+        w.sync_turn("c", None, 0, Instant::now());
         let t0 = Instant::now();
-        // A burst of output shorter than the minimum is not work.
+        let s = Duration::from_secs;
+        // Start-up and quiet moments in the middle of a turn: statuses come and go, nothing is reported.
         w.observe("c", Status::Working, t0);
-        assert_eq!(w.observe("c", Status::Idle, t0 + Duration::from_secs(2)), None);
-        // Real work, no report of its own.
-        w.observe("c", Status::Working, t0 + Duration::from_secs(10));
-        assert_eq!(w.observe("c", Status::Idle, t0 + Duration::from_secs(14)), Some(Auto::Idle));
-        // Real work and an explicit report during the turn: the daemon adds nothing.
-        w.observe("c", Status::Working, t0 + Duration::from_secs(20));
+        assert_eq!(w.observe("c", Status::Idle, t0 + s(4)), None, "quiet between two tool calls");
+        assert!(w.quiet_candidates(t0 + s(100)).len() == 1, "(the quiet check is asked, and the daemon settles it for such agents)");
+        w.settle_quiet("c");
+        assert!(w.quiet_candidates(t0 + s(100)).is_empty());
+        assert_eq!(w.observe("c", Status::Working, t0 + s(10)), None);
+        assert_eq!(w.observe("c", Status::Idle, t0 + s(20)), None);
+        // The signal: the turn, begun at t0, really ended.
+        assert_eq!(w.turn_ended("c", t0 + s(21)), Some(Auto::Idle));
+        assert_eq!(w.turn_ended("c", t0 + s(22)), None, "once per turn");
+        // A signal without work behind it (a background thread, a turn of a second) is not a report.
+        assert_eq!(w.turn_ended("c", t0 + s(30)), None);
+        w.observe("c", Status::Working, t0 + s(40));
+        assert_eq!(w.turn_ended("c", t0 + s(41)), None, "a burst shorter than the minimum is not work");
+        // Real work, and the agent reported by itself: nothing is added; the next turn starts clean.
+        w.observe("c", Status::Idle, t0 + s(42));
+        w.observe("c", Status::Working, t0 + s(50));
         w.explicit("c");
         assert!(w.explicit_this_turn("c"));
-        assert_eq!(w.observe("c", Status::Idle, t0 + Duration::from_secs(30)), None);
-        // The next turn starts clean.
-        w.observe("c", Status::Working, t0 + Duration::from_secs(40));
+        assert_eq!(w.turn_ended("c", t0 + s(60)), None);
+        w.observe("c", Status::Idle, t0 + s(61));
+        // Working again on the screen is not a new turn; a prompt is.
+        w.observe("c", Status::Working, t0 + s(70));
+        assert!(w.explicit_this_turn("c"), "a flicker does not clear a report");
+        w.sync_turn("c", Some(t0 + s(72)), 0, t0 + s(72));
         assert!(!w.explicit_this_turn("c"));
-        assert_eq!(w.observe("c", Status::Idle, t0 + Duration::from_secs(50)), Some(Auto::Idle));
-        // Idle at the start (no turn seen) says nothing.
+        assert_eq!(w.turn_ended("c", t0 + s(80)), Some(Auto::Idle));
+        // A session never seen says nothing.
+        assert_eq!(ChildWatch::default().turn_ended("n", t0), None);
         let mut fresh = ChildWatch::default();
         assert_eq!(fresh.observe("n", Status::Idle, t0), None);
+    }
+
+    #[test]
+    fn an_agent_without_a_signal_is_reported_once_after_a_long_unbroken_quiet() {
+        let mut w = ChildWatch::with_quiet(Duration::from_secs(30));
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let at = |secs: u64| t0 + s(secs);
+        // Real work, then quiet.
+        w.observe("c", Status::Working, at(0));
+        w.observe("c", Status::Idle, at(10));
+        assert_eq!(w.quiet("c", at(39), false, 1), None, "29 s of quiet is not enough");
+        assert!(w.quiet_candidates(at(39)).is_empty());
+        // A quiet spell shorter than the minimum is broken by more work: the clock starts over.
+        w.observe("c", Status::Working, at(40));
+        w.observe("c", Status::Idle, at(50));
+        assert_eq!(w.quiet("c", at(70), false, 1), None, "20 s since the second quiet began");
+        assert_eq!(w.quiet_candidates(at(80)), ["c".to_string()]);
+        // Its first prompt is still to be typed: nothing is said, and nothing is used up.
+        assert_eq!(w.quiet("c", at(81), true, 1), None);
+        assert_eq!(w.quiet("c", at(82), false, 1), Some(Auto::Idle));
+        assert_eq!(w.quiet("c", at(200), false, 1), None, "once per cycle");
+        assert!(w.quiet_candidates(at(200)).is_empty());
+        // The next cycle can report again.
+        w.observe("c", Status::Working, at(210));
+        w.observe("c", Status::Idle, at(220));
+        assert_eq!(w.quiet("c", at(251), false, 1), Some(Auto::Idle));
+    }
+
+    #[test]
+    fn a_quiet_agent_that_reported_itself_or_did_no_work_is_not_reported() {
+        let mut w = ChildWatch::with_quiet(Duration::from_secs(30));
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        // A start-up burst of two seconds is not work.
+        w.observe("a", Status::Working, t0);
+        w.observe("a", Status::Idle, t0 + s(2));
+        assert_eq!(w.quiet("a", t0 + s(60), false, 1), None);
+        // It reported by itself in this turn.
+        w.observe("b", Status::Working, t0);
+        w.explicit("b");
+        w.observe("b", Status::Idle, t0 + s(10));
+        assert_eq!(w.quiet("b", t0 + s(60), false, 1), None);
+        // An exit ends it all.
+        w.observe("c", Status::Working, t0);
+        w.observe("c", Status::Idle, t0 + s(10));
+        assert_eq!(w.observe("c", Status::Exited, t0 + s(20)), Some(Auto::Exited));
+        assert_eq!(w.quiet("c", t0 + s(100), false, 1), None);
+    }
+
+    #[test]
+    fn a_report_of_its_own_holds_through_a_flickering_screen_until_new_input() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        // A hook agent: report done, then the screen flickers while hooks run, then the turn-complete signal.
+        let mut w = ChildWatch::default();
+        w.sync_turn("c", Some(t0), 3, t0);
+        w.observe("c", Status::Working, t0 + s(1));
+        w.explicit("c");
+        w.observe("c", Status::Idle, t0 + s(20));
+        w.observe("c", Status::Working, t0 + s(21));
+        w.observe("c", Status::Idle, t0 + s(25));
+        w.observe("c", Status::Working, t0 + s(26));
+        w.sync_turn("c", Some(t0), 3, t0);
+        assert!(w.explicit_this_turn("c"), "nothing was typed and no turn began");
+        assert_eq!(w.turn_ended("c", t0 + s(30)), None, "no idle mail after the explicit report");
+        // A prompt (typed or delivered) begins the next turn, which is reported as usual.
+        w.sync_turn("c", Some(t0 + s(40)), 3, t0 + s(40));
+        w.observe("c", Status::Working, t0 + s(41));
+        w.observe("c", Status::Idle, t0 + s(50));
+        assert_eq!(w.turn_ended("c", t0 + s(51)), Some(Auto::Idle));
+        // Claude: its own turn-start hook counts, with no input seen by Kelpie.
+        w.explicit("c");
+        w.sync_turn("c", Some(t0 + s(40)), 4, t0 + s(60));
+        assert!(!w.explicit_this_turn("c"));
+
+        // A hookless agent: the quiet report waits for new input after an explicit report.
+        let mut q = ChildWatch::with_quiet(s(30));
+        q.sync_turn("g", None, 0, t0);
+        q.observe("g", Status::Working, t0);
+        q.explicit("g");
+        q.observe("g", Status::Idle, t0 + s(10));
+        q.observe("g", Status::Working, t0 + s(12));
+        q.observe("g", Status::Idle, t0 + s(20));
+        assert_eq!(q.quiet("g", t0 + s(100), false, 1), None, "it reported by itself");
+        q.sync_turn("g", Some(t0 + s(110)), 0, t0 + s(110));
+        q.observe("g", Status::Working, t0 + s(111));
+        q.observe("g", Status::Idle, t0 + s(120));
+        assert_eq!(q.quiet("g", t0 + s(151), false, 1), Some(Auto::Idle));
     }
 
     #[test]

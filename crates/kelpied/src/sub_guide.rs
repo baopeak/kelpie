@@ -13,6 +13,9 @@ block until something happens.
 - Give each child a self-contained task: the goal, what 'done' means with the evidence you want (tests run, files changed, a command's \
 output), and which paths it may write. It sees none of your conversation.
 - Use `worktree: true` for children that write code in parallel, so they do not edit the same files; closing a child never removes its worktree.
+- Automatic notices (\"went quiet or finished a turn without reporting\") are hints, not completion: an agent is silent between steps. \
+Wait for the child's own kelpie_report, or look at its screen with kelpie_read before you send it work again. Never re-send a task \
+because of such a notice.
 - Verify the child's work yourself (read its diff, run the checks); a summary is a claim, not proof.
 - Close children when they are done (kelpie_close). Opening more than needed costs the user's tokens and the computer's memory; \
 the limits are enforced and a refused spawn says what is running.
