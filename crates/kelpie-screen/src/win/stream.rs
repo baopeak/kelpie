@@ -35,7 +35,7 @@ use super::states_win::Looker;
 use super::targets_win::{self, hwnd};
 use super::{system, wall_ms};
 use crate::control::{Controller, Event, Flight, Params, Stats, MIN_KBPS};
-use crate::pace::{self, BigFrame, EncoderRate, Pacer, TopOff, BIG_FRAME_PERCENT};
+use crate::pace::{self, BigFrame, EncoderRate, Pacer, ReencodeGate, TopOff, BIG_FRAME_PERCENT};
 use crate::geom::{self, Rect};
 use crate::input::{fresh, parse_hotkey, Hotkey, QUEUE};
 use crate::sps;
@@ -53,6 +53,8 @@ const CURSOR_EVERY: Duration = Duration::from_millis(33);
 const ENCODER_POLL_MS: u64 = 4;
 /// How long the loop waits for a change once a capture is due (it comes round for the encoder, the cursor and the app at least this often).
 const CAPTURE_WAIT_MS: u64 = 30;
+/// Captures or conversions failed this many times in a row: the device is asked whether it was removed.
+const DEVICE_CHECK_AFTER: u32 = 20;
 /// Paint-over tiles: at most this share of the video's rate, with this much at once.
 const TILE_SHARE: f64 = 0.5;
 const TILE_BURST: f64 = 256.0 * 1024.0;
@@ -85,6 +87,22 @@ enum Source {
 struct Shared {
     geometry: Geometry,
     policy: InputPolicy,
+}
+
+/// The input thread, stopped and joined when this goes: on the stream's normal end, and on a panic, which would otherwise leave it doing what
+/// is queued with no border, no hotkey and no stream.
+struct InputGuard {
+    stopping: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for InputGuard {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 /// A frame in the encoder: its time (the encoder's key for it), when it went in, when its picture was taken (ms since the stream started),
@@ -142,11 +160,15 @@ impl Host {
         let flag = stopping.clone();
         let (told, told_sc) = (self.out.clone(), sc.clone());
         let thread = std::thread::spawn(move || {
-            // A stream that fails on its way is said to have ended, never left frozen without a word (its border and input go with it).
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(opts, cmd_rx, input_rx, out, started_tx, flag))).is_err() {
-                system::streaming(false);
-                emit(&told, json!({"event": "ended", "sc": told_sc, "reason": "failed"}));
-            }
+            // A stream that fails on its way is said to have ended, never left frozen without a word (its border, its input thread and its
+            // hotkey go with it: `InputGuard`, the border's drop).
+            crate::guarded(
+                || run(opts, cmd_rx, input_rx, out, started_tx, flag),
+                || {
+                    system::streaming(false);
+                    emit(&told, json!({"event": "ended", "sc": told_sc, "reason": "failed"}));
+                },
+            );
         });
         let mut running = Running { sc, cmds, input, stopping, thread: Some(thread) };
         match started_rx.recv_timeout(START_WAIT) {
@@ -160,7 +182,14 @@ impl Host {
                 }
                 Err(e)
             }
-            Err(_) => {
+            // The stream failed before it was ready (it panicked: its answer will never come).
+            Err(RecvTimeoutError::Disconnected) => {
+                if let Some(t) = running.thread.take() {
+                    let _ = t.join();
+                }
+                Err("the screen failed to start".into())
+            }
+            Err(RecvTimeoutError::Timeout) => {
                 // Too slow: it is stopped, not left to start after the app gave up on it.
                 self.running = Some(running);
                 self.stop("failed");
@@ -355,9 +384,10 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let (outcome_tx, outcome_rx) = channel::<Outcome>();
     // Input done, counted by the input thread: each one boosts the capture rate (`pace::Pacer::boost`).
     let inputs = Arc::new(AtomicU64::new(0));
-    let input_thread = {
+    // Declared after the border: on the way out, normal or a panic, the input thread is stopped and joined before the border and its hotkey go.
+    let input_guard = {
         let (shared, out, stopping, inputs) = (shared.clone(), out.clone(), stopping.clone(), inputs.clone());
-        std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping, inputs))
+        InputGuard { stopping: stopping.clone(), thread: Some(std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping, inputs))) }
     };
     let _ = started.send(Ok(json!({"kind": if window { "window" } else { "monitor" }, "title": title, "exe": exe, "w": src.0, "h": src.1, "encoder": if encoder.hardware { "hw" } else { "sw" }, "encoder_name": encoder.name})));
     emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": if encoder.hardware { "hw" } else { "sw" }, "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms}));
@@ -384,6 +414,9 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     // The last picture taken: encoded again when a keyframe is owed and nothing new came (a still window sends no frames by itself), and for
     // the top-off passes of a still one.
     let mut last_picture: Option<ID3D11Texture2D> = None;
+    let mut reencode = ReencodeGate::default();
+    // Captures and conversions failed in a row (`DEVICE_CHECK_AFTER`).
+    let mut failures = 0u32;
     let reason: String = 'stream: loop {
         let now = now_ms();
         // What the app said.
@@ -436,6 +469,11 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
             match o {
                 Outcome::Covered => {
                     if let Some(s) = tracker.covered() {
+                        emit(&out, json!({"event": "state", "sc": opts.sc, "state": s.name()}));
+                    }
+                }
+                Outcome::ForeignDialog => {
+                    if let Some(s) = tracker.covered_by_dialog() {
                         emit(&out, json!({"event": "state", "sc": opts.sc, "state": s.name()}));
                     }
                 }
@@ -513,24 +551,41 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         }
         params = next;
 
-        // A frame the encoder never gave back (it may drop one) is not waited for after a second.
+        // A frame the encoder never gave back (it may drop one) is not waited for after a second, and counts as a second's encode: an encoder
+        // stalled behind a game on the GPU is slow, not instant, and may give way to the software one.
+        let mut stalled = false;
         while in_encoder.front().is_some_and(|f| f.began.elapsed() > Duration::from_secs(1)) {
             in_encoder.pop_front();
             pacer.done();
+            stalled |= ctl.on_encoded(1000.0, now) == Some(Event::UseSoftware);
+        }
+        if stalled {
+            if let Ok(sw) = Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false) {
+                encoder = sw;
+                ctl.set_software(true);
+                in_encoder.clear();
+                pacer.done();
+                rate = EncoderRate::new(params.kbps);
+                dip = None;
+                flight.restart();
+                emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms, "why": "slow"}));
+            }
         }
         let interval = ctl.interval_ms();
         let due = pacer.due_in(interval, ctl.boost_interval_ms(), now);
         // Room for a frame on the link, nothing gating a keyframe, a picture that may move: then the pacer says when.
         let ready = !link_paused && !flight.gated() && tracker.state().picture_moves() && ctl.may_encode(flight.inflight(), None);
         let may = ready && due == Some(0);
-        let top_off_due = may && top_off.due(now) && ctl.crisp_ok(flight.inflight(), now);
+        let top_off_due = may && top_off.due(now) && ctl.crisp_ok(flight.inflight(), now) && last_picture.is_some();
+        // A keyframe owed on a still window: the last picture again, at most once a second (`pace::ReencodeGate`).
+        let reencode_due = may && flight.wants_key() && last_picture.is_some() && reencode.ready(now);
         // While a frame is in the encoder the loop comes back within a few milliseconds to take it, so that its time is the encoder's own;
         // once due it waits for the next change (a still picture gives nothing until then), but not past a top-off pass that is due.
         let wait_ms = if pacer.pending() {
             ENCODER_POLL_MS
         } else if may {
-            // Something to encode again at once (a keyframe owed, a top-off pass), once there is a picture to encode again.
-            if (top_off_due || flight.wants_key()) && last_picture.is_some() { 0 } else { CAPTURE_WAIT_MS }
+            // Something to encode again at once (a keyframe owed, a top-off pass): no waiting for a change first.
+            if top_off_due || reencode_due { 0 } else { CAPTURE_WAIT_MS }
         } else if ready {
             due.unwrap_or(ENCODER_POLL_MS).clamp(1, CAPTURE_WAIT_MS)
         } else {
@@ -544,6 +599,10 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 Source::Monitor(dxgi, tex) => match dxgi.grab(&d, wait_ms as u32, tex) {
                     capture_dxgi::Grab::Frame { dirty } => Some((tex.clone(), dirty)),
                     capture_dxgi::Grab::Changed => break 'stream "display_changed".to_string(),
+                    capture_dxgi::Grab::Unavailable => {
+                        failures += 1;
+                        None
+                    }
                     _ => None,
                 },
                 Source::Window(wgc, ..) => match wgc.grab(Duration::from_millis(wait_ms)) {
@@ -571,6 +630,10 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         }
                         Some((t, None))
                     }
+                    (capture_wgc::Grab::Failed, _) => {
+                        failures += 1;
+                        None
+                    }
                     _ => {
                         if wgc.closed.load(Ordering::SeqCst) {
                             break 'stream "closed".to_string();
@@ -580,6 +643,14 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 },
             }
         };
+        // Captures or conversions that keep failing: a graphics driver that restarted (or was updated) took the device with it, and nothing
+        // will reach the encoder again. Said and ended, never a silent freeze.
+        if failures >= DEVICE_CHECK_AFTER {
+            failures = 0;
+            if unsafe { d.device.GetDeviceRemovedReason() }.is_err() {
+                break 'stream "device_lost".to_string();
+            }
+        }
         // A new picture; else, with a keyframe owed and allowed, the last one again (the phone, and the daemon, which holds input back while
         // one is owed, would wait for the window to change); else a top-off pass of the still one.
         let (picture, dirty, pass) = match grabbed {
@@ -587,7 +658,10 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 last_picture = Some(tex.clone());
                 (Some(tex), dirty, false)
             }
-            None if may && flight.wants_key() => (last_picture.clone(), None, false),
+            None if reencode_due => {
+                reencode.used(now);
+                (last_picture.clone(), None, false)
+            }
             None if top_off_due => (last_picture.clone(), None, true),
             None => (None, None, false),
         };
@@ -604,7 +678,12 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 }
             }
             let converting = Instant::now();
-            if let Ok(nv12) = conv.convert(&tex) {
+            let converted = conv.convert(&tex);
+            if converted.is_err() {
+                failures += 1;
+            }
+            if let Ok(nv12) = converted {
+                failures = 0;
                 let convert_ms = converting.elapsed().as_secs_f64() * 1000.0;
                 let time = (started_at.elapsed().as_nanos() / 100) as i64;
                 let key = flight.wants_key();
@@ -664,14 +743,16 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                     let entry = in_encoder.iter().position(|f| f.time == e.time).and_then(|i| in_encoder.remove(i));
                     // One frame in the encoder at a time: the next capture may be scheduled.
                     pacer.done();
-                    let encode_ms = entry.as_ref().map_or(0.0, |f| f.began.elapsed().as_secs_f64() * 1000.0) + delay.map_or(0.0, |d| d.as_secs_f64() * 1000.0);
+                    // Output that matches no frame given (one already counted as a second's stall) is not timed: it would read as instant.
+                    let measured = entry.as_ref().map(|f| f.began.elapsed().as_secs_f64() * 1000.0 + delay.map_or(0.0, |d| d.as_secs_f64() * 1000.0));
+                    let encode_ms = measured.unwrap_or(0.0);
                     if let Some((t, back)) = dip {
                         if t == e.time {
                             encoder.set_bitrate(back);
                             dip = None;
                         }
                     }
-                    if let Some(Event::UseSoftware) = ctl.on_encoded(encode_ms, now) {
+                    if let Some(Event::UseSoftware) = measured.and_then(|ms| ctl.on_encoded(ms, now)) {
                         if let Ok(sw) = Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false) {
                             encoder = sw;
                             ctl.set_software(true);
@@ -685,8 +766,8 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         }
                     }
                     let Some(au) = ps.fix(&e.data) else {
-                        // Not sendable: what follows would refer to it.
-                        flight.restart();
+                        // Not sendable: what follows would refer to it. A keyframe, through the gate (at most one a second).
+                        flight.ask_key(now);
                         continue;
                     };
                     let key = e.key || sps::is_keyframe(&au);
@@ -698,7 +779,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         unpaint = v.unpaint;
                         unpaint_all = v.unpaint_all;
                         ctl.bandwidth.kbps = (ctl.bandwidth.kbps * 3 / 4).max(MIN_KBPS);
-                        flight.restart();
+                        flight.ask_key(now);
                         stats.dropped_link += 1;
                         continue;
                     }
@@ -763,7 +844,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     drop(cmds);
     // The input thread ends once it sees it holds the last reference to what it reads.
     drop(shared);
-    let _ = input_thread.join();
+    drop(input_guard);
     system::streaming(false);
     emit(&out, json!({"event": "ended", "sc": opts.sc, "reason": reason}));
 }
@@ -799,7 +880,7 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
             InputCmd::Ops(ops, t) => {
                 if !fresh(t, wall_ms()) {
                     // Late: dropped, but a release still goes, so that no button stays pressed.
-                    if ops.iter().any(|op| op["k"] == "up") {
+                    if ops.iter().any(|op| op["k"] == "up" || op["k"] == "release") {
                         input_win::release(&mut pressed);
                     }
                     continue;
@@ -820,8 +901,12 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
                             let _ = outcomes.send(Outcome::NotFront);
                             json!({"id": id, "err": "not_front: the shared window is not in front on the computer, so nothing was typed"})
                         }
+                        (Outcome::ForeignDialog, 0) => {
+                            let _ = outcomes.send(Outcome::ForeignDialog);
+                            json!({"id": id, "err": "covered_dialog: a dialog of another program is in front of the shared window, so nothing was typed"})
+                        }
                         // The focus moved partway: what came before went to the shared window, the rest was not typed.
-                        (Outcome::NotFront, typed) => {
+                        (Outcome::NotFront | Outcome::ForeignDialog, typed) => {
                             let _ = outcomes.send(Outcome::NotFront);
                             json!({"id": id, "err": format!("not_front_partial: another window took the focus after {typed} characters; the rest was not typed")})
                         }

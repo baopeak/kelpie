@@ -80,6 +80,27 @@ impl Pacer {
     }
 }
 
+/// The least time between two encodes of the same still picture for a keyframe (a still window gives nothing new to encode).
+pub const REENCODE_GAP_MS: u64 = 1000;
+
+/// A keyframe owed on a still window encodes the last picture again: at most once a second, whatever owes it (a phone's request is gated
+/// already; a failure on the helper's own side, a parameter set the rewriter refuses or an encoder with no room, would otherwise ask again on
+/// every turn of the loop, an IDR and a readback each time).
+#[derive(Debug, Default)]
+pub struct ReencodeGate {
+    last: Option<u64>,
+}
+
+impl ReencodeGate {
+    pub fn ready(&self, now: u64) -> bool {
+        self.last.is_none_or(|l| now.saturating_sub(l) >= REENCODE_GAP_MS)
+    }
+
+    pub fn used(&mut self, now: u64) {
+        self.last = Some(now);
+    }
+}
+
 /// CRD's `kMinQuantizer`: a quantizer at or below this is as good as it gets.
 pub const TOP_OFF_QP: u32 = 10;
 /// Passes at most for one still picture (ours: without a quantizer from the encoder, this bounds what refining costs).
@@ -272,6 +293,22 @@ mod tests {
             h.check(1000, 1500, 33.3);
         }
         assert!(h.check(2_000_000, 1500, 33.3), "the large one aged out");
+    }
+
+    #[test]
+    fn a_still_window_s_last_picture_is_encoded_again_at_most_once_a_second() {
+        let mut g = ReencodeGate::default();
+        assert!(g.ready(0), "the first keyframe owed on a still window goes at once");
+        g.used(0);
+        // Every turn of the loop wants it again (a failure that persists): no more than once a second.
+        let encodes = (4..=3000u64).step_by(4).filter(|t| {
+            let go = g.ready(*t);
+            if go {
+                g.used(*t);
+            }
+            go
+        });
+        assert_eq!(encodes.count(), 3, "at 1000, 2000 and 3000 ms only");
     }
 
     #[test]

@@ -21,6 +21,26 @@
 /// The window class of the sharing border, which is never offered as a target and never captured.
 pub const BORDER_CLASS: &str = "KelpieScreenBorder";
 
+/// Runs `run`; if it panics, `failed` runs once (the stream says it ended instead of freezing without a word). True when `run` finished.
+pub fn guarded(run: impl FnOnce(), failed: impl FnOnce()) -> bool {
+    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).is_ok();
+    if !ok {
+        failed();
+    }
+    ok
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_stream_that_panics_is_said_to_have_ended_once_and_one_that_ends_is_not() {
+        let mut told = 0;
+        assert!(!super::guarded(|| panic!("a stream fails on its way"), || told += 1));
+        assert_eq!(told, 1);
+        assert!(super::guarded(|| {}, || told += 1));
+        assert_eq!(told, 1, "an ordinary end says nothing more");
+    }
+}
 pub mod control;
 pub mod geom;
 pub mod input;

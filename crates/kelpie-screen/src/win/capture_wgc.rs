@@ -32,7 +32,10 @@ struct Shared {
 }
 
 pub struct Wgc {
-    _item: GraphicsCaptureItem,
+    item: GraphicsCaptureItem,
+    /// The handlers' registrations, removed on drop: the pool's handler holds the mailbox, which may hold a frame of the pool.
+    arrived: i64,
+    closed_token: i64,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     shared: Arc<(Mutex<Shared>, Condvar)>,
@@ -50,6 +53,8 @@ pub enum Grab {
     /// The newest picture, `w`×`h`, copied into `into` (made again by the caller when the size changed).
     Frame { w: u32, h: u32 },
     Timeout,
+    /// A frame came and could not be copied (a lost device): counted by the stream, which asks the device why after a run of them.
+    Failed,
 }
 
 impl Wgc {
@@ -64,7 +69,7 @@ impl Wgc {
         let _ = session.SetIsCursorCaptureEnabled(false);
         let shared = Arc::new((Mutex::new(Shared { latest: None }), Condvar::new()));
         let closed = Arc::new(AtomicBool::new(false));
-        {
+        let arrived = {
             let (shared, last_size) = (shared.clone(), Arc::new(Mutex::new(size)));
             let rt_device = AgileReference::new(&rt_device)?;
             // No Direct3D here: the immediate context is the stream's (and the encoder's), and a copy made on this thread under the mailbox's
@@ -80,13 +85,16 @@ impl Wgc {
                 }
                 let Some(frame) = frame else { return Ok(()) };
                 let content = frame.ContentSize()?;
-                {
+                let replaced = {
                     let (lock, cv) = &*shared;
                     let mut s = lock.lock().unwrap();
-                    if let Some(old) = s.latest.replace(frame) {
-                        let _ = old.Close();
-                    }
+                    let old = s.latest.replace(frame);
                     cv.notify_one();
+                    old
+                };
+                // Closed with the mailbox let go.
+                if let Some(old) = replaced {
+                    let _ = old.Close();
                 }
                 // The window was resized: the pool follows, the next frame has the new size.
                 let mut last = last_size.lock().unwrap();
@@ -97,19 +105,19 @@ impl Wgc {
                     }
                 }
                 Ok(())
-            }))?;
-        }
-        {
+            }))?
+        };
+        let closed_token = {
             let closed = closed.clone();
             let shared = shared.clone();
             item.Closed(&TypedEventHandler::<GraphicsCaptureItem, windows::core::IInspectable>::new(move |_, _| {
                 closed.store(true, Ordering::SeqCst);
                 shared.1.notify_one();
                 Ok(())
-            }))?;
-        }
+            }))?
+        };
         session.StartCapture()?;
-        Ok(Wgc { _item: item, pool, session, shared, closed, device: d.device.clone(), ctx: d.ctx.clone(), own: None })
+        Ok(Wgc { item, arrived, closed_token, pool, session, shared, closed, device: d.device.clone(), ctx: d.ctx.clone(), own: None })
     }
 
     /// Waits up to `timeout` for a picture newer than the last one taken, and copies it into the stream's own texture, which it hands over.
@@ -126,7 +134,7 @@ impl Wgc {
         let _ = frame.Close();
         match copied {
             Some((own, w, h)) => (Grab::Frame { w, h }, Some(own)),
-            None => (Grab::Timeout, None),
+            None => (Grab::Failed, None),
         }
     }
 
@@ -152,8 +160,16 @@ impl Wgc {
 }
 
 impl Drop for Wgc {
+    /// The session first (no frame comes after it), then the handlers, then a frame still in the mailbox, then the pool: nothing is left
+    /// holding the pool, its buffers or the device behind it.
     fn drop(&mut self) {
         let _ = self.session.Close();
+        let _ = self.pool.RemoveFrameArrived(self.arrived);
+        let _ = self.item.RemoveClosed(self.closed_token);
+        let waiting = self.shared.0.lock().ok().and_then(|mut s| s.latest.take());
+        if let Some(frame) = waiting {
+            let _ = frame.Close();
+        }
         let _ = self.pool.Close();
     }
 }
