@@ -390,5 +390,16 @@
   "Reset this phone's lock": "Đặt lại khóa của điện thoại này",
   "Phone “{name}” set up its app lock. If that was not you, unpair it.": "Điện thoại “{name}” đã thiết lập khóa ứng dụng. Nếu không phải bạn, hãy bỏ ghép đôi.",
   "This address is a number, and a passkey needs a name, so a phone paired here can only read while the app lock is on.": "Địa chỉ này là một dãy số, còn khóa truy cập cần một tên miền, nên điện thoại ghép đôi ở đây chỉ đọc được khi khóa ứng dụng đang bật.",
-  "may set up a passkey": "có thể thiết lập khóa truy cập"
+  "may set up a passkey": "có thể thiết lập khóa truy cập",
+  "Let agents open sub-sessions without asking you? Each one is another agent that uses tokens and works in your folders, and one opened by an agent that skips permission checks does too.": "Cho phép agent mở phiên con mà không hỏi bạn? Mỗi phiên con là một agent nữa, tốn token và làm việc trong thư mục của bạn; phiên con do agent bỏ qua kiểm tra quyền mở ra cũng vậy.",
+  "Connect to the session daemon to change this.": "Hãy kết nối với daemon phiên để thay đổi mục này.",
+  "How sub-sessions work": "Phiên con hoạt động thế nào",
+  "Set": "Đặt số",
+  "{n} on this computer": "{n} trên máy này",
+  "The running session daemon is older and has no sub-sessions. Restart it (it keeps your sessions' conversations) to use them.": "Daemon phiên đang chạy là bản cũ và chưa có phiên con. Hãy khởi động lại nó (các cuộc hội thoại của phiên vẫn được giữ) để dùng.",
+  "Restart the session daemon": "Khởi động lại daemon phiên",
+  "Sub-sessions": "Phiên con",
+  "Let an agent open other agent sessions (any installed agent CLI) from its own: it starts them, steers them, and gets their reports back as a new turn. They show nested under it. Ask: you allow each one (once, for the session, or always). Allow: no question. Off: agents cannot. Agents started before this change get the tools after a restart.": "Cho một agent mở các phiên agent khác (bất kỳ CLI agent nào đã cài) từ phiên của nó: nó khởi động, điều khiển và nhận báo cáo của chúng như một lượt mới. Chúng hiện lồng bên dưới phiên đó. Hỏi: bạn cho phép từng phiên (một lần, cho cả phiên, hoặc luôn luôn). Cho phép: không hỏi. Tắt: agent không mở được. Agent đã chạy trước thay đổi này có công cụ sau khi được khởi động lại.",
+  "Sub-sessions running at once": "Số phiên con chạy cùng lúc",
+  "The most sub-sessions that run at the same time on this computer. Auto picks a number from its processor and memory. A new one is refused, not queued, when this many run or the computer is under heavy load.": "Số phiên con tối đa chạy cùng lúc trên máy này. Tự động chọn một số theo bộ xử lý và bộ nhớ. Khi đã đủ số này, hoặc máy đang quá tải, phiên mới bị từ chối chứ không xếp hàng chờ."
 }

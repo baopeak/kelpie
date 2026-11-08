@@ -16,6 +16,7 @@ import { CORE_AGENTS, acpArgv } from "../lib/agents";
 import { type AgentSettings, claudeSettingsFrom, withSettings } from "./agent-settings";
 import { agentLatestSession, claudeTranscript, createSession, daemon, sendInput } from "../lib/ipc";
 import { daemonOwnsQueue } from "../lib/attention";
+import { SUB_SESSIONS_API } from "../lib/sub-sessions";
 import { store, type PaneTarget } from "../lib/store";
 import { disposeView } from "../lib/terminal-host";
 import { uid } from "../lib/platform";
@@ -29,6 +30,14 @@ import { confirmDialog } from "../lib/confirm-dialog";
 export const supportsChat = (kind: string) => kind === "claude" || kind === "codex" || acpArgv(kind) !== null;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Tells the daemon that the stop of `s` that follows is a switch between views: it does not report it as an exit to the session
+ *  that opened `s`, and the new session says it continues. Cleared when the switch does not happen. An older daemon has no such
+ *  thing; its error is ignored. */
+async function markSwitching(s: SessionInfo, on: boolean) {
+  if (store.daemonApi() < SUB_SESSIONS_API) return;
+  await daemon("session.update", { handle: s.handle, handover: on }).catch(() => {});
+}
 
 /** Panes with a switch in flight (double clicks must not start two front-ends). */
 const switching = new Set<string>();
@@ -178,12 +187,14 @@ async function doSwitchToChat(project: Project, tab: Tab, pane: Pane) {
     store.notify(t("No conversation to continue yet — starting a new chat."));
   }
   store.notify(t("Switching {agent} to chat view…", { agent: s.kind }));
+  await markSwitching(s, true);
   const stopped = await stopProcess(s, async () => {
     await sendInput(s.handle, "\x03");
     await sleep(300);
     await sendInput(s.handle, "\x03");
   });
   if (!stopped) {
+    await markSwitching(s, false);
     store.notify(t("The terminal session did not stop; not starting a second writer."));
     return;
   }
@@ -196,12 +207,15 @@ async function doSwitchToChat(project: Project, tab: Tab, pane: Pane) {
       agent_session_id: conv ?? (s.kind === "codex" ? "latest" : undefined),
       chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null, settings),
       env: ownEnv(s),
+      // The conversation keeps its place among the sub-sessions: its parent, its children and its mail follow it.
+      lineage_from: s.id,
     });
     store.setSessions(info.id, info);
     store.replacePaneIn(project.id, tab.id, pane.id, { id: pane.id, kind: "chat", sessionId: info.id });
     disposeView(s.id);
     await daemon("session.close", { handle: s.handle }).catch(() => {});
   } catch (e) {
+    await markSwitching(s, false);
     store.notify(t("Chat mode failed: {error}", { error: String(e) }));
   }
 }
@@ -224,6 +238,7 @@ async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane, comman
   if (ctrl?.state.busy && !(await confirmDialog(t("The agent is working. Interrupt it and continue in the terminal?")))) return;
   let conv = ctrl?.state.conversationId ?? c.agent_session_id;
   if (conv === "latest") conv = null;
+  await markSwitching(c, true);
   const stopped = await stopProcess(c, async () => {
     // The daemon's queue stops taking and writing messages before the interrupt, so no turn slips in between the
     // interrupt and the end of stdin. (An older daemon has no queue: the call fails and nothing is lost.)
@@ -234,6 +249,7 @@ async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane, comman
   });
   if (!stopped) {
     await daemon("chat.queue_op", { handle: c.handle, op: "hold", held: false }).catch(() => {});
+    await markSwitching(c, false);
     store.notify(t("The chat process did not stop; not starting a second writer."));
     return;
   }
@@ -246,12 +262,13 @@ async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane, comman
     // Only agents whose terminal UI is known to resume an ACP / chat conversation by its id get
     // it; for the others the id may mean nothing to the CLI, so their terminal starts fresh.
     const resumes = CORE_AGENTS.includes(c.kind);
-    const info = await createSession({ kind: c.kind, cwd: c.cwd, project_id: c.project_id ?? project.id, name: c.name ?? undefined, agent_session_id: resumes ? conv ?? undefined : undefined, args, env: ownEnv(c) ?? launch.env, cols: 120, rows: 32, prompt: command });
+    const info = await createSession({ kind: c.kind, cwd: c.cwd, project_id: c.project_id ?? project.id, name: c.name ?? undefined, agent_session_id: resumes ? conv ?? undefined : undefined, args, env: ownEnv(c) ?? launch.env, cols: 120, rows: 32, prompt: command, lineage_from: c.id });
     store.setSessions(info.id, info);
     store.replacePaneIn(project.id, tab.id, pane.id, { id: pane.id, kind: "terminal", sessionId: info.id });
     disposeController(c.id);
     await daemon("session.close", { handle: c.handle }).catch(() => {});
   } catch (e) {
+    await markSwitching(c, false);
     store.notify(t("Terminal mode failed: {error}", { error: String(e) }));
   }
 }
@@ -275,6 +292,7 @@ async function replaceChat(s: SessionInfo, conv: string | null, settings: AgentS
     agent_session_id: conv ?? (s.kind === "codex" ? "latest" : undefined),
     chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null, settings),
     env: ownEnv(s) ?? store.profileLaunch(s.kind).env,
+    lineage_from: s.id,
   });
   store.setSessions(info.id, info);
   const loc = store.paneLocation(s.id);
@@ -303,6 +321,7 @@ async function restartInBypass(sessionId: string) {
   switching.add(sessionId);
   try {
     store.notify(t("Starting Claude again in bypass mode…"));
+    await markSwitching(s, true);
     const stopped = await stopProcess(s, async () => {
       // As for a switch to the terminal: no queued message slips in between the interrupt and the end of stdin.
       await daemon("chat.queue_op", { handle: s.handle, op: "hold" }).catch(() => {});
@@ -312,12 +331,14 @@ async function restartInBypass(sessionId: string) {
     });
     if (!stopped) {
       await daemon("chat.queue_op", { handle: s.handle, op: "hold", held: false }).catch(() => {});
+      await markSwitching(s, false);
       store.notify(t("The chat process did not stop; not starting a second writer."));
       return;
     }
     restartedForBypass.add(key);
     await replaceChat(s, conv, { ...chatSettings(ctrl), mode: "bypassPermissions" });
   } catch (e) {
+    await markSwitching(s, false);
     store.notify(t("Could not resume the {agent} chat: {error}", { agent: s.kind, error: String(e) }));
   } finally {
     switching.delete(sessionId);

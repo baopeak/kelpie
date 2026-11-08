@@ -117,6 +117,48 @@ struct Inner {
     q: Queue,
     /// Counts the lines the daemon built, for their request ids.
     built: u64,
+    /// What the agent was last told about asking before it acts (launch arguments, a mode chip, a turn's policy): best effort.
+    /// `perm_skip`: it may act without asking (any of the ways); `perm_bypass`: full bypass, nothing asked and no sandbox.
+    perm_skip: bool,
+    perm_bypass: bool,
+    /// The `kelpie` MCP server added, by the daemon, to the `mcpServers` of every ACP call that opens a conversation (it holds
+    /// this session's token, which never passes through the window).
+    acp_mcp: Option<Value>,
+    /// User turns written to the agent (a message that starts a turn, whoever built it). Permission answers, interrupts and other
+    /// lines are not turns. Sub-sessions' reports are judged turn by turn (see `ChildWatch::sync_turn`).
+    turn_count: u64,
+}
+
+/// The ACP calls that open a conversation and carry the agent's `mcpServers`.
+const ACP_OPENERS: [&str; 3] = ["session/new", "session/load", "session/resume"];
+
+/// `line` (one JSON-RPC line, its newline kept) with `server` added to `params.mcpServers` when the line opens an ACP
+/// conversation. `None` when it is anything else, when the list already holds a server of that name (the app's own wins), or when
+/// `mcpServers` is not a list: such a line is written as it came.
+fn with_mcp_server(line: &[u8], server: &Value) -> Option<Vec<u8>> {
+    let head = String::from_utf8_lossy(&line[..line.len().min(300)]);
+    if !ACP_OPENERS.iter().any(|m| head.contains(m)) {
+        return None;
+    }
+    let end = line.iter().rposition(|b| !b.is_ascii_whitespace()).map_or(0, |i| i + 1);
+    let mut v: Value = serde_json::from_slice(&line[..end]).ok()?;
+    if !ACP_OPENERS.contains(&v.get("method")?.as_str()?) {
+        return None;
+    }
+    let params = v.get_mut("params")?.as_object_mut()?;
+    let list = params.entry("mcpServers").or_insert(Value::Null);
+    if list.is_null() {
+        *list = json!([]);
+    }
+    let list = list.as_array_mut()?;
+    let name = server.get("name").and_then(Value::as_str);
+    if list.iter().any(|s| s.get("name").and_then(Value::as_str) == name) {
+        return None;
+    }
+    list.push(server.clone());
+    let mut out = serde_json::to_vec(&v).ok()?;
+    out.push(b'\n');
+    Some(out)
 }
 
 /// `chat.request_info`: what a phone's card says about a request. Worked out only when a phone is there to read it.
@@ -222,12 +264,37 @@ fn pinned_kind(line: &[u8]) -> Option<usize> {
     PINNED_IDS.iter().position(|id| head.contains(id)).filter(|_| line.len() < 1 << 20)
 }
 
+/// What a line written to the agent says about asking before it acts, as (may act without asking, full bypass): `None` for a
+/// line that says nothing about it. The chat's launch arguments are read separately (`set_launch_permissions`).
+fn permission_skip(dialect: Dialect, v: &Value) -> Option<(bool, bool)> {
+    match dialect {
+        Dialect::Claude if v.pointer("/request/subtype").and_then(Value::as_str) == Some("set_permission_mode") => {
+            let bypass = v.pointer("/request/mode").and_then(Value::as_str) == Some("bypassPermissions");
+            Some((bypass, bypass))
+        }
+        // Never asking is not full bypass while a sandbox holds: that needs the sandbox off too.
+        Dialect::Codex if v.get("method").and_then(Value::as_str) == Some("turn/start") => v.pointer("/params/approvalPolicy").map(|p| {
+            let never = p.as_str() == Some("never");
+            let open = v.pointer("/params/sandboxPolicy/type").and_then(Value::as_str) == Some("dangerFullAccess");
+            (never, never && open)
+        }),
+        Dialect::Acp if v.get("method").and_then(Value::as_str) == Some("session/set_mode") => {
+            let mode = v.pointer("/params/modeId").and_then(Value::as_str).unwrap_or_default().to_lowercase();
+            let bypass = mode.contains("bypass") || mode.contains("yolo");
+            Some((bypass, bypass))
+        }
+        _ => None,
+    }
+}
+
 /// What `chat.resolved` calls who gave the answer that counted.
 fn kind(by: &By) -> &'static str {
     if by.is_desktop() {
         "desktop"
     } else if *by == By::telegram() {
         "telegram"
+    } else if by.is_kelpie() {
+        "kelpie"
     } else {
         "phone"
     }
@@ -616,6 +683,10 @@ impl ChatSession {
                 conv: Conversation::default(),
                 q: Queue::new(),
                 built: 0,
+                perm_skip: false,
+                perm_bypass: false,
+                acp_mcp: None,
+                turn_count: 0,
             }),
         })
     }
@@ -637,7 +708,8 @@ impl ChatSession {
         rx
     }
 
-    pub fn spawn(self: &Arc<Self>, argv: &[String]) -> Result<()> {
+    /// `env`: extra variables of the process (`KELPIE_CLI`), set before the spec's own.
+    pub fn spawn(self: &Arc<Self>, argv: &[String], env: &[(String, String)]) -> Result<()> {
         let spec = self.spec.lock().clone();
         let mut cmd = tokio::process::Command::new(&argv[0]);
         cmd.args(&argv[1..])
@@ -651,7 +723,10 @@ impl ChatSession {
         if std::path::Path::new(&spec.cwd).is_dir() {
             cmd.current_dir(&spec.cwd);
         }
-        for (k, v) in &spec.env {
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        for (k, v) in spec.env.iter().filter(|(k, _)| !crate::session::is_injected_env(k)) {
             cmd.env(k, v);
         }
         #[cfg(windows)]
@@ -926,14 +1001,21 @@ impl ChatSession {
         for line in bytes.split(|b| *b == b'\n') {
             let head = &line[..line.len().min(300)];
             let head = String::from_utf8_lossy(head);
-            if !["user", "interrupt", "/start", "/resume", "/prompt", "/cancel", "session/", "thread/"].iter().any(|m| head.contains(m)) {
+            if !["user", "interrupt", "/start", "/resume", "/prompt", "/cancel", "session/", "thread/", "set_permission_mode", "approvalPolicy"].iter().any(|m| head.contains(m)) {
                 continue;
             }
             let Ok(v) = serde_json::from_slice::<Value>(line) else { continue };
             let dialect = g.dialect;
             g.conv.learn_written(dialect, &v);
+            if let Some((skips, bypass)) = permission_skip(dialect, &v) {
+                g.perm_skip = skips;
+                g.perm_bypass = bypass;
+            }
             match turns::written(dialect, &v) {
                 Written::Turn { req } => {
+                    g.turn_count += 1;
+                    // Somebody else's message (the queue's own are committed elsewhere): the user is talking to it again.
+                    g.q.mail_hold = false;
                     if g.q.flight.is_none() {
                         g.q.flight = Some(InFlight { qid: None, req, since: now, output: false });
                     }
@@ -966,7 +1048,7 @@ impl ChatSession {
             let Some(head) = g.q.items.front() else { break };
             let (origin, offered, declined, qid, cid) = (head.origin.clone(), head.offered, head.declined, head.qid.clone(), head.cid.clone());
             match origin {
-                Origin::Phone => {
+                Origin::Phone | Origin::Kelpie => {
                     if !self.write_plain(g, now) {
                         break;
                     }
@@ -1078,6 +1160,7 @@ impl ChatSession {
         // A message that starts a turn is logged ahead of the write, so the log shows it whoever built the
         // line and whether or not the agent echoes it. A command the window runs itself is not a message.
         if turn || turn_line {
+            g.turn_count += 1;
             let sent = json!({
                 "type": "kelpie_sent", "qid": entry.qid, "cid": entry.cid, "by": kind(&entry.by), "name": entry.by.name,
                 "text": queue::clip(&entry.text, SENT_TEXT_MAX), "images": entry.images,
@@ -1086,7 +1169,7 @@ impl ChatSession {
         }
         if let Some(stdin) = &g.stdin {
             for line in &lines {
-                let _ = stdin.send(format!("{line}\n").into_bytes());
+                let _ = stdin.send(Self::for_agent(g.acp_mcp.as_ref(), format!("{line}\n").as_bytes()));
             }
         }
         g.activity.last_input = Some(now);
@@ -1131,9 +1214,22 @@ impl ChatSession {
             return Err(Refused::NeedsDesktop);
         }
         let (device, cid) = (new.by.id.clone(), new.cid.clone());
+        // Mail from a session waits while the user holds the queue (a Stop, even with nothing queued); a person's message ends
+        // that wait. One piece of mail at a time: more would only fill the queue the user types into.
+        let mail = new.origin == Origin::Kelpie;
+        if mail && (g.q.paused || g.q.mail_hold) {
+            return Err(Refused::Paused);
+        }
+        if mail && g.q.items.iter().any(|e| e.origin == Origin::Kelpie) {
+            return Err(Refused::QueueFull);
+        }
         let (qid, ahead) = g.q.push(new, now, crate::session::now_millis())?;
-        // A new message ends the wait a stop asked for.
-        g.q.paused = false;
+        // A new message ends the wait a stop asked for, and goes before any mail that was waiting.
+        if !mail {
+            g.q.paused = false;
+            g.q.mail_hold = false;
+            g.q.mail_to_back();
+        }
         let dropped = self.pump(&mut g, now);
         self.announce(&mut g, &dropped);
         let state = g.q.lookup(&device, &cid, now).map_or(State::Queued, |(_, s)| s);
@@ -1196,6 +1292,7 @@ impl ChatSession {
         let now = Instant::now();
         let mut g = self.inner.lock();
         g.q.paused = false;
+        g.q.mail_hold = false;
         let dropped = self.pump(&mut g, now);
         self.announce(&mut g, &dropped);
     }
@@ -1323,6 +1420,46 @@ impl ChatSession {
         }
     }
 
+    /// The agent may act without asking, in any way (broad), as far as the daemon saw (see `permission_skip`).
+    pub fn skips_permissions(&self) -> bool {
+        self.inner.lock().perm_skip
+    }
+
+    /// The agent runs in full bypass (strict): what a child may inherit.
+    pub fn bypasses_permissions(&self) -> bool {
+        self.inner.lock().perm_bypass
+    }
+
+    /// What the arguments the chat process is started with say, read when it is created (a chat switched to bypass is
+    /// started again with the flag in its command line, and no line is ever written about it).
+    pub fn set_launch_permissions(&self, skips: bool, bypass: bool) {
+        let mut g = self.inner.lock();
+        g.perm_skip = skips;
+        g.perm_bypass = bypass;
+    }
+
+    /// What is written to the agent's stdin for the lines the window built: the same lines, with Kelpie's MCP server added to
+    /// the calls that open an ACP conversation. Every writer of window-built lines (`input`, `commit_turn`: `/new` and `/clear`
+    /// open a conversation inside a queued turn) goes through here.
+    fn for_agent(server: Option<&Value>, bytes: &[u8]) -> Vec<u8> {
+        match server {
+            Some(server) => bytes.split_inclusive(|b| *b == b'\n').flat_map(|line| with_mcp_server(line, server).unwrap_or_else(|| line.to_vec())).collect(),
+            None => bytes.to_vec(),
+        }
+    }
+
+    /// How many user turns have been written to the agent so far.
+    pub fn turn_count(&self) -> u64 {
+        self.inner.lock().turn_count
+    }
+
+    /// Adds the MCP server `server` (ACP's stdio shape) to every `session/new`, `session/load` and `session/resume` written to
+    /// this chat's agent, whatever the window put in `mcpServers`. Only for an ACP agent; the others have their own way in.
+    pub fn set_acp_mcp(&self, server: Option<Value>) {
+        let mut g = self.inner.lock();
+        g.acp_mcp = server.filter(|_| g.dialect == Dialect::Acp);
+    }
+
     /// Stops the turn that runs: the dialect's interrupt line, and for ACP a cancelled answer to
     /// every question the agent has open (so every card closes). A queue with messages in it then
     /// waits. `by` is who asked.
@@ -1332,6 +1469,8 @@ impl ChatSession {
         if !g.alive || !(g.q.flight.is_some() || !Self::idle(&g, now)) {
             return Stopped::Nothing;
         }
+        // The user wants it to stop: no mail starts it again until they send something or resume.
+        g.q.mail_hold = true;
         g.built += 1;
         let dialect = g.dialect;
         let Some(line) = turns::interrupt(dialect, &g.conv, g.built) else {
@@ -1637,6 +1776,7 @@ impl ChatSession {
         g.activity.last_input = Some(now);
         g.last_activity = crate::session::now_millis();
         let before = Self::shape(&g);
+        let bytes = Self::for_agent(g.acp_mcp.as_ref(), &bytes);
         let (bytes, answers) = Self::keep_unanswered(&mut g, self.handle, &self.spec.lock().id, bytes);
         self.observe_written(&mut g, &bytes, now);
         if let Some(stdin) = g.stdin.as_ref().filter(|_| !bytes.is_empty()) {
@@ -2924,6 +3064,10 @@ mod tests {
         NewEntry { cid: cid.into(), by: By { id: device.into(), name: format!("Phone {device}") }, text: text.into(), images: vec![], origin: Origin::Phone }
     }
 
+    fn from_kelpie(cid: &str, text: &str) -> NewEntry {
+        NewEntry { cid: cid.into(), by: By::kelpie(), text: text.into(), images: vec![], origin: Origin::Kelpie }
+    }
+
     fn from_desktop(client: u64, cid: &str, text: &str, rich: bool) -> NewEntry {
         NewEntry { cid: cid.into(), by: By::desktop(), text: text.into(), images: if rich { vec!["a.png".into()] } else { vec![] }, origin: Origin::Desktop { client, rich } }
     }
@@ -2995,6 +3139,108 @@ mod tests {
         assert!(written_lines(&mut stdin).is_empty(), "answered, working again");
         c.ingest_line(json!({"type": "result"}).to_string());
         assert_eq!(written_lines(&mut stdin).iter().map(|l| text_of(l).to_string()).collect::<Vec<_>>(), ["while working"]);
+    }
+
+    #[test]
+    fn mail_from_a_session_waits_behind_a_stop_and_belongs_to_no_phone() {
+        let (c, mut stdin) = live();
+        c.enqueue(from_phone("p1", "a", "one")).unwrap();
+        c.enqueue(from_phone("p1", "b", "two")).unwrap();
+        written_lines(&mut stdin);
+        c.stop(By { id: "p1".into(), name: "P".into() });
+        assert_eq!(c.queue_view()["paused"], true);
+        written_lines(&mut stdin);
+        finishes(&c);
+        // The user holds the queue: mail does not end that wait, and nothing of theirs is sent on its account.
+        assert_eq!(c.enqueue(from_kelpie("m1", "[Kelpie] 1 message")).unwrap_err(), Refused::Paused);
+        assert!(written_lines(&mut stdin).is_empty());
+        assert_eq!(c.queue_view()["paused"], true);
+        c.resume();
+        written_lines(&mut stdin);
+        finishes(&c);
+        // Not a phone's: longer in bytes than a phone may send, labelled as Kelpie, and still there when phone access goes
+        // off. (The agent is busy with a message of the user's, so the mail waits in the queue.)
+        c.enqueue(from_phone("p1", "busy", "working")).unwrap();
+        c.enqueue(from_kelpie("m6", &"\u{4e2d}".repeat(6000))).unwrap();
+        let view = c.queue_view();
+        assert!(view["items"].as_array().unwrap().iter().any(|e| e["kind"] == "kelpie" && e["by"]["id"] == "kelpie"), "{view}");
+        let before = view["items"].as_array().unwrap().len();
+        c.drop_phones("revoked");
+        assert_eq!(c.queue_view()["items"].as_array().unwrap().len(), before, "mail survives phone access going off");
+    }
+
+    #[test]
+    fn a_stop_holds_mail_even_with_nothing_queued_until_the_user_sends_or_resumes() {
+        let (c, mut stdin) = live();
+        c.enqueue(from_phone("p1", "a", "one")).unwrap();
+        written_lines(&mut stdin);
+        assert_eq!(c.stop(By { id: "p1".into(), name: "P".into() }), Stopped::Done);
+        assert_eq!(c.queue_view()["paused"], false, "nothing was waiting: the queue itself is not paused");
+        written_lines(&mut stdin);
+        finishes(&c);
+        // The stopped turn is over and the agent idle, which is when a report would be delivered: not now.
+        assert_eq!(c.enqueue(from_kelpie("m1", "[Kelpie] 1 message")).unwrap_err(), Refused::Paused);
+        assert!(written_lines(&mut stdin).is_empty());
+        // The user talking to it again ends the hold.
+        c.enqueue(from_phone("p1", "b", "two")).unwrap();
+        assert_eq!(written_lines(&mut stdin).len(), 1);
+        finishes(&c);
+        c.enqueue(from_kelpie("m2", "[Kelpie] 1 message")).unwrap();
+        assert_eq!(written_lines(&mut stdin).len(), 1, "mail goes out when nobody holds the queue");
+        // Resuming ends it as well.
+        c.enqueue(from_phone("p1", "c", "three")).unwrap();
+        c.stop(By { id: "p1".into(), name: "P".into() });
+        finishes(&c);
+        written_lines(&mut stdin);
+        assert!(c.enqueue(from_kelpie("m3", "again")).is_err());
+        c.resume();
+        c.enqueue(from_kelpie("m3", "again")).unwrap();
+        // One piece of mail waits at a time, so it cannot fill the queue the user types into.
+        let sent: Vec<bool> = (0..3).map(|i| c.enqueue(from_kelpie(&format!("n{i}"), "more")).is_ok()).collect();
+        assert!(!sent[2], "{sent:?}");
+        c.enqueue(from_phone("p1", "d", "still room")).unwrap();
+    }
+
+    #[test]
+    fn mail_queued_before_a_stop_waits_behind_the_message_the_user_sends_next() {
+        let (c, mut stdin) = live();
+        c.enqueue(from_phone("p1", "a", "working")).unwrap();
+        c.enqueue(from_kelpie("m1", "[Kelpie] mail")).unwrap();
+        written_lines(&mut stdin);
+        c.stop(By { id: "p1".into(), name: "P".into() });
+        assert_eq!(c.queue_view()["paused"], true, "the mail waits in a paused queue");
+        written_lines(&mut stdin);
+        finishes(&c);
+        c.enqueue(from_phone("p1", "b", "the user next")).unwrap();
+        let lines = written_lines(&mut stdin);
+        assert_eq!(lines.iter().map(|l| text_of(l).to_string()).collect::<Vec<_>>(), ["the user next"], "theirs first");
+        finishes(&c);
+        let lines = written_lines(&mut stdin);
+        assert_eq!(lines.iter().map(|l| text_of(l).to_string()).collect::<Vec<_>>(), ["[Kelpie] mail"], "then the mail");
+    }
+
+    #[test]
+    fn the_mode_a_chat_was_told_to_run_in_is_what_its_permissions_are_taken_to_be() {
+        let write = |c: &ChatSession, line: Value| {
+            let mut g = c.inner.lock();
+            c.observe_written(&mut g, line.to_string().as_bytes(), Instant::now());
+        };
+        let (claude, _stdin) = live();
+        assert!(!claude.skips_permissions());
+        write(&claude, json!({"type": "control_request", "request_id": "x", "request": {"subtype": "set_permission_mode", "mode": "bypassPermissions"}}));
+        assert!(claude.skips_permissions(), "the mode chip moved it to bypass");
+        write(&claude, json!({"type": "control_request", "request_id": "y", "request": {"subtype": "set_permission_mode", "mode": "plan"}}));
+        assert!(!claude.skips_permissions());
+        let (codex, _stdin) = live_of("codex");
+        write(&codex, json!({"jsonrpc": "2.0", "id": 1, "method": "turn/start", "params": {"approvalPolicy": "never"}}));
+        assert!(codex.skips_permissions());
+        write(&codex, json!({"jsonrpc": "2.0", "id": 2, "method": "turn/start", "params": {"approvalPolicy": "on-request"}}));
+        assert!(!codex.skips_permissions());
+        let (acp, _stdin) = live_of("gemini");
+        write(&acp, json!({"jsonrpc": "2.0", "id": 3, "method": "session/set_mode", "params": {"modeId": "yolo"}}));
+        assert!(acp.skips_permissions());
+        write(&acp, json!({"jsonrpc": "2.0", "id": 4, "method": "session/set_mode", "params": {"modeId": "default"}}));
+        assert!(!acp.skips_permissions());
     }
 
     #[test]
@@ -3809,5 +4055,102 @@ mod tests {
         let (claude, mut cstdin) = live();
         claude.ingest_line(json!({"type": "control_request", "request_id": "h", "request": {"subtype": "hook_callback"}}).to_string());
         assert!(written_lines(&mut cstdin).is_empty());
+    }
+
+    fn acp_chat() -> (Arc<ChatSession>, Stdin) {
+        let c = ChatSession::new(8, SessionSpec { id: "acp-1".into(), kind: "gemini".into(), cwd: ".".into(), ..Default::default() });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        c.inner.lock().stdin = Some(tx);
+        (c, rx)
+    }
+
+    fn kelpie_server() -> Value {
+        json!({"name": "kelpie", "command": "kelpied", "args": ["mcp"], "env": [{"name": "KELPIE_SESSION_ID", "value": "acp-1"}]})
+    }
+
+    fn sent(rx: &mut Stdin) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            for line in String::from_utf8(bytes).unwrap().lines() {
+                out.push(serde_json::from_str(line).unwrap());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_daemon_adds_the_kelpie_server_to_the_calls_that_open_an_acp_conversation() {
+        let (c, mut rx) = acp_chat();
+        c.set_acp_mcp(Some(kelpie_server()));
+        let open = |method: &str, extra: Value| {
+            let mut params = json!({"cwd": ".", "mcpServers": []});
+            params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            format!("{}\n", json!({"jsonrpc": "2.0", "id": "a", "method": method, "params": params}))
+        };
+        for (method, extra) in [("session/new", json!({})), ("session/load", json!({"sessionId": "s1"})), ("session/resume", json!({"sessionId": "s1"}))] {
+            c.input(open(method, extra).into_bytes());
+            let lines = sent(&mut rx);
+            assert_eq!(lines.len(), 1, "{method}");
+            assert_eq!(lines[0]["method"], method);
+            assert_eq!(lines[0]["params"]["mcpServers"], json!([kelpie_server()]), "{method}");
+            assert_eq!(lines[0]["params"]["cwd"], ".", "the rest of the call is untouched");
+        }
+        // The window's own servers stay, and a missing or null list becomes one.
+        c.input(format!("{}\n", json!({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": {"cwd": ".", "mcpServers": [{"name": "mine"}]}})).into_bytes());
+        c.input(format!("{}\n", json!({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "."}})).into_bytes());
+        c.input(format!("{}\n", json!({"jsonrpc": "2.0", "id": 3, "method": "session/new", "params": {"cwd": ".", "mcpServers": null}})).into_bytes());
+        let lines = sent(&mut rx);
+        assert_eq!(lines[0]["params"]["mcpServers"], json!([{"name": "mine"}, kelpie_server()]));
+        assert_eq!(lines[1]["params"]["mcpServers"], json!([kelpie_server()]));
+        assert_eq!(lines[2]["params"]["mcpServers"], json!([kelpie_server()]));
+        // Two lines in one write: only the opener changes; every other line is written as it came.
+        let prompt = r#"{"jsonrpc":"2.0",  "id":"p","method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}"#;
+        c.input(format!("{prompt}\n{}", open("session/new", json!({}))).into_bytes());
+        let raw = String::from_utf8(rx.try_recv().unwrap()).unwrap();
+        assert!(raw.starts_with(&format!("{prompt}\n")), "{raw}");
+        assert!(raw.contains("\"name\":\"kelpie\""));
+    }
+
+    #[test]
+    fn nothing_is_added_when_off_when_the_app_has_its_own_or_for_other_dialects() {
+        // No server set (policy off at creation): written as it came, byte for byte.
+        let (c, mut rx) = acp_chat();
+        let line = r#"{"jsonrpc":"2.0","id":"a","method":"session/new","params":{"cwd":".","mcpServers":[]}}"#.to_string() + "\n";
+        c.input(line.clone().into_bytes());
+        assert_eq!(rx.try_recv().unwrap(), line.clone().into_bytes());
+        // A server of that name already there: the app's wins, nothing is added twice.
+        c.set_acp_mcp(Some(kelpie_server()));
+        let own = r#"{"jsonrpc":"2.0","id":"a","method":"session/new","params":{"cwd":".","mcpServers":[{"name":"kelpie","command":"mine"}]}}"#.to_string() + "\n";
+        c.input(own.clone().into_bytes());
+        assert_eq!(rx.try_recv().unwrap(), own.into_bytes());
+        // Not a list: left alone.
+        let odd = r#"{"jsonrpc":"2.0","id":"a","method":"session/new","params":{"cwd":".","mcpServers":"x"}}"#.to_string() + "\n";
+        c.input(odd.clone().into_bytes());
+        assert_eq!(rx.try_recv().unwrap(), odd.into_bytes());
+        // Claude and Codex have their own way in: the setter ignores them.
+        let (claude, mut crx) = chat();
+        claude.set_acp_mcp(Some(kelpie_server()));
+        claude.input(line.clone().into_bytes());
+        assert_eq!(crx.try_recv().unwrap(), line.into_bytes());
+        // A method that merely mentions an opener is not one.
+        assert!(with_mcp_server(br#"{"method":"session/prompt","params":{"prompt":[{"type":"text","text":"session/new"}]}}"#, &kelpie_server()).is_none());
+    }
+
+    #[test]
+    fn new_and_clear_inside_a_queued_turn_open_the_conversation_with_kelpie_too() {
+        let (c, mut rx) = acp_chat();
+        c.set_acp_mcp(Some(kelpie_server()));
+        let entry = queue::Entry {
+            qid: "q1".into(), cid: "c1".into(), by: By::desktop(), text: "/new".into(), images: vec![], origin: Origin::Desktop { client: 1, rich: false },
+            at: 1, offered: None, declined: false, retry_at: None, first_offer: None, waiting_window: false, orphaned: false,
+        };
+        let line = json!({"jsonrpc": "2.0", "id": "kelpie-new", "method": "session/new", "params": {"cwd": ".", "mcpServers": []}}).to_string();
+        {
+            let mut g = c.inner.lock();
+            c.commit_turn(&mut g, entry, vec![line], false, Instant::now());
+        }
+        let lines = sent(&mut rx);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["params"]["mcpServers"], json!([kelpie_server()]));
     }
 }

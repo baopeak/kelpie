@@ -103,6 +103,9 @@ pub struct Task {
     /// What its worktree was given from the repository's ignored files (see `Materialize`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brought: Option<kelpie_proto::materialize::Materialized>,
+    /// Why a ready task has not started (the sub-session limits are full): shown on the task, gone when it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Ignored files and folders of the repository a run's worktrees get (`.kelpie.yaml` `copy:` and
@@ -176,6 +179,10 @@ pub struct Run {
     pub tasks: Vec<Task>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialize: Option<Materialize>,
+    /// The session whose program created this run (not the user): its tasks' sessions are sub-sessions of it, and start only
+    /// where the sub-session limits allow. Set by the daemon, never taken from a request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
     pub status: RunStatus,
     pub created_at: u64,
     #[serde(default)]
@@ -199,6 +206,18 @@ pub enum Action {
     Capture { run: String, task: String, session: String },
     /// The session is not to be resumed by the app: it belonged to a task on a host that was already marked failed.
     Release { session: String },
+    /// A task of a run made by a program in a session began to wait for the sub-session limits (said once).
+    Waiting { run: String, task: String, reason: String },
+}
+
+/// Whether a task of a run made by a program in a session may start now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gate {
+    Open,
+    /// The sub-session limits are full: it waits, ready, and the reason is shown on the task.
+    Wait(String),
+    /// It never can (sub-sessions were turned off, or the session that made the run is gone).
+    Fail(String),
 }
 
 /// A task's session as the engine needs it.
@@ -308,6 +327,7 @@ pub fn build_run(new: NewRun, id: String, now: u64) -> Result<Run> {
             error: None,
             worked: false,
             brought: None,
+            note: None,
         });
     }
     for t in &tasks {
@@ -331,6 +351,7 @@ pub fn build_run(new: NewRun, id: String, now: u64) -> Result<Run> {
         project_id: new.project_id,
         tasks,
         materialize: new.materialize,
+        creator: None,
         status: RunStatus::Running,
         created_at: now,
         finished_at: 0,
@@ -387,6 +408,16 @@ impl Runs {
         Runs { path, list }
     }
 
+    /// The sessions of tasks that are done, failed, skipped or cancelled.
+    pub fn finished_sessions(&self) -> HashSet<String> {
+        self.list
+            .iter()
+            .flat_map(|r| r.tasks.iter())
+            .filter(|t| matches!(t.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Skipped | TaskStatus::Cancelled))
+            .filter_map(|t| t.session_id.clone())
+            .collect()
+    }
+
     pub fn save(&self) -> Result<()> {
         write_atomic(&self.path, &serde_json::to_vec_pretty(&self.list)?)
     }
@@ -439,11 +470,23 @@ impl Runs {
     }
 
     /// Advances every running run. Returns what to do and the ids of runs that changed.
+    #[cfg(test)]
     pub fn step(&mut self, now: u64, view: impl Fn(&str) -> Option<SessionView>) -> (Vec<Action>, Vec<String>) {
+        self.step_gated(now, view, |_, _| Gate::Open)
+    }
+
+    /// [`Self::step`], where a task of a run made by a program in a session (`Run::creator`, given to `gate`) starts only when
+    /// the gate is open. A task that must wait stays ready and is looked at again by the next step.
+    pub fn step_gated(&mut self, now: u64, view: impl Fn(&str) -> Option<SessionView>, gate: impl Fn(&str, &HashSet<String>) -> Gate) -> (Vec<Action>, Vec<String>) {
         let mut actions = Vec::new();
+        // Sessions of tasks that ended (their agents may idle on): the sub-session limits count busy sessions only.
+        let finished = self.finished_sessions();
         let mut changed = Vec::new();
         for run in self.list.iter_mut().filter(|r| r.status == RunStatus::Running) {
             let before = run.clone();
+            for t in run.tasks.iter_mut().filter(|t| t.note.is_some() && t.status != TaskStatus::Pending) {
+                t.note = None;
+            }
             for t in run.tasks.iter_mut().filter(|t| t.status == TaskStatus::Running) {
                 let Some(sid) = t.session_id.clone() else {
                     t.status = TaskStatus::Failed;
@@ -511,9 +554,30 @@ impl Runs {
                                 moved = true;
                             }
                         } else {
-                            t.status = TaskStatus::Starting;
-                            actions.push(Action::Start { run: run.id.clone(), task: t.id.clone() });
-                            moved = true;
+                            match run.creator.as_deref().map_or(Gate::Open, |creator| gate(creator, &finished)) {
+                                Gate::Open => {
+                                    t.note = None;
+                                    t.status = TaskStatus::Starting;
+                                    actions.push(Action::Start { run: run.id.clone(), task: t.id.clone() });
+                                    moved = true;
+                                }
+                                // Ready, and asked again at the next step; the reason is on the task, and said once.
+                                Gate::Wait(reason) => {
+                                    if t.note.as_deref() != Some(reason.as_str()) {
+                                        if t.note.is_none() {
+                                            actions.push(Action::Waiting { run: run.id.clone(), task: t.id.clone(), reason: reason.clone() });
+                                        }
+                                        t.note = Some(reason);
+                                    }
+                                }
+                                Gate::Fail(why) => {
+                                    t.note = None;
+                                    t.status = TaskStatus::Failed;
+                                    t.error = Some(why);
+                                    t.finished_at = now;
+                                    moved = true;
+                                }
+                            }
                         }
                     }
                 }
@@ -594,6 +658,42 @@ mod tests {
 
     fn view(alive: bool, working: bool, exit: Option<i32>, last: u64) -> Option<SessionView> {
         Some(SessionView { alive, working, idle: !working && alive, exit_code: exit, last_activity: last, interrupted: false })
+    }
+
+    #[test]
+    fn a_task_of_a_run_made_by_a_session_starts_only_where_the_gate_is_open() {
+        let mut runs = Runs { path: std::env::temp_dir().join("kelpie-gate-runs.json"), list: vec![] };
+        let mut made = run_of(vec![new_task("a", &[]), new_task("b", &["a"])]);
+        made.creator = Some("p".into());
+        runs.list.push(made);
+        let none = |_: &str| None;
+        // Full: ready, not started, not failed; asked again at the next step.
+        let wait = || Gate::Wait("full".into());
+        let (actions, _) = runs.step_gated(1, none, |creator, _| if creator == "p" { wait() } else { Gate::Open });
+        assert_eq!(actions, vec![Action::Waiting { run: "r1".into(), task: "a".into(), reason: "full".into() }], "said once");
+        assert_eq!(runs.list[0].tasks[0].status, TaskStatus::Pending);
+        // Said once, shown on the task; a changed reason is shown without another notice.
+        assert_eq!(runs.list[0].tasks[0].note.as_deref(), Some("full"));
+        let (actions, _) = runs.step_gated(2, none, |_, _| Gate::Wait("still full".into()));
+        assert!(actions.is_empty());
+        assert_eq!(runs.list[0].tasks[0].note.as_deref(), Some("still full"));
+        // Room: it starts.
+        let (actions, _) = runs.step_gated(3, none, |_, _| Gate::Open);
+        assert_eq!(actions, vec![Action::Start { run: "r1".into(), task: "a".into() }]);
+        assert_eq!(runs.list[0].tasks[0].status, TaskStatus::Starting);
+        assert_eq!(runs.list[0].tasks[0].note, None, "the reason goes when it starts");
+        // Never: the task fails and what depends on it is skipped.
+        runs.list[0].tasks[0].status = TaskStatus::Pending;
+        let (actions, _) = runs.step_gated(4, none, |_, _| Gate::Fail("turned off".into()));
+        assert!(actions.is_empty());
+        assert_eq!((runs.list[0].tasks[0].status, runs.list[0].tasks[0].error.as_deref()), (TaskStatus::Failed, Some("turned off")));
+        assert_eq!(runs.list[0].tasks[1].status, TaskStatus::Skipped);
+        // A run nobody's program made is never held back, and `step` is that.
+        let mut plain = Runs { path: std::env::temp_dir().join("kelpie-gate-runs2.json"), list: vec![run_of(vec![new_task("a", &[])])] };
+        let (actions, _) = plain.step_gated(1, none, |_, _| Gate::Wait("full".into()));
+        assert_eq!(actions.len(), 1);
+        let (actions, _) = Runs { path: plain.path.clone(), list: vec![run_of(vec![new_task("a", &[])])] }.step(1, none);
+        assert_eq!(actions.len(), 1);
     }
 
     #[test]

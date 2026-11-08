@@ -43,7 +43,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// 29: the computer's screen for a phone with `control` (the `screen` provider kind and its `screen.*` requests and notices to the app; `provider.event`
 /// with `sc`; the phone's `screens`, `sc_start`, `sc_stop`, `sc_ack`, `sc_input`, `sc_text`, `sc_key`, `sc_rebind`, `sc_resume`, the `sc_state`, `sc_stats`,
 /// `sc_fhb`, `sc_end` messages, and binary media messages on the link, `0x01` first); an older daemon has none of it, so the phone offers the screen only at 29.
-pub const API_LEVEL: u32 = 29;
+/// 30: sub-sessions (`sub.spawn`, `sub.message`, `sub.report`, `sub.inbox`, `sub.close` for programs in a session; `sub.answer`, `sub.pending` and the `sub.request` and `sub.request_done` events for the user): a session records its `parent`, `depth` and last `report`, and `daemon.policy` / `daemon.set_policy` carry `sub_sessions`, `sub_max` and `sub_auto_max`; an older daemon has none of it, so the app offers sub-sessions only at 30 (26 to 29 belong to other work).
+pub const API_LEVEL: u32 = 30;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

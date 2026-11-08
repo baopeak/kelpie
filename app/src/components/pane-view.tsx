@@ -24,6 +24,7 @@ import { confirmDialog } from "../lib/confirm-dialog";
 import { isLimited } from "../lib/limits";
 import { commandHint } from "../lib/commands";
 import { composerRequest, toggleComposer } from "../lib/composer-state";
+import { SubSessionsBar } from "./sub-sessions-strip";
 
 // Loaded when a diff or a turn's file is first opened.
 const DiffView = lazy(() => import("./diff-view").then((m) => ({ default: m.DiffView })));
@@ -112,6 +113,10 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
           </Show>
           {tools()}
         </div>
+      </Show>
+      {/* Where this session stands among sub-sessions: the session that opened it, and the ones it opened. */}
+      <Show when={props.pane.kind === "terminal" || props.pane.kind === "chat" ? props.pane.sessionId : undefined} keyed>
+        {(id) => <SubSessionsBar sessionId={id} />}
       </Show>
       {/* The usage limit stopped this agent (the daemon says so for Claude Code). */}
       <Show when={props.pane.kind === "terminal" ? session() : undefined} keyed>

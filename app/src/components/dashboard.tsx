@@ -6,6 +6,7 @@ import { StatusDot, STATUS_WORDS } from "./sidebar";
 import type { SessionInfo } from "../lib/types";
 import { t, msg } from "../lib/i18n";
 import { ANSWER_API, waitedFor, waitingSessions } from "../lib/attention";
+import { needsYou } from "../lib/session-state";
 
 /** A failed turn or a failed exit that nothing has followed yet. */
 const failedNow = (s: SessionInfo) => !!s.failed && !(s.alive && (s.status === "waiting" || s.status === "working"));
@@ -14,8 +15,8 @@ const columns: { id: string; title: string; color: string; test: (s: SessionInfo
   { id: "waiting", title: msg("Needs you"), color: "var(--waiting)", test: (s) => s.alive && s.status === "waiting" },
   { id: "failed", title: msg("Failed"), color: "var(--danger)", test: failedNow },
   { id: "working", title: msg("Working"), color: "var(--working)", test: (s) => s.alive && s.status === "working" },
-  { id: "done", title: msg("Done · unread"), color: "var(--idle)", test: (s) => s.alive && s.status === "idle" && s.unread && !failedNow(s) },
-  { id: "idle", title: msg("Idle / exited"), color: "var(--text-faint)", test: (s) => (!s.alive || (s.status === "idle" && !s.unread)) && !failedNow(s) },
+  { id: "done", title: msg("Done · unread"), color: "var(--idle)", test: (s) => s.alive && s.status === "idle" && s.unread && !failedNow(s) && needsYou(s) === 0 },
+  { id: "idle", title: msg("Idle / exited"), color: "var(--text-faint)", test: (s) => (!s.alive || (s.status === "idle" && !s.unread)) && !failedNow(s) && needsYou(s) === 0 },
 ];
 
 /** Every session in every project, grouped by what it needs — without rendering a single terminal. */
@@ -65,7 +66,7 @@ export function Dashboard() {
                             <Show when={col.id === "waiting" && s.waiting_since} fallback={<span>· {relTime(s.created_at)}</span>}>
                               <span>· {t("waiting {time}", { time: waitedFor(s.waiting_since!) })}</span>
                             </Show>
-                            <Show when={col.id === "waiting" && !s.chat && store.daemonApi() >= ANSWER_API}>
+                            <Show when={col.id === "waiting" && s.status === "waiting" && !s.chat && store.daemonApi() >= ANSWER_API}>
                               <button class="btn dash-answer" onClick={(e) => { e.stopPropagation(); store.openAnswer(s.id); }}>{t("Answer")}</button>
                             </Show>
                           </div>

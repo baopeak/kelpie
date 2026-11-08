@@ -14,6 +14,14 @@ export const daemon = <T = unknown>(method: string, params: object = {}) =>
 export const mobileSecure = <T = unknown>(method: "mobile.approve" | "mobile.set_permission" | "mobile.reset" | "mobile.set_options" | "mobile.set_tailscale" | "mobile.set_lock" | "mobile.reset_lock" | "mobile.set_relay" | "mobile.relay_recreate" | "notify.telegram_bind", params: object) =>
   invoke<T>("mobile_secure_call", { method, params: { ...params, lang: locale() } });
 
+/** The user's answer to a sub-session request (the approval card). `always` also turns the policy to allow. */
+export const subAnswer = (id: string, decision: "once" | "session" | "always" | "deny") => daemon<unknown>("sub.answer", { id, decision });
+/** Requests still waiting for the user (the daemon keeps them for 5 minutes). */
+export const subPending = () => daemon<unknown[]>("sub.pending");
+/** The sub-session part of the daemon's policy: `sub_sessions` off|ask|allow, `sub_max` (0: automatic), read-only `sub_auto_max`. */
+export const subPolicyGet = () => daemon<unknown>("daemon.policy");
+export const subPolicySet = (patch: { sub_sessions?: "off" | "ask" | "allow"; sub_max?: number }) => daemon<unknown>("daemon.set_policy", patch);
+
 export const listSessions = () => daemon<SessionInfo[]>("session.list");
 
 export interface CreateSession {
@@ -31,6 +39,9 @@ export interface CreateSession {
   prompt?: string;
   /** Runs on another machine over SSH (cwd is a path there). */
   remote?: { dest: string; port?: number; config?: string; tmux: boolean };
+  /** The session this one replaces (a conversation moved between terminal and chat view): it takes over that session's place
+   *  among the sub-sessions (its parent, its children, its mail). Daemon API 30+; an older daemon ignores it. */
+  lineage_from?: string;
 }
 export const createSession = (p: CreateSession) => daemon<SessionInfo>("session.create", p);
 

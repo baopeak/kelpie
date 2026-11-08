@@ -733,6 +733,67 @@ kelpied review list [--json]
 The same prompt to several agents, with a compare view to pick the best, is *Try with several agents…*
 (see Review and Finish).
 
+### Sub-sessions
+
+An agent can open other agent sessions to share a job. Unlike the subagents some agents run
+inside their own process, a **sub-session** is a real Kelpie session (Claude, Codex, OMP, ...
+whatever is installed): it shows in the sidebar, you can open it, type to it or close it, and it
+keeps running with the window closed. Nothing to install: agents Kelpie starts get the tools.
+
+**Ask in plain words**, in a session that is Claude, Codex or another agent Kelpie started: *"open
+sub-sessions to fix #1 #2 #3 with Codex"*. The agent opens one child per task, ends its turn, and
+each child's result arrives as a new message in the parent when the parent is idle: done, blocked,
+needs you, or exited. It does not have to poll. A child that stops at a prompt is reported anyway. One that
+stops without reporting gets a hint from what Kelpie sees (the end of its screen, redacted), at the
+agent's turn end (Claude, Codex) or after a stretch of quiet (about 30 s; 2 min for a Codex child without hooks); the child may still be
+working, and only its own *done* report means done. The parent can
+also message a child, or a session in another project (delivered when that session is idle, never
+into a prompt waiting on you). A message from another session is never you: it cannot approve
+anything.
+
+**Approvals.** By default each sub-session asks you first: a card at the bottom right names the
+asking session, the agent, folder, task and model, and says in red when the child will run without
+asking before it acts. *Allow once*, *Allow for this session* (until the session daemon restarts),
+*Always allow* (changes the Settings mode to Allow, with a confirm) or *Deny*. Buttons switch on
+half a second after a card appears. The card also lives in Activity (the bell), and Kelpie raises
+a notification when the window is not focused. *Later* hides a card; `Ctrl+Shift+A` / `⌘⇧A`
+brings the first open request back and focuses it (the key is Kelpie's only while a request is
+open). A request not answered in 5 minutes is refused, and one withdrawn when its agent gave up.
+
+**The tree.** A child sits under its parent in the sidebar (if both are in the same project); the
+parent row has a fold arrow and a badge coloured by the worst state below it (needs you, failed,
+working, finished, idle). Over a session with children, a strip lists them as chips with their
+last report; click one to open it, `+N` shows the rest. A child's strip starts with *Sub-session of
+<parent>*. *Close finished* on the strip, or in the right-click menu of the strip or the parent's
+row, closes the children that are done or exited after listing them; folders and worktrees are
+kept. Closing a parent leaves its children running.
+
+**Limits on this computer.** At most 3 levels deep, 10 running children per session, and a limit
+across the computer: Auto (about half the cores, or half the memory above 4 GB, between 2 and 8; the
+number is shown in Settings) or a number you set. A child that has reported done does not count
+while it only sits idle. Spawns are refused, with what is running, when the limit is reached or the
+computer is under heavy load. Each child is another agent using tokens and memory; ask for a few.
+
+**Permissions.** A sub-session never gets more than the session that opened it. It starts with
+the agent's skip-permission flags only if its opener runs with permission checks off (Settings →
+Agents → Permissions: Yolo, or a session started that way); a request from such a session says
+so on its card. A session that asks before it acts cannot message one that does not. Agents can only
+choose a model for a child, not other arguments, and not start plain terminals this way.
+
+**Agents without the tools.** Claude and Codex (terminal and chat) and ACP chats get the tools
+automatically. Other agents see a short brief in the child's prompt and `$KELPIE_CLI` in their
+environment; the same operations are a command, in bash `"$KELPIE_CLI" sub spawn codex "fix #1"
+--worktree` and in PowerShell `& $env:KELPIE_CLI sub spawn codex "fix #1" --worktree`.
+`kelpied sub --help` lists them (`agents`, `spawn`, `list`, `send`, `read`, `wait`, `report`,
+`inbox`, `close`). `--worktree` gives the child its own branch `kelpie/sub-<name>`, which closing
+never removes (Finish and Review do). Switching a parent between terminal and chat keeps its
+children.
+
+**Turning it off.** Settings → Agents → **Sub-sessions**: Off, Ask (default) or Allow, and how many
+run at once. Off refuses every request; sessions already running keep their tools until restarted,
+and new ones start without them. With Allow no card appears, so every request is a spend you did not
+see. If the settings say the session daemon is older, restart it there (conversations are kept).
+
 ### Specs and tasks (the Plan tab)
 
 The **Plan** tab of the right panel (palette: *Plan (specs and tasks)*) shows the plans and specs your
@@ -1250,6 +1311,7 @@ App shortcuts use `Ctrl+Shift` on Windows so plain `Ctrl+letter` keys reach the 
 | Layout menu | Ctrl+Shift+L | ⌘⇧L |
 | Focus pane left / right / up / down | Ctrl+Alt+← / → / ↑ / ↓ | ⌃⌥← / → / ↑ / ↓ |
 | Runs (orchestration) | Ctrl+Shift+R | ⌘⇧R |
+| Review a sub-session request (only while one is open) | Ctrl+Shift+A | ⌘⇧A |
 | Open browser | Ctrl+Shift+U | ⌘⇧U |
 | Dictate (start / stop) | Ctrl+Shift+Space | ⌘⇧Space |
 | Composer (write a prompt with @ mentions) | Ctrl+Shift+I | ⌘⇧I |
@@ -1277,7 +1339,8 @@ a setting.
 - **Agents**: permissions (Manual / Yolo); per agent extra arguments (e.g. `--model opus`),
   permission mode (Claude) or approval policy (Codex) and environment variables (stored in
   plain text) — used by terminal and chat sessions; which agent CLIs launchers show; the agent
-  for AI actions; hibernation; turn snapshots; prioritize visible terminals; keep computer awake.
+  for AI actions; hibernation; turn snapshots; prioritize visible terminals; keep computer awake;
+  *Sub-sessions* (Off / Ask / Allow and how many run at once, see "Sub-sessions").
 - **Agent setup**: MCP servers, instruction files, skills and the ACP registry (see above).
 - **Accounts**, **Integrations**, **Remote (SSH)**, **Mobile**, **Voice**, **Plugins**,
   **Layouts**, **Quick Commands**, **Automations**, **Shortcuts**: see above.

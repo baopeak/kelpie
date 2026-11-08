@@ -12,6 +12,8 @@ import { navBack, navForward } from "./nav-history";
 import { addExistingWorktrees } from "./worktrees";
 import { openFinish, openReviewWith, openTryAgents } from "./review-queue";
 import { waitingSessions } from "./attention";
+import { subRequests } from "./sub-sessions";
+import { focusFirstSubRequest } from "./sub-session-actions";
 import { openWorktreeDialog } from "../components/worktree-dialog";
 import { openRuns } from "../components/runs-page";
 import { openHosts } from "../components/hosts-page";
@@ -85,8 +87,9 @@ export const commands: Command[] = [
   { id: "palette", label: msg("Search Everything"), win: "mod+shift+p", mac: "mod+shift+p", run: () => store.setOverlay("palette") },
   { id: "quickopen", label: msg("Go to File…"), win: "mod+shift+o", mac: "mod+p", run: () => store.setOverlay("quickopen"), when: hasProject },
   { id: "jump", label: msg("Jump to Session / Project…"), win: "mod+shift+k", mac: "mod+k", run: () => store.setOverlay("jump") },
+  { id: "sub.review", label: msg("Review sub-session request"), win: "mod+shift+a", mac: "mod+shift+a", when: () => subRequests().length > 0, run: () => focusFirstSubRequest() },
   { id: "attention.next", label: msg("Next Session Waiting for You"), win: "mod+shift+.", mac: "mod+shift+.", run: () => store.revealNextWaiting() },
-  { id: "attention.answer", label: msg("Answer Waiting Session…"), when: () => Object.values(store.sessions).some((s) => s.alive && s.status === "waiting"), run: () => { const s = waitingSessions(Object.values(store.sessions))[0]; if (s) store.openAnswer(s.id); } },
+  { id: "attention.answer", label: msg("Answer Waiting Session…"), when: () => waitingSessions(Object.values(store.sessions)).length > 0, run: () => { const s = waitingSessions(Object.values(store.sessions))[0]; if (s) store.openAnswer(s.id); } },
   { id: "dashboard", label: msg("Toggle Agent Dashboard"), win: "mod+shift+m", mac: "mod+shift+m", run: () => store.setOverlay(store.overlay() === "dashboard" ? null : "dashboard") },
   { id: "project.add", label: msg("Add Project Folder…"), run: () => void pickProjectFolder() },
   { id: "project.addRemote", label: msg("Add Remote Project (SSH)…"), run: () => store.setOverlay("remote") },

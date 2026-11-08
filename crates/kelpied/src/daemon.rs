@@ -1,6 +1,6 @@
 //! Session registry, client registry, RPC methods and the periodic status/persistence ticker.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -30,6 +30,7 @@ use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, tu
 
 mod automation;
 mod process;
+mod sub_rpc;
 
 /// What delivery of alerts asks of the daemon, from the destinations' own threads.
 struct NotifyHost(std::sync::Weak<Daemon>);
@@ -218,6 +219,8 @@ pub struct Daemon {
     pub notifier: Notifier,
     /// "Continue at reset" timers.
     scheduled: ScheduledInputs,
+    /// Sub-sessions: their policy, mail, requests and caps (see `subs.rs`).
+    subs: crate::subs::Subs,
     /// What the sessions run, looked at when the app asks (`process.*`).
     procs: crate::procs::Procs,
     /// The app's connection, asked for what only the window can do (`provider`).
@@ -262,6 +265,21 @@ struct CreateParams {
     /// Its programs may act only on this session through `kelpied` (see `auth`).
     #[serde(default)]
     restricted: bool,
+    /// The session this one replaces (a conversation moved between terminal and chat view): it takes over that session's place
+    /// among the sub-sessions. Only the user's connections can set it (a program in a session cannot, see `parse_create`).
+    #[serde(default)]
+    lineage_from: Option<String>,
+}
+
+/// Where a new session stands among the sub-sessions (parent, depth, last report): the lineage the daemon gives a spawn, else that
+/// of the session it replaces, else none.
+fn place_among_subs(lineage: Option<(String, u8)>, replaced: Option<&SessionSpec>) -> (Option<String>, u8, Option<crate::session::SubReport>) {
+    match (lineage, replaced) {
+        (Some((parent, depth)), _) => (Some(parent), depth, None),
+        // Only what the agent said itself: an automatic report (an exit from the stop of the switch, say) describes the old process.
+        (None, Some(old)) => (old.parent.clone(), old.depth, old.report.clone().filter(|r| !r.auto)),
+        (None, None) => (None, 0, None),
+    }
 }
 
 fn default_kind() -> String {
@@ -323,6 +341,7 @@ impl Daemon {
             });
             // Shared by the two that decide about alerts: phone access says who has them on, the notifier what is sent.
             let destinations = Destinations::new(&data_dir, secrets.clone(), Arc::new(NotifyHost(weak.clone())));
+            let policy = load_policy(&data_dir);
             Daemon {
                 sessions: RwLock::new(BTreeMap::new()),
                 next_handle: AtomicU32::new(1),
@@ -339,11 +358,12 @@ impl Daemon {
                 awake: Awake::new(),
                 awake_mode: Mutex::new(awake::Mode::Off),
                 prioritize: AtomicBool::new(true),
-                agents_control_others: AtomicBool::new(load_policy(&data_dir)),
+                agents_control_others: AtomicBool::new(policy.agents_control_others),
                 checkpoints: Arc::new(Checkpoints::new(&data_dir, emit)),
                 deliver_review: Mutex::new(HashMap::new()),
                 notifier: Notifier::with_destinations(&data_dir, secrets, destinations),
                 scheduled: ScheduledInputs::open(&data_dir),
+                subs: crate::subs::Subs::new(policy.sub).with_stats_file(data_dir.join("sub-stats.json")),
                 procs: crate::procs::Procs::default(),
                 providers: crate::provider::Providers::default(),
                 takeover: crate::takeover::Broker::default(),
@@ -373,10 +393,10 @@ impl Daemon {
     /// What `restart` resumes: the known conversation, else (agents that report no id) the
     /// folder's most recent one.
     /// The command line of a session: local, or over SSH for a remote one.
-    fn launch_for(spec: &SessionSpec, resume: Resume, prompt: Option<&str>, exe: &std::path::Path, data_dir: &std::path::Path) -> Result<agents::Launch> {
+    fn launch_for(spec: &SessionSpec, resume: Resume, prompt: Option<&str>, exe: &std::path::Path, data_dir: &std::path::Path, sub_tools: bool) -> Result<agents::Launch> {
         match &spec.remote {
             Some(r) => agents::build_remote_launch(&spec.kind, &spec.args, resume, prompt, r, &spec.cwd, &spec.id),
-            None => agents::build_launch(&spec.kind, &spec.args, resume, prompt, exe, data_dir),
+            None => agents::build_launch(&spec.kind, &spec.args, resume, prompt, exe, data_dir, sub_tools),
         }
     }
 
@@ -761,15 +781,21 @@ impl Daemon {
                 SessionView { alive: i.alive, working: i.status == Status::Working, idle: i.status == Status::Idle, exit_code: i.exit_code, last_activity: i.last_activity, interrupted: i.interrupted }
             })
         };
-        let (actions, changed) = self.runs.lock().step(now_millis(), view);
+        let (actions, changed) = self.runs.lock().step_gated(now_millis(), view, |creator, finished| self.run_gate(creator, finished));
         self.runs_changed(&changed);
         for a in actions {
+            // Said to the session that made the run, once; quick enough for the ticker.
+            if let Action::Waiting { run, task, reason } = &a {
+                self.announce_waiting(run, task, reason);
+                continue;
+            }
             let me = self.clone();
             // Worktrees and process starts take a moment: never on the ticker itself.
             tokio::task::spawn_blocking(move || match a {
                 Action::Start { run, task } => me.start_task(&run, &task),
                 Action::Capture { run, task, session } => me.capture_task(&run, &task, &session),
                 Action::Release { session } => me.release_session(&session),
+                Action::Waiting { .. } => {}
             });
         }
     }
@@ -777,6 +803,29 @@ impl Daemon {
     /// Creates the task's worktree (when asked) and starts its agent with the task prompt.
     fn start_task(&self, run_id: &str, task_id: &str) {
         let Some((run, task)) = self.runs.lock().get(run_id).and_then(|r| r.tasks.iter().find(|t| t.id == task_id).cloned().map(|t| (r.clone(), t))) else { return };
+        // A run a program in a session made: its tasks are that session's sub-sessions, within the limits. The place held
+        // here counts until the session exists.
+        let (lineage, task_args, _slot) = match run.creator.as_deref() {
+            None => (None, task.args.clone(), None),
+            Some(creator) => match self.task_lineage(creator, &task) {
+                Ok((depth, args, slot)) => (Some((creator.to_string(), depth)), args, Some(slot)),
+                Err(gate) => {
+                    if let Ok((t, _)) = self.runs.lock().task_mut(run_id, task_id) {
+                        match gate {
+                            // Ready again: the engine asks at the next step.
+                            runs::Gate::Open | runs::Gate::Wait(_) => t.status = TaskStatus::Pending,
+                            runs::Gate::Fail(why) => {
+                                t.status = TaskStatus::Failed;
+                                t.error = Some(why);
+                                t.finished_at = now_millis();
+                            }
+                        }
+                    }
+                    self.runs_changed(&[run_id.to_string()]);
+                    return;
+                }
+            },
+        };
         let prepared = if task.worktree { create_task_worktree(&run, &task).map(Some) } else { Ok(None) };
         // The session id is the task's before its process starts: an agent that reports at once
         // must find its task.
@@ -791,17 +840,20 @@ impl Daemon {
                 None => wt.as_ref().map_or_else(|| run.cwd.clone(), |w| w.path.clone()),
             };
             let prompt = runs::task_prompt(&run, &task, &self.exe);
-            let info = self.create(json!({
-                "id": sid,
-                "kind": task.kind,
-                "cwd": cwd,
-                "project_id": run.project_id,
-                "name": format!("{} · {}", run.name, task.title),
-                "args": task.args,
-                "env": task.env,
-                "remote": task.host.as_ref().map(runs::TaskHost::remote),
-                "prompt": prompt,
-            }))?;
+            let info = self.create_inner(
+                json!({
+                    "id": sid,
+                    "kind": task.kind,
+                    "cwd": cwd,
+                    "project_id": run.project_id,
+                    "name": format!("{} · {}", run.name, task.title),
+                    "args": task_args,
+                    "env": task.env,
+                    "remote": task.host.as_ref().map(runs::TaskHost::remote),
+                    "prompt": prompt,
+                }),
+                lineage,
+            )?;
             Ok((info.spec.id, cwd, wt))
         });
         {
@@ -860,6 +912,7 @@ impl Daemon {
 
     /// Keeps the end of a finished task's output when its agent reported no summary.
     fn capture_task(&self, run_id: &str, task_id: &str, session: &str) {
+        self.record_task_outcome(run_id, task_id, session);
         let tail = match self.by_id(session) {
             Some(Entry::Term(s)) => s.text_tail(40),
             _ => return,
@@ -877,6 +930,15 @@ impl Daemon {
         self.runs_changed(&[run_id.to_string()]);
     }
 
+    /// Adds a new run to the list, saves it and tells the clients.
+    fn insert_run(&self, run: runs::Run) -> Value {
+        let out = json!(run);
+        let rid = run.id.clone();
+        self.runs.lock().list.insert(0, run);
+        self.runs_changed(&[rid]);
+        out
+    }
+
     fn run_rpc(&self, method: &str, params: &Value) -> Result<Value> {
         let id = || params.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
         let task = || params.get("task").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -887,11 +949,7 @@ impl Daemon {
             "run.create" => {
                 let new: NewRun = serde_json::from_value(params.clone()).context("run.create params")?;
                 let run = runs::build_run(new, uuid::Uuid::new_v4().to_string(), now_millis())?;
-                let out = json!(run);
-                let rid = run.id.clone();
-                self.runs.lock().list.insert(0, run);
-                self.runs_changed(&[rid]);
-                return Ok(out);
+                return Ok(self.insert_run(run));
             }
             "run.approve" => {
                 let mut runs = self.runs.lock();
@@ -1146,7 +1204,7 @@ impl Daemon {
         for saved in self.store.load_sessions() {
             let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
             if saved.chat {
-                let chat = ChatSession::new(handle, saved.spec.clone());
+                let chat = ChatSession::new(handle, SessionSpec { switching: false, ..saved.spec.clone() });
                 if saved.alive {
                     chat.mark_interrupted(saved.last_activity);
                 }
@@ -1154,7 +1212,7 @@ impl Daemon {
                 self.sessions.write().insert(handle, Entry::Chat(chat));
                 continue;
             }
-            let session = Session::new(handle, saved.spec.clone(), saved.cols, saved.rows);
+            let session = Session::new(handle, SessionSpec { switching: false, ..saved.spec.clone() }, saved.cols, saved.rows);
             if let Some(snapshot) = self.store.load_snapshot(&saved.spec.id) {
                 session.ingest(&snapshot);
                 if saved.alive {
@@ -1172,8 +1230,18 @@ impl Daemon {
     }
 
     pub fn create(&self, params: Value) -> Result<SessionInfo> {
+        self.create_inner(params, None)
+    }
+
+    /// `create`, for a session a program opened with `sub.spawn`: `lineage` is its parent's id and its own depth.
+    /// Only the daemon sets it; `session.create` has no such parameter.
+    fn create_inner(&self, params: Value, lineage: Option<(String, u8)>) -> Result<SessionInfo> {
         let p: CreateParams = serde_json::from_value(params).context("session.create params")?;
         let model = model_from_args(&p.args);
+        // What the replaced session was among the sub-sessions: the daemon's own lineage for a spawn wins, and an id it does not
+        // know carries nothing.
+        let replaced = p.lineage_from.as_deref().filter(|_| lineage.is_none()).and_then(|id| self.by_id(id)).map(|e| e.spec());
+        let place = place_among_subs(lineage, replaced.as_ref());
         let mut spec = SessionSpec {
             id: p.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             project_id: p.project_id,
@@ -1187,16 +1255,41 @@ impl Daemon {
             created_at: now_millis(),
             remote: p.remote,
             restricted: p.restricted,
+            parent: place.0,
+            depth: place.1,
+            report: place.2,
+            switching: false,
         };
         if self.by_id(&spec.id).is_some() {
             bail!("session id {} already exists", spec.id);
+        }
+        // A closed parent's id stays on its children as history: a new session must not take it over (it would
+        // be taken for that parent by `sub.close` and receive its children's reports).
+        if self.sessions.read().values().any(|e| e.spec().parent.as_deref() == Some(spec.id.as_str())) {
+            bail!("session id {} belongs to the history of a sub-session", spec.id);
         }
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let entry = if let Some(argv) = p.chat_argv {
             anyhow::ensure!(!argv.is_empty(), "chat_argv is empty");
             let argv = if spec.kind == "claude" && spec.remote.is_none() { agents::claude_chat_argv(argv, &spec.env) } else { argv };
+            // A chat switched to bypass is started again with the flag in this command line, not in `args`.
+            let yolo = agents::preset_for(&spec.kind).map_or(&[][..], |p| p.yolo);
+            let (skips, bypass) = crate::subs::launch_permissions(&spec.kind, yolo, &argv);
+            // Kelpie's sub-session tools, while the policy allows them. The permission check above looks at the command line as the
+            // app sent it: what is added here is not a permission.
+            let tools = self.sub_tools_on() && spec.remote.is_none();
+            let argv = if tools { agents::chat_with_sub_tools(argv, &self.exe, &self.data_dir)? } else { argv };
+            let env = if tools { vec![("KELPIE_CLI".to_string(), self.exe.to_string_lossy().into_owned())] } else { Vec::new() };
+            let spec_id = spec.id.clone();
             let chat = ChatSession::new(handle, spec);
-            chat.spawn(&agents::platform_argv(argv)?)?;
+            chat.set_launch_permissions(skips, bypass);
+            // An ACP agent is told about Kelpie's tools in the conversation it opens: the daemon adds the server to that call.
+            if tools {
+                let token = crate::auth::session_token(&spec_id);
+                let key = kelpie_proto::endpoint_key(&kelpie_proto::endpoint());
+                chat.set_acp_mcp(Some(agents::acp_mcp_server(&self.exe, &spec_id, &token, &key, &agents::daemon_location_env())));
+            }
+            chat.spawn(&agents::platform_argv(argv)?, &env)?;
             Entry::Chat(chat)
         } else {
             let fresh = Self::preset_conversation(&mut spec);
@@ -1205,18 +1298,68 @@ impl Daemon {
                 Some(_) => Self::resume_for(&spec),
                 None => Resume::None,
             };
-            let launch = Self::launch_for(&spec, resume, p.prompt.as_deref(), &self.exe, &self.data_dir)?;
+            let launch = Self::launch_for(&spec, resume, p.prompt.as_deref(), &self.exe, &self.data_dir, self.sub_tools_on())?;
             let session = Session::new(handle, spec, p.cols, p.rows);
             session.spawn(&launch)?;
             Entry::Term(session)
         };
         let info = entry.info();
         self.sessions.write().insert(handle, entry);
+        if let Some(old) = &replaced {
+            self.hand_over_lineage(&old.id, &info);
+        }
         self.meta_dirty.store(true, Ordering::Relaxed);
         self.notifier.seed(&info);
         self.broadcast("session.updated", serde_json::to_value(&info)?);
         self.checkpoint_baseline(&info.spec, "spawn");
         Ok(info)
+    }
+
+    /// Session `new` replaces `old` (the same conversation, in the other view): its sub-sessions now belong to `new`, its mail and
+    /// its "allow for this session" follow, and `old` is no longer anybody's sub-session (its own end must not be reported to its
+    /// parent, nor count as a sub-session's end). The next tick tells the apps about the children's new parent.
+    fn hand_over_lineage(&self, old: &str, new_info: &SessionInfo) {
+        let new = new_info.spec.id.as_str();
+        let entries: Vec<Entry> = self.sessions.read().values().cloned().collect();
+        let mut was: Option<(u32, Option<String>)> = None;
+        for entry in entries {
+            let (lock, handle) = match &entry {
+                Entry::Term(s) => (&s.spec, s.handle),
+                Entry::Chat(c) => (&c.spec, c.handle),
+            };
+            let mut spec = lock.lock();
+            if spec.id == old {
+                was = Some((handle, spec.parent.take()));
+                spec.depth = 0;
+                spec.report = None;
+                spec.switching = false;
+            } else if spec.parent.as_deref() == Some(old) && spec.id != new {
+                spec.parent = Some(new.to_string());
+            }
+        }
+        // Runs the old session made go on with the new one as their creator (their gate looks the creator up).
+        let moved: Vec<String> = {
+            let mut runs = self.runs.lock();
+            runs.list.iter_mut().filter(|r| r.creator.as_deref() == Some(old)).map(|r| {
+                r.creator = Some(new.to_string());
+                r.id.clone()
+            }).collect()
+        };
+        self.runs_changed(&moved);
+        self.subs.transfer(old, new);
+        self.subs.end_handover(old);
+        // The parent is told once, and in words: its handle for this child is the old one, which is closed now.
+        if let Some((old_handle, Some(parent))) = was {
+            if let Some(parent) = self.by_id(&parent) {
+                let view = if new_info.chat { "chat view" } else { "terminal" };
+                let text = format!("continues in the {view} as #{} (the same conversation); #{old_handle} is closed. Use #{} or its name from now on.", new_info.handle, new_info.handle);
+                let mail = crate::subs::NewMail { from_id: new.to_string(), from_label: self.session_tag(new_info), kind: crate::subs::MailKind::Report, status: Some("continues".into()), text };
+                if let Err(e) = self.subs.mail.lock().add(&parent.spec().id, mail, Instant::now(), now_millis(), false) {
+                    tracing::debug!("hand-over note not queued: {e}");
+                }
+            }
+        }
+        self.meta_dirty.store(true, Ordering::Relaxed);
     }
 
     pub fn restart(&self, handle: u32) -> Result<SessionInfo> {
@@ -1232,7 +1375,7 @@ impl Daemon {
             }
             spec.clone()
         };
-        let launch = Self::launch_for(&spec, Self::resume_for(&spec), None, &self.exe, &self.data_dir)?;
+        let launch = Self::launch_for(&spec, Self::resume_for(&spec), None, &self.exe, &self.data_dir, self.sub_tools_on())?;
         self.drop_timer(&spec.id, "restarted");
         // The program starts below the old output, which stays readable above it. A resumed agent
         // redraws only the latest part of its conversation (Claude Code shows about a screenful),
@@ -1250,6 +1393,11 @@ impl Daemon {
     pub fn close(&self, handle: u32) -> Result<()> {
         let entry = self.sessions.write().remove(&handle).ok_or_else(|| anyhow!("no session {handle}"))?;
         self.notifier.forget(handle);
+        self.record_sub_close(&entry);
+        // Its mail, grants and the requests it was waiting on go; its children stay (they keep `parent` as history).
+        for request in self.subs.forget(&entry.spec().id) {
+            self.broadcast("sub.request_done", json!({"id": request, "decision": "cancelled"}));
+        }
         self.drop_timer(&entry.spec().id, "exited");
         entry.kill();
         self.store.remove_snapshot(&entry.spec().id);
@@ -1277,6 +1425,11 @@ impl Daemon {
             }
             if let Some(id) = params.get("agent_session_id") {
                 spec.agent_session_id = id.as_str().map(str::to_string);
+            }
+            // The app is about to stop this session to continue its conversation in the other view (see `SessionSpec::switching`).
+            if let Some(on) = params.get("handover").and_then(Value::as_bool) {
+                spec.switching = on;
+                self.subs.set_handover(&spec.id, on, Instant::now());
             }
             if let Some(args) = params.get("args").and_then(Value::as_array) {
                 spec.args = args.iter().filter_map(|a| a.as_str().map(str::to_string)).collect();
@@ -1350,6 +1503,10 @@ impl Daemon {
             session.set_hook_status(status, hook_event_failed(event));
             if hook_event_limited(event, &payload) {
                 session.set_limited();
+            }
+            // The one signal that a sub-session's turn really ended.
+            if matches!((agent, event), ("claude", "Stop" | "StopFailure") | ("codex", "agent-turn-complete")) {
+                self.sub_turn_ended(&Entry::Term(session.clone()), Instant::now());
             }
         }
         // The app reads the conversation's usage when a turn moves on (it debounces).
@@ -1568,6 +1725,7 @@ impl Daemon {
         let mut last_status: HashMap<u32, Status> = HashMap::new();
         let mut last_boundary: HashMap<u32, Instant> = HashMap::new();
         let mut last_run_tick = Instant::now();
+        let mut last_mail_tick = Instant::now();
         loop {
             interval.tick().await;
             let now = Instant::now();
@@ -1575,6 +1733,13 @@ impl Daemon {
                 last_run_tick = now;
                 self.run_tick();
                 self.mobile.lock_sweep();
+            }
+            // Mail between sessions: one look a second, and nothing but a lock when nobody has any.
+            if now.duration_since(last_mail_tick) >= Duration::from_secs(1) {
+                last_mail_tick = now;
+                self.deliver_mail();
+                self.sub_quiet_check(now);
+                self.flush_handovers();
             }
             for item in self.scheduled.take_due(now_millis()) {
                 self.fire_scheduled(item);
@@ -1670,6 +1835,9 @@ impl Daemon {
                     if prev == Some(Status::Working) && matches!(info.status, Status::Idle | Status::Waiting) && !info.chat {
                         self.broadcast("session.turn", turn_event(&info.spec.id, "turn_end", &Value::Null, info.spec.agent_session_id.as_deref()));
                     }
+                    if info.spec.parent.is_some() {
+                        self.sub_status_changed(&entry, &info, now);
+                    }
                 }
             }
             if now.duration_since(last_persist) > Duration::from_secs(30) || self.meta_dirty.load(Ordering::Relaxed) {
@@ -1709,14 +1877,21 @@ impl Daemon {
                 // Looks at running processes made so far: only the app's requests make one.
                 "process_scans": self.procs.scans(),
             }),
-            "daemon.policy" => json!({"agents_control_others": self.agents_control_others()}),
+            "daemon.policy" => self.policy_json(),
             "daemon.set_policy" => {
+                // The sub-session settings are checked before anything is applied: a bad value changes nothing.
+                let sub = self.requested_sub_policy(&params)?;
                 if let Some(on) = params.get("agents_control_others").and_then(Value::as_bool) {
                     self.agents_control_others.store(on, Ordering::Relaxed);
-                    save_policy(&self.data_dir, on);
                 }
-                json!({"agents_control_others": self.agents_control_others()})
+                if let Some(sub) = sub {
+                    *self.subs.policy.write() = sub;
+                }
+                self.persist_policy();
+                self.policy_json()
             }
+            "sub.spawn" => return self.sub_spawn(tx, id, &params),
+            m if m.starts_with("sub.") => self.sub_rpc(m, &params)?,
             "daemon.set_theme" => {
                 let light = params.get("theme").and_then(Value::as_str) == Some("light");
                 match params.get("palette").filter(|p| p.is_object()) {
@@ -1819,6 +1994,7 @@ impl Daemon {
             "session.set_env_restart" => serde_json::to_value(self.set_env_restart(handle_of(&params)?, params.get("env").unwrap_or(&Value::Null))?)?,
             "agent.presets" => {
                 let installed = agents::installed_presets();
+                let outcomes = self.subs.stats.by_agent();
                 json!(agents::all_presets()
                     .into_iter()
                     .map(|p| json!({
@@ -1829,6 +2005,8 @@ impl Daemon {
                         "resume_latest": !p.resume_latest.is_empty(),
                         "acp": p.acp,
                         "installed": installed.contains(&p.id),
+                        // How this agent fared as a sub-session (null before any finished): routing hints.
+                        "outcomes": outcomes.iter().find(|s| s.agent == p.id),
                     }))
                     .collect::<Vec<_>>())
             }
@@ -2117,7 +2295,19 @@ impl Daemon {
             }
             m if m.starts_with("automation.") => self.automation_rpc(client, m, params)?,
             m if m.starts_with("run.") => {
-                let out = self.run_rpc(m, &params)?;
+                // A run a program in a session creates is that session's, and its tasks are its sub-sessions.
+                let session_caller = match self.client_roles.lock().get(&client) {
+                    Some(crate::auth::Role::Session(caller)) if m == "run.create" => Some(caller.clone()),
+                    _ => None,
+                };
+                // The user taking over a retry of a run whose session is gone: the run is theirs from then on.
+                if m == "run.retry" && !matches!(self.client_roles.lock().get(&client), Some(crate::auth::Role::Session(_))) {
+                    self.adopt_orphaned_run(&params);
+                }
+                let out = match session_caller {
+                    Some(caller) => self.run_create_from_session(&caller, &params)?,
+                    None => self.run_rpc(m, &params)?,
+                };
                 // What lets a task start (a new run, an approval, a retry, a task that ended) does not wait for the next tick.
                 if matches!(m, "run.create" | "run.approve" | "run.retry" | "run.task_done" | "run.task_skip") && tokio::runtime::Handle::try_current().is_ok() {
                     self.run_tick();
@@ -2157,7 +2347,18 @@ impl Daemon {
                 json!(true)
             }
             "session.list" => serde_json::to_value(self.list())?,
-            "session.create" => serde_json::to_value(self.create(params)?)?,
+            "session.create" => {
+                // A program in a session opens a sub-session of it, through the same gates as `sub.spawn`. The user's
+                // connections (app, scripts with the user token) create as ever.
+                let caller = match self.client_roles.lock().get(&client) {
+                    Some(crate::auth::Role::Session(caller)) => Some(caller.clone()),
+                    _ => None,
+                };
+                if let Some(caller) = caller {
+                    return self.session_create_from_session(tx, id, &caller, &params);
+                }
+                serde_json::to_value(self.create(params)?)?
+            }
             "session.attach" => {
                 let handle = handle_of(&params)?;
                 match self.entry(handle)? {
@@ -2265,18 +2466,42 @@ impl Daemon {
 
 const POLICY_FILE: &str = "policy.json";
 
-/// Scripting other sessions is allowed unless the user turned it off.
-fn load_policy(data_dir: &std::path::Path) -> bool {
-    std::fs::read(data_dir.join(POLICY_FILE))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|v| v.get("agents_control_others").and_then(Value::as_bool))
-        .unwrap_or(true)
+/// What `policy.json` holds. A file from before sub-sessions has only the first key.
+struct Policy {
+    /// Programs in a session may script other sessions (on unless the user turned it off).
+    agents_control_others: bool,
+    sub: crate::subs::SubPolicy,
 }
 
-fn save_policy(data_dir: &std::path::Path, agents_control_others: bool) {
-    if let Err(e) = std::fs::write(data_dir.join(POLICY_FILE), json!({"agents_control_others": agents_control_others}).to_string()) {
-        tracing::warn!("save {POLICY_FILE}: {e}");
+fn load_policy(data_dir: &std::path::Path) -> Policy {
+    let file = std::fs::read(data_dir.join(POLICY_FILE)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let get = |key: &str| file.as_ref().and_then(|v| v.get(key));
+    Policy {
+        agents_control_others: get("agents_control_others").and_then(Value::as_bool).unwrap_or(true),
+        sub: crate::subs::SubPolicy {
+            mode: get("sub_sessions").and_then(Value::as_str).and_then(crate::subs::Mode::parse).unwrap_or_default(),
+            max: get("sub_max").and_then(Value::as_u64).map_or(0, |n| n.min(u64::from(crate::subs::MAX_SUB_CAP)) as u32),
+        },
+    }
+}
+
+/// Writes our keys into the file and leaves any other it holds alone (a newer Kelpie's, for one).
+fn save_policy(data_dir: &std::path::Path, policy: &Policy) {
+    let path = data_dir.join(POLICY_FILE);
+    let existing = std::fs::read(&path).ok();
+    let parsed = existing.as_deref().and_then(|b| serde_json::from_slice::<Value>(b).ok()).filter(Value::is_object);
+    // A file that is there but cannot be read as settings is kept beside the new one, not written over.
+    if let (Some(bytes), None) = (&existing, &parsed) {
+        if let Err(e) = std::fs::write(data_dir.join(format!("{POLICY_FILE}.unreadable")), bytes) {
+            tracing::warn!("keep the unreadable {POLICY_FILE}: {e}");
+        }
+    }
+    let mut file = parsed.unwrap_or_else(|| json!({}));
+    file["agents_control_others"] = json!(policy.agents_control_others);
+    file["sub_sessions"] = json!(policy.sub.mode.as_str());
+    file["sub_max"] = json!(policy.sub.max);
+    if let Err(e) = write_atomic(&path, file.to_string().as_bytes()) {
+        tracing::warn!("save {POLICY_FILE}: {e:#}");
     }
 }
 
@@ -2295,27 +2520,48 @@ struct TaskWorktree {
 /// ignored files the run was approved to bring (`copy:` / `link:` of `.kelpie.yaml`). Returns the
 /// folder, the branch, the branch it was forked from and what was brought.
 fn create_task_worktree(run: &runs::Run, task: &runs::Task) -> Result<TaskWorktree> {
-    let git = |args: &[&str]| -> Result<String> {
-        let mut cmd = std::process::Command::new("git");
-        cmd.args(args).stdin(std::process::Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        let out = cmd.output().context("run git")?;
-        if !out.status.success() {
-            bail!("git {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
+    let short: String = run.id.chars().take(6).collect();
+    let leaf = format!("{}-{short}-{}", runs::slug(&run.name), task.id);
+    create_worktree(&run.cwd, &leaf, run.materialize.as_ref(), "a task worktree needs the run folder")
+}
+
+/// Runs git with these arguments; its trimmed output, or git's own complaint.
+fn run_git(args: &[&str]) -> Result<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args).stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().context("run git")?;
+    if !out.status.success() {
+        bail!("git {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Takes back a worktree that was made for a session that then failed to start: nothing was committed in it yet.
+/// Returns what to tell the caller when it could not (the folder and branch are then still there).
+fn discard_worktree(cwd: &str, w: &TaskWorktree) -> Option<String> {
+    // Git must not see another worktree add half done (see `create_worktree`).
+    let _lock = run_git(&["-C", cwd, "rev-parse", "--show-toplevel"]).ok().and_then(|top| kelpie_proto::worktree_lock::acquire(std::path::Path::new(&top)).ok());
+    let _ = run_git(&["-C", cwd, "worktree", "remove", "--force", &w.path]);
+    let removed = run_git(&["-C", cwd, "branch", "-D", &w.branch]);
+    (removed.is_err() || std::path::Path::new(&w.path).exists()).then(|| format!("the worktree {} (branch {}) was left behind", w.path, w.branch))
+}
+
+/// A new git worktree of the repository `cwd` is in: branch `kelpie/<leaf>` from its HEAD, in
+/// `<repo>-worktrees/<leaf>`. `what` names the caller and the folder in the errors ("... needs the folder").
+fn create_worktree(cwd: &str, leaf: &str, materialize: Option<&runs::Materialize>, what: &str) -> Result<TaskWorktree> {
+    let git = run_git;
     // The repository's top folder and the branch it is on, from one git run.
-    let head = git(&["-C", &run.cwd, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"]).map_err(|_| {
+    let head = git(&["-C", cwd, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"]).map_err(|_| {
         // Which of the two it is: not a repository, or one without a commit to fork from.
-        if git(&["-C", &run.cwd, "rev-parse", "--show-toplevel"]).is_ok() {
-            anyhow!("a task worktree needs the run folder's repository to have a commit")
+        if git(&["-C", cwd, "rev-parse", "--show-toplevel"]).is_ok() {
+            anyhow!("{what}'s repository to have a commit")
         } else {
-            anyhow!("a task worktree needs the run folder to be a git repository")
+            anyhow!("{what} to be a git repository")
         }
     })?;
     let mut head = head.lines();
@@ -2323,17 +2569,15 @@ fn create_task_worktree(run: &runs::Run, task: &runs::Task) -> Result<TaskWorktr
     // `HEAD` itself: a detached head, no branch to merge back into.
     let base = head.next().map(str::trim).filter(|b| !b.is_empty() && *b != "HEAD").map(str::to_string);
     let name = top.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
-    let short: String = run.id.chars().take(6).collect();
-    let leaf = format!("{}-{short}-{}", runs::slug(&run.name), task.id);
     let branch = format!("kelpie/{leaf}");
-    let path = top.parent().unwrap_or(&top).join(format!("{name}-worktrees")).join(&leaf);
+    let path = top.parent().unwrap_or(&top).join(format!("{name}-worktrees")).join(leaf);
     let path_s = path.to_string_lossy().into_owned();
     // Git can observe another add's incomplete worktree metadata while checking branches.
     // Coordinate with other daemon runs and the desktop; copies and links stay parallel.
     let worktree_lock = kelpie_proto::worktree_lock::acquire(&top)?;
     git(&["-C", &top.to_string_lossy(), "worktree", "add", "-b", &branch, &path_s, "HEAD"])?;
     drop(worktree_lock);
-    let brought = run.materialize.as_ref().map(|m| kelpie_proto::materialize::materialize(top.clone(), path.clone(), m.copy.clone(), m.link.clone()));
+    let brought = materialize.map(|m| kelpie_proto::materialize::materialize(top.clone(), path.clone(), m.copy.clone(), m.link.clone()));
     Ok(TaskWorktree { path: path_s, branch, base, brought })
 }
 

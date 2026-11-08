@@ -12,6 +12,8 @@
 //!   kelpied terminal list|read|send|wait …   drive sessions from a script or another agent
 //!   kelpied worktree get|set …               this folder's comment / board status
 //!   kelpied review add|list …                review notes on this worktree's diff
+//!   kelpied sub agents|spawn|list|send|read|wait|report|inbox|close …   sub-sessions (`kelpied sub --help`)
+//!   kelpied mcp                              the same as an MCP server on stdio (Kelpie injects it into Claude and Codex)
 
 mod agents;
 mod askpass;
@@ -27,6 +29,7 @@ mod client;
 mod daemon;
 mod echo_bench;
 mod load;
+mod mcp;
 mod meta;
 mod mobile;
 mod notes;
@@ -45,6 +48,9 @@ mod screen;
 mod server;
 mod session;
 mod status;
+mod sub_guide;
+mod sub_stats;
+mod subs;
 mod takeover;
 mod user_presence;
 mod vt;
@@ -106,6 +112,8 @@ fn main() -> Result<()> {
         Some("worktree") => runtime()?.block_on(cli::worktree(&args[1..])),
         Some("run") => runtime()?.block_on(cli::run(&args[1..])),
         Some("review") => runtime()?.block_on(cli::review(&args[1..])),
+        Some("sub") => runtime()?.block_on(cli::sub(&args[1..])),
+        Some("mcp") => mcp::serve(),
         // ssh runs its SSH_ASKPASS program with the prompt as the only argument.
         Some(prompt) if std::env::var_os("KELPIE_ASKPASS").is_some() => std::process::exit(askpass::run(prompt)),
         Some(other) => anyhow::bail!("unknown command `{other}`"),

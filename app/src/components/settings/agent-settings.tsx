@@ -1,11 +1,14 @@
 // Agents: permissions, which agent CLIs launchers show, per-agent arguments / permission mode /
 // environment, the agent for AI actions, hibernation and keep-awake.
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal } from "solid-js";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { store } from "../../lib/store";
+import { subPolicyGet, subPolicySet } from "../../lib/ipc";
+import { SUB_MAX_LIMIT, SUB_SESSIONS_API, parseSubMax, setSubPolicy, subPolicy, toSubPolicy } from "../../lib/sub-sessions";
 import { msg, t } from "../../lib/i18n";
 import { LoadBar } from "../load-bar";
 import { CORE_AGENTS, agentPresets, kindInfo, loadAgentPresets } from "../../lib/agents";
-import { KindGlyph } from "../icons";
+import { Icon, KindGlyph } from "../icons";
 import { Choice, SettingRow, Toggle } from "./setting-row";
 import type { AgentProfile } from "../../lib/types";
 import { confirmDialog } from "../../lib/confirm-dialog";
@@ -95,6 +98,69 @@ function AgentList() {
   );
 }
 
+/** The daemon's sub-session policy (it keeps it in policy.json, so it holds with the window closed). Every change is sent, then
+ *  shown as the daemon answers. On a daemon below the API gate there is nothing to set: the note offers the restart. */
+function SubSessionSettings() {
+  const supported = () => store.daemonApi() >= SUB_SESSIONS_API;
+  const [busy, setBusy] = createSignal(false);
+  createEffect(() => {
+    if (store.connected() && supported()) void subPolicyGet().then((r) => setSubPolicy(toSubPolicy(r)), () => {});
+  });
+  const send = async (patch: { sub_sessions?: "off" | "ask" | "allow"; sub_max?: number }) => {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      setSubPolicy(toSubPolicy(await subPolicySet(patch)));
+    } catch (e) {
+      store.notify(String(e).replace(/^Error: /, ""), undefined, 8000);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const mode = async (v: "off" | "ask" | "allow") => {
+    if (v === "allow" && !(await confirmDialog(t("Let agents open sub-sessions without asking you? Each one is another agent that uses tokens and works in your folders, and one opened by an agent that skips permission checks does too.")))) return;
+    await send({ sub_sessions: v });
+  };
+  const fixed = () => (subPolicy()?.sub_max ?? 0) > 0;
+  return (
+    <>
+      <SettingRow id="sub-sessions" wide>
+        <Show when={supported()} fallback={<Show when={store.connected() && store.daemonApi() > 0} fallback={<span class="muted">{t("Connect to the session daemon to change this.")}</span>}><DaemonTooOld /></Show>}>
+          <div class="inline-fields" style={{ "align-items": "center" }}>
+            <Choice value={subPolicy()?.sub_sessions ?? "ask"} options={[["off", t("Off")], ["ask", t("Ask")], ["allow", t("Allow")]]} onChange={(v) => void mode(v)} />
+            <button class="link-btn" onClick={() => void openUrl("https://github.com/baopeak/kelpie/blob/master/docs/user-guide.md#sub-sessions")}>{t("How sub-sessions work")} <Icon name="external" size={11} /></button>
+          </div>
+        </Show>
+      </SettingRow>
+      <Show when={supported()}>
+        <SettingRow id="sub-sessions-max">
+          <div class="inline-fields" style={{ "align-items": "center" }}>
+            <Choice value={fixed() ? "set" : "auto"} options={[["auto", t("Auto")], ["set", t("Set")]]} onChange={(v) => void send({ sub_max: v === "auto" ? 0 : subPolicy()?.sub_max || subPolicy()?.sub_auto_max || 2 })} />
+            <Show when={fixed()} fallback={<span class="muted-inline">{t("{n} on this computer", { n: subPolicy()?.sub_auto_max ?? "…" })}</span>}>
+              <input class="text-input" type="number" min="1" max={SUB_MAX_LIMIT} style={{ width: "80px" }} value={subPolicy()?.sub_max ?? 1}
+                onChange={(e) => {
+                  const n = parseSubMax(e.currentTarget.value);
+                  if (n === null) e.currentTarget.value = String(subPolicy()?.sub_max ?? 1);
+                  else void send({ sub_max: n });
+                }} />
+            </Show>
+          </div>
+        </SettingRow>
+      </Show>
+    </>
+  );
+}
+
+/** A daemon that predates sub-sessions: the controls would do nothing, so they are not shown. */
+function DaemonTooOld() {
+  return (
+    <div class="inline-fields" style={{ "align-items": "center" }}>
+      <span class="muted">{t("The running session daemon is older and has no sub-sessions. Restart it (it keeps your sessions' conversations) to use them.")}</span>
+      <Show when={store.connected()}><button class="btn" onClick={() => void store.switchDaemon()}>{t("Restart the session daemon")}</button></Show>
+    </div>
+  );
+}
+
 export function AgentSettings() {
   return (
     <>
@@ -114,6 +180,7 @@ export function AgentSettings() {
       <SettingRow id="agent-list" wide>
         <AgentList />
       </SettingRow>
+      <SubSessionSettings />
       <SettingRow id="ai-agent">
         <Choice value={s().aiAgent ?? "claude"} options={[["claude", "Claude Code"], ["codex", "Codex"]]} onChange={(v) => store.setSettings({ aiAgent: v })} />
       </SettingRow>
