@@ -44,6 +44,14 @@ resume. The sessions stay on the previous session daemon until they have all sto
 the new one takes over on its own. A notice offers **Switch now** if you want the new daemon's
 features earlier (running sessions stop for a moment; agents that can resume continue).
 
+**Closing Kelpie** stops its session daemon too, and with it every session, automation and file transfer. When
+something still runs (sessions, run tasks, file transfers) Kelpie names it first and asks: **Close and stop** or
+**Cancel**, with *Don't ask again*; with nothing running it just closes. Kelpie does not wait for the work: next time
+sessions come back interrupted and agents resume their conversation (Settings → Agents → *Resume after a restart*),
+and transfers show Interrupted, with Resume. To keep everything going with the window closed (automations, scheduled
+runs, phone and Telegram access, file copies), set Settings → Session Daemon → *When Kelpie closes* to **Keep it
+running in the background**. Updates never stop the daemon, whichever you choose.
+
 ## Everyday use
 
 1. **Add a project**: sidebar `+` (or search → *Add Project Folder…*). Any folder works; for a
@@ -516,7 +524,7 @@ list keeps everything either way.
 #### On your phone, with the window closed
 
 Settings → Notifications → *Off this computer* sends the same events from the session daemon,
-which keeps running when you close the window. Nothing is sent until you switch a channel on or a phone
+which keeps running with the window closed when Settings → Session Daemon → *When Kelpie closes* is *Keep it running in the background*. Nothing is sent until you switch a channel on or a phone
 turns its alerts on. A computer that is asleep sends nothing; *Keep computer awake* (Settings → Agents)
 keeps it up while agents work.
 
@@ -1392,8 +1400,9 @@ a setting.
   with the window closed (events, turn length, away-only, screen text), notes about shortcuts kept
   from the terminal, first-run tips.
 - **Usage & Resources**: usage and memory meters, the per-session cost cap, the Usage & cost page.
-- **Session Daemon**: status, data folder and log, *Export and import settings*, *Stop daemon &
-  all sessions*.
+- **Session Daemon**: status, *When Kelpie closes* (stop the session daemon and its sessions, the default, or
+  keep it running in the background; *Ask first when something still runs* undoes *Don't ask again*), data folder
+  and log, *Export and import settings*, *Stop daemon & all sessions*.
 
 Settings and layouts live in `app-state.json` in the data folder; when its format changes the
 old file is first copied to `app-state.v<N>.bak.json`.

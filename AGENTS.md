@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Kelpie is a Tauri 2 desktop workbench for coding-agent CLIs and shells across projects. SolidJS renders the interface; a separate Rust daemon, `kelpied`, keeps sessions running when the window closes. Agents are external programs, not bundled model implementations.
+Kelpie is a Tauri 2 desktop workbench for coding-agent CLIs and shells across projects. SolidJS renders the interface; a separate Rust daemon, `kelpied`, runs the sessions apart from the window: closing Kelpie stops it (sessions resume later) unless the user keeps it running, and updates never stop it. Agents are external programs, not bundled model implementations.
 
 ## Architecture & Data Flow
 
