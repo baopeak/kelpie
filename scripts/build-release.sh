@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds the Kelpie installer for the current platform:
-#   Windows → NSIS installer (kelpied.exe, kelpie-stt.exe + sideloaded ConPTY next to Kelpie.exe)
-#   macOS   → Kelpie.app + .dmg (kelpied, kelpie-stt inside Contents/MacOS)
-#   Linux   → AppImage + .deb with `--bundles appimage,deb` (kelpied, kelpie-stt next to the app in usr/bin)
+#   Windows → NSIS installer (kelpied.exe, kelpie-stt.exe, kelpie-screen.exe + sideloaded ConPTY next to Kelpie.exe)
+#   macOS   → Kelpie.app + .dmg (kelpied, kelpie-stt, kelpie-screen inside Contents/MacOS)
+#   Linux   → AppImage + .deb with `--bundles appimage,deb` (kelpied, kelpie-stt, kelpie-screen next to the app in usr/bin)
 # Usage: scripts/build-release.sh [extra tauri build args]
 # Bumps the patch version first (0.1.0 → 0.1.1), so each installer has its own number.
 set -euo pipefail
@@ -65,23 +65,24 @@ bundle_dir="$out_dir/release/bundle"
 if [ "${KELPIE_TARGET:-}" = "universal-apple-darwin" ]; then
   # One macOS build for Apple Silicon and Intel: each sidecar for both, joined with lipo.
   for t in aarch64-apple-darwin x86_64-apple-darwin; do
-    cargo build --release -p kelpied -p kelpie-stt --target "$t"
+    cargo build --release -p kelpied -p kelpie-stt -p kelpie-screen --target "$t"
     # Tauri's per-architecture Rust builds need these before final universal bundling.
-    for bin in kelpied kelpie-stt; do
+    for bin in kelpied kelpie-stt kelpie-screen; do
       cp "$out_dir/$t/release/$bin" "app/src-tauri/binaries/$bin-$t"
     done
   done
-  for bin in kelpied kelpie-stt; do
+  for bin in kelpied kelpie-stt kelpie-screen; do
     lipo -create -output "app/src-tauri/binaries/$bin-universal-apple-darwin" \
       "$out_dir/aarch64-apple-darwin/release/$bin" "$out_dir/x86_64-apple-darwin/release/$bin"
   done
   target_args=(--target universal-apple-darwin)
   bundle_dir="$out_dir/universal-apple-darwin/release/bundle"
 else
-  cargo build --release -p kelpied -p kelpie-stt
+  cargo build --release -p kelpied -p kelpie-stt -p kelpie-screen
   # Tauri sidecars are looked up as <name>-<target triple><ext>.
   cp "$out_dir/release/kelpied$ext" "app/src-tauri/binaries/kelpied-$triple$ext"
   cp "$out_dir/release/kelpie-stt$ext" "app/src-tauri/binaries/kelpie-stt-$triple$ext"
+  cp "$out_dir/release/kelpie-screen$ext" "app/src-tauri/binaries/kelpie-screen-$triple$ext"
 fi
 
 cd app

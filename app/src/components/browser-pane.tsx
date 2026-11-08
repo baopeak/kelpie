@@ -12,6 +12,7 @@ import {
   annotationPrompt, browserBounds, browserDesign, browserDevtools, browserGo, browserLabel, browserNavigate, browserOpen, browserScreenshot, browserVisible, browserState as state, markPageSeen, onBrowserEvent, setBrowserState as setState,
   type Annotation, type Rect,
 } from "../lib/browser";
+import { held, stopTakeover } from "../lib/takeover";
 import { Icon } from "./icons";
 import { LoadBar } from "./load-bar";
 import type { Pane, Project, Tab } from "../lib/types";
@@ -154,6 +155,16 @@ export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; foc
         <button class="icon-btn" title={t("Developer tools")} disabled={!opened()} onClick={() => void browserDevtools(label)}><Icon name="code" size={14} /></button>
         <button class="icon-btn" title={t("Open in your browser")} disabled={!s().url} onClick={() => void openUrl(s().url)}><Icon name="external" size={13} /></button>
       </div>
+      {/* Above the page, never on it: the page is a native view that would cover anything drawn over it. */}
+      <Show when={held()[props.pane.id]}>
+        {(h) => (
+          <div class="takeover-banner" role="status" data-takeover={h().tk}>
+            <Icon name="server" size={13} />
+            <span>{t("Controlled from {device}", { device: h().device })}</span>
+            <button class="btn" data-takeover-stop onClick={() => void stopTakeover(h().tk)}>{t("Stop")}</button>
+          </div>
+        )}
+      </Show>
       <div class="browser-host" ref={host}>
         <Show when={!opened()}>
           <div class="empty">

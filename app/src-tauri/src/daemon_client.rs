@@ -89,6 +89,10 @@ impl DaemonClient {
                     *self.out.lock() = Some(out_tx);
                     self.connected.store(true, Ordering::SeqCst);
                     self.connected_notify.notify_waiters();
+                    // This window provides its browser panes to a phone that takes one over (Windows: the WebView2 DevTools protocol).
+                    if cfg!(windows) {
+                        tauri::async_runtime::spawn(self.clone().register_provider());
+                    }
                     let _ = self.app.emit("daemon-status", json!({"connected": true}));
                     let writer = tauri::async_runtime::spawn(async move {
                         while let Some(mut bytes) = out_rx.recv().await {
@@ -119,6 +123,30 @@ impl DaemonClient {
         }
     }
 
+    /// Registers this connection as the daemon's provider of browser panes and of the screen (through the helper this app runs, `screen`). The daemon
+    /// takes that from the verified app only, and hands it over at once from this app's own connection before; while something else holds a kind this
+    /// tries again a few times, further apart each time. An older daemon has no such method, and a connection that goes ends the tries (the next one
+    /// starts its own). Each kind tries on its own, so one held by another program never holds back the other.
+    async fn register_provider(self: Arc<Self>) {
+        let tries: Vec<_> = ["browser", "screen"].into_iter().map(|kind| tauri::async_runtime::spawn(self.clone().register_kind(kind))).collect();
+        for t in tries {
+            let _ = t.await;
+        }
+    }
+
+    async fn register_kind(self: Arc<Self>, kind: &'static str) {
+        for wait_ms in [0u64, 500, 1000, 2000, 4000, 8000] {
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+            match self.call("provider.register", json!({"kind": kind})).await {
+                Ok(_) => return,
+                Err(e) if e.to_string().contains("already provides") => continue,
+                // An older daemon (no such kind, or no providers at all): nothing to wait for.
+                Err(_) => return,
+            }
+        }
+        tracing::warn!("another program provides {kind} to phones: it is off from a phone until Kelpie reconnects");
+    }
+
     fn on_disconnect(&self) {
         self.connected.store(false, Ordering::SeqCst);
         *self.out.lock() = None;
@@ -131,6 +159,9 @@ impl DaemonClient {
         }
         // Views must re-attach (with their last seq) once reconnected.
         self.views.lock().clear();
+        // A daemon that went took its takeovers with it: the panes stop streaming and lose their banner.
+        crate::browser::daemon_gone(&self.app);
+        crate::screen::daemon_gone(&self.app);
         let _ = self.app.emit("daemon-status", json!({"connected": false}));
     }
 
@@ -179,6 +210,14 @@ impl DaemonClient {
                         }
                     } else if msg.get("event").is_some() {
                         let _ = self.app.emit("daemon-event", msg);
+                    } else if msg.get("preq").is_some() || msg.get("pnote").is_some() {
+                        // The daemon asks the window for something only it can do: a browser pane (`browser::takeover`) or the screen (`screen`).
+                        let method = msg.get("method").or_else(|| msg.get("pnote")).and_then(Value::as_str).unwrap_or_default();
+                        if method.starts_with("screen.") {
+                            crate::screen::provider_message(&self.app, msg);
+                        } else {
+                            crate::browser::provider_message(&self.app, msg);
+                        }
                     }
                 }
                 Frame::Input { .. } => {}
@@ -276,6 +315,20 @@ impl DaemonClient {
 
     pub fn input(&self, handle: u32, data: Vec<u8>) -> Result<()> {
         self.send_frame(&Frame::Input { handle, data })
+    }
+
+    /// Tells the daemon something it does not answer (a provider's reply or event): no id, nothing waited for.
+    pub fn notify(&self, method: &str, params: Value) -> Result<()> {
+        self.send_frame(&Frame::json(&json!({"method": method, "params": params})))
+    }
+
+    /// The answer to the daemon's request `preq` (`provider` in the daemon).
+    pub fn provider_reply(&self, preq: u64, result: Result<Value, String>) -> Result<()> {
+        let params = match result {
+            Ok(v) => json!({"preq": preq, "result": v}),
+            Err(e) => json!({"preq": preq, "error": {"message": e}}),
+        };
+        self.notify("provider.reply", params)
     }
 }
 

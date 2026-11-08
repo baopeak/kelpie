@@ -49,6 +49,8 @@ import { startUpdater } from "../lib/updater";
 import { CHECKPOINT_API } from "../lib/checkpoint-api";
 import { initNotifySync } from "../lib/notify-sync";
 import { initLimits } from "../lib/limits";
+import { initTakeover } from "../lib/takeover";
+import { initScreen } from "../lib/screen";
 
 const Board = lazy(() => import("./board").then((m) => ({ default: m.Board })));
 const SavedReplyDialog = lazy(() => import("./bookmarks-panel").then((m) => ({ default: m.SavedReplyDialog })));
@@ -125,6 +127,8 @@ export function App() {
   });
   onMount(() => {
     initRuns();
+    initTakeover();
+    initScreen();
     initSessionUsage();
     initReviewWatch();
     void loadSshConfigPath().catch(() => {});

@@ -57,7 +57,13 @@ export function describeConn(s: ConnState): { label: string; detail: string; ton
         tone: "bad",
       };
     case "relay_unreachable":
-      return { label: t("Relay unreachable"), detail: t("The relay cannot be reached. What you see is the last state."), tone: "bad" };
+      return { label: t("Relay unreachable"), detail: t("The relay cannot be reached, and your computer does not answer directly either. What you see is the last state."), tone: "bad" };
+    case "no_path":
+      return {
+        label: t("No way to your computer"),
+        detail: t("Tailscale is off on this phone and the relay cannot be reached, so Kelpie has no way to your computer from here. Turn on Tailscale, or try again when the relay is back. What you see is the last state."),
+        tone: "bad",
+      };
     case "restarted":
       return { label: t("Computer restarted"), detail: t("Kelpie restarted on your computer. Sessions were loaded again."), tone: "warn" };
     case "busy":

@@ -15,7 +15,7 @@ and the Tailscale checks fail saying so. It never reaches the real one either wa
 The server is bound to 127.0.0.1 (no firewall prompt on the test machine). The phone is
 headless Edge with mobile emulation, driven through msedgedriver on port 9515.
 
-Covers: off by default; turning it on (status, URL); security headers and the embedded phone client
+Covers: off by default; turning it on (status, URL); Settings → Mobile (every option's lines, the safe defaults, the summary, Advanced, each switch reaching the daemon, a change that fails); security headers and the embedded phone client
 (SolidJS, app/phone); pairing with a QR link, typing the phone's code on the desktop, the device list, nothing readable on the wire, no CSP
 violation; the phone's
 inbox (a session that needs you comes first), a session's screen, typing and quick keys reaching the
@@ -39,6 +39,7 @@ import http.client
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -324,6 +325,24 @@ try:
     d.js(f"{S}.openSettings('mobile')")
     d.wait("return !!document.querySelector('[data-setting=\"mobile-pair\"] .btn.primary')", 10)
     run.shot("01-mobile-settings")
+
+    # ---------- what the page says before anything was changed: every option with its lines, the safe defaults, the summary ----------
+    d.wait("return !!document.querySelector('[data-setting=\"mobile-ntfy\"]')", 10)
+    rows_with_lines = "return ['mobile-access', 'mobile-tailscale', 'mobile-webpush', 'mobile-lock', 'mobile-lock-idle', 'mobile-lock-recheck', 'mobile-lock-plain', 'mobile-ntfy', 'mobile-telegram'].filter((id) => !['what', 'tradeoff', 'safety'].every((line) => document.querySelector(`[data-setting=\"${id}\"] [data-option-${line}] dd`)?.textContent.trim()))"
+    run.check("every option says what it does, what it costs and how safe it is", d.js(rows_with_lines) == [], str(d.js(rows_with_lines)))
+    switch_on = lambda row: d.js(f"return document.querySelector('[data-setting=\"{row}\"] .switch').classList.contains('on')")  # noqa: E731
+    defaults = {row: switch_on(row) for row in ("mobile-tailscale", "mobile-lock", "mobile-lock-recheck", "mobile-lock-plain", "mobile-ntfy", "mobile-telegram")}
+    run.check("a new install has the safe defaults", defaults == {"mobile-tailscale": False, "mobile-lock": True, "mobile-lock-recheck": False, "mobile-lock-plain": True, "mobile-ntfy": False, "mobile-telegram": False} and d.js("return document.querySelector('[data-lock-idle]').value") == "300", str(defaults))
+    run.check("…as the daemon holds them", daemon(d, "mobile.status")["lock"] == {"on": True, "idle_s": 300, "recheck": False, "plain_read": True} and not daemon(d, "notify.get")["config"]["ntfy"]["enabled"] and not daemon(d, "notify.get")["config"]["telegram"]["enabled"])
+    run.check("alerts are off until a phone turns them on, and this computer only reports them", d.js("return document.querySelector('[data-webpush-state]').textContent") == "Off" and not d.js("return !!document.querySelector('[data-setting=\"mobile-webpush\"] .switch')"))
+    said = d.js("return document.querySelector('[data-mobile-summary]')?.textContent ?? ''")
+    run.check("the summary says how a phone gets here, and that the lock is on and nothing is sent", "plain HTTP" in said and "app lock is on" in said and "Nothing is sent" in said and "No phone is paired" in said, said)
+    in_advanced = "return ['mobile-network', 'mobile-tls', 'mobile-devices'].every((id) => !!document.querySelector(`[data-setting=\"${id}\"]`)?.closest('[data-mobile-advanced]'))"
+    run.check("address, certificate and phones are under Advanced, closed", d.js(in_advanced) is True and d.js("return document.querySelector('[data-mobile-advanced]').open") is False)
+    d.js(f"{S}.openSettings('mobile', 'mobile-tls')")
+    run.check("…and a link to one of them opens it", d.wait("return document.querySelector('[data-mobile-advanced]').open", 10) is True)
+    d.js(f"{S}.openSettings('mobile')")
+    d.wait("return !document.querySelector('[data-mobile-advanced]').open", 10)
 
     # ---------- pairing ----------
     run.check("the settings know this window is the verified app", daemon(d, "mobile.status").get("app") is True)
@@ -1216,7 +1235,7 @@ for n in (1, 2, 3):
     ps.fake_tailscale_says(FAKE_TS[1], status=ps.FAKE_TAILSCALE_READY)
     d.js("document.querySelector('[data-tailscale-check]').click()")
     run.check("ready: it says so", d.wait(f"return {ts_state[7:]} === 'ready' && {ts_serve[7:]} === 'off'", 15) is True)
-    run.check("the price is stated: the name in public certificate logs", "certificate logs" in d.js("return document.querySelector('[data-tailscale-privacy]')?.textContent ?? ''"))
+    run.check("the price is stated: the name in public certificate logs", "certificate logs" in d.js("return document.querySelector('[data-setting=\"mobile-tailscale\"] [data-option-tradeoff]')?.textContent ?? ''"))
     run.shot("22-tailscale-ready")
     d.js("document.querySelector('[data-setting=\"mobile-tailscale\"] .switch').click()")
     try:
@@ -1255,6 +1274,10 @@ for n in (1, 2, 3):
     daemon(d, "mobile.disable")
     run.check("phone access off with Tailscale down: Settings says the entry is still there", bool(d.wait("return !!document.querySelector('[data-tailscale-to-remove]')", 20)))
     run.check("…and the daemon has kept it", daemon(d, "mobile.status")["tailscale"]["to_remove"] is True and json.load(open(FAKE_TS[1], encoding="utf-8"))["serve"] != "{}")
+    off_rows = "return ['mobile-tailscale', 'mobile-lock', 'mobile-lock-recheck', 'mobile-lock-plain'].every((id) => { const r = document.querySelector(`[data-setting=\"${id}\"]`); return r.querySelector('.switch').disabled && r.querySelector('[data-option-disabled]')?.textContent.includes('Turn on phone access first') })"
+    run.check("with phone access off, what needs it is there, cannot be changed, and says what to do", d.wait(off_rows, 10) is True and d.js("return document.querySelector('[data-lock-idle]').disabled") is True)
+    run.check("…while the channels, which do not need it, can", d.js("return ['mobile-ntfy', 'mobile-telegram'].every((id) => !document.querySelector(`[data-setting=\"${id}\"] .switch`).disabled)") is True)
+    run.check("…and the summary says phones cannot get here", "phone access is off" in d.js("return document.querySelector('[data-summary-reach]').textContent"))
     ps.fake_tailscale_says(FAKE_TS[1], serve_down=False)
     d.js("document.querySelector('[data-tailscale-check]').click()")
     run.check("…and once Tailscale answers, Check again removes it and the note goes", d.wait("return !document.querySelector('[data-tailscale-to-remove]')", 20) is True and json.load(open(FAKE_TS[1], encoding="utf-8"))["serve"] == "{}")
@@ -1312,6 +1335,56 @@ for n in (1, 2, 3):
     run.check("repeated unknown phones are rate limited", refusals[-1] == 4429, str(refusals))
     run.check("…and the desktop says so", bool(d.wait("return [...document.querySelectorAll('.toast')].some(t => t.textContent.includes('Too many failed'))", 15)))
 
+    # ---------- each switch reaches the daemon, and a change that fails leaves it as it was ----------
+    d.js(f"{S}.openSettings('mobile')")
+    d.wait("return !!document.querySelector('[data-setting=\"mobile-ntfy\"] .switch')", 10)
+    flip = lambda row: d.js(f"document.querySelector('[data-setting=\"{row}\"] .switch').click()")  # noqa: E731
+    lock_now = lambda: daemon(d, "mobile.status")["lock"]  # noqa: E731
+    flip("mobile-lock")
+    run.check("the app lock can be turned off (the person's verification is the test's stand-in here)", bool(wait(lambda: lock_now()["on"] is False, 15)), str(lock_now()))
+    run.check("…and what depends on it says why it cannot be changed", d.wait("return ['mobile-lock-idle', 'mobile-lock-recheck', 'mobile-lock-plain'].every((id) => !!document.querySelector(`[data-setting=\"${id}\"] [data-option-disabled]`))", 10) is True)
+    run.check("…and the summary says the lock is off", "app lock is off" in d.js("return document.querySelector('[data-summary-lock]').textContent"))
+    flip("mobile-lock")
+    run.check("…and back on, which asks nobody", bool(wait(lambda: lock_now()["on"] is True, 15)))
+    d.wait("return !document.querySelector('[data-setting=\"mobile-lock-plain\"] [data-option-disabled]')", 10)
+    flip("mobile-lock-plain")
+    run.check("reading over plain HTTP can be closed", bool(wait(lambda: lock_now()["plain_read"] is False, 15)))
+    run.check("…and the summary says what that does here", bool(d.wait("return document.querySelector('[data-summary-reach]').textContent.includes('see nothing')", 10)))
+    flip("mobile-lock-plain")
+    run.check("…and opened again, through the person's verification", bool(wait(lambda: lock_now()["plain_read"] is True, 15)))
+    # A server that answers nobody: nothing this run raises may reach a real one while the switch is on.
+    config_before = daemon(d, "notify.get")["config"]
+    daemon(d, "notify.set", {"config": {**config_before, "ntfy": {"enabled": False, "server": "http://127.0.0.1:9"}}})
+    channel = lambda name: daemon(d, "notify.get")["config"][name]["enabled"]  # noqa: E731
+    # A change the daemon cannot save: this run's own notify.json made read-only, which its atomic replace cannot overwrite. (The page's
+    # `invoke` cannot be swapped for a failing one: Tauri defines it, and the object holding it, read-only.)
+    notify_file = os.path.join(ISOLATED["KELPIE_DATA_DIR"], "notify.json")
+    errors = "[...document.querySelectorAll('.settings-section .form-note.error')].map((e) => e.textContent).filter((t) => t.trim())"
+    errors_before = len(d.js(f"return {errors}"))
+    os.chmod(notify_file, stat.S_IREAD)
+    try:
+        flip("mobile-ntfy")
+        shown = d.wait(f"const now = {errors}; return now.length > {errors_before} ? now : null", 10)
+    finally:
+        os.chmod(notify_file, stat.S_IREAD | stat.S_IWRITE)
+    run.check("a change that fails shows the error and leaves the switch off", bool(shown) and not switch_on("mobile-ntfy") and not channel("ntfy"), shown)
+    flip("mobile-ntfy")
+    run.check("ntfy turns on through the same settings as Notifications", bool(wait(lambda: channel("ntfy") is True, 10)) and daemon(d, "notify.get")["config"]["ntfy"]["server"] == "http://127.0.0.1:9", str(daemon(d, "notify.get")["config"]["ntfy"]))
+    run.check("…which made its topic, as there", daemon(d, "notify.get")["secrets"]["ntfy_topic"] is True)
+    run.check("…and the switch and the summary say so", d.wait("return document.querySelector('[data-setting=\"mobile-ntfy\"] .switch').classList.contains('on') && document.querySelector('[data-summary-alerts]').textContent.includes('ntfy')", 10) is True)
+    flip("mobile-telegram")
+    run.check("Telegram turns on too, keeping ntfy", bool(wait(lambda: channel("telegram") is True, 10)) and channel("ntfy") is True)
+    run.check("…and says what it still lacks", d.wait("return document.querySelector('[data-setting=\"mobile-telegram\"] [data-telegram-problem]')?.textContent.includes('bot token')", 10) is True)
+    d.js(f"{S}.openSettings('notifications')")
+    run.check("Notifications shows the same two switches on", d.wait("return ['push-ntfy', 'push-telegram'].every((id) => document.querySelector(`[data-setting=\"${id}\"] .switch`)?.classList.contains('on'))", 15) is True)
+    d.js("document.querySelector('[data-setting=\"push-telegram\"] .switch').click()")
+    wait(lambda: channel("telegram") is False, 10)
+    d.js("document.querySelector('[data-open-mobile]').click()")
+    run.check("…and a switch off there is off here", d.wait("return !!document.querySelector('[data-setting=\"mobile-telegram\"] .switch') && !document.querySelector('[data-setting=\"mobile-telegram\"] .switch').classList.contains('on')", 15) is True)
+    flip("mobile-ntfy")
+    run.check("ntfy turns off", bool(wait(lambda: channel("ntfy") is False, 10)))
+    daemon(d, "notify.set", {"config": config_before})
+
     # ---------- settings: how long a silent phone stays, what phones did, the kill switch ----------
     d.js(f"{S}.openSettings('mobile')")
     d.wait("return !!document.querySelector('[data-dormant]')", 10)
@@ -1321,6 +1394,8 @@ for n in (1, 2, 3):
     d.js("const a = document.querySelector('[data-audit]'); a.open = true;")
     run.check("the list of what phones did shows entries, with an intact log", bool(d.wait("return document.querySelectorAll('[data-audit-entry]').length > 0 && !document.querySelector('[data-audit-broken]')", 10)))
     run.shot("20-mobile-audit")
+    d.js("const a = document.querySelector('[data-mobile-advanced]'); a.open = false; a.dispatchEvent(new Event('toggle'));")
+    run.check("revoke all is in sight with Advanced closed", d.js("const b = document.querySelector('[data-revoke-all]'); return !!b && !b.closest('[data-mobile-advanced]') && b.getClientRects().length > 0") is True)
     d.js("document.querySelector('[data-revoke-all]').click()")
     run.check("the kill switch turns phone access off and removes every phone", bool(wait(lambda: (lambda s: not s["running"] and not s["devices"])(daemon(d, "mobile.status")), 10)))
     run.check("…and the phone hears it at once", bool(phone.wait("return document.querySelector('.card')?.textContent.includes('no longer paired')", 15)))

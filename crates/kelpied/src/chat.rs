@@ -178,6 +178,8 @@ struct Pending {
     allows: Vec<String>,
     /// What it asks for, as its own fields say: never its title or its reason.
     request: crate::mobile::risk::Request,
+    /// Claude's tool input, which its yes repeats (`KEPT_INPUT`).
+    input: Option<Value>,
 }
 
 impl Inner {
@@ -289,6 +291,8 @@ fn permission_skip(dialect: Dialect, v: &Value) -> Option<(bool, bool)> {
 fn kind(by: &By) -> &'static str {
     if by.is_desktop() {
         "desktop"
+    } else if *by == By::telegram() {
+        "telegram"
     } else if by.is_kelpie() {
         "kelpie"
     } else {
@@ -408,7 +412,11 @@ struct Ask {
     once: Vec<String>,
     allows: Vec<String>,
     request: crate::mobile::risk::Request,
+    input: Option<Value>,
 }
+
+/// A tool input kept for an approval the daemon writes itself (`telegram_approval`): Claude's yes repeats it. A bigger one is not kept, and its request is answered elsewhere.
+const KEPT_INPUT: usize = 16 * 1024;
 
 /// The request a line makes *to the person*: Claude's `control_request` asking leave to use a tool
 /// (or an elicitation), or a JSON-RPC request of the kinds in [`asks_the_user`]. Every other request
@@ -426,13 +434,14 @@ fn ask_of(line: &str) -> Option<Ask> {
             Some(tool) => crate::mobile::risk::from_tool(tool, v.pointer("/request/input").unwrap_or(&Value::Null), None),
             None => Default::default(),
         };
-        return Some(Ask { key: format!("control:{}", id.as_str()?), id: id.clone(), method: subtype.to_string(), once: Vec::new(), allows: Vec::new(), request });
+        let input = v.pointer("/request/input").filter(|i| i.is_object() && subtype == "can_use_tool" && i.to_string().len() <= KEPT_INPUT).cloned();
+        return Some(Ask { key: format!("control:{}", id.as_str()?), id: id.clone(), method: subtype.to_string(), once: Vec::new(), allows: Vec::new(), request, input });
     }
     let method = v.get("method")?.as_str()?;
     let id = v.get("id")?;
     let of_kinds = |kinds: &[&str]| -> Vec<String> { v.pointer("/params/options").and_then(Value::as_array).map(|options| options.iter().filter(|o| o["kind"].as_str().is_some_and(|k| kinds.contains(&k))).filter_map(|o| o["optionId"].as_str().map(str::to_string)).collect()).unwrap_or_default() };
     let (once, allows) = (of_kinds(&["allow_once", "reject_once"]), of_kinds(&["allow_once"]));
-    asks_the_user(method).then(|| id_key(id).map(|k| Ask { key: format!("rpc:{k}"), id: id.clone(), method: method.to_string(), once, allows, request: rpc_request(method, &v["params"]) })).flatten()
+    asks_the_user(method).then(|| id_key(id).map(|k| Ask { key: format!("rpc:{k}"), id: id.clone(), method: method.to_string(), once, allows, request: rpc_request(method, &v["params"]), input: None })).flatten()
 }
 
 /// What a JSON-RPC agent's request asks for. Codex names its command (a string or its words) and directory; ACP names a kind of tool with its raw input. A title and a reason are the agent's own
@@ -443,11 +452,11 @@ fn rpc_request(method: &str, params: &Value) -> crate::mobile::risk::Request {
     match method {
         "item/commandExecution/requestApproval" | "execCommandApproval" => {
             let command = command_text(&params["command"]);
-            Request { tool: Some("exec".into()), shown: shown_text(command.clone().unwrap_or_default()), command, paths: Vec::new(), cwd }
+            Request { tool: Some("exec".into()), shown: shown_text(command.clone().unwrap_or_default()), command, cwd, ..Default::default() }
         }
         "applyPatchApproval" => {
             let paths: Vec<String> = params["fileChanges"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
-            Request { tool: Some("apply_patch".into()), shown: shown_text(paths.join("\n")), command: None, paths, cwd }
+            Request { tool: Some("apply_patch".into()), shown: shown_text(paths.join("\n")), paths, cwd, ..Default::default() }
         }
         "session/request_permission" => {
             let call = &params["toolCall"];
@@ -820,8 +829,8 @@ impl ChatSession {
             g.title = title;
         }
         let asked = ask.as_ref().map(|a| a.key.clone());
-        if let Some(Ask { key, id, method, once, allows, request }) = ask {
-            g.pending.insert(key, Pending { id, method, once, allows, request });
+        if let Some(Ask { key, id, method, once, allows, request, input }) = ask {
+            g.pending.insert(key, Pending { id, method, once, allows, request, input });
         }
         self.append(&mut g, line);
         // Behind the line it is about, for the phones watching. With none, nothing is worked out.
@@ -1692,6 +1701,64 @@ impl ChatSession {
         (label(&pending.request, &worktree).level == Level::Dangerous).then_some(pending.request.shown)
     }
 
+    /// What a Telegram button could answer in this chat (`notify::telegram_poll`): the one request open, when the daemon labels it low, it
+    /// changes no file, and the daemon can write its one-time yes and its no in the agent's dialect. Claude's yes repeats the tool's input, so a request whose input was not kept has
+    /// none. Each line is one `answer` takes as a one-shot answer to that very request, or nothing is offered.
+    pub fn telegram_approval(&self) -> Option<(crate::notify::telegram_poll::Target, String)> {
+        use crate::mobile::risk::{label, Level};
+        let worktree = self.spec.lock().cwd.clone();
+        let pending = {
+            let g = self.inner.lock();
+            // Nothing could take an answer.
+            g.stdin.as_ref()?;
+            let mut open = g.pending.items.values();
+            let (Some(one), None) = (open.next(), open.next()) else { return None };
+            one.clone()
+        };
+        // A file edit, write or patch shows its path alone, not what it writes: the alert and its link only.
+        if label(&pending.request, &worktree).level != Level::Low || pending.request.shown.is_empty() || crate::mobile::risk::changes_files(&pending.request) {
+            return None;
+        }
+        let (allow, deny) = Self::telegram_lines(&pending)?;
+        Some((crate::notify::telegram_poll::Target::Chat { request_id: pending.id.clone(), allow, deny }, pending.request.shown))
+    }
+
+    /// The lines in the agent's dialect that approve `pending` once and refuse it, when the daemon can write both: each one `answer` takes as
+    /// a one-shot answer to that very request, the yes read as a yes and the no as a no. Whether a button may carry them is
+    /// `telegram_approval`'s to say.
+    fn telegram_lines(pending: &Pending) -> Option<(String, String)> {
+        let id = &pending.id;
+        let decided = |yes: &str, no: &str| (json!({"id": id, "result": {"decision": yes}}), json!({"id": id, "result": {"decision": no}}));
+        let (allow, deny) = match pending.method.as_str() {
+            "can_use_tool" => {
+                let input = pending.input.clone()?;
+                let line = |response: Value| json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": response}});
+                (line(json!({"behavior": "allow", "updatedInput": input})), line(json!({"behavior": "deny", "message": "The user denied this action."})))
+            }
+            "item/commandExecution/requestApproval" => decided("accept", "decline"),
+            "execCommandApproval" | "applyPatchApproval" => decided("approved", "denied"),
+            "session/request_permission" => {
+                let [yes] = pending.allows.as_slice() else { return None };
+                let no = pending.once.iter().find(|o| !pending.allows.contains(o)).map_or_else(|| json!({"outcome": "cancelled"}), |o| json!({"outcome": "selected", "optionId": o}));
+                let outcome = |o: Value| json!({"jsonrpc": "2.0", "id": id, "result": {"outcome": o}});
+                (outcome(json!({"outcome": "selected", "optionId": yes})), outcome(no))
+            }
+            _ => return None,
+        };
+        let (allow, deny) = (allow.to_string(), deny.to_string());
+        let takes = |line: &str| exact_answer(line, id).is_some_and(|(_, clean)| answer_is_one_shot(&pending.method, &pending.once, &clean));
+        if !takes(&allow) || !takes(&deny) || !answer_approves(&pending.allows, &serde_json::from_str(&allow).unwrap_or_default()) || answer_approves(&pending.allows, &serde_json::from_str(&deny).unwrap_or_default()) {
+            return None;
+        }
+        Some((allow, deny))
+    }
+
+    /// Who answered the request whose answer `line` would be, while that is remembered.
+    pub fn resolution(&self, request_id: &Value, line: &str) -> Option<Resolution> {
+        let (key, _) = exact_answer(line, request_id)?;
+        self.inner.lock().answered.get(&key)
+    }
+
     pub fn detach(&self, client: u64) {
         let mut g = self.inner.lock();
         g.subs.retain(|s| s.client != client);
@@ -2120,6 +2187,87 @@ mod tests {
 
     fn allow(id: &str) -> Value {
         json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": {"behavior": "allow"}}})
+    }
+
+    #[test]
+    fn telegram_answers_one_low_request_in_each_dialect_with_lines_the_answer_path_takes() {
+        use crate::notify::telegram_poll::Target;
+        let lines = |line: Value| {
+            let (c, stdin) = chat();
+            c.spec.lock().cwd = "C:/work/proj".into();
+            c.ingest_line(line.to_string());
+            let offered = c.telegram_approval();
+            (c, stdin, offered)
+        };
+        // Claude: the yes repeats the input it was asked with.
+        let (c, mut stdin, offered) = lines(json!({"type": "control_request", "request_id": "r1", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls -la"}}}));
+        let (Target::Chat { request_id, allow, deny }, command) = offered.expect("a low request") else { panic!("a chat's") };
+        assert_eq!((request_id.clone(), command.as_str()), (json!("r1"), "ls -la"));
+        let yes: Value = serde_json::from_str(&allow).unwrap();
+        assert_eq!(yes["response"]["response"], json!({"behavior": "allow", "updatedInput": {"command": "ls -la"}}));
+        assert_eq!(serde_json::from_str::<Value>(&deny).unwrap()["response"]["response"]["behavior"], "deny");
+        c.answer(&request_id, &allow, By::telegram()).unwrap();
+        let written: Value = serde_json::from_slice(&stdin.try_recv().unwrap()).unwrap();
+        assert_eq!(written, yes);
+        assert!(c.telegram_approval().is_none(), "answered");
+        assert_eq!(c.resolution(&request_id, &deny).map(|r| r.by), Some(By::telegram()));
+        assert!(matches!(c.answer(&request_id, &deny, By::desktop()), Err(NotAnswered::AlreadyAnswered(r)) if r.by == By::telegram()));
+        let log = c.inner.lock().log.iter().map(|l| String::from_utf8_lossy(l).to_string()).collect::<Vec<_>>().join("\n");
+        assert!(log.contains("\"by\":\"telegram\""), "the log says Telegram answered: {log}");
+        // Codex, both ways it asks; ACP with its one-time options.
+        let codex = |method: &str, yes: &str, no: &str| {
+            let (_c, _stdin, offered) = lines(json!({"id": 7, "method": method, "params": {"command": ["ls"]}}));
+            let Some((Target::Chat { allow, deny, .. }, _)) = offered else { panic!("{method}") };
+            assert_eq!(serde_json::from_str::<Value>(&allow).unwrap(), json!({"id": 7, "result": {"decision": yes}}), "{method}");
+            assert_eq!(serde_json::from_str::<Value>(&deny).unwrap(), json!({"id": 7, "result": {"decision": no}}), "{method}");
+        };
+        codex("item/commandExecution/requestApproval", "accept", "decline");
+        codex("execCommandApproval", "approved", "denied");
+        let options = json!([{"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"}, {"optionId": "no", "kind": "reject_once"}]);
+        let (_c, _stdin, offered) = lines(json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"toolCall": {"kind": "execute", "rawInput": {"command": "ls"}}, "options": options}}));
+        let Some((Target::Chat { allow, deny, .. }, _)) = offered else { panic!("acp") };
+        assert_eq!(serde_json::from_str::<Value>(&allow).unwrap()["result"]["outcome"], json!({"outcome": "selected", "optionId": "once"}), "never the lasting one");
+        assert_eq!(serde_json::from_str::<Value>(&deny).unwrap()["result"]["outcome"], json!({"outcome": "selected", "optionId": "no"}));
+        // What is not low, has no one-time yes, cannot be written again, or is not alone gets nothing.
+        for line in [
+            json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "git push"}}}),
+            json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "rm -rf build"}}}),
+            json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls", "description": "x".repeat(KEPT_INPUT)}}}),
+            json!({"type": "control_request", "request_id": "r", "request": {"subtype": "elicitation", "message": "ls?"}}),
+            json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"toolCall": {"kind": "execute", "rawInput": {"command": "ls"}}, "options": [{"optionId": "always", "kind": "allow_always"}]}}),
+            json!({"id": 7, "method": "item/fileChange/requestApproval", "params": {"itemId": "i"}}),
+            json!({"id": 7, "method": "item/permissions/requestApproval", "params": {"permissions": {}}}),
+            // A delete is never low.
+            json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"toolCall": {"kind": "delete", "rawInput": {"path": "src/a.rs"}}, "options": options}}),
+        ] {
+            assert!(lines(line.clone()).2.is_none(), "{line}");
+        }
+        // A file edit, write, patch or move inside the worktree is labelled low and has its lines, but its message would show only the path:
+        // that alone keeps the buttons away.
+        for line in [
+            json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "Edit", "input": {"file_path": "src/a.rs", "old_string": "x", "new_string": "y"}}}),
+            json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": {"file_path": "build.rs", "content": "fn main() {}"}}}),
+            json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "MultiEdit", "input": {"file_path": "src/a.rs", "edits": []}}}),
+            json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool", "tool_name": "NotebookEdit", "input": {"notebook_path": "a.ipynb", "new_source": "x"}}}),
+            json!({"id": 7, "method": "applyPatchApproval", "params": {"fileChanges": {"src/a.rs": {"update": {"unified_diff": "+x"}}}}}),
+            json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"toolCall": {"kind": "edit", "rawInput": {"path": "src/a.rs"}}, "options": options}}),
+            json!({"jsonrpc": "2.0", "id": 9, "method": "session/request_permission", "params": {"toolCall": {"kind": "move", "rawInput": {"path": "src/a.rs"}}, "options": options}}),
+        ] {
+            let (c, _stdin, offered) = lines(line.clone());
+            let pending = c.inner.lock().pending.items.values().next().cloned().expect("the request");
+            assert_eq!(crate::mobile::risk::label(&pending.request, "C:/work/proj").level, crate::mobile::risk::Level::Low, "{line}");
+            assert!(ChatSession::telegram_lines(&pending).is_some(), "the daemon could answer it: {line}");
+            assert!(offered.is_none(), "{line}");
+        }
+        let (c, _stdin) = chat();
+        c.ingest_line(json!({"type": "control_request", "request_id": "a", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}}).to_string());
+        c.ingest_line(json!({"type": "control_request", "request_id": "b", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}}).to_string());
+        assert!(c.telegram_approval().is_none(), "two open");
+        c.close_stdin();
+        let (c, _stdin) = chat();
+        c.ingest_line(json!({"type": "control_request", "request_id": "a", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}}).to_string());
+        c.close_stdin();
+        assert!(c.telegram_approval().is_none(), "nothing can take an answer");
     }
 
     #[test]

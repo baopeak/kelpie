@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import cacophony from "../../../crates/kelpie-link/tests/cacophony-ik.json";
 import vectors from "../../../crates/kelpie-link/tests/vectors.json";
-import { b64url, Cipher, concat, decodePairPayload, FIRST_HEADER, fingerprint, Initiator, keypair, MAX_APP, MAX_CHUNK, MAX_NOISE, MODE_PAIR, MODE_RECONNECT, pairCode, randomBytes, Session, unb64url } from "./noise";
+import padding from "../../../crates/kelpie-link/tests/padding.json";
+import { b64url, Cipher, concat, decodePairPayload, FIRST_HEADER, fingerprint, frameChunk, Initiator, keypair, MAX_APP, MAX_CHUNK, MAX_NOISE, MODE_PAIR, MODE_RECONNECT, PAD_BUCKETS, pairCode, randomBytes, Session, unb64url, unframeChunk } from "./noise";
 
 const hex = (s: string) => Uint8Array.from(s.match(/../g) ?? [], (b) => parseInt(b, 16));
 const toHex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
@@ -95,6 +96,37 @@ describe("kelpie-link on the phone", () => {
     const two = c.seal(new Uint8Array(MAX_CHUNK + 5));
     expect(d.open(two[0], 0)).toBeNull();
     expect(() => d.open(two[1], 10_001)).toThrow();
+  });
+
+  it("pads chunks to a few sizes, as the Rust crate does, and reads padded and unpadded alike", () => {
+    expect(PAD_BUCKETS).toEqual(padding.buckets);
+    for (const c of padding.cases) {
+      const data = new Uint8Array(c.len).fill(c.byte);
+      const plain = frameChunk(c.more, data, true);
+      expect([plain.length, plain[0], (plain[plain.length - 2] << 8) | plain[plain.length - 1]]).toEqual([c.padded_len, c.flags, c.zeros]);
+      const back = unframeChunk(plain);
+      expect([back.more, toHex(back.data)]).toEqual([c.more, toHex(data)]);
+    }
+    expect(() => unframeChunk(Uint8Array.of(2, 97, 7, 0, 1))).toThrow();
+    expect(() => unframeChunk(Uint8Array.of(2, 97, 0, 9))).toThrow();
+    expect(() => unframeChunk(Uint8Array.of(4, 97))).toThrow();
+    expect(toHex(unframeChunk(Uint8Array.of(3, 97, 0, 0, 0)).data)).toBe(toHex(Uint8Array.of(97, 0)));
+
+    const k = randomBytes(32);
+    const [a, b] = [new Session(new Cipher(k), new Cipher(k), new Uint8Array(32)), new Session(new Cipher(k), new Cipher(k), new Uint8Array(32))];
+    a.pad = true;
+    const sizes = PAD_BUCKETS.map((n) => n + 16);
+    for (const len of [0, 10, 300, 5000, 70_000]) {
+      const msg = Uint8Array.from({ length: len }, (_, i) => i % 251);
+      const frames = a.seal(msg);
+      expect(frames.every((f) => sizes.includes(f.length)), `${len}`).toBe(true);
+      let got: Uint8Array | null = null;
+      for (const f of frames) got = b.open(f, 0);
+      expect(toHex(got!)).toBe(toHex(msg));
+    }
+    const plainFrame = b.seal(Uint8Array.of(1, 2, 3));
+    expect(plainFrame[0].length).toBe(1 + 3 + 16);
+    expect(toHex(a.open(plainFrame[0], 0)!)).toBe("010203");
   });
 
   it("reads the pairing QR payload and nothing else", () => {

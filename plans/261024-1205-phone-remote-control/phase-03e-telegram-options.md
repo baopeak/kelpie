@@ -1,7 +1,7 @@
 ---
 phase: 3e
 title: "Telegram: alert + deep link, opt-in low-risk approvals"
-status: pending
+status: done, two rounds of review fixes applied (local, unmerged; the manual check with a real bot from a phone and a calm-machine mobile.py run have not run)
 priority: P2
 effort: "3d"
 dependencies: [3b, 3c, 3d]
@@ -23,11 +23,11 @@ approve: low-risk request → sendMessage + inline keyboard {callback_data: a|d 
 - Functional
   - **Mode** on `notify::Telegram` (`notify.rs:94`), serde default for existing users: `alert` (today's text, no link unless `phone_link`), `alert_link` (default when switched on from now on), `approve_low` (opt-in). Existing configurations keep exactly what they send today.
   - **Deep link**: `running_url` + `#s=` (3a prefers the `ts` origin). `disable_web_page_preview` stays on (`notify.rs:926`), so Telegram does not fetch the address. The row warns that Telegram sees the machine name in the link.
-  - **Binding**: `chat_id` exists; `user_id` is new. Turning approve on needs `Role::App` + presence and shows a code to send as `/bind <code>` to the bot; the first matching message within 5 min stores both. Change or clear only from the desktop.
+  - **Binding**: `chat_id` exists; `user_id` is new. Turning approve on needs `Role::App` + presence and shows a code to send as `/bind <code>` to the bot; the first matching message within 5 min, **from the configured chat** (any while none is set; never an anonymous group admin), stores the sender and its name. Choosing another mode, switching Telegram off, or changing the chat or token ends a code under way. Change or clear only from the desktop.
   - **Polling**: `getUpdates` long poll on its own thread with its own agent (the 10 s `post_json` timeout, `notify.rs:514`, is too short), started only in `approve_low`, stopped on any mode change. Stored `offset`. A webhook set on the token makes `getUpdates` fail: shown with a plain instruction. Outbound only; no listener.
   - **Filter**: accept a callback only when `from.id == user_id` and `message.chat.id == chat_id`. Anything else is dropped, counted and audited once per minute.
   - **Nonce**: 128-bit random in `callback_data` (limit 64 B [U]), in memory only, single use, expires in 5 min or with the request. Restart invalidates all.
-  - **What may be approved**: only requests with level `low` from `mobile/risk.rs` (3c); `unknown`, `medium`, `dangerous` get alert + deep link and no buttons. Only the one-time option: `choice_lasts` (`session.rs`) and `NotAnswered::Lasting` (`chat.rs:210`) rules apply. Deny is offered for the same requests.
+  - **What may be approved**: only requests with level `low` from `mobile/risk.rs` (3c); `unknown`, `medium`, `dangerous` get alert + deep link and no buttons, and so does every file edit, write, patch, move or delete whatever its label (Telegram would show only the path). Only the one-time option: `choice_lasts` (`session.rs`) and `NotAnswered::Lasting` (`chat.rs:210`) rules apply. Deny is offered for the same requests.
   - **Answering**: `Session::answer_by` with `waiting_since` (`session.rs`), `Chat::answer` (`chat.rs:1301`) with `By {id: "telegram", name: "Telegram"}`, first answer wins; a late tap gets "already answered". Chat answers need a line built per dialect: the phone builds these in its adapters today, so the daemon needs an allow-once builder per dialect, or chat approval from Telegram ships only for dialects where one exists [UNVERIFIED, trace in step 1].
   - **Message text**: passes `kelpie_proto::redact` (`notify.rs` already does), command shown with the daemon's label; never the screen tail unless `include_screen` is on.
   - **Warning** (switch and confirm dialog, EN/VI): Telegram can read these messages; a bot chat is not end-to-end encrypted; a tap here has no Face ID; anyone with this Telegram account can approve.
@@ -48,6 +48,24 @@ approve: low-risk request → sendMessage + inline keyboard {callback_data: a|d 
 ## Related Code Files
 - Create: `crates/kelpied/src/notify/telegram_poll.rs`
 - Modify: `crates/kelpied/src/notify.rs`, `crates/kelpied/src/notify/destinations.rs`, `crates/kelpied/src/daemon.rs`, `crates/kelpied/src/auth.rs` (`APP_ONLY`), `crates/kelpied/src/chat.rs`, `crates/kelpied/src/mobile.rs` (kill-switch hooks), `crates/kelpie-proto/src/lib.rs`, `app/src/components/settings/mobile-settings.tsx`, `app/src/components/settings/push-settings.tsx`, `app/src/lib/ipc.ts`, `app/src/lib/types.ts`, locales, `docs/architecture.md`, `docs/user-guide.md`, `README.md` (privacy)
+
+## Step 1: the answer line per dialect (traced 2026-11-05, decided)
+The phone does not build lines itself: it renders the shared adapters (`app/src/chat/*-adapter.ts`), and `ChatSession::answer` only checks what they wrote (`exact_answer`, `answer_is_one_shot`). Traced per dialect:
+
+| Dialect, request | One-time yes the adapter writes | No | What the daemon needs to write it |
+|---|---|---|---|
+| Claude `can_use_tool` | `control_response` `{behavior: allow, updatedInput: <input>}` | `{behavior: deny, message}` | the tool's input, which `Pending` did not keep |
+| Claude `elicitation` | a form's answers | | not an approval: no buttons |
+| Codex `item/commandExecution/requestApproval` | `{id, result: {decision: accept}}` | `decline` | nothing more |
+| Codex `execCommandApproval`, `applyPatchApproval` | `{decision: approved}` | `denied` | nothing more |
+| Codex `item/fileChange/requestApproval` | as above | | its label is always `unknown`: no buttons |
+| Codex `item/permissions/requestApproval` | a grant with a scope | | a grant, not an approval: no buttons |
+| ACP `session/request_permission` | `outcome: selected` with the `allow_once` option | the `reject_once` option, else `cancelled` | the options, which `Pending` keeps |
+| Terminal (Claude Code with hooks) | the menu's key | the menu's key | which key is the plain one-time *Yes* and the plain *No* |
+
+**Decision: all three chat dialects and Claude Code terminals ship**, each only where its one-time yes is certain:
+- Chat: `Pending` keeps Claude's tool input up to 16 KiB (a bigger one gets no buttons). `ChatSession::telegram_approval` builds the lines for the methods above, and offers them only if `answer` itself takes each as a one-shot answer to that very request and `answer_approves` reads the yes as a yes and the no as a no. Only when exactly one request is open.
+- Terminal: exactly one open request reported by a hook, labelled `low`, and a permission menu on screen with exactly one plain *Yes* and one plain *No*, neither lasting (`choices::one_time_answers`). Other agents' terminals have no label, so they never get buttons. The menu is drawn after the hook, so the sender waits for it up to 3 s.
 
 ## Implementation Steps
 1. Trace the answer line per dialect; decide scope; record it here.

@@ -375,3 +375,56 @@ fn vectors() {
     let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("tests/vectors.json")).unwrap();
     assert_eq!(saved, made, "the shared vectors changed: regenerate them and check the phone and the e2e scripts");
 }
+
+#[test]
+fn padded_chunks_are_one_of_a_few_sizes_and_come_out_as_they_went_in() {
+    let (desktop, phone) = keys();
+    let code = random_key().unwrap();
+    let (mut ph, mut desk, _) = pair(&desktop, &phone, &[code], &code).unwrap();
+    ph.set_padding(true);
+    let sizes: Vec<usize> = PAD_BUCKETS.iter().map(|b| b + TAG_LEN).collect();
+    for len in [0usize, 10, 253, 254, 300, 5_000, 20_000, 65_516, 65_517, 200_000] {
+        let msg: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let frames = ph.seal(&msg).unwrap();
+        for f in &frames {
+            assert!(sizes.contains(&f.len()), "{len}: a frame of {} bytes", f.len());
+        }
+        let mut got = None;
+        for f in &frames {
+            got = desk.open(f, 0).unwrap();
+        }
+        assert_eq!(got.as_deref(), Some(&msg[..]), "{len}");
+    }
+    // An end that does not pad is read all the same, and reads what is padded.
+    let plain = desk.seal(b"hello").unwrap();
+    assert_eq!(plain[0].len(), 1 + 5 + TAG_LEN);
+    assert_eq!(ph.open(&plain[0], 0).unwrap().as_deref(), Some(&b"hello"[..]));
+}
+
+#[test]
+fn padding_that_is_not_zeros_or_says_more_than_there_is_is_not_ours() {
+    assert_eq!(unframe_chunk(&[FLAG_PADDED, b'a', 7, 0, 1]).unwrap_err(), LinkError::Malformed, "filler that is not zeros");
+    assert_eq!(unframe_chunk(&[FLAG_PADDED, b'a', 0, 9]).unwrap_err(), LinkError::Malformed, "more zeros than bytes");
+    assert_eq!(unframe_chunk(&[FLAG_PADDED, 0]).unwrap_err(), LinkError::Malformed, "no room for the count");
+    assert_eq!(unframe_chunk(&[4, b'a']).unwrap_err(), LinkError::Malformed, "an unknown flag");
+    assert_eq!(unframe_chunk(&[]).unwrap_err(), LinkError::Malformed);
+    assert_eq!(unframe_chunk(&[FLAG_PADDED, b'a', 0, 0, 1]).unwrap(), (false, &b"a"[..]));
+    assert_eq!(unframe_chunk(&[FLAG_PADDED | FLAG_MORE, b'a', 0, 0, 0]).unwrap(), (true, &[b'a', 0][..]), "a zero that is data stays data when the count says so");
+    assert_eq!(unframe_chunk(&[FLAG_MORE, 1, 2]).unwrap(), (true, &[1u8, 2][..]));
+}
+
+#[test]
+fn padding_is_framed_as_the_phone_frames_it() {
+    let v: serde_json::Value = serde_json::from_str(include_str!("../tests/padding.json")).unwrap();
+    let buckets: Vec<usize> = v["buckets"].as_array().unwrap().iter().map(|b| b.as_u64().unwrap() as usize).collect();
+    assert_eq!(buckets, PAD_BUCKETS);
+    for c in v["cases"].as_array().unwrap() {
+        let data = vec![c["byte"].as_u64().unwrap() as u8; c["len"].as_u64().unwrap() as usize];
+        let more = c["more"].as_bool().unwrap();
+        let plain = frame_chunk(more, &data, true);
+        assert_eq!(plain.len() as u64, c["padded_len"].as_u64().unwrap(), "{c}");
+        assert_eq!(u64::from(plain[0]), c["flags"].as_u64().unwrap(), "{c}");
+        assert_eq!(u64::from(u16::from_be_bytes([plain[plain.len() - 2], plain[plain.len() - 1]])), c["zeros"].as_u64().unwrap(), "{c}");
+        assert_eq!(unframe_chunk(&plain).unwrap(), (more, &data[..]));
+    }
+}

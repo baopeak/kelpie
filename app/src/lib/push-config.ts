@@ -1,10 +1,21 @@
 // The shape of the daemon's notification settings (`notify.get`, crates/kelpied/src/notify.rs) and
 // the plain-language summary under the settings: what is on, and what is missing for it to work.
+import { createSignal } from "solid-js";
 import { t } from "./i18n";
+
+/** Goes up when a page of Settings saved these settings: the daemon sends no event for them, and search can show two such pages at once. */
+const [pushRevision, setPushRevision] = createSignal(0);
+export { pushRevision };
+export const pushChanged = () => setPushRevision((n) => n + 1);
+
+/** What a Telegram message carries: the alert as before (a link only with `phone_link`), the alert with a link, or that and buttons for a low-risk request. */
+export type TelegramMode = "alert" | "alert_link" | "approve_low";
 
 export interface PushConfig {
   ntfy: { enabled: boolean; server: string };
-  telegram: { enabled: boolean; chat_id: string };
+  /** `mode`, `user_id` and `user_name` are absent below `TELEGRAM_API`. `user_id` is the bound account and `user_name` its `@username` or
+   * first name: only a binding sets them, and what is sent back is not read. */
+  telegram: { enabled: boolean; chat_id: string; mode?: TelegramMode; user_id?: string; user_name?: string };
   webhook: { enabled: boolean };
   events: { needs_you: boolean; done: boolean; failed: boolean; automation: boolean; approval: boolean; cost_cap: boolean };
   /** A finished turn shorter than this many seconds is not sent. */
@@ -31,13 +42,15 @@ export interface PushState {
   webpush?: { devices: number };
   /** Messages not sent because they queued up behind a server that did not answer. */
   dropped?: number;
+  /** Approvals from Telegram: on, polling, a binding code still valid for this many seconds, what stopped them, buttons open (absent below `TELEGRAM_API`). */
+  telegram?: { approving: boolean; polling: boolean; binding_expires_in: number | null; error: string | null; open: number };
 }
 
 /** What the daemon starts with (the same defaults as `Config::default`). */
 export function emptyPushConfig(): PushConfig {
   return {
     ntfy: { enabled: false, server: "https://ntfy.sh" },
-    telegram: { enabled: false, chat_id: "" },
+    telegram: { enabled: false, chat_id: "", mode: "alert_link" },
     webhook: { enabled: false },
     events: { needs_you: true, done: true, failed: true, automation: true, approval: true, cost_cap: true },
     min_turn_s: 30,
@@ -47,11 +60,17 @@ export function emptyPushConfig(): PushConfig {
   };
 }
 
-/** What a channel that is switched on still lacks to send anything. */
-export function pushProblems(cfg: PushConfig, secrets: PushSecrets): string[] {
+/** What Telegram, switched on, still lacks to send anything. */
+export function telegramProblems(cfg: PushConfig, secrets: PushSecrets): string[] {
   const out: string[] = [];
   if (cfg.telegram.enabled && !secrets.telegram_token) out.push(t("Telegram needs a bot token."));
   if (cfg.telegram.enabled && !cfg.telegram.chat_id) out.push(t("Telegram needs a chat id."));
+  return out;
+}
+
+/** What a channel that is switched on still lacks to send anything. */
+export function pushProblems(cfg: PushConfig, secrets: PushSecrets): string[] {
+  const out = telegramProblems(cfg, secrets);
   if (cfg.webhook.enabled && !secrets.webhook_url) out.push(t("The webhook needs an address."));
   return out;
 }

@@ -15,15 +15,38 @@ export interface Pairing {
   name: string;
   /** The computer's name. */
   computer: string;
-  /** Where the computer can be reached: direct addresses (the newest `addrs` replace the `lan` ones) and, later, relays. */
+  /** Where the computer can be reached: direct addresses and the relay (the newest `addrs` replace them all). */
   endpoints: Endpoint[];
   addrsSeq: number;
+  /** The token that lets this phone into the computer's room at the relay (base64url), and until when (ms epoch). Given inside the session. */
+  relayToken?: string;
+  relayExpires?: number;
+}
+
+/** The relay's socket address for this pairing, when it has a relay, a token that has not expired, and the page is on HTTPS (the relay is for the
+ *  installed app; a page on plain HTTP is not let in, and its CSP would not let it try). */
+export function relayUrl(p: Pairing, now: number, secure: boolean): string | null {
+  const relay = p.endpoints.find((e) => e.t === "relay" && typeof e.r === "string" && /^wss:\/\//.test(e.a));
+  if (!secure || !relay || !p.relayToken || (p.relayExpires ?? 0) <= now) return null;
+  return `${relay.a}/v1/phone?t=${encodeURIComponent(relay.r!)}&k=${encodeURIComponent(p.relayToken)}`;
 }
 
 const DB = "kelpie-link";
 const STORE = "kv";
 const KEY = "pairing";
 const MARKER = "kelpie-paired";
+/** What the service worker reads to open a paired app from its kept shell at once (sw.ts). */
+const SHELL_FLAGS = "kelpie-shell-flags";
+const PAIRED_MARK = "/paired";
+
+function markShell(paired: boolean) {
+  try {
+    if (typeof caches === "undefined") return;
+    void caches.open(SHELL_FLAGS).then(async (c) => void (paired ? await c.put(PAIRED_MARK, new Response("1")) : await c.delete(PAIRED_MARK))).catch(() => {});
+  } catch {
+    /* no cache storage on this page */
+  }
+}
 let memory: Pairing | null = null;
 let opened: Promise<IDBDatabase | null> | null = null;
 
@@ -72,6 +95,7 @@ export async function loadPairing(): Promise<Pairing | null> {
 export async function savePairing(p: Pairing): Promise<boolean> {
   memory = p;
   store.set(MARKER, "1");
+  markShell(true);
   const d = await db();
   if (!d) return false;
   return new Promise((resolve) => {
@@ -89,6 +113,7 @@ export async function savePairing(p: Pairing): Promise<boolean> {
 export async function forgetPairing(): Promise<void> {
   memory = null;
   store.del(MARKER);
+  markShell(false);
   const d = await db();
   try {
     d?.transaction(STORE, "readwrite").objectStore(STORE).delete(KEY);

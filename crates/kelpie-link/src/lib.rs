@@ -16,6 +16,9 @@
 //!   nonces are implicit counters over an ordered stream: a dropped, repeated, reordered or altered message fails to decrypt, and
 //!   every error means the connection is finished (the caller drops it and both ends handshake again). There is no reorder window
 //!   and no resumption: every reconnect is a fresh handshake.
+//! - **Padding**: a chunk may be padded, so that what the carrier sees is one of a few sizes ([`PAD_BUCKETS`]) and not the size of what
+//!   is said: flag `PADDED`, the bytes, zeros, and the number of zeros (u16 big-endian) last. Every end reads both; an end pads only once
+//!   the other said it reads padded chunks ([`Session::set_padding`]). No frame is ever sent only to fill the line.
 //!
 //! Wire framing of the first message: `[version, mode, mac1 (16 bytes)] + noise message 1`. `mac1` is a keyed BLAKE2s over the
 //! version, the mode and the Noise message, keyed from the desktop's public key (reconnect) or the pairing secret (pairing): it
@@ -66,6 +69,11 @@ pub const REASSEMBLY_TIMEOUT_MS: u64 = 10_000;
 pub const HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 
 const FLAG_MORE: u8 = 1;
+/// The chunk ends with zeros and their number.
+const FLAG_PADDED: u8 = 2;
+const PAD_LEN: usize = 2;
+/// What a padded chunk's plaintext (flags, bytes, zeros, their number) is rounded up to; the last is the largest a Noise message holds.
+pub const PAD_BUCKETS: [usize; 5] = [256, 1024, 4096, 16384, MAX_NOISE_MESSAGE - TAG_LEN];
 /// HKDF `info` of the six-digit code.
 const SAS_INFO: &[u8] = b"kelpie-sas";
 
@@ -204,7 +212,7 @@ pub fn prefilter(desktop: &[u8; KEY_LEN], first: &[u8], psks: &[[u8; KEY_LEN]]) 
 // ---------- the QR code ----------
 
 /// A way to reach the desktop, in a pairing record. A list of these, not one address: direct candidates and, later, relays.
-/// `t` says what it is (`ts`, `a` being `<name>:<port>` of an HTTPS origin; `lan`, `a` being `ip:port`); a client skips kinds it does not know.
+/// `t` says what it is (`ts`, `a` being `<name>:<port>` of an HTTPS origin; `lan`, `a` being `ip:port`; `relay`, `a` being `wss://<host>` and `r` the room's ticket); a client skips kinds it does not know.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Endpoint {
     #[serde(rename = "t")]
@@ -225,6 +233,11 @@ impl Endpoint {
     /// The computer's Tailscale HTTPS origin (`<name>:<port>`).
     pub fn tailscale(addr: &str) -> Endpoint {
         Endpoint { kind: "ts".into(), addr: addr.into(), room: None }
+    }
+
+    /// A relay (`wss://<host>`) and the ticket of the computer's room there.
+    pub fn relay(url: &str, ticket: &str) -> Endpoint {
+        Endpoint { kind: "relay".into(), addr: url.into(), room: Some(ticket.into()) }
     }
 }
 
@@ -434,6 +447,8 @@ pub struct Session {
     sent_since_rekey: u64,
     received_since_rekey: u64,
     rekey_every: u64,
+    /// Chunks sent are padded to `PAD_BUCKETS`.
+    pad: bool,
     partial: Vec<u8>,
     partial_since: Option<u64>,
     buf: Vec<u8>,
@@ -455,6 +470,7 @@ impl Session {
             sent_since_rekey: 0,
             received_since_rekey: 0,
             rekey_every: REKEY_EVERY_MESSAGES,
+            pad: false,
             partial: Vec::new(),
             partial_since: None,
             buf: vec![0u8; MAX_NOISE_MESSAGE],
@@ -477,19 +493,22 @@ impl Session {
         self.rekey_every = n.max(1);
     }
 
+    /// Pads what this end sends from now on: only once the other end said it reads padded chunks.
+    pub fn set_padding(&mut self, on: bool) {
+        self.pad = on;
+    }
+
     /// One application message as the carrier messages to send, in order.
     pub fn seal(&mut self, msg: &[u8]) -> Result<Vec<Vec<u8>>, LinkError> {
         if msg.len() > MAX_APP_MESSAGE {
             return Err(LinkError::TooLarge);
         }
-        let chunks: Vec<&[u8]> = if msg.is_empty() { vec![&[][..]] } else { msg.chunks(MAX_CHUNK).collect() };
+        let size = if self.pad { MAX_CHUNK - PAD_LEN } else { MAX_CHUNK };
+        let chunks: Vec<&[u8]> = if msg.is_empty() { vec![&[][..]] } else { msg.chunks(size).collect() };
         let last = chunks.len() - 1;
         let mut out = Vec::with_capacity(chunks.len());
-        let mut plain = Vec::with_capacity(MAX_CHUNK + 1);
         for (i, chunk) in chunks.into_iter().enumerate() {
-            plain.clear();
-            plain.push(if i < last { FLAG_MORE } else { 0 });
-            plain.extend_from_slice(chunk);
+            let plain = frame_chunk(i < last, chunk, self.pad);
             let n = self.transport.write_message(&plain, &mut self.buf).map_err(noise)?;
             out.push(self.buf[..n].to_vec());
             self.sent_since_rekey += 1;
@@ -515,15 +534,12 @@ impl Session {
             self.transport.rekey_incoming();
             self.received_since_rekey = 0;
         }
-        let (&flags, chunk) = self.buf[..n].split_first().ok_or(LinkError::Malformed)?;
-        if flags & !FLAG_MORE != 0 {
-            return Err(LinkError::Malformed);
-        }
+        let (more, chunk) = unframe_chunk(&self.buf[..n])?;
         if self.partial.len() + chunk.len() > MAX_APP_MESSAGE {
             return Err(LinkError::TooLarge);
         }
         self.partial.extend_from_slice(chunk);
-        if flags & FLAG_MORE != 0 {
+        if more {
             self.partial_since.get_or_insert(now_ms);
             return Ok(None);
         }
@@ -535,6 +551,48 @@ impl Session {
     pub fn reassembly_expired(&self, now_ms: u64) -> bool {
         self.partial_since.is_some_and(|t| now_ms.saturating_sub(t) > REASSEMBLY_TIMEOUT_MS)
     }
+}
+
+/// A chunk's plaintext: its flags and bytes, and when `pad`, zeros up to the smallest of `PAD_BUCKETS` that holds it all, and their number.
+pub fn frame_chunk(more: bool, data: &[u8], pad: bool) -> Vec<u8> {
+    let mut plain = Vec::with_capacity(if pad { MAX_CHUNK + 1 } else { data.len() + 1 });
+    plain.push(if more { FLAG_MORE } else { 0 });
+    plain.extend_from_slice(data);
+    if pad {
+        let need = plain.len() + PAD_LEN;
+        let bucket = PAD_BUCKETS.iter().copied().find(|b| *b >= need).unwrap_or(need);
+        let zeros = bucket - need;
+        plain[0] |= FLAG_PADDED;
+        plain.resize(plain.len() + zeros, 0);
+        plain.extend_from_slice(&(zeros as u16).to_be_bytes());
+    }
+    plain
+}
+
+/// What a chunk's plaintext carries: whether more chunks follow, and its bytes. Padding that is not zeros, or says more than there is, is not ours.
+pub fn unframe_chunk(plain: &[u8]) -> Result<(bool, &[u8]), LinkError> {
+    let (&flags, rest) = plain.split_first().ok_or(LinkError::Malformed)?;
+    if flags & !(FLAG_MORE | FLAG_PADDED) != 0 {
+        return Err(LinkError::Malformed);
+    }
+    let data = if flags & FLAG_PADDED != 0 {
+        if rest.len() < PAD_LEN {
+            return Err(LinkError::Malformed);
+        }
+        let (body, count) = rest.split_at(rest.len() - PAD_LEN);
+        let zeros = usize::from(u16::from_be_bytes([count[0], count[1]]));
+        if zeros > body.len() {
+            return Err(LinkError::Malformed);
+        }
+        let (data, filler) = body.split_at(body.len() - zeros);
+        if filler.iter().any(|b| *b != 0) {
+            return Err(LinkError::Malformed);
+        }
+        data
+    } else {
+        rest
+    };
+    Ok((flags & FLAG_MORE != 0, data))
 }
 
 /// The six-digit approval code (short authentication string) of a handshake hash: `HKDF-BLAKE2s(ikm = h, salt = none,

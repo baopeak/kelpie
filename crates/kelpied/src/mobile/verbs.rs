@@ -3,7 +3,7 @@
 //! `session.update`, `session.attach`, closing, phone settings and the other admin methods cannot
 //! be reached by naming them.
 
-/// What a paired device may do, least first. `Control` (screen takeover) is the native app's only; no verb needs it yet.
+/// What a paired device may do, least first. `Control` (taking over a browser pane, seeing and driving the screen) is the native app's, or a browser device's that paired on a secure origin with its app lock set up and on (`mobile::record_ceiling`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Permission {
@@ -76,6 +76,35 @@ pub enum Verb {
     LockNow,
     /// The person did something, at most every 30 s: the idle time starts over.
     LockTouch,
+    /// The app's browser panes this phone may take over (`takeover`).
+    Panes,
+    /// Take over a pane: its screen comes as `tk_frame`.
+    TkStart,
+    /// Taps, drags, scrolls and keys into the pane held.
+    TkInput,
+    /// Text into the pane held, with an answer of its own.
+    TkText,
+    /// The phone has shown a frame: it may have the next.
+    TkAck,
+    TkStop,
+    /// The same device's new connection keeps the hold its dropped one had.
+    TkRebind,
+    /// The computer's monitors and windows a phone may see (`screen`).
+    Screens,
+    /// See one: its picture comes as binary media messages on the link.
+    ScStart,
+    ScStop,
+    /// The phone has decoded a video frame.
+    ScAck,
+    /// Clicks, moves, the wheel and keys.
+    ScInput,
+    /// Text, with an answer of its own.
+    ScText,
+    /// The decoder lost its place: a keyframe, please.
+    ScKey,
+    ScRebind,
+    /// Go on after a pause to protect a busy computer.
+    ScResume,
 }
 
 impl Verb {
@@ -104,6 +133,22 @@ impl Verb {
             "lock_unlock" => Verb::LockUnlock,
             "lock_now" => Verb::LockNow,
             "lock_touch" => Verb::LockTouch,
+            "panes" => Verb::Panes,
+            "tk_start" => Verb::TkStart,
+            "tk_input" => Verb::TkInput,
+            "tk_text" => Verb::TkText,
+            "tk_ack" => Verb::TkAck,
+            "tk_stop" => Verb::TkStop,
+            "tk_rebind" => Verb::TkRebind,
+            "screens" => Verb::Screens,
+            "sc_start" => Verb::ScStart,
+            "sc_stop" => Verb::ScStop,
+            "sc_ack" => Verb::ScAck,
+            "sc_input" => Verb::ScInput,
+            "sc_text" => Verb::ScText,
+            "sc_key" => Verb::ScKey,
+            "sc_rebind" => Verb::ScRebind,
+            "sc_resume" => Verb::ScResume,
             _ => return None,
         })
     }
@@ -112,7 +157,20 @@ impl Verb {
         match self {
             Verb::List | Verb::Hb | Verb::Ack | Verb::Sub | Verb::Unsub | Verb::ChatSub | Verb::PushInfo | Verb::PushSub | Verb::PushUnsub | Verb::PushTest | Verb::LockChallenge | Verb::LockEnrol | Verb::LockUnlock | Verb::LockNow | Verb::LockTouch => Permission::Read,
             Verb::Input | Verb::Key | Verb::Answer | Verb::ChatAnswer | Verb::ChatSend | Verb::ChatCancel | Verb::ChatStop | Verb::ChatResume => Permission::Write,
+            Verb::Panes | Verb::TkStart | Verb::TkInput | Verb::TkText | Verb::TkAck | Verb::TkStop | Verb::TkRebind => Permission::Control,
+            Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume => Permission::Control,
         }
+    }
+
+    /// Whether this is one of the control verbs (a browser pane's takeover or the screen), which a broker carries out (`takeover::Broker::phone_verb`,
+    /// `screen::Broker::phone_verb`) and the audit log never sees the content of.
+    pub fn takeover(self) -> bool {
+        self.needs() == Permission::Control
+    }
+
+    /// Whether this is one of the screen's verbs (`screen`).
+    pub fn screen(self) -> bool {
+        matches!(self, Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume)
     }
 
     /// What may pass while the phone is locked: keeping the connection up, and getting out of the lock. Nothing here says anything about a session.
@@ -161,21 +219,25 @@ pub fn key_bytes(key: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const ALL: [Verb; 23] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch];
+    const ALL: [Verb; 39] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch, Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume];
 
     #[test]
     fn the_table_is_closed_and_every_verb_has_its_permission() {
-        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch"];
+        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch", "panes", "tk_start", "tk_input", "tk_text", "tk_ack", "tk_stop", "tk_rebind", "screens", "sc_start", "sc_stop", "sc_ack", "sc_input", "sc_text", "sc_key", "sc_rebind", "sc_resume"];
+        assert_eq!(names.len(), ALL.len());
         for (name, verb) in names.iter().zip(ALL) {
             assert_eq!(Verb::parse(name), Some(verb), "{name}");
         }
         let reads = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "push_info", "push_sub", "push_unsub", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch"];
         for (name, verb) in names.iter().zip(ALL) {
-            let expected = if reads.contains(name) { Permission::Read } else { Permission::Write };
+            let screen = name.starts_with("sc_") || *name == "screens";
+            let expected = if reads.contains(name) { Permission::Read } else if name.starts_with("tk_") || *name == "panes" || screen { Permission::Control } else { Permission::Write };
             assert_eq!(verb.needs(), expected, "{name}");
+            assert_eq!(verb.takeover(), expected == Permission::Control, "{name}");
+            assert_eq!(verb.screen(), screen, "{name}");
         }
         // The daemon's own methods, admin ones above all, are not verbs, whatever they are named.
-        for other in ["chat.send", "chat.queue_op", "chat.write_turn", "chat_queue", "chat_write", "session.update", "session.attach", "session.answer", "session.input", "session.close", "mobile.approve", "mobile.revoke", "daemon.shutdown", "notify.test", "notify.set", "push.sub", "push", "read", "auth", "", "LIST", "list "] {
+        for other in ["tk_eval", "tk_cdp", "sc_eval", "sc_send_input", "screen.input", "screen.start", "screen.text", "browser.takeover_input", "browser.takeover_start", "provider.reply", "provider.register", "chat.send", "chat.queue_op", "chat.write_turn", "chat_queue", "chat_write", "session.update", "session.attach", "session.answer", "session.input", "session.close", "mobile.approve", "mobile.revoke", "daemon.shutdown", "notify.test", "notify.set", "push.sub", "push", "read", "auth", "", "LIST", "list "] {
             assert_eq!(Verb::parse(other), None, "{other:?}");
         }
     }
@@ -185,7 +247,10 @@ mod tests {
         let read_only = Permission::Read;
         let reachable: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() <= read_only).collect();
         assert_eq!(reachable, [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch]);
-        assert!(ALL.into_iter().all(|v| v.needs() <= Permission::Write));
+        let writes: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() <= Permission::Write).collect();
+        assert_eq!(writes.len(), 23, "everything but taking over a pane or seeing the screen");
+        let control: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() == Permission::Control).collect();
+        assert_eq!(control, [Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume]);
     }
 
     #[test]

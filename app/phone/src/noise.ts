@@ -26,7 +26,40 @@ const REKEY_EVERY = 1 << 16;
 /** A message whose chunks stop arriving for this long ends the connection. */
 export const REASSEMBLY_MS = 10_000;
 const MORE = 1;
-const HASHLEN = 32;
+/** The chunk ends with zeros and their number (u16 big-endian), so that it is one of `PAD_BUCKETS` long. */
+const PADDED = 2;
+/** What a padded chunk's plaintext is rounded up to (`PAD_BUCKETS` in crates/kelpie-link); the last is the most a Noise message holds. */
+export const PAD_BUCKETS = [256, 1024, 4096, 16384, MAX_NOISE - TAG];
+
+/** A chunk's plaintext: its flags and bytes, and when `pad`, zeros up to the smallest bucket that holds it all, and their number. */
+export function frameChunk(more: boolean, data: Uint8Array, pad: boolean): Uint8Array {
+  if (!pad) return concat(Uint8Array.of(more ? MORE : 0), data);
+  const need = 1 + data.length + 2;
+  const bucket = PAD_BUCKETS.find((b) => b >= need) ?? need;
+  const out = new Uint8Array(bucket);
+  out[0] = (more ? MORE : 0) | PADDED;
+  out.set(data, 1);
+  const zeros = bucket - need;
+  out[bucket - 2] = zeros >> 8;
+  out[bucket - 1] = zeros & 0xff;
+  return out;
+}
+
+/** Whether more chunks follow, and the chunk's bytes. Padding that is not zeros, or says more than there is, is not ours. */
+export function unframeChunk(plain: Uint8Array): { more: boolean; data: Uint8Array } {
+  if (!plain.length) throw new Error("bad chunk");
+  const flags = plain[0];
+  if (flags & ~(MORE | PADDED)) throw new Error("bad flags");
+  let data = plain.subarray(1);
+  if (flags & PADDED) {
+    if (data.length < 2) throw new Error("bad padding");
+    const zeros = (data[data.length - 2] << 8) | data[data.length - 1];
+    const body = data.subarray(0, data.length - 2);
+    if (zeros > body.length || body.subarray(body.length - zeros).some((b) => b !== 0)) throw new Error("bad padding");
+    data = body.subarray(0, body.length - zeros);
+  }
+  return { more: !!(flags & MORE), data };
+}const HASHLEN = 32;
 const enc = new TextEncoder();
 const PROLOGUE = enc.encode(`kelpie-link/${VERSION}`);
 
@@ -232,6 +265,8 @@ export class Session {
   private receivedSinceRekey = 0;
   /** Messages between rekeys, each direction counting its own (2^16; smaller in tests). */
   rekeyEvery = REKEY_EVERY;
+  /** Pads what this end sends: only once the computer said it reads padded chunks. */
+  pad = false;
   private partial: Uint8Array[] = [];
   private partialSize = 0;
   private partialSince: number | null = null;
@@ -247,10 +282,11 @@ export class Session {
   seal(msg: Uint8Array): Uint8Array[] {
     if (msg.length > MAX_APP) throw new Error("message too large");
     const chunks: Uint8Array[] = [];
-    for (let at = 0; at < msg.length; at += MAX_CHUNK) chunks.push(msg.subarray(at, at + MAX_CHUNK));
+    const size = this.pad ? MAX_CHUNK - 2 : MAX_CHUNK;
+    for (let at = 0; at < msg.length; at += size) chunks.push(msg.subarray(at, at + size));
     if (!chunks.length) chunks.push(new Uint8Array(0));
     return chunks.map((chunk, i) => {
-      const frame = this.tx.encrypt(new Uint8Array(0), concat(Uint8Array.of(i < chunks.length - 1 ? MORE : 0), chunk));
+      const frame = this.tx.encrypt(new Uint8Array(0), frameChunk(i < chunks.length - 1, chunk, this.pad));
       if (++this.sentSinceRekey >= this.rekeyEvery) {
         this.tx.rekey();
         this.sentSinceRekey = 0;
@@ -268,13 +304,11 @@ export class Session {
       this.rx.rekey();
       this.receivedSinceRekey = 0;
     }
-    const flags = plain[0];
-    if (flags & ~MORE) throw new Error("bad flags");
-    const chunk = plain.subarray(1);
+    const { more, data: chunk } = unframeChunk(plain);
     if (this.partialSize + chunk.length > MAX_APP) throw new Error("message too large");
     this.partial.push(chunk);
     this.partialSize += chunk.length;
-    if (flags & MORE) {
+    if (more) {
       this.partialSince ??= now;
       return null;
     }

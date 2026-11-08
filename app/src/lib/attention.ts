@@ -17,6 +17,20 @@ export const TAILSCALE_API = 23;
 /** Daemon API level that has the phones' app lock (`mobile.set_lock`, `mobile.reset_lock`, `lock` in `mobile.status`). */
 export const LOCK_API = 25;
 
+/** Daemon API level that has Telegram's choices: alerts, alerts with a link, approvals of low-risk requests (`telegram.mode`, `notify.telegram_bind`, the `notify.telegram` event). */
+export const TELEGRAM_API = 26;
+
+/** Daemon API level that has the relay (`mobile.set_relay`, `mobile.relay_recreate`, `relay` in `mobile.status`). */
+export const RELAY_API = 27;
+
+/** Daemon API level that has browser pane takeover: the app provides panes (`provider.register`), the phone's `panes` and `tk_*`, and `control` for a
+ *  browser device paired on a secure origin with its app lock on (`may_control` in `mobile.status`). Below it nothing of it is offered. */
+export const TAKEOVER_API = 28;
+
+/** Daemon API level that has the computer's screen for a phone with control (`screens`, `sc_*`, binary media on the link, the app's `screen` provider). Below it the
+ *  phone offers no screen and Settings shows no screen options. */
+export const SCREEN_API = 29;
+
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;
 

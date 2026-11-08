@@ -33,6 +33,8 @@ export const defaultSettings: Settings = {
   hibernateMinutes: 30,
   keepAwake: "off",
   prioritizeVisible: true,
+  screenStopHotkey: "Ctrl+Alt+Shift+K",
+  screenCrispText: true,
   checkpoints: false,
   agentsScripting: true,
   notificationSound: false,

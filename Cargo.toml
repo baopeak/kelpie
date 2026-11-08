@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/kelpie-proto", "crates/kelpie-link", "crates/kelpied", "crates/kelpie-stt", "app/src-tauri"]
+members = ["crates/kelpie-proto", "crates/kelpie-link", "crates/kelpied", "crates/kelpie-stt", "crates/kelpie-screen", "app/src-tauri"]
 # The speech helper downloads and links a large native library: built on request
-# (`cargo build --release -p kelpie-stt`, scripts/build-release.sh), not by every `cargo build`.
+# (`cargo build --release -p kelpie-stt`, scripts/build-release.sh), not by every `cargo build`. The screen helper likewise
+# (`cargo build --release -p kelpie-screen`): the daemon and the app use only its pure modules (`default-features = false`).
 default-members = ["crates/kelpie-proto", "crates/kelpie-link", "crates/kelpied", "app/src-tauri"]
 
 [workspace.package]

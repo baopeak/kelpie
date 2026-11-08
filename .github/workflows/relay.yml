@@ -1,0 +1,39 @@
+name: relay
+
+# The phone relay (relay/): its own workspace and lockfile, so it is checked here, not in ci.yml. Checks only: typecheck, tests on
+# workerd, and the self-hosted bundle smoke-tested on a local workerd. Deploying is done by hand with wrangler (docs/relay-self-host.md).
+on:
+  pull_request:
+    paths: ["relay/**", ".github/workflows/relay.yml"]
+  push:
+    branches: [master]
+    paths: ["relay/**", ".github/workflows/relay.yml"]
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      # Throwaway secrets for a relay that lives as long as this step.
+      - name: Self-hosted relay on workerd, smoke-tested
+        run: |
+          pnpm build:selfhost
+          cd workerd
+          mkdir -p rooms
+          TICKET_SECRET="ci-$(openssl rand -hex 16)" REGISTRATION_KEY="ci-registration" \
+            ../node_modules/.pnpm/@cloudflare+workerd-linux-64@*/node_modules/@cloudflare/workerd-linux-64/bin/workerd serve config.capnp &
+          for i in $(seq 1 30); do curl -sf http://localhost:8787/v1/health && break; sleep 1; done
+          cd ..
+          RELAY_URL=http://localhost:8787 REGISTRATION_KEY=ci-registration pnpm smoke

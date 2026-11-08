@@ -28,6 +28,9 @@ MAX_CHUNK = MAX_NOISE - TAG - 1
 MAX_APP = 1 << 20
 REKEY_EVERY = 1 << 16
 MORE = 1
+PADDED = 2
+# What a padded chunk's plaintext is rounded up to (`PAD_BUCKETS` in crates/kelpie-link).
+PAD_BUCKETS = (256, 1024, 4096, 16384, MAX_NOISE - TAG)
 HASHLEN = 32
 RAW = serialization.Encoding.Raw
 
@@ -189,6 +192,8 @@ class Session:
         self.received_since_rekey = 0
         self.rekey_every = REKEY_EVERY
         self.partial = b""
+        # Pads what it sends, once the other end said it reads padded chunks.
+        self.pad = False
 
     def pair_code(self):
         return pair_code(self.hash)
@@ -197,11 +202,11 @@ class Session:
         if isinstance(msg, str):
             msg = msg.encode()
         assert len(msg) <= MAX_APP
-        chunks = [msg[i:i + MAX_CHUNK] for i in range(0, len(msg), MAX_CHUNK)] or [b""]
+        size = MAX_CHUNK - 2 if self.pad else MAX_CHUNK
+        chunks = [msg[i:i + size] for i in range(0, len(msg), size)] or [b""]
         out = []
         for i, chunk in enumerate(chunks):
-            flags = MORE if i < len(chunks) - 1 else 0
-            out.append(self.send.encrypt(b"", bytes([flags]) + chunk))
+            out.append(self.send.encrypt(b"", frame_chunk(i < len(chunks) - 1, chunk, self.pad)))
             self.sent_since_rekey += 1
             if self.sent_since_rekey >= self.rekey_every:
                 self.send.rekey()
@@ -214,16 +219,40 @@ class Session:
         if self.received_since_rekey >= self.rekey_every:
             self.recv.rekey()
             self.received_since_rekey = 0
-        flags, chunk = plain[0], plain[1:]
-        if flags & ~MORE:
-            raise ValueError("bad flags")
+        more, chunk = unframe_chunk(plain)
         self.partial += chunk
         if len(self.partial) > MAX_APP:
             raise ValueError("too large")
-        if flags & MORE:
+        if more:
             return None
         whole, self.partial = self.partial, b""
         return whole
+
+
+def frame_chunk(more, data, pad):
+    """A chunk's plaintext: flags and bytes, and when `pad`, zeros up to the next of PAD_BUCKETS and their number (u16 big-endian)."""
+    plain = bytes([MORE if more else 0]) + data
+    if not pad:
+        return plain
+    need = len(plain) + 2
+    bucket = next((b for b in PAD_BUCKETS if b >= need), need)
+    zeros = bucket - need
+    return bytes([plain[0] | PADDED]) + data + b"\x00" * zeros + struct.pack(">H", zeros)
+
+
+def unframe_chunk(plain):
+    flags, rest = plain[0], plain[1:]
+    if flags & ~(MORE | PADDED):
+        raise ValueError("bad flags")
+    if flags & PADDED:
+        if len(rest) < 2:
+            raise ValueError("bad padding")
+        zeros = struct.unpack(">H", rest[-2:])[0]
+        body = rest[:-2]
+        if zeros > len(body) or any(body[len(body) - zeros:]):
+            raise ValueError("bad padding")
+        rest = body[:len(body) - zeros]
+    return bool(flags & MORE), rest
 
 
 def check_vectors(path=None):

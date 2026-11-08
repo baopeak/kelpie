@@ -147,6 +147,32 @@ where
                 };
                 let req_id = req.get("id").cloned().unwrap_or(Value::Null);
                 let method = req.get("method").and_then(Value::as_str).unwrap_or("").to_string();
+                // The app's answers to the daemon's own requests (`provider`) and what it says on its own, a frame above all: taken here, ahead of its
+                // requests, which may be slow. Nobody else is heard on these, and nothing is said back.
+                // Registering as a provider is taken here too: the peer's process says whether a new connection is the same app as the one before.
+                if method == "provider.register" {
+                    let reply = match daemon.provider_register(id, &role, peer, req.get("params").unwrap_or(&Value::Null), &out_tx) {
+                        Ok(v) => json!({"id": req_id, "result": v}),
+                        Err(e) => json!({"id": req_id, "error": {"message": format!("{e:#}")}}),
+                    };
+                    if !req_id.is_null() {
+                        let _ = out_tx.send(json_out(&reply));
+                    }
+                    continue;
+                }
+                if matches!(method.as_str(), "provider.reply" | "provider.event") {
+                    if role == Role::App {
+                        let params = req.get("params").unwrap_or(&Value::Null);
+                        if method == "provider.reply" {
+                            daemon.providers.reply(id, params);
+                        } else if crate::screen::Broker::owns_event(params) {
+                            daemon.screen.on_event(&daemon, id, params);
+                        } else {
+                            daemon.takeover.on_event(&daemon, id, params);
+                        }
+                    }
+                    continue;
+                }
                 let denied = if method == "auth" {
                     match auth::authenticate(&daemon, req.get("params").unwrap_or(&Value::Null)) {
                         Ok(r) => {
@@ -160,6 +186,10 @@ where
                                 Role::App => json!({"user": true, "app": true}),
                                 _ => json!({"user": true}),
                             };
+                            // A connection that is no longer the app provides nothing from now on.
+                            if role == Role::App && r != Role::App {
+                                daemon.provider_gone(id);
+                            }
                             role = r;
                             daemon.set_client_role(id, &role);
                             daemon.mark_app(id, says_app);
@@ -191,6 +221,8 @@ where
             Frame::Output { .. } => {}
         }
     }
+    // What it provided is free before its queued requests are drained (a long one may wait on the person): the app that connects again takes it at once.
+    daemon.provider_gone(id);
     drop(req_tx);
     let _ = worker.await;
     daemon.unregister_client(id);

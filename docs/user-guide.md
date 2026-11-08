@@ -531,7 +531,8 @@ keeps it up while agents work.
 - **ntfy**: switch it on, install the ntfy app and subscribe to the topic Kelpie shows (*Show topic*).
   The topic is 128 random bits only you know; use *New topic* if you shared it by accident. An
   access token is optional, and the server can be your own.
-- **Telegram**: make a bot with @BotFather, paste its token and your chat id, press *Send a test*.
+- **Telegram**: make a bot with @BotFather, paste its token and your chat id, press *Send a test*. What
+  it gets is chosen in Settings → Mobile (see [Telegram's choices](#telegram-alerts-links-and-approvals)).
 - **Webhook**: a JSON `POST` to an address you choose.
 
 Choose which events go out (needs you, finished, failed, automation, run approval, cost cap), skip
@@ -862,6 +863,9 @@ elements on the page: each pick records its selector, text, HTML, attributes (pa
 token-like values removed) and size, with a screenshot of the element; add a note and **send
 to an agent** as one prompt. With Settings → Terminal → *Open localhost links in a browser
 pane*, `Ctrl/⌘+click` on a dev-server address in a terminal opens it next to the terminal.
+A page that opens a sign-in window of a set size (an OAuth "Continue with…" window) gets it as a
+window of its own, so the sign-in can hand back to the page; other links that open a new window
+open in the pane.
 
 ### Processes, ports and preview
 
@@ -1034,8 +1038,43 @@ pairing keeps working. Raising what a phone may do,
 resetting phone access and keeping unused phones paired for longer ask the same way; declining a phone,
 lowering a permission and removing a phone do not. If you refuse three prompts in a few minutes,
 or leave three unanswered in 20, Kelpie stops asking for five minutes: if you did not start them, use
-*Turn off phone access and revoke all*. A prompt you leave open for nearly five minutes stops counting, and
+*Turn off phone access and revoke all*, near the top of the page. A prompt you leave open for nearly five minutes stops counting, and
 while its dialog is still on screen Kelpie asks you to close it before showing another.
+
+**How the page is laid out.** The top of Settings → Mobile says in a few lines how a phone reaches this computer now, whether the app lock is on, where alerts go and how many phones are paired. Below it is one row per option, each with the same lines: *What it does*, *Trade-off*, *How safe*, and *Which phones* where that differs. A row that cannot be changed right now says why and what to do first, and one that will ask you to verify says so. Your network address, port, certificate, the list of paired phones and resetting are under **Advanced** at the bottom. *Turn off phone access and revoke all* stays outside it, near the top, so it is in sight when a phone is lost. *Show them* in the summary opens it, and so does a phone that must be paired again.
+
+| Option | Starts | Changing it asks you to verify |
+| --- | --- | --- |
+| *Reach this computer with Tailscale* | off | turning it on |
+| *Reach this computer through the relay* | off | turning it on |
+| *Alerts on your phone* | off, until a phone turns them on | no. Each phone turns them on for itself, in the phone app, so here it only shows how many have |
+| *Lock Kelpie on phones* | on | turning it off |
+| *Lock after idle* | 5 minutes | a longer time |
+| *Ask again for dangerous commands* | off | turning it off |
+| *Allow reading over plain HTTP* | on | turning it on |
+| *ntfy*, *Telegram* | off | no |
+| *Telegram gets* | *Alerts with a link* (a setting from before keeps *Alerts only*) | choosing approvals |
+
+The *ntfy* and *Telegram* switches here are the same ones as in Settings → Notifications, which keeps their server, topic and tokens. *Allow reading over plain HTTP* only counts while the lock is on: with the lock off such a page reads anyway.
+
+<a id="telegram-alerts-links-and-approvals"></a>**Telegram: alerts, links and approvals.** With Telegram on, *Telegram gets* has three choices:
+
+- **Alerts only**: what Kelpie sent before there was a choice. A setting from an earlier version stays here, so nothing changes until you choose; the link to the session comes only with *Include a link to the phone page* in Settings → Notifications.
+- **Alerts with a link** (what Telegram gets when you switch it on now): each message ends with a link to the session in the phone app, at the Tailscale address when there is one. Telegram sees the link, with this computer's name or address in it, but does not open it, and the link holds no code or token.
+- **Alerts with a link, and approvals of low-risk requests**: off unless you choose it. A message about a request Kelpie labels **low risk** gets two buttons, *Approve once* and *Deny*; everything else (risk unknown, medium or dangerous) gets the alert and the link only, and you answer it on the computer or a paired phone.
+
+Read what approving from Telegram gives up before choosing it: **Telegram can read these messages** (a chat with a bot is not end-to-end encrypted, and it shows the command), **a tap asks for no Face ID**, and **anyone who has this Telegram account can approve** (a stolen phone, a SIM swap, a session left open elsewhere). Kelpie asks you to verify first (Windows Hello or your password), then shows a code: from the Telegram account that will approve, send `/bind <code>` within five minutes in the chat set in Settings → Notifications (your chat with the bot, or the group). A code sent from any other chat, or by a group's anonymous admin, binds nothing, and the bot says why (once a minute at most in each chat). That account in that chat is then the only one whose presses count; Settings shows its name next to its number, so you can tell it is yours. Only the installed Kelpie app can turn this on, and only on the computer.
+
+How the buttons behave:
+
+- Each pair answers one request, once, for five minutes. It stops working when the request is answered anywhere else (the message then says so), when Kelpie restarts, and when you turn approvals off. The first answer wins: a late press is told who answered.
+- Only the one-time choice is offered. "Always", "don't ask again" and "for this session" stay on the computer, and so does a request whose one-time yes Kelpie cannot tell for certain (two requests at once, a terminal menu it does not recognise, or a menu that does not show exactly the command the agent reported).
+- A file edit, write or patch gets no buttons, even inside the project: Telegram would show only the file's name, not what goes in it. Answer it on the computer or a paired phone, where you can see the change.
+- A command that takes more than one line in the agent's permission dialog gets no buttons either, only the alert and its link: on screen, a long line that wrapped looks just like two commands.
+- At most six approvals a minute from Telegram; past that, messages come without buttons until the minute is over.
+- Every approval, denial and refused press is in *What phones did* under Advanced, as *telegram*, with the command as a length and a hash. Presses from any other account or chat do nothing, and their count is noted there once a minute, as is the count of presses of buttons that no longer work.
+- **Turning it off**: choose *Alerts with a link* or *Alerts only*, or switch Telegram off. Another chat id or bot token turns approvals off too, and so does *Turn off phone access and revoke all*, turning phone access off, and resetting it. The messages already sent lose their buttons, and turning approvals on again needs a new code. While a code is shown, choosing *Alerts with a link* or *Alerts only*, switching Telegram off, or changing its chat id or bot token ends that code; changing other settings leaves it waiting.
+- If Telegram refuses the polling because the bot has a webhook or another program reads its messages, Settings says so; remove the webhook (`deleteWebhook`) or stop that program. A token Telegram rejects stops approvals, and Settings says that too. Kelpie only ever connects out to Telegram: nothing listens on your computer for it.
 
 **Reaching this computer from anywhere, with Tailscale.** If you use [Tailscale](https://tailscale.com) on
 both the computer and the phone, turn on *Reach this computer with Tailscale* in Settings → Mobile. Kelpie then
@@ -1064,6 +1103,21 @@ Tailscale plan is for non-commercial use. Turning phone access off, the kill swi
 remove the entry; turning phone access on again does not bring it back until you turn it on and confirm. If Tailscale is stopped at that moment, Settings says the entry is
 still there. Kelpie tries again when you open Settings → Mobile or press *Check again*, and when it next starts; nothing runs in the background to retry while phone access is off.
 
+**Reaching this computer without Tailscale, through the relay.** With *Reach this computer through the relay* on, the installed app
+reaches this computer when Tailscale is off on the phone, or a network blocks it, through a relay on Cloudflare that passes on what they say
+without being able to read it. This computer connects out to the relay; nothing on it is opened to the internet. Turning it on asks you to
+confirm, and the first time it asks for the relay's registration key, which whoever runs the relay gives you: it makes this computer's
+room there once and stays in the credential store. *Relay address* is Kelpie's relay unless you run your own
+([relay-self-host.md](relay-self-host.md)). Only phones paired over Tailscale can use it, each with a token it gets the next time it connects
+and that changes every week; removing a phone shuts it out of the relay too, even while this computer is offline. The phone tries the
+Tailscale address first and the relay a moment later, and goes back to the Tailscale address by itself once it answers again.
+
+What to know: **installing the app on a phone still needs Tailscale the first time**, because the relay serves no page. **The relay also needs Tailscale mode to have been on at least once**: it lets phones in only from this computer's Tailscale address, so with no such address no phone can use it, and its row says so. If this computer's Tailscale name changes (renaming it, or MagicDNS giving it a new name), phones installed from the old name are cut off from the relay as well as from the old address, until you install and pair them again at the new name. With the relay down
+and Tailscale off the app has no way to this computer, and says *No way to your computer*; *Relay unreachable* and *Computer offline* say
+which of the two does not answer. The relay sees that a phone and this computer are connected, their internet addresses, when and how much
+they send, and the room's number, never what is said; *What the relay can see* under its row says the same. If the relay stays slow from
+this computer for a day, its row offers *Make a new room*, placed near where the computer is now; phones move to it by themselves. When the relay is turned on or moved while the app is open, the app reloads itself the next time you come back to it, or at once if it cannot reach the computer any other way: a page can only reach the relay its own page allows. When you unpair a phone while the relay is on, and this computer keeps the registration key, Settings asks whether to make a new room too, and the answer is *Not now* unless you choose otherwise: the removed phone still knows the old room's ticket, though the relay no longer lets it in. Phones connected at that moment move to the new room by themselves, over their encrypted link; a phone that is not connected cannot use the relay until it connects once over Tailscale, and may need to be paired again. Making a room asks you to verify.
+
 **The app lock.** A phone paired at a name over Tailscale or HTTPS opens only after Face ID, a fingerprint or its passcode, and your computer checks that. Someone who copied the phone's key cannot get in while it is unlocked, cannot keep it unlocked, and cannot set up a passkey of their own, with one gap: in the five minutes after you approve a phone or press *Reset this phone's lock*, someone with its key could set one up first. Your computer tells you when a phone sets up its lock: if that was not you, unpair it. Set it up right after pairing, when it asks. If those five minutes have passed, it says to press *Reset this phone's lock* on the computer first. It locks again the moment you leave the app or reload the page, and after the idle time in Settings → Mobile (5 minutes unless you change it). Unlocking is one tap and then Face ID: it never starts by itself. A network that drops and comes back while you are using it does not ask again; restarting Kelpie on the computer does.
 
 **Phones paired with Kelpie 0.1.11 or earlier** are not covered by this lock, and can only read until you pair them again through Tailscale mode, however they connect. That includes a phone that could type over a Tailscale address or your own certificate before. To keep typing on the same pairing instead, turn off *Lock Kelpie on phones* in Settings → Mobile. Reading without a lock can be closed with *Allow reading over plain HTTP*.
@@ -1084,6 +1138,52 @@ command, so allow typing only on phones you would trust at your keyboard. Recogn
 effort: a new agent's wording may still get a button, or an ordinary option lose one. Unpairing a device
 disconnects it at once.
 
+**Taking over a browser pane from the phone** (Windows). When an agent is stuck on a sign-in, a consent screen, a 2FA code or a check in one of Kelpie's
+browser panes, a phone may drive that pane: *Take over a browser pane* in a session lists the panes with a page open, those of the session's project first.
+The phone shows the page; a tap clicks, a swipe scrolls, holding still for a moment (0.4 s) and then moving drags, pinching does not zoom the page, the key row has Enter, Tab, Backspace, Esc and the arrows,
+and the text field types into the page (a password goes as one message, and the phone says *Sent to the page* or *Not sent*; it is never sent twice by
+itself). A sign-in window the page opens comes to the phone too, and closing it goes back to the page. On the computer the pane's tab comes to the front and
+stays there (switching away brings it back once, since the phone sees nothing of a hidden page; switch away again and it stays where you put it; the phone then says the pane is hidden on the computer, as it does while Kelpie is minimised, and sends nothing until the pane shows again), with *Controlled from <phone> · Stop* above it; the sign-in window's title says the same. Stop on either side ends it, and so do 10 minutes with
+nothing typed, the phone locking or leaving the app, and removing the phone or lowering what it may do, within a second or two.
+
+Only a phone given *May take control* can do this, and Settings → Mobile offers that only for a phone paired over Tailscale (or your own HTTPS name) whose app
+lock is set up, while *Lock Kelpie on phones* is on; giving it asks you to verify, and that is the only confirmation a takeover asks for. Turning the lock
+off takes control away from every such phone, which can then only type: after turning the lock back on, give it *May take control* again. It works over Tailscale or that HTTPS address, not through the relay. What is typed
+is not recorded anywhere: *What phones did* says only when a takeover started and why it ended. If the computer is very busy a new takeover waits; if the
+picture stops for a few seconds the phone dims it and sends nothing until it is back, so a tap never lands on a page that changed meanwhile. A program on the
+computer that tries to stand in for Kelpie's window here is refused, and Kelpie says so.
+
+**Seeing the computer's screen from the phone** (Windows). When an agent waits on something outside Kelpie — a dialog, an installer, the app it is building,
+an IDE — a phone given *May take control* can see one of the computer's screens or one window and use it: *See the computer's screen* in the inbox or in a session lists the
+screens, then Kelpie and the code editors that are open, then the other windows. On the phone one finger works as a trackpad: it moves the computer's pointer,
+a tap clicks where the pointer is, holding still then moving drags, and a long press right-clicks; *Direct touch* clicks under your finger instead. Two fingers
+scroll, pinching zooms the phone's view (not the computer's), and two fingers tapped together right-click. The key row has Ctrl, Shift, Alt and Win (tap one,
+then a key, or type one letter with it held for a shortcut such as Ctrl+S or Win+E), Esc, Tab, Enter, the arrows, ⊞ (the Windows key alone, for Start) and a few more; the text field types on the computer and
+the phone says *Typed on the computer* or *Not sent*. Under the picture the phone says how it is going (`720p · 15 fps · reduced: computer busy`); tap that
+line for details. When text stands still it is sent once more as a sharp picture (*Crisp text* in Settings → Mobile → Advanced, on by default; it uses more
+data, so it turns itself off while the connection is slow, mobile data included, and the phone says *crisp text off: slow connection*).
+
+On the computer an orange border goes around what is shared, with a badge naming the phone and the stop hotkey, and the status bar says *Shared with <phone>*
+with *Stop*. **Ctrl+Alt+Shift+K stops it from anywhere**; it is always on (you can pick another key in Settings → Mobile → Advanced, not turn it off, and Kelpie
+tells you if another program holds it). Stop on the phone ends it too, and so do 10 minutes with nothing done, the phone locking or leaving the app (at once,
+with no grace), removing the phone or lowering what it may do (within a second), and closing the shared window. It needs the Kelpie app open on the computer (the phone says so otherwise), works over Tailscale or your HTTPS
+address and never through the relay, and one phone at a time. If the computer is very busy a new screen waits, and after five very busy minutes the picture
+pauses until you tap it. The phone says when the computer is locked, when a Windows security prompt (UAC) is up, when an app running as administrator is in
+front, and when the window is minimized: those cannot be seen or answered from the phone. What is typed or clicked is not recorded anywhere: *What phones
+did* says which program was shared (such as `Code.exe`, never the window's title) or that it was a whole screen, when, and why it ended.
+
+Keys and text go only into the shared window: if another window has taken the focus on the computer, Kelpie brings the shared one to the front once,
+and if that does not work it types nothing and the phone says *Not typed*, so a password never lands in a chat that popped up. Sharing does not start
+if the orange border cannot be shown or another program holds the stop hotkey (Kelpie says so: pick another hotkey), nor while Kelpie itself runs as
+administrator. A 4K or larger screen is shown at 1080p, with crisp text at its full sharpness; a rotated screen cannot be shown yet (share one of its
+windows). If the picture stops while the computer says it is sending, the phone says *The picture is stuck* and asks for a fresh one.
+
+**What *May take control* means for the screen.** A phone given it can do anything you can do at this computer while signed in: for example Win+R and a
+command runs any program as you. Win+L locks the computer, and the phone cannot unlock it again: someone has to sign in at the computer. Ctrl+Alt+Del
+cannot be sent from the phone, and Windows security prompts (UAC), the lock screen and sign-in cannot be seen or answered from it. Give it only to your own
+phone, with its lock on. The phone needs a browser that decodes H.264 video with WebCodecs: Safari on iOS 16.4 or later (iOS 26 works
+best), or Chrome on Android; an older one says so.
+
 **"Not paired here" on the phone** means the computer did not recognise this phone, or keeps not
 answering it. It may have been removed there, phone access may have been reset, something on the
 network may be interfering, or the answer may not have come from your computer. The phone keeps its pairing and tries again by itself. If it was
@@ -1102,7 +1202,7 @@ Paired devices stay saved, but must reconnect after access is enabled again; an 
 cannot keep reading or answering prompts across that switch. Turning it off is not how to cut off a
 phone: any program holding your account's Kelpie token can turn it back on, which is recorded in
 *What phones did*, and every paired phone then has its access back. To cut a phone off, use *Unpair*,
-or *Turn off phone access and revoke all* for every phone.
+under **Advanced**, or *Turn off phone access and revoke all* near the top of the page for every phone.
 
 ### Voice dictation
 

@@ -2,7 +2,7 @@
 import { createSignal, For, Show } from "solid-js";
 import { msg, t } from "./i18n";
 import { groupSessions, labelOf, whereOf, type GroupKey } from "./inbox-order";
-import { discardNotSent, notSent, now, openSession, paintedFrom, projects, sessions } from "./phone-state";
+import { canSeeScreen, connected, discardNotSent, notSent, now, openSession, paintedFrom, projects, remoteScreens, sessions } from "./phone-state";
 import { waitedFor } from "../../src/lib/attention";
 
 /** Messages this phone sent to chats that are gone from the computer's list (closed, or resumed as a new session) and that were
@@ -58,6 +58,10 @@ export function Inbox() {
   const groups = () => groupSessions(sessions());
   return (
     <div classList={{ painted: paintedFrom() !== null }}>
+      {/* The computer's screen is reached from here too, not only from a session (a dialog may have nothing to do with one). */}
+      <Show when={canSeeScreen()}>
+        <div class="takeover-entry"><button class="btn" data-see-screen disabled={!connected()} onClick={() => void remoteScreens.openPicker()}>{t("See the computer's screen")}</button></div>
+      </Show>
       <For each={groups()} fallback={<div class="card"><p class="muted">{t("No sessions are running.")}</p></div>}>
         {(g) => (
           <section data-group={g.key}>

@@ -51,6 +51,9 @@ pub struct Request {
     /// The files a file tool reads or changes.
     pub paths: Vec<String>,
     pub cwd: Option<String>,
+    /// What the agent says the call is for (`description` in Claude's Bash input), which its permission dialog shows under the command.
+    /// Only for telling that dialog on screen apart (`choices::menu_shows_command`): never shown, never read for the level.
+    pub description: String,
 }
 
 /// More sub-commands than a person reads on a phone, and a good way to bury one of them.
@@ -82,6 +85,12 @@ fn tool_kind(tool: &str) -> ToolKind {
         "webfetch" | "websearch" | "fetch" => ToolKind::Fetch,
         _ => ToolKind::Other,
     }
+}
+
+/// A request whose effect is what it writes to files (an edit, a write, a patch, a move or a delete): its path names the file, not what
+/// goes in it. A button that shows only `shown` (`notify::telegram_poll`) is not offered for it. The level is not changed by this.
+pub fn changes_files(request: &Request) -> bool {
+    request.tool.as_deref().is_some_and(|t| matches!(tool_kind(t), ToolKind::Edit | ToolKind::Delete))
 }
 
 // What a test runs whenever a label is begun on its thread.
@@ -137,7 +146,7 @@ pub fn from_tool(tool: &str, input: &serde_json::Value, cwd: Option<&str>) -> Re
     let command = input.get("command").and_then(command_text);
     let paths: Vec<String> = ["file_path", "notebook_path", "path"].iter().find_map(|k| text(k)).into_iter().collect();
     let shown = command.clone().or_else(|| paths.first().cloned()).unwrap_or_else(|| if input.is_null() { String::new() } else { input.to_string() });
-    Request { tool: Some(tool.to_string()), command, shown: shown_text(shown), paths, cwd: cwd.map(str::to_string) }
+    Request { tool: Some(tool.to_string()), command, shown: shown_text(shown), paths, cwd: cwd.map(str::to_string), description: text("description").unwrap_or_default() }
 }
 
 /// A command as an agent's protocol gives it: a line a shell will read, or its words, which no shell has split. Words are quoted where they need it, so that a word keeps its
@@ -643,6 +652,17 @@ fn program_of(word: &str) -> String {
         }
     }
     name
+}
+
+/// Whether `word`, first on a line, names a program or a shell word this table knows, however it is cased or wherever it is (`Rm`,
+/// `/bin/rm`, `rm.exe`): a line that starts with it reads as a command.
+pub fn names_a_program(word: &str) -> bool {
+    let program = program_of(word);
+    let p = program.as_str();
+    is_shell(p)
+        || [READ_ONLY, KNOWN_CHANGES, NETWORK, DELETES, SUDO, WRAPPERS].iter().any(|list| list.contains(&p))
+        || matches!(p, "find" | "eval" | "source" | "." | "iex" | "invoke-expression" | "perl" | "xargs" | "parallel" | "watch" | "printenv" | "cmdkey" | "security" | "vault" | "op")
+        || matches!(p, "if" | "then" | "elif" | "else" | "fi" | "while" | "until" | "for" | "do" | "done" | "case" | "esac" | "function" | "!")
 }
 
 fn is_shell(program: &str) -> bool {

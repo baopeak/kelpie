@@ -19,12 +19,13 @@ use crate::checkpoints::{self, Checkpoints};
 use crate::meta::MetaStore;
 use crate::notes::{self, Note, NoteStore};
 use crate::notify::destinations::{Destinations, Host};
+use crate::notify::telegram_poll::{Answered, Approval, Target};
 use crate::notify::{self, Notifier, Raised};
 use crate::status::Status;
 use crate::persist::{write_atomic, SavedSession, Store};
 use crate::runs::{self, Action, NewRun, Runs, SessionView, TaskStatus};
 use crate::scheduled_input::{ScheduledInputs, CONTINUE_TEXT};
-use crate::session::{json_out, now_millis, Answer, AnswerError, ClientTx, Session, SessionInfo, SessionSpec};
+use crate::session::{json_out, now_millis, Answer, AnswerError, By, ClientTx, Session, SessionInfo, SessionSpec};
 use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, turn_event};
 
 mod automation;
@@ -63,6 +64,74 @@ impl Host for NotifyHost {
         if let Some(d) = self.0.upgrade() {
             d.mobile.push_gone(device, endpoint);
             d.broadcast("mobile.updated", json!({}));
+        }
+    }
+
+    fn telegram_approval(&self, session: &str, wait: Option<u64>) -> Option<Approval> {
+        let found = match self.0.upgrade()?.by_id(session)? {
+            // On a destination's or the polling thread: a menu drawn just after the hook said what is asked is waited for, a few seconds at most.
+            Entry::Term(s) => {
+                let wait = wait?;
+                let until = Instant::now() + Duration::from_secs(3);
+                loop {
+                    if let Some(found) = s.telegram_approval(wait) {
+                        break Some(found);
+                    }
+                    if Instant::now() >= until || !s.telegram_menu_due(wait) {
+                        break None;
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+            Entry::Chat(c) => c.telegram_approval(),
+        };
+        found.map(|(target, command)| Approval { session: session.to_string(), target, command })
+    }
+
+    /// Only for the request the button was sent for, still as it was: then the session's own answer path decides, and the first answer wins.
+    fn telegram_answer(&self, approval: &Approval, allow: bool, go: &dyn Fn() -> bool) -> Answered {
+        let Some(entry) = self.0.upgrade().and_then(|d| d.by_id(&approval.session)) else { return Answered::Gone };
+        let still = self.telegram_still(approval);
+        match (&entry, &approval.target) {
+            (Entry::Term(s), Target::Term { wait, yes, no }) => {
+                if !still {
+                    return s.resolution(*wait).map_or(Answered::Gone, |r| Answered::Already(r.by.id));
+                }
+                if !go() {
+                    return Answered::Off;
+                }
+                match s.answer_by(Some(*wait), Answer::Text(if allow { yes } else { no }), false, By::telegram()) {
+                    Ok(()) => Answered::Done,
+                    Err(AnswerError::Answered(r)) => Answered::Already(r.by.id),
+                    Err(_) => Answered::Gone,
+                }
+            }
+            (Entry::Chat(c), Target::Chat { request_id, allow: yes, deny: no }) => {
+                if !still {
+                    return c.resolution(request_id, yes).map_or(Answered::Gone, |r| Answered::Already(r.by.id));
+                }
+                if !go() {
+                    return Answered::Off;
+                }
+                match c.answer(request_id, if allow { yes } else { no }, By::telegram()) {
+                    Ok(()) => Answered::Done,
+                    Err(crate::chat::NotAnswered::AlreadyAnswered(r)) => Answered::Already(r.by.id),
+                    Err(_) => Answered::Gone,
+                }
+            }
+            _ => Answered::Gone,
+        }
+    }
+
+    fn telegram_audit(&self, action: &str, summary: &str) {
+        if let Some(d) = self.0.upgrade() {
+            d.mobile.audit("telegram", action, summary);
+        }
+    }
+
+    fn telegram_changed(&self, what: &str) {
+        if let Some(d) = self.0.upgrade() {
+            d.broadcast("notify.telegram", json!({"change": what}));
         }
     }
 }
@@ -154,6 +223,12 @@ pub struct Daemon {
     subs: crate::subs::Subs,
     /// What the sessions run, looked at when the app asks (`process.*`).
     procs: crate::procs::Procs,
+    /// The app's connection, asked for what only the window can do (`provider`).
+    pub providers: crate::provider::Providers,
+    /// Phones that took over a browser pane (`takeover`).
+    pub takeover: crate::takeover::Broker,
+    /// Phones that see this computer's screen (`screen`).
+    pub screen: crate::screen::Broker,
     /// This daemon, for threads that outlive a call.
     me: std::sync::Weak<Daemon>,
 }
@@ -290,6 +365,9 @@ impl Daemon {
                 scheduled: ScheduledInputs::open(&data_dir),
                 subs: crate::subs::Subs::new(policy.sub).with_stats_file(data_dir.join("sub-stats.json")),
                 procs: crate::procs::Procs::default(),
+                providers: crate::provider::Providers::default(),
+                takeover: crate::takeover::Broker::default(),
+                screen: crate::screen::Broker::default(),
                 me: weak,
                 data_dir,
                 exe,
@@ -483,7 +561,13 @@ impl Daemon {
 
     /// What a message needs to know around an event; read only for one that is being sent.
     fn push_context(&self, ev: &Raised) -> notify::Context {
-        let mut ctx = notify::Context { phone_url: self.notifier.config().phone_link.then(|| self.mobile.running_url()).flatten(), ..Default::default() };
+        let config = self.notifier.config();
+        let telegram_link = config.telegram.enabled && config.telegram.mode != notify::TelegramMode::Alert;
+        let mut ctx = notify::Context {
+            phone_url: config.phone_link.then(|| self.mobile.running_url()).flatten(),
+            telegram_url: telegram_link.then(|| self.mobile.running_url()).flatten(),
+            ..Default::default()
+        };
         ctx.project = ev.project_id.as_deref().and_then(|p| self.mobile.project_name(p));
         let Some(entry) = ev.session.as_deref().and_then(|s| self.by_id(s)) else { return ctx };
         let info = entry.info();
@@ -970,6 +1054,9 @@ impl Daemon {
     }
 
     pub fn unregister_client(&self, id: u64) {
+        // The app's requests in flight are answered now, and the phones that held its panes or its screen let go of them (the read loop did, unless this
+        // connection never had one).
+        self.provider_gone(id);
         self.clients.lock().remove(&id);
         self.client_roles.lock().remove(&id);
         self.auto_rt.drop_client(id);
@@ -980,6 +1067,39 @@ impl Daemon {
             if let Entry::Chat(c) = entry {
                 c.client_gone(id);
             }
+        }
+    }
+
+    /// `provider.register` (the verified app only, `auth::APP_ONLY`; taken on the connection's read loop, which knows its peer's process): it provides
+    /// browser panes to phones that take one over. The same app process on a new connection takes over from its old one, whose holds end. Anything else
+    /// that asks while one provides is refused, the audit log has it and the desktop hears of it.
+    pub fn provider_register(&self, client: u64, role: &crate::auth::Role, pid: Option<u32>, params: &Value, tx: &ClientTx) -> Result<Value> {
+        let kind = param(params, "kind")?.as_str().unwrap_or_default();
+        match self.providers.register(client, role, kind, pid, tx)? {
+            crate::provider::Registration::Registered => Ok(json!({"registered": true})),
+            crate::provider::Registration::Replaced(old) => {
+                // The old connection is on its way out: what it served of this kind ends.
+                if kind == "screen" {
+                    self.screen.provider_gone(self, old);
+                } else {
+                    self.takeover.provider_gone(self, old);
+                }
+                Ok(json!({"registered": true}))
+            }
+            crate::provider::Registration::Taken => {
+                self.mobile.audit("-", "provider_refused", kind);
+                self.broadcast("provider.refused", json!({"kind": kind}));
+                bail!("another connection already provides {kind}")
+            }
+        }
+    }
+
+    /// `client` stops being the app (its connection ended, or it said it is something else): what it provided is free, and the phones that held its
+    /// panes let go of them.
+    pub fn provider_gone(&self, client: u64) {
+        if !self.providers.client_gone(client).is_empty() {
+            self.takeover.provider_gone(self, client);
+            self.screen.provider_gone(self, client);
         }
     }
 
@@ -1805,8 +1925,20 @@ impl Daemon {
                     Some(c) if !c.is_null() => Some(serde_json::from_value(c.clone()).context("notify config")?),
                     _ => None,
                 };
-                self.notifier.update(config, params.get("secrets").unwrap_or(&Value::Null))?;
+                // `end_binding`: the person chose another Telegram mode than approvals, so a code shown for them binds nothing.
+                let ends_binding = params.get("end_binding").and_then(Value::as_bool) == Some(true);
+                self.notifier.update_choosing(config, params.get("secrets").unwrap_or(&Value::Null), ends_binding)?;
                 self.notifier.describe(false)
+            }
+            // The verified app only (`auth::APP_ONLY`), then the person: it lets a Telegram account approve low-risk requests with no Face ID.
+            // Turning it off is `notify.set` with another mode, which anyone of the user's may ask for.
+            "notify.telegram_bind" => {
+                self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::TelegramApprovals, |me| {
+                    let v = me.notifier.telegram_bind()?;
+                    me.mobile.audit("telegram", "telegram_bind_started", "a code to bind a Telegram account was shown");
+                    Ok(v)
+                })?;
+                return Ok(None);
             }
             "notify.rotate_topic" => json!({"topic": self.notifier.rotate_topic()?}),
             "notify.clear" => {
@@ -1889,6 +2021,7 @@ impl Daemon {
                 write_atomic(&self.data_dir.join("custom-agents.json"), &serde_json::to_vec_pretty(&defs)?)?;
                 json!(true)
             }
+
             "mobile.status" => self.mobile.status(self.client_roles.lock().get(&client) == Some(&crate::auth::Role::App)),
             "mobile.load" => {
                 if params.get("reset").and_then(Value::as_bool) == Some(true) {
@@ -1914,6 +2047,7 @@ impl Daemon {
                     self.mobile.audit("-", "phone_access_off", "turned off");
                 }
                 self.mobile.disable();
+                self.notifier.telegram_off("phone access was turned off");
                 crate::mobile::tailscale::remove_after_off(self);
                 // Nobody is let in any more: what phones had waiting is not written.
                 for e in self.sessions.read().values() {
@@ -2019,6 +2153,7 @@ impl Daemon {
             // connection of the user may ask, with no verification.
             "mobile.revoke_all" => {
                 let events = self.mobile.revoke_all();
+                self.notifier.telegram_off("every phone was revoked");
                 crate::mobile::tailscale::remove_after_off(self);
                 for e in self.sessions.read().values() {
                     if let Entry::Chat(c) = e {
@@ -2089,6 +2224,7 @@ impl Daemon {
             "mobile.reset" => {
                 self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::Reset, |me| {
                     let events = me.mobile.reset();
+                    me.notifier.telegram_off("phone access was reset");
                     crate::mobile::tailscale::remove_after_off(me);
                     for e in me.sessions.read().values() {
                         if let Entry::Chat(c) = e {
@@ -2107,6 +2243,42 @@ impl Daemon {
             "mobile.set_projects" => {
                 self.mobile.set_projects(&params);
                 json!(true)
+            }
+            // The verified app only (`auth::APP_ONLY`). Turning the relay off asks nobody; turning it on is checked first (an address, a registration key when
+            // the room is to be made), then the person verifies, and only then is a room made and a socket opened.
+            "mobile.set_relay" => {
+                if !self.is_verified_app(client) {
+                    bail!("this needs the Kelpie app: phone access is decided in Kelpie → Settings → Mobile");
+                }
+                use crate::mobile::relay;
+                if !param(&params, "on")?.as_bool().ok_or_else(|| anyhow!("on must be true or false"))? {
+                    let v = relay::turn_off(self)?;
+                    self.broadcast("mobile.updated", json!({}));
+                    v
+                } else {
+                    let asked = relay::check_turn_on(&self.mobile, &params)?;
+                    let runtime = tokio::runtime::Handle::current();
+                    self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::Relay, move |me| {
+                        let _in_runtime = runtime.enter();
+                        let v = relay::turn_on(me, asked)?;
+                        me.broadcast("mobile.updated", json!({}));
+                        Ok(v)
+                    })?;
+                    return Ok(None);
+                }
+            }
+            // A new room for a relay that stays slow: the verified app, then the person. It needs the kept registration key, and gives nobody more access.
+            "mobile.relay_recreate" => {
+                if !self.is_verified_app(client) {
+                    bail!("this needs the Kelpie app: phone access is decided in Kelpie → Settings → Mobile");
+                }
+                let runtime = tokio::runtime::Handle::current();
+                self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::RelayRoom, move |me| {
+                    let v = runtime.block_on(crate::mobile::relay::recreate(me.clone()));
+                    me.broadcast("mobile.updated", json!({}));
+                    v
+                })?;
+                return Ok(None);
             }
             "meta.list" => serde_json::to_value(&self.workspace_meta.lock().map)?,
             "meta.get" => {
@@ -3048,6 +3220,100 @@ mod tests {
         for method in methods.iter().take(5) {
             authorize(&daemon, &Role::User, method, &mut json!({})).unwrap();
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Approvals from Telegram that are on, polling an address where nothing listens.
+    fn approving(d: &Daemon) {
+        let approvals = d.notifier.telegram();
+        approvals.set_test_base("http://127.0.0.1:9");
+        let c = notify::Config { telegram: notify::Telegram { enabled: true, chat_id: "42".into(), ..Default::default() }, ..Default::default() };
+        d.notifier.update(Some(c), &json!({"telegram_token": "1:test"})).unwrap();
+        approvals.bind_for_test(42, 42);
+        assert!(d.notifier.config().telegram.approving());
+    }
+
+    #[tokio::test]
+    async fn the_phones_kill_switch_stops_approvals_from_telegram_too() {
+        for method in ["mobile.revoke_all", "mobile.disable", "mobile.reset"] {
+            let (d, dir) = test_daemon("telegram-kill");
+            approving(&d);
+            let (tx, mut rx) = crate::session::client_channel();
+            if method == "mobile.reset" {
+                // The app's, once the person said yes.
+                d.set_client_role(1, &crate::auth::Role::App);
+                d.presence.inject(|_| Ok(()));
+                assert!(d.dispatch(1, &tx, &json!(1), method, json!({})).unwrap().is_none(), "answered after the prompt");
+                let o = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("a reply").expect("a reply");
+                let reply: Value = serde_json::from_slice(&o.data[5..]).unwrap();
+                assert_eq!(reply["result"], true, "{reply}");
+            } else {
+                d.dispatch(1, &tx, &json!(1), method, json!({})).unwrap();
+            }
+            let t = d.notifier.config().telegram;
+            assert!(!t.approving() && t.user_id.is_empty() && t.mode == notify::TelegramMode::AlertLink, "{method}");
+            let log = d.mobile.audit_entries(20).to_string();
+            assert!(log.contains("telegram_off"), "{method}: {log}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn a_telegram_press_answers_a_chat_through_its_own_answer_path() {
+        let (d, dir) = test_daemon("telegram-chat");
+        let c = ChatSession::new(9, SessionSpec { id: "chat-tg".into(), kind: "codex".into(), cwd: dir.to_string_lossy().into_owned(), ..Default::default() });
+        let mut stdin = c.live_for_test();
+        d.insert_for_test(Entry::Chat(c.clone()));
+        c.ingest_for_test(json!({"id": 7, "method": "execCommandApproval", "params": {"command": ["ls"]}}).to_string());
+        let host = NotifyHost(Arc::downgrade(&d));
+        let approval = host.telegram_approval("chat-tg", None).expect("a low request with a one-time yes");
+        assert!(matches!(&approval.target, Target::Chat { request_id, .. } if *request_id == json!(7)) && approval.command == "ls", "{approval:?}");
+        // Approvals that ended while the press was on its way write nothing.
+        assert_eq!(host.telegram_answer(&approval, true, &|| false), Answered::Off);
+        assert!(stdin.try_recv().is_err());
+        // Deny first: the dialect's no goes to the agent, as Telegram's answer.
+        assert_eq!(host.telegram_answer(&approval, false, &|| true), Answered::Done);
+        let written: Value = serde_json::from_slice(&stdin.try_recv().expect("the no")).unwrap();
+        assert_eq!(written, json!({"id": 7, "result": {"decision": "denied"}}));
+        assert_eq!(c.resolution(&json!(7), &json!({"id": 7, "result": {"decision": "approved"}}).to_string()).map(|r| r.by), Some(By::telegram()));
+        // A later press is told who answered, by id, and writes nothing.
+        assert_eq!(host.telegram_answer(&approval, true, &|| true), Answered::Already("telegram".into()));
+        assert!(stdin.try_recv().is_err());
+        // A button for another kind of session, or for one that is gone, answers nothing.
+        let term = Approval { target: Target::Term { wait: 1, yes: "1".into(), no: "3".into() }, ..approval.clone() };
+        assert_eq!(host.telegram_answer(&term, true, &|| true), Answered::Gone);
+        let gone = Approval { session: "nobody".into(), ..approval };
+        assert_eq!(host.telegram_answer(&gone, true, &|| true), Answered::Gone);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn only_the_verified_app_and_the_person_turn_approvals_from_telegram_on() {
+        let (d, dir) = test_daemon("telegram-bind");
+        d.presence.inject(|reason| panic!("nobody should be asked: {reason}"));
+        let (tx, mut rx) = crate::session::client_channel();
+        d.set_client_role(1, &crate::auth::Role::User);
+        let refused = d.dispatch(1, &tx, &json!(1), "notify.telegram_bind", json!({})).unwrap_err();
+        assert!(refused.to_string().contains("Kelpie app"), "{refused}");
+        let mut no_role = json!({});
+        assert!(crate::auth::authorize(&d, &crate::auth::Role::User, "notify.telegram_bind", &mut no_role).is_err(), "the user token alone");
+        // The app, once the person said yes, and only with Telegram set up.
+        d.set_client_role(5, &crate::auth::Role::App);
+        d.presence.inject(|reason| if reason.contains("Telegram") && reason.contains("Face ID") { Ok(()) } else { Err(reason.to_string()) });
+        assert!(d.dispatch(5, &tx, &json!(2), "notify.telegram_bind", json!({})).unwrap().is_none(), "answered after the prompt");
+        let o = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("a reply").expect("a reply");
+        let reply: Value = serde_json::from_slice(&o.data[5..]).unwrap();
+        assert!(reply["error"]["message"].as_str().unwrap_or_default().contains("Telegram on first"), "{reply}");
+        d.notifier.telegram().set_test_base("http://127.0.0.1:9");
+        let c = notify::Config { telegram: notify::Telegram { enabled: true, chat_id: "42".into(), ..Default::default() }, ..Default::default() };
+        d.notifier.update(Some(c), &json!({"telegram_token": "1:test"})).unwrap();
+        d.dispatch(5, &tx, &json!(3), "notify.telegram_bind", json!({})).unwrap();
+        let o = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("a reply").expect("a reply");
+        let reply: Value = serde_json::from_slice(&o.data[5..]).unwrap();
+        let code = reply["result"]["code"].as_str().unwrap_or_default();
+        assert!(code.len() == 12 && reply["result"]["command"] == format!("/bind {code}"), "{reply}");
+        assert!(d.notifier.describe(false)["telegram"]["binding_expires_in"].as_u64().is_some_and(|s| (290..=300).contains(&s)));
+        d.notifier.telegram_off("the test is over");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
