@@ -169,6 +169,7 @@ const RULES: Record<string, (v: unknown) => unknown> = {
   autoWorktree: oneOf("ask", "always", "never"),
   mascotMotion: oneOf("on", "system", "off"),
   resumeSessions: oneOf("shown", "all", "off"),
+  daemonOnClose: oneOf("stop", "keep"),
   language: oneOf("system", "en", "vi"),
   terminalTheme: text(200),
   integrations: (v) => {

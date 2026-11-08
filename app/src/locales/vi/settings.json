@@ -146,7 +146,7 @@
   "Memory meter": "Đồng hồ bộ nhớ",
   "Memory used by Kelpie, its session daemon and the sessions.": "Bộ nhớ do Kelpie, daemon phiên và các phiên sử dụng.",
   "Daemon status": "Trạng thái daemon",
-  "The process that keeps sessions running when the window closes.": "Tiến trình giữ các phiên chạy khi cửa sổ đóng.",
+  "The process that runs your sessions, apart from the window.": "Tiến trình chạy các phiên của bạn, tách khỏi cửa sổ.",
   "Data directory and logs": "Thư mục dữ liệu và log",
   "Where sessions, snapshots and logs are stored.": "Nơi lưu phiên, snapshot và log.",
   "Stop daemon and all sessions": "Dừng daemon và mọi phiên",
@@ -401,5 +401,10 @@
   "Sub-sessions": "Phiên con",
   "Let an agent open other agent sessions (any installed agent CLI) from its own: it starts them, steers them, and gets their reports back as a new turn. They show nested under it. Ask: you allow each one (once, for the session, or always). Allow: no question. Off: agents cannot. Agents started before this change get the tools after a restart.": "Cho một agent mở các phiên agent khác (bất kỳ CLI agent nào đã cài) từ phiên của nó: nó khởi động, điều khiển và nhận báo cáo của chúng như một lượt mới. Chúng hiện lồng bên dưới phiên đó. Hỏi: bạn cho phép từng phiên (một lần, cho cả phiên, hoặc luôn luôn). Cho phép: không hỏi. Tắt: agent không mở được. Agent đã chạy trước thay đổi này có công cụ sau khi được khởi động lại.",
   "Sub-sessions running at once": "Số phiên con chạy cùng lúc",
-  "The most sub-sessions that run at the same time on this computer. Auto picks a number from its processor and memory. A new one is refused, not queued, when this many run or the computer is under heavy load.": "Số phiên con tối đa chạy cùng lúc trên máy này. Tự động chọn một số theo bộ xử lý và bộ nhớ. Khi đã đủ số này, hoặc máy đang quá tải, phiên mới bị từ chối chứ không xếp hàng chờ."
+  "The most sub-sessions that run at the same time on this computer. Auto picks a number from its processor and memory. A new one is refused, not queued, when this many run or the computer is under heavy load.": "Số phiên con tối đa chạy cùng lúc trên máy này. Tự động chọn một số theo bộ xử lý và bộ nhớ. Khi đã đủ số này, hoặc máy đang quá tải, phiên mới bị từ chối chứ không xếp hàng chờ.",
+  "When Kelpie closes": "Khi đóng Kelpie",
+  "Stop: closing Kelpie also stops the session daemon; sessions come back interrupted next time and agents resume. Keep it running in the background: automations, scheduled runs, phone and Telegram access and file copies go on with the window closed. Updates never stop it.": "Dừng: đóng Kelpie cũng dừng daemon phiên; lần mở sau các phiên trở lại ở trạng thái bị ngắt và agent tiếp tục. Giữ chạy nền: tự động hóa, lượt chạy theo lịch, truy cập từ điện thoại và Telegram cùng việc sao chép file vẫn tiếp tục khi cửa sổ đóng. Cập nhật không bao giờ dừng daemon.",
+  "Stop the session daemon and its sessions": "Dừng daemon phiên và các phiên của nó",
+  "Keep it running in the background": "Giữ chạy nền",
+  "Ask first when something still runs": "Hỏi trước nếu vẫn còn việc đang chạy"
 }

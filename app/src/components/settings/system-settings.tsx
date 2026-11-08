@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { store } from "../../lib/store";
 import { t } from "../../lib/i18n";
 import { daemon, platformInfo, revealEntry } from "../../lib/ipc";
-import { SettingRow, Toggle } from "./setting-row";
+import { Choice, SettingRow, Toggle } from "./setting-row";
 import { BrandMark, BrandWordmark, Kip } from "../brand";
 import { confirmDialog } from "../../lib/confirm-dialog";
 import { checkForUpdate } from "../../lib/updater";
@@ -26,6 +26,7 @@ const ConfigTransfer = lazy(() => import("./config-transfer"));
 
 export function DaemonSettings() {
   const [info, { refetch }] = createResource(() => store.connected(), () => daemon<DaemonInfo>("daemon.info").catch(() => null));
+  const onClose = () => store.state.settings.daemonOnClose ?? "stop";
   const stopAll = async () => {
     if (!(await confirmDialog(t("Stop the session daemon and every running session?")))) return;
     await daemon("daemon.shutdown", { kill_sessions: true }).catch(() => {});
@@ -43,6 +44,17 @@ export function DaemonSettings() {
             </div>
           )}
         </Show>
+      </SettingRow>
+      <SettingRow id="daemon-on-close" wide>
+        <div class="inline-fields" style={{ "flex-wrap": "wrap" }}>
+          <Choice value={onClose()} options={[["stop", t("Stop the session daemon and its sessions")], ["keep", t("Keep it running in the background")]]} onChange={(v) => store.setSettings({ daemonOnClose: v })} />
+          <Show when={onClose() === "stop"}>
+            <label class="check-label">
+              <input type="checkbox" data-field="ask-before-stop" checked={store.state.settings.askBeforeStop ?? true} onChange={(e) => store.setSettings({ askBeforeStop: e.currentTarget.checked })} />
+              {t("Ask first when something still runs")}
+            </label>
+          </Show>
+        </div>
       </SettingRow>
       <SettingRow id="daemon-data" wide>
         <div class="kv">

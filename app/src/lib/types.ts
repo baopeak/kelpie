@@ -270,6 +270,11 @@ export interface Settings {
   /** After the session daemon restarts (reboot, update, crash): resume sessions when they are
    *  shown, all at once, or leave them stopped until you restart them. */
   resumeSessions: "shown" | "all" | "off";
+  /** When Kelpie closes: stop the session daemon (sessions come back interrupted and resume) or keep it running in the
+   *  background. Missing means stop. Updates never stop it. */
+  daemonOnClose: "stop" | "keep";
+  /** Ask before that stop when something still runs ("Don't ask again" turns it off). */
+  askBeforeStop: boolean;
   /** Extra Claude Code / Codex sign-ins (lib/accounts.ts). */
   accounts: AgentAccount[];
   /** Account new sessions use, by agent; absent = the agent's default sign-in. */

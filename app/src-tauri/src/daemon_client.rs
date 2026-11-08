@@ -51,6 +51,8 @@ pub struct DaemonClient {
     next_id: AtomicU64,
     connected: AtomicBool,
     connected_notify: Notify,
+    /// Off once the app quits with the daemon stopped: it must not start a new one on its way out.
+    respawn: AtomicBool,
 }
 
 impl DaemonClient {
@@ -65,6 +67,7 @@ impl DaemonClient {
             next_id: AtomicU64::new(1),
             connected: AtomicBool::new(false),
             connected_notify: Notify::new(),
+            respawn: AtomicBool::new(true),
         });
         tauri::async_runtime::spawn(client.clone().connection_loop());
         tauri::async_runtime::spawn(client.clone().flush_loop());
@@ -110,7 +113,7 @@ impl DaemonClient {
                 }
                 Err(_) => {
                     // Spawn at most once per 5 s; the daemon may take a moment to bind.
-                    if spawned_at.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) {
+                    if self.respawn.load(Ordering::SeqCst) && spawned_at.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) {
                         if let Err(e) = spawn_daemon() {
                             tracing::error!("spawn kelpied: {e:#}");
                             let _ = self.app.emit("daemon-status", json!({"connected": false, "error": format!("{e:#}")}));
@@ -292,6 +295,11 @@ impl DaemonClient {
                 Err(anyhow!("{method}: no reply from daemon"))
             }
         }
+    }
+
+    /// The app is quitting with the daemon stopped: from now on a lost connection starts no daemon.
+    pub fn stop_respawning(&self) {
+        self.respawn.store(false, Ordering::SeqCst);
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {

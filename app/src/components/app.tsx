@@ -26,6 +26,7 @@ import { LayoutMenuHost } from "./layout-menu";
 import { RunsPage } from "./runs-page";
 import { RemoteDialog } from "./remote-dialog";
 import { RootUserDialogHost } from "./root-user-dialog";
+import { CloseDialogHost } from "./close-dialog";
 import { HostsPage } from "./hosts-page";
 import { initSshHosts, vault } from "../lib/ssh-hosts";
 import { MobileApprovals } from "./settings/mobile-settings";
@@ -193,6 +194,7 @@ export function App() {
         <FloatingTerminal />
       </Show>
       <RootUserDialogHost />
+      <CloseDialogHost />
       <ContextMenuHost />
       <ConflictDialog />
       <Show when={bookmarks.shown()}><SavedReplyDialog /></Show>

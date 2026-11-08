@@ -48,6 +48,8 @@ export const defaultSettings: Settings = {
   mascotMotion: "system",
   layouts: [],
   resumeSessions: "shown",
+  daemonOnClose: "stop",
+  askBeforeStop: true,
   accounts: [],
   activeAccounts: {},
   integrations: { linear: false, jira: null, gitlabHosts: [] },

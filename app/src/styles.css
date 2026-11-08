@@ -1324,6 +1324,13 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 
 /* Claude Code on a host that logs in as root (root-user-dialog.tsx); above other overlays. */
 .root-user-overlay { z-index: 60; }
+/* Closing Kelpie with work still running: above any other overlay. */
+.close-daemon-overlay { z-index: 70; }
+.modal.close-daemon { width: min(560px, 94vw); }
+.close-daemon-work { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; }
+.close-daemon-names { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.close-daemon-names .chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.close-daemon-text { margin: 0; font-size: 13px; line-height: 1.5; }
 .root-user-guide { width: min(680px, 94vw); }
 .root-user-text { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text); }
 .root-user-step { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); }

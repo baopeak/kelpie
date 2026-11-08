@@ -384,5 +384,17 @@
   "one is working": "có phiên đang làm",
   "one finished, unread": "có phiên đã xong, chưa đọc",
   "Reported: needs you": "Phiên báo: cần bạn",
-  "Reported: failed": "Phiên báo: bị lỗi"
+  "Reported: failed": "Phiên báo: bị lỗi",
+  "Stop the session daemon and close Kelpie?": "Dừng daemon phiên và đóng Kelpie?",
+  "1 session is running": "1 phiên đang chạy",
+  "{n} sessions are running": "{n} phiên đang chạy",
+  "1 run task is working": "1 tác vụ của lượt chạy đang làm việc",
+  "{n} run tasks are working": "{n} tác vụ của lượt chạy đang làm việc",
+  "1 file transfer is copying": "1 lượt chuyển file đang sao chép",
+  "{n} file transfers are copying": "{n} lượt chuyển file đang sao chép",
+  "They stop now; Kelpie does not wait for them. When you open Kelpie again, sessions come back interrupted and agents resume their conversation (Settings → Agents → Resume after a restart). File transfers show Interrupted, with Resume.": "Chúng sẽ dừng ngay; Kelpie không chờ chúng xong. Khi bạn mở lại Kelpie, các phiên trở lại ở trạng thái bị ngắt và agent tiếp tục đúng hội thoại (Cài đặt → Agent → Tiếp tục sau khi khởi động lại). Các lượt chuyển file hiện Bị ngắt, có nút Tiếp tục.",
+  "To keep them running with the window closed, choose Keep it running in the background in Settings → Session Daemon.": "Để chúng tiếp tục chạy khi cửa sổ đóng, chọn Giữ chạy nền trong Cài đặt → Daemon phiên.",
+  "Don't ask again": "Không hỏi lại",
+  "Close and stop": "Đóng và dừng",
+  "Could not close Kelpie: {error}": "Không đóng được Kelpie: {error}"
 }
