@@ -2,9 +2,10 @@
 
     python -X utf8 scripts/e2e/ssh_hosts.py <screenshot-dir> <scratch-dir>
 
-Start tauri-driver with KELPIE_E2E=1, an isolated KELPIE_DATA_DIR / KELPIE_ENDPOINT and KELPIE_SSH_DIR
-(Kelpie's stand-in for ~/.ssh: keys and known_hosts the test creates never touch the real ones);
-run this script with the same KELPIE_SSH_DIR. Starts `ssh_test_server.py` on 127.0.0.1:47824 with
+Start tauri-driver with KELPIE_E2E=1, an isolated KELPIE_DATA_DIR / KELPIE_ENDPOINT, KELPIE_SSH_DIR
+(Kelpie's stand-in for ~/.ssh: keys and known_hosts the test creates never touch the real ones) and KELPIE_FILES_HOME
+(the Files tab's home: its local pane starts there, never in the real Downloads); run this script with the same
+KELPIE_SSH_DIR and KELPIE_FILES_HOME. Starts `ssh_test_server.py` on 127.0.0.1:47824 with
 password login and its own $HOME (KELPIE_TEST_HOME), so "installing a key on the host" writes a
 scratch authorized_keys.
 
@@ -35,6 +36,11 @@ PASSWORD = f"pw-{int(time.time())}"
 ssh_dir = os.environ.get("KELPIE_SSH_DIR")
 if not ssh_dir:
     raise SystemExit("set KELPIE_SSH_DIR (the same value tauri-driver was started with)")
+# The Files tab's local pane must never be the real profile: the test writes there.
+files_home = os.environ.get("KELPIE_FILES_HOME")
+if not files_home or os.path.normcase(os.path.abspath(files_home)) == os.path.normcase(os.path.expanduser("~")):
+    raise SystemExit("set KELPIE_FILES_HOME to a scratch folder (the same value tauri-driver was started with)")
+os.makedirs(os.path.join(files_home, "Downloads"), exist_ok=True)
 fwd = lambda p: p.replace("\\", "/")
 BASH = os.environ.get("KELPIE_TEST_BASH", r"C:\Program Files\Git\bin\bash.exe")
 # The test host is Git Bash: C:\x -> /c/x, and the temp folder is /tmp.
@@ -190,20 +196,26 @@ try:
     d.click("[data-host=test-box]")
     d.click("[data-action=files]")
     open(os.path.join(home, "existing.txt"), "w").write("on the host")
-    run.check("files on the host are listed", wait(lambda: exists('[data-entry=".ssh"]') or exists('[data-entry="existing.txt"]'), 30))
-    click_text("New folder")
-    fill("[data-field=ask]", "made-by-e2e")
-    d.click("[data-action=ask-ok]")
-    run.check("new folder on the host", wait(lambda: os.path.isdir(os.path.join(home, "made-by-e2e")) and exists('[data-entry="made-by-e2e"]'), 20))
+    # The host is the right pane; the local (left) one starts in KELPIE_FILES_HOME's Downloads, which this run owns.
+    run.check("the local pane is the scratch home, not the real profile", wait(lambda: os.path.normcase(files_home) in os.path.normcase(d.js("return document.querySelector('[data-pane=left] [data-field=pane-path]')?.value || ''")), 20))
+    run.check("files on the host are listed", wait(lambda: exists('[data-pane=right] [data-entry=".ssh"]') or exists('[data-pane=right] [data-entry="existing.txt"]'), 30))
+    d.click("[data-pane=right] [data-action=new-folder]")
+    fill("[data-pane=right] [data-field=ask]", "made-by-e2e")
+    d.click("[data-pane=right] [data-action=ask-ok]")
+    run.check("new folder on the host", wait(lambda: os.path.isdir(os.path.join(home, "made-by-e2e")) and exists('[data-pane=right] [data-entry="made-by-e2e"]'), 20))
+    run.check("nothing was made on this computer", not os.path.exists(os.path.join(files_home, "Downloads", "made-by-e2e")))
     up = os.path.join(scratch, "upload-me.txt")
     open(up, "w").write("uploaded by kelpie")
-    invoke("ssh_transfer", {"alias": "test-box", "upload": True, "sources": [up], "target": posix(home) + "/made-by-e2e"})
-    run.check("upload (scp)", open(os.path.join(home, "made-by-e2e", "upload-me.txt")).read() == "uploaded by kelpie")
+    def xfer(job):
+        jid = daemon(d, "xfer.start", job)["id"]
+        return wait(lambda: next((j for j in daemon(d, "xfer.list")["jobs"] if j["id"] == jid and j["state"] in ("done", "failed", "cancelled")), None), 60)
+    j = xfer({"src": {}, "dst": {"dest": "test-box"}, "items": [up], "dst_dir": posix(home) + "/made-by-e2e", "conflict": "replace"})
+    run.check("upload (transfer queue)", j and j["state"] == "done" and open(os.path.join(home, "made-by-e2e", "upload-me.txt")).read() == "uploaded by kelpie", str(j))
     down = os.path.join(scratch, "downloads")
     shutil.rmtree(down, ignore_errors=True)
     os.makedirs(down)
-    invoke("ssh_transfer", {"alias": "test-box", "upload": False, "sources": [posix(home) + "/existing.txt"], "target": down})
-    run.check("download (scp)", open(os.path.join(down, "existing.txt")).read() == "on the host")
+    j = xfer({"src": {"dest": "test-box"}, "dst": {}, "items": [posix(home) + "/existing.txt"], "dst_dir": down, "conflict": "replace"})
+    run.check("download (transfer queue)", j and j["state"] == "done" and open(os.path.join(down, "existing.txt")).read() == "on the host", str(j))
     run.shot("06-files")
 
     # ---- port forwards ----
@@ -268,7 +280,8 @@ try:
     d.click("[data-host=test-box]")
     d.click("[data-action=check]")
     agents = wait(lambda: text_of("[data-host-check]"), 30) or ""
-    if "Claude Code" in agents:
+    # "Install Claude Code" names it too: only a host check that lists it as found starts it.
+    if "Claude Code" in agents.replace("Install Claude Code", ""):
         d.click("[data-action=claude]")
         c = wait(lambda: next((s for s in daemon(d, "session.list") if s["kind"] == "claude" and (s.get("remote") or {}).get("dest") == "test-box"), None), 30)
         run.check("Claude Code starts on the host (in tmux when it has one)", c is not None, agents)

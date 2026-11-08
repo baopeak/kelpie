@@ -16,6 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub mod materialize;
 pub mod procs;
 pub mod redact;
+pub mod ssh;
 pub mod worktree_lock;
 pub use redact::redact;
 
@@ -44,7 +45,16 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// with `sc`; the phone's `screens`, `sc_start`, `sc_stop`, `sc_ack`, `sc_input`, `sc_text`, `sc_key`, `sc_rebind`, `sc_resume`, the `sc_state`, `sc_stats`,
 /// `sc_fhb`, `sc_end` messages, and binary media messages on the link, `0x01` first); an older daemon has none of it, so the phone offers the screen only at 29.
 /// 30: sub-sessions (`sub.spawn`, `sub.message`, `sub.report`, `sub.inbox`, `sub.close` for programs in a session; `sub.answer`, `sub.pending` and the `sub.request` and `sub.request_done` events for the user): a session records its `parent`, `depth` and last `report`, and `daemon.policy` / `daemon.set_policy` carry `sub_sessions`, `sub_max` and `sub_auto_max`; an older daemon has none of it, so the app offers sub-sessions only at 30 (26 to 29 belong to other work).
-pub const API_LEVEL: u32 = 30;
+/// 31: the daemon browses hosts over SFTP and this computer (`sftp.list`, `sftp.stat`, `sftp.realpath`, `sftp.mkdir`, `sftp.rename`,
+/// `sftp.chmod`, `local.list`, `local.home`); an older daemon has none of them, so the app's file manager asks for a restart below 31.
+/// 32: the transfer queue (`xfer.start` with copy, delete and chmod jobs and an `expect` for an edited file's upload, `xfer.list`,
+/// `xfer.control`, `xfer.answer`, `xfer.clear_finished`; the `xfer.updated` and `xfer.removed` events; `<data>/transfers.json`; `transfers` in
+/// `daemon.info` and `daemon.shutdown` waiting for them under `if_idle` / `if_no_transfers`); an
+/// older daemon has none of it, so the app's file manager asks for a restart below 32.
+/// 33: host-to-host copies choose their route (`xfer.start` `route: auto|relay`; jobs report `route_used` and `route_reason`): direct when the
+/// first host logs in to the second by itself, else through this computer. An older daemon ignores `route` and copies through this
+/// computer, so the app offers the choice only at 33.
+pub const API_LEVEL: u32 = 33;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

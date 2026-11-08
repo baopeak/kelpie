@@ -42,11 +42,14 @@ export function idle(sessions: SessionInfo[]): boolean {
 }
 
 export { olderVersion } from "./version";
+import { activeCount, updateMayInstall } from "./transfers";
 
 const [available, setAvailable] = createSignal<UpdateInfo | null>(null);
 const [progress, setProgress] = createSignal<{ downloaded?: number; total?: number | null } | null>(null);
 const [whenIdle, setWhenIdle] = createSignal(false);
-export { available, progress, whenIdle };
+/** This update has to stop the session daemon (it runs from the install folder): it waits for file transfers. */
+const [stopsDaemon, setStopsDaemon] = createSignal(false);
+export { available, progress, whenIdle, stopsDaemon, setStopsDaemon };
 
 /** Says once per release that it is out: the status bar's offer is easy to miss. A manual check opens the dialog itself, so it
  *  only counts as said. */
@@ -109,6 +112,6 @@ export function startUpdater() {
     });
   });
   createEffect(() => {
-    if (whenIdle() && available() && idle(Object.values(store.sessions))) void installUpdate().catch((e) => store.notify(String(e)));
+    if (whenIdle() && available() && idle(Object.values(store.sessions)) && updateMayInstall({ daemonStops: stopsDaemon(), transfers: activeCount() })) void installUpdate().catch((e) => store.notify(String(e)));
   });
 }

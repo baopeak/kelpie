@@ -1,27 +1,26 @@
 // Hosts page (Termius-style): saved SSH hosts with groups and tags, one-click terminals and
-// agents on a host, its files (upload / download), keys, known hosts and port forwards.
+// agents on a host, its files (two panes and a transfer queue, see files/), keys, known hosts and port forwards.
 import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { OsBadge } from "./host-target";
 import { findTerminalTheme, terminalThemes } from "../lib/terminal-themes";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { store } from "../lib/store";
-import * as ipc from "../lib/ipc";
 import { kindInfo } from "../lib/agents";
 import { tmuxInstall, type HostCheck } from "../lib/remote";
 import { openRootUserGuide } from "../lib/root-user";
 import {
   CLAUDE_INSTALL, agentAdd, agentList, checkHost, connectHost, deleteKey, forwardStart, forwardStatus, forwardStop, generateKey, hasSecret, hostAddress, hostById, hostKeys,
   hostProject, importKey, importSshConfig, installKey, isHostKeyError, knownHosts, listKeys, loadVault, newForward, newHost, parseDestination, removeForward, removeHost, removeKnownHosts, runOnHosts,
-  saveForward, saveHost, saveVault, setSecret, transfer, trustHost, vault, type HostKeys, type SshForward, type SshHost,
+  saveForward, saveHost, saveVault, setSecret, trustHost, vault, type HostKeys, type SshForward, type SshHost,
 } from "../lib/ssh-hosts";
 import { Icon } from "./icons";
 import { LoadBar } from "./load-bar";
 import { t, errorText } from "../lib/i18n";
 import { relTimeShort } from "../lib/platform";
-import type { DirEntry } from "../lib/types";
 import { confirmDialog } from "../lib/confirm-dialog";
+import { AskRow, type Ask } from "./ask-row";
+import { FilesPanes } from "./files/files-panes";
 
 type Tab = "hosts" | "keys" | "known" | "forwards";
 const [tab, setTab] = createSignal<Tab>("hosts");
@@ -36,6 +35,15 @@ const localProject = () => {
   return p && !p.remote ? p : null;
 };
 
+/** Host whose Files view opens with the page (the status bar's transfer chip). */
+const [filesFor, setFilesFor] = createSignal<string | null>(null);
+
+/** The Hosts page with a host's Files view and its transfer queue open. */
+export function openFiles(hostId: string) {
+  setFilesFor(hostId);
+  openHosts("hosts", hostId);
+}
+
 export function openHosts(which: Tab = "hosts", hostId?: string, opts: { trust?: boolean } = {}) {
   setTab(which);
   if (hostId) setSelected(hostId);
@@ -45,27 +53,6 @@ export function openHosts(which: Tab = "hosts", hostId?: string, opts: { trust?:
 
 const errText = (e: unknown) => errorText(String(e));
 
-type Ask = { label: string; value: string; secret?: boolean; ok: (v: string) => void };
-
-/** One-line question shown in place (no blocking browser prompt). */
-function AskRow(props: { ask: Ask; onClose: () => void }) {
-  const [v, setV] = createSignal(props.ask.value);
-  let input!: HTMLInputElement;
-  onMount(() => input.focus());
-  const ok = () => {
-    props.onClose();
-    props.ask.ok(v());
-  };
-  return (
-    <div class="inline-fields ask-row">
-      <span class="muted-inline">{props.ask.label}</span>
-      <input ref={input} class="text-input" data-field="ask" style={{ flex: 1, width: "auto" }} type={props.ask.secret ? "password" : "text"} autocomplete="off" value={v()}
-        onInput={(e) => setV(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter") ok(); if (e.key === "Escape") { e.preventDefault(); props.onClose(); } }} />
-      <button class="btn primary" data-action="ask-ok" onClick={ok}>{t("OK")}</button>
-      <button class="btn" onClick={props.onClose}>{t("Cancel")}</button>
-    </div>
-  );
-}
 
 export function HostsPage() {
   let el!: HTMLDivElement;
@@ -246,6 +233,11 @@ function HostDetail(props: { host: SshHost; onEdit: () => void }) {
     setTrustFor(null);
   });
   const [files, setFiles] = createSignal(false);
+  createEffect(() => {
+    if (filesFor() !== props.host.id) return;
+    setFiles(true);
+    setFilesFor(null);
+  });
   const here = localProject;
   const inHere = openInHere;
   const setInHere = setOpenInHere;
@@ -352,7 +344,7 @@ function HostDetail(props: { host: SshHost; onEdit: () => void }) {
         )}
       </Show>
       <Show when={!check() && !error() && !trust()}><div class="form-note">{h().folder ? t("Terminals and agents start in {folder}, inside tmux when the host has it.", { folder: h().folder }) : t("Terminals start in the login folder, inside tmux when the host has it. Agents need a start folder, or a project linked to its folder here.")}</div></Show>
-      <Show when={files()}><FileBrowser host={h()} onHostKey={() => setTrust(true)} /></Show>
+      <Show when={files()}><FilesPanes host={h()} onHostKey={() => setTrust(true)} /></Show>
       <HostProjects host={h()} />
       <HostForwards host={h()} />
       <Show when={h().notes.trim()}><div class="host-notes">{h().notes}</div></Show>
@@ -582,122 +574,6 @@ function HostEditor(props: { host: SshHost; onDone: (id?: string) => void }) {
           <button class="btn primary drawer-connect" data-action="connect-host" disabled={!h().hostname.trim() || connecting()} onClick={() => void connect()}>{connecting() ? t("Connecting…") : t("Connect")}</button>
         </div>
       </div>
-    </div>
-  );
-}
-
-// ---------- files on a host ----------
-
-function FileBrowser(props: { host: SshHost; onHostKey: () => void }) {
-  const root = () => `ssh://${props.host.alias}/`;
-  const [path, setPath] = createSignal(props.host.folder.trim() || "~");
-  const [entries, setEntries] = createSignal<DirEntry[] | null>(null);
-  const [picked, setPicked] = createSignal<string[]>([]);
-  const [busy, setBusy] = createSignal<string | null>(null);
-  const [error, setError] = createSignal<string | null>(null);
-  const [ask, setAsk] = createSignal<Ask | null>(null);
-  const [listing, setListing] = createSignal(false);
-  let box!: HTMLDivElement;
-  const rel = (p: string) => p.replace(/^\/+/, "");
-  const join = (name: string) => `${path().replace(/\/+$/, "")}/${name}`;
-  const load = async (p: string) => {
-    setError(null);
-    setListing(true);
-    try {
-      // `~`: the login folder, from the host check.
-      const abs = p === "~" ? (await checkHost(props.host)).home : p;
-      setEntries(await ipc.listDir(root(), rel(abs)));
-      setPath(abs || "/");
-      setPicked([]);
-    } catch (e) {
-      if (isHostKeyError(e)) props.onHostKey();
-      setError(errText(e));
-    } finally {
-      setListing(false);
-    }
-  };
-  onMount(() => void load(path()));
-  const run = async (label: string, fn: () => Promise<unknown>) => {
-    setBusy(label);
-    setError(null);
-    try {
-      await fn();
-      await load(path());
-    } catch (e) {
-      setError(errText(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-  const upload = (dirs: boolean) => run("upload", async () => {
-    const f = await openDialog({ multiple: true, directory: dirs, title: dirs ? t("Upload folders") : t("Upload files") });
-    const list = Array.isArray(f) ? f : typeof f === "string" ? [f] : [];
-    if (list.length) await transfer(props.host.alias, true, list, path());
-  });
-  const download = () => run("download", async () => {
-    const dest = await openDialog({ directory: true, title: t("Download to folder") });
-    if (typeof dest === "string") {
-      await transfer(props.host.alias, false, picked().map(join), dest);
-      store.notify(t("Downloaded to {path}", { path: dest }));
-    }
-  });
-  const mkdir = () => setAsk({ label: t("New folder name"), value: "", ok: (v) => v.trim() && void run("mkdir", () => ipc.createEntry(root(), rel(join(v.trim())), true)) });
-  const rename = () => {
-    const from = picked()[0];
-    if (from) setAsk({ label: t("Rename {name} to", { name: from }), value: from, ok: (v) => v.trim() && v.trim() !== from && void run("rename", () => ipc.renameEntry(root(), rel(join(from)), rel(join(v.trim())))) });
-  };
-  const remove = async () => {
-    if (!picked().length || !(await confirmDialog(t("Delete {n} item(s) on {host}? There is no trash on the host.", { n: picked().length, host: props.host.label })))) return;
-    void run("delete", async () => { for (const n of picked()) await ipc.deleteEntry(root(), rel(join(n))); });
-  };
-  // Files dropped from Explorer / Finder onto the list upload into the current folder.
-  onMount(() => {
-    const un = getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type !== "drop") return;
-      const { x, y } = event.payload.position;
-      const ratio = window.devicePixelRatio || 1;
-      const hit = document.elementFromPoint(x / ratio, y / ratio);
-      const paths = event.payload.paths;
-      if (hit && box.contains(hit) && paths.length) void run("upload", () => transfer(props.host.alias, true, paths, path()));
-    });
-    onCleanup(() => void un.then((f) => f()));
-  });
-  const fmt = (n: number) => (n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(1)} KB` : n < 1 << 30 ? `${(n / (1 << 20)).toFixed(1)} MB` : `${(n / (1 << 30)).toFixed(1)} GB`);
-  return (
-    <div class="sftp" ref={box} data-sftp>
-      <LoadBar when={listing() || busy()} />
-      <div class="inline-fields">
-        <button class="icon-btn" title={t("Parent folder")} onClick={() => void load(path().replace(/\/[^/]*\/?$/, "") || "/")}><Icon name="up" size={14} /></button>
-        <input class="text-input mono" style={{ flex: 1, width: "auto" }} value={path()} onKeyDown={(e) => e.key === "Enter" && void load(e.currentTarget.value.trim() || "/")} />
-        <button class="icon-btn" title={t("Refresh")} onClick={() => void load(path())}><Icon name="refresh" size={14} /></button>
-      </div>
-      <div class="inline-fields" style={{ "flex-wrap": "wrap" }}>
-        <button class="btn" data-action="upload" disabled={!!busy()} onClick={() => void upload(false)}><Icon name="up" size={13} /> {t("Upload files")}</button>
-        <button class="btn" disabled={!!busy()} onClick={() => void upload(true)}>{t("Upload folder")}</button>
-        <button class="btn" data-action="download" disabled={!!busy() || !picked().length} onClick={() => void download()}><Icon name="down" size={13} /> {t("Download")}</button>
-        <button class="btn" disabled={!!busy()} onClick={mkdir}>{t("New folder")}</button>
-        <button class="btn" disabled={!!busy() || picked().length !== 1} onClick={rename}>{t("Rename")}</button>
-        <button class="btn" disabled={!!busy() || !picked().length} onClick={remove}>{t("Delete")}</button>
-        <Show when={busy()}><span class="muted-inline">{busy() === "upload" ? t("Uploading…") : busy() === "download" ? t("Downloading…") : t("Working…")}</span></Show>
-      </div>
-      <Show when={ask()} keyed>{(a) => <AskRow ask={a} onClose={() => setAsk(null)} />}</Show>
-      <Show when={error()}><div class="form-note error">{error()}</div></Show>
-      <div class="sftp-list">
-        <Show when={entries()} fallback={<div class="muted">{t("Loading…")}</div>}>
-          <For each={entries()} fallback={<div class="muted">{t("Empty folder. Drop files here to upload them.")}</div>}>
-            {(e) => (
-              <div class={`sftp-row${picked().includes(e.name) ? " on" : ""}`} data-entry={e.name}
-                onClick={(ev) => setPicked(ev.ctrlKey || ev.metaKey ? (picked().includes(e.name) ? picked().filter((x) => x !== e.name) : [...picked(), e.name]) : [e.name])}
-                onDblClick={() => e.is_dir && void load(join(e.name))}>
-                <Icon name={e.is_dir ? "folder" : "files"} size={13} />
-                <span class="sftp-name">{e.name}</span>
-                <span class="muted-inline">{e.is_dir ? "" : fmt(e.size)}</span>
-              </div>
-            )}
-          </For>
-        </Show>
-      </div>
-      <div class="form-note">{t("Double-click a folder to open it; Ctrl+click selects several. Drop files from your computer here to upload them.")}</div>
     </div>
   );
 }

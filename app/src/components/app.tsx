@@ -18,6 +18,7 @@ import { WorktreeDialog } from "./worktree-dialog";
 import { NewSessionMenu } from "./new-session-menu";
 import { Welcome } from "./welcome";
 import { ContextMenuHost } from "./context-menu";
+import { ConflictDialog } from "./files/conflict-dialog";
 import { ImageLightbox } from "./image-lightbox";
 import { bookmarks } from "../lib/chat-bookmarks";
 import { FloatingTerminal } from "./floating-terminal";
@@ -193,6 +194,7 @@ export function App() {
       </Show>
       <RootUserDialogHost />
       <ContextMenuHost />
+      <ConflictDialog />
       <Show when={bookmarks.shown()}><SavedReplyDialog /></Show>
       <ImageLightbox />
       <LayoutMenuHost />

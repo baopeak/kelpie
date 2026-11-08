@@ -22,6 +22,7 @@ import { agentFolder, agentsAt, hostOf, isHostKeyError, layoutTarget, layoutTarg
 import { confirmRootStart } from "./root-user";
 import type { WorkStatus, AgentProfile, AppState, BranchInfo, InboxItem, LayoutNode, LayoutTemplate, Pane, Project, ProjectHost, RecentItem, ReviewNote, SessionInfo, SessionKind, SessionTarget, Settings, Tab, Workspace, WorkspaceMeta } from "./types";
 import { confirmDialog } from "./confirm-dialog";
+import { createHandOver, type ShutdownAnswer } from "./hand-over";
 import { SUB_SESSIONS_API, buildSessionTree, dispatchRequest, folderName, setSubPolicy, subRequests, toSubPolicy, toSubRequest, type SubRequest } from "./sub-sessions";
 import { remember } from "./prompt-history";
 import { defaultSettings } from "./default-settings";
@@ -186,8 +187,30 @@ function createAppStore() {
   /** The key the daemon files each project's notes under (its worktree's folder), by project id. */
   const [noteKeys, setNoteKeys] = createStore<Record<string, string>>({});
 
+  /** File transfers the old daemon still copies: a hand-over (an update) waits for them. 0 when none, or unknown. */
+  const [handOverHeldFor, setHandOverHeldFor] = createSignal(0);
+  const runningTransfers = () => ipc.daemon<{ transfers?: number }>("daemon.info", {}).then((i) => i.transfers ?? 0).catch(() => 0);
+  /** The wait for those transfers, tied to the daemon connection it started on (see `hand-over.ts`). */
+  const handOver = createHandOver({
+    transfers: runningTransfers,
+    shutdown: (when) => ipc.daemon<ShutdownAnswer>("daemon.shutdown", when === "idle" ? { kill_sessions: false, if_idle: true } : { kill_sessions: false, if_no_transfers: true }),
+    setHeld: setHandOverHeldFor,
+    idleAgain: () => handOverIfIdle(),
+    handedOver: () => {
+      olderDaemon = false;
+      setDaemonNeedsSwitch(false);
+    },
+  });
+
   async function switchDaemon() {
     if (!(await confirmDialog(t("Switch to the new session daemon now? Running sessions stop for a moment; agents that can resume continue their conversation.")))) return;
+    const transfers = await runningTransfers();
+    if (transfers && !(await confirmDialog(t("{n} file transfers are running. Switch anyway? They stop and show Interrupted, with Resume, on the new daemon. Cancel waits until they have finished.", { n: transfers })))) {
+      notify(t("The session daemon switches once {n} file transfers have finished", { n: transfers }), { label: t("Switch now"), run: () => void switchDaemon() });
+      return handOver.switchWhenFinished(transfers);
+    }
+    // Switch anyway: whatever waited is over.
+    handOver.reset();
     olderDaemon = false;
     setDaemonNeedsSwitch(false);
     void ipc.daemon("daemon.shutdown", { kill_sessions: false }).catch(() => {});
@@ -200,6 +223,9 @@ function createAppStore() {
   async function checkDaemonApi() {
     olderDaemon = false;
     setDaemonNeedsSwitch(false);
+    // A new connection (another daemon, or the same one again): a wait for the previous one's transfers is over.
+    handOver.reset();
+    clearTimeout(handOverTimer);
     const [info, app] = await Promise.all([ipc.daemon<{ api?: number; version?: string; security?: number; exe?: string }>("daemon.info", {}), ipc.platformInfo()]).catch(() => [null, null]);
     // A daemon that predates API levels says none: level 1.
     setDaemonApi(info ? info.api ?? 1 : 0);
@@ -251,8 +277,15 @@ function createAppStore() {
       if (!olderDaemon) return;
       const list = await ipc.listSessions().catch(() => null);
       if (!list || list.some((s) => s.alive)) return;
-      olderDaemon = false;
-      void ipc.daemon("daemon.shutdown", { kill_sessions: false, if_idle: true }).catch(() => {});
+      // File transfers hold it too: the old daemon would cut them off.
+      const transfers = await runningTransfers();
+      if (!olderDaemon) return;
+      if (transfers) {
+        if (!handOverHeldFor()) notify(t("The new session daemon takes over once {n} file transfers have finished", { n: transfers }), { label: t("Switch now"), run: () => void switchDaemon() });
+        return handOver.wait(transfers);
+      }
+      // Refused when a session or a transfer started meanwhile: a session asks again when it changes, a transfer is waited for.
+      void handOver.handOver("idle");
     }, 10_000);
   }
 
@@ -1673,7 +1706,7 @@ function createAppStore() {
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
     registryAgent, settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
-    pendingEntries, daemonNeedsSwitch, switchDaemon, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting, sessionTree,
+    pendingEntries, daemonNeedsSwitch, switchDaemon, handOverHeldFor, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting, sessionTree,
     notesFor, addNote, removeNotes, noteKeyFor, clearNotesAt, promptsFor, rememberPrompt, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
     newFloating, toggleFloating, selectFloating, closeFloating,
   };

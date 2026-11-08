@@ -100,12 +100,12 @@ fn ssh_dir() -> PathBuf {
 }
 
 pub(crate) fn vault_path() -> PathBuf {
-    kelpie_proto::data_dir().join("ssh").join("hosts.json")
+    kelpie_proto::ssh::hosts_path()
 }
 
 /// The generated ssh config every Kelpie ssh / scp reads.
 pub fn config_path() -> PathBuf {
-    kelpie_proto::data_dir().join("ssh").join("config")
+    kelpie_proto::ssh::config_path()
 }
 
 pub fn user_config() -> PathBuf {
@@ -156,13 +156,7 @@ fn askpass_exe() -> PathBuf {
 /// Environment that lets ssh ask Kelpie for saved secrets instead of a terminal. `host_id` is the
 /// host the connection is for (its password wins when a jump host has the same address).
 pub fn askpass_env(host_id: &str) -> Vec<(String, String)> {
-    vec![
-        ("SSH_ASKPASS".into(), askpass_exe().to_string_lossy().into_owned()),
-        ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
-        ("KELPIE_ASKPASS".into(), if host_id.is_empty() { "-".into() } else { host_id.to_string() }),
-        // Older OpenSSH only uses askpass with a display set.
-        ("DISPLAY".into(), std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into())),
-    ]
+    kelpie_proto::ssh::askpass_env(&askpass_exe(), host_id)
 }
 
 /// A saved host by alias.
@@ -170,18 +164,7 @@ pub fn host_by_alias(alias: &str) -> Option<Host> {
     load().hosts.into_iter().find(|h| h.alias == alias)
 }
 
-/// An OpenSSH program. On Windows, the system's own (`System32\OpenSSH`) when present: a Git
-/// Bash one earlier on PATH reads `C:\…` as a host named `C` and cannot reach the Windows
-/// ssh-agent service.
-pub fn program(name: &str) -> PathBuf {
-    if cfg!(windows) {
-        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into())).join("System32").join("OpenSSH").join(format!("{name}.exe"));
-        if system.is_file() {
-            return system;
-        }
-    }
-    PathBuf::from(name)
-}
+pub use kelpie_proto::ssh::program;
 
 /// A process for an OpenSSH tool (no console window on Windows).
 pub fn tool(name: &str) -> tokio::process::Command {
@@ -967,63 +950,6 @@ pub fn ssh_forward_status(state: tauri::State<'_, Forwards>) -> BTreeMap<String,
             (id.clone(), ForwardState { running, error: if running { String::new() } else { p.stderr.lock().unwrap().trim().to_string() } })
         })
         .collect()
-}
-
-// ---------- file transfer ----------
-
-/// Copies files and folders between this computer and a host with `scp -r`: `upload` sends
-/// local `sources` into the remote folder `target`; otherwise remote `sources` land in the
-/// local folder `target`.
-#[tauri::command]
-pub async fn ssh_transfer(alias: String, upload: bool, sources: Vec<String>, target: String) -> CmdResult<()> {
-    if !valid_alias(&alias) && !valid_jump(&alias) {
-        return Err("invalid host".into());
-    }
-    if sources.is_empty() {
-        return Ok(());
-    }
-    let r = crate::remote::parse_root(&format!("ssh://{alias}/")).ok_or("invalid host")?;
-    let remote_path = |p: &str| -> CmdResult<String> {
-        if !p.starts_with('/') || p.contains(['\n', '\r']) {
-            return Err(format!("{p}: not an absolute path on the host"));
-        }
-        Ok(match r.port {
-            Some(_) => format!("scp://{}{}", r.dest, p),
-            None => format!("{}:{p}", r.dest),
-        })
-    };
-    // `-S`: scp starts `ssh` from PATH otherwise (see `program`).
-    let mut args: Vec<String> = vec!["-S".into(), program("ssh").to_string_lossy().into_owned(), "-F".into(), config_path().to_string_lossy().into_owned(), "-r".into(), "-p".into(), "-o".into(), "ConnectTimeout=15".into(), "-o".into(), "NumberOfPasswordPrompts=1".into()];
-    if let Some(p) = r.port {
-        args.extend(["-P".into(), p.to_string()]);
-    }
-    if upload {
-        for s in &sources {
-            if !Path::new(s).exists() {
-                return Err(format!("{s} does not exist"));
-            }
-            args.push(s.clone());
-        }
-        args.push(remote_path(&format!("{}/", target.trim_end_matches('/')))?);
-    } else {
-        for s in &sources {
-            args.push(remote_path(s)?);
-        }
-        if !Path::new(&target).is_dir() {
-            return Err(format!("{target} is not a folder"));
-        }
-        args.push(target);
-    }
-    let host_id = host_by_alias(&r.dest).map(|h| h.id).unwrap_or_default();
-    let out = tokio::time::timeout(Duration::from_secs(3600), tool("scp").envs(askpass_env(&host_id)).args(&args).output())
-        .await
-        .map_err(|_| "the transfer took more than an hour".to_string())?
-        .map_err(not_found("scp"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    Err(if msg.is_empty() { format!("scp failed (exit code {:?})", out.status.code()) } else { msg })
 }
 
 #[cfg(test)]

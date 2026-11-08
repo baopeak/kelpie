@@ -223,6 +223,8 @@ pub struct Daemon {
     subs: crate::subs::Subs,
     /// What the sessions run, looked at when the app asks (`process.*`).
     procs: crate::procs::Procs,
+    /// Browsing hosts and this computer, and the transfer queue (`sftp.*`, `local.*`, `xfer.*`).
+    pub files: Arc<crate::files::service::Files>,
     /// The app's connection, asked for what only the window can do (`provider`).
     pub providers: crate::provider::Providers,
     /// Phones that took over a browser pane (`takeover`).
@@ -341,6 +343,13 @@ impl Daemon {
             });
             // Shared by the two that decide about alerts: phone access says who has them on, the notifier what is sent.
             let destinations = Destinations::new(&data_dir, secrets.clone(), Arc::new(NotifyHost(weak.clone())));
+            let files_owner = weak.clone();
+            let files_emit: crate::files::Emit =Arc::new(move |event: &str, params: Value| {
+                if let Some(d) = files_owner.upgrade() {
+                    d.broadcast(event, params);
+                }
+            });
+            let files = crate::files::service::Files::new(exe.clone(), data_dir.clone(), files_emit);
             let policy = load_policy(&data_dir);
             Daemon {
                 sessions: RwLock::new(BTreeMap::new()),
@@ -365,6 +374,7 @@ impl Daemon {
                 scheduled: ScheduledInputs::open(&data_dir),
                 subs: crate::subs::Subs::new(policy.sub).with_stats_file(data_dir.join("sub-stats.json")),
                 procs: crate::procs::Procs::default(),
+                files,
                 providers: crate::provider::Providers::default(),
                 takeover: crate::takeover::Broker::default(),
                 screen: crate::screen::Broker::default(),
@@ -1876,6 +1886,8 @@ impl Daemon {
                 "sessions": self.sessions.read().len(),
                 // Looks at running processes made so far: only the app's requests make one.
                 "process_scans": self.procs.scans(),
+                // File transfers running now: an update waits for them.
+                "transfers": self.files.queue.active_count(),
             }),
             "daemon.policy" => self.policy_json(),
             "daemon.set_policy" => {
@@ -2330,11 +2342,27 @@ impl Daemon {
                 return Ok(None);
             }
             m if m.starts_with("checkpoint.") => self.checkpoint_rpc(m, &params)?,
+            // Files answer when ssh and the host do: from their own task, so this client's other requests go on.
+            m if m.starts_with("sftp.") || m.starts_with("local.") || m.starts_with("xfer.") => {
+                let (files, tx, id, method) = (self.files.clone(), tx.clone(), id.clone(), m.to_string());
+                tokio::runtime::Handle::try_current()?.spawn(async move {
+                    let reply = rpc_answer(&id, files.rpc(&method, params).await);
+                    let _ = tx.send(json_out(&reply));
+                });
+                return Ok(None);
+            }
             "daemon.shutdown" => {
                 // A hand-over to a newer daemon: only when nothing runs any more (checked here,
                 // not from a session list the app read a moment ago).
-                if params.get("if_idle").and_then(Value::as_bool) == Some(true) && self.sessions.read().values().any(|e| e.info().alive) {
+                let if_idle = params.get("if_idle").and_then(Value::as_bool) == Some(true);
+                if if_idle && self.sessions.read().values().any(|e| e.info().alive) {
                     return Ok(Some(json!(false)));
+                }
+                // File transfers hold a hand-over until they finish; the person may still switch anyway (they then
+                // load as interrupted, with Resume, on the next daemon).
+                let transfers = self.files.queue.active_count();
+                if transfers > 0 && (if_idle || params.get("if_no_transfers").and_then(Value::as_bool) == Some(true)) {
+                    return Ok(Some(json!({ "waiting_for_transfers": transfers })));
                 }
                 if params.get("kill_sessions").and_then(Value::as_bool).unwrap_or(false) {
                     for e in self.sessions.read().values() {
@@ -2924,6 +2952,23 @@ mod tests {
         assert!(took < Duration::from_secs(30), "{took:?}");
         let _ = std::process::Command::new("git").args(["worktree", "prune"]).current_dir(&repo).status();
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_hand_over_waits_for_running_transfers_unless_asked_to_switch_anyway() {
+        let (daemon, dir) = test_daemon("handover");
+        let (tx, _rx) = crate::session::client_channel();
+        daemon.register_client(1, tx.clone());
+        daemon.set_client_role(1, &crate::auth::Role::User);
+        let call = |method: &str, params: Value| daemon.dispatch(1, &tx, &json!(1), method, params).map(|v| v.unwrap());
+        assert_eq!(call("daemon.info", json!({})).unwrap()["transfers"], 0);
+        daemon.files.queue.queue_for_test();
+        assert_eq!(call("daemon.info", json!({})).unwrap()["transfers"], 1);
+        assert_eq!(call("daemon.shutdown", json!({"if_idle": true})).unwrap(), json!({"waiting_for_transfers": 1}));
+        assert_eq!(call("daemon.shutdown", json!({"if_no_transfers": true})).unwrap(), json!({"waiting_for_transfers": 1}));
+        // "Switch anyway": the jobs load as interrupted on the next daemon.
+        assert_eq!(call("daemon.shutdown", json!({})).unwrap(), json!(true));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

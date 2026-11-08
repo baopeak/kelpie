@@ -28,6 +28,7 @@ mod cli;
 mod client;
 mod daemon;
 mod echo_bench;
+mod files;
 mod load;
 mod mcp;
 mod meta;
@@ -266,6 +267,8 @@ fn serve() -> Result<()> {
     // Stop the ticker before the final save so the two never persist concurrently.
     rt.shutdown_timeout(std::time::Duration::from_secs(2));
     daemon.persist(true);
+    // Transfers that were running load as interrupted next time; the person resumes them.
+    daemon.files.shutdown();
     tracing::info!("kelpied stopped");
     result
 }

@@ -96,8 +96,7 @@ fn ssh_base(r: &RemoteRoot) -> Vec<String> {
 
 /// Askpass environment for the saved host `r` points at (if any).
 fn ssh_env(r: &RemoteRoot) -> Vec<(String, String)> {
-    let alias = r.dest.rsplit('@').next().unwrap_or(&r.dest);
-    crate::ssh_hosts::askpass_env(&crate::ssh_hosts::host_by_alias(alias).map(|h| h.id).unwrap_or_default())
+    crate::ssh_hosts::askpass_env(&kelpie_proto::ssh::host_id_for_alias(&r.dest).unwrap_or_default())
 }
 
 pub struct Output {

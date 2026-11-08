@@ -27,6 +27,7 @@ mod session_usage;
 mod ssh_hosts;
 mod sys_stats;
 mod updater;
+mod sftp_edit;
 mod usage;
 mod usage_report;
 mod user_presence;
@@ -531,7 +532,10 @@ pub fn run() {
             app.manage(browser::Takeovers::default());
             app.manage(screen::Screens::default());
             app.manage(ssh_hosts::Forwards::default());
+            app.manage(sftp_edit::EditSessions::default());
             ssh_hosts::init();
+            // Copies of edited host files older than 7 days.
+            std::thread::spawn(sftp_edit::cleanup);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -704,12 +708,20 @@ pub fn run() {
             ssh_hosts::ssh_known_hosts_remove,
             ssh_hosts::ssh_host_keys,
             ssh_hosts::ssh_host_trust,
-            ssh_hosts::ssh_transfer,
+            sftp_edit::sftp_edit_prepare,
+            sftp_edit::sftp_edit_watch,
+            sftp_edit::sftp_edit_stop,
             ssh_hosts::ssh_forward_start,
             ssh_hosts::ssh_forward_stop,
             ssh_hosts::ssh_forward_status,
             sys_stats::memory_stats,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Kelpie");
+        .build(tauri::generate_context!())
+        .expect("error while running Kelpie")
+        .run(|_app, event| {
+            // Copies of host files opened in an external editor do not outlive the app.
+            if let tauri::RunEvent::Exit = event {
+                sftp_edit::remove_all();
+            }
+        });
 }

@@ -99,7 +99,6 @@ export const knownHosts = () => invoke<KnownHost[]>("ssh_known_hosts_list");
 export const removeKnownHosts = (lines: number[]) => invoke<void>("ssh_known_hosts_remove", { lines });
 export const hostKeys = (alias: string) => invoke<HostKeys>("ssh_host_keys", { alias });
 export const trustHost = (lines: string[]) => invoke<void>("ssh_host_trust", { lines });
-export const transfer = (alias: string, upload: boolean, sources: string[], target: string) => invoke<void>("ssh_transfer", { alias, upload, sources, target });
 export const forwardStart = (id: string) => invoke<void>("ssh_forward_start", { id });
 export const forwardStop = (id: string) => invoke<void>("ssh_forward_stop", { id });
 export const forwardStatus = () => invoke<Record<string, ForwardState>>("ssh_forward_status");
@@ -185,10 +184,10 @@ export const hostAgents = (hostId: string): string[] => {
   return c ? agentIds(c) : CORE_AGENTS;
 };
 
-/** The remote project for a host's folder (created on first use). */
-export async function hostProject(host: SshHost, check?: HostCheck): Promise<string> {
+/** The remote project for a host's folder (created on first use): its start folder, or `folder` when given. */
+export async function hostProject(host: SshHost, check?: HostCheck, folder?: string): Promise<string> {
   const c = check ?? (await checkHost(host));
-  const folder = host.folder.trim() || c.home || "/";
+  folder = folder || host.folder.trim() || c.home || "/";
   const root = remoteRoot(host.alias, undefined, folder);
   const path = root.slice(root.indexOf("/", "ssh://".length));
   const leaf = path.split("/").filter(Boolean).pop() ?? "/";

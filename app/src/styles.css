@@ -1354,12 +1354,55 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .trust-panel.changed .trust-title { color: var(--danger); }
 .trust-title { font-size: 12.5px; }
 .trust-fp { font-size: 12px; user-select: text; }
-.sftp { border: 1px solid var(--border); border-radius: 9px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-.sftp-list { max-height: 340px; overflow: auto; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
-.sftp-row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; font-size: 12.5px; cursor: default; user-select: none; }
-.sftp-row:hover { background: var(--bg-hover); }
-.sftp-row.on { background: var(--bg-active); }
-.sftp-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Files tab: two panes, a transfer queue, dialogs (components/files/). */
+.files-tab { display: flex; flex-direction: column; gap: 10px; }
+.files-panes { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; align-items: stretch; }
+.files-mid { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; }
+.files-route { max-width: 128px; font-size: 11.5px; }
+.file-pane { border: 1px solid var(--border); border-radius: 9px; padding: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0; background: var(--bg-elev); }
+.file-pane.active { border-color: var(--accent); }
+.file-pane-bar { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.file-pane-path { flex: 1; width: auto; min-width: 0; }
+.file-pane-filter { flex: 1; width: auto; min-width: 0; }
+.file-pane-foot { font-size: 11.5px; }
+.files-head, .files-row { display: grid; grid-template-columns: minmax(0, 1fr) 72px 118px auto auto; gap: 8px; align-items: center; padding: 3px 10px; font-size: 12.5px; }
+.files-head { padding-top: 0; padding-bottom: 0; }
+.files-col { background: none; border: 0; color: var(--text-faint); font: inherit; font-size: 11.5px; text-align: left; padding: 2px 0; cursor: pointer; white-space: nowrap; }
+.files-col.on { color: var(--text); }
+.files-col.size, .files-size { text-align: right; }
+.files-list { height: 340px; overflow: auto; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); outline: none; }
+.files-list:focus-visible { border-color: var(--accent); }
+.files-row { cursor: default; user-select: none; }
+.files-row:hover { background: var(--bg-hover); }
+.files-row.on { background: var(--bg-active); }
+.files-row.unreadable { opacity: .45; }
+.files-name { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.files-name > span:first-of-type { overflow: hidden; text-overflow: ellipsis; }
+.files-time, .files-owner, .files-size { color: var(--text-faint); white-space: nowrap; }
+.files-mode { color: var(--text-faint); font-size: 11.5px; }
+.transfer-queue, .edit-sessions { border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; background: var(--bg-elev); }
+.transfer-queue-head { display: flex; align-items: center; gap: 8px; }
+.transfer-job { display: flex; flex-direction: column; gap: 3px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 12.5px; }
+.transfer-job-line, .edit-session { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12.5px; }
+.transfer-job-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
+.transfer-bar { height: 4px; border-radius: 2px; background: var(--bg); overflow: hidden; }
+.transfer-bar-fill { height: 100%; background: var(--accent); transition: width .25s; }
+.transfer-bar-fill.unknown { width: 30% !important; animation: transfer-scan 1.2s linear infinite; }
+@keyframes transfer-scan { from { transform: translateX(-100%); } to { transform: translateX(330%); } }
+.transfer-state { color: var(--text-faint); }
+.transfer-state.failed, .transfer-state.reconnecting { color: var(--danger); }
+.transfer-state.done { color: var(--working); }
+.transfer-failures { font-size: 11.5px; color: var(--text-faint); }
+.conflict-dialog, .permissions-dialog { padding: 18px; display: flex; flex-direction: column; gap: 10px; max-width: 520px; }
+.conflict-path { overflow-wrap: anywhere; font-size: 12px; }
+.conflict-sides td { padding: 2px 12px 2px 0; font-size: 12.5px; }
+.perm-grid td, .perm-grid th { padding: 3px 10px; text-align: center; font-size: 12.5px; font-weight: normal; }
+.perm-grid td:first-child { text-align: left; }
+.check-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
+@media (max-width: 900px) {
+  .files-panes { grid-template-columns: minmax(0, 1fr); }
+  .files-mid { flex-direction: row; justify-content: center; }
+}
 .host-forwards { display: flex; flex-direction: column; gap: 6px; }
 .host-forwards .section-label { padding: 6px 0 0; }
 .forward-row, .key-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); font-size: 12.5px; }

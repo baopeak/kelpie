@@ -2,7 +2,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { locale } from "./i18n";
-import type { AttachReply, BranchInfo, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, SessionInfo, SessionUsage, UsageReport, UsageTotals } from "./types";
+import type { AttachReply, BranchInfo, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, RemoteEntry, RemoteMeta, SessionInfo, SessionUsage, UsageReport, UsageTotals, XferChoice, XferJob, XferStart } from "./types";
 
 export const daemon = <T = unknown>(method: string, params: object = {}) =>
   invoke<T>("daemon_call", { method, params });
@@ -235,3 +235,34 @@ export function b64ToBytes(b64: string): Uint8Array {
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
+
+
+/** From this daemon API level the daemon browses hosts over SFTP and this computer (`sftp.*`, `local.*`). */
+export const FILES_API = 31;
+
+export const sftpList = (dest: string, path: string, hidden = false) => daemon<RemoteEntry[]>("sftp.list", { dest, path, hidden });
+/** `lstat` is the path itself; `stat` follows a link (null when its target is gone). */
+export const sftpStat = (dest: string, path: string) => daemon<{ lstat: RemoteMeta; stat: RemoteMeta | null }>("sftp.stat", { dest, path });
+/** `~` (the default) is the login folder. */
+export const sftpRealpath = (dest: string, path = "~") => daemon<{ path: string }>("sftp.realpath", { dest, path }).then((r) => r.path);
+export const sftpMkdir = (dest: string, path: string) => daemon<boolean>("sftp.mkdir", { dest, path });
+/** Refuses an existing `to`. */
+export const sftpRename = (dest: string, from: string, to: string) => daemon<boolean>("sftp.rename", { dest, from, to });
+/** Not recursive: a recursive change is a transfer job (`xferStart` with kind `chmod`). */
+export const sftpChmod = (dest: string, paths: string[], mode: number) => daemon<boolean>("sftp.chmod", { dest, paths, mode });
+/** `""` lists the drives on Windows. */
+export const localList = (path: string, hidden = false) => daemon<RemoteEntry[]>("local.list", { path, hidden });
+export const localHome = () => daemon<{ path: string }>("local.home").then((r) => r.path);
+
+/** From this daemon API level the daemon runs the transfer queue (`xfer.*`, the `xfer.updated` / `xfer.removed` events). */
+export const XFER_API = 32;
+/** From this daemon API level a host-to-host copy may go direct (`route: "auto"`); below it, it goes through this computer. */
+export const ROUTE_API = 33;
+
+export const xferStart = (job: XferStart) => daemon<{ id: string }>("xfer.start", job).then((r) => r.id);
+/** `notice`: the saved transfer list could not be read (it was kept aside, or saving is off until a restart). */
+export const xferList = () => daemon<{ jobs: XferJob[]; notice: string | null }>("xfer.list");
+export const xferControl = (id: string, action: "pause" | "resume" | "cancel" | "retry" | "clear") => daemon<boolean>("xfer.control", { id, action });
+/** `all`: the choice also answers the rest of this transfer (never other transfers). */
+export const xferAnswer = (id: string, choice: XferChoice, all = false, question?: number) => daemon<boolean>("xfer.answer", { id, choice, all, question });
+export const xferClearFinished = () => daemon<boolean>("xfer.clear_finished");

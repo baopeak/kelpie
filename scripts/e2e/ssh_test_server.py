@@ -139,14 +139,37 @@ def splice(sock, chan):
     threading.Thread(target=one, args=(chan, sock), daemon=True).start()
 
 
+# POSIX permissions the Windows file system cannot hold, kept per path as a POSIX host keeps them: a file the client
+# creates gets the mode it names, else 0666 less the umask (022); chmod sets it; stat reports it.
+UMASK = 0o022
+MODES = {}
+
+
+def _key(p):
+    return os.path.normcase(os.path.abspath(p))
+
+
+def with_mode(attr, p):
+    m = MODES.get(_key(p))
+    if m is not None and attr.st_mode is not None:
+        attr.st_mode = (attr.st_mode & ~0o7777) | m
+    return attr
+
+
+def set_mode(p, attr):
+    if attr is not None and getattr(attr, "st_mode", None) is not None:
+        MODES[_key(p)] = attr.st_mode & 0o7777
+
+
 class Handle(paramiko.SFTPHandle):
     def stat(self):
         try:
-            return paramiko.SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
+            return with_mode(paramiko.SFTPAttributes.from_stat(os.fstat(self.readfile.fileno())), self.filename)
         except OSError as e:
             return paramiko.SFTPServer.convert_errno(e.errno)
 
     def chattr(self, attr):
+        set_mode(self.filename, attr)
         return paramiko.SFTP_OK
 
 
@@ -158,7 +181,15 @@ class Sftp(paramiko.SFTPServerInterface):
             path = subprocess.run([BASH, "-c", "printf %s \"$HOME\""], capture_output=True, text=True, env=dict(os.environ, HOME=HOME)).stdout or "/"
             if re.match(r"^[A-Za-z]:", path):
                 path = "/" + path[0].lower() + path[2:].replace("\\", "/")
-        return os.path.normpath(path).replace("\\", "/") if path.startswith("/") else path
+        if not path.startswith("/"):
+            return path
+        # Listings and lstat here follow links (os.stat); realpath does resolve them, as servers do, so a client
+        # can tell a link to a folder from the folder. Only a path with a link in it changes.
+        local = local_path(path)
+        real = os.path.realpath(local)
+        if os.path.normcase(real) != os.path.normcase(os.path.abspath(local)) and re.match(r"^[A-Za-z]:", real):
+            return "/" + real[0].lower() + real[2:].replace("\\", "/")
+        return os.path.normpath(path).replace("\\", "/")
 
     def _err(self, e):
         return paramiko.SFTPServer.convert_errno(e.errno)
@@ -167,7 +198,8 @@ class Sftp(paramiko.SFTPServerInterface):
         try:
             out = []
             for name in os.listdir(local_path(path)):
-                attr = paramiko.SFTPAttributes.from_stat(os.stat(os.path.join(local_path(path), name)))
+                full = os.path.join(local_path(path), name)
+                attr = with_mode(paramiko.SFTPAttributes.from_stat(os.stat(full)), full)
                 attr.filename = name
                 out.append(attr)
             return out
@@ -176,7 +208,7 @@ class Sftp(paramiko.SFTPServerInterface):
 
     def stat(self, path):
         try:
-            return paramiko.SFTPAttributes.from_stat(os.stat(local_path(path)))
+            return with_mode(paramiko.SFTPAttributes.from_stat(os.stat(local_path(path))), local_path(path))
         except OSError as e:
             return self._err(e)
 
@@ -185,7 +217,11 @@ class Sftp(paramiko.SFTPServerInterface):
     def open(self, path, flags, attr):
         p = local_path(path)
         try:
+            existed = os.path.exists(p)
             fd = os.open(p, flags | getattr(os, "O_BINARY", 0), 0o666)
+            if flags & os.O_CREAT and not existed:
+                named = attr is not None and getattr(attr, "st_mode", None) is not None
+                MODES[_key(p)] = (attr.st_mode & 0o7777) if named else (0o666 & ~UMASK)
             mode = "ab" if flags & os.O_APPEND else ("r+b" if flags & os.O_RDWR else ("wb" if flags & os.O_WRONLY else "rb"))
             f = os.fdopen(fd, mode)
         except OSError as e:
@@ -201,6 +237,7 @@ class Sftp(paramiko.SFTPServerInterface):
             os.remove(local_path(path))
         except OSError as e:
             return self._err(e)
+        MODES.pop(_key(local_path(path)), None)
         return paramiko.SFTP_OK
 
     def rename(self, old, new):
@@ -208,6 +245,9 @@ class Sftp(paramiko.SFTPServerInterface):
             os.rename(local_path(old), local_path(new))
         except OSError as e:
             return self._err(e)
+        m = MODES.pop(_key(local_path(old)), None)
+        if m is not None:
+            MODES[_key(local_path(new))] = m
         return paramiko.SFTP_OK
 
     posix_rename = rename
@@ -227,6 +267,7 @@ class Sftp(paramiko.SFTPServerInterface):
         return paramiko.SFTP_OK
 
     def chattr(self, path, attr):
+        set_mode(local_path(path), attr)
         return paramiko.SFTP_OK
 
 
