@@ -161,3 +161,27 @@ a.btn { display: inline-block; text-decoration: none; color: inherit; }
 .risk-tag { color: var(--dim); font-size: 12px; }
 .code.command { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext; }
 .command .escaped { color: var(--danger); font-weight: 600; }
+
+/* Taking over a browser pane of the computer. The picture takes every touch: the page must not scroll or zoom under the finger. */
+.takeover-entry { padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.takeover-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); }
+.takeover-row-main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.takeover { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.takeover-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.takeover-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.takeover-screen { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: #000; touch-action: none; user-select: none; -webkit-user-select: none; overflow: hidden; }
+.takeover-screen img { max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; -webkit-touch-callout: none; pointer-events: none; }
+.takeover.dim .takeover-screen img { opacity: .4; }
+.takeover-hidden { padding: 24px; text-align: center; color: #fff; }
+.takeover-hidden p { margin: 0 0 8px; }
+.takeover-lost { position: absolute; left: 12px; right: 12px; top: 12px; padding: 8px 12px; border-radius: 9px; background: color-mix(in srgb, var(--danger) 85%, black); color: #fff; font-size: 13px; text-align: center; }
+.takeover .keybar { display: flex; gap: 6px; overflow-x: auto; }
+.takeover .keybar .btn { padding: 8px 12px; flex: none; }
+.takeover-text { display: flex; gap: 8px; }
+.takeover-text .field { flex: 1; min-width: 0; }
+/* The computer's screen: a canvas the size of its box (the picture, the crisp tiles and the cursor are drawn into it). */
+.takeover-entry .btn + .btn { margin-left: 8px; }
+.screen-canvas canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+.screen-live.dim .screen-canvas canvas { opacity: .4; }
+.screen-quality { margin: 0; padding: 4px 12px; font-size: 12px; min-height: 16px; }
+.screen-debug { position: absolute; left: 8px; bottom: 8px; margin: 0; padding: 6px 8px; max-width: calc(100% - 16px); border-radius: 6px; background: rgba(0, 0, 0, .7); color: #9fe; font-size: 11px; white-space: pre-wrap; word-break: break-all; pointer-events: none; }

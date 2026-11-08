@@ -162,7 +162,7 @@ try:
             break
         except OSError:
             time.sleep(0.1)
-    check(c and c.call("daemon.info")["api"] >= 28, "daemon with host-to-host routes")
+    check(c and c.call("daemon.info")["api"] >= 33, "daemon with host-to-host routes")
 
     src = os.path.join(home_a, "big.bin")
     with open(src, "wb") as f:

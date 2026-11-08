@@ -26,6 +26,8 @@ pub const BEHIND_SERVE: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 pub fn shown(ip: IpAddr) -> String {
     if ip == BEHIND_SERVE {
         "Tailscale".into()
+    } else if super::relay::is_slot_ip(ip) {
+        "the relay".into()
     } else {
         ip.to_string()
     }

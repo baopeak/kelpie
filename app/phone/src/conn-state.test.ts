@@ -4,7 +4,7 @@ import { backoffMs, canAct, dataAge, deriveConn, LagMeter, NAME_FAILS_WITHIN_MS,
 const NOW = 10_000_000;
 const facts = (over: Partial<ConnFacts> = {}): ConnFacts => ({
   online: true, ready: true, connecting: false, attempt: 0, nextAt: null, reach: "reachable", lastLiveAt: NOW, replaced: false, unpaired: false, notPairedHere: null,
-  outdated: false, restartedAt: 0, rttMs: null, rttAt: 0, probeSince: null, lagMs: 0, lagAt: 0, resyncing: false, load: { level: 0, reasons: [] }, route: "direct", ...over,
+  outdated: false, restartedAt: 0, rttMs: null, rttAt: 0, probeSince: null, lagMs: 0, lagAt: 0, resyncing: false, load: { level: 0, reasons: [] }, route: "direct", relay: "none", ...over,
 });
 
 describe("deriveConn", () => {
@@ -41,11 +41,25 @@ describe("deriveConn", () => {
     expect(deriveConn(facts({ ready: false, attempt: 1, nextAt: null }), NOW)).toEqual({ kind: "reconnecting", attempt: 1, nextInS: null });
   });
 
-  it("names a sign-in page, an unreachable computer and (later) an unreachable relay", () => {
+  it("names a sign-in page, an unreachable computer and an unreachable relay", () => {
     expect(deriveConn(facts({ ready: false, attempt: 1, reach: "portal" }), NOW).kind).toBe("sign_in");
     expect(deriveConn(facts({ ready: false, attempt: 1, reach: "unreachable" }), NOW).kind).toBe("reconnecting");
     expect(deriveConn(facts({ ready: false, attempt: 3, reach: "unreachable", lastLiveAt: NOW - 90_000 }), NOW)).toEqual({ kind: "computer_offline", since: NOW - 90_000 });
-    expect(deriveConn(facts({ ready: false, attempt: 3, reach: "unreachable", route: "relay" }), NOW).kind).toBe("relay_unreachable");
+    expect(deriveConn(facts({ ready: false, attempt: 3, reach: "unreachable", route: "relay", relay: "down" }), NOW).kind).toBe("relay_unreachable");
+    expect(deriveConn(facts({ ready: false, attempt: 3, reach: "unreachable", relay: "down" }), NOW).kind).toBe("relay_unreachable");
+  });
+
+  it("tells a relay that cannot be reached from a computer the relay says is not there, and says when there is no way at all", () => {
+    // Tailscale off on this phone: with a relay to try, that is not the whole story.
+    expect(deriveConn(facts({ ready: false, attempt: 3, reach: "no_tailnet" }), NOW).kind).toBe("no_tailnet");
+    expect(deriveConn(facts({ ready: false, attempt: 3, reach: "no_tailnet", relay: "refused" }), NOW).kind).toBe("no_tailnet");
+    expect(deriveConn(facts({ ready: false, attempt: 3, reach: "no_tailnet", relay: "down" }), NOW).kind).toBe("no_path");
+    expect(deriveConn(facts({ ready: false, attempt: 3, reach: "no_tailnet", relay: "no_computer", lastLiveAt: NOW - 5000 }), NOW)).toEqual({ kind: "computer_offline", since: NOW - 5000 });
+    expect(deriveConn(facts({ ready: false, attempt: 3, reach: "unreachable", relay: "no_computer", lastLiveAt: NOW - 5000 }), NOW)).toEqual({ kind: "computer_offline", since: NOW - 5000 });
+    expect(deriveConn(facts({ ready: false, attempt: 3, reach: "no_tailnet", relay: "up" }), NOW).kind).toBe("reconnecting");
+    expect(canAct(deriveConn(facts({ ready: false, attempt: 3, reach: "no_tailnet", relay: "down" }), NOW))).toBe(false);
+    // Connected over the relay is connected.
+    expect(deriveConn(facts({ route: "relay", relay: "up" }), NOW).kind).toBe("live");
   });
 
   it("an answer is the computer's own, a login page, or Tailscale saying nothing is behind it", () => {
@@ -101,7 +115,7 @@ describe("deriveConn", () => {
       facts({ ready: false, online: false }),
       facts({ ready: false, attempt: 1, reach: "portal" }),
       facts({ ready: false, connecting: true, lastLiveAt: 0 }),
-      facts({ ready: false, attempt: 3, reach: "unreachable", route: "relay" }),
+      facts({ ready: false, attempt: 3, reach: "unreachable", route: "relay", relay: "down" }),
       facts({ replaced: true }),
       facts({ outdated: true }),
       facts({ unpaired: true }),

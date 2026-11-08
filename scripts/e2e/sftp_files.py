@@ -194,7 +194,7 @@ try:
     proxy.stdout.readline()
     c = start_daemon()
     info = c.call("daemon.info")
-    check(info["api"] >= 27, f"daemon API {info['api']} has the file methods and the queue")
+    check(info["api"] >= 32, f"daemon API {info['api']} has the file methods and the queue")
 
     # ---- browsing ----
     host_home = c.call("sftp.realpath", {"dest": "e2e-host", "path": "~"})["path"]

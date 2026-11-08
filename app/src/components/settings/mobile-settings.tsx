@@ -1,16 +1,25 @@
 // Settings → Mobile: the daemon's web app for phones (crates/kelpied/src/mobile.rs). Off by default. A phone pairs with a
 // one-time QR code and end-to-end encryption (kelpie-link); the person approves it here by typing the six digits the phone
 // shows, and the daemon then asks the OS to verify them (Windows Hello or the password). Raising what a phone may do, resetting
-// phone access and keeping unused phones longer ask for that verification too (`mobileSecure`); what the prompt says is the daemon's.
+// phone access, keeping unused phones longer and approvals from Telegram ask for that verification too (`mobileSecure`); what the prompt says is the daemon's.
+// The page: a summary, one `OptionRow` per option, and the address, certificate, the shared screen's stop hotkey and paired phones under Advanced.
+// Revoke all stays outside Advanced: a lost phone is when it is needed, and it must not take a search to find.
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
-import { LOCK_API, TAILSCALE_API } from "../../lib/attention";
+import { invoke } from "@tauri-apps/api/core";
+import { LOCK_API, RELAY_API, SCREEN_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
+import { mobileSummary, offerNewRoom, optionState, telegramChoice, type OptionId } from "../../lib/mobile-options";
+import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
+import { catalogEntry, entryMatches } from "../../lib/settings-catalog";
 import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
-import { SettingRow, Toggle } from "./setting-row";
+import { OptionRow } from "./option-row";
+import { createRelayForm, NewRoomOffer, RelayDetails, type RelayStatus } from "./mobile-relay-settings";
+import { SettingRow, settingsQuery, Toggle } from "./setting-row";
 import { confirmDialog } from "../../lib/confirm-dialog";
+import { offersControl } from "../../lib/takeover-panes";
 
 export type MobilePermission = "read" | "write" | "control";
 
@@ -30,6 +39,8 @@ export interface MobileDevice {
   passkey?: boolean;
   lock_reset?: boolean;
   unlocked?: boolean;
+  /** Its record may be given control: the native app, or a browser device paired on a secure origin with its app lock set up and on (absent below `TAKEOVER_API`). */
+  may_control?: boolean;
   /** `unverified`: its record was changed outside Kelpie (or the key that checks it is gone): it must be paired again.
    *  `unchecked`: the key that checks it cannot be read right now; nothing is concluded, and it is checked again when it can be. */
   state: "ok" | "unverified" | "unchecked";
@@ -60,6 +71,8 @@ export interface MobileStatus {
   tailscale?: { on: boolean; origin: string | null; to_remove?: boolean };
   /** The phones' app lock, as the daemon applies it (absent below `LOCK_API`). */
   lock?: { on: boolean; idle_s: number; recheck: boolean; plain_read: boolean };
+  /** The relay, as the daemon holds it (absent below `RELAY_API`). */
+  relay?: RelayStatus;
   /** This window is the verified Kelpie app: it may approve phones and raise what they may do. */
   app: boolean;
 }
@@ -127,13 +140,20 @@ interface MobileAudit {
 
 const DORMANT_DAYS = [30, 90, 180, 0];
 const IDLE_SECONDS = [60, 300, 900, 1800, 3600];
+/** The rows under Advanced. */
+const ADVANCED = ["mobile-network", "mobile-tls", "mobile-screen", "mobile-devices"];
 
 const errText = (e: unknown) => String(e).replace(/^Error: /, "");
+
+/** Said by the choice and by the question before it: what approving from Telegram gives up. */
+const telegramWarning = () =>
+  t("Telegram can read these messages: a bot chat is not end-to-end encrypted. A tap in Telegram asks for no Face ID, and anyone who has this Telegram account can approve. Only requests Kelpie labels low risk get buttons, each for one time and five minutes.");
 
 export function MobileSettings() {
   const [status, { refetch }] = createResource(() => store.connected(), () => mobileStatus().catch(() => null));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [hotkeyError, setHotkeyError] = createSignal<string | null>(null);
   const [qr, setQr] = createSignal<{ url: string; qr: string; until: number; tls: boolean; tailscale?: boolean; passkey?: boolean } | null>(null);
   const [now, setNow] = createSignal(Date.now());
   // The two steps of pairing over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
@@ -141,6 +161,13 @@ export function MobileSettings() {
   // Only while phone access is on and this page is open; looked at again when what the daemon holds changes, or when asked.
   const tailscaleKey = () => (store.connected() && store.daemonApi() >= TAILSCALE_API && (status()?.enabled || status()?.tailscale?.to_remove) ? `${status()!.tailscale?.on}|${status()!.tailscale?.origin}|${status()!.tailscale?.to_remove}` : null);
   const [tailscale, { refetch: checkTailscale }] = createResource(tailscaleKey, () => daemon<TailscaleStatus>("mobile.tailscale_status").catch(() => null));
+  // What the channels are set to, the same settings as Settings → Notifications. Undefined: not asked yet; null: the daemon could not say.
+  const [push, setPush] = createSignal<PushState | null | undefined>(undefined);
+  const loadPush = () => daemon<PushState>("notify.get").then((p) => setPush(p), () => setPush(null));
+  createEffect(() => {
+    pushRevision();
+    if (store.connected()) void loadPush();
+  });
   // The two steps are about the origin: with it gone they end, and do not come back unasked when it returns.
   createEffect(() => {
     if (guideStep() && !tailscale.loading && !tailscale()?.origin) {
@@ -150,8 +177,30 @@ export function MobileSettings() {
   });
   onMount(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
-    const un = onEvent<{ event: string }>("daemon-event", (m) => {
+    const un = onEvent<{ event: string; params?: { change?: string } }>("daemon-event", (m) => {
       if (m.event === "mobile.updated" || m.event === "mobile.pair_request" || m.event === "mobile.device_changed") void refetch();
+      // A phone turned its alerts on or off, or was removed.
+      if (m.event === "mobile.updated") void loadPush();
+      // Approvals from Telegram changed on their own: an account was bound, the code ran out, or they stopped.
+      if (m.event === "notify.telegram") {
+        const change = m.params?.change;
+        const shown = bindingOpen();
+        // An error (another poller, say) leaves a code be only while the daemon still has it waiting.
+        if (change === "error") void daemon<PushState>("notify.get").then(
+            (p) => {
+              if (!p.telegram?.binding_expires_in) setBinding(null);
+            },
+            () => {},
+          );
+        else setBinding(null);
+        // Every page that shows these settings reads them again: one sending what it read before would undo the change.
+        pushChanged();
+        if (change === "bound") store.notify(t("Telegram account bound: it can approve low-risk requests from its chat."), undefined, 8000);
+        else if (change === "bind_expired") store.notify(t("The Telegram code was not used in time, so nothing was bound. Choose approvals again for a new code."), undefined, 8000);
+        else if (change === "bind_failed") store.notify(t("Nothing was bound with the Telegram code: too many wrong codes, or the settings changed meanwhile. Choose approvals again for a new code."), undefined, 8000);
+        // This page dropped its own code when the person chose otherwise here: only a code still shown is news.
+        else if (change === "bind_cancelled" && shown) store.notify(t("The Telegram code was cancelled because Telegram's settings changed, so nothing was bound. Choose approvals again for a new code."), undefined, 8000);
+      }
       if (m.event === "mobile.device_changed") {
         setQr(null);
         setGuideStep(null);
@@ -211,9 +260,67 @@ export function MobileSettings() {
     });
   // What takes protection away asks the person, and is back to what holds now if they did not verify: the status did not change, so nothing else redraws it.
   const setLock = (patch: Partial<NonNullable<MobileStatus["lock"]>>) => run(() => mobileSecure("mobile.set_lock", patch));
+  const relay = createRelayForm(run);
+  // The phone just removed while the relay was on: a new room is offered, and nothing happens unless the person makes it.
+  const [roomOffer, setRoomOffer] = createSignal<string | null>(null);
+  const unpair = async (d: MobileDevice) => {
+    if (!(await confirmDialog(t("Unpair “{name}”? It is disconnected at once.", { name: d.name })))) return;
+    const offer = offerNewRoom(s());
+    await run(() => daemon("mobile.revoke", { id: d.id }));
+    if (offer && !s()?.devices.some((x) => x.id === d.id)) setRoomOffer(d.name);
+  };
+  const makeRoom = async () => {
+    setRoomOffer(null);
+    await relay.recreate();
+  };
   const resetLock = (d: MobileDevice) => run(() => mobileSecure("mobile.reset_lock", { id: d.id }));
   const setPermission = (d: MobileDevice, permission: MobilePermission) =>
     run(() => mobileSecure("mobile.set_permission", { id: d.id, permission }));
+  // One write after another, each from what the daemon holds then: two quick switches must not undo each other, and everything else in these settings goes back as it was.
+  let channelWrites: Promise<unknown> = Promise.resolve();
+  const setChannel = (name: "ntfy" | "telegram", on: boolean) => {
+    channelWrites = channelWrites.then(() =>
+      run(async () => {
+        const now = await daemon<PushState>("notify.get");
+        now.config[name].enabled = on;
+        await daemon("notify.set", { config: now.config });
+        pushChanged();
+      }),
+    );
+    return channelWrites;
+  };
+  // What Telegram carries. Approvals are turned on by binding an account (the verified app, then the person); the code waits here until it is used.
+  const [binding, setBinding] = createSignal<{ command: string; until: number } | null>(null);
+  const bindingOpen = () => !!binding() && binding()!.until > now();
+  const telegram = () => telegramChoice({ api: store.daemonApi(), status: s() ?? null, push: push() ?? null });
+  const telegramMode = (): TelegramMode => (bindingOpen() ? "approve_low" : telegram()?.mode ?? "alert");
+  // The bound account as Telegram names it, next to its id: a bare number is hard to tell from someone else's.
+  const boundAccount = () => {
+    const tg = push()?.config.telegram;
+    const id = tg?.user_id ?? "";
+    return tg?.user_name ? `${tg.user_name} (${id})` : id;
+  };
+  const setTelegramMode = async (mode: TelegramMode) => {
+    if (mode === "approve_low") {
+      if (!(await confirmDialog(`${telegramWarning()} ${t("Turn on approvals from Telegram? Kelpie asks you to verify first, then shows a code to send to your bot.")}`))) return;
+      await run(async () => {
+        const r = await mobileSecure<{ command: string; expires_in: number }>("notify.telegram_bind", {});
+        setBinding({ command: r.command, until: Date.now() + r.expires_in * 1000 });
+      });
+      return;
+    }
+    setBinding(null);
+    channelWrites = channelWrites.then(() =>
+      run(async () => {
+        const now = await daemon<PushState>("notify.get");
+        now.config.telegram.mode = mode;
+        // The person chose otherwise: a code shown for approvals binds nothing now. Any other save leaves it be.
+        await daemon("notify.set", { config: now.config, end_binding: true });
+        pushChanged();
+      }),
+    );
+    await channelWrites;
+  };
   const reset = async () => {
     if (!(await confirmDialog(t("Reset phone access? Every paired phone is removed and disconnected, the pairing keys are replaced and phone access turns off."))))
       return;
@@ -231,12 +338,39 @@ export function MobileSettings() {
   const shownError = () => (error()?.includes("could not be saved") ? s()?.error : error() ?? s()?.error);
   const deviceName = (id: string) => s()?.devices.find((d) => d.id === id)?.name ?? id;
   const hasAccess = () => !!s() && (s()!.enabled || s()!.devices.length > 0 || (s()!.legacy ?? []).length > 0);
+  const option = (id: OptionId) => optionState(id, { api: store.daemonApi(), status: s() ?? null, push: push() ?? null });
+  const summary = () => mobileSummary(s()!, push() ?? null);
+  const alertsOn = () => {
+    const n = push()?.webpush?.devices ?? 0;
+    return n === 0 ? t("Off") : n === 1 ? t("On for 1 phone") : t("On for {n} phones", { n });
+  };
+  const query = () => settingsQuery().trim();
+  const advancedMatches = () => ADVANCED.some((id) => entryMatches(catalogEntry(id)!, query()));
+  // Advanced opens by itself for what would otherwise be out of sight: a search or a link that leads into it, or a phone that must be paired again.
+  const advancedForced = () => (!!query() && advancedMatches()) || ADVANCED.includes(store.settingsItem() ?? "") || !!s()?.legacy?.length || !!s()?.devices.some((d) => d.state !== "ok");
+  const [advancedWanted, setAdvancedWanted] = createSignal(false);
+  const advancedOpen = () => advancedWanted() || advancedForced();
+  let advanced: HTMLDetailsElement | undefined;
+  const showPhones = () => {
+    setAdvancedWanted(true);
+    queueMicrotask(() => advanced?.scrollIntoView({ block: "start" }));
+  };
   return (
     <>
       <LoadBar when={busy()} />
-      <SettingRow id="mobile-access">
-        <Toggle on={!!s()?.enabled} onChange={(on) => void (on ? enable() : run(() => daemon("mobile.disable")))} />
-      </SettingRow>
+      <Show when={s() && !query()}>
+        <div class="mobile-summary" data-mobile-summary>
+          <div data-summary-reach>{summary().reach}</div>
+          <div data-summary-lock>{summary().lock}</div>
+          <Show when={summary().alerts}><div data-summary-alerts>{summary().alerts}</div></Show>
+          <div data-summary-phones>
+            {summary().phones}
+            {" "}
+            <Show when={s()!.devices.length || s()!.legacy?.length}><button class="link-btn" data-summary-show-phones onClick={showPhones}>{t("Show them")}</button></Show>
+          </div>
+        </div>
+      </Show>
+      <OptionRow id="mobile-access" state={option("mobile-access")} onChange={(on) => void (on ? enable() : run(() => daemon("mobile.disable")))} />
       <Show when={shownError()}><div class="form-note error">{errorText(shownError())}</div></Show>
       <Show when={s()?.store_error}>
         <div class="form-note error" data-store-error>
@@ -245,56 +379,50 @@ export function MobileSettings() {
           <button class="btn danger" disabled={busy()} onClick={() => void reset()}>{t("Reset phone access")}</button>
         </div>
       </Show>
-      <Show when={s()?.enabled}>
-        <SettingRow id="mobile-network" wide>
-          <div class="inline-fields">
-            <select class="text-input" value={s()!.ip ?? ""} disabled={busy()} onChange={(e) => void enable({ ip: e.currentTarget.value })}>
-              <option value="">{t("Every private and Tailscale address")}</option>
-              <For each={s()!.ips}>{(a) => <option value={a.ip}>{a.ip} ({a.name})</option>}</For>
-              <Show when={s()!.ip && !s()!.ips.some((a) => a.ip === s()!.ip)}><option value={s()!.ip!}>{s()!.ip}</option></Show>
-            </select>
-            <input class="text-input" type="number" min="1024" max="65535" style={{ width: "100px" }} value={s()!.port} disabled={busy()}
-              onChange={(e) => void enable({ port: +e.currentTarget.value })} />
-          </div>
-          <For each={s()!.urls ?? []}>{(u) => <div class="mono mobile-url">{u}</div>}</For>
-          <Show when={!s()!.tls}>
-            <div class="form-note warn-note">{t("Plain HTTP: what phones see and send is still end-to-end encrypted, but a browser page served this way could be swapped by someone on the network, so browsers connected over plain HTTP can only read. With the app lock off, one on a Tailscale address can type.")}</div>
+      <Show when={hasAccess() && !s()!.store_error && (!query() || advancedMatches())}>
+        <div class="inline-fields" style={{ "margin-top": "8px" }}>
+          <button class="btn danger" data-revoke-all onClick={() => void revokeAll()}>{t("Turn off phone access and revoke all")}</button>
+        </div>
+      </Show>
+      <Show when={s()}>
+        <OptionRow id="mobile-tailscale" state={option("mobile-tailscale")} onChange={(on) => void setTailscaleMode(on)}>
+          <Show when={store.daemonApi() >= TAILSCALE_API}>
+            <Show when={s()!.enabled} fallback={
+              <Show when={s()!.tailscale?.to_remove}>
+                <Show when={tailscale()} fallback={<div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>}>
+                  <div class="form-note warn-note" data-tailscale-to-remove data-tailscale-serve={tailscale()!.serve}>{tailscale()!.state === "ready" ? tailscaleInstruction(tailscale()!) : t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
+                </Show>
+                <button class="btn" data-tailscale-check disabled={tailscale.loading} onClick={() => void checkTailscale()}>{t("Check again")}</button>
+              </Show>
+            }>
+              <div class="inline-fields" style={{ "align-items": "center" }}>
+                <button class="btn" data-tailscale-check disabled={tailscale.loading} onClick={() => void checkTailscale()}>{t("Check again")}</button>
+                <Show when={s()!.running && (tailscale()?.serve === "missing" || tailscale()?.serve === "port_busy" || tailscale()?.serve === "renamed")}>
+                  <button class="btn primary" data-tailscale-restore disabled={busy()} onClick={() => void setTailscaleMode(true)}>{t("Restore")}</button>
+                </Show>
+                <Show when={tailscale()?.serve === "left_behind"}>
+                  <button class="btn primary" data-tailscale-remove disabled={busy()} onClick={() => void setTailscaleMode(false)}>{t("Remove")}</button>
+                </Show>
+              </div>
+              <Show when={tailscale()}>
+                <div class="muted-inline" data-tailscale-state={tailscale()!.state} data-tailscale-serve={tailscale()!.serve}>{tailscaleInstruction(tailscale()!)}</div>
+              </Show>
+              <Show when={s()!.tailscale?.to_remove && !["left_behind", "port_busy"].includes(tailscale()?.serve ?? "")}>
+                <div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
+              </Show>
+              <Show when={tailscale()?.origin}>
+                <button class="btn primary" data-tailscale-pair disabled={busy() || !s()!.running} onClick={() => setGuideStep(1)}><Icon name="plus" size={13} /> {t("Pair a phone over Tailscale")}</button>
+              </Show>
+            </Show>
           </Show>
-        </SettingRow>
-        <SettingRow id="mobile-tls" wide>
-          <div class="inline-fields">
-            <input class="text-input mono" placeholder={t("certificate (.crt / .pem)")} value={s()!.cert ?? ""} onChange={(e) => void enable({ cert: e.currentTarget.value })} />
-            <input class="text-input mono" placeholder={t("private key (.key / .pem)")} value={s()!.key ?? ""} onChange={(e) => void enable({ key: e.currentTarget.value })} />
-          </div>
-        </SettingRow>
-        <Show when={store.daemonApi() >= TAILSCALE_API}>
-          <SettingRow id="mobile-tailscale" wide>
-            <div class="inline-fields" style={{ "align-items": "center" }}>
-              <Toggle on={!!s()!.tailscale?.on} onChange={(on) => void setTailscaleMode(on)} />
-              <button class="btn" data-tailscale-check disabled={tailscale.loading} onClick={() => void checkTailscale()}>{t("Check again")}</button>
-              <Show when={s()!.running && (tailscale()?.serve === "missing" || tailscale()?.serve === "port_busy" || tailscale()?.serve === "renamed")}>
-                <button class="btn primary" data-tailscale-restore disabled={busy()} onClick={() => void setTailscaleMode(true)}>{t("Restore")}</button>
-              </Show>
-              <Show when={tailscale()?.serve === "left_behind"}>
-                <button class="btn primary" data-tailscale-remove disabled={busy()} onClick={() => void setTailscaleMode(false)}>{t("Remove")}</button>
-              </Show>
-            </div>
-            <Show when={tailscale()}>
-              <div class="muted-inline" data-tailscale-state={tailscale()!.state} data-tailscale-serve={tailscale()!.serve}>{tailscaleInstruction(tailscale()!)}</div>
-            </Show>
-            <Show when={s()!.tailscale?.to_remove && !["left_behind", "port_busy"].includes(tailscale()?.serve ?? "")}>
-              <div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
-            </Show>
-            <Show when={!s()!.app}>
-              <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot change this.")}</div>
-            </Show>
-            <div class="muted-inline" data-tailscale-privacy>{t("This computer's name goes into public certificate logs when Tailscale gets its certificate, and that cannot be undone. Tailscale sees which devices connect and when, not what they say. Tailnet Lock protects you from a key handed out without your approval. The free Tailscale plan is for non-commercial use.")}</div>
-            <Show when={tailscale()?.origin}>
-              <div class="muted-inline">{t("A phone paired over plain HTTP keeps working there, read-only. To type over Tailscale it must be paired again: a browser keeps its pairing per address.")}</div>
-              <button class="btn primary" data-tailscale-pair disabled={busy() || !s()!.running} onClick={() => setGuideStep(1)}><Icon name="plus" size={13} /> {t("Pair a phone over Tailscale")}</button>
-            </Show>
-          </SettingRow>
-        </Show>
+        </OptionRow>
+        <OptionRow id="mobile-relay" state={option("mobile-relay")} onChange={(on) => void relay.turn(on, s()!.relay)}>
+          <Show when={store.daemonApi() >= RELAY_API && s()!.relay}>
+            <RelayDetails status={s()!.relay!} form={relay} busy={busy()} />
+          </Show>
+        </OptionRow>
+      </Show>
+      <Show when={s()?.enabled}>
         <Show when={guideStep() && tailscale()?.origin}>
           <div class="overlay" data-tailscale-guide={guideStep()}>
             <div class="modal" style={{ width: "560px" }}>
@@ -333,31 +461,6 @@ export function MobileSettings() {
             </div>
           </div>
         </Show>
-        <Show when={store.daemonApi() >= LOCK_API && s()!.lock}>
-          <SettingRow id="mobile-lock" wide>
-            <div class="inline-fields" style={{ "align-items": "center" }}>
-              <Toggle on={!!s()!.lock!.on} onChange={(on) => void setLock({ on })} />
-              <span>{t("Lock after")}</span>
-              <select class="text-input" data-lock-idle value={s()!.lock!.idle_s} disabled={busy() || !s()!.lock!.on} onChange={(e) => {
-                const select = e.currentTarget;
-                void setLock({ idle_s: +select.value }).then(() => { select.value = String(s()?.lock?.idle_s ?? select.value); });
-              }}>
-                <For each={IDLE_SECONDS}>{(n) => <option value={n}>{t("{n} min idle", { n: n / 60 })}</option>}</For>
-              </select>
-            </div>
-            <Show when={!s()!.app}>
-              <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot change this.")}</div>
-            </Show>
-          </SettingRow>
-          <Show when={s()!.lock!.on}>
-            <SettingRow id="mobile-lock-recheck">
-              <Toggle on={!!s()!.lock!.recheck} onChange={(recheck) => void setLock({ recheck })} />
-            </SettingRow>
-            <SettingRow id="mobile-lock-plain">
-              <Toggle on={!!s()!.lock!.plain_read} onChange={(plain_read) => void setLock({ plain_read })} />
-            </SettingRow>
-          </Show>
-        </Show>
         <SettingRow id="mobile-pair" wide>
           <Show when={!s()!.app}>
             <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot approve phones or raise what they may do.")}</div>
@@ -379,90 +482,190 @@ export function MobileSettings() {
           </Show>
         </SettingRow>
       </Show>
-      <Show when={!s()?.enabled && s()?.tailscale?.to_remove}>
-        <SettingRow id="mobile-tailscale" wide>
-          <Show when={tailscale()} fallback={<div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>}>
-            <div class="form-note warn-note" data-tailscale-to-remove data-tailscale-serve={tailscale()!.serve}>{tailscale()!.state === "ready" ? tailscaleInstruction(tailscale()!) : t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
-          </Show>
-          <button class="btn" data-tailscale-check disabled={tailscale.loading} onClick={() => void checkTailscale()}>{t("Check again")}</button>
-        </SettingRow>
-      </Show>
       <Show when={s()}>
-        <SettingRow id="mobile-devices" wide>
-          <div class="saved-layouts">
-            <For each={s()!.devices} fallback={<div class="muted-inline">{t("No paired devices.")}</div>}>
-              {(d) => (
-                <div class="saved-layout" data-device={d.id} data-state={d.state}>
-                  <Icon name="server" size={16} />
-                  <div class="saved-layout-main">
-                    <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show><Show when={d.passkey}> · {t("app lock set up")}</Show><Show when={d.lock_reset}> · {t("may set up a passkey")}</Show></span></div>
-                    <div class="muted-inline" style={{ "font-size": "11.5px" }}>
-                      {d.state === "unverified"
-                        ? t("Its record was changed outside Kelpie: pair it again.")
-                        : d.state === "unchecked"
-                          ? t("Kelpie cannot read the key that checks this record right now. It will check again; the phone stays paired.")
-                          : t("paired {when} · last seen {seen}", { when: formatRelative(d.created_at), seen: formatRelative(d.last_seen) })}
-                    </div>
-                  </div>
-                  <Show when={d.state === "ok"}>
-                    <select class="text-input" data-permission value={d.permission} disabled={busy()} onChange={(e) => void setPermission(d, e.currentTarget.value as MobilePermission)}>
-                      <option value="read">{t("May read")}</option>
-                      <option value="write">{t("May type")}</option>
-                      <Show when={d.kind === "app"}><option value="control">{t("May take control")}</option></Show>
-                    </select>
-                  </Show>
-                  <Show when={d.state === "ok" && d.secure_origin && store.daemonApi() >= LOCK_API}>
-                    <button class="btn" data-reset-lock disabled={busy()} onClick={() => void resetLock(d)}>{t("Reset this phone's lock")}</button>
-                  </Show>
-                  <button class="btn" onClick={async () => (await confirmDialog(t("Unpair “{name}”? It is disconnected at once.", { name: d.name }))) && void run(() => daemon("mobile.revoke", { id: d.id }))}>{t("Unpair")}</button>
+        <Show when={push() !== undefined}>
+          <OptionRow id="mobile-webpush" state={option("mobile-webpush")} control={<span class="muted-inline" data-webpush-state>{alertsOn()}</span>}>
+            <button class="link-btn" data-open-notifications onClick={() => store.openSettings("notifications", "push-webpush")}>{t("Send a test alert: Settings → Notifications")}</button>
+          </OptionRow>
+        </Show>
+        <OptionRow id="mobile-lock" state={option("mobile-lock")} onChange={(on) => void setLock({ on })} />
+        <OptionRow id="mobile-lock-idle" state={option("mobile-lock-idle")} control={
+          <select class="text-input" data-lock-idle value={s()!.lock?.idle_s} disabled={busy() || !!option("mobile-lock-idle").disabled} onChange={(e) => {
+            const select = e.currentTarget;
+            void setLock({ idle_s: +select.value }).then(() => { select.value = String(s()?.lock?.idle_s ?? select.value); });
+          }}>
+            <For each={IDLE_SECONDS}>{(n) => <option value={n}>{t("{n} min idle", { n: n / 60 })}</option>}</For>
+          </select>
+        } />
+        <OptionRow id="mobile-lock-recheck" state={option("mobile-lock-recheck")} onChange={(recheck) => void setLock({ recheck })} />
+        <OptionRow id="mobile-lock-plain" state={option("mobile-lock-plain")} onChange={(plain_read) => void setLock({ plain_read })} />
+        <Show when={push() !== undefined}>
+          <OptionRow id="mobile-ntfy" state={option("mobile-ntfy")} onChange={(on) => void setChannel("ntfy", on)}>
+            <button class="link-btn" data-open-notifications onClick={() => store.openSettings("notifications", "push-ntfy")}>{t("Server, topic and token: Settings → Notifications")}</button>
+          </OptionRow>
+          <OptionRow id="mobile-telegram" state={option("mobile-telegram")} onChange={(on) => void setChannel("telegram", on)}>
+            <For each={push() ? telegramProblems(push()!.config, push()!.secrets) : []}>{(p) => <div class="form-note warn-note" data-telegram-problem>{p}</div>}</For>
+            <button class="link-btn" data-open-notifications onClick={() => store.openSettings("notifications", "push-telegram")}>{t("Bot token and chat id: Settings → Notifications")}</button>
+            <Show when={telegram()}>
+              <div class="inline-fields" style={{ "align-items": "center" }}>
+                <span>{t("Telegram gets")}</span>
+                <select class="text-input" data-telegram-mode value={telegramMode()} disabled={busy()} onChange={(e) => {
+                  const select = e.currentTarget;
+                  // Back to what holds now when the person did not go on (nothing else redraws it then).
+                  void setTelegramMode(select.value as TelegramMode).then(() => { select.value = telegramMode(); });
+                }}>
+                  <option value="alert">{t("Alerts only")}</option>
+                  <option value="alert_link">{t("Alerts with a link")}</option>
+                  <option value="approve_low" disabled={!!telegram()!.approveBlocked && telegramMode() !== "approve_low"}>{t("Alerts with a link, and approvals of low-risk requests")}</option>
+                </select>
+              </div>
+              <Show when={telegram()!.approveBlocked && telegramMode() !== "approve_low"}><div class="muted-inline" data-telegram-approve-blocked>{telegram()!.approveBlocked}</div></Show>
+              <Show when={telegramMode() !== "alert"}>
+                <div class="form-note" data-telegram-link-note>{t("The link holds this computer's name or address on your network, which Telegram sees. Telegram does not open it, and it holds no code or token.")}</div>
+              </Show>
+              <Show when={telegramMode() === "approve_low"}><div class="form-note warn-note" data-telegram-warning>{telegramWarning()}</div></Show>
+              <Show when={bindingOpen()}>
+                <div class="form-note" data-telegram-bind>
+                  {t("From the Telegram account that will approve, send this within {n} s in the chat set in Settings → Notifications (your chat with the bot, or the group):", { n: Math.max(0, Math.round((binding()!.until - now()) / 1000)) })}
+                  {" "}
+                  <span class="mono" data-telegram-bind-command>{binding()!.command}</span>
+                  {" "}
+                  <button class="btn mini" data-telegram-bind-copy onClick={() => void navigator.clipboard?.writeText(binding()!.command)}>{t("Copy")}</button>
                 </div>
-              )}
-            </For>
-            <For each={s()!.legacy ?? []}>
-              {(d) => (
-                <div class="saved-layout" data-legacy={d.id}>
-                  <Icon name="server" size={16} />
-                  <div class="saved-layout-main">
-                    <div>{d.name}</div>
-                    <div class="muted-inline" style={{ "font-size": "11.5px" }}>{t("Paired before end-to-end encryption: pair it again.")}</div>
-                  </div>
-                  <button class="btn" onClick={() => void run(() => daemon("mobile.revoke", { id: d.id }))}>{t("Remove")}</button>
-                </div>
-              )}
-            </For>
-          </div>
-          <Show when={hasAccess() && !s()!.store_error}>
-            <div class="inline-fields" style={{ "margin-top": "8px" }}>
-              <button class="btn danger" data-revoke-all onClick={() => void revokeAll()}>{t("Turn off phone access and revoke all")}</button>
-              <button class="btn danger" disabled={busy()} onClick={() => void reset()}>{t("Reset phone access")}</button>
-            </div>
-          </Show>
-          <div class="inline-fields" style={{ "margin-top": "8px", "align-items": "center" }}>
-            <span>{t("Remove phones not seen for")}</span>
-            <select class="text-input" data-dormant value={s()!.dormant_days} disabled={busy()} onChange={(e) => {
-              const select = e.currentTarget;
-              const dormant_days = +select.value;
-              // Back to what holds now when the person did not verify (the status did not change, so nothing else redraws it).
-              void run(() => mobileSecure("mobile.set_options", { dormant_days })).then(() => { select.value = String(s()?.dormant_days ?? dormant_days); });
-            }}>
-              <For each={DORMANT_DAYS}>{(n) => <option value={n}>{n === 0 ? t("Never remove") : t("{n} days", { n })}</option>}</For>
-              <Show when={!DORMANT_DAYS.includes(s()!.dormant_days)}><option value={s()!.dormant_days}>{t("{n} days", { n: s()!.dormant_days })}</option></Show>
-            </select>
-          </div>
-          <details style={{ "margin-top": "8px" }} data-audit onToggle={(e) => e.currentTarget.open && void loadAudit()}>
-            <summary>{t("What phones did")}</summary>
-            <Show when={audit() && !audit()!.intact}>
-              <div class="form-note error" data-audit-broken>{t("This log was edited or damaged, so it cannot be fully trusted.")}</div>
+              </Show>
+              <Show when={push()?.telegram?.approving && !bindingOpen()}>
+                <div class="muted-inline" data-telegram-bound>{t("Approvals are on for Telegram account {user} in chat {chat}. Presses from anyone else do nothing.", { user: boundAccount(), chat: push()!.config.telegram.chat_id })}</div>
+              </Show>
+              <Show when={push()?.telegram?.error}><div class="form-note error" data-telegram-error>{errorText(push()!.telegram!.error)}</div></Show>
             </Show>
-            <For each={audit()?.entries ?? []} fallback={<div class="muted-inline">{t("Nothing yet.")}</div>}>
-              {(a) => (
-                <div class="muted-inline" style={{ "font-size": "11.5px" }} data-audit-entry>
-                  {formatRelative(a.at)} · {a.device === "-" ? "Kelpie" : deviceName(a.device)} · <span class="mono">{a.action}</span>{a.summary ? ` · ${a.summary}` : ""}
-                </div>
-              )}
-            </For>
-          </details>
-        </SettingRow>
+          </OptionRow>
+        </Show>
+      </Show>
+      <Show when={s() && (!query() || advancedMatches())}>
+        <details class="option-advanced" ref={advanced} data-mobile-advanced open={advancedOpen()} onToggle={(e) => {
+          // Held open while something under it must be seen: the page's state and the element stay the same.
+          if (advancedForced()) e.currentTarget.open = true;
+          else setAdvancedWanted(e.currentTarget.open);
+        }}>
+          <summary>{t("Advanced: address, certificate, screen and paired phones")}</summary>
+          <Show when={s()!.enabled}>
+            <SettingRow id="mobile-network" wide>
+              <div class="inline-fields">
+                <select class="text-input" value={s()!.ip ?? ""} disabled={busy()} onChange={(e) => void enable({ ip: e.currentTarget.value })}>
+                  <option value="">{t("Every private and Tailscale address")}</option>
+                  <For each={s()!.ips}>{(a) => <option value={a.ip}>{a.ip} ({a.name})</option>}</For>
+                  <Show when={s()!.ip && !s()!.ips.some((a) => a.ip === s()!.ip)}><option value={s()!.ip!}>{s()!.ip}</option></Show>
+                </select>
+                <input class="text-input" type="number" min="1024" max="65535" style={{ width: "100px" }} value={s()!.port} disabled={busy()}
+                  onChange={(e) => void enable({ port: +e.currentTarget.value })} />
+              </div>
+              <For each={s()!.urls ?? []}>{(u) => <div class="mono mobile-url">{u}</div>}</For>
+              <Show when={!s()!.tls}>
+                <div class="form-note warn-note">{t("Plain HTTP: what phones see and send is still end-to-end encrypted, but a browser page served this way could be swapped by someone on the network, so browsers connected over plain HTTP can only read. With the app lock off, one on a Tailscale address can type.")}</div>
+              </Show>
+            </SettingRow>
+            <SettingRow id="mobile-tls" wide>
+              <div class="inline-fields">
+                <input class="text-input mono" placeholder={t("certificate (.crt / .pem)")} value={s()!.cert ?? ""} onChange={(e) => void enable({ cert: e.currentTarget.value })} />
+                <input class="text-input mono" placeholder={t("private key (.key / .pem)")} value={s()!.key ?? ""} onChange={(e) => void enable({ key: e.currentTarget.value })} />
+              </div>
+            </SettingRow>
+          </Show>
+          <Show when={store.daemonApi() >= SCREEN_API}>
+            <SettingRow id="mobile-screen" wide>
+              <div class="inline-fields" style={{ "align-items": "center" }}>
+                <span>{t("Stop hotkey")}</span>
+                <input class="text-input mono" data-screen-hotkey style={{ width: "180px" }} value={store.state.settings.screenStopHotkey} onChange={(e) => {
+                  const input = e.currentTarget;
+                  const hotkey = input.value.trim();
+                  // The app checks it as the helper will: two modifiers, one of them Ctrl or Alt.
+                  void invoke("screen_prefs", { hotkey, tiles: store.state.settings.screenCrispText })
+                    .then(() => store.setSettings({ screenStopHotkey: hotkey }))
+                    .catch((err) => { setHotkeyError(errorText(err)); input.value = store.state.settings.screenStopHotkey; });
+                }} onInput={() => setHotkeyError(null)} />
+                <Toggle on={store.state.settings.screenCrispText} label={t("Crisp text")} onChange={(on) => store.setSettings({ screenCrispText: on })} />
+              </div>
+              <Show when={hotkeyError()}><div class="form-note error">{hotkeyError()}</div></Show>
+            </SettingRow>
+          </Show>
+          <SettingRow id="mobile-devices" wide>
+            <Show when={roomOffer()}>
+              <NewRoomOffer name={roomOffer()!} busy={busy()} onMake={() => void makeRoom()} onSkip={() => setRoomOffer(null)} />
+            </Show>
+            <div class="saved-layouts">
+              <For each={s()!.devices} fallback={<div class="muted-inline">{t("No paired devices.")}</div>}>
+                {(d) => (
+                  <div class="saved-layout" data-device={d.id} data-state={d.state}>
+                    <Icon name="server" size={16} />
+                    <div class="saved-layout-main">
+                      <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show><Show when={d.passkey}> · {t("app lock set up")}</Show><Show when={d.lock_reset}> · {t("may set up a passkey")}</Show><Show when={d.kind === "pwa" && d.secure_origin && !d.may_control && store.daemonApi() >= TAKEOVER_API}> · {t("may take control once its app lock is set up and on")}</Show></span></div>
+                      <div class="muted-inline" style={{ "font-size": "11.5px" }}>
+                        {d.state === "unverified"
+                          ? t("Its record was changed outside Kelpie: pair it again.")
+                          : d.state === "unchecked"
+                            ? t("Kelpie cannot read the key that checks this record right now. It will check again; the phone stays paired.")
+                            : t("paired {when} · last seen {seen}", { when: formatRelative(d.created_at), seen: formatRelative(d.last_seen) })}
+                      </div>
+                    </div>
+                    <Show when={d.state === "ok"}>
+                      <select class="text-input" data-permission value={d.permission} disabled={busy()} onChange={(e) => void setPermission(d, e.currentTarget.value as MobilePermission)}>
+                        <option value="read">{t("May read")}</option>
+                        <option value="write">{t("May type")}</option>
+                        <Show when={offersControl(d, store.daemonApi())}><option value="control">{t("May take control")}</option></Show>
+                      </select>
+                    </Show>
+                    <Show when={d.state === "ok" && d.secure_origin && store.daemonApi() >= LOCK_API}>
+                      <button class="btn" data-reset-lock disabled={busy()} onClick={() => void resetLock(d)}>{t("Reset this phone's lock")}</button>
+                    </Show>
+                    <button class="btn" onClick={() => void unpair(d)}>{t("Unpair")}</button>
+                  </div>
+                )}
+              </For>
+              <For each={s()!.legacy ?? []}>
+                {(d) => (
+                  <div class="saved-layout" data-legacy={d.id}>
+                    <Icon name="server" size={16} />
+                    <div class="saved-layout-main">
+                      <div>{d.name}</div>
+                      <div class="muted-inline" style={{ "font-size": "11.5px" }}>{t("Paired before end-to-end encryption: pair it again.")}</div>
+                    </div>
+                    <button class="btn" onClick={() => void run(() => daemon("mobile.revoke", { id: d.id }))}>{t("Remove")}</button>
+                  </div>
+                )}
+              </For>
+            </div>
+            <Show when={hasAccess() && !s()!.store_error}>
+              <div class="inline-fields" style={{ "margin-top": "8px" }}>
+                <button class="btn danger" disabled={busy()} onClick={() => void reset()}>{t("Reset phone access")}</button>
+              </div>
+            </Show>
+            <div class="inline-fields" style={{ "margin-top": "8px", "align-items": "center" }}>
+              <span>{t("Remove phones not seen for")}</span>
+              <select class="text-input" data-dormant value={s()!.dormant_days} disabled={busy()} onChange={(e) => {
+                const select = e.currentTarget;
+                const dormant_days = +select.value;
+                // Back to what holds now when the person did not verify (the status did not change, so nothing else redraws it).
+                void run(() => mobileSecure("mobile.set_options", { dormant_days })).then(() => { select.value = String(s()?.dormant_days ?? dormant_days); });
+              }}>
+                <For each={DORMANT_DAYS}>{(n) => <option value={n}>{n === 0 ? t("Never remove") : t("{n} days", { n })}</option>}</For>
+                <Show when={!DORMANT_DAYS.includes(s()!.dormant_days)}><option value={s()!.dormant_days}>{t("{n} days", { n: s()!.dormant_days })}</option></Show>
+              </select>
+            </div>
+            <details style={{ "margin-top": "8px" }} data-audit onToggle={(e) => e.currentTarget.open && void loadAudit()}>
+              <summary>{t("What phones did")}</summary>
+              <Show when={audit() && !audit()!.intact}>
+                <div class="form-note error" data-audit-broken>{t("This log was edited or damaged, so it cannot be fully trusted.")}</div>
+              </Show>
+              <For each={audit()?.entries ?? []} fallback={<div class="muted-inline">{t("Nothing yet.")}</div>}>
+                {(a) => (
+                  <div class="muted-inline" style={{ "font-size": "11.5px" }} data-audit-entry>
+                    {formatRelative(a.at)} · {a.device === "-" ? "Kelpie" : deviceName(a.device)} · <span class="mono">{a.action}</span>{a.summary ? ` · ${a.summary}` : ""}
+                  </div>
+                )}
+              </For>
+            </details>
+          </SettingRow>
+        </details>
       </Show>
     </>
   );

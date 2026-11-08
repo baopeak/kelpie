@@ -75,7 +75,7 @@ def forget_secrets(endpoint):
     if not endpoint or endpoint.startswith("kelpie-" + os.environ.get("USERNAME", os.environ.get("USER", "")) + "-v"):
         raise ValueError(f"not a test endpoint: {endpoint!r}")
     service = f"Kelpie ({endpoint})"
-    for key in ("mobile-link-key", "mobile-device-key", "mobile-push-vapid", "notify-ntfy-topic"):
+    for key in ("mobile-link-key", "mobile-device-key", "mobile-push-vapid", "notify-ntfy-topic", "mobile-relay-room-key", "mobile-relay-operator-key"):
         if os.name == "nt":
             ctypes.windll.advapi32.CredDeleteW(f"{key}.{service}", 1, 0)  # CRED_TYPE_GENERIC
         else:
@@ -494,6 +494,8 @@ class Phone:
         self.auto_ack, self.auto_hb = auto_ack, auto_hb
         self.caps = ["ack", "hb"] if caps else None  # None: a page from before frames were acknowledged
         self.resume = resume
+        # More for the first sealed message, as the page says it (the hash of the relay token it holds, say).
+        self.greeting = {}
         self.log = []
         self.lines = {}
         self.rev = {}
@@ -521,7 +523,7 @@ class Phone:
             self.closed = e.rcvd.code if e.rcvd else 1006
             return None
         self.session, _ = init.finish(reply)
-        await self.send(**({"caps": self.caps} if self.caps else {}), **({"resume": self.resume} if self.resume else {}))
+        await self.send(**({"caps": self.caps} if self.caps else {}), **({"resume": self.resume} if self.resume else {}), **self.greeting)
         self.reader = asyncio.ensure_future(self._read())
         self.acker = asyncio.ensure_future(self._flush_acks())
         await self.wait(lambda m: m["type"] == "hello", 10)
@@ -542,6 +544,9 @@ class Phone:
     async def _read(self):
         try:
             async for raw in self.ws:
+                # Text is never kelpie-link: on the relay it is the relay's own word (`desktop_offline`), which the page takes as a hint.
+                if isinstance(raw, str):
+                    continue
                 if len(self.wire) < WIRE_KEPT:
                     self.wire += raw[: WIRE_KEPT - len(self.wire)]
                 whole = self.session.open(raw)

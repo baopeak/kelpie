@@ -2856,6 +2856,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "jpeg-encoder"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b454d911ac55068f53495488d8ccd0646eaa540c033a28ee15b07838afafb01f"
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2907,6 +2913,7 @@ dependencies = [
  "interprocess",
  "jsonc-parser",
  "kelpie-proto",
+ "kelpie-screen",
  "keyring",
  "libc",
  "notify",
@@ -2967,6 +2974,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kelpie-screen"
+version = "0.1.12"
+dependencies = [
+ "jpeg-encoder",
+ "png 0.17.16",
+ "serde",
+ "serde_json",
+ "windows",
+]
+
+[[package]]
 name = "kelpie-stt"
 version = "0.1.12"
 dependencies = [
@@ -2994,6 +3012,7 @@ dependencies = [
  "block2",
  "chrono",
  "dirs 6.0.0",
+ "futures-util",
  "hkdf",
  "hmac",
  "hyper",
@@ -3002,6 +3021,7 @@ dependencies = [
  "interprocess",
  "kelpie-link",
  "kelpie-proto",
+ "kelpie-screen",
  "keyring",
  "libc",
  "objc2",
@@ -3021,11 +3041,13 @@ dependencies = [
  "sysinfo",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "tower",
  "tracing",
  "tracing-subscriber",
  "ureq 3.4.2",
  "uuid",
+ "webpki-roots 1.0.10",
  "windows",
  "windows-future",
  "windows-sys 0.61.2",

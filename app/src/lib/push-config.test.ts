@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { emptyPushConfig, pushProblems, pushSummary, type PushSecrets } from "./push-config";
+import { emptyPushConfig, pushProblems, pushSummary, telegramProblems, type PushSecrets } from "./push-config";
 
 const none: PushSecrets = { ntfy_topic: false, ntfy_token: false, telegram_token: false, webhook_url: false };
 
@@ -30,6 +30,8 @@ describe("pushSummary", () => {
     expect(pushProblems(c, none)).toEqual(["Telegram needs a bot token.", "Telegram needs a chat id.", "The webhook needs an address."]);
     expect(pushProblems(c, { ...none, telegram_token: true, webhook_url: true })).toEqual(["Telegram needs a chat id."]);
     expect(pushSummary(c, none)).toContain("Telegram needs a bot token.");
+    expect(telegramProblems(c, none)).toEqual(["Telegram needs a bot token.", "Telegram needs a chat id."]);
+    expect(telegramProblems(emptyPushConfig(), none)).toEqual([]);
   });
 
   it("warns when no event is selected", () => {

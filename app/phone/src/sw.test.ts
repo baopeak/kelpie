@@ -4,17 +4,18 @@ const ORIGIN = "https://desk.tail1234.ts.net:8443";
 const KEPT = "the kept shell";
 
 /** The worker, loaded fresh on a scope of its own: what it does with one request. */
-async function ask(request: { url: string; mode: string; method?: string }, network: () => Promise<Response>) {
+async function ask(request: { url: string; mode: string; method?: string }, network: () => Promise<Response>, paired = false) {
   vi.resetModules();
   const handlers: Record<string, (e: unknown) => void> = {};
   vi.stubGlobal("self", { addEventListener: (type: string, h: (e: unknown) => void) => (handlers[type] = h), location: { origin: ORIGIN }, skipWaiting: async () => {}, clients: { claim: async () => {} } });
   vi.stubGlobal("__PRECACHE__", ["/", "/icon.svg"]);
   vi.stubGlobal("__VERSION__", "test");
-  vi.stubGlobal("caches", { open: async () => ({ match: async () => new Response(KEPT), put: async () => {}, addAll: async () => {} }), keys: async () => [] });
+  const kept = (name: string) => async () => (name === "kelpie-shell-flags" ? (paired ? new Response("1") : undefined) : new Response(KEPT));
+  vi.stubGlobal("caches", { open: async (name: string) => ({ match: kept(name), put: async () => {}, addAll: async () => {} }), keys: async () => [] });
   vi.stubGlobal("fetch", vi.fn(network));
   await import("./sw");
   let answered: Promise<Response> | null = null;
-  handlers.fetch({ request: { method: "GET", ...request, url: ORIGIN + request.url }, respondWith: (p: Promise<Response>) => (answered = p) });
+  handlers.fetch({ request: { method: "GET", ...request, url: ORIGIN + request.url }, respondWith: (p: Promise<Response>) => (answered = p), waitUntil: () => {} });
   return answered as Promise<Response> | null;
 }
 
@@ -131,9 +132,97 @@ describe("opening the app", () => {
     expect(await (await r)!.text()).toBe(KEPT);
   });
 
+  it("opens a paired app from its kept shell at once, with no wait for the computer's address", async () => {
+    // A computer that never answers: the page is there all the same, and the network is asked only behind it.
+    const r = await ask(page, () => new Promise<Response>(() => {}), true);
+    expect(await (await r)!.text()).toBe(KEPT);
+  });
+
   it("leaves the socket and the reachability request to the network", async () => {
     expect(await ask({ url: "/link", mode: "websocket" }, async () => new Response(""))).toBeNull();
     expect(await ask({ url: "/manifest.webmanifest?probe=1", mode: "cors" }, async () => new Response(""))).toBeNull();
     expect(await ask({ url: "/", mode: "navigate", method: "POST" }, async () => new Response(""))).toBeNull();
+  });
+});
+
+describe("the kept shell, fetched again behind it", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** The worker with a kept `/` (`body`, `csp`), paired, and a network that answers `fresh`. What it keeps, and what it waits on, are given back. */
+  async function shellWorker(fresh: () => Promise<Response>) {
+    vi.resetModules();
+    const handlers: Record<string, (e: unknown) => void> = {};
+    const kept = new Map<string, Response>([["kelpie-phone-test/", new Response("<html>v1</html>", { headers: { "content-security-policy": "connect-src 'self'" } })], ["kelpie-shell-flags/paired", new Response("1")]]);
+    const told: unknown[] = [];
+    const page = { url: ORIGIN + "/", focus: async () => {}, postMessage: (m: unknown) => void told.push(m) };
+    vi.stubGlobal("self", { addEventListener: (type: string, h: (e: unknown) => void) => (handlers[type] = h), location: { origin: ORIGIN }, skipWaiting: async () => {}, clients: { claim: async () => {}, matchAll: async () => [page] } });
+    vi.stubGlobal("__PRECACHE__", ["/"]);
+    vi.stubGlobal("__VERSION__", "test");
+    vi.stubGlobal("caches", {
+      open: async (name: string) => ({
+        match: async (key: string) => kept.get(name + key)?.clone(),
+        put: async (key: string, value: Response) => void kept.set(name + key, value),
+        addAll: async () => {},
+      }),
+      keys: async () => [],
+    });
+    vi.stubGlobal("fetch", vi.fn(fresh));
+    await import("./sw");
+    const waits: Promise<unknown>[] = [];
+    const open = async () => {
+      let answered: Promise<Response> | null = null;
+      handlers.fetch({ request: { method: "GET", url: ORIGIN + "/", mode: "navigate" }, respondWith: (p: Promise<Response>) => (answered = p), waitUntil: (p: Promise<unknown>) => waits.push(p) });
+      const page = await answered!;
+      await Promise.all(waits);
+      return page;
+    };
+    const message = async (data: unknown) => {
+      handlers.message({ data, waitUntil: (p: Promise<unknown>) => waits.push(p) });
+      await Promise.all(waits);
+    };
+    const csp = () => kept.get("kelpie-phone-test/")?.headers.get("content-security-policy");
+    return { open, message, csp, told };
+  }
+
+  it("keeps the page's new headers, so a relay turned on after install is allowed the next time the app opens", async () => {
+    const w = await shellWorker(async () => new Response("<html>v1</html>", { headers: { "content-security-policy": "connect-src 'self' https://relay.example wss://relay.example" } }));
+    const first = await w.open();
+    expect(first.headers.get("content-security-policy")).toBe("connect-src 'self'");
+    expect(w.csp()).toContain("wss://relay.example");
+    expect((await w.open()).headers.get("content-security-policy")).toContain("wss://relay.example");
+  });
+
+  it("refreshes when the page says the relay changed", async () => {
+    const w = await shellWorker(async () => new Response("<html>v1</html>", { headers: { "content-security-policy": "connect-src 'self' https://relay.example wss://relay.example" } }));
+    await w.message({ type: "kelpie-refresh-shell" });
+    expect(w.csp()).toContain("wss://relay.example");
+  });
+
+  it("tells open pages once the kept CSP changed, and only then, since a page keeps the CSP it loaded with", async () => {
+    const w = await shellWorker(async () => new Response("<html>v1</html>", { headers: { "content-security-policy": "connect-src 'self' wss://relay.example" } }));
+    await w.message({ type: "kelpie-refresh-shell" });
+    expect(w.told).toEqual([{ type: "kelpie-shell-changed" }]);
+    // Fetched again with the same headers: nothing changed, nobody is told, so a page that reloads for it cannot do so again and again.
+    await w.message({ type: "kelpie-refresh-shell" });
+    await w.open();
+    expect(w.told).toHaveLength(1);
+  });
+
+  it("tells nobody when the page answered is another version's, or nothing answered", async () => {
+    const other = await shellWorker(async () => new Response("<html>v2</html>", { headers: { "content-security-policy": "connect-src 'self' wss://relay.example" } }));
+    await other.message({ type: "kelpie-refresh-shell" });
+    expect(other.told).toEqual([]);
+    const offline = await shellWorker(() => Promise.reject(new TypeError("offline")));
+    await offline.message({ type: "kelpie-refresh-shell" });
+    expect(offline.told).toEqual([]);
+  });
+
+  it("leaves the kept page alone when another version answers, or nothing does", async () => {
+    const other = await shellWorker(async () => new Response("<html>v2</html>", { headers: { "content-security-policy": "connect-src 'self' wss://relay.example" } }));
+    await other.open();
+    expect(other.csp()).toBe("connect-src 'self'");
+    const offline = await shellWorker(() => Promise.reject(new TypeError("offline")));
+    expect(await (await offline.open()).text()).toBe("<html>v1</html>");
+    expect(offline.csp()).toBe("connect-src 'self'");
   });
 });

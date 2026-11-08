@@ -283,6 +283,12 @@ fn parse_force(text: &str) -> Option<(Level, String)> {
     Some((Level::parse(level)?, reason.trim().to_string()))
 }
 
+/// Whether `KELPIE_LOAD_FORCE` also stands for the free memory (the screen's 20 % floor): only in a debug build or an e2e run (`KELPIE_E2E`), so a
+/// leftover variable in a release daemon's environment never lets a screen start on a machine short of memory.
+pub fn memory_hook_applies(forced: bool, debug_build: bool, e2e: bool) -> bool {
+    forced && (debug_build || e2e)
+}
+
 /// The test hook `KELPIE_LOAD_FORCE=L2:thermal` pins the level, whatever is measured.
 fn forced() -> Option<(Level, String)> {
     parse_force(&std::env::var("KELPIE_LOAD_FORCE").ok()?)
@@ -351,6 +357,15 @@ impl Load {
             0 => true,
             at => self.began + Duration::from_millis(at - 1) <= t,
         }
+    }
+
+    /// Free memory as the last second measured it (percent); none while the test hook pins the load in a test (`memory_hook_applies`), where
+    /// it stands for everything measured. A release daemon always gives the measured value, whatever its environment says.
+    pub fn memory_free(&self) -> Option<f64> {
+        if memory_hook_applies(forced().is_some(), cfg!(debug_assertions), std::env::var_os("KELPIE_E2E").is_some()) {
+            return None;
+        }
+        self.last.lock().reading.memory_free
     }
 
     /// What the last second measured, for the `mobile.load` call.
@@ -529,6 +544,13 @@ fn p95(lags: &VecDeque<f64>) -> f64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_pinned_load_stands_for_the_memory_only_in_a_test_build_or_an_e2e_run() {
+        assert!(memory_hook_applies(true, true, false), "a debug build");
+        assert!(memory_hook_applies(true, false, true), "a release daemon an e2e script started");
+        assert!(!memory_hook_applies(true, false, false), "a release daemon with the variable left in its environment: the measured value counts");
+        assert!(!memory_hook_applies(false, true, true), "no hook, no bypass");
+    }
     fn sample(lag: f64, cpu: f64, free: f64) -> Sample {
         Sample { lag_p95_ms: lag, reading: Reading { cpu: Some(cpu), memory_free: Some(free), ..Default::default() } }
     }

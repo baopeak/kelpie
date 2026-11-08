@@ -6,11 +6,12 @@
 //! each on its own thread with its own outbox (`destinations`, `outbox`).
 //! Nothing here runs with no destination: no thread, no socket, no timer. Secrets
 //! (topic, tokens, webhook address, signing key, subscription secrets) live in the OS credential store through [`SecretStore`];
-//! `notify.json` holds only what is safe to read. Text leaving the computer passes
+//! `notify.json` holds only what is safe to read. Telegram can also answer, when the person bound an account for it (`telegram_poll`). Text leaving the computer passes
 //! `kelpie_proto::redact`, a phone's alert holds no text from a session at all (`web_push`), request addresses are never logged and are not part of any error text.
 
 pub mod destinations;
 pub mod outbox;
+pub mod telegram_poll;
 pub mod web_push;
 
 use std::collections::{HashMap, HashSet};
@@ -100,11 +101,46 @@ impl Default for Ntfy {
     }
 }
 
+/// What a Telegram message carries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramMode {
+    /// What it sent before there was a choice: the link only when `phone_link` is on.
+    Alert,
+    /// The alert and a link to the session in the phone app.
+    #[default]
+    AlertLink,
+    /// That, and buttons that approve or deny a low-risk request once (`telegram_poll`). Turned on only by binding an account.
+    ApproveLow,
+}
+
+impl TelegramMode {
+    /// A `notify.json` from before the choice keeps sending what it sent.
+    fn before_the_choice() -> TelegramMode {
+        TelegramMode::Alert
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Telegram {
     pub enabled: bool,
     pub chat_id: String,
+    #[serde(default = "TelegramMode::before_the_choice")]
+    pub mode: TelegramMode,
+    /// The Telegram account whose button presses count, set by the binding alone (`notify.telegram_bind`): what the app sends is not read.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub user_id: String,
+    /// That account's `@username`, or its first name, as Telegram gave it when it bound: shown next to the id. Kept and cleared with it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub user_name: String,
+}
+
+impl Telegram {
+    /// Its buttons can answer: on, bound to an account and a chat, and in that mode.
+    pub fn approving(&self) -> bool {
+        self.enabled && self.mode == TelegramMode::ApproveLow && !self.user_id.is_empty() && !self.chat_id.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -383,6 +419,8 @@ pub struct Context {
     pub screen: Option<String>,
     /// The phone web app's address, when phone access is on.
     pub phone_url: Option<String>,
+    /// The same for Telegram's link, which its own mode asks for whatever `phone_link` says.
+    pub telegram_url: Option<String>,
 }
 
 /// The message as every channel gets it. All text is redacted.
@@ -729,6 +767,8 @@ impl Notifier {
         let config = destinations.config();
         let active = AtomicBool::new(loaded.any_enabled());
         *config.lock() = loaded;
+        // Approvals that were on go on polling; with none, nothing starts.
+        destinations.telegram().refresh();
         Notifier {
             path,
             secrets,
@@ -915,7 +955,11 @@ impl Notifier {
         };
         for ch in [Channel::Ntfy, Channel::Telegram, Channel::Webhook] {
             if channel_on(&c, ch) {
-                self.destinations.enqueue(destinations::Dest::Channel(ch), entry(Some(payload.clone()), 0));
+                let mut payload = payload.clone();
+                if ch == Channel::Telegram && c.telegram.mode != TelegramMode::Alert && payload.link.is_none() {
+                    payload.link = ev.session.as_deref().zip(ctx.telegram_url.as_deref()).and_then(|(s, base)| deep_link(base, s));
+                }
+                self.destinations.enqueue(destinations::Dest::Channel(ch), entry(Some(payload), 0));
             }
         }
         for device in self.destinations.device_ids() {
@@ -963,6 +1007,8 @@ impl Notifier {
             "webpush": {"devices": self.destinations.device_count()},
             "windows": windows,
             "dropped": self.dropped.load(Ordering::Relaxed),
+            // Approvals from Telegram: polling, a binding under way, and what stopped them.
+            "telegram": self.destinations.telegram().describe(),
         });
         if reveal_topic {
             v["ntfy_topic"] = json!(self.secrets.get(K_TOPIC));
@@ -973,6 +1019,12 @@ impl Notifier {
     /// Replaces the configuration and changes the secrets named in `secrets` (a string sets,
     /// null removes). Switching ntfy on creates its random topic.
     pub fn update(&self, config: Option<Config>, secrets: &Value) -> Result<()> {
+        self.update_choosing(config, secrets, false)
+    }
+
+    /// `update`, and with `ends_binding` the person chose a Telegram mode other than approvals while a code for them was shown: that code
+    /// binds nothing from now on. Any other save leaves a code be, unless it switches Telegram off, or changes its chat or its bot token.
+    pub fn update_choosing(&self, config: Option<Config>, secrets: &Value, ends_binding: bool) -> Result<()> {
         let mut changes: Vec<(&str, Option<String>)> = Vec::new();
         for (field, key) in [("ntfy_token", K_NTFY_TOKEN), ("telegram_token", K_TELEGRAM_TOKEN), ("webhook_url", K_WEBHOOK)] {
             match secrets.get(field) {
@@ -995,13 +1047,46 @@ impl Notifier {
         if token_after && server.starts_with("http://") && !is_loopback(&server) {
             bail!("an ntfy access token is sent only to an https server: use https, or remove the token");
         }
+        let approvals = self.destinations.telegram();
+        // One writer of the file at a time: a binding that completes meanwhile is not lost, nor brought back by this.
+        let _saving = approvals.saving();
+        let before = self.config();
+        // Approvals are the binding's to turn on (`telegram_bind`, the verified app and the person), and whatever changes who or where they come from turns them off.
+        let config = config.map(|mut c| {
+            c.telegram.user_id = before.telegram.user_id.clone();
+            c.telegram.user_name = before.telegram.user_name.clone();
+            c
+        });
+        if let Some(c) = &config {
+            if c.telegram.mode == TelegramMode::ApproveLow && before.telegram.mode != TelegramMode::ApproveLow {
+                bail!("approvals from Telegram are turned on in Kelpie → Settings → Mobile, which binds your Telegram account first");
+            }
+        }
+        let token_changed = changes.iter().any(|(k, _)| *k == K_TELEGRAM_TOKEN);
         for (key, value) in &changes {
             match value {
                 Some(v) => self.secrets.set(key, v)?,
                 None => self.secrets.delete(key)?,
             }
         }
-        if let Some(c) = config {
+        // A code shown for approvals binds nothing once the person chose another mode, switched Telegram off, or named another chat or bot.
+        // Under `saving`: a code read already is not saved after this.
+        if ends_binding || token_changed || config.as_ref().is_some_and(|c| !c.telegram.enabled || c.telegram.chat_id != before.telegram.chat_id) {
+            approvals.cancel_binding();
+        }
+        if token_changed {
+            approvals.forget_bot_name();
+        }
+        // A new bot token is a new bot: an account bound to the old one approves nothing through it.
+        let config = config.or_else(|| (token_changed && before.telegram.mode == TelegramMode::ApproveLow).then(|| before.clone()));
+        if let Some(mut c) = config {
+            let t = &before.telegram;
+            let ends = t.mode == TelegramMode::ApproveLow && (c.telegram.mode != TelegramMode::ApproveLow || !c.telegram.enabled || c.telegram.chat_id != t.chat_id || token_changed);
+            if ends {
+                c.telegram.mode = if c.telegram.mode == TelegramMode::ApproveLow { TelegramMode::AlertLink } else { c.telegram.mode };
+                c.telegram.user_id.clear();
+                c.telegram.user_name.clear();
+            }
             if c.ntfy.enabled && self.secrets.get(K_TOPIC).is_none() {
                 self.secrets.set(K_TOPIC, &random_topic())?;
             }
@@ -1010,8 +1095,36 @@ impl Notifier {
             // In this order: a thread ending because its channel went looks at the configuration, and must find it off.
             *self.config.lock() = c.clone();
             self.destinations.channels_changed(&c);
+            if ends {
+                approvals.ended("turned off in Settings", true);
+            }
         }
+        approvals.refresh();
         Ok(())
+    }
+
+    /// Lets one Telegram account approve low-risk requests: the code it sends the bot as `/bind <code>` within five minutes binds it and its chat
+    /// (`telegram_poll`). The caller has checked it is the verified app and that the person passed the OS verification.
+    pub fn telegram_bind(&self) -> Result<Value> {
+        let c = self.config();
+        if !c.telegram.enabled {
+            bail!("turn Telegram on first");
+        }
+        if self.secrets.read(K_TELEGRAM_TOKEN)?.is_none() {
+            bail!("Telegram needs a bot token first: Settings → Notifications");
+        }
+        let (code, expires_in) = self.destinations.telegram().begin_binding();
+        Ok(json!({"code": code, "command": format!("/bind {code}"), "expires_in": expires_in}))
+    }
+
+    /// The kill switch: buttons stop working at once, the ones sent lose them, and approvals stay off until bound again.
+    pub fn telegram_off(&self, why: &str) {
+        self.destinations.telegram().turn_off(why);
+    }
+
+    #[cfg(test)]
+    pub fn telegram(&self) -> &Arc<telegram_poll::Approvals> {
+        self.destinations.telegram()
     }
 
     /// A new topic: whoever had the old one stops receiving.
@@ -1058,6 +1171,46 @@ fn secret(secrets: &dyn SecretStore, key: &str) -> std::result::Result<Option<St
     secrets.read(key).map_err(|_| Failure::again("the credential store did not answer"))
 }
 
+/// A Telegram message: the title, what happened, what a button would approve (`telegram_poll`), then the link. Telegram does not fetch the
+/// link (`disable_web_page_preview`), but it does see it, and the computer's name in it.
+pub(crate) fn telegram_text(p: &Payload, asked: Option<&str>) -> String {
+    let mut text = format!("{}\n{}", p.title(), p.text());
+    if let Some(asked) = asked {
+        text.push_str("\n\n");
+        text.push_str(asked);
+    }
+    if let Some(link) = &p.link {
+        text.push_str(&format!("\n\n{link}"));
+    }
+    text
+}
+
+/// One call of the Telegram Bot API: what its reply has under `result` when it says `ok`, else why not. Errors never hold the address, which holds the token.
+pub(crate) fn telegram_call(base: &str, token: &str, method: &str, body: &Value, timeout: Duration) -> std::result::Result<Value, Failure> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .timeout_resolve(Some(Duration::from_secs(5)))
+        .timeout_connect(Some(Duration::from_secs(5)))
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .build()
+        .into();
+    let url = format!("{base}/bot{token}/{method}");
+    match agent.post(&url).content_type("application/json").send(body.to_string().as_bytes()) {
+        Ok(mut resp) => {
+            let status = resp.status().as_u16();
+            let reply: Value = resp.body_mut().with_config().limit(1 << 20).read_to_string().ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+            if (200..300).contains(&status) && reply["ok"] == true {
+                return Ok(reply["result"].clone());
+            }
+            let status = if (200..300).contains(&status) { reply["error_code"].as_u64().and_then(|c| u16::try_from(c).ok()).unwrap_or(500) } else { status };
+            let asked = reply.pointer("/parameters/retry_after").and_then(Value::as_u64).map(Duration::from_secs);
+            Err(Failure { status: Some(status), retry_after: asked, ..Failure::from(format!("HTTP {status}").as_str()) })
+        }
+        Err(e) => Err(failure_of(e)),
+    }
+}
+
 /// Sends `p` through one channel. Errors say what failed, never where.
 fn deliver(secrets: &dyn SecretStore, c: &Config, ch: Channel, p: &Payload, telegram: &str) -> std::result::Result<(), Failure> {
     match ch {
@@ -1076,12 +1229,8 @@ fn deliver(secrets: &dyn SecretStore, c: &Config, ch: Channel, p: &Payload, tele
             if c.telegram.chat_id.is_empty() {
                 return Err("no chat id".into());
             }
-            let mut text = format!("{}\n{}", p.title(), p.text());
-            if let Some(link) = &p.link {
-                text.push_str(&format!("\n\n{link}"));
-            }
             let url = format!("{telegram}/bot{token}/sendMessage");
-            post_json(&url, &[], &json!({"chat_id": c.telegram.chat_id, "text": text, "disable_web_page_preview": true}))
+            post_json(&url, &[], &json!({"chat_id": c.telegram.chat_id, "text": telegram_text(p, None), "disable_web_page_preview": true}))
         }
         Channel::Webhook => {
             let url = secret(secrets, K_WEBHOOK)?.ok_or("no address")?;

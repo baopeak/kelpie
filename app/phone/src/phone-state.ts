@@ -15,16 +15,20 @@ import { canAct, dataAge, deriveConn, type ConnState } from "./conn-state";
 import { browserEnv, Link, linkCodec, type ChatMsg, type ChatQueueMsg, type ChatRequestInfo, type ChatResolved, type DeviceInfo, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
 import { browserCredentials, LockModel, type LockInfo, type Proof } from "./lock";
 import { pair, type PairSocket } from "./pair";
-import { currentPairing, forgetPairing, loadPairing, savePairing, seemsPaired } from "./pairing-store";
+import { currentPairing, forgetPairing, loadPairing, relayUrl, savePairing, seemsPaired } from "./pairing-store";
 import { emptyView, ScreenSync, type Prompt, type ScreenFrame, type ScreenView } from "./screen-sync";
 import { forgetHistory } from "./history";
 import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
+import { browserReloadEnv, ShellReload, SHELL_CHANGED } from "./shell-reload";
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
 import { screenNow } from "./install-guide";
 import { afterFailedPairing, movedTo, platformOf } from "./install-state";
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
+import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
+import { KIND_VIDEO, ScreenSession, type ScreenState } from "./screen";
+import { SCREEN_API, TAKEOVER_API } from "../../src/lib/attention";
 
 // ---------- signals the views read ----------
 
@@ -72,6 +76,21 @@ export function dismissNotice() {
 }
 
 export const canType = () => !!device()?.can_write;
+/** The computer's feature level, from its last hello. */
+export const [daemonApi, setDaemonApi] = createSignal(0);
+/** This phone may take over the computer's browser panes here (a device given control, on this computer's HTTPS address, unlocked). */
+export const canTakeOver = () => device()?.permission === "control" && daemonApi() >= TAKEOVER_API;
+/** A pane taken over, or being picked (null: none). */
+export const [takeover, setTakeover] = createSignal<TakeoverState | null>(null);
+/** This phone may see the computer's screen (the same rule as a pane's takeover, at a computer that has it). */
+export const canSeeScreen = () => device()?.permission === "control" && daemonApi() >= SCREEN_API;
+/** The computer's screen seen from here, or being picked (null: none). Its media goes to the view directly (`onScreenMedia`), not through a signal. */
+export const [remoteScreen, setRemoteScreen] = createSignal<ScreenState | null>(null);
+let screenMediaSink: ((bytes: Uint8Array) => void) | null = null;
+/** The screen view takes the media messages while it is shown. */
+export function onScreenMedia(sink: ((bytes: Uint8Array) => void) | null) {
+  screenMediaSink = sink;
+}
 export const connected = () => canAct(conn());
 
 // ---------- the link ----------
@@ -101,7 +120,11 @@ export const [lockShown, setLockShown] = createSignal<{ clear: boolean; face: st
 const lock = new LockModel({
   credentials: browserCredentials(),
   ask: (m) => link.lockAsk(m),
-  lockNow: () => link.lockNow(),
+  lockNow: () => {
+    // Leaving the app locks it, and that ends a screen at once (the computer does the same on `lock_now`).
+    remoteScreens.locked();
+    link.lockNow();
+  },
   touch: () => link.lockTouch(),
   setResume: (secret) => link.setResume(secret),
   connected: () => link.ready,
@@ -140,6 +163,23 @@ function askRecheck(request: string, command: string): Promise<Proof | null> {
   });
 }
 
+/** The relay was turned on, off or moved: the kept shell is fetched again, for the CSP that names it (sw.ts). */
+function refreshShell() {
+  try {
+    navigator.serviceWorker?.controller?.postMessage({ type: "kelpie-refresh-shell" });
+  } catch {
+    /* no worker on this page */
+  }
+}
+
+const shellReload = new ShellReload(browserReloadEnv());
+
+/** The relay, for the installed app on its HTTPS origin, once the computer gave this phone a token. */
+const relayRoute = () => {
+  const p = currentPairing();
+  return p ? relayUrl(p, Date.now(), location.protocol === "https:") : null;
+};
+
 const link = new Link(browserEnv(), () => {
   const p = currentPairing();
   return p ? linkCodec(p) : null;
@@ -147,6 +187,8 @@ const link = new Link(browserEnv(), () => {
   changed: () => recompute(),
   locked(info: LockInfo) {
     lock.told(info);
+    // The computer ended any screen this phone saw when it locked: no grace (owner decision 2026-11-06).
+    remoteScreens.locked();
   },
   chatRequestInfo(m: ChatRequestInfo) {
     setRequestInfo((cur) => ({ ...cur, [infoKey(m.id, m.request_id)]: m }));
@@ -158,6 +200,7 @@ const link = new Link(browserEnv(), () => {
     document.documentElement.dataset.servedLegacy = String(h.hb?.legacy ?? false);
     batch(() => {
       setDevice(h.device);
+      setDaemonApi(h.api);
       setSessions(h.sessions);
       setProjects(h.projects);
       setPaintedFrom(null);
@@ -184,6 +227,20 @@ const link = new Link(browserEnv(), () => {
     wantFromAlert = false;
     if (wanted) openSession(wanted.id);
     else if (openId() && !h.sessions.some((s) => s.id === openId())) closeSession();
+    // A pane held when the connection dropped: this connection asks for it again. The screen likewise.
+    void takeovers.reconnected();
+    void remoteScreens.reconnected();
+  },
+  takeover(m) {
+    takeovers.onMessage({ ...m, meta: m.meta as FrameMeta | undefined });
+  },
+  screen(m) {
+    remoteScreens.onMessage(m as Parameters<ScreenSession["onMessage"]>[0]);
+  },
+  screenMedia(bytes) {
+    // Only video says frames are coming; a cursor or a tile does not.
+    remoteScreens.media(bytes[1] === KIND_VIDEO);
+    screenMediaSink?.(bytes);
   },
   sessions(m: SessionsMsg) {
     const before = new Map(sessions().map((s) => [s.id, s.status]));
@@ -224,7 +281,20 @@ const link = new Link(browserEnv(), () => {
     const known = m.endpoints ?? m.list.map((a) => ({ t: "lan", a }));
     setMovedHost(movedTo(known, location.host));
     const p = currentPairing();
-    if (p && m.seq > p.addrsSeq) void savePairing({ ...p, endpoints: [...known, ...p.endpoints.filter((e) => e.t !== "lan" && e.t !== "ts")], addrsSeq: m.seq });
+    // `endpoints` is the whole list, the relay's included (or left out, when it was turned off); a computer from before sends the direct addresses only.
+    if (p && m.seq > p.addrsSeq) {
+      const relayBefore = JSON.stringify(p.endpoints.find((e) => e.t === "relay") ?? null);
+      const endpoints = m.endpoints ? known : [...known, ...p.endpoints.filter((e) => e.t !== "lan" && e.t !== "ts")];
+      void savePairing({ ...p, endpoints, addrsSeq: m.seq });
+      if (JSON.stringify(endpoints.find((e) => e.t === "relay") ?? null) !== relayBefore) refreshShell();
+    }
+  },
+  relay(m) {
+    const p = currentPairing();
+    if (!p) return;
+    const was = p.endpoints.find((e) => e.t === "relay");
+    void savePairing({ ...p, relayToken: m.token, relayExpires: m.expires, endpoints: [...p.endpoints.filter((e) => e.t !== "relay"), { t: "relay", a: m.url, r: m.ticket }] });
+    if (was?.a !== m.url) refreshShell();
   },
   deviceChanged(m) {
     const name = m.name;
@@ -238,6 +308,8 @@ const link = new Link(browserEnv(), () => {
     wipeTypedText();
     forgetHistory();
     forgetSenders();
+    takeovers.close();
+    remoteScreens.close();
     batch(() => {
       setPaired(false);
       setNotPairedMessage(t("This device is no longer paired. Pair it again from Kelpie → Settings → Mobile."));
@@ -247,9 +319,41 @@ const link = new Link(browserEnv(), () => {
   },
   haveRev: (id) => syncs.get(id)?.haveRev() ?? null,
   chatSince: (id) => chats.since(id),
-});
+}, relayRoute);
 
 export { link };
+
+const takeovers = new TakeoverSession({
+  panes: () => link.panes(),
+  start: (pane) => link.tkStart(pane),
+  stop: (tk) => link.tkStop(tk),
+  text: (tk, text, st, w) => link.tkText(tk, text, st, w),
+  rebind: (tk) => link.tkRebind(tk),
+  input: (tk, ops, st, w) => link.tkInput(tk, ops, st, w),
+  ack: (tk, seq) => link.tkAck(tk, seq),
+  serverNow: () => link.serverNow(),
+  now: () => Date.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+}, setTakeover, t);
+export { takeovers };
+
+const remoteScreens = new ScreenSession({
+  targets: () => link.screens(),
+  start: (target) => link.scStart(target),
+  stop: (sc) => link.scStop(sc),
+  text: (sc, text, st) => link.scText(sc, text, st),
+  rebind: (sc) => link.scRebind(sc),
+  resume: (sc) => link.scResume(sc),
+  input: (sc, ops, st) => link.scInput(sc, ops, st),
+  ack: (sc, seq) => link.scAck(sc, seq),
+  keyframe: (sc) => link.scKey(sc),
+  serverNow: () => link.serverNow(),
+  now: () => Date.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+}, setRemoteScreen, t);
+export { remoteScreens };
 
 // ---------- alerts ----------
 
@@ -573,7 +677,9 @@ export async function pairDevice(code: string, name: string): Promise<string | n
   setPairShown(null);
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/link`;
   const held = await loadPairing();
-  const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }), held);
+  // The relay only for the installed app on its HTTPS origin: a plain-HTTP page is not let in there.
+  const relaySocket = location.protocol === "https:" ? (relay: string) => new WebSocket(relay) as unknown as PairSocket : undefined;
+  const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }), held, relaySocket);
   setPairShown(null);
   if (!r.ok) {
     if (!held) {
@@ -667,8 +773,13 @@ export function startApp() {
   setInterval(tick, 1000);
   navigator.serviceWorker?.addEventListener("message", (e: MessageEvent) => {
     if (e.data?.type === "kelpie-open" && typeof e.data.navigate === "string") openFromAlert(e.data.navigate);
+    if (e.data?.type === SHELL_CHANGED) shellReload.shellChanged();
   });
+  // A page keeps the CSP it loaded with: one that refuses the relay loads again, from the shell the worker kept for it (shell-reload.ts).
+  document.addEventListener("securitypolicyviolation", (e) => shellReload.violation(e.blockedURI, relayRoute()));
   window.addEventListener("online", () => link.setOnline(true));
+// Another network under the page: on the relay, the computer's own address may answer again.
+(navigator as Navigator & { connection?: EventTarget }).connection?.addEventListener?.("change", () => link.networkChanged());
   window.addEventListener("offline", () => link.setOnline(false));
   window.addEventListener("pageshow", (e) => e.persisted && link.kick());
   // What counts as the person being there, for the computer's idle time.
@@ -681,6 +792,7 @@ export function startApp() {
     // Nothing goes out from a hidden page, not even a late acknowledgement.
     if (document.hidden) for (const s of syncs.values()) s.dispose();
     if (!document.hidden) recompute();
+    if (!document.hidden) shellReload.visible();
   });
   window.addEventListener("hashchange", () => {
     const waited = readAlertLink(location.hash).waited;

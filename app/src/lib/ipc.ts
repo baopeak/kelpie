@@ -11,8 +11,16 @@ export const daemon = <T = unknown>(method: string, params: object = {}) =>
  *  accepts these only from the verified app and asks the operating system to verify the person (Windows Hello or the OS
  *  password) before one that raises access takes effect. What that prompt says is the daemon's own text; `lang` only picks its
  *  language. `daemon()` refuses the first three. */
-export const mobileSecure = <T = unknown>(method: "mobile.approve" | "mobile.set_permission" | "mobile.reset" | "mobile.set_options" | "mobile.set_tailscale" | "mobile.set_lock" | "mobile.reset_lock", params: object) =>
+export const mobileSecure = <T = unknown>(method: "mobile.approve" | "mobile.set_permission" | "mobile.reset" | "mobile.set_options" | "mobile.set_tailscale" | "mobile.set_lock" | "mobile.reset_lock" | "mobile.set_relay" | "mobile.relay_recreate" | "notify.telegram_bind", params: object) =>
   invoke<T>("mobile_secure_call", { method, params: { ...params, lang: locale() } });
+
+/** The user's answer to a sub-session request (the approval card). `always` also turns the policy to allow. */
+export const subAnswer = (id: string, decision: "once" | "session" | "always" | "deny") => daemon<unknown>("sub.answer", { id, decision });
+/** Requests still waiting for the user (the daemon keeps them for 5 minutes). */
+export const subPending = () => daemon<unknown[]>("sub.pending");
+/** The sub-session part of the daemon's policy: `sub_sessions` off|ask|allow, `sub_max` (0: automatic), read-only `sub_auto_max`. */
+export const subPolicyGet = () => daemon<unknown>("daemon.policy");
+export const subPolicySet = (patch: { sub_sessions?: "off" | "ask" | "allow"; sub_max?: number }) => daemon<unknown>("daemon.set_policy", patch);
 
 export const listSessions = () => daemon<SessionInfo[]>("session.list");
 
@@ -31,6 +39,9 @@ export interface CreateSession {
   prompt?: string;
   /** Runs on another machine over SSH (cwd is a path there). */
   remote?: { dest: string; port?: number; config?: string; tmux: boolean };
+  /** The session this one replaces (a conversation moved between terminal and chat view): it takes over that session's place
+   *  among the sub-sessions (its parent, its children, its mail). Daemon API 30+; an older daemon ignores it. */
+  lineage_from?: string;
 }
 export const createSession = (p: CreateSession) => daemon<SessionInfo>("session.create", p);
 
@@ -227,7 +238,7 @@ export function b64ToBytes(b64: string): Uint8Array {
 
 
 /** From this daemon API level the daemon browses hosts over SFTP and this computer (`sftp.*`, `local.*`). */
-export const FILES_API = 26;
+export const FILES_API = 31;
 
 export const sftpList = (dest: string, path: string, hidden = false) => daemon<RemoteEntry[]>("sftp.list", { dest, path, hidden });
 /** `lstat` is the path itself; `stat` follows a link (null when its target is gone). */
@@ -244,9 +255,9 @@ export const localList = (path: string, hidden = false) => daemon<RemoteEntry[]>
 export const localHome = () => daemon<{ path: string }>("local.home").then((r) => r.path);
 
 /** From this daemon API level the daemon runs the transfer queue (`xfer.*`, the `xfer.updated` / `xfer.removed` events). */
-export const XFER_API = 27;
+export const XFER_API = 32;
 /** From this daemon API level a host-to-host copy may go direct (`route: "auto"`); below it, it goes through this computer. */
-export const ROUTE_API = 28;
+export const ROUTE_API = 33;
 
 export const xferStart = (job: XferStart) => daemon<{ id: string }>("xfer.start", job).then((r) => r.id);
 /** `notice`: the saved transfer list could not be read (it was kept aside, or saving is off until a restart). */

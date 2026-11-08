@@ -3,6 +3,7 @@ import { store } from "../lib/store";
 import { Icon } from "./icons";
 import { MemoryMeter, UsageMeters } from "./usage-meter";
 import { InboxPanel } from "./inbox";
+import { reportedState } from "./sidebar";
 import { setCovering } from "../lib/overlays";
 import { activeRuns } from "../lib/runs";
 import { available, stopsDaemon, whenIdle } from "../lib/updater";
@@ -13,6 +14,7 @@ import { activeCount, chipText, closeConflicts, conflictsShown, heldText, initTr
 import { XFER_API } from "../lib/ipc";
 import { hostByAlias } from "../lib/ssh-hosts";
 import { openFiles, openHosts } from "./hosts-page";
+import { ScreenIndicator } from "./screen-indicator";
 
 const waitingApproval = () => activeRuns().reduce((n, r) => n + r.tasks.filter((t) => t.status === "waiting_approval").length, 0);
 
@@ -61,7 +63,8 @@ export function StatusBar() {
       if (!s.alive) continue;
       alive++;
       if (s.status === "working") working++;
-      if (s.status === "waiting") waiting++;
+      // The sidebar's own rule: a session waiting on a prompt, or a quiet sub-session that reported it needs you or is blocked. Once each.
+      if (reportedState(s) === "waiting") waiting++;
     }
     return { alive, working, waiting };
   });
@@ -130,6 +133,7 @@ export function StatusBar() {
           }}>{text()}</span>
         )}
       </Show>
+      <ScreenIndicator />
       <Show when={activeRuns().length}>
         <span class="item clickable" title={t("Orchestration runs in progress")} onClick={() => store.setOverlay("runs")}>
           <Icon name="board" size={13} /> {activeRuns().length === 1 ? t("{n} run", { n: 1 }) : t("{n} runs", { n: activeRuns().length })}

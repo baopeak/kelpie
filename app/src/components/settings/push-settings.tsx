@@ -1,14 +1,14 @@
 // Settings → Notifications → "Off this computer": ntfy, Telegram and a webhook, kept by the session
 // daemon (crates/kelpied/src/notify.rs) so they work with the window closed. The daemon holds the
 // secrets in the OS credential store; this page only learns whether each one is set.
-import { For, Show, createEffect, createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { store } from "../../lib/store";
-import { daemon } from "../../lib/ipc";
+import { daemon, onEvent } from "../../lib/ipc";
 import { confirmDialog } from "../../lib/confirm-dialog";
 import { errorText, t } from "../../lib/i18n";
 import { SettingRow, Toggle } from "./setting-row";
-import { emptyPushConfig, pushSummary, type PushConfig, type PushState } from "../../lib/push-config";
+import { emptyPushConfig, pushChanged, pushRevision, pushSummary, type PushConfig, type PushState } from "../../lib/push-config";
 import "./push-settings.css";
 
 type Channel = "ntfy" | "telegram" | "webhook" | "webpush";
@@ -40,7 +40,17 @@ export default function PushSettings() {
   // A plain signal, not a resource: reloading after each change must not flash the section.
   const [state, setState] = createSignal<PushState | null>(null);
   const refetch = () => daemon<PushState>("notify.get").then(setState, () => {});
-  createEffect(() => store.connected() && void refetch());
+  createEffect(() => {
+    pushRevision();
+    if (store.connected()) void refetch();
+  });
+  // Approvals from Telegram change in the daemon on their own (an account bound, a token refused): a save from what was read before would undo that.
+  onMount(() => {
+    const un = onEvent<{ event: string }>("daemon-event", (m) => {
+      if (m.event === "notify.telegram") void refetch();
+    });
+    onCleanup(() => void un.then((f) => f()));
+  });
   const [error, setError] = createSignal<string | null>(null);
   const [topic, setTopic] = createSignal<string | null>(null);
   const [tested, setTested] = createSignal<Partial<Record<Channel, string>>>({});
@@ -59,7 +69,7 @@ export default function PushSettings() {
       } catch (e) {
         setError(errorText(e));
       }
-      if (--pending === 0) await refetch();
+      if (--pending === 0) pushChanged();
     });
     return chain;
   };
@@ -96,6 +106,7 @@ export default function PushSettings() {
     <Show when={state()}>
       <h3 class="settings-subhead">{t("Off this computer")}</h3>
       <div class="form-note">{t("Also tell your phone, with Kelpie's window closed. The session daemon sends these; nothing is sent until you switch a channel on.")}</div>
+      <button class="link-btn" data-open-mobile onClick={() => store.openSettings("mobile", "mobile-ntfy")}>{t("What each one costs and how safe it is: Settings → Mobile")}</button>
       <Show when={error()}><div class="form-note error">{error()}</div></Show>
 
       <SettingRow id="push-webpush" wide aside={<button class="btn mini" data-webpush-test disabled={!state()?.webpush?.devices} onClick={() => void test("webpush")}>{t("Send a test")}</button>}>
@@ -135,6 +146,12 @@ export default function PushSettings() {
               <button class="btn mini" disabled={!secrets().telegram_token || !cfg().telegram.chat_id} onClick={() => void test("telegram")}>{t("Send a test")}</button>
             </div>
             <Show when={tested().telegram ?? status("telegram")?.error}><div class="form-note">{tested().telegram ?? status("telegram")?.error}</div></Show>
+            <Show when={state()?.telegram?.approving}>
+              <div class="form-note warn-note" data-telegram-approving>{t("Approvals from Telegram are on: another chat id or bot token turns them off.")}</div>
+            </Show>
+            <Show when={state()?.telegram}>
+              <button class="link-btn" data-open-mobile-telegram onClick={() => store.openSettings("mobile", "mobile-telegram")}>{t("Alerts, a link, or approvals of low-risk requests: Settings → Mobile")}</button>
+            </Show>
           </div>
         </Show>
       </SettingRow>

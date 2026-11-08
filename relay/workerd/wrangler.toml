@@ -1,0 +1,13 @@
+# Only for bundling the self-hosted relay (`pnpm build:selfhost`): nothing is deployed from here.
+name = "kelpie-link-relay-selfhost"
+main = "entry.ts"
+compatibility_date = "2026-10-15"
+workers_dev = false
+
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

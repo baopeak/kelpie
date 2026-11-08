@@ -51,9 +51,15 @@ export interface ConnFacts {
   load: { level: number; reasons: string[] };
   /** The daemon restarted: what the phone follows is being sent again, and has not all arrived yet. */
   resyncing: boolean;
-  /** The route in use; "relay" arrives with the relay (a later phase). */
+  /** The route in use, or last used. */
   route: "direct" | "relay";
+  /** What is known of the relay: `none` this phone has no relay to try; `up` it answered; `down` it could not be reached; `no_computer` it said
+   *  this computer is not there (a hint: the relay can say anything, and it only ever ends a connection); `refused` the computer will not
+   *  serve this device through it. */
+  relay: RelayFact;
 }
+
+export type RelayFact = "none" | "unknown" | "up" | "down" | "no_computer" | "refused";
 
 /** `reset`: the computer's server answers and it has said nothing to this device's handshakes, which is what a computer with new
  *  pairing keys does. */
@@ -69,6 +75,8 @@ export type ConnState =
   | { kind: "computer_offline"; since: number }
   | { kind: "no_tailnet" }
   | { kind: "relay_unreachable" }
+  /** Tailscale is off on this phone and the relay cannot be reached either: no way to the computer from here. */
+  | { kind: "no_path" }
   | { kind: "restarted"; resyncing: boolean }
   | { kind: "busy"; level: number; reasons: string[] }
   | { kind: "replaced" }
@@ -101,9 +109,15 @@ export function deriveConn(f: ConnFacts, now: number): ConnState {
   if (!f.online) return { kind: "no_network" };
   if (f.attempt === 0 && f.connecting && f.lastLiveAt === 0) return { kind: "connecting" };
   if (f.reach === "portal") return { kind: "sign_in" };
-  if (f.reach === "no_tailnet" && f.attempt >= 2) return { kind: "no_tailnet" };
+  if (f.reach === "no_tailnet" && f.attempt >= 2) {
+    // With a relay to try, what Tailscale does matters only once the relay has failed too.
+    if (f.relay === "down") return { kind: "no_path" };
+    if (f.relay === "no_computer") return { kind: "computer_offline", since: f.lastLiveAt };
+    if (f.relay === "none" || f.relay === "refused") return { kind: "no_tailnet" };
+  }
   if (f.reach === "unreachable" && f.attempt >= 2) {
-    return f.route === "relay" ? { kind: "relay_unreachable" } : { kind: "computer_offline", since: f.lastLiveAt };
+    if (f.relay === "no_computer") return { kind: "computer_offline", since: f.lastLiveAt };
+    return f.relay === "down" || (f.route === "relay" && f.relay !== "none") ? { kind: "relay_unreachable" } : { kind: "computer_offline", since: f.lastLiveAt };
   }
   return { kind: "reconnecting", attempt: Math.max(f.attempt, 1), nextInS: f.nextAt === null ? null : Math.max(0, Math.ceil((f.nextAt - now) / 1000)) };
 }
@@ -156,6 +170,11 @@ export class LagMeter {
     this.samples.push(diff);
     if (this.samples.length > this.keep) this.samples.shift();
     return diff - Math.min(...this.samples);
+  }
+
+  /** The daemon's clock now, as well as it can be read: `localNow` less the smallest difference seen (the clocks' gap and the quickest delivery). */
+  serverNow(localNow: number): number {
+    return this.samples.length ? localNow - Math.min(...this.samples) : localNow;
   }
 }
 

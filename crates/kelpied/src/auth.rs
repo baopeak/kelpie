@@ -7,8 +7,9 @@
 //! - **Session** (`KELPIE_SESSION_ID` + `KELPIE_SESSION_TOKEN` from the session's environment):
 //!   the programs a session runs. They get the documented scripting surface (`kelpied terminal`,
 //!   `worktree`, `run`, `call session.*`) unless the user turned that off or the session was
-//!   started restricted; then only their own session. Hook and run reports always speak for the
-//!   caller's own session. Admin methods (custom agents, automations, phone access, daemon
+//!   started restricted; then only their own session, plus `sub.report` (to the session that opened them) and
+//!   `sub.inbox` (their own mail). Hook, run and sub-session calls always speak for the caller's own session;
+//!   answering a sub-session request (`sub.answer`) is the user's. Admin methods (custom agents, automations, phone access, daemon
 //!   settings, closing sessions, turn checkpoints and their undo, notification channels, timers
 //!   that type into a session, changing a session's account, resolving review notes, listing and stopping a session's processes…) are the user's only. Other sessions' environments are left
 //!   out of what they read.
@@ -18,7 +19,8 @@
 //!
 //! - **App** (the user token, `client: "app"`, *and* the connection's peer process runs the installed
 //!   Kelpie app, `peer_identity`): everything a User may, plus the phone-access decisions in
-//!   [`APP_ONLY`] (approving a phone, raising its permission, resetting phone access, Tailscale mode, the app lock). The role only
+//!   [`APP_ONLY`] (approving a phone, raising its permission, resetting phone access, Tailscale mode, the app lock, approvals from Telegram, the relay, providing browser panes to a
+//!   phone that takes one over, `provider`). The role only
 //!   decides who may ask: what raises access takes effect once the person passed the OS verification
 //!   the daemon runs itself (`user_presence`).
 //!
@@ -54,7 +56,7 @@ impl Role {
 
 /// Decisions about phone access that only the verified app may ask for (the daemon then verifies the person): a program that
 /// holds the user token cannot add a phone or raise what one may do, nor raise the prompt that would.
-pub const APP_ONLY: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale", "mobile.set_lock", "mobile.reset_lock"];
+pub const APP_ONLY: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale", "mobile.set_lock", "mobile.reset_lock", "mobile.set_relay", "mobile.relay_recreate", "notify.telegram_bind", "provider.register"];
 
 /// The role an `auth` with the user token gets: App when it says it is the app and its peer process is the installed app.
 pub fn user_role(says_app: bool, peer: Option<u32>) -> Role {
@@ -127,9 +129,10 @@ const SCRIPTING: &[&str] = &[
     "daemon.info", "agent.presets", "session.list", "session.read", "session.input", "session.create",
     "meta.list", "meta.get", "meta.set", "run.list", "run.get", "run.create", "run.retry",
     "run.task_done", "run.task_skip", "run.cancel", "run.report", "hook.report", "note.add", "note.list",
+    "sub.spawn", "sub.message", "sub.report", "sub.inbox", "sub.close",
 ];
 /// Methods a restricted session's programs may call, on their own session only.
-const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report", "note.add", "note.list"];
+const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report", "note.add", "note.list", "sub.report", "sub.inbox"];
 /// Methods of a session whose token went missing.
 const CLAIMED: &[&str] = &["daemon.info", "hook.report"];
 
@@ -178,7 +181,9 @@ pub fn authorize(d: &Daemon, role: &Role, method: &str, params: &mut Value) -> R
     if matches!(role, Role::Session(_) | Role::Claimed(_)) {
         object_params(method, params)?;
     }
-    if matches!(method, "hook.report" | "run.report") {
+    // `sub.*` speak for the caller's own session too: a program cannot report as, read the mail of, close
+    // the sub-sessions of, or message as another session. `sub.answer` and `sub.pending` are the user's.
+    if matches!(method, "hook.report" | "run.report" | "sub.spawn" | "sub.message" | "sub.report" | "sub.inbox" | "sub.close") {
         if let Some(obj) = params.as_object_mut() {
             obj.insert("session_id".into(), Value::String(id.clone()));
             // Whether the caller proved it is that session (a claimed id proves nothing).
@@ -334,6 +339,8 @@ pub(crate) fn event_visibility(d: &Daemon, role: &Role, event: &str, params: &Va
             if params.get("path").and_then(Value::as_str).is_some_and(|path| scripting || own_folder(path, &cwd)) { Full } else { Hidden }
         }
         "run.updated" | "run.deleted" if scripting => Full,
+        // A spawn waiting for the user's decision is for the user's eyes: a program must not learn it is asked, or by whom.
+        "sub.request" | "sub.request_done" => Hidden,
         _ => Hidden,
     }
 }
@@ -467,7 +474,7 @@ mod tests {
         let user = Role::User;
         let s = Role::Session("s".into());
         let claimed = Role::Claimed("s".into());
-        let admin = ["chat.send", "chat.write_turn", "chat.queue_op", "chat.close_stdin", "agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys", "process.list", "process.ports", "process.port_owner", "process.kill", "process.kill_children", "sftp.list", "sftp.stat", "sftp.realpath", "sftp.mkdir", "sftp.rename", "sftp.chmod", "local.list", "local.home", "xfer.start", "xfer.list", "xfer.control", "xfer.answer", "xfer.clear_finished"];
+        let admin = ["chat.send", "chat.write_turn", "chat.queue_op", "chat.close_stdin", "agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys", "process.list", "process.ports", "process.port_owner", "process.kill", "process.kill_children", "sub.answer", "sub.pending", "sftp.list", "sftp.stat", "sftp.realpath", "sftp.mkdir", "sftp.rename", "sftp.chmod", "local.list", "local.home", "xfer.start", "xfer.list", "xfer.control", "xfer.answer", "xfer.clear_finished"];
         // Phone-access decisions: the verified app only, never the bare user token or a session.
         for m in APP_ONLY {
             assert!(allowed(&Role::App, false, m), "app: {m}");
@@ -500,6 +507,23 @@ mod tests {
         }
         assert!(!allowed(&s, false, "session.create"));
         assert!(!allowed(&s, false, "run.create"));
+        // Sub-sessions: a session that may script others opens, messages, reports, reads its mail and closes its own;
+        // one that may not (or was started restricted) can still report to its parent and read its own mail.
+        for m in ["sub.spawn", "sub.message", "sub.report", "sub.inbox", "sub.close"] {
+            assert!(allowed(&s, true, m), "scripting session: {m}");
+            assert!(allowed(&user, false, m), "user: {m}");
+            assert!(!allowed(&claimed, true, m) && !allowed(&Role::Anonymous, false, m), "{m}");
+        }
+        for m in ["sub.report", "sub.inbox"] {
+            assert!(allowed(&s, false, m), "own-only session: {m}");
+        }
+        for m in ["sub.spawn", "sub.message", "sub.close"] {
+            assert!(!allowed(&s, false, m), "own-only session: {m}");
+        }
+        for m in ["sub.answer", "sub.pending"] {
+            assert!(allowed(&user, false, m) && allowed(&Role::App, false, m), "the user decides: {m}");
+            assert!(!allowed(&s, true, m) && !allowed(&s, false, m) && !allowed(&claimed, true, m) && !allowed(&Role::Anonymous, false, m), "{m}");
+        }
         assert!(allowed(&claimed, true, "hook.report"));
         assert!(!allowed(&claimed, true, "session.input"));
         assert!(!allowed(&claimed, true, "run.report"));

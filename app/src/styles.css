@@ -858,6 +858,9 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 /* ---------- pane tools ---------- */
 .pane-tools { position: absolute; top: 6px; right: 10px; z-index: 8; display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgba(22,26,35,.92); border: 1px solid var(--border-strong); opacity: 0; transition: opacity .12s; pointer-events: none; }
 .pane:hover > .pane-tools { opacity: 1; pointer-events: auto; }
+/* The sub-sessions strip runs under the tools' corner: while the pointer is on it, the tools step aside so its
+   right-hand actions (Close finished) can be clicked. */
+.pane:has(.sub-strip:hover) > .pane-tools { opacity: 0; pointer-events: none; }
 .pane-tools .icon-btn { width: 28px; height: 28px; }
 
 /* ---------- sidebar (rich) ---------- */
@@ -945,6 +948,15 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .switch span { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-faint); transition: left .12s, background .12s; }
 .switch.on { background: var(--accent); border-color: var(--accent); }
 .switch.on span { left: 18px; background: #fff; }
+.switch:disabled { opacity: .5; cursor: not-allowed; }
+/* Settings → Mobile: an option's lines, the summary over them, and the group the older fields moved to. */
+.option-lines { display: grid; gap: 3px; margin: 4px 0 0; }
+.option-lines > div { display: grid; grid-template-columns: 92px minmax(0, 1fr); column-gap: 10px; }
+.option-lines dt { color: var(--text-dim); }
+.option-lines dd { margin: 0; }
+.mobile-summary { display: grid; gap: 4px; padding: 10px 12px; margin-bottom: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); font-size: 12.5px; color: var(--text-dim); }
+.option-advanced { margin-top: 14px; }
+.option-advanced > summary { cursor: pointer; padding: 6px 0; color: var(--text-dim); font-size: 13px; }
 .kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 14px; font-size: 12.5px; color: var(--text-dim); user-select: text; min-width: 0; }
 .kv span { overflow-wrap: anywhere; }
 .kv span:nth-child(odd) { color: var(--text-faint); }
@@ -1289,6 +1301,9 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .browser-address input { width: 100%; height: 26px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0 9px; color: var(--text); font: 12.5px var(--font-ui); outline: none; }
 .browser-address input:focus { border-color: var(--accent); }
 .browser-host { flex: 1; min-height: 0; position: relative; background: #fff; }
+/* A phone controls the page: said above it, where the native page view cannot cover it. */
+.takeover-banner { flex: none; display: flex; align-items: center; gap: 8px; padding: 4px 10px; background: var(--accent-soft); color: var(--accent-strong); border-bottom: 1px solid var(--accent); font-weight: 600; }
+.takeover-banner > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browser-host > .empty { position: absolute; inset: 0; background: var(--term-bg); }
 .browser-notes { flex: none; max-height: 42%; display: flex; flex-direction: column; border-top: 1px solid var(--border); background: var(--bg-elev); }
 .browser-notes-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; font-size: 12px; color: var(--text-dim); }
@@ -1572,3 +1587,57 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
   .agent-map-list { max-height: calc(80vh - 170px); }
   .agent-map-list > .agent-map-children { margin-left: 0; }
 }
+
+/* ---------- sub-sessions ---------- */
+/* Sessions an agent opened sit under its row, behind a thin guide line (the indent builds up level by level). */
+.sub-list { margin: 0 0 2px 12px; padding-left: 8px; border-left: 1px solid var(--border); }
+.sub-chev { width: 14px; height: 16px; margin-right: -6px; padding: 0; border: 0; background: transparent; color: var(--text-faint); cursor: pointer; display: inline-grid; place-items: center; flex: none; }
+.sub-chev:hover { color: var(--text); }
+.sub-badge { min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; flex: none; color: var(--on-status); background: var(--exited); }
+.sub-badge.waiting { background: var(--waiting); }
+.sub-badge.error { background: var(--danger); }
+.sub-badge.working { background: var(--working); color: var(--on-working); }
+.sub-badge.done { background: var(--idle); }
+.sub-badge.idle { background: var(--text-faint); }
+/* The bar under a pane's header: who opened this session, and the ones it opened. */
+.sub-strip { flex: none; display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 2px 10px; font-size: 12px; color: var(--text-dim); background: var(--bg-elev); border-bottom: 1px solid var(--border); overflow: hidden; }
+.sub-parent { border: 0; background: transparent; color: var(--text-dim); font: inherit; padding: 2px 6px; border-radius: 5px; cursor: pointer; white-space: nowrap; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+.sub-parent:hover { background: var(--bg-hover); color: var(--text); }
+.sub-parent b { color: var(--text); font-weight: 600; }
+.sub-strip-label { flex: none; color: var(--text-faint); }
+.sub-chips { display: flex; gap: 6px; min-width: 0; overflow: hidden; }
+.sub-chip { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 210px; padding: 2px 9px 2px 7px; border-radius: 12px; border: 1px solid var(--border-strong); background: var(--bg-elev-2); color: var(--text); font: inherit; font-size: 11.5px; cursor: pointer; flex: 0 1 auto; }
+.sub-chip:hover { background: var(--bg-hover); }
+.sub-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub-chip-report { flex: none; color: var(--text-faint); }
+.sub-chip.r-done { border-color: var(--idle); }
+.sub-chip.r-failed { border-color: var(--danger); }
+.sub-chip:is(.r-blocked, .r-needs_user) { border-color: var(--waiting); }
+.sub-chip.more { flex: none; color: var(--text-dim); }
+.sub-close { margin-left: auto; flex: none; }
+/* The approval card: bottom right, over the window without covering a pane's controls. */
+.sub-cards { position: fixed; right: 16px; bottom: 36px; z-index: 119; width: min(430px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; }
+.sub-card { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px; font-size: 12.5px; background: var(--bg-elev-2); border: 1px solid var(--border-strong); border-left: 3px solid var(--accent); border-radius: 10px; box-shadow: 0 12px 30px rgb(var(--shadow-rgb) / calc(.5 * var(--shadow-k))); }
+.sub-card-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sub-card-what { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sub-card-task { color: var(--text-dim); background: var(--bg-elev); padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.sub-card-warn { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--text); }
+.sub-card-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.sub-card .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sub-cards-more { align-self: flex-end; border: 0; background: var(--bg-elev-2); color: var(--text-dim); border-radius: 8px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; box-shadow: 0 4px 12px rgb(var(--shadow-rgb) / calc(.4 * var(--shadow-k))); }
+.sub-cards-more:hover { color: var(--text); }
+.inbox .sub-card { margin: 4px 10px; box-shadow: none; }
+/* Nested rows give the name the room: smaller indent, no age (it is in the tooltip). */
+.sub-list { margin-left: 6px; padding-left: 5px; }
+.sub-list .session-row { gap: 5px; padding-left: 5px; padding-right: 6px; }
+.sub-list .session-row .age:not(.state-label) { display: none; }
+/* "Later" sits at the card's top right (last in the tab order, after Deny). */
+.sub-card { position: relative; }
+.sub-card-title { padding-right: 52px; }
+.sub-later { position: absolute; top: 8px; right: 10px; border: 0; background: transparent; color: var(--text-dim); font: inherit; font-size: 12px; text-decoration: underline; cursor: pointer; padding: 2px 4px; border-radius: 4px; }
+.sub-later:hover:not(:disabled) { color: var(--text); }
+.sub-later:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sub-later:disabled { opacity: .5; cursor: default; }
+/* A parent's name has priority over its age; the badge is compact. */
+.session-row.has-kids .age:not(.state-label) { display: none; }
+.sub-badge { min-width: 15px; padding: 0 4px; gap: 2px; }

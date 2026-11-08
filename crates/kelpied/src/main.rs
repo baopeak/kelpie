@@ -12,6 +12,8 @@
 //!   kelpied terminal list|read|send|wait …   drive sessions from a script or another agent
 //!   kelpied worktree get|set …               this folder's comment / board status
 //!   kelpied review add|list …                review notes on this worktree's diff
+//!   kelpied sub agents|spawn|list|send|read|wait|report|inbox|close …   sub-sessions (`kelpied sub --help`)
+//!   kelpied mcp                              the same as an MCP server on stdio (Kelpie injects it into Claude and Codex)
 
 mod agents;
 mod askpass;
@@ -28,6 +30,7 @@ mod daemon;
 mod echo_bench;
 mod files;
 mod load;
+mod mcp;
 mod meta;
 mod mobile;
 mod notes;
@@ -38,12 +41,18 @@ mod persist;
 mod ports;
 mod proc_tree;
 mod procs;
+mod provider;
 mod runtimes;
 mod runs;
 mod scheduled_input;
+mod screen;
 mod server;
 mod session;
 mod status;
+mod sub_guide;
+mod sub_stats;
+mod subs;
+mod takeover;
 mod user_presence;
 mod vt;
 
@@ -104,6 +113,8 @@ fn main() -> Result<()> {
         Some("worktree") => runtime()?.block_on(cli::worktree(&args[1..])),
         Some("run") => runtime()?.block_on(cli::run(&args[1..])),
         Some("review") => runtime()?.block_on(cli::review(&args[1..])),
+        Some("sub") => runtime()?.block_on(cli::sub(&args[1..])),
+        Some("mcp") => mcp::serve(),
         // ssh runs its SSH_ASKPASS program with the prompt as the only argument.
         Some(prompt) if std::env::var_os("KELPIE_ASKPASS").is_some() => std::process::exit(askpass::run(prompt)),
         Some(other) => anyhow::bail!("unknown command `{other}`"),
@@ -294,15 +305,19 @@ fn init_logging(data_dir: &std::path::Path) {
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
     let file = std::fs::OpenOptions::new().create(true).append(true).open(&path);
-    // The HTTP client logs the address of each request (a bot token is part of Telegram's): never,
-    // whatever level the user asks for.
-    let mut filter = tracing_subscriber::EnvFilter::try_from_env("KELPIE_LOG").unwrap_or_else(|_| "info".into());
-    for quiet in ["ureq=warn", "ureq_proto=warn"] {
-        filter = filter.add_directive(quiet.parse().expect("log directive"));
-    }
+    let filter = log_filter(tracing_subscriber::EnvFilter::try_from_env("KELPIE_LOG").unwrap_or_else(|_| "info".into()));
     if let Ok(file) = file {
         tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
     }
+}
+
+/// The level asked for, except that the HTTP client logs the address of each request (a bot token is part of Telegram's): never,
+/// whatever level the user asks for.
+pub(crate) fn log_filter(mut filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
+    for quiet in ["ureq=warn", "ureq_proto=warn"] {
+        filter = filter.add_directive(quiet.parse().expect("log directive"));
+    }
+    filter
 }
 
 /// Called by agents' hook machinery. Must be fast, print nothing to stdout (Claude feeds

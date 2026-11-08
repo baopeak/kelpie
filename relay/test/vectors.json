@@ -1,0 +1,14 @@
+{
+  "_about": "Shared by relay/test and crates/kelpied/src/mobile/relay.rs: the desktop signs with this room key as the relay checks, and both derive the same pairing token. The signature came from WebCrypto.",
+  "room_key_private_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "room_key_public": "BFFcPW6545a5BNP-yn9U_c0MwemXvzddylFa0KbDtANfRTa-OlDzGPv5pUdZAqIhUCvvDVfgjFOyzApW8X2fk1Q",
+  "room": "00112233445566778899aabbccddeeff",
+  "ts": 1762329600000,
+  "statement": "kelpie-relay/1 desktop 00112233445566778899aabbccddeeff 1762329600000",
+  "signature": "NvdCcfZJjmBVEejT60aRVE88jSecWrNDWnLwn-rqYyL7-_QuZT48g3sq_Vk2MrhnW_MqFtj1yw6x_N1EUGzQ-Q",
+  "psk_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "pair_token": "uDEZD_0dITUDFSih13NOrPturhEd-8BfaqI2kq8cPAw",
+  "pair_token_sha256": "48811535781dde30608b53e6d55759333fe17f09fb7a7d5cc91378766ef2b324",
+  "device_token": "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
+  "device_token_sha256": "425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c"
+}

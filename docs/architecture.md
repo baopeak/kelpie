@@ -16,7 +16,8 @@ Kelpie (Tauri app)                        kelpied (session daemon, one per user)
 │  history, usage, accounts, plugins,     ├─ phone server (opt-in, HTTP/WS on the LAN)
 │  integrations, remote (ssh), voice      │
 ├─ local socket ◄──────────────────────►  └─ local socket server
-└─ stdin/stdout ◄──► kelpie-stt (speech)  kelpied hook  ◄── agent hooks (Claude/Codex)
+├─ stdin/stdout ◄──► kelpie-stt (speech)  kelpied hook  ◄── agent hooks (Claude/Codex)
+└─ stdin/stdout ◄──► kelpie-screen (a phone's view of the screen, Windows)
 ```
 
 | Process | Lifetime | Owns |
@@ -24,6 +25,7 @@ Kelpie (Tauri app)                        kelpied (session daemon, one per user)
 | `Kelpie` | while the window is open | layout, settings (`app-state.json`), saved chat replies (`chat-bookmarks.json`), views |
 | `kelpied` | until stopped explicitly (or logoff) | PTYs, agent processes, terminal state, `sessions.json`, snapshots |
 | `kelpie-stt` | while dictation is used (exits after 10 idle minutes) | the loaded speech model, the microphone stream |
+| `kelpie-screen` | while a phone sees the screen (exits 30 s after the last viewer) | capture, the H.264 encoder, the phone's input into `SendInput`, the sharing border |
 | agent CLIs | per session | — |
 
 `app-state.json` carries a format `version` (currently 3: n-ary pane splits). A file with an older version, an
@@ -92,8 +94,8 @@ anything but `daemon.info` answers:
 - the **verified app** (`Role::App`): the user token, `client: "app"`, *and* the connection's peer process runs the Kelpie
   app's executable (`crates/kelpied/src/peer_identity.rs`: `kelpie` next to the daemon, or in the folder named by a runtime slot's
   `source.txt`, which an AppImage rewrites at every start because its mount moves while the daemon lives; on macOS a path check only, no code-signature check, a known weakening to fix or accept before macOS ships). Only
-  it may ask for the phone decisions `mobile.approve`, `mobile.set_permission`, `mobile.set_write`, `mobile.reset`, `mobile.set_tailscale`
-  (`auth::APP_ONLY`), and for a `mobile.set_options` that keeps unused phones longer. Those that raise access take effect only
+  it may ask for the phone decisions `mobile.approve`, `mobile.set_permission`, `mobile.set_write`, `mobile.reset`, `mobile.set_tailscale`,
+  `mobile.set_lock`, `mobile.reset_lock` and for approvals from Telegram, `notify.telegram_bind` (`auth::APP_ONLY`), and for a `mobile.set_options` that keeps unused phones longer. Those that raise access take effect only
   after **the daemon itself** asked the operating system to verify the person (`crates/kelpied/src/user_presence.rs`: Windows
   Hello, else the Windows password prompt checked with `LogonUserW` and required to be this user's account; macOS Touch ID or the
   login password; Linux polkit, by running `pkcheck --action-id org.freedesktop.policykit.exec --process <own pid>
@@ -130,6 +132,16 @@ anything but `daemon.info` answers:
   other sessions* off (`daemon.set_policy`, saved in `policy.json`) or a session created `restricted`,
   only its own session (`meta.set` compared on canonical paths, `..` refused). Everything else
   (settings, custom agents, automations, phone access, closing sessions) is the user's.
+  Sub-sessions add `sub.spawn|message|report|inbox|close` to the scripting surface and only
+  `sub.report|inbox` to a restricted session's; `authorize` overwrites their `session_id` with the caller's,
+  and `sub.answer|pending` are the user's. From a session, `session.create` and `run.create` are not
+  the old direct calls: they pass the same gate as `sub.spawn` (see "Sub-sessions"): a linked child,
+  the policy (`off` refuses, `ask` asks the user, `allow`), the caps, only installed agent kinds
+  (`shell`/`custom` refused: a shell could run anything, so a child could exceed its parent), `args`
+  limited to a model (`--model X`, `subs::only_model`), `id`, `env`, `chat_argv`, `remote`,
+  `agent_session_id` and `lineage_from` refused, `host` and `env` refused in a run, and the child's
+  Yolo flags only when the caller itself runs in full bypass. User, app and run-engine callers
+  still call `create` directly.
 - a **claimed** session (`KELPIE_SESSION_ID` without its token, which some agents strip from the
   programs they run): hook reports for that session only. `kelpied` never falls back to the user
   token inside a session.
@@ -166,10 +178,11 @@ Frames (`crates/kelpie-proto`): `u32 LE length | u8 kind | payload`
 | 2 Output | daemon → app | `u32 handle \| u64 seq \| bytes` (`seq` = stream offset after the bytes) |
 | 3 Input | app → daemon | `u32 handle \| bytes` |
 
-RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `chat.close_stdin`, `chat.send|write_turn|queue_op` (API 21: the chat's message queue, below), `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|revoke_all|set_permission|set_write|set_options|audit|reset|set_projects` (API 22 for `revoke_all`, `set_permission`, `set_options`, `audit`, `reset`), `mobile.load` (API 17: the machine-load level, lag percentiles; `{reset: true}` restarts the percentiles), and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
+RPC methods: `auth`, `daemon.info|set_theme|set_awake|set_priority|policy|set_policy|shutdown`, `session.list|create|attach|detach|input|answer|resize|focus|kill|close|restart|update|read|set_unread`, `sub.spawn|message|report|inbox|close|answer|pending` (API 30; per caller above), `chat.close_stdin`, `chat.send|write_turn|queue_op` (API 21: the chat's message queue, below), `hook.report`, `agent.presets|run|set_custom`, `meta.list|get|set`, `automation.list|state|save|delete|run|approve|set_paused|event` (API 15 for the last four and `state`), `run.list|get|create|approve|retry|task_done|task_skip|cancel|delete|report`, `note.add|list` (sessions: own worktree only) and `note.clear` (the user's) since API 13, `mobile.status|enable|disable|pair_start|approve|revoke|revoke_all|set_permission|set_write|set_options|audit|reset|set_projects` (API 22 for `revoke_all`, `set_permission`, `set_options`, `audit`, `reset`), `mobile.load` (API 17: the machine-load level, lag percentiles; `{reset: true}` restarts the percentiles), and since API 12 `ui.focus`, `notify.get|set|test|rotate_topic|clear|report`, `session.schedule_continue|cancel_scheduled|scheduled|set_env_restart` (all the user's: no session token reaches them), and since API 16 `process.list|ports|port_owner|kill|kill_children` (the user's only; see "Processes and ports" under "Daemon services beyond sessions").
+API 30 also adds: `session.create {lineage_from}` (user path only; hands a conversation's place in the tree to the new session), `session.update {handover}` (user only), `daemon.policy|set_policy` keys `sub_sessions` (`off|ask|allow`), `sub_max` (0 = auto) and, read only, `sub_auto_max`, and `agent.presets[].outcomes` (`sub_stats::AgentStats`: `{agent, count, judged, done_share, median_minutes}`; `done_share` (done among judged outcomes) and `median_minutes` are null without a verdict or a known time; the field is null before any sub-session of that agent finished). `session.updated` rows carry `parent`, `depth`, `report` and, while a view switch is under way, `switching`.
 `daemon.info` reports an `api` feature level (`kelpie_proto::API_LEVEL`); an app built for a
 higher level offers to restart an older daemon still running from a previous version.
-Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request` (API 22 adds `fingerprint`, `want`, `address`), `mobile.device_changed` and `mobile.lockout` (API 22: a phone was added, changed or removed; too many failed attempts, `{reason, address?}`), `daemon.unresponsive` (API 17: `{seconds}`, the event loop has been silent for 30 s; sent by the watchdog, delivered when the loop runs again), `chat.resolved` (API 17: `{handle, id, request_id, by, dropped, answered_by, at}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), `chat.queue` and `chat.turn_ready` (API 21: the chat's message queue and the offer of its next message to the window that queued it; see "Chat mode"), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
+Events: `session.updated` (coalesced, 250 ms), `session.turn` (API 9: `{session, event, transcript_path?, agent_session_id?}`, from every agent hook and when a session leaves `working`; built by the daemon from the hook payload, so no program can publish one — the app reads a session's usage on it, see "Context, tokens and cost"), `session.closed`, `session.resync`, `session.clipboard`, `meta.updated`, `notes.changed` (API 13: `{path, notes}`, a worktree's whole list), `automation.ran` (API 15 adds `dry_run` and `note`), `automation.changed`, `run.updated`, `mobile.pair_request` (API 22 adds `fingerprint`, `want`, `address`), `mobile.device_changed` and `mobile.lockout` (API 22: a phone was added, changed or removed; too many failed attempts, `{reason, address?}`), `daemon.unresponsive` (API 17: `{seconds}`, the event loop has been silent for 30 s; sent by the watchdog, delivered when the loop runs again), `chat.resolved` (API 17: `{handle, id, request_id, by, dropped, answered_by, at}`, to the clients attached to a chat when a request of its agent is answered; see "Phone protocol (v2)"), `chat.queue` and `chat.turn_ready` (API 21: the chat's message queue and the offer of its next message to the window that queued it; see "Chat mode"), `sub.request` and `sub.request_done` (API 30, the user's only: a spawn waits for approval; `{id, decision}` once it is answered, timed out or cancelled), and since API 12 `notify.event` and `scheduled.updated` (see "Notifications and limit actions").
 
 ## Session threading (daemon)
 
@@ -295,7 +308,7 @@ token; the message goes as JSON to the server's root, so the topic is never in a
 service and never reads or writes the installed app's entries; `notify.json` holds only what is safe to
 read, and `notify.get` says whether each secret is set, never its value (the topic only with
 `reveal_topic`). Nothing runs until a channel is switched on: no thread, socket or timer (the sending
-thread starts with the first message). Send errors say what failed (`HTTP 500`, `timed out`…), never
+thread starts with the first message; approvals from Telegram, which the person turns on, add one polling thread, below). Send errors say what failed (`HTTP 500`, `timed out`…), never
 where; request addresses are not logged (the daemon's log filter keeps the HTTP client at `warn`, whatever
 `KELPIE_LOG` says: its trace output contains the request path, a Telegram bot token among it). What is dropped
 (a full queue, an outbox past its limit, an entry too old, one tried twice with no answer) is counted and shown in the
@@ -311,6 +324,64 @@ screen is included only when switched on (a warning is shown), last 14 lines, 10
 The phone link is `<phone address>/#s=<session id>` while phone access is on and *Include a link to the
 phone page* is (default on; the link holds this computer's LAN address and goes to the chosen server): no pairing code and no
 token, so it opens only on a device that is already paired (the phone page strips the fragment).
+
+**Telegram's choices** (`notify::TelegramMode`, `notify/telegram_poll.rs`, API 26). `telegram.mode` is `alert` (what it sent before
+there was a choice: the link only with *Include a link*), `alert_link` (the default when switched on from now on: the link
+`running_url` + `#s=`, the Tailscale origin when there is one, whatever *Include a link* says) or `approve_low`. A `notify.json`
+without the field reads as `alert`, and so does a `notify.set` from an app below API 26 (its `telegram` has no `mode`): a link the
+person had chosen goes, and approvals end, which fails safe. `disable_web_page_preview` stays on, so Telegram does not fetch the link, but it sees it.
+- **Turning approvals on.** `notify.set` cannot: it refuses `approve_low` unless it is on already, and keeps `user_id` and `user_name`
+  from what it holds whatever the app sends. `notify.telegram_bind` (`auth::APP_ONLY`, then the person passes `user_presence`, then
+  Telegram must be on with a bot token) returns a 12-character code for five minutes. The first `/bind <code>` the bot gets in that time
+  **in the configured chat** (any chat while none is set; `@name` matches the chat's username) stores the sender's `user_id`, its
+  `@username` or first name as `user_name` (shown next to the id, and in the audit entry), and that chat's number as `chat_id`, and sets
+  `approve_low`. A `/bind` from another chat, or from a group's anonymous admin (`sender_chat`, or the account 1087968824), is refused
+  with a reply and binds nothing; so is a code that was used or ran out. Those replies go at most once a minute to each chat, off the
+  polling thread, at most four at once; the last of the four is kept for the configured chat, which the 64-chat cap does not hold
+  either, and a reply left out does not count towards the minute. `/bind@<bot>` counts only for this bot's own username (`getMe`,
+  for the token held now); a command for another bot is ignored. Five wrong
+  codes from the configured chat end the binding; other chats' do not count. A `notify.set` with `end_binding: true` (the page sends it
+  when the person picks another mode), one that switches Telegram off or names another chat, and a new bot token end a binding under way
+  (`notify.telegram` `bind_cancelled`); any other save leaves it waiting. A correct code is saved only if, under the same lock as the
+  settings' writer, Telegram is still on with the same chat and mode and the binding was not cancelled, renewed or killed meanwhile;
+  otherwise, as when the file cannot be written, the chat is told nothing was bound and the app hears `bind_failed`.
+- **Turning them off.** Another mode, Telegram off, another chat id or bot token, `notify.clear`, and the kill switch (`mobile.revoke_all`,
+  `mobile.disable`, `mobile.reset`) set `alert_link` and forget the account, saved. Every nonce is burnt and the sent messages lose
+  their buttons (`editMessageText`). A `401` or `404` from `getUpdates`, a token Telegram rejects, does the same and says so. A press
+  taken before that answers nothing after it: approvals are looked at again right before the answer is written, after any wait for the
+  request.
+- **Polling.** One thread (`kelpie-telegram`) long-polls `getUpdates` (25 s, its own agent with a 35 s limit, at most 20 updates) only
+  while approvals are on or a binding waits: in `alert` and `alert_link` there is no thread and no request of its own. Every poll asks for
+  `message` and `callback_query`: Telegram keeps only what the last poll asked for, so a `/bind` sent while presses alone were asked for
+  would never arrive. A `/bind` sent while nothing polls waits at Telegram, and the next poll answers it (no code waiting, or a wrong code
+  when a new one is open). The bot's username is asked once per token (`getMe`), and forgotten when the token changes. A poll that returns nothing in under a second waits out
+  the second. A note on a press of a button no longer valid is sent off the polling thread. Outbound only, no listener. The offset is kept in memory. Errors back off with full jitter from
+  1 s to 60 s; a `409` (a webhook, or another poller) is shown once with what to do.
+- **Buttons.** Only for a needs-you message about a request the daemon labels `low` (`mobile::risk`) that changes no file, shown whole
+  (at most 2000 characters, no hidden marks), with a one-time yes known to be one: in a terminal, the one open request a hook reported,
+  shown whole on one line of the menu's own dialog, between its `… command` header and its question, alone or followed, from the next
+  line, by the hook's own `description` (`choices::menu_shows_command`; whitespace collapsed, anything more or less refuses). A command
+  of more than one line, in the request or in the dialog, gets no buttons: a wrapped line cannot be told from a line break, which the
+  shell runs as a second command. The window must hold one header, left of every line under it, and a description that could be the
+  command's next line (a character a shell acts on, or a first word that is not plain letters or names a program the risk table knows)
+  matches nothing. Then a permission menu with one
+  plain *Yes* and one plain *No*
+  (`choices::one_time_answers`); in a chat, the one open request, for which the daemon writes the dialect's own one-time yes and no
+  (Claude's `can_use_tool` repeating its input when that was at most 16 KiB, Codex's command approvals in both versions, ACP's one
+  `allow_once` and its `reject_once`), each of which `ChatSession::answer` must take as a one-shot answer to that very request. A file
+  edit, write, patch, move or delete (`risk::changes_files`: Claude's Edit, Write, MultiEdit and NotebookEdit, Codex's
+  `applyPatchApproval`, ACP's edit, move and delete kinds) shows only its path, so it gets the alert and the link however it is
+  labelled. `unknown`, `medium` and `dangerous` get the alert and the link. `callback_data` is `a:` or `d:`
+  and a 128-bit nonce, in memory only, bound to its message, single use, gone after five minutes, when the request is answered
+  elsewhere (looked at before each poll) and with a restart. At most six approvals a minute; past that, messages go without buttons.
+- **A press.** Counted only from the bound `user_id` in the bound `chat_id`; any other is dropped, and the count goes to the audit log
+  once a minute (`telegram_ignored`). It answers through `Session::answer_by` with `waiting_since` or `ChatSession::answer`, as
+  `By {id: "telegram", name: "Telegram"}`, after checking the request is still the one it was sent for: the first answer wins, and a
+  late press is told who answered (*on the computer*, *from Telegram* or *on a paired phone*: never a phone's name). `chat.resolved`
+  and the log's `kelpie_answer` say `by: "telegram"`. Every approval, denial and refused press is in the phones' audit log as device
+  `telegram`, with the command as a length and a hash; presses of buttons that are no longer valid are counted and noted once a
+  minute, like strangers'. The app hears `notify.telegram` `{change}` (`bound`, `bind_expired`, `bind_failed`, `bind_cancelled`, `off`,
+  `error`) and reads `telegram` in `notify.get`.
 
 **Continue at reset.** Claude Code's `StopFailure` hook with error `rate_limit` marks the session
 `limited` (a `limited` field of `session.list`, cleared when the agent works again); other agents report
@@ -539,7 +610,11 @@ third implementation for the tests, and all three are checked against the crate'
   lengthening that needs the verified app and the person, shortening it does not.
 - **Permissions**: `read` < `write` < `control`, capped by the transport: a browser page may type only over HTTPS (Tailscale Serve's included), from a Tailscale
   address or from this machine, because a plain `http://` page can be swapped by someone on the network. Until a native app exists
-  `mobile.pair_start` makes browser pairings only.
+  `mobile.pair_start` makes browser pairings only. `control` (taking over a browser pane, API 28) is for a browser device only while all of these hold: it paired
+  on a secure origin, its passkey is set up and the app lock is on (`record_ceiling`, `may_control` in `mobile.status`), it was raised to it on the desktop with the
+  person's verification, this connection is this computer's own HTTPS page and not the relay (`transport_cap`), and the passkey has opened it now (`Mobile::control_now`,
+  read on every message; a connection from a page is held to this rule whatever its record's kind, an app record used from a browser too). That grant is also the confirmation of the device's first takeover: no other prompt. Turning the app lock off (`set_lock`) lowers every such
+  record to `write` (sealed, audited, its connection starts again); turning it back on does not restore it, a new grant does. Owner decisions, 2026-11-05.
 - **Tailscale mode** (`mobile/tailscale.rs`, off by default): `tailscale serve --bg --https=8443 http://127.0.0.1:<port>` publishes the
   page at `https://<fqdn>:8443` to the person's own tailnet, and forwards to one loopback listener that exists only while the mode is on and
   follows the same `Generation` stop as the others, with its own for what came through it, so turning it off cuts those phones and no
@@ -556,7 +631,7 @@ third implementation for the tests, and all three are checked against the crate'
     never publishes anything. An entry Tailscale will not remove yet is kept in the store (`tailscale_remove`), shown in Settings even with phone access off, and removed the next time Tailscale is looked at or phone access or the daemon starts. No timer runs for it.
   - **With the mode on the listener does not depend on this network's**: a busy port, a pinned address or no address at all are reported, and the server goes on.
   - **A MagicDNS rename**: an entry under another name is `renamed`, not `ours`. No origin is advertised and Restore publishes under the new name. That tailscaled keeps entries by name, and that `serve --https=8443 off` acts only on the name of now, are inferred, not seen: a rename was not tried on the real tailnet. If so, Restore leaves the old entry beside the new one, and turning off takes only the new one. An entry counts as removed only once a second read finds the port free, so Kelpie then keeps its port, reports `left_behind` and keeps trying, and it must be removed with Tailscale's own tools. Restore refuses to put a second entry on a second port.
-  - **Limit: a machine with more than one OS user.** The serve entry outlives the daemon: `tailscaled` is a service, and it keeps forwarding to `127.0.0.1:<port>` after a crash, a logoff or a shutdown, or while the store cannot be read. While nothing of ours holds that port, **another local user can bind it and answer at the phone's trusted origin**, with Tailscale's valid certificate in front. The installed app's service worker accepts that answer, so that user's script runs at the origin and can read the phone's Noise key from IndexedDB, and with it later reach this daemon as that device, up to its permission. A 502 while nobody holds the port is the good case, not the only one. A daemon that starts and finds the port taken removes its entry, which closes the window if `off` works, and does not undo a key already read; if it fails, Settings warns that phones may be reaching that program (`port_busy`). A daemon that cannot get that far (a bad certificate, a credential store that will not answer) does not look. The window is also open while a removal is still pending after phone access went off. On a machine with one OS user this does not apply: same-user code is out of scope (`auth.rs`). Settings does not state this limit. Decided on 2026-11-01: the limit stays documented, with no further guard, for a machine with one OS user. If shared machines come into scope the ways out are removing the entry on a clean shutdown, or `tailscale cert` with a listener on the Tailscale address, where a squatter has no valid certificate.
+  - **Limit: a machine with more than one OS user.** The serve entry outlives the daemon: `tailscaled` is a service, and it keeps forwarding to `127.0.0.1:<port>` after a crash, a logoff or a shutdown, or while the store cannot be read. While nothing of ours holds that port, **another local user can bind it and answer at the phone's trusted origin**, with Tailscale's valid certificate in front. The installed app's service worker accepts that answer, so that user's script runs at the origin and can read the phone's Noise key from IndexedDB, and with it later reach this daemon as that device, up to its permission. A 502 while nobody holds the port is the good case, not the only one. A daemon that starts and finds the port taken removes its entry, which closes the window if `off` works, and does not undo a key already read; if it fails, Settings warns that phones may be reaching that program (`port_busy`). A daemon that cannot get that far (a bad certificate, a credential store that will not answer) does not look. The window is also open while a removal is still pending after phone access went off. On a machine with one OS user this does not apply: same-user code is out of scope (`auth.rs`). Decided on 2026-11-01: the limit stays documented, with no further guard, for a machine with one OS user; the mode's row in Settings says in one line to use it only on such a machine. If shared machines come into scope the ways out are removing the entry on a clean shutdown, or `tailscale cert` with a listener on the Tailscale address, where a squatter has no valid certificate.
   - **Limits**: on this listener alone, `Peer` takes the client from the last value of `X-Forwarded-For`, and only a Tailscale address (serve replaces whatever a client sent; seen on 1.98). Missing, garbled or any other
     address falls into one shared bucket, `listen::BEHIND_SERVE`, which is not loopback, so nothing through serve has this machine's exemption. The header means nothing on any other listener. All upgrades through serve also share a budget of 20 a second, bursts of 40, spent only on what the address's own limit lets through, so one real address, which is all serve gives a tailnet device, cannot empty it. Several devices together can.
   - **The header is only as good as the programs on this machine**, which can connect to that port and say what they like. That gets no session: reconnecting takes a paired key, and pairing takes a live secret, the typed code and the OS prompt. The same is true of "From address" in the approval dialog. **What this comes to, without any key, for as long as the program runs: it can keep phones from connecting.** It can refuse every phone's new connection by keeping the budget spent, naming addresses it makes up (phones already connected stay). It can keep out one phone, whose Tailscale address is no secret, by holding that address's four handshake places (four connections every 5 s, with no lockout at all), or by renewing its lockout, which takes about one failure every 6 s: a lockout lasts a minute from the failures that made it, and they age out one by one. Past 1,024 addresses the table of failures starts over, which also wipes real lockouts. The desktop hears of a lockout, and of a flood only through an audit line every 5 minutes. This is accepted for now because nothing tells `tailscaled` from another program on that port and none of it gives access, but the reason differs by who it is: same-user code is out of scope (`auth.rs`), which does not cover another OS user, who can reach loopback too, or a tailnet device, which is not local at all. For another OS user that falls under the decision on the limit above. Several tailnet devices together were not decided separately.
@@ -566,6 +641,14 @@ third implementation for the tests, and all three are checked against the crate'
   - **`secure_origin`** on a device record says it paired from a page on an HTTPS origin: this computer's Tailscale origin as published at that moment, or a listener with a certificate of the person's own. A pairing that comes while Tailscale could not be read (no origin published at that moment) records false, and stays so until paired again. A program of this user can still produce it, with the pairing secret and the person's approval, by naming that origin on the loopback port; so it says what the person approved, not that no such program exists. It is what the relay and `control` will rest on, so it has a tag of its own (`secure_mac`), a second one so that a record still verifies for an older daemon, which ignores both and drops them when it saves. Setting the flag in the file makes the record `unverified`.
   - **The phone**: at a Tailscale name and not installed it shows how to install, because iOS keeps a tab's storage apart from the installed app's; so does a page on a person's own certificate opened with no code, while a pairing link there pairs directly, as it did before this mode. In the app the code comes from the camera (`qr-scan.ts`: `BarcodeDetector`, else `qr-decode.ts`, loaded only then) or a pasted link; plain `http://` is unchanged. A `*.ts.net` name failing at once reads as `no_tailnet` ("Turn on Tailscale"), distinct from a computer that does not answer; a 5xx from serve is no sign-in page, and the service worker answers with the kept shell.
   - Test seam: `KELPIE_TAILSCALE_BIN`, only with `KELPIE_E2E`; with `KELPIE_E2E` and no such variable there is no Tailscale. `serve --bg` returns at once and the certificate comes on the first request (38 s when measured), which stays with tailscaled. What real phones may yet change is in the phase file (`plans/261024-1205-phone-remote-control/phase-03a-tailscale-https.md`).
+- **Relay** (`mobile/relay.rs`, `relay/`, off by default, API 27; wire and close codes in [link-protocol.md](link-protocol.md), running one in [relay-self-host.md](relay-self-host.md)): one untrusted forwarder on Cloudflare Workers with a Durable Object per room, for the installed app when Tailscale is off on the phone or blocked. It carries kelpie-link frames it cannot read; it sees addresses, timing, sizes and the room id. **It never serves code**: the page comes only from this daemon over Tailscale HTTPS, so a phone's first install still needs Tailscale, and with the relay down and Tailscale off the app has no path and says so (`no_path`).
+  - `mobile.set_relay {on, url?, operator_key?}` and `mobile.relay_recreate` are in `auth::APP_ONLY`; on is checked first (an address `wss://<host>` whose host is a plain name or an address, a registration key when a room is to be made), then verified (`Prompt::Relay`), and only then is a room made and a socket opened; a registration key is kept only once the relay took it. A new room is verified too (`Prompt::RelayRoom`); the old room is removed (on the old connection while it is in that room, else on one of its own) before the new one opens. Unpairing a phone with the relay on offers a new room in Settings, answered no unless the person makes one (owner decision, 2026-11-06): it is the one way to change the ticket the removed phone holds, and phones not connected then lose the relay until they reach the computer over Tailscale. Off asks nobody and keeps the room and tokens. Off: no socket, no task, nothing in a QR code, `addrs` or the page's CSP, which otherwise adds exactly the relay's origin to `connect-src`.
+  - **The room** is made with the operator's registration key (a Worker secret; Kelpie keeps it in the credential store to make a new room). Its key is P-256 in the credential store; the relay keeps the public half and checks a fresh signature on every connection, with a time later than the last. Settings (`store::RelaySettings`) are sealed with the device key, so editing the file can neither turn the relay on nor point it elsewhere.
+  - **Phones**: a device with `secure_origin` gets a token inside the session (`relay`, 30 days, a new one after 7, also in `paired`); only its SHA-256 is kept, bound to the device by a tag of its own. The relay gets the hashes of tokens of devices that are paired, verified and on a secure origin, whole, first on every connection, before it says which phones are there: a phone removed while the relay was away is closed before it reaches anything. A device change sends the list a second later, so a removed phone hears `revoked` in its session first. A list sent during that second adds new tokens at once and takes none off. Phone access off, the kill switch and a reset end the connection gently: what the sessions still send, then an empty list (or `drop` on a reset), to the room that was this computer's when it was decided. When the relay is out of reach then, that word is said on a connection of its own once it answers (tried for a day, and not once this computer is back in that room); a connection that came back in another room meanwhile says nothing there. The relay hears only its newest desktop socket. A new token never replaces the one the phone says it holds. A pairing code adds a single-use token derived from its secret, retired once the code is spent.
+  - **Slots**: a slot number is one phone socket's, never reused while a socket holds it, and the daemon numbers each `open` so an old session's frames and kicks are dropped. Each phone socket at the relay feeds `link::accept` through `link::Carrier`, exactly as an upgrade on `/link` does, at an address in `100::/64` (a block that goes nowhere) for every limit, the one of the token it came in with (`relay::phone_ip`, from `k` in the relay's `open`; a slot is new for every socket, so by slot nothing would add up): the same 16 pending, 20 handshakes a second and 5 per token, the same lockout after 10 failures, `mac1` before any Diffie-Hellman, nothing before the first valid sealed frame. A phone closes the loser of its race with 4000 (`link::ROUTE_LOST`), which the relay passes on in `close`, and which is not counted as a handshake left unfinished; any other close or silence after the reply still is. The relay names these addresses, so when a limiter table is full a relay address pushes out only relay addresses and never empties the table of network addresses. A slot serves only a device with `secure_origin` (else 4412 before any reply), whose `caps` has `ack` and `hb` (else 4412: the relay keeps its own TCP alive, so only the session's heartbeats would find a dead phone). Its cap is `write`; the page's origin is the room's registered one, which the browser vouches for and the relay could only lie about with no keys to use it. The room's origin is the Tailscale origin last published, so a computer that never had Tailscale mode on can serve no phone through the relay, and after a tailnet rename phones installed from the old name are refused there too (403), as they are at the old address, until installed and paired again (accepted: first install needs Tailscale anyway).
+  - **Liveness**: a text keepalive every 20 s, which the relay answers without waking the room; nothing heard for 45 s and the connection is made again, after full-jitter backoff from 1 s to 60 s that starts over after 30 s up and when this machine's addresses change. A round trip whose average stays above 200 ms for a day is reported, and Settings offers a new room: phones hear the new ticket in `addrs` before the old room is dropped.
+  - **On the phone** (`link.ts`): the page's own origin first, the relay 250 ms later or at once when the first has failed; the first completed handshake wins. On the relay the direct origin is looked at every 30 s and when the network changes, and once it has answered for 10 s the link makes a new handshake there, closes the relay socket and follows again what it followed. `relay_unreachable` is told apart from `computer_offline` (the relay's `desktop_offline`), and both from `no_path`. A paired installed app opens from its kept shell at once (`sw.ts`), and the page is fetched again behind it and kept when it is the same version's, so its CSP follows the relay without a release; the page also asks for that when the relay is turned on, off or moved. A page keeps the CSP it loaded with, so an open one loads again (`shell-reload.ts`): at once when it refuses the relay's address (once per tab), and the next time the person comes back to it after the worker kept a shell with another CSP (at most once a minute).
+  - **Padding, no chaff** (owner decision, 2026-11-05): once both ends say they read it (`pad` in the phone's `caps`, `pad: true` in the hello), every chunk is padded to 256 B, 1 KiB, 4 KiB, 16 KiB or the largest Noise message (link-protocol.md), on every carrier. No frame is sent only to fill the line, so the timing and count of frames still show. The relay-lease lost-contact push stays deferred.
 - **Kill switch and audit**: `mobile.revoke_all` turns phone access off, removes every device and stops their connections. What phones
   did is in a hash-chained log (`mobile/audit.rs`, `mobile.audit`, `intact` says whether the chain holds; a line cut short by a failed
   write is skipped, nothing the chain covers is lost with it): the verb, device and time; of typed
@@ -632,6 +715,226 @@ A phone that paired on a secure origin reaches nothing until a passkey's signatu
 - **Risk labels** (`mobile/risk.rs`, pure): tool, full command, working directory and worktree to a level (`low`, `medium`, `dangerous`, `unknown`) and tags (`network`, `delete`, `outside_worktree`, `git_push`, `secret_access`, `install`, `sudo`, `pipe_to_shell`, `edits_config`). `low` is earned: a known read-only program, or an edit inside the worktree. A program not listed or named by a path outside the system's own folders, what cannot be read (quotes left open, 17 or more sub-commands, a shell's control words) and any bidi, zero-width or control character make `unknown`, unless something on the table is already `dangerous`. What is inside `$(...)`, backticks, `(...)` or a `{...}` script block is `unknown` and is also read as commands of its own, in double quotes and `${...}` as well, as are what `xargs` and `find -exec` run and a shell's `-c` script ahead of its first operand, up to four levels down and 512 KiB of reading in all per label; past either it says `unknown`, and labels are worked out with the session's lock let go. A backslash inside double quotes is read both as a POSIX shell takes it and as PowerShell does, and what either reading finds counts; a command given as an argument array keeps its words (`command_text`). A reader told to run or write (`rg --pre`, `sort -o`, `uniq` with two operands, `git log --output`) is no longer read-only, with long options cut short counted too, git is read through the options ahead of its subcommand (`-c`, `-C` and the like make it `unknown` at least), a file's name counts for `secret_access` and `edits_config` with or without a slash, and a word the shell works out (`$NAME`, a glob) makes a reader `medium`. This table will always have gaps: what it cannot read with confidence should be `unknown`, not `low`, and `unknown` does not ask for the re-check. Known ones it leaves: `/usr/local/bin/` and `/opt/homebrew/bin/` count as the system's although a person can write there, flags on a wrapper (`env -i`, `nice -n 5`) read `unknown` instead of what the wrapped command is, a `\"` with a `;` in the text can read `unknown` in a POSIX command, a `PostToolUse` of an auto-allowed run takes the entry of an open dialog with the identical command, and a plain string given to cmd.exe itself is read as a POSIX shell would read it (`echo # & del /s x`, `echo ^" & del /s x & echo ^"`), since only a written `cmd /c` says it is cmd. A heredoc and `$'...'` read `unknown`. An agent's description, title or reason is never an input. It reads words; it is not a shell, and someone who wants to hide from it can, which is why it is information and the whole command is shown under it. A terminal's prompt is labelled from what `PermissionRequest` hooks said (`wait {command, risk}` on a screen frame), and is `unknown` with no command when no hook spoke: what the screen says is an agent's text. The session keeps the requests open, not one slot: each stays until that tool's `PostToolUse` or `PostToolUseFailure`, or the end of the turn (`Stop`, `UserPromptSubmit`, an idle report, the agent gone). Another tool's events, a long silence and an answer end none of them: an answer does not say which dialog it was for, so a dialog that was refused stays on the card until the turn ends. A card says every command and the worst level, the re-check is over all of it, and past 16 open requests the mildest goes. All of that errs high, with one exception: the end of a turn clears the list, even when it is reported while a background agent's dialog is still open, and that card then says less than it should. A chat's request is labelled from its own fields, per dialect (`chat::rpc_request`), as `chat_request_info {id, request_id, command, risk}` behind its log line, and at `chat_sub` for those still open; a Codex file change names its files only in the log, so it is `unknown`. A command over 64 KiB is not sent: a notice says to read it on the computer, as a command cut short is not the command.
 - **Dangerous re-check** (off by default): an `answer` or `chat_answer` that approves a request labelled `dangerous` needs `recheck {expiry, auth_data, client_data, signature}`, an assertion whose challenge is SHA-256(request ‖ 0 ‖ SHA-256(command) ‖ expiry), with expiry at most 2 minutes ahead by the daemon's clock; else it is refused as `recheck`, and the page then asks with a sheet whose button is the tap a ceremony may need. For a terminal's menu Esc alone is known to refuse. Raw `input` and `key` cannot be classified, so while a dangerous request is open they are refused as `recheck`, except `esc` and `ctrl-c`, whatever the screen or the agent's status says, since a dialog stays up while another tool reports and on a screen that never goes quiet. The refusal lifts when exactly one request is open and something was typed since the list last changed: Esc, a card's answer or the computer's keys, which is how the phone can type again after Esc. A refused key writes nothing, so it cannot lift it. A chat approval's `updatedInput` that differs from the request is labelled for what would run, and the assertion must be over that. **`unknown` does not ask for the re-check**, by the owner's choice, so a command read wrongly gets no second look. Only Claude Code registers `PermissionRequest` hooks (`agents.rs`; Codex's `notify` fires at the end of a turn), so a terminal prompt of any other agent is `unknown` and has no re-check. Chat sessions label each request from its own fields, whichever agent it is.
 - **On the phone** (`lock.ts`, `lock-screen.tsx`): the lock screen stands before any cached paint, until the computer has said no lock applies here (and what it said is remembered for an offline start). On `visibilitychange` hidden an opaque cover goes up at once, `lock_now` goes out and the page drops the window's secret, so if the network took that with it the next hello is locked all the same. A hello already on its way that says `open` is answered with `lock_now` before anything shows. A ceremony's own system sheet is not leaving. Deny or cancel leaves it locked with its button. The challenge is kept fresh in the background, so that the tap goes straight to the browser. **Residual:** the page's cache and kept messages stay in IndexedDB unencrypted, a person with the unlocked phone's browser tools can read them, and the label is rendered by the page: what comes from the daemon over TLS.
+
+### Browser pane takeover
+
+A phone with `control` takes over one of the app's browser panes to get past a sign-in, an OAuth consent, a 2FA code or a captcha (API 28, Windows: the WebView2
+DevTools protocol; macOS is the later window-capture phase). Over Tailscale or this computer's HTTPS address only: a connection through the relay is never given
+`control`, so takeover is not offered there.
+
+- **Provider channel** (`provider.rs`): the daemon's own requests to the app. A connection of the verified app (`Role::App`) registers with `provider.register {kind:
+  "browser"}` (`APP_ONLY`); a second registration is refused, the audit log has `provider_refused` and the desktop hears `provider.refused`. The daemon sends
+  `{preq, method, params}` and waits 10 s for `provider.reply {preq, result | error}`, or `{pnote, method, params}`, which nobody answers. `provider.reply` and the
+  app's own `provider.event` are read on the connection's read loop, ahead of its requests, and only from that connection; so is `provider.register`, whose
+  peer process id says whether a new connection is the same app: the same process takes the kind over from its connection before with no alert (a quick
+  reconnect), anything else is refused. When the connection's read loop ends, or it authenticates again as something other than the app, every request it had
+  is answered with an error at once and every hold it served ends, before its queued requests are drained. The app retries a refused registration five times,
+  0.5 to 8 s apart. A request whose caller is dropped leaves nothing waiting.
+- **Broker** (`takeover.rs`): the phone's verbs `panes`, `tk_start {pane}`, `tk_input {tk, ops, st, w}`, `tk_text {tk, text, st, w}`, `tk_ack {tk, seq}`, `tk_stop`,
+  `tk_rebind`, all needing `control`; to the phone `tk_frame {tk, seq, data, meta}` (`meta.window_id` names the window shown), `tk_fhb {tk, seq, paused, hidden}` every
+  second, `tk_end {tk, reason}`. A hold is keyed by device, link connection and provider connection, one per pane, one per device; a start reserves its pane and
+  device until the app has answered, so two starts at once get one hold, and a start the app fails or does not answer in time tells it to let go
+  (`browser.takeover_stop`, which also makes the app refuse that start if it comes later). It rests on a `Mobile::grant` flag that a revoke, a lower permission,
+  the lock (`lock_now`, an idle window running out, `set_lock` turning it off, which also lowers the record to `write`), phone access off or a reset clear at once:
+  every input checks it, and the hold's task lets go of the pane within 250 ms, also when what the flag rests on is gone without it being cleared
+  (`Mobile::control_held`: the record's `control`, and for a page its lock on and a window its passkey opened). A rebind on the connection that holds it already
+  keeps it; a device's own hold is not listed to it as taken. At most 60 input messages a second are taken. A dropped link keeps the hold 15 s for the same device's next connection (`tk_rebind`, after its handshake), which gets a fresh
+  frame, never one from before. 10 minutes with no input ends it, and so does Stop on either side. New takeovers are refused at load L2 and above (`host_busy`).
+- **Frames are not queued**: the app acknowledges each `Page.screencastFrame` at once and hands it over; the broker keeps the newest one and sends it when the
+  phone has credit (2 frames unacknowledged; the phone acknowledges once the image is decoded), at the step's rate. Steps (`Ladder`): q70/1280 px at 10, 5 and 2 fps,
+  then q55/1024, q45/800, q40/800, down when the median acknowledgement round trip of the last 3 is over 400 ms or a frame is over 700 KiB of base64 (one link
+  message holds 1 MiB), up when the median of 10 is under 150 ms and the step held 5 s. Load caps: L1 q60/1280/8 fps, L2 q50/960/4, L3 q40/800/2. Nothing
+  acknowledged for 2 s pauses the screencast and drops the waiting frame, and the hold sleeps until something changes; the heartbeat says `paused`, and the phone
+  shows the picture as stuck and acknowledges its last frame again, which resumes it with a fresh one. A frame the phone cannot decode is acknowledged all the
+  same, and the phone says its picture is behind. The relay's 55 KB/s budget is not built: relay takeover is deferred.
+- **Input**: a closed set (`tap`, `down`, `move`, `up` in CSS pixels of the page's viewport, `wheel`, `key` from a short list) checked by the daemon, 32 to a
+  message. On the phone a tap clicks, a drag scrolls, a 400 ms hold then a drag drags (owner decision, 2026-11-05); only the first finger counts, and a second one
+  gives the gesture up (a drag lets go where it is) until every finger is off, so a pinch reaches the page as nothing. Every input names the window id of the
+  frame it was mapped against. In the app one ordered queue per takeover (at most 64 items) carries both input and text, so text never overtakes the tap that
+  chose its field; at its turn an item meant for another window (a popup that opened or closed meanwhile) is dropped, and so is anything but a release whose
+  `st` is more than 1 s off by then. Input goes as `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`; text as `Input.insertText`, answered once it is typed,
+  sent or not sent, never retried. A button a drag left pressed is released when the takeover ends or its window changes. Input whose `st` (the phone's reading of this computer's clock) is more than 1 s off is dropped, so a tap that arrives after a gap clicks
+  nothing; the phone merges moves and scrolls and sends nothing while its picture is not live (3 s without a frame or heartbeat dims it). **Nothing typed is logged**:
+  `Conn::note` leaves the takeover verbs out, the audit log has `takeover_start` (the page's host) and `takeover_stop` (why), and no log line names input.
+- **The app** (`browser/takeover.rs`, `lib/takeover.ts`): `browser.panes` and `browser.takeover_start` go to the window (`provider-request`), which lists the
+  panes and, for a start, brings the pane's tab to the front, shows "Controlled from <device> · Stop" above the page (a native page view would cover anything
+  drawn over it) and calls `browser_takeover_start`. The `Page.screencastFrame` receiver exists only while a pane is held. **Pane groups**: a `window.open` that asks
+  for a size (an OAuth or sign-in window) opens as a top-level window of its own on the pane's WebView2 environment (`NewWindowResponse::Create`, `window_features`
+  carrying the opener's environment), so `window.opener` holds; it has no IPC and stays on http(s) like the pane, its title says who controls it, and while it is
+  open it is what the phone sees. Closing it goes back to the pane; closing the pane closes its popups and ends its takeover. Any other new window still opens in the
+  pane (owner decision, 2026-11-05).
+- **What WebView2 does, as measured (2026-11-06, Windows 10)**: a pane hidden behind another tab, and a popup window behind the main one, paint no
+  screencast frames. So right after the person switches away from the newest held pane, the window brings its tab back once (`keepInFront`,
+  `paneToBringBack`: one hold only, once per hold, never several against one another), and a stream silent for 1 s is captured with
+  `Page.captureScreenshot` at the step's quality and width (`fallback`, `meta.captured`): at the ladder's rate and no faster than twice a second, every 2 s
+  on a still page nobody touches, never while paused (the daemon pauses the app while the phone's link is down too), and never the same picture twice in a
+  row (a resume, a rebind or a new window starts that over, since the phone may not have the last one; a new ladder step alone does not). A hidden pane gives
+  no capture either. Input to it is not safe: a phone tap (move, press, release) sent to a pane hidden for a few seconds clicked only once the pane showed
+  again, on whatever was there by then, while a bare press and release clicked at once; the protocol call returns at once either way. `document.visibilityState`
+  says `hidden` for a pane behind another tab and for a minimised window of its own, but stays `visible` for a pane in a minimised main window and for a
+  window behind the main one (WebView2 156, 2026-11-07). So a window counts as hidden
+  when the window hides the pane (`browser_visible`), when its window is minimised, or when its page says so (`document.visibilityState`, asked before each
+  input item and every 250 ms, 500 ms at most for an answer): it gets nothing but a release at the point pressed, its text is refused, nothing is captured of
+  it, and the app tells the daemon (`provider.event {kind: "hidden", on}`), whose next heartbeat says `hidden`, so the phone shows "the pane is hidden on the
+  computer" instead of a picture that looks live. Before each call but a release the queue looks again (the window, hidden, `st`), and the view's visibility
+  and its window's minimised state are read on the window thread right before the call (`devtools_when`), so a hide posted after that cannot overtake it. A
+  button the phone holds down is released before the window hides its pane. A window of its own behind the main one is not seen as hidden: input to it lands
+  at once (measured), and the phone keeps its last picture. A screencast started again on a still, visible page sends no first frame
+  by itself; the capture shows it. The
+  phone acknowledges at once a frame identical to the one shown, and an acknowledgement while paused writes off what was counted as on its way, so a still
+  page cannot lock the stream. A start that finishes after the daemon gave up stops its screencast and is refused, and Stop on the desktop always takes the
+  banner down. `window.close()` in a popup
+  makes wry destroy only its page view; the app closes the window with it, so the group goes back to the pane. `Create` inside the new-window handler works and
+  `window.opener` holds. A popup's DevTools state starts over when it takes the opener's request, so its screencast starts again when its page has loaded.
+  `Page.startScreencast` needs no `Page.enable`.
+- **Limits**: a dialog over the pane hides it (the native view would cover the dialog), and then the phone's picture stops and its input is not sent until the pane shows again; coordinates under browser zoom are
+  untested; the window-thread time per frame and the L2 CPU cut are not measured (the phase file has the numbers that are).
+
+### The computer's screen on a phone
+
+A phone with `control` sees a monitor or one window of this computer as H.264 video and drives it (API 29, Windows; macOS later). The same rules as a
+pane's takeover: Tailscale or this computer's HTTPS address only (the relay never carries `control`), the grant on the desktop with the person's verification
+as the only confirmation, the lock and a revoke ending it at once. The video goes **over the phone's end-to-end encrypted link**, not WebRTC: no UDP socket,
+no STUN or TURN (owner decision 2026-11-06; WebRTC is a later stage, only if stalls over 250 ms p95 are measured; a WebTransport spike comes first,
+2026-11-07). Built and run end to end on one desktop; the phase file lists what is still owed and the measurement plan.
+
+```
+phone ──link: screens · sc_start · sc_input · sc_text · sc_ack · sc_key · sc_stop · sc_rebind · sc_resume──▶ kelpied screen.rs ──provider (screen.*)──▶ app screen.rs ──stdin JSON──▶ kelpie-screen
+phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb · sc_end ◀── kelpied ◀── provider.event {sc, kind} ◀── app ◀── stdout frames ◀── kelpie-screen
+```
+
+- **The helper** (`crates/kelpie-screen`, a workspace member that no default build makes): spawned by the app on the first viewer (`app/src-tauri/src/screen.rs`,
+  like `kelpie-stt`), checked by its `hello {proto}`, stopped 30 s after the last viewer, shipped as an `externalBin`. Windows Graphics Capture for a window (the
+  yellow border stays on Windows 10), DXGI Desktop Duplication for a monitor, the cursor left out (the phone draws it from cursor messages, so it never dirties
+  the picture); a one-slot mailbox (DXGI keeps only the newest picture; the WGC handler keeps only the newest frame and does no Direct3D: the stream's thread
+  copies it, since a copy on the pool's thread under the mailbox's lock deadlocked with the stream holding the immediate context); BGRA → NV12 and scaling on the GPU (D3D11 video
+  processor); Media Foundation H.264, the adapter's hardware encoder first (asynchronous, D3D11 surfaces), the inbox software encoder as the fallback, never
+  openh264: CBR with a buffer of about two frames, no B-frames, keyframes only when asked, `AVLowLatencyMode`, one reference, `QualityVsSpeed` towards speed,
+  live bitrate; each setting is read back after it is set, and the daemon's log names the encoder, what it refused or did not keep and its first output's
+  delay (`screen encoder`). One frame is in the encoder at a time unless the encoder asks for another (the hardware encoder's `METransformNeedInput`, or
+  the software one needing more input with a frame inside): one that does not honour low latency gives a frame back only once the next is in, and is fed
+  at the rate instead of waiting a second for its frame to be given up on. Capture is paced as CRD's host paces it (`pace.rs`, its constants read in the
+  raw Chromium source): a constant-rate timer from the last capture's start, and nothing queued: once due the stream takes the next change. There is no
+  boost after input: CRD boosts from a low idle rate, and a still screen here sends nothing, so a boost could only override the link's and the encoder's own
+  rate. A still picture is **topped off** in the codec on CRD's timer (`max(1.1 × interval, interval + 2 ms)`), the same picture encoded again so that CBR
+  spends its bits refining it, until the encoder reports a quantizer of 10 or less, a pass comes out under 200 bytes, or ten passes; a change under four
+  64×64 cells (a caret) starts none; crisp tiles follow only after it. An update or a keyframe more than 300 000 px larger than the largest of the last five
+  that would take more than a frame interval at 100 KB/MP (CRD's large-frame guard) is encoded at 40 % of the bitrate for that one frame, a coarser picture on
+  time rather than a late one, the bitrate set back however that frame leaves the encoder. The encoder hears a new bitrate at once when it is a cut and
+  only beyond +33 % when it is an increase (CRD's reconfiguration gate). DXGI gives the changed region of a monitor as its dirty rectangles plus each move's
+  source and destination (unmoved moves skipped, as WebRTC's duplicator does): the whole picture is copied on the GPU every frame, and only that region is
+  read back for the tiles (the first frame after the duplication is made again, and after a failed readback, count as all changed); WGC (a window) gives
+  none, so its cells are hashed. The device is asked four times a second whether it was removed. Every SPS it emits is rewritten
+  with `bitstream_restriction` (`max_num_reorder_frames = 0`) so a decoder holds no frame (`sps.rs`), and every keyframe carries its SPS and PPS. Input with
+  `SendInput` in the picture's pixels mapped through the target's place (`DWMWA_EXTENDED_FRAME_BOUNDS`, per-monitor DPI v2, absolute units over the virtual
+  desktop, `geom.rs`). For a window target nothing goes anywhere but that window or a dialog, menu (`#32768`) or dropdown list (`ComboLBox`) of its own (`input::keys_reach`,
+  `press_reach`): a press that would land on another window over it, a second window of the same program included (the phone does not see it), is dropped
+  and reported (`covered`), and **keys and text go only while the target, or a dialog of its own process that it owns, is the foreground window**, never
+  another top-level window of the same program, and never a window of **another process** that names the target as its owner (a credential prompt,
+  another program's file picker: Windows lets any program do so): that is refused as `covered_dialog`, and the phone says to share the whole monitor to
+  type into it (owner decision 2026-11-07). Otherwise the target is brought to the front once if it is not (if it still is not, they are
+  refused as `not_front`, and `sc_text` answers not typed), so a password never goes into a window that took the focus meanwhile. The focus is the
+  window Windows holds as foreground and the one its thread gives the keys to (`GetGUIThreadInfo`), looked at right before **every** `SendInput` call, one
+  typed unit (a character, Enter) per call; text that loses the focus partway stops at once and says so ("Stopped partway", with what was typed before). What
+  remains: `SendInput` cannot name a window, so a window that takes the focus in the microseconds between that look and the call gets that one unit, and a
+  program that routes keys among its own windows by itself (Tk does) is beyond what Windows reports. A button a press left
+  held is released when the stream ends; input still queued when it stops is not done. A drag stays over what the phone sees: a move onto another window
+  holds the pointer at the last point on the shared one, and an `up` there lets go at that point (`input::drag_step`), so nothing is dropped into a window
+  the phone cannot see. Input the daemon drops (late, onto a stale picture, over the
+  rate) sends nothing, except one `release` with no place, and only while a press is outstanding, so a drag is never left held and a flood of late `up`s
+  moves nothing. A stream that panics ends (`failed`) with its input thread stopped before its border and hotkey go; a graphics driver that restarted
+  is found after 20 failed captures or conversions in a row (`GetDeviceRemovedReason`) and ends it as `device_lost`. A target the list would not offer (another virtual desktop, a tool
+  window, the border) is refused at the start. The encoder's picture is at most the top rung, 1920×1080 (a 4K or 5K monitor is shown at 1080p, an ultrawide
+  no wider than 1920; crisp tiles keep its text at the source's resolution); a rotated monitor is refused for now, and a mode change ends the stream
+  (`display_changed`).
+  An always-on-top border and badge (who sees it, the stop hotkey) are drawn around what is shared and left out of every capture (`WDA_EXCLUDEFROMCAPTURE`);
+  the stop hotkey (default Ctrl+Alt+Shift+K, Settings → Mobile; always on, it cannot be turned off) is `RegisterHotKey` on that window's thread. **Sharing
+  does not start without both**: a border that cannot be shown or a hotkey another program holds fails the start, and the phone hears why. Above-normal priority and no EcoQoS while it
+  streams, MMCSS "Capture" on its threads. The decisions are pure modules tested without a GPU (`geom`, `targets`, `states`, `control`, `tiles`, `sps`, `wire`,
+  `input`); the native code is in `win/`, one API per module. The app runs only the helper next to its own executable (its install folder, as for
+  `kelpie-stt`; `KELPIE_SCREEN_PATH` in debug builds only, for the e2e), and none while it runs as administrator (the helper would inherit that and drive
+  elevated windows). Its start budget (hello 4 s, start 9 s) stays under the daemon's 15 s; a start the daemon gave up on is stopped when it finishes, and a
+  stop that cannot be queued drops the helper.
+- **Media messages** (`kelpie-screen/src/wire.rs`, read by `app/phone/src/screen.ts`): binary, little-endian, first byte `0x01` (no JSON message starts with it,
+  which is how the page tells them apart on the link): video (key and unpaint-all flags, unpaint rectangles, `seq`, capture time, source and coded size, an
+  Annex B access unit), a tile (PNG or JPEG q90, the `seq` it matches, its rectangle in source pixels), the cursor (shape, visible, position). On the local pipe
+  app → daemon they are base64 in `provider.event`, as a pane's frames are; on the link they are binary (`Wire::send_bytes`). A message is at most 1000 KiB.
+  A video frame's capture time is when its picture was taken (ms since the stream started).
+- **Broker** (`crates/kelpied/src/screen.rs`): a hold keyed by device, link connection and provider connection, one screen at a time for one device, resting on
+  `Mobile::grant`: input checks it every time and the hold's task ends within 250 ms (`revoked`). 15 s for the same device's next connection (`sc_rebind`),
+  after which the helper sends a keyframe first; 10 minutes with no input ends it. New screens are refused at load L2+ and with under 20 % memory free
+  (`host_busy`; the `KELPIE_LOAD_FORCE` test hook stands for the memory too, in a debug build or an e2e run only, never in a release daemon), without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper
+  are checked again (known ids and kinds, short titles). A start reserves the screen for its whole length: a second start meanwhile, by any device, is
+  refused as in use (`sc_taken`), and the first holder keeps it; a failed or timed-out start tells the app to stop; a link that closes during a start leaves a
+  hold that waits for the device's next connection. A hold also rests on the record as it is now (`control_held`, looked at again by its task), takes at most
+  60 input messages a second, and a rebind from the connection that holds it is no change. The audit log has `screen_start` (`monitor`, or `window:` and the program's file name such as
+  `Code.exe`, never the window's title, which can name a document) and `screen_stop` (why); **no input is logged**. The phone locking (`lock_now` when its page
+  is hidden, or its idle time running out) clears the grant like a revoke, with no grace, and the page ends its view at once.
+- **Flow on TCP**: nothing is lost on the link, only delayed, so frames are dropped before encoding, never after (a dropped P-frame would break every frame
+  after it). The phone acknowledges each frame as it decodes (`sc_ack`); the broker forwards `{acked, rtt_ms, level}` (`screen.flow`, also once a second) and
+  the helper encodes only while fewer than 3 frames are in flight. **What the phone sends never waits for what goes to it**: the link's `Wire` sends from a
+  writer task of its own (`mobile/link.rs`), which seals each message as it writes it and takes, in this order, control messages (replies, the lock,
+  heartbeats, and the screen's own `sc_state`, `sc_stats`, `sc_fhb` and `sc_end`, which have a lane of their own), bulk (the connection's task moves bulk only
+  while the writer has room for it, so it never waits there) and the media lane (`mobile/lanes.rs`, 6 messages). So a click, an acknowledgement or a
+  heartbeat is read while a keyframe is on its way to a slow phone (one used to hold the connection's task for most of a second), a reply waits at most for
+  the one message being written, and a writer that stops (the socket gone, a message over `SLOW_AFTER`) ends the connection at once. Nothing of the media
+  lane goes to a locked phone (the writer drops it, by a flag set wherever the lock is); when it is full or more than 192 KiB wait unacknowledged, video is
+  dropped up to the next keyframe, asked for at most once a second.
+  **Lost frames never hold the stream** (`control::Flight`): `screen.flow` carries `dropped_through`, the last frame dropped, and the helper stops counting
+  those as in flight; a keyframe request gives up every frame in flight; while a keyframe is owed but not yet allowed, nothing else is encoded, and once it is
+  allowed a still window's last picture is encoded again, at most once a second whatever owes it (a window that does not change sends no frames, and input
+  waits while a keyframe is owed); an acknowledgement is never taken past the highest frame sent; the phone
+  acknowledges frames it skips or its decoder fails on. A tile or the cursor goes only while the lane has 3 places free, so it never takes video's room.
+  `screen.flow` also carries the bytes the media took on the wire (the link pads each message to a few sizes: a 5 KB frame goes as 16 KB), and the encoder is
+  asked for the link's rate divided by that factor. The phone calls its picture **stuck** when the computer says it sends frames, the heartbeat goes on and
+  nothing has been shown for 2 s, and asks for a fresh one; input onto a stale picture (a frame unacknowledged, or a keyframe owed, for 2 s) is not sent.
+- **Quality** (`control.rs`): one ladder, frames a second first, then size (30/20/15/10/8 fps at 100 %, then 8 fps 75 %, 6 and 4 fps 67 %, 4 fps 50 %; a window
+  never under 540 lines). Three things move along it and the lowest wins: the encoder's own load (EMA of encode time over the frame interval, over 0.85 for 2 s
+  down, under 0.42 for 10 s up), the link (queueing: the round trip's floor over the last 500 ms, counted from after the last cut, more than 50 ms over its
+  floor of 10 s cuts 15 % at once; after a cut a floor that rose further cuts again half a second later, one that fell is a queue draining, and one that
+  held for a second is a new base (another route, a slower decoder), taken as the floor rather than cut for; three queueing cuts in ten seconds at most, and
+  a new connection forgets the round trips before it; the link's window of frames full for a second cuts the same, full as the daemon counts it, from a
+  frame leaving for the phone to its acknowledgement arriving (`screen.flow`'s `link_full_ms`, sent at every look of the hold's task while it is full), never
+  as the helper counts it, since the helper's count also holds the way through the app and its own loop, which a busy computer (a game, a build) slows while
+  the link is fine: that slowness is the encoder's controller and the window's gate, never a bandwidth cut; 10
+  seconds with neither while frames go out add 10 %, and a still screen, or frames held up on this computer, earn no increase; an up-step undone within 10 s doubles the
+  wait up to a minute; 150 kbps–4 Mbps, start 1.5), and the load level (L1 ≤ 1080p20, L2 ≤
+  720p15, L3 ≤ 540p8; five minutes of L3 pause the stream until the person resumes it). The hardware encoder gives way to the software one (capped at 720p15)
+  only when it fails, or is over 33 ms p95 for 5 s at the lowest rung, and the phone is told. Stats once a second: `sc_stats {fps, w, h, kbps, encode_ms_p95,
+  dropped, reason, degraded, level, encoder, idr_ratio, crisp, stages}`, `stages` the helper's timings for the measurement plan (`control::Stages`: picture
+  taken → message out p50/p95, conversion p95, encoder p50, send interval p95, daemon queue → phone acknowledgement p50/p95, top-off passes, big frames,
+  frames held in the encoder, its first output's delay, the bitrate's cuts in all and by rule (`queueing`, `window`, `size`: a frame too large for one
+  message) with what the last one saw). Each cut also goes with the stats to the daemon, which logs it (`screen bandwidth cut`, its rule, the rates, the
+  round trip's recent and ten-second floors, how long the link's window was full, the helper's own count in flight).
+  `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS` adds encode time to drive the ladder without a GPU.
+- **Crisp text** (`tiles.rs`, `tile_image.rs`): the picture read back is hashed in 64×64 cells; cells still for 300 ms are sent once more as tiles of up to
+  8×4 cells, PNG, or JPEG q90 where PNG would be over a byte a pixel, at the source's size, within a byte budget of the video's rate (burst 256 KiB), once the top-off of the video has ended. A video
+  frame carries the rectangles of painted cells that changed, and the phone drops those tiles as it draws that frame, or as it skips it. A dropped video frame
+  makes the helper paint every still cell again (`lost_tiles`, then unpaint-all), a frame not sent puts its unpaint back on the next one, and the phone refuses
+  a tile whose region a later frame changed while its image was still being decoded. Tiles take at most half the video's rate. Off with *Crisp text* in Settings
+  (on by default), and off by itself while the link is slow: under 1 Mbps, lagging, or within 10 s of a bitrate cut, and at L3 (`Controller::crisp_ok`).
+  It is measured, so cellular counts like any slow link (an iPhone page cannot tell cellular from Wi-Fi); `sc_stats.crisp` says so (`false`).
+- **States, never a silent freeze** (`states.rs`): four looks a second at the input desktop (`OpenInputDesktop`: the secure desktop of UAC and the lock screen
+  cannot be opened from the user's session), the session's lock (`WTSSessionInfoEx`), the integrity level of the window in front or of the target, and the
+  target window (closed, minimized); a change held for two looks is told (`sc_state`), a lock or a secure desktop at once. What input may do follows: nothing on a
+  lock or a secure desktop, clicks but no keys with an elevated window in front of a monitor, nothing into an elevated window target. A secure desktop cannot
+  be seen or controlled from the user's session (that would need a SYSTEM service, a non-goal): the phone says so.
+- **On the phone** (`screen.ts`, `screen-view.tsx`): `VideoDecoder` probed first with `isConfigSupported` (a plain message when this browser has no H.264
+  WebCodecs), configured in the `avc` format with an `avcC` description built from the keyframe's SPS and PPS and `optimizeForLatency`, one `decode()` per
+  frame, **no smoothing buffer**: a decoded frame is drawn as the decoder gives it, on a canvas asked for `desynchronized` (a low-latency canvas where the
+  browser offers one, which the page reports), and a delta is skipped up to the next keyframe only when the decoder is behind its own usual queue by more
+  than two for three deltas in a row (`Backlog`: some Android decoders always keep a few). The cursor the finger moves is drawn at once (local echo); the
+  computer's cursor messages, a round trip old, leave its position alone for 400 ms after a local move and then follow it, a difference of 3 px or less
+  taken as none; a trackpad tap clicks where the cursor is drawn (`followHostCursor`), never at an older position. The page measures each frame (`FrameTimes`: inter-arrival and inter-present p50/p95/p99, gaps
+  over 100 and 250 ms, decoder time, receive → present, frames never shown), shown with the computer's stages in the debug view (tap the quality line) and
+  read by a test driver as `__kelpieScreenTimes()`. Trackpad (default) or direct touch, two-finger scroll,
+  pinch zoom and pan of the view only, a key bar with Ctrl, Shift, Alt and the Windows key (`meta`, alone for Start or held), text with an answer of its
+  own. The entry is in the inbox and in a session's view. Input older than 1 s by the
+  computer's clock is dropped by the daemon and by the helper; 3 s without media or heartbeat dims the picture; frames that come and do not decode for 1 s
+  ask for a keyframe. In trackpad mode a tap clicks where the computer's cursor is drawn: with no finger down the page takes the computer's position.
+- **What `control` of the screen allows.** It is the person's whole session: Win+R and a command runs anything as the user, so a phone given `control` can
+  run anything this user can. Win+L locks the computer, and the phone can then only show "locked": it cannot sign in again. Ctrl+Alt+Del cannot be sent by any
+  program, and UAC prompts and the lock and sign-in screens are on the secure desktop, which can be neither seen nor answered from here.
 
 ### Phone client
 
@@ -1421,6 +1724,119 @@ task's run status is the Runs engine's.
   refuses when `specs/` or the spec's folder is a link or any of the three files exists, and creates each
   file with `fs_create` (which refuses an existing one) before writing it.
 
+## Sub-sessions
+
+An agent in a session opens other agent sessions, steers them, and gets their reports back as a
+new turn. Why this shape: the daemon owns sessions, mailboxes and delivery, so it works with the
+window closed; a child is an ordinary session the user can open; nothing a child or a message says
+counts as the user's consent. Rules live in `crates/kelpied/src/subs.rs` (pure, unit-tested) and
+`daemon/sub_rpc.rs` (RPCs, spawn, delivery); the guide agents read is `sub_guide.rs`.
+
+- **Lineage.** `SessionSpec` gains `parent`, `depth` (a person's session is 0; at most 3) and `report`
+  `{status, summary, at, auto}`, all serde-default and persisted in `sessions.json`; old files load
+  unchanged. Only the daemon sets them. Closing a parent leaves its children (the app shows an orphan
+  in its project); `is_descendant` follows `parent` links, so closing a session in the middle of a
+  chain cuts the ancestors off from what is below it. The sidebar nests a child only under a parent
+  with the same `project_id`.
+- **Policy** (`policy.json`, written atomically, unknown keys kept, an unreadable file copied to
+  `policy.json.unreadable`): `sub_sessions` `off|ask|allow` (default `ask`) and `sub_max` (0 = auto, at
+  most 64). `off` also stops launch-time injection (below) for sessions started afterwards; running
+  sessions keep their tools and every call is refused.
+- **Caps** (`subs::check_caps`; one `Slot` is held from the check until the child exists so concurrent
+  spawns cannot overshoot, and the check repeats after an approval): policy not `off`, caller not
+  `restricted` or remote, depth below 3, fewer than 10 busy children of the caller, fewer busy
+  sub-sessions in all than the cap, machine load below L3. Auto cap = clamp(min(cores/2,
+  (RAM GiB - 4)/2), 2, 8), worked out once per daemon run. *Busy* = alive and not finished, where
+  finished = its run task ended, or it last reported itself `done`/`failed`, and it is not working or
+  waiting on the user now (a finished child given more work counts again). Refusals say what runs and
+  what to do. A run task made by a session passes the same check each tick: full limits make it wait
+  (`Task.note`, one mail to the creating session); a policy turned off, a creator that is gone or a
+  depth at the limit fails it.
+- **Permissions.** A child never has more than its opener, by two best-effort classifiers in `subs.rs`.
+  Strict `args_full_bypass` (the preset's Yolo flags, Claude `--dangerously-skip-permissions` or
+  `--permission-mode bypassPermissions`, Codex `--dangerously-bypass-approvals-and-sandbox` or `--yolo`,
+  Gemini `--yolo`/`--approval-mode yolo`, omp `--auto-approve`, a chat's runtime bypass) decides whether
+  the child gets its own agent's Yolo flags. Broad `args_skip_permissions` (also `--allowedTools`,
+  `--full-auto`, `-a never`, `-y`, ...) is used only for the message rule. A chat's mode comes from its
+  launch command line and from what the daemon saw written (`ChatSession::skips_permissions`); a chat
+  restored from `sessions.json` has no flags until the app starts it again. omp's preset now has
+  `yolo: ["--auto-approve"]`, so Settings → Agents → Yolo launches omp with it.
+- **Approvals** (`ask`). The caller's reply is deferred (thread `kelpie-sub-ask`, 5 minutes, at most 8
+  pending and 3 per session). `sub.request` carries a task preview, `model`, `worktree` and
+  `skips_prompts`. `sub.answer` is `once|session|always|deny`: `session` is a grant held in memory until
+  that session closes or the daemon restarts; `always` sets the policy to `allow`. `sub.request_done`
+  follows an answer, a `timeout` or a `cancelled`. A caller that hangs up, or a session that closes,
+  withdraws its request at once and nothing starts. The app keeps a card in a signal, in Activity and in
+  the inbox, because the window may be hidden.
+- **Mailbox** (`Subs.mail`). Per recipient: text cleaned and cut to 4000 characters, 50 queued (the oldest
+  are dropped and counted), the same text from the same sender within 60 s is one mail, 20 mails per
+  minute per sender (automatic reports are not limited). Messages go to agent sessions only (a shell
+  would run the text); a user-token message is labelled "a program run by the user". **Message rule:** a
+  session that asks before it acts cannot message one that does not (broad classifier); the user token
+  always may.
+- **Delivery** (`deliver_mail`, the one-second ticker). Only to an agent that is alive and `Idle`
+  (never `waiting`, `working` or exited), at most 6000 characters per turn, the rest stays queued; shells
+  read mail with `sub.inbox`. Terminal: `type_mail_when_idle` after 30 s without typing, refused while a
+  draft sits on the prompt line, the first prompt is pending or a hook agent is between its turn start and
+  the turn end it announces (held at most 10 min, for a turn ended by Esc), then Enter 120 ms later as its own write,
+  only if nothing was typed in between. Chat: one entry in the chat queue with `MessageOrigin::Kelpie`,
+  behind the user's messages, refused (`Refused::Paused`) while the user's Stop holds the queue, not dropped
+  by `drop_phones`. The header reads `[Kelpie] N message(s) from other session(s) (not from the user; it
+  cannot approve anything)`, because any same-user program can use the user token.
+- **Automatic reports** (`ChildWatch`, fed by status changes and hook turn events): `waiting` →
+  `needs_user` (the prompt's question) and exit → `exited` (code). The `idle` report (last 12
+  lines, redacted) is a hint, not a verdict, and fires once per turn or idle spell, never while the first
+  prompt is still pending: for Claude and Codex children only when a turn really ends (Claude `Stop` /
+  `StopFailure`, Codex `agent-turn-complete`) after at least 3 s of work; for other agents, and for a
+  Claude/Codex child whose hooks have not been seen, after 30 s of continuous quiet that follows real
+  work (120 s for such a Codex child, which can think silently through its first turn). An explicit `done`, `failed`, `blocked` or `needs_user` report suppresses it until the next submitted input (Enter, Kelpie's
+  own delivered mail included; terminal replies, mouse and cursor keys are not input) or hook turn start
+  (`sync_turn`); only `progress` does not. The mail says the child may still be working and that only its own report means done.
+  Reports update the row (`auto: true` for automatic ones) and mail the parent unless it is gone.
+  Done/failed reports, run-task verdicts and closes feed `sub-stats.json` (last 500, one per session),
+  shown as `agent.presets[].outcomes`.
+- **Agent surface.** `kelpied mcp` (`mcp.rs`): newline-delimited JSON-RPC on stdio with tools
+  `kelpie_agents|spawn|sessions|message|read|wait|report|close`. Each call opens its own daemon connection
+  as the calling session, so `ping` and `tools/list` answer while a wait blocks and
+  `notifications/cancelled` aborts one call. Outside a Kelpie session every tool answers "Start this agent
+  from Kelpie"; a session of another daemon is refused rather than falling back to the user token.
+  `kelpied sub agents|spawn|list|send|read|wait|report|inbox|close` (`cli.rs`) runs the same
+  `mcp::run_tool`; `inbox` is CLI only. `kelpie_wait` (`wait_outcome`) ends on mail, nothing to wait for (a child already exited when
+  it began is shown, not waited for), a watched child exiting or, having worked, stopping, no child working
+  after 3 s, or its timeout (default 600 s, **at most 1500 s**: Claude aborts an MCP call silent for 1800 s,
+  measured on Claude 2.1.319).
+- **Injection** (`agents::build_launch`; only while the policy is not `off`; the decision is taken at
+  launch). `KELPIE_CLI` (the `kelpied` path) goes to every local session; a session's `env` cannot replace
+  it or `KELPIE_SESSION_*`.
+  - Claude terminal: `--mcp-config <data>/claude-mcp.json` first (it is variadic and would swallow the
+    prompt), then `--settings <data>/claude-hooks-sub.json` (the usual hooks plus the allow rule
+    `mcp__kelpie`; `off` keeps `claude-hooks.json`, so a running session's rules never change). No `env`
+    block: Claude passes its environment to a stdio server, so the token is never written to disk. Claude
+    stream-json chat: the same config plus `claude-chat-sub.json`, which holds only the allow rule.
+  - Codex terminal and `app-server` chat: `-c mcp_servers.kelpie.*` with `command`, `args`, `env_vars` (the
+    session id, token and endpoint, `KELPIE_ENDPOINT`, `KELPIE_DATA_DIR`, `XDG_DATA_HOME`, by name),
+    `tool_timeout_sec=1900` (the default 60 s would cut `kelpie_wait`) and
+    `default_tools_approval_mode="approve"` (Kelpie's policy is then the only prompt).
+  - ACP chats: the daemon rewrites `session/new|load|resume` lines in `ChatSession::input` and
+    `commit_turn`, appending a `kelpie` stdio server to `mcpServers` with the session variables by value
+    (an ACP agent's environment is not known to reach its MCP servers; the token never reaches the
+    webview). A server of that name already there wins. The adapter does not auto-approve ACP permission
+    prompts for these tools, so such an agent may ask once per tool as well as Kelpie's card.
+  - Any other agent: `KELPIE_CLI` plus the brief in the child's first prompt (`subs::child_brief`).
+- **Mode switch.** Terminal ↔ chat creates a session with a new id. `session.create {lineage_from}` (user
+  path; `parse_create` refuses it from a session) gives the new one the old one's parent, depth and report,
+  re-points the old one's children and any run it created, and moves its mailbox, grant and birth time
+  (`hand_over_lineage`). `session.update {handover: true}` before the stop marks the old session
+  `switching` for 15 s: its stop sends no exit report, and the parent gets one note naming the new handle.
+  The old handle or id is not aliased afterwards (names keep working). A pending approval belongs to the
+  process that asked and is cancelled with it.
+- **Generated files** in the data dir: `claude-mcp.json`, `claude-hooks-sub.json`, `claude-chat-sub.json`
+  (all compare-before-write), `sub-stats.json`, and the `policy.json` keys above.
+- **Known limits.** A cancel in the one daemon round trip between taking the mail and the reply loses that
+  mail. Whether Codex strips `*TOKEN*` from its shell commands depends on the user's config (not stripped
+  on the version tested); the MCP path does not depend on it. `sub.review` (Ctrl/Cmd+Shift+A) is
+  registered only while a request is open, so the chord reaches the terminal otherwise.
+
 ## Daemon services beyond sessions
 
 - **Agent presets** (`agents.rs` `PRESETS`): binary, launch args, skip-permission flags,
@@ -1593,13 +2009,13 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
   - Transfer jobs open their own sessions.
   - ssh's stderr (16 KiB) gives the error text, in `remote::exec`'s wording (`ssh <dest>: …`), so the app's host-key check still recognises an unknown key.
   - The children are `kill_on_drop`. The spike showed ssh, and a ProxyJump's inner ssh, exit by themselves when the daemon dies and their pipes close.
-- **Methods** (API 26), answered from their own task:
+- **Methods** (API 31), answered from their own task:
   - `sftp.list {dest, path, hidden}`, `sftp.stat` (`lstat` and the followed `stat`), `sftp.realpath` (`~` is the login folder);
   - `sftp.mkdir`, `sftp.rename` (refuses an existing target), `sftp.chmod {paths, mode}` (not recursive);
   - `local.list {path, hidden}`, `local.home`.
 
   They are open to the user's and the app's connections only. Programs in sessions cannot call them, so an agent cannot use saved passwords through the daemon.
-- **Transfer queue** (`files/queue.rs`, API 27):
+- **Transfer queue** (`files/queue.rs`, API 32):
   - **Jobs**: `copy`, `delete` and `chmod`, between this computer and a host, or host and host (through this computer).
   - **Scheduling**: at most 3 run at once; the rest wait in order. A job copies 4 files at once, and a file of 8 MiB or more alone.
   - **Walk** (`files/walk.rs`): streamed, so copying starts before a large folder is listed. Only the queue of folders still to list is held in memory.
@@ -1643,7 +2059,7 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
   - `xfer.start` → `{id}`, `xfer.list`, `xfer.control {id, action: pause|resume|cancel|retry|clear}`, `xfer.answer`, `xfer.clear_finished`.
   - `xfer.updated {job}` is sent on every change and at most 4 times a second for progress, with speed as an average over about 3 s. `xfer.removed {id}` is sent when a job is cleared.
   - Programs in sessions neither call these methods nor see the events.
-- **Host to host** (`files/route.rs`, API 28): `xfer.start {route: auto|relay}`; jobs report `route_used` and `route_reason`.
+- **Host to host** (`files/route.rs`, API 33): `xfer.start {route: auto|relay}`; jobs report `route_used` and `route_reason`.
   - **Never direct** when this computer reaches B through a jump host, a proxy command or a local address (loopback, link-local; `ssh -G`): A could reach another machine by that address. The reason says so.
   - **Probe** (Auto only, cached per (A, B) for 10 minutes): the ssh to A always has `-T` and the pinned options above (no terminal, no forwarding, no remote or local command, no ControlMaster). The ssh and sftp that run on A pin `RequestTTY=no`, `ControlMaster=no` and `ControlPath=none` too.
     - A fixed one-line script (csh login shells refuse newlines in quotes) runs there with quoted positional values: `sftp`, `ssh` and `ssh-keygen` must exist, and `ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -p <port> -l <user> <hostname> true` must work.
@@ -1670,7 +2086,7 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
 | Accounts | `app/src-tauri/src/accounts.rs`, `lib/accounts.ts` | One config home per account under `<data>/accounts/<agent>/<id>`, passed as `CLAUDE_CONFIG_DIR` / `CODEX_HOME` to every launch (terminal, chat, automations, runs, one-shot AI actions); history and usage read each home. A stopped terminal session can move to another account (`account_transcript` copies the conversation, `session.set_env_restart` restarts it there; see "Notifications and limit actions"). |
 | Orchestration | `crates/kelpied/src/runs.rs` | A run is a task DAG (cycle-checked) persisted in `runs.json`. `Runs::step` starts ready tasks (deps done, approval given) as ordinary sessions, optionally in a new worktree; tasks end on `kelpied run report`, session exit, or idle after working (default 300 s). A run may carry `materialize` (ignored files its worktrees get) and a task records its `base` branch and what it `brought`; see "Cross-review and best-of-N". |
 | Integrations | `app/src-tauri/src/integrations.rs` | Linear GraphQL, Jira REST (Cloud v3 `search/jql`, Server v2), GitLab REST v4. Tokens live in the OS keyring (`keyring`, service `Kelpie (<endpoint>)`) and never reach the webview. |
-| Browser panes | `app/src-tauri/src/browser.rs`, `browser_picker.js` | Tauri child webviews positioned over the pane (hidden while an overlay covers them). Design mode injects a picker; picks travel through a cancelled navigation to a sentinel URL, are redacted and size-capped, and the element screenshot uses the WebView2 DevTools protocol (end-to-end tests also send trusted page input through it, `browser_test_input`, dev / e2e builds only). |
+| Browser panes | `app/src-tauri/src/browser.rs`, `browser_picker.js` | Tauri child webviews positioned over the pane (hidden while an overlay covers them). Design mode injects a picker; picks travel through a cancelled navigation to a sentinel URL, are redacted and size-capped, and the element screenshot uses the WebView2 DevTools protocol (end-to-end tests also send trusted page input through it, `browser_test_input`, dev / e2e builds only). A sized `window.open` opens as a window of its own on the pane's WebView2 environment; a phone may take a pane over (see Browser pane takeover). |
 | Remote (SSH) | `app/src-tauri/src/remote.rs`, `agents.rs` `build_remote_launch` | The system OpenSSH client (on Windows `System32\OpenSSH`, never a Git Bash one from PATH): sessions run `ssh -t host` with a login shell, inside `tmux new-session -A` when available; files, search and git run as remote commands with quoted arguments. Commands never prompt: secrets come from askpass, anything else fails. |
 | SSH hosts | `app/src-tauri/src/ssh_hosts.rs`, `crates/kelpied/src/askpass.rs`, `app/src/components/hosts-page.tsx` | Saved hosts and forward rules in `<data>/ssh/hosts.json`, rendered into `<data>/ssh/config` (one `Host` per saved host, then `Match all` + `Include` of the user's config) that every Kelpie `ssh` / `scp` reads with `-F`. Passwords and key passphrases live in the OS keyring (service `Kelpie (<endpoint>)`); ssh gets them through `SSH_ASKPASS=kelpied` + `SSH_ASKPASS_REQUIRE=force` + `KELPIE_ASKPASS=<host id>` — `kelpied` answers password / passphrase prompts and declines host-key questions, which the page settles with `ssh-keyscan` fingerprints first. Connecting to a host opens a remote project on it. Port forwards are `ssh -N` children of the app (stopped with it; auto-start rules restart on launch); transfers go through the daemon's queue over SFTP (see File transfer). Keys, agent and known hosts go through `ssh-keygen` / `ssh-add` and the known_hosts file. `KELPIE_SSH_DIR` replaces `~/.ssh` for the tests. |
 | Phone server | `crates/kelpied/src/mobile.rs`, `crates/kelpied/mobile/` | axum on a chosen address (default port 4817), optional rustls (ring). Pairing: a one-time secret shown as a QR (2 min), then the phone's six digits typed into the verified app (see "Phone link"); devices are Noise public keys in a MAC'd store; Origin checks, CSP, failed attempts limited per source address; revoking closes the device's sockets. Protocol v2 (verbs, state sync, answers, chat): `mobile/verbs.rs`, `mobile/sync.rs`, `mobile/lanes.rs`, machine load in `load.rs`, and "Phone protocol (v2)". |

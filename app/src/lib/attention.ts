@@ -3,6 +3,7 @@
 // screen (menus, yes/no — agents without hooks show nothing else), with `waiting_since`.
 import { createSignal } from "solid-js";
 import type { SessionInfo } from "./types";
+import { needsYou } from "./session-state";
 
 /** Daemon API level that brings `waiting_since`, prompts in `session.read` and `session.answer`. */
 export const ANSWER_API = 7;
@@ -16,17 +17,42 @@ export const TAILSCALE_API = 23;
 /** Daemon API level that has the phones' app lock (`mobile.set_lock`, `mobile.reset_lock`, `lock` in `mobile.status`). */
 export const LOCK_API = 25;
 
+/** Daemon API level that has Telegram's choices: alerts, alerts with a link, approvals of low-risk requests (`telegram.mode`, `notify.telegram_bind`, the `notify.telegram` event). */
+export const TELEGRAM_API = 26;
+
+/** Daemon API level that has the relay (`mobile.set_relay`, `mobile.relay_recreate`, `relay` in `mobile.status`). */
+export const RELAY_API = 27;
+
+/** Daemon API level that has browser pane takeover: the app provides panes (`provider.register`), the phone's `panes` and `tk_*`, and `control` for a
+ *  browser device paired on a secure origin with its app lock on (`may_control` in `mobile.status`). Below it nothing of it is offered. */
+export const TAKEOVER_API = 28;
+
+/** Daemon API level that has the computer's screen for a phone with control (`screens`, `sc_*`, binary media on the link, the app's `screen` provider). Below it the
+ *  phone offers no screen and Settings shows no screen options. */
+export const SCREEN_API = 29;
+
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;
 
 /** Whether a daemon at level `api` owns the queue. A lower level has no `chat.send`, however close the number. */
 export const daemonOwnsQueue = (api: number) => api >= CHAT_QUEUE_API;
 
-/** Live sessions waiting on the user, the longest wait first (unknown start times last). */
+/** Live sessions that need the user, the same ones the status bar counts: those waiting on a prompt first, the longest wait first
+ *  (unknown start times last), then quiet sub-sessions that reported they need you or are blocked, the oldest report first. */
 export function waitingSessions(sessions: SessionInfo[]): SessionInfo[] {
+  const kind = new Map<string, 1 | 2>();
+  for (const s of sessions) {
+    const k = needsYou(s);
+    if (k) kind.set(s.id, k);
+  }
   return sessions
-    .filter((s) => s.alive && s.status === "waiting")
-    .sort((a, b) => (a.waiting_since ?? Number.MAX_SAFE_INTEGER) - (b.waiting_since ?? Number.MAX_SAFE_INTEGER) || a.created_at - b.created_at);
+    .filter((s) => kind.has(s.id))
+    .sort((a, b) =>
+      kind.get(a.id)! - kind.get(b.id)! ||
+      (kind.get(a.id) === 1
+        ? (a.waiting_since ?? Number.MAX_SAFE_INTEGER) - (b.waiting_since ?? Number.MAX_SAFE_INTEGER)
+        : (a.report?.at ?? 0) - (b.report?.at ?? 0)) ||
+      a.created_at - b.created_at);
 }
 
 /** The waiting session after `currentId` in that order, wrapping around; the first when the

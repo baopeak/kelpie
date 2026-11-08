@@ -194,6 +194,46 @@ pub struct Store {
     /// How the app lock is set. `None`: a store from before there was a lock, as `LockOptions::default`. It is written when the first passkey is, so with a passkey on record `None` means it was removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock: Option<LockOptions>,
+    /// The relay (`relay`). `None`: never turned on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelaySettings>,
+}
+
+/// The relay: where it is, this computer's room there, the page origin phones come from, and the tokens phones were given for it. Sealed with the device key: a
+/// program of this user that edits the file can neither turn it on, nor send it elsewhere, nor add a phone to the room.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct RelaySettings {
+    #[serde(default)]
+    pub on: bool,
+    /// `wss://<host>[:port]`.
+    #[serde(default)]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    /// `https://<name>:8443`, the Tailscale origin the phones' app was installed from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// HMAC-SHA256 (hex) over the fields above.
+    #[serde(default)]
+    pub mac: String,
+    /// Each with its own tag, bound to its device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tokens: Vec<RelayToken>,
+}
+
+/// A token a phone shows the relay to be let into the room: only its SHA-256 is kept, here and there.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RelayToken {
+    pub device: String,
+    /// SHA-256 of the token's bytes, hex.
+    pub hash: String,
+    pub issued: u64,
+    pub expires: u64,
+    /// HMAC-SHA256 (hex) over the device's id and key and the fields above.
+    #[serde(default)]
+    pub mac: String,
 }
 
 pub const DEFAULT_DORMANT_DAYS: u32 = 90;
@@ -330,6 +370,41 @@ pub fn seal_options(o: &mut LockOptions, key: &[u8; 32]) {
 
 pub fn options_hold(o: &LockOptions, key: &[u8; 32]) -> bool {
     tag_holds(key, &options_input(o), &o.mac)
+}
+
+fn relay_input(r: &RelaySettings) -> Vec<u8> {
+    let mut out = b"kelpie-relay/1".to_vec();
+    for field in [if r.on { "on" } else { "off" }, r.url.as_str(), r.room.as_deref().unwrap_or(""), r.ticket.as_deref().unwrap_or(""), r.origin.as_deref().unwrap_or("")] {
+        out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
+pub fn seal_relay(r: &mut RelaySettings, key: &[u8; 32]) {
+    r.mac = tag(key, &relay_input(r));
+}
+
+pub fn relay_holds(r: &RelaySettings, key: &[u8; 32]) -> bool {
+    tag_holds(key, &relay_input(r), &r.mac)
+}
+
+/// What a relay token's `mac` covers: the phone's identity, as a passkey's does, so that re-sealing its record blesses nothing.
+fn token_input(d: &Device, t: &RelayToken) -> Vec<u8> {
+    let mut out = b"kelpie-relay-token/1".to_vec();
+    for field in [d.id.as_str(), d.pk.as_str(), t.device.as_str(), t.hash.as_str(), &t.issued.to_string(), &t.expires.to_string()] {
+        out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
+pub fn seal_token(t: &mut RelayToken, d: &Device, key: &[u8; 32]) {
+    t.mac = tag(key, &token_input(d, t));
+}
+
+pub fn token_holds(t: &RelayToken, d: &Device, key: &[u8; 32]) -> bool {
+    t.device == d.id && tag_holds(key, &token_input(d, t), &t.mac)
 }
 
 /// Whether the record's subscription is as it was sealed with `key`.
@@ -571,6 +646,48 @@ mod tests {
         assert!(!base.weakened_by(&LockOptions { idle_s: 60, ..base.clone() }));
         let off = LockOptions { on: false, idle_s: 3600, recheck: false, plain_read: true, mac: String::new() };
         assert!(!off.weakened_by(&LockOptions { on: true, ..off.clone() }));
+    }
+
+    #[test]
+    fn relay_settings_and_tokens_edited_in_the_file_do_not_hold() {
+        let key = [3u8; 32];
+        let mut r = RelaySettings { on: true, url: "wss://relay.example".into(), room: Some("ab".repeat(16)), ticket: Some("t".into()), origin: Some("https://desk.tail.ts.net:8443".into()), ..Default::default() };
+        assert!(!relay_holds(&r, &key), "not sealed");
+        seal_relay(&mut r, &key);
+        assert!(relay_holds(&r, &key));
+        assert!(!relay_holds(&r, &[4u8; 32]));
+        let edits: [fn(&mut RelaySettings); 4] = [|r| r.url = "wss://mine.example".into(), |r| r.room = Some("cd".repeat(16)), |r| r.origin = Some("https://evil.example".into()), |r| r.ticket = None];
+        for edit in edits {
+            let mut edited = r.clone();
+            edit(&mut edited);
+            assert!(!relay_holds(&edited, &key));
+        }
+        let mut off = r.clone();
+        off.on = false;
+        assert!(!relay_holds(&off, &key), "turned off in the file: it reads as not sealed, so as off");
+        seal_relay(&mut off, &key);
+        let mut on_again = off.clone();
+        on_again.on = true;
+        assert!(!relay_holds(&on_again, &key), "turned on in the file");
+
+        let d = device(&key);
+        let mut t = RelayToken { device: d.id.clone(), hash: "ab".repeat(32), issued: 1, expires: 2, mac: String::new() };
+        seal_token(&mut t, &d, &key);
+        assert!(token_holds(&t, &d, &key));
+        let mut longer = t.clone();
+        longer.expires = u64::MAX;
+        assert!(!token_holds(&longer, &d, &key), "a later expiry");
+        let mut other = device(&key);
+        other.id = "d2".into();
+        seal(&mut other, &key);
+        let mut moved = t.clone();
+        moved.device = "d2".into();
+        assert!(!token_holds(&moved, &other, &key), "another device's token");
+        let mut rekeyed = d.clone();
+        rekeyed.pk = "BBBB".into();
+        assert!(!token_holds(&t, &rekeyed, &key), "a swapped phone key");
+        let store: Store = serde_json::from_str(r#"{"version":2,"enabled":true}"#).unwrap();
+        assert!(store.relay.is_none(), "a store from before the relay");
     }
 
     #[test]

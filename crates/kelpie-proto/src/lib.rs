@@ -35,16 +35,26 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// 23: Tailscale mode (`mobile.tailscale_status`, `mobile.set_tailscale`, the verified app only to change it; `mobile.pair_start {plain}`; a `ts` endpoint in the QR code and `endpoints` beside `list` in `addrs`; `secure_origin` on a device); an older daemon has none of it, so the app offers it only at 23.
 /// 24: Web Push sent by the daemon itself (the phone's `push_info`, `push_sub`, `push_unsub`, `push_test`, `push` in its `hello`; `webpush` in `notify.get` and `notify.test`; `push` on a device in `mobile.status`); an older daemon has none of it, so the phone page offers alerts only at 24.
 /// 25: the app lock (the phone's `lock_challenge`, `lock_enrol`, `lock_unlock`, `lock_now`, `lock_touch`, `locked` and `locked: true` in its `hello`, the `resume` secret on the ack of an unlock or enrolment and in its first sealed frame, the `desktop` state and `needs_desktop` refusal for a phone with no window to set up a passkey, and `recheck` refusing `input` and `key` during a dangerous request; `mobile.set_lock` and `mobile.reset_lock` from the verified app; `lock` in `mobile.status`) and the daemon's risk labels (`wait` on a screen frame, `chat_request_info`); an older daemon has none of it, so the app offers the lock's settings only at 25 and the phone page counts it as out of date below it.
-/// 26: the daemon browses hosts over SFTP and this computer (`sftp.list`, `sftp.stat`, `sftp.realpath`, `sftp.mkdir`, `sftp.rename`,
-/// `sftp.chmod`, `local.list`, `local.home`); an older daemon has none of them, so the app's file manager asks for a restart below 26.
-/// 27: the transfer queue (`xfer.start` with copy, delete and chmod jobs and an `expect` for an edited file's upload, `xfer.list`,
+/// 26: Telegram's choices (`telegram.mode` and `telegram.user_id` in `notify.get`/`notify.set`, `end_binding` in `notify.set`, `telegram` in `notify.get`, `notify.telegram_bind` from the verified app, the `notify.telegram` event, and `telegram` as a `by` in `chat.resolved` and the log's answers); an older daemon has none of it, so the app offers the choice only at 26.
+/// 27: the relay (`mobile.set_relay` and `mobile.relay_recreate` from the verified app, `relay` in `mobile.status`; a `relay` endpoint in the QR code and in `addrs`; the phone's `relay` cap and `relay_token`, and the `relay` message that gives it a token; padded chunks, from the hello on, for a phone whose `caps` has `pad`, and `pad` in the hello); an older daemon has none of it, so the app offers the relay only at 27.
+/// 28: browser pane takeover (`provider.register`, the daemon's own requests to the app as `preq` with `provider.reply`, `provider.event` for frames, the
+/// `provider.refused` event; the phone's `panes`, `tk_start`, `tk_input`, `tk_text`, `tk_ack`, `tk_stop`, `tk_rebind` and the `tk_frame`, `tk_fhb`, `tk_end` messages;
+/// `control` for a browser device paired on a secure origin with its app lock set up and on, and `may_control` on a device in `mobile.status`); an older daemon has none of
+/// it, so the app offers `control` to such a device and the phone offers takeover only at 28.
+/// 29: the computer's screen for a phone with `control` (the `screen` provider kind and its `screen.*` requests and notices to the app; `provider.event`
+/// with `sc`; the phone's `screens`, `sc_start`, `sc_stop`, `sc_ack`, `sc_input`, `sc_text`, `sc_key`, `sc_rebind`, `sc_resume`, the `sc_state`, `sc_stats`,
+/// `sc_fhb`, `sc_end` messages, and binary media messages on the link, `0x01` first); an older daemon has none of it, so the phone offers the screen only at 29.
+/// 30: sub-sessions (`sub.spawn`, `sub.message`, `sub.report`, `sub.inbox`, `sub.close` for programs in a session; `sub.answer`, `sub.pending` and the `sub.request` and `sub.request_done` events for the user): a session records its `parent`, `depth` and last `report`, and `daemon.policy` / `daemon.set_policy` carry `sub_sessions`, `sub_max` and `sub_auto_max`; an older daemon has none of it, so the app offers sub-sessions only at 30 (26 to 29 belong to other work).
+/// 31: the daemon browses hosts over SFTP and this computer (`sftp.list`, `sftp.stat`, `sftp.realpath`, `sftp.mkdir`, `sftp.rename`,
+/// `sftp.chmod`, `local.list`, `local.home`); an older daemon has none of them, so the app's file manager asks for a restart below 31.
+/// 32: the transfer queue (`xfer.start` with copy, delete and chmod jobs and an `expect` for an edited file's upload, `xfer.list`,
 /// `xfer.control`, `xfer.answer`, `xfer.clear_finished`; the `xfer.updated` and `xfer.removed` events; `<data>/transfers.json`; `transfers` in
 /// `daemon.info` and `daemon.shutdown` waiting for them under `if_idle` / `if_no_transfers`); an
-/// older daemon has none of it, so the app's file manager asks for a restart below 27.
-/// 28: host-to-host copies choose their route (`xfer.start` `route: auto|relay`; jobs report `route_used` and `route_reason`): direct when the
+/// older daemon has none of it, so the app's file manager asks for a restart below 32.
+/// 33: host-to-host copies choose their route (`xfer.start` `route: auto|relay`; jobs report `route_used` and `route_reason`): direct when the
 /// first host logs in to the second by itself, else through this computer. An older daemon ignores `route` and copies through this
-/// computer, so the app offers the choice only at 28.
-pub const API_LEVEL: u32 = 28;
+/// computer, so the app offers the choice only at 33.
+pub const API_LEVEL: u32 = 33;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

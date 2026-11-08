@@ -1,7 +1,7 @@
 ---
 phase: 7
 title: "Browser pane takeover (CDP screencast) + app provider channel"
-status: pending
+status: completed
 priority: P2
 effort: "5d"
 dependencies: [3, 3a, 3c]
@@ -11,7 +11,55 @@ dependencies: [3, 3a, 3c]
 
 > **Updated 2026-10-30 (path D).** Runs over Tailscale HTTPS (or LAN HTTPS) from the installed PWA. **Relay-mode takeover is deferred**; the relay figures below stand as reference and do not gate this phase. API level: next free, expected 25.
 >
-> **`control` for the PWA**: `transport_cap` (`mobile.rs`) caps browsers at `write` and the desktop offers `control` to `app` devices only (`mobile-settings.tsx`), following the 2026-10-24 decision "`control` native only". With the native app deferred, this phase needs that amended: a PWA device with `secure_origin` (3a) and an enrolled app lock (3c) may hold `control`, granted on the desktop with presence. **Confirm with the user before starting** (open question in the plan).
+> **`control` for the PWA — owner decision, final (2026-11-05):** a PWA device may hold `control` only when it paired over HTTPS/Tailscale (`secure_origin`), its app lock is enrolled and on, and it was granted on the desktop with OS verification (presence). Other browser devices stay capped at `write`. An app-lock auto-lock releases the hold like a revoke. Relay-mode takeover stays deferred: takeover is refused over the relay. API level **28** (26 is 3e, 27 is phase 4).
+
+## Execution state — 2026-11-05
+
+**Built and tested 2026-11-06** (branch `phone/phase7-takeover`, rebased onto phase 4's `832e966`): `cargo test -p kelpie-proto -p kelpied -p kelpie -p kelpie-link` all green, clippy clean, pnpm typecheck/test/i18n green, `scripts/e2e/takeover.py` 39/0 and `browser.py` 37/0 on a debug app with an isolated daemon. After both follow-up reviews (below): the full suite 1243 passed / 0 failed (kelpied 923, kelpie 276 rerun after the last fix, kelpie-link 15, kelpie-proto 29), clippy clean on `kelpied` and `kelpie`, pnpm green (vitest 1607), `takeover.py --spike` 45/0, `browser.py` 37/0. Report: `plans/reports/fullstack-developer-261105-1900-phone-phase7.md`.
+
+**Spike results (Windows 10, WebView2 156, debug app, `takeover.py --spike`):**
+- Frames arrive without `Page.enable`; clicks are `isTrusted`. A login page (948 × 784 CSS px) at q70/1280: JPEG ~12.8 KB, newest frame 11 ms old p50 / 17 ms p95 on loopback, ~8 fps with a CSS animation.
+- Tap → the page's click handler: 23 ms p50 / 58 ms p95 (earlier runs 26/90 and 51/128), inside the 150 ms budget before the frame back.
+- `NewWindowResponse::Create` inside the handler works, no deadlock; `window.opener` and `postMessage` hold. A new popup sends no screencast frames (its window is behind the main one, and its DevTools state starts over on load): the stream restarts on its load, and a 1 s silent stream falls back to `Page.captureScreenshot` every 500 ms. `window.close()` left the window open (wry destroys only the view): now closed with it.
+- A pane hidden behind another tab sends **0** frames in 4 s: kill rule applied, the held pane's tab is brought back to the front once (28 frames in the same 4 s after the fix).
+- **A hidden pane gives no capture either** (0 frames, 0 captures in 3 s, 2026-11-06, three runs): so no capture of a hidden pane is ever stale, there is none. A tap sent to a hidden still pane did not click while hidden, **and clicked once the pane was shown again** (WebView2 keeps the input): the app now sends a pane the window hides (`browser_visible`) nothing but a release at the point pressed, and refuses its text; `takeover.py --spike` checks the late click no longer happens.
+- **A screencast started again on a still, visible page sends no first frame by itself** (three runs): the first frame of a new takeover there was a capture. So the stale-picture risk the second follow-up review raised was not limited to hidden panes; the fresh counter covers it.
+- **The final review's WebView2 questions** (2026-11-07, two `--spike` runs, past the guard through `browser_test_input`, a press and a release on the sign-in page's probe square 3 s after hiding):
+  1. *Does input to a hidden pane complete at once?* The protocol call returned at once in every case (22–75 ms). The page acted on a bare press and release at once too, while hidden. A phone tap (move, press, release) to a hidden still pane, in the earlier runs, clicked only once the pane showed again: a mouse move seems to wait for a frame the hidden pane never paints, and what follows waits behind it. Either way input to a hidden pane is not safe, so the guard stays.
+  2. *Is input queued for a window behind another, or a minimised window?* No. A window of its own behind the main one, a minimised window of its own, and a pane in a minimised main window all clicked at once. A phone tap (with its move) on a window behind the main one clicked at once too.
+  3. *What does `document.visibilityState` say?* `hidden` for a pane behind another tab and for a minimised window of its own. It stays `visible` for a pane in a minimised main window and for a window behind the main one. So the guard checks a minimised window itself (`is_minimized`, and `IsIconic` on the window thread), and the phone was told "hidden" in those three cases. A window behind the main one is not detected, and its input lands at once.
+- WebView2 CPU on that page: 34 % of a core without a stream, 85–107 % with it at L0. **Not measured:** the L2 cap's CPU cut, window-thread time per frame, coordinates under browser zoom, JPEG sizes at q40–q55 (the ladder did not step down on loopback).
+
+**Owner answers (2026-11-05), applied:**
+1. The desktop grant of `control`, with OS verification, is the first-takeover confirmation: no extra prompt.
+2. Turning the app lock off lowers every browser device's `control` to `write` in its record; getting it back takes a new grant on the desktop with verification (`Mobile::set_lock`, test `turning_the_lock_off_takes_a_pages_control_back_to_typing_until_it_is_granted_again`).
+3. A `window.open` with a size or position becomes its own window; every other new window opens in the pane.
+4. Gestures: a tap clicks, a drag scrolls, a 400 ms hold then a drag drags, pinch is not passed through.
+
+**Independent review (2026-11-06, `plans/reports/code-reviewer-261106-1645-phone-phase7-review.md`), applied, still unbuilt:** command registration by `browser::takeover::…` path; first finger only, a second gives the gesture up (no pinch); one ordered app-side queue for input and text; window ids on frames and input; app-side TTL and a 64-item bound, 60 input messages a second at the broker; a failed or timed-out start tells the app to stop and the app refuses it later; no wake loop while paused, a `paused` heartbeat and decode failures acknowledged; the same app process re-registering takes over without an alert, release before the old connection drains, registration retried; an app record from a browser held to the page rule; reservations against concurrent starts; same-connection rebind; button released on stop and retarget; drag released outside the picture at the last point; `control_held` re-read by the hold; dropped requests forgotten; own hold not listed as taken; a non-app re-auth gives the role up. Left: popups still have only a title (no overlay or Stop of their own), the pane is brought to the front at start only (a spike item), no byte budget (relay takeover deferred).
+
+**Follow-up review (2026-11-06, `plans/reports/code-reviewer-261106-2120-phone-phase7-fixes-review.md`), applied, built and tested:** a `fresh` counter on the app's hold, bumped by a resume, a notice asking for a fresh frame and a new window, makes the captures send the same picture again at once (a ladder step alone does not); the daemon keeps a pending frame when the phone's lane is full instead of losing it; the daemon numbers its notices to the app (`v`) and the app applies only a newer one, synchronously, then reconciles the stream; a release is sent only when a press was recorded, and a late one at the pressed point; the `keepInFront` timer looks again at the hold and the pane before switching; a takeover that ended before its start returned is not shown (`endedEarly`); the phone answers a paused heartbeat even when it never acknowledged a frame. The e2e asserts no paused heartbeat on the still page and compares each capture with the frame just before it. Found by the spike and fixed with it: input to a hidden pane (above).
+
+**Final review (2026-11-07, `plans/reports/code-reviewer-261106-2300-phone-phase7-final-review.md`), applied, built and tested:**
+- A window counts as hidden when the window hides the pane, when its window is minimised, or when its page says so. A hidden window gets only a release, and its text is refused.
+- The queue looks again before every call but a release, and resolves the target for the item's window only. The window thread checks the view's visibility and the minimised state right before each call.
+- The pressed button follows what was sent. A button held down is released before the window hides its pane.
+- The app tells the daemon when a held window is hidden or shown. The heartbeat carries `hidden`, and the phone shows "The pane is hidden on the computer." in place of the picture.
+- An older notice that asks for a fresh frame still resets the captures unless the hold is paused, and `reconcile` reads the hold again after the stop.
+- The daemon builds a frame message only once the lane has room.
+- `takeover.py` checks in every run, behind another tab and with the window minimised, that the phone is told and that a tap never clicks then or later.
+- Results:
+  - The full suite: kelpied 915/9, kelpie 281/1, kelpie-link 15/0, kelpie-proto 29/0. The failures are environmental (see the report): the 9 `notify::destinations` failures come from the installed Kelpie app probing the tests' local servers (all 54 pass when run outside the agent session's process tree), and the one kelpie failure is a load-sensitive timing test.
+  - Focused kelpied (takeover, provider, mobile) 328/0, and kelpie takeover 18/0.
+  - Clippy clean. pnpm typecheck, i18n and vitest 1608/0.
+  - `takeover.py` 51/0, `--spike` 51/0 twice, and `browser.py` 37/0.
+
+**Research (docs and the crates' sources, tauri 2.12.4 / tauri-runtime 2.12.2 / wry 0.57 / webview2-com 0.39.1), design chosen from it:**
+- Popups: `WebviewBuilder::on_new_window` may return `NewWindowResponse::Create { window }`; on Windows the new webview must use the opener's environment, which `WebviewWindowBuilder::window_features(features)` sets (`with_environment(features.opener().environment)`). The docs' own example builds the window inside the handler. Only a `window.open` with a size or position (`NewWindowFeatures::size()/position()`, an OAuth window) is made a window; any other new window still opens in the pane, which keeps `browser.py`'s target=_blank check as it was.
+- Frames: `ICoreWebView2::GetDevToolsProtocolEventReceiver("Page.screencastFrame")` + `add_DevToolsProtocolEventReceived` (`DevToolsProtocolEventReceivedEventHandler`, `ParameterObjectAsJson`), attached for a held pane only and removed with its token; `Page.startScreencast {format: jpeg, quality, maxWidth, maxHeight, everyNthFrame}` and `Page.screencastFrameAck {sessionId}`, sent without waiting. The handler only hands the JSON to a task (window thread kept free).
+- Input reuses `devtools()` (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.insertText`) behind the daemon's takeover id; `browser_test_input` stays as it was, debug and e2e only.
+
+**Spike checks still owed (need a built app):** frames arrive and `isTrusted` holds on a real login page; tap → visible change ≤ 150 ms p95 on LAN/Tailscale; frames while the pane is hidden or covered (the window brings its tab to the front at start; a dialog over it may still stop them); `Create` from inside the handler works (no deadlock) and `window.opener`/`postMessage` survive; coordinates under page zoom and DPI (`deviceWidth`/`pageScaleFactor`); JPEG sizes q40–q70 at 800–1280 px for text-heavy pages; `msedgewebview2` CPU with and without a screencast, and the L2 cap cutting it ≥ 50 %; `Page.startScreencast` without `Page.enable`; ≤ 2 ms window-thread time per frame.
 
 ## Overview
 The cheapest takeover for the most common blocker — a login, OAuth consent, 2FA or captcha in a Kelpie browser pane — with no OS capture

@@ -1145,3 +1145,44 @@ fn a_chats_request_label_reaches_the_phone_as_its_own_message() {
     let told = translator.translate(&r.daemon, &event.data, &Notify::new());
     assert_eq!(told, vec![json!({"type": "chat_request_info", "id": "c1", "request_id": "r1", "command": "ls", "risk": {"level": "low", "tags": []}})]);
 }
+
+/// Turning the app lock off takes a browser device's control away in its record: turning the lock on again does not bring it back, a new grant does.
+#[tokio::test]
+async fn turning_the_lock_off_takes_a_pages_control_back_to_typing_until_it_is_granted_again() {
+    let (r, _a) = enrolled().await;
+    let m = &r.daemon.mobile;
+    let key = m.mac_key(true).unwrap().unwrap();
+    {
+        let mut c = m.config.lock();
+        let phone = c.devices.iter_mut().find(|x| x.id == "phone").unwrap();
+        phone.kind = Kind::Pwa;
+        phone.permission = Permission::Control;
+        store::seal(phone, &key);
+    }
+    m.add_test_device("native", "Native", kelpie_link::Keypair::generate().unwrap().public, Permission::Control, Kind::App);
+    assert_eq!(m.status(true)["devices"][0]["may_control"], true);
+    let grant = m.grant("phone");
+    let mut heard = m.revoked.subscribe();
+    let off = store::LockOptions { on: false, ..m.lock_options() };
+    m.set_lock(off).unwrap();
+    assert!(!grant.load(Ordering::SeqCst), "what it controlled stopped");
+    assert_eq!(m.permission("phone"), Some(Permission::Write), "its record went back to typing");
+    // Its tags are checked again from scratch, as at a load: the lowered record is sealed as it is now.
+    m.config.lock().devices.iter_mut().for_each(|d| d.verified = false);
+    m.verify_devices();
+    assert!(device_of(&r).verified, "the lowered record verifies");
+    assert_eq!(device_of(&r).permission, Permission::Write);
+    assert_eq!(m.permission("native"), Some(Permission::Control), "the native app's control does not rest on the lock");
+    let mut changed = None;
+    while let Ok(e) = heard.try_recv() {
+        if e.id == "phone" && e.change == "changed" {
+            changed = e.permission;
+        }
+    }
+    assert_eq!(changed, Some(Permission::Write), "its connection starts again with the new record");
+    assert!(m.audit_entries(20).to_string().contains("the app lock was turned off"));
+    assert!(m.raise_prompt("phone", Permission::Control).is_err(), "with the lock off it cannot be given control");
+    m.set_lock(store::LockOptions { on: true, ..m.lock_options() }).unwrap();
+    assert_eq!(m.permission("phone"), Some(Permission::Write), "the lock on again does not bring control back");
+    assert!(matches!(m.raise_prompt("phone", Permission::Control).unwrap(), Some(crate::user_presence::Prompt::Raise { .. })), "a new grant does, verified");
+}

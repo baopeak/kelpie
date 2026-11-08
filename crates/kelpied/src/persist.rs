@@ -163,4 +163,23 @@ mod tests {
         let saved: Vec<SavedSession> = serde_json::from_str(stopped).unwrap();
         assert!(!saved[0].alive);
     }
+
+    #[test]
+    fn sessions_saved_before_sub_sessions_load_without_a_parent_and_new_fields_round_trip() {
+        let old = r#"[{"spec":{"id":"a","kind":"shell","cwd":"."},"cols":80,"rows":24}]"#;
+        let saved: Vec<SavedSession> = serde_json::from_str(old).unwrap();
+        assert_eq!((saved[0].spec.parent.clone(), saved[0].spec.depth, saved[0].spec.report.clone()), (None, 0, None));
+        // A session nobody opened writes none of the new keys, so an older Kelpie reads the file as before.
+        let written = serde_json::to_string(&saved).unwrap();
+        for key in ["parent", "depth", "report"] {
+            assert!(!written.contains(&format!("\"{key}\"")), "{key}: {written}");
+        }
+        let mut child = saved[0].clone();
+        child.spec.parent = Some("p".into());
+        child.spec.depth = 2;
+        child.spec.report = Some(crate::session::SubReport { status: "done".into(), summary: "fixed".into(), at: 5, auto: false });
+        let back: Vec<SavedSession> = serde_json::from_str(&serde_json::to_string(&[child.clone()]).unwrap()).unwrap();
+        assert_eq!(back[0].spec, child.spec);
+        assert!(!serde_json::to_string(&child.spec.report).unwrap().contains("auto"), "a report the agent made carries no flag");
+    }
 }

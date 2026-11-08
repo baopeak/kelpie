@@ -1,7 +1,7 @@
 ---
 phase: 8
 title: "Desktop / window screen control — Windows"
-status: pending
+status: in-progress
 priority: P2
 effort: "10d"
 dependencies: [3, 3a, 3c, 7]
@@ -9,86 +9,165 @@ dependencies: [3, 3a, 3c, 7]
 
 # Phase 8: Desktop / window screen control — Windows
 
-> **Updated 2026-10-30 (path D).** Screen goes over Tailscale from the installed PWA: WebRTC host candidates on the Tailscale address, no relay, no TURN. **Deferred with relay-mode screen and the native app**: `relay/src/turn.ts` and `POST /v1/turn`, TURN credentials and cost, the phase-5 WebView spike, native network and thermal hints. Text on those below stands as reference and does not gate this phase. Direct STUN `srflx` candidates are optional, tested in the spike. Needs the same "`control` for the PWA" decision as phase 7. API level: next free, expected 26.
+> **Owner decisions, final (2026-11-06). They replace the transport of the 2026-10-30 text below; everything else stands where it fits.**
+> - **Transport: H.264 over the existing end-to-end encrypted phone link.** Binary messages on the Noise link (`kelpie-link`) over Tailscale HTTPS or LAN HTTPS; the PWA decodes with WebCodecs `VideoDecoder`. **No `str0m`, no WebRTC, no UDP socket, no STUN/TURN in this phase.** WebRTC is a later stage, added only if measurements show stalls above 250 ms p95.
+> - The SPS is written with no frame reordering (VUI `bitstream_restriction` with `max_num_reorder_frames = 0`), so a decoder (Safari above all) has no reason to hold frames. H.264 only.
+> - Kept as specified: WGC for windows, DXGI Desktop Duplication for monitors; Media Foundation hardware H.264 with the inbox software MFT as fallback (no openh264); `SendInput`; the helper `kelpie-screen` spawned by the app; the safety rules (`control`, border and badge, stop hotkey, idle stop, audit, stop within 1 s on revoke, lock or link close); states reported and never a silent freeze (secure desktop, locked, elevated/UIPI, minimized); UAC and the lock screen cannot be controlled, and the phone says so.
+> - **Crisp text ("paint-over") ships here:** when regions stop changing, lossless (PNG) or high-quality (JPEG q90) tiles of them go on top of the video, and the phone draws them over the video until those regions change again.
+> - **iOS version unknown:** the PWA probes WebCodecs H.264 (`VideoDecoder.isConfigSupported`) and says plainly when it is missing.
+> - **Controls as phase 7 where they apply:** `control` for a PWA device needs `secure_origin` and an app lock that is on, granted on the desktop with OS verification (that grant is the confirmation, no extra prompt); turning the lock off drops the device to `write`. **No screen over the relay: refused.**
+> - **Flow control and budgets:** the resilience section's degradation ladder, encoder overuse detector, bounded queues and keyframe limits, fitted to the new transport (below).
+> - API level **29** (26 is 3e, 27 is phase 4, 28 is phase 7).
+
+## Execution state — 2026-11-06
+
+**Update 2026-11-07:** built, unit-tested and run end to end on one desktop (`scripts/e2e/screen.py`, isolated): see the report. The speed work below is written on top and waits for the build slot.
+
+**Code written, not built** (branch `phone/phase8-screen`, from `phone/phase7-takeover` b71fb05). Cargo and pnpm were not run (the machine's one build slot was held); the Rust unit tests, the TS tests and `scripts/e2e/screen.py` are written and unrun. Report: `plans/reports/fullstack-developer-261106-1645-phone-phase8.md`.
+
+- `crates/kelpie-screen`: workspace member, **not** a default member. Pure, GPU-free modules with unit tests: `geom` (coordinates, DPI, virtual desktop), `targets` (window filters, IDE shortcuts, ids), `states` (secure desktop / locked / elevated / minimized / closed, input policy, debounce), `control` (degradation ladder, overuse detector, bandwidth controller, load caps, HW→SW decision, keyframe gate, long-L3 pause), `tiles` (64×64 change detection, paint-over and unpaint), `sps` (VUI rewrite, Annex B, codec string), `wire` (helper framing and the phone's media messages), `input` (closed op set, TTL, bounded queue, keys, hotkey parser). Native Windows code in small modules under `win/` (`d3d`, `capture_dxgi`, `capture_wgc`, `convert`, `encode_mf`, `input_win`, `targets_win`, `states_win`, `border`), uncompiled.
+- `windows-capture` is **not** used: its D3D11 texture hand-off is unconfirmed in the research, and the capture texture must stay on the encoder's own device. Raw WGC/DXGI through the `windows` crate (0.62, the app's version) instead.
+- Daemon: `crates/kelpied/src/screen.rs` (broker: holds, grants, rebind, idle, media forwarding with an IDR-on-overflow rule, input TTL); small edits to `mobile.rs` (a media lane), `mobile/link.rs` (`Wire::send_bytes`), `mobile/lanes.rs`, `mobile/verbs.rs`, `provider.rs` (`screen` kind), `server.rs`, `daemon.rs`, `kelpie-proto` (API 29).
+- App: `app/src-tauri/src/screen.rs` (spawn, version handshake, idle exit 30 s, provider requests), the status-bar indicator, the stop hotkey setting. Phone: `screen.ts` (logic, tested), `screen-view.tsx`.
+- **Not built in this pass** (left for after the first build and the spike): the helper's RSS alarm (300 MB ⇒ restart the stream once); the 1 fps repeat frame when capture stalls (a still screen sends nothing by design, and the 1 Hz `sc_fhb` keeps the phone from counting it frozen); a hard cap of 2 frames inside a hardware MFT (the stream feeds only on `METransformNeedInput` and at most 3 frames are in flight to the phone); an IDR size cap (measured as `idr_ratio`, not enforced: MF has no direct knob). The clipboard-paste mode is not wanted for now (owner, 2026-11-06). The integration test (`tests/software_encode.rs`) is ignored until the runners' D3D11 video processor is confirmed.
+
+## Review fixes (2026-11-06), after rebasing on the hardened phase 7 (`a497b20`)
+
+Review: `plans/reports/code-reviewer-261106-1815-phone-phase8-review.md`. Still unbuilt; tests written for each change in behaviour.
+- **Compile errors:** `Win32_System_Ole` added (`VARIANT`, `ICodecAPI::SetValue`); the WGC handler captures only `Send` values (the D3D11 device, the WinRT device behind an `AgileReference`); the phone tests pass messages through `expect(value, message)`.
+- **Frames lost never hold the stream:** `control::Flight` (test `frames_lost_on_the_way_never_hold_the_stream`): a keyframe request gives up the frames in flight, `screen.flow.dropped_through` does the same for frames the daemon dropped, nothing but the owed keyframe is encoded while it waits for its second; the phone acknowledges frames it skips or fails to decode, and shows *stuck* when the computer says it sends and nothing shows for 2 s; input onto a stale picture is not sent (a frame unacknowledged or a keyframe owed for 2 s).
+- **Keys and text only into the target:** they need the target (or a dialog it owns, never another top-level window of its program) in front, brought there once, else `not_front` and *Not typed*; a click that lands on a window of the target's own process (a menu, a dialog) is no longer `covered`.
+- **Crisp tiles never stale:** a dropped video frame sets `lost_tiles` (then unpaint-all), a frame not sent puts its unpaint back, the phone applies the unpaint of frames it skips and refuses a tile whose region a later frame changed (unpaint history).
+- **Hardware encoder output** drained while feeding is kept for `poll`.
+- **Mediums:** start budgets (helper 7 s, app hello 4 s + start 9 s, daemon 15 s) and a start the daemon gave up on stopped; a link that closes during a start leaves a hold waiting for the device; a start reserves the screen (the first holder keeps it, the second gets *in use*); tiles and the cursor only with 3 lane places free and at most half the video's rate; the link's padding fed into the bitrate (`wire_len`, `Bandwidth::on_wire`); the encoder's picture capped at 1920×1080 (5K works, a 4K monitor is not "reduced"); trackpad taps where the computer's cursor is drawn; no border or a taken hotkey fails the start; `KELPIE_SCREEN_PATH` in debug builds only, the helper otherwise only next to the app.
+- **Lows:** queued input not done after a stop; a held button released at the end; the `Blocked` comment; a minimized target restored by every press; `start` refuses windows the list would not offer; the virtual desktop read again every 2 s and a monitor mode change ends the stream (`display_changed`); a rotated monitor refused; the app does not run the helper while elevated; the helper's idle time counts from its spawn; aligned token buffer; mapped staging always unmapped; Media Foundation started once; the border's window waited for (no hang on drop), `GetMessageW` -1 ends its loop; odd-sized monitors copied at the encoder's even size; the WGC picture copied into the stream's own texture (no tearing); a second finger during a one-finger gesture ignored.
+- **Left:** finer padding of media is the owner's call (padding hides message sizes); the helper is still bundled on macOS and Linux as a stub (download size only); per-machine install and a helper signature check stay with the release work.
+
+## Speed work (2026-11-07): latency and smoothness first
+The owner made performance the priority and approved items 2–10 of [the CRD research](../reports/researcher-261107-0050-crd-remote-speed-techniques.md); item 1 (WebTransport) waits for its one-day spike. Every Chromium constant used was read again in the raw source (`webrtc_frame_scheduler_constant_rate.cc`, `webrtc_video_encoder_wrapper.cc`, `encoder_bitrate_filter.cc`, WebRTC's `dxgi_output_duplicator.cc`); where CRD's value was not found (the boost's caller), ours is marked as ours. Written, then built and measured when the build slot comes round.
+- **2. Input never waits for media:** `mobile/link.rs` `Wire` sends from a writer task of its own (seals as it writes, the media lane taken only when no other message waits, none of it to a locked phone); the connection's task keeps reading the phone's clicks and acknowledgements while a keyframe is written. Unacknowledged media cap 512 → 192 KiB. The phone already merges moves per 33 ms and sends presses at once.
+- **3. Local cursor echo:** the cursor the finger moves is drawn at once; the computer's positions are ignored for 400 ms after a local move, then followed, ≤ 3 px taken as the same (`reconcileCursor`).
+- **4. CRD's capture scheduling** (`pace::Pacer`): a constant-rate timer from the last capture's start, one frame in the encoder unless the encoder asks for another (one that holds a frame is fed at the rate), nothing queued. The boost after input was dropped after review (2026-11-07): there is no low idle rate to boost from, and it overrode the rate controllers with the encoder set for another rate.
+- **5. Decode and present:** a decoded frame is drawn in the decoder's output callback (no `requestAnimationFrame` wait) on a canvas asked for `desynchronized`; a delta with more than two decodes waiting is skipped to the next keyframe; `optimizeForLatency` as before.
+- **6. Media Foundation low latency:** every setting read back after it is set (`set_checked`), the refused or not kept named in the app's log (`screen encoder`); `QualityVsSpeed` asked of hardware too; the quantizer of each output (`MFSampleExtension_VideoEncodeQP`), the first-output delay and the frames held are read.
+- **7. Faster overuse detection:** queueing = the round trip's floor over 500 ms (after the last cut) more than 50 ms over its 10 s floor ⇒ −15 % at once, again after 500 ms only on new evidence; a full window for 1 s the same; no increase while application-limited; the encoder reconfigured at once for a cut, only beyond +33 % for an increase.
+- **8. Large-frame guard** (`pace::BigFrame`, CRD's 300 000 px / 100 KB per MP / last 5 frames): a frame that would be late is encoded at 40 % of the bitrate for that one frame.
+- **9. DXGI dirty and move rects:** dirty plus each real move's source and destination (unmoved skipped); only that region is copied into the stream's picture and read back for the tiles.
+- **10. Top-off in the codec** (`pace::TopOff`): a still picture encoded again on CRD's timer until the encoder reports QP ≤ 10, a pass under 200 bytes, or 10 passes; crisp tiles follow it (they keep text at the source's resolution and colour, which 4:2:0 cannot). MF accepts a fixed QP only in fixed-QP mode, so the refinement comes from CBR spending a still picture's bits.
+- **Typing race narrowed:** the foreground and its keyboard focus (`GetGUIThreadInfo`) are checked before every `SendInput` call, one typed unit per call; text that loses the focus partway stops and says so. Left: the microseconds between the check and the call, and a program that moves keys among its own windows itself.
+- **Measurement hooks** for the research's plan (section 5): the helper's `stages` in `sc_stats` (picture → message out p50/p95, conversion, encoder, send interval, daemon queue → phone acknowledgement, top-off passes, big frames, frames held, first output), and the phone's `FrameTimes` (inter-arrival and inter-present p50/p95/p99, gaps over 100/250 ms, decoder time, receive → present, frames never shown) in the debug view and `__kelpieScreenTimes()`.
+- **Owed:** build and test; e2e; the measurement matrix (LAN, Tailscale direct, clumsy 1/3 % loss, +40 ms), first on an idle GPU (this machine's Intel HD 530 was shared with another program at 58 %, which put ≈ 140 ms between a frame's submission and its output whatever the encoder or size); the WebTransport spike.
 
 ## Overview
 View and control a monitor or a single window (an IDE, the app under test, a dialog) from the phone with low latency. A helper
-`kelpie-screen`, **spawned by the Kelpie app** like `kelpie-stt` (`app/src-tauri/src/voice.rs:40-61`), captures, hardware-encodes H.264 and
-sends it P2P over WebRTC; input comes back on a DataChannel. Signaling: phone → `kelpie-link` → daemon → phase-7 provider channel → app → helper.
-Screen control therefore needs the Kelpie app running; the phone says "open Kelpie on the computer" otherwise. [RT-13]
-Go/no-go input: this phase's step 1, run against the installed PWA on iPhone and Android.
-
-## Requirements
-- Functional
-  - Targets: each monitor; visible top-level windows (title, process); shortcuts for IDEs (Code, Cursor, Zed, JetBrains) and the Kelpie window.
-  - Video: WGC for windows (yellow border stays on Win10 19045 — marks what is shared), DXGI Desktop Duplication for monitors; cursor composited; frames only on change.
-  - Encode: Media Foundation H.264 hardware MFT (D3D11 NV12, `CODECAPI_AVLowLatencyMode`, CBR, no B-frames, long GOP + IDR on PLI, live bitrate from BWE); inbox software MFT fallback. Profile 42e01f unless the offer allows higher.
-  - Transport: `str0m` (`wincrypto` or `rust-crypto`, no aws-lc/OpenSSL); phone offerer (recvonly video + DataChannel `input`); candidates: host on the Tailscale address (srflx via `stun.cloudflare.com:3478` optional; TURN deferred);
-    RTP payload ≤ 1100 B (Tailscale MTU 1280); NACK, PLI, TWCC; `playout-delay` 0; DTLS fingerprints exchanged inside `kelpie-link`.
-  - Input: unordered channel for moves, reliable for keys/clicks/text; `SendInput` (`KEYEVENTF_UNICODE` text, VK keys, `MOUSEEVENTF_ABSOLUTE|VIRTUALDESK`); per-monitor DPI v2; window targets via `DWMWA_EXTENDED_FRAME_BOUNDS`, brought to front on first click; optional clipboard-paste mode marked "not for passwords".
-  - States reported, never a silent freeze: secure desktop (UAC/lock/login), session locked, elevated foreground (UIPI drops input), target minimized/closed.
-  - Safety: `control` permission; desktop confirmation per device with user presence (phase 3), "always allow this device" also user-presence gated; always-on-top border + status-bar badge; global stop hotkey (default Ctrl+Alt+Shift+K); idle auto-stop 10 min; audit start/stop/target (never input).
-  - **Grant lifetime** [RT-12]: WebRTC peer keyed `(device key, link connection, app provider client)`; revoke/downgrade/provider loss ⇒ helper `stop` and DataChannel closed in < 1 s.
-  - Phone: `<video>`, trackpad (default) / direct-touch modes, pinch zoom/pan, long-press right click, two-finger scroll, shared key bar, text box, quality indicator, debug `getStats` overlay.
-  - Helper lifecycle: app spawns on first viewer, stdio JSON lines, exits 30 s after the last viewer; version handshake with the app; above-normal priority while streaming; shipped as `externalBin` next to the app (`app/src-tauri/tauri.bundle.json:3`).
-- Non-functional: glass-to-glass ≤ 150 ms p95 LAN, ≤ 250 ms Tailscale/direct P2P (≤ 400 ms via TURN only if relay-mode screen returns); idle ≤ 50 kbps; helper ≤ 10 % of one core at 1080p30 HW.
-
-## Resilience requirements — unstable networks and host overload
-<!-- Updated: 2026-10-25 - resilience research -->
-**Network**
-- **Spike gate additions**: ICE restart on a live str0m `Rtc` (or a full re-offer/new session ≤ 5 s as fallback); a UDP TURN client for the helper (str0m has none; e.g. the `turn` crate) while only the phone uses TURN-over-TLS 443 (Cloudflare TURN has TLS but no RFC 6062 TCP allocations; a desktop with UDP fully blocked is unsupported ⇒ Tailscale/RustDesk); Wi-Fi → 4G mid-stream; 5 % and 10 % loss (netem/clumsy); keyframe storm.
-- **Restart ladder** (phone is offerer and owns it): path-change event ⇒ `restartIce()` at once; `iceConnectionState` disconnected 3 s or failed ⇒ restart; no `framesDecoded` and no DataChannel ping reply for 5 s ⇒ restart. Attempts at 0, 2, 5, 10 s (max 3 per 30 s), then tear down with "Screen lost — tap to reconnect". Signaling waits for the link re-handshake; fresh TURN credentials (1 h, allocation refreshed every 5 min) fetched over the link on every restart.
-- **Helper side**: no STUN/RTCP response for 5 s ⇒ pause the encoder (capture stays warm); consent expiry at 30 s (RFC 7675) ⇒ stop sending, keep ICE state 60 s awaiting a restart, then stop the stream.
-- **Freeze detection**: helper sends a DataChannel ping 1 Hz `{t, seq}`; 2 missed ⇒ "poor connection" badge, 5 missed ⇒ restart ladder; packets flowing but `framesDecoded` flat ≥ 1 s ⇒ keyframe request.
-- **Keyframes**: ≤ 1 IDR per second per peer (PLI/FIR coalesced), IDR size ≤ 3× the mean frame, NACK preferred when RTT < 150 ms, long GOP kept, no FEC/RED in v1 (usable to ~5 % loss, degraded at 5–20 %). Test at 10 % loss: ≤ 30 IDR/min, ≤ 3 bitrate down-up cycles/min.
-- **Degradation ladder for text-heavy screens** (fps first, keep resolution): 1080p30 → 1080p15 → 1080p8 → 720p8 → 720p4; BWE 150 kbps–4 Mbps, start 1.5 Mbps; < 300 kbps ⇒ 720p/5 fps; down-step immediate, up-step after 10 s stable; "degraded" badge when fps < 8 or scaled.
-- Input TTL 1 s on the input DataChannel (keys carry seq; the helper drops anything older); input refused while the DataChannel is unhealthy.
-- TURN cost note: 1.5 Mbps ≈ 675 MB/h per viewer; Cloudflare 1 000 GB/month free then $0.05/GB.
-
-**Host overload**
-- **Pipeline**: capture → 1-slot mailbox (drop-oldest) → encoder; ≤ 2 frames in flight in the MFT; `MF_E_NOTACCEPTING` or a full pipeline for > 3 frames ⇒ drop incoming frames, count `dropped_encoder`.
-- **Overuse detector** (libwebrtc model): `encode_usage = EMA(encode_ms) / EMA(target frame interval)`; > 0.85 for 2 s ⇒ step down; < 0.42 for 10 s ⇒ step up one rung (needs ≥ 60 frames of data). Rung order: fps 30 → 20 → 15 → 10, then scale 100 → 75 → 50 % (windows never below 540p), then bitrate cap. Load-level caps: L1 1080p20, L2 720p15, L3 540p8 + banner; **new screen sessions refused at L2+** (`host_busy`, retry-after 10 s) and when free memory < 20 %.
-- **HW ↔ SW**: stay on hardware and shed load; switch to the software MFT only if the HW MFT is absent/failed or HW encode p95 > 33 ms for 5 s at the lowest rung; SW capped at 720p15; every switch emits `encoder_changed` and a visible badge (no silent fallback). Spike enumerates `MFTEnumEx(HARDWARE|SORTANDFILTER)` per GPU vendor and logs the chosen MFT.
-- **Scheduling**: capture/encode threads `AvSetMmThreadCharacteristics("Capture")` and MF work queues via `MFLockSharedWorkQueue("Capture")`; helper opted out of EcoQoS; never HIGH/REALTIME. No frame for > 500 ms while the desktop is active (3D saturation) ⇒ 1 fps keepalive repeat frame.
-- **Bounds**: RTP queue ≤ 200 ms of media or 512 KiB (overflow ⇒ drop to the next IDR boundary + one IDR request); input queue ≤ 256 events; fixed texture pool 4; helper RSS alarm 300 MB ⇒ restart the stream once.
-- **Stats** over the DataChannel 1 Hz: `{fps, w, h, bitrate, encode_ms_p95, dropped, reason: cpu|gpu|bandwidth|thermal|battery|other, level}` shown on the phone (`720p · 15 fps · 180 ms · reduced: computer busy`); a long L3 (> 5 min) auto-pauses with "Paused to protect your computer — tap to resume".
-- Test hook `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS` drives the ladder deterministically in CI (no GPU on runners); GPU-load gates run manually/self-hosted: 3D shader load + all-core stress ⇒ stream stays up, fps ≥ 10, encode p95 ≤ 33 ms at the lowest rung, glass-to-glass p95 ≤ 400 ms LAN, no silent HW→SW switch.
-- Success criterion added: Wi-Fi ↔ 4G handover ⇒ stream resumes ≤ 5 s p95 without user action; no stuck black frame > 5 s.
+`kelpie-screen`, **spawned by the Kelpie app** like `kelpie-stt` (`app/src-tauri/src/voice.rs`), captures, hardware-encodes H.264 and
+hands each frame to the app, which gives it to the daemon through the phase-7 provider channel; the daemon sends it to the phone as a binary
+message on the phone's encrypted link. Input comes back the same way. Screen control therefore needs the Kelpie app running; the phone says
+"open Kelpie on the computer" otherwise. [RT-13]
 
 ## Architecture
 ```
-phone ─link: screen.offer/answer/ice─▶ kelpied (verbs, grants) ─provider channel─▶ app ─stdio─▶ kelpie-screen
-phone ◀════════ WebRTC: SRTP H.264 + DataChannel (UDP, P2P or TURN) ════════▶ kelpie-screen
-                  capture (windows-capture 2.x) → MF H.264 → str0m → UDP;  DataChannel → SendInput
+phone ──link (Noise): screens / sc_start / sc_input / sc_ack…──▶ kelpied screen broker (grants, holds, TTL) ──provider channel──▶ app screen.rs ──stdin JSON──▶ kelpie-screen
+phone ◀── link: binary media (H.264 AU · tile · cursor) + sc_state / sc_stats / sc_fhb / sc_end ◀── kelpied ◀── provider.event ◀── app ◀── stdout frames ◀── kelpie-screen
+kelpie-screen: WGC (window) | DXGI duplication (monitor) → texture pool (4) → D3D11 video processor (BGRA→NV12, scale) → MF H.264 (HW, SW fallback) → SPS VUI rewrite
+               CPU readback → 64×64 tile hashes → paint-over tiles (PNG / JPEG q90);  stdin input → SendInput;  border + badge window (excluded from capture) + RegisterHotKey
 ```
+- **Media message** (binary, first byte `0x01`, which no JSON message starts with): `kind` 1 video (flags key / unpaint-all, unpaint rects, `seq`, capture ms, source and coded size, Annex B access unit), 2 tile (format, `seq` it matches, id, rect in source pixels, PNG/JPEG bytes), 3 cursor (shape, visible, x, y in source pixels). Defined once in `kelpie-screen/src/wire.rs`; the phone parses it in `app/phone/src/screen.ts`. The local hop app → daemon carries it base64 in `provider.event` (as phase 7's frames); the network hop is binary.
+- **Phone decode:** WebCodecs `VideoDecoder`, `avc` format with an `avcC` description built from the keyframe's SPS/PPS (supported by Safari's VideoToolbox path and Chrome alike), `optimizeForLatency: true`, one `decode()` per frame, newest frame drawn on `requestAnimationFrame`; tiles via `createImageBitmap`; the cursor drawn by the phone (capture has the cursor off, so a moving cursor never dirties tiles).
+- **Flow control (TCP-friendly):** frames are dropped at capture, never after encode. The phone acknowledges each decoded frame (`sc_ack {seq}`); the daemon forwards `{acked, rtt_ms, inflight}` to the helper, which encodes only while fewer than 3 frames are in flight (newest capture wins in a one-slot mailbox). The daemon's media lane is bounded (6 messages, 512 KiB unacknowledged); overflow drops video until the next IDR and asks for one (≤ 1 per second).
+
+## Requirements
+- Functional
+  - Targets: each monitor; visible top-level windows (title, process); shortcuts for IDEs (Code, Cursor, Zed, JetBrains, Visual Studio) and the Kelpie window.
+  - Video: WGC for windows (yellow border stays on Win10 19045 — marks what is shared), DXGI Desktop Duplication for monitors; cursor drawn by the phone from cursor messages; frames only on change.
+  - Encode: Media Foundation H.264 hardware MFT (async, D3D11 NV12 surfaces, `CODECAPI_AVLowLatencyMode`, CBR with a ~2-frame VBV, no B-frames, long GOP + IDR on request), live bitrate (`CODECAPI_AVEncCommonMeanBitRate`); inbox software MFT fallback with CPU NV12. Main profile (High where the MFT offers it), level left to the encoder. SPS VUI rewritten with `bitstream_restriction` (`max_num_reorder_frames = 0`, `max_dec_frame_buffering = max_num_ref_frames`).
+  - Transport: binary messages on the phone's kelpie-link session (≤ 1 MiB each; tiles split to ≤ 256 KiB); JSON for state, stats, heartbeat and end.
+  - Input: closed op set (`move`, `down`, `up`, `click`, `wheel`, `key` with modifiers, `text`); `SendInput` (`KEYEVENTF_UNICODE` text, VK keys, `MOUSEEVENTF_ABSOLUTE|VIRTUALDESK`); per-monitor DPI v2; window targets via `DWMWA_EXTENDED_FRAME_BOUNDS`, brought to front before the first click, and a click that would land on another window is dropped and reported (`covered`).
+  - States reported, never a silent freeze: secure desktop (UAC/lock/login), session locked, elevated foreground (UIPI drops input), target minimized/closed/covered.
+  - Safety: `control` permission (phase 7 rule above); always-on-top border + badge excluded from capture, and the status-bar indicator with Stop; global stop hotkey (default Ctrl+Alt+Shift+K, changeable in Settings → Mobile, always on); idle auto-stop 10 min; audit start/stop and the target's program name or `monitor` (never the title, never input).
+  - **Grant lifetime** [RT-12]: hold keyed `(device key, link connection, app provider client)`; revoke/downgrade/lock/provider loss ⇒ helper `stop` and input refused at once, the hold gone in < 1 s; a dropped link keeps the hold 15 s for the same device's next connection only.
+  - Phone: canvas, trackpad (default) / direct-touch modes, pinch zoom/pan, long-press right click, two-finger scroll, shared key bar with modifiers, text box, quality line (`720p · 15 fps · reduced: computer busy`), debug overlay (decode ms, queue, rtt), plain "this phone cannot show the screen" when WebCodecs H.264 is missing.
+  - Helper lifecycle: app spawns on first viewer, stdin JSON lines in and framed stdout out, exits 30 s after the last viewer; version handshake (`hello {proto}`); above-normal priority and EcoQoS opt-out while streaming, MMCSS "Capture" on capture/encode threads; shipped as `externalBin` next to the app.
+- Non-functional: glass-to-glass ≤ 150 ms p95 LAN, ≤ 250 ms Tailscale direct; idle ≤ 50 kbps; helper ≤ 10 % of one core at 1080p30 HW.
+
+## Resilience requirements — unstable networks and host overload (fitted to the link transport)
+**Network** (TCP under the link: no packet loss to recover, only delay to bound)
+- **Freeze detection:** the daemon sends `sc_fhb` 1 Hz; the phone dims "connection lost" and stops input after 3 s without media or heartbeat. Frames arriving but nothing decoded for 1 s ⇒ `sc_key` (keyframe request). A link reconnect ⇒ `sc_rebind` within 15 s, then a fresh IDR, never a replay.
+- **Keyframes:** ≤ 1 IDR per second (requests coalesced in the helper); IDR on start, rebind, decoder error and daemon overflow only (no loss on TCP ⇒ no IDR storms). IDR size vs mean frame is measured and reported (MF has no direct cap; spike).
+- **Degradation ladder** (fps first, keep resolution): rungs 30/20/15/10/8 fps at 100 %, then 8 fps 75 %, 6 fps 67 %, 4 fps 67 %, 4 fps 50 %; windows never below 540 lines. Bandwidth controller: bitrate 150 kbps–4 Mbps, start 1.5 Mbps; lag = more than 3 frames in flight or queueing delay (rtt − min rtt) over 150 ms; lag for 2 s ⇒ −25 % at once; 10 s clean ⇒ +10 %, the wait doubling (to 60 s) after an up-step that was undone within 10 s (≤ 3 down-up cycles a minute); the rung follows the bitrate (≥ 1.2 Mbps 30 fps, ≥ 800 k 15 fps, ≥ 500 k 8 fps, ≥ 300 k 8 fps 75 %, below 4 fps 67 %). "Degraded" badge when fps < 8 or scaled.
+- Input TTL 1 s (stamped with the computer's clock, as phase 7); input refused while the stream is not live (no ack for 2 s).
+- Relay: none. A stage-2 WebRTC path returns only if the spike measures stalls above 250 ms p95 on the link.
+
+**Host overload** (unchanged where it fits)
+- **Pipeline:** capture → 1-slot mailbox (newest wins) → encoder; ≤ 2 frames in the MFT; `MF_E_NOTACCEPTING` or a full pipeline ⇒ drop incoming, count `dropped_encoder`.
+- **Overuse detector:** `encode_usage = EMA(encode_ms) / target frame interval`; > 0.85 for 2 s ⇒ one rung down; < 0.42 for 10 s ⇒ one up (≥ 60 frames since the last change). Load caps: L1 ≤ 1080p20, L2 ≤ 720p15, L3 ≤ 540p8 + banner; **new screen sessions refused at L2+** (`host_busy`) and when free memory < 20 %. L3 for more than 5 min ⇒ paused, "Paused to protect your computer — tap to resume".
+- **HW ↔ SW:** stay on hardware and shed load; software only if the HW MFT is absent/failed or HW encode p95 > 33 ms for 5 s at the lowest rung; SW capped at 720p15; every switch is an `encoder` event and a visible badge.
+- **Scheduling:** MMCSS "Capture" on capture/encode threads, EcoQoS opt-out; never HIGH/REALTIME. No frame for > 500 ms while frames are expected ⇒ 1 fps repeat of the last one.
+- **Bounds:** daemon media lane 6 messages / 512 KiB unacknowledged; helper input queue ≤ 256 events; texture pool 4; helper RSS alarm 300 MB ⇒ restart the stream once.
+- **Stats** 1 Hz `sc_stats {fps, w, h, kbps, encode_ms_p95, dropped, reason: cpu|gpu|bandwidth|load|encoder|other, level, encoder: hw|sw, idr_ratio}`.
+- Test hook `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS` adds encode time to drive the ladder deterministically; the pure controller is unit-tested without it.
+
+## Spike research done from documents (2026-11-06)
+- **Media Foundation low latency** ([H.264 Video Encoder](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder)): output type before input type; `MF_MT_MPEG_SEQUENCE_HEADER` appears on the output type once set. HCK-certified HW encoders must support rate control mode, mean/max bitrate, buffer size, GOP size, QP and **force key frame**; `CODECAPI_AVLowLatencyMode`, max ref frames, slice control and CABAC are **optional**, and `AVEncMPVDefaultBPictureCount` is optional and untested. So: set every knob, read back what took, and log the MFT's name and the result (`encoder` event). The inbox software encoder defaults to slice-parallel low-latency encoding and supports CBR, live `MeanBitRate` (adaptive encoding) and force key frame from Windows 8. Settings used: CBR, `MeanBitRate`, `BufferSize` ≈ 2 frames, `GOPSize` large (IDR on request), B-frames 0, `AVLowLatencyMode` on, `MaxNumRefFrame` 1 where offered, `QualityVsSpeed` low-complexity for SW.
+- **WebCodecs on Safari:** WebCodecs video is in Safari from 16.4 (iOS "partial" 16.4–18.x, full from 26 per caniuse, as the research report cites); the [AVC registration](https://w3c.github.io/webcodecs/avc_codec_registration.html) defines `annexb` (no description) and `avc` (parameter sets in `description`); implementations need not support H.264 at all. WebKit's exported H.264 decoder tests pass for the `h264_avc` case including low-latency decode; Annex B results are not shown. Decision: always use `avc` with an `avcC` description built on the phone from the keyframe's SPS/PPS, and probe with `isConfigSupported` first.
+- **SPS:** without VUI `bitstream_restriction`, a decoder may assume up to `MaxDpbFrames` of reordering and hold that many frames before output; writing `max_num_reorder_frames = 0` and `max_dec_frame_buffering = max_num_ref_frames` lets it output each frame at once (the dev.to measurement in the research: 267 ms → 2.5 ms). The helper rewrites every SPS it emits (bit-exact parse up to the VUI, emulation-prevention aware) rather than relying on each vendor's MFT.
+
+## Spike checks still owed (need a built helper, a GPU and real phones)
+1. MF HW encode per GPU vendor (≥ 2): chosen MFT logged, `AVLowLatencyMode` honoured, first-output delay, encode ms p95 at 1080p30, live bitrate change response, IDR size ratio, frames held inside the MFT.
+2. The SPS rewrite accepted by Safari (installed PWA, iOS version noted) and Chrome Android; decode latency with and without it.
+3. `isConfigSupported` results on the iPhones at hand; the fallback message on one without WebCodecs.
+4. Glass-to-glass p95 on LAN and Tailscale direct (and over DERP, reported); idle kbps; helper CPU at 1080p30 HW and SW.
+5. Paint-over on an IDE: tile bytes per screen (PNG vs JPEG q90), time to crisp, no visible seam or stale tile after a change.
+6. WGC on Win10 19045: frames for a covered window, `IsCursorCaptureEnabled(false)`, the yellow border; DXGI `ACCESS_LOST` on UAC and its recovery; the border/badge window kept out of capture (`WDA_EXCLUDEFROMCAPTURE`).
+7. `SendInput` into a normal and an elevated window (UIPI state shown), foreground handling for window targets, 100–200 % DPI on two monitors with a negative origin.
+8. Link behaviour: `bufferedAmount`/lane occupancy under 3–10 % loss (clumsy), Wi-Fi ↔ 4G handover ≤ 5 s back, stalls > 250 ms p95 (the WebRTC trigger).
+9. Defender/SmartScreen on the unsigned helper.
 
 ## Related Code Files
-- Create: `crates/kelpie-screen/**` (`capture.rs`, `encode_mf.rs`, `rtc.rs`, `input_win.rs`, `targets.rs`, `states.rs`), `app/src-tauri/src/screen.rs`, `app/phone/src/screen-view.tsx`, `app/src/components/screen-indicator.tsx`
-- Modify: `Cargo.toml` (member, not default-member), `app/src-tauri/tauri.bundle.json`, `app/src-tauri/src/lib.rs`, `crates/kelpied/src/takeover.rs` (screen grants), `crates/kelpied/src/mobile/verbs.rs`, `app/src/components/settings/mobile-settings.tsx` (hotkey, always-allow list), `scripts/build-release.sh`, locales, docs
+- Create: `crates/kelpie-screen/**`, `crates/kelpied/src/screen.rs`, `app/src-tauri/src/screen.rs`, `app/phone/src/screen.ts`, `app/phone/src/screen.test.ts`, `app/phone/src/screen-view.tsx`, `app/src/components/screen-indicator.tsx`, `app/src/lib/screen.ts`, `app/src/locales/vi/screen.json`, `scripts/e2e/screen.py`
+- Modify: `Cargo.toml` (member, not default-member), `app/src-tauri/tauri.bundle.json`, `app/src-tauri/src/lib.rs`, `app/src-tauri/src/daemon_client.rs`, `crates/kelpied/src/{main,daemon,provider,server,mobile}.rs`, `crates/kelpied/src/mobile/{verbs,link,lanes}.rs`, `crates/kelpie-proto/src/lib.rs`, `app/src/components/settings/mobile-settings.tsx`, `app/src/components/status-bar.tsx`, phone `link.ts`/`phone-state.ts`/`app.tsx`/`session-view.tsx`/`phone.css`, `scripts/build-release.sh`, docs
 
 ## Implementation Steps
-1. **Spike gate (1–2 d)**: str0m build on MSVC without NASM; DXGI → MF HW → str0m → iPhone Safari and Android Chrome as installed PWAs; LAN, Tailscale direct, 4G over Tailscale; ≥ 2 GPU vendors. Pass = targets above. Fail ⇒ webrtc-rs 0.20 once; fail again ⇒ stop the phase and document RustDesk-over-Tailscale.
-2. Targets + capture + change detection.
-3. MF encoder with BWE-driven bitrate/fps/scale and SW fallback.
-4. App screen module (spawn, version handshake) + signaling through the provider channel.
-5. Input mapping, DPI, window targets, state detection.
-6. Safety: confirm, border, badge, hotkey, idle stop, audit, grant lifetime (an app auto-lock, 3c, stops the stream like a revoke).
-7. Phone screen view + gestures. Packaging; docs; e2e.
+1. Spike: the owed checks above. Pass = targets above. If the link transport measures stalls > 250 ms p95 on real networks, stage 2 (WebRTC, `str0m`) is planned then; if MF HW fails on a vendor, SW at 720p15 for that vendor and a per-vendor note.
+2. Targets + capture + change detection. ✔ written
+3. MF encoder with ladder-driven bitrate/fps/scale and SW fallback. ✔ written
+4. App screen module (spawn, version handshake) + provider channel. ✔ written
+5. Input mapping, DPI, window targets, state detection. ✔ written
+6. Safety: border, badge, hotkey, idle stop, audit, grant lifetime (an app auto-lock stops the stream like a revoke). ✔ written
+7. Phone screen view + gestures; packaging; docs; e2e. ✔ written, unrun
 
 ## Tests
-- `cargo test -p kelpie-screen`: coordinate mapping (multi-monitor, negative origins, 100–200 % DPI), target filters, state logic, bitrate controller.
-- Integration: in-process str0m receiver decodes ≥ 30 frames from the helper (software MFT on `windows-latest`).
-- e2e `scripts/e2e/screen.py`: phone-emulated browser receives a test window, clicks a button in it (verified), Stop via hotkey and phone, revoke stops input < 1 s, read/write devices refused, app closed ⇒ "open Kelpie" state.
+- `cargo test -p kelpie-screen` (no GPU): coordinate mapping (multi-monitor, negative origins, 100–200 % DPI), target filters, state logic, ladder/overuse/bandwidth controller, keyframe gate, tile change detection and paint-over, SPS rewrite, media framing, input checks and hotkey parsing.
+- `cargo test -p kelpied screen`: hold start/stop, revoke ⇒ input refused at once and the hold gone < 1 s, idle stop, rebind window, provider gone, IDR-on-overflow, L2 refusal, audit without input.
+- `pnpm exec vitest run phone/src/screen.test.ts`: media parsing, `avcC` building, codec string, gestures (trackpad and direct), coordinate mapping with zoom, tile overlay life, freeze and keyframe request, unsupported decoder message.
+- Integration (owed, needs a built helper and Windows): the inbox software MFT encodes ≥ 30 frames of a test pattern, and the Media Foundation H.264 decoder decodes them all, with the rewritten SPS.
+- e2e `scripts/e2e/screen.py`: phone-emulated client receives a test window, clicks a button in it (verified by the window), Stop via hotkey and via phone, revoke stops input < 1 s, read/write devices refused, app closed ⇒ "open Kelpie" refusal.
 
 ## Perf gate
-- Off: helper not spawned, no UDP socket. Idle desktop ≤ 50 kbps; CPU budgets above.
+- Off: helper not spawned, no extra socket. Idle desktop ≤ 50 kbps; CPU budgets above.
 
 ## Success Criteria
 - [ ] IDE window and a native test app controllable from the phone within latency targets.
 - [ ] Secure desktop / elevated / minimized states shown, never a silent freeze.
 - [ ] Desktop always shows sharing + stop; revoke ends control within 1 s.
+- [ ] Text in an IDE is crisp within a second of it standing still.
+
+## Owner answers (2026-11-06), applied
+1. One viewer at a time (`sc_taken` for another device).
+2. No extra desktop prompt: the `control` grant with OS verification is the confirmation, as in phase 7.
+3. The key bar has the Windows key: `Meta` alone (Start) and `meta` as a modifier (Win+E, Win+L) (`input.rs`, test `a_key_with_modifiers_presses_them_around_it`).
+4. No clipboard-paste mode for now.
+5. Crisp text on by default, and off by itself while the link is slow (under 1 Mbps, lagging, within 10 s of a bitrate cut) or the machine is at L3, cellular included since it is measured (`Controller::crisp_ok`, test `crisp_text_turns_itself_off_on_a_slow_or_lagging_link_and_back_on_once_it_is_calm`); `sc_stats.crisp` tells the phone, which says *crisp text off: slow connection*.
+6. The stop hotkey is always on: it can be changed, never turned off.
+7. The audit log records only the program's file name (`window: Code.exe`) or `monitor`, never the window's title (test `the_audit_log_names_a_program_by_its_file_name_only`).
+8. Leaving the phone app locks it and ends the screen at once, no grace: the daemon's `lock_now` clears the grant (test `leaving_the_app_takes_every_control_grant_away_at_once`) and the page ends its view (`ScreenSession::locked`); e2e checks it within a second.
+9. *See the computer's screen* is in the inbox as well as a session's view.
 
 ## Risk Assessment
-- No production str0m desktop-streaming users; response: spike stop rule.
-- AMD/Intel MFT ignore low-latency props; signal: encode > 15 ms; response: per-vendor table or SW MFT at lower resolution.
+- AMD/Intel MFT ignore low-latency props; signal: encode > 15 ms or frames held; response: per-vendor table or SW MFT at lower resolution.
+- TCP head-of-line blocking on lossy cellular; signal: stalls > 250 ms p95; response: stage-2 WebRTC.
+- Safari WebCodecs gaps on older iOS; response: the probe and a plain message.
 - Antivirus flags the input helper; response: signed builds, clear name, docs.
+
+## History
+The 2026-10-30 version of this phase sent video P2P over WebRTC (`str0m`, host candidates on the Tailscale address, DataChannel input, ICE restart ladder, TURN deferred). The owner replaced that transport on 2026-11-06 after the [build-stack](../reports/researcher-261105-2210-remote-screen-build-stack.md) and [existing-solutions](../reports/researcher-261105-2210-remote-screen-existing-solutions.md) research; WebRTC is stage 2, gated on measurements.

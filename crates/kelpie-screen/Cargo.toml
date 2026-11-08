@@ -1,0 +1,63 @@
+[package]
+name = "kelpie-screen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kelpie's screen helper: captures a monitor or a window, encodes H.264 and drives input for a phone (Windows)"
+
+# The pure parts (coordinates, targets, states, the quality controller, tiles, the SPS rewrite, the message formats, input checks) build
+# everywhere and are what the daemon and the app use (`default-features = false`). The helper itself (`helper`) adds the tile images and,
+# on Windows, capture, encoding, input and the border window.
+[lib]
+name = "kelpie_screen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kelpie-screen"
+path = "src/main.rs"
+required-features = ["helper"]
+
+[features]
+default = ["helper"]
+helper = ["dep:png", "dep:jpeg-encoder", "dep:windows"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+png = { version = "0.17", optional = true }
+jpeg-encoder = { version = "0.6", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# The app's version (app/src-tauri/Cargo.toml). WGC and DXGI directly: `windows-capture` is not used (its D3D11 texture hand-off is
+# unconfirmed, and the capture texture must stay on the encoder's own device).
+windows = { version = "0.62", optional = true, features = [
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D10",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    # `VARIANT` and `ICodecAPI::SetValue` (encode_mf.rs) are gated on it.
+    "Win32_System_Ole",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
