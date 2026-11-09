@@ -13,6 +13,7 @@
 //! old ones. What was acknowledged is kept per (device, session) within `Views`' bounds.
 
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -77,11 +78,11 @@ fn fit(lines: Vec<String>) -> Vec<String> {
 /// scroll (`shift`, lines dropped from the top of `old`) that leaves the fewest rows to send, and
 /// the indexes of the rows that still differ. A line printed under a full screen then costs one
 /// row, not all of them.
-pub fn diff(old: &[Arc<str>], new: &[Arc<str>]) -> (usize, Vec<usize>) {
+pub fn diff(old: &[Row], new: &[Row]) -> (usize, Vec<usize>) {
     // Rows are compared by their text (a row past the old window is blank).
     let differs = |shift: usize, i: usize| match old.get(i + shift) {
-        Some(o) => !(Arc::ptr_eq(o, &new[i]) || **o == *new[i]),
-        None => !new[i].is_empty(),
+        Some(o) => *o != new[i],
+        None => !new[i].text.is_empty(),
     };
     let mut best = (0, (0..new.len()).filter(|&i| differs(0, i)).count());
     for shift in 1..=old.len().min(MAX_SHIFT) {
@@ -103,10 +104,38 @@ pub fn diff(old: &[Arc<str>], new: &[Arc<str>]) -> (usize, Vec<usize>) {
     (best.0, (0..new.len()).filter(|&i| differs(best.0, i)).collect())
 }
 
+/// Whether `diff(old, new)` finds nothing to send and no scroll: every row as it was, and the rows
+/// past the old window blank. Gives up at the first row that differs.
+fn unchanged(old: &[Row], new: &[Row]) -> bool {
+    new.iter().enumerate().all(|(i, n)| old.get(i).map_or(n.text.is_empty(), |o| o == n))
+}
+
+/// One row of a view and a hash of its text, taken once when the session is rendered: rows are told
+/// apart by their hashes, and only rows whose hashes match have their text compared.
+#[derive(Clone)]
+pub struct Row {
+    hash: u64,
+    text: Arc<str>,
+}
+
+impl Row {
+    fn new(text: Arc<str>) -> Row {
+        let mut hasher = std::hash::DefaultHasher::new();
+        text.hash(&mut hasher);
+        Row { hash: hasher.finish(), text }
+    }
+}
+
+impl PartialEq for Row {
+    fn eq(&self, other: &Row) -> bool {
+        self.hash == other.hash && (Arc::ptr_eq(&self.text, &other.text) || *self.text == *other.text)
+    }
+}
+
 /// The end of a session's screen as of one moment: shared by every phone that
 /// follows the session (a phone that wants fewer rows takes the last of them).
 pub struct Snapshot {
-    lines: Vec<Arc<str>>,
+    lines: Vec<Row>,
     cursor: Option<(usize, usize)>,
     prompt: Option<Prompt>,
     waiting_since: Option<u64>,
@@ -117,7 +146,7 @@ pub struct Snapshot {
 impl Snapshot {
     fn of(view: ScreenView) -> Snapshot {
         Snapshot {
-            lines: fit(view.lines).into_iter().map(Arc::from).collect(),
+            lines: fit(view.lines).into_iter().map(|l| Row::new(Arc::from(l))).collect(),
             cursor: view.cursor,
             prompt: view.prompt,
             waiting_since: view.waiting_since,
@@ -141,7 +170,7 @@ struct Extras {
 /// The screen a phone holds after a frame: its number and what it says.
 struct Held {
     rev: u64,
-    rows: Vec<Arc<str>>,
+    rows: Vec<Row>,
     extras: Extras,
     /// Size of the frame that brought it.
     bytes: usize,
@@ -171,7 +200,7 @@ impl Slot {
 
     /// The memory this slot holds while nobody follows it.
     fn kept(&self) -> usize {
-        self.acked.as_ref().map_or(0, |a| a.rows.iter().map(|r| r.len()).sum())
+        self.acked.as_ref().map_or(0, |a| a.rows.iter().map(|r| r.text.len()).sum())
     }
 }
 
@@ -207,7 +236,8 @@ pub struct Views {
     /// The last frame number given out, for all of this daemon's phones and sessions. A slot comes and goes (a hidden page lets go of
     /// its session), and a number is never reused, so a phone that holds a frame from before cannot mistake it for another.
     last_rev: AtomicU64,
-    slots: Mutex<HashMap<(String, String), Slot>>,
+    /// Each slot has a lock of its own: one phone's frame is worked out without holding up the others'.
+    slots: Mutex<HashMap<(String, String), Arc<Mutex<Slot>>>>,
     feeds: Mutex<HashMap<String, Arc<Feed>>>,
     load: Arc<Load>,
 }
@@ -237,7 +267,8 @@ impl Views {
     pub fn open_as(&self, device: &str, session: &str, conn: u64, have: Option<u64>, legacy: bool) -> Arc<Notify> {
         let mut slots = self.slots.lock();
         let now = Instant::now();
-        let slot = slots.entry((device.to_string(), session.to_string())).or_insert_with(|| Slot { owner: conn, acked: None, flying: VecDeque::new(), left: None, used: now, wake: Arc::new(Notify::new()), legacy });
+        let shared = slots.entry((device.to_string(), session.to_string())).or_insert_with(|| Arc::new(Mutex::new(Slot { owner: conn, acked: None, flying: VecDeque::new(), left: None, used: now, wake: Arc::new(Notify::new()), legacy }))).clone();
+        let mut slot = shared.lock();
         if have.is_none_or(|h| slot.acked.as_ref().is_none_or(|a| a.rev != h)) {
             slot.acked = None;
         }
@@ -248,6 +279,7 @@ impl Views {
         slot.left = None;
         slot.used = now;
         let wake = slot.wake.clone();
+        drop(slot);
         self.trim(&mut slots);
         wake
     }
@@ -256,7 +288,8 @@ impl Views {
     pub fn leave(&self, device: &str, conn: u64) {
         let mut slots = self.slots.lock();
         let now = Instant::now();
-        for ((d, _), slot) in slots.iter_mut() {
+        for ((d, _), slot) in slots.iter() {
+            let mut slot = slot.lock();
             if d == device && slot.owner == conn && slot.left.is_none() {
                 slot.left = Some(now);
                 slot.used = now;
@@ -270,20 +303,29 @@ impl Views {
     pub fn close(&self, device: &str, session: &str, conn: u64) {
         let mut slots = self.slots.lock();
         let key = (device.to_string(), session.to_string());
-        if slots.get(&key).is_some_and(|s| s.owner == conn) {
+        if slots.get(&key).is_some_and(|s| s.lock().owner == conn) {
             slots.remove(&key);
         }
     }
 
     /// The phone confirms it holds frame `rev` of `session`: frames follow it from now on.
     pub fn ack(&self, device: &str, session: &str, conn: u64, rev: u64) {
-        let mut slots = self.slots.lock();
-        let Some(slot) = slots.get_mut(&(device.to_string(), session.to_string())).filter(|s| s.owner == conn) else { return };
+        let Some(shared) = self.slot(device, session) else { return };
+        let mut guard = shared.lock();
+        let slot = &mut *guard;
+        if slot.owner != conn {
+            return;
+        }
         if let Some(at) = slot.flying.iter().position(|h| h.rev == rev) {
             slot.acked = slot.flying.drain(..=at).next_back();
             slot.used = Instant::now();
             slot.wake.notify_one();
         }
+    }
+
+    /// The slot of `session` for `device`, out of the map: its lock is never held with the map's.
+    fn slot(&self, device: &str, session: &str) -> Option<Arc<Mutex<Slot>>> {
+        self.slots.lock().get(&(device.to_string(), session.to_string())).cloned()
     }
 
     /// Slots held, followed or not.
@@ -299,15 +341,20 @@ impl Views {
 
     /// Enforces the resume cache's limits: too old, too many for a device, too many devices, too much
     /// memory. Only slots nobody follows are ever dropped, the least recently used first.
-    fn trim(&self, slots: &mut HashMap<(String, String), Slot>) {
-        slots.retain(|_, s| s.left.is_none_or(|at| at.elapsed() < RESUME_TTL));
+    fn trim(&self, slots: &mut HashMap<(String, String), Arc<Mutex<Slot>>>) {
+        slots.retain(|_, s| s.lock().left.is_none_or(|at| at.elapsed() < RESUME_TTL));
         // Short of memory (not merely busy): nothing is kept for phones that are away. Checked wherever
         // the cache is touched, so a phone that comes back finds it empty even if no one else is connected.
         if self.load.status().short_of_memory() {
-            slots.retain(|_, s| s.left.is_none());
+            slots.retain(|_, s| s.lock().left.is_none());
         }
-        let oldest = |slots: &HashMap<(String, String), Slot>, of: &dyn Fn(&(String, String)) -> bool| {
-            slots.iter().filter(|(k, s)| s.left.is_some() && of(k)).min_by_key(|(_, s)| s.used).map(|(k, _)| k.clone())
+        // When a slot nobody follows was last used.
+        let left_used = |s: &Mutex<Slot>| {
+            let s = s.lock();
+            s.left.map(|_| s.used)
+        };
+        let oldest = |slots: &HashMap<(String, String), Arc<Mutex<Slot>>>, of: &dyn Fn(&(String, String)) -> bool| {
+            slots.iter().filter(|(k, _)| of(k)).filter_map(|(k, s)| left_used(s).map(|used| (k, used))).min_by_key(|(_, used)| *used).map(|(k, _)| k.clone())
         };
         loop {
             let mut per_device: HashMap<&str, usize> = HashMap::new();
@@ -319,9 +366,9 @@ impl Views {
                 oldest(slots, &|k| k.0 == d)
             } else if per_device.len() > RESUME_DEVICES {
                 // The device whose newest slot is oldest, and its oldest slot.
-                let stalest = per_device.keys().filter_map(|d| slots.iter().filter(|(k, s)| k.0 == *d && s.left.is_some()).map(|(_, s)| s.used).max().map(|used| (used, d.to_string()))).min().map(|(_, d)| d);
+                let stalest = per_device.keys().filter_map(|d| slots.iter().filter(|(k, _)| k.0 == *d).filter_map(|(_, s)| left_used(s)).max().map(|used| (used, d.to_string()))).min().map(|(_, d)| d);
                 stalest.and_then(|d| oldest(slots, &|k| k.0 == d))
-            } else if slots.values().map(Slot::kept).sum::<usize>() > RESUME_BYTES {
+            } else if slots.values().map(|s| s.lock().kept()).sum::<usize>() > RESUME_BYTES {
                 oldest(slots, &|_| true)
             } else {
                 None
@@ -380,15 +427,18 @@ impl Views {
             title: snapshot.title.clone(),
             wait: snapshot.wait.clone(),
         };
-        let mut slots = self.slots.lock();
-        let slot = slots.get_mut(&(device.to_string(), session.to_string())).filter(|s| s.owner == conn).ok_or(Lost)?;
+        let shared = self.slot(device, session).ok_or(Lost)?;
+        let mut guard = shared.lock();
+        let slot = &mut *guard;
+        if slot.owner != conn {
+            return Err(Lost);
+        }
         slot.used = Instant::now();
         if slot.flying.len() >= WINDOW_FRAMES || slot.flying.iter().map(|h| h.bytes).sum::<usize>() >= WINDOW_BYTES {
             return Ok(Next::Blocked);
         }
         if let Some(latest) = slot.latest() {
-            let (shift, rows) = diff(&latest.rows, lines);
-            if rows.is_empty() && shift == 0 && latest.extras == extras {
+            if latest.extras == extras && unchanged(&latest.rows, lines) {
                 return Ok(Next::Same);
             }
         }
@@ -397,12 +447,12 @@ impl Views {
                 let (shift, rows) = diff(&a.rows, lines);
                 (Some(a.rev), shift, rows)
             }
-            None => (None, 0, (0..lines.len()).filter(|&i| !lines[i].is_empty()).collect()),
+            None => (None, 0, (0..lines.len()).filter(|&i| !lines[i].text.is_empty()).collect()),
         };
         // From the bottom: what the phone looks at first.
         let (mut budget, mut sent) = (level.frame_rows_bytes(), Vec::new());
         for &i in changed.iter().rev() {
-            let c = cost(&lines[i]);
+            let c = cost(&lines[i].text);
             if c > budget && !sent.is_empty() {
                 break;
             }
@@ -412,15 +462,19 @@ impl Views {
         sent.reverse();
         let more = sent.len() < changed.len();
         // What the phone holds once it has applied this: the confirmed screen scrolled, with these rows in.
-        let blank: Arc<str> = Arc::from("");
-        let mut rows: Vec<Arc<str>> = (0..lines.len()).map(|i| slot.acked.as_ref().and_then(|a| a.rows.get(i + shift)).unwrap_or(&blank).clone()).collect();
-        for &i in &sent {
-            rows[i] = lines[i].clone();
-        }
+        // (`sent` is in order: each row is taken once, from the snapshot or from what was confirmed.)
+        let blank = Row::new(Arc::from(""));
+        let mut fresh = sent.iter().peekable();
+        let rows: Vec<Row> = (0..lines.len())
+            .map(|i| match fresh.next_if_eq(&&i) {
+                Some(_) => lines[i].clone(),
+                None => slot.acked.as_ref().and_then(|a| a.rows.get(i + shift)).unwrap_or(&blank).clone(),
+            })
+            .collect();
         let rev = self.last_rev.fetch_add(1, Ordering::Relaxed) + 1;
         let frame = Frame {
             kind: "screen", id: session, rev, base, shift,
-            rows: sent.iter().map(|&i| (i, &*lines[i])).collect(),
+            rows: sent.iter().map(|&i| (i, &*lines[i].text)).collect(),
             height: extras.height, cursor: extras.cursor, prompt: &extras.prompt,
             waiting_since: extras.waiting_since, title: &extras.title, wait: extras.wait.as_ref(),
             server_ts: now_millis(), level: level.number(),
@@ -565,8 +619,8 @@ mod tests {
     use crate::session::SessionSpec;
     use serde_json::{json, Value};
 
-    fn rows(lines: &[&str]) -> Vec<Arc<str>> {
-        lines.iter().map(|l| Arc::from(*l)).collect()
+    fn rows(lines: &[&str]) -> Vec<Row> {
+        lines.iter().map(|l| Row::new(Arc::from(*l))).collect()
     }
 
     fn view(lines: &[&str]) -> ScreenView {
@@ -611,6 +665,59 @@ mod tests {
         assert_eq!(diff(&rows(&["x"]), &rows(&["x", "y"])), (0, vec![1]));
         // Rows past the old window that are empty need no sending.
         assert_eq!(diff(&rows(&["x"]), &rows(&["x", ""])), (0, vec![]));
+    }
+
+    /// Rows with the same hash and different text (a collision) are still different rows.
+    #[test]
+    fn rows_are_compared_by_their_text_whatever_their_hashes() {
+        let forged = |text: &str| Row { hash: 7, text: Arc::from(text) };
+        assert!(forged("a") != forged("b"));
+        assert!(forged("a") == forged("a"));
+        assert_eq!(diff(&[forged("a"), forged("b")], &[forged("a"), forged("c")]), (0, vec![1]));
+        assert!(!unchanged(&[forged("a")], &[forged("b")]));
+    }
+
+    /// Whether a frame is needed is decided without the whole diff: it must say "nothing changed"
+    /// exactly when the diff finds no row to send and no scroll, for screens of every shape.
+    #[test]
+    fn nothing_changed_exactly_when_the_diff_finds_nothing() {
+        let words = ["", "a", "b", "c"];
+        // Screens of up to five rows of these words, from a fixed-seed generator.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut both = [0, 0];
+        for _ in 0..20_000 {
+            let (n, m) = (next() % 6, next() % 6);
+            let a: Vec<&str> = (0..n).map(|_| words[(next() % 4) as usize]).collect();
+            let b: Vec<&str> = (0..m).map(|_| words[(next() % 4) as usize]).collect();
+            let (old, new) = (rows(&a), rows(&b));
+            let nothing = diff(&old, &new) == (0, vec![]);
+            assert_eq!(unchanged(&old, &new), nothing, "{a:?} -> {b:?}");
+            both[usize::from(nothing)] += 1;
+        }
+        assert!(both[0] > 1000 && both[1] > 1000, "{both:?}");
+    }
+
+    /// Each phone's slot has its own lock: working out one phone's frame never waits for another's.
+    #[test]
+    fn a_phones_frame_does_not_wait_for_another_phones_slot() {
+        let views = Arc::new(Views::default());
+        views.open("one", "s", 1, None);
+        views.open("two", "s", 2, None);
+        let held = views.slot("one", "s").unwrap();
+        let _busy = held.lock();
+        let (done, finished) = std::sync::mpsc::channel();
+        let other = views.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(json_of(other.frame("two", "s", 2, &snapshot(&["x"]), MAX_HEIGHT, Level::L0)));
+        });
+        let frame = finished.recv_timeout(Duration::from_secs(5)).expect("the frame waited for another phone's slot");
+        assert_eq!(frame.unwrap()["rows"], json!([[0, "x"]]));
     }
 
     #[test]
@@ -708,7 +815,7 @@ mod tests {
         // An acknowledgement of a frame never sent, or an old one, changes nothing.
         views.ack("p", "s", 1, 99);
         views.ack("p", "s", 1, 1);
-        assert_eq!(views.slots.lock()[&("p".to_string(), "s".to_string())].acked.as_ref().unwrap().rev, 2);
+        assert_eq!(views.slot("p", "s").unwrap().lock().acked.as_ref().unwrap().rev, 2);
     }
 
     #[test]
@@ -804,7 +911,7 @@ mod tests {
         frame(&views, "phone", "s1", 1, &["a"]).unwrap();
         views.ack("phone", "s1", 1, 1);
         views.leave("phone", 1);
-        views.slots.lock().get_mut(&("phone".to_string(), "s1".to_string())).unwrap().left = Some(Instant::now() - RESUME_TTL - Duration::from_secs(1));
+        views.slot("phone", "s1").unwrap().lock().left = Some(Instant::now() - RESUME_TTL - Duration::from_secs(1));
         views.open("phone", "s2", 1, None);
         assert!(!views.slots.lock().contains_key(&("phone".to_string(), "s1".to_string())), "expired slots are dropped");
     }
