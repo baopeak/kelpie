@@ -319,6 +319,17 @@ try:
     ok = wait(lambda: info("my-tools"), 10)
     run.check("create makes a valid starter plugin", ok and not ok["error"] and ok["manifest"]["name"] == "My Tools", str(ok))
     run.check("starter plugin is listed in settings", wait(lambda: d.js(f"return !!document.querySelector('{card('my-tools')}')"), 10))
+    # The app shows the new manifest in the file manager; an e2e run only records it (no Explorer
+    # window is left open on a folder the run deletes afterwards).
+    manifest = os.path.normcase(os.path.join(plugins_dir, "my-tools", "kelpie-plugin.json"))
+    revealed = []
+
+    def manifest_revealed():
+        r = js_await("window.__TAURI_INTERNALS__.invoke('e2e_revealed')")
+        revealed.extend(r if isinstance(r, list) else [str(r)])
+        return any(os.path.normcase(os.path.normpath(p)) == manifest for p in revealed)
+
+    run.check("create shows the new manifest in the file manager", wait(manifest_revealed, 10), str(revealed))
     r = js_await(f"{P}.pluginCreate('my-tools', 'Again')")
     run.check("creating an existing id is refused", isinstance(r, dict) and "already exists" in r.get("err", ""))
     r = js_await(f"{P}.pluginCreate('Bad Id', 'x')")

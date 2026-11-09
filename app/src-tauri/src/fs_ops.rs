@@ -350,6 +350,9 @@ pub async fn fs_reveal(root: String, path: String) -> CmdResult<()> {
 
 fn fs_reveal_blocking(root: String, path: String) -> CmdResult<()> {
     let full = guard(&root, &path)?;
+    if reveal_in_e2e(&full) {
+        return Ok(());
+    }
     #[cfg(windows)]
     let result = std::process::Command::new("explorer").arg(format!("/select,{}", full.display())).spawn();
     #[cfg(target_os = "macos")]
@@ -357,6 +360,29 @@ fn fs_reveal_blocking(root: String, path: String) -> CmdResult<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let result = crate::daemon_runtime::clean_env(&mut std::process::Command::new("xdg-open")).arg(full.parent().unwrap_or(&full)).spawn();
     result.map(|_| ()).map_err(err)
+}
+
+/// Paths an end-to-end run asked to show in the file manager, oldest first (see `reveal_in_e2e`).
+static E2E_REVEALED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// In an end-to-end run (`KELPIE_E2E`) no file manager opens: the path is kept for the test to read
+/// through `e2e_revealed` instead, so a scenario's temporary folders leave no Explorer window on the
+/// desktop once the run deletes them. True when the path was kept and nothing must be opened.
+pub(crate) fn reveal_in_e2e(path: &Path) -> bool {
+    if std::env::var_os("KELPIE_E2E").is_none() {
+        return false;
+    }
+    E2E_REVEALED.lock().unwrap().push(path.to_string_lossy().into_owned());
+    true
+}
+
+/// End-to-end runs only: the paths asked to be shown in the file manager since the last call.
+#[tauri::command]
+pub fn e2e_revealed() -> CmdResult<Vec<String>> {
+    if std::env::var_os("KELPIE_E2E").is_none() {
+        return Err("end-to-end runs only".into());
+    }
+    Ok(std::mem::take(&mut *E2E_REVEALED.lock().unwrap()))
 }
 
 const TEMP_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "txt", "md", "diff", "log"];

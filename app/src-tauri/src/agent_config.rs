@@ -1212,6 +1212,9 @@ pub async fn agent_setup_reveal(project: Option<String>, path: String) -> CmdRes
         }
         let p = PathBuf::from(&path);
         let shown = if p.exists() { p } else { p.parent().map(Path::to_path_buf).unwrap_or(p) };
+        if crate::fs_ops::reveal_in_e2e(&shown) {
+            return Ok(());
+        }
         #[cfg(windows)]
         let result = {
             use std::os::windows::process::CommandExt;
