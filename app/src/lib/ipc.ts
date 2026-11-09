@@ -69,6 +69,12 @@ export const applyBookmarks = (change: { add?: unknown; remove?: string }) => in
 /** `text` with recognisable credentials masked (`kelpie_proto::redact`): for anything Kelpie
  *  sends out of a session. */
 export const redact = (text: string) => invoke<string[]>("redact_batch", { texts: [text] }).then((r) => r[0] ?? "");
+/** Closing Kelpie (src-tauri/src/quit.rs): the window handles `quit-requested` from now on. */
+export const quitGuard = () => invoke<void>("quit_guard");
+/** A `quit-requested` arrived (the window is not hung). */
+export const quitSeen = () => invoke<void>("quit_seen");
+/** Exits the app; `stopDaemon` stops the session daemon gracefully first. */
+export const quitApp = (stopDaemon: boolean) => invoke<void>("quit_app", { stopDaemon });
 export const platformInfo = () => invoke<{ os: string; home: string; data_dir: string; api: number; version: string; security: number; e2e: boolean }>("platform_info");
 
 export const canonicalPath = (path: string) => invoke<string>("fs_canonical", { path });

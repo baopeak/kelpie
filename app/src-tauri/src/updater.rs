@@ -3,7 +3,9 @@
 //! The endpoint and public key are compile-time configuration (`tauri.conf.json`). Installing
 //! never touches the session daemon: it runs from its own copy (`daemon_runtime`), so every
 //! session keeps running while the installer replaces the app, and the restarted app reconnects
-//! to it. Dev builds and end-to-end runs never look for updates (an install from them would
+//! to it. Updating never goes through closing Kelpie (`quit.rs`), which may stop the daemon: on
+//! Windows the installer ends this process directly, elsewhere `app.restart()` exits with a code,
+//! which is never held. Dev builds and end-to-end runs never look for updates (an install from them would
 //! replace the real Kelpie); test overrides exist only with the `e2e-updater` feature.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::json;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::fs_ops::{err, CmdResult};
@@ -114,5 +116,8 @@ async fn install(app: &AppHandle, pending: &PendingUpdate) -> CmdResult<()> {
     }
     update.install(bytes).map_err(err)?;
     pending.update.lock().take();
+    // The restart never goes through closing Kelpie (quit.rs): the session daemon keeps running.
+    // `restart` asks to exit with a code, which is never held; this says so for any close on the way out.
+    app.state::<crate::quit::QuitGate>().confirm();
     app.restart();
 }

@@ -23,7 +23,7 @@ Kelpie (Tauri app)                        kelpied (session daemon, one per user)
 | Process | Lifetime | Owns |
 |---|---|---|
 | `Kelpie` | while the window is open | layout, settings (`app-state.json`), saved chat replies (`chat-bookmarks.json`), views |
-| `kelpied` | until stopped explicitly (or logoff) | PTYs, agent processes, terminal state, `sessions.json`, snapshots |
+| `kelpied` | until Kelpie closes (Settings → Session Daemon → *When Kelpie closes*: stop, the default, or keep running), it is stopped explicitly, or logoff; an update never stops it | PTYs, agent processes, terminal state, `sessions.json`, snapshots |
 | `kelpie-stt` | while dictation is used (exits after 10 idle minutes) | the loaded speech model, the microphone stream |
 | `kelpie-screen` | while a phone sees the screen (exits 30 s after the last viewer) | capture, the H.264 encoder, the phone's input into `SendInput`, the sharing border |
 | agent CLIs | per session | — |
@@ -39,7 +39,14 @@ another running Kelpie's changes, a restored copy and entries this build does no
 A file that cannot be read is an error: it stays byte-identical, the feature is read-only until the next
 start, and the user is told once.
 
-Closing or crashing the app never stops a session. If `kelpied` itself stops, sessions that
+Closing Kelpie stops `kelpied` too unless *When Kelpie closes* keeps it running. The close is held natively
+(`quit.rs`: the main window's close request, or an exit without a code such as Cmd+Q, while the main window
+exists) and handed to the window as `quit-requested`; when sessions, file transfers or run tasks still run it asks
+first ("Don't ask again" is a setting), then `quit_app` stops the daemon with `daemon.shutdown {kill_sessions:
+false}`, keeps the app from starting another, and exits. Nothing is waited for. An exit with a code
+(`app.restart()` after an update), the Windows installer (it ends the process directly, or through Restart
+Manager's `WM_ENDSESSION`), a crash, a UI that never listened or stopped answering (a second close after 5 s goes
+through) and other windows never take this path, so they leave the daemon running. If `kelpied` stops, sessions that
 were running are restored *interrupted* with their last screen; the app resumes them when they
 are shown, all at once, or on request (Settings → Agents). Agents resume their conversation
 (`--resume <id>` / `resume <id>`); shells restart below their old output. A new Claude Code

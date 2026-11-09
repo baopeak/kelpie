@@ -4,7 +4,7 @@
     "sidebarCollapsed", "notifications", "notifyFinished", "shortcutHints", "projectFilter", "projectSort", "usageMeters", "memoryMeter", "costCap",
     "costCapEsc", "theme", "density", "uiScale", "tips", "tipsSeen", "agentPermissions", "hiddenAgents", "hibernate",
     "hibernateMinutes", "keepAwake", "prioritizeVisible", "checkpoints", "agentsScripting", "notificationSound", "updateChecks",
-    "terminalTheme", "wordWrap", "aiAgent", "autoWorktree", "floatingTerminal", "mascot", "mascotMotion", "resumeSessions",
+    "terminalTheme", "wordWrap", "aiAgent", "autoWorktree", "floatingTerminal", "mascot", "mascotMotion", "resumeSessions", "daemonOnClose", "askBeforeStop",
     "integrations", "localhostInBrowser", "agentWebTabs", "voice", "language", "screenStopHotkey", "screenCrispText"
   ],
   "excluded": [

@@ -18,6 +18,7 @@ mod git_sync;
 mod github;
 mod integrations;
 mod plugins;
+mod quit;
 mod voice;
 mod remote;
 mod screen;
@@ -521,6 +522,8 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updater::PendingUpdate::default())
+        .manage(quit::QuitGate::default())
+        .on_window_event(quit::on_window_event)
         .setup(|app| {
             fs_ops::sweep_temp();
             let index = Arc::new(search::FileIndex::default());
@@ -558,6 +561,9 @@ pub fn run() {
             config_transfer::config_hosts_write,
             updater::update_check,
             updater::update_install,
+            quit::quit_guard,
+            quit::quit_seen,
+            quit::quit_app,
             fs_ops::fs_list_dir,
             fs_ops::fs_is_dir,
             fs_ops::fs_canonical,
@@ -718,7 +724,8 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while running Kelpie")
-        .run(|_app, event| {
+        .run(|app, event| {
+            quit::on_run_event(app, &event);
             // Copies of host files opened in an external editor do not outlive the app.
             if let tauri::RunEvent::Exit = event {
                 sftp_edit::remove_all();
