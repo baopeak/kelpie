@@ -443,7 +443,8 @@ fn with_a_phone_and_no_channel_the_notifier_counts_as_on_and_starts_only_with_a_
 
 #[test]
 fn removal_stops_what_a_device_still_had_to_send_before_it_returns() {
-    let (r, service) = (rig(), PushService::start(&[Answer::Status(503)]));
+    // The service asks for 2 s, so the retry is still pending when the device is removed, even on a slow machine.
+    let (r, service) = (rig(), PushService::start(&[Answer::RetryAfter(503, "2")]));
     r.phone("d1", &service, "en");
     r.notifier.send(&waiting("s1"), &Context::default());
     service.wait_for(1, Duration::from_secs(5));
