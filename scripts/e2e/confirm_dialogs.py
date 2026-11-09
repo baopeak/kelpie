@@ -131,7 +131,14 @@ def native_case():
     loc = pane_of(sid)
     sel = f".pane[data-pane=\"{loc['paneId']}\"] button[title^=\"Close pane\"]"
 
-    d.click(sel)
+    def close_pane():
+        # A lone pane's tools take clicks only while the pointer is over the pane, as a person's mouse would be. After the
+        # native dialog had focus the pointer may be elsewhere, so move it onto the button first.
+        r = d.js("const b = document.querySelector(arguments[0]).getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]", sel)
+        d.pointer([("move", r[0] - 40, r[1] + 40), ("move", r[0], r[1]), ("pause", 200)])
+        d.click(sel)
+
+    close_pane()
     dlg = wait(lambda: (lambda r: r if r.get("open") else None)(native(pid)), 10) or {}
     run.check("clicking Close pane opens the native dialog", dlg.get("open"), json.dumps(dlg))
     run.check("the dialog asks to stop codex", "Stop codex and close this pane?" in dlg.get("text", ""), dlg.get("text", ""))
@@ -148,7 +155,7 @@ def native_case():
     run.check("Cancel keeps the pane", pane_of(sid) is not None)
     run.check("Cancel keeps codex running", alive(sid))
 
-    d.click(sel)
+    close_pane()
     wait(lambda: native(pid).get("open"), 10)
     r = native(pid, "OK")
     run.check("OK can be pressed", r.get("clicked"), json.dumps(r))

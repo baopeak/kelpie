@@ -368,7 +368,8 @@ fn a_binding_needs_its_code_from_the_chat_set_and_binds_the_account_that_sent_it
     assert_eq!(saved.telegram, t, "kept for the next start");
     until(|| r.fake.said_to(CHAT).iter().any(|t| t.contains("can now approve")), "the chat is told");
     assert!(r.sessions.noted("telegram_bound").iter().any(|s| s.contains("Bao (42)") && s.contains("-100777")), "{:?}", r.sessions.noted("telegram_bound"));
-    assert!(r.sessions.changed.lock().contains(&"bound".to_string()));
+    // The app is told after the chat, so the reply alone does not mean it has been told yet.
+    until(|| r.sessions.changed.lock().contains(&"bound".to_string()), "the app is told");
     // The code was for once, and a late one is told so.
     r.approvals().forget_replies();
     r.fake.push("message", json!({"message_id": 16, "from": {"id": 9}, "chat": {"id": CHAT}, "text": format!("/bind {code}")}));

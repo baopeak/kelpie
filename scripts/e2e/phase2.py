@@ -4,7 +4,10 @@ collapse, context menu, filter) and the unified search box (recents, scopes, pre
     python -X utf8 scripts/e2e/phase2.py <screenshot-dir> <scratch-dir>
 """
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -13,6 +16,11 @@ from smoke_support import REPO, Run, daemon  # noqa: E402
 shots, scratch = sys.argv[1], sys.argv[2]
 run = Run(shots)
 d = run.d
+# A second project with no git repository; removed at the end.
+second = tempfile.mkdtemp(prefix="kelpie-phase2-")
+# The subtitle shows the checked-out branch, or "detached" when HEAD is not on one.
+head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip()
+branch = "detached" if head == "HEAD" else head
 
 ROWS_JS = "return [...document.querySelectorAll('.session-row')].map(r => r.innerText.replace(/\\n/g, ' '))"
 
@@ -22,7 +30,7 @@ try:
     for s in daemon(d, "session.list"):
         daemon(d, "session.close", {"handle": s["handle"]})
     d.js("const s = window.__kelpie.store; for (const p of [...s.state.projects]) s.removeProject(p.id);")
-    for p in [REPO, os.path.join(os.path.dirname(REPO), "orca-ref", "orca"), scratch]:
+    for p in [REPO, second, scratch]:
         d.js("window.__kelpie.store.addProject(arguments[0]);", p)
     ids = d.js("return window.__kelpie.store.state.projects.map(p => p.id)")
     created = []
@@ -37,7 +45,7 @@ try:
     rows = d.js(ROWS_JS)
     run.check("sidebar lists sessions of every project", len(rows) == 3, f"{len(rows)} rows")
     sub = d.wait("return [...document.querySelectorAll('.project-sub')].map(e => e.innerText).join('|') || null", 15)
-    run.check("project subtitle shows the git branch", "master" in sub, sub)
+    run.check("project subtitle shows the git branch", branch in sub, f"{sub} (expected {branch})")
 
     daemon(d, "session.update", {"handle": created[0]["handle"], "model": "claude-opus-5-5"})
     model = d.wait("return document.querySelector('.session-row .model')?.innerText ?? null", 10)
@@ -57,13 +65,13 @@ try:
     # after their startup output).
     for c in created:
         daemon(d, "session.set_unread", {"handle": c["handle"], "unread": False})
-    d.wait("return !document.querySelector('.session-row .dot.unread')", 5)
+    d.wait("return !document.querySelector('.session-row .dot.done')", 5)
     d.js("const r = document.querySelector('.session-row'); r.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: 120, clientY: 160}));")
     labels = d.js("return [...document.querySelectorAll('.ctx-item')].map(e => e.innerText)")
     run.check("session context menu has actions", any("unread" in l.lower() or "read" in l.lower() for l in labels), "|".join(labels))
     run.shot("p2-02-session-menu")
     d.js("[...document.querySelectorAll('.ctx-item')].find(e => /unread/i.test(e.innerText))?.click()")
-    ok = d.wait("return !!document.querySelector('.session-row .dot.unread')", 5)
+    ok = d.wait("return !!document.querySelector('.session-row .dot.done')", 5)
     run.check("mark as unread reflected in the sidebar", ok)
 
     # Filter: only projects needing attention (the unread one) + the active project.
@@ -74,7 +82,7 @@ try:
     time.sleep(0.4)
     names = d.js("return [...document.querySelectorAll('.project-name')].map(e => e.innerText)")
     dbg = d.js("const s = window.__kelpie.store; return JSON.stringify({active: s.activeProject()?.name, rows: s.state.projects.map(p => [p.name, Object.values(s.sessions).filter(x => x.project_id === p.id).map(x => [x.alive, x.status, x.unread])])})")
-    run.check("attention filter hides quiet projects", len(names) == 2 and "orca" not in names, ",".join(names) + " " + dbg)
+    run.check("attention filter hides quiet projects", len(names) == 2 and os.path.basename(second) not in names, ",".join(names) + " " + dbg)
     d.js("window.__kelpie.store.setSettings({ projectFilter: 'all' })")
 
     # Unified search.
@@ -113,3 +121,4 @@ except Exception:
     run.check("scenario ran to completion", False)
 finally:
     run.finish()
+    shutil.rmtree(second, ignore_errors=True)

@@ -68,7 +68,10 @@ registry_hits = []
 
 class Registry(BaseHTTPRequestHandler):
     def do_GET(self):
-        registry_hits.append(self.path)
+        # A Kelpie app running this script inside one of its sessions probes "/" on the ports that session listens on, looking
+        # for a web page to preview. Those probes are not registry requests.
+        if self.path != "/":
+            registry_hits.append(self.path)
         body = json.dumps(REGISTRY).encode()
         self.send_response(200 if self.path == "/registry.json" else 404)
         self.send_header("Content-Type", "application/json")
