@@ -42,14 +42,24 @@ function perfProbes(peekView: (sessionId: string) => { term: any } | undefined) 
   // Wall-clock time of the first frame with the sidebar drawn and the state loaded.
   let interactiveAt: number | null = null;
   const watch = () => {
-    if (store.loaded() && document.querySelector(".sidebar")) interactiveAt = performance.timeOrigin + performance.now();
-    else requestAnimationFrame(watch);
+    if (store.loaded() && document.querySelector(".sidebar")) {
+      interactiveAt = performance.timeOrigin + performance.now();
+      performance.mark("kelpie:interactive");
+    } else requestAnimationFrame(watch);
   };
   watch();
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const frames = (): Promise<unknown> => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(undefined))));
   return {
     interactiveAt: () => interactiveAt,
+    /** Start-up steps in ms after `timeOrigin` (the page's navigation start, epoch ms): the HTML
+     *  received, the entry module run, the fonts loaded, the saved state applied, the first
+     *  interactive frame. A step not reached yet is null. */
+    startup: () => {
+      const at = (name: string) => performance.getEntriesByName(name, "mark")[0]?.startTime ?? null;
+      const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+      return { timeOrigin: performance.timeOrigin, html: nav?.responseEnd ?? null, script: at("kelpie:script"), fonts: at("kelpie:fonts"), state: at("kelpie:state"), interactive: at("kelpie:interactive") };
+    },
     longTasks: () => longTasks.slice(),
     clearLongTasks: () => { longTasks.length = 0; },
     /** Switches through `projectIds` in turn; resolves with each switch's time to the second frame (ms). */
@@ -98,10 +108,13 @@ function perfProbes(peekView: (sessionId: string) => { term: any } | undefined) 
     },
   };
 }
+// Start-up steps, read by `perf.startup()` (a mark costs microseconds, so they are always taken).
+performance.mark("kelpie:script");
 // Terminals measure glyphs once at open: wait for the bundled font before the first render.
 void Promise.all([document.fonts.load('13px "JetBrains Mono"'), document.fonts.load('bold 13px "JetBrains Mono"')])
   .catch(() => {})
   .finally(() => {
+    performance.mark("kelpie:fonts");
     void store.init();
     void bookmarks.load();
     render(() => <App />, document.getElementById("root")!);

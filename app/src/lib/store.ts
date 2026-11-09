@@ -1657,6 +1657,7 @@ function createAppStore() {
       setState(reconcile({ ...emptyState(), ...saved, version: STATE_VERSION, settings: { ...defaultSettings, ...saved.settings } }));
     }
     setLoaded(true);
+    performance.mark("kelpie:state");
     if (migrate) persist();
     setInterval(hibernateIdle, 60_000);
     // Sidebar subtitles; git calls are capped at 3 in flight by the backend.

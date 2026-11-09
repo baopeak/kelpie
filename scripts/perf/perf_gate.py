@@ -9,6 +9,9 @@ Metric groups (--metrics, default all):
   bench   `kelpied bench --sessions 20 --mb 2` wall time, isolated daemon.     (no GUI)
   gui     the release app driven through WebDriver, timed inside the page:
           cold start, project switch, keystroke echo, long tasks, idle CPU and RSS with 20 shells.
+          Reported beside them, never budgeted: the start-up steps, the RSS of each process kind
+          (app, daemon, WebView2 browser / GPU / renderer / other) and, on Windows, the RSS while
+          the window is minimised and the first frame after it is restored.
 
 The GUI group needs the release app (scripts/build-release.sh --no-bundle), `tauri-driver`, a
 `msedgedriver` matching the WebView2 runtime, and `pip install psutil`; see scripts/perf/README.md.
@@ -240,6 +243,13 @@ def port_free(port):
         return s.connect_ex(("127.0.0.1", port)) != 0
 
 
+def free_port():
+    """A port nothing listens on right now, chosen by the system."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def sum_cpu(procs):
     out = {}
     for p in procs:
@@ -261,6 +271,89 @@ def sum_rss(procs):
     return total / 2**20
 
 
+def sum_private(procs):
+    """Private bytes in MB (Windows; None elsewhere): memory no other process shares."""
+    total = 0
+    for p in procs:
+        try:
+            private = getattr(p.memory_info(), "private", None)
+        except Exception:  # noqa: BLE001
+            continue
+        if private is None:
+            return None
+        total += private
+    return total / 2**20
+
+
+_webview_kinds = {}
+
+
+def webview_kind(p):
+    """A WebView2 process's role from its command line: browser (no --type), gpu, renderer or other."""
+    key = (p.pid, p.create_time())
+    if key not in _webview_kinds:
+        try:
+            m = re.search(r"--type=([\w-]+)", " ".join(p.cmdline()))
+        except Exception:  # noqa: BLE001 - exited while sampling
+            return "other"
+        _webview_kinds[key] = "browser" if not m else {"gpu-process": "gpu", "renderer": "renderer"}.get(m.group(1), "other")
+    return _webview_kinds[key]
+
+
+def is_webview(p):
+    try:
+        return p.name().lower().startswith("msedgewebview2")
+    except Exception:  # noqa: BLE001 - exited while sampling
+        return False
+
+
+def memory_sample(app_proc, daemon_proc, webview):
+    """Working set in MB of each part of the budget, their total and the total private bytes.
+    `webview` is every other child of the app: WebView2's processes by role, anything else (git,
+    the speech helper, a console host) with the app."""
+    parts = {"app": [app_proc], "daemon": [daemon_proc], "webview_browser": [], "webview_gpu": [], "webview_renderer": [], "webview_other": []}
+    for p in webview:
+        parts["webview_" + webview_kind(p) if is_webview(p) else "app"].append(p)
+    out = {f"rss_{name}_mb": sum_rss(procs) for name, procs in parts.items()}
+    out["rss_mb"] = sum(out.values())
+    out["private_mb"] = sum_private([app_proc, daemon_proc] + webview)
+    return out
+
+
+def median_sample(samples, suffix=""):
+    """Per key, the median over memory samples (keys renamed `<name><suffix>_mb`); None values dropped."""
+    out = {}
+    for key in samples[0] if samples else []:
+        vals = [s[key] for s in samples if s[key] is not None]
+        if vals:
+            out[key[:-3] + suffix + "_mb"] = r2(median(vals))
+    return out
+
+
+def main_window(pid):
+    """The visible top-level window of process `pid` that no other window owns (the app's main window)."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    user32.GetWindow.restype = wintypes.HWND
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd) and not user32.GetWindow(hwnd, 4):  # GW_OWNER
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return found[0] if found else None
+
+
 def gui_run(args, index):
     """One launch of the release app: returns this run's metrics."""
     import psutil
@@ -273,8 +366,16 @@ def gui_run(args, index):
     for what, path in (("release app (scripts/build-release.sh --no-bundle)", app), ("kelpied", kelpied), ("msedgedriver (--msedgedriver)", native), ("tauri-driver (cargo install tauri-driver)", tauri_driver)):
         if not path or not os.path.exists(path):
             raise SystemExit(f"missing {what}: {path}")
+    # The previous run's tauri-driver may still be letting its port go.
+    end = time.time() + 15
+    while time.time() < end and not port_free(args.driver_port):
+        time.sleep(0.25)
     if not port_free(args.driver_port):
         raise SystemExit(f"port {args.driver_port} is in use: stop the other tauri-driver (netstat -ano) or pass --driver-port")
+    # tauri-driver's own msedgedriver gets a fresh free port each run: the default 4445 is shared with
+    # e2e runs of other worktrees, and the previous run's port can stay unbindable for a while after
+    # its msedgedriver is stopped.
+    native_port = free_port()
 
     data = tempfile.mkdtemp(prefix="kelpie-perf-data-")
     projects_dir = tempfile.mkdtemp(prefix="kelpie-perf-proj-")
@@ -283,7 +384,7 @@ def gui_run(args, index):
         "KELPIE_ENDPOINT": f"kelpie-perf-{os.getpid()}-{index}",
     }
     os.environ["KELPIE_E2E_DRIVER"] = f"http://127.0.0.1:{args.driver_port}"
-    driver_proc = subprocess.Popen([tauri_driver, "--port", str(args.driver_port), "--native-driver", native], env=env)
+    driver_proc = subprocess.Popen([tauri_driver, "--port", str(args.driver_port), "--native-port", str(native_port), "--native-driver", native], env=env)
     run = None
     daemon_pid = None
     try:
@@ -298,7 +399,17 @@ def gui_run(args, index):
         d._req("POST", d.s("/timeouts"), {"script": 900_000})
         d.wait("return window.__kelpie.perf && window.__kelpie.perf.interactiveAt() !== null", 60, 0.1)
         cold = d.js("return window.__kelpie.perf.interactiveAt()") / 1000 - app_proc.create_time()
-        log(f"run {index + 1}: cold start {cold * 1000:.0f} ms")
+        # Where the start-up time goes, in ms from the process's creation: WebView2 starts the page,
+        # the HTML arrives, the entry module runs, the fonts are in, the saved state is applied.
+        startup = {}
+        steps = d.js("return window.__kelpie.perf.startup ? window.__kelpie.perf.startup() : null")
+        if steps:
+            page_start = steps["timeOrigin"] - app_proc.create_time() * 1000
+            startup["start_webview_ms"] = r2(page_start)
+            for step in ("html", "script", "fonts", "state"):
+                if steps[step] is not None:
+                    startup[f"start_{step}_ms"] = r2(page_start + steps[step])
+        log(f"run {index + 1}: cold start {cold * 1000:.0f} ms ({', '.join(f'{k[6:-3]} {v:.0f}' for k, v in startup.items())})")
         daemon_pid = daemon(d, "daemon.info")["pid"]
 
         # Three projects, the sessions spread over them.
@@ -334,17 +445,19 @@ def gui_run(args, index):
             pty = daemon_proc.children(recursive=True)
             owned = {p.pid for p in pty} | {daemon_proc.pid}
             webview = [p for p in app_proc.children(recursive=True) if p.pid not in owned]
-            return [app_proc, daemon_proc] + webview, pty
+            return [app_proc, daemon_proc] + webview, pty, webview
 
-        budget, pty = groups()
+        budget, pty, _ = groups()
         cpu0, pty_cpu0, t0 = sum_cpu(budget), sum_cpu(pty), time.time()
-        rss, pty_rss = [], []
+        memory, pty_rss = [], []
         log(f"run {index + 1}: idle for {args.idle} s")
         while time.time() - t0 < args.idle:
             time.sleep(max(0.0, min(2.0, args.idle - (time.time() - t0))))
-            b, p = groups()
-            rss.append(sum_rss(b))
+            _, p, webview = groups()
+            memory.append(memory_sample(app_proc, daemon_proc, webview))
             pty_rss.append(sum_rss(p))
+        idle_memory = median_sample(memory)
+        log(f"run {index + 1}: idle memory (MB) " + ", ".join(f"{k[:-3]} {v:.0f}" for k, v in idle_memory.items()))
         wall = time.time() - t0
         cpu1, pty_cpu1 = sum_cpu(budget), sum_cpu(pty)
         idle_cpu = sum(cpu1[k] - cpu0[k] for k in cpu0 if k in cpu1) / wall * 100
@@ -372,14 +485,42 @@ def gui_run(args, index):
             raise SystemExit(f"too few samples: {len(switches)} switches, {len(echo_ok)} echoes ({missed} missed)")
         long_over = [t for t in long_tasks if t["ms"] > 50]
         log(f"run {index + 1}: switch p50 {median(switches):.1f} p95 {pct(switches, .95):.1f} ms; echo p50 {median(echo_ok):.1f} p95 {pct(echo_ok, .95):.1f} ms; long tasks {len(long_over)}")
+
+        # Minimised: the memory the window keeps while nobody looks at it, then what showing it again costs.
+        minimised = {}
+        hwnd = main_window(app_proc.pid) if args.minimized > 0 and os.name == "nt" else None
+        if hwnd:
+            import ctypes
+            user32 = ctypes.windll.user32
+            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+            log(f"run {index + 1}: minimised for {args.minimized} s")
+            samples, t_min = [], time.time()
+            while time.time() - t_min < args.minimized:
+                time.sleep(2)
+                samples.append(memory_sample(app_proc, daemon_proc, groups()[2]))
+            # Trimming takes a moment: the second half of the samples count.
+            minimised = median_sample(samples[len(samples) // 2:], "_minimized")
+            t_restore = time.time() * 1000
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            painted = d.js_async("const done = arguments[arguments.length-1]; setTimeout(() => done(null), 10000); requestAnimationFrame(() => requestAnimationFrame(() => done(performance.timeOrigin + performance.now())));")
+            if painted is None:
+                raise SystemExit("the restored window did not paint within 10 s")
+            minimised["restore_frame_ms"] = r2(painted - t_restore)
+            after = d.js_async(f"const done = arguments[arguments.length-1]; {page}.switchProjects(arguments[0], 30).then(done);", ids)
+            minimised["switch_after_restore_median_ms"] = r2(median(after))
+            minimised["switch_after_restore_max_ms"] = r2(max(after))
+            log(f"run {index + 1}: minimised rss {minimised.get('rss_minimized_mb')} MB (private {minimised.get('private_minimized_mb')}); restore frame {minimised['restore_frame_ms']:.0f} ms; switches after p50 {minimised['switch_after_restore_median_ms']:.1f} max {minimised['switch_after_restore_max_ms']:.1f} ms")
+        elif args.minimized > 0 and os.name == "nt":
+            log(f"run {index + 1}: main window not found, minimised phase skipped")
         return {
             "cold_start_ms": r2(cold * 1000),
             "switch_median_ms": r2(median(switches)), "switch_p95_ms": r2(pct(switches, .95)), "switch_samples": len(switches),
             "echo_median_ms": r2(median(echo_ok)), "echo_p95_ms": r2(pct(echo_ok, .95)), "echo_samples": len(echo_ok), "echo_missed": missed,
             "long_tasks": len(long_over), "long_task_ms": [t["ms"] for t in long_over],
-            "idle_cpu_pct": r2(idle_cpu), "rss_mb": r2(median(rss)),
+            "idle_cpu_pct": r2(idle_cpu), **idle_memory,
             "pty_idle_cpu_pct": r2(pty_cpu), "pty_rss_mb": r2(median(pty_rss)),
             "sessions": len(handles), "idle_seconds": args.idle,
+            **startup, **minimised,
         }
     finally:
         if run is not None:
@@ -457,12 +598,13 @@ def main():
     ap.add_argument("--app", help="release app executable (default: <target>/release/kelpie)")
     ap.add_argument("--kelpied", help="kelpied executable (default: <target>/release/kelpied)")
     ap.add_argument("--msedgedriver", help="path of msedgedriver (default: PATH)")
-    ap.add_argument("--driver-port", type=int, default=4444)
+    ap.add_argument("--driver-port", type=int, default=4444, help="tauri-driver's port (its msedgedriver gets a free port of its own)")
     ap.add_argument("--sessions", type=int, default=20, help="shells open during the idle and scenario phases")
     ap.add_argument("--switches", type=int, default=210, help="project switches timed per run (at least 200 samples)")
     ap.add_argument("--echo-chars", type=int, default=210)
     ap.add_argument("--idle", type=float, default=60, help="seconds of idle CPU / RSS sampling")
     ap.add_argument("--settle", type=float, default=20, help="seconds to let the new shells finish starting before the idle phase")
+    ap.add_argument("--minimized", type=float, default=30, help="seconds the window stays minimised for the minimised RSS (Windows; 0 skips)")
     ap.add_argument("--inject-busy-loop", type=int, default=0, metavar="MS", help="self-test: block the page for MS ms during the switches; long_tasks must then fail the gate")
     args = ap.parse_args()
 
