@@ -314,7 +314,8 @@ try:
 
     # ---------- create ----------
     d.js("const r = document.querySelector('[data-setting=\"plugin-create\"]'); const [id, name] = r.querySelectorAll('input'); id.value = 'my-tools'; id.dispatchEvent(new InputEvent('input', {bubbles: true})); name.value = 'My Tools'; name.dispatchEvent(new InputEvent('input', {bubbles: true}));")
-    click_button('[data-setting="plugin-create"]', "Create")
+    # Create stays disabled while the page is still busy with the previous action; wait until it can be clicked.
+    run.check("Create can be clicked", wait(lambda: click_button('[data-setting="plugin-create"]', "Create"), 10))
     ok = wait(lambda: info("my-tools"), 10)
     run.check("create makes a valid starter plugin", ok and not ok["error"] and ok["manifest"]["name"] == "My Tools", str(ok))
     run.check("starter plugin is listed in settings", wait(lambda: d.js(f"return !!document.querySelector('{card('my-tools')}')"), 10))

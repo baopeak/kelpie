@@ -26,7 +26,11 @@ VI = {}
 for f in glob.glob(os.path.join(REPO, "app", "src", "locales", "vi", "*.json")):
     VI.update(json.load(open(f, encoding="utf-8")))
 # Lines that may legitimately stay English: the same in both languages, or brand-like.
-SUSPECT = {k for k, v in VI.items() if v != k and "{" not in k and len(k) > 2} - {"English"}  # the language picker names each language in itself
+SUSPECT = {k for k, v in VI.items() if v != k and "{" not in k and len(k) > 2}
+# A line that is also some key's Vietnamese text is translated text, not a leftover.
+SUSPECT -= set(VI.values())
+# The language picker names each language in itself; "Windows" is also the OS name, shown as is.
+SUSPECT -= {"English", "Windows"}
 
 run = Run(shots)
 d = run.d

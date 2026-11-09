@@ -25,7 +25,8 @@ S = "window.__kelpie.store"
 repo = os.path.join(scratch, "parity-repo")
 remote = os.path.join(scratch, "parity-remote.git")
 other = os.path.join(scratch, "parity-other")
-kelpied = os.path.join(REPO, "target", "release", "kelpied.exe" if os.name == "nt" else "kelpied")
+# The daemon the app was started with, else the release build of this checkout.
+kelpied = os.environ.get("KELPIE_DAEMON_PATH") or os.path.join(REPO, "target", "release", "kelpied.exe" if os.name == "nt" else "kelpied")
 
 
 def _writable(func, path, _exc):
@@ -373,7 +374,11 @@ try:
     # ---------- automations ----------
     a = daemon(d, "automation.save", {"id": "", "name": "Parity automation", "enabled": False, "kind": "shell", "prompt": "echo automation-ran", "cwd": repo, "project_id": pid, "args": [], "every": "daily", "time": "09:00", "weekday": 1})
     run.check("automation saved with a next run", a["next_run"] > time.time() * 1000, str(a.get("next_run")))
-    info = daemon(d, "automation.run", {"id": a["id"]})
+    # A shell automation runs only once its command is approved in Kelpie.
+    listed = next(x for x in daemon(d, "automation.list") if x["id"] == a["id"])
+    daemon(d, "automation.approve", {"id": a["id"], "hash": listed["command_hash"]})
+    # The reply says what the run did; `session` is the session it started.
+    info = daemon(d, "automation.run", {"id": a["id"]})["session"]
     run.check("Run now starts its session with the prompt", wait_text(info["handle"], "automation-ran", 40))
     lst = daemon(d, "automation.list")
     run.check("run is recorded", any(x["id"] == a["id"] and x["last_run"] > 0 and x["last_session"] == info["id"] for x in lst))
