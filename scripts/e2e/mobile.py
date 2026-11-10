@@ -15,7 +15,7 @@ and the Tailscale checks fail saying so. It never reaches the real one either wa
 The server is bound to 127.0.0.1 (no firewall prompt on the test machine). The phone is
 headless Edge with mobile emulation, driven through msedgedriver on port 9515.
 
-Covers: off by default; turning it on (status, URL); Settings → Mobile (every option's lines, the safe defaults, the summary, Advanced, each switch reaching the daemon, a change that fails); security headers and the embedded phone client
+Covers: off by default; turning it on (status, URL); Settings → Mobile (every option's lines, the safe defaults, the summary, Advanced, each switch reaching the daemon, a change that fails; with no relay the hosted app's row says the relay comes first, and with this network's listeners off no browser here is offered pairing); security headers and the embedded phone client
 (SolidJS, app/phone); pairing with a QR link, typing the phone's code on the desktop, the device list, nothing readable on the wire, no CSP
 violation; the phone's
 inbox (a session that needs you comes first), a session's screen, typing and quick keys reaching the
@@ -343,6 +343,16 @@ try:
     run.check("…and a link to one of them opens it", d.wait("return document.querySelector('[data-mobile-advanced]').open", 10) is True)
     d.js(f"{S}.openSettings('mobile')")
     d.wait("return !document.querySelector('[data-mobile-advanced]').open", 10)
+
+    # ---------- with no relay the hosted app is not offered; with this network's listeners off no browser here is paired ----------
+    hosted_row = d.js("return document.querySelector('[data-setting=\"mobile-hosted\"]')?.textContent ?? null")
+    run.check("without the relay the hosted app's row says the relay comes first, and offers no pairing", "Turn on the relay first" in (hosted_row or "") and not d.js("return !!document.querySelector('[data-hosted-pair]')"), str(hosted_row)[:200])
+    run.check("…while a browser on this network can be paired", d.js("return !!document.querySelector('[data-plain-pair]')") is True)
+    lan_off = d.invoke("daemon_call", {"method": "mobile.enable", "params": {"lan": False}})
+    run.check("this network's listeners off with nothing else reaching this computer is refused, saying so", "nothing else reaches this computer" in str(lan_off.get("err", "")), str(lan_off)[:200])
+    run.check("…and Settings no longer offers to pair a browser on this network", d.wait("return !document.querySelector('[data-plain-pair]') && !document.querySelector('[data-setting=\"mobile-pair\"]')", 10) is True)
+    daemon(d, "mobile.enable", {"lan": True, "ip": "127.0.0.1", "port": PORT})
+    run.check("…and offers it again once they are back on", d.wait("return !!document.querySelector('[data-plain-pair]')", 10) is True and daemon(d, "mobile.status")["running"])
 
     # ---------- pairing ----------
     run.check("the settings know this window is the verified app", daemon(d, "mobile.status").get("app") is True)

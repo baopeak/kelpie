@@ -13,6 +13,7 @@ import atexit
 import base64
 import ctypes
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -288,6 +289,17 @@ class Device:
 
 def link_url(base):
     return base.replace("http://", "ws://").replace("https://", "wss://") + "link"
+
+
+def relay_pair_token(psk):
+    """The single-use token a pairing code lets into the relay: HKDF-SHA256 of its secret, no salt, info `kelpie-relay-pair` (base64url)."""
+    prk = hmac.new(b"\0" * 32, psk, hashlib.sha256).digest()
+    return b64url(hmac.new(prk, b"kelpie-relay-pair\x01", hashlib.sha256).digest())
+
+
+def status_of(e):
+    """The HTTP status a refused WebSocket upgrade answered, from either of websockets' client implementations."""
+    return getattr(getattr(e, "response", None), "status_code", None) or getattr(e, "status_code", None)
 
 
 def pair_secrets(link):
