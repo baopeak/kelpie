@@ -1,13 +1,16 @@
 // What each option of Settings → Mobile can do now, and the page's summary, from what the daemon said (`mobile.status`, `notify.get`).
 // Pure, so that every row is tested at every daemon level. The daemon enforces all of it; this only says so ahead of time:
 // `presence` follows `LockOptions::weakened_by` and `mobile.set_tailscale`, and a change it does not mention can still be refused.
-import { LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
+import { HOSTED_API, LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { t } from "./i18n";
 import { NOTIFY_API } from "./notify-events";
 import { pushSummary, type PushState, type TelegramMode } from "./push-config";
-import type { MobileStatus } from "../components/settings/mobile-settings";
+import { offersControl } from "./takeover-panes";
+import type { MobilePageKind } from "./types";
+import type { MobileDevice, MobilePermission, MobileStatus } from "../components/settings/mobile-settings";
+import type { RelayStatus } from "../components/settings/mobile-relay-settings";
 
-export const OPTION_IDS = ["mobile-access", "mobile-tailscale", "mobile-relay", "mobile-webpush", "mobile-lock", "mobile-lock-idle", "mobile-lock-recheck", "mobile-lock-plain", "mobile-ntfy", "mobile-telegram"] as const;
+export const OPTION_IDS = ["mobile-access", "mobile-hosted", "mobile-tailscale", "mobile-relay", "mobile-webpush", "mobile-lock", "mobile-lock-idle", "mobile-lock-recheck", "mobile-lock-plain", "mobile-ntfy", "mobile-telegram", "mobile-lan"] as const;
 export type OptionId = (typeof OPTION_IDS)[number];
 
 /** What is known. `status` or `push` is null when the daemon could not say. */
@@ -58,6 +61,18 @@ export function optionState(id: OptionId, f: OptionFacts): OptionState {
       const on = !!s?.relay?.on;
       return { on, disabled: blocked(f, RELAY_API, !!s?.relay, true), presence: on ? null : t("Turning this on asks you to verify first.") };
     }
+    // Pairing, not a setting: "on" while a phone can pair on the hosted app now. Starting a code needs no verification; approving the phone does.
+    case "mobile-hosted": {
+      const r = s?.relay;
+      const waiting = () => (!r!.on ? t("Turn on the relay first: the phone app comes from it.") : r!.hosted!.available ? null : hostedLine(r!));
+      return { on: hostedPairing(f), disabled: blocked(f, HOSTED_API, !!r?.hosted, false) ?? waiting(), presence: null };
+    }
+    // Off it leaves nothing that reaches this computer unless the relay or Tailscale does, and the daemon would stop phone access: not offered then.
+    case "mobile-lan": {
+      const on = s?.lan !== false;
+      const alone = on && !s?.relay?.on && !s?.tailscale?.on;
+      return { on, disabled: blocked(f, HOSTED_API, s?.lan !== undefined, false) ?? (alone ? t("Turn on the relay or Tailscale first: with this off, nothing else would reach this computer.") : null), presence: null };
+    }
     // Each phone turns this on for itself: this computer only reports it, so nothing here changes it.
     case "mobile-webpush":
       return { on: (f.push?.webpush?.devices ?? 0) > 0, disabled: f.push && !f.push.webpush ? needsRestart() : null, presence: null };
@@ -96,7 +111,14 @@ function reachLine(s: MobileStatus): string {
   if (!s.running) return t("Phone access is on, but not running, so phones cannot reach this computer. See the message below.");
   const lines: string[] = [];
   if (s.tailscale?.on) lines.push(s.tailscale.origin ? t("Phones with Tailscale on reach this computer at {origin}, from anywhere.", { origin: s.tailscale.origin }) : t("Tailscale mode is on, but phones cannot use it right now: see its row."));
-  if (s.relay?.on) lines.push(s.relay.connected ? t("With Tailscale off, the installed app reaches this computer through the relay.") : t("The relay is on, but this computer is not connected to it right now: see its row."));
+  const r = s.relay;
+  if (r?.on && !r.connected) lines.push(t("The relay is on, but this computer is not connected to it right now: see its row."));
+  else if (r?.on) {
+    const hosted = relayServesApp(r) && r.hosted?.origin;
+    if (hosted) lines.push(t("Phones with the hosted app from {origin} reach this computer through the relay, from anywhere.", { origin: hosted }));
+    // The app installed over Tailscale: let in through the relay from its origin, and the only one there without the hosted app.
+    if (!hosted || r.origin) lines.push(t("With Tailscale off, the installed app reaches this computer through the relay."));
+  }
   if (s.urls.length) {
     if (s.tls) lines.push(t("Phones on this network connect over HTTPS, with your certificate."));
     else if (s.lock?.on && !s.lock.plain_read) lines.push(t("Phones on this network connect over plain HTTP, and see nothing: Allow reading over plain HTTP is off."));
@@ -108,7 +130,11 @@ function reachLine(s: MobileStatus): string {
 
 function lockLine(s: MobileStatus): string {
   if (!s.lock) return t("This background service has no app lock yet. Restart it to get one.");
-  return s.lock.on ? t("The app lock is on: a phone paired at a name asks for Face ID, and locks after {n} min idle.", { n: s.lock.idle_s / 60 }) : t("The app lock is off: whoever holds a paired phone reaches what it may do.");
+  if (s.lock.on) return t("The app lock is on: a phone paired at a name asks for Face ID, and locks after {n} min idle.", { n: s.lock.idle_s / 60 });
+  // The daemon locks phones on the hosted app whatever the switch says.
+  return s.devices.some((d) => d.page_kind === "hosted")
+    ? t("The app lock is off: whoever holds a phone paired over Tailscale or this network reaches what it may do. Phones on the hosted app still ask for Face ID.")
+    : t("The app lock is off: whoever holds a paired phone reaches what it may do.");
 }
 
 function phonesLine(s: MobileStatus): string {
@@ -127,7 +153,145 @@ export function mobileSummary(s: MobileStatus, push: PushState | null) {
 }
 
 /** Whether removing a phone offers a new room at the relay: the removed phone still knows the room's ticket, though the relay no longer lets it in.
- *  Only while this computer keeps the registration key, which a new room needs: without it the person would verify only to be asked for the key. */
-export function offerNewRoom(s: MobileStatus | null | undefined): boolean {
-  return !!s?.relay?.on && !!s.relay.room && !!s.relay.operator_key;
+ *  Only while a new room needs nothing typed: this computer keeps the registration key, or the daemon makes rooms without one at a relay of the
+ *  second version. Otherwise the person would verify only to be asked for the key. */
+export function offerNewRoom(s: MobileStatus | null | undefined, api: number): boolean {
+  return !!s?.relay?.on && !!s.relay.room && roomNeedsNothing(s.relay, api);
+}
+
+/** A new room at this relay needs no registration key typed. */
+export function roomNeedsNothing(r: RelayStatus, api: number): boolean {
+  return r.operator_key || (api >= HOSTED_API && (r.version ?? 0) >= 2);
+}
+
+// ---------- the phone app the relay hosts ----------
+
+/** The daemon's reason while it has not looked at the relay's phone app yet: it is looking now, and says so when done (`mobile.updated`). */
+const NOT_CHECKED = "not checked yet";
+
+/** A new setup, as the daemon says (`new_store`): phone access never on, no phone, no relay, nothing chosen. Turning phone access on then sets up the
+ *  hosted app over the relay. Nothing else makes a setup new: an existing one must never be moved. */
+export function newSetup(f: OptionFacts): boolean {
+  return f.api >= HOSTED_API && f.status?.new_store === true;
+}
+
+/** The calls turning phone access on makes. `secure` is `mobileSecure`: the person verifies first. */
+export interface AccessCalls {
+  daemon: (method: string, params: Record<string, unknown>) => Promise<unknown>;
+  secure: (method: "mobile.set_relay", params: Record<string, unknown>) => Promise<unknown>;
+  status: () => Promise<MobileStatus | null>;
+}
+
+/** Turns phone access on. A new setup: no listener on this network, then the default relay (one verification, no key), and "hosted" for the pairing guide
+ *  to open. Otherwise exactly what the switch always did. Throws what stopped it. */
+export async function turnOnAccess(f: OptionFacts, call: AccessCalls): Promise<"hosted" | "plain"> {
+  if (!newSetup(f)) {
+    await call.daemon("mobile.enable", {});
+    return "plain";
+  }
+  try {
+    await call.daemon("mobile.enable", { lan: false });
+  } catch (e) {
+    // Until the relay is on nothing reaches this computer, and the daemon says so; phone access is on all the same, which the relay needs.
+    if (!(await call.status().catch(() => null))?.enabled) throw e;
+  }
+  await call.secure("mobile.set_relay", { on: true });
+  return "hosted";
+}
+
+/** The daemon's refusal to start with this network's listeners off and nothing else that reaches this computer. */
+const NOTHING_ELSE = "Turn on the relay or Tailscale: nothing else reaches this computer";
+
+/** The daemon's error for the page. Its refusal to start with nothing to reach this computer stays in the status after turning the relay on started phone
+ *  access, so it is shown only while phone access is not running. */
+export function statusError(s: MobileStatus): string | null {
+  return s.error === NOTHING_ELSE && s.running ? null : s.error;
+}
+
+/** "Pair a phone" on the hosted app is offered:phone access is on, the relay is on and the daemon found the app serving. */
+export function hostedPairing(f: OptionFacts): boolean {
+  const s = f.status;
+  return f.api >= HOSTED_API && !!s?.enabled && !s.store_error && !!s.relay?.on && !!s.relay.hosted?.available;
+}
+
+/** "Pair a browser on this network" is offered only while this network's listeners are on (always, from a daemon without the choice). */
+export function plainPairing(f: OptionFacts): boolean {
+  return f.status?.lan !== false;
+}
+
+/** The relay row's line about the phone app: where and which version, still being checked, or not served. Null from a daemon without it. */
+export function hostedLine(r: RelayStatus): string | null {
+  const h = r.hosted;
+  if (!h) return null;
+  if (h.available && h.origin) return h.version ? t("Phone app at {origin}, version {version}.", { origin: h.origin, version: h.version }) : t("Phone app at {origin}.", { origin: h.origin });
+  if (h.reason === NOT_CHECKED) return t("Kelpie is checking whether this relay serves the phone app.");
+  return t("This relay does not serve the phone app: pair phones over Tailscale.");
+}
+
+/** Why the relay's phone app cannot be used, as the daemon says it; null when it can or is still being checked. */
+export function hostedReason(r: RelayStatus): string | null {
+  const h = r.hosted;
+  return h && !h.available && h.reason !== NOT_CHECKED ? h.reason : null;
+}
+
+/** The relay serves the phone app phones use: it was found serving, or phones are paired on it. */
+export function relayServesApp(r: RelayStatus): boolean {
+  return !!r.hosted?.available || (r.hosted_devices ?? 0) > 0;
+}
+
+/** What the hosted app trusts, in the words Settings shows under its row. Kelpie's own relay names Cloudflare and Kelpie's release deploy; another relay
+ *  names whoever runs it, whose app no Kelpie release describes. */
+export function hostedTrust(r: RelayStatus): string | null {
+  const origin = r.hosted?.origin;
+  if (!origin) return null;
+  const host = origin.replace(/^https:\/\//, "");
+  return r.url === r.default_url
+    ? t("The phone app comes from Kelpie's relay at {host}, on Cloudflare. Whoever controls that Cloudflare account or Kelpie's release deploy could send your phone different code that reads your sessions and types into them while the app is unlocked. Each release publishes the app's fingerprint so anyone can check what the relay serves; nobody can check what one phone received. For a phone app served only by this computer, use Tailscale mode.", { host })
+    : t("The phone app comes from the relay at {host}, not from Kelpie's. Whoever runs that relay or can deploy to it could send your phone different code that reads your sessions and types into them while the app is unlocked. The fingerprints Kelpie publishes describe the app on Kelpie's relay, not this one. For a phone app served only by this computer, use Tailscale mode.", { host });
+}
+
+/** Said before the relay moves to another address while phones use the app at the present one: it is their only way to this computer. */
+export function movingRelayWarning(r: RelayStatus | undefined, url: string): string | null {
+  const n = r?.hosted_devices ?? 0;
+  const origin = r?.hosted?.origin;
+  const same = (a: string) => a.trim().replace(/\/+$/, "");
+  if (!r || n === 0 || !origin || same(url) === same(r.url)) return null;
+  return n === 1
+    ? t("1 phone using the app at {origin} loses its way to this computer and must be paired again.", { origin })
+    : t("{n} phones using the app at {origin} lose their way to this computer and must be paired again.", { n, origin });
+}
+
+/** The relay answered that a room there needs a registration key, or did not take the one given: the key field is shown then. */
+export function asksForKey(error: unknown): boolean {
+  return /needs a registration key|did not take that registration key/.test(String(error));
+}
+
+/** A device's page, in a few words: the badge in the device list and the line in the approval. */
+export function pageKindLabel(kind: MobilePageKind | null | undefined): string | null {
+  switch (kind) {
+    case "hosted":
+      return t("hosted app");
+    case "ts":
+      return t("Tailscale");
+    case "own":
+      return t("this computer's HTTPS");
+    case "plain":
+      return t("this network");
+    default:
+      return null;
+  }
+}
+
+/** What a paired device may be given in its list. Control never for one on the hosted app: the daemon refuses it, whatever its lock. */
+export function permissionChoices(d: MobileDevice, api: number): MobilePermission[] {
+  return d.page_kind !== "hosted" && offersControl(d, api) ? ["read", "write", "control"] : ["read", "write"];
+}
+
+/** The approval's two buttons: which one is the default, what the phone asks for as it can have it, and the line said with typing. A phone on the hosted
+ *  app gets reading by default and the line on what typing from it means; control is never asked for there. */
+export function approvalChoices(r: { want: MobilePermission; origin_kind?: MobilePageKind }): { choices: ("read" | "write")[]; primary: "read" | "write"; asks: MobilePermission; typing: string | null } {
+  if (r.origin_kind === "hosted") {
+    return { choices: ["read", "write"], primary: "read", asks: r.want === "read" ? "read" : "write", typing: t("Typing from the hosted app lets code served by Kelpie's relay type into your sessions while the phone is unlocked.") };
+  }
+  return { choices: ["read", "write"], primary: r.want === "read" ? "read" : "write", asks: r.want, typing: null };
 }

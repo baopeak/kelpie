@@ -1,18 +1,23 @@
 // Settings → Mobile, the relay's row: where the relay is (Kelpie's own, or another), the registration key that makes this computer's room
-// there once, how the connection stands, a new room when the relay stays slow, and what the relay can see. The switch is the row's
-// (`OptionRow`); turning it on asks the person to verify, at the daemon (crates/kelpied/src/mobile/relay.rs).
+// there once when the relay asks for one, how the connection stands, whether it serves the phone app, a new room when the relay stays slow,
+// and what the relay can see. The switch is the row's (`OptionRow`); turning it on asks the person to verify, at the daemon
+// (crates/kelpied/src/mobile/relay.rs).
 import { Show, createSignal } from "solid-js";
 import { mobileSecure } from "../../lib/ipc";
 import { errorText, t } from "../../lib/i18n";
+import { HOSTED_API } from "../../lib/attention";
+import { confirmDialog } from "../../lib/confirm-dialog";
+import { asksForKey, hostedLine, hostedReason, movingRelayWarning, relayServesApp, roomNeedsNothing } from "../../lib/mobile-options";
+import type { MobileRelayHosted } from "../../lib/types";
 
-/** `relay` in `mobile.status` (absent below `RELAY_API`). */
-export interface RelayStatus {
+/** `relay` in `mobile.status` (absent below `RELAY_API`; the hosted app's fields absent below `HOSTED_API`). */
+export interface RelayStatus extends Partial<MobileRelayHosted> {
   on: boolean;
   url: string;
   default_url: string;
   /** This computer has a room there. */
   room: boolean;
-  /** The page origin phones are let in from: the Tailscale origin the app was installed from. */
+  /** The Tailscale page origin phones installed over Tailscale are let in from. */
   origin: string | null;
   /** The registration key is kept, so a new room needs nothing typed. */
   operator_key: boolean;
@@ -32,25 +37,48 @@ export function createRelayForm(run: (fn: () => Promise<unknown>) => Promise<voi
   // null: the address as the daemon holds it.
   const [url, setUrl] = createSignal<string | null>(null);
   const [key, setKey] = createSignal("");
-  const turn = (on: boolean, status: RelayStatus | undefined) =>
-    run(async () => {
-      if (!on) return void (await mobileSecure("mobile.set_relay", { on: false }));
+  // The relay answered that it needs a registration key: its field shows from then on.
+  const [keyAsked, setKeyAsked] = createSignal(false);
+  const turn = async (on: boolean, status: RelayStatus | undefined) => {
+    if (!on) return run(() => mobileSecure("mobile.set_relay", { on: false }));
+    const address = (url() ?? status?.url ?? "").trim();
+    // Phones on the hosted app reach this computer only through this relay: the person hears so before verifying.
+    const moving = movingRelayWarning(status, address);
+    if (moving && !(await confirmDialog(`${moving} ${t("Use this relay anyway?")}`))) return;
+    await run(async () => {
       const operator = key().trim();
-      await mobileSecure("mobile.set_relay", { on: true, url: (url() ?? status?.url ?? "").trim(), ...(operator ? { operator_key: operator } : {}) });
+      try {
+        await mobileSecure("mobile.set_relay", { on: true, url: address, ...(operator ? { operator_key: operator } : {}) });
+      } catch (e) {
+        if (asksForKey(e)) setKeyAsked(true);
+        throw e;
+      }
       setKey("");
       setUrl(null);
     });
+  };
   const recreate = () => run(() => mobileSecure("mobile.relay_recreate", {}));
-  return { url, setUrl, key, setKey, turn, recreate };
+  return { url, setUrl, key, setKey, keyAsked, turn, recreate };
 }
 
-export function RelayDetails(props: { status: RelayStatus; form: RelayForm; busy: boolean }) {
+export function RelayDetails(props: { status: RelayStatus; form: RelayForm; busy: boolean; api: number }) {
   const s = () => props.status;
   const address = () => props.form.url() ?? s().url;
   const custom = () => address().trim() !== s().default_url;
-  // A room is made when there is none at this address; it needs the key unless the key is kept.
-  const needsKey = () => !s().operator_key && (!s().room || address().trim() !== s().url);
-  const phones = () => (s().phones === 0 ? t("No phone has a token yet: each gets one the next time it connects over Tailscale.") : s().phones === 1 ? t("1 phone can use it.") : t("{n} phones can use it.", { n: s().phones }));
+  const hosted = () => props.api >= HOSTED_API && !!s().hosted;
+  // A room is made when there is none at this address. It needs the key unless the key is kept; a daemon that makes rooms without one asks for it only
+  // once the relay said it needs one.
+  const needsKey = () => (!hosted() || props.form.keyAsked()) && !s().operator_key && (!s().room || address().trim() !== s().url);
+  const phones = () =>
+    s().phones === 0
+      ? hosted()
+        ? t("No phone has a token yet: a phone gets one when it pairs on the hosted app, or the next time it connects over Tailscale.")
+        : t("No phone has a token yet: each gets one the next time it connects over Tailscale.")
+      : s().phones === 1
+        ? t("1 phone can use it.")
+        : t("{n} phones can use it.", { n: s().phones });
+  // Phones installed over Tailscale are let in from its origin only. With the phone app served or being checked, that is not needed to use the relay.
+  const noOrigin = () => !s().origin && (!hosted() || (!s().hosted!.available && hostedReason(s()) !== null));
   return (
     <div class="relay-details" data-relay={s().on ? "on" : "off"}>
       <Show when={s().on} fallback={
@@ -75,10 +103,14 @@ export function RelayDetails(props: { status: RelayStatus; form: RelayForm; busy
           {" "}{phones()}
         </div>
         <Show when={s().error}><div class="form-note error" data-relay-error>{errorText(s().error)}</div></Show>
-        <Show when={!s().origin}><div class="form-note warn-note" data-relay-no-origin>{t("Turn on Tailscale mode once, so the relay knows the app's address: phones are let in from there only.")}</div></Show>
+        <Show when={hosted()}>
+          <div class="muted-inline" data-relay-hosted={s().hosted!.available ? "available" : "not"}>{hostedLine(s())}</div>
+          <Show when={hostedReason(s())}><div class="muted-inline" data-relay-hosted-reason>{errorText(hostedReason(s()))}</div></Show>
+        </Show>
+        <Show when={noOrigin()}><div class="form-note warn-note" data-relay-no-origin>{t("Turn on Tailscale mode once, so the relay knows the app's address: phones are let in from there only.")}</div></Show>
         <Show when={s().slow}><div class="form-note warn-note" data-relay-slow>{t("The relay has been slow from this computer for a day. A new room is made near where this computer is now, and phones move to it by themselves.")}</div></Show>
         <div class="inline-fields">
-          <button class="btn" data-relay-recreate disabled={props.busy || !s().operator_key} onClick={() => void props.form.recreate()}>{t("Make a new room")}</button>
+          <button class="btn" data-relay-recreate disabled={props.busy || !roomNeedsNothing(s(), props.api)} onClick={() => void props.form.recreate()}>{t("Make a new room")}</button>
         </div>
       </Show>
       <details class="relay-sees" data-relay-sees>
@@ -87,7 +119,9 @@ export function RelayDetails(props: { status: RelayStatus; form: RelayForm; busy
           <li>{t("That a phone and this computer are connected, and when.")}</li>
           <li>{t("Their internet addresses, and how much they send.")}</li>
           <li>{t("The number of this computer's room.")}</li>
-          <li>{t("Never what is said: it is encrypted between the phone and this computer, and the relay holds no key to it. It keeps no logs of what passes, and serves no page.")}</li>
+          <Show when={hosted() && relayServesApp(s())} fallback={<li>{t("Never what is said: it is encrypted between the phone and this computer, and the relay holds no key to it. It keeps no logs of what passes, and serves no page.")}</li>}>
+            <li>{t("Never what is said: it is encrypted between the phone and this computer, and the relay holds no key to it. It keeps no logs of what passes, and serves the phone app: see What this trusts, under Hosted phone app.")}</li>
+          </Show>
         </ul>
       </details>
     </div>
