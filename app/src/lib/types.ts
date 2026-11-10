@@ -656,6 +656,73 @@ export interface XferJob {
   finished: number | null;
 }
 
+/** Which page a phone paired on, from the code the desktop issued: this computer's Tailscale origin, its own HTTPS listener, the app the relay hosts, or a
+ *  page over plain HTTP. */
+export type MobilePageKind = "ts" | "own" | "hosted" | "plain";
+
+/** What a device in `mobile.status` says of its page (absent below `HOSTED_API`; null for a phone paired before pages were recorded). */
+export interface MobileDevicePage {
+  page?: string | null;
+  page_kind?: MobilePageKind | null;
+}
+
+/** A phone waiting for the person to type its code (`pending` in `mobile.status`, and the `mobile.pair_request` event). */
+export interface MobilePairRequest {
+  id: string;
+  name: string;
+  kind: "app" | "pwa";
+  fingerprint: string;
+  want: "read" | "write" | "control";
+  address: string;
+  /** The page its code was for (absent below `HOSTED_API`). */
+  origin_kind?: MobilePageKind;
+}
+
+/** The app the relay hosts at its own origin, as `relay.hosted` in `mobile.status` says (absent below `HOSTED_API`). */
+export interface MobileHostedStatus {
+  /** A phone can pair on it now. */
+  available: boolean;
+  /** `https://<relay host>`; null for a relay that is not `wss://`. */
+  origin: string | null;
+  /** The app's version, from its `version.json`. */
+  version: string | null;
+  /** Why it cannot be used, in plain words; null when it can. */
+  reason: string | null;
+  /** The install page's QR code (an SVG, no secret in it). */
+  install_qr: string | null;
+}
+
+/** What `HOSTED_API` adds to `relay` in `mobile.status`. */
+export interface MobileRelayHosted {
+  /** The relay's protocol on the connection that is up (2: several page origins); null while not connected. */
+  version: number | null;
+  hosted: MobileHostedStatus;
+  /** Phones paired on the hosted app at the relay's present origin: a new relay address cuts them off. */
+  hosted_devices: number;
+}
+
+/** What `HOSTED_API` adds to `mobile.status` itself. */
+export interface MobileHostedFields {
+  /** This network's listeners are on. */
+  lan: boolean;
+  /** Nothing in the store was set up by a person: a new setup gets the hosted app over the relay. */
+  new_store: boolean;
+}
+
+/** `mobile.pair_start`'s answer. */
+export interface MobilePairStart {
+  url: string;
+  qr: string;
+  expires_in: number;
+  kind: "app" | "pwa";
+  tls: boolean;
+  tailscale: boolean;
+  relay: boolean;
+  passkey: boolean;
+  /** A code for the hosted app (absent below `HOSTED_API`). */
+  hosted?: boolean;
+}
+
 export interface XferStart {
   kind?: "copy" | "delete" | "chmod";
   src: XferEnd;

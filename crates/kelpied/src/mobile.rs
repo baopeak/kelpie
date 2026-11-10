@@ -39,7 +39,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -61,7 +61,7 @@ use crate::session::{bounded_client_channel, next_client_id, now_millis, Answer,
 use lanes::{Beat, Liveness, SLOW_AFTER};
 use link::{Opened, Peer, Wire};
 use lock::{Gate, LockMemory, LockPath};
-use store::{Device, Kind, Store};
+use store::{Device, Kind, PageKind, Store};
 pub use verbs::Permission;
 use verbs::Verb;
 
@@ -200,13 +200,24 @@ struct Pending {
     address: IpAddr,
     /// It came from a page on an HTTPS origin.
     secure_origin: bool,
+    /// The page its code was issued for.
+    page: PageOrigin,
     reply: oneshot::Sender<Option<Device>>,
+}
+
+/// The page a pairing code is for, as the desktop issued it: a phone pairs with it only from there (`link::pair`), and its record keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageOrigin {
+    pub kind: PageKind,
+    /// `scheme://host[:port]`.
+    pub origin: String,
 }
 
 /// A pairing secret shown in a QR code.
 struct Code {
     psk: [u8; 32],
     kind: Kind,
+    page: PageOrigin,
     at: Instant,
     /// First messages it has answered, by source address.
     attempts: HashMap<IpAddr, u8>,
@@ -975,11 +986,14 @@ impl Mobile {
                     "id": d.id, "name": d.name, "permission": d.permission.name(), "kind": d.kind.name(), "can_write": d.permission >= Permission::Write,
                     "created_at": d.created_at, "last_seen": d.last_seen, "secure_origin": d.secure_origin, "push": d.push.is_some(), "state": if d.verified { "ok" } else if key_unreadable { "unchecked" } else { "unverified" },
                     "passkey": d.lock.is_some(), "lock_reset": lock_reset, "unlocked": unlocked, "may_control": d.verified && record_ceiling(d, options.on) == Permission::Control,
+                    "page": d.page, "page_kind": d.page_kind.map(PageKind::name),
                 })
             }).collect::<Vec<_>>(),
             "legacy": c.legacy.iter().map(|d| json!({"id": d.id, "name": d.name, "created_at": d.created_at})).collect::<Vec<_>>(),
             "pairing_expires_in": code,
-            "pending": self.pending.lock().iter().map(|(id, p)| json!({"id": id, "name": p.name, "kind": p.kind.name(), "fingerprint": fingerprint(&p.pk), "want": p.want.name(), "address": listen::shown(p.address)})).collect::<Vec<_>>(),
+            "pending": self.pending.lock().iter().map(|(id, p)| json!({"id": id, "name": p.name, "kind": p.kind.name(), "fingerprint": fingerprint(&p.pk), "want": p.want.name(), "address": listen::shown(p.address), "origin_kind": p.page.kind.name()})).collect::<Vec<_>>(),
+            "lan": c.lan_on(),
+            "new_store": c.is_new(),
             "dormant_days": c.dormant_days.unwrap_or(store::DEFAULT_DORMANT_DAYS),
             "tailscale": {"on": c.tailscale, "origin": running.as_ref().and_then(|r| r.ts_origin.clone()), "to_remove": c.tailscale_remove},
             "lock": {"on": options.on, "idle_s": options.idle_s, "recheck": options.recheck, "plain_read": options.plain_read},
@@ -1262,16 +1276,22 @@ impl Mobile {
         *n <= CODE_ATTEMPTS
     }
 
-    /// Spends a code that was just used: its kind, or None when it was spent or expired meanwhile.
-    fn spend_code(&self, psk: &[u8; 32]) -> Option<Kind> {
+    /// The page a live code was issued for, without spending it.
+    fn code_page(&self, psk: &[u8; 32]) -> Option<PageOrigin> {
+        self.codes.lock().iter().find(|c| c.psk == *psk && c.at.elapsed() < CODE_TTL).map(|c| c.page.clone())
+    }
+
+    /// Spends a code that was just used: its kind and page, or None when it was spent or expired meanwhile.
+    fn spend_code(&self, psk: &[u8; 32]) -> Option<(Kind, PageOrigin)> {
         let mut codes = self.codes.lock();
         let i = codes.iter().position(|c| c.psk == *psk && c.at.elapsed() < CODE_TTL)?;
-        Some(codes.remove(i).kind)
+        let code = codes.remove(i);
+        Some((code.kind, code.page))
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn add_pending(&self, id: &str, name: &str, kind: Kind, pk: [u8; 32], code: String, want: Permission, address: IpAddr, secure_origin: bool, reply: oneshot::Sender<Option<Device>>) {
-        self.pending.lock().insert(id.to_string(), Pending { name: name.to_string(), kind, pk, code, tries: 0, want, address, secure_origin, reply });
+    fn add_pending(&self, id: &str, name: &str, kind: Kind, pk: [u8; 32], code: String, want: Permission, address: IpAddr, secure_origin: bool, page: PageOrigin, reply: oneshot::Sender<Option<Device>>) {
+        self.pending.lock().insert(id.to_string(), Pending { name: name.to_string(), kind, pk, code, tries: 0, want, address, secure_origin, page, reply });
     }
 
     fn remove_pending(&self, id: &str) {
@@ -1339,7 +1359,7 @@ impl Mobile {
     /// A paired device as `approve` makes one (its record sealed with this store's key).
     fn add_test_device(&self, id: &str, name: &str, pk: [u8; 32], permission: Permission, kind: Kind) {
         let key = self.mac_key(true).expect("a readable store").expect("a key");
-        let mut d = Device { id: id.into(), name: name.into(), pk: kelpie_link::b64(&pk), permission, kind, created_at: 1, last_seen: now_millis(), mac: String::new(), secure_origin: false, secure_mac: String::new(), push: None, lock: None, verified: false };
+        let mut d = Device { id: id.into(), name: name.into(), pk: kelpie_link::b64(&pk), permission, kind, created_at: 1, last_seen: now_millis(), mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, verified: false };
         store::seal(&mut d, &key);
         self.config.lock().devices.push(d);
     }
@@ -1449,23 +1469,15 @@ impl Mobile {
             let r = running.as_ref().ok_or_else(|| anyhow!("turn mobile access on first"))?;
             (r.tls, r.listeners.addrs(), r.port, r.ts_origin.clone().filter(|_| !plain))
         };
+        if plain && !self.config.lock().lan_on() {
+            bail!("this network's listeners are off, so a phone cannot pair over this network: turn them on in Settings → Mobile");
+        }
         let kind = Kind::Pwa;
         let key = self.link_key()?;
         let psk = kelpie_link::random_key().map_err(|e| anyhow!("{e}"))?;
-        {
-            let mut codes = self.codes.lock();
-            codes.retain(|c| c.at.elapsed() < CODE_TTL);
-            if codes.len() >= LIVE_CODES {
-                codes.remove(0);
-            }
-            codes.push(Code { psk, kind, at: Instant::now(), attempts: HashMap::new() });
-        }
         let lan: Vec<String> = addrs.iter().map(listen::host).collect();
         // A phone can pair through the relay too, with a token from this code, and with no address of this network to bind.
         let relay = if plain { None } else { self.relay_endpoint() };
-        if relay.is_some() {
-            self.relay_pair(&psk);
-        }
         // The page the installed app is at, while Tailscale is not publishing it now.
         let relay_host = if ts.is_none() && relay.is_some() { self.relay_live().and_then(|r| r.origin?.strip_prefix("https://").map(str::to_string)) } else { None };
         let over_relay = relay.is_some();
@@ -1480,11 +1492,52 @@ impl Mobile {
         };
         let secure = tls || ts.is_some() || relay_host.is_some();
         let scheme = if secure { "https" } else { "http" };
+        let page_kind = if ts.is_some() || relay_host.is_some() {
+            PageKind::Ts
+        } else if tls {
+            PageKind::Own
+        } else {
+            PageKind::Plain
+        };
+        self.new_code(psk, kind, PageOrigin { kind: page_kind, origin: format!("{scheme}://{host}") });
+        if over_relay {
+            self.relay_pair(&psk);
+        }
         let (link, qr) = pair_link(scheme, &host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints, name: listen::hostname() })?;
         // Whether a phone that pairs at this link can have a passkey, and so type while the lock is on.
         let passkey = webauthn::rp_id(&format!("{scheme}://{host}")).is_some();
         // `tailscale`: the link is the installed app's origin, so the app can scan it; `relay`: a phone may pair through the relay too.
-        Ok(json!({"url": link, "qr": qr_svg(&qr), "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": secure, "tailscale": ts.is_some() || relay_host.is_some(), "relay": over_relay, "passkey": passkey}))
+        Ok(json!({"url": link, "qr": qr_svg(&qr), "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": secure, "tailscale": ts.is_some() || relay_host.is_some(), "relay": over_relay, "passkey": passkey, "hosted": false}))
+    }
+
+    /// A pairing QR code for the app the relay hosts at its own origin: the link opens that page, and the only way it names to this computer is the relay (a page
+    /// there can use neither this network's addresses nor Tailscale's). The relay must be on, connected, of a version that takes several origins, and serving the
+    /// page (`relay::hosted_check`, which the caller runs first).
+    pub fn pair_start_hosted(&self) -> Result<Value> {
+        ensure!(self.running.lock().is_some(), "turn mobile access on first");
+        let hosted = self.hosted_ready()?;
+        let relay = self.relay_endpoint().ok_or_else(|| anyhow!("turn the relay on first"))?;
+        let kind = Kind::Pwa;
+        let key = self.link_key()?;
+        let psk = kelpie_link::random_key().map_err(|e| anyhow!("{e}"))?;
+        self.new_code(psk, kind, PageOrigin { kind: PageKind::Hosted, origin: hosted.clone() });
+        // The room lets the page in before its token is told: the control queue keeps that order.
+        self.relay_note_origin();
+        self.relay_pair(&psk);
+        let host = hosted.strip_prefix("https://").unwrap_or(&hosted);
+        let (link, qr) = pair_link("https", host, kelpie_link::QrPayload { dpk: key.public, psk, endpoints: vec![relay], name: listen::hostname() })?;
+        let passkey = webauthn::rp_id(&hosted).is_some();
+        Ok(json!({"url": link, "qr": qr_svg(&qr), "expires_in": CODE_TTL.as_secs(), "kind": kind.name(), "tls": true, "tailscale": false, "relay": true, "passkey": passkey, "hosted": true}))
+    }
+
+    /// Keeps a new pairing code: the oldest goes when too many are live.
+    fn new_code(&self, psk: [u8; 32], kind: Kind, page: PageOrigin) {
+        let mut codes = self.codes.lock();
+        codes.retain(|c| c.at.elapsed() < CODE_TTL);
+        if codes.len() >= LIVE_CODES {
+            codes.remove(0);
+        }
+        codes.push(Code { psk, kind, page, at: Instant::now(), attempts: HashMap::new() });
     }
 
     /// The person says no to a pairing request (no verification: it adds nothing).
@@ -1537,7 +1590,10 @@ impl Mobile {
                 bail!("the credential store did not give the device key ({why}): phone access cannot pair devices on this computer");
             }
         };
-        let mut device = Device { id: uuid::Uuid::new_v4().to_string(), name: p.name.clone(), pk: kelpie_link::b64(&p.pk), permission: wanted, kind: p.kind, created_at: now_millis(), last_seen: now_millis(), mac: String::new(), secure_origin: p.secure_origin, secure_mac: String::new(), push: None, lock: None, verified: false };
+        let mut device = Device {
+            id: uuid::Uuid::new_v4().to_string(), name: p.name.clone(), pk: kelpie_link::b64(&p.pk), permission: wanted, kind: p.kind, created_at: now_millis(), last_seen: now_millis(), mac: String::new(),
+            secure_origin: p.secure_origin, secure_mac: String::new(), page: Some(p.page.origin.clone()), page_kind: Some(p.page.kind), page_mac: String::new(), push: None, lock: None, verified: false,
+        };
         store::seal(&mut device, &key);
         let replaced: Vec<(String, String)> = {
             let mut c = self.config.lock();
@@ -1573,7 +1629,7 @@ impl Mobile {
         let c = self.config.lock();
         let d = c.devices.iter().find(|d| d.id == id).ok_or_else(|| anyhow!("no such device"))?;
         anyhow::ensure!(d.verified, "this device must be paired again");
-        anyhow::ensure!(permission <= record_ceiling(d, lock_on), "{}", ceiling_refusal(permission));
+        anyhow::ensure!(permission <= record_ceiling(d, lock_on), "{}", ceiling_refusal(d, permission));
         Ok((permission > d.permission).then(|| crate::user_presence::Prompt::Raise { name: d.name.clone(), permission }))
     }
 
@@ -1607,7 +1663,7 @@ impl Mobile {
             let d = c.devices.iter().find(|d| d.id == id).ok_or_else(|| anyhow!("no such device"))?;
             anyhow::ensure!(d.verified, "this device must be paired again");
             // Lowering is always allowed, whatever the device could be raised to now.
-            anyhow::ensure!(permission <= d.permission || permission <= record_ceiling(d, lock_on), "{}", ceiling_refusal(permission));
+            anyhow::ensure!(permission <= d.permission || permission <= record_ceiling(d, lock_on), "{}", ceiling_refusal(d, permission));
             permission < d.permission
         };
         // What it controls stops before anything else changes.
@@ -1746,6 +1802,10 @@ pub async fn enable(daemon: Arc<Daemon>, params: Value) -> Result<Value> {
         if let Some(port) = params.get("port").and_then(Value::as_u64) {
             c.port = Some(u16::try_from(port).ok().filter(|p| *p >= 1024).ok_or_else(|| anyhow!("port must be 1024–65535"))?);
         }
+        // This network's listeners. Closing them weakens nothing, and opening them is what turning phone access on always did.
+        if let Some(lan) = params.get("lan") {
+            c.lan = Some(lan.as_bool().ok_or_else(|| anyhow!("lan must be true or false"))?);
+        }
         turned_on = !c.enabled;
         let path = |k: &str| params.get(k).map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string));
         if let Some(v) = path("cert") {
@@ -1787,20 +1847,28 @@ pub async fn autostart(daemon: Arc<Daemon>) {
 }
 
 async fn start(daemon: Arc<Daemon>) -> Result<()> {
-    let (ip, port, cert, key) = {
+    let (ip, port, cert, key, lan) = {
         let c = daemon.mobile.config.lock();
-        (c.ip.clone(), c.port.unwrap_or(DEFAULT_PORT), c.cert.clone(), c.key.clone())
+        (c.ip.clone(), c.port.unwrap_or(DEFAULT_PORT), c.cert.clone(), c.key.clone(), c.lan_on())
     };
     // With Tailscale mode or the relay on, no address here is no reason to stop: a laptop away from home has none, and that is what they are for.
     let keep_going = daemon.mobile.config.lock().tailscale || daemon.mobile.relay_live().is_some();
+    if !lan && !keep_going {
+        bail!("Turn on the relay or Tailscale: nothing else reaches this computer");
+    }
     let mut no_network = None;
-    let ips = match listen::wanted(ip.as_deref()) {
-        Ok(ips) => ips,
-        Err(e) if keep_going => {
-            no_network = Some(e);
-            Vec::new()
+    // This network's listeners off: nothing is bound to its addresses.
+    let ips = if !lan {
+        Vec::new()
+    } else {
+        match listen::wanted(ip.as_deref()) {
+            Ok(ips) => ips,
+            Err(e) if keep_going => {
+                no_network = Some(e);
+                Vec::new()
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => return Err(e),
     };
     // The key is made before anything listens: a credential store that will not keep it is reported now.
     daemon.mobile.link_key()?;
@@ -1810,7 +1878,7 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
     };
     let listeners = Arc::new(listen::Listeners::default());
     let (fresh, _, error) = listeners.rebind(&ips, port).await;
-    if fresh.is_empty() {
+    if fresh.is_empty() && lan {
         let why = error.or(no_network).unwrap_or_else(|| anyhow!("nothing to listen on"));
         if !keep_going {
             return Err(why);
@@ -1866,8 +1934,8 @@ async fn start(daemon: Arc<Daemon>) -> Result<()> {
             }
         }
     });
-    // Without a chosen address the listeners follow the machine's addresses.
-    if ip.is_none() {
+    // Without a chosen address the listeners follow the machine's addresses (while there are any to have).
+    if ip.is_none() && lan {
         let (daemon, listeners, stop) = (Arc::downgrade(&daemon), listeners.clone(), stop.clone());
         tokio::spawn(async move {
             loop {
@@ -2010,25 +2078,29 @@ fn transport_cap(kind: Kind, browser: bool, peer: &Peer) -> Permission {
 
 /// The most a device's record may be raised to. A page in a browser may be given control once it paired on this computer's HTTPS origin and its app
 /// lock is set up and on: control then rests on its passkey as well as on its key, and an auto-lock lets go of it like a revoke.
+/// A device paired on the app the relay hosts never goes past typing: whoever deploys that page could change it, and control is the screen and the browser panes.
 fn record_ceiling(d: &Device, lock_on: bool) -> Permission {
     match d.kind {
         Kind::App => Permission::Control,
+        _ if d.page_kind == Some(PageKind::Hosted) => Permission::Write,
         Kind::Pwa if d.secure_origin && d.lock.is_some() && lock_on => Permission::Control,
         Kind::Pwa => Permission::Write,
     }
 }
 
-fn ceiling_refusal(permission: Permission) -> String {
-    if permission == Permission::Control {
+fn ceiling_refusal(d: &Device, permission: Permission) -> String {
+    if permission == Permission::Control && d.page_kind == Some(PageKind::Hosted) {
+        "a phone using the hosted app can read and type; taking control needs Tailscale or this computer's own HTTPS address".into()
+    } else if permission == Permission::Control {
         "a page in a browser can be given control only once it was paired over HTTPS (Tailscale), and its app lock is set up and on".into()
     } else {
         format!("a page in a browser cannot be given {}", permission.name())
     }
 }
 
-/// What a page's control rests on, whatever its record's kind: paired on a secure origin, a passkey on record and the lock on.
+/// What a page's control rests on, whatever its record's kind: paired on a secure origin that is not the hosted app, a passkey on record and the lock on.
 fn page_may_control(d: &Device, lock_on: bool) -> bool {
-    d.secure_origin && d.lock.is_some() && lock_on
+    d.secure_origin && d.page_kind != Some(PageKind::Hosted) && d.lock.is_some() && lock_on
 }
 
 impl Mobile {
@@ -2673,7 +2745,7 @@ impl Conn {
                     return Err(refuse("one_shot", ONE_SHOT));
                 }
                 // A dangerous approval needs the passkey again, if the person asked for that. Esc is the one answer known to refuse: a key of a menu cannot be told apart, so any other asks.
-                if self.lock_path == LockPath::Passkey && self.daemon.mobile.recheck_on() && req["key"].as_str() != Some("esc") {
+                if self.lock_path.passkey() && self.daemon.mobile.recheck_on() && req["key"].as_str() != Some("esc") {
                     if let Some(command) = session.dangerous_wait() {
                         self.check_recheck(req, req["waiting_since"].as_u64().unwrap_or_default().to_string(), command).await?;
                     }
@@ -2789,7 +2861,7 @@ impl Conn {
                 return Ok(Some(json!({"type": "ack", "result": "ok", "resume": resume})));
             }
             Verb::LockNow => {
-                if self.lock_path == LockPath::Passkey {
+                if self.lock_path.passkey() {
                     self.daemon.mobile.lock_now(&self.device);
                 }
             }
@@ -2802,7 +2874,7 @@ impl Conn {
                 let request_id = req.get("request_id").filter(|r| r.is_string() || r.is_number()).ok_or_else(|| refuse("bad_request", "missing request_id"))?;
                 let line = req["line"].as_str().filter(|l| l.len() <= MAX_ANSWER_LINE).ok_or_else(|| refuse("bad_request", "missing or too long line"))?;
                 // A dangerous approval needs the passkey again, if the person asked for that. A refusal never does.
-                if self.lock_path == LockPath::Passkey && self.daemon.mobile.recheck_on() {
+                if self.lock_path.passkey() && self.daemon.mobile.recheck_on() {
                     if let Some(command) = chat.dangerous_approval(request_id, line) {
                         let request = request_id.as_str().map_or_else(|| request_id.to_string(), str::to_string);
                         self.check_recheck(req, request, command).await?;
@@ -2892,7 +2964,7 @@ impl Conn {
     /// With the re-check on, what is typed while a dangerous request is open could be its approval, with no passkey and with the end of the command unread. So only what is known not to approve
     /// goes through: Esc and Ctrl+C. A card may not be showing, so this does not send the person to one alone. Only a connection the passkey is asked of: others have none to give.
     fn typing_allowed(&self, session: &crate::session::Session, key: Option<&str>) -> Result<(), Refusal> {
-        if self.lock_path == LockPath::Passkey && !matches!(key, Some("esc" | "ctrl-c")) && self.daemon.mobile.recheck_on() && session.typing_may_approve_danger() {
+        if self.lock_path.passkey() && !matches!(key, Some("esc" | "ctrl-c")) && self.daemon.mobile.recheck_on() && session.typing_may_approve_danger() {
             return Err(refuse("recheck", "This request is marked dangerous, so typing here could approve it with no passkey. Answer it on the computer, or on its card if one is showing. Esc and Ctrl+C still work."));
         }
         Ok(())
@@ -3505,7 +3577,7 @@ mod tests {
         assert_eq!(transport_cap(Kind::Pwa, false, &at("192.168.1.9:5000", true)), Permission::Write, "a page paired as one stays one");
         assert_eq!(transport_cap(Kind::Pwa, true, &at("127.0.0.1:5000", false)), Permission::Write, "no network between: nothing to swap the page");
         // What the phone hears.
-        let mut d = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), verified: true };
+        let mut d = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
         let capped = device_hello(&d, d.permission, Permission::Read);
         assert_eq!((capped["permission"].as_str(), capped["can_write"].as_bool(), capped["capped"].as_bool()), (Some("read"), Some(false), Some(true)));
         d.permission = Permission::Read;
@@ -3515,7 +3587,7 @@ mod tests {
 
     #[test]
     fn a_browser_device_may_be_given_control_only_once_paired_on_https_with_its_lock_set_up_and_on() {
-        let mut d = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), verified: true };
+        let mut d = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
         assert_eq!(record_ceiling(&d, true), Permission::Write, "paired over plain HTTP");
         d.secure_origin = true;
         assert_eq!(record_ceiling(&d, true), Permission::Write, "no passkey yet");

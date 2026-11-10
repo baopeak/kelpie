@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
 use super::lanes::SLOW_AFTER;
-use super::store::Kind;
+use super::store::{Device, Kind, PageKind};
 use super::{listen, webauthn, Generation, HandshakeSlot, KeyLookup, CLOSE_TIMEOUT, CODE_TTL, NOT_PAIRED, RECONNECT, UNCONFIRMED};
 use crate::session::now_millis as now;
 use crate::daemon::Daemon;
@@ -522,6 +522,13 @@ async fn pair(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>,
     if peer.via_relay() && !peer.secure_origin {
         return;
     }
+    // The code is for one page, the one the desktop issued it for: from anywhere else it is a failed attempt, and stays live for that page.
+    let Some(page) = m.code_page(&psk) else { return };
+    if !code_fits(&page, &peer, m.relay_v2()) {
+        failed(&daemon, peer.ip());
+        close(&mut ws, BAD_CODE, "page").await;
+        return;
+    }
     // Kelpie is short of CPU or memory: one handshake at a time, spaced out. The code is not spent, and it says so: the phone
     // proved it holds the code.
     if m.pairing_paced() {
@@ -559,7 +566,7 @@ async fn pair(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>,
     // Single use: spent now, whatever happens next. Another connection may have spent it a moment ago.
     let spent = m.spend_code(&psk);
     m.relay_pair_spent(&psk);
-    let Some(kind) = spent else {
+    let Some((kind, page)) = spent else {
         wire.send(&json!({"type": "declined", "reason": "code"}).to_string()).await;
         wire.close(1000, "").await;
         return;
@@ -571,8 +578,9 @@ async fn pair(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>,
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     let fingerprint = super::fingerprint(&remote);
-    m.add_pending(&id, &name, kind, remote, wire.session().pair_code(), want, peer.ip(), peer.secure_origin, tx);
-    daemon.broadcast("mobile.pair_request", json!({"id": id, "name": name, "kind": kind.name(), "fingerprint": fingerprint, "want": want.name(), "address": listen::shown(peer.ip())}));
+    let origin_kind = page.kind.name();
+    m.add_pending(&id, &name, kind, remote, wire.session().pair_code(), want, peer.ip(), peer.secure_origin, page, tx);
+    daemon.broadcast("mobile.pair_request", json!({"id": id, "name": name, "kind": kind.name(), "fingerprint": fingerprint, "want": want.name(), "address": listen::shown(peer.ip()), "origin_kind": origin_kind}));
     // The person types the phone's code on the desktop. Meanwhile the phone may only wait (or go away).
     let decision = tokio::select! {
         biased;
@@ -595,6 +603,30 @@ async fn pair(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generation>,
     wire.send(&told.to_string()).await;
     wire.close(1000, "").await;
 }
+/// Whether a phone may pair with a code issued for `page`, coming as `peer`. Over the relay its page must be the code's (the relay names it, from the
+/// origins this computer registered: `relay::on_control`), and the hosted app's only on a relay that takes several origins; directly on `/link`, a code for
+/// the hosted app is never used, as that page reaches this computer only through the relay.
+pub(super) fn code_fits(page: &super::PageOrigin, peer: &Peer, relay_v2: bool) -> bool {
+    let hosted = page.kind == PageKind::Hosted;
+    if peer.via_relay() {
+        peer.origin.as_deref() == Some(page.origin.as_str()) && (!hosted || relay_v2)
+    } else {
+        !hosted
+    }
+}
+
+/// The page a device's connection through the relay goes by, or None when it may not come from where it does (`came`, the origin the relay named). A
+/// device that recorded its page comes from there and nowhere else. One from before pages were recorded paired at the Tailscale origin the room lets in
+/// (`room`), and goes by it as it always did; a relay that names another origin for it is refused.
+pub(super) fn relay_page(device: &Device, came: Option<&str>, room: Option<&str>) -> Option<Option<String>> {
+    match (device.page.as_deref(), came) {
+        (Some(page), Some(came)) if page == came => Some(Some(page.to_string())),
+        (Some(_), _) => None,
+        (None, Some(came)) if Some(came) != room => None,
+        (None, _) => Some(room.map(str::to_string)),
+    }
+}
+
 /// Resolves when the phone closes its side (anything it sends meanwhile is ignored: it has nothing to say yet).
 async fn gone(ws: &mut CarrierRx) {
     while let Some(Ok(msg)) = ws.recv().await {
@@ -631,6 +663,17 @@ async fn reconnect(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generat
         close(&mut ws, RELAY_REFUSED, "relay").await;
         return;
     }
+    // And only from the page it paired on: the connection goes by that page from here on (its alerts, its passkey).
+    let mut peer = peer;
+    if peer.via_relay() {
+        let room = m.relay_live().and_then(|r| r.origin);
+        let Some(page) = relay_page(&device, peer.origin.as_deref(), room.as_deref()) else {
+            close(&mut ws, RELAY_REFUSED, "page").await;
+            return;
+        };
+        peer.secure_origin = page.is_some();
+        peer.origin = page;
+    }
     let Ok((session, reply)) = opened.accept() else { return };
     if tokio::time::timeout(HANDSHAKE, ws.send(Message::Binary(reply.into()))).await.is_err() {
         return;
@@ -663,6 +706,50 @@ async fn reconnect(daemon: Arc<Daemon>, mut ws: Carrier, generation: Arc<Generat
 mod tests {
     use super::super::relay::{Inbound, Out, Slot};
     use super::*;
+
+    const TS: &str = "https://desk.tail1234.ts.net:8443";
+    const HOSTED: &str = "https://kelpie-link-relay.example.workers.dev";
+
+    fn page(kind: PageKind, origin: &str) -> super::super::PageOrigin {
+        super::super::PageOrigin { kind, origin: origin.into() }
+    }
+
+    fn relayed(o: Option<&str>) -> Peer {
+        Peer::relayed(super::super::relay::slot_ip(1), o.map(str::to_string))
+    }
+
+    #[test]
+    fn a_code_is_used_only_from_the_page_it_was_issued_for() {
+        let hosted = page(PageKind::Hosted, HOSTED);
+        let ts = page(PageKind::Ts, TS);
+        assert!(code_fits(&hosted, &relayed(Some(HOSTED)), true));
+        assert!(!code_fits(&hosted, &relayed(Some(HOSTED)), false), "a relay of the first version never carries the hosted app");
+        assert!(!code_fits(&hosted, &relayed(Some(TS)), true), "a hosted code from the Tailscale page");
+        assert!(!code_fits(&ts, &relayed(Some(HOSTED)), true), "a Tailscale code from the hosted page");
+        assert!(code_fits(&ts, &relayed(Some(TS)), true) && code_fits(&ts, &relayed(Some(TS)), false), "as before, on either version");
+        assert!(!code_fits(&ts, &relayed(None), true));
+        let direct = Peer::direct("192.168.1.9:5000".parse().unwrap(), true);
+        assert!(!code_fits(&hosted, &direct, true), "never on this computer's own /link");
+        for kind in [PageKind::Ts, PageKind::Own, PageKind::Plain] {
+            assert!(code_fits(&page(kind, "https://192.168.1.2:4817"), &direct, false), "{kind:?} on /link as before");
+        }
+    }
+
+    #[test]
+    fn a_device_on_the_relay_goes_by_the_page_it_paired_on() {
+        let mut d = Device { id: "d".into(), name: "n".into(), pk: String::new(), permission: super::super::Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: true, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, verified: true };
+        // From before pages: the room's Tailscale origin, as always, and no other page the relay names.
+        assert_eq!(relay_page(&d, Some(TS), Some(TS)), Some(Some(TS.to_string())));
+        assert_eq!(relay_page(&d, None, Some(TS)), Some(Some(TS.to_string())), "a relay of the first version, or no Origin");
+        assert_eq!(relay_page(&d, Some(HOSTED), Some(TS)), None, "the hosted page is not its");
+        assert_eq!(relay_page(&d, None, None), Some(None));
+        // With its page: from there only.
+        d.page = Some(HOSTED.into());
+        d.page_kind = Some(PageKind::Hosted);
+        assert_eq!(relay_page(&d, Some(HOSTED), Some(TS)), Some(Some(HOSTED.to_string())));
+        assert_eq!(relay_page(&d, Some(TS), Some(TS)), None);
+        assert_eq!(relay_page(&d, None, Some(TS)), None);
+    }
 
     /// The daemon's session and the phone's, after a reconnect handshake.
     fn sessions() -> (kelpie_link::Session, kelpie_link::Session) {

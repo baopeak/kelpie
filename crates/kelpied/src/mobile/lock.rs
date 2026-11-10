@@ -39,10 +39,20 @@ const RECHECK_MAX_MS: u64 = 120_000;
 pub enum LockPath {
     /// It paired on a secure origin: locked until its passkey passes, whatever carries it.
     Passkey,
+    /// It paired on the app the relay hosts: as `Passkey`, and also while the lock is off, since whoever deploys that page could change it and the passkey is
+    /// what keeps a changed page to the moments the person has the app unlocked.
+    PasskeyAlways,
     /// It never had a secure origin, and comes over the network: reading at most.
     Plain,
     /// It never had a secure origin, and comes from this machine over plain HTTP.
     Local,
+}
+
+impl LockPath {
+    /// The passkey is what opens it.
+    pub fn passkey(self) -> bool {
+        matches!(self, LockPath::Passkey | LockPath::PasskeyAlways)
+    }
 }
 
 /// What may pass right now.
@@ -125,7 +135,9 @@ impl Mobile {
 
     /// Which lock a connection of `device` goes by.
     pub(super) fn lock_path(&self, device: &Device, peer: &Peer) -> LockPath {
-        if device.secure_origin || device.lock.is_some() {
+        if device.page_kind == Some(store::PageKind::Hosted) {
+            LockPath::PasskeyAlways
+        } else if device.secure_origin || device.lock.is_some() {
             LockPath::Passkey
         } else if !peer.through_serve && !peer.tls && self.this_machine(peer.ip()) {
             LockPath::Local
@@ -140,14 +152,14 @@ impl Mobile {
             let o = self.lock_memory.options.lock();
             (o.on, o.plain_read)
         };
-        if !on {
+        if !on && path != LockPath::PasskeyAlways {
             return Gate::Open;
         }
         match path {
             LockPath::Local => Gate::Open,
             LockPath::Plain if plain_read => Gate::ReadOnly,
             LockPath::Plain => Gate::Locked,
-            LockPath::Passkey => {
+            LockPath::Passkey | LockPath::PasskeyAlways => {
                 if self.lock_memory.unlocked.lock().get(device).is_some_and(|w| w.until > Instant::now() && resume.is_some_and(|r| same(r, &w.resume))) {
                     Gate::Open
                 } else {
@@ -163,9 +175,9 @@ impl Mobile {
     pub(super) fn lock_state(&self, device: &str, path: LockPath, gate: Gate, page: Option<&str>) -> &'static str {
         match gate {
             Gate::ReadOnly => "read_only",
-            Gate::Open if path == LockPath::Passkey && self.lock_memory.options.lock().on => "open",
+            Gate::Open if path == LockPath::PasskeyAlways || (path == LockPath::Passkey && self.lock_memory.options.lock().on) => "open",
             Gate::Open => "none",
-            Gate::Locked if path != LockPath::Passkey => "closed",
+            Gate::Locked if !path.passkey() => "closed",
             Gate::Locked => {
                 // The key as it was read when the record was checked: this runs on the connection's task, which does not wait on a credential store. A verified record means it was read.
                 let key = *self.mac_key.lock();
@@ -251,7 +263,9 @@ impl Mobile {
 
     /// Takes a new passkey for `device`, whose page is at `page`, and gives the new window's secret. Blocking: it saves the store, and what cannot be saved is not taken.
     pub(super) fn lock_enrol(&self, device: &str, req: &Value, page: Option<&str>) -> Result<String, Refusal> {
-        if !self.lock_memory.options.lock().on {
+        // A phone on the hosted app has its passkey asked for whatever the switch says, so it may set one up with the switch off too.
+        let always = self.config.lock().devices.iter().any(|d| d.id == device && d.page_kind == Some(store::PageKind::Hosted));
+        if !self.lock_memory.options.lock().on && !always {
             return Err(refuse("lock_off", "The app lock is off on this computer."));
         }
         let origin = page.filter(|p| webauthn::rp_id(p).is_some()).ok_or_else(|| refuse("insecure", "A passkey needs an HTTPS address with a name: open Kelpie through Tailscale."))?;

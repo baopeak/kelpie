@@ -48,6 +48,28 @@ impl Kind {
     }
 }
 
+/// Which page a device paired on, as the pairing code the desktop issued says (never as a relay says): this computer's Tailscale origin (`ts`), its own
+/// HTTPS listener (`own`), the app hosted at the relay's own origin (`hosted`), or a page over plain HTTP (`plain`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PageKind {
+    Ts,
+    Own,
+    Hosted,
+    Plain,
+}
+
+impl PageKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            PageKind::Ts => "ts",
+            PageKind::Own => "own",
+            PageKind::Hosted => "hosted",
+            PageKind::Plain => "plain",
+        }
+    }
+}
+
 /// Where this phone gets its alerts: what its browser gave when it subscribed. Its secret (`auth`) is in the credential store.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PushSub {
@@ -140,6 +162,16 @@ pub struct Device {
     /// still verifies for an older Kelpie, which ignores both, and setting the flag in the file does not verify anywhere.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub secure_mac: String,
+    /// The origin of the page it paired on, and what kind of page that is, from the code it paired with: what the relay must say it comes from, where its
+    /// alerts and passkey belong, and what it may be raised to. None: paired before this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_kind: Option<PageKind>,
+    /// HMAC-SHA256 (hex) over `page` and `page_kind`, a tag of its own as `secure_mac` is: an older Kelpie ignores all three and the record still verifies there,
+    /// and here a page edited, added or half removed in the file does not verify.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub page_mac: String,
     /// Alerts on this phone, with its own tag: a record paired here still verifies for an older Kelpie, which ignores this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push: Option<PushSub>,
@@ -197,6 +229,23 @@ pub struct Store {
     /// The relay (`relay`). `None`: never turned on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelaySettings>,
+    /// Listeners on this network's addresses. `None`: a store from before the choice, which has them, as it always did. Not sealed: turning them off in the
+    /// file only closes a port, and turning them on is what an older store does anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan: Option<bool>,
+}
+
+impl Store {
+    /// Whether this network's listeners are wanted.
+    pub fn lan_on(&self) -> bool {
+        self.lan != Some(false)
+    }
+
+    /// Nothing in it that a person set up: no phone, no relay, no Tailscale mode, no certificate, no chosen address, no choice about this network's listeners.
+    /// Phone access may have been turned on and off: with nothing paired, that is nothing anyone relies on.
+    pub fn is_new(&self) -> bool {
+        !self.enabled && self.devices.is_empty() && self.legacy.is_empty() && self.relay.is_none() && !self.tailscale && self.cert.is_none() && self.key.is_none() && self.ip.is_none() && self.lan.is_none()
+    }
 }
 
 /// The relay: where it is, this computer's room there, the page origin phones come from, and the tokens phones were given for it. Sealed with the device key: a
@@ -327,6 +376,16 @@ fn secure_input(d: &Device) -> Vec<u8> {
     out
 }
 
+/// What `page_mac` covers: this record and no other, and the page as it paired.
+fn page_input(d: &Device) -> Vec<u8> {
+    let mut out = b"kelpie-device-page/1".to_vec();
+    for field in [d.mac.as_str(), d.page.as_deref().unwrap_or(""), d.page_kind.map_or("", PageKind::name)] {
+        out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
 /// What a subscription's `mac` covers: this record and no other, and what it was told to do.
 fn push_input(d: &Device, p: &PushSub) -> Vec<u8> {
     let mut out = b"kelpie-device-push/1".to_vec();
@@ -428,15 +487,24 @@ fn tag_holds(key: &[u8; 32], input: &[u8], hex_tag: &str) -> bool {
 pub fn seal(d: &mut Device, key: &[u8; 32]) {
     d.mac = tag(key, &mac_input(d));
     d.secure_mac = if d.secure_origin { tag(key, &secure_input(d)) } else { String::new() };
+    d.page_mac = if has_page(d) { tag(key, &page_input(d)) } else { String::new() };
     if let Some(mac) = d.push.as_ref().map(|p| tag(key, &push_input(d, p))) {
         d.push.as_mut().expect("just read").mac = mac;
     }
     d.verified = true;
 }
 
-/// Whether the record is as it was sealed with `key` (constant time). A record that says it paired on a secure origin must prove that too.
+/// Whether the record names any part of a page.
+fn has_page(d: &Device) -> bool {
+    d.page.is_some() || d.page_kind.is_some() || !d.page_mac.is_empty()
+}
+
+/// Whether the record is as it was sealed with `key` (constant time). A record that says it paired on a secure origin must prove that too, and so must one
+/// that names its page, which then names both its origin and its kind.
 pub fn verify(d: &Device, key: &[u8; 32]) -> bool {
-    tag_holds(key, &mac_input(d), &d.mac) && (!d.secure_origin || tag_holds(key, &secure_input(d), &d.secure_mac))
+    tag_holds(key, &mac_input(d), &d.mac)
+        && (!d.secure_origin || tag_holds(key, &secure_input(d), &d.secure_mac))
+        && (!has_page(d) || (d.page.is_some() && d.page_kind.is_some() && tag_holds(key, &page_input(d), &d.page_mac)))
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
@@ -457,9 +525,111 @@ mod tests {
     }
 
     fn device(key: &[u8; 32]) -> Device {
-        let mut d = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), push: None, lock: None, verified: false };
+        let mut d = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, verified: false };
         seal(&mut d, key);
         d
+    }
+
+    const HOSTED: &str = "https://kelpie-link-relay.example.workers.dev";
+
+    fn hosted_device(key: &[u8; 32]) -> Device {
+        let mut d = device(key);
+        d.secure_origin = true;
+        d.page = Some(HOSTED.into());
+        d.page_kind = Some(PageKind::Hosted);
+        seal(&mut d, key);
+        d
+    }
+
+    #[test]
+    fn a_page_is_kept_with_its_own_tag_and_cannot_be_edited_in_the_file() {
+        let key = [3u8; 32];
+        let d = hosted_device(&key);
+        assert!(verify(&d, &key));
+        assert!(!d.page_mac.is_empty());
+        let back: Device = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!((back.page.as_deref(), back.page_kind), (Some(HOSTED), Some(PageKind::Hosted)));
+        assert!(verify(&back, &key), "read back, it still verifies");
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["page_kind"], "hosted");
+
+        let edits: [fn(&mut Device); 6] = [
+            |d| d.page = Some("https://desk.tail1234.ts.net:8443".into()),
+            |d| d.page_kind = Some(PageKind::Ts),
+            |d| d.page = None,
+            |d| d.page_kind = None,
+            |d| d.page_mac = String::new(),
+            |d| d.page_mac = "00".repeat(32),
+        ];
+        for (i, edit) in edits.into_iter().enumerate() {
+            let mut edited = d.clone();
+            edit(&mut edited);
+            assert!(!verify(&edited, &key), "edit {i}");
+        }
+        // Another record's tag, or one added to a record paired without a page.
+        let mut other = device(&key);
+        other.id = "d2".into();
+        seal(&mut other, &key);
+        other.page = d.page.clone();
+        other.page_kind = d.page_kind;
+        other.page_mac = d.page_mac.clone();
+        assert!(!verify(&other, &key), "another record's tag");
+        let mut claimed = device(&key);
+        claimed.page = Some(HOSTED.into());
+        claimed.page_kind = Some(PageKind::Hosted);
+        assert!(!verify(&claimed, &key), "a page added in the file");
+        // A raised permission re-seals the record and keeps its page.
+        let mut raised = d.clone();
+        raised.permission = Permission::Write;
+        seal(&mut raised, &key);
+        assert!(verify(&raised, &key) && raised.page.as_deref() == Some(HOSTED));
+    }
+
+    #[test]
+    fn an_older_kelpie_reads_a_record_with_a_page_and_a_record_without_one_is_as_before() {
+        let key = [3u8; 32];
+        let d = hosted_device(&key);
+        // What an older Kelpie checks: the record's own tag and `secure_mac`, over fields it knows; the page's three fields it never reads.
+        let mut older = serde_json::to_value(&d).unwrap();
+        let o = older.as_object_mut().unwrap();
+        for unknown in ["page", "page_kind", "page_mac"] {
+            assert!(o.remove(unknown).is_some(), "{unknown} is written");
+        }
+        let older: Device = serde_json::from_value(older).unwrap();
+        assert!(tag_holds(&key, &mac_input(&older), &older.mac) && tag_holds(&key, &secure_input(&older), &older.secure_mac), "the record holds for an older reader");
+        assert_eq!(older.mac, d.mac, "the page changes nothing an older Kelpie checks");
+        // Here, with the page stripped, it is a record from before pages: it verifies, and nothing of a page is assumed.
+        assert!(verify(&older, &key));
+        assert!(older.page.is_none() && older.page_kind.is_none());
+        // A record written before the fields exist.
+        let plain = device(&key);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("page"), "{json}");
+        assert!(verify(&serde_json::from_str::<Device>(&json).unwrap(), &key));
+    }
+
+    #[test]
+    fn a_store_is_new_only_while_nothing_in_it_was_set_up() {
+        let fresh: Store = serde_json::from_str(r#"{"version":2}"#).unwrap();
+        assert!(fresh.is_new() && fresh.lan_on(), "a store from before the choice has this network's listeners");
+        let set: [fn(&mut Store); 8] = [
+            |s| s.enabled = true,
+            |s| s.relay = Some(RelaySettings::default()),
+            |s| s.tailscale = true,
+            |s| s.cert = Some("c.pem".into()),
+            |s| s.ip = Some("192.168.1.5".into()),
+            |s| s.lan = Some(true),
+            |s| s.lan = Some(false),
+            |s| s.legacy.push(LegacyDevice { id: "x".into(), name: "Old".into(), created_at: 0 }),
+        ];
+        for (i, change) in set.into_iter().enumerate() {
+            let mut s: Store = serde_json::from_str(r#"{"version":2}"#).unwrap();
+            change(&mut s);
+            assert!(!s.is_new(), "change {i}");
+        }
+        let off: Store = serde_json::from_str(r#"{"version":2,"lan":false}"#).unwrap();
+        assert!(!off.lan_on());
+        assert!(!serde_json::to_string(&fresh).unwrap().contains("lan"), "nothing written for a store that never chose");
     }
 
     #[test]

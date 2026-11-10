@@ -18,6 +18,8 @@ struct FakeRelay {
     url: String,
     accepted: mpsc::Receiver<(String, RelaySocket)>,
     refuse: Arc<std::sync::atomic::AtomicBool>,
+    /// The protocol it names in its answer to a desktop (none: a relay of the first version, which names nothing).
+    version: Arc<Mutex<Option<&'static str>>>,
 }
 
 // The handshake callback's error type is tungstenite's own.
@@ -28,18 +30,24 @@ async fn fake_relay() -> FakeRelay {
     let (tx, accepted) = mpsc::channel(4);
     let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let refusing = refuse.clone();
+    let version: Arc<Mutex<Option<&'static str>>> = Arc::new(Mutex::new(None));
+    let naming = version.clone();
     tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {
             let asked = Arc::new(Mutex::new(String::new()));
             let seen = asked.clone();
             let refusing = refusing.clone();
-            let callback = move |req: &Request, resp: Handshake| -> std::result::Result<Handshake, ErrorResponse> {
+            let naming = *naming.lock();
+            let callback = move |req: &Request, mut resp: Handshake| -> std::result::Result<Handshake, ErrorResponse> {
                 if refusing.load(Ordering::SeqCst) {
                     let mut no = ErrorResponse::new(None);
                     *no.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::SERVICE_UNAVAILABLE;
                     return Err(no);
                 }
                 *seen.lock() = req.uri().to_string();
+                if let Some(v) = naming {
+                    resp.headers_mut().insert("x-kelpie-relay-version", v.parse().unwrap());
+                }
                 Ok(resp)
             };
             if let Ok(ws) = tokio_tungstenite::accept_hdr_async(tcp, callback).await {
@@ -48,7 +56,14 @@ async fn fake_relay() -> FakeRelay {
             }
         }
     });
-    FakeRelay { url, accepted, refuse }
+    FakeRelay { url, accepted, refuse, version }
+}
+
+/// A stand-in relay of the second version: it names its version, and so hears `origins` and names a phone's `o`.
+async fn fake_relay_v2() -> FakeRelay {
+    let fake = fake_relay().await;
+    *fake.version.lock() = Some("2");
+    fake
 }
 
 fn room_key() -> p256::ecdsa::SigningKey {
@@ -96,7 +111,16 @@ async fn next_text(ws: &mut RelaySocket) -> Value {
 }
 
 async fn open_slot(ws: &mut RelaySocket, slot: u16) {
-    ws.send(WsMessage::text(json!({"t": "open", "s": slot, "via": "token"}).to_string())).await.unwrap();
+    open_slot_from(ws, slot, None).await;
+}
+
+/// Opens `slot` as a relay of the second version does, naming the phone's page (`o`) when it has one.
+async fn open_slot_from(ws: &mut RelaySocket, slot: u16, o: Option<&str>) {
+    let mut open = json!({"t": "open", "s": slot, "via": "token"});
+    if let Some(o) = o {
+        open["o"] = json!(o);
+    }
+    ws.send(WsMessage::text(open.to_string())).await.unwrap();
 }
 
 async fn to_slot(ws: &mut RelaySocket, slot: u16, bytes: &[u8]) {
@@ -130,7 +154,12 @@ async fn for_slot(ws: &mut RelaySocket, slot: u16, others: &mut Vec<Value>) -> O
 
 /// A reconnect through the relay: the session, or the code the slot was closed with.
 async fn reconnect(ws: &mut RelaySocket, slot: u16, keys: &kelpie_link::Keypair, desktop: &[u8; 32], others: &mut Vec<Value>) -> std::result::Result<kelpie_link::Session, u16> {
-    open_slot(ws, slot).await;
+    reconnect_from(ws, slot, keys, desktop, others, None).await
+}
+
+/// As `reconnect`, from page `o`.
+async fn reconnect_from(ws: &mut RelaySocket, slot: u16, keys: &kelpie_link::Keypair, desktop: &[u8; 32], others: &mut Vec<Value>, o: Option<&str>) -> std::result::Result<kelpie_link::Session, u16> {
+    open_slot_from(ws, slot, o).await;
     let (init, first) = kelpie_link::Initiator::reconnect(keys, desktop).unwrap();
     to_slot(ws, slot, &first).await;
     match for_slot(ws, slot, others).await {
@@ -495,4 +524,406 @@ async fn a_phone_whose_other_route_won_is_no_failed_attempt_and_a_silent_one_sti
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(failures(&d), 1);
+}
+
+// ---------- the hosted app ----------
+
+const DAY: u64 = 24 * 3600 * 1000;
+
+/// Nothing more comes on the relay's socket for a while.
+async fn quiet(ws: &mut RelaySocket) -> bool {
+    loop {
+        match tokio::time::timeout(Duration::from_millis(600), ws.next()).await {
+            Err(_) => return true,
+            Ok(Some(Ok(WsMessage::Text(t)))) if t.as_str() == "ping" => {}
+            Ok(_) => return false,
+        }
+    }
+}
+
+/// A phone pairing with `psk` through `slot`, from page `o`, up to the desktop being asked: its session, or the code its slot was closed with.
+async fn pair_through(ws: &mut RelaySocket, slot: u16, keys: &kelpie_link::Keypair, desktop: &[u8; 32], psk: &[u8; 32], o: Option<&str>, others: &mut Vec<Value>) -> std::result::Result<kelpie_link::Session, u16> {
+    open_slot_from(ws, slot, o).await;
+    let (init, first) = kelpie_link::Initiator::pair(keys, desktop, psk).unwrap();
+    to_slot(ws, slot, &first).await;
+    match for_slot(ws, slot, others).await {
+        Some(ForSlot::Frame(reply)) => {
+            let mut session = init.finish(&reply).unwrap();
+            say(ws, slot, &mut session, json!({"type": "pair", "name": "Hosted phone"})).await;
+            Ok(session)
+        }
+        Some(ForSlot::Kick(code)) => Err(code),
+        None => Err(0),
+    }
+}
+
+/// The relay of the second version on, its first words heard, and the hosted app found serving: the socket and the hosted origin, which the room was told of.
+async fn hosted_relay(fake: &mut FakeRelay) -> (NetworkRig, RelaySocket, String) {
+    let network = relay_rig(fake, true, true).await;
+    let (_, mut ws) = desktop_socket(fake).await;
+    assert_eq!(next_text(&mut ws).await["t"], "allow");
+    assert_eq!(next_text(&mut ws).await, json!({"t": "origins", "o": [ORIGIN]}));
+    let hosted = network.rig.daemon.mobile.hosted_found_for_test();
+    assert_eq!(next_text(&mut ws).await, json!({"t": "origins", "o": [ORIGIN, hosted]}));
+    (network, ws, hosted)
+}
+
+/// The rig's phone as one paired on the hosted app at `hosted`.
+fn make_hosted(d: &Daemon, hosted: &str) {
+    let key = d.mobile.mac_key(true).unwrap().unwrap();
+    let mut c = d.mobile.config.lock();
+    let phone = c.devices.iter_mut().find(|x| x.id == "phone").unwrap();
+    phone.kind = Kind::Pwa;
+    phone.secure_origin = true;
+    phone.page = Some(hosted.into());
+    phone.page_kind = Some(PageKind::Hosted);
+    store::seal(phone, &key);
+}
+
+/// A subscription a page at `origin` gives, as request `req`.
+fn subscription_from(origin: &str, req: u64) -> Value {
+    let mut sub = subscription(ENDPOINT);
+    sub["origin"] = json!(origin);
+    sub["req"] = json!(req);
+    sub
+}
+
+/// Says `req` on `slot` and waits for the reply to it.
+async fn ask_slot(ws: &mut RelaySocket, slot: u16, session: &mut kelpie_link::Session, others: &mut Vec<Value>, req: Value) -> Value {
+    say(ws, slot, session, req.clone()).await;
+    loop {
+        let v = hear(ws, slot, session, others).await.unwrap();
+        if v["req"] == req["req"] {
+            return v;
+        }
+    }
+}
+
+fn psk_of(made: &Value) -> [u8; 32] {
+    kelpie_link::QrPayload::decode(made["url"].as_str().unwrap().split("#p=").nth(1).unwrap()).unwrap().psk
+}
+
+#[tokio::test]
+async fn a_relay_of_the_second_version_hears_every_page_it_lets_in_and_never_the_single_origin() {
+    let mut fake = fake_relay_v2().await;
+    let (network, mut ws, hosted) = hosted_relay(&mut fake).await;
+    let m = &network.rig.daemon.mobile;
+    assert!(m.relay_v2());
+    assert_eq!(m.relay_status()["version"], 2);
+    m.relay_note_origin();
+    assert!(quiet(&mut ws).await, "nothing new, nothing said");
+    // Again after a drop: the whole list at once, and never `origin`.
+    drop(ws);
+    let (_, mut ws) = desktop_socket(&mut fake).await;
+    assert_eq!(next_text(&mut ws).await["t"], "allow");
+    assert_eq!(next_text(&mut ws).await, json!({"t": "origins", "o": [ORIGIN, hosted]}));
+    assert!(quiet(&mut ws).await);
+}
+
+#[tokio::test]
+async fn a_relay_of_the_first_version_is_told_one_origin_and_never_of_the_hosted_app() {
+    let mut fake = fake_relay().await;
+    let network = relay_rig(&fake, true, true).await;
+    let (_, mut ws) = desktop_socket(&mut fake).await;
+    assert_eq!(next_text(&mut ws).await["t"], "allow");
+    assert_eq!(next_text(&mut ws).await, json!({"t": "origin", "o": ORIGIN}));
+    let m = &network.rig.daemon.mobile;
+    assert!(!m.relay_v2());
+    assert_eq!(m.relay_status()["version"], 1);
+    let hosted = m.hosted_found_for_test();
+    assert!(quiet(&mut ws).await, "no `origins`: an older relay closes the socket on it");
+    let refused = m.pair_start_hosted().unwrap_err().to_string();
+    assert!(refused.contains("older version"), "{refused}");
+    assert_eq!(m.relay_status()["hosted"]["available"], false);
+    // A hosted code that exists all the same: its phone cannot pair through this relay, and the code stays.
+    let psk = [5u8; 32];
+    m.new_code(psk, Kind::Pwa, PageOrigin { kind: PageKind::Hosted, origin: hosted });
+    let desktop = m.link_key().unwrap().public;
+    let refused = pair_through(&mut ws, 3, &kelpie_link::Keypair::generate().unwrap(), &desktop, &psk, None, &mut Vec::new()).await;
+    assert_eq!(refused.err(), Some(link::BAD_CODE));
+    assert_eq!(m.code_page(&psk).map(|p| p.kind), Some(PageKind::Hosted), "not spent");
+}
+
+#[tokio::test]
+async fn a_hosted_code_pairs_only_from_the_hosted_page_and_the_record_keeps_that_page() {
+    let mut fake = fake_relay_v2().await;
+    let (network, mut ws, hosted) = hosted_relay(&mut fake).await;
+    let d = network.rig.daemon.clone();
+    let m = &d.mobile;
+    let made = m.pair_start_hosted().unwrap();
+    assert_eq!((made["hosted"].as_bool(), made["relay"].as_bool(), made["tailscale"].as_bool()), (Some(true), Some(true), Some(false)));
+    let url = made["url"].as_str().unwrap();
+    assert!(url.starts_with(&format!("{hosted}/#p=")), "{url}");
+    let payload = kelpie_link::QrPayload::decode(url.split("#p=").nth(1).unwrap()).unwrap();
+    assert_eq!(payload.endpoints.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["relay"], "the relay only: a hosted page can use nothing else");
+    let psk = payload.psk;
+    let mut others = Vec::new();
+    let desktop = m.link_key().unwrap().public;
+    // From the Tailscale page: a failed attempt, and the code stays for the right page.
+    let refused = pair_through(&mut ws, 1, &kelpie_link::Keypair::generate().unwrap(), &desktop, &psk, Some(ORIGIN), &mut others).await;
+    assert_eq!(refused.err(), Some(link::BAD_CODE));
+    assert!(m.code_page(&psk).is_some(), "not spent");
+    assert_eq!(m.failures.lock().get(&relay_side::slot_ip(1)).map_or(0, VecDeque::len), 1, "counted as a failed attempt");
+    // A Tailscale code through the hosted page: refused, and kept likewise.
+    let ts_psk = psk_of(&m.pair_start(false).unwrap());
+    assert_eq!(m.code_page(&ts_psk).map(|p| (p.kind, p.origin)), Some((PageKind::Ts, ORIGIN.to_string())));
+    let refused = pair_through(&mut ws, 2, &kelpie_link::Keypair::generate().unwrap(), &desktop, &ts_psk, Some(&hosted), &mut others).await;
+    assert_eq!(refused.err(), Some(link::BAD_CODE));
+    assert!(m.code_page(&ts_psk).is_some());
+    // From the hosted page: the person is asked, and sees where it pairs.
+    let keys = kelpie_link::Keypair::generate().unwrap();
+    let mut session = pair_through(&mut ws, 3, &keys, &desktop, &psk, Some(&hosted), &mut others).await.unwrap();
+    let id = pending_request(&d).await;
+    assert_eq!(m.status(true)["pending"][0]["origin_kind"], "hosted");
+    assert!(m.code_page(&psk).is_none(), "spent");
+    m.approve(&json!({"id": id, "allow": true, "code": session.pair_code(), "permission": "write"})).unwrap();
+    let paired = hear(&mut ws, 3, &mut session, &mut others).await.unwrap();
+    assert_eq!(paired["type"], "paired", "{paired}");
+    assert!(paired["relay"]["expires"].as_u64().unwrap().abs_diff(now_millis() + 90 * DAY) < 60_000, "a hosted phone's token lives as long as an unused phone stays paired");
+    let device = m.config.lock().devices.iter().find(|x| x.pk == kelpie_link::b64(&keys.public)).unwrap().clone();
+    assert_eq!((device.page.as_deref(), device.page_kind, device.secure_origin), (Some(hosted.as_str()), Some(PageKind::Hosted), true));
+    assert!(store::verify(&device, &m.mac_key(false).unwrap().unwrap()));
+    let status = m.status(true);
+    assert_eq!(status["relay"]["hosted_devices"], 1);
+    let listed = status["devices"].as_array().unwrap().iter().find(|x| x["id"] == device.id.as_str()).unwrap().clone();
+    assert_eq!((listed["page_kind"].as_str(), listed["may_control"].as_bool()), (Some("hosted"), Some(false)));
+}
+
+#[tokio::test]
+async fn a_hosted_code_is_refused_on_this_computers_own_link_and_stays_live() {
+    let network = NetworkRig::new().await;
+    let d = network.rig.daemon.clone();
+    let psk = [9u8; 32];
+    d.mobile.new_code(psk, Kind::Pwa, PageOrigin { kind: PageKind::Hosted, origin: "https://relay.example".into() });
+    let mut phone = network.socket_as(kelpie_link::Keypair::generate().unwrap(), true).await;
+    assert!(start_pairing(&mut phone, &psk, "Pixel").await.is_none());
+    assert_eq!(phone.closed, Some(link::BAD_CODE));
+    assert!(d.mobile.code_page(&psk).is_some(), "not spent");
+    assert!(d.mobile.pending.lock().is_empty());
+    // A code for this network's page pairs here as before, and the record says so.
+    let made = d.mobile.pair_start(false).unwrap();
+    assert_eq!(made["hosted"], false);
+    assert_eq!(d.mobile.code_page(&psk_of(&made)).map(|p| p.kind), Some(PageKind::Plain));
+}
+
+#[tokio::test]
+async fn a_hosted_phone_comes_only_from_its_page_and_its_alerts_lead_there() {
+    let mut fake = fake_relay_v2().await;
+    let (network, mut ws, hosted) = hosted_relay(&mut fake).await;
+    let d = network.rig.daemon.clone();
+    make_hosted(&d, &hosted);
+    let desktop = d.mobile.link_key().unwrap().public;
+    let phone = network.rig.phone.clone();
+    let mut others = Vec::new();
+    assert_eq!(reconnect_from(&mut ws, 1, &phone, &desktop, &mut others, Some(ORIGIN)).await.err(), Some(link::RELAY_REFUSED), "from the Tailscale page");
+    assert_eq!(reconnect_from(&mut ws, 2, &phone, &desktop, &mut others, None).await.err(), Some(link::RELAY_REFUSED), "from no page");
+    // From its page, unlocked: alerts may lead to that page, and to no other.
+    let resume = d.mobile.open_window_for_test("phone");
+    let mut session = reconnect_from(&mut ws, 3, &phone, &desktop, &mut others, Some(&hosted)).await.unwrap();
+    say(&mut ws, 3, &mut session, json!({"caps": ["ack", "hb", "relay"], "resume": resume})).await;
+    let hello = hear(&mut ws, 3, &mut session, &mut others).await.unwrap();
+    assert_eq!((hello["type"].as_str(), hello["locked"].as_bool(), hello["device"]["permission"].as_str()), (Some("hello"), Some(false), Some("write")), "{hello}");
+    let refused = ask_slot(&mut ws, 3, &mut session, &mut others, subscription_from(ORIGIN, 1)).await;
+    assert_eq!(refused["code"], "bad_origin", "the Tailscale page is not where this phone is: {refused}");
+    let taken = ask_slot(&mut ws, 3, &mut session, &mut others, subscription_from(&hosted, 2)).await;
+    assert_eq!(taken["result"], "ok", "{taken}");
+    assert_eq!(d.mobile.config.lock().devices.iter().find(|x| x.id == "phone").unwrap().push.as_ref().unwrap().origin.as_deref(), Some(hosted.as_str()));
+}
+
+#[tokio::test]
+async fn a_phone_paired_before_pages_comes_through_the_relay_only_from_the_tailscale_page() {
+    let mut fake = fake_relay_v2().await;
+    let (network, mut ws, hosted) = hosted_relay(&mut fake).await;
+    let desktop = network.rig.daemon.mobile.link_key().unwrap().public;
+    let phone = network.rig.phone.clone();
+    let mut others = Vec::new();
+    // A hosted phone whose page was taken out of the file reads as one from before pages, and the hosted page is not its.
+    assert_eq!(reconnect_from(&mut ws, 1, &phone, &desktop, &mut others, Some(&hosted)).await.err(), Some(link::RELAY_REFUSED));
+    let mut session = reconnect_from(&mut ws, 2, &phone, &desktop, &mut others, Some(ORIGIN)).await.unwrap();
+    say(&mut ws, 2, &mut session, json!({"caps": ["ack", "hb", "relay"]})).await;
+    assert_eq!(hear(&mut ws, 2, &mut session, &mut others).await.unwrap()["type"], "hello");
+}
+
+#[tokio::test]
+async fn a_hosted_record_edited_in_the_file_is_refused_on_the_relay() {
+    let mut fake = fake_relay_v2().await;
+    let (network, mut ws, hosted) = hosted_relay(&mut fake).await;
+    let d = network.rig.daemon.clone();
+    make_hosted(&d, &hosted);
+    {
+        let mut c = d.mobile.config.lock();
+        let phone = c.devices.iter_mut().find(|x| x.id == "phone").unwrap();
+        phone.page_kind = Some(PageKind::Ts);
+        phone.verified = false;
+    }
+    let desktop = d.mobile.link_key().unwrap().public;
+    let refused = reconnect_from(&mut ws, 1, &network.rig.phone, &desktop, &mut Vec::new(), Some(&hosted)).await.err();
+    assert_eq!(refused, Some(UNCONFIRMED), "a record that does not verify reaches nothing");
+}
+
+// ---------- making a room, and the hosted page, against a stand-in on this machine ----------
+
+/// An HTTP server on this machine that answers every request with `answer`, and keeps each request's head.
+fn http_server(answer: String) -> (String, Arc<Mutex<Vec<String>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    std::thread::spawn(move || {
+        for tcp in listener.incoming() {
+            let Ok(mut tcp) = tcp else { return };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && tcp.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head).to_string();
+            let length = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok())).unwrap_or(0);
+            let mut body = vec![0; length];
+            let _ = tcp.read_exact(&mut body);
+            seen.lock().push(head);
+            let _ = tcp.write_all(answer.as_bytes());
+        }
+    });
+    (addr, asked)
+}
+
+fn http_answer(status: &str, headers: &str, body: &str) -> String {
+    format!("HTTP/1.1 {status}\r\n{headers}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+}
+
+fn room_made() -> String {
+    http_answer("201 Created", "", &json!({"room": ROOM, "ticket": format!("{ROOM}.t")}).to_string())
+}
+
+#[tokio::test]
+async fn a_room_is_made_with_no_key_and_a_key_goes_only_when_given_and_is_kept_only_when_taken() {
+    let network = NetworkRig::new().await;
+    let d = network.rig.daemon.clone();
+    let m = &d.mobile;
+    // No key anywhere: none is sent, and the room is made.
+    let (addr, asked) = http_server(room_made());
+    let turn_on = |url: String, key: Option<&str>| {
+        let mut params = json!({"on": true, "url": url});
+        if let Some(k) = key {
+            params["operator_key"] = json!(k);
+        }
+        relay_side::check_turn_on(m, &params).and_then(|asked| relay_side::turn_on(&d, asked))
+    };
+    turn_on(format!("ws://{addr}"), None).unwrap();
+    let head = asked.lock()[0].to_ascii_lowercase();
+    assert!(head.starts_with("post /v1/rooms") && !head.contains("authorization"), "{head}");
+    assert_eq!(m.relay_room().as_deref(), Some(ROOM));
+    assert_eq!(m.secrets.read(KEYS[1]).unwrap(), None);
+    // A key given and taken goes with the request and is kept.
+    let (addr, asked) = http_server(room_made());
+    turn_on(format!("ws://{addr}"), Some("good-key")).unwrap();
+    assert!(asked.lock()[0].to_ascii_lowercase().contains("authorization: bearer good-key"), "{:?}", asked.lock()[0]);
+    assert_eq!(m.secrets.read(KEYS[1]).unwrap().as_deref(), Some("good-key"));
+    // A key refused is not kept: the one from before stays.
+    let (addr, _) = http_server(http_answer("401 Unauthorized", "", ""));
+    let refused = turn_on(format!("ws://{addr}"), Some("bad-key")).unwrap_err().to_string();
+    assert!(refused.contains("did not take that registration key"), "{refused}");
+    assert_eq!(m.secrets.read(KEYS[1]).unwrap().as_deref(), Some("good-key"));
+    // A relay that asks for a key, asked with none.
+    m.secrets.delete(KEYS[1]).unwrap();
+    let (addr, _) = http_server(http_answer("401 Unauthorized", "", ""));
+    assert_eq!(turn_on(format!("ws://{addr}"), None).unwrap_err().to_string(), "This relay needs a registration key");
+    // The open relay's limits, in plain words.
+    for (status, reason, says) in [("429 Too Many Requests", "network", "This network made too many rooms today"), ("429 Too Many Requests", "rate", "too many rooms just now"), ("503 Service Unavailable", "full", "not taking new rooms today")] {
+        let (addr, _) = http_server(http_answer(status, &format!("x-kelpie-reason: {reason}\r\n"), ""));
+        let refused = turn_on(format!("ws://{addr}"), None).unwrap_err().to_string();
+        assert!(refused.contains(says), "{reason}: {refused}");
+    }
+}
+
+#[tokio::test]
+async fn the_hosted_page_counts_only_when_it_says_it_is_the_phone_app_of_an_api_this_daemon_has() {
+    let good = json!({"app": "kelpie-phone", "version": "0.2.0", "api_min": 34}).to_string();
+    let (addr, _) = http_server(http_answer("200 OK", "", &good));
+    assert_eq!(relay_side::probe(&format!("http://{addr}")).as_deref(), Ok("0.2.0"));
+    let newer = json!({"app": "kelpie-phone", "version": "9.0.0", "api_min": kelpie_proto::API_LEVEL + 1}).to_string();
+    let oversize = json!({"app": "kelpie-phone", "version": "0.2.0", "api_min": 34, "pad": "x".repeat(5000)}).to_string();
+    for (what, answer) in [
+        ("a redirect", http_answer("302 Found", "location: https://elsewhere.example/version.json\r\n", "")),
+        ("too long", http_answer("200 OK", "", &oversize)),
+        ("another app", http_answer("200 OK", "", &json!({"app": "something", "api_min": 1}).to_string())),
+        ("a newer API", http_answer("200 OK", "", &newer)),
+        ("no API", http_answer("200 OK", "", &json!({"app": "kelpie-phone"}).to_string())),
+        ("not JSON", http_answer("200 OK", "", "<html>")),
+        ("not there", http_answer("404 Not Found", "", "")),
+    ] {
+        let (addr, _) = http_server(answer);
+        assert!(relay_side::probe(&format!("http://{addr}")).is_err(), "{what}");
+    }
+}
+
+#[tokio::test]
+async fn the_hosted_page_is_never_looked_at_while_phone_access_is_off() {
+    // A stand-in that counts who comes, and lets them go at once.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let came = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = came.clone();
+    std::thread::spawn(move || {
+        for tcp in listener.incoming() {
+            counted.fetch_add(1, Ordering::SeqCst);
+            drop(tcp);
+        }
+    });
+    let r = rig();
+    let m = &r.daemon.mobile;
+    let key = m.mac_key(true).unwrap().unwrap();
+    let mut settings = store::RelaySettings { on: true, url: format!("ws://{addr}"), room: Some(ROOM.into()), ticket: Some(format!("{ROOM}.t")), ..Default::default() };
+    store::seal_relay(&mut settings, &key);
+    m.config.lock().relay = Some(settings);
+    m.config.lock().enabled = false;
+    relay_side::hosted_check(m);
+    relay_side::hosted_look(&r.daemon);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(came.load(Ordering::SeqCst), 0, "phone access off: nothing looks");
+    assert_eq!(m.relay_status()["hosted"]["reason"], "not checked yet");
+    m.config.lock().enabled = true;
+    relay_side::hosted_check(m);
+    let looked = came.load(Ordering::SeqCst);
+    assert!(looked >= 1, "asked, it looks");
+    relay_side::hosted_check(m);
+    assert_eq!(came.load(Ordering::SeqCst), looked, "and what it found is kept for a while");
+    let hosted = m.relay_status()["hosted"].clone();
+    assert_eq!(hosted["available"], false);
+    assert!(hosted["reason"].as_str().unwrap().contains("could not be reached"), "{hosted}");
+    assert!(hosted["install_qr"].as_str().unwrap().contains("<svg"));
+}
+
+// ---------- this network's listeners ----------
+
+#[tokio::test]
+async fn with_this_networks_listeners_off_phone_access_runs_on_the_relay_alone() {
+    // Off with nothing else to reach this computer: said so.
+    let r = rig();
+    let refused = enable(r.daemon.clone(), json!({"lan": false, "ip": "127.0.0.1", "port": 1024})).await.unwrap_err().to_string();
+    assert_eq!(refused, "Turn on the relay or Tailscale: nothing else reaches this computer");
+    assert!(r.daemon.mobile.running.lock().is_none());
+    assert_eq!(r.daemon.mobile.config.lock().lan, Some(false));
+    assert!(enable(r.daemon.clone(), json!({"lan": "no"})).await.unwrap_err().to_string().contains("true or false"));
+    // With the relay on: it starts, binds nothing here, and dials the relay.
+    let mut fake = fake_relay().await;
+    let mut network = relay_rig(&fake, true, true).await;
+    desktop_socket(&mut fake).await;
+    network.rig.daemon.mobile.config.lock().lan = Some(false);
+    network.restart().await;
+    let d = network.rig.daemon.clone();
+    let m = &d.mobile;
+    assert!(m.running.lock().as_ref().unwrap().listeners.addrs().is_empty(), "nothing listens on this network");
+    assert!(tokio::net::TcpStream::connect(network.addr).await.is_err());
+    assert!(m.relay_live().is_some() && m.relay_endpoint().is_some(), "phones are told of the relay");
+    let status = m.status(true);
+    assert_eq!((status["running"].as_bool(), status["lan"].as_bool(), status["error"].is_null()), (Some(true), Some(false), true), "{status}");
+    assert!(m.pair_start(true).unwrap_err().to_string().contains("listeners are off"));
+    // A store that never chose has them, as before.
+    m.config.lock().lan = None;
+    network.restart().await;
+    assert!(!m.running.lock().as_ref().unwrap().listeners.addrs().is_empty());
+    assert!(m.pair_start(true).is_ok());
 }

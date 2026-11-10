@@ -31,6 +31,10 @@ export const TAKEOVER_API = 28;
  *  phone offers no screen and Settings shows no screen options. */
 export const SCREEN_API = 29;
 
+/** Daemon API level that has the phone app the relay hosts (`mobile.pair_start {hosted}`, `relay.hosted` and `new_store` in `mobile.status`, `page_kind` on a
+ *  device, `origin_kind` on a pairing request, `mobile.enable {lan}`) and makes rooms with no registration key. Below it the hosted app is not offered. */
+export const HOSTED_API = 34;
+
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;
 

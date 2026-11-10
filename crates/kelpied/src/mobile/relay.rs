@@ -40,14 +40,143 @@ use super::{listen, Generation, Mobile};
 use crate::daemon::Daemon;
 use crate::session::now_millis;
 
-/// The relay this Kelpie is built to use: personal use first, so a room there needs the owner's registration key.
+/// The relay this Kelpie is built to use. It makes a room for any Kelpie, and also serves the phone app at its own origin (`hosted_origin`).
 pub const DEFAULT_URL: &str = "wss://kelpie-link-relay.baopeak.workers.dev";
-/// Credential-store keys: the room's signing key, and the registration key that makes rooms.
+/// Credential-store keys: the room's signing key, and the registration key that makes rooms at a relay that asks for one.
 const K_ROOM: &str = "mobile-relay-room-key";
 const K_OPERATOR: &str = "mobile-relay-operator-key";
 pub const KEYS: [&str; 2] = [K_ROOM, K_OPERATOR];
 const DAY_MS: u64 = 24 * 3600 * 1000;
 const TOKEN_LIFE_MS: u64 = 30 * DAY_MS;
+/// The longest a token of a phone on the hosted app lives: the relay is its only way to this computer, so it lives as long as an unused phone stays paired.
+const HOSTED_TOKEN_MAX_MS: u64 = 365 * DAY_MS;
+/// What the desktop's upgrade answer says of the relay's protocol: from 2 a room takes several origins (`origins`) and names the phone's (`o` in `open`).
+const VERSION_HEADER: &str = "x-kelpie-relay-version";
+/// The hosted page's `version.json`: how long it may take and how much of it is read, and how long what it said is believed.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const PROBE_MAX_BYTES: u64 = 4096;
+const PROBE_KEEP: Duration = Duration::from_secs(600);
+/// What `version.json` names itself as.
+const PHONE_APP: &str = "kelpie-phone";
+
+/// A test seam's value: only in a debug build, and only in an e2e run (`KELPIE_E2E`). Every caller is itself compiled into debug builds only, so a release
+/// build has no such path and not even the variables' names.
+#[cfg(debug_assertions)]
+fn test_seam(name: &str) -> Option<String> {
+    seam_value(std::env::var_os("KELPIE_E2E").is_some(), std::env::var(name).ok())
+}
+
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+fn seam_value(e2e: bool, value: Option<String>) -> Option<String> {
+    value.filter(|v| e2e && !v.trim().is_empty())
+}
+
+/// The relay turned on when none is named: `KELPIE_RELAY_TEST_URL` in an e2e run of a debug build, else `DEFAULT_URL`.
+pub fn default_url() -> String {
+    #[cfg(debug_assertions)]
+    {
+        if let Some(url) = test_seam("KELPIE_RELAY_TEST_URL") {
+            return url;
+        }
+    }
+    DEFAULT_URL.to_string()
+}
+
+/// Whether an e2e run of a debug build refuses this relay: only this machine is let, so no test reaches a real relay by mistake.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+fn e2e_refuses(e2e: bool, url: &str) -> bool {
+    if !e2e {
+        return false;
+    }
+    let host = url.parse::<axum::http::Uri>().ok().and_then(|u| u.host().map(|h| h.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase()));
+    !host.is_some_and(|h| h == "localhost" || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()))
+}
+
+/// Refuses, in an e2e run of a debug build (and in unit tests), any relay that is not on this machine.
+fn e2e_guard(url: &str) -> Result<()> {
+    #[cfg(debug_assertions)]
+    {
+        let e2e = cfg!(test) || std::env::var_os("KELPIE_E2E").is_some();
+        ensure!(!e2e_refuses(e2e, url), "an e2e run reaches no relay but one on this machine");
+    }
+    let _ = url;
+    Ok(())
+}
+
+/// The certificates a test relay's own CA adds (`KELPIE_RELAY_TEST_CA`, a PEM file), in an e2e run of a debug build.
+fn test_roots() -> Vec<rustls::pki_types::CertificateDer<'static>> {
+    #[cfg(debug_assertions)]
+    {
+        use rustls::pki_types::pem::PemObject;
+        if let Some(path) = test_seam("KELPIE_RELAY_TEST_CA") {
+            return rustls::pki_types::CertificateDer::pem_file_iter(path).map(|certs| certs.flatten().collect()).unwrap_or_default();
+        }
+    }
+    Vec::new()
+}
+
+/// The origin the relay serves the phone app at: its own, for a `wss://` relay only. A test's stand-in relay on this machine speaks `ws://` and stands for one.
+pub fn hosted_origin(url: &str) -> Option<String> {
+    if let Some(rest) = url.strip_prefix("wss://") {
+        return Some(format!("https://{rest}"));
+    }
+    #[cfg(test)]
+    if let Some(rest) = url.strip_prefix("ws://") {
+        return Some(format!("https://{rest}"));
+    }
+    None
+}
+
+/// The token life of a phone on the hosted app: as long as an unused phone stays paired (`dormant_days`, 0 for never), at least the usual 30 days and at most
+/// a year. Any other phone has the usual.
+fn token_life(hosted: bool, dormant_days: u32) -> u64 {
+    if !hosted {
+        return TOKEN_LIFE_MS;
+    }
+    match dormant_days {
+        0 => HOSTED_TOKEN_MAX_MS,
+        days => (u64::from(days) * DAY_MS).clamp(TOKEN_LIFE_MS, HOSTED_TOKEN_MAX_MS),
+    }
+}
+
+/// What the hosted page said of itself, and when.
+#[derive(Clone)]
+struct Probe {
+    origin: String,
+    at: Instant,
+    /// Its version, or why it cannot be used.
+    result: std::result::Result<String, String>,
+}
+
+/// Asks the hosted page what it is: `GET <origin>/version.json`, no redirect, 10 s, 4 KiB at most, a JSON object that names the phone app and an API level
+/// this daemon has. Its version, or why it cannot be used. Blocking.
+pub fn probe(origin: &str) -> std::result::Result<String, String> {
+    e2e_guard(origin).map_err(|e| e.to_string())?;
+    let mut config = ureq::Agent::config_builder().timeout_global(Some(PROBE_TIMEOUT)).http_status_as_error(false).max_redirects(0);
+    let roots = test_roots();
+    if !roots.is_empty() {
+        let certs: Vec<ureq::tls::Certificate<'static>> = roots.iter().map(|c| ureq::tls::Certificate::from_der(c.as_ref()).to_owned()).collect();
+        config = config.tls_config(ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::new_with_certs(&certs)).build());
+    }
+    let agent: ureq::Agent = config.build().into();
+    let mut resp = agent.get(&format!("{origin}/version.json")).call().map_err(|_| "the relay's phone app could not be reached".to_string())?;
+    match resp.status().as_u16() {
+        200 => {}
+        300..=399 => return Err("the relay sends its phone app elsewhere".into()),
+        _ => return Err("the relay serves no phone app".into()),
+    }
+    let body = resp.body_mut().with_config().limit(PROBE_MAX_BYTES).read_to_vec().map_err(|_| "the relay's phone app did not say what it is".to_string())?;
+    let v: Value = serde_json::from_slice(&body).map_err(|_| "the relay's phone app did not say what it is".to_string())?;
+    if v["app"].as_str() != Some(PHONE_APP) {
+        return Err("the relay serves another app".into());
+    }
+    match v["api_min"].as_u64() {
+        Some(min) if min <= u64::from(kelpie_proto::API_LEVEL) => {}
+        Some(_) => return Err("the relay's phone app needs a newer Kelpie: update Kelpie on this computer".into()),
+        None => return Err("the relay's phone app did not say what it is".into()),
+    }
+    Ok(v["version"].as_str().map(|s| s.chars().filter(|c| !c.is_control()).take(40).collect()).unwrap_or_default())
+}
 const TOKEN_RENEW_MS: u64 = 7 * DAY_MS;
 const MAX_ALLOWED: usize = 64;
 const PAIR_TOKENS: usize = 4;
@@ -291,6 +420,12 @@ pub struct Runtime {
     /// Whether the credential store holds the registration key (None: not looked yet).
     operator: Mutex<Option<bool>>,
     room_key: Mutex<Option<SigningKey>>,
+    /// The page origins the room was last told to let in, on this connection.
+    origins: Mutex<Vec<String>>,
+    /// What the hosted page last said of itself (`probe`).
+    hosted: Mutex<Option<Probe>>,
+    /// A look at the hosted page is under way: one at a time.
+    probing: std::sync::atomic::AtomicBool,
 }
 
 struct Task {
@@ -345,6 +480,8 @@ struct Facts {
     error: Option<String>,
     rtt_ms: Option<f64>,
     slow_since: Option<Instant>,
+    /// The protocol the relay said it speaks on this connection (`VERSION_HEADER`; 1 when it says nothing), read again on every dial.
+    version: Option<u32>,
 }
 
 impl Runtime {
@@ -354,18 +491,26 @@ impl Runtime {
         *last
     }
 
-    fn up(&self, control: mpsc::UnboundedSender<String>) {
+    fn up(&self, control: mpsc::UnboundedSender<String>, version: u32) {
         *self.control.lock() = Some(control);
         let mut f = self.facts.lock();
         f.connected = true;
         f.error = None;
+        f.version = Some(version);
     }
 
     fn down(&self, error: Option<String>) {
         *self.control.lock() = None;
+        self.origins.lock().clear();
         let mut f = self.facts.lock();
         f.connected = false;
         f.error = error;
+        f.version = None;
+    }
+
+    /// The relay's protocol on the connection that is up, if one is.
+    fn version(&self) -> Option<u32> {
+        self.facts.lock().version
     }
 
     /// A keepalive's round trip, smoothed. Slow for a day and the person is offered a new room.
@@ -453,7 +598,9 @@ impl Mobile {
             return None;
         }
         let token = kelpie_link::random_key().ok()?;
-        let mut t = RelayToken { device: device.id.clone(), hash: token_hash(&token), issued: now, expires: now + TOKEN_LIFE_MS, mac: String::new() };
+        let dormant = self.config.lock().dormant_days.unwrap_or(store::DEFAULT_DORMANT_DAYS);
+        let life = token_life(device.page_kind == Some(store::PageKind::Hosted), dormant);
+        let mut t = RelayToken { device: device.id.clone(), hash: token_hash(&token), issued: now, expires: now + life, mac: String::new() };
         store::seal_token(&mut t, device, &key);
         {
             let mut c = self.config.lock();
@@ -498,24 +645,128 @@ impl Mobile {
 
     /// Tailscale publishes this computer at a new origin: the room lets phones in from there.
     pub(super) fn relay_note_origin(&self) {
-        let Some(ts) = self.tailscale_origin() else { return };
-        let origin = format!("https://{ts}");
-        let Some(key) = self.mac_key(false).ok().flatten() else { return };
-        let changed = {
-            let mut c = self.config.lock();
-            match c.relay.as_mut() {
-                Some(r) if store::relay_holds(r, &key) && r.origin.as_deref() != Some(origin.as_str()) => {
-                    r.origin = Some(origin.clone());
-                    store::seal_relay(r, &key);
-                    true
+        if let Some(ts) = self.tailscale_origin() {
+            let origin = format!("https://{ts}");
+            let Some(key) = self.mac_key(false).ok().flatten() else { return };
+            let changed = {
+                let mut c = self.config.lock();
+                match c.relay.as_mut() {
+                    Some(r) if store::relay_holds(r, &key) && r.origin.as_deref() != Some(origin.as_str()) => {
+                        r.origin = Some(origin.clone());
+                        store::seal_relay(r, &key);
+                        true
+                    }
+                    _ => false,
                 }
-                _ => false,
+            };
+            if changed {
+                self.keep();
             }
-        };
-        if changed {
-            self.keep();
-            self.relay.control(json!({"t": "origin", "o": origin}));
         }
+        self.relay_tell_origins();
+    }
+
+    /// The page origins the room lets phones in from: the Tailscale origin (kept for its phones while Tailscale does not publish this computer), and the hosted
+    /// app's while the relay was found serving it or a phone is paired on it.
+    pub(super) fn relay_origins(&self) -> Vec<String> {
+        let Some(r) = self.relay_live() else { return Vec::new() };
+        let mut list: Vec<String> = r.origin.into_iter().collect();
+        if let Some(hosted) = hosted_origin(&r.url) {
+            let serving = self.relay.hosted.lock().as_ref().is_some_and(|p| p.origin == hosted && p.result.is_ok());
+            let paired = self.config.lock().devices.iter().any(|d| d.verified && d.page.as_deref() == Some(hosted.as_str()));
+            if (serving || paired) && !list.contains(&hosted) {
+                list.push(hosted);
+            }
+        }
+        list
+    }
+
+    /// What tells the room which pages it lets in, and the list it names: `origins` on a relay that takes several, else the Tailscale origin alone, as `origin`
+    /// (an older relay closes the socket on a message it does not know). None when a relay of the first version would be told nothing.
+    fn origins_message(&self, version: u32) -> Option<(Value, Vec<String>)> {
+        if version >= 2 {
+            let list = self.relay_origins();
+            return Some((json!({"t": "origins", "o": list}), list));
+        }
+        let origin = self.relay_live().and_then(|r| r.origin)?;
+        Some((json!({"t": "origin", "o": origin}), vec![origin]))
+    }
+
+    /// The room hears the origins again when they changed since it was last told, on the connection that is up.
+    pub(super) fn relay_tell_origins(&self) {
+        let Some(version) = self.relay.version() else { return };
+        let Some((message, list)) = self.origins_message(version) else { return };
+        {
+            let mut told = self.relay.origins.lock();
+            if *told == list {
+                return;
+            }
+            *told = list;
+        }
+        self.relay.control(message);
+    }
+
+    /// The relay is on, connected and of the version that lets several origins in.
+    pub(super) fn relay_v2(&self) -> bool {
+        self.relay_live().is_some() && self.relay.version().is_some_and(|v| v >= 2)
+    }
+
+    /// The relay whose hosted page is asked about: the one that is on, else the one kept, else the one turning it on would use.
+    fn relay_url_shown(&self) -> String {
+        let kept = self.config.lock().relay.clone();
+        kept.map(|r| r.url).filter(|u| !u.is_empty()).unwrap_or_else(default_url)
+    }
+
+    /// The hosted app's origin, once the relay is on, connected, of the second version and was found serving the app lately: what a hosted pairing code is
+    /// for. Else why not, plainly.
+    pub(super) fn hosted_ready(&self) -> Result<String> {
+        let r = self.relay_live().ok_or_else(|| anyhow!("turn the relay on first"))?;
+        let hosted = hosted_origin(&r.url).ok_or_else(|| anyhow!("this relay serves no phone app: only a wss:// relay can"))?;
+        match self.relay.version() {
+            None => bail!("the relay is not connected yet: try again in a moment"),
+            Some(v) if v < 2 => bail!("this relay is of an older version, which cannot let the hosted app in: update the relay, or use Tailscale"),
+            Some(_) => {}
+        }
+        match self.relay.hosted.lock().clone() {
+            Some(p) if p.origin == hosted && p.at.elapsed() < PROBE_KEEP => p.result.map(|_| hosted).map_err(|why| anyhow!("{why}")),
+            _ => bail!("the relay's phone app has not been checked yet: try again"),
+        }
+    }
+
+    /// The hosted page as if it had just been found serving the phone app: its origin. The room hears it at once.
+    #[cfg(test)]
+    pub(super) fn hosted_found_for_test(&self) -> String {
+        let origin = hosted_origin(&self.relay_url_shown()).expect("a relay that can host");
+        *self.relay.hosted.lock() = Some(Probe { origin: origin.clone(), at: Instant::now(), result: Ok("1.0.0".into()) });
+        self.relay_tell_origins();
+        origin
+    }
+
+    /// Phones paired on the hosted app of the relay as it is now: a new relay address cuts them off.
+    fn hosted_devices(&self, hosted: Option<&str>) -> usize {
+        let Some(hosted) = hosted else { return 0 };
+        self.config.lock().devices.iter().filter(|d| d.page_kind == Some(store::PageKind::Hosted) && d.page.as_deref() == Some(hosted)).count()
+    }
+
+    /// What Settings shows of the hosted app: whether a phone can pair on it now, at which origin, the app's version, why not, and the install page's QR code
+    /// (no secret in it).
+    fn hosted_status(&self, url: &str, version: Option<u32>) -> Value {
+        let origin = hosted_origin(url);
+        let probe = self.relay.hosted.lock().clone().filter(|p| Some(&p.origin) == origin.as_ref());
+        let reason = match (&origin, &probe) {
+            (None, _) => Some("only a wss:// relay serves the phone app".to_string()),
+            _ if version.is_some_and(|v| v < 2) => Some("this relay is of an older version, which cannot let the hosted app in".to_string()),
+            (_, None) => Some("not checked yet".to_string()),
+            (_, Some(p)) => p.result.clone().err(),
+        };
+        let install_qr = origin.as_deref().and_then(|o| qrcode::QrCode::new(format!("{o}/").as_bytes()).ok()).map(|qr| super::qr_svg(&qr));
+        json!({
+            "available": reason.is_none(),
+            "origin": origin,
+            "version": probe.and_then(|p| p.result.ok()),
+            "reason": reason,
+            "install_qr": install_qr,
+        })
     }
 
     fn relay_has_operator_key(&self) -> bool {
@@ -598,10 +849,17 @@ impl Mobile {
             let allowed: HashSet<String> = self.relay_allowed().into_iter().collect();
             kept.iter().flat_map(|r| r.tokens.iter()).filter(|t| allowed.contains(&t.hash)).map(|t| t.device.clone()).collect()
         };
+        let url = kept.as_ref().map(|r| r.url.clone()).filter(|u| !u.is_empty()).unwrap_or_else(default_url);
+        let version = facts.version.filter(|_| live.is_some());
+        let hosted = self.hosted_status(&url, version);
+        let hosted_devices = self.hosted_devices(hosted["origin"].as_str());
         json!({
             "on": live.is_some(),
-            "url": kept.as_ref().map(|r| r.url.clone()).filter(|u| !u.is_empty()).unwrap_or_else(|| DEFAULT_URL.to_string()),
-            "default_url": DEFAULT_URL,
+            "url": url,
+            "default_url": default_url(),
+            "version": version,
+            "hosted": hosted,
+            "hosted_devices": hosted_devices,
             "room": kept.as_ref().is_some_and(|r| r.room.is_some()),
             "origin": kept.as_ref().and_then(|r| r.origin.clone()),
             "operator_key": self.relay_has_operator_key(),
@@ -650,6 +908,47 @@ fn restart(daemon: &Arc<Daemon>) {
     follow(daemon);
 }
 
+// ---------- the hosted page ----------
+
+/// Looks at the hosted page (`probe`) unless what it said is recent, and tells the room if that changes what it lets in. Only while phone access is on, and only
+/// when someone asks (Settings, a hosted pairing code): nothing looks at it on its own. Blocking.
+pub fn hosted_check(m: &Mobile) {
+    if !m.is_on() {
+        return;
+    }
+    let Some(origin) = hosted_origin(&m.relay_url_shown()) else { return };
+    let fresh = m.relay.hosted.lock().as_ref().is_some_and(|p| p.origin == origin && p.at.elapsed() < PROBE_KEEP);
+    if fresh {
+        return;
+    }
+    let result = probe(&origin);
+    if let Err(why) = &result {
+        tracing::info!("relay: the hosted phone app cannot be used: {why}");
+    }
+    *m.relay.hosted.lock() = Some(Probe { origin, at: Instant::now(), result });
+    m.relay_tell_origins();
+}
+
+/// Settings asked for the status: the hosted page is looked at off this thread when what it said is not recent, and the app hears once it is known.
+pub fn hosted_look(daemon: &Arc<Daemon>) {
+    let m = &daemon.mobile;
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    if !m.is_on() || m.relay.probing.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let stale = hosted_origin(&m.relay_url_shown()).is_some_and(|origin| !m.relay.hosted.lock().as_ref().is_some_and(|p| p.origin == origin && p.at.elapsed() < PROBE_KEEP));
+    if !stale {
+        m.relay.probing.store(false, std::sync::atomic::Ordering::SeqCst);
+        return;
+    }
+    let daemon = daemon.clone();
+    runtime.spawn_blocking(move || {
+        hosted_check(&daemon.mobile);
+        daemon.mobile.relay.probing.store(false, std::sync::atomic::Ordering::SeqCst);
+        daemon.broadcast("mobile.updated", json!({}));
+    });
+}
+
 // ---------- turning it on and off ----------
 
 /// What turning the relay on will use, checked before the person is asked.
@@ -660,18 +959,18 @@ pub struct TurnOn {
     register: bool,
 }
 
-/// `mobile.set_relay {on: true, url?, operator_key?}`: everything that needs no prompt. A room needs the registration key, given now or kept from before.
+/// `mobile.set_relay {on: true, url?, operator_key?}`: everything that needs no prompt. A relay that asks for a registration key says so when the room is
+/// made; one given now, or kept from before, goes with the request.
 pub fn check_turn_on(m: &Mobile, params: &Value) -> Result<TurnOn> {
     ensure!(m.is_on(), "turn phone access on first");
-    let url = normalized_url(params.get("url").and_then(Value::as_str).filter(|u| !u.trim().is_empty()).unwrap_or(DEFAULT_URL))?;
+    let named = params.get("url").and_then(Value::as_str).filter(|u| !u.trim().is_empty()).map(str::to_string);
+    let url = normalized_url(&named.unwrap_or_else(default_url))?;
+    e2e_guard(&url)?;
     let operator_key = params.get("operator_key").and_then(Value::as_str).map(str::trim).filter(|k| !k.is_empty()).map(str::to_string);
     if let Some(k) = &operator_key {
         ensure!(k.len() <= 256 && !k.chars().any(|c| c.is_whitespace() || c.is_control()), "that is not a registration key");
     }
     let register = m.config.lock().relay.as_ref().is_none_or(|r| r.url != url || r.room.is_none() || r.ticket.is_none());
-    if register && operator_key.is_none() && !m.relay_has_operator_key() {
-        bail!("paste the relay's registration key: it is needed once, to make this computer's room");
-    }
     Ok(TurnOn { url, operator_key, register })
 }
 
@@ -682,11 +981,11 @@ pub fn turn_on(daemon: &Arc<Daemon>, asked: TurnOn) -> Result<Value> {
     let mut settings = m.config.lock().relay.clone().filter(|r| store::relay_holds(r, &key)).unwrap_or_default();
     if asked.register {
         let operator = match asked.operator_key.clone() {
-            Some(k) => k,
-            None => m.secrets.read(K_OPERATOR)?.ok_or_else(|| anyhow!("paste the relay's registration key"))?,
+            Some(k) => Some(k),
+            None => m.secrets.read(K_OPERATOR)?,
         };
         let room_key = new_room_key()?;
-        let (room, ticket) = register(&asked.url, &operator, &public_key(&room_key))?;
+        let (room, ticket) = register(&asked.url, operator.as_deref(), &public_key(&room_key))?;
         m.keep_room_key(&room_key)?;
         settings.room = Some(room);
         settings.ticket = Some(ticket);
@@ -706,6 +1005,10 @@ pub fn turn_on(daemon: &Arc<Daemon>, asked: TurnOn) -> Result<Value> {
     m.keep();
     m.audit("-", "relay_on", &asked.url);
     readvertise(m);
+    // Phone access on and not running (this network's listeners off, and nothing else that reached this computer): the relay is that now.
+    if m.running.lock().is_none() {
+        tokio::spawn(super::autostart(daemon.clone()));
+    }
     restart(daemon);
     Ok(m.status(true))
 }
@@ -745,9 +1048,9 @@ pub async fn recreate(daemon: Arc<Daemon>) -> Result<Value> {
     let asker = daemon.clone();
     let url = live.url.clone();
     let (room, ticket, room_key) = tokio::task::spawn_blocking(move || -> Result<(String, String, SigningKey)> {
-        let operator = asker.mobile.secrets.read(K_OPERATOR)?.ok_or_else(|| anyhow!("paste the relay's registration key again: this computer no longer has it"))?;
+        let operator = asker.mobile.secrets.read(K_OPERATOR)?;
         let key = new_room_key()?;
-        let (room, ticket) = register(&url, &operator, &public_key(&key))?;
+        let (room, ticket) = register(&url, operator.as_deref(), &public_key(&key))?;
         Ok((room, ticket, key))
     })
     .await
@@ -786,18 +1089,36 @@ pub async fn recreate(daemon: Arc<Daemon>) -> Result<Value> {
     Ok(m.status(true))
 }
 
-/// Makes a room: the room id and its ticket.
-fn register(url: &str, operator: &str, pk: &str) -> Result<(String, String)> {
+/// Why a relay would not make a room, from its status, the reason it names (`x-kelpie-reason`) and whether a registration key went with the request.
+fn register_refusal(status: u16, reason: Option<&str>, keyed: bool) -> String {
+    match (status, reason) {
+        (401, _) if !keyed => "This relay needs a registration key".into(),
+        (401, _) => "the relay did not take that registration key".into(),
+        (429, Some("network")) => "This network made too many rooms today: try again tomorrow, or use Tailscale".into(),
+        (429, Some("rate")) => "The relay is making too many rooms just now: try again in a minute".into(),
+        (429, _) => "the relay stopped taking registration keys from this network for today: too many wrong ones".into(),
+        (503, Some("full")) => "The relay is not taking new rooms today".into(),
+        (503, _) => "the relay is not set up yet".into(),
+        (s, _) => format!("the relay answered HTTP {s}"),
+    }
+}
+
+/// Makes a room: the room id and its ticket. The registration key goes only when there is one.
+fn register(url: &str, operator: Option<&str>, pk: &str) -> Result<(String, String)> {
+    e2e_guard(url)?;
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).http_status_as_error(false).max_redirects(0).build().into();
-    let bearer = format!("Bearer {operator}");
     let body = json!({"pk": pk}).to_string();
-    let mut resp = agent.post(&format!("{}/v1/rooms", http_url(url))).header("authorization", bearer.as_str()).content_type("application/json").send(body.as_bytes()).map_err(|e| anyhow!("the relay could not be reached: {e}"))?;
+    let mut request = agent.post(&format!("{}/v1/rooms", http_url(url))).content_type("application/json");
+    if let Some(operator) = operator {
+        request = request.header("authorization", format!("Bearer {operator}").as_str());
+    }
+    let mut resp = request.send(body.as_bytes()).map_err(|e| anyhow!("the relay could not be reached: {e}"))?;
     match resp.status().as_u16() {
         201 => {}
-        401 => bail!("the relay did not take that registration key"),
-        429 => bail!("the relay stopped taking registration keys from this network for today: too many wrong ones"),
-        503 => bail!("the relay is not set up yet"),
-        s => bail!("the relay answered HTTP {s}"),
+        s => {
+            let reason = resp.headers().get("x-kelpie-reason").and_then(|v| v.to_str().ok()).map(str::to_string);
+            bail!("{}", register_refusal(s, reason.as_deref(), operator.is_some()));
+        }
     }
     let text = resp.body_mut().read_to_string().context("the relay's answer")?;
     let v: Value = serde_json::from_str(&text).context("the relay's answer")?;
@@ -888,7 +1209,7 @@ async fn say_last_word(daemon: &Weak<Daemon>, word: &LastWord) {
         };
         let url = format!("{}/v1/desktop?t={}&ts={ts}&sig={}", word.url, word.ticket, signature(&word.key, &word.room, ts));
         let said = async {
-            let mut ws = tokio::time::timeout(CONNECT_TIMEOUT, dial(&url)).await.map_err(|_| anyhow!("the relay did not answer in time"))??;
+            let (mut ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, dial(&url)).await.map_err(|_| anyhow!("the relay did not answer in time"))??;
             // The room reads a socket's messages in order, the close after the word.
             send_text(&mut ws, word.message()).await?;
             let _ = ws.close(None).await;
@@ -931,8 +1252,10 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
-/// Dials the relay: TCP with no Nagle delay, TLS from the system's usual roots (`webpki-roots`, ring), then the WebSocket.
-async fn dial(url: &str) -> Result<Socket> {
+/// Dials the relay: TCP with no Nagle delay, TLS from the system's usual roots (`webpki-roots`, ring), then the WebSocket. With the protocol the relay says
+/// it speaks in its answer (`VERSION_HEADER`), 1 when it says none.
+async fn dial(url: &str) -> Result<(Socket, u32)> {
+    e2e_guard(url)?;
     let uri: axum::http::Uri = url.parse().context("the relay's address")?;
     let host = uri.host().ok_or_else(|| anyhow!("the relay's address has no name"))?.trim_start_matches('[').trim_end_matches(']').to_string();
     let tls = uri.scheme_str() == Some("wss");
@@ -943,6 +1266,9 @@ async fn dial(url: &str) -> Result<Socket> {
     let io: Box<dyn Io> = if tls {
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        for cert in test_roots() {
+            let _ = roots.add(cert);
+        }
         let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()?
             .with_root_certificates(roots)
@@ -954,13 +1280,18 @@ async fn dial(url: &str) -> Result<Socket> {
     };
     let config = tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(MAX_FRAME)).max_frame_size(Some(MAX_FRAME));
     match tokio_tungstenite::client_async_with_config(url, io, Some(config)).await {
-        Ok((ws, _)) => Ok(ws),
+        Ok((ws, response)) => Ok((ws, relay_version(response.headers()))),
         Err(tungstenite::Error::Http(response)) => {
             let attempts = response.headers().get("x-kelpie-reason").is_some_and(|v| v.as_bytes() == b"attempts");
             Err(Refused { status: response.status().as_u16(), attempts }.into())
         }
         Err(e) => Err(e).context("the relay's WebSocket"),
     }
+}
+
+/// The protocol a relay's upgrade answer names: 1 when it names none or one that cannot be read.
+fn relay_version(headers: &tungstenite::http::HeaderMap) -> u32 {
+    headers.get(VERSION_HEADER).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok()).filter(|v| *v >= 1).unwrap_or(1)
 }
 
 async fn send_text(ws: &mut Socket, msg: Value) -> Result<()> {
@@ -1020,19 +1351,27 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify, ending: 
     let key = m.room_key()?.ok_or_else(|| anyhow!("this computer's room key is gone: make a new room in Settings → Mobile"))?;
     let ts = m.relay.next_ts();
     let url = format!("{}/v1/desktop?t={ticket}&ts={ts}&sig={}", r.url, signature(&key, &room, ts));
-    let mut ws = tokio::time::timeout(CONNECT_TIMEOUT, dial(&url)).await.map_err(|_| anyhow!("the relay did not answer in time"))??;
-    // What the relay must know before it says which phones are there: who may be let in, and from what page.
+    let (mut ws, version) = tokio::time::timeout(CONNECT_TIMEOUT, dial(&url)).await.map_err(|_| anyhow!("the relay did not answer in time"))??;
+    // What the relay must know before it says which phones are there: who may be let in, and from what pages. A relay of the first version hears of one
+    // page, as it always did, and never of `origins`, which it would close the socket on.
     let mut sent = Vec::new();
     send_list(&mut ws, m.relay_allowed(), &mut sent).await?;
-    if let Some(origin) = &r.origin {
-        send_text(&mut ws, json!({"t": "origin", "o": origin})).await?;
-    }
+    let told = match m.origins_message(version) {
+        Some((message, list)) => {
+            send_text(&mut ws, message).await?;
+            list
+        }
+        None => Vec::new(),
+    };
+    *m.relay.origins.lock() = told;
     for (hash, ttl) in m.relay.live_pairs() {
         send_text(&mut ws, json!({"t": "pair", "h": hash, "ttl": ttl})).await?;
     }
     let (out_tx, mut out_rx) = mpsc::channel::<Out>(OUT_QUEUE);
     let (control_tx, mut control_rx) = mpsc::unbounded_channel::<String>();
-    m.relay.up(control_tx);
+    m.relay.up(control_tx, version);
+    // What changed while this connection was being made is told now.
+    m.relay_tell_origins();
     d.broadcast("mobile.updated", json!({}));
     tracing::info!("relay: connected");
     let mut slots = Slots::default();
@@ -1107,7 +1446,7 @@ async fn connection(d: &Arc<Daemon>, stop: &Generation, nudge: &Notify, ending: 
                             m.relay.rtt(at.elapsed());
                         }
                     }
-                    WsMessage::Text(text) => on_control(d, text.as_str(), &mut slots, &out_tx),
+                    WsMessage::Text(text) => on_control(d, text.as_str(), version, &mut slots, &out_tx),
                     WsMessage::Binary(frame) if frame.len() >= 2 => {
                         let slot = u16::from_be_bytes([frame[0], frame[1]]);
                         // A phone that sends faster than its connection reads goes, rather than holding up the others.
@@ -1132,8 +1471,18 @@ async fn sleep_until_due(due: Option<tokio::time::Instant>) {
     }
 }
 
+/// The page a phone on a slot comes from. A relay of the second version names its `Origin` (`o`), which counts only when it is one this computer told the
+/// room to let in (`told`); one of the first version names none, and the room let in only the Tailscale origin (`room`).
+fn slot_origin(version: u32, o: Option<&str>, told: &[String], room: Option<String>) -> Option<String> {
+    if version >= 2 {
+        o.filter(|o| told.iter().any(|t| t == o)).map(str::to_string)
+    } else {
+        room
+    }
+}
+
 /// What the relay says of a phone slot: `open` starts a connection on it, as an upgrade on `/link` does; `close` ends it.
-fn on_control(d: &Arc<Daemon>, text: &str, slots: &mut Slots, out: &mpsc::Sender<Out>) {
+fn on_control(d: &Arc<Daemon>, text: &str, version: u32, slots: &mut Slots, out: &mpsc::Sender<Out>) {
     let Ok(v) = serde_json::from_str::<Value>(text) else { return };
     let Some(slot) = v["s"].as_u64().and_then(|s| u16::try_from(s).ok()) else { return };
     match v["t"].as_str() {
@@ -1145,7 +1494,8 @@ fn on_control(d: &Arc<Daemon>, text: &str, slots: &mut Slots, out: &mpsc::Sender
                 let _ = out.try_send(Out::Kick(slot, generation, super::RECONNECT, "off".into()));
                 return;
             };
-            let origin = d.mobile.relay_live().and_then(|r| r.origin);
+            let told = d.mobile.relay.origins.lock().clone();
+            let origin = slot_origin(version, v["o"].as_str(), &told, d.mobile.relay_live().and_then(|r| r.origin));
             let carrier = Carrier::Relay(Slot { slot, generation, frames, out: out.clone() });
             let ip = phone_ip(slot, v["k"].as_str());
             tokio::spawn(link::accept(d.clone(), carrier, running, Peer::relayed(ip, origin), true));
@@ -1283,6 +1633,109 @@ mod tests {
         assert!(text(429, true).contains("too many refused attempts"), "the router's, not the room's limit");
         assert!(text(429, false).contains("monthly limit"));
         assert!(text(404, false).contains("make a new room"));
+    }
+
+    #[test]
+    fn a_room_refused_says_why_in_plain_words() {
+        assert_eq!(register_refusal(401, None, false), "This relay needs a registration key");
+        assert_eq!(register_refusal(401, None, true), "the relay did not take that registration key");
+        assert_eq!(register_refusal(429, Some("network"), false), "This network made too many rooms today: try again tomorrow, or use Tailscale");
+        assert!(register_refusal(429, Some("rate"), false).contains("too many rooms just now"));
+        assert!(register_refusal(429, Some("attempts"), true).contains("too many wrong ones"), "a relay that asks for a key, as before");
+        assert_eq!(register_refusal(503, Some("full"), false), "The relay is not taking new rooms today");
+        assert_eq!(register_refusal(503, None, false), "the relay is not set up yet");
+        assert_eq!(register_refusal(500, None, false), "the relay answered HTTP 500");
+    }
+
+    #[test]
+    fn the_relays_version_is_what_its_answer_says_and_one_when_it_says_nothing() {
+        let mut h = tungstenite::http::HeaderMap::new();
+        assert_eq!(relay_version(&h), 1);
+        h.insert(VERSION_HEADER, "2".parse().unwrap());
+        assert_eq!(relay_version(&h), 2);
+        for odd in ["two", "0", "-1", ""] {
+            h.insert(VERSION_HEADER, odd.parse().unwrap());
+            assert_eq!(relay_version(&h), 1, "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn a_slot_comes_from_a_page_only_when_this_computer_told_the_room_of_it() {
+        let ts = "https://desk.tail1234.ts.net:8443".to_string();
+        let hosted = "https://kelpie-link-relay.example.workers.dev".to_string();
+        let told = vec![ts.clone(), hosted.clone()];
+        assert_eq!(slot_origin(2, Some(&hosted), &told, Some(ts.clone())), Some(hosted.clone()));
+        assert_eq!(slot_origin(2, Some("https://evil.example"), &told, Some(ts.clone())), None, "a page the room was never told of");
+        assert_eq!(slot_origin(2, None, &told, Some(ts.clone())), None, "no Origin: nothing to call secure");
+        assert_eq!(slot_origin(2, Some(&hosted), std::slice::from_ref(&ts), Some(ts.clone())), None, "the hosted page while the room does not let it in");
+        assert_eq!(slot_origin(1, None, &[], Some(ts.clone())), Some(ts.clone()), "a relay of the first version: the room's one origin");
+        assert_eq!(slot_origin(1, Some(&hosted), &told, Some(ts.clone())), Some(ts), "and what it would say is not read");
+    }
+
+    #[test]
+    fn the_hosted_app_lives_at_a_wss_relays_own_origin_only() {
+        assert_eq!(hosted_origin("wss://kelpie-link-relay.baopeak.workers.dev").as_deref(), Some("https://kelpie-link-relay.baopeak.workers.dev"));
+        assert_eq!(hosted_origin("wss://relay.example:8443").as_deref(), Some("https://relay.example:8443"));
+        assert_eq!(hosted_origin("https://relay.example"), None);
+    }
+
+    #[test]
+    fn a_hosted_phones_token_lives_as_long_as_an_unused_phone_stays_paired() {
+        assert_eq!(token_life(false, 90), 30 * DAY_MS, "Tailscale phones as before");
+        assert_eq!(token_life(false, 0), 30 * DAY_MS);
+        assert_eq!(token_life(true, store::DEFAULT_DORMANT_DAYS), 90 * DAY_MS, "90 days by default");
+        assert_eq!(token_life(true, 0), 365 * DAY_MS, "never: a year");
+        assert_eq!(token_life(true, 7), 30 * DAY_MS, "never shorter than the usual");
+        assert_eq!(token_life(true, 1000), 365 * DAY_MS, "never longer than a year");
+    }
+
+    #[test]
+    fn test_seams_count_only_in_an_e2e_run_and_reach_no_relay_but_this_machines() {
+        assert_eq!(seam_value(false, Some("ws://127.0.0.1:8787".into())), None, "ignored without KELPIE_E2E");
+        assert_eq!(seam_value(true, Some("ws://127.0.0.1:8787".into())).as_deref(), Some("ws://127.0.0.1:8787"));
+        assert_eq!(seam_value(true, Some("  ".into())), None);
+        assert_eq!(default_url(), DEFAULT_URL, "no seam in a unit test");
+        for refused in [DEFAULT_URL, "wss://relay.example", "https://kelpie-link-relay.baopeak.workers.dev", "wss://10.0.0.2:8443", "not an address"] {
+            assert!(e2e_refuses(true, refused), "{refused}");
+            assert!(!e2e_refuses(false, refused), "{refused}: only in an e2e run");
+        }
+        for local in ["ws://127.0.0.1:8787", "wss://localhost:8443", "https://LOCALHOST", "ws://[::1]:8787"] {
+            assert!(!e2e_refuses(true, local), "{local}");
+        }
+        // A unit test is held to it as an e2e run is: nothing here can reach a real relay.
+        assert!(e2e_guard(DEFAULT_URL).is_err() && e2e_guard("ws://127.0.0.1:1").is_ok());
+        assert!(probe("https://kelpie-link-relay.baopeak.workers.dev").is_err());
+        assert!(register("wss://relay.example", None, "pk").unwrap_err().to_string().contains("e2e run"));
+    }
+
+    #[test]
+    fn a_hosted_phone_gets_the_longer_token_and_a_tailscale_phone_the_usual() {
+        let m = mobile();
+        relay_on(&m);
+        let ts = secure_device(&m, "ts-phone");
+        let key = m.mac_key(false).unwrap().unwrap();
+        let hosted = {
+            m.add_test_device("hosted-phone", "hosted-phone", kelpie_link::random_key().unwrap(), Permission::Write, Kind::Pwa);
+            let mut c = m.config.lock();
+            let d = c.devices.iter_mut().find(|d| d.id == "hosted-phone").unwrap();
+            d.secure_origin = true;
+            d.page = Some("https://relay.example".into());
+            d.page_kind = Some(store::PageKind::Hosted);
+            store::seal(d, &key);
+            d.clone()
+        };
+        let expires = |given: String| serde_json::from_str::<Value>(&given).unwrap()["expires"].as_u64().unwrap();
+        let now = now_millis();
+        let ts_expires = expires(m.relay_grant(&ts, &caps(None)).unwrap());
+        assert!(ts_expires.abs_diff(now + 30 * DAY_MS) < 60_000);
+        let hosted_expires = expires(m.relay_grant(&hosted, &caps(None)).unwrap());
+        assert!(hosted_expires.abs_diff(now + 90 * DAY_MS) < 60_000);
+        m.set_options(Some(0));
+        let mut c = m.config.lock();
+        c.relay.as_mut().unwrap().tokens.retain(|t| t.device != "hosted-phone");
+        drop(c);
+        let never = expires(m.relay_grant(&hosted, &caps(None)).unwrap());
+        assert!(never.abs_diff(now + 365 * DAY_MS) < 60_000, "unused phones kept for ever: a year");
     }
 
     #[test]
