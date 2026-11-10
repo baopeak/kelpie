@@ -42,7 +42,9 @@ function serviceWorker(): Plugin {
       const version = createHash("sha256").update(shell.join("\n")).digest("hex").slice(0, 10);
       const sw = bundle["sw.js"];
       if (sw?.type !== "chunk") throw new Error("the service worker entry was not built");
-      sw.code = sw.code.replace("__PRECACHE__", JSON.stringify(shell)).replace("__VERSION__", JSON.stringify(version));
+      // Every use: the worker reads the list when it installs and again on each request.
+      sw.code = sw.code.replaceAll("__PRECACHE__", JSON.stringify(shell)).replaceAll("__VERSION__", JSON.stringify(version));
+      if (/__PRECACHE__|__VERSION__/.test(sw.code)) throw new Error("the service worker still names a value the build fills in");
     },
   };
 }
