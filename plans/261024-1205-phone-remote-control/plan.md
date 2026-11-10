@@ -77,6 +77,8 @@ relay, daemon-enforced app lock, one inbox across 23 agents, browser-pane and de
 | D18 | **Every option a plain switch** (3d): what it does / trade-off / how safe, safe defaults; weakening needs `Role::App` + OS verification | User decision 2026-10-30 |
 | D19 | **Telegram** (3e): one-way alerts stay; alert + deep link default when on; opt-in low-risk approvals with a clear warning, outbound long polling, bound to `user_id` + `chat_id`, per-request nonce + expiry, one-shot, audited | User decision 2026-10-30; not E2E and no Face ID, so opt-in and `low` only |
 
+**2026-11-10 (owner): D5 amended** — the phone app is also served from the relay worker's own origin (deployed only by CI, open relay, Tailscale mode kept): [hosted phone app plan](../261110-1141-hosted-phone-app/plan.md).
+
 ```
 Phone: installed PWA from the daemon (app/phone), locked until WebAuthn passes
    │  kelpie-link (Noise) frames
