@@ -2,3 +2,4 @@
 // helpers only reach Durable Objects defined in the main Worker.
 export { default } from "../src/worker";
 export { Room } from "../src/room";
+export { Registrar } from "../src/registrar";

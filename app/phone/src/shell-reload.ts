@@ -2,7 +2,8 @@
 // and the worker keeps a shell with the new header (sw.ts); a page that is already open, or alive in the background, still has the old one
 // and cannot reach the relay until it loads again. So it loads again:
 // - when the page refuses the relay's address itself (`securitypolicyviolation`), at once: it has no other way to the computer then;
-// - when the worker says the kept shell's CSP changed, the next time the person comes back to the app, so that nothing moves under them.
+// - when the worker says the kept shell's CSP changed, the next time the person comes back to the app, so that nothing moves under them;
+// - likewise when a new version's worker takes the page over (`watchWorker`): the old version's files are kept for it until then (sw.ts).
 // What is typed is kept across a reload (composer drafts, kept-messages.ts). A reload that does not help is not done again: each reason
 // reloads once in this tab (a violation) or once a minute (a changed shell), as `sessionStorage` remembers.
 
@@ -74,6 +75,22 @@ export class ShellReload {
     const host = relayRefused(blocked, relay);
     if (host) reloadOnce(this.env, `relay ${host}`, Number.POSITIVE_INFINITY);
   }
+}
+
+/** What of `navigator.serviceWorker` a page needs to see a new worker take it over. */
+export interface WorkerContainer {
+  controller: unknown;
+  addEventListener(type: "controllerchange", listener: () => void): void;
+}
+
+/** A new version's worker took this page over: the page is still the old version's, so it loads again at the next foreground, as for a changed
+ *  shell. The first worker taking a page that had none (just installed) is no new version. */
+export function watchWorker(container: WorkerContainer, reload: ShellReload): void {
+  let had = !!container.controller;
+  container.addEventListener("controllerchange", () => {
+    if (had) reload.shellChanged();
+    had = true;
+  });
 }
 
 /** The page's own: this tab's `sessionStorage`, which outlives a reload and nothing more. */

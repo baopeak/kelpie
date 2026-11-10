@@ -273,7 +273,8 @@ async fn approving_a_phone_at_a_name_opens_the_window_for_its_passkey() {
     let m = &r.daemon.mobile;
     let pair = |id: &str, pk: u8, secure_origin: bool| {
         let (reply, answered) = tokio::sync::oneshot::channel();
-        m.add_pending(id, id, Kind::Pwa, [pk; 32], "123456".into(), Permission::Write, "100.101.102.103".parse().unwrap(), secure_origin, reply);
+        let page = PageOrigin { kind: if secure_origin { PageKind::Ts } else { PageKind::Plain }, origin: if secure_origin { ORIGIN.into() } else { "http://192.168.1.9:4817".into() } };
+        m.add_pending(id, id, Kind::Pwa, [pk; 32], "123456".into(), Permission::Write, "100.101.102.103".parse().unwrap(), secure_origin, page, reply);
         let approved = m.approve(&json!({"id": id, "code": "123456", "permission": "write"})).unwrap();
         drop(answered);
         approved.reply["id"].as_str().unwrap().to_string()
@@ -1185,4 +1186,100 @@ async fn turning_the_lock_off_takes_a_pages_control_back_to_typing_until_it_is_g
     m.set_lock(store::LockOptions { on: true, ..m.lock_options() }).unwrap();
     assert_eq!(m.permission("phone"), Some(Permission::Write), "the lock on again does not bring control back");
     assert!(matches!(m.raise_prompt("phone", Permission::Control).unwrap(), Some(crate::user_presence::Prompt::Raise { .. })), "a new grant does, verified");
+}
+// ---------- a phone on the app the relay hosts ----------
+
+const HOSTED: &str = "https://kelpie-link-relay.example.workers.dev";
+
+/// The rig's phone as one paired on the hosted app, its record sealed with that page.
+fn hosted(d: &Daemon) -> Device {
+    let key = d.mobile.mac_key(true).unwrap().unwrap();
+    let mut c = d.mobile.config.lock();
+    let phone = c.devices.iter_mut().find(|x| x.id == "phone").unwrap();
+    phone.kind = Kind::Pwa;
+    phone.secure_origin = true;
+    phone.page = Some(HOSTED.into());
+    phone.page_kind = Some(PageKind::Hosted);
+    store::seal(phone, &key);
+    phone.clone()
+}
+
+#[tokio::test]
+async fn a_hosted_phone_is_locked_with_the_lock_off_and_may_set_up_its_passkey_then() {
+    let mut r = rig();
+    let held = r.daemon.clone();
+    let m = &held.mobile;
+    m.set_lock(store::LockOptions { on: false, ..m.lock_options() }).unwrap();
+    let device = hosted(&r.daemon);
+    let peer = Peer::relayed(crate::mobile::relay::slot_ip(1), Some(HOSTED.into()));
+    assert_eq!(m.lock_path(&device, &peer), LockPath::PasskeyAlways, "over the relay");
+    assert_eq!(m.lock_path(&device, &Peer::direct("127.0.0.1:1".parse().unwrap(), false)), LockPath::PasskeyAlways, "and however else it comes");
+    assert_eq!(m.lock_gate("phone", LockPath::PasskeyAlways, None), Gate::Locked, "the lock off does not open it");
+    assert_eq!(m.lock_gate("phone", LockPath::Passkey, None), Gate::Open, "a Tailscale phone with the lock off, as before");
+    assert_eq!(m.lock_state("phone", LockPath::PasskeyAlways, Gate::Locked, Some(HOSTED)), "desktop", "no window to set one up yet");
+    // The computer's button (approving it does the same): it sets up its passkey with the lock off, at the hosted page's name.
+    m.reset_lock("phone");
+    r.conn.lock_path = m.lock_path(&device, &peer);
+    r.conn.page_origin = Some(HOSTED.into());
+    r.conn.secure_page = Some(HOSTED.into());
+    r.conn.locked = true;
+    assert_eq!(m.lock_state("phone", LockPath::PasskeyAlways, Gate::Locked, Some(HOSTED)), "enrol");
+    let typed = r.ask_write(json!({"type": "input", "id": "t1", "text": "x"})).await;
+    assert_eq!(typed["code"], "locked", "nothing passes before its passkey");
+    let a = Authenticator::new(HOSTED);
+    let c = challenge(&mut r).await;
+    let reply = r.ask_write(enrol_message(&a, &c)).await;
+    assert_eq!(reply["result"], "ok", "{reply}");
+    let resume = reply["resume"].as_str().unwrap().to_string();
+    assert_eq!(device_of(&r).lock.unwrap().origin, HOSTED, "its passkey is for the hosted page's name");
+    assert_eq!(m.lock_gate("phone", LockPath::PasskeyAlways, Some(&resume)), Gate::Open);
+    assert_eq!(m.lock_state("phone", LockPath::PasskeyAlways, Gate::Open, Some(HOSTED)), "open");
+    let typed = r.ask_write(json!({"type": "input", "id": "t1", "text": "x"})).await;
+    assert_eq!(code(&typed), None, "unlocked, it types: {typed}");
+    // Its window ends: locked again, the lock still off.
+    m.expire_window("phone");
+    assert_eq!(m.lock_gate("phone", LockPath::PasskeyAlways, Some(&resume)), Gate::Locked);
+    // A Tailscale phone with the lock off still cannot set one up.
+    let mut tailscale = device_of(&r);
+    tailscale.page_kind = Some(PageKind::Ts);
+    tailscale.page = Some(ORIGIN.into());
+    {
+        let key = m.mac_key(false).unwrap().unwrap();
+        let mut c = m.config.lock();
+        let phone = c.devices.iter_mut().find(|x| x.id == "phone").unwrap();
+        *phone = tailscale;
+        store::seal(phone, &key);
+    }
+    m.reset_lock("phone");
+    assert_eq!(m.lock_path(&device_of(&r), &peer), LockPath::Passkey);
+    let refused = m.lock_enrol("phone", &json!({}), Some(ORIGIN)).err().map(|e| e.code);
+    assert_eq!(refused, Some("lock_off"));
+}
+
+#[tokio::test]
+async fn a_hosted_phone_never_goes_past_typing() {
+    let mut r = rig();
+    let held = r.daemon.clone();
+    let m = &held.mobile;
+    let device = hosted(&r.daemon);
+    assert_eq!(record_ceiling(&device, true), Permission::Write);
+    let mut with_passkey = device.clone();
+    with_passkey.lock = Some(store::LockCredential { cred_id: "c".into(), spki: "s".into(), origin: HOSTED.into(), sign_count: 0, created_at: 0, mac: String::new() });
+    assert_eq!(record_ceiling(&with_passkey, true), Permission::Write, "not even with its passkey and the lock on");
+    assert!(!page_may_control(&with_passkey, true));
+    let refused = m.raise_prompt("phone", Permission::Control).unwrap_err().to_string();
+    assert_eq!(refused, "a phone using the hosted app can read and type; taking control needs Tailscale or this computer's own HTTPS address");
+    assert!(m.raise_prompt("phone", Permission::Write).unwrap().is_none(), "typing it has");
+    assert!(m.set_permission("phone", Permission::Control).is_err());
+    // Unlocked, and asked with control whatever its connection says: takeover and the screen are refused.
+    r.conn.lock_path = LockPath::PasskeyAlways;
+    r.conn.page_origin = Some(HOSTED.into());
+    r.conn.secure_page = Some(HOSTED.into());
+    r.conn.resume = Some(m.open_window_for_test("phone"));
+    for verb in [json!({"type": "panes"}), json!({"type": "tk_start", "pane": "browser-a"}), json!({"type": "screens"}), json!({"type": "sc_start", "target": "w:1:2"})] {
+        let reply = r.ask(Permission::Control, verb.clone()).await;
+        assert_eq!(code(&reply), Some("no_control"), "{verb}: {reply}");
+    }
+    assert!(!m.control_now("phone", LockPath::PasskeyAlways, Gate::Open, true));
+    assert!(!m.control_held("phone"));
 }

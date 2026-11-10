@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "build:phone": "tsc --noEmit && vite build --config vite.phone.config.ts",
+    "build:phone:hosted": "tsc --noEmit && vite build --config vite.phone.config.ts --mode hosted",
     "typecheck": "tsc --noEmit",
     "i18n:check": "node scripts/i18n-check.mjs",
     "test": "vitest run",

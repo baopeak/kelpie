@@ -2034,7 +2034,11 @@ impl Daemon {
                 json!(true)
             }
 
-            "mobile.status" => self.mobile.status(self.client_roles.lock().get(&client) == Some(&crate::auth::Role::App)),
+            "mobile.status" => {
+                // Whether the relay serves the hosted phone app is looked at when someone asks, off this thread; the app hears when it is known.
+                crate::mobile::relay::hosted_look(self);
+                self.mobile.status(self.client_roles.lock().get(&client) == Some(&crate::auth::Role::App))
+            }
             "mobile.load" => {
                 if params.get("reset").and_then(Value::as_bool) == Some(true) {
                     self.mobile.load.reset_lags();
@@ -2070,6 +2074,18 @@ impl Daemon {
                 self.broadcast("mobile.updated", json!({}));
                 self.mobile.unsaved(crate::mobile::NOT_SAVED_OFF)?;
                 json!(true)
+            }
+            // `{hosted: true}`: a code for the app the relay hosts, once its page was looked at (a request over the network, so never on this thread).
+            "mobile.pair_start" if params.get("hosted").and_then(Value::as_bool) == Some(true) => {
+                let (me, tx, id) = (self.clone(), tx.clone(), id.clone());
+                tokio::spawn(async move {
+                    let asker = me.clone();
+                    let checked = tokio::task::spawn_blocking(move || crate::mobile::relay::hosted_check(&asker.mobile)).await;
+                    let answer = checked.map_err(|_| anyhow!("that did not finish")).and_then(|()| me.mobile.pair_start_hosted());
+                    let _ = tx.send(json_out(&rpc_answer(&id, answer)));
+                    me.broadcast("mobile.updated", json!({}));
+                });
+                return Ok(None);
             }
             "mobile.pair_start" => self.mobile.pair_start(params.get("plain").and_then(Value::as_bool) == Some(true))?,
             // Runs the Tailscale CLI, so never on this thread. Only when someone asks: Settings → Mobile, open.

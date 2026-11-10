@@ -4,7 +4,8 @@ import { createSignal, For, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
 import { Inbox } from "./inbox";
 import { localeSetting, setLocale, t, type LocaleSetting } from "./i18n";
-import { alertsError, alertsState, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, remoteScreen, remoteScreens, sessions, setPairing, takeover, takeovers, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
+import { alertsError, alertsState, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, remoteScreen, remoteScreens, sessions, setPairing, setTrustOpen, takeover, takeovers, testAlert, trustOpen, turnAlertsOff, turnAlertsOn } from "./phone-state";
+import { APP_VERSION, HOSTED, servedVersion, trustText, type ServedVersion } from "./hosted";
 import { PaneTakeover } from "./pane-takeover";
 import { ScreenView } from "./screen-view";
 import { LockCover, LockScreen, RecheckSheet } from "./lock-screen";
@@ -111,7 +112,9 @@ function SecurityBanner() {
       </Show>
       <Show when={movedHost()}>
         <div class="banner" role="status" data-banner="moved">
-          {t("This computer can be reached at {host}. A browser keeps its pairing per address, so this device must be paired again there.", { host: movedHost()! })}
+          {HOSTED
+            ? t("Your computer now uses the relay at {host}. This app works only through the relay it came from, so this phone must be paired again there.", { host: movedHost()! })
+            : t("This computer can be reached at {host}. A browser keeps its pairing per address, so this device must be paired again there.", { host: movedHost()! })}
           <div class="actions"><a class="btn" href={`https://${movedHost()}/`}>{t("Open it")}</a></div>
         </div>
       </Show>
@@ -163,7 +166,30 @@ function AlertsRow() {
   );
 }
 
-function Sheet(props: { onClose: () => void }) {
+/** What the hosted app trusts, its version, and the fingerprint the relay says it serves (asked of the network each time). */
+function TrustSheet(props: { onClose: () => void }) {
+  const [served, setServed] = createSignal<ServedVersion | null | undefined>(undefined);
+  void servedVersion().then(setServed);
+  const said = () => {
+    const s = served();
+    if (s === undefined) return t("Asking the relay which version it serves…");
+    return s ? t("The relay says it serves {version}, with this fingerprint:", { version: s.version }) : t("The relay did not say which version it serves.");
+  };
+  return (
+    <div class="sheet-back" onClick={props.onClose}>
+      <div class="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={t("What this app trusts")} data-trust>
+        <h2>{t("What this app trusts")}</h2>
+        <For each={trustText(t)}>{(p) => <p class="muted">{p}</p>}</For>
+        <p class="muted" data-trust-version>{t("This app's version: {version}", { version: APP_VERSION })}</p>
+        <p class="muted">{said()}</p>
+        <Show when={served()}><p class="code command" data-trust-bundle>{served()!.bundle}</p></Show>
+        <button class="btn" onClick={props.onClose}>{t("Close")}</button>
+      </div>
+    </div>
+  );
+}
+
+function Sheet(props: { onClose: () => void; onTrust: () => void }) {
   const info = () => describeConn(conn());
   return (
     <div class="sheet-back" onClick={props.onClose}>
@@ -184,6 +210,9 @@ function Sheet(props: { onClose: () => void }) {
             <For each={["auto", "light", "dark"] as const}>{(v) => <option value={v}>{v === "auto" ? t("Automatic") : v === "light" ? t("Light") : t("Dark")}</option>}</For>
           </select>
         </label>
+        <Show when={HOSTED}>
+          <div class="actions"><button class="btn" data-trust-open onClick={() => { props.onClose(); props.onTrust(); }}>{t("What this app trusts")}</button></div>
+        </Show>
         <div class="actions">
           <button class="btn" onClick={() => { link.kick(); props.onClose(); }}>{t("Reconnect now")}</button>
           <button class="btn danger" onClick={() => { if (confirm(t("Forget this pairing on this device?"))) { forgetDevice(); props.onClose(); } }}>{t("Forget this device")}</button>
@@ -230,7 +259,8 @@ export function App() {
           </Show>
         </Show>
       </main>
-      <Show when={sheet()}><Sheet onClose={() => setSheet(false)} /></Show>
+      <Show when={sheet()}><Sheet onClose={() => setSheet(false)} onTrust={() => setTrustOpen(true)} /></Show>
+      <Show when={HOSTED && trustOpen()}><TrustSheet onClose={() => setTrustOpen(false)} /></Show>
       <RecheckSheet />
       <LockCover />
     </>

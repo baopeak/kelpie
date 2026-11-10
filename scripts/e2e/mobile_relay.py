@@ -7,28 +7,32 @@ Before it: `cd relay && pnpm install --frozen-lockfile && pnpm build:selfhost` (
 
 Daemon only, no app and no browser: its own endpoint and data folder (phone_support.isolate), a fake Tailscale CLI (never the real one) so
 that the daemon has a Tailscale origin for the relay to let phones in from, and workerd from relay/node_modules with secrets made for this
-run and held by its process alone. Two TCP taps sit between the daemon and the relay and between the phone and the relay: they keep what
-passes, so the test can look for plaintext in it, and the daemon's can be cut to play a relay that went away. The phone speaks kelpie-link
-(link_noise.py) and connects only to the relay: it is never given the daemon's own address. Nothing here reaches Cloudflare.
+run and held by its process alone, once open to every install and once with a registration key. TCP taps sit between the daemon
+and the relay and between the phone and the relay: they keep what passes, so the test can look for plaintext in it (and read the
+control messages), and the daemon's can be cut to play a relay that went away. The phone speaks kelpie-link (link_noise.py) and
+connects only to the relay: it is never given the daemon's own address. Nothing here reaches Cloudflare.
 
-1. The daemon makes its room with the registration key and connects; the relay holds the Tailscale origin.
-2. Three phones pair through the relay with the QR code's single-use token, from the Tailscale origin; the request names "the relay";
+1. On a relay open to every install (no registration key) the daemon makes its room with no key; the relay says it is of the second
+   version, the daemon tells it the pages it lets in (`origins`, never the single `origin`), the relay names the page a phone came from
+   (`o` in `open`), a phone pairs there, and a phone whose page is elsewhere is refused.
+2. The daemon makes its room with the registration key and connects; the relay holds the Tailscale origin.
+3. Three phones pair through the relay with the QR code's single-use token, from the Tailscale origin; the request names "the relay";
    the pairing gives each a relay token. A second use of a pairing token is refused.
-3. Reconnected with its token, a phone types into a shell and reads the result; every frame after the hello is one of the padded sizes.
-4. Neither tap's capture holds what was typed, what came back, or the phone's name.
-5. The same phone connects again while its old socket is still there: the new session takes over and keeps working.
-6. A new room: connected phones hear its ticket, the old room is removed (4004, and 404 for its ticket), and the token works there.
-7. With the relay cut off from the daemon, a phone is removed; a phone socket the relay still admits hears `desktop_offline`; once the
+4. Reconnected with its token, a phone types into a shell and reads the result; every frame after the hello is one of the padded sizes.
+5. Neither tap's capture holds what was typed, what came back, or the phone's name.
+6. The same phone connects again while its old socket is still there: the new session takes over and keeps working.
+7. A new room: connected phones hear its ticket, the old room is removed (4004, and 404 for its ticket), and the token works there.
+8. With the relay cut off from the daemon, a phone is removed; a phone socket the relay still admits hears `desktop_offline`; once the
    daemon is back, the relay closes it (4002) before it reaches anything, and the token is refused from then on.
-8. A phone removed while connected through the relay hears `revoked` in its session, and is closed by the computer (4401).
-9. The kill switch tells a phone on the relay it was removed, and the relay refuses its token after.
-10. Turning the relay off closes the daemon's socket and dials nothing again.
+9. A phone removed while connected through the relay hears `revoked` in its session, and is closed by the computer (4401).
+10. The kill switch tells a phone on the relay it was removed, and the relay refuses its token after.
+11. A relay whose answer names no version (the first version's, played by a tap that strips `x-kelpie-relay-version`) is told the single
+    origin and never the list, and phones pair and connect through it as before.
+12. Turning the relay off closes the daemon's socket and dials nothing again.
 """
 import asyncio
-import base64
 import glob
 import hashlib
-import hmac
 import json
 import os
 import secrets
@@ -72,20 +76,15 @@ def free_port():
         return s.getsockname()[1]
 
 
-def hkdf_sha256(ikm, info, n=32):
-    prk = hmac.new(b"\0" * 32, ikm, hashlib.sha256).digest()
-    return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()[:n]
-
-
-def b64(data):
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-
 class Tap:
-    """A TCP forwarder that keeps what passes both ways, and can be cut (its connections dropped, new ones refused) and restored."""
+    """A TCP forwarder that keeps what passes both ways, and can be cut (its connections dropped, new ones refused) and restored.
+    `streams` keeps each connection's two directions apart, for reading the WebSocket frames in them. `strip_version`: the
+    relay's answers lose `x-kelpie-relay-version`, as a relay of the first version sends them."""
 
-    def __init__(self, target):
+    def __init__(self, target, strip_version=False):
         self.target, self.up, self.seen, self.accepted, self.open = target, True, bytearray(), 0, set()
+        self.strip_version = strip_version
+        self.streams = []
 
     async def start(self):
         self.server = await asyncio.start_server(self._client, "127.0.0.1", 0)
@@ -104,12 +103,24 @@ class Tap:
             return
         pair = (writer, up_writer)
         self.open.add(pair)
+        stream = {"up": bytearray(), "down": bytearray()}
+        self.streams.append(stream)
 
-        async def pipe(src, dst):
+        async def pipe(src, dst, kept, answers):
+            head = bytearray()  # the HTTP answer's head, until it is whole: the header goes from it as one piece
             try:
                 while data := await src.read(65536):
+                    if answers and self.strip_version and head is not None:
+                        head += data
+                        if b"\r\n\r\n" not in head:
+                            continue
+                        top, rest = bytes(head).split(b"\r\n\r\n", 1)
+                        top = b"\r\n".join(line for line in top.split(b"\r\n") if not line.lower().startswith(b"x-kelpie-relay-version:"))
+                        data, head = top + b"\r\n\r\n" + rest, None
                     if len(self.seen) < 16 << 20:
                         self.seen += data
+                    if len(kept) < 4 << 20:
+                        kept += data
                     dst.write(data)
                     await dst.drain()
             except (OSError, asyncio.IncompleteReadError):
@@ -117,7 +128,7 @@ class Tap:
             finally:
                 dst.transport.abort()
 
-        await asyncio.gather(pipe(reader, up_writer), pipe(up_reader, writer))
+        await asyncio.gather(pipe(reader, up_writer, stream["up"], False), pipe(up_reader, writer, stream["down"], True))
         self.open.discard(pair)
 
     def cut(self):
@@ -132,6 +143,39 @@ class Tap:
     def close(self):
         self.cut()
         self.server.close()
+
+    def texts(self, direction):
+        """The JSON text frames of every connection in one direction (`up`: what the daemon sent, unmasked; `down`: what the relay sent)."""
+        out = []
+        for stream in self.streams:
+            data = bytes(stream[direction])
+            if b"\r\n\r\n" not in data:
+                continue
+            out += [json.loads(t) for t in ws_texts(data.split(b"\r\n\r\n", 1)[1]) if t.startswith("{")]
+        return out
+
+
+def ws_texts(data):
+    """The text frames in a run of WebSocket frames (RFC 6455), unmasked."""
+    texts, i = [], 0
+    while i + 2 <= len(data):
+        opcode, length, masked = data[i] & 0x0F, data[i + 1] & 0x7F, data[i + 1] & 0x80
+        i += 2
+        if length == 126:
+            length, i = int.from_bytes(data[i:i + 2], "big"), i + 2
+        elif length == 127:
+            length, i = int.from_bytes(data[i:i + 8], "big"), i + 8
+        mask = data[i:i + 4] if masked else b""
+        i += 4 if masked else 0
+        payload = data[i:i + length]
+        i += length
+        if len(payload) < length:
+            break
+        if masked:
+            payload = bytes(b ^ mask[n % 4] for n, b in enumerate(payload))
+        if opcode == 1:
+            texts.append(payload.decode("utf-8", "replace"))
+    return texts
 
 
 def start_workerd(port, secrets_env):
@@ -151,7 +195,8 @@ def start_workerd(port, secrets_env):
         f.write(config)
     with open(bundle, "rb") as src, open(os.path.join(run, "dist", "entry.js"), "wb") as dst:
         dst.write(src.read())
-    proc = subprocess.Popen([found[0], "serve", "config.capnp"], cwd=run, env={**os.environ, **secrets_env}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    env = {k: v for k, v in os.environ.items() if k not in ("REGISTRATION_KEY", "OPEN_REGISTRATION", "TICKET_SECRET")}
+    proc = subprocess.Popen([found[0], "serve", "config.capnp"], cwd=run, env={**env, **secrets_env}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     end = time.time() + 20
     while time.time() < end:
         try:
@@ -173,7 +218,7 @@ async def until(fn, timeout, step=0.2):
     return None
 
 
-async def main(d, phone_tap, desk_tap, registration_key):
+async def main(d, phone_tap, desk_tap, registration_key, open_tap, open_port, v1_tap):
     async def call(method, params=None):
         return await asyncio.to_thread(d.call, method, params or {})
 
@@ -187,30 +232,22 @@ async def main(d, phone_tap, desk_tap, registration_key):
     check("Tailscale mode gives the daemon its origin", told.get("origin") == ORIGIN.removeprefix("https://"), told.get("origin"))
     await call("mobile.set_lock", {"on": False})
     url = f"ws://127.0.0.1:{desk_tap.port}"
-    wrong = await asyncio.to_thread(lambda: _refused(d, "mobile.set_relay", {"on": True, "url": url, "operator_key": "not-the-key"}))
-    check("a wrong registration key makes no room", "did not take that registration key" in (wrong or ""), wrong)
-    plain = await asyncio.to_thread(lambda: _refused(ps.kc.Conn(), "mobile.set_relay", {"on": True, "url": url, "operator_key": registration_key}))
-    check("the plain user token cannot turn the relay on", "needs the Kelpie app" in (plain or ""), plain)
-    await call("mobile.set_relay", {"on": True, "url": url, "operator_key": registration_key})
-    status = await until(lambda: _connected(relay_status), 20)
-    check("the daemon makes its room and connects", bool(status), status)
-    check("…with the Tailscale origin for phones", status and status["origin"] == ORIGIN, status)
 
-    # ---------- pairing through the relay ----------
     vectors = json.load(open(os.path.join(RELAY, "test", "vectors.json"), encoding="utf-8"))
-    check("the pairing token is derived as the relay's vectors say", b64(hkdf_sha256(bytes.fromhex(vectors["psk_hex"]), b"kelpie-relay-pair")) == vectors["pair_token"])
+    check("the pairing token is derived as the relay's vectors say", ps.relay_pair_token(bytes.fromhex(vectors["psk_hex"])) == vectors["pair_token"])
 
-    async def pair_through_relay(name, first=False):
-        """A phone pairs through the relay with the QR code's token: (device, its relay token, the room's ticket), or None."""
+    async def pair_through_relay(name, first=False, via=None, relay_url=None):
+        """A phone pairs through the relay with the QR code's token: (device, its relay token, the room's ticket), or None. `via`: the port the phone
+        reaches the relay at (the phone side's tap), `relay_url`: the relay the computer is on."""
         link = (await call("mobile.pair_start"))["url"]
         payload = json.loads(ln.unb64(link.split("#p=")[1]))
         relay_ep = next((e for e in payload["ep"] if e["t"] == "relay"), None)
         if first:
-            check("the QR code names the relay and the room's ticket", relay_ep and relay_ep["a"] == url and "." in relay_ep["r"], payload["ep"])
+            check("the QR code names the relay and the room's ticket", relay_ep and relay_ep["a"] == (relay_url or url) and "." in relay_ep["r"], payload["ep"])
         if not relay_ep:
             return None
-        pair_token = b64(hkdf_sha256(ln.unb64(payload["psk"]), b"kelpie-relay-pair"))
-        base = f"ws://127.0.0.1:{phone_tap.port}/v1/phone?t={relay_ep['r']}"
+        pair_token = ps.relay_pair_token(ln.unb64(payload["psk"]))
+        base = f"ws://127.0.0.1:{via or phone_tap.port}/v1/phone?t={relay_ep['r']}"
         attempt = ps.PairAttempt(BASE, link, name, "write", origin=ORIGIN)
         attempt.url = f"{base}&p={pair_token}"
         await attempt.start()
@@ -231,7 +268,7 @@ async def main(d, phone_tap, desk_tap, registration_key):
                 await again.close()
                 check("a pairing token is let in once", False)
             except websockets.exceptions.InvalidHandshake as e:
-                check("a pairing token is let in once", status_of(e) == 403, status_of(e))
+                check("a pairing token is let in once", ps.status_of(e) == 403, ps.status_of(e))
         if not (paired and paired.get("relay")):
             return None
         return ps.Device(attempt.priv, attempt.pub, attempt.dpk, paired["device"]["id"]), paired["relay"]["token"], relay_ep["r"]
@@ -255,6 +292,39 @@ async def main(d, phone_tap, desk_tap, registration_key):
         await phone.send(type="hb", n=n)
         return bool(await phone.wait(lambda m: m["type"] == "hb" and m.get("echo") and m.get("n") == n, 5))
 
+    # ---------- a relay open to every install ----------
+    open_url = f"ws://127.0.0.1:{open_tap.port}"
+    opened = await asyncio.to_thread(lambda: _refused(d, "mobile.set_relay", {"on": True, "url": open_url}))
+    status = await until(lambda: _connected_at(relay_status, open_url, open_tap), 20)
+    check("a relay open to every install makes a room with no registration key, and the daemon connects", opened is None and bool(status), opened or status)
+    check("…a relay that says it is of the second version", status and status.get("version") == 2, status)
+    open_paired = await pair_through_relay(PHONE_NAME + " open", via=open_port, relay_url=open_url)
+    check("a phone pairs through it", bool(open_paired))
+    sent, heard = open_tap.texts("up"), open_tap.texts("down")
+    check("the computer tells a relay of the second version the pages it lets in, never the single origin", any(m.get("t") == "origins" and ORIGIN in m.get("o", []) for m in sent) and not any(m.get("t") == "origin" for m in sent), [m.get("t") for m in sent][:12])
+    check("…and the relay says which page a phone came from (`o` in `open`)", any(m.get("t") == "open" and m.get("o") == ORIGIN for m in heard), [m for m in heard if m.get("t") == "open"][:3])
+    elsewhere = json.loads(ln.unb64((await call("mobile.pair_start"))["url"].split("#p=")[1]))
+    relay_ep = next(e for e in elsewhere["ep"] if e["t"] == "relay")
+    try:
+        foreign = await websockets.connect(f"ws://127.0.0.1:{open_port}/v1/phone?t={relay_ep['r']}&p={ps.relay_pair_token(ln.unb64(elsewhere['psk']))}", origin="https://not-a-page-it-lets-in.example", open_timeout=5)
+        await foreign.close()
+        check("a phone from a page the room does not let in is refused", False)
+    except websockets.exceptions.InvalidHandshake as e:
+        check("a phone from a page the room does not let in is refused", ps.status_of(e) == 403, ps.status_of(e))
+    if open_paired:
+        await call("mobile.revoke", {"id": open_paired[0].id})
+
+    # ---------- a relay that asks for a registration key ----------
+    wrong = await asyncio.to_thread(lambda: _refused(d, "mobile.set_relay", {"on": True, "url": url, "operator_key": "not-the-key"}))
+    check("a wrong registration key makes no room", "did not take that registration key" in (wrong or ""), wrong)
+    plain = await asyncio.to_thread(lambda: _refused(ps.kc.Conn(), "mobile.set_relay", {"on": True, "url": url, "operator_key": registration_key}))
+    check("the plain user token cannot turn the relay on", "needs the Kelpie app" in (plain or ""), plain)
+    await call("mobile.set_relay", {"on": True, "url": url, "operator_key": registration_key})
+    status = await until(lambda: _connected_at(relay_status, url, desk_tap), 20)
+    check("the daemon makes its room and connects", bool(status), status)
+    check("…with the Tailscale origin for phones", status and status["origin"] == ORIGIN, status)
+
+    # ---------- pairing through the relay ----------
     paired_a = await pair_through_relay(PHONE_NAME, first=True)
     if not paired_a:
         return
@@ -308,7 +378,7 @@ async def main(d, phone_tap, desk_tap, registration_key):
         await old_room.close()
         check("the old ticket finds no room", False)
     except websockets.exceptions.InvalidHandshake as e:
-        check("the old ticket finds no room", status_of(e) == 404, status_of(e))
+        check("the old ticket finds no room", ps.status_of(e) == 404, ps.status_of(e))
     ticket = next(e for e in moved["endpoints"] if e["t"] == "relay")["r"] if moved else ticket
     await until(lambda: _connected(relay_status), 20)
     phone, hello = await through_relay(device, ticket, token)
@@ -341,7 +411,7 @@ async def main(d, phone_tap, desk_tap, registration_key):
         await late.close()
         check("its token is refused from then on", False)
     except websockets.exceptions.InvalidHandshake as e:
-        check("its token is refused from then on", status_of(e) == 403, status_of(e))
+        check("its token is refused from then on", ps.status_of(e) == 403, ps.status_of(e))
     await until(lambda: _connected(relay_status), 60)
 
     # ---------- a revoke while the phone is connected through the relay ----------
@@ -366,18 +436,32 @@ async def main(d, phone_tap, desk_tap, registration_key):
             await after.close()
             return None
         except websockets.exceptions.InvalidHandshake as e:
-            return status_of(e)
+            return ps.status_of(e)
 
     # The relay hears last, a second after the sessions had their say.
     check("…and the relay lets its token in no more", await until(refused, 10, step=0.5) == 403)
     await call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
     await until(lambda: _connected(relay_status), 30)
+    # ---------- a relay of the first version: its answer names no version ----------
+    v1_url = f"ws://127.0.0.1:{v1_tap.port}"
+    moved = await asyncio.to_thread(lambda: _refused(d, "mobile.set_relay", {"on": True, "url": v1_url}))
+    status = await until(lambda: _connected_at(relay_status, v1_url, v1_tap), 30)
+    check("a relay whose answer names no version is taken for the first one, and the daemon connects", moved is None and status and status.get("version") == 1, moved or status)
+    sent = v1_tap.texts("up")
+    check("…and is told the single origin, never the list of pages", any(m.get("t") == "origin" and m.get("o") == ORIGIN for m in sent) and not any(m.get("t") == "origins" for m in sent), [m.get("t") for m in sent][:12])
+    v1_paired = await pair_through_relay(PHONE_NAME + " v1", relay_url=v1_url)
+    check("phones pair through it from the Tailscale origin", bool(v1_paired))
+    if v1_paired:
+        v1_phone, v1_hello = await through_relay(v1_paired[0], v1_paired[2], v1_paired[1])
+        check("…and connect through it again with their token", v1_hello.get("type") == "hello" and await answers(v1_phone, 91))
+        await v1_phone.close()
+
     # ---------- off ----------
     await call("mobile.set_relay", {"on": False})
-    before = desk_tap.accepted
+    before = v1_tap.accepted
     await asyncio.sleep(3)
     status = await relay_status()
-    check("off: no connection, and none made again", not status["on"] and not status["connected"] and desk_tap.accepted == before, (status, desk_tap.accepted - before))
+    check("off: no connection, and none made again", not status["on"] and not status["connected"] and v1_tap.accepted == before, (status, v1_tap.accepted - before))
     after = json.loads(ln.unb64((await call("mobile.pair_start"))["url"].split("#p=")[1]))
     check("…and a QR code names no relay", not any(e["t"] == "relay" for e in after["ep"]), after["ep"])
     await call("session.close", {"handle": next(s for s in await call("session.list") if s["id"] == sid)["handle"]})
@@ -386,6 +470,12 @@ async def main(d, phone_tap, desk_tap, registration_key):
 async def _connected(status):
     s = await status()
     return s if s["on"] and s["connected"] else None
+
+
+async def _connected_at(status, url, tap):
+    """Connected to the relay at `url`, through its tap: a connection to the relay it was on before does not count."""
+    s = await status()
+    return s if s["on"] and s["connected"] and s["url"] == url and tap.accepted else None
 
 
 async def _closed(phone):
@@ -401,11 +491,6 @@ async def _shows(phone, sid, text):
     return text in phone.text(sid)
 
 
-def status_of(e):
-    """The HTTP status a refused upgrade answered, from either of websockets' client implementations."""
-    return getattr(getattr(e, "response", None), "status_code", None) or getattr(e, "status_code", None)
-
-
 def _refused(conn, method, params):
     try:
         conn.call(method, params)
@@ -418,24 +503,28 @@ TS = ps.write_fake_tailscale(tempfile.mkdtemp(prefix="kelpie-relay-ts-"))
 
 
 async def run():
-    relay_port = free_port()
+    relay_port, open_port = free_port(), free_port()
     registration_key = secrets.token_urlsafe(32)
     workerd = start_workerd(relay_port, {"TICKET_SECRET": secrets.token_urlsafe(32), "REGISTRATION_KEY": registration_key})
+    open_workerd = start_workerd(open_port, {"TICKET_SECRET": secrets.token_urlsafe(32), "OPEN_REGISTRATION": "1"})
     phone_tap = await Tap(relay_port).start()
     desk_tap = await Tap(relay_port).start()
+    open_tap = await Tap(open_port).start()
+    v1_tap = await Tap(relay_port, strip_version=True).start()
     d = ps.Daemon(exe, env={"KELPIE_E2E": "1", "KELPIE_TAILSCALE_BIN": TS[0]})
     await asyncio.to_thread(d.start)
     try:
-        await main(d, phone_tap, desk_tap, registration_key)
+        await main(d, phone_tap, desk_tap, registration_key, open_tap, open_port, v1_tap)
     finally:
         await asyncio.to_thread(d.stop)
-        phone_tap.close()
-        desk_tap.close()
-        workerd.terminate()
-        try:
-            workerd.wait(10)
-        except subprocess.TimeoutExpired:
-            workerd.kill()
+        for tap in (phone_tap, desk_tap, open_tap, v1_tap):
+            tap.close()
+        for proc in (workerd, open_workerd):
+            proc.terminate()
+            try:
+                proc.wait(10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 
 asyncio.run(run())

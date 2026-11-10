@@ -16,6 +16,8 @@ export interface PageFacts {
   https: boolean;
   /** At a Tailscale name. A person's own certificate on this network is HTTPS too, and pairing there worked before any of this. */
   tailnet: boolean;
+  /** The app served from the relay's origin (hosted.ts): installed first, as at a Tailscale name. */
+  hosted: boolean;
   /** Opened from the Home Screen, not in a browser tab. */
   installed: boolean;
   paired: boolean;
@@ -30,7 +32,8 @@ export type FirstScreen = "install" | "scan" | "pair";
 
 export function firstScreen(f: PageFacts): FirstScreen {
   if (!f.https || f.paired) return "pair";
-  if (!f.installed && !f.stayInBrowser && (f.tailnet || !f.hasCode)) return "install";
+  const installFirst = f.hosted || f.tailnet;
+  if (!f.installed && !f.stayInBrowser && (installFirst || !f.hasCode)) return "install";
   return f.hasCode ? "pair" : "scan";
 }
 
@@ -67,4 +70,17 @@ export function readCode(text: string, here: string): CodeReading {
 export function movedTo(endpoints: readonly Endpoint[], here: string): string | null {
   const ts = endpoints.find((e) => e.t === "ts")?.a;
   return ts && ts !== here ? ts : null;
+}
+
+/** On the hosted app: the host of the computer's relay when it is not this page's. The app works only through the relay that serves it, so the
+ *  computer moved and this phone must be paired again (at that relay's app, when it serves one). */
+export function relayMovedTo(endpoints: readonly Endpoint[], here: string): string | null {
+  const relay = endpoints.find((e) => e.t === "relay")?.a;
+  if (!relay) return null;
+  try {
+    const host = new URL(relay).host;
+    return host && host !== here ? host : null;
+  } catch {
+    return null;
+  }
 }

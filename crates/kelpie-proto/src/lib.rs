@@ -54,7 +54,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// 33: host-to-host copies choose their route (`xfer.start` `route: auto|relay`; jobs report `route_used` and `route_reason`): direct when the
 /// first host logs in to the second by itself, else through this computer. An older daemon ignores `route` and copies through this
 /// computer, so the app offers the choice only at 33.
-pub const API_LEVEL: u32 = 33;
+/// 34: the phone app the relay hosts at its own origin (`mobile.pair_start {hosted}` and `hosted` on its answer; `relay.hosted`, `relay.hosted_devices`
+/// and `relay.version` in `mobile.status`, and `new_store` and `lan` beside them; `page` and `page_kind` on a device and `origin_kind` on a pairing request
+/// and `mobile.pair_request`; `mobile.enable {lan}`), rooms made with no registration key, and a relay of the second version told every page origin it
+/// lets in (`origins`) and naming the phone's (`o`); an older daemon has none of it, so the app offers the hosted app only at 34.
+pub const API_LEVEL: u32 = 34;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

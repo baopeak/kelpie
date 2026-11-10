@@ -1,16 +1,37 @@
 name: relay
 
-# The phone relay (relay/): its own workspace and lockfile, so it is checked here, not in ci.yml. Checks only: typecheck, tests on
-# workerd, and the self-hosted bundle smoke-tested on a local workerd. Deploying is done by hand with wrangler (docs/relay-self-host.md).
+# The phone relay (relay/): its own workspace and lockfile, so it is checked here, not in ci.yml. Checks: typecheck, tests on
+# workerd, the self-hosted bundle smoke-tested on a local workerd with open registration and with a key, and the hosted phone
+# app served beside the relay by `wrangler dev`.
+#
+# Kelpie's own relay is never deployed by hand. The router and the hosted app deploy from a release tag (release.yml). The room
+# script deploys here (deploy-room), only when room code changed and before the release's router: run this workflow from the
+# release tag itself (`gh workflow run relay.yml --ref vX -f tag=vX -f target=staging`, then production); the owner approves
+# it in relay-room-<target>. A room deploy drops every live room's sockets. Self-hosting: docs/relay-self-host.md.
 on:
   pull_request:
-    paths: ["relay/**", ".github/workflows/relay.yml"]
+    paths: ["relay/**", "app/phone/**", "app/vite.phone.config.ts", "scripts/hosted/**", ".github/workflows/relay.yml"]
   push:
     branches: [master]
-    paths: ["relay/**", ".github/workflows/relay.yml"]
+    paths: ["relay/**", "app/phone/**", "app/vite.phone.config.ts", "scripts/hosted/**", ".github/workflows/relay.yml"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to deploy the room script from (the same tag this run uses)"
+        required: true
+        type: string
+      target:
+        description: "Where to deploy it"
+        required: true
+        type: choice
+        options: [staging, production]
+
+permissions:
+  contents: read
 
 jobs:
   test:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -26,14 +47,120 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
-      # Throwaway secrets for a relay that lives as long as this step.
-      - name: Self-hosted relay on workerd, smoke-tested
+      # Throwaway secrets for relays that live as long as this step: first with open registration, then with a key.
+      - name: Self-hosted relay on workerd, smoke-tested in open and key mode
+        shell: bash
         run: |
           pnpm build:selfhost
-          cd workerd
-          mkdir -p rooms
-          TICKET_SECRET="ci-$(openssl rand -hex 16)" REGISTRATION_KEY="ci-registration" \
-            ../node_modules/.pnpm/@cloudflare+workerd-linux-64@*/node_modules/@cloudflare/workerd-linux-64/bin/workerd serve config.capnp &
-          for i in $(seq 1 30); do curl -sf http://localhost:8787/v1/health && break; sleep 1; done
-          cd ..
-          RELAY_URL=http://localhost:8787 REGISTRATION_KEY=ci-registration pnpm smoke
+          workerd=$(ls "$PWD"/node_modules/.pnpm/@cloudflare+workerd-linux-64@*/node_modules/@cloudflare/workerd-linux-64/bin/workerd | head -1)
+          smoke() {
+            rm -rf workerd/rooms && mkdir -p workerd/rooms
+            (cd workerd && exec env TICKET_SECRET="ci-$(openssl rand -hex 16)" "$@" "$workerd" serve config.capnp) &
+            pid=$!
+            for i in $(seq 1 30); do curl -sf http://localhost:8787/v1/health && break; sleep 1; done
+            status=0
+            RELAY_URL=http://localhost:8787 REGISTRATION_KEY="$key" pnpm smoke || status=$?
+            kill "$pid"; wait "$pid" || true
+            return "$status"
+          }
+          key="" smoke OPEN_REGISTRATION=1
+          key=ci-registration smoke REGISTRATION_KEY=ci-registration
+
+  # The hosted phone app, built for a test origin and served by `wrangler dev --local` the way Cloudflare serves it: headers from
+  # its `_headers`, the 404 page, `/v1/*` to the Worker. Nothing here reaches Cloudflare.
+  page:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Hosted bundle scripts' tests
+        run: |
+          python3 -I scripts/hosted/test_bundle_manifest.py
+          python3 -I scripts/hosted/test_verify_live.py
+      - name: Build the hosted phone app for a test origin
+        working-directory: app
+        env:
+          KELPIE_HOSTED_ORIGIN: https://relay.example.test
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:phone:hosted
+      - name: Its manifest and version.json
+        run: python3 -I scripts/hosted/bundle_manifest.py app/dist-phone-hosted --tag v0.0.0-ci --commit "$GITHUB_SHA"
+      - name: Relay dependencies
+        working-directory: relay
+        run: pnpm install --frozen-lockfile
+      - name: The app beside the relay on wrangler dev, smoke-tested and checked against its manifest
+        working-directory: relay
+        shell: bash
+        env:
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          rm -rf public && cp -R ../app/dist-phone-hosted public
+          printf 'TICKET_SECRET=ci-%s\n' "$(openssl rand -hex 16)" > .dev.vars
+          pnpm exec wrangler dev --local -c wrangler.toml -c wrangler.room.toml --ip 127.0.0.1 --port 8787 > "$RUNNER_TEMP/wrangler-dev.log" 2>&1 &
+          pid=$!
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/v1/health && break; sleep 1; done
+          status=0
+          RELAY_URL=http://127.0.0.1:8787 PAGE=1 pnpm smoke || status=$?
+          python3 -I ../scripts/hosted/verify_live.py --origin http://127.0.0.1:8787 --tag v0.0.0-ci \
+            --manifest ../app/hosted-phone-manifest.json || status=$?
+          kill "$pid"; wait "$pid" || true
+          [ "$status" = 0 ] || { cat "$RUNNER_TEMP/wrangler-dev.log"; exit "$status"; }
+
+  # The room script, from a release tag, after the owner's approval in relay-room-<target>. Shares the deploy group with
+  # release.yml's deploys, so a room and a router deploy never overlap.
+  deploy-room:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    environment: relay-room-${{ inputs.target }}
+    concurrency:
+      group: hosted-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Run from the release tag it deploys
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$GITHUB_REF" == refs/tags/v* ]] || { echo "run this workflow from a release tag (--ref vX), not $GITHUB_REF_NAME"; exit 1; }
+          [ "$TAG" = "$GITHUB_REF_NAME" ] || { echo "the tag input must name the tag this run uses ($GITHUB_REF_NAME)"; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install relay dependencies
+        working-directory: relay
+        run: pnpm install --frozen-lockfile
+      - name: Deploy the room script
+        working-directory: relay
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+          TARGET: ${{ inputs.target }}
+        run: |
+          [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "the environment has no Cloudflare secrets"; exit 1; }
+          if [ "$TARGET" = staging ]; then env=staging; else env=; fi
+          pnpm deploy:room --env="$env" --message "$GITHUB_REF_NAME room $GITHUB_SHA"
+      - name: Smoke test the relay
+        working-directory: relay
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          if [ "$TARGET" = staging ]; then url=https://kelpie-link-relay-staging.baopeak.workers.dev; else url=https://kelpie-link-relay.baopeak.workers.dev; fi
+          RELAY_URL="$url" pnpm smoke

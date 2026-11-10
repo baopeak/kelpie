@@ -5,6 +5,13 @@ name: release
 # publish it on GitHub — only then does `releases/latest/download/latest.json` offer it to apps.
 # Secrets: TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD (empty when the key
 # has none).
+#
+# The same tag builds the hosted phone app twice (the two must hash alike), adds its manifest, bundle
+# and hash to the draft, then deploys it with the relay's router: to staging, then to production,
+# each only after the owner approves it in its GitHub environment (hosted-staging, hosted-production).
+# CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are secrets of those environments only. Publish the
+# draft only after the production deploy and its check passed. The room script deploys on its own
+# (relay.yml, deploy-room), before this, and only when room code changed.
 on:
   push:
     tags: ["v*"]
@@ -92,7 +99,8 @@ jobs:
           fi
           [ -f "$bin" ] || { echo "app binary not found: $bin"; exit 1; }
           if grep -a -q KELPIE_UPDATE_ENDPOINT "$bin"; then echo "$bin was built with e2e-updater"; exit 1; fi
-      - name: The release daemon carries the phone client, not its placeholder page
+      # The relay test hooks (KELPIE_RELAY_TEST_URL, KELPIE_RELAY_TEST_CA) exist only in debug builds.
+      - name: The release daemon carries the phone client, not its placeholder page, and no relay test hooks
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
@@ -105,6 +113,7 @@ jobs:
           for bin in $bins; do
             [ -f "$bin" ] || { echo "daemon binary not found: $bin"; exit 1; }
             if grep -a -q KELPIE_PHONE_BUNDLE_MISSING "$bin"; then echo "$bin was built without the phone client"; exit 1; fi
+            if grep -a -q -e KELPIE_RELAY_TEST_URL -e KELPIE_RELAY_TEST_CA "$bin"; then echo "$bin carries the relay test hooks"; exit 1; fi
           done
       - uses: actions/upload-artifact@v4
         with:
@@ -121,8 +130,57 @@ jobs:
             target/release/bundle/deb/*.deb.sig
           if-no-files-found: error
 
+  # The hosted phone app, built twice from clean folders: both builds must give one bundle hash.
+  hosted-build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    outputs:
+      bundle_sha256: ${{ steps.build.outputs.bundle_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: The tag names the frontend's version
+        shell: bash
+        run: |
+          pkg=$(python3 -c "import json;print(json.load(open('app/package.json'))['version'])")
+          [ "$pkg" = "${GITHUB_REF_NAME#v}" ] || { echo "tag $GITHUB_REF_NAME, package.json $pkg"; exit 1; }
+      - name: Install frontend dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Build twice, write the manifests, compare
+        id: build
+        shell: bash
+        env:
+          KELPIE_HOSTED_ORIGIN: https://kelpie-link-relay.baopeak.workers.dev
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/hosted"
+          for n in 1 2; do
+            rm -rf app/dist-phone-hosted
+            (cd app && pnpm build:phone:hosted)
+            mkdir -p "$out/$n"
+            mv app/dist-phone-hosted "$out/$n/dist-phone-hosted"
+            python3 -I scripts/hosted/bundle_manifest.py "$out/$n/dist-phone-hosted" --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA"
+          done
+          cmp "$out/1/hosted-phone-manifest.json" "$out/2/hosted-phone-manifest.json"
+          sha=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle_sha256"])' "$out/1/hosted-phone-manifest.json")
+          echo "bundle_sha256=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hosted-phone
+          path: ${{ runner.temp }}/hosted/1/
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, hosted-build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -130,10 +188,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Installers only: the hosted app's files must never become release assets one by one.
       - uses: actions/download-artifact@v4
         with:
           path: downloaded
+          pattern: bundle-*
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: hosted-phone
+          path: hosted
       - name: Release files, notes and updater manifest
         shell: bash
         run: |
@@ -164,8 +228,171 @@ jobs:
             --artifact "darwin-x86_64=$mac" \
             --artifact "linux-x86_64=$appimage" "${extra[@]}" > dist/latest.json
           cat dist/latest.json
+      # After latest.json, so the update notes apps show stay the tag's own.
+      - name: Hosted phone app manifest, bundle and hash
+        shell: bash
+        env:
+          BUNDLE_SHA256: ${{ needs.hosted-build.outputs.bundle_sha256 }}
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          python3 -I scripts/hosted/verify_live.py --bundle hosted/dist-phone-hosted --tag "$GITHUB_REF_NAME" \
+            --manifest hosted/hosted-phone-manifest.json
+          sha=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle_sha256"])' hosted/hosted-phone-manifest.json)
+          [ "$sha" = "$BUNDLE_SHA256" ] || { echo "manifest $sha, build $BUNDLE_SHA256"; exit 1; }
+          cp hosted/hosted-phone-manifest.json dist/
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C hosted/dist-phone-hosted -cf - . \
+            | gzip -n > "dist/hosted-phone-$v.tar.gz"
+          cat >> notes.md <<EOF
+
+          ## Hosted phone app
+
+          Served at https://kelpie-link-relay.baopeak.workers.dev. Bundle sha256: \`$sha\`
+          (every file and its hash: \`hosted-phone-manifest.json\`; the bundle: \`hosted-phone-$v.tar.gz\`).
+          Check what the origin serves, from a clone of this repository:
+
+              python3 -I scripts/hosted/verify_live.py --tag $GITHUB_REF_NAME
+          EOF
+          ls -l dist
       - name: Create the draft release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --draft --title "Kelpie ${GITHUB_REF_NAME#v}" --notes-file notes.md
+
+  # Deploys: one at a time (relay.yml's room deploys share the group), each after the owner's approval in its environment.
+  # The Cloudflare secrets reach only the deploy step; nothing here runs with `set -x` or prints them.
+  hosted-staging:
+    needs: hosted-build
+    runs-on: ubuntu-22.04
+    environment:
+      name: hosted-staging
+      url: https://kelpie-link-relay-staging.baopeak.workers.dev
+    concurrency:
+      group: hosted-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install relay dependencies
+        working-directory: relay
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hosted-phone
+          path: ${{ runner.temp }}/hosted
+      - name: The bundle is the one the manifest and the build name
+        shell: bash
+        env:
+          BUNDLE_SHA256: ${{ needs.hosted-build.outputs.bundle_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 -I scripts/hosted/verify_live.py --bundle "$RUNNER_TEMP/hosted/dist-phone-hosted" --tag "$GITHUB_REF_NAME" \
+            --manifest "$RUNNER_TEMP/hosted/hosted-phone-manifest.json"
+          sha=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle_sha256"])' "$RUNNER_TEMP/hosted/hosted-phone-manifest.json")
+          [ "$sha" = "$BUNDLE_SHA256" ] || { echo "manifest $sha, build $BUNDLE_SHA256"; exit 1; }
+          rm -rf relay/public
+          cp -R "$RUNNER_TEMP/hosted/dist-phone-hosted" relay/public
+      - name: Deploy the router and the app to staging
+        working-directory: relay
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+          BUNDLE_SHA256: ${{ needs.hosted-build.outputs.bundle_sha256 }}
+        run: |
+          [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "the environment has no Cloudflare secrets"; exit 1; }
+          pnpm exec wrangler deploy -c wrangler.toml --env=staging --message "$GITHUB_REF_NAME $BUNDLE_SHA256"
+      # The edge may serve the previous version for a few seconds after a deploy.
+      - name: Check what staging serves
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5 6; do
+            python3 -I scripts/hosted/verify_live.py --env staging --tag "$GITHUB_REF_NAME" \
+              --manifest "$RUNNER_TEMP/hosted/hosted-phone-manifest.json" && exit 0
+            sleep 10
+          done
+          exit 1
+      - name: Smoke test staging
+        working-directory: relay
+        env:
+          RELAY_URL: https://kelpie-link-relay-staging.baopeak.workers.dev
+          PAGE: "1"
+        run: pnpm smoke
+
+  hosted-production:
+    needs: [hosted-build, publish, hosted-staging]
+    runs-on: ubuntu-22.04
+    environment:
+      name: hosted-production
+      url: https://kelpie-link-relay.baopeak.workers.dev
+    concurrency:
+      group: hosted-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install relay dependencies
+        working-directory: relay
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hosted-phone
+          path: ${{ runner.temp }}/hosted
+      - name: The bundle is the one the manifest and the build name
+        shell: bash
+        env:
+          BUNDLE_SHA256: ${{ needs.hosted-build.outputs.bundle_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 -I scripts/hosted/verify_live.py --bundle "$RUNNER_TEMP/hosted/dist-phone-hosted" --tag "$GITHUB_REF_NAME" \
+            --manifest "$RUNNER_TEMP/hosted/hosted-phone-manifest.json"
+          sha=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["bundle_sha256"])' "$RUNNER_TEMP/hosted/hosted-phone-manifest.json")
+          [ "$sha" = "$BUNDLE_SHA256" ] || { echo "manifest $sha, build $BUNDLE_SHA256"; exit 1; }
+          rm -rf relay/public
+          cp -R "$RUNNER_TEMP/hosted/dist-phone-hosted" relay/public
+      - name: Deploy the router and the app to production
+        working-directory: relay
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+          BUNDLE_SHA256: ${{ needs.hosted-build.outputs.bundle_sha256 }}
+        run: |
+          [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "the environment has no Cloudflare secrets"; exit 1; }
+          pnpm exec wrangler deploy -c wrangler.toml --env= --message "$GITHUB_REF_NAME $BUNDLE_SHA256"
+      - name: Check what production serves
+        shell: bash
+        run: |
+          for i in 1 2 3 4 5 6; do
+            python3 -I scripts/hosted/verify_live.py --env production --tag "$GITHUB_REF_NAME" \
+              --manifest "$RUNNER_TEMP/hosted/hosted-phone-manifest.json" && exit 0
+            sleep 10
+          done
+          exit 1
+      - name: Smoke test production
+        working-directory: relay
+        env:
+          RELAY_URL: https://kelpie-link-relay.baopeak.workers.dev
+          PAGE: "1"
+        run: pnpm smoke

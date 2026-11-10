@@ -8,6 +8,14 @@ workers_dev = false
 name = "ROOM"
 class_name = "Room"
 
+[[durable_objects.bindings]]
+name = "REGISTRAR"
+class_name = "Registrar"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Registrar"]

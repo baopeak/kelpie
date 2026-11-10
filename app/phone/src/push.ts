@@ -170,7 +170,8 @@ export class Alerts {
     return info.t === "ack" ? info.vapid ?? null : null;
   }
 
-  /** The pairing is over: nothing of it should reach this phone any more. */
+  /** The pairing is over, or this app is about to pair with another computer: nothing of it should reach this phone any more. Ending the
+   *  browser's subscription voids its endpoint at the push service, so the computer left behind cannot alert this phone even if it kept it. */
   async forget() {
     this.env.setWanted(false);
     const held = await this.env.current().catch(() => null);

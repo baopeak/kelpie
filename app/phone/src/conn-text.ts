@@ -1,6 +1,7 @@
 // Words for the connection state. "Your connection is slow" and "the computer is busy" are different
 // things and read differently; so are "no network" and "the computer does not answer".
 import type { ConnState } from "./conn-state";
+import { HOSTED } from "./hosted";
 import { intlLocale, t } from "./i18n";
 
 export type Tone = "ok" | "warn" | "bad" | "idle";
@@ -24,7 +25,9 @@ export function busyText(reasons: string[]): string {
   return t("The computer is busy, so updates are slower. Typing still works.");
 }
 
-export function describeConn(s: ConnState): { label: string; detail: string; tone: Tone } {
+export function describeConn(state: ConnState): { label: string; detail: string; tone: Tone } {
+  // The hosted app has no Tailscale route to speak of: the relay is its only way.
+  const s: ConnState = HOSTED && (state.kind === "no_tailnet" || state.kind === "no_path") ? { kind: "relay_unreachable" } : state;
   switch (s.kind) {
     case "connecting":
       return { label: t("Connecting…"), detail: t("Reaching Kelpie on your computer."), tone: "idle" };
@@ -57,7 +60,15 @@ export function describeConn(s: ConnState): { label: string; detail: string; ton
         tone: "bad",
       };
     case "relay_unreachable":
-      return { label: t("Relay unreachable"), detail: t("The relay cannot be reached, and your computer does not answer directly either. What you see is the last state."), tone: "bad" };
+      return HOSTED
+        ? { label: t("Relay unreachable"), detail: t("Kelpie's relay cannot be reached from this phone right now. What you see is the last state."), tone: "bad" }
+        : { label: t("Relay unreachable"), detail: t("The relay cannot be reached, and your computer does not answer directly either. What you see is the last state."), tone: "bad" };
+    case "relay_moved":
+      return {
+        label: t("Pair this phone again"),
+        detail: t("Your computer now uses another relay, and this app works only through the relay it came from. Pair this phone again from Kelpie → Settings → Mobile."),
+        tone: "bad",
+      };
     case "no_path":
       return {
         label: t("No way to your computer"),

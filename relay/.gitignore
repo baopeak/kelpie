@@ -3,3 +3,5 @@
 workerd/dist/
 workerd/rooms/
 dist/
+# The hosted phone app, copied in before a deploy: never committed.
+public/

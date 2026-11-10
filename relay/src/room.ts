@@ -1,20 +1,23 @@
 // One Durable Object per room. It forwards binary frames it cannot read between one desktop and up to eight phones, and
 // stores only what admits them: the room's public key, the hashes of the phones' tokens, the hashes of live pairing tokens,
-// the page origin phones may come from, and how much the room has carried this month. Everything a socket needs to survive
+// the page origins phones may come from, and how much the room has carried this month. Everything a socket needs to survive
 // hibernation lives in its attachment, and all waiting is left to the runtime, so that an idle room costs nothing.
 //
 // - **Desktop**: `/v1/desktop?t=&ts=&sig=`, `sig` being an ECDSA P-256 signature with the room key over
 //   `kelpie-relay/1 desktop <room> <ts>`; `ts` is the desktop's clock in ms, within 5 minutes of ours and above the last one
-//   used, so a signature cannot be used twice. No `Origin`. The newest desktop wins.
+//   used, so a signature cannot be used twice. No `Origin`. The newest desktop wins. Its 101 says which version of this protocol the
+//   room speaks (`x-kelpie-relay-version`), so that a desktop never sends a message an older room would close it for.
 // - **Phone**: `/v1/phone?t=&k=<token>` with a token whose SHA-256 the desktop put on the allow-list, or `&p=<pair token>`
-//   once. An `Origin`, when there is one, must be the one the desktop registered.
+//   once. An `Origin`, when there is one, must be one of those the desktop registered: a guard against other pages only, the token
+//   being what admits.
 // - **Frames**: binary only, at most 64 KiB. A phone's frame reaches the desktop as `[slot, u16 big-endian] + frame`; the
 //   desktop's goes to the slot it names. Nothing is queued: with no desktop ready a phone's frame is dropped, uncounted. A slot is a number
 //   for one phone socket, never given to another while any socket still holds it, so a late close, frame or kick of an old socket
 //   cannot reach a new one. The desktop's frames are limited per slot: one phone's traffic closes that phone, not the room.
 // - **The desktop's word** (JSON text): `allow` (the whole allow-list; phones whose token left it are closed, and the desktop
-//   hears of phones only after it), `pair`, `origin`, `kick`, `drop`, heard from the newest desktop socket only. It hears
-//   `open` for each phone slot, with the hash the phone came in with (`k`), and `close`, with the phone's close code (`c`).
+//   hears of phones only after it), `pair`, `origins` (up to four; `origin`, one, from desktops before it), `kick`, `drop`, heard from
+//   the newest desktop socket only. It hears `open` for each phone slot, with the hash the phone came in with (`k`) and the page
+//   origin it came from (`o`, none for an app that sends none), and `close`, with the phone's close code (`c`).
 //   Phones hear `desktop_offline` and `desktop_online`, which a relay can forge: hints only.
 
 import { DurableObject } from "cloudflare:workers";
@@ -31,6 +34,8 @@ interface Attachment {
   /** Phone: how it was let in, and the hash of its token (or of its pairing token), so that a revoke can close it. */
   via?: "token" | "pair";
   cred?: string;
+  /** Phone: the page origin it came from, one the desktop registered; none for an app that sends none. */
+  origin?: string;
   /** Desktop: it has sent its allow-list on this socket, so phones may reach it. */
   ready?: boolean;
   /** Desktop: a newer desktop took the room; what this socket still says is not heard. */
@@ -56,13 +61,18 @@ const MAX_ALLOWED = 64;
 const MAX_PAIR_TOKENS = 4;
 const MAX_PAIR_TTL_S = 120;
 const MAX_ORIGIN = 300;
+const MAX_ORIGINS = 4;
+const ORIGIN = /^https:\/\/[^/?#@\s\\]+$/;
+/** The protocol this room speaks: 2 added `origins` and `o`. Said on the desktop's 101, whatever the deployment calls itself. */
+export const PROTOCOL_VERSION = "2";
 /** More than this many messages in a second from one socket closes it. */
 export const MESSAGES_PER_SECOND = 200;
 /** What the room carries at most, as a burst and then each second. */
 export const ROOM_BURST_BYTES = 4 * 1024 * 1024;
 /** A soft cap on what a room carries in a calendar month (UTC). */
 export const MONTHLY_BYTES = 2 * 1024 * 1024 * 1024;
-const USAGE_FLUSH_MS = 5000;
+/** Usage is written at most this often (or each MB): a minute's count lost to an eviction matters little against a monthly cap. */
+export const USAGE_FLUSH_MS = 60_000;
 const USAGE_FLUSH_BYTES = 1024 * 1024;
 /** A room nobody connected to for this long is removed. */
 export const ROOM_TTL_MS = 90 * 24 * 3600 * 1000;
@@ -147,12 +157,20 @@ export class Room extends DurableObject<RoomEnv> {
     }
     this.ctx.acceptWebSocket(server, ["desktop"]);
     server.serializeAttachment({ role: "desktop", slot: 0, entry, ready: false } satisfies Attachment);
-    return new Response(null, { status: 101, webSocket: client });
+    return new Response(null, { status: 101, webSocket: client, headers: { "x-kelpie-relay-version": PROTOCOL_VERSION } });
+  }
+
+  /** The page origins phones may come from; a room stored before there could be several has one, as `origin`. */
+  private async origins(): Promise<string[]> {
+    const origins = await this.ctx.storage.get<string[]>("origins");
+    if (origins) return origins;
+    const origin = await this.ctx.storage.get<string>("origin");
+    return origin ? [origin] : [];
   }
 
   private async phone(url: URL, request: Request, entry: string, now: number): Promise<Response> {
-    const origin = request.headers.get("origin");
-    if (origin !== null && origin !== (await this.ctx.storage.get<string>("origin"))) return plain(403, "origin\n");
+    const origin = request.headers.get("origin") ?? undefined;
+    if (origin !== undefined && !(await this.origins()).includes(origin)) return plain(403, "origin\n");
     const token = url.searchParams.get("k");
     const pairToken = url.searchParams.get("p");
     let via: "token" | "pair";
@@ -187,18 +205,19 @@ export class Room extends DurableObject<RoomEnv> {
 
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server, ["phone", slotTag(slot)]);
-    server.serializeAttachment({ role: "phone", slot, entry, via, cred } satisfies Attachment);
+    server.serializeAttachment({ role: "phone", slot, entry, via, cred, origin } satisfies Attachment);
     this.nextSlot = (slot + 1) % SLOTS;
     const desktop = this.readyDesktop();
-    if (desktop) desktop.send(this.opened(slot, via, cred));
+    if (desktop) desktop.send(this.opened(slot, via, cred, origin));
     else server.send(JSON.stringify({ t: "desktop_offline" }));
     await this.ctx.storage.put({ lastUsed: now, nextSlot: this.nextSlot });
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** What the desktop hears of a phone's slot: how it came in, and the hash it came in with, which its limits go by (the slot is new every time). */
-  private opened(slot: number, via: Attachment["via"], cred: string | undefined): string {
-    return JSON.stringify({ t: "open", s: slot, via, k: cred });
+  /** What the desktop hears of a phone's slot: how it came in, the hash it came in with, which its limits go by (the slot is new every
+   *  time), and the page origin it came from, if any. */
+  private opened(slot: number, via: Attachment["via"], cred: string | undefined, origin: string | undefined): string {
+    return JSON.stringify({ t: "open", s: slot, via, k: cred, o: origin });
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -285,7 +304,7 @@ export class Room extends DurableObject<RoomEnv> {
           ws.serializeAttachment({ ...from, ready: true } satisfies Attachment);
           for (const phone of this.phones()) {
             const a = attachment(phone);
-            ws.send(this.opened(a.slot, a.via, a.cred));
+            ws.send(this.opened(a.slot, a.via, a.cred, a.origin));
             phone.send(JSON.stringify({ t: "desktop_online" }));
           }
         }
@@ -302,13 +321,15 @@ export class Room extends DurableObject<RoomEnv> {
         await this.ctx.storage.put("pair", live.slice(-MAX_PAIR_TOKENS));
         return;
       }
+      case "origins": {
+        const list = msg.o;
+        if (!Array.isArray(list) || list.length > MAX_ORIGINS || !list.every(isOrigin)) return ws.close(CLOSE_TEXT_NOT_ACCEPTED, "origins");
+        return this.keepOrigins(list as string[]);
+      }
+      // A desktop from before there could be several says the one.
       case "origin": {
-        const o = msg.o;
-        if (typeof o !== "string" || o.length > MAX_ORIGIN || !/^https:\/\/[^/?#@\s\\]+$/.test(o)) {
-          return ws.close(CLOSE_TEXT_NOT_ACCEPTED, "origin");
-        }
-        await this.ctx.storage.put("origin", o);
-        return;
+        if (!isOrigin(msg.o)) return ws.close(CLOSE_TEXT_NOT_ACCEPTED, "origin");
+        return this.keepOrigins([msg.o]);
       }
       case "kick": {
         const slot = Number(msg.s);
@@ -321,6 +342,11 @@ export class Room extends DurableObject<RoomEnv> {
       default:
         return ws.close(CLOSE_TEXT_NOT_ACCEPTED, "unknown message");
     }
+  }
+
+  private async keepOrigins(origins: string[]): Promise<void> {
+    await this.ctx.storage.put("origins", origins);
+    await this.ctx.storage.delete("origin");
   }
 
   /** Nothing is queued: with no desktop ready the frame is dropped. */
@@ -462,7 +488,15 @@ function slotTag(slot: number): string {
 }
 
 function plain(status: number, body: string): Response {
-  return new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff", "cache-control": "no-store" },
+  });
+}
+
+/** A page origin a phone may come from: `https://` and a host (with a port, maybe), nothing more. */
+function isOrigin(o: unknown): o is string {
+  return typeof o === "string" && o.length <= MAX_ORIGIN && ORIGIN.test(o);
 }
 
 /** SHA-256 of a base64url token's bytes, hex. */

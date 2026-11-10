@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev -c wrangler.toml -c wrangler.room.toml",
+    "dev:page": "wrangler dev --local -c wrangler.toml -c wrangler.room.toml",
     "deploy:room": "wrangler deploy -c wrangler.room.toml",
     "deploy:router": "wrangler deploy -c wrangler.toml",
     "build:selfhost": "wrangler deploy --dry-run --outdir dist -c workerd/wrangler.toml",

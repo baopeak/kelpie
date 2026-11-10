@@ -96,13 +96,32 @@ sw.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(__PRECACHE__)).then(() => sw.skipWaiting()));
 });
 
+/** The versions whose files are kept, oldest first: this one's and the one before it. A page of the previous version may still be open (or
+ *  alive in the background) and ask for a chunk it loads lazily, which the origin no longer has; it reloads into this version at its next
+ *  foreground (shell-reload.ts). The order is written down, since names are content hashes and say nothing of it. */
+const VERSIONS = "kelpie-sw-versions";
+const VERSIONS_KEY = "/order";
+const KEEP_VERSIONS = 2;
+
+async function keepRecent(): Promise<void> {
+  const book = await caches.open(VERSIONS);
+  let order: string[] = [];
+  try {
+    const parsed: unknown = await (await book.match(VERSIONS_KEY))?.json();
+    if (Array.isArray(parsed)) order = parsed.filter((n): n is string => typeof n === "string");
+  } catch {
+    /* none written, or unreadable */
+  }
+  const names = (await caches.keys()).filter((n) => n.startsWith("kelpie-phone-"));
+  // Written by none yet (the worker before this one): the other versions' caches are what came before. That worker kept one.
+  if (!order.length) order = names.filter((n) => n !== CACHE);
+  order = [...order.filter((n) => n !== CACHE && names.includes(n)), CACHE].slice(-KEEP_VERSIONS);
+  await Promise.all(names.filter((n) => !order.includes(n)).map((n) => caches.delete(n)));
+  await book.put(VERSIONS_KEY, new Response(JSON.stringify(order), { headers: { "content-type": "application/json" } }));
+}
+
 sw.addEventListener("activate", (e) => {
-  e.waitUntil(
-    caches
-      .keys()
-      .then((names) => Promise.all(names.filter((n) => n.startsWith("kelpie-phone-") && n !== CACHE).map((n) => caches.delete(n))))
-      .then(() => sw.clients.claim()),
-  );
+  e.waitUntil(keepRecent().catch(() => {}).then(() => sw.clients.claim()));
 });
 
 const withTimeout = (p: Promise<Response>, ms: number) =>
@@ -159,8 +178,8 @@ sw.addEventListener("fetch", (e) => {
   const req = e.request;
   const url = new URL(req.url);
   if (req.method !== "GET" || url.origin !== sw.location.origin) return;
-  // Not ours to keep: the reachability probe (it must see the network), the socket.
-  if (url.pathname === "/link" || url.pathname === "/manifest.webmanifest") return;
+  // Not ours to keep: the reachability probe (it must see the network), the socket, what the origin says it serves.
+  if (url.pathname === "/link" || url.pathname === "/manifest.webmanifest" || url.pathname === "/version.json") return;
   if (req.mode === "navigate") {
     e.respondWith(
       (async () => {
@@ -181,10 +200,12 @@ sw.addEventListener("fetch", (e) => {
     );
     return;
   }
-  if (url.pathname.startsWith("/assets/") || __PRECACHE__.includes(url.pathname)) {
+  const asset = url.pathname.startsWith("/assets/");
+  if (asset || __PRECACHE__.includes(url.pathname)) {
     e.respondWith(
       caches.open(CACHE).then(async (c) => {
-        const hit = await c.match(req);
+        // An asset's name is its content's hash: whichever kept version has it has the right file, and a page of the previous version finds its own.
+        const hit = asset ? await caches.match(req) : await c.match(req);
         if (hit) return hit;
         const fresh = await fetch(req);
         if (fresh.ok) void c.put(req, fresh.clone());

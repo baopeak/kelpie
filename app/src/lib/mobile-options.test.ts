@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
-import type { MobileStatus } from "../components/settings/mobile-settings";
-import { LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
+import type { MobileDevice, MobileStatus } from "../components/settings/mobile-settings";
+import type { RelayStatus } from "../components/settings/mobile-relay-settings";
+import { HOSTED_API, LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
-import { mobileSummary, offerNewRoom, OPTION_IDS, optionState, telegramChoice, type OptionFacts, type OptionId } from "./mobile-options";
+import {
+  approvalChoices, asksForKey, hostedLine, hostedPairing, hostedReason, hostedTrust, mobileSummary, movingRelayWarning, offerNewRoom, OPTION_IDS, optionState, pageKindLabel,
+  permissionChoices, plainPairing, relayServesApp, telegramChoice, turnOnAccess, type AccessCalls, type OptionFacts, type OptionId,
+} from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
 import { emptyPushConfig, type PushState } from "./push-config";
 import { catalogEntry, entryMatches } from "./settings-catalog";
 
-const API = RELAY_API;
+const API = HOSTED_API;
 const RESTART = "Restart Kelpie's background service";
 
 /** A new install with phone access just turned on, as the daemon reports it. */
@@ -17,11 +21,22 @@ function status(patch: Partial<MobileStatus> = {}): MobileStatus {
     devices: [], legacy: [], pairing_expires_in: null, pending: [], dormant_days: 90,
     tailscale: { on: false, origin: null },
     lock: { on: true, idle_s: 300, recheck: false, plain_read: true },
-    relay: { on: false, url: "wss://relay.example", default_url: "wss://relay.example", room: false, origin: null, operator_key: false, connected: false, error: null, rtt_ms: null, slow: false, phones: 0 },
+    relay: {
+      on: false, url: "wss://relay.example", default_url: "wss://relay.example", room: false, origin: null, operator_key: false, connected: false, error: null, rtt_ms: null, slow: false, phones: 0,
+      version: null, hosted: { available: false, origin: "https://relay.example", version: null, reason: "not checked yet", install_qr: "<svg/>" }, hosted_devices: 0,
+    },
+    lan: true, new_store: false,
     app: true,
     ...patch,
   };
 }
+
+/** The relay on and connected, at a relay of the second version found serving the phone app. */
+const hostedRelay = (patch: Partial<RelayStatus> = {}): RelayStatus => ({
+  ...status().relay!, on: true, room: true, connected: true, version: 2, hosted: { available: true, origin: "https://relay.example", version: "0.1.16", reason: null, install_qr: "<svg/>" }, ...patch,
+});
+
+const device = (patch: Partial<MobileDevice> = {}): MobileDevice => ({ id: "a", name: "A", permission: "read", kind: "pwa", can_write: false, created_at: 0, last_seen: 0, state: "ok", ...patch });
 
 const push = (phones = 0): PushState => ({ config: emptyPushConfig(), secrets: { ntfy_topic: false, ntfy_token: false, telegram_token: false, webhook_url: false }, webpush: { devices: phones } });
 const facts = (patch: Partial<OptionFacts> = {}): OptionFacts => ({ api: API, status: status(), push: push(), ...patch });
@@ -33,12 +48,14 @@ const PHONE_ROWS: [OptionId, number][] = [["mobile-tailscale", TAILSCALE_API], [
 describe("a new install", () => {
   it("has the safe defaults", () => {
     const on = Object.fromEntries(OPTION_IDS.map((id) => [id, state(id).on]));
-    expect(on).toEqual({ "mobile-access": true, "mobile-tailscale": false, "mobile-relay": false, "mobile-webpush": false, "mobile-lock": true, "mobile-lock-idle": true, "mobile-lock-recheck": false, "mobile-lock-plain": true, "mobile-ntfy": false, "mobile-telegram": false });
+    expect(on).toEqual({ "mobile-access": true, "mobile-hosted": false, "mobile-tailscale": false, "mobile-relay": false, "mobile-webpush": false, "mobile-lock": true, "mobile-lock-idle": true, "mobile-lock-recheck": false, "mobile-lock-plain": true, "mobile-ntfy": false, "mobile-telegram": false, "mobile-lan": true });
     expect(state("mobile-access", { status: status({ enabled: false }) }).on).toBe(false);
   });
 
-  it("can change every option", () => {
-    for (const id of OPTION_IDS) expect(state(id).disabled, id).toBeNull();
+  it("can change every option, pairs on the hosted app once the relay is on, and keeps this network's listeners while they are the only way in", () => {
+    for (const id of OPTION_IDS) if (id !== "mobile-hosted" && id !== "mobile-lan") expect(state(id).disabled, id).toBeNull();
+    expect(state("mobile-hosted").disabled).toBe("Turn on the relay first: the phone app comes from it.");
+    expect(state("mobile-lan").disabled).toContain("nothing else would reach this computer");
   });
 });
 
@@ -239,17 +256,231 @@ describe("a new room after a phone is removed", () => {
   const relay = (patch: Partial<NonNullable<MobileStatus["relay"]>>) => status({ relay: { ...status().relay!, ...patch } });
 
   it("is offered only while the relay is on, this computer has a room there and keeps the key that makes one", () => {
-    expect(offerNewRoom(relay({ on: true, room: true, operator_key: true }))).toBe(true);
-    expect(offerNewRoom(relay({ on: false, room: true, operator_key: true }))).toBe(false);
-    expect(offerNewRoom(relay({ on: true, room: false, operator_key: true }))).toBe(false);
-    expect(offerNewRoom(relay({ on: true, room: true, operator_key: false })), "no registration key kept").toBe(false);
-    expect(offerNewRoom(status({ relay: undefined }))).toBe(false);
-    expect(offerNewRoom(null)).toBe(false);
+    expect(offerNewRoom(relay({ on: true, room: true, operator_key: true }), API)).toBe(true);
+    expect(offerNewRoom(relay({ on: false, room: true, operator_key: true }), API)).toBe(false);
+    expect(offerNewRoom(relay({ on: true, room: false, operator_key: true }), API)).toBe(false);
+    expect(offerNewRoom(relay({ on: true, room: true, operator_key: false }), API), "no registration key kept").toBe(false);
+    expect(offerNewRoom(status({ relay: undefined }), API)).toBe(false);
+    expect(offerNewRoom(null, API)).toBe(false);
+  });
+
+  it("needs no key kept at a relay of the second version, from a daemon that makes rooms without one", () => {
+    expect(offerNewRoom(relay({ on: true, room: true, operator_key: false, version: 2 }), HOSTED_API)).toBe(true);
+    expect(offerNewRoom(relay({ on: true, room: true, operator_key: false, version: 2 }), HOSTED_API - 1), "an older daemon still sends a key").toBe(false);
+    expect(offerNewRoom(relay({ on: true, room: true, operator_key: false, version: 1 }), HOSTED_API), "a relay of the first version wants its key").toBe(false);
   });
 
   it("says plainly what it costs, in English and Vietnamese", () => {
     const line = "Phones connected now move to the new room by themselves, over their encrypted link. A phone not connected now cannot use the relay until it connects once over Tailscale, and may need to be paired again. Making a room asks you to verify.";
     expect(translated(line)).toBeTruthy();
     expect(translated("Not now")).toBeTruthy();
+  });
+});
+
+describe("turning phone access on", () => {
+  const NOTHING_ELSE = "Turn on the relay or Tailscale: nothing else reaches this computer";
+  /** Records every call; `enable` and `relay` say how the daemon answers, `after` what its status says after `mobile.enable`. */
+  function daemon(answers: { enable?: Error; relay?: Error; after?: Partial<MobileStatus> | null } = {}) {
+    const calls: [string, Record<string, unknown>][] = [];
+    const call: AccessCalls = {
+      daemon: async (method, params) => {
+        calls.push([method, params]);
+        if (answers.enable) throw answers.enable;
+      },
+      secure: async (method, params) => {
+        calls.push([method, params]);
+        if (answers.relay) throw answers.relay;
+      },
+      status: async () => (answers.after === null ? null : status({ enabled: true, running: false, ...answers.after })),
+    };
+    return { calls, call };
+  }
+  const fresh = (patch: Partial<OptionFacts> = {}) => facts({ status: status({ enabled: false, running: false, new_store: true, lan: true }), ...patch });
+
+  it("sets up a new store with no listener on this network and the relay on, then opens the guide", async () => {
+    const d = daemon({ enable: new Error(NOTHING_ELSE) });
+    expect(await turnOnAccess(fresh(), d.call)).toBe("hosted");
+    expect(d.calls).toEqual([["mobile.enable", { lan: false }], ["mobile.set_relay", { on: true }]]);
+    const quiet = daemon();
+    expect(await turnOnAccess(fresh(), quiet.call)).toBe("hosted");
+    expect(quiet.calls).toEqual([["mobile.enable", { lan: false }], ["mobile.set_relay", { on: true }]]);
+  });
+
+  it("leaves an existing store as the switch always did: phone access on, nothing else asked", async () => {
+    for (const f of [facts({ status: status({ enabled: false, new_store: false }) }), facts({ status: status({ enabled: false, new_store: undefined, lan: undefined }) }), fresh({ api: HOSTED_API - 1 }), fresh({ status: null })]) {
+      const d = daemon();
+      expect(await turnOnAccess(f, d.call)).toBe("plain");
+      expect(d.calls).toEqual([["mobile.enable", {}]]);
+    }
+  });
+
+  it("says why when the relay makes no room, after phone access is on", async () => {
+    const d = daemon({ enable: new Error(NOTHING_ELSE), relay: new Error("This network made too many rooms today: try again tomorrow, or use Tailscale") });
+    await expect(turnOnAccess(fresh(), d.call)).rejects.toThrow("too many rooms");
+    expect(d.calls.map(([m]) => m)).toEqual(["mobile.enable", "mobile.set_relay"]);
+  });
+
+  it("stops at phone access when it did not turn on", async () => {
+    for (const after of [{ enabled: false }, null]) {
+      const d = daemon({ enable: new Error("the credential store did not keep the key"), after });
+      await expect(turnOnAccess(fresh(), d.call)).rejects.toThrow("credential store");
+      expect(d.calls).toEqual([["mobile.enable", { lan: false }]]);
+    }
+  });
+});
+
+describe("the hosted app's rows", () => {
+  const on = (patch: Partial<RelayStatus> = {}) => facts({ status: status({ relay: hostedRelay(patch) }) });
+
+  it("say to restart the service below the level that has the hosted app, and offer no pairing there", () => {
+    for (const id of ["mobile-hosted", "mobile-lan"] as const) {
+      expect(state(id, { ...on(), api: HOSTED_API - 1 }).disabled, id).toContain(RESTART);
+      expect(state(id, { status: status({ relay: { ...hostedRelay(), hosted: undefined }, lan: undefined }) }).disabled, id).toContain(RESTART);
+    }
+    expect(hostedPairing({ ...on(), api: HOSTED_API - 1 })).toBe(false);
+    expect(hostedPairing(on())).toBe(true);
+    expect(state("mobile-hosted", on())).toEqual({ on: true, disabled: null, presence: null });
+  });
+
+  it("offer pairing on the hosted app only while the relay serves it", () => {
+    expect(hostedPairing(on({ on: false }))).toBe(false);
+    expect(hostedPairing(on({ hosted: { ...hostedRelay().hosted!, available: false, reason: "not checked yet" } }))).toBe(false);
+    expect(hostedPairing(facts({ status: status({ enabled: false, relay: hostedRelay() }) }))).toBe(false);
+    expect(hostedPairing(facts({ status: status({ store_error: "bad", relay: hostedRelay() }) }))).toBe(false);
+    expect(state("mobile-hosted", on({ hosted: { ...hostedRelay().hosted!, available: false, reason: "not checked yet" } })).disabled).toContain("checking");
+    const refused = on({ hosted: { ...hostedRelay().hosted!, available: false, reason: "this relay is of an older version, which cannot let the hosted app in" } });
+    expect(state("mobile-hosted", refused).disabled).toBe("This relay does not serve the phone app: pair phones over Tailscale.");
+    expect(hostedReason(refused.status!.relay!)).toContain("older version");
+    expect(hostedReason(hostedRelay({ hosted: { ...hostedRelay().hosted!, available: false, reason: "not checked yet" } }))).toBeNull();
+  });
+
+  it("offer pairing a browser on this network only while its listeners are on", () => {
+    expect(plainPairing(facts({ status: status({ lan: false }) }))).toBe(false);
+    expect(plainPairing(facts({ status: status({ lan: true }) }))).toBe(true);
+    expect(plainPairing(facts({ status: status({ lan: undefined }) })), "a daemon without the choice listens").toBe(true);
+  });
+
+  it("turn this network's listeners off only while something else reaches this computer", () => {
+    expect(state("mobile-lan").disabled).toContain("Turn on the relay or Tailscale first");
+    expect(state("mobile-lan", on()).disabled).toBeNull();
+    expect(state("mobile-lan", facts({ status: status({ tailscale: { on: true, origin: null } }) })).disabled).toBeNull();
+    expect(state("mobile-lan", facts({ status: status({ lan: false }) }))).toEqual({ on: false, disabled: null, presence: null });
+    expect(state("mobile-lan", facts({ status: status({ enabled: false, running: false }) })).disabled).toBe("Turn on phone access first.");
+  });
+
+  it("show the app's origin and version on the relay's row, or why it is not served", () => {
+    expect(hostedLine(hostedRelay())).toBe("Phone app at https://relay.example, version 0.1.16.");
+    expect(hostedLine(status().relay!)).toContain("checking");
+    expect(hostedLine(hostedRelay({ hosted: { ...hostedRelay().hosted!, available: false, reason: "only a wss:// relay serves the phone app" } }))).toContain("pair phones over Tailscale");
+    expect(hostedLine({ ...hostedRelay(), hosted: undefined })).toBeNull();
+    expect(relayServesApp(hostedRelay())).toBe(true);
+    expect(relayServesApp(hostedRelay({ hosted: { ...hostedRelay().hosted!, available: false }, hosted_devices: 1 }))).toBe(true);
+    expect(relayServesApp(status().relay!)).toBe(false);
+  });
+
+  it("show the registration key only once the relay asked for it", () => {
+    expect(asksForKey(new Error("This relay needs a registration key"))).toBe(true);
+    expect(asksForKey("the relay did not take that registration key")).toBe(true);
+    expect(asksForKey("The relay is not taking new rooms today")).toBe(false);
+  });
+});
+
+describe("what the hosted app trusts", () => {
+  it("says who could change the app, what the fingerprint shows and what it cannot, in English and Vietnamese", () => {
+    const text = hostedTrust(hostedRelay())!;
+    expect(text).toContain("The phone app comes from Kelpie's relay at relay.example, on Cloudflare.");
+    expect(text).toContain("fingerprint");
+    expect(text).toContain("nobody can check what one phone received");
+    expect(text).toContain("use Tailscale mode");
+    expect(text).not.toMatch(/verified|guarantee/i);
+    const other = hostedTrust(hostedRelay({ url: "wss://mine.example" }))!;
+    expect(other).toContain("The phone app comes from the relay at relay.example, not from Kelpie's.");
+    expect(other).toContain("not this one");
+    expect(other).not.toMatch(/verified|guarantee/i);
+    expect(hostedTrust({ ...hostedRelay(), hosted: { ...hostedRelay().hosted!, origin: null } })).toBeNull();
+  });
+
+  it("is in Vietnamese too, with no word of overclaiming in either", () => {
+    for (const r of [hostedRelay(), hostedRelay({ url: "wss://mine.example" })]) {
+      const en = hostedTrust(r)!.replace("relay.example", "{host}");
+      expect(translated(en), en).toBeTruthy();
+      expect(translated(en)).not.toMatch(/xác minh|đảm bảo/i);
+    }
+  });
+});
+
+describe("approving a phone", () => {
+  it("offers a phone on the hosted app reading first, typing with what it means, and never control", () => {
+    for (const want of ["read", "write", "control"] as const) {
+      const c = approvalChoices({ want, origin_kind: "hosted" });
+      expect(c.choices).toEqual(["read", "write"]);
+      expect(c.choices).not.toContain("control");
+      expect(c.primary).toBe("read");
+      expect(c.typing).toBe("Typing from the hosted app lets code served by Kelpie's relay type into your sessions while the phone is unlocked.");
+      expect(translated(c.typing!)).toBeTruthy();
+    }
+    expect(approvalChoices({ want: "control", origin_kind: "hosted" }).asks).toBe("write");
+  });
+
+  it("leaves other pages as they were: what the phone asks for is the default", () => {
+    expect(approvalChoices({ want: "write", origin_kind: "ts" })).toEqual({ choices: ["read", "write"], primary: "write", asks: "write", typing: null });
+    expect(approvalChoices({ want: "read" })).toEqual({ choices: ["read", "write"], primary: "read", asks: "read", typing: null });
+  });
+
+  it("names the page it pairs on", () => {
+    expect([pageKindLabel("hosted"), pageKindLabel("ts"), pageKindLabel("own"), pageKindLabel("plain"), pageKindLabel(null), pageKindLabel(undefined)]).toEqual(["hosted app", "Tailscale", "this computer's HTTPS", "this network", null, null]);
+    for (const k of ["hosted", "ts", "own", "plain"] as const) expect(translated(pageKindLabel(k)!), k).toBeTruthy();
+  });
+});
+
+describe("the paired devices", () => {
+  it("never offer control to a phone on the hosted app", () => {
+    expect(permissionChoices(device({ page_kind: "hosted", page: "https://relay.example", secure_origin: true, may_control: true }), API)).toEqual(["read", "write"]);
+    expect(permissionChoices(device({ page_kind: "ts", secure_origin: true, may_control: true }), API)).toEqual(["read", "write", "control"]);
+    expect(permissionChoices(device({ kind: "app" }), API)).toEqual(["read", "write", "control"]);
+    expect(permissionChoices(device({ may_control: false }), API)).toEqual(["read", "write"]);
+  });
+
+  it("say the lock holds for phones on the hosted app with the lock off", () => {
+    const off = { on: false, idle_s: 300, recheck: false, plain_read: true };
+    expect(mobileSummary(status({ lock: off, devices: [device({ page_kind: "hosted" })] }), null).lock).toContain("Phones on the hosted app still ask for Face ID");
+    expect(mobileSummary(status({ lock: off, devices: [device({ page_kind: "ts" })] }), null).lock).toBe("The app lock is off: whoever holds a paired phone reaches what it may do.");
+  });
+});
+
+describe("moving the relay", () => {
+  const relay = (n: number) => hostedRelay({ on: false, hosted_devices: n });
+
+  it("warns when phones use the app at the present address", () => {
+    expect(movingRelayWarning(relay(2), "wss://other.example")).toBe("2 phones using the app at https://relay.example lose their way to this computer and must be paired again.");
+    expect(movingRelayWarning(relay(1), "wss://other.example")).toBe("1 phone using the app at https://relay.example loses its way to this computer and must be paired again.");
+    for (const line of ["{n} phones using the app at {origin} lose their way to this computer and must be paired again.", "1 phone using the app at {origin} loses its way to this computer and must be paired again."]) expect(translated(line), line).toBeTruthy();
+  });
+
+  it("says nothing when no phone uses it, or the address stays", () => {
+    expect(movingRelayWarning(relay(0), "wss://other.example")).toBeNull();
+    expect(movingRelayWarning(relay(2), "wss://relay.example/ ")).toBeNull();
+    expect(movingRelayWarning({ ...relay(2), hosted_devices: undefined }, "wss://other.example"), "a daemon without the count").toBeNull();
+    expect(movingRelayWarning(undefined, "wss://other.example")).toBeNull();
+  });
+});
+
+describe("the summary of a computer with the hosted app", () => {
+  it("names the hosted app as a way in", () => {
+    const reach = mobileSummary(status({ urls: [], lan: false, relay: hostedRelay() }), null).reach;
+    expect(reach).toBe("Phones with the hosted app from https://relay.example reach this computer through the relay, from anywhere.");
+    expect(reach, "no app installed over Tailscale to speak of").not.toContain("installed app");
+    expect(mobileSummary(status({ urls: [], relay: hostedRelay({ origin: "https://pc.tail1.ts.net:8443" }) }), null).reach).toContain("With Tailscale off, the installed app");
+    expect(mobileSummary(status({ urls: [], relay: { ...hostedRelay(), hosted: undefined } }), null).reach, "an older daemon").toContain("With Tailscale off, the installed app");
+    expect(mobileSummary(status({ urls: [], relay: hostedRelay({ hosted: { ...hostedRelay().hosted!, available: false } }) }), null).reach).not.toContain("hosted app");
+    expect(mobileSummary(status({ urls: [], relay: hostedRelay({ hosted: { ...hostedRelay().hosted!, available: false }, hosted_devices: 1 }) }), null).reach, "phones paired on it still come").toContain("hosted app");
+  });
+
+  it("is found by the page's search: hosted, trust, fingerprint", () => {
+    const e = catalogEntry("mobile-hosted")!;
+    for (const q of ["hosted", "trust", "fingerprint", "cloudflare"]) expect(entryMatches(e, q), q).toBe(true);
+    expect(entryMatches(catalogEntry("mobile-lan")!, "network listen")).toBe(true);
+    const vi = translated(e.safety!)!.split(" ").slice(0, 4).join(" ");
+    expect(entryMatches(e, vi)).toBe(true);
   });
 });

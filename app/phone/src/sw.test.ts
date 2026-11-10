@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ShellReload, watchWorker, type ReloadEnv } from "./shell-reload";
 
 const ORIGIN = "https://desk.tail1234.ts.net:8443";
 const KEPT = "the kept shell";
@@ -138,9 +139,10 @@ describe("opening the app", () => {
     expect(await (await r)!.text()).toBe(KEPT);
   });
 
-  it("leaves the socket and the reachability request to the network", async () => {
+  it("leaves the socket, the reachability request and what the origin says it serves to the network", async () => {
     expect(await ask({ url: "/link", mode: "websocket" }, async () => new Response(""))).toBeNull();
     expect(await ask({ url: "/manifest.webmanifest?probe=1", mode: "cors" }, async () => new Response(""))).toBeNull();
+    expect(await ask({ url: "/version.json", mode: "cors" }, async () => new Response("{}"))).toBeNull();
     expect(await ask({ url: "/", mode: "navigate", method: "POST" }, async () => new Response(""))).toBeNull();
   });
 });
@@ -224,5 +226,149 @@ describe("the kept shell, fetched again behind it", () => {
     const offline = await shellWorker(() => Promise.reject(new TypeError("offline")));
     expect(await (await offline.open()).text()).toBe("<html>v1</html>");
     expect(offline.csp()).toBe("connect-src 'self'");
+  });
+});
+/** Cache storage as a browser keeps it: caches in the order they were made, each a map of paths. */
+class Store {
+  caches = new Map<string, Map<string, Response>>();
+  private path = (k: string | { url: string }) => (typeof k === "string" ? k : new URL(k.url).pathname);
+  open = async (name: string) => {
+    let c = this.caches.get(name);
+    if (!c) this.caches.set(name, (c = new Map()));
+    const kept = c;
+    return {
+      match: async (k: string | { url: string }) => kept.get(this.path(k))?.clone(),
+      put: async (k: string | { url: string }, v: Response) => void kept.set(this.path(k), v),
+      addAll: async (paths: string[]) => paths.forEach((p) => kept.set(p, new Response(`${name}${p}`))),
+      delete: async (k: string | { url: string }) => kept.delete(this.path(k)),
+    };
+  };
+  keys = async () => [...this.caches.keys()];
+  delete = async (name: string) => this.caches.delete(name);
+  match = async (k: string | { url: string }) => {
+    for (const c of this.caches.values()) {
+      const hit = c.get(this.path(k));
+      if (hit) return hit.clone();
+    }
+    return undefined;
+  };
+  versions = () => [...this.caches.keys()].filter((n) => n.startsWith("kelpie-phone-"));
+}
+
+/** One version's worker, installed and activated over `store`, as a browser does when a new version is deployed. */
+async function deploy(store: Store, version: string, assets: string[], network: () => Promise<Response> = async () => new Response("from the network")) {
+  vi.resetModules();
+  const handlers: Record<string, (e: unknown) => void> = {};
+  vi.stubGlobal("self", { addEventListener: (type: string, h: (e: unknown) => void) => (handlers[type] = h), location: { origin: ORIGIN }, skipWaiting: async () => {}, clients: { claim: async () => {} } });
+  vi.stubGlobal("__PRECACHE__", ["/", ...assets]);
+  vi.stubGlobal("__VERSION__", version);
+  vi.stubGlobal("caches", store);
+  vi.stubGlobal("fetch", vi.fn(network));
+  await import("./sw");
+  for (const type of ["install", "activate"]) {
+    let done: Promise<unknown> = Promise.resolve();
+    handlers[type]({ waitUntil: (p: Promise<unknown>) => (done = p) });
+    await done;
+  }
+  const get = async (path: string) => {
+    let answered: Promise<Response> | null = null;
+    handlers.fetch({ request: { method: "GET", url: ORIGIN + path, mode: "cors" }, respondWith: (p: Promise<Response>) => (answered = p), waitUntil: () => {} });
+    const got = answered as Promise<Response> | null;
+    return got ? (await got).text() : null;
+  };
+  return { get };
+}
+
+describe("a new version deployed under an open page", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("serves the previous version's chunks from its kept files, which the origin no longer has", async () => {
+    const store = new Store();
+    await deploy(store, "aaa", ["/assets/index-a.js", "/assets/chat-a.js"]);
+    const b = await deploy(store, "bbb", ["/assets/index-b.js"], async () => new Response("gone", { status: 404 }));
+    // A page of version A, still open, loads its chat chunk lazily.
+    expect(await b.get("/assets/chat-a.js")).toBe("kelpie-phone-aaa/assets/chat-a.js");
+    expect(await b.get("/assets/index-b.js")).toBe("kelpie-phone-bbb/assets/index-b.js");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the previous version's files through the next activation and lets them go at the one after", async () => {
+    const store = new Store();
+    await deploy(store, "aaa", ["/assets/a.js"]);
+    await deploy(store, "bbb", ["/assets/b.js"]);
+    expect(store.versions()).toEqual(["kelpie-phone-aaa", "kelpie-phone-bbb"]);
+    await deploy(store, "ccc", ["/assets/c.js"]);
+    expect(store.versions()).toEqual(["kelpie-phone-bbb", "kelpie-phone-ccc"]);
+  });
+
+  it("goes by the order it wrote down, not by the names, which are hashes", async () => {
+    const store = new Store();
+    await deploy(store, "zzz", ["/assets/z.js"]);
+    await deploy(store, "mmm", ["/assets/m.js"]);
+    await deploy(store, "aaa", ["/assets/a.js"]);
+    expect(store.versions().sort()).toEqual(["kelpie-phone-aaa", "kelpie-phone-mmm"]);
+  });
+
+  it("keeps the one version a worker from before this kept, the first time", async () => {
+    const store = new Store();
+    // What the earlier worker left: its own cache and no order.
+    (await store.open("kelpie-phone-old")).put("/assets/old.js", new Response("old"));
+    const now = await deploy(store, "new", ["/assets/new.js"]);
+    expect(store.versions().sort()).toEqual(["kelpie-phone-new", "kelpie-phone-old"]);
+    expect(await now.get("/assets/old.js")).toBe("old");
+  });
+
+  it("fetches an asset no kept version has, and keeps it with this version", async () => {
+    const store = new Store();
+    const w = await deploy(store, "aaa", []);
+    expect(await w.get("/assets/late.js")).toBe("from the network");
+    expect(await (await store.open("kelpie-phone-aaa")).match("/assets/late.js")).toBeDefined();
+  });
+});
+
+describe("a page a new version's worker took over", () => {
+  /** The page's reload record lives in its tab, as in a browser. */
+  function page(controller: unknown) {
+    let kept: string | null = null;
+    let clock = 1_000_000;
+    const env: ReloadEnv & { reloads: number } = { reloads: 0, now: () => clock, read: () => kept, write: (v) => void (kept = v), reload: () => void env.reloads++ };
+    let changed: (() => void) | null = null;
+    const reload = new ShellReload(env);
+    watchWorker({ controller, addEventListener: (_type, listener) => void (changed = listener) }, reload);
+    return { env, reload, takeOver: () => changed?.(), later: (ms: number) => void (clock += ms) };
+  }
+
+  it("reloads once, at the next foreground, not under the person", () => {
+    const p = page({});
+    p.takeOver();
+    expect(p.env.reloads).toBe(0);
+    p.reload.visible();
+    expect(p.env.reloads).toBe(1);
+    p.reload.visible();
+    expect(p.env.reloads).toBe(1);
+  });
+
+  it("does not reload for the first worker taking a page that had none", () => {
+    const p = page(null);
+    p.takeOver();
+    p.reload.visible();
+    expect(p.env.reloads).toBe(0);
+    // A later version's worker does.
+    p.takeOver();
+    p.reload.visible();
+    expect(p.env.reloads).toBe(1);
+  });
+
+  it("reloads at most once a minute however often workers change", () => {
+    const p = page({});
+    p.takeOver();
+    p.reload.visible();
+    p.takeOver();
+    p.reload.visible();
+    expect(p.env.reloads).toBe(1);
+    p.later(60_000);
+    p.takeOver();
+    p.reload.visible();
+    expect(p.env.reloads).toBe(2);
   });
 });

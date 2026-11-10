@@ -4,26 +4,28 @@
 // phone access, keeping unused phones longer and approvals from Telegram ask for that verification too (`mobileSecure`); what the prompt says is the daemon's.
 // The page: a summary, one `OptionRow` per option, and the address, certificate, the shared screen's stop hotkey and paired phones under Advanced.
 // Revoke all stays outside Advanced: a lost phone is when it is needed, and it must not take a search to find.
+// A new setup (the daemon's `new_store`) turns phone access on with the relay and the phone app it hosts, and this network's listeners off; an existing
+// one keeps what it had. One two-step guide pairs a phone on the hosted app or over Tailscale: install from the page's address, then scan the code.
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
 import { invoke } from "@tauri-apps/api/core";
-import { LOCK_API, RELAY_API, SCREEN_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
+import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
-import { mobileSummary, offerNewRoom, optionState, telegramChoice, type OptionId } from "../../lib/mobile-options";
+import { approvalChoices, hostedPairing, hostedReason, hostedTrust, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel, permissionChoices, plainPairing, telegramChoice, turnOnAccess, type OptionFacts, type OptionId } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
 import { catalogEntry, entryMatches } from "../../lib/settings-catalog";
+import type { MobileDevicePage, MobileHostedFields, MobilePairRequest, MobilePairStart } from "../../lib/types";
 import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
 import { OptionRow } from "./option-row";
 import { createRelayForm, NewRoomOffer, RelayDetails, type RelayStatus } from "./mobile-relay-settings";
 import { SettingRow, settingsQuery, Toggle } from "./setting-row";
 import { confirmDialog } from "../../lib/confirm-dialog";
-import { offersControl } from "../../lib/takeover-panes";
 
 export type MobilePermission = "read" | "write" | "control";
 
-export interface MobileDevice {
+export interface MobileDevice extends MobileDevicePage {
   id: string;
   name: string;
   permission: MobilePermission;
@@ -46,7 +48,8 @@ export interface MobileDevice {
   state: "ok" | "unverified" | "unchecked";
 }
 
-export interface MobileStatus {
+/** `mobile.status`; `lan` and `new_store` absent below `HOSTED_API`. */
+export interface MobileStatus extends Partial<MobileHostedFields> {
   enabled: boolean;
   running: boolean;
   url: string | null;
@@ -64,7 +67,7 @@ export interface MobileStatus {
   /** Phones paired with a token before end-to-end encryption: they must be paired again. */
   legacy: { id: string; name: string; created_at: number }[];
   pairing_expires_in: number | null;
-  pending: { id: string; name: string; kind: "app" | "pwa"; fingerprint: string; want: MobilePermission; address: string }[];
+  pending: MobilePairRequest[];
   /** Phones not seen for this many days are removed (0: never). */
   dormant_days: number;
   /** Tailscale mode, as the daemon holds it (absent from a daemon older than `TAILSCALE_API`). `origin`: `<name>:8443` while phones can use it. */
@@ -141,7 +144,10 @@ interface MobileAudit {
 const DORMANT_DAYS = [30, 90, 180, 0];
 const IDLE_SECONDS = [60, 300, 900, 1800, 3600];
 /** The rows under Advanced. */
-const ADVANCED = ["mobile-network", "mobile-tls", "mobile-screen", "mobile-devices"];
+const ADVANCED = ["mobile-lan", "mobile-network", "mobile-tls", "mobile-screen", "mobile-devices"];
+
+/** The pairing guide's two steps, for the page phones install from: the app the relay hosts, or this computer's Tailscale origin. */
+type Guide = { via: "hosted" | "tailscale"; step: 1 | 2 };
 
 const errText = (e: unknown) => String(e).replace(/^Error: /, "");
 
@@ -154,13 +160,26 @@ export function MobileSettings() {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [hotkeyError, setHotkeyError] = createSignal<string | null>(null);
-  const [qr, setQr] = createSignal<{ url: string; qr: string; until: number; tls: boolean; tailscale?: boolean; passkey?: boolean } | null>(null);
+  const [qr, setQr] = createSignal<{ url: string; qr: string; until: number; tls: boolean; tailscale?: boolean; hosted?: boolean; passkey?: boolean } | null>(null);
   const [now, setNow] = createSignal(Date.now());
-  // The two steps of pairing over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
-  const [guideStep, setGuideStep] = createSignal<1 | 2 | null>(null);
+  // The two steps of pairing on the hosted app or over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
+  const [guide, setGuide] = createSignal<Guide | null>(null);
+  const guideStep = () => guide()?.step ?? null;
+  // A new setup whose relay would not make a room: Tailscale is offered instead.
+  const [hostedRefused, setHostedRefused] = createSignal(false);
   // Only while phone access is on and this page is open; looked at again when what the daemon holds changes, or when asked.
   const tailscaleKey = () => (store.connected() && store.daemonApi() >= TAILSCALE_API && (status()?.enabled || status()?.tailscale?.to_remove) ? `${status()!.tailscale?.on}|${status()!.tailscale?.origin}|${status()!.tailscale?.to_remove}` : null);
   const [tailscale, { refetch: checkTailscale }] = createResource(tailscaleKey, () => daemon<TailscaleStatus>("mobile.tailscale_status").catch(() => null));
+  // The guide's page and its install QR code (no secret in either): the hosted app while the relay is on, else this computer's Tailscale origin.
+  const hostedPage = () => {
+    const r = status()?.relay;
+    return r?.on && r.hosted?.origin && r.hosted.install_qr ? { origin: r.hosted.origin, qr: r.hosted.install_qr } : null;
+  };
+  const guidePage = () => {
+    if (guide()?.via === "hosted") return hostedPage();
+    const ts = tailscale();
+    return ts?.origin ? { origin: `https://${ts.origin}`, qr: ts.install_qr ?? "" } : null;
+  };
   // What the channels are set to, the same settings as Settings → Notifications. Undefined: not asked yet; null: the daemon could not say.
   const [push, setPush] = createSignal<PushState | null | undefined>(undefined);
   const loadPush = () => daemon<PushState>("notify.get").then((p) => setPush(p), () => setPush(null));
@@ -170,8 +189,9 @@ export function MobileSettings() {
   });
   // The two steps are about the origin: with it gone they end, and do not come back unasked when it returns.
   createEffect(() => {
-    if (guideStep() && !tailscale.loading && !tailscale()?.origin) {
-      setGuideStep(null);
+    const g = guide();
+    if (g && !(g.via === "hosted" ? status.loading : tailscale.loading) && !guidePage()) {
+      setGuide(null);
       setQr(null);
     }
   });
@@ -203,7 +223,7 @@ export function MobileSettings() {
       }
       if (m.event === "mobile.device_changed") {
         setQr(null);
-        setGuideStep(null);
+        setGuide(null);
       }
     });
     onCleanup(() => {
@@ -224,6 +244,33 @@ export function MobileSettings() {
     }
   };
   const enable = (patch: Record<string, unknown> = {}) => run(() => daemon("mobile.enable", patch));
+  const facts = (): OptionFacts => ({ api: store.daemonApi(), status: s() ?? null, push: push() ?? null });
+  // The switch. A new setup gets the relay with it and the guide opens once the relay is on; if the relay would not make a room, it says why and
+  // Tailscale is offered.
+  const turnOn = async () => {
+    const f = facts();
+    const fresh = newSetup(f);
+    let hosted = false;
+    setHostedRefused(false);
+    await run(async () => {
+      try {
+        hosted = (await turnOnAccess(f, { daemon: (m, p) => daemon(m, p), secure: (m, p) => mobileSecure(m, p), status: () => mobileStatus() })) === "hosted";
+      } catch (e) {
+        if (fresh) setHostedRefused(true);
+        throw e;
+      }
+    });
+    // After `run` has read the status again, which has the relay's page now.
+    if (hosted) openGuide("hosted");
+  };
+  // Instead of the relay: this network's listeners back on, which Tailscale mode needs running, then Tailscale mode (the person verifies).
+  const useTailscaleInstead = () =>
+    run(async () => {
+      await daemon("mobile.enable", { lan: true });
+      setHostedRefused(false);
+      await mobileSecure("mobile.set_tailscale", { on: true });
+      await checkTailscale();
+    });
   const pairBrowser = async () => {
     const ok = await confirmDialog(
       t("Pair a browser on this network? Anyone who can see the code on your screen in the next 2 minutes can try to use it, and you still approve each phone here. Over plain HTTP the page itself could be swapped by someone on this network, so a browser connected that way can only read; it can type over HTTPS or Tailscale."),
@@ -231,26 +278,37 @@ export function MobileSettings() {
     if (!ok) return;
     await run(async () => {
       // The plain pairing, whatever Tailscale is doing: its own address, and its own pairing.
-      const r = await daemon<{ url: string; qr: string; expires_in: number; tls: boolean; passkey?: boolean }>("mobile.pair_start", { plain: true });
-      setGuideStep(null);
+      const r = await daemon<MobilePairStart>("mobile.pair_start", { plain: true });
+      setGuide(null);
       setQr({ ...r, until: Date.now() + r.expires_in * 1000 });
     });
   };
-  const pairOverTailscale = () =>
+  // Step 2 of the guide: a code for the page the guide is about.
+  const pairInGuide = () =>
     run(async () => {
-      const r = await daemon<{ url: string; qr: string; expires_in: number; tls: boolean; tailscale: boolean }>("mobile.pair_start", {});
-      // The origin went while this was asked for: a code for this network's address is one the installed app refuses.
-      if (!r.tailscale) {
+      const via = guide()?.via ?? "tailscale";
+      const r = await daemon<MobilePairStart>("mobile.pair_start", via === "hosted" ? { hosted: true } : {});
+      // The origin went while this was asked for: a code for another page is one the installed app refuses.
+      if (via === "tailscale" && !r.tailscale) {
         setQr(null);
-        setGuideStep(null);
+        setGuide(null);
         await checkTailscale();
         throw new Error(t("Tailscale is not publishing this computer right now, so no code was shown. See what Settings says, then try again."));
       }
+      if (via === "hosted" && !r.hosted) {
+        setQr(null);
+        setGuide(null);
+        throw new Error(t("The relay's phone app cannot be used right now, so no code was shown. See what Settings says, then try again."));
+      }
       setQr({ ...r, until: Date.now() + r.expires_in * 1000 });
-      setGuideStep(2);
+      setGuide({ via, step: 2 });
     });
+  const openGuide = (via: Guide["via"]) => {
+    setError(null);
+    setGuide({ via, step: 1 });
+  };
   const closeGuide = () => {
-    setGuideStep(null);
+    setGuide(null);
     setQr(null);
   };
   const setTailscaleMode = (on: boolean) =>
@@ -265,7 +323,7 @@ export function MobileSettings() {
   const [roomOffer, setRoomOffer] = createSignal<string | null>(null);
   const unpair = async (d: MobileDevice) => {
     if (!(await confirmDialog(t("Unpair “{name}”? It is disconnected at once.", { name: d.name })))) return;
-    const offer = offerNewRoom(s());
+    const offer = offerNewRoom(s(), store.daemonApi());
     await run(() => daemon("mobile.revoke", { id: d.id }));
     if (offer && !s()?.devices.some((x) => x.id === d.id)) setRoomOffer(d.name);
   };
@@ -338,7 +396,8 @@ export function MobileSettings() {
   const shownError = () => (error()?.includes("could not be saved") ? s()?.error : error() ?? s()?.error);
   const deviceName = (id: string) => s()?.devices.find((d) => d.id === id)?.name ?? id;
   const hasAccess = () => !!s() && (s()!.enabled || s()!.devices.length > 0 || (s()!.legacy ?? []).length > 0);
-  const option = (id: OptionId) => optionState(id, { api: store.daemonApi(), status: s() ?? null, push: push() ?? null });
+  const option = (id: OptionId) => optionState(id, facts());
+  const trust = () => (store.daemonApi() >= HOSTED_API && s()?.relay ? hostedTrust(s()!.relay!) : null);
   const summary = () => mobileSummary(s()!, push() ?? null);
   const alertsOn = () => {
     const n = push()?.webpush?.devices ?? 0;
@@ -370,8 +429,15 @@ export function MobileSettings() {
           </div>
         </div>
       </Show>
-      <OptionRow id="mobile-access" state={option("mobile-access")} onChange={(on) => void (on ? enable() : run(() => daemon("mobile.disable")))} />
+      <OptionRow id="mobile-access" state={option("mobile-access")} onChange={(on) => void (on ? turnOn() : run(() => daemon("mobile.disable")))} />
       <Show when={shownError()}><div class="form-note error">{errorText(shownError())}</div></Show>
+      <Show when={hostedRefused() && s()?.enabled && !s()!.relay?.on}>
+        <div class="form-note warn-note" data-hosted-refused>
+          {t("The relay did not make this computer's room, so phones cannot reach it yet. Try the relay's switch again later, or use Tailscale: it needs Tailscale on this computer and on the phone, and turns this network's listeners back on.")}
+          {" "}
+          <button class="btn" data-use-tailscale disabled={busy()} onClick={() => void useTailscaleInstead()}>{t("Use Tailscale instead")}</button>
+        </div>
+      </Show>
       <Show when={s()?.store_error}>
         <div class="form-note error" data-store-error>
           {t("The phone access settings could not be read ({error}). A copy was kept next to them; phone access stays off until you reset it.", { error: s()!.store_error! })}
@@ -385,6 +451,24 @@ export function MobileSettings() {
         </div>
       </Show>
       <Show when={s()}>
+        <OptionRow id="mobile-hosted" state={option("mobile-hosted")} control={
+          <Show when={hostedPairing(facts())}>
+            <button class="btn primary" data-hosted-pair disabled={busy()} onClick={() => openGuide("hosted")}><Icon name="plus" size={13} /> {t("Pair a phone")}</button>
+          </Show>
+        }>
+          <Show when={store.daemonApi() >= HOSTED_API && s()!.relay?.on && hostedReason(s()!.relay!)}>
+            <div class="muted-inline" data-hosted-reason>{errorText(hostedReason(s()!.relay!))}</div>
+          </Show>
+          <Show when={hostedPairing(facts()) && !s()!.app}>
+            <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot approve phones or raise what they may do.")}</div>
+          </Show>
+          <Show when={trust()}>
+            <details class="relay-sees" data-hosted-trust>
+              <summary>{t("What this trusts")}</summary>
+              <div class="form-note">{trust()}</div>
+            </details>
+          </Show>
+        </OptionRow>
         <OptionRow id="mobile-tailscale" state={option("mobile-tailscale")} onChange={(on) => void setTailscaleMode(on)}>
           <Show when={store.daemonApi() >= TAILSCALE_API}>
             <Show when={s()!.enabled} fallback={
@@ -411,20 +495,20 @@ export function MobileSettings() {
                 <div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
               </Show>
               <Show when={tailscale()?.origin}>
-                <button class="btn primary" data-tailscale-pair disabled={busy() || !s()!.running} onClick={() => setGuideStep(1)}><Icon name="plus" size={13} /> {t("Pair a phone over Tailscale")}</button>
+                <button class="btn primary" data-tailscale-pair disabled={busy() || !s()!.running} onClick={() => openGuide("tailscale")}><Icon name="plus" size={13} /> {t("Pair a phone over Tailscale")}</button>
               </Show>
             </Show>
           </Show>
         </OptionRow>
         <OptionRow id="mobile-relay" state={option("mobile-relay")} onChange={(on) => void relay.turn(on, s()!.relay)}>
           <Show when={store.daemonApi() >= RELAY_API && s()!.relay}>
-            <RelayDetails status={s()!.relay!} form={relay} busy={busy()} />
+            <RelayDetails status={s()!.relay!} form={relay} busy={busy()} api={store.daemonApi()} />
           </Show>
         </OptionRow>
       </Show>
       <Show when={s()?.enabled}>
-        <Show when={guideStep() && tailscale()?.origin}>
-          <div class="overlay" data-tailscale-guide={guideStep()}>
+        <Show when={guideStep() && guidePage()}>
+          <div class="overlay" data-pair-guide={guideStep()} data-guide-via={guide()!.via} data-tailscale-guide={guide()!.via === "tailscale" ? guideStep() : undefined} data-hosted-guide={guide()!.via === "hosted" ? guideStep() : undefined}>
             <div class="modal" style={{ width: "560px" }}>
               <Show when={guideStep() === 1} fallback={
                 <>
@@ -432,7 +516,7 @@ export function MobileSettings() {
                   <Show when={qr() && qr()!.until > now()} fallback={
                     <>
                       <div style={{ color: "var(--text-dim)" }}>{t("The code expired. Show a new one.")}</div>
-                      <button class="btn primary" disabled={busy()} onClick={() => void pairOverTailscale()}>{t("Show a new code")}</button>
+                      <button class="btn primary" disabled={busy()} onClick={() => void pairInGuide()}>{t("Show a new code")}</button>
                     </>
                   }>
                     <div class="mobile-qr">
@@ -448,39 +532,49 @@ export function MobileSettings() {
               }>
                 <h2>{t("Step 1: Install")}</h2>
                 <div class="mobile-qr">
-                  <div class="mobile-qr-code" innerHTML={tailscale()!.install_qr ?? ""} data-install-link={`https://${tailscale()!.origin}/`} />
+                  <div class="mobile-qr-code" innerHTML={guidePage()!.qr} data-install-link={`${guidePage()!.origin}/`} />
                   <div>
-                    <div>{t("Turn on Tailscale on your phone and scan this with its camera. The page shows how to install Kelpie on the phone; then open it from the Home Screen.")}</div>
-                    <div class="muted-inline">{t("This code holds no secret. The very first visit can take up to a minute while Tailscale gets its certificate.")}</div>
-                    <div class="mono mobile-qr-url">{`https://${tailscale()!.origin}/`}</div>
-                    <button class="btn primary" data-guide-next disabled={busy()} onClick={() => void pairOverTailscale()}>{t("Installed: Step 2")}</button>
+                    <Show when={guide()!.via === "hosted"} fallback={
+                      <>
+                        <div>{t("Turn on Tailscale on your phone and scan this with its camera. The page shows how to install Kelpie on the phone; then open it from the Home Screen.")}</div>
+                        <div class="muted-inline">{t("This code holds no secret. The very first visit can take up to a minute while Tailscale gets its certificate.")}</div>
+                      </>
+                    }>
+                      <div>{t("Scan this with the phone's camera. The page shows how to install Kelpie on the phone; then open it from the Home Screen.")}</div>
+                      <div class="muted-inline">{t("This code holds no secret. The app comes from the relay: see What this trusts, under Hosted phone app.")}</div>
+                    </Show>
+                    <div class="mono mobile-qr-url">{`${guidePage()!.origin}/`}</div>
+                    <button class="btn primary" data-guide-next disabled={busy()} onClick={() => void pairInGuide()}>{guide()!.via === "hosted" ? t("Already installed: Step 2") : t("Installed: Step 2")}</button>
                   </div>
                 </div>
               </Show>
+              <Show when={error()}><div class="form-note error" data-guide-error>{errorText(error())}</div></Show>
               <div class="footer"><span style={{ flex: 1 }} /><button class="btn" data-guide-close onClick={closeGuide}>{t("Close")}</button></div>
             </div>
           </div>
         </Show>
-        <SettingRow id="mobile-pair" wide>
-          <Show when={!s()!.app}>
-            <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot approve phones or raise what they may do.")}</div>
-          </Show>
-          <Show when={qr() && !guideStep() && qr()!.until > now()} fallback={
-            <button class="btn primary" disabled={!s()!.running || busy()} onClick={() => void pairBrowser()}><Icon name="plus" size={13} /> {t("Pair a browser on this network")}</button>
-          }>
-            <div class="mobile-qr">
-              <div class="mobile-qr-code" innerHTML={qr()!.qr} data-link={qr()!.url} />
-              <div>
-                <div>{t("Scan with the phone's camera. The phone then shows six digits: type them here when Kelpie asks.")}</div>
-                <div class="muted-inline">{t("The code works once and expires in {n} s.", { n: Math.max(0, Math.round((qr()!.until - now()) / 1000)) })}</div>
-                <Show when={!qr()!.tls}><div class="form-note warn-note">{t("Plain HTTP: a browser paired this way can only read. With the app lock off, it can type over a Tailscale address.")}</div></Show>
-                <Show when={qr()!.tls && qr()!.passkey === false}><div class="form-note warn-note" data-pair-no-passkey>{t("This address is a number, and a passkey needs a name, so a phone paired here can only read while the app lock is on.")}</div></Show>
-                <div class="mono mobile-qr-url">{qr()!.url.split("#")[0]}</div>
-                <button class="btn" onClick={() => setQr(null)}>{t("Cancel")}</button>
+        <Show when={plainPairing(facts())}>
+          <SettingRow id="mobile-pair" wide>
+            <Show when={!s()!.app}>
+              <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot approve phones or raise what they may do.")}</div>
+            </Show>
+            <Show when={qr() && !guideStep() && qr()!.until > now()} fallback={
+              <button class="btn primary" data-plain-pair disabled={!s()!.running || busy()} onClick={() => void pairBrowser()}><Icon name="plus" size={13} /> {t("Pair a browser on this network")}</button>
+            }>
+              <div class="mobile-qr">
+                <div class="mobile-qr-code" innerHTML={qr()!.qr} data-link={qr()!.url} />
+                <div>
+                  <div>{t("Scan with the phone's camera. The phone then shows six digits: type them here when Kelpie asks.")}</div>
+                  <div class="muted-inline">{t("The code works once and expires in {n} s.", { n: Math.max(0, Math.round((qr()!.until - now()) / 1000)) })}</div>
+                  <Show when={!qr()!.tls}><div class="form-note warn-note">{t("Plain HTTP: a browser paired this way can only read. With the app lock off, it can type over a Tailscale address.")}</div></Show>
+                  <Show when={qr()!.tls && qr()!.passkey === false}><div class="form-note warn-note" data-pair-no-passkey>{t("This address is a number, and a passkey needs a name, so a phone paired here can only read while the app lock is on.")}</div></Show>
+                  <div class="mono mobile-qr-url">{qr()!.url.split("#")[0]}</div>
+                  <button class="btn" onClick={() => setQr(null)}>{t("Cancel")}</button>
+                </div>
               </div>
-            </div>
-          </Show>
-        </SettingRow>
+            </Show>
+          </SettingRow>
+        </Show>
       </Show>
       <Show when={s()}>
         <Show when={push() !== undefined}>
@@ -488,7 +582,9 @@ export function MobileSettings() {
             <button class="link-btn" data-open-notifications onClick={() => store.openSettings("notifications", "push-webpush")}>{t("Send a test alert: Settings → Notifications")}</button>
           </OptionRow>
         </Show>
-        <OptionRow id="mobile-lock" state={option("mobile-lock")} onChange={(on) => void setLock({ on })} />
+        <OptionRow id="mobile-lock" state={option("mobile-lock")} onChange={(on) => void setLock({ on })}>
+          <Show when={store.daemonApi() >= HOSTED_API}><div class="muted-inline" data-lock-hosted>{t("Phones paired on the hosted app always use the lock, even with this off.")}</div></Show>
+        </OptionRow>
         <OptionRow id="mobile-lock-idle" state={option("mobile-lock-idle")} control={
           <select class="text-input" data-lock-idle value={s()!.lock?.idle_s} disabled={busy() || !!option("mobile-lock-idle").disabled} onChange={(e) => {
             const select = e.currentTarget;
@@ -548,6 +644,7 @@ export function MobileSettings() {
           else setAdvancedWanted(e.currentTarget.open);
         }}>
           <summary>{t("Advanced: address, certificate, screen and paired phones")}</summary>
+          <OptionRow id="mobile-lan" state={option("mobile-lan")} onChange={(lan) => void enable({ lan })} />
           <Show when={s()!.enabled}>
             <SettingRow id="mobile-network" wide>
               <div class="inline-fields">
@@ -598,7 +695,7 @@ export function MobileSettings() {
                   <div class="saved-layout" data-device={d.id} data-state={d.state}>
                     <Icon name="server" size={16} />
                     <div class="saved-layout-main">
-                      <div>{d.name} <span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show><Show when={d.passkey}> · {t("app lock set up")}</Show><Show when={d.lock_reset}> · {t("may set up a passkey")}</Show><Show when={d.kind === "pwa" && d.secure_origin && !d.may_control && store.daemonApi() >= TAKEOVER_API}> · {t("may take control once its app lock is set up and on")}</Show></span></div>
+                      <div>{d.name} <Show when={pageKindLabel(d.page_kind)}><span class="chip" data-page-kind={d.page_kind}>{pageKindLabel(d.page_kind)}</span> </Show><span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show><Show when={d.passkey}> · {t("app lock set up")}</Show><Show when={d.lock_reset}> · {t("may set up a passkey")}</Show><Show when={d.kind === "pwa" && d.secure_origin && !d.may_control && d.page_kind !== "hosted" && store.daemonApi() >= TAKEOVER_API}> · {t("may take control once its app lock is set up and on")}</Show></span></div>
                       <div class="muted-inline" style={{ "font-size": "11.5px" }}>
                         {d.state === "unverified"
                           ? t("Its record was changed outside Kelpie: pair it again.")
@@ -609,9 +706,7 @@ export function MobileSettings() {
                     </div>
                     <Show when={d.state === "ok"}>
                       <select class="text-input" data-permission value={d.permission} disabled={busy()} onChange={(e) => void setPermission(d, e.currentTarget.value as MobilePermission)}>
-                        <option value="read">{t("May read")}</option>
-                        <option value="write">{t("May type")}</option>
-                        <Show when={offersControl(d, store.daemonApi())}><option value="control">{t("May take control")}</option></Show>
+                        <For each={permissionChoices(d, store.daemonApi())}>{(p) => <option value={p}>{p === "read" ? t("May read") : p === "write" ? t("May type") : t("May take control")}</option>}</For>
                       </select>
                     </Show>
                     <Show when={d.state === "ok" && d.secure_origin && store.daemonApi() >= LOCK_API}>
@@ -671,29 +766,21 @@ export function MobileSettings() {
   );
 }
 
-interface PairRequest {
-  id: string;
-  name: string;
-  kind: string;
-  fingerprint: string;
-  want: MobilePermission;
-  address: string;
-}
-
 /** Asks whether a phone that scanned the pairing code may connect (shown over everything): the person types the six digits
- *  the phone shows. Also says when a phone was added, changed or removed. */
+ *  the phone shows. Also says when a phone was added, changed or removed. A phone on the hosted app is offered reading first, and hears what typing
+ *  from it means; control is never offered at approval. */
 export function MobileApprovals() {
-  const [requests, setRequests] = createSignal<PairRequest[]>([]);
+  const [requests, setRequests] = createSignal<MobilePairRequest[]>([]);
   const [codes, setCodes] = createSignal<Record<string, string>>({});
   const [errors, setErrors] = createSignal<Record<string, string>>({});
   /** The request being allowed: a second click would burn another of its three tries and raise a second prompt. */
   const [allowing, setAllowing] = createSignal<string | null>(null);
-  const add = (p: PairRequest) => setRequests((r) => (r.some((x) => x.id === p.id) ? r : [...r, p]));
+  const add = (p: MobilePairRequest) => setRequests((r) => (r.some((x) => x.id === p.id) ? r : [...r, p]));
   onMount(() => {
     // Requests waiting already: this window was reloaded, or came up after the phone scanned.
     void mobileStatus().then((s) => s.pending.forEach(add)).catch(() => {});
     const un = onEvent<{ event: string; params: any }>("daemon-event", (m) => {
-      if (m.event === "mobile.pair_request") add({ id: m.params.id, name: m.params.name, kind: m.params.kind ?? "pwa", fingerprint: m.params.fingerprint ?? "", want: m.params.want ?? "read", address: m.params.address ?? "" });
+      if (m.event === "mobile.pair_request") add({ id: m.params.id, name: m.params.name, kind: m.params.kind ?? "pwa", fingerprint: m.params.fingerprint ?? "", want: m.params.want ?? "read", address: m.params.address ?? "", origin_kind: m.params.origin_kind ?? undefined });
       if (m.event === "mobile.lockout") {
         store.notify(m.params.reason === "sas" ? t("A pairing request was declined after three wrong codes.") : t("Too many failed phone connections from {address}: that address is blocked for a while.", { address: m.params.address ?? "" }), undefined, 10000);
       }
@@ -730,29 +817,35 @@ export function MobileApprovals() {
   };
   return (
     <For each={requests()}>
-      {(r) => (
-        <div class="overlay mobile-approve" data-request={r.id}>
-          <div class="modal" style={{ width: "460px" }}>
-            <h2>{t("Pair “{name}”?", { name: r.name })}</h2>
-            <div style={{ "font-weight": 600, margin: "4px 0" }}>{t("Did you just scan a QR code on your phone?")}</div>
-            <div style={{ color: "var(--text-dim)" }}>{t("A device that scanned your pairing code wants to see your sessions. Only approve a device you are holding: type the six digits it shows.")}</div>
-            <div class="muted-inline" style={{ margin: "8px 0 0" }} data-request-details>
-              <div>{t("Device key (the phone shows the same): {fingerprint}", { fingerprint: r.fingerprint })}</div>
-              <div>{t("It asks to: {what}", { what: r.want === "read" ? t("read") : r.want === "control" ? t("read, type and take control") : t("read and type") })}</div>
-              <Show when={r.address}><div>{t("From address: {address}", { address: r.address })}</div></Show>
-            </div>
-            <input class="text-input mono mobile-approve-code" inputmode="numeric" maxlength="7" autocomplete="off" placeholder="000000" style={{ "font-size": "20px", "letter-spacing": "4px", width: "160px", margin: "12px 0" }}
-              value={codes()[r.id] ?? ""} onInput={(e) => setCodes((c) => ({ ...c, [r.id]: e.currentTarget.value }))} />
-            <Show when={errors()[r.id]}><div class="form-note error">{errors()[r.id]}</div></Show>
-            <div class="footer">
-              <button class="btn" onClick={() => deny(r.id)}>{t("Deny")}</button>
-              <span style={{ flex: 1 }} />
-              <button class={r.want === "read" ? "btn primary" : "btn"} data-allow="read" disabled={allowing() === r.id} onClick={() => void allow(r, "read")}>{t("Allow reading")}</button>
-              <button class={r.want === "read" ? "btn" : "btn primary"} data-allow="write" disabled={allowing() === r.id} onClick={() => void allow(r, "write")}>{t("Allow reading and typing")}</button>
+      {(r) => {
+        const choice = approvalChoices(r);
+        return (
+          <div class="overlay mobile-approve" data-request={r.id} data-origin-kind={r.origin_kind}>
+            <div class="modal" style={{ width: "460px" }}>
+              <h2>{t("Pair “{name}”?", { name: r.name })}</h2>
+              <div style={{ "font-weight": 600, margin: "4px 0" }}>{t("Did you just scan a QR code on your phone?")}</div>
+              <div style={{ color: "var(--text-dim)" }}>{t("A device that scanned your pairing code wants to see your sessions. Only approve a device you are holding: type the six digits it shows.")}</div>
+              <div class="muted-inline" style={{ margin: "8px 0 0" }} data-request-details>
+                <div>{t("Device key (the phone shows the same): {fingerprint}", { fingerprint: r.fingerprint })}</div>
+                <div>{t("It asks to: {what}", { what: choice.asks === "read" ? t("read") : choice.asks === "control" ? t("read, type and take control") : t("read and type") })}</div>
+                <Show when={pageKindLabel(r.origin_kind)}><div data-request-page>{t("It pairs on: {page}", { page: pageKindLabel(r.origin_kind)! })}</div></Show>
+                <Show when={r.address}><div>{t("From address: {address}", { address: r.address })}</div></Show>
+              </div>
+              <Show when={choice.typing}><div class="form-note warn-note" data-request-typing>{choice.typing}</div></Show>
+              <input class="text-input mono mobile-approve-code" inputmode="numeric" maxlength="7" autocomplete="off" placeholder="000000" style={{ "font-size": "20px", "letter-spacing": "4px", width: "160px", margin: "12px 0" }}
+                value={codes()[r.id] ?? ""} onInput={(e) => setCodes((c) => ({ ...c, [r.id]: e.currentTarget.value }))} />
+              <Show when={errors()[r.id]}><div class="form-note error">{errors()[r.id]}</div></Show>
+              <div class="footer">
+                <button class="btn" onClick={() => deny(r.id)}>{t("Deny")}</button>
+                <span style={{ flex: 1 }} />
+                <For each={choice.choices}>
+                  {(p) => <button class={choice.primary === p ? "btn primary" : "btn"} data-allow={p} disabled={allowing() === r.id} onClick={() => void allow(r, p)}>{p === "read" ? t("Allow reading") : t("Allow reading and typing")}</button>}
+                </For>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      }}
     </For>
   );
 }
