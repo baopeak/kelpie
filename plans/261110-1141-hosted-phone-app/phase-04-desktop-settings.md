@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "Desktop Settings → Mobile: hosted default, trust text"
-status: pending
+status: done
 priority: P1
 effort: "2d"
 dependencies: [2, 3]
@@ -62,3 +62,13 @@ Revert the commit; the daemon keeps working with the old UI (new params are opti
 
 ## Success criteria
 Tests green; a reviewer reading Settings → Mobile can tell, without the docs, which way a phone reaches the computer and what the hosted app trusts.
+
+## Completion note (2026-11-10)
+Done on branch `phone/hosted-settings`; report: [reports/fullstack-261110-desktop-settings.md](reports/fullstack-261110-desktop-settings.md). `pnpm typecheck`, `pnpm test` (1777) and `pnpm i18n:check` green; GUI checks are phase 6's. Where the code differed from this spec:
+- `types.ts` not edited after all: `MobileStatus`, `RelayStatus`, `MobileDevice` and the pending list extend phase 2's shapes (`Partial<…>`, since older daemons omit them).
+- The hosted rows (*Hosted phone app*, *Pair browsers on this network*) are shown below `HOSTED_API` with the restart text, as req. 9 says; what is hidden there is the pairing button and the hosted lines.
+- A new setup turns the relay on with `{on: true}` (the daemon's default relay); `mobile.enable {lan: false}` is expected to fail until the relay is on, so its error is passed over when phone access is on all the same, and the daemon's stale "nothing else reaches this computer" is hidden once phone access runs.
+- "Offer Tailscale mode" after a refused room turns this network's listeners back on first: Tailscale mode needs phone access running.
+- The LAN switch cannot be turned off while neither the relay nor Tailscale is on (the daemon would stop phone access).
+- "Make a new room" and the offer after unpairing no longer need a kept key at a v2 relay from a `HOSTED_API` daemon.
+- A second trust text for a relay other than Kelpie's; badge/approval wording uses "hosted app"; the row is "Hosted phone app".

@@ -61,7 +61,7 @@ Execution: strictly sequential (owner preference: full review/test/fix loop per 
 | 1 | [Relay v2: open rooms, abuse limits, many origins, hosted page](phase-01-relay-v2-open-rooms-hosting.md) | 2.5d | — | `relay/**` | done |
 | 2 | [Daemon: hosted pairing, device page, relay v2 client](phase-02-daemon-hosted-pairing.md) | 4d | 1 | `crates/**`, `app/src/lib/attention.ts`, `app/src/lib/types.ts` | done |
 | 3 | [Phone: hosted build and behaviour, SW versioning, manifest](phase-03-phone-hosted-build.md) | 3d | 2 | `app/phone/**`, `app/vite.phone.config.ts`, `app/package.json`, `scripts/hosted/bundle_manifest.py`, `.gitignore`, `app/src/locales/vi/phone.json` | done |
-| 4 | [Desktop Settings → Mobile: hosted default, trust text](phase-04-desktop-settings.md) | 2d | 2, 3 | `app/src/components/settings/mobile-*.tsx`, `app/src/lib/mobile-options.ts`, `settings-catalog.ts`, `app/src/locales/vi/settings.json` | pending |
+| 4 | [Desktop Settings → Mobile: hosted default, trust text](phase-04-desktop-settings.md) | 2d | 2, 3 | `app/src/components/settings/mobile-*.tsx`, `app/src/lib/mobile-options.ts`, `settings-catalog.ts`, `app/src/locales/vi/settings.json` | done |
 | 5 | [CI deploy, approval, published hash, live verification](phase-05-ci-deploy-verification.md) | 2d | 1, 3 | `.github/workflows/*`, `scripts/hosted/verify_live.py`, `[env.staging]` in `relay/wrangler*.toml` | pending |
 | 6 | [E2E on an emulated phone, existing e2e updated](phase-06-e2e-emulated-phone.md) | 2d | 1–5 | `scripts/e2e/mobile_hosted.py`, `mobile_relay.py`, `mobile.py` | pending |
 | 7 | [Docs](phase-07-docs.md) | 1d | 1–6 | `docs/*.md`, `README.md` | pending |
