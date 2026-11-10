@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: "Phone: hosted build and behaviour, SW versioning, manifest"
-status: pending
+status: done
 priority: P1
 effort: "3d"
 dependencies: [2]
@@ -82,3 +82,12 @@ Revert the commit; the hosted bundle is not deployed before phase 5/8, and the d
 
 ## Success criteria
 Tests green; both builds succeed; the two-build hash check matches; a hosted build served by `wrangler dev --local` (phase 1 `dev:page`) loads with no CSP violation in a desktop Chromium.
+
+## Completion note (2026-11-10)
+Done on branch `phone/hosted-phone-app`; report: [reports/fullstack-261110-phone-hosted.md](reports/fullstack-261110-phone-hosted.md). Two clean hosted builds gave one `bundle_sha256`; `wrangler dev --local` served the bundle with its `_headers` and headless Edge saw no CSP violation. Where the code differed from this spec:
+- `security-headers.test.ts` is in `app/phone/src/` (Vitest collects only `phone/src`); the build flags are read through `typeof` guards so tests need no `define`.
+- `shell-reload.ts` gained `watchWorker` (the `controllerchange` rule) and `scripts/hosted/test_bundle_manifest.py` holds the fixture test; `.gitignore` also ignores `hosted-phone-manifest.json`.
+- `hosted.ts` takes the translator as an argument, so the link imports it without the phone dictionary.
+- The leak guard is a build check: the default build fails if `/v1/health` reaches any chunk.
+- The trust sheet opens after every hosted pairing; replacing a computer also clears the old one's cached list, screens, drafts and kept messages once the new pairing succeeds.
+- `version.json`'s `version` is the tag as given.
