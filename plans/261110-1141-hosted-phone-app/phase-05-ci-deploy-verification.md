@@ -1,7 +1,7 @@
 ---
 phase: 5
 title: "CI deploy, approval, published hash, live verification"
-status: pending
+status: done
 priority: P1
 effort: "2d"
 dependencies: [1, 3]
@@ -81,3 +81,11 @@ Disable the hosted jobs (or delete the environments' secrets) to stop deploys; p
 ## Success criteria
 - Production cannot be deployed without the owner's approval in `hosted-production` (`gh api repos/<owner>/<repo>/environments/hosted-production` shows the reviewer and the `v*` rule).
 - The first release with the pipeline has `hosted-phone-manifest.json` and the hash in its notes, and `verify_live.py` exits 0 against production.
+
+## Completion note (2026-11-10)
+Done on branch `ci/hosted-deploy`; report: [reports/fullstack-261110-ci-deploy.md](reports/fullstack-261110-ci-deploy.md) (also holds the owner's setup list and the release runbook for phase 7). `test_verify_live.py` 29 passed; `verify_live.py` exits 0 against `wrangler dev --local` serving a real hosted build and 1 after a one-byte change; staging and top-level `wrangler deploy --dry-run` pass offline; the workerd smoke passes in open and key mode. Not run here: any deploy, `--scripts` against Cloudflare (API path unverified), a real `--rebuild`, the fork dry run of `hosted-build`. Where the code differed from this spec:
+- `verify_live.py` gained `--env production|staging` and `--bundle DIR` (offline check CI runs on the artifact before each deploy and in `publish`); it fetches `/` too and never `_headers` (wrangler does not upload it).
+- `deploy-room` must be run from the tag itself (`--ref vX`, input equal to it) so the environments' tag rule applies; its message is `<tag> room <commit>`.
+- `hosted-build` checks `app/package.json` against the tag; the hosted lines are appended to the notes after `latest.json`, so update notes stay the tag's.
+- `relay.yml`'s page job also runs both Python tests and `verify_live.py` against `wrangler dev`; its paths include `app/phone/**` and `scripts/hosted/**`.
+- Found: `vite.phone.config.ts` replaces only the first `__PRECACHE__` in `sw.js` (also on master), so the worker's fetch handler throws for non-asset files; fix belongs to phases 3/6.
