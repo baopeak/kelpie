@@ -8,3 +8,5 @@ app/src-tauri/binaries/
 plans/261020-0823-erka-ui-improvements/assets/
 __pycache__/
 app/dist-phone/
+app/dist-phone-hosted/
+hosted-phone-manifest.json

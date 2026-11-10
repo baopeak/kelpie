@@ -14,8 +14,10 @@ import { clearCache, loadList, loadScreen, saveList, saveScreen } from "./cache"
 import { canAct, dataAge, deriveConn, type ConnState } from "./conn-state";
 import { browserEnv, Link, linkCodec, type ChatMsg, type ChatQueueMsg, type ChatRequestInfo, type ChatResolved, type DeviceInfo, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
 import { browserCredentials, LockModel, type LockInfo, type Proof } from "./lock";
-import { pair, type PairSocket } from "./pair";
+import { pair, type HostedPairing, type PairSocket } from "./pair";
 import { currentPairing, forgetPairing, loadPairing, relayUrl, savePairing, seemsPaired } from "./pairing-store";
+import { HOSTED } from "./hosted";
+import type { Endpoint } from "./noise";
 import { emptyView, ScreenSync, type Prompt, type ScreenFrame, type ScreenView } from "./screen-sync";
 import { forgetHistory } from "./history";
 import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
@@ -23,7 +25,7 @@ import { browserReloadEnv, ShellReload, SHELL_CHANGED } from "./shell-reload";
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
 import { screenNow } from "./install-guide";
-import { afterFailedPairing, movedTo, platformOf } from "./install-state";
+import { afterFailedPairing, movedTo, platformOf, relayMovedTo } from "./install-state";
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
@@ -56,8 +58,9 @@ export const [conn, setConn] = createSignal<ConnState>({ kind: "connecting" });
 export const [now, setNow] = createSignal(Date.now());
 export const [dataState, setDataState] = createSignal<"fresh" | "slow" | "stuck">("fresh");
 export const [lastLiveAt, setLastLiveAt] = createSignal(0);
-/** The computer's Tailscale origin, when this page is somewhere else. */
+/** The computer's Tailscale origin, when this page is somewhere else; on the hosted app, its relay's host when that is not this page's. */
 export const [movedHost, setMovedHost] = createSignal<string | null>(null);
+const movedHere = (endpoints: readonly Endpoint[]) => (HOSTED ? relayMovedTo(endpoints, location.host) : movedTo(endpoints, location.host));
 /** The one message about the open session that outlives what it is about (see notice.ts). */
 export const [notice, setNotice] = createSignal<Notice | null>(null);
 const board = new NoticeBoard();
@@ -172,7 +175,8 @@ function refreshShell() {
   }
 }
 
-const shellReload = new ShellReload(browserReloadEnv());
+/** Loads the page again when its shell changed under it: a kept shell with another CSP, or a new version's worker taking it over (main.tsx). */
+export const shellReload = new ShellReload(browserReloadEnv());
 
 /** The relay, for the installed app on its HTTPS origin, once the computer gave this phone a token. */
 const relayRoute = () => {
@@ -279,7 +283,7 @@ const link = new Link(browserEnv(), () => {
     // Kept for a client that can dial another address (a page's origin cannot change; the native app's can). What this page can do with
     // them is say so when the computer's Tailscale origin is not where it is.
     const known = m.endpoints ?? m.list.map((a) => ({ t: "lan", a }));
-    setMovedHost(movedTo(known, location.host));
+    setMovedHost(movedHere(known));
     const p = currentPairing();
     // `endpoints` is the whole list, the relay's included (or left out, when it was turned off); a computer from before sends the direct addresses only.
     if (p && m.seq > p.addrsSeq) {
@@ -679,7 +683,18 @@ export async function pairDevice(code: string, name: string): Promise<string | n
   const held = await loadPairing();
   // The relay only for the installed app on its HTTPS origin: a plain-HTTP page is not let in there.
   const relaySocket = location.protocol === "https:" ? (relay: string) => new WebSocket(relay) as unknown as PairSocket : undefined;
-  const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }), held, relaySocket);
+  // The hosted app pairs through its relay alone, and with one computer: another one's pairing goes only once the person says so.
+  const hosted: HostedPairing | undefined = HOSTED
+    ? {
+        origin: location.origin,
+        confirm: (question) => confirm(question),
+        leave: async () => {
+          lock.forget();
+          await alerts.forget();
+        },
+      }
+    : undefined;
+  const r = await pair(code, name, () => new WebSocket(url) as unknown as PairSocket, (digits, key) => setPairShown({ digits, key }), held, relaySocket, hosted);
   setPairShown(null);
   if (!r.ok) {
     if (!held) {
@@ -695,13 +710,29 @@ export async function pairDevice(code: string, name: string): Promise<string | n
     tellDeviceNews(r.message);
     return null;
   }
+  // What this app kept of the computer it left (its list, screens, drafts and messages) is nothing to the new one.
+  if (HOSTED && held && !sameKey(held.dpk, r.pairing.dpk)) {
+    void clearCache();
+    wipeTypedText();
+    forgetHistory();
+    forgetSenders();
+    closeSession();
+    setSessions([]);
+  }
   const kept = await savePairing(r.pairing);
   setNotPairedMessage(kept ? null : t("This browser would not keep the pairing: it lasts until this page is closed."));
   setPairing(null);
   setPaired(true);
   link.start();
+  // What the hosted app trusts, said once the pairing is made (and from the menu at any time).
+  if (HOSTED) setTrustOpen(true);
   return null;
 }
+
+const sameKey = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/** The sheet that says what the hosted app trusts. */
+export const [trustOpen, setTrustOpen] = createSignal(false);
 
 /** Forgets this device's pairing (the computer still lists it until it is removed there). */
 export function forgetDevice() {
@@ -822,7 +853,7 @@ export function startApp() {
       return;
     }
     setPaired(true);
-    setMovedHost(movedTo(p.endpoints, location.host));
+    setMovedHost(movedHere(p.endpoints));
     // Nothing kept is painted while the lock may be on: the computer says, and until it has, the lock screen stands.
     void loadList().then((c) => {
       if (c && lock.clear() && !link.facts.ready && !sessions().length) {

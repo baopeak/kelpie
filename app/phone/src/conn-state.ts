@@ -55,11 +55,11 @@ export interface ConnFacts {
   route: "direct" | "relay";
   /** What is known of the relay: `none` this phone has no relay to try; `up` it answered; `down` it could not be reached; `no_computer` it said
    *  this computer is not there (a hint: the relay can say anything, and it only ever ends a connection); `refused` the computer will not
-   *  serve this device through it. */
+   *  serve this device through it; `elsewhere` it is on another host than the hosted app's own, which dials no other. */
   relay: RelayFact;
 }
 
-export type RelayFact = "none" | "unknown" | "up" | "down" | "no_computer" | "refused";
+export type RelayFact = "none" | "unknown" | "up" | "down" | "no_computer" | "refused" | "elsewhere";
 
 /** `reset`: the computer's server answers and it has said nothing to this device's handshakes, which is what a computer with new
  *  pairing keys does. */
@@ -77,6 +77,8 @@ export type ConnState =
   | { kind: "relay_unreachable" }
   /** Tailscale is off on this phone and the relay cannot be reached either: no way to the computer from here. */
   | { kind: "no_path" }
+  /** The computer now names a relay other than the one this hosted app is on: it must be paired again. */
+  | { kind: "relay_moved" }
   | { kind: "restarted"; resyncing: boolean }
   | { kind: "busy"; level: number; reasons: string[] }
   | { kind: "replaced" }
@@ -107,6 +109,7 @@ export function deriveConn(f: ConnFacts, now: number): ConnState {
     return { kind: "live" };
   }
   if (!f.online) return { kind: "no_network" };
+  if (f.relay === "elsewhere") return { kind: "relay_moved" };
   if (f.attempt === 0 && f.connecting && f.lastLiveAt === 0) return { kind: "connecting" };
   if (f.reach === "portal") return { kind: "sign_in" };
   if (f.reach === "no_tailnet" && f.attempt >= 2) {
@@ -122,10 +125,11 @@ export function deriveConn(f: ConnFacts, now: number): ConnState {
   return { kind: "reconnecting", attempt: Math.max(f.attempt, 1), nextInS: f.nextAt === null ? null : Math.max(0, Math.ceil((f.nextAt - now) / 1000)) };
 }
 
-/** What an answer to the reachability request says. A 5xx is Tailscale answering for a computer whose Kelpie does not: no Wi-Fi login page. */
-export function reachFromAnswer(status: number, redirected: boolean, contentType: string): Reach {
+/** What an answer to the reachability request says: `expected` is the type of what was asked for (the computer's manifest, or on the hosted
+ *  app the relay's plain-text health). A 5xx is Tailscale (or the relay's host) answering for something behind it that does not: no Wi-Fi login page. */
+export function reachFromAnswer(status: number, redirected: boolean, contentType: string, expected = "manifest+json"): Reach {
   if (status >= 500) return "unreachable";
-  return status >= 200 && status < 300 && !redirected && contentType.includes("manifest+json") ? "reachable" : "portal";
+  return status >= 200 && status < 300 && !redirected && contentType.includes(expected) ? "reachable" : "portal";
 }
 
 /** Failing this fast is no computer that stopped answering. */

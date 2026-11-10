@@ -70,6 +70,10 @@ function valid(p: unknown): p is Pairing {
   return !!x && x.priv instanceof Uint8Array && x.priv.length === 32 && x.pub instanceof Uint8Array && x.dpk instanceof Uint8Array && x.dpk.length === 32 && typeof x.deviceId === "string";
 }
 
+/** A record as IndexedDB gives it back, or null. Records are kept as they were saved: a new version may add fields, never rename or
+ *  drop one, so that what an earlier version saved still loads (and an earlier version loads what this one saves). */
+export const readPairing = (got: unknown): Pairing | null => (valid(got) ? got : null);
+
 /** Whether a pairing was saved (to paint the right screen before IndexedDB answers). */
 export const seemsPaired = () => store.get(MARKER) === "1";
 
@@ -86,7 +90,7 @@ export async function loadPairing(): Promise<Pairing | null> {
       resolve(null);
     }
   });
-  memory = valid(got) ? got : null;
+  memory = readPairing(got);
   if (!memory) store.del(MARKER);
   return memory;
 }

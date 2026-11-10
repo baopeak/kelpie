@@ -198,5 +198,22 @@
   "This device can only read at this address. To type, pair it through Tailscale or at an HTTPS name.": "Thiết bị này chỉ đọc được ở địa chỉ này. Để gõ, hãy ghép đôi qua Tailscale hoặc ở một tên miền HTTPS.",
   "Press the button on the computer": "Hãy bấm nút trên máy tính",
   "Setting up the app lock starts on your computer, so a copied phone key cannot do it. Press \"Reset this phone's lock\" next to this phone in Kelpie → Settings → Mobile, then set it up here within five minutes.": "Việc thiết lập khóa ứng dụng bắt đầu trên máy tính của bạn, nên khóa điện thoại bị sao chép không làm được. Hãy bấm \"Đặt lại khóa của điện thoại này\" bên cạnh điện thoại này trong Kelpie → Cài đặt → Điện thoại, rồi thiết lập tại đây trong vòng năm phút.",
-  "This device has no passkey, so it can only read here. To type, pair it again through Tailscale or at an HTTPS name.": "Thiết bị này không có khóa truy cập nên chỉ đọc được ở đây. Để gõ, hãy ghép đôi lại qua Tailscale hoặc ở một tên miền HTTPS."
+  "This device has no passkey, so it can only read here. To type, pair it again through Tailscale or at an HTTPS name.": "Thiết bị này không có khóa truy cập nên chỉ đọc được ở đây. Để gõ, hãy ghép đôi lại qua Tailscale hoặc ở một tên miền HTTPS.",
+  "Your computer now uses the relay at {host}. This app works only through the relay it came from, so this phone must be paired again there.": "Máy tính của bạn giờ dùng relay tại {host}. Ứng dụng này chỉ hoạt động qua relay đã phục vụ nó, nên điện thoại này phải được ghép đôi lại ở đó.",
+  "Asking the relay which version it serves…": "Đang hỏi relay phiên bản nó đang phục vụ…",
+  "The relay says it serves {version}, with this fingerprint:": "Relay cho biết nó đang phục vụ {version}, với mã nhận dạng này:",
+  "The relay did not say which version it serves.": "Relay không cho biết nó đang phục vụ phiên bản nào.",
+  "What this app trusts": "Ứng dụng này tin cậy những gì",
+  "This app's version: {version}": "Phiên bản của ứng dụng này: {version}",
+  "Kelpie's relay cannot be reached from this phone right now. What you see is the last state.": "Hiện điện thoại này không kết nối được relay của Kelpie. Những gì bạn thấy là trạng thái gần nhất.",
+  "Pair this phone again": "Hãy ghép đôi lại điện thoại này",
+  "Your computer now uses another relay, and this app works only through the relay it came from. Pair this phone again from Kelpie → Settings → Mobile.": "Máy tính của bạn giờ dùng một relay khác, còn ứng dụng này chỉ hoạt động qua relay đã phục vụ nó. Hãy ghép đôi lại điện thoại này từ Kelpie → Cài đặt → Điện thoại.",
+  "This app comes from Kelpie's relay on Cloudflare, not from your computer.": "Ứng dụng này được tải từ relay của Kelpie trên Cloudflare, không phải từ máy tính của bạn.",
+  "Whoever controls that Cloudflare account, or Kelpie's release deploy, could send this phone different code. That code could read and type in your sessions while the app is unlocked.": "Ai kiểm soát tài khoản Cloudflare đó, hoặc quy trình phát hành của Kelpie, có thể gửi mã khác tới điện thoại này. Mã đó có thể đọc và gõ vào các phiên của bạn trong lúc ứng dụng đang mở khóa.",
+  "Each Kelpie release publishes this app's fingerprint and how to check it against what the relay serves.": "Mỗi bản phát hành Kelpie công bố mã nhận dạng của ứng dụng này và cách đối chiếu nó với những gì relay đang phục vụ.",
+  "This screen cannot prove what this phone runs: changed code could show anything here.": "Màn hình này không chứng minh được điện thoại này đang chạy gì: mã đã bị thay đổi có thể hiện bất cứ điều gì ở đây.",
+  "For an app served only by your computer, use Tailscale mode in Kelpie → Settings → Mobile.": "Để dùng ứng dụng chỉ do máy tính của bạn phục vụ, hãy chọn chế độ Tailscale trong Kelpie → Cài đặt → Điện thoại.",
+  "This app is paired with {a}. Pair with {b} instead? {a} loses this phone.": "Ứng dụng này đang ghép đôi với {a}. Ghép đôi với {b} thay thế? {a} sẽ mất điện thoại này.",
+  "This code is for another relay, and this app pairs only through the relay it came from. Show a new QR code in Kelpie on your computer.": "Mã này dành cho một relay khác, còn ứng dụng này chỉ ghép đôi qua relay đã phục vụ nó. Hãy hiện mã QR mới trong Kelpie trên máy tính của bạn.",
+  "Nothing changed: this app stays paired with {name}.": "Không có gì thay đổi: ứng dụng này vẫn ghép đôi với {name}."
 }

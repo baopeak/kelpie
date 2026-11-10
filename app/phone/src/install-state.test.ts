@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { afterFailedPairing, firstScreen, movedTo, platformOf, readCode, type PageFacts } from "./install-state";
+import { afterFailedPairing, firstScreen, movedTo, platformOf, readCode, relayMovedTo, type PageFacts } from "./install-state";
 import { b64url, randomBytes } from "./noise";
 
-const facts = (over: Partial<PageFacts> = {}): PageFacts => ({ https: true, tailnet: true, installed: false, paired: false, hasCode: false, stayInBrowser: false, ...over });
+const facts = (over: Partial<PageFacts> = {}): PageFacts => ({ https: true, tailnet: true, hosted: false, installed: false, paired: false, hasCode: false, stayInBrowser: false, ...over });
 const code = b64url(new TextEncoder().encode(JSON.stringify({ v: 1, dpk: b64url(randomBytes(32)), psk: b64url(randomBytes(32)), ep: [{ t: "ts", a: "desk.tail1234.ts.net:8443" }], name: "Desk" })));
 const HERE = "desk.tail1234.ts.net:8443";
 
@@ -40,6 +40,16 @@ describe("the first screen", () => {
     // A browser tab on a person's own certificate: with the code cleared it would land on the install steps, with no word of what went wrong.
     expect(after({ tailnet: false })).toBe("stay");
     expect(after({ https: false })).toBe("stay");
+  });
+
+  it("the app served from the relay is installed first, as at a Tailscale name, with or without a code", () => {
+    const hosted = (over: Partial<PageFacts> = {}) => firstScreen(facts({ tailnet: false, hosted: true, ...over }));
+    expect(hosted()).toBe("install");
+    expect(hosted({ hasCode: true })).toBe("install");
+    expect(hosted({ installed: true })).toBe("scan");
+    expect(hosted({ installed: true, hasCode: true })).toBe("pair");
+    expect(hosted({ stayInBrowser: true })).toBe("scan");
+    expect(afterFailedPairing(hosted({ installed: true }))).toBe("back_to_scanner");
   });
 
   it("a paired device is past all of it", () => {
@@ -87,5 +97,17 @@ describe("the computer's Tailscale address", () => {
     expect(movedTo([{ t: "ts", a: HERE }], "192.168.1.5:4817")).toBe(HERE);
     expect(movedTo([{ t: "lan", a: "192.168.1.5:4817" }], "192.168.1.5:4817")).toBeNull();
     expect(movedTo([], HERE)).toBeNull();
+  });
+});
+
+describe("the computer's relay, on the app the relay serves", () => {
+  const RELAY_HOST = "kelpie-link-relay.example.workers.dev";
+
+  it("is news only when it is on another host than this page", () => {
+    expect(relayMovedTo([{ t: "ts", a: HERE }, { t: "relay", a: `wss://${RELAY_HOST}`, r: "ticket" }], RELAY_HOST)).toBeNull();
+    expect(relayMovedTo([{ t: "relay", a: "wss://relay.other.example", r: "ticket" }], RELAY_HOST)).toBe("relay.other.example");
+    expect(relayMovedTo([{ t: "relay", a: `wss://${RELAY_HOST}:8443`, r: "ticket" }], RELAY_HOST)).toBe(`${RELAY_HOST}:8443`);
+    expect(relayMovedTo([{ t: "ts", a: HERE }], RELAY_HOST)).toBeNull();
+    expect(relayMovedTo([{ t: "relay", a: "not a url" }], RELAY_HOST)).toBeNull();
   });
 });

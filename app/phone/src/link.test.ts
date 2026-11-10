@@ -1,9 +1,9 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PHONE_API } from "../../src/lib/attention";
 import { canAct, deriveConn, type Reach } from "./conn-state";
 import { DIRECT_PROBE_MS, DIRECT_STABLE_MS, Link, linkCodec, PING_AFTER_MS, PROBE_MS, RELAY_STAGGER_MS, RETRY_WINDOW_MS, tokenHash, type Codec, type Env, type Hello, type LinkHandlers, type Outcome, type SocketLike } from "./link";
 import { FIRST_HEADER, Initiator, keypair, MODE_RECONNECT } from "./noise";
-import { relayUrl, type Pairing } from "./pairing-store";
+import { readPairing, relayUrl, type Pairing } from "./pairing-store";
 import vectors from "../../../relay/test/vectors.json";
 
 /** Plain JSON, no handshake: what the link does is tested apart from kelpie-link (noise.test.ts, and the codec test below). */
@@ -54,7 +54,8 @@ function hello(over: Partial<Hello> = {}): Hello {
   };
 }
 
-function rig(opts: { random?: number; token?: string | null; codec?: () => Codec | null; relay?: string | null } = {}) {
+/** `direct`: the direct route's address (null: none, as on the hosted app). `relayHost`: the one host a relay may be on. */
+function rig(opts: { random?: number; token?: string | null; codec?: () => Codec | null; relay?: string | null; direct?: string | null; relayHost?: string | null } = {}) {
   let t = 1_000_000;
   const timers: { at: number; fn: () => void; id: number }[] = [];
   let nextId = 1;
@@ -67,7 +68,8 @@ function rig(opts: { random?: number; token?: string | null; codec?: () => Codec
       sockets.push(s);
       return s;
     },
-    url: () => "ws://test/ws",
+    url: () => (opts.direct === undefined ? "ws://test/ws" : opts.direct),
+    relayHost: () => opts.relayHost ?? null,
     now: () => t,
     setTimeout: (fn, ms) => {
       const id = nextId++;
@@ -1137,6 +1139,134 @@ describe("the relay route", () => {
     expect(relayUrl({ ...p, relayToken: undefined }, 1000, true)).toBeNull();
     expect(relayUrl({ ...p, endpoints: [{ t: "relay", a: "http://relay.example", r: "x" }] }, 1000, true)).toBeNull();
     expect(relayUrl({ ...p, endpoints: [{ t: "relay", a: "wss://relay.example" }] }, 1000, true)).toBeNull();
+  });
+});
+
+describe("the app the relay serves", () => {
+  const HOST = "kelpie-link-relay.example.workers.dev";
+  const HOME = `wss://${HOST}/v1/phone?t=room.ticket&k=token`;
+  const hosted = (relay = HOME) => rig({ relay, direct: null, relayHost: HOST, codec: handshakeCodec });
+
+  it("dials the relay alone, at once, and never a route of its own", async () => {
+    const r = hosted();
+    r.link.start();
+    expect(r.sockets.map((s) => s.url)).toEqual([HOME]);
+    const relay = r.last();
+    relay.open();
+    relay.say({});
+    relay.say({ type: "hello", ...hello({ server_ts: r.now() }) });
+    expect(r.link.facts.route).toBe("relay");
+    expect(r.link.facts.ready).toBe(true);
+    // The page's origin answers (it is the relay): no move to a direct route, which there is not.
+    r.setReach("reachable");
+    for (let at = 0; at < 3 * DIRECT_PROBE_MS; at += 5000) {
+      relay.say({ type: "hb", n: 1, server_ts: r.now() });
+      r.advance(5000);
+      await flush();
+    }
+    r.link.networkChanged();
+    r.link.kick();
+    await flush();
+    expect(r.sockets.map((s) => s.url)).toEqual([HOME]);
+    expect(r.sockets.some((s) => s.url.endsWith("/link") || s.url === "ws://test/ws")).toBe(false);
+  });
+
+  it("tries the relay again after a failure, and only the relay", () => {
+    const r = hosted();
+    r.link.start();
+    r.last().die();
+    r.advance(60_000);
+    expect(r.sockets.length).toBeGreaterThan(1);
+    expect(new Set(r.sockets.map((s) => s.url))).toEqual(new Set([HOME]));
+  });
+
+  it("does not dial a relay on another host, and says the phone must be paired again", () => {
+    const r = hosted("wss://relay.other.example/v1/phone?t=room.ticket&k=token");
+    r.link.start();
+    r.advance(120_000);
+    expect(r.sockets).toEqual([]);
+    expect(r.link.facts.relay).toBe("elsewhere");
+    const state = deriveConn(r.link.facts, r.now());
+    expect(state.kind).toBe("relay_moved");
+    expect(canAct(state)).toBe(false);
+  });
+
+  it("asks the relay's own health, not the computer's manifest, whether the page's origin answers", async () => {
+    vi.resetModules();
+    vi.stubGlobal("__HOSTED__", true);
+    vi.stubGlobal("location", { protocol: "https:", host: HOST, hostname: HOST });
+    const asked: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      asked.push(url);
+      return new Response("ok\n", { headers: { "content-type": "text/plain; charset=utf-8" } });
+    });
+    try {
+      const { browserEnv } = await import("./link");
+      const env = browserEnv();
+      expect(env.url()).toBeNull();
+      expect(env.relayHost?.()).toBe(HOST);
+      expect(await env.reach()).toBe("reachable");
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toMatch(/^\/v1\/health\?probe=\d+$/);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
+  it("the computer's own page keeps its direct route, its manifest probe, and any relay", async () => {
+    vi.resetModules();
+    vi.stubGlobal("location", { protocol: "https:", host: "desk.tail1234.ts.net:8443", hostname: "desk.tail1234.ts.net" });
+    const asked: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      asked.push(url);
+      return new Response("{}", { headers: { "content-type": "application/manifest+json" } });
+    });
+    try {
+      const { browserEnv } = await import("./link");
+      const env = browserEnv();
+      expect(env.url()).toBe("wss://desk.tail1234.ts.net:8443/link");
+      expect(env.relayHost?.()).toBeNull();
+      expect(await env.reach()).toBe("reachable");
+      expect(asked[0]).toMatch(/^\/manifest\.webmanifest\?probe=\d+$/);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+});
+
+describe("a pairing kept by an earlier version", () => {
+  // As the 0.1.13 phone app saved it in IndexedDB: fields are only ever added, so this must load as it is.
+  const saved0113 = {
+    priv: new Uint8Array(32).fill(1),
+    pub: new Uint8Array(32).fill(2),
+    dpk: new Uint8Array(32).fill(3),
+    deviceId: "dev-7f3a",
+    name: "Pixel",
+    computer: "Desk",
+    endpoints: [
+      { t: "ts", a: "desk.tail1234.ts.net:8443" },
+      { t: "lan", a: "192.168.1.5:4817" },
+      { t: "relay", a: "wss://kelpie-link-relay.example.workers.dev", r: "room.ticket" },
+    ],
+    addrsSeq: 12,
+    relayToken: "tok",
+    relayExpires: 5_000,
+  };
+
+  it("loads, and reaches its relay as before", () => {
+    const p = readPairing(structuredClone(saved0113));
+    expect(p).toEqual(saved0113);
+    expect(relayUrl(p!, 1000, true)).toBe("wss://kelpie-link-relay.example.workers.dev/v1/phone?t=room.ticket&k=tok");
+  });
+
+  it("loads with only what the first version kept, and nothing that lacks a key", () => {
+    const { relayToken: _t, relayExpires: _e, ...first } = saved0113;
+    expect(readPairing(structuredClone(first))).toEqual(first);
+    expect(readPairing({ ...saved0113, dpk: new Uint8Array(31) })).toBeNull();
+    expect(readPairing({ ...saved0113, priv: "x" })).toBeNull();
+    expect(readPairing(null)).toBeNull();
   });
 });
 describe("padding", () => {

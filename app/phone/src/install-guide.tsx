@@ -1,5 +1,6 @@
 // The steps before pairing on a secure origin: install the app, then scan the pairing code inside it (or paste the link).
 import { createSignal, For, onCleanup, Show } from "solid-js";
+import { HOSTED } from "./hosted";
 import { t } from "./i18n";
 import { firstScreen, platformOf, readCode, type CodeReading, type FirstScreen } from "./install-state";
 import { startScan, type Scanner } from "./qr-scan";
@@ -32,7 +33,7 @@ function runsInstalled(): boolean {
 }
 
 export function screenNow(paired: boolean, hasCode: boolean): FirstScreen {
-  return firstScreen({ https: location.protocol === "https:", tailnet: location.hostname.endsWith(".ts.net"), installed: runsInstalled(), paired, hasCode, stayInBrowser: stayInBrowser() });
+  return firstScreen({ https: location.protocol === "https:", tailnet: location.hostname.endsWith(".ts.net"), hosted: HOSTED, installed: runsInstalled(), paired, hasCode, stayInBrowser: stayInBrowser() });
 }
 
 function codeProblem(r: CodeReading & { ok: false }): string {

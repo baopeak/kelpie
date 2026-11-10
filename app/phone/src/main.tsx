@@ -4,7 +4,8 @@ import { App } from "./app";
 import { locale } from "./i18n";
 import { watchInstall } from "./install-guide";
 import { needsCount } from "./inbox-order";
-import { lockShown, paired, sessions, startApp } from "./phone-state";
+import { lockShown, paired, sessions, shellReload, startApp } from "./phone-state";
+import { watchWorker } from "./shell-reload";
 import { applyTheme } from "./theme";
 import "./phone.css";
 
@@ -31,6 +32,8 @@ startApp();
 
 // The app shell is kept for offline starts, on secure origins only (HTTPS, Tailscale's HTTPS, localhost):
 // browsers refuse a service worker on plain http, where the page simply loads from the computer each time.
+// A new version's worker taking this page over reloads it at the next foreground.
 if (window.isSecureContext && "serviceWorker" in navigator) {
+  watchWorker(navigator.serviceWorker, shellReload);
   navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {});
 }

@@ -242,6 +242,92 @@ describe("pairing through the relay", () => {
     expect(tried).toBe(false);
   });
 
+  describe("on the app the relay serves", () => {
+    const HOST = "kelpie-link-relay.example.workers.dev";
+    const ORIGIN = `https://${HOST}`;
+    const code = (relayAt: string, dpk = desktop.pub, name = "Desk") => b64url(encoder.encode(JSON.stringify({ v: 1, dpk: b64url(dpk), psk: b64url(psk), ep: [{ t: "relay", a: relayAt, r: "room.ticket" }], name })));
+    const mine = keypair();
+    const heldBy = (dpk: Uint8Array, computer = "Desk"): Pairing => ({ priv: mine.priv, pub: mine.pub, dpk, deviceId: "old", name: "Pixel", computer, endpoints: [{ t: "relay", a: `wss://${HOST}`, r: "old.ticket" }], addrsSeq: 3, relayToken: "old-token", relayExpires: 9 });
+
+    /** Pairs from the hosted app; `answer` is what the person says to replacing another computer's pairing. Every step is logged in order. */
+    function hostedRun(link: string, held: Pairing | null, answer = true) {
+      const log: string[] = [];
+      const relay = new FakeSocket();
+      const direct = vi.fn(() => {
+        log.push("direct");
+        return new FakeSocket();
+      });
+      const result = pair(link, "Pixel", direct, () => {}, held, (url) => {
+        log.push(`relay ${url}`);
+        return relay;
+      }, {
+        origin: ORIGIN,
+        confirm: (question) => {
+          log.push(`confirm ${question}`);
+          return answer;
+        },
+        leave: async () => void log.push("leave"),
+      });
+      return { log, relay, direct, result };
+    }
+
+    it("pairs through its own relay alone, never the computer's address, and names its page in the sealed hello", async () => {
+      const run = hostedRun(code(`wss://${HOST}`), null);
+      await vi.waitFor(() => expect(run.relay.onopen).not.toBeNull());
+      expect(run.direct).not.toHaveBeenCalled();
+      expect(run.log).toEqual([`relay wss://${HOST}/v1/phone?t=room.ticket&p=${pairToken(psk)}`]);
+      run.relay.onopen?.({});
+      run.relay.receive(new Uint8Array([9]));
+      expect(JSON.parse(decoder.decode(run.relay.sent[1]))).toEqual({ type: "pair", name: "Pixel", want: "read", page: ORIGIN });
+      run.relay.say({ type: "paired", device: { id: "d1", name: "Pixel" }, relay: { token: "tok", expires: 123 } });
+      const r = await run.result;
+      expect(r.ok && [r.pairing.deviceId, r.pairing.relayToken]).toEqual(["d1", "tok"]);
+    });
+
+    it("refuses a code whose relay is on another host, or that names no relay, without opening anything", async () => {
+      for (const link of [code("wss://relay.other.example"), b64url(encoder.encode(JSON.stringify({ v: 1, dpk: b64url(desktop.pub), psk: b64url(psk), ep: [{ t: "ts", a: "desk.tail1234.ts.net:8443" }], name: "Desk" })))]) {
+        const run = hostedRun(link, null);
+        const r = await run.result;
+        expect(r.ok ? "" : r.message).toMatch(/another relay/);
+        expect(run.log).toEqual([]);
+      }
+    });
+
+    it("asks before it replaces another computer's pairing, and lets that computer's alerts and lock go first", async () => {
+      const run = hostedRun(code(`wss://${HOST}`, desktop.pub, "Laptop"), heldBy(keypair().pub, "Desk"));
+      await vi.waitFor(() => expect(run.relay.onopen).not.toBeNull());
+      expect(run.log).toEqual(["confirm This app is paired with {a}. Pair with {b} instead? {a} loses this phone.", "leave", expect.stringMatching(/^relay wss:\/\//)]);
+      run.relay.onopen?.({});
+      run.relay.receive(new Uint8Array([9]));
+      run.relay.say({ type: "paired", device: { id: "d2", name: "Pixel" } });
+      const r = await run.result;
+      expect(r.ok && [...r.pairing.dpk]).toEqual([...desktop.pub]);
+      // Another computer: another key.
+      expect(r.ok && [...r.pairing.pub]).not.toEqual([...mine.pub]);
+    });
+
+    it("keeps the pairing it holds when the person declines, and opens nothing", async () => {
+      const before = heldBy(keypair().pub, "Desk");
+      const copy = structuredClone(before);
+      const run = hostedRun(code(`wss://${HOST}`, desktop.pub, "Laptop"), before, false);
+      const r = await run.result;
+      expect(r.ok ? "" : r.message).toMatch(/Nothing changed/);
+      expect(run.log).toEqual([expect.stringMatching(/^confirm /)]);
+      expect(before).toEqual(copy);
+    });
+
+    it("asks nothing when it pairs again with the computer it holds, and keeps its key", async () => {
+      const run = hostedRun(code(`wss://${HOST}`), heldBy(desktop.pub));
+      await vi.waitFor(() => expect(run.relay.onopen).not.toBeNull());
+      expect(run.log.some((l) => l.startsWith("confirm") || l === "leave")).toBe(false);
+      run.relay.onopen?.({});
+      run.relay.receive(new Uint8Array([9]));
+      run.relay.say({ type: "paired", device: { id: "d3", name: "Pixel" } });
+      const r = await run.result;
+      expect(r.ok && [...r.pairing.pub]).toEqual([...mine.pub]);
+    });
+  });
+
   it("says so when the relay has no computer in the room", async () => {
     const relay = new FakeSocket();
     const result = pair(withRelay, "Pixel", () => {

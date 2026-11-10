@@ -13,8 +13,11 @@
 // carries the same sealed frames and cannot read them; what it says itself (`desktop_offline`) is a hint, and only ever
 // ends a connection. On the relay the direct address is looked at every 30 s and when the network changes, and once it
 // has answered for 10 s the link moves back to it with a new handshake, and picks up what it followed.
+// The hosted app (hosted.ts) has no direct route: its page is the relay's, so the relay is its only way, and only the relay on the page's
+// own host (another is not dialled: the computer moved to it, and this app must be paired again).
 import { PHONE_API } from "../../src/lib/attention";
 import { backoffMs, LagMeter, reachFromAnswer, whyNoAnswer, type ConnFacts, type Reach } from "./conn-state";
+import { HEALTH_PATH, HOSTED, onHost } from "./hosted";
 import type { Risk } from "./command-text";
 import type { LockInfo } from "./lock";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -264,7 +267,10 @@ export function linkCodec(p: Pairing): Codec {
 
 export interface Env {
   socket(url: string): SocketLike;
-  url(): string;
+  /** The direct route's socket address; null where there is none (the hosted app, whose page is the relay's). */
+  url(): string | null;
+  /** The one host a relay may be on (the hosted app's own); null: any. A relay elsewhere is not dialled, and said so (`relay: "elsewhere"`). */
+  relayHost?(): string | null;
   now(): number;
   setTimeout(fn: () => void, ms: number): unknown;
   clearTimeout(handle: unknown): void;
@@ -281,7 +287,8 @@ export function browserEnv(): Env {
       ws.binaryType = "arraybuffer";
       return ws as unknown as SocketLike;
     },
-    url: () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/link`,
+    url: () => (HOSTED ? null : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/link`),
+    relayHost: () => (HOSTED ? location.host : null),
     now: () => Date.now(),
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (h) => clearTimeout(h as number),
@@ -292,9 +299,10 @@ export function browserEnv(): Env {
       const timer = setTimeout(() => abort.abort(), 3000);
       const began = Date.now();
       try {
-        // A file the service worker leaves alone, so that the answer comes from the network.
-        const r = await fetch(`/manifest.webmanifest?probe=${Date.now()}`, { cache: "no-store", signal: abort.signal });
-        return reachFromAnswer(r.status, r.redirected, r.headers.get("content-type") ?? "");
+        // A file the service worker leaves alone, so that the answer comes from the network: the computer's manifest, or on the hosted app the relay's own word.
+        const [path, type] = HOSTED ? [HEALTH_PATH, "text/plain"] : ["/manifest.webmanifest", "manifest+json"];
+        const r = await fetch(`${path}?probe=${Date.now()}`, { cache: "no-store", signal: abort.signal });
+        return reachFromAnswer(r.status, r.redirected, r.headers.get("content-type") ?? "", type);
       } catch {
         return whyNoAnswer(location.hostname, abort.signal.aborted, Date.now() - began);
       } finally {
@@ -768,22 +776,36 @@ export class Link {
     this.facts.ready = false;
     const relayAddress = this.relayUrl();
     if (!relayAddress) this.facts.relay = "none";
-    else if (this.facts.relay === "none") this.facts.relay = "unknown";
+    else if (!this.relayAllowed(relayAddress)) this.facts.relay = "elsewhere";
+    else if (this.facts.relay === "none" || this.facts.relay === "elsewhere") this.facts.relay = "unknown";
     // The computer said it will not serve this device through the relay: no use asking again until the link starts over.
-    const relay = this.facts.relay === "refused" ? null : relayAddress;
+    const relay = this.facts.relay === "refused" || this.facts.relay === "elsewhere" ? null : relayAddress;
     // No route completed its handshake in this long: the attempt is over.
     this.timers.connect = this.env.setTimeout(() => this.attempts.length && this.drop(1006), CONNECT_MS);
-    const direct = this.tryRoute("direct", this.env.url());
+    const directUrl = this.env.url();
+    const direct = directUrl !== null && this.tryRoute("direct", directUrl);
     if (relay && direct) this.timers.stagger = this.env.setTimeout(() => this.tryRelay(), RELAY_STAGGER_MS);
     else if (relay) this.tryRoute("relay", relay);
     if (!this.attempts.length) return this.closed(this.failCode || 1006, false);
     this.h.changed();
   }
 
+  /** Whether a relay at `url` may be dialled from this page: on the hosted app only the relay that serves it. */
+  private relayAllowed(url: string): boolean {
+    const only = this.env.relayHost?.() ?? null;
+    return only === null || onHost(url, only);
+  }
+
+  /** The relay's address, when there is one this page may dial. */
+  private usableRelay(): string | null {
+    const url = this.relayUrl();
+    return url && this.relayAllowed(url) ? url : null;
+  }
+
   /** The relay's turn in the race (or at once, when the direct route has failed). */
   private tryRelay() {
     this.clearTimer("stagger");
-    const url = this.relayUrl();
+    const url = this.usableRelay();
     if (!url || this.ws || this.facts.relay === "refused" || this.attempts.some((a) => a.route === "relay")) return;
     if (!this.tryRoute("relay", url) && !this.attempts.length) this.closed(this.failCode || 1006, false);
   }
@@ -849,7 +871,7 @@ export class Link {
     // The direct route is gone already: the relay need not wait its turn.
     if (route === "direct" && this.timers.stagger !== null) {
       this.clearTimer("stagger");
-      const url = this.relayUrl();
+      const url = this.usableRelay();
       if (url && !this.ws && this.facts.relay !== "refused") this.tryRoute("relay", url);
     }
     if (this.attempts.length || this.ws) return this.h.changed();
@@ -905,7 +927,7 @@ export class Link {
 
   /** On the relay: does the direct route answer? Once it has for `DIRECT_STABLE_MS`, the link moves to it. */
   private checkDirect() {
-    if (!this.facts.ready || this.facts.route !== "relay" || this.migration) return;
+    if (!this.facts.ready || this.facts.route !== "relay" || this.migration || this.env.url() === null) return;
     this.clearTimer("direct");
     void this.env.reach().then((r) => {
       if (!this.facts.ready || this.facts.route !== "relay" || this.migration) return;
@@ -925,16 +947,17 @@ export class Link {
 
   private scheduleDirect(ms: number) {
     this.clearTimer("direct");
-    if (this.facts.route === "relay") this.timers.direct = this.env.setTimeout(() => this.checkDirect(), ms);
+    if (this.facts.route === "relay" && this.env.url() !== null) this.timers.direct = this.env.setTimeout(() => this.checkDirect(), ms);
   }
 
   /** A new handshake on the direct route while the relay carries on; the relay's connection goes only once this one is made. */
   private migrate() {
     const codec = this.codecFor();
-    if (!codec) return;
+    const url = this.env.url();
+    if (!codec || url === null) return;
     let ws: SocketLike;
     try {
-      ws = this.env.socket(this.env.url());
+      ws = this.env.socket(url);
     } catch {
       return;
     }

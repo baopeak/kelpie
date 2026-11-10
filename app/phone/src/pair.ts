@@ -6,10 +6,12 @@
 // the new record replaces the old one, and only once it is approved.
 // When the computer's own address gets no answer (Tailscale off on this phone) and the code names a relay, the same handshake goes through
 // the relay, let in once by a token derived from the code's secret; the relay carries it and cannot read it.
+// The hosted app (hosted.ts) has only that relay: it pairs through it alone, with one computer at a time.
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { b64url, decodePairPayload, fingerprint, Initiator, keypair, MODE_PAIR, type PairPayload, type Session } from "./noise";
 import type { Pairing } from "./pairing-store";
+import { onHost, replaceQuestion } from "./hosted";
 import { t } from "./i18n";
 
 export interface PairSocket {
@@ -57,13 +59,34 @@ export function relayPairUrl(payload: PairPayload): string | null {
   return relay ? `${relay.a}/v1/phone?t=${encodeURIComponent(relay.r!)}&p=${pairToken(payload.psk)}` : null;
 }
 
+/** The hosted app's way to pair: only through the relay on its own host (its page is the relay's; there is no computer's address to try), saying
+ *  which page asks (the computer goes by the page its code was made for, not by this). One computer per app: pairing another asks first. */
+export interface HostedPairing {
+  /** This page's origin. */
+  origin: string;
+  /** Asks the person; true: go on. */
+  confirm(question: string): boolean | Promise<boolean>;
+  /** What this app lets go of before it pairs with another computer: the alerts that computer sends, the state of its lock. */
+  leave(): Promise<void>;
+}
+
 /** Pairs with the computer the link came from. `code` is told the six digits and this phone's key fingerprint to show once
  *  the computer answered. `held`: the pairing this browser holds, if any. `relaySocket`: how to open the relay's socket, for when the computer's
- *  own address does not answer at all. */
-export async function pair(payloadText: string, name: string, socket: () => PairSocket, code: (digits: string, key: string) => void, held?: Pairing | null, relaySocket?: (url: string) => PairSocket): Promise<PairResult> {
+ *  own address does not answer at all. `hosted`: on the hosted app, which pairs through the relay alone. */
+export async function pair(payloadText: string, name: string, socket: () => PairSocket, code: (digits: string, key: string) => void, held?: Pairing | null, relaySocket?: (url: string) => PairSocket, hosted?: HostedPairing): Promise<PairResult> {
   const payload = decodePairPayload(payloadText);
   if (!payload) return { ok: false, message: t("This pairing link is not valid. Show a new QR code in Kelpie on your computer.") };
   const me = held && sameBytes(held.dpk, payload.dpk) ? keypair(held.priv) : keypair();
+  if (hosted) {
+    const relay = relaySocket && relayPairUrl(payload);
+    if (!relay || !onHost(relay, new URL(hosted.origin).host)) return { ok: false, message: t("This code is for another relay, and this app pairs only through the relay it came from. Show a new QR code in Kelpie on your computer.") };
+    // Asked of the pairing this app holds, whatever the link says.
+    if (held && !sameBytes(held.dpk, payload.dpk)) {
+      if (!(await hosted.confirm(replaceQuestion(t, held.computer, payload.name)))) return { ok: false, message: t("Nothing changed: this app stays paired with {name}.", { name: held.computer }) };
+      await hosted.leave();
+    }
+    return (await attempt(payload, name, me, () => relaySocket!(relay), code, { page: hosted.origin })).result;
+  }
   const direct = await attempt(payload, name, me, socket, code);
   const relay = relaySocket && relayPairUrl(payload);
   // Only a socket that never answered moves on: one the computer answered, or closed with a reason, was the computer's word.
@@ -71,8 +94,9 @@ export async function pair(payloadText: string, name: string, socket: () => Pair
   return (await attempt(payload, name, me, () => relaySocket!(relay), code)).result;
 }
 
-function attempt(payload: PairPayload, name: string, me: { priv: Uint8Array; pub: Uint8Array }, socket: () => PairSocket, code: (digits: string, key: string) => void): Promise<{ ok: boolean; answered: boolean; result: PairResult }> {
-  const hello = new TextEncoder().encode(JSON.stringify({ type: "pair", name: name.trim().slice(0, 40) || t("Phone"), want: "read" }));
+/** `extra`: more for the first sealed message (`page` on the hosted app). */
+function attempt(payload: PairPayload, name: string, me: { priv: Uint8Array; pub: Uint8Array }, socket: () => PairSocket, code: (digits: string, key: string) => void, extra: Record<string, string> = {}): Promise<{ ok: boolean; answered: boolean; result: PairResult }> {
+  const hello = new TextEncoder().encode(JSON.stringify({ type: "pair", name: name.trim().slice(0, 40) || t("Phone"), want: "read", ...extra }));
   let answered = false;
   return new Promise((settle) => {
     const resolve = (result: PairResult) => settle({ ok: result.ok, answered, result });
