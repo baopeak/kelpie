@@ -42,3 +42,31 @@ class_name = "Registrar"
 script_name = "kelpie-link-relay-room"
 
 # TICKET_SECRET and REGISTRATION_KEY come from `wrangler secret put`, never from this file.
+
+# Staging (`--env staging`): the same router, assets and limits under its own name and origin, bound to the staging room script.
+# Bindings and vars are not inherited by an environment, so they are repeated here. Its TICKET_SECRET is its own
+# (`wrangler secret put TICKET_SECRET --env staging`), and its rate limit counts apart from production's.
+[env.staging]
+name = "kelpie-link-relay-staging"
+workers_dev = true
+preview_urls = false
+
+[env.staging.vars]
+OPEN_REGISTRATION = "1"
+ROOMS_PER_NETWORK_DAY = "20"
+ROOMS_PER_DAY = "1000"
+
+[[env.staging.ratelimits]]
+name = "ROOM_RATE"
+namespace_id = "1002"
+simple = { limit = 5, period = 60 }
+
+[[env.staging.durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+script_name = "kelpie-link-relay-room-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "REGISTRAR"
+class_name = "Registrar"
+script_name = "kelpie-link-relay-room-staging"

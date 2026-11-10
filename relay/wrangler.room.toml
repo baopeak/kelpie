@@ -24,3 +24,17 @@ new_sqlite_classes = ["Room"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Registrar"]
+
+# Staging (`--env staging`): the same classes under their own name, reached only by the staging router. Vars and bindings are not
+# inherited by an environment, so they are repeated here; the migrations above apply to it as they are.
+[env.staging]
+name = "kelpie-link-relay-room-staging"
+workers_dev = false
+preview_urls = false
+
+[env.staging.vars]
+RELAY_VERSION = "2"
+
+[[env.staging.durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
