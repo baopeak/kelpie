@@ -30,6 +30,7 @@ the published cacophony ones in `cacophony-ik.json`.
 - **Approval code**: `HKDF-BLAKE2s(ikm = handshake hash, no salt, info = "kelpie-sas")`, its first 4 bytes big-endian, modulo 10^6.
 - **QR payload** (`#p=`): base64url of `{v: 1, dpk, psk, ep: [{t, a, r?}], name}`. Endpoint kinds: `ts` (`a` = `<name>:<port>` of the HTTPS
   origin), `relay` (`a` = `wss://<host>`, `r` = the room's ticket), `lan` (`a` = `ip:port`). A client skips kinds it does not know.
+  A code for the hosted phone app has the relay as its only endpoint, and its link is on the relay's own origin (`https://<host>/#p=…`).
 
 The JSON messages inside the session are the phone protocol, described in architecture.md, "Phone protocol (v2)". The relay adds two:
 
@@ -39,18 +40,36 @@ The JSON messages inside the session are the phone protocol, described in archit
 
 ## The relay
 
-Source: [`relay/`](../relay). A Cloudflare Worker (the router, `src/worker.ts`) and one Durable Object per room (`src/room.ts`), or both in
-one workerd process when self-hosted ([relay-self-host.md](relay-self-host.md)).
+Source: [`relay/`](../relay). A Cloudflare Worker (the router, `src/worker.ts`) and one Durable Object per room (`src/room.ts`), with one more
+Durable Object that counts the rooms made in a day (`src/registrar.ts`), or all in one workerd process when self-hosted
+([relay-self-host.md](relay-self-host.md)). On Cloudflare the router also has the phone app's files beside it as static assets.
 
 ### HTTP
 
 | Request | Answer |
 | --- | --- |
 | `GET /v1/health` | `200 ok` |
-| `POST /v1/rooms`, `Authorization: Bearer <registration key>`, body `{"pk": "<P-256 public key, uncompressed, base64url>"}`, no `Origin` | `201 {"room", "ticket"}`; 401 a wrong key, 429 after 10 wrong keys from one address in a day, 403 any `Origin`, 400 a key that is not one |
-| `GET /v1/desktop?t=<ticket>&ts=<ms>&sig=<signature>` (WebSocket) | 101, or 403 a bad ticket, signature or `Origin`, 404 no such room, 429 the month's cap is spent |
-| `GET /v1/phone?t=<ticket>&k=<token>` or `&p=<pairing token>` (WebSocket) | 101, or 403 a bad ticket, an unknown token or a foreign `Origin`, 409 eight phones already, 429 the cap |
-| anything else | 404, 405 or 426, in plain text: the relay never serves a page |
+| `POST /v1/rooms`, body `{"pk": "<P-256 public key, uncompressed, base64url>"}` (1,024 bytes at most), no `Origin`; `Authorization: Bearer <registration key>` when the relay has one | `201 {"room", "ticket"}`; see "Making a room" for the refusals |
+| `GET /v1/desktop?t=<ticket>&ts=<ms>&sig=<signature>` (WebSocket) | 101 with `x-kelpie-relay-version: 2`, or 403 a bad ticket, signature or `Origin`, 404 no such room, 429 the month's cap is spent |
+| `GET /v1/phone?t=<ticket>&k=<token>` or `&p=<pairing token>` (WebSocket) | 101, or 403 a bad ticket, an unknown token or an `Origin` the room does not list, 409 eight phones already, 429 the cap |
+| any other path under `/v1` | 404, 405 or 426, in plain text |
+| any path outside `/v1` | on Cloudflare: the phone app's static files, or the app's own 404 page, answered without running the Worker; on workerd: 404 in plain text, since a self-hosted relay serves no page |
+
+The Worker's own answers repeat nothing of the request, because the page runs on the same origin: plain text or JSON, `nosniff`, no cache.
+
+#### Making a room
+
+Who may is the relay's setting, and it is checked in this order:
+
+1. A `REGISTRATION_KEY` is set: only its holder, `Authorization: Bearer <key>` (at most 256 characters). A missing or wrong key is `401`; 10 wrong
+   keys from one network in a day are answered `429` after that (no `x-kelpie-reason`).
+2. No key, and `OPEN_REGISTRATION` is `1`: anyone. The router first sheds a burst per network (Cloudflare only, 5 a minute): `429` with
+   `x-kelpie-reason: rate`. The registrar then counts rooms per UTC day and per network (`ROOMS_PER_NETWORK_DAY`, 20 unless set): `429` with
+   `x-kelpie-reason: network`; and for the whole relay (`ROOMS_PER_DAY`, 1,000 unless set): `503` with `x-kelpie-reason: full`.
+3. Neither: `503`, "relay not configured".
+
+Any `Origin` is `403` (a page can never make a room), a body announced as over 1,024 bytes `413`, a key that is not a P-256 public key `400`. A network is
+the hash of `Cf-Connecting-Ip` (an IPv6 address by its /64, an IPv4 address whole); no address is stored.
 
 A ticket is no secret (every QR code has one), so the router counts the sockets a room refused (403, 404) by a hash of the network (an IPv6
 address by its /64, an IPv4 address whole), the path and the room: phones' refusals never count against the desktop. Past 30 in 10 minutes it
@@ -62,7 +81,11 @@ expired counts, then of the oldest, never of all at once. In the isolate's memor
   `ts` must be within 5 minutes of the relay's clock and later than the last one the room took.
 - **Tokens**: the room keeps SHA-256 (hex) of each 32-byte token. A pairing token is `HKDF-SHA256(ikm = the QR code's secret, no salt,
   info = "kelpie-relay-pair", 32 bytes)`, let in once and for at most 120 s.
-- **Origin**: the desktop's socket must have none. A phone's, when it has one, must be the origin the desktop registered.
+- **Origin**: the desktop's socket must have none. A phone's, when it has one, must be one of the (up to four) origins the desktop registered
+  (`origins`), which are the pages its phones come from: the computer's Tailscale origin and, once the relay serves the phone app, the
+  relay's own. It guards against other pages only; the token is what lets a phone in.
+- **Version**: the desktop's 101 carries `x-kelpie-relay-version: 2`. A desktop that reads none (an older relay) speaks the first version:
+  it sends `origin`, never `origins`, and offers no hosted app. A relay of the first version closes a socket on a message it does not know.
 
 ### On the sockets
 
@@ -80,14 +103,15 @@ text is JSON:
 | --- | --- |
 | `{"t": "allow", "h": ["<sha256 hex>", …]}` | The whole allow-list (64 at most). Phones whose token left it are closed (4002). The first one on a connection makes the desktop ready: only then does it hear of phones, and phones of it. |
 | `{"t": "pair", "h": "<sha256 hex>", "ttl": <1–120 s>}` | A pairing token, once (4 live at most). |
-| `{"t": "origin", "o": "https://<host>"}` | The page origin phones come from. |
+| `{"t": "origins", "o": ["https://<host>", …]}` | The page origins phones may come from (4 at most), replacing the list. |
+| `{"t": "origin", "o": "https://<host>"}` | The one page origin, from a desktop that predates `origins`; the relay keeps it as a list of one. |
 | `{"t": "kick", "s": <slot>, "c": <4000–4999>, "r": "<reason>"}` | Close that phone's socket with that code. |
 | `{"t": "drop"}` | Remove the room: every socket closes (4004) and nothing of it is kept. |
 | `info` | Counts only: the object's id, start, uptime, sockets, version. |
 
 | From the relay | To | Meaning |
 | --- | --- | --- |
-| `{"t": "open", "s", "via": "token" \| "pair", "k": "<sha256 hex>"}` | desktop | A phone is on slot `s`, let in by the token (or pairing token) with hash `k`. The daemon's limits go by `k`, since a slot is new for every socket. |
+| `{"t": "open", "s", "via": "token" \| "pair", "k": "<sha256 hex>", "o": "<origin>"}` | desktop | A phone is on slot `s`, let in by the token (or pairing token) with hash `k`, from the page `o` (left out for an app that sends no `Origin`). The daemon's limits go by `k`, since a slot is new for every socket. The daemon pairs a phone only when `o` is the page its pairing code was issued for, and a device later only from the page it paired on; the relay could only lie about `o` with no key to use it. |
 | `{"t": "close", "s", "c"}` | desktop | That phone left, closing with code `c` (1006 when its socket just dropped). 4000 is a phone's route that lost its race, which the daemon does not count as a failed attempt. |
 | `{"t": "desktop_offline"}`, `{"t": "desktop_online"}` | phones | The desktop left, or is back. Hints only: a relay can say anything, so they only ever end a connection. |
 
@@ -112,8 +136,10 @@ heartbeats).
 
 ### Limits and storage
 
-- A room stores its id, its public key, the last signature time, the allow-list, live pairing tokens, the phones' origin, the next slot number
-  and its byte count for the month, written as messages arrive, in batches of 5 s or 1 MB, never on a timer. An unused room is removed 90 days
+- A room stores its id, its public key, the last signature time, the allow-list, live pairing tokens, the phones' origins (`origins`; a room
+  made before there could be several keeps its one `origin`, until the desktop sends a list), the next slot number and its byte count for the
+  month, written as messages arrive, in batches (once a minute, or after each MB), never on a timer. The registrar stores, for each UTC day,
+  the number of rooms made in all and per network (a hash, never an address), and drops the days before yesterday. An unused room is removed 90 days
   after its last connection, on one alarm set each time it is used; a desktop still connected when the alarm comes counts as use.
 - **How the daemon ends its connection**: when the relay is turned off or moves, at once. When phone access goes off, the kill switch or a reset:
   for a second it passes on what the sessions still send (a removed phone's sealed `revoked`), then sends `allow` with nothing, so nobody is let

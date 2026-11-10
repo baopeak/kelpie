@@ -528,7 +528,7 @@ which keeps running with the window closed when Settings → Session Daemon → 
 turns its alerts on. A computer that is asleep sends nothing; *Keep computer awake* (Settings → Agents)
 keeps it up while agents work.
 
-- **Alerts on the phone app**: on a phone paired over HTTPS or Tailscale, open the connection sheet (tap
+- **Alerts on the phone app**: on a phone paired on the hosted app, over HTTPS or Tailscale, open the connection sheet (tap
   the connection indicator) and press *Turn on alerts*. On an iPhone the app must be installed to the Home
   Screen first. *Send a test alert* checks it. The computer signs and encrypts each alert itself and hands it
   to the phone's own push service (Apple's, Google's, Mozilla's or Microsoft's); no account is needed and no
@@ -1070,9 +1070,73 @@ default) turns it off for that host. Kelpie's sessions are named `kelpie-…` on
 
 ### Phone access
 
-Settings → Mobile turns on a small web app for your phone on your network (off by default;
-port 4817; choose a private or Tailscale address — never every interface; HTTPS with your own
-certificate, e.g. from `tailscale cert`, or from Tailscale itself as described below). **Pair a browser on this network** shows a QR code valid
+Phone access is off by default. Settings → Mobile → *Mobile access* turns it on, and a phone can then reach this computer in three ways:
+with the Kelpie app from Kelpie's relay, which needs no Tailscale (the next subsection, and what a new setup uses); with an app served only
+by this computer, over Tailscale; or as a browser on your network. Each phone is paired with a one-time code and approved on this
+computer, and what it sees and sends is end-to-end encrypted.
+
+**Pair a phone with the Kelpie app (no Tailscale).**
+
+1. In Settings → Mobile, turn on *Mobile access*. In a new setup (one that never had phone access) this also turns on the relay, Kelpie's
+   own on Cloudflare, and leaves this network's listeners off, so nothing on this computer is opened to your network. Kelpie asks you to
+   confirm once, as described below, for the relay. There is no account and no registration key. In a setup from before, turn on *Reach this
+   computer through the relay* yourself; *Pair a phone* under *Hosted phone app* then appears once Kelpie has found the relay serving the app.
+2. **Step 1: Install** opens by itself after the switch in a new setup; otherwise press *Pair a phone*. Scan its code with the phone's camera; it holds no
+   secret. The page that opens shows how to install Kelpie on the phone (Share → Add to Home Screen on an iPhone, the Install button or the
+   browser's menu on Android). Open Kelpie from the Home Screen, then press *Already installed: Step 2* on the computer. A phone that
+   cannot install can press *Continue in this browser*, but a browser tab and the installed app keep their pairings apart, on an iPhone
+   especially: pair in the place you will use.
+3. **Step 2: Pair** shows the pairing code, which works once and expires in two minutes. In the Kelpie app press *Scan the code* (or
+   paste the link), then type the six digits it shows into Kelpie. Kelpie's dialog says *It pairs on: hosted app* and offers *Allow reading*,
+   the first choice, and *Allow reading and typing*; confirming comes next, as below.
+4. The phone then asks to set up its app lock with Face ID, a fingerprint or its passcode. Do it right away (see *The app lock* below).
+
+**What a phone on the hosted app may do.** It can read your sessions and, if you allow it, type into them. It is never given *May take
+control* (Settings does not offer it, and the computer refuses it), so it cannot take over a browser pane or see and drive the computer's
+screen; those stay with Tailscale or your own HTTPS address. Its app lock is always on, even with *Lock Kelpie on phones* turned off. A
+phone gets alerts like any other (the hosted app's connection sheet, *Turn on alerts*), and the link in an alert opens the hosted app.
+
+**The relay is always in the path.** The hosted app has no direct route to this computer, even on the same Wi-Fi: every message goes
+through the relay, end-to-end encrypted, so the phone needs the internet and the relay must be up. If it is not, the app says
+*Relay unreachable* or *Computer offline*, whichever does not answer. A hosted app belongs to one computer: pairing it with another asks
+first, and the first computer loses that phone, including its alerts. A phone that is not seen for the time in *Remove phones not seen for*
+under Advanced (90 days unless you change it) is removed, as every phone is; with *Never remove*, a hosted phone unused for a year has to be paired
+again. **Moving the relay to another address cuts these phones off**, since it is their only way here: Settings says how many before it does.
+
+**What the hosted app trusts.** The app's code comes from Kelpie's relay on Cloudflare, not from this computer, so you trust whoever can
+change what that relay serves. Whoever controls that Cloudflare account, or Kelpie's release deploy, could send your phone different code
+that reads your sessions and types into them while the app is unlocked. What narrows this, and what it cannot do:
+
+- **The app is deployed only from a release, by Kelpie's CI, after the maintainer approves.** Each release publishes the app's
+  fingerprint (a hash of every file) and the list of file hashes, so anyone can compare them with what the relay serves, after the fact, and
+  rebuild the release to get the same fingerprint. That finds a broad swap. It cannot find code served to one phone only or between two
+  checks, and the account's owner, or someone who steals the account or a session, can still deploy from Cloudflare directly.
+  **Nobody can check what one phone received**, and the version and fingerprint the app shows come from the same relay, so changed code
+  could claim any.
+- **The app lock is checked by your computer.** A key copied by changed code reaches nothing, and changed code acts only while you have the
+  app unlocked; while it is unlocked it can see and send whatever that phone may.
+- **Typing is the ceiling.** Changed code cannot drive the computer's screen or a browser pane, but it can type into the terminals and chats the
+  phone may write to, and so run commands through a session. Allow typing only on phones you would trust at your keyboard.
+- **The relay itself** sees that a phone and this computer are connected, their internet addresses, when and how much they send, and the
+  room's number, never what is said. It keeps no logs of what passes.
+
+If that is more trust than you want, use the Tailscale option below: the app then comes from this computer, and Kelpie's relay serves nothing
+a phone runs. A relay of your own on a server serves no app either; one on your own Cloudflare account serves the app you deploy there and makes
+you the one to trust ([relay-self-host.md](relay-self-host.md)).
+
+**Checking what the relay serves.** From a clone of this repository, `python -I scripts/hosted/verify_live.py` asks the relay which
+release it says it runs, fetches every file that release's manifest lists, and compares each file's hash and size, the response headers
+and `/version.json` with it. It exits 0 when everything matches, 1 on a difference and 2 when it could not finish. It can show that the relay serves, to your
+computer at that moment, the files of a Kelpie release. It cannot show what a phone received at another time, or code a phone already
+cached. Options (a given release, a rebuild, the deployed scripts) are in [relay-self-host.md](relay-self-host.md#checking-what-the-relay-serves).
+
+**Approving a phone, and a browser on your network.** With *Pair browsers on this network* on (under Advanced; on for a setup from before,
+off for a new one), Settings → Mobile also serves a small web app for your phone on your network (port 4817; choose a private or Tailscale
+address — never every interface; HTTPS with your own certificate, e.g. from `tailscale cert`, or from Tailscale itself as described below).
+Off, nothing on this computer listens on your network, and phones come through the relay or Tailscale; turning it off closes the port at
+once, and phones paired on this network then reach this computer only when it is on again. Settings does not let you turn it off while
+neither the relay nor Tailscale is on, since nothing else would reach this computer. **Pair a browser on this network** (offered only while
+it is on) shows a QR code valid
 for two minutes; scan it, name the phone, and type the six digits it shows into Kelpie. Windows then
 asks you to confirm with Windows Hello or your password (Touch ID or your password on a Mac). Read
 that prompt: it names the phone and what it would be allowed to do. While it is up Kelpie's window
@@ -1093,13 +1157,15 @@ while its dialog is still on screen Kelpie asks you to close it before showing a
 
 | Option | Starts | Changing it asks you to verify |
 | --- | --- | --- |
+| *Mobile access* | off | in a new setup, turning it on (it turns the relay on too); otherwise no |
 | *Reach this computer with Tailscale* | off | turning it on |
-| *Reach this computer through the relay* | off | turning it on |
+| *Reach this computer through the relay* | off, until a new setup's *Mobile access* turns it on | turning it on |
 | *Alerts on your phone* | off, until a phone turns them on | no. Each phone turns them on for itself, in the phone app, so here it only shows how many have |
 | *Lock Kelpie on phones* | on | turning it off |
 | *Lock after idle* | 5 minutes | a longer time |
 | *Ask again for dangerous commands* | off | turning it off |
 | *Allow reading over plain HTTP* | on | turning it on |
+| *Pair browsers on this network* | on, but off in a new setup | no |
 | *ntfy*, *Telegram* | off | no |
 | *Telegram gets* | *Alerts with a link* (a setting from before keeps *Alerts only*) | choosing approvals |
 
@@ -1124,7 +1190,8 @@ How the buttons behave:
 - **Turning it off**: choose *Alerts with a link* or *Alerts only*, or switch Telegram off. Another chat id or bot token turns approvals off too, and so does *Turn off phone access and revoke all*, turning phone access off, and resetting it. The messages already sent lose their buttons, and turning approvals on again needs a new code. While a code is shown, choosing *Alerts with a link* or *Alerts only*, switching Telegram off, or changing its chat id or bot token ends that code; changing other settings leaves it waiting.
 - If Telegram refuses the polling because the bot has a webhook or another program reads its messages, Settings says so; remove the webhook (`deleteWebhook`) or stop that program. A token Telegram rejects stops approvals, and Settings says that too. Kelpie only ever connects out to Telegram: nothing listens on your computer for it.
 
-**Reaching this computer from anywhere, with Tailscale.** If you use [Tailscale](https://tailscale.com) on
+**Reaching this computer from anywhere, with Tailscale.** This is the option for a phone app that only this computer serves, and for
+seeing the computer's screen or taking over a browser pane from a phone, which the hosted app never does. If you use [Tailscale](https://tailscale.com) on
 both the computer and the phone, turn on *Reach this computer with Tailscale* in Settings → Mobile. Kelpie then
 publishes the phone page at `https://<machine>.<tailnet>.ts.net:8443` with `tailscale serve`, which only your
 own Tailscale devices can reach: there is no Kelpie server and no Kelpie account. It asks you to confirm first, as above. Settings says
@@ -1151,22 +1218,29 @@ Tailscale plan is for non-commercial use. Turning phone access off, the kill swi
 remove the entry; turning phone access on again does not bring it back until you turn it on and confirm. If Tailscale is stopped at that moment, Settings says the entry is
 still there. Kelpie tries again when you open Settings → Mobile or press *Check again*, and when it next starts; nothing runs in the background to retry while phone access is off.
 
-**Reaching this computer without Tailscale, through the relay.** With *Reach this computer through the relay* on, the installed app
-reaches this computer when Tailscale is off on the phone, or a network blocks it, through a relay on Cloudflare that passes on what they say
-without being able to read it. This computer connects out to the relay; nothing on it is opened to the internet. Turning it on asks you to
-confirm, and the first time it asks for the relay's registration key, which whoever runs the relay gives you: it makes this computer's
-room there once and stays in the credential store. *Relay address* is Kelpie's relay unless you run your own
-([relay-self-host.md](relay-self-host.md)). Only phones paired over Tailscale can use it, each with a token it gets the next time it connects
-and that changes every week; removing a phone shuts it out of the relay too, even while this computer is offline. The phone tries the
-Tailscale address first and the relay a moment later, and goes back to the Tailscale address by itself once it answers again.
+**The relay.** With *Reach this computer through the relay* on, phones reach this computer through a relay on Cloudflare that passes on
+what they say without being able to read it: the hosted app always, and an app installed over Tailscale when Tailscale is off on the
+phone, or a network blocks it. This computer connects out to the relay; nothing on it is opened to the internet. Turning it on asks you to
+confirm, and makes this computer's room there once. Kelpie's relay needs no registration key; a relay you run may ask for one, and Settings
+shows *Registration key* only then (it makes the room and stays in the credential store). *Relay address* is Kelpie's relay unless you run
+your own ([relay-self-host.md](relay-self-host.md)). Each phone has a token it gets when it pairs on the hosted app, or the next time it
+connects over Tailscale, and that changes every week; removing a phone shuts it out of the relay too, even while this computer is offline.
+A phone installed over Tailscale tries the Tailscale address first and the relay a moment later, and goes back to the Tailscale address by
+itself once it answers again.
 
-What to know: **installing the app on a phone still needs Tailscale the first time**, because the relay serves no page. **The relay also needs Tailscale mode to have been on at least once**: it lets phones in only from this computer's Tailscale address, so with no such address no phone can use it, and its row says so. If this computer's Tailscale name changes (renaming it, or MagicDNS giving it a new name), phones installed from the old name are cut off from the relay as well as from the old address, until you install and pair them again at the new name. With the relay down
-and Tailscale off the app has no way to this computer, and says *No way to your computer*; *Relay unreachable* and *Computer offline* say
-which of the two does not answer. The relay sees that a phone and this computer are connected, their internet addresses, when and how much
-they send, and the room's number, never what is said; *What the relay can see* under its row says the same. If the relay stays slow from
-this computer for a day, its row offers *Make a new room*, placed near where the computer is now; phones move to it by themselves. When the relay is turned on or moved while the app is open, the app reloads itself the next time you come back to it, or at once if it cannot reach the computer any other way: a page can only reach the relay its own page allows. When you unpair a phone while the relay is on, and this computer keeps the registration key, Settings asks whether to make a new room too, and the answer is *Not now* unless you choose otherwise: the removed phone still knows the old room's ticket, though the relay no longer lets it in. Phones connected at that moment move to the new room by themselves, over their encrypted link; a phone that is not connected cannot use the relay until it connects once over Tailscale, and may need to be paired again. Making a room asks you to verify.
+What to know: **Kelpie's relay serves the phone app; a relay you run on a server serves none.** With such a relay, *Hosted phone app* says
+*This relay does not serve the phone app: pair phones over Tailscale*, and installing the app on a phone needs Tailscale the first time.
+**A phone installed over Tailscale is let in through the relay only from this computer's Tailscale address**, so Tailscale mode must have
+been on at least once for those phones, and its row says so; phones on the hosted app need no Tailscale. If this computer's Tailscale name
+changes (renaming it, or MagicDNS giving it a new name), phones installed from the old name are cut off from the relay as well as from the old
+address, until you install and pair them again at the new name. With the relay down
+and Tailscale off an app installed over Tailscale has no way to this computer, and says *No way to your computer*; *Relay unreachable* and
+*Computer offline* say which of the two does not answer. The relay sees that a phone and this computer are connected, their internet
+addresses, when and how much they send, and the room's number, never what is said. It serves the phone app too (see *What the hosted app
+trusts*), and keeps no logs of what passes; *What the relay can see* under its row says the same. If the relay stays slow from
+this computer for a day, its row offers *Make a new room*, placed near where the computer is now; phones move to it by themselves. When the relay is turned on or moved while the app is open, the app reloads itself the next time you come back to it, or at once if it cannot reach the computer any other way: a page can only reach the relay its own page allows. When you unpair a phone while the relay is on, and making a room needs nothing typed (Kelpie's relay, or a relay whose registration key this computer keeps), Settings asks whether to make a new room too, and the answer is *Not now* unless you choose otherwise: the removed phone still knows the old room's ticket, though the relay no longer lets it in. Phones connected at that moment move to the new room by themselves, over their encrypted link; a phone that is not connected cannot use the relay until it connects once over Tailscale, which a phone on the hosted app cannot do, so it has to be paired again. Making a room asks you to verify.
 
-**The app lock.** A phone paired at a name over Tailscale or HTTPS opens only after Face ID, a fingerprint or its passcode, and your computer checks that. Someone who copied the phone's key cannot get in while it is unlocked, cannot keep it unlocked, and cannot set up a passkey of their own, with one gap: in the five minutes after you approve a phone or press *Reset this phone's lock*, someone with its key could set one up first. Your computer tells you when a phone sets up its lock: if that was not you, unpair it. Set it up right after pairing, when it asks. If those five minutes have passed, it says to press *Reset this phone's lock* on the computer first. It locks again the moment you leave the app or reload the page, and after the idle time in Settings → Mobile (5 minutes unless you change it). Unlocking is one tap and then Face ID: it never starts by itself. A network that drops and comes back while you are using it does not ask again; restarting Kelpie on the computer does.
+**The app lock.** A phone paired at a name over Tailscale or HTTPS, or on the hosted app (which is locked even with *Lock Kelpie on phones* turned off), opens only after Face ID, a fingerprint or its passcode, and your computer checks that. Someone who copied the phone's key cannot get in while it is unlocked, cannot keep it unlocked, and cannot set up a passkey of their own, with one gap: in the five minutes after you approve a phone or press *Reset this phone's lock*, someone with its key could set one up first. Your computer tells you when a phone sets up its lock: if that was not you, unpair it. Set it up right after pairing, when it asks. If those five minutes have passed, it says to press *Reset this phone's lock* on the computer first. It locks again the moment you leave the app or reload the page, and after the idle time in Settings → Mobile (5 minutes unless you change it). Unlocking is one tap and then Face ID: it never starts by itself. A network that drops and comes back while you are using it does not ask again; restarting Kelpie on the computer does.
 
 **Phones paired with Kelpie 0.1.11 or earlier** are not covered by this lock, and can only read until you pair them again through Tailscale mode, however they connect. That includes a phone that could type over a Tailscale address or your own certificate before. To keep typing on the same pairing instead, turn off *Lock Kelpie on phones* in Settings → Mobile. Reading without a lock can be closed with *Allow reading over plain HTTP*.
 
@@ -1196,7 +1270,7 @@ nothing typed, the phone locking or leaving the app, and removing the phone or l
 
 Only a phone given *May take control* can do this, and Settings → Mobile offers that only for a phone paired over Tailscale (or your own HTTPS name) whose app
 lock is set up, while *Lock Kelpie on phones* is on; giving it asks you to verify, and that is the only confirmation a takeover asks for. Turning the lock
-off takes control away from every such phone, which can then only type: after turning the lock back on, give it *May take control* again. It works over Tailscale or that HTTPS address, not through the relay. What is typed
+off takes control away from every such phone, which can then only type: after turning the lock back on, give it *May take control* again. It works over Tailscale or that HTTPS address, not through the relay, so never for a phone on the hosted app. What is typed
 is not recorded anywhere: *What phones did* says only when a takeover started and why it ended. If the computer is very busy a new takeover waits; if the
 picture stops for a few seconds the phone dims it and sends nothing until it is back, so a tap never lands on a page that changed meanwhile. A program on the
 computer that tries to stand in for Kelpie's window here is refused, and Kelpie says so.
