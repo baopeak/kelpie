@@ -149,14 +149,14 @@ from a release tag**, after the maintainer approves it in a GitHub environment; 
 - **Staging** is a second, separate relay at `https://kelpie-link-relay-staging.baopeak.workers.dev` with its own scripts, rooms and
   `TICKET_SECRET`. It serves the same bytes as production; phones are not meant to use it.
 - **One-time setup**: the four environments (`hosted-staging`, `hosted-production`, `relay-room-staging`, `relay-room-production`) each with
-  the maintainer as required reviewer and deployment limited to `v*` tags; `CLOUDFLARE_API_TOKEN` (Workers Scripts: Edit, with an expiry,
-  used nowhere else) and `CLOUDFLARE_ACCOUNT_ID` as secrets of those environments only, never of the repository. Each router has its own
+  the maintainer as required reviewer and deployment limited to `v*` tags; `CLOUDFLARE_API_TOKEN` (Workers Scripts: Edit, with an expiry;
+  for Kelpie's relay it is the maintainer's own token, the one below) and `CLOUDFLARE_ACCOUNT_ID` as secrets of those environments only, never of the repository. Each router has its own
   `TICKET_SECRET`: `wrangler secret put TICKET_SECRET -c wrangler.toml` (add `--env staging` for staging).
 - **Who deployed what**: `wrangler versions list` (or the dashboard) shows a message on every version: `<tag> <bundle sha256>` for the
   router, `<tag> room <commit>` for the room script. A version without a tag in its message was not deployed by CI.
 - **Rollback**: fix forward with a new tag, or run the release again for the previous tag so the same pipeline deploys it. In an emergency,
   `wrangler versions rollback` to a version CI made; whether that also restores the app's files has not been confirmed.
-- **Break-glass**: the maintainer's own Cloudflare token is for `wrangler versions rollback` to a CI-made version and for secrets (setting
+- **Break-glass**: by hand, the maintainer's own Cloudflare token (the same one CI holds) is used only for `wrangler versions rollback` to a CI-made version and for secrets (setting
   `REGISTRATION_KEY` closes registration at once, and removing it opens it again), never for deploying code or app files. Each use is noted. Changing
   `TICKET_SECRET` voids every ticket, so every computer has to make a new room.
 

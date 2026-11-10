@@ -129,6 +129,8 @@ Phone plan: [plan](../261024-1205-phone-remote-control/plan.md) · [phase 3](../
 ## Owner answers — 2026-11-10
 The owner took every recommendation below: 1a, 2a, 3a, 4a, 5a, 6a, 7a, 8 (defaults), 9a. Kept as asked for the record.
 
+2026-11-10, owner: CI uses the owner's existing Cloudflare token (Workers Scripts: Edit proven by a staging Worker and secret it made; expires 2027-01-29) instead of a new one. Accepted trade-off: the copy on the owner's machine and CI's are one token, so revoking one revokes both and versions are told apart only by their CI message. 6a stands for hand use. Environments, their reviewers, `v*` rules and secrets are set; staging's `TICKET_SECRET` is set.
+
 ## Questions answered (owner)
 1. **Lock for hosted devices.** (a) Always required for hosted devices, even with *Lock Kelpie on phones* off; (b) follow the switch like Tailscale devices. **Recommend (a)**: the daemon-checked passkey is the one control that limits a changed deploy to the moments the person unlocks the app.
 2. **Several computers in one hosted app.** (a) One computer per app; pairing another asks to replace it and unsubscribes its alerts (in phase 3); (b) multi-computer store and switcher (+~3d phone, alerts per computer). **Recommend (a)** for v1, (b) on demand.
