@@ -57,3 +57,12 @@ over `OPTION_IDS`, now with the two new rows).
 - Stale VI entries for the old `mobile-access` tradeoff (`mobile.json`) and old `mobile-relay` lines (`relay.json`) are now unused; outside this
   phase's files, left in place.
 - The hosted reason "not checked yet" is matched as a literal (it is the daemon's tested text); a code field would be sturdier.
+
+## Follow-up
+- Stale error: resolved. `autostart` clears `last_error` before it starts (as `enable` does), with a daemon test that an earlier refusal is gone once the
+  relay starts phone access; `statusError` is removed and the page shows `s().error` again (departure 2 no longer applies).
+- VI daemon texts: resolved. The relay's hosted reasons, the room refusals, the listeners-off texts, the hosted `pair_start` errors and the hosted
+  ceiling text are in `locales/vi/backend.json`. "not checked yet" is never shown, and "lan must be true or false" is a parameter check, so neither
+  is translated.
+- Stale VI entries: the four old `mobile-relay` lines in `relay.json` and the old `mobile-access` tradeoff in `mobile.json` appear in no source now
+  (they did at the start of this branch) and were removed.
