@@ -838,8 +838,10 @@ export class Link {
       if (!this.attempts.includes(a)) return;
       const said = route === "relay" ? relayControl(e.data) : null;
       if (said === "offline") {
-        // The relay has no computer for this room now: no use waiting on this route.
+        // The relay has no computer for this room now: no use waiting on this route. What this route sent reached no computer, so it
+        // was not left unanswered by one: a computer that is away is not one that was reset (the relay itself answering says nothing of it).
         this.facts.relay = "no_computer";
+        this.sentFirst = false;
         return this.attemptFailed(a, route, 1006);
       }
       if (said) return;

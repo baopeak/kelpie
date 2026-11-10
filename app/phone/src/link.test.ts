@@ -1180,6 +1180,28 @@ describe("the app the relay serves", () => {
     expect(new Set(r.sockets.map((s) => s.url))).toEqual(new Set([HOME]));
   });
 
+  it("a computer away from the relay is not one that was reset, however often the relay says so", async () => {
+    const r = hosted();
+    r.link.start();
+    // The relay answers (its own health is the page's reach) and lets the phone in, but has no computer in the room for a while.
+    r.setReach("reachable");
+    for (let i = 0; i < 5; i++) {
+      const relay = r.last();
+      relay.open();
+      relay.onmessage?.({ data: JSON.stringify({ t: "desktop_offline" }) });
+      await flush();
+      expect(deriveConn(r.link.facts, r.now()).kind).not.toBe("not_paired_here");
+      const count = r.sockets.length;
+      while (r.sockets.length === count) r.advance(500);
+    }
+    // The computer is back: the next socket's handshake completes and the session opens.
+    const relay = r.last();
+    relay.open();
+    relay.say({});
+    relay.say({ type: "hello", ...hello({ server_ts: r.now() }) });
+    expect(r.link.facts.ready).toBe(true);
+  });
+
   it("does not dial a relay on another host, and says the phone must be paired again", () => {
     const r = hosted("wss://relay.other.example/v1/phone?t=room.ticket&k=token");
     r.link.start();
