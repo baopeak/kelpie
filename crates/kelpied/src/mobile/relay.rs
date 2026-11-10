@@ -7,7 +7,7 @@
 //! - **The room** is made once with the operator's registration key (`POST /v1/rooms`), which is kept in the credential store to make
 //!   a new room later. Its key is a P-256 key in the credential store; the relay keeps the public half and checks a fresh signature
 //!   on every connection, so nothing that crosses the wire lets anyone else in as this computer.
-//! - **Phones**: one that paired on a secure origin gets a token inside kelpie-link (good for 30 days, a new one after 7) and the
+//! - **Phones**: one that paired on a secure origin gets a token inside kelpie-link (good for 30 days, a new one after 7; on the hosted app as long as an unused phone stays paired, `token_life`) and the
 //!   relay gets the tokens' hashes. The whole list goes first on every connection, before the relay says which phones are there: a
 //!   phone removed while the relay was away is closed before it reaches anything. A pairing QR code adds a single-use token derived
 //!   from its secret, for two minutes.
