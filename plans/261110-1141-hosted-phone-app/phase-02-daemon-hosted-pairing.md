@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "Daemon: hosted pairing, device page, relay v2 client"
-status: pending
+status: done
 priority: P1
 effort: "4d"
 dependencies: [1]
@@ -89,3 +89,13 @@ Revert the commit. Stores written by it load in older builds (unknown fields ign
 
 ## Success criteria
 All tests above green; `mobile_relay.py` (phase 6 update) passes against a v2 relay and, with the header suppressed, as v1.
+
+## Completion note (2026-11-10)
+Done on branch `phone/hosted-daemon` at API 34; report: [reports/fullstack-261110-daemon-hosted.md](reports/fullstack-261110-daemon-hosted.md). Where the code differed from this spec:
+- A record without a page reaches the relay only from the room's Tailscale origin (any other `o` ⇒ `RELAY_REFUSED`). Today that was the only origin a room admitted, so nothing changes for it; it also stops a hosted record whose page fields were deleted from the file from passing as an old record and escaping the mandatory lock.
+- `page`/`page_kind` edited in the file make the whole record unverified (`UNCONFIRMED` everywhere), the stricter reading of "stops verifying".
+- The room admits the hosted origin while the page was found serving *or* a verified device is paired on it, so hosted phones keep working after a daemon restart (the probe is in memory and runs only when asked).
+- `mobile.status` answers from the cached probe and probes off-thread, broadcasting `mobile.updated` when it is known; `mobile.pair_start {hosted}` answers asynchronously after its probe.
+- `relay::turn_on` starts phone access when it is on but not running (LAN off and nothing else on), so the relay-only setup comes up once the relay is turned on.
+- `MobileStatus` and `RelayStatus` live in Settings components (phase 4's files): the new shapes are building blocks in `app/src/lib/types.ts` for phase 4 to compose.
+- The release-binary grep for `KELPIE_RELAY_TEST_*` belongs to phase 5 (workflows); the names exist only in `#[cfg(debug_assertions)]` code.
