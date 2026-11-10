@@ -12,7 +12,7 @@ import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
 import { invoke } from "@tauri-apps/api/core";
 import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
-import { approvalChoices, hostedPairing, hostedReason, hostedTrust, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel, permissionChoices, plainPairing, statusError, telegramChoice, turnOnAccess, type OptionFacts, type OptionId } from "../../lib/mobile-options";
+import { approvalChoices, hostedPairing, hostedReason, hostedTrust, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel, permissionChoices, plainPairing, telegramChoice, turnOnAccess, type OptionFacts, type OptionId } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
 import { catalogEntry, entryMatches } from "../../lib/settings-catalog";
 import type { MobileDevicePage, MobileHostedFields, MobilePairRequest, MobilePairStart } from "../../lib/types";
@@ -393,8 +393,7 @@ export function MobileSettings() {
   const loadAudit = () => daemon<MobileAudit>("mobile.audit", { limit: 100 }).then(setAudit).catch((e) => setError(errText(e)));
   const s = () => status();
   // "Could not be saved" holds only until it could be: that is the daemon's to say, and it says so in its status.
-  const daemonError = () => (s() ? statusError(s()!) : null);
-  const shownError = () => (error()?.includes("could not be saved") ? daemonError() : error() ?? daemonError());
+  const shownError = () => (error()?.includes("could not be saved") ? s()?.error : error() ?? s()?.error);
   const deviceName = (id: string) => s()?.devices.find((d) => d.id === id)?.name ?? id;
   const hasAccess = () => !!s() && (s()!.enabled || s()!.devices.length > 0 || (s()!.legacy ?? []).length > 0);
   const option = (id: OptionId) => optionState(id, facts());

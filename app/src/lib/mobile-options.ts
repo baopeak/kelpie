@@ -199,15 +199,6 @@ export async function turnOnAccess(f: OptionFacts, call: AccessCalls): Promise<"
   return "hosted";
 }
 
-/** The daemon's refusal to start with this network's listeners off and nothing else that reaches this computer. */
-const NOTHING_ELSE = "Turn on the relay or Tailscale: nothing else reaches this computer";
-
-/** The daemon's error for the page. Its refusal to start with nothing to reach this computer stays in the status after turning the relay on started phone
- *  access, so it is shown only while phone access is not running. */
-export function statusError(s: MobileStatus): string | null {
-  return s.error === NOTHING_ELSE && s.running ? null : s.error;
-}
-
 /** "Pair a phone" on the hosted app is offered:phone access is on, the relay is on and the daemon found the app serving. */
 export function hostedPairing(f: OptionFacts): boolean {
   const s = f.status;

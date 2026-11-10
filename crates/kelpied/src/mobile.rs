@@ -1839,6 +1839,8 @@ pub async fn enable(daemon: Arc<Daemon>, params: Value) -> Result<Value> {
 pub async fn autostart(daemon: Arc<Daemon>) {
     tailscale::remove_after_off(&daemon);
     if daemon.mobile.config.lock().enabled && daemon.mobile.broken.lock().is_none() {
+        // What an earlier start could not do is no longer the news; this start says its own.
+        *daemon.mobile.last_error.lock() = None;
         if let Err(e) = start(daemon.clone()).await {
             tracing::warn!("mobile access: {e:#}");
             *daemon.mobile.last_error.lock() = Some(format!("{e:#}"));

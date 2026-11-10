@@ -927,3 +927,24 @@ async fn with_this_networks_listeners_off_phone_access_runs_on_the_relay_alone()
     assert!(!m.running.lock().as_ref().unwrap().listeners.addrs().is_empty());
     assert!(m.pair_start(true).is_ok());
 }
+
+/// Phone access that could not start, then started by the relay turning on: the earlier refusal is not left showing.
+#[tokio::test]
+async fn phone_access_started_by_the_relay_no_longer_shows_why_it_could_not_start_before() {
+    let mut fake = fake_relay().await;
+    let r = rig();
+    let d = r.daemon.clone();
+    let m = &d.mobile;
+    let refused = enable(d.clone(), json!({"lan": false, "ip": "127.0.0.1", "port": 1024})).await.unwrap_err().to_string();
+    assert_eq!(m.status(true)["error"].as_str(), Some(refused.as_str()), "said while nothing runs");
+    // The relay is on now, as `mobile.set_relay` leaves it, and what it starts is phone access.
+    let key = m.mac_key(true).unwrap().unwrap();
+    m.secrets.set(KEYS[0], &hex(&room_key().to_bytes())).unwrap();
+    let mut settings = store::RelaySettings { on: true, url: fake.url.clone(), room: Some(ROOM.into()), ticket: Some(format!("{ROOM}.ticket")), origin: Some(ORIGIN.into()), ..Default::default() };
+    store::seal_relay(&mut settings, &key);
+    m.config.lock().relay = Some(settings);
+    autostart(d.clone()).await;
+    desktop_socket(&mut fake).await;
+    let status = m.status(true);
+    assert_eq!((status["running"].as_bool(), status["error"].is_null()), (Some(true), true), "{status}");
+}

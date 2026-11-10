@@ -5,7 +5,7 @@ import { HOSTED_API, LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./
 import { translated } from "./i18n";
 import {
   approvalChoices, asksForKey, hostedLine, hostedPairing, hostedReason, hostedTrust, mobileSummary, movingRelayWarning, offerNewRoom, OPTION_IDS, optionState, pageKindLabel,
-  permissionChoices, plainPairing, relayServesApp, statusError, telegramChoice, turnOnAccess, type AccessCalls, type OptionFacts, type OptionId,
+  permissionChoices, plainPairing, relayServesApp, telegramChoice, turnOnAccess, type AccessCalls, type OptionFacts, type OptionId,
 } from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
 import { emptyPushConfig, type PushState } from "./push-config";
@@ -326,12 +326,6 @@ describe("turning phone access on", () => {
       await expect(turnOnAccess(fresh(), d.call)).rejects.toThrow("credential store");
       expect(d.calls).toEqual([["mobile.enable", { lan: false }]]);
     }
-  });
-
-  it("does not show the daemon's refusal to start once the relay has started it", () => {
-    expect(statusError(status({ error: NOTHING_ELSE, running: true }))).toBeNull();
-    expect(statusError(status({ error: NOTHING_ELSE, running: false }))).toBe(NOTHING_ELSE);
-    expect(statusError(status({ error: "port in use", running: true }))).toBe("port in use");
   });
 });
 
