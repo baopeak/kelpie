@@ -1,6 +1,9 @@
 # The relay on workerd, for running it yourself (docs/relay-self-host.md). The same code as the Cloudflare relay; rooms live in /data.
 # Build in relay/:   docker build -t kelpie-relay .
 # Run:               docker run -d -p 8787:8787 -v kelpie-relay:/data -e TICKET_SECRET -e REGISTRATION_KEY kelpie-relay
+# Registration: with REGISTRATION_KEY set, only its holder makes rooms. Without it, -e OPEN_REGISTRATION=1 lets anyone make them,
+# ROOMS_PER_NETWORK_DAY (20) per network and ROOMS_PER_DAY (1000) in all per UTC day; with neither, no rooms are made.
+# Behind your own proxy every client counts as one network. This relay serves no phone app (config.capnp).
 # Put a TLS proxy in front (Caddy, say): phones and Kelpie connect with wss://.
 FROM node:24-bookworm-slim AS build
 WORKDIR /relay

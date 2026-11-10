@@ -1,6 +1,7 @@
-# The room: a Durable Object per room, reached only through the router's binding.
+# The room: a Durable Object per room, reached only through the router's binding. The Registrar, which counts the rooms made
+# without a registration key, lives in this script too.
 name = "kelpie-link-relay-room"
-main = "src/room.ts"
+main = "src/entry-room.ts"
 compatibility_date = "2026-10-15"
 workers_dev = false
 preview_urls = false
@@ -9,7 +10,7 @@ preview_urls = false
 enabled = false
 
 [vars]
-RELAY_VERSION = "1"
+RELAY_VERSION = "2"
 
 [[durable_objects.bindings]]
 name = "ROOM"
@@ -19,3 +20,7 @@ class_name = "Room"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Registrar"]

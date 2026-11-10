@@ -2,3 +2,4 @@
 // scripts, so that a router deploy leaves live rooms alone.
 export { default } from "../src/worker";
 export { Room } from "../src/room";
+export { Registrar } from "../src/registrar";

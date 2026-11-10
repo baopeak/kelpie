@@ -1,11 +1,24 @@
 import { evictDurableObject, listDurableObjectIds, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import registrarSource from "../src/registrar.ts?raw";
 import roomSource from "../src/room.ts?raw";
 import workerSource from "../src/worker.ts?raw";
 import { encodeBase64Url, hex } from "../src/encoding";
-import { desktopStatement, MESSAGES_PER_SECOND, MONTHLY_BYTES, ROOM_BURST_BYTES, ROOM_TTL_MS, tokenSha256, verifyDesktop, type Room } from "../src/room";
-import { ADMISSION_REFUSALS, makeTicket, network, Strikes, TOO_MANY_REFUSED, type Env } from "../src/worker";
+import { TOTAL, utcDay, type Registrar } from "../src/registrar";
+import {
+  desktopStatement,
+  MESSAGES_PER_SECOND,
+  MONTHLY_BYTES,
+  PROTOCOL_VERSION,
+  ROOM_BURST_BYTES,
+  ROOM_TTL_MS,
+  tokenSha256,
+  USAGE_FLUSH_MS,
+  verifyDesktop,
+  type Room,
+} from "../src/room";
+import worker, { ADMISSION_REFUSALS, makeTicket, network, ROOMS_FULL, ROOMS_NETWORK, ROOMS_RATE, Strikes, TOO_MANY_REFUSED, type Env } from "../src/worker";
 import vectors from "./vectors.json";
 
 const relayEnv = env as unknown as Env;
@@ -81,6 +94,8 @@ interface Socket {
   /** The next text message, parsed. */
   said(): Promise<Record<string, unknown>>;
   closed: Promise<number>;
+  /** The reason the socket was closed with. */
+  reason: Promise<string>;
 }
 
 /** Opens a socket and collects what arrives, so a test can wait for the next frame. */
@@ -96,6 +111,7 @@ function socket(response: Response): Socket {
     else inbox.push(data);
   });
   const closed = new Promise<number>((resolve) => ws.addEventListener("close", (event) => resolve((event as CloseEvent).code)));
+  const reason = new Promise<string>((resolve) => ws.addEventListener("close", (event) => resolve((event as CloseEvent).reason)));
   (ws as unknown as { binaryType: string }).binaryType = "arraybuffer";
   ws.accept();
   open.push(ws);
@@ -110,7 +126,7 @@ function socket(response: Response): Socket {
       });
     });
   const said = async () => JSON.parse((await next()) as string) as Record<string, unknown>;
-  return { ws, next, said, closed };
+  return { ws, next, said, closed, reason };
 }
 
 async function desktop(r: Registered, allowed: string[] = []): Promise<Socket> {
@@ -132,6 +148,46 @@ function phone(r: Registered, query: string, headers: Record<string, string> = {
 
 function stub(r: Registered) {
   return relayEnv.ROOM.get(relayEnv.ROOM.idFromName(r.room));
+}
+
+/** The relay as it is configured with registration open and no key. */
+function openEnv(extra: Partial<Env> = {}): Env {
+  return { ...relayEnv, REGISTRATION_KEY: undefined, OPEN_REGISTRATION: "1", ...extra };
+}
+
+/** A network of its own, so that one test's rooms never count against another's. */
+function someNetwork(): string {
+  return `100.${crypto.getRandomValues(new Uint8Array(3)).join(".")}`;
+}
+
+/** Asks the router to make a room, as a relay configured with `relay` would. */
+async function registerIn(relay: Env, from: string, headers: Record<string, string> = {}): Promise<Response> {
+  const { pk } = await roomKeys();
+  const request = new Request("https://relay.test/v1/rooms", {
+    method: "POST",
+    headers: { "content-type": "application/json", "cf-connecting-ip": from, ...headers },
+    body: JSON.stringify({ pk }),
+  });
+  return worker.fetch(request, relay);
+}
+
+function registrar(name = "registrar") {
+  return relayEnv.REGISTRAR.get(relayEnv.REGISTRAR.idFromName(name));
+}
+
+async function registrarRows(name = "registrar"): Promise<{ day: string; key: string; count: number }[]> {
+  return runInDurableObject(registrar(name), (_r: Registrar, state) =>
+    state.storage.sql.exec<{ day: string; key: string; count: number }>("SELECT day, key, count FROM rooms").toArray(),
+  );
+}
+
+async function todaysTotal(): Promise<number> {
+  return (await registrarRows()).find((row) => row.day === utcDay(Date.now()) && row.key === TOTAL)?.count ?? 0;
+}
+
+/** A fake of the Rate Limiting binding, which the test pool does not give. */
+function limiter(success: boolean) {
+  return { limit: vi.fn(async (_options: RateLimitOptions) => ({ success })) };
 }
 
 afterEach(() => {
@@ -267,6 +323,136 @@ describe("registration", () => {
   });
 });
 
+describe("registration modes", () => {
+  it("makes a room without a key when registration is open, and pays no heed to an Authorization", async () => {
+    const made = await registerIn(openEnv(), someNetwork());
+    expect(made.status).toBe(201);
+    const { room, ticket } = (await made.json()) as { room: string; ticket: string };
+    expect(ticket.startsWith(`${room}.`)).toBe(true);
+    expect((await registerIn(openEnv(), someNetwork(), { authorization: "Bearer anything" })).status).toBe(201);
+  });
+
+  it("asks for the key whenever one is set, open or not", async () => {
+    const keyed = { ...relayEnv, OPEN_REGISTRATION: "1" };
+    expect((await registerIn(keyed, someNetwork())).status).toBe(401);
+    expect((await registerIn(keyed, someNetwork(), { authorization: `Bearer ${REGISTRATION_KEY}` })).status).toBe(201);
+  });
+
+  it("makes no room when neither a key nor open registration is set", async () => {
+    const before = (await listDurableObjectIds(relayEnv.ROOM)).length;
+    for (const open of [undefined, "0", "true"]) {
+      const closed = await registerIn(openEnv({ OPEN_REGISTRATION: open }), someNetwork());
+      expect(closed.status).toBe(503);
+      expect(await closed.text()).toBe("relay not configured\n");
+    }
+    expect((await listDurableObjectIds(relayEnv.ROOM)).length).toBe(before);
+  });
+
+  it("refuses a page in every mode", async () => {
+    const page = { origin: "https://evil.example", authorization: `Bearer ${REGISTRATION_KEY}` };
+    for (const relay of [relayEnv, openEnv(), openEnv({ OPEN_REGISTRATION: undefined })]) {
+      expect((await registerIn(relay, someNetwork(), page)).status).toBe(403);
+    }
+  });
+});
+
+describe("limits on rooms made without a key", () => {
+  it("refuses a network past its rooms for the day, and still admits another network", async () => {
+    const relay = openEnv({ ROOMS_PER_NETWORK_DAY: "2" });
+    const busy = someNetwork();
+    expect((await registerIn(relay, busy)).status).toBe(201);
+    expect((await registerIn(relay, busy)).status).toBe(201);
+    const lookup = vi.spyOn(relayEnv.ROOM, "idFromName");
+    const refused = await registerIn(relay, busy);
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("x-kelpie-reason")).toBe(ROOMS_NETWORK);
+    expect(lookup).not.toHaveBeenCalled();
+    expect((await registerIn(relay, someNetwork())).status).toBe(201);
+  });
+
+  it("refuses everyone once the relay made its rooms for the day", async () => {
+    const relay = openEnv({ ROOMS_PER_DAY: String((await todaysTotal()) + 1) });
+    expect((await registerIn(relay, someNetwork())).status).toBe(201);
+    const lookup = vi.spyOn(relayEnv.ROOM, "idFromName");
+    const refused = await registerIn(relay, someNetwork());
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get("x-kelpie-reason")).toBe(ROOMS_FULL);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it("sheds a burst with the rate binding before the Registrar or a room is asked", async () => {
+    const shed = limiter(false);
+    const registrarLookup = vi.spyOn(relayEnv.REGISTRAR, "idFromName");
+    const roomLookup = vi.spyOn(relayEnv.ROOM, "idFromName");
+    const refused = await registerIn(openEnv({ ROOM_RATE: shed }), someNetwork());
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("x-kelpie-reason")).toBe(ROOMS_RATE);
+    expect(registrarLookup).not.toHaveBeenCalled();
+    expect(roomLookup).not.toHaveBeenCalled();
+    // Keyed by the network's hash, never its address.
+    expect(shed.limit.mock.calls[0][0].key).toMatch(/^[0-9a-f]{64}$/);
+    expect((await registerIn(openEnv({ ROOM_RATE: limiter(true) }), someNetwork())).status).toBe(201);
+  });
+
+  it("leaves the key's holder out of the limits", async () => {
+    const shed = limiter(false);
+    const registrarLookup = vi.spyOn(relayEnv.REGISTRAR, "idFromName");
+    const keyed = { ...relayEnv, ROOM_RATE: shed, ROOMS_PER_NETWORK_DAY: "1", ROOMS_PER_DAY: "1" };
+    expect((await registerIn(keyed, someNetwork(), { authorization: `Bearer ${REGISTRATION_KEY}` })).status).toBe(201);
+    expect(shed.limit).not.toHaveBeenCalled();
+    expect(registrarLookup).not.toHaveBeenCalled();
+  });
+
+  it("stores hashes of networks, never an address", async () => {
+    const from = someNetwork();
+    expect((await registerIn(openEnv(), from)).status).toBe(201);
+    const rows = await registrarRows();
+    expect(rows.length).toBeGreaterThan(1);
+    for (const row of rows) {
+      expect(row.key === TOTAL || /^[0-9a-f]{64}$/.test(row.key)).toBe(true);
+      expect(JSON.stringify(row)).not.toContain(from);
+    }
+    await runInDurableObject(registrar(`unit-${randomRoom()}`), (instance: Registrar) => {
+      expect(() => instance.admit("203.0.113.7", Date.now(), 20, 1000)).toThrow("not a network key");
+    });
+  });
+});
+
+describe("the Registrar", () => {
+  const net = (n: number) => n.toString(16).padStart(64, "0");
+  const day = 24 * 3600 * 1000;
+
+  it("counts per network and in all, per UTC day", async () => {
+    const name = `unit-${randomRoom()}`;
+    const r = registrar(name);
+    const now = Date.now();
+    expect(await r.admit(net(1), now, 2, 3)).toBe("ok");
+    expect(await r.admit(net(1), now, 2, 3)).toBe("ok");
+    expect(await r.admit(net(1), now, 2, 3)).toBe("network");
+    expect(await r.admit(net(2), now, 2, 3)).toBe("ok");
+    expect(await r.admit(net(3), now, 2, 3)).toBe("full");
+    // A new day counts from nothing.
+    expect(await r.admit(net(1), now + day, 2, 3)).toBe("ok");
+    const rows = await registrarRows(name);
+    expect(rows.find((row) => row.day === utcDay(now) && row.key === TOTAL)?.count).toBe(3);
+    expect(rows.find((row) => row.day === utcDay(now) && row.key === net(1))?.count).toBe(2);
+  });
+
+  it("forgets the days before yesterday when it next counts", async () => {
+    const name = `unit-${randomRoom()}`;
+    const r = registrar(name);
+    const now = Date.now();
+    await r.admit(net(1), now - 2 * day, 20, 1000);
+    await r.admit(net(1), now - day, 20, 1000);
+    expect(new Set((await registrarRows(name)).map((row) => row.day)).size).toBe(2);
+    await r.admit(net(1), now, 20, 1000);
+    expect(new Set((await registrarRows(name)).map((row) => row.day))).toEqual(new Set([utcDay(now - day), utcDay(now)]));
+    // A refusal writes nothing, so it forgets nothing either.
+    await r.admit(net(1), now + 2 * day, 20, 0);
+    expect(new Set((await registrarRows(name)).map((row) => row.day))).toEqual(new Set([utcDay(now - day), utcDay(now)]));
+  });
+});
+
 describe("what the desktop and the relay share", () => {
   it("checks the shared vectors as the daemon makes them", async () => {
     expect(await verifyDesktop(vectors.room_key_public, vectors.room, vectors.ts, vectors.signature)).toBe(true);
@@ -296,6 +482,14 @@ describe("the desktop's admission", () => {
     expect((await upgrade("/v1/desktop", query)).status).toBe(403);
   });
 
+  it("says on its 101 which version of the protocol the room speaks", async () => {
+    const r = await register();
+    const answer = await upgrade("/v1/desktop", await desktopQuery(r));
+    expect(answer.headers.get("x-kelpie-relay-version")).toBe("2");
+    expect(PROTOCOL_VERSION).toBe("2");
+    socket(answer);
+  });
+
   it("gives the room to the newest desktop", async () => {
     const r = await register();
     const old = await desktop(r);
@@ -322,10 +516,79 @@ describe("the phone's admission", () => {
     const d = await desktop(r, [k]);
     expect((await phone(r, `k=${k}`, { origin: "https://desk.tail1234.ts.net:8443" })).status).toBe(403);
     d.ws.send(JSON.stringify({ t: "origin", o: "https://desk.tail1234.ts.net:8443" }));
-    await expect.poll(async () => runInDurableObject(stub(r), async (_room: Room, state) => state.storage.get("origin"))).toBe("https://desk.tail1234.ts.net:8443");
+    await expect.poll(async () => runInDurableObject(stub(r), async (_room: Room, state) => state.storage.get("origins"))).toEqual(["https://desk.tail1234.ts.net:8443"]);
     expect((await phone(r, `k=${k}`, { origin: "https://evil.example" })).status).toBe(403);
     socket(await phone(r, `k=${k}`, { origin: "https://desk.tail1234.ts.net:8443" }));
     socket(await phone(r, `k=${k}`));
+  });
+
+  it("takes phones from any origin the desktop listed, and from no other", async () => {
+    const r = await register();
+    const tokens = [token(), token(), token(), token()];
+    const d = await desktop(r, tokens);
+    const [ts, hosted] = ["https://desk.tail1234.ts.net:8443", "https://relay.example.workers.dev"];
+    d.ws.send(JSON.stringify({ t: "origins", o: [ts, hosted] }));
+    await expect.poll(async () => runInDurableObject(stub(r), async (_room: Room, state) => state.storage.get("origins"))).toEqual([ts, hosted]);
+    socket(await phone(r, `k=${tokens[0]}`, { origin: ts }));
+    socket(await phone(r, `k=${tokens[1]}`, { origin: hosted }));
+    socket(await phone(r, `k=${tokens[2]}`));
+    expect((await phone(r, `k=${tokens[3]}`, { origin: "https://evil.example" })).status).toBe(403);
+    expect((await phone(r, `k=${tokens[3]}`, { origin: "http://relay.example.workers.dev" })).status).toBe(403);
+    // An empty list lets no page in, and an app without an Origin still.
+    d.ws.send(JSON.stringify({ t: "origins", o: [] }));
+    await expect.poll(async () => runInDurableObject(stub(r), async (_room: Room, state) => state.storage.get("origins"))).toEqual([]);
+    expect((await phone(r, `k=${tokens[3]}`, { origin: hosted })).status).toBe(403);
+    socket(await phone(r, `k=${tokens[3]}`));
+  });
+
+  it("reads a room stored with one origin as a list of it", async () => {
+    const r = await register();
+    const k = token();
+    await desktop(r, [k]);
+    const ts = "https://desk.tail1234.ts.net:8443";
+    await runInDurableObject(stub(r), async (_room: Room, state) => {
+      await state.storage.delete("origins");
+      await state.storage.put("origin", ts);
+    });
+    socket(await phone(r, `k=${k}`, { origin: ts }));
+    expect((await phone(r, `k=${k}`, { origin: "https://evil.example" })).status).toBe(403);
+  });
+
+  it.each([
+    ["more than four", ["https://a.example", "https://b.example", "https://c.example", "https://d.example", "https://e.example"]],
+    ["one over plain http", ["https://a.example", "http://b.example"]],
+    ["one with a path", ["https://a.example/app"]],
+    ["not a list", "https://a.example"],
+  ])("closes a desktop that lists origins with %s", async (_name, o) => {
+    const r = await register();
+    const d = await desktop(r);
+    d.ws.send(JSON.stringify({ t: "origins", o }));
+    expect(await d.closed).toBe(4003);
+    expect(await d.reason).toBe("origins");
+  });
+
+  it("tells the desktop the origin a phone came from, and none for an app without one", async () => {
+    const r = await register();
+    const [browser, app] = [token(), token()];
+    const hosted = "https://relay.example.workers.dev";
+    const d = await desktop(r, [browser, app]);
+    d.ws.send(JSON.stringify({ t: "origins", o: [hosted] }));
+    await expect.poll(async () => runInDurableObject(stub(r), async (_room: Room, state) => state.storage.get("origins"))).toEqual([hosted]);
+    socket(await phone(r, `k=${browser}`, { origin: hosted }));
+    expect(await d.said()).toEqual({ t: "open", s: 0, via: "token", k: await tokenHash(browser), o: hosted });
+    socket(await phone(r, `k=${app}`));
+    const opened = await d.said();
+    expect(opened).toEqual({ t: "open", s: 1, via: "token", k: await tokenHash(app) });
+    expect("o" in opened).toBe(false);
+
+    // A desktop that comes back hears both again, each with what it came from.
+    const back = socket(await upgrade("/v1/desktop", await desktopQuery(r)));
+    await allow(back, [browser, app]);
+    const heard = [await back.said(), await back.said()].sort((a, b) => Number(a.s) - Number(b.s));
+    expect(heard).toEqual([
+      { t: "open", s: 0, via: "token", k: await tokenHash(browser), o: hosted },
+      { t: "open", s: 1, via: "token", k: await tokenHash(app) },
+    ]);
   });
 
   it("lets a pairing token in once, and not once it expired", async () => {
@@ -446,6 +709,49 @@ describe("what the router serves", () => {
     expect((await listDurableObjectIds(relayEnv.ROOM)).length).toBe(before);
   });
 
+  it("marks every answer nosniff and uncached, never HTML, and repeats nothing of the request", async () => {
+    const r = await register();
+    const marker = `zq${hex(crypto.getRandomValues(new Uint8Array(6)))}`;
+    const ticket = encodeURIComponent(r.ticket);
+    const unregistered = encodeURIComponent(await makeTicket(randomRoom(), relayEnv.TICKET_SECRET));
+    const ws = { upgrade: "websocket" };
+    const asked: [string, RequestInit][] = [
+      [`/${marker}`, {}],
+      [`/v1/${marker}?${marker}=${marker}`, {}],
+      [`/v1/health?${marker}=1`, {}],
+      [`/v1/rooms?${marker}`, {}],
+      [`/v1/rooms`, { method: "POST", body: JSON.stringify({ pk: marker }) }],
+      [`/v1/rooms`, { method: "POST", headers: { authorization: `Bearer ${REGISTRATION_KEY}` }, body: JSON.stringify({ pk: marker }) }],
+      [`/v1/rooms`, { method: "POST", headers: { authorization: `Bearer ${marker}` }, body: "{}" }],
+      [`/v1/rooms`, { method: "POST", headers: { origin: `https://${marker}.example` }, body: "{}" }],
+      [`/v1/phone?t=${marker}`, {}],
+      [`/v1/phone?t=${marker}`, { headers: ws }],
+      [`/v1/phone?t=${ticket}&k=${marker}`, { headers: ws }],
+      [`/v1/phone?t=${ticket}&k=${token()}&${marker}=1`, { headers: { ...ws, origin: `https://${marker}.example` } }],
+      [`/v1/phone?t=${unregistered}&k=${marker}`, { headers: ws }],
+      [`/v1/desktop?t=${ticket}&ts=${marker}&sig=${marker}`, { headers: ws }],
+      [`/v1/desktop?t=${ticket}`, { headers: { ...ws, origin: `https://${marker}.example` } }],
+    ];
+    for (const [path, init] of asked) {
+      const response = await self().fetch(`https://relay.test${path}`, { ...init, headers: { "cf-connecting-ip": someNetwork(), ...init.headers } });
+      expect(response.status, path).not.toBe(101);
+      expect(response.headers.get("x-content-type-options"), path).toBe("nosniff");
+      expect(response.headers.get("cache-control"), path).toBe("no-store");
+      expect(response.headers.get("content-type"), path).not.toMatch(/html/);
+      expect(await response.text(), path).not.toContain(marker);
+    }
+    const made = await registerWith({ pk: (await roomKeys()).pk });
+    expect(made.headers.get("content-type")).toBe("application/json");
+    expect(made.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("gives each Cloudflare script a main module of entrypoints only, which the runtime requires", async () => {
+    const modules = [await import("../src/entry-router"), await import("../src/entry-room")];
+    for (const exported of modules.flatMap((m) => Object.values(m))) {
+      expect(typeof exported === "function" || (typeof exported === "object" && exported !== null)).toBe(true);
+    }
+    expect(Object.keys(modules[1]).sort()).toEqual(["Registrar", "Room", "default"]);
+  });
   it("serves no HTML on any path", async () => {
     for (const [path, status, method] of [
       ["/", 404, "GET"],
@@ -499,6 +805,34 @@ describe("forwarding", () => {
     await d.said();
     d.ws.close(1000, "bye");
     expect(await again.said()).toEqual({ t: "desktop_offline" });
+  });
+
+  it("pairs and relays for a desktop from before open rooms, which sends one origin and reads no headers", async () => {
+    const r = await register();
+    const ts = "https://desk.tail1234.ts.net:8443";
+    const d = socket(await upgrade("/v1/desktop", await desktopQuery(r)));
+    await allow(d, []);
+    d.ws.send(JSON.stringify({ t: "origin", o: ts }));
+    const p = token();
+    d.ws.send(JSON.stringify({ t: "pair", h: await tokenHash(p), ttl: 120 }));
+    await expect.poll(async () => runInDurableObject(stub(r), async (_room: Room, state) => ((await state.storage.get<unknown[]>("pair")) ?? []).length)).toBe(1);
+    const paired = socket(await phone(r, `p=${p}`, { origin: ts }));
+    const opened = await d.said();
+    expect(opened).toMatchObject({ t: "open", via: "pair", k: await tokenHash(p) });
+    paired.ws.send(new Uint8Array([1, 2]));
+    expect(Array.from(new Uint8Array((await d.next()) as ArrayBuffer))).toEqual([0, opened.s as number, 1, 2]);
+
+    // Paired: the desktop lists the device's token, and the phone comes back with it.
+    const k = token();
+    await allow(d, [k]);
+    paired.ws.close(1000, "paired");
+    expect(await d.said()).toMatchObject({ t: "close", s: opened.s });
+    const back = socket(await phone(r, `k=${k}`, { origin: ts }));
+    const reopened = await d.said();
+    expect(reopened).toMatchObject({ t: "open", via: "token", k: await tokenHash(k) });
+    d.ws.send(Uint8Array.of(0, reopened.s as number, 9));
+    expect(Array.from(new Uint8Array((await back.next()) as ArrayBuffer))).toEqual([9]);
+    expect((await phone(r, `k=${k}`, { origin: "https://evil.example" })).status).toBe(403);
   });
 
   it("drops a phone's frames while no desktop is ready, and counts nothing for them", async () => {
@@ -731,7 +1065,34 @@ describe("hibernation", () => {
     expect(after.sockets).toBe(2);
   });
 
+  it("writes the month's usage at most once a minute under steady traffic", async () => {
+    const r = await register();
+    await desktop(r);
+    await runInDurableObject(stub(r), async (instance: Room, state) => {
+      const room = instance as unknown as { count(bytes: number): Promise<boolean>; flushedAt: number };
+      let now = Date.now();
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+      try {
+        room.flushedAt = now;
+        let flushes = 0;
+        // Three minutes of a frame a second, well under a megabyte.
+        for (let i = 0; i < 180; i++) {
+          now += 1000;
+          const before = room.flushedAt;
+          await room.count(1000);
+          if (room.flushedAt !== before) flushes += 1;
+        }
+        expect(flushes).toBe(180_000 / USAGE_FLUSH_MS);
+        expect(USAGE_FLUSH_MS).toBe(60_000);
+        expect((await state.storage.get<{ bytes: number }>("usage"))?.bytes).toBe(180 * 1000);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+  });
+
   it("keeps timers, plain accept and looping alarms out of the source", () => {
+    expect(registrarSource.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")).not.toMatch(/\bsetTimeout\b|\bsetInterval\b|setAlarm|\balarm\b|console\./);
     for (const source of [roomSource, workerSource]) {
       const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
       expect(code).not.toMatch(/\bsetTimeout\b|\bsetInterval\b/);
