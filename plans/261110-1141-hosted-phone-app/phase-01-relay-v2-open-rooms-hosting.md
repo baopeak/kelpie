@@ -1,7 +1,7 @@
 ---
 phase: 1
 title: "Relay v2: open rooms, abuse limits, many origins, hosted page"
-status: pending
+status: done
 priority: P1
 effort: "2.5d"
 dependencies: []
@@ -99,5 +99,14 @@ Revert the commit. Deployed: redeploy the previous router (assets go with it) an
 ## Success criteria
 - All tests above green; both smoke modes pass; the page smoke shows CSP, `nosniff`, `no-referrer`, `X-Frame-Options: DENY` on `/` and immutable caching on `/assets/*`.
 - A v1-style desktop (sends `origin`, ignores headers) still pairs and relays in the vitest suite.
+
+## Completion note (2026-11-10)
+Done on branch `relay/v2-open-rooms`; report: [reports/fullstack-261110-relay-v2.md](reports/fullstack-261110-relay-v2.md). Where the code differed from this spec:
+- The burst limit (5/min) is the `[[ratelimits]]` binding's `simple.limit` in `wrangler.toml`, not a `ROOMS_PER_MINUTE` var: the binding's limit is fixed at deploy. The daily limits are vars as specified.
+- The limits apply only without a key (open registration); a relay with `REGISTRATION_KEY` set behaves as before. The burst refusal is `429` with `x-kelpie-reason: rate` (besides `network` / `full`); phase 2 should map it to a "try again in a minute" text.
+- `x-kelpie-relay-version` is a protocol constant in `room.ts` (`2`), not `RELAY_VERSION`, which stays the deployment label shown by `info` (set to `2`).
+- The Cloudflare scripts now have handler-only main modules (`src/entry-router.ts`, `src/entry-room.ts`): current workerd refuses a main module that exports plain constants (`worker.ts`/`room.ts` do, for tests), which broke `wrangler dev` already before this phase.
+- With `[assets]`, `wrangler dev` and `wrangler deploy` refuse to start without `public/` (checked with a local dry run): a router deploy cannot ship without a bundle; for relay-only dev, create an empty `public/`.
+- `.github/workflows/relay.yml` still smokes key mode only; adding the open-mode run belongs to phase 5 (workflows).
 
 Sources: [static assets billing](https://docs-durable-objects-instance-replaced-errors.previews.developers.cloudflare.com/workers/static-assets/billing-and-limitations/index.md) · [rate limit binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) · [DO pricing](https://developers.cloudflare.com/durable-objects/platform/pricing)
