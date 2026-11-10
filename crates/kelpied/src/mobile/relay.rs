@@ -139,6 +139,18 @@ fn token_life(hosted: bool, dormant_days: u32) -> u64 {
     }
 }
 
+/// How this computer asks the relay over HTTP (making a room, reading what its phone app is): no redirect, the status as the relay gave it, and in an e2e
+/// run of a debug build the test relay's own CA as the only root, as `dial()` trusts it.
+fn https_agent(timeout: Duration) -> ureq::Agent {
+    let mut config = ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).max_redirects(0);
+    let roots = test_roots();
+    if !roots.is_empty() {
+        let certs: Vec<ureq::tls::Certificate<'static>> = roots.iter().map(|c| ureq::tls::Certificate::from_der(c.as_ref()).to_owned()).collect();
+        config = config.tls_config(ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::new_with_certs(&certs)).build());
+    }
+    config.build().into()
+}
+
 /// What the hosted page said of itself, and when.
 #[derive(Clone)]
 struct Probe {
@@ -152,13 +164,7 @@ struct Probe {
 /// this daemon has. Its version, or why it cannot be used. Blocking.
 pub fn probe(origin: &str) -> std::result::Result<String, String> {
     e2e_guard(origin).map_err(|e| e.to_string())?;
-    let mut config = ureq::Agent::config_builder().timeout_global(Some(PROBE_TIMEOUT)).http_status_as_error(false).max_redirects(0);
-    let roots = test_roots();
-    if !roots.is_empty() {
-        let certs: Vec<ureq::tls::Certificate<'static>> = roots.iter().map(|c| ureq::tls::Certificate::from_der(c.as_ref()).to_owned()).collect();
-        config = config.tls_config(ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::new_with_certs(&certs)).build());
-    }
-    let agent: ureq::Agent = config.build().into();
+    let agent = https_agent(PROBE_TIMEOUT);
     let mut resp = agent.get(&format!("{origin}/version.json")).call().map_err(|_| "the relay's phone app could not be reached".to_string())?;
     match resp.status().as_u16() {
         200 => {}
@@ -1106,7 +1112,7 @@ fn register_refusal(status: u16, reason: Option<&str>, keyed: bool) -> String {
 /// Makes a room: the room id and its ticket. The registration key goes only when there is one.
 fn register(url: &str, operator: Option<&str>, pk: &str) -> Result<(String, String)> {
     e2e_guard(url)?;
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).http_status_as_error(false).max_redirects(0).build().into();
+    let agent = https_agent(Duration::from_secs(15));
     let body = json!({"pk": pk}).to_string();
     let mut request = agent.post(&format!("{}/v1/rooms", http_url(url))).content_type("application/json");
     if let Some(operator) = operator {
