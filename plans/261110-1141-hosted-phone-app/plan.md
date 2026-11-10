@@ -63,7 +63,7 @@ Execution: strictly sequential (owner preference: full review/test/fix loop per 
 | 3 | [Phone: hosted build and behaviour, SW versioning, manifest](phase-03-phone-hosted-build.md) | 3d | 2 | `app/phone/**`, `app/vite.phone.config.ts`, `app/package.json`, `scripts/hosted/bundle_manifest.py`, `.gitignore`, `app/src/locales/vi/phone.json` | done |
 | 4 | [Desktop Settings → Mobile: hosted default, trust text](phase-04-desktop-settings.md) | 2d | 2, 3 | `app/src/components/settings/mobile-*.tsx`, `app/src/lib/mobile-options.ts`, `settings-catalog.ts`, `app/src/locales/vi/settings.json` | done |
 | 5 | [CI deploy, approval, published hash, live verification](phase-05-ci-deploy-verification.md) | 2d | 1, 3 | `.github/workflows/*`, `scripts/hosted/verify_live.py`, `[env.staging]` in `relay/wrangler*.toml` | done |
-| 6 | [E2E on an emulated phone, existing e2e updated](phase-06-e2e-emulated-phone.md) | 2d | 1–5 | `scripts/e2e/mobile_hosted.py`, `mobile_relay.py`, `mobile.py` | pending |
+| 6 | [E2E on an emulated phone, existing e2e updated](phase-06-e2e-emulated-phone.md) | 2d | 1–5 | `scripts/e2e/mobile_hosted.py`, `mobile_relay.py`, `mobile.py` | done |
 | 7 | [Docs](phase-07-docs.md) | 1d | 1–6 | `docs/*.md`, `README.md` | pending |
 | 8 | [Go-live (owner/maintainer)](phase-08-go-live.md) | 0.5d + owner time | 1–7 | none (settings, secrets, real phones) | pending |
 

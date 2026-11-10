@@ -1,7 +1,7 @@
 ---
 phase: 6
 title: "E2E on an emulated phone; existing e2e updated"
-status: pending
+status: done
 priority: P1
 effort: "2d"
 dependencies: [1, 2, 3, 4, 5]
@@ -75,3 +75,11 @@ Test-only files; revert.
 
 ## Success criteria
 All three scripts green on Windows; the hosted checks also run on macOS where the GUI part needs no Windows-only piece (or are marked Windows-only with the reason).
+
+## Completion note (2026-11-10)
+Done on branch `test/hosted-e2e`; report: [reports/fullstack-261110-hosted-e2e.md](reports/fullstack-261110-hosted-e2e.md). `mobile_hosted.py --gui` 76/76, `mobile_relay.py` 49/49, `mobile.py` 246 passed / 0 failed, no process of any run left. Fixed on the way: room making ignored the test relay's CA (`1e86250`); the phone took a computer away from the relay for one that was reset, showing "Not paired here" on the hosted app during relay restarts (`1194a7d`, with a regression test). Where the code differed from this spec:
+- wrangler's HTTPS flags exist (no TLS front); the run's copy of the configs sets `[dev]` https, since wrangler dev's proxy otherwise rewrites a page's `Origin` to `http://` and the room refuses it.
+- The push stand-in is installed on every page load through CDP and the phone's Edge resolves nothing off this machine: before that, a reload let the page subscribe with Edge's real push service and a test daemon's alert test reached it (report, "Incident").
+- The replace check's 410 comes from daemon A's alert test, not a needs-you event (focus/idle rules); "one verification" is one `relay_on` audit entry; the worker update is triggered with `registration.update()`.
+- The GUI part starts tauri-driver itself with an isolated `WEBVIEW2_USER_DATA_FOLDER` (the debug app shares the installed app's identifier).
+- Open: the expired-token state (unstable in e2e, not a check), fencing real push hosts in the daemon's e2e seam, the guide opening a moment before the relay connection is up.
