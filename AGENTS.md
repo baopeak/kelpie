@@ -68,6 +68,7 @@ The release script **bumps patch versions** in the workspace manifest, frontend 
 - Rust tests use ordinary Cargo tests and colocated test modules. Focus with `cargo test -p kelpied <test_filter>`; CI explicitly runs `cargo test -p kelpie-proto -p kelpied -p kelpie -p kelpie-stt` on Windows and macOS.
 - No enforced coverage percentage is configured. Add behavior-level regressions for changed contracts; unit tests do not verify WebView/native interactions.
 - Exercise affected desktop paths through the real app. Python scripts in `scripts/e2e/` document their own arguments and prerequisites; GUI scenarios generally need `tauri-driver` and matching `msedgedriver`. Some invoke real signed-in agents, incur model calls, manipulate SSH fixtures or restart daemons: inspect setup/cleanup before running.
+- With `KELPIE_E2E` set the app opens no file manager window (Show in folder, a new plugin's manifest, an agent's config file): the path is recorded instead and `invoke('e2e_revealed')` returns the paths since the last call. Check that rather than letting a scenario open Explorer on a temp folder it deletes.
 - Performance procedure and budgets live in `scripts/perf/README.md` and `scripts/perf/baseline.json`. Example: `python scripts/perf/perf_gate.py --label my-change --compare scripts/perf/baseline.json`. Full GUI metrics require a desktop/WebDriver environment and `psutil`; CI gates bundle size and daemon throughput. Do not update the baseline merely to hide a regression.
 
 ## User Docs & Demo Kit

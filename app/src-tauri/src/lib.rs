@@ -573,6 +573,7 @@ pub fn run() {
             fs_ops::fs_rename,
             fs_ops::fs_delete,
             fs_ops::fs_reveal,
+            fs_ops::e2e_revealed,
             fs_ops::fs_write_temp,
             fs_ops::fs_read_image,
             search::quick_open,
