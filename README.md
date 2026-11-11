@@ -1,57 +1,92 @@
 <p align="center"><img src="app/src/assets/brand/kip-peek.svg" alt="Kip, the Kelpie mascot, peeking out of a terminal" width="120"></p>
 
-# Kelpie
+<h1 align="center">Kelpie</h1>
 
-**More agents. Less juggling. One place to bring the work together.**
+<p align="center"><strong>Every coding agent you use, side by side, in one workbench that never loses track.</strong></p>
 
-It starts with one terminal. Then another agent takes a second task. A test needs its own shell, a bug needs another branch, and the browser is somewhere behind everything else.
+<p align="center">
+  <a href="https://github.com/baopeak/kelpie/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/baopeak/kelpie?label=download"></a>
+  <img alt="Windows, macOS and Linux" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-4c7a8a">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-4c7a8a"></a>
+</p>
 
-Soon, the hard part is not starting the work. It is remembering where it all went: which agent needs an answer, which checkout belongs to which task, and what is actually ready to review.
+<p align="center">
+  <a href="https://github.com/baopeak/kelpie/releases"><strong>Download Kelpie</strong></a> ·
+  <a href="#see-it-in-action">See it in action</a> ·
+  <a href="#try-the-demo-kit">Try the demo kit</a> ·
+  <a href="docs/user-guide.md">User guide</a> ·
+  <a href="README.vi.md">Tiếng Việt</a>
+</p>
 
-**Kelpie is a desktop workbench for that moment.** Run your coding-agent CLIs and shells side by side, keep each project and worktree in view, and come back to sessions that keep running when you close the window.
+![Four agents at work in one Kelpie tab: Claude Code, Codex and OMP in their own terminals and Claude Code in chat view, all reviewing the same checkout, beside eight demo projects](docs/screenshots/workspace.png)
 
-[**Download Kelpie**](https://github.com/baopeak/kelpie/releases) · [Follow the workflow](#a-day-with-kelpie) · [Try the demo](#try-the-demo-yourself) · [User guide](docs/user-guide.md)
+You start one agent in a terminal. Then a second agent takes another task, a test needs its own shell, a bug needs another branch, and the browser hides somewhere behind everything else. Soon the hard part is no longer starting the work. The hard part is remembering where it went: which agent is waiting for an answer, which checkout belongs to which task, and what is actually ready to review.
 
-![Kelpie's four-pane workspace with PowerShell checks, Codex sign-in, an actual OMP checkout review and Git worktree output, alongside eight demo projects](docs/screenshots/workspace.png)
+**Kelpie is a desktop workbench for that moment.** It runs Claude Code, Codex, OMP and twenty more agent CLIs next to your shells, across all of your projects and worktrees. It tells you which session needs you, helps you review what an agent changed, and merges the finished work safely. Its sessions live in a separate background process, so **updating Kelpie never interrupts an agent that is working**.
 
-Windows 10 1809+ / 11 · macOS 12+ · Open source, MIT licensed
-Built with Tauri 2, SolidJS and a Rust session daemon. Bring your own agent CLIs and sign-ins.
+## Why people use it
 
-## A day with Kelpie
+- **You keep your own tools.** Kelpie launches the agent CLIs you already installed, with your own sign-ins, subscriptions and permission rules. It does not bundle a model, and it does not need an account.
+- **You see what needs you.** A dashboard sorts every session into *Needs you*, *Working*, *Done* and *Failed*. You can answer a waiting prompt without opening its tab, from the bell in the status bar or from your phone.
+- **Parallel work stays separate.** Each task can get its own Git worktree, its own sessions and a short comment that says why it matters. A board shows every task moving from *Todo* to *Done*.
+- **Review is part of the flow.** You read the diff, leave a note on the line that matters, and send all notes back to an agent in one request. When the work is ready, **Finish** commits, merges, runs your approved checks and cleans up.
+- **Updates do not stop the work.** The `kelpied` daemon owns every process. When Kelpie installs an update, only the window restarts, and each agent is still running when it comes back. (The one exception is described under [Install](docs/user-guide.md#install): the first update from an early 0.1 release stops sessions once.)
 
-The walkthrough below follows a small checkout change: understand the rules, separate the tasks, run the checks, and review the result. Its projects and planning data are samples; the OMP responses and shell output are real executions. This is a workflow illustration, not a customer testimonial.
+## What is inside
 
-### First, give the work a home
+| | |
+|---|---|
+| **Multi-agent workspace** | Tabs, splits, grid presets up to 3×3 or any custom grid, saved layouts, broadcast input, a floating terminal and one search box for sessions, files, commands and settings. |
+| **Terminal or chat, your choice** | Supported agents can switch between their own terminal interface and Kelpie's chat view in the same conversation, with tool cards, approvals, model controls and pictures. |
+| **Attention you can trust** | The dashboard, quick answers, desktop and phone notifications, and ntfy, Telegram or webhook messages tell you when a session waits, finishes or fails. |
+| **Worktrees and a board** | New worktrees come with optional setup commands, copied `.env` files and shared folders from `.kelpie.yaml`, and every one of them appears on the board. |
+| **Review and Finish** | Diff notes, review by a second agent from another vendor, turn-by-turn undo, pull requests through `gh`, GitLab merge requests and a guarded merge with checks. |
+| **Orchestration** | Runs split a job into agent tasks with dependencies and approvals. *Try with several agents* gives one prompt to up to five agents and compares their results. Agents can open **sub-sessions** that you can see, steer and close. |
+| **Plans in your repository** | The Plan tab reads Markdown checklists from `plans/`, `specs/`, `.kiro/specs/` and `docs/plans/`, lets you tick them, and starts an agent on any task. |
+| **Files, browser and processes** | An editor with Markdown, Mermaid, CSV, PDF and notebook viewers, a browser pane with a design mode, and a Processes panel that shows each session's programs and ports. |
+| **Remote work** | SSH projects, a Termius-style hosts page with keys, port forwarding and file transfer, and agent panes on any server, kept alive with `tmux`. |
+| **Your phone** | An optional, end-to-end encrypted phone app lists your sessions, buzzes when one needs you and lets you answer it. |
+| **Make it yours** | Agent setup for MCP servers and instruction files, plugins, quick commands, automations, shortcuts, themes, offline voice dictation, settings export, and English or Vietnamese. |
 
-You open the project, start an agent, and put a shell beside it. Now the explanation, the test output and the branch are visible together. When a task gets bigger, split the pane again or arrange the tab into a grid. When one detail needs your full attention, maximize that pane without stopping its neighbours.
+## See it in action
 
-**Keep the tools you chose. Change how you work around them.** Kelpie launches installed CLIs such as Claude Code, Codex and OMP; it does not replace their models, subscriptions or permission systems. A plain PowerShell session belongs in the workspace just as naturally as an agent.
+The tour below follows one small checkout change through a working day. The projects and planning data are samples. The shell output and every agent answer are real executions with real sign-ins, and [capture.json](docs/screenshots/capture.json) records which parts are sample data.
+
+### Give every task a home
+
+You open the project, start an agent and put a shell beside it. The explanation, the test output and the branch are now visible together. When a task grows, you split the pane again or arrange the tab into a grid. When one detail needs your full attention, you maximize that pane without stopping its neighbours.
+
+In the picture at the top, four agents work on the same checkout at once, in three different agent CLIs: Claude Code, Codex and OMP in their own terminal interfaces, and a second Claude Code session in Kelpie's chat view. Kelpie launches each installed CLI exactly as it is, and a plain PowerShell or Bash session belongs in the workspace just as naturally as an agent.
 
 <details>
-<summary><strong>Meet the sessions: OMP, Codex, Claude Code and PowerShell</strong></summary>
+<summary><strong>Meet the sessions: Claude Code, Codex, OMP, Claude Code chat and PowerShell</strong></summary>
 
-**OMP** reads the checkout implementation and explains its shipping and rounding boundaries.
+**Claude Code** keeps its native terminal interface and names the riskiest checkout boundaries.
 
-![OMP's real terminal response and file-reading activity inside Kelpie](docs/screenshots/omp.png)
+![Claude Code's real answer in its own terminal interface inside Kelpie](docs/screenshots/claude.png)
 
-**Codex** runs in its own terminal pane. This capture shows its actual sign-in screen using a separate demo configuration, not a completed Codex task.
+**Codex** reads the smoke checks and suggests a missing assertion for the free-shipping boundary.
 
-![Codex CLI's ChatGPT, device-code and API-key sign-in choices inside Kelpie](docs/screenshots/codex.png)
+![Codex CLI's real answer inside Kelpie](docs/screenshots/codex.png)
 
-**Claude Code** keeps its native terminal interface. No Claude model turn was requested for this capture.
+**OMP** reads the checkout code and explains its shipping and rounding rules.
 
-![Claude Code's native interface in the demo project](docs/screenshots/claude.png)
+![OMP's real terminal answer and file-reading activity inside Kelpie](docs/screenshots/omp.png)
 
-**PowerShell 7** runs the sample's assertions and prints a calculated checkout quote.
+**Claude Code in chat view** answers the same kind of question as a conversation, with its tool rows and model controls; the [chat section](#read-the-result-in-the-form-that-makes-sense) shows it.
 
-![PowerShell 7 showing its version, passing checks and a real checkout quote](docs/screenshots/powershell.png)
+**PowerShell 7** runs the sample's checks and prints a real checkout quote.
+
+![PowerShell 7 showing its version, passing checks and a checkout quote](docs/screenshots/powershell.png)
 
 </details>
 
 <details>
-<summary><strong>Choose the agent, choose the layout, keep a shell close</strong></summary>
+<summary><strong>Start from a clean welcome, choose the agent, choose the layout</strong></summary>
 
-![Kelpie's new-session launcher with installed agents and placement options](docs/screenshots/new-session.png)
+![Kelpie's welcome screen with Kip, the project and SSH buttons and the command palette](docs/screenshots/welcome.png)
+
+![The new-session launcher with installed agents and placement options](docs/screenshots/new-session.png)
 
 ![Pane layout choices over a split workspace](docs/screenshots/layouts.png)
 
@@ -61,79 +96,83 @@ You open the project, start an agent, and put a shell beside it. Now the explana
 
 </details>
 
-### Then, let the tasks take different paths
+### Let the tasks take different paths
 
-The checkout change turns into two questions: how should coupon input be normalized, and where should free shipping begin? They belong to the same project, but they do not have to share a working copy.
+The checkout change turns into two questions: how should coupon input be normalized, and where should free shipping begin? Both questions belong to the same project, but they do not need to share a working copy.
 
-Create a Git worktree for each task. Kelpie keeps them beneath their parent project, with their own sessions and a comment explaining the work. The board turns those folders into a readable picture: **Todo → In progress → Review → Done**.
-
-**Parallel work should be easy to distinguish—not merely easy to launch.** A branch name tells you where the code lives; a worktree comment and board stage tell you why you care about it now.
+You create a Git worktree for each task. Kelpie keeps the worktrees under their parent project, each with its own sessions and a comment that explains the work. The board turns those folders into one readable picture: **Todo → In progress → Review → Done**.
 
 ![The workspace board with eight sample projects and two worktrees across Todo, In progress, Review and Done](docs/screenshots/board.png)
 
 <details>
-<summary><strong>From a new worktree to a plan stored in your repository</strong></summary>
+<summary><strong>From a new worktree to a plan and a run</strong></summary>
+
+The new-worktree dialog shows the repository's `.kelpie.yaml` setup and runs it only after you approve that exact file.
 
 ![The new-worktree dialog with branch, base reference, folder and setup options](docs/screenshots/worktree-dialog.png)
 
-The Plan tab reads checklists from repository Markdown. Tick a task and the file changes on disk; the plan remains part of the project rather than a separate project-management database.
+The Plan tab reads checklists from Markdown in your repository. When you tick a task, the file on disk changes by that one character.
 
-![Completed and pending release tasks in Kelpie's Plan tab](docs/screenshots/plan.png)
+![Completed and pending tasks in Kelpie's Plan tab](docs/screenshots/plan.png)
+
+A run splits a larger job into agent tasks. In this run, two tasks wait for your approval and will each get a worktree of their own when they start, and a cross-review task waits for both.
+
+![The Runs page with a three-task checkout run waiting for approval](docs/screenshots/runs.png)
 
 </details>
 
-### Step away without abandoning the session
+### Know which session needs you
 
-Another project needs you. Later, you close the window. The local agent processes do not belong to that window: **the background daemon, `kelpied`, owns them**. Reopen Kelpie and reconnect to the sessions instead of rebuilding your workspace from memory.
-
-When a session needs an answer, the dashboard and activity inbox help you find it. Scheduled automations also belong to the daemon, so their schedule does not depend on keeping the desktop window open.
-
-Closing the window is not the same as stopping the daemon or rebooting the computer. After a daemon restart, interrupted sessions use the supported agent's resume workflow; see [session recovery](docs/user-guide.md#resuming-after-a-restart).
-
-<details>
-<summary><strong>Find what needs you, see what happened, schedule the repeatable work</strong></summary>
+While the agents work, you look at something else. When a session asks a question, it moves to *Needs you* on the dashboard, its row turns amber in the sidebar, and the bell in the status bar gets a dot. You answer the prompt from the dashboard without opening its tab, and `Ctrl+Shift+.` takes you to the next session that is waiting.
 
 ![The session dashboard with a real shell confirmation prompt waiting for an answer](docs/screenshots/dashboard.png)
 
-![The activity inbox with explicitly labelled sample notifications](docs/screenshots/inbox.png)
+<details>
+<summary><strong>Activity, automations and your phone</strong></summary>
+
+![The activity inbox with clearly labelled sample notifications](docs/screenshots/inbox.png)
+
+The automation examples below are disabled, so they cannot start paid model calls by surprise.
 
 ![Three disabled sample automations with their agents and schedules](docs/screenshots/automations.png)
 
-The automation examples are disabled. They illustrate the setup without unexpectedly starting paid model calls.
+You can also [pair a phone](docs/user-guide.md#phone-access). The phone lists your sessions, buzzes when one needs you, shows its screen and, if you allow it, sends replies.
 
 </details>
 
-### Come back to a review, not just a “done” message
+### Review the result, not just a "done" message
 
-An agent finishes. That is the beginning of your review, not a reason to skip it.
+An agent finishes. That moment starts your review; it is not a reason to skip it.
 
-Open the diff, look at the changed line, and leave a note where the question belongs. Send the notes back to an agent as one focused request. The Changes panel keeps Git operations nearby; the worktree review queue connects the result to checks and finishing options.
-
-**The useful hand-off is the code plus the context needed to judge it.** Kelpie keeps both in the same workspace, from the first prompt to the final diff.
+You open the diff, look at the changed line, and leave a note where the question belongs. Kelpie sends all notes to an agent as one focused request. You can also ask a second agent from another vendor to review the same worktree and leave its own notes on the diff.
 
 ![A checkout diff with a review note on coupon normalization and the Changes panel beside it](docs/screenshots/review-notes.png)
 
+When the work is ready, **Finish** commits what is left, merges with the method you choose, runs the checks from `.kelpie.yaml` that you approved, and removes the worktree only after everything else succeeded. It never forces anything.
+
+![The Finish dialog for the coupon-validation worktree with its merge method and approved check](docs/screenshots/finish.png)
+
 <details>
-<summary><strong>Inspect the change and draft the next request</strong></summary>
+<summary><strong>Inspect the change, draft the next request, try several agents</strong></summary>
 
 ![The Changes panel with the sample repository's uncommitted checkout change](docs/screenshots/changes.png)
 
-![The floating composer with a drafted checkout review request for OMP](docs/screenshots/composer.png)
+![The floating composer with a drafted checkout review request](docs/screenshots/composer.png)
 
-The composer supports file and context mentions, images and project prompt history. The text shown here is a draft, not an agent response.
+*Try with several agents* gives one prompt to two to five agents, each in its own worktree. The Compare view then shows time, cost, changed lines and checks side by side.
+
+![The Try with several agents dialog with a shipping-boundary prompt](docs/screenshots/try.png)
 
 </details>
 
 ### Read the result in the form that makes sense
 
-Sometimes you want the agent's TUI. Sometimes you want a conversation with rendered Markdown, tool activity and model controls. Supported agents can use Kelpie's chat view, with terminal/chat hand-off designed to keep one writer for a conversation.
+Sometimes you want the agent's own terminal interface. Sometimes you want a conversation with rendered Markdown, tool activity and model controls. Supported agents can switch to Kelpie's chat view and back in the same conversation, and Kelpie makes sure that only one front end writes to it.
 
-The surrounding evidence matters too. Read source in the editor, open an architecture diagram as Markdown, or inspect a CSV as a table. You do not have to flatten every artifact into terminal output to keep it near the task.
-
-![An actual OMP chat response explaining checkout rounding and shipping boundaries, with tool activity and model controls](docs/screenshots/chat.png)
+![A real Claude Code answer in Kelpie's chat view, with tool activity, the context ring and model controls](docs/screenshots/chat.png)
 
 <details>
-<summary><strong>Source, diagrams, data and search—without leaving the project</strong></summary>
+<summary><strong>Source, diagrams, data, notebooks and search</strong></summary>
 
 ![The checkout implementation in Kelpie's source editor](docs/screenshots/editor.png)
 
@@ -141,36 +180,46 @@ The surrounding evidence matters too. Read source in the editor, open an archite
 
 ![The CSV viewer displaying synthetic demo measurements](docs/screenshots/csv.png)
 
+![A notebook with a daily revenue summary rendered in Kelpie](docs/screenshots/notebook.png)
+
 ![Global search finding sample projects and sessions](docs/screenshots/search.png)
 
 </details>
 
-### Bring the browser along, too
+### Bring the browser and the servers along
 
-The next question is on a web page. Open it beside the agent rather than burying the workspace behind another application.
-
-Here, **ChatGPT web and OMP's CLI are separate panes in Kelpie**. ChatGPT is the real, signed-out website—not a bundled model client, a Codex session, or a fabricated conversation.
+The next question is on a web page. You open it beside the agent instead of burying the workspace behind another application. Here, ChatGPT's website and OMP's CLI are two separate panes in Kelpie. The website is the real, signed-out page; it is not a bundled model client.
 
 ![ChatGPT web and a real OMP checkout review side by side in native browser and terminal panes](docs/screenshots/chatgpt.png)
 
-A web page an agent starts gets a tab of its own in the background, and the [Processes panel](docs/user-guide.md#processes-ports-and-preview) shows and stops what each session runs.
+When an agent starts a dev server, the page gets a tab of its own in the background. The **Processes** panel shows what each session runs, with PIDs, memory, CPU and ports, and stops a program only after it tells you what will end.
 
-When the work grows beyond the local machine, Kelpie also offers [SSH projects and panes](docs/user-guide.md#remote-projects-ssh), [orchestration runs](docs/user-guide.md#orchestration-runs), [issue integrations](docs/user-guide.md#issue-trackers-and-gitlab) and opt-in [phone access](docs/user-guide.md#phone-access). These have their own setup and security boundaries; the local screenshot tour does not claim to have exercised them.
+![The Processes panel showing the sample catalog server and its port 8765](docs/screenshots/processes.png)
 
-### Finally, make it feel like your workspace
+When the work moves to a server, the **SSH hosts** page keeps your machines, keys, port forwards and file transfers in one place. Agent panes on a server run inside `tmux`, so they survive a dropped connection.
 
-A workbench is something you spend time in. Choose a dark or light interface, tune terminal fonts and colours, adjust density and text size, and record shortcuts that fit your keyboard. English and Vietnamese are available without turning your project into a different environment.
+![The SSH hosts page with three demo hosts grouped by environment](docs/screenshots/hosts.png)
 
-**You bring the workflow. Kelpie gives it room.**
+### Update without stopping the work
+
+Kelpie checks for a new release in the background. When you choose **Install now**, or **Install when idle**, only the window restarts. The daemon keeps every terminal and agent running, and the window reconnects to the same screens. You never have to wait for an agent to finish before you update. The one exception is the first update from an early 0.1 release whose daemon still ran from the install folder: that update stops sessions once, says so first, and agents resume.
+
+When you quit Kelpie, it asks first if something is still running, and then stops its sessions. The next time you open it, agents resume the same conversation. If you want automations, phone access or file copies to continue with the window closed, you can [keep the daemon running in the background](docs/user-guide.md#install).
+
+### Make it your workspace
+
+A workbench is a place where you spend hours. You can choose a dark or light interface, tune terminal fonts and colours, change density and text size, and record shortcuts that fit your keyboard. The interface is available in English and Vietnamese.
 
 ![Appearance settings with language, theme, density, text-size and mascot controls](docs/screenshots/settings.png)
 
 <details>
-<summary><strong>Fonts, agents, shortcuts, light theme and Vietnamese</strong></summary>
+<summary><strong>Fonts, agents, plugins, shortcuts, light theme and Vietnamese</strong></summary>
 
 ![Terminal settings with font, shell and colour-palette controls](docs/screenshots/terminal-settings.png)
 
 ![Installed and available agent presets in Settings](docs/screenshots/agents.png)
+
+![The demo plugin listed in Settings and waiting for review](docs/screenshots/plugins.png)
 
 ![Configurable keyboard shortcuts](docs/screenshots/shortcuts.png)
 
@@ -180,90 +229,151 @@ A workbench is something you spend time in. Choose a dark or light interface, tu
 
 </details>
 
-## Start your first session
+## Everything in the box
 
-1. **[Download Kelpie](https://github.com/baopeak/kelpie/releases).** Use the Windows installer, or open the macOS disk image and drag Kelpie to Applications.
-2. **Install and sign in to the agent CLIs you want to use.** Kelpie detects them through PATH on Windows or your login shell on macOS. Check **Settings → Agents**.
-3. **Add a project folder and start a session.** Put a shell beside it, give the agent a task, and keep the result in view.
+<details>
+<summary><strong>The full feature list, with links to the user guide</strong></summary>
 
-Windows 10 1809+ and Windows 11 are supported. macOS 12+ builds are produced by CI but have had less hands-on testing than Windows. The GitHub CLI (`gh`) is optional for pull-request workflows; remote sessions need your SSH setup and, for persistence on the host, `tmux`.
+**Workspace**
+- [Projects and worktrees](docs/user-guide.md#everyday-use) appear in a sidebar that shows each session's status, task title, model and last activity.
+- [Tabs, splits, grids and saved layouts](docs/user-guide.md#layouts) let you arrange as many sessions as you need, and *Broadcast input* types into every terminal of a tab.
+- [Search everything](docs/user-guide.md#everyday-use) finds sessions, projects, files, commands, settings and earlier prompts from one box.
+- [Past conversations](docs/user-guide.md#past-conversations) of Claude Code, Codex and OMP can be searched and resumed in a terminal or in chat view.
 
-## Try the demo yourself
+**Agents**
+- Kelpie knows [23 agent CLIs](docs/user-guide.md#agents), including Claude Code, Codex, OMP, Gemini, Cursor, OpenCode and GitHub Copilot, and it can add agents from the Agent Client Protocol registry.
+- [Chat view](docs/user-guide.md#everyday-use) continues the same conversation with tool cards, approvals, an agent map, saved replies and pictures.
+- [Several accounts](docs/user-guide.md#several-claude-code--codex-accounts) of Claude Code or Codex can be used side by side, and a session can move to another account when it reaches its usage limit.
+- [Sub-sessions](docs/user-guide.md#sub-sessions) let an agent open other agent sessions, with your approval and within limits you set.
+- [Hand-off, hibernation, compact and restart](docs/user-guide.md#agents) keep long conversations healthy.
 
-The screenshot workspace contains **eight small local Git projects and two extra worktrees**. Each project includes runnable Python-standard-library behavior, smoke assertions, architecture Markdown, a synthetic CSV dataset and a release checklist. They illustrate domains, not production mobile applications or deployed infrastructure.
+**Attention and cost**
+- The [dashboard and quick answers](docs/user-guide.md#everyday-use) show every session that waits for you, the longest wait first.
+- [Activity and notifications](docs/user-guide.md#activity-and-notifications) reach your desktop, ntfy, Telegram or a webhook.
+- [Context, tokens and cost](docs/user-guide.md#context-tokens-and-cost) appear on every session, with a usage page and an optional cost cap.
 
-| Project | The task in the story |
+**Review and Git**
+- The [Changes panel](docs/user-guide.md#source-control-and-review) pushes, pulls, switches branches, shows history and stashes, drafts commit messages and opens pull requests.
+- [Review notes, review queue and Finish](docs/user-guide.md#review-and-finish) take a worktree from "done" to merged.
+- [Review with another agent and best of several](docs/user-guide.md#review-with-another-agent-and-best-of-several) compare independent attempts.
+- [Turns and undo](docs/user-guide.md#turns-and-undo) restore what one agent turn changed, after a preview.
+
+**Planning and automation**
+- [Orchestration runs](docs/user-guide.md#orchestration-runs) start agent tasks in order of their dependencies.
+- The [Plan tab](docs/user-guide.md#specs-and-tasks-the-plan-tab) reads, ticks and runs the checklists in your repository.
+- [Automations](docs/user-guide.md#automations) start agents or approved commands on a schedule or when a file, commit, check or worktree changes.
+- [Issue trackers](docs/user-guide.md#issue-trackers-and-gitlab) connect Linear, Jira and GitLab to new sessions and worktrees.
+
+**Files, browser and processes**
+- The [editor and viewers](docs/user-guide.md#files) open source, Markdown, Mermaid, CSV, PDF and Jupyter notebooks.
+- [Browser panes](docs/user-guide.md#browser-panes-and-design-mode) include developer tools and a design mode that sends picked elements to an agent.
+- The [Processes panel](docs/user-guide.md#processes-ports-and-preview) lists each session's programs and ports and stops them safely.
+
+**Remote and mobile**
+- [Remote projects](docs/user-guide.md#remote-projects-ssh), the [SSH hosts page](docs/user-guide.md#ssh-hosts) and [SSH panes in any project](docs/user-guide.md#ssh-panes-in-any-project) bring servers into the same workspace.
+- [Keeping sessions running on a server](docs/user-guide.md#keeping-sessions-running-on-a-server) explains the `tmux` setup.
+- [Phone access](docs/user-guide.md#phone-access) pairs a phone through Kelpie's relay, Tailscale or your local network.
+
+**Personal setup**
+- [Agent setup](docs/user-guide.md#agent-setup) manages MCP servers, instruction files and skills for every agent in one place.
+- [Plugins](docs/user-guide.md#plugins), [quick commands](docs/user-guide.md#quick-commands) and the [composer](docs/user-guide.md#composer) extend what you can launch and send.
+- [Voice dictation](docs/user-guide.md#voice-dictation) recognises speech on your computer; nothing is sent anywhere.
+- [Export and import settings](docs/user-guide.md#export-and-import-settings) move your setup to another computer without its secrets.
+- [Keyboard shortcuts](docs/user-guide.md#keyboard-shortcuts) can all be changed.
+
+</details>
+
+## Start in three steps
+
+1. **[Download Kelpie](https://github.com/baopeak/kelpie/releases).** Run the Windows installer, drag the macOS app to Applications, or use the Linux AppImage or `.deb` package.
+2. **Install and sign in to the agent CLIs you want to use.** Kelpie finds them on your `PATH` or through your login shell. Settings → Agents shows which agents it found.
+3. **Add a project folder and start a session.** Put a shell beside the agent, give the agent a task, and keep the result in view.
+
+Kelpie supports Windows 10 1809+ and Windows 11, macOS 12+, and Linux x86-64 with glibc 2.35 or newer. Windows receives the most hands-on testing. The GitHub CLI (`gh`) is optional and enables pull-request features. Remote sessions use your own OpenSSH setup and, for persistence on the server, `tmux`.
+
+## Try the demo kit
+
+The demo kit creates **eight small Git projects, two worktrees and a demo plugin** in a folder you choose. Every project runs with the Python standard library and includes smoke checks, architecture Markdown with a Mermaid diagram, a synthetic CSV dataset and a release checklist. The projects illustrate domains; they are not production applications.
+
+| Project | Its part in the story |
 |---|---|
-| `atlas-commerce` | Checkout quotes, coupon normalization, rounding and free-shipping boundaries; two worktrees and an uncommitted change for review |
-| `beacon-api` | Product-catalog queries and category filtering |
-| `orbit-mobile` | Offline note synchronization and conflict handling |
-| `prism-design` | Colour tokens and accessibility checks |
-| `harbor-infra` | Staging capacity and rollout planning |
-| `pulse-analytics` | Daily revenue aggregation and CSV export |
-| `relay-workers` | A deterministic job queue and retry-policy planning |
-| `field-notes` | A searchable Markdown research index |
+| `atlas-commerce` | Checkout quotes, coupon normalization and the free-shipping boundary. It has a full `.kelpie.yaml`, a plan with two phases, a run file, two worktrees (one with a finished commit) and an uncommitted change to review. |
+| `beacon-api` | A product catalog with category filtering and an optional local server on port 8765. |
+| `orbit-mobile` | Offline note synchronization with conflict reporting. |
+| `prism-design` | Colour tokens and contrast checks. |
+| `harbor-infra` | Staging capacity and rollout planning. |
+| `pulse-analytics` | Daily revenue aggregation, a CSV export and a notebook. |
+| `relay-workers` | A deterministic job queue and retry-policy planning. |
+| `field-notes` | A searchable Markdown research index. |
 
-Generate the projects into a new, empty directory outside this repository:
+Generate the kit into a new, empty folder outside this repository:
 
 ```bash
 python scripts/e2e/readme_demo.py ../kelpie-demo-projects
 python ../kelpie-demo-projects/atlas-commerce/smoke.py
 ```
 
-Add the folders in Kelpie, or run the [native screenshot walkthrough](scripts/e2e/readme_shots.py). On Windows it requires built app/daemon binaries, `tauri-driver`, and `msedgedriver` matching the installed WebView2 runtime:
+Then add the folders in Kelpie and follow the **[demo scripts](docs/demo-scripts.vi.md)** (in Vietnamese). They contain a three-minute pitch, a fifteen-minute tour and optional scenes, each with steps, narration and the expected result.
+
+<details>
+<summary><strong>Recapture the screenshots</strong></summary>
+
+The [screenshot tour](scripts/e2e/readme_shots.py) drives the real app with WebDriver. It needs a built app and daemon, `tauri-driver`, and an `msedgedriver` that matches the installed WebView2 runtime:
 
 ```bash
+cd app && pnpm tauri build --debug --no-bundle && cd .. && cargo build -p kelpied
 python -X utf8 scripts/e2e/readme_shots.py docs/screenshots ../kelpie-demo-projects \
-  --app target/release/kelpie.exe --native-driver /path/to/msedgedriver.exe \
-  --chat omp --agents --browser
+  --app target/debug/kelpie.exe --native-driver /path/to/msedgedriver.exe \
+  --agents --browser
 ```
 
-The walkthrough uses a separate data folder and daemon endpoint. `--chat omp` and `--agents` make real OMP model calls with your existing sign-in. Omit those options and `--browser` for the shell-only tour. Codex uses a clean demo home and is captured at sign-in; ChatGPT web is not signed in.
+The tour uses its own data folder, daemon endpoint and empty SSH folder, so it never touches your sessions, keys or settings. The images are Full HD (1920 × 1080). `--agents` starts Claude Code, Codex and OMP in their terminals and Claude Code in chat view, each on one read-only task, and makes real model calls with your own sign-ins; leave out `--agents` and `--browser` for a tour without agents. Claude Code and Codex may ask once to trust the demo folder, and the tour answers yes. The agents keep their usual transcripts of these demo turns in their own folders, as any session of yours would. ChatGPT web is not signed in. The SSH hosts use documentation addresses and are never contacted. The tour writes [capture.json](docs/screenshots/capture.json) with the app version, the screenshots and every check it ran.
 
-Board stages, comments, review notes, notifications and disabled automations are seeded scenario data. CSV values are synthetic, not Kelpie benchmarks. No private conversation history is seeded. The gallery uses complete app views at 1600 × 1000, with a native whole-window capture for the browser split. [Capture provenance and checks](docs/screenshots/capture.json) distinguish sample data from executed results.
+</details>
 
-## Why the window can close
+## How it works
 
-Kelpie separates the desktop interface from the session runtime. The SolidJS interface presents the workspace; the Rust daemon owns local processes, terminal state and persistent session work. The desktop reconnects over a local named pipe or Unix socket.
+Kelpie separates the window from the work. The SolidJS interface presents the workspace. The Rust daemon, `kelpied`, owns the terminals, agent processes, automations, runs and phone link, and the window talks to it over a local named pipe or Unix socket.
 
-Hidden terminals do not need to keep rendering. A returning view receives replayed output or a snapshot, rather than asking the agent to start over. That separation is the foundation for a workspace that can stay useful as more sessions accumulate—not a promise that running more agents consumes no resources.
+A terminal that is not on screen does not need to render. When you return to it, the window receives the missing output or a snapshot instead of asking the agent to start over. That separation lets an update restart the window while every agent keeps working, and it keeps the workspace responsive as sessions accumulate. It does not mean that more agents cost nothing; each agent still uses memory, CPU and tokens.
 
-Read the [architecture](docs/architecture.md) for ownership, transport and recovery contracts, and the [performance procedure](scripts/perf/README.md) for measurement methods and budgets. Historical measurements are kept in [reports](plans/reports/); synthetic demo CSVs are not performance evidence.
+Read the [architecture](docs/architecture.md) for ownership, transport and recovery contracts, and the [performance procedure](scripts/perf/README.md) for measurement methods and budgets.
 
 ## Your tools, your data, your decisions
 
-- **Local workspace state.** Sessions, layouts and settings are stored on your machine. Kelpie has no telemetry. Your agent CLIs still contact their model providers under their own accounts and policies.
-- **Explicit connections.** Remote hosts, issue trackers, notification providers and optional phone access require configuration. Phone access is off by default. What a paired phone sees and sends is end-to-end encrypted, each phone is approved on the computer by typing a code it shows and passing the operating system's own check (Windows Hello or your password, Touch ID on macOS), and there is no Kelpie account. With the optional Tailscale mode, which you turn on, your computer's name appears in public certificate logs and Tailscale sees connection metadata, not content. A phone that turns alerts on gets them through its own push service (Apple's, Google's, Mozilla's or Microsoft's), directly from your computer: that service sees the address, size and time of an encrypted message, and the message holds a fixed sentence and a link, no session text. A phone paired over HTTPS or Tailscale opens only after Face ID, a fingerprint or its passcode, checked by your computer with a passkey that stays on the phone; what the phone last showed stays in its browser's storage, not encrypted. Telegram, if you use it, reads its messages, which are not end-to-end encrypted: with its link on, it sees your computer's name in the link. Approving from Telegram is off unless you turn it on and bind one Telegram account; then that account can approve a request Kelpie labels low risk, once each, with no Face ID, and Telegram sees the command. In a new setup, turning phone access on also turns on the relay (a setup from before keeps what it had, and the relay stays a switch you choose): a phone then reaches your computer through Kelpie's relay on Cloudflare, or one you run yourself, with no Tailscale on either end. The relay passes on encrypted frames it cannot read, and sees that a phone and your computer are connected, their internet addresses, when, how much they send and the room's number; it keeps no content. Kelpie's relay also serves the phone app that pairs with your computer, so whoever controls that Cloudflare account or Kelpie's release deploy could send your phone different code that reads your sessions and types into them while the app is unlocked. Each release publishes the app's fingerprint, and a script in this repository checks what the relay serves against it; nobody can check what one phone received. A phone on that app can read and type, never take over the screen or a browser pane, and always uses the app lock. For a phone app served only by your computer, turn on Tailscale mode instead; a relay you run yourself on a server serves no app, so its phones use Tailscale too.
-- **Credentials are not all alike.** Supported integration secrets use the OS credential store, but environment variables you enter in agent settings are stored as plain text. Do not put secrets into project files for a demo.
-- **Review remains yours.** Worktree setup, finishing checks and agent permissions have approval controls. Kelpie organizes the workflow; it does not make an agent's output trustworthy by itself.
+- **Your workspace stays on your computer.** Sessions, layouts and settings are stored locally, and Kelpie sends no telemetry. Your agent CLIs still contact their model providers under their own accounts and policies.
+- **Every connection is one you turn on.** Remote hosts, issue trackers, notification channels and phone access all need explicit setup, and phone access is off by default.
+- **The phone link is end-to-end encrypted.** You approve each phone on the computer by typing the code it shows and passing your operating system's own check, such as Windows Hello or Touch ID. Kelpie needs no account. The relay that connects a phone over the internet passes encrypted frames it cannot read, but it sees connection metadata, and the hosted phone app's code comes from that relay. The [phone access guide](docs/user-guide.md#phone-access) explains this trust model, the Tailscale alternative and how to check what the relay serves.
+- **Secrets are handled with care, within limits.** Integration tokens, SSH passwords and notification tokens go to the operating system's credential store. Environment variables that you enter in agent settings are stored as plain text, so do not put secrets there or in demo projects.
+- **Review remains your job.** Worktree setup, finishing checks, automation commands, plugins and agent permissions all ask for your approval. Kelpie organizes the work; it does not make an agent's output trustworthy by itself.
 
-For detailed storage, authentication and transport boundaries, read the [architecture](docs/architecture.md). If you are upgrading from the former Erka name, quit Erka before launching Kelpie; existing repositories' `.erka.yaml` setup files remain supported. See the [user guide](docs/user-guide.md) for day-to-day operation.
+If you are upgrading from the former Erka name, quit Erka before launching Kelpie. Existing `.erka.yaml` files keep working.
 
 ## Build from source
 
-Requirements: Rust stable, Node.js 22+, pnpm 11, and the platform's native build tools (MSVC on Windows; Apple tooling on macOS).
+You need Rust stable, Node.js 22+, pnpm 11 and your platform's native build tools: MSVC on Windows, Apple tooling on macOS, and the WebKitGTK packages listed in the [user guide](docs/user-guide.md#build-from-source) on Linux.
 
 ```bash
 # Frontend dependencies
 cd app && pnpm install --frozen-lockfile && cd ..
 
-# Shell 1: isolated development daemon
+# Shell 1: an isolated development daemon
 bash scripts/dev-daemon.sh run
 
-# Shell 2: desktop app using that daemon
+# Shell 2: the desktop app connected to that daemon
 cd app && KELPIE_ENDPOINT=kelpie-dev pnpm tauri dev
 ```
 
 In PowerShell, set `$env:KELPIE_ENDPOINT = 'kelpie-dev'` before the desktop command. Vite alone cannot exercise the native desktop APIs.
 
-For an installer, use the repository's [release script](scripts/build-release.sh):
+To build an installer, use the [release script](scripts/build-release.sh):
 
 ```bash
 KELPIE_KEEP_VERSION=1 bash scripts/build-release.sh --bundles nsis
-# macOS: --bundles app,dmg
+# macOS: --bundles app,dmg    Linux: --bundles appimage,deb
 ```
 
-Without `KELPIE_KEEP_VERSION=1`, the release script bumps the patch version. It also builds native sidecars, so it is not a lightweight verification command.
+Without `KELPIE_KEEP_VERSION=1`, the release script bumps the patch version. It also builds native sidecars, so it is not a quick verification command.
 
 ### Checks and real-app verification
 
@@ -277,9 +387,7 @@ pnpm test
 pnpm i18n:check
 ```
 
-CI exercises the Rust suite on both Windows and macOS. A local pass on one platform does not replace the other platform's checks.
-
-`cargo test --workspace` also includes the optional native speech helper. Real-app scenarios live in [scripts/e2e](scripts/e2e); inspect their prerequisites first, because some use signed-in agents, remote fixtures or paid model calls. Keep test daemons isolated from personal sessions. Performance verification is documented in [scripts/perf/README.md](scripts/perf/README.md).
+CI runs the Rust suite on Windows and macOS. A local pass on one platform does not replace the other platform's checks. `cargo test --workspace` also includes the optional native speech helper. Real-app scenarios live in [scripts/e2e](scripts/e2e); read their prerequisites first, because some use signed-in agents, remote fixtures or paid model calls. Keep test daemons isolated from your own sessions.
 
 ### Scripting the workbench
 
@@ -289,22 +397,24 @@ Agents and local scripts can inspect sessions and report progress through `kelpi
 kelpied terminal list
 kelpied terminal read 3 --lines 80
 kelpied worktree set --comment "checkout ready for review" --status review
-kelpied run report done "checks passed"
+kelpied run create runs/checkout-hardening.json
+kelpied sub spawn codex "check the catalog filter" --worktree
 ```
 
-Session-scoped calls and user-only administration have different permissions. See [automation and CLI usage](docs/user-guide.md#automation) before scripting control of other sessions.
+Session-scoped calls and user-only administration have different permissions. Read [automation and CLI usage](docs/user-guide.md#automation) before you script control of other sessions.
 
 ## Go deeper
 
-- [User guide](docs/user-guide.md) — everyday workflows, worktrees, chat, remote hosts, phone access, voice and integrations.
-- [Keyboard shortcuts](docs/user-guide.md#keyboard-shortcuts) — defaults and customization.
-- [Architecture](docs/architecture.md) — process ownership, security, transport, replay and recovery.
-- [Plugins](docs/plugins.md) — declarative extensions and approval.
-- [Brand](docs/brand.md) — visual identity and Kip.
-- [Performance](scripts/perf/README.md) — reproducible measurement rather than marketing numbers.
+- [User guide](docs/user-guide.md) and [hướng dẫn tiếng Việt](docs/user-guide.vi.md) cover everyday workflows, worktrees, chat, remote hosts, phone access, voice and integrations.
+- [Demo scripts](docs/demo-scripts.vi.md) help you present Kelpie with the demo kit.
+- [Architecture](docs/architecture.md) explains process ownership, security, transport, replay and recovery.
+- [Plugins](docs/plugins.md) describes declarative extensions and their review.
+- [Relay self-hosting](docs/relay-self-host.md) and the [link protocol](docs/link-protocol.md) document the phone connection.
+- [Brand](docs/brand.md) presents the visual identity and Kip.
+- [Performance](scripts/perf/README.md) documents reproducible measurements instead of marketing numbers.
 
 ## License and acknowledgements
 
-Kelpie is [MIT licensed](LICENSE). The bundled Windows ConPTY binaries are Microsoft's, also MIT; see [ConPTY notes](docs/third-party-conpty.md).
+Kelpie is [MIT licensed](LICENSE). The bundled Windows ConPTY binaries are Microsoft's and also MIT licensed; see the [ConPTY notes](docs/third-party-conpty.md).
 
-Claude, Codex, Gemini, Cursor, OpenCode, GitHub Copilot and their logos are trademarks of their respective owners. Kelpie launches these tools but is not affiliated with or endorsed by them. [Agent logo credits](docs/third-party-agent-logos.md).
+Claude, Codex, Gemini, Cursor, OpenCode, GitHub Copilot and their logos are trademarks of their respective owners. Kelpie launches these tools but is not affiliated with or endorsed by them. See the [agent logo credits](docs/third-party-agent-logos.md).
