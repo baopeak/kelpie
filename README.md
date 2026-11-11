@@ -2,7 +2,7 @@
 
 <h1 align="center">Kelpie</h1>
 
-<p align="center"><strong>Every coding agent you use, side by side, in one workbench that never loses track.</strong></p>
+<p align="center"><strong>Kelpie keeps every coding agent you use side by side on one screen, so no task gets lost.</strong></p>
 
 <p align="center">
   <a href="https://github.com/baopeak/kelpie/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/baopeak/kelpie?label=download"></a>
@@ -20,17 +20,15 @@
 
 ![Four agents at work in one Kelpie tab: Claude Code, Codex and OMP in their own terminals and Claude Code in chat view, all reviewing the same checkout, beside eight demo projects](docs/screenshots/workspace.png)
 
-You start one agent in a terminal. Then a second agent takes another task, a test needs its own shell, a bug needs another branch, and the browser hides somewhere behind everything else. Soon the hard part is no longer starting the work. The hard part is remembering where it went: which agent is waiting for an answer, which checkout belongs to which task, and what is actually ready to review.
-
-**Kelpie is a desktop workbench for that moment.** It runs Claude Code, Codex, OMP and twenty more agent CLIs next to your shells, across all of your projects and worktrees. It tells you which session needs you, helps you review what an agent changed, and merges the finished work safely. Its sessions live in a separate background process, so **updating Kelpie never interrupts an agent that is working**.
+Starting one coding agent is easy. Once four agents work across three Git branches and two terminal windows, though, it gets hard to remember which agent is waiting for your answer, which checkout belongs to which task, and what is actually ready to review. Kelpie brings all of it onto one screen. Claude Code, Codex, OMP and twenty more agent CLIs run next to your shells, a session that needs you stands out, and finished work moves into a review queue. Because the sessions live in a separate background process, **updating Kelpie never interrupts an agent in the middle of its work**.
 
 ## Why people use it
 
-- **You keep your own tools.** Kelpie launches the agent CLIs you already installed, with your own sign-ins, subscriptions and permission rules. It does not bundle a model, and it does not need an account.
-- **You see what needs you.** A dashboard sorts every session into *Needs you*, *Working*, *Done* and *Failed*. You can answer a waiting prompt without opening its tab, from the bell in the status bar or from your phone.
-- **Parallel work stays separate.** Each task can get its own Git worktree, its own sessions and a short comment that says why it matters. A board shows every task moving from *Todo* to *Done*.
-- **Review is part of the flow.** You read the diff, leave a note on the line that matters, and send all notes back to an agent in one request. When the work is ready, **Finish** commits, merges, runs your approved checks and cleans up.
-- **Updates do not stop the work.** The `kelpied` daemon owns every process. When Kelpie installs an update, only the window restarts, and each agent is still running when it comes back. (The one exception is described under [Install](docs/user-guide.md#install): the first update from an early 0.1 release stops sessions once.)
+- Kelpie launches the agent CLIs you already installed, with your own sign-ins, subscriptions and permission rules, so you change neither your tools nor your accounts.
+- A dashboard sorts every session into *Needs you*, *Working*, *Done* and *Failed*, and you can answer a waiting agent without opening its tab.
+- Each parallel task can get its own Git worktree, sessions and comment, while a board shows whether it sits in *Todo*, *In progress*, *Review* or *Done*.
+- When an agent finishes, you review the diff and leave notes inside Kelpie, and **Finish** then commits, merges, runs the checks you approved and cleans up the worktree.
+- The `kelpied` daemon owns every process, so when Kelpie installs an update, only the window restarts while the agents keep working.
 
 ## What is inside
 
@@ -56,7 +54,7 @@ The tour below follows one small checkout change through a working day. The proj
 
 You open the project, start an agent and put a shell beside it. The explanation, the test output and the branch are now visible together. When a task grows, you split the pane again or arrange the tab into a grid. When one detail needs your full attention, you maximize that pane without stopping its neighbours.
 
-In the picture at the top, four agents work on the same checkout at once, in three different agent CLIs: Claude Code, Codex and OMP in their own terminal interfaces, and a second Claude Code session in Kelpie's chat view. Kelpie launches each installed CLI exactly as it is, and a plain PowerShell or Bash session belongs in the workspace just as naturally as an agent.
+The picture at the top shows four agents reviewing the same checkout through three different CLIs. Claude Code, Codex and OMP run in their own terminal interfaces, while a second Claude Code session runs in Kelpie's chat view. Because Kelpie launches each CLI exactly as it is, a plain PowerShell or Bash session fits into the workspace just as naturally as an agent.
 
 <details>
 <summary><strong>Meet the sessions: Claude Code, Codex, OMP, Claude Code chat and PowerShell</strong></summary>
@@ -142,7 +140,7 @@ You can also [pair a phone](docs/user-guide.md#phone-access). The phone lists yo
 
 ### Review the result, not just a "done" message
 
-An agent finishes. That moment starts your review; it is not a reason to skip it.
+When an agent reports that it is done, your review begins; the report is not a reason to skip it.
 
 You open the diff, look at the changed line, and leave a note where the question belongs. Kelpie sends all notes to an agent as one focused request. You can also ask a second agent from another vendor to review the same worktree and leave its own notes on the diff.
 
@@ -206,9 +204,9 @@ Kelpie checks for a new release in the background. When you choose **Install now
 
 When you quit Kelpie, it asks first if something is still running, and then stops its sessions. The next time you open it, agents resume the same conversation. If you want automations, phone access or file copies to continue with the window closed, you can [keep the daemon running in the background](docs/user-guide.md#install).
 
-### Make it your workspace
+### Fit Kelpie to the way you work
 
-A workbench is a place where you spend hours. You can choose a dark or light interface, tune terminal fonts and colours, change density and text size, and record shortcuts that fit your keyboard. The interface is available in English and Vietnamese.
+Because you will spend hours in Kelpie, you can choose a dark or light interface, tune terminal fonts and colours, change density and text size, and record shortcuts that fit your keyboard. The interface is available in English and Vietnamese.
 
 ![Appearance settings with language, theme, density, text-size and mascot controls](docs/screenshots/settings.png)
 
@@ -342,11 +340,11 @@ Read the [architecture](docs/architecture.md) for ownership, transport and recov
 
 ## Your tools, your data, your decisions
 
-- **Your workspace stays on your computer.** Sessions, layouts and settings are stored locally, and Kelpie sends no telemetry. Your agent CLIs still contact their model providers under their own accounts and policies.
-- **Every connection is one you turn on.** Remote hosts, issue trackers, notification channels and phone access all need explicit setup, and phone access is off by default.
-- **The phone link is end-to-end encrypted.** You approve each phone on the computer by typing the code it shows and passing your operating system's own check, such as Windows Hello or Touch ID. Kelpie needs no account. The relay that connects a phone over the internet passes encrypted frames it cannot read, but it sees connection metadata, and the hosted phone app's code comes from that relay. The [phone access guide](docs/user-guide.md#phone-access) explains this trust model, the Tailscale alternative and how to check what the relay serves.
-- **Secrets are handled with care, within limits.** Integration tokens, SSH passwords and notification tokens go to the operating system's credential store. Environment variables that you enter in agent settings are stored as plain text, so do not put secrets there or in demo projects.
-- **Review remains your job.** Worktree setup, finishing checks, automation commands, plugins and agent permissions all ask for your approval. Kelpie organizes the work; it does not make an agent's output trustworthy by itself.
+- Kelpie stores sessions, layouts and settings on your computer and sends no telemetry, while your agent CLIs still contact their model providers under their own accounts and policies.
+- Every outside connection is one you set up yourself, including remote hosts, issue trackers, notification channels and phone access, and phone access is off by default.
+- The phone link is end-to-end encrypted. You approve each phone on the computer by typing the code it shows and passing your operating system's own check, such as Windows Hello or Touch ID. Kelpie needs no account. The relay that connects a phone over the internet passes encrypted frames it cannot read, but it sees connection metadata, and the hosted phone app's code comes from that relay. The [phone access guide](docs/user-guide.md#phone-access) explains this trust model, the Tailscale alternative and how to check what the relay serves.
+- Integration tokens, SSH passwords and notification tokens go to the operating system's credential store. Environment variables that you enter in agent settings are stored as plain text, so do not put secrets there or in demo projects.
+- Worktree setup, finishing checks, automation commands, plugins and agent permissions all ask for your approval. Kelpie organizes the work, but judging an agent's output remains your job.
 
 If you are upgrading from the former Erka name, quit Erka before launching Kelpie. Existing `.erka.yaml` files keep working.
 
@@ -411,6 +409,7 @@ Session-scoped calls and user-only administration have different permissions. Re
 - [Architecture](docs/architecture.md) explains process ownership, security, transport, replay and recovery.
 - [Plugins](docs/plugins.md) describes declarative extensions and their review.
 - [Relay self-hosting](docs/relay-self-host.md) and the [link protocol](docs/link-protocol.md) document the phone connection.
+- [Writing style](docs/writing-style.md) sets how documentation and interface text are written in English and Vietnamese.
 - [Brand](docs/brand.md) presents the visual identity and Kip.
 - [Performance](scripts/perf/README.md) documents reproducible measurements instead of marketing numbers.
 
