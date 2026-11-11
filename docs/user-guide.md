@@ -134,10 +134,11 @@ running in the background**. Updates never stop the daemon, whichever you choose
      its rows arrive.
    - The bar over the transcript names the prompt of the turn you are reading; click it to go back to
      that prompt, also from far up a long conversation. It leaves the caret in the message field.
-   - Click a file in a reply to open it: a link, a path in inline code (`src/a.ts:42` opens at that
-     line), a tool's target (an edit's opens its changes) or the file on an approval card. Something
+   - Click a file in a reply to open it: a link, a path in inline code or in the text (`src/a.ts:42` opens at that
+     line; a bare `name.py` is found by its name), a tool's target (an edit's opens its changes) or the file on an approval card. Something
      outside the project only shows a message: nothing an agent names is ever launched. Addresses in
-     your own messages open in the browser.
+     your own messages open in the browser. Right-click a named file to copy its relative or full path or its name,
+     or a link to copy its address. The same copy items are in the file tree and in a file pane's header.
    - Paste (`Ctrl+V`) or drop pictures into the message field, up to 8 and 5 MB each, also on their
      own and while the agent works. Click a thumbnail, or a picture in a reply, to enlarge it: click
      again for its real size, the arrows go through a message's pictures, `Esc` closes it without
@@ -469,7 +470,8 @@ prompt**; for a terminal it is a startup command.
 ### Terminals
 
 Right-click a terminal for copy / paste / select all / clear, **Copy Context** (the last 400
-lines as text), splits, your quick commands and hand-offs. Settings → Terminal → *Colour
+lines as text), splits, your quick commands and hand-offs. `Ctrl/⌘+click` on an address opens it; on a file path
+(`src/a.ts:42`, `D:\w\x.py`, or a bare `name.py`) it opens the file in Kelpie's viewer at that line, looked for from session's folder, then the project's, then by its name in the project. Right-click a path for *Open*, *Copy Relative*, *Copy Path*, *Copy Name* and *Reveal in Explorer*, or an address for *Open Link* and *Copy Link*. Settings → Terminal → *Colour
 theme* offers Dracula, Nord, One Dark, Tokyo Night, Catppuccin, Gruvbox, Solarized and GitHub
 Light (agents are told the same colours when they ask).
 

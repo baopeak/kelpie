@@ -1,9 +1,10 @@
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../lib/store";
 import { redact } from "../lib/ipc";
-import { getView, parkView } from "../lib/terminal-host";
+import { getView, openTerminalLink, parkView } from "../lib/terminal-host";
 import { Icon } from "./icons";
 import { openContextMenu, type MenuItem } from "./context-menu";
+import { fileRefMenuItems, linkMenuItems, sessionFiles } from "./path-menu";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { isMac } from "../lib/platform";
 import { isAgentKind, kindInfo, launchableAgents } from "../lib/agents";
@@ -112,7 +113,12 @@ export function TerminalPane(props: { sessionId: string; focused: boolean }) {
         items.push({ label: t("Hand Off to {agent}", { agent: kindInfo(kind).label }), run: () => void handOffSession(s, kind) });
       }
     }
-    openContextMenu(e, items);
+    // Over a link: what to do with it first, then the terminal's own items.
+    const url = view.hoveredUrl;
+    const file = view.hoveredFile;
+    const files = file ? sessionFiles(props.sessionId) : null;
+    if (file && files) return openContextMenu(e, [...fileRefMenuItems(files.project, file, undefined, files.cwd), null, ...items]);
+    openContextMenu(e, url ? [...linkMenuItems(url, () => openTerminalLink(url)), null, ...items] : items);
   };
 
   return (

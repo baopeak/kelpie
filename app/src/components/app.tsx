@@ -38,7 +38,9 @@ import { initRuns } from "../lib/runs";
 import { initSessionUsage } from "../lib/session-usage";
 import { initReviewWatch } from "../lib/review-queue";
 import { setCovering } from "../lib/overlays";
-import { allViews, setLinkOpener } from "../lib/terminal-host";
+import { allViews, setFileLinkOpener, setLinkOpener } from "../lib/terminal-host";
+import { openChatFile } from "./chat-open-file";
+import { sessionFiles } from "./path-menu";
 import { isLocalUrl, openBrowser } from "../lib/browser";
 import "../lib/agent-web-pages";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -139,6 +141,11 @@ export function App() {
     initVoice();
     // Dev-server links from terminals open next to the terminal.
     setLinkOpener((uri) => (store.state.settings.localhostInBrowser !== false && isLocalUrl(uri) && store.activeProject() ? openBrowser(uri, "right") : void openUrl(uri)));
+    // A file path Ctrl/Cmd-clicked in a terminal: found from the session's folder, opened in its project's viewer.
+    setFileLinkOpener((sessionId, ref) => {
+      const files = sessionFiles(sessionId);
+      if (files) void openChatFile(files.project, ref, undefined, files.cwd);
+    });
     // Files dropped from Explorer/Finder onto a terminal paste their (quoted) paths.
     void getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type !== "drop") return;

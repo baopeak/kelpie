@@ -15,7 +15,7 @@ vi.mock("../lib/store", () => ({ store: { notify, openFile } }));
 vi.mock("../lib/ipc", () => ({ readFile, quickOpen }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl, openPath, revealItemInDir }));
 
-import { openChatFile, openChatLink } from "./chat-open-file";
+import { openChatFile, openChatLink, resolveChatFile } from "./chat-open-file";
 
 const project = { id: "p1", name: "proj", path: "D:\\proj", color: "#fff" } as any;
 const hit = (path: string) => ({ path, score: 1, indices: [], is_dir: false });
@@ -195,5 +195,36 @@ describe("openChatLink", () => {
     expect(notify).not.toHaveBeenCalled();
     openChatLink("https://x.y");
     expect(openUrl).toHaveBeenCalledWith("https://x.y/");
+  });
+});
+
+describe("resolveChatFile from a terminal's folder", () => {
+  it("tries the folder the text was written in before the project's own", async () => {
+    readFile.mockImplementation(async (_root: string, path: string) => {
+      if (path !== "sub/a.ts") throw new Error("not found");
+      return { size: 1 };
+    });
+    expect(await resolveChatFile(project, { path: "a.ts" }, "D:\\proj\\sub")).toEqual({ rel: "sub/a.ts" });
+    expect(readFile).toHaveBeenCalledWith("D:\\proj", "sub/a.ts", 1);
+  });
+
+  it("falls back to the project folder when the file is not under that folder", async () => {
+    readFile.mockImplementation(async (_root: string, path: string) => {
+      if (path !== "a.ts") throw new Error("not found");
+      return { size: 1 };
+    });
+    expect(await resolveChatFile(project, { path: "a.ts" }, "D:\\proj\\sub")).toEqual({ rel: "a.ts" });
+  });
+
+  it("works out `..` from the folder, but never leaves the project", async () => {
+    expect(await resolveChatFile(project, { path: "../lib/b.ts" }, "D:\\proj\\sub")).toEqual({ rel: "lib/b.ts" });
+    notify.mockClear();
+    expect(await resolveChatFile(project, { path: "../../etc/passwd.txt" }, "D:\\proj\\sub")).toEqual({ error: "../../etc/passwd.txt is outside this project" });
+    expect(readFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores the folder for an absolute path", async () => {
+    expect(await resolveChatFile(project, { path: "D:\\proj\\x.py" }, "D:\\proj\\sub")).toEqual({ rel: "x.py" });
+    expect(await resolveChatFile(project, { path: "D:\\other\\x.py" }, "D:\\proj\\sub")).toEqual({ error: "D:\\other\\x.py is outside this project" });
   });
 });
