@@ -33,6 +33,7 @@ mod usage;
 mod usage_report;
 mod user_presence;
 mod watcher;
+mod webview_memory;
 mod worktree_files;
 
 use std::sync::Arc;
@@ -536,6 +537,7 @@ pub fn run() {
             app.manage(screen::Screens::default());
             app.manage(ssh_hosts::Forwards::default());
             app.manage(sftp_edit::EditSessions::default());
+            webview_memory::watch_main_window(app.handle());
             ssh_hosts::init();
             // Copies of edited host files older than 7 days.
             std::thread::spawn(sftp_edit::cleanup);

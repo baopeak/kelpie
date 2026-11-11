@@ -208,7 +208,9 @@ pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, lab
     if let Some(wv) = app.get_webview(&label) {
         wv.set_position(LogicalPosition::new(rect.x, rect.y)).map_err(err)?;
         wv.set_size(LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0))).map_err(err)?;
-        return wv.show().map_err(err);
+        wv.show().map_err(err)?;
+        crate::webview_memory::fit(&wv);
+        return Ok(());
     }
     let url = parse_url(&url)?;
     let window = app.get_window("main").ok_or("no main window")?;
@@ -249,9 +251,10 @@ pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, lab
             }
             NewWindowResponse::Deny
         });
-    window
+    let wv = window
         .add_child(builder, LogicalPosition::new(rect.x, rect.y), LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0)))
         .map_err(err)?;
+    crate::webview_memory::fit(&wv);
     Ok(())
 }
 
@@ -272,11 +275,14 @@ pub async fn browser_visible(app: AppHandle, label: String, visible: bool) -> Cm
     let Some(wv) = app.get_webview(&label) else { return Ok(()) };
     if visible {
         app.state::<Takeovers>().set_visible(&label, true);
-        wv.show().map_err(err)
+        wv.show().map_err(err)?;
     } else {
         takeover::hiding(&app, &label).await;
-        wv.hide().map_err(err)
+        wv.hide().map_err(err)?;
     }
+    // A hidden pane keeps less memory; posted after the show/hide, so it sees the new state.
+    crate::webview_memory::fit(&wv);
+    Ok(())
 }
 
 #[tauri::command]
@@ -433,7 +439,7 @@ pub(crate) const NOT_SHOWN: &str = "the pane is hidden on the computer";
 
 /// Whether the view is shown now: not hidden (`SetIsVisible`) and its window not minimised. On the window thread.
 #[cfg(windows)]
-unsafe fn shown(controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller) -> bool {
+pub(crate) unsafe fn shown(controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, IsIconic, GA_ROOT};
     let mut visible = windows::core::BOOL::default();
     if controller.IsVisible(&mut visible).is_err() || !visible.as_bool() {

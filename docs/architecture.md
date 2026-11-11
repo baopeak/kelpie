@@ -241,6 +241,11 @@ writing them.
 - Solid's fine-grained stores mean a status change on one session re-renders only its dot.
 - The file watcher and git status only run for the active project; git commands are capped
   at 3 concurrent processes and debounced (300 ms).
+- A view nobody has seen for 5 s asks WebView2 for its low memory target (Windows,
+  `webview_memory.rs`): every view of the main window while it is minimised, and a hidden
+  browser pane. WebView2 trims its working set; scripts keep running, so terminals, chat and
+  notifications carry on. Shown again, the view returns to the normal target at once. The delay
+  spares a pane that a menu or dialog covers for a moment.
 
 ## Agent status
 
@@ -2113,9 +2118,42 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
 | Settings export / import | `app/src-tauri/src/config_transfer.rs`, `lib/config-transfer.ts`, `lib/settings-transfer.json`, `components/settings/config-transfer.tsx` | A file `{kind: "kelpie-config", version: 1, exportedAt, appVersion, sections}` (sections `settings`, `quickCommands`, `layouts`, `automations`, `sshHosts`, `plugins`, `agents`). The window passes its own sections and the daemon's `automation.list` (only at the API level with event automations); the app core adds hosts (`hosts.json`, read strictly) and the plugin list and owns the file: 2 MB cap (checked on the path's metadata before it is opened), an allowlist per section (unknown fields and sections dropped). Settings keys come from `settings-transfer.json` (`exported` / `excluded`, read by both sides; a unit test makes every default setting be classified); the window also checks each imported value against the settings page's enums and ranges. Credential filter (a heuristic, the same both ways): every string through `kelpie_proto::redact` plus `NAME=value` / `--flag value` / `--flag=value` with a secret-sounding name (a name part PASS, PWD, KEY, AUTH, COOKIE, PAT, or one ending in PASSWORD, SECRET, TOKEN, CREDENTIAL, PASSPHRASE, SSHPASS, DBPASS, PRIVATEKEY, SECRETKEY, ACCESSKEY, APIKEY, AUTHORIZATION, WEBHOOK, less a list of known non-secrets such as BYPASS; parts split at punctuation, camelCase and acronym ends; `…env_key` names a variable and is left alone), secret headers, Bearer tokens, `-u user:pass`, and `-pPASS` for mysql / mariadb / sshpass, `mysql -p…`, `curl -u user:…`; argument lists mask the element after such a flag; environment as `[{name, value?}]` with values only on request and never for such a name; automations without approvals, run history or `enabled`; hosts without credentials, with ids passwords can be saved under; one path classifier (`path_kind`: local, network — `\\server`, `//server`, `\\?\UNC\`, `\??\UNC\`, any mix of separators — or device — `\\.\`, `\\?\`, `\??\`) refuses network and device paths for a key file, an automation folder, program or any argument (the daemon reads those on save) and the terminal program and arguments, naming what was left out on export and import; device paths are never opened as the file itself. Import: plan against the current configuration (preview counts by id, then name; each section read on its own, an unreadable one shown as unavailable), with every value that decides what runs shown old → new (`shellArgs`, `agentPermissions`, `agentsScripting`, profile args / permission / env, quick-command text, automation action / kind / command / args / prompt / cwd / trigger or schedule / deliver / env, host target (new hosts) / `identityFile` / `startup`, layouts with remote panes) behind a separate confirmation; a masked value (`[redacted]`) is never written: it takes this computer's value, and the preview says so (arguments by position only: the same occurrence of the same flag for an exact marker, of `name=`, of the same header after the same flag occurrence, or the same index in a list of the same shape), else it is left empty and listed, or the item is left out when it cannot work without it (a shell command that would run differently included); an argument list with an element it could not restore is never imported in part: an agent profile, an agent automation or the terminal keeps this computer's list whole (`argsNotImported`, named in the preview with the reason), and a new automation is left out. The Rust cleaner never shortens a list either: one over 256 elements or with an element that is not text, over 64 KB or has a NUL is left out whole on export and import (the item carries `argsLeftOut` with the reason, the terminal's is named in `argsLeftOut` of the read and export results); plan again before applying (refused if any of that moved), back up to `<data>/backups/config-<ms>` (newest 5), forget the saved password of every replaced host whose user, host name, port or jump changed (first, so no failure or crash leaves a password bound to a new address; never undone, and a failure says so; a forget that fails stops the import before anything is saved), then hosts (compare-before-write) → app settings (re-planned from the current settings, saved at once) → automations (`automation.save` over the app connection, always `enabled: false`; one the daemon refuses is skipped and reported, while a lost daemon, or one that kept the automation in memory although it reported a failure, compared on every field the import saves, fails the import). A moved host's port forwards are removed and agent forwarding is off; a file never turns agent forwarding on. Applied steps are undone in reverse on failure (a replaced automation's own approval is restored by its hash). No daemon change. |
 | Language | `app/src/lib/i18n.ts`, `app/src/locales/vi/*.json` | `t("English text")` looks the text up in the Vietnamese dictionaries (English is the key and the fallback); reactive on the language setting; dates through `Intl`. `pnpm i18n:check` reports missing translations. |
 
+## UI stack: a WebView over a Rust core
+
+The window is a WebView (Tauri) over Rust: the daemon and the app's Rust core own every process,
+buffer and long-running job, and the page only draws. A native GPU UI (GPUI and the like) was
+weighed in 2026-11 and not taken, for these reasons:
+
+- **Where the memory is.** With 20 shells (`perf_gate.py`, release build, Windows 10) the
+  budgeted processes take about 530 MB of working set: WebView2 about 465 (GPU 155–165,
+  renderer 130, browser 115, others 65), the app 29, `kelpied` 28. A native UI would save perhaps
+  250–350 MB of that; each agent CLI Kelpie runs takes about 350 MB on its own.
+- **One UI codebase for the desktop and the phone.** The phone client (`app/phone`) imports the
+  chat adapters from `app/src/chat`; a native desktop UI would need them a second time.
+- **The browser pane needs a WebView anyway** (its takeover streams WebView2's own screencast),
+  and CodeMirror, Mermaid, Markdown and xterm.js would all need native replacements, as would IME
+  (Telex/VNI) and screen-reader support.
+
+The rule that follows: work that both the desktop and the phone need, or that must outlive the
+window, goes into `kelpied`; TypeScript stays presentation and protocol translation.
+
+Revisit when at least two hold: WebView2 still takes over ~400 MB after the measures above and
+users notice; GPUI (or an equal) is stable with Windows IME and screen-reader support; a native
+phone app shares a Rust core; terminal rendering becomes the bottleneck (echo over one frame, or
+switch p95 over 50 ms that is not the page's own work). Start with a terminal-only spike
+(`alacritty_terminal` + GPUI, 20 terminals) measured against `perf_gate.py`, not with a rewrite.
+
 ## Measured (Windows 10, see `plans/reports/`)
 
 - 20 sessions × 2 MiB output: 40 MiB in 3.9 s through the daemon, 0 sequence gaps.
+- Window minimised with 20 shells (`perf_gate.py`, medians of 3 runs, see
+  `perf-261109-webview-memory-ab.md`): working set 525 → 402 MB with the low memory target (the
+  page's renderer 161 → 28 MB); private bytes unchanged at ~380 MB, so the pages are trimmed, not
+  freed. First frame after a restore 60–159 ms without it, 103–148 ms with it (the second frame,
+  before terminals re-attach). A browser pane hidden for 40 s: its renderer 134 → 29 MB.
+- Cold start (release, idle machine) 1.07–1.80 s, about three fifths of it before the page starts
+  loading (process start, Rust set-up, WebView2); the entry module then takes ~300 ms, the font
+  ~30 ms, the saved state ~110 ms.
 - Attach (snapshot) p50/p95: 4.4 / 5.8 ms.
 - Project switch (3 projects with terminals): release p50 ≈ 30 ms, p95 40–52 ms; dev build p95 35–105 ms.
 - Session history, 421 transcripts / 1.2 GB (release build): first scan 0.5 s, later launches

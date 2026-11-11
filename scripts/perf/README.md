@@ -25,6 +25,16 @@ python scripts/perf/perf_gate.py --label rebase --update-baseline --reason "why 
 Shells, `OpenConsole` / `conhost` and the agents under `kelpied` are the PTY children: reported as
 `pty_idle_cpu_pct` / `pty_rss_mb`, never budgeted.
 
+Reported next to the budgets, never budgeted (they say where a budgeted number comes from):
+
+| Metric | How |
+|---|---|
+| `rss_app_mb`, `rss_daemon_mb`, `rss_webview_browser_mb`, `rss_webview_gpu_mb`, `rss_webview_renderer_mb`, `rss_webview_other_mb` | `rss_mb` split by process: the app, `kelpied`, and the WebView2 processes by their `--type` (none = browser, `gpu-process`, `renderer`, anything else = other) |
+| `private_mb` | private bytes of the same processes (Windows): memory no other process shares, unlike the working set |
+| `start_webview_ms`, `start_html_ms`, `start_script_ms`, `start_fonts_ms`, `start_state_ms` | the start-up steps, in ms from the app process's creation: the page's navigation starts, its HTML arrives, the entry module runs, the terminal font is loaded, the saved state is applied (`perf.startup()`); `cold_start_ms` is the step after them |
+| `rss_minimized_mb` (+ the same split and `private_minimized_mb`) | Windows: the window minimised for `--minimized` seconds (default 30), median of the second half of the samples |
+| `restore_frame_ms`, `switch_after_restore_median_ms` / `_max_ms` | the window restored: time to its second frame (includes one WebDriver round trip, ~20 ms), then 30 project switches |
+
 Timings are taken inside the page through `window.__kelpie.perf` (exposed only in dev builds and when
 the app runs with `KELPIE_E2E`, like the rest of `__kelpie`), so WebDriver round trips (about 20 ms
 each) never enter a sample. The gate runs the app `--runs` times (default 3; each run is a fresh
@@ -41,7 +51,7 @@ launch with its own daemon and data folder) and compares the median of the runs.
 
 The gate starts and stops `tauri-driver`, the app and the daemon itself, with `KELPIE_ENDPOINT` /
 `KELPIE_DATA_DIR` pointing at throw-away values, and refuses to start while port 4444
-(`--driver-port`) is taken. Close other heavy programs first: 20 shells plus a WebView take a
+(`--driver-port`) is taken; its msedgedriver gets a free port of its own each run. Close other heavy programs first: 20 shells plus a WebView take a
 few GB and the idle phase is sensitive to background work.
 
 ## Baseline
