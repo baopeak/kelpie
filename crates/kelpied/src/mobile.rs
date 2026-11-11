@@ -6751,8 +6751,9 @@ mod tests {
             d.set_client_role(95, &crate::auth::Role::User);
             let (tx, _replies) = crate::session::client_channel();
             assert!(d.dispatch(95, &tx, &json!(1), method, json!({})).unwrap().is_some());
+            // The fake records the call before it takes the entry off: wait for the entry itself.
             for _ in 0..500 {
-                if fake.changes().iter().any(|c| c == "serve --https=8443 off") {
+                if *fake.serve.lock() == "{}" {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
