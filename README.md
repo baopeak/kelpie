@@ -266,6 +266,7 @@ A workbench is a place where you spend hours. You can choose a dark or light int
 
 **Files, browser and processes**
 - The [editor and viewers](docs/user-guide.md#files) open source, Markdown, Mermaid, CSV, PDF and Jupyter notebooks.
+- [File links](docs/user-guide.md#terminals) turn the paths agents print, such as `src/a.ts:42`, into links: `Ctrl+click` opens the file at that line, and a right-click copies its path.
 - [Browser panes](docs/user-guide.md#browser-panes-and-design-mode) include developer tools and a design mode that sends picked elements to an agent.
 - The [Processes panel](docs/user-guide.md#processes-ports-and-preview) lists each session's programs and ports and stops them safely.
 

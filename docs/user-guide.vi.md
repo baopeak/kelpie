@@ -43,6 +43,8 @@ Khi chưa có project nào, Kelpie hiện màn hình chào với Kip, linh vật
 
 **Terminal nổi.** `` Ctrl+Shift+` `` mở một shell ở thư mục home, nằm trên mọi project. Khi bạn ẩn nó, shell vẫn chạy.
 
+**Liên kết tệp.** Khi agent in ra một đường dẫn như `src/a.ts:42`, `D:\w\x.py` hay chỉ một tên tệp như `name.py`, bạn nhấn `Ctrl+click` để mở tệp trong trình xem của Kelpie ở đúng dòng đó. Kelpie tìm tệp trong thư mục của phiên, rồi trong project, rồi theo tên tệp. Nhấp chuột phải vào đường dẫn để chọn *Open*, *Copy Relative*, *Copy Path*, *Copy Name* hoặc *Reveal in Explorer*. Trong chat view, bạn nhấp vào tên tệp trong câu trả lời để mở tệp đó.
+
 **Terminal dài.** Khi bạn cuộn lên trong một cuộc hội thoại dài, một nhãn ở góc đếm số dòng mới và đưa bạn về cuối. `Ctrl+Shift+↑/↓` nhảy tới prompt trước hoặc sau mà bạn đã gửi. Nhấp chuột phải vào terminal để sao chép, dán, xoá màn hình, **Copy Context** (400 dòng cuối), chia pane, chạy quick command hoặc hand-off cho agent khác.
 
 Chi tiết: [Everyday use](user-guide.md#everyday-use), [Layouts](user-guide.md#layouts), [Terminals](user-guide.md#terminals).

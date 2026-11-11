@@ -268,6 +268,7 @@ Liên kết dẫn tới [user guide tiếng Anh](docs/user-guide.md), nơi mô t
 
 **Tệp, trình duyệt và tiến trình**
 - [Trình soạn thảo và trình xem tệp](docs/user-guide.md#files) mở mã nguồn, Markdown, Mermaid, CSV, PDF và notebook Jupyter.
+- [Liên kết tệp](docs/user-guide.md#terminals) biến các đường dẫn mà agent in ra, như `src/a.ts:42`, thành liên kết: `Ctrl+click` mở tệp ở đúng dòng đó, và nhấp chuột phải để sao chép đường dẫn.
 - [Pane trình duyệt](docs/user-guide.md#browser-panes-and-design-mode) có công cụ nhà phát triển và chế độ thiết kế để gửi phần tử đã chọn cho agent.
 - [Panel Processes](docs/user-guide.md#processes-ports-and-preview) liệt kê chương trình và cổng của từng phiên và dừng chúng một cách an toàn.
 
