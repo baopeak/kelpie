@@ -293,7 +293,7 @@
   "Dictate": "Đọc chính tả",
   "Transcribing…": "Đang chuyển thành văn bản…",
   "Cancel (Esc)": "Hủy (Esc)",
-  "Run many coding agents across many projects. Sessions live in a background daemon, so switching projects or closing this window never stops them.": "Chạy nhiều agent lập trình trên nhiều dự án. Các phiên nằm trong một daemon chạy nền, nên chuyển dự án hay đóng cửa sổ này đều không làm chúng dừng.",
+  "Run many coding agents across many projects. Sessions live in a background daemon, so switching projects or updating Kelpie never stops them.": "Chạy nhiều agent lập trình trên nhiều dự án. Các phiên nằm trong một daemon chạy nền, nên chuyển dự án hay cập nhật Kelpie đều không làm chúng dừng.",
   "Command palette": "Bảng lệnh",
   "Your default shell": "Shell mặc định của bạn",
   "on {host}": "trên {host}",

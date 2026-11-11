@@ -30,7 +30,7 @@ export function Welcome() {
         <Show when={kipShown()}><Kip mood="peek" size={150} /></Show>
         <h1><BrandWordmark height={34} /></h1>
         <div style={{ color: "var(--text-dim)" }}>
-          {t("Run many coding agents across many projects. Sessions live in a background daemon, so switching projects or closing this window never stops them.")}
+          {t("Run many coding agents across many projects. Sessions live in a background daemon, so switching projects or updating Kelpie never stops them.")}
         </div>
         <div class="actions">
           <button class="btn primary" onClick={() => void pickProjectFolder()}>{t("Add project folder")}</button>

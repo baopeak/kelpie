@@ -52,6 +52,18 @@ and transfers show Interrupted, with Resume. To keep everything going with the w
 runs, phone and Telegram access, file copies), set Settings → Session Daemon → *When Kelpie closes* to **Keep it
 running in the background**. Updates never stop the daemon, whichever you choose.
 
+## First start, Kip and tips
+
+With no project open, Kelpie shows its welcome screen: Kip, the mascot, above *Add project folder*, *Add remote
+project (SSH)*, *SSH hosts* and the command palette. Kip also sits over the sidebar footer and shows how your
+agents are doing (working, needing you, finished); Settings → Appearance → *Kip, the mascot* hides it, and *Kip
+animations* turns its small animations on, off or makes them follow the system's animation setting.
+
+For the first launches Kelpie shows one short tip per launch, four seconds after it opens: search everything,
+the agent dashboard, terminal or chat, and past conversations. *Turn off tips* on a tip, or Settings →
+Notifications, stops them; *Show tips again* there brings them back. Icon-only buttons show a small hint with
+their name and shortcut when you hover them.
+
 ## Everyday use
 
 1. **Add a project**: sidebar `+` (or search → *Add Project Folder…*). Any folder works; for a
@@ -70,7 +82,9 @@ running in the background**. Updates never stop the daemon, whichever you choose
    `⌘⌥←/→`) go back and forward through recently focused panes, across projects.
 4. **Search everything** (`Ctrl+Shift+P` / `⌘⇧P`): recent items, sessions that need you,
    sessions, projects, files, commands and settings in one box. Prefix `@` sessions, `#` files,
-   `>` commands, `/` settings, or press `Tab` to change scope.
+   `>` commands, `/` settings, `!` prompts you sent earlier in this project, or press `Tab` to change
+   scope. Some commands live only here, without a default key: *Answer Waiting Session…* (the quick
+   answer of the dashboard for the session that waited longest) and *Clear Terminal Buffer*, among others.
 5. **Dashboard** (`Ctrl+Shift+M` / `⌘⇧M`): every session of every project grouped by
    *Needs you / Failed / Working / Done / Idle* — click a card to jump there. *Needs you* lists
    the longest wait first ("waiting 3 min"); **Answer** opens a quick answer: the bottom of that
@@ -597,7 +611,8 @@ Besides the editor and markdown preview, CSV / TSV files open as a sortable, fil
 table, PDFs in a viewer, Jupyter notebooks with their outputs, and Mermaid diagrams (`.mmd`
 files and ```` ```mermaid ```` blocks in markdown). `Alt+Z` toggles word wrap. Right-click a
 folder → **Find in Folder…** searches only there. A project's menu opens it in VS Code,
-Cursor, Windsurf, Zed, Sublime Text or IntelliJ IDEA when installed.
+Cursor, Windsurf, Zed, Sublime Text or IntelliJ IDEA when installed (the first four Kelpie finds on
+this computer are listed).
 
 ### Automations
 
@@ -732,8 +747,8 @@ the prompt), exits, or worked and then stayed idle for 5 minutes. Failed tasks c
 skipped or marked done; the status bar shows active runs and tasks waiting for approval.
 
 ```
-kelpied run create run.json          # {"name", "objective", "tasks": [{"id", "title", "prompt",
-kelpied run list                     #   "kind", "deps": [...], "approve", "worktree"}]}
+kelpied run create run.json          # {"name", "objective", "cwd"?, "tasks": [{"id", "title", "prompt",
+kelpied run list                     #   "kind", "args"?, "env"?, "deps": [...], "approve", "worktree", "host"?}]}
 kelpied run show <run> | approve|retry|done|skip <run> <task> | cancel|delete <run>
 kelpied run wait <run>
 kelpied review add <file>:<line> "<comment>" [--old] [--base <ref>]   # a note on this worktree's diff
@@ -795,7 +810,8 @@ automatically. Other agents see a short brief in the child's prompt and `$KELPIE
 environment; the same operations are a command, in bash `"$KELPIE_CLI" sub spawn codex "fix #1"
 --worktree` and in PowerShell `& $env:KELPIE_CLI sub spawn codex "fix #1" --worktree`.
 `kelpied sub --help` lists them (`agents`, `spawn`, `list`, `send`, `read`, `wait`, `report`,
-`inbox`, `close`). `--worktree` gives the child its own branch `kelpie/sub-<name>`, which closing
+`inbox`, `close`). `--worktree` gives the child its own branch `kelpie/sub-<name>-<tag>` (`<tag>` is four
+random characters, so two children with the same task never share a branch), which closing
 never removes (Finish and Review do). Switching a parent between terminal and chat keeps its
 children.
 
@@ -1262,6 +1278,12 @@ command, so allow typing only on phones you would trust at your keyboard. Recogn
 effort: a new agent's wording may still get a button, or an ordinary option lose one. Unpairing a device
 disconnects it at once.
 
+A session in chat view opens as a chat on the phone: the conversation, its tool rows and its approval
+cards. A phone allowed to type sends messages into it (plain text), answers approvals and questions, and
+stops the agent or cancels a message it queued. The computer keeps one queue per chat, so messages from
+the window and from phones go to the agent one at a time, in the order they arrived. A message only the
+window can build (with a picture or a command) waits for its chat to be open there, and the phone says so.
+
 **Taking over a browser pane from the phone** (Windows). When an agent is stuck on a sign-in, a consent screen, a 2FA code or a check in one of Kelpie's
 browser panes, a phone may drive that pane: *Take over a browser pane* in a session lists the panes with a page open, those of the session's project first.
 The phone shows the page; a tap clicks, a swipe scrolls, holding still for a moment (0.4 s) and then moving drags, pinching does not zoom the page, the key row has Enter, Tab, Backspace, Esc and the arrows,
@@ -1545,8 +1567,21 @@ unavailable, with the reason.
 
 ## Automation
 
-Besides `kelpied terminal …`, `kelpied worktree …` and `kelpied run …` (above), `kelpied call <method> [json]` talks
-to the running daemon directly, e.g.
+The `kelpied` command groups, described in their sections above:
+
+| Command | What it does |
+|---|---|
+| `kelpied terminal list\|read\|send\|wait` | Lists sessions, reads a screen, types into a session, waits until it stops working ([Terminals](#terminals)). |
+| `kelpied worktree get\|set` | Reads or sets a folder's comment and board status ([Worktrees](#worktrees-and-the-workspace-board)). |
+| `kelpied review add\|list` | Leaves or lists notes on the worktree's diff ([Review with another agent](#review-with-another-agent-and-best-of-several)). |
+| `kelpied run create\|list\|show\|approve\|retry\|done\|skip\|cancel\|delete\|report\|wait` | Creates and drives orchestration runs ([Orchestration runs](#orchestration-runs)). |
+| `kelpied sub agents\|spawn\|list\|send\|read\|wait\|report\|inbox\|close` | Opens and steers sub-sessions ([Sub-sessions](#sub-sessions)). |
+| `kelpied ping` | Prints the running daemon's version and API level. |
+| `kelpied stop [--kill-sessions] [--wait [--timeout-ms N]]` | Asks the daemon to exit; with `--kill-sessions` its sessions end too, and `--wait` waits until the process is gone. |
+| `kelpied mcp` | The MCP server Kelpie gives Claude Code and Codex for sub-sessions (started by the agents, not by hand). |
+| `kelpied call <method> [json]` | Calls any daemon method directly. |
+
+`kelpied call` talks to the running daemon directly, e.g.
 
 ```
 kelpied call session.list

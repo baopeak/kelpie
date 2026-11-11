@@ -5,6 +5,12 @@
 Import ``seed(root)`` to receive eight project dictionaries. The same list is
 saved as ``root/projects.json``. This script never reads or changes Kelpie state,
 starts agents, contacts remotes, or runs the generated applications/checks.
+
+Besides code, smoke checks, Mermaid docs, CSV data and a release checklist in every
+project, atlas-commerce carries a full ``.kelpie.yaml`` (setup, tabs, copy, check),
+a ``plans/`` plan with phases, a run file (``runs/checkout-hardening.json``) and a
+``.mmd`` diagram; pulse-analytics has a notebook; ``root/plugins/kelpie-demo-tools``
+is a declarative plugin to install from Settings → Plugins.
 """
 
 import argparse
@@ -388,6 +394,49 @@ DETAILS = {
 }
 
 
+def _cell(kind, source, outputs=None):
+    cell = {"cell_type": kind, "metadata": {}, "source": source.splitlines(keepends=True)}
+    if kind == "code":
+        cell.update(execution_count=None, outputs=outputs or [])
+    return cell
+
+
+# The stored output is what src/app.py prints for data/orders.csv (paid orders only);
+# the generator writes it without executing the notebook.
+NOTEBOOK = {
+    "nbformat": 4, "nbformat_minor": 5,
+    "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3", "language": "python"},
+                 "language_info": {"name": "python"}},
+    "cells": [
+        _cell("markdown", "# Daily revenue summary\n\nSynthetic orders from `data/orders.csv`; refunded and pending orders are excluded.\nThe output below was stored by the demo generator. Run the cell to check it."),
+        _cell("code", "import csv\nimport sys\n\nsys.path.insert(0, '..')  # the notebook runs from notebooks/\nfrom src.app import summarize\n\nwith open('../data/orders.csv', newline='') as source:\n    for day in summarize(csv.DictReader(source)):\n        print(day['date'], day['orders'], day['revenue_cents'])",
+              [{"output_type": "stream", "name": "stdout",
+                "text": ["2026-10-20 2 5000\n", "2026-10-21 2 18900\n", "2026-10-22 1 4100\n"]}]),
+        _cell("markdown", "| Day | Paid orders | Revenue |\n| --- | ---: | ---: |\n| 2026-10-20 | 2 | $50.00 |\n| 2026-10-21 | 2 | $189.00 |\n| 2026-10-22 | 1 | $41.00 |"),
+    ],
+}
+
+
+# A declarative plugin for Settings → Plugins → Install from folder. Kelpie lists every
+# command it would run and keeps it off until it is reviewed and enabled.
+PLUGIN = {
+    "id": "kelpie-demo-tools",
+    "name": "Kelpie demo tools",
+    "version": "1.0.0",
+    "description": "Demo checks, a review prompt, a terminal theme and a branch readout for the sample projects.",
+    "contributes": {
+        "commands": [{"id": "smoke", "label": "Run the smoke checks", "run": "python smoke.py", "in": "split"}],
+        "quickCommands": [{"label": "Review the checkout diff", "action": "agent", "enter": False,
+                           "text": "Review the uncommitted change in src/checkout.py for rounding and validation mistakes. Do not edit files."}],
+        "terminalThemes": [{"id": "tide", "label": "Kelpie Tide", "dark": True, "colors": [
+            "#0d1b24", "#d7e6ee", "#83d6c4",
+            "#16252f", "#ef7f7f", "#83d6a0", "#e8c47a", "#7fb4ef", "#c49ae8", "#7fd6d6", "#c7d3da",
+            "#3a4c57", "#f59b9b", "#a2e6bb", "#f2d89b", "#a2cbf5", "#d8b9f2", "#a2e6e6", "#eef4f7"]}],
+        "statusItems": [{"id": "branch", "label": "Branch", "command": "git rev-parse --abbrev-ref HEAD", "intervalSeconds": 30}],
+    },
+}
+
+
 def _put(root, relative, content):
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -432,6 +481,70 @@ def _assets(repo, name):
             before coupon lookup. This is an uncommitted demo change for diff review.
             No payments are accepted and no customer data is stored.
             """)
+        # Worktree setup Kelpie offers (and runs only after approval) in New worktree.
+        # `.env.local` is ignored by Git, so `copy:` brings it into each new worktree.
+        _put(repo, ".gitignore", "__pycache__/\n*.py[cod]\n.venv/\n.env.local\n")
+        _put(repo, ".env.local", "# Demo-only settings; no secrets.\nDEMO_CURRENCY=USD\nDEMO_REGION=local\n")
+        _put(repo, ".kelpie.yaml", """\
+            # Local, dependency-free demo setup; Kelpie asks before it runs any of it.
+            setup:
+              - python smoke.py
+            tabs:
+              - shell
+              - command: python src/checkout.py
+            copy:
+              - .env.local
+            check:
+              - python smoke.py
+            """)
+        _put(repo, "docs/checkout-flow.mmd", """\
+            flowchart TD
+                cart["Cart lines"] --> subtotal["Subtotal in cents"]
+                coupon["Coupon code"] --> normalize["Trim + uppercase"]
+                normalize --> discount["Half-up discount"]
+                subtotal --> discount
+                discount --> threshold{"Discounted subtotal >= 10,000?"}
+                threshold -- yes --> free["Free shipping"]
+                threshold -- no --> paid["595 cents shipping"]
+            """)
+        _put(repo, "plans/checkout-hardening/plan.md", """\
+            # Checkout hardening
+
+            Demo plan for Kelpie's Plan tab. Checked items describe what this fixture
+            contains; nothing here records an agent run.
+
+            - [x] Write the checkout rules down (`docs/checkout-rules.md`)
+            - [ ] Normalize coupon input before lookup
+            - [ ] Confirm the free-shipping boundary with a reviewer
+            """)
+        _put(repo, "plans/checkout-hardening/phase-01-coupon-input.md", """\
+            # Phase 1: coupon input
+
+            - [x] Reproduce: ` welcome10 ` is rejected as an unknown coupon
+            - [ ] Trim whitespace and uppercase the code before lookup
+            - [ ] Add a smoke assertion for pasted, lowercase codes
+            """)
+        _put(repo, "plans/checkout-hardening/phase-02-shipping-boundary.md", """\
+            # Phase 2: shipping boundary
+
+            - [ ] Assert that exactly 10,000 discounted cents ships free
+            - [ ] Assert that 9,999 discounted cents pays 595 cents
+            - [ ] Document the rule beside the constant
+            """)
+        # A run Kelpie can load (`kelpied run create runs/checkout-hardening.json`):
+        # every task waits for approval or a dependency, so loading it starts nothing.
+        _put(repo, "runs/checkout-hardening.json", json.dumps({
+            "name": "Checkout hardening",
+            "objective": "Normalize coupon input and lock the free-shipping boundary with tests.",
+            "tasks": [
+                {"id": "coupon", "title": "Normalize coupon input", "kind": "claude", "approve": True, "worktree": True,
+                 "prompt": "In src/checkout.py, trim and uppercase coupon codes before lookup. Add a smoke assertion. Report with kelpied run report."},
+                {"id": "shipping", "title": "Test the shipping boundary", "kind": "codex", "approve": True, "worktree": True,
+                 "prompt": "Add smoke assertions for 9,999 and 10,000 discounted cents. Do not change pricing rules."},
+                {"id": "review", "title": "Cross-review both changes", "kind": "omp", "deps": ["coupon", "shipping"],
+                 "prompt": "Review the two worktrees' diffs for rounding and boundary mistakes. Do not edit files."},
+            ],
+        }, indent=2) + "\n")
     elif name == "beacon-api":
         _put(repo, "data/catalog.json", json.dumps([
             {"id": "journal", "name": "Field Journal", "category": "paper", "price_cents": 1800},
@@ -445,6 +558,7 @@ def _assets(repo, name):
         _put(repo, "data/environments.json", '{"development": 12, "staging": 85, "production": 260}\n')
     elif name == "pulse-analytics":
         _put(repo, "data/orders.csv", "date,order_id,amount_cents,status\n2026-10-20,A101,3200,paid\n2026-10-20,A102,1800,paid\n2026-10-20,A103,900,refunded\n2026-10-21,A104,12500,paid\n2026-10-21,A105,6400,paid\n2026-10-22,A106,1800,pending\n2026-10-22,A107,4100,paid\n")
+        _put(repo, "notebooks/revenue-summary.ipynb", json.dumps(NOTEBOOK, indent=1) + "\n")
     elif name == "field-notes":
         _put(repo, "notes/trail-interviews.md", "# Trail interviews\n\n#research #offline\n\nSynthetic observation: hikers need offline trail notes before leaving the station.\n")
         _put(repo, "notes/packing-study.md", "# Packing study\n\n#research #planning\n\nSynthetic observation: a short packing checklist reduces repeated gear checks.\n")
@@ -604,13 +718,25 @@ def seed(root):
         worktree = root / "worktrees" / folder
         worktree.parent.mkdir(parents=True, exist_ok=True)
         _git(atlas, "worktree", "add", "-q", "-b", branch, str(worktree), "main")
-    # Only the main checkout has an uncommitted code change. Both worktrees start
-    # from the second commit, so their baseline smoke contracts remain identical.
-    _put(atlas, "src/checkout.py", CHECKOUT.replace(
+    normalized = CHECKOUT.replace(
         '    if coupon and coupon not in COUPONS:\n',
         '    # Accept codes pasted from emails without changing discount rules.\n'
         '    coupon = coupon.strip().upper()\n'
-        '    if coupon and coupon not in COUPONS:\n'))
+        '    if coupon and coupon not in COUPONS:\n')
+    # The coupon worktree holds the finished task as one commit, so Review and Finish
+    # have a real branch to merge and a check (`python smoke.py`) to run.
+    coupon = root / "worktrees" / "coupon-validation"
+    _put(coupon, "src/checkout.py", normalized)
+    smoke = (coupon / "smoke.py").read_text(encoding="utf-8").replace(
+        '\nprint("PASS', '\nassert quote([LineItem("kit", 10000)], " welcome10 ").discount_cents == 1000\n\nprint("PASS')
+    _put(coupon, "smoke.py", smoke)
+    _git(coupon, "commit", "-q", "-am", "fix: accept pasted, lowercase coupon codes",
+         date="2026-10-22T10:15:00+00:00")
+    # The main checkout carries the same idea as an uncommitted change for diff review;
+    # the shipping worktree stays at the second commit.
+    _put(atlas, "src/checkout.py", normalized)
+    # Outside every project: installed into Kelpie only from Settings → Plugins.
+    _put(root, f"plugins/{PLUGIN['id']}/kelpie-plugin.json", json.dumps(PLUGIN, indent=2) + "\n")
     _put(root, "projects.json", json.dumps(projects, indent=2) + "\n")
     return projects
 
