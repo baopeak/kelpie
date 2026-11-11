@@ -15,6 +15,13 @@ export interface AgentSettings {
   mode?: string | null;
 }
 
+/** A model a conversation can be started with, or null. Claude Code writes its own messages into the transcript as replies of the model
+ *  `<synthetic>` (an API error such as a proxy's certificate, an interruption, "No response requested."): `--model <synthetic>` would
+ *  fail every turn after, so such a reply says nothing about the model and an older one is looked at. */
+export function realModel(model: unknown): string | null {
+  return typeof model === "string" && model && !model.startsWith("<") ? model : null;
+}
+
 /** Claude's settings as its transcript last recorded them; the session's own flags fill what it
  *  never recorded (a session started with `--dangerously-skip-permissions` and no turn yet). */
 export function claudeSettingsFrom(lines: string[], args: string[] = []): AgentSettings {
@@ -32,7 +39,7 @@ export function claudeSettingsFrom(lines: string[], args: string[] = []): AgentS
     // with (all that chat view's process records). A sub-agent's messages carry their own.
     if (out.mode == null && typeof m.permissionMode === "string" && (m.type === "permission-mode" || (m.type === "user" && !m.isSidechain))) out.mode = m.permissionMode;
     if (m.type === "assistant" && !m.isSidechain) {
-      if (out.model == null) out.model = m.requestedModel ?? m.message?.model ?? null;
+      if (out.model == null) out.model = realModel(m.requestedModel ?? m.message?.model);
       if (out.effort == null && typeof m.effort === "string") out.effort = m.effort;
     }
   }
@@ -41,7 +48,7 @@ export function claudeSettingsFrom(lines: string[], args: string[] = []): AgentS
     return i < 0 ? null : args[i].includes("=") ? args[i].split("=").slice(1).join("=") : args[i + 1] ?? null;
   };
   out.mode ??= args.includes("--dangerously-skip-permissions") ? "bypassPermissions" : flag("--permission-mode");
-  out.model ??= flag("--model");
+  out.model ??= realModel(flag("--model"));
   out.effort ??= flag("--effort");
   return out;
 }
@@ -91,7 +98,8 @@ export function withSettings(kind: string, args: string[], s: AgentSettings): st
       out = drop(out, ["--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"], false);
       out.push("--permission-mode", s.mode);
     }
-    if (s.model && s.model !== "default") out = [...drop(out, ["--model"], true), "--model", s.model];
+    const model = realModel(s.model);
+    if (model && model !== "default") out = [...drop(out, ["--model"], true), "--model", model];
     if (s.effort) out = [...drop(out, ["--effort"], true), "--effort", s.effort];
   } else if (kind === "codex") {
     if (s.mode && CODEX_MODE_FLAGS[s.mode]) {

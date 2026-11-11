@@ -32,6 +32,18 @@ describe("claudeSettingsFrom", () => {
     expect(claudeSettingsFrom([...later, line({ type: "user", permissionMode: "default" })]).mode).toBe("default");
   });
 
+  it("passes over Claude Code's own messages (model `<synthetic>`) to the model the conversation really ran", () => {
+    const lines = [
+      line({ type: "assistant", requestedModel: "opus", effort: "high", message: { model: "claude-opus-5-5" } }),
+      line({ type: "user", message: { content: "next" } }),
+      // An API error (a proxy's self-signed certificate) recorded as a reply.
+      line({ type: "assistant", isApiErrorMessage: true, message: { model: "<synthetic>", content: [{ type: "text", text: "API Error: Unable to connect to API" }] } }),
+    ];
+    expect(claudeSettingsFrom(lines)).toEqual({ mode: null, model: "opus", effort: "high" });
+    expect(claudeSettingsFrom([lines[2]], ["--model", "sonnet"]).model).toBe("sonnet");
+    expect(claudeSettingsFrom([lines[2]], ["--model", "<synthetic>"]).model).toBeNull();
+  });
+
   it("falls back to the session's own flags", () => {
     expect(claudeSettingsFrom([], ["--dangerously-skip-permissions", "--model=haiku", "--effort", "max"])).toEqual({ mode: "bypassPermissions", model: "haiku", effort: "max" });
     expect(claudeSettingsFrom([], [])).toEqual({ mode: null, model: null, effort: null });
