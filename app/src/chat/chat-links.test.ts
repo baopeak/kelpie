@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CHAT_SANITIZE, chatMarkdownHtml, fileRefInCode, linkifyText, parseChatLink, projectRelative } from "./chat-links";
+import { CHAT_SANITIZE, chatMarkdownHtml, fileRefInCode, findFileRefs, linkifyText, parseChatLink, projectRelative } from "./chat-links";
 
 // DOMPurify needs a real DOM, so what it does with these is checked in a browser; this only
 // stops an entry being dropped by accident.
@@ -345,5 +345,38 @@ describe("chatMarkdownHtml", () => {
     const html = chatMarkdownHtml("| a |\n| - |\n| 1 |\n\n`x`");
     expect(html).toContain("<table>");
     expect(html).toContain("<code>x</code>");
+  });
+});
+
+describe("findFileRefs", () => {
+  const paths = (text: string) => findFileRefs(text).map((r) => (r.line ? `${r.path}@${r.line}` : r.path));
+
+  it("finds a bare file name with a known extension in a sentence", () => {
+    expect(paths("Đã tìm ra nguyên nhân trong redraw_element.py: prompt không dặn giữ phần trắng.")).toEqual(["redraw_element.py"]);
+    expect(paths("See README.md.")).toEqual(["README.md"]);
+  });
+
+  it("finds paths with folders, lines and columns, in either slash style or absolute", () => {
+    expect(paths("edit src/lib/foo.ts:42 and app\\src\\x.tsx:10:5, then D:\\Works\\x.py or /home/u/a.go")).toEqual([
+      "src/lib/foo.ts@42", "app\\src\\x.tsx@10", "D:\\Works\\x.py", "/home/u/a.go",
+    ]);
+    expect(paths("Update(app/src/a.ts)")).toEqual(["app/src/a.ts"]);
+  });
+
+  it("gives where each one is in the text, with its line suffix", () => {
+    const text = "at a/b.ts:3 now";
+    const [r] = findFileRefs(text);
+    expect(text.slice(r.start, r.end)).toBe("a/b.ts:3");
+    expect(r.text).toBe("a/b.ts:3");
+  });
+
+  it("leaves words, versions, domains, addresses and product names alone", () => {
+    expect(paths("e.g. v0.1.16 1.5x github.com kelpie-link-relay.baopeak.workers.dev Node.js user@host.py")).toEqual([]);
+    expect(paths("https://example.com/src/a.py and //host/share/b.py")).toEqual([]);
+  });
+
+  it("does not take the front part of a longer name", () => {
+    expect(paths("archive.tar.gz notes.md.bak")).toEqual([]);
+    expect(paths("lib/archive.tar.gz")).toEqual(["lib/archive.tar.gz"]);
   });
 });

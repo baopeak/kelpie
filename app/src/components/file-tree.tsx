@@ -2,16 +2,15 @@
 // directory is read from disk the first time it is expanded (then refreshed by the watcher).
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { setSearchFolder } from "./search-panel";
 import { store } from "../lib/store";
-import { createEntry, deleteEntry, listDir, onEvent, renameEntry, revealEntry } from "../lib/ipc";
+import { createEntry, deleteEntry, listDir, onEvent, renameEntry } from "../lib/ipc";
 import { gitState } from "../lib/git-state";
 import { allPanes } from "../lib/layout";
-import { isMac, joinPath } from "../lib/platform";
 import { peekView } from "../lib/terminal-host";
 import type { DirEntry, Project } from "../lib/types";
 import { openContextMenu, type MenuItem } from "./context-menu";
+import { pathMenuItems } from "./path-menu";
 import { t } from "../lib/i18n";
 import { confirmDialog } from "../lib/confirm-dialog";
 
@@ -155,9 +154,7 @@ export function FileTree(props: { project: Project; api?: (api: FileTreeApi) => 
         null,
         { label: t("Insert Path into Terminal"), run: () => { const v = focusedTerminal(); if (v) { v.paste(entry.path.includes(" ") ? `"${entry.path}" ` : entry.path + " "); v.focus(); } } },
         ...(entry.is_dir ? [{ label: t("Find in Folder…"), run: () => { setSearchFolder(entry.path); store.showRightPanel("search"); } }] : []),
-        { label: t("Copy Relative Path"), run: () => void writeText(entry.path) },
-        { label: t("Copy Path"), run: () => void writeText(joinPath(root(), entry.path)) },
-        { label: isMac ? t("Reveal in Finder") : t("Reveal in Explorer"), run: () => void revealEntry(root(), entry.path) },
+        ...pathMenuItems(props.project, entry.path),
         null,
         { label: t("Rename…"), run: () => setEditing({ dir: parentOf(entry.path), kind: "rename", entry }) },
         {

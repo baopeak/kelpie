@@ -25,6 +25,8 @@ import { isLimited } from "../lib/limits";
 import { commandHint } from "../lib/commands";
 import { composerRequest, toggleComposer } from "../lib/composer-state";
 import { SubSessionsBar } from "./sub-sessions-strip";
+import { openContextMenu } from "./context-menu";
+import { pathMenuItems } from "./path-menu";
 
 // Loaded when a diff or a turn's file is first opened.
 const DiffView = lazy(() => import("./diff-view").then((m) => ({ default: m.DiffView })));
@@ -91,6 +93,8 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
   // Chat view runs the agent as a local process: not for sessions on another machine.
   const chatable = () => !!session() && supportsChat(session()!.kind) && !session()!.remote;
   const broadcasting = () => !!props.tab.broadcast && props.pane.kind === "terminal";
+  /** The file a file or diff pane shows, relative to the project: its header's menu copies its paths. */
+  const filePath = () => ((props.pane.kind === "file" || props.pane.kind === "diff") && props.pane.path) || undefined;
 
   return (
     <div class={`pane${focused() && multi() ? " focused" : ""}${broadcasting() ? " broadcast" : ""}${target() ? " on-host" : ""}`} data-pane={props.pane.id} data-tab={props.tab.id} data-pane-host={target()?.dest}
@@ -101,7 +105,8 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
         <div class="pane-tools" data-hints>{tools()}</div>
       </Show>
       <Show when={hasHeader()}>
-        <div class="pane-header" data-hints onPointerDown={(e) => multi() && startPaneDrag(e, props.project, props.tab, props.pane.id)} title={multi() ? t("Drag to move or swap this pane, or onto a tab") : undefined}>
+        <div class="pane-header" data-hints onPointerDown={(e) => multi() && startPaneDrag(e, props.project, props.tab, props.pane.id)} title={multi() ? t("Drag to move or swap this pane, or onto a tab") : undefined}
+          onContextMenu={(e) => filePath() && openContextMenu(e, pathMenuItems(props.project, filePath()!))}>
           <Show when={session()} fallback={<Icon name={props.pane.kind === "empty" ? "plus" : props.pane.kind === "browser" ? "globe" : "files"} size={13} />}>
             {(s) => <><StatusDot s={s()} /><KindGlyph kind={s().kind} size={14} /></>}
           </Show>

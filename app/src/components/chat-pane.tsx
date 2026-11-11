@@ -7,7 +7,7 @@ import { bookmarks, findReply } from "../lib/chat-bookmarks";
 import { listTurns, turnsByMessage } from "../lib/checkpoints";
 import { findPane } from "../lib/layout";
 import { getController, switchToTerminal } from "../chat/mode-switch";
-import { CHAT_SANITIZE, chatMarkdownHtml, fileRefInCode, linkifyText } from "../chat/chat-links";
+import { CHAT_SANITIZE, chatMarkdownHtml, fileRefInCode, findFileRefs, linkifyText, parseChatLink } from "../chat/chat-links";
 import { imageUrl } from "../chat/chat-images";
 import { type AgentRun, formatDuration, mergeRuns } from "../chat/agent-runs";
 import { mountAttach, type ChatItem, type UserImage } from "../chat/chat-model";
@@ -21,6 +21,8 @@ import { Icon } from "./icons";
 import { ChatComposer } from "./chat-composer";
 import { BookmarkButton, CopyButton, copyText } from "./chat-copy";
 import { openChatFile, openChatLink } from "./chat-open-file";
+import { openContextMenu } from "./context-menu";
+import { fileRefMenuItems, linkMenuItems } from "./path-menu";
 import { clock, type FileChange, fullClock, PermissionCard, ThinkingRow, ToolRow, ToolRun, TurnFiles } from "./chat-rows";
 import { openLightbox } from "./image-lightbox";
 import { isAgentKind, kindInfo } from "../lib/agents";
@@ -55,7 +57,7 @@ const selecting = () => window.getSelection()?.isCollapsed === false;
  *  marked (given a project; nothing is looked up until a click). Both are added to the DOM
  *  afterwards, never spliced into the sanitized markup: some WebKit builds serialize `<` and `>`
  *  unescaped in attribute values, so a string edit could turn an attribute into live markup. */
-function MarkdownHtml(props: { text: string; project?: Project; class?: string; onClick?: (e: MouseEvent) => void }) {
+function MarkdownHtml(props: { text: string; project?: Project; class?: string; onClick?: (e: MouseEvent) => void; onContextMenu?: (e: MouseEvent) => void }) {
   let el!: HTMLDivElement;
   createEffect(() => {
     el.innerHTML = toHtml(props.text);
@@ -78,8 +80,37 @@ function MarkdownHtml(props: { text: string; project?: Project; class?: string; 
       code.dataset.fileRef = text;
       code.classList.add("file-ref");
     }
+    markProseFiles(el);
   });
-  return <div ref={el} class={props.class} onClick={props.onClick} />;
+  return <div ref={el} class={props.class} onClick={props.onClick} onContextMenu={props.onContextMenu} />;
+}
+
+/** Files the reply names in its plain text (`redraw_element.py`, `src/a.ts:42`) become spans like a file in inline code. Built with the
+ *  DOM, never as markup; links, code and code blocks keep their own handling. */
+function markProseFiles(root: HTMLElement) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement?.closest("a, code, pre, .code-block, [data-file-ref]") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  const nodes: Text[] = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+  for (const node of nodes) {
+    const text = node.data;
+    const refs = findFileRefs(text).filter((r) => fileRefInCode(r.text));
+    if (!refs.length) continue;
+    const parts = document.createDocumentFragment();
+    let at = 0;
+    for (const r of refs) {
+      if (r.start > at) parts.append(text.slice(at, r.start));
+      const span = document.createElement("span");
+      span.className = "file-ref";
+      span.dataset.fileRef = r.text;
+      span.textContent = r.text;
+      parts.append(span);
+      at = r.end;
+    }
+    if (at < text.length) parts.append(text.slice(at));
+    node.replaceWith(parts);
+  }
 }
 
 /** A code block's button copies its code; links and inline code naming a file are followed. All of
@@ -110,9 +141,29 @@ const onMarkdownClick = (project?: Project, onOpenFile?: () => void) => (e: Mous
   if (ref) void openChatFile(project!, ref, onOpenFile);
 };
 
+/** A right click on a link or a named file: open it, or copy the address or the file's paths. Elsewhere (or over a selection) the
+ *  usual menu stays. */
+const onMarkdownMenu = (project?: Project, onOpenFile?: () => void) => (e: MouseEvent) => {
+  if (selecting()) return;
+  const target = e.target as HTMLElement;
+  const a = target.closest<HTMLElement>("a");
+  if (a) {
+    const link = parseChatLink(a.dataset.href ?? a.getAttribute("href") ?? "");
+    if (link.kind === "web") openContextMenu(e, linkMenuItems(link.url, () => openChatLink(link.url)));
+    else if (link.kind === "file" && project) openContextMenu(e, fileRefMenuItems(project, link, onOpenFile));
+    return;
+  }
+  const code = target.closest<HTMLElement>("[data-file-ref]");
+  const ref = code && project ? fileRefInCode(code.dataset.fileRef ?? "") : null;
+  if (ref) openContextMenu(e, fileRefMenuItems(project!, ref, onOpenFile));
+};
+
 /** `onOpenFile`: a link in it is about to open a file, for a dialog that shows it to get out of the way. */
 export function Markdown(props: { text: string; project?: Project; onOpenFile?: () => void }) {
-  return <MarkdownHtml class="msg-assistant" text={props.text} project={props.project} onClick={onMarkdownClick(props.project, props.onOpenFile)} />;
+  return (
+    <MarkdownHtml class="msg-assistant" text={props.text} project={props.project}
+      onClick={onMarkdownClick(props.project, props.onOpenFile)} onContextMenu={onMarkdownMenu(props.project, props.onOpenFile)} />
+  );
 }
 
 /** A reply that is still arriving: finished blocks as markdown, the open one as plain text (or
@@ -122,7 +173,7 @@ function StreamingMarkdown(props: { text: string; project?: Project }) {
   const done = createMemo(() => props.text.slice(0, cut()));
   const tail = () => props.text.slice(cut());
   return (
-    <div class="msg-assistant" onClick={onMarkdownClick(props.project)}>
+    <div class="msg-assistant" onClick={onMarkdownClick(props.project)} onContextMenu={onMarkdownMenu(props.project)}>
       <MarkdownHtml text={done()} project={props.project} />
       <Show when={openTable(tail())} fallback={<div style={{ "white-space": "pre-wrap" }}>{tail()}</div>}>
         <MarkdownHtml text={tail()} project={props.project} />

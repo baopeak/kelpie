@@ -73,6 +73,35 @@ export function fileRefInCode(text: string): FileRef | null {
   return /[\\/]/.test(ref.path) || /\.[a-zA-Z][a-zA-Z0-9]{0,7}$/.test(ref.path) || /^\.[a-z][a-z0-9_]{0,15}$/.test(ref.path) ? ref : null;
 }
 
+/** Extensions a bare name in prose must end in to be taken for a file: with no folder in it, `x.com` or `e.g` must stay words. */
+const PROSE_EXTENSIONS = new Set(
+  ("py pyi ts tsx mts cts js jsx mjs cjs rs go java kt kts swift c h cc cpp cxx hpp hh cs fs rb php pl lua dart scala r jl ex exs erl hs ml " +
+    "clj nim zig vue svelte astro html htm css scss sass less json jsonc json5 toml yaml yml xml md mdx rst txt csv tsv log ini cfg conf env " +
+    "lock sh bash zsh fish ps1 psm1 psd1 bat cmd sql graphql gql proto tf hcl nix gradle ipynb png jpg jpeg gif svg webp ico pdf").split(" "),
+);
+
+export interface FoundFileRef extends FileRef { start: number; end: number; text: string }
+
+/** File paths named in plain text (an agent's prose, a terminal line): `a/b.py`, `src\x.ts:42:7`, `D:\w\y.rs`, `/abs/z.go`, or a bare
+ *  `name.ext` with a known extension. Never part of an address or of a longer word, and a sentence's closing `.`, `,` or `)` is not
+ *  taken. Like `fileRefInCode`, nothing is checked here: a word that only looks like a file costs one toast on click. */
+export function findFileRefs(text: string): FoundFileRef[] {
+  const found: FoundFileRef[] = [];
+  const re = /(?<![\w.\\/:@%~+-])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[\\/])?(?:[\w@+~-][\w.@+~-]*[\\/])*[\w@+~-][\w.@+~-]*\.([A-Za-z][A-Za-z0-9]{0,7}))(?::(\d+)(?::\d+)?)?(?![\w\\/@-]|\.\w)/g;
+  for (const m of text.matchAll(re)) {
+    const path = m[1];
+    const ext = m[2].toLowerCase();
+    const folder = /[\\/]/.test(path);
+    // A bare name: a known extension, and not `Node.js` (a product name, capitalised, one plain word).
+    // An `@` only after a folder (`node_modules/@types/x.d.ts`): a bare `user@host.py` reads as an address.
+    if (!folder && (!PROSE_EXTENSIONS.has(ext) || path.includes("@") || (ext === "js" && /^[A-Z][a-z]+\.js$/.test(path)))) continue;
+    if (/^[\\/]{2}/.test(path) || path.length > 260) continue;
+    const line = lineNumber(m[3]);
+    found.push({ start: m.index, end: m.index + m[0].length, text: m[0], path, ...(line ? { line } : {}) });
+  }
+  return found;
+}
+
 /** `path` relative to the project folder, or null when it lies outside. A remote project's root
  *  is `ssh://host/abs`, its paths plain `/abs/…`. What comes back is never rooted: `D:foo` and
  *  `D:/proj//etc/x` would otherwise leave the project as soon as they are joined to its folder. */

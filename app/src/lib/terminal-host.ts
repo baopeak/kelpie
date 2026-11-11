@@ -25,6 +25,8 @@ import { typedText } from "./typed-text";
 import { osc52Text } from "./osc52";
 import { deviceQueryGate } from "./device-query-gate";
 import type { Settings } from "./types";
+import type { FileRef } from "../chat/chat-links";
+import { fileLinkProvider } from "./terminal-file-links";
 
 /** A session's own terminal theme id (its host's), over the app's; set by lib/ssh-hosts.ts. */
 let themeOf: (sessionId: string) => string | undefined = () => undefined;
@@ -49,6 +51,11 @@ export const setOverlayCheck = (fn: () => boolean) => (overlayOpen = fn);
 /** Opens a Ctrl/Cmd-clicked link (the app routes local dev-server URLs to a browser pane). */
 let openLink: (uri: string) => void = (uri) => void openUrl(uri);
 export const setLinkOpener = (fn: (uri: string) => void) => (openLink = fn);
+/** Follows a link from a terminal's menu, the way a Ctrl/Cmd+click would. */
+export const openTerminalLink = (uri: string) => openLink(uri);
+/** Opens a Ctrl/Cmd-clicked file path in the session's project (the app resolves it against the session's folder). */
+let openFileLink: (sessionId: string, ref: FileRef) => void = () => {};
+export const setFileLinkOpener = (fn: (sessionId: string, ref: FileRef) => void) => (openFileLink = fn);
 /** Other sessions that receive what is typed into a session (a tab with broadcast input on). */
 let inputFanout: (sessionId: string) => number[] = () => [];
 export const setInputFanout = (fn: (sessionId: string) => number[]) => (inputFanout = fn);
@@ -79,6 +86,9 @@ export class TermView {
   private resizeObs: ResizeObserver | null = null;
   private resizeTimer = 0;
   focused = false;
+  /** The address or the file whose link the pointer is over (for the right-click menu), or null. */
+  hoveredUrl: string | null = null;
+  hoveredFile: FileRef | null = null;
   /** Lines where the user pressed Enter (prompts sent to a shell or an agent), oldest first. */
   private marks: IMarker[] = [];
   /** Scrolled away from the bottom, and how many lines arrived since (for "jump to bottom"). */
@@ -110,9 +120,17 @@ export class TermView {
     this.term.loadAddon(this.search);
     this.term.loadAddon(new Unicode11Addon());
     this.term.unicode.activeVersion = "11";
-    // Links open only on Ctrl/Cmd+click: terminal text never triggers actions implicitly.
-    this.term.loadAddon(new WebLinksAddon((e, uri) => {
-      if (isMac ? e.metaKey : e.ctrlKey) openLink(uri);
+    // Links open only on Ctrl/Cmd+click: terminal text never triggers actions implicitly. The one under the pointer is kept for the
+    // terminal's right-click menu.
+    // xterm activates a link on any button: Ctrl+right-click is the menu, not a click.
+    const modified = (e: MouseEvent) => e.button === 0 && (isMac ? e.metaKey : e.ctrlKey);
+    this.term.loadAddon(new WebLinksAddon((e, uri) => modified(e) && openLink(uri), {
+      hover: (_e, uri) => (this.hoveredUrl = uri),
+      leave: () => (this.hoveredUrl = null),
+    }));
+    this.term.registerLinkProvider(fileLinkProvider(this.term, {
+      activate: (e, ref) => modified(e) && openFileLink(this.sessionId, ref),
+      hover: (ref) => (this.hoveredFile = ref),
     }));
     this.term.onData((d) => this.input(d));
     this.term.onBinary((d) => this.input(d, true));
