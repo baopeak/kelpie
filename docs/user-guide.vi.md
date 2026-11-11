@@ -1,103 +1,103 @@
 # Hướng dẫn sử dụng Kelpie
 
-Kelpie chạy nhiều coding agent (Claude Code, Codex, OMP và 20 CLI khác) cùng các shell trên nhiều project. Các phiên chạy trong daemon nền `kelpied`, tách khỏi cửa sổ: việc chuyển project, cập nhật Kelpie hay lỗi giao diện không làm dừng phiên. Kelpie chỉ vẽ project mà bạn đang xem.
+Kelpie chạy nhiều agent lập trình (coding agent) như Claude Code, Codex, OMP và 20 CLI khác, cùng với các shell, trên nhiều project. Vì các phiên chạy trong daemon `kelpied`, một tiến trình nền tách khỏi cửa sổ, nên việc chuyển project, cập nhật Kelpie hay lỗi giao diện đều không làm phiên dừng lại. Ngoài ra, ứng dụng chỉ vẽ giao diện của project mà bạn đang xem.
 
-Tài liệu này hướng dẫn các thao tác thường dùng theo từng việc. [User guide tiếng Anh](user-guide.md) mô tả đầy đủ mọi chi tiết, giới hạn và trường hợp đặc biệt; mỗi phần dưới đây đều có liên kết tới phần tương ứng. Nếu bạn muốn trình diễn Kelpie, hãy xem [kịch bản demo](demo-scripts.vi.md).
+Tài liệu này hướng dẫn các thao tác thường dùng theo từng việc, còn [bản hướng dẫn tiếng Anh](user-guide.md) mô tả đầy đủ mọi chi tiết, giới hạn và trường hợp đặc biệt. Cuối mỗi phần dưới đây đều có liên kết tới phần tương ứng của bản tiếng Anh. Nếu bạn muốn trình diễn Kelpie, hãy xem [kịch bản trình diễn](demo-scripts.vi.md).
 
-Trong tài liệu này, phím tắt được ghi theo Windows và Linux. Trên macOS, `Ctrl+Shift` thường tương ứng với `⌘⇧`; bảng [phím tắt](#phím-tắt) ghi đủ cả hai.
+Trong tài liệu này, phím tắt được ghi theo Windows và Linux. Trên macOS, `Ctrl+Shift` thường tương ứng với `⌘⇧`, và bảng [phím tắt](#phím-tắt) ghi đủ cả hai hệ.
 
 ## Cài đặt và cập nhật
 
 **Cài đặt.**
 
-- **Windows 10 1809+ và Windows 11:** bạn chạy bộ cài `Kelpie_x.y.z_x64-setup.exe`. Bộ cài chỉ cài cho người dùng hiện tại và không cần quyền quản trị.
-- **macOS 12+:** bạn mở tệp `.dmg` và kéo Kelpie vào Applications.
-- **Linux x86-64 (glibc 2.35 trở lên):** bạn dùng AppImage (`chmod +x` rồi chạy; cần FUSE 2) hoặc cài gói `.deb` bằng `sudo apt install ./Kelpie_x.y.z_amd64.deb`. Trên Linux, việc lưu bí mật cần một Secret Service như GNOME Keyring hoặc KWallet.
+- Trên Windows 10 1809+ và Windows 11, bạn chạy bộ cài `Kelpie_x.y.z_x64-setup.exe`. Bộ cài chỉ cài cho người dùng hiện tại nên không cần quyền quản trị.
+- Trên macOS 12+, bạn mở tệp `.dmg` rồi kéo Kelpie vào thư mục Applications.
+- Trên Linux x86-64 (glibc 2.35 trở lên), bạn dùng AppImage (`chmod +x` rồi chạy, cần FUSE 2) hoặc cài gói `.deb` bằng `sudo apt install ./Kelpie_x.y.z_amd64.deb`. Để lưu bí mật trên Linux, Kelpie cần một Secret Service như GNOME Keyring hoặc KWallet.
 
-Kelpie không kèm agent. Bạn cài các CLI mình dùng (`claude`, `codex`, `omp`…) như bình thường. Kelpie tìm chúng qua `PATH` trên Windows, và qua login shell trên macOS và Linux.
+Kelpie không kèm sẵn agent nào, vì vậy bạn cài các CLI mình dùng (`claude`, `codex`, `omp`…) theo cách thông thường. Trên Windows, Kelpie tìm các CLI này qua `PATH`, còn trên macOS và Linux, ứng dụng tìm chúng qua login shell.
 
-**Cập nhật.** Kelpie kiểm tra bản mới trên GitHub 30 giây sau khi khởi động và sau đó mỗi 6 giờ. Khi có bản mới, thanh trạng thái hiện *Update x.y.z*. Hộp thoại cập nhật hiển thị release notes và ba lựa chọn: **Install now**, **Install when idle** (cài khi không còn phiên nào đang làm việc) và **Skip this version**. Bản cập nhật được ký số.
+**Cập nhật.** Kelpie kiểm tra bản mới trên GitHub 30 giây sau khi khởi động, sau đó cứ 6 giờ lại kiểm tra một lần. Khi có bản mới, thanh trạng thái hiện *Update x.y.z*, và hộp thoại cập nhật hiển thị ghi chú phát hành (release notes) cùng ba lựa chọn: *Install now*, *Install when idle* (cài khi không còn phiên nào đang làm việc) và *Skip this version*. Mọi bản cập nhật đều được ký số.
 
-**Cập nhật không làm gián đoạn agent.** Khi cài bản mới, chỉ ứng dụng khởi động lại. Mọi phiên vẫn chạy trong daemon và hiện lại đúng chỗ cũ khi Kelpie mở ra. Đây là lợi ích chính của việc tách daemon khỏi cửa sổ: bạn không phải chờ agent làm xong mới dám cập nhật. Ngoại lệ duy nhất là lần cập nhật đầu tiên từ một bản 0.1 đời đầu, khi daemon còn chạy từ thư mục cài đặt: lần đó các phiên dừng một lần, hộp thoại báo trước, và agent tiếp tục sau đó.
+**Cập nhật không làm gián đoạn agent.** Khi bạn cài bản mới, chỉ ứng dụng khởi động lại, còn mọi phiên vẫn chạy trong daemon và hiện lại đúng chỗ cũ khi Kelpie mở ra. Đây là lợi ích chính của việc tách daemon khỏi cửa sổ, vì bạn không phải chờ agent xong việc mới dám cập nhật. Ngoại lệ duy nhất là lần cập nhật đầu tiên từ một bản 0.1 đời đầu, khi daemon vẫn chạy từ thư mục cài đặt. Khi đó, các phiên dừng một lần, hộp thoại báo trước, và agent tiếp tục làm việc sau đó.
 
-**Đóng Kelpie.** Theo mặc định, đóng Kelpie sẽ dừng daemon cùng mọi phiên, automation và việc truyền tệp. Nếu còn việc đang chạy, Kelpie liệt kê chúng và hỏi **Close and stop** hoặc **Cancel**. Lần mở sau, các phiên hiện lại ở trạng thái *interrupted* và agent tiếp tục đúng cuộc hội thoại cũ. Nếu bạn muốn automation, run theo lịch, truy cập từ điện thoại hoặc việc sao chép tệp tiếp tục khi cửa sổ đóng, bạn đặt Settings → Session Daemon → *When Kelpie closes* thành **Keep it running in the background**.
+**Đóng Kelpie.** Theo mặc định, khi bạn đóng Kelpie thì daemon cũng dừng, kéo theo mọi phiên, automation và việc truyền tệp. Nếu vẫn còn việc đang chạy, Kelpie liệt kê các việc đó và hỏi bạn chọn *Close and stop* hay *Cancel*. Ở lần mở sau, các phiên hiện lại với trạng thái *interrupted* và agent tiếp tục đúng cuộc hội thoại cũ. Nếu bạn muốn automation, run theo lịch, truy cập từ điện thoại hoặc việc sao chép tệp vẫn tiếp tục khi cửa sổ đã đóng, hãy đặt Settings → Session Daemon → *When Kelpie closes* thành *Keep it running in the background*.
 
-Chi tiết: [Install](user-guide.md#install), [Resuming after a restart](user-guide.md#resuming-after-a-restart).
+Chi tiết nằm ở các phần [Install](user-guide.md#install) và [Resuming after a restart](user-guide.md#resuming-after-a-restart).
 
 ## Bắt đầu nhanh
 
-1. Bạn nhấn `+` ở sidebar (hoặc mở tìm kiếm và chọn *Add Project Folder…*) để thêm một thư mục. Nếu thư mục là một Git repository, Kelpie tự thêm các worktree khác của nó vào dưới project.
-2. Trên màn hình trống của project, bạn nhấn **Claude Code**, **Codex**, **OMP** hoặc **Terminal**. Nút `+` trên thanh tab mở hộp thoại phiên mới với tham số, tên, vị trí đặt pane, tài khoản, *Chat view* và một prompt đầu tiên.
-3. Bạn nhấn `Ctrl+Shift+D` để chia pane sang phải và chọn thứ cần chạy trong pane mới.
-4. Bạn giao việc cho agent và theo dõi sidebar: chấm hổ phách nghĩa là phiên cần bạn, chấm xanh dương nghĩa là đang làm việc, chấm xanh lá nghĩa là đã xong nhưng bạn chưa xem.
+1. Để thêm một thư mục, bạn nhấn `+` ở thanh bên (sidebar) hoặc mở ô tìm kiếm và chọn *Add Project Folder…*. Nếu thư mục đó là một Git repository, Kelpie tự thêm các worktree khác của nó (những thư mục làm việc khác của cùng repository) vào dưới project.
+2. Trên màn hình trống của project, bạn nhấn *Claude Code*, *Codex*, *OMP* hoặc *Terminal* để mở phiên. Muốn chỉnh thêm, bạn dùng nút `+` trên thanh tab: nút này mở hộp thoại phiên mới, nơi bạn đặt tham số, tên, vị trí của khung (pane, tức một ô trong tab), tài khoản, *Chat view* và yêu cầu đầu tiên (prompt) cho agent.
+3. Khi cần thêm một khung, bạn nhấn `Ctrl+Shift+D` để chia sang phải rồi chọn thứ cần chạy trong khung mới.
+4. Sau khi giao việc cho agent, bạn theo dõi chấm trạng thái trên thanh bên. Chấm hổ phách nghĩa là phiên cần bạn, chấm xanh dương nghĩa là phiên đang làm việc, còn chấm xanh lá nghĩa là phiên đã xong nhưng bạn chưa xem.
 
-Khi chưa có project nào, Kelpie hiện màn hình chào với Kip, linh vật của Kelpie, cùng các nút *Add project folder*, *Add remote project (SSH)*, *SSH hosts* và *Command palette*. Trong vài lần mở đầu, Kelpie hiện một mẹo ngắn mỗi lần (tìm kiếm, dashboard, terminal hoặc chat, hội thoại cũ). Bạn có thể tắt mẹo hoặc bật lại trong Settings → Notifications.
+Khi chưa có project nào, Kelpie hiện màn hình chào với Kip, linh vật của ứng dụng, cùng các nút *Add project folder*, *Add remote project (SSH)*, *SSH hosts* và *Command palette*. Trong vài lần mở đầu tiên, mỗi lần Kelpie hiện một mẹo ngắn về tìm kiếm, bảng điều khiển, terminal hoặc chat, hay các hội thoại cũ. Bạn có thể tắt hoặc bật lại mẹo trong Settings → Notifications.
 
 ## Không gian làm việc
 
-**Sidebar.** Sidebar liệt kê mọi project cùng nhánh Git (`*` nghĩa là có thay đổi chưa commit; ↑↓ là số commit đi trước hoặc đi sau) và các phiên của nó theo thứ tự pane trên màn hình. Mỗi phiên hiện chấm trạng thái, tiêu đề việc, model và thời gian từ lần hoạt động cuối. Bạn nhấp chuột phải vào phiên để đổi tên, đánh dấu chưa đọc, khởi động lại, resume, chuyển sang chat view hoặc dừng. Bạn nhấp chuột phải vào project để tạo worktree, đổi tên hoặc sắp xếp. `Alt+1…9` chuyển nhanh giữa các project, còn `Alt+Shift+←/→` đi lùi và đi tới qua các pane bạn vừa xem.
+**Thanh bên.** Thanh bên liệt kê mọi project kèm nhánh Git và các phiên của từng project, theo đúng thứ tự khung trên màn hình. Ở nhánh Git, dấu `*` cho biết có thay đổi chưa commit, còn ↑↓ là số commit đi trước hoặc đi sau. Mỗi phiên hiện chấm trạng thái, tiêu đề việc, model và thời gian từ lần hoạt động cuối. Khi nhấp chuột phải vào một phiên, bạn có thể đổi tên, đánh dấu chưa đọc, khởi động lại, tiếp tục (resume), chuyển sang chat view hoặc dừng phiên; với project, menu chuột phải cho phép tạo worktree, đổi tên hoặc sắp xếp. Ngoài ra, `Alt+1…9` chuyển nhanh giữa các project, còn `Alt+Shift+←/→` đưa bạn lùi hoặc tới qua các khung vừa xem.
 
-**Tab và pane.** Mỗi tab là một việc; các pane là những thứ bạn cần nhìn cùng lúc trong việc đó. Bạn rê chuột lên một pane để thấy nút chia phải, chia xuống, phóng to (`Ctrl+Shift+Enter`) và đóng. Một pane mới hỏi bạn muốn chạy gì: bạn nhấp một agent hoặc *Terminal*, hoặc nhấn `1`–`9`.
+**Tab và khung.** Mỗi tab tương ứng với một việc, còn các khung trong tab là những thứ bạn cần nhìn cùng lúc khi làm việc đó. Khi bạn rê chuột lên một khung, các nút chia phải, chia xuống, phóng to (`Ctrl+Shift+Enter`) và đóng sẽ hiện ra. Mỗi khung mới đều hỏi bạn muốn chạy gì, và bạn nhấp một agent hoặc *Terminal*, hoặc nhấn `1`–`9` để chọn.
 
-**Layout.** Nút lưới trên thanh tab (`Ctrl+Shift+L`) sắp xếp tab theo các mẫu từ 2 cột tới 3×3, hoặc theo số pane mỗi hàng như `3,2`. **Tile all** gom các tab chỉ có một CLI vào một lưới đều; **Spread into tabs** làm ngược lại. Bạn kéo header của pane để đổi chỗ, kéo sang tab khác để chuyển pane, và kéo đường chia để đổi kích thước. **Broadcast input** gửi những gì bạn gõ tới mọi terminal của tab. *Save this layout* lưu cách sắp xếp kèm thứ đang chạy trong từng pane.
+**Bố cục.** Nút lưới trên thanh tab (`Ctrl+Shift+L`) sắp xếp tab theo các mẫu từ 2 cột tới 3×3, hoặc theo số khung trên mỗi hàng như `3,2`. Lệnh *Tile all* gom các tab chỉ chứa một CLI vào một lưới đều, còn *Spread into tabs* làm điều ngược lại. Bạn kéo thanh tiêu đề của khung để đổi chỗ, kéo khung sang tab khác để chuyển tab, và kéo đường chia để đổi kích thước. Khi bật *Broadcast input*, những gì bạn gõ được gửi tới mọi terminal trong tab. Còn *Save this layout* lưu cách sắp xếp kèm thứ đang chạy trong từng khung.
 
-**Terminal nổi.** `` Ctrl+Shift+` `` mở một shell ở thư mục home, nằm trên mọi project. Khi bạn ẩn nó, shell vẫn chạy.
+**Terminal nổi.** Phím `` Ctrl+Shift+` `` mở một shell ở thư mục home trong một terminal nổi phía trên mọi project. Khi bạn ẩn terminal này, shell vẫn tiếp tục chạy.
 
-**Liên kết tệp.** Khi agent in ra một đường dẫn như `src/a.ts:42`, `D:\w\x.py` hay chỉ một tên tệp như `name.py`, bạn nhấn `Ctrl+click` để mở tệp trong trình xem của Kelpie ở đúng dòng đó. Kelpie tìm tệp trong thư mục của phiên, rồi trong project, rồi theo tên tệp. Nhấp chuột phải vào đường dẫn để chọn *Open*, *Copy Relative*, *Copy Path*, *Copy Name* hoặc *Reveal in Explorer*. Trong chat view, bạn nhấp vào tên tệp trong câu trả lời để mở tệp đó.
+**Liên kết tệp.** Khi agent in ra một đường dẫn như `src/a.ts:42`, `D:\w\x.py` hay chỉ một tên tệp như `name.py`, bạn có thể `Ctrl+click` để mở tệp trong trình xem của Kelpie ở đúng dòng đó. Kelpie tìm tệp lần lượt trong thư mục của phiên, trong project, rồi theo tên tệp. Menu chuột phải trên đường dẫn có *Open*, *Copy Relative*, *Copy Path*, *Copy Name* và *Reveal in Explorer*. Trong chat view, bạn chỉ cần nhấp tên tệp trong câu trả lời để mở tệp.
 
-**Terminal dài.** Khi bạn cuộn lên trong một cuộc hội thoại dài, một nhãn ở góc đếm số dòng mới và đưa bạn về cuối. `Ctrl+Shift+↑/↓` nhảy tới prompt trước hoặc sau mà bạn đã gửi. Nhấp chuột phải vào terminal để sao chép, dán, xoá màn hình, **Copy Context** (400 dòng cuối), chia pane, chạy quick command hoặc hand-off cho agent khác.
+**Hội thoại dài trong terminal.** Khi bạn cuộn lên trong một cuộc hội thoại dài, một nhãn ở góc màn hình đếm số dòng mới và đưa bạn về cuối. Phím `Ctrl+Shift+↑/↓` nhảy tới yêu cầu trước hoặc sau mà bạn đã gửi. Menu chuột phải của terminal cho phép sao chép, dán, xoá màn hình, chép bối cảnh bằng *Copy Context* (400 dòng cuối), chia khung, chạy quick command hoặc chuyển giao cho agent khác.
 
-Chi tiết: [Everyday use](user-guide.md#everyday-use), [Layouts](user-guide.md#layouts), [Terminals](user-guide.md#terminals).
+Chi tiết nằm ở các phần [Everyday use](user-guide.md#everyday-use), [Layouts](user-guide.md#layouts) và [Terminals](user-guide.md#terminals).
 
 ## Tìm kiếm, dashboard và Activity
 
-**Tìm mọi thứ (`Ctrl+Shift+P`).** Một ô tìm kiếm tìm các mục gần đây, phiên đang cần bạn, phiên, project, tệp, lệnh và cài đặt. Bạn gõ tiền tố `@` cho phiên, `#` cho tệp, `>` cho lệnh, `/` cho cài đặt và `!` cho các prompt cũ, hoặc nhấn `Tab` để đổi phạm vi.
+**Tìm mọi thứ (`Ctrl+Shift+P`).** Một ô tìm kiếm duy nhất tìm các mục gần đây, phiên đang cần bạn, phiên, project, tệp, lệnh và cài đặt. Để thu hẹp phạm vi, bạn gõ tiền tố `@` cho phiên, `#` cho tệp, `>` cho lệnh, `/` cho cài đặt và `!` cho các yêu cầu đã gửi trước đây, hoặc nhấn `Tab` để đổi phạm vi.
 
-**Dashboard (`Ctrl+Shift+M`).** Dashboard nhóm mọi phiên của mọi project thành *Needs you*, *Failed*, *Working*, *Done* và *Idle*. Nhóm *Needs you* xếp phiên chờ lâu nhất lên đầu. Nút **Answer** mở phần cuối màn hình của phiên, các nút cho từng phím mà lời nhắc chấp nhận (1 2 3, y n), Enter, Esc và một dòng văn bản. Câu trả lời chỉ được gửi nếu phiên vẫn đang chờ đúng lời nhắc đó. `Ctrl+Shift+.` nhảy tới phiên chờ lâu nhất, rồi phiên tiếp theo.
+**Bảng điều khiển (`Ctrl+Shift+M`).** Bảng điều khiển (Dashboard) nhóm mọi phiên trong mọi project thành *Needs you*, *Failed*, *Working*, *Done* và *Idle*, trong đó nhóm *Needs you* xếp phiên chờ lâu nhất lên đầu. Nút *Answer* mở phần cuối màn hình của phiên cùng các nút cho từng phím mà lời nhắc chấp nhận (1 2 3, y n), Enter, Esc và một dòng để gõ văn bản. Kelpie chỉ gửi câu trả lời nếu phiên vẫn đang chờ đúng lời nhắc đó. Ngoài ra, `Ctrl+Shift+.` đưa bạn tới phiên chờ lâu nhất, rồi tới phiên tiếp theo.
 
-Với các agent không có hook (Codex, Gemini, Aider, OpenCode…), Kelpie coi phiên là *needs you* khi màn hình hiện một menu hoặc một câu hỏi có/không.
+Với các agent không có hook để báo trạng thái (Codex, Gemini, Aider, OpenCode…), Kelpie coi phiên là *needs you* khi màn hình hiện một menu hoặc một câu hỏi có/không.
 
-**Activity.** Chuông trên thanh trạng thái liệt kê những gì đã xảy ra khi bạn nhìn chỗ khác: agent đã xong hoặc cần bạn, automation đã chạy, worktree mới. Bạn nhấp một mục để tới đó và nhấp chuột phải để đổi trạng thái đã đọc. Phiên mà bạn đang nhìn không tạo thông báo.
+**Activity.** Chuông trên thanh trạng thái liệt kê những gì đã xảy ra trong lúc bạn nhìn chỗ khác, chẳng hạn agent đã xong hoặc cần bạn, automation đã chạy, hay có worktree mới. Bạn nhấp một mục để tới đó, hoặc nhấp chuột phải để đổi trạng thái đã đọc. Riêng phiên mà bạn đang nhìn thì không tạo thông báo.
 
-Chi tiết: [Everyday use](user-guide.md#everyday-use), [Activity and notifications](user-guide.md#activity-and-notifications).
+Chi tiết nằm ở các phần [Everyday use](user-guide.md#everyday-use) và [Activity and notifications](user-guide.md#activity-and-notifications).
 
 ## Agent và chat view
 
-**Các agent được hỗ trợ.** Ngoài Claude Code, Codex và OMP, Kelpie nhận diện 20 CLI khác: Gemini, Cursor CLI, OpenCode, GitHub Copilot, Grok, Qwen Code, Droid, Aider, Amp, Goose, Kimi, Crush, Cline, Kiro, Continue, Devin, Auggie, CodeBuddy, Mistral Vibe và Pi. Settings → Agents cho phép ẩn agent, sửa tham số và biến môi trường của từng agent. Biến môi trường được lưu dạng văn bản thường.
+**Các agent được hỗ trợ.** Ngoài Claude Code, Codex và OMP, Kelpie nhận diện 20 CLI khác: Gemini, Cursor CLI, OpenCode, GitHub Copilot, Grok, Qwen Code, Droid, Aider, Amp, Goose, Kimi, Crush, Cline, Kiro, Continue, Devin, Auggie, CodeBuddy, Mistral Vibe và Pi. Trong Settings → Agents, bạn có thể ẩn agent, sửa tham số và biến môi trường của từng agent. Kelpie lưu biến môi trường dưới dạng văn bản thường.
 
-**Quyền.** Chế độ *Permissions: Manual* khiến agent hỏi bạn trước khi hành động. *Permissions: Yolo* khởi động agent với cờ bỏ qua xin quyền của chính agent đó.
+**Quyền.** Ở chế độ *Permissions: Manual*, agent hỏi bạn trước khi hành động. Còn ở chế độ *Permissions: Yolo*, Kelpie khởi động agent với cờ bỏ qua bước xin quyền của chính agent đó.
 
-**Chat view.** Trong header của pane agent, bạn nhấp biểu tượng chat để tiếp tục *cùng cuộc hội thoại* trong giao diện chat; biểu tượng terminal đưa bạn trở lại. Kelpie dừng giao diện này trước khi mở giao diện kia, nên một cuộc hội thoại không bao giờ có hai người ghi. Trong ô nhập, `/` liệt kê lệnh của agent, `@` liệt kê tệp, và với Codex `$` liệt kê skill. Các chip dưới ô nhập đổi model, mức effort và chế độ quyền. Transcript hiện mỗi lần dùng công cụ trên một dòng, gộp các lần đọc và tìm kiếm liên tiếp, và liệt kê các tệp đã đổi sau mỗi lượt. Bạn có thể dán ảnh, lưu câu trả lời vào tab *Saved*, và mở *Agent map* để xem các subagent của cuộc hội thoại.
+**Chat view.** Để tiếp tục *cùng cuộc hội thoại* trong giao diện chat, bạn nhấp biểu tượng chat trên thanh tiêu đề của khung agent; biểu tượng terminal sẽ đưa bạn trở lại. Vì Kelpie dừng giao diện này trước khi mở giao diện kia, nên một cuộc hội thoại không bao giờ có hai nơi cùng ghi vào. Trong ô nhập, `/` liệt kê lệnh của agent, `@` liệt kê tệp, còn với Codex thì `$` liệt kê skill. Các nút nhỏ dưới ô nhập đổi model, mức effort và chế độ quyền. Bản ghi hội thoại hiện mỗi lần dùng công cụ trên một dòng, gộp các lần đọc và tìm kiếm liên tiếp, đồng thời liệt kê các tệp đã đổi sau mỗi lượt. Ngoài ra, bạn có thể dán ảnh, lưu câu trả lời vào tab *Saved* và mở *Agent map* để xem các subagent của cuộc hội thoại.
 
-**Phê duyệt trong chat.** Thẻ phê duyệt hiện lệnh hoặc nội dung sửa mà agent muốn làm. Bạn nhấn `1`–`9` để chọn, hoặc gõ điều agent nên làm thay thế rồi nhấn *Deny*.
+**Phê duyệt trong chat.** Thẻ phê duyệt hiện lệnh hoặc phần sửa mà agent muốn thực hiện. Bạn nhấn `1`–`9` để chọn một phương án, hoặc gõ điều agent nên làm thay thế rồi nhấn *Deny*.
 
-**Hội thoại cũ.** Tab **Sessions** của panel bên phải liệt kê các cuộc hội thoại Claude, Codex và OMP trước đây, nhóm theo ngày và tìm được theo tiêu đề hoặc prompt đầu tiên. Bạn có thể resume trong terminal hoặc chat view.
+**Hội thoại cũ.** Tab *Sessions* trong panel bên phải liệt kê các cuộc hội thoại Claude, Codex và OMP trước đây, nhóm theo ngày, và bạn có thể tìm chúng theo tiêu đề hoặc yêu cầu đầu tiên. Từ đây, bạn mở lại (resume) một cuộc hội thoại trong terminal hoặc chat view.
 
-**Giữ cuộc hội thoại khoẻ.** Menu của phiên có **Hand off to…** (mở agent khác với phần cuối transcript làm bối cảnh), **Compact**, **Clear** và **Restart** giữ nguyên cuộc hội thoại. *Hibernation* dừng agent đã xong và nằm yên trong project nền sau N phút; agent tiếp tục khi bạn mở lại.
+**Duy trì cuộc hội thoại.** Menu của phiên có *Hand off to…* để mở agent khác với phần cuối bản ghi hội thoại làm bối cảnh. Menu này còn có *Compact*, *Clear* và *Restart*, và cả ba đều giữ nguyên cuộc hội thoại. Ngoài ra, khi bật *Hibernation*, Kelpie dừng những agent đã xong và nằm yên trong một project chạy nền quá N phút, rồi cho agent tiếp tục khi bạn mở lại.
 
-**Nhiều tài khoản.** Settings → Accounts thêm tài khoản Claude Code hoặc Codex. Khi một phiên Claude Code chạm giới hạn sử dụng, dải thông báo phía trên pane cho bạn **Continue at reset**, **Switch account…** hoặc **Hand off to…**.
+**Nhiều tài khoản.** Bạn thêm tài khoản Claude Code hoặc Codex trong Settings → Accounts. Khi một phiên Claude Code chạm giới hạn sử dụng, dải thông báo phía trên khung cho bạn ba lựa chọn: *Continue at reset*, *Switch account…* hoặc *Hand off to…*.
 
-**Context và chi phí.** Mỗi phiên Claude Code, Codex và OMP có vòng tròn context cho biết cửa sổ ngữ cảnh đã dùng bao nhiêu. Trang **Usage & cost** thống kê chi phí và token theo ngày, project, agent hoặc model. Settings → Usage & Resources có giới hạn chi phí cho mỗi phiên.
+**Context và chi phí.** Mỗi phiên Claude Code, Codex và OMP có một vòng tròn context cho biết cửa sổ ngữ cảnh đã dùng bao nhiêu. Trang *Usage & cost* thống kê chi phí và token theo ngày, project, agent hoặc model, còn Settings → Usage & Resources cho phép đặt giới hạn chi phí cho mỗi phiên.
 
-Chi tiết: [Agents](user-guide.md#agents), [Everyday use](user-guide.md#everyday-use) (mục Chat view), [Past conversations](user-guide.md#past-conversations), [Several accounts](user-guide.md#several-claude-code--codex-accounts), [Context, tokens and cost](user-guide.md#context-tokens-and-cost).
+Chi tiết nằm ở các phần [Agents](user-guide.md#agents), [Everyday use](user-guide.md#everyday-use) (mục Chat view), [Past conversations](user-guide.md#past-conversations), [Several accounts](user-guide.md#several-claude-code--codex-accounts) và [Context, tokens and cost](user-guide.md#context-tokens-and-cost).
 
 ## Sub-session
 
-Một agent có thể mở các phiên agent khác để chia việc. Khác với subagent chạy bên trong tiến trình của agent, **sub-session** là một phiên Kelpie thật: phiên đó hiện trên sidebar, bạn mở, gõ vào hoặc đóng được, và kết quả của nó được gửi về phiên cha.
+Một agent có thể mở các phiên agent khác để chia việc. Khác với subagent chạy bên trong tiến trình của agent, mỗi **sub-session** là một phiên Kelpie thật, nên phiên đó hiện trên thanh bên và bạn có thể mở, gõ vào hoặc đóng nó. Sub-session gửi kết quả về phiên cha.
 
-**Cách dùng.** Trong một phiên Claude, Codex hoặc agent khác do Kelpie khởi động, bạn yêu cầu bằng lời thường, ví dụ: *"mở sub-session để sửa #1 #2 #3 bằng Codex"*. Agent mở một phiên con cho mỗi việc. Khi phiên con báo xong, bị chặn hoặc cần bạn, kết quả hiện thành tin nhắn mới trong phiên cha.
+**Cách dùng.** Trong một phiên Claude, Codex hoặc agent khác do Kelpie khởi động, bạn chỉ cần yêu cầu bằng lời thường, ví dụ *"mở sub-session để sửa #1 #2 #3 bằng Codex"*. Agent sẽ mở một phiên con cho mỗi việc. Khi phiên con báo xong, bị chặn hoặc cần bạn, kết quả hiện thành một tin nhắn mới trong phiên cha.
 
-**Phê duyệt.** Theo mặc định, mỗi sub-session hỏi bạn trước bằng một thẻ ở góc dưới bên phải. Thẻ ghi tên phiên yêu cầu, agent, thư mục, việc và model. Bạn chọn *Allow once*, *Allow for this session*, *Always allow* hoặc *Deny*. `Ctrl+Shift+A` đưa yêu cầu đang mở lên trước.
+**Phê duyệt.** Theo mặc định, mỗi sub-session đều hỏi bạn trước bằng một thẻ ở góc dưới bên phải. Thẻ ghi tên phiên yêu cầu, agent, thư mục, việc và model, để bạn chọn *Allow once*, *Allow for this session*, *Always allow* hoặc *Deny*. Nếu có yêu cầu đang mở, `Ctrl+Shift+A` đưa yêu cầu đó lên trước.
 
-**Giới hạn.** Sub-session sâu tối đa 3 cấp, mỗi phiên có tối đa 10 phiên con đang chạy, và toàn máy có một giới hạn tự động hoặc do bạn đặt. Sub-session không bao giờ có nhiều quyền hơn phiên đã mở nó. Settings → Agents → **Sub-sessions** có ba chế độ: Off, Ask (mặc định) và Allow.
+**Giới hạn.** Sub-session được lồng sâu tối đa 3 cấp, mỗi phiên có tối đa 10 phiên con đang chạy, và toàn máy còn có một giới hạn chung do Kelpie đặt tự động hoặc do bạn chọn. Một sub-session không bao giờ có nhiều quyền hơn phiên đã mở nó. Trong Settings → Agents → *Sub-sessions*, bạn chọn một trong ba chế độ Off, Ask (mặc định) và Allow.
 
-Chi tiết: [Sub-sessions](user-guide.md#sub-sessions).
+Chi tiết nằm ở phần [Sub-sessions](user-guide.md#sub-sessions).
 
 ## Worktree và board
 
-**Tạo worktree.** Bạn nhấp chuột phải vào một repository và chọn **New worktree…**. Hộp thoại gợi ý tên nhánh, nhánh gốc và thư mục (`<repo>-worktrees/<branch>`). Worktree hiện dưới repository với phiên và layout riêng. **Remove worktree…** liệt kê trước những gì sẽ mất, rồi mới dừng phiên và xoá worktree; nhánh luôn được giữ lại.
+**Tạo worktree.** Bạn nhấp chuột phải vào một repository và chọn *New worktree…*. Hộp thoại gợi ý sẵn tên nhánh, nhánh gốc và thư mục (`<repo>-worktrees/<branch>`). Worktree mới hiện dưới repository với phiên và bố cục riêng. Khi bạn chọn *Remove worktree…*, Kelpie liệt kê trước những gì sẽ mất rồi mới dừng phiên và xoá worktree, nhưng luôn giữ lại nhánh.
 
-**Tệp `.kelpie.yaml`.** Repository có thể chứa tệp này để chuẩn bị worktree mới. Kelpie hiển thị nội dung tệp theo commit gốc và chỉ chạy khi bạn đánh dấu đồng ý:
+**Tệp `.kelpie.yaml`.** Một repository có thể chứa tệp này để chuẩn bị cho worktree mới. Kelpie hiển thị nội dung tệp theo commit gốc và chỉ chạy các bước trong đó khi bạn đánh dấu đồng ý. Tệp có dạng như sau:
 
 ```yaml
 setup:            # lệnh gõ vào một terminal "setup"
@@ -113,115 +113,115 @@ check:            # check mà Finish chạy, xem phần Review
   - pnpm test
 ```
 
-**Agent mới trong worktree riêng.** Settings → Agents → *Worktree for new agent sessions* cho phép mỗi agent mới chạy trong worktree riêng, với tên nhánh tạo từ prompt đầu tiên.
+**Agent mới trong worktree riêng.** Khi bạn bật Settings → Agents → *Worktree for new agent sessions*, mỗi agent mới sẽ chạy trong worktree riêng, với tên nhánh được tạo từ yêu cầu đầu tiên.
 
-**Board (`Ctrl+Shift+J`).** Board hiện mọi project và worktree thành thẻ trong các cột *Todo*, *In progress*, *Review* và *Done*, kèm các agent đang chạy. Bạn kéo thẻ giữa các cột, ghim thẻ quan trọng và nhấp thẻ để mở. Mỗi worktree có thể có một ghi chú về việc đang làm; bạn đặt ghi chú từ menu sidebar, hoặc agent tự đặt bằng `kelpied worktree set --comment "…" --status review`.
+**Board (`Ctrl+Shift+J`).** Board là bảng công việc hiện mọi project và worktree thành thẻ trong các cột *Todo*, *In progress*, *Review* và *Done*, kèm các agent đang chạy. Bạn kéo thẻ giữa các cột, ghim thẻ quan trọng và nhấp thẻ để mở. Mỗi worktree có thể có một ghi chú về việc đang làm. Ghi chú này do bạn đặt từ menu thanh bên, hoặc do agent tự đặt bằng `kelpied worktree set --comment "…" --status review`.
 
-Chi tiết: [Worktrees and the workspace board](user-guide.md#worktrees-and-the-workspace-board), [New agent sessions in a worktree](user-guide.md#new-agent-sessions-in-a-worktree).
+Chi tiết nằm ở các phần [Worktrees and the workspace board](user-guide.md#worktrees-and-the-workspace-board) và [New agent sessions in a worktree](user-guide.md#new-agent-sessions-in-a-worktree).
 
 ## Review, Git và Finish
 
-**Panel Changes (`Ctrl+Shift+G`).** Panel này push, pull (chỉ fast-forward) và sync, hiện xung đột khi đang merge hoặc rebase, và có **Resolve with AI**. Nút ✦ soạn thông điệp commit từ diff. Bạn nhấp tên nhánh ở đầu panel để đổi nhánh; Kelpie chỉ đổi khi không có gì bị mất. Phần *History* hiện 100 commit gần nhất, và phần *Stashes* cho phép áp dụng hoặc xoá stash. Với GitHub, panel hiện pull request của nhánh và trạng thái check, và có **Create pull request…**. Với GitLab, panel hiện merge request và pipeline.
+**Panel Changes (`Ctrl+Shift+G`).** Panel Changes cho phép push, pull (chỉ fast-forward) và sync, hiện xung đột khi đang merge hoặc rebase, và có nút *Resolve with AI*. Nút ✦ soạn thông điệp commit dựa trên diff. Khi muốn đổi nhánh, bạn nhấp tên nhánh ở đầu khung, và Kelpie chỉ đổi khi không có gì bị mất. Phần *History* hiện 100 commit gần nhất, còn phần *Stashes* cho phép áp dụng hoặc xoá stash. Với GitHub, khung này hiện pull request của nhánh cùng trạng thái các check (bước kiểm tra tự động) và có nút *Create pull request…*; với GitLab, khung hiện merge request và pipeline.
 
-**Ghi chú review.** Trong diff, bạn nhấp dấu `+` ở lề để ghi chú một dòng. Ghi chú của mọi tệp gom vào một thanh phía trên diff. **Send to agent ▾** gửi tất cả ghi chú thành một prompt cho agent đang chạy hoặc một agent mới. `F7` và `Shift+F7` chuyển giữa các thay đổi.
+**Ghi chú khi duyệt.** Trong diff, bạn nhấp dấu `+` ở lề để ghi chú cho một dòng. Ghi chú của mọi tệp được gom vào một thanh phía trên diff, và nút *Send to agent ▾* gửi tất cả thành một yêu cầu cho agent đang chạy hoặc cho một agent mới. Để chuyển giữa các thay đổi, bạn dùng `F7` và `Shift+F7`.
 
-**Review với agent khác.** **Review with…** nhờ một agent khác, mặc định là agent không viết thay đổi đó, review worktree. Agent review có thể để ghi chú trên diff bằng `kelpied review add <file>:<line> "<comment>"`.
+**Nhờ agent khác duyệt.** Lệnh *Review with…* nhờ một agent khác duyệt worktree, và theo mặc định Kelpie chọn agent không viết ra thay đổi đó. Agent duyệt có thể để lại ghi chú trên diff bằng `kelpied review add <file>:<line> "<comment>"`.
 
-**Hàng đợi review và Finish.** Cột *Review* của board là hàng đợi review. Thẻ worktree trong cột này hiện số tệp, số dòng thêm và bớt, số commit, check, chi phí và số lượt. **Approve → Finish** mở hộp thoại Finish: danh sách tệp chưa commit sẽ được lưu thành commit "WIP", cách gộp (squash, merge commit hoặc rebase), thông điệp và các check. Sau đó, Kelpie dừng các phiên của worktree, commit, gộp, chạy check, chỉ di chuyển nhánh đích nếu nhánh đó không đổi trong lúc chờ, và xoá worktree sau cùng. Finish không bao giờ dùng force. Check được đọc từ `.kelpie.yaml` trên nhánh đích, không bao giờ từ nhánh đang được gộp, và chỉ chạy sau khi bạn duyệt đúng danh sách đó.
+**Hàng đợi duyệt và Finish.** Cột *Review* trên board đóng vai trò hàng đợi duyệt. Mỗi thẻ worktree trong cột này hiện số tệp, số dòng thêm và bớt, số commit, check, chi phí và số lượt. Khi bạn nhấn *Approve → Finish*, hộp thoại Finish mở ra với danh sách tệp chưa commit (sẽ được lưu thành commit "WIP"), cách gộp (squash, merge commit hoặc rebase), thông điệp và các check. Sau đó, Kelpie dừng các phiên của worktree, commit, gộp, chạy check, chỉ di chuyển nhánh đích nếu nhánh đó không đổi trong lúc chờ, rồi xoá worktree sau cùng. Finish không bao giờ dùng thao tác force. Kelpie đọc danh sách check từ `.kelpie.yaml` trên nhánh đích chứ không bao giờ từ nhánh đang được gộp, và chỉ chạy chúng sau khi bạn duyệt đúng danh sách đó.
 
-**Lượt và hoàn tác.** Khi bật Settings → Agents → **Turn snapshots**, Kelpie chụp trạng thái thư mục sau mỗi lượt của agent. Tab **Turns** liệt kê các lượt, và nút hoàn tác cho bạn xem trước mọi tệp sẽ được khôi phục trước khi thay đổi bất cứ điều gì.
+**Lượt và hoàn tác.** Khi bạn bật Settings → Agents → *Turn snapshots*, Kelpie chụp lại trạng thái thư mục sau mỗi lượt của agent. Tab *Turns* liệt kê các lượt, và nút hoàn tác cho bạn xem trước mọi tệp sẽ được khôi phục trước khi thay đổi bất cứ điều gì.
 
-Chi tiết: [Source control and review](user-guide.md#source-control-and-review), [Review and Finish](user-guide.md#review-and-finish), [Review with another agent](user-guide.md#review-with-another-agent-and-best-of-several), [Turns and undo](user-guide.md#turns-and-undo).
+Chi tiết nằm ở các phần [Source control and review](user-guide.md#source-control-and-review), [Review and Finish](user-guide.md#review-and-finish), [Review with another agent](user-guide.md#review-with-another-agent-and-best-of-several) và [Turns and undo](user-guide.md#turns-and-undo).
 
 ## Kế hoạch, run và automation
 
-**Tab Plan.** Tab Plan đọc kế hoạch và spec có sẵn trong repository: `plans/<tên>/plan.md` cùng các tệp `phase-*.md`, `specs/**`, `.kiro/specs/**` và `docs/plans/**`. Kelpie không có định dạng riêng; tab chỉ đọc checklist Markdown `- [ ]` và `- [x]`. Khi bạn tích một ô, tệp chỉ thay đổi đúng một ký tự. Nút tia sét ở cuối một task (**Run with…**) giao task đó cho một agent, chạy ngay tại thư mục, trong worktree riêng hoặc trên một máy chủ SSH đã liên kết. **New spec** tạo `requirements.md`, `design.md` và `tasks.md` cho một spec mới.
+**Tab Plan.** Tab Plan đọc kế hoạch và spec có sẵn trong repository, gồm `plans/<tên>/plan.md` cùng các tệp `phase-*.md`, `specs/**`, `.kiro/specs/**` và `docs/plans/**`. Kelpie không áp đặt định dạng riêng mà chỉ đọc checklist Markdown `- [ ]` và `- [x]`, nên khi bạn tích một ô, tệp chỉ thay đổi đúng một ký tự. Nút tia sét ở cuối mỗi việc (*Run with…*) giao việc đó cho một agent chạy ngay tại thư mục, trong worktree riêng hoặc trên một máy chủ SSH đã liên kết. Còn nút *New spec* tạo `requirements.md`, `design.md` và `tasks.md` cho một spec mới.
 
-**Run (`Ctrl+Shift+R`).** Một run chia việc lớn thành các task. Mỗi task có prompt, agent, các task phải chờ, tuỳ chọn cần phê duyệt trước khi chạy và tuỳ chọn worktree riêng. *Plan tasks with AI* soạn sẵn danh sách task từ một mục tiêu để bạn xem lại. Daemon chạy các task theo thứ tự phụ thuộc. Bạn cũng có thể tạo run từ một tệp JSON bằng `kelpied run create run.json`.
+**Run (`Ctrl+Shift+R`).** Một run chia việc lớn thành nhiều nhiệm vụ. Mỗi nhiệm vụ có yêu cầu, agent, các nhiệm vụ phải chờ, tuỳ chọn cần phê duyệt trước khi chạy và tuỳ chọn chạy trong worktree riêng. Từ một mục tiêu, *Plan tasks with AI* soạn sẵn danh sách nhiệm vụ để bạn xem lại. Daemon chạy các nhiệm vụ theo thứ tự phụ thuộc. Bạn cũng có thể tạo run từ một tệp JSON bằng `kelpied run create run.json`.
 
-**Thử nhiều agent.** *Try with several agents…* gửi một prompt tới 2–5 agent, mỗi agent trong worktree riêng. Tab **Compare** của run đặt các kết quả cạnh nhau: trạng thái, thời gian, chi phí, số tệp, số dòng thay đổi và check. **Use this one** mở Finish cho kết quả được chọn và dọn các kết quả còn lại.
+**Thử nhiều agent.** Lệnh *Try with several agents…* gửi một yêu cầu tới 2–5 agent, mỗi agent làm trong worktree riêng. Tab *Compare* của run đặt các kết quả cạnh nhau, gồm trạng thái, thời gian, chi phí, số tệp, số dòng thay đổi và check. Khi bạn chọn *Use this one*, Kelpie mở Finish cho kết quả đó và dọn các kết quả còn lại.
 
-**Automation.** Settings → Automations chạy một agent với một prompt theo lịch (mỗi giờ, mỗi ngày, ngày làm việc hoặc mỗi tuần), hoặc khi có sự kiện: tệp thay đổi, agent xong một lượt, có commit mới, check của pull request thất bại, hoặc một worktree được Finish. Automation có thể chạy một lệnh, nhưng lệnh đó phải được bạn duyệt và chạy không qua shell. *Dry run* cho biết automation sẽ làm gì mà không chạy thật.
+**Automation.** Trong Settings → Automations, bạn cho một agent chạy một yêu cầu theo lịch (mỗi giờ, mỗi ngày, ngày làm việc hoặc mỗi tuần) hoặc khi có sự kiện. Các sự kiện gồm tệp thay đổi, agent xong một lượt, có commit mới, check của pull request thất bại, hoặc một worktree được Finish. Automation cũng có thể chạy một lệnh, nhưng lệnh đó phải được bạn duyệt và chạy trực tiếp, không qua shell. Chế độ *Dry run* cho biết automation sẽ làm gì mà không chạy thật.
 
-**Quick command.** Settings → Quick Commands lưu các lệnh và prompt hay dùng. Bạn chạy chúng từ tìm kiếm (`>`), từ menu phiên mới hoặc bằng `Ctrl+1…9`.
+**Quick command.** Trong Settings → Quick Commands, bạn lưu các lệnh và yêu cầu hay dùng để chạy lại từ ô tìm kiếm (`>`), từ menu phiên mới hoặc bằng `Ctrl+1…9`.
 
-**Issue tracker.** Settings → Integrations kết nối Linear, Jira và GitLab. Panel **Issues** liệt kê issue đang mở; bạn có thể giao issue cho agent, tạo worktree cho issue hoặc đổi trạng thái của nó.
+**Issue tracker.** Settings → Integrations kết nối Kelpie với Linear, Jira và GitLab. Khi đó, panel *Issues* liệt kê các issue đang mở, và bạn có thể giao issue cho agent, tạo worktree cho issue hoặc đổi trạng thái của issue.
 
-Chi tiết: [Specs and tasks](user-guide.md#specs-and-tasks-the-plan-tab), [Orchestration runs](user-guide.md#orchestration-runs), [Automations](user-guide.md#automations), [Quick commands](user-guide.md#quick-commands), [Issue trackers](user-guide.md#issue-trackers-and-gitlab).
+Chi tiết nằm ở các phần [Specs and tasks](user-guide.md#specs-and-tasks-the-plan-tab), [Orchestration runs](user-guide.md#orchestration-runs), [Automations](user-guide.md#automations), [Quick commands](user-guide.md#quick-commands) và [Issue trackers](user-guide.md#issue-trackers-and-gitlab).
 
 ## Tệp, trình duyệt và tiến trình
 
-**Tệp.** Panel bên phải có Files (lọc theo tên hoặc tìm theo nội dung), Changes và Sessions. Bạn nhấp một tệp để mở trong trình soạn thảo (`Ctrl+S` lưu; Kelpie phát hiện khi tệp bị đổi từ bên ngoài). Tệp CSV và TSV mở thành bảng sắp xếp và lọc được; PDF, notebook Jupyter, sơ đồ Mermaid và Markdown đều được hiển thị trực tiếp. `Alt+Z` bật hoặc tắt ngắt dòng. Menu của project mở thư mục trong VS Code, Cursor, Windsurf, Zed, Sublime Text hoặc IntelliJ IDEA nếu máy có cài.
+**Tệp.** Khung bên phải có các tab Files, Changes và Sessions, trong đó tab Files cho phép lọc theo tên hoặc tìm theo nội dung. Tệp bạn nhấp sẽ mở trong trình soạn thảo, nơi `Ctrl+S` lưu thay đổi và Kelpie phát hiện khi tệp bị sửa từ bên ngoài. Tệp CSV và TSV mở thành bảng có thể sắp xếp và lọc, còn PDF, notebook Jupyter, sơ đồ Mermaid và Markdown đều được hiển thị trực tiếp. Phím `Alt+Z` bật hoặc tắt ngắt dòng. Menu của project mở thư mục trong VS Code, Cursor, Windsurf, Zed, Sublime Text hoặc IntelliJ IDEA nếu máy có cài.
 
-**Composer (`Ctrl+Shift+I`).** Composer là ô soạn nhiều dòng trên phiên đang chọn. Bạn gõ `@` để nhắc tới tệp, thư mục, `@selection`, `@diff`, `@note`, `@terminal:<phiên>` hoặc `@issue:<mã>`. Bí mật trong nội dung được che trước khi gửi.
+**Composer (`Ctrl+Shift+I`).** Composer là ô soạn nhiều dòng nằm trên phiên đang chọn. Trong ô này, bạn gõ `@` để nhắc tới tệp, thư mục, `@selection`, `@diff`, `@note`, `@terminal:<phiên>` hoặc `@issue:<mã>`. Trước khi gửi, Kelpie che các bí mật có trong nội dung.
 
-**Trình duyệt (`Ctrl+Shift+U`).** Pane trình duyệt có thanh địa chỉ, công cụ nhà phát triển và chụp màn hình trang. **Design mode** cho phép bạn nhấp các phần tử trên trang, thêm ghi chú và gửi cho agent trong một prompt.
+**Trình duyệt (`Ctrl+Shift+U`).** Khung trình duyệt có thanh địa chỉ, công cụ nhà phát triển và chức năng chụp màn hình trang. Ở chế độ *Design mode*, bạn nhấp các phần tử trên trang, thêm ghi chú rồi gửi tất cả cho agent trong một yêu cầu.
 
-**Processes.** Khi một agent trên màn hình khởi động một trang web (dev server, dashboard…), trang đó được mở trong một tab nền và Kelpie báo ngắn. Tab **Processes** của panel bên phải liệt kê những gì mỗi phiên đang chạy dưới dạng cây, kèm PID, bộ nhớ, CPU và cổng. Bạn nhấp một cổng để mở trang trong tab trình duyệt. **Kill** dừng một chương trình và những gì nó khởi động; **Kill children** dừng những gì một phiên đã khởi động mà vẫn giữ phiên. Cả hai đều hỏi trước và nói rõ cổng nào sẽ được giải phóng.
+**Tiến trình.** Khi một agent trên màn hình khởi động một trang web (dev server, bảng điều khiển…), Kelpie mở trang đó trong một tab nền và báo ngắn cho bạn. Tab *Processes* trong panel bên phải liệt kê những gì mỗi phiên đang chạy dưới dạng cây, kèm PID, bộ nhớ, CPU và cổng. Bạn nhấp một cổng để mở trang tương ứng trong tab trình duyệt. Nút *Kill* dừng một chương trình cùng những gì nó đã khởi động, còn *Kill children* dừng những gì một phiên đã khởi động nhưng vẫn giữ phiên đó. Cả hai nút đều hỏi trước và nói rõ cổng nào sẽ được giải phóng.
 
-Chi tiết: [Files](user-guide.md#files), [Composer](user-guide.md#composer), [Browser panes](user-guide.md#browser-panes-and-design-mode), [Processes](user-guide.md#processes-ports-and-preview).
+Chi tiết nằm ở các phần [Files](user-guide.md#files), [Composer](user-guide.md#composer), [Browser panes](user-guide.md#browser-panes-and-design-mode) và [Processes](user-guide.md#processes-ports-and-preview).
 
 ## Làm việc qua SSH
 
-**Project trên máy chủ.** *Add Remote Project (SSH)…* chọn một máy chủ và một thư mục trên đó. Terminal và agent chạy trên máy chủ qua `ssh -t`, bên trong `tmux` nếu máy chủ có, nên phiên vẫn sống khi kết nối rớt. Cây tệp, trình soạn thảo, tìm kiếm và Git cũng hoạt động qua SSH. Kelpie dùng OpenSSH và cấu hình SSH của bạn.
+**Project trên máy chủ.** Lệnh *Add Remote Project (SSH)…* cho bạn chọn một máy chủ và một thư mục trên máy chủ đó. Terminal và agent chạy trên máy chủ qua `ssh -t`, bên trong `tmux` nếu máy chủ có cài, nhờ đó phiên vẫn sống khi kết nối bị rớt. Cây tệp, trình soạn thảo, tìm kiếm và Git cũng hoạt động qua SSH. Kelpie dùng OpenSSH và cấu hình SSH sẵn có của bạn.
 
-**Trang SSH hosts (`Ctrl+Alt+H`).** Trang này quản lý máy chủ theo kiểu Termius:
+**Trang SSH hosts (`Ctrl+Alt+H`).** Trang này quản lý máy chủ theo kiểu Termius, với các tính năng sau:
 
 - Mỗi máy chủ có tên, nhóm, thẻ, màu, ghi chú, địa chỉ, người dùng và cổng. Bạn đăng nhập bằng khoá, SSH agent hoặc mật khẩu được lưu trong kho thông tin xác thực của hệ điều hành.
-- Mỗi máy chủ có thể có màu và theme terminal riêng, để môi trường production không bao giờ trông giống máy tính của bạn.
-- Một cú nhấp mở *Terminal*, **Claude Code here** hoặc agent khác trên máy chủ.
-- Tab *Files* duyệt, tải lên, tải xuống, đổi tên và xoá tệp, với hàng đợi truyền tệp.
-- Bạn có thể chạy một lệnh trên nhiều máy chủ cùng lúc, quản lý khoá trong tab *Keychain*, xem *Known hosts* và tạo quy tắc *Port forwarding*.
+- Từng máy chủ có thể dùng màu và theme terminal riêng, nhờ đó môi trường production không bao giờ trông giống máy tính của bạn.
+- Một cú nhấp là bạn mở được *Terminal*, *Claude Code here* hoặc agent khác trên máy chủ.
+- Tab *Files* cho phép duyệt, tải lên, tải xuống, đổi tên và xoá tệp, kèm một hàng đợi truyền tệp.
+- Ngoài ra, bạn có thể chạy một lệnh trên nhiều máy chủ cùng lúc, quản lý khoá trong tab *Keychain*, xem *Known hosts* và tạo quy tắc *Port forwarding*.
 
-**Pane SSH trong mọi project.** Một project trên máy có thể chứa terminal và agent chạy trên máy chủ, cạnh các pane cục bộ. Pane mới và hộp thoại *New session…* có dòng **Run on**: *This computer*, các máy chủ đã liên kết với project, hoặc *Other host…*. Pane trên máy khác có một sọc theo màu của máy chủ.
+**Khung SSH trong mọi project.** Một project trên máy tính của bạn có thể chứa terminal và agent chạy trên máy chủ, đặt cạnh các khung cục bộ. Khung mới và hộp thoại *New session…* có dòng *Run on* để chọn *This computer*, một máy chủ đã liên kết với project, hoặc *Other host…*. Mỗi khung chạy trên máy khác có một sọc mang màu của máy chủ đó.
 
-**Giữ phiên chạy trên máy chủ.** Bạn cài `tmux` trên máy chủ, ví dụ `sudo apt-get install -y tmux` trên Ubuntu. Khi đó, phiên vẫn chạy trên máy chủ khi mạng rớt, khi bạn đóng Kelpie hoặc khi máy tính của bạn ngủ.
+**Giữ phiên chạy trên máy chủ.** Bạn chỉ cần cài `tmux` trên máy chủ, ví dụ bằng `sudo apt-get install -y tmux` trên Ubuntu. Khi đó, phiên vẫn chạy dù mạng bị rớt, dù bạn đóng Kelpie hay máy tính của bạn chuyển sang chế độ ngủ.
 
-Chi tiết: [Remote projects](user-guide.md#remote-projects-ssh), [SSH hosts](user-guide.md#ssh-hosts), [SSH panes in any project](user-guide.md#ssh-panes-in-any-project), [Keeping sessions running on a server](user-guide.md#keeping-sessions-running-on-a-server).
+Chi tiết nằm ở các phần [Remote projects](user-guide.md#remote-projects-ssh), [SSH hosts](user-guide.md#ssh-hosts), [SSH panes in any project](user-guide.md#ssh-panes-in-any-project) và [Keeping sessions running on a server](user-guide.md#keeping-sessions-running-on-a-server).
 
 ## Điện thoại
 
-Truy cập từ điện thoại mặc định tắt. Settings → Mobile → *Mobile access* bật tính năng này. Điện thoại có thể kết nối theo ba cách: ứng dụng Kelpie tải từ relay của Kelpie (không cần Tailscale, là cách mặc định của thiết lập mới), ứng dụng do chính máy tính phục vụ qua Tailscale, hoặc trình duyệt trên cùng mạng.
+Truy cập từ điện thoại mặc định bị tắt, và bạn bật nó trong Settings → Mobile → *Mobile access*. Điện thoại có thể kết nối theo ba cách. Cách mặc định của thiết lập mới là dùng ứng dụng Kelpie tải từ máy chủ chuyển tiếp (relay) của Kelpie, không cần Tailscale. Ngoài ra, điện thoại có thể dùng ứng dụng do chính máy tính phục vụ qua Tailscale, hoặc mở trình duyệt trên cùng mạng.
 
 **Ghép đôi bằng ứng dụng Kelpie.**
 
-1. Bạn bật *Mobile access*. Với thiết lập mới, Kelpie bật relay và hỏi bạn xác nhận một lần.
-2. Ở bước **Install**, bạn quét mã bằng camera điện thoại và cài Kelpie lên màn hình chính (Share → Add to Home Screen trên iPhone, nút Install trên Android).
-3. Ở bước **Pair**, bạn mở ứng dụng trên điện thoại, nhấn *Scan the code*, rồi nhập sáu chữ số điện thoại hiện vào Kelpie. Mã ghép đôi chỉ dùng một lần và hết hạn sau hai phút.
-4. Bạn chọn *Allow reading* hoặc *Allow reading and typing*, rồi xác nhận bằng Windows Hello, mật khẩu hoặc Touch ID.
-5. Điện thoại yêu cầu bạn thiết lập khoá ứng dụng bằng Face ID, vân tay hoặc mã máy. Bạn nên làm ngay.
+1. Đầu tiên, bạn bật *Mobile access*; với thiết lập mới, Kelpie sẽ bật relay và hỏi bạn xác nhận một lần.
+2. Ở bước **Install**, bạn quét mã bằng camera điện thoại rồi cài Kelpie lên màn hình chính (Share → Add to Home Screen trên iPhone, nút Install trên Android).
+3. Ở bước **Pair**, bạn mở ứng dụng trên điện thoại, nhấn *Scan the code*, rồi nhập vào Kelpie sáu chữ số mà điện thoại hiện ra. Mã ghép đôi chỉ dùng được một lần và hết hạn sau hai phút.
+4. Tiếp theo, bạn chọn *Allow reading* hoặc *Allow reading and typing* rồi xác nhận bằng Windows Hello, mật khẩu hoặc Touch ID.
+5. Cuối cùng, điện thoại yêu cầu bạn thiết lập khoá ứng dụng bằng Face ID, vân tay hoặc mã máy, và bạn nên làm việc này ngay.
 
-**Điện thoại làm được gì.** Điện thoại liệt kê mọi phiên theo nhóm *Needs you*, *Working*, *Idle* và *Stopped*, rung khi một phiên cần bạn và hiện màn hình của phiên. Nếu được phép gõ, điện thoại gửi câu trả lời, phím (Enter, Esc, Ctrl+C, mũi tên, y/n, 1–3) và tin nhắn chat. Mỗi yêu cầu phê duyệt được gắn nhãn rủi ro của Kelpie (*Low risk*, *Medium risk*, *Dangerous*, *Risk unknown*) kèm toàn bộ lệnh. Trên Windows, một điện thoại được cấp quyền điều khiển qua Tailscale hoặc HTTPS còn có thể tiếp quản một pane trình duyệt hoặc xem màn hình máy tính.
+**Những việc điện thoại làm được.** Ứng dụng điện thoại liệt kê mọi phiên theo nhóm *Needs you*, *Working*, *Idle* và *Stopped*, rung khi một phiên cần bạn và hiển thị màn hình của phiên. Nếu được phép gõ, điện thoại còn gửi được câu trả lời, phím (Enter, Esc, Ctrl+C, mũi tên, y/n, 1–3) và tin nhắn chat. Kelpie gắn nhãn rủi ro (*Low risk*, *Medium risk*, *Dangerous*, *Risk unknown*) cho mỗi yêu cầu phê duyệt và hiện kèm toàn bộ lệnh. Trên Windows, một điện thoại được cấp quyền điều khiển qua Tailscale hoặc HTTPS còn có thể tiếp quản một khung trình duyệt hoặc xem màn hình máy tính.
 
-**Bảo mật.** Nội dung giữa điện thoại và máy tính được mã hoá đầu cuối, và không cần tài khoản Kelpie. Relay chỉ chuyển tiếp các khung đã mã hoá nhưng thấy siêu dữ liệu kết nối. Mã của ứng dụng điện thoại được tải từ relay; [phần Phone access](user-guide.md#phone-access) giải thích mô hình tin cậy và cách kiểm tra những gì relay phục vụ. Để cắt quyền một điện thoại, bạn dùng *Unpair*, hoặc *Turn off phone access and revoke all* để gỡ mọi điện thoại.
+**Bảo mật.** Nội dung truyền giữa điện thoại và máy tính được mã hoá đầu cuối, và bạn không cần tài khoản Kelpie. Relay chỉ chuyển tiếp các khung dữ liệu đã mã hoá, tuy nhiên relay vẫn thấy siêu dữ liệu kết nối. Vì mã của ứng dụng điện thoại được tải từ relay, [phần Phone access](user-guide.md#phone-access) giải thích mô hình tin cậy và cách kiểm tra những gì relay phục vụ. Để cắt quyền một điện thoại, bạn dùng *Unpair*; còn để gỡ mọi điện thoại, bạn dùng *Turn off phone access and revoke all*.
 
-Chi tiết: [Phone access](user-guide.md#phone-access), [Tự host relay](relay-self-host.md).
+Chi tiết nằm ở phần [Phone access](user-guide.md#phone-access) và hướng dẫn [tự vận hành relay](relay-self-host.md).
 
 ## Thông báo
 
-**Trên máy tính.** Thông báo của hệ điều hành chỉ dành cho những việc cần bạn: agent chờ trả lời, run chờ phê duyệt, lỗi và giới hạn chi phí. Settings → Notifications → **Also when a turn finishes** bật thêm thông báo khi một lượt kết thúc, kèm âm báo tuỳ chọn. Biểu tượng thẻ cạnh chuông tắt hoặc bật thông báo trên máy tính.
+**Trên máy tính.** Kelpie chỉ dùng thông báo của hệ điều hành cho những việc cần bạn, gồm agent chờ trả lời, run chờ phê duyệt, lỗi và giới hạn chi phí. Nếu bật Settings → Notifications → *Also when a turn finishes*, bạn sẽ nhận thêm thông báo mỗi khi một lượt kết thúc, kèm âm báo tuỳ chọn. Biểu tượng thẻ cạnh chuông tắt hoặc bật thông báo trên máy tính.
 
-**Ngoài máy tính.** Settings → Notifications → *Off this computer* gửi cùng các sự kiện qua **ntfy**, **Telegram** hoặc **webhook**. Bạn chọn loại sự kiện, bỏ qua các lượt ngắn và có thể chỉ gửi khi bạn không ở trước máy. Token được lưu trong kho thông tin xác thực của hệ điều hành.
+**Ngoài máy tính.** Với Settings → Notifications → *Off this computer*, Kelpie gửi cùng các sự kiện đó qua ntfy, Telegram hoặc webhook. Bạn chọn loại sự kiện cần gửi, bỏ qua các lượt ngắn, và có thể chỉ gửi khi bạn không ngồi trước máy. Kelpie lưu token trong kho thông tin xác thực của hệ điều hành.
 
-Chi tiết: [Activity and notifications](user-guide.md#activity-and-notifications), [On your phone](user-guide.md#on-your-phone-with-the-window-closed).
+Chi tiết nằm ở các phần [Activity and notifications](user-guide.md#activity-and-notifications) và [On your phone](user-guide.md#on-your-phone-with-the-window-closed).
 
 ## Cá nhân hoá
 
-**Giao diện.** Settings → Appearance chọn ngôn ngữ (English, Tiếng Việt hoặc theo hệ thống), theme tối hoặc sáng, mật độ, cỡ chữ giao diện, và việc hiện Kip cùng chuyển động của Kip. Settings → Terminal chọn font, cỡ chữ, số dòng cuộn lại, shell mặc định và bảng màu (Dracula, Nord, One Dark, Tokyo Night, Catppuccin, Gruvbox, Solarized, GitHub Light).
+**Giao diện.** Trong Settings → Appearance, bạn chọn ngôn ngữ (English, Tiếng Việt hoặc theo hệ thống), giao diện tối hoặc sáng, mật độ hiển thị, cỡ chữ giao diện, cũng như việc hiện Kip và chuyển động của Kip. Còn Settings → Terminal cho phép chọn phông chữ, cỡ chữ, số dòng cuộn lại, shell mặc định và bảng màu (Dracula, Nord, One Dark, Tokyo Night, Catppuccin, Gruvbox, Solarized, GitHub Light).
 
-**Agent setup.** Settings → Agent setup gom vào một trang những gì agent được biết và được dùng: MCP server của Claude Code, Codex, Gemini, OpenCode và Cursor; các tệp hướng dẫn như `CLAUDE.md` và `AGENTS.md`; danh sách skill và lệnh; và registry Agent Client Protocol. Mọi thay đổi đều có bản xem trước, bản sao lưu và bước kiểm tra tệp sau khi ghi.
+**Agent setup.** Trang Settings → Agent setup gom vào một chỗ những gì agent được biết và được dùng: MCP server của Claude Code, Codex, Gemini, OpenCode và Cursor; các tệp hướng dẫn như `CLAUDE.md` và `AGENTS.md`; danh sách skill và lệnh; và registry Agent Client Protocol. Mọi thay đổi đều có bản xem trước, bản sao lưu và bước kiểm tra tệp sau khi ghi.
 
-**Plugin.** Plugin là một thư mục có tệp `kelpie-plugin.json`, thêm agent, lệnh, quick command, theme terminal, layout và mục trên thanh trạng thái. Plugin không làm gì cho tới khi bạn nhấn **Review & enable**; màn hình review liệt kê mọi chương trình plugin có thể chạy. Định dạng: [plugins.md](plugins.md).
+**Plugin.** Một plugin là một thư mục chứa tệp `kelpie-plugin.json`, có thể thêm agent, lệnh, quick command, theme terminal, bố cục và mục trên thanh trạng thái. Plugin không làm gì cho tới khi bạn nhấn *Review & enable*, và màn hình duyệt khi đó liệt kê mọi chương trình mà plugin có thể chạy. Định dạng plugin được mô tả trong [plugins.md](plugins.md).
 
-**Đọc chính tả.** Settings → Voice tải một mô hình nhận dạng giọng nói một lần: mô hình tiếng Việt nhanh (26 MB) hoặc Whisper cho khoảng 100 ngôn ngữ. `Ctrl+Shift+Space` bắt đầu và kết thúc việc nghe; chữ được chèn vào chỗ bạn đang gõ. Giọng nói được nhận dạng ngay trên máy và không được gửi đi đâu.
+**Đọc chính tả.** Settings → Voice tải một mô hình nhận dạng giọng nói về máy một lần, và bạn chọn giữa mô hình tiếng Việt nhanh (26 MB) và Whisper cho khoảng 100 ngôn ngữ. Phím `Ctrl+Shift+Space` bắt đầu và kết thúc việc nghe, còn chữ được chèn vào đúng chỗ bạn đang gõ. Kelpie nhận dạng giọng nói ngay trên máy và không gửi đi đâu.
 
-**Xuất và nhập cài đặt.** Settings → Session Daemon → **Export and import settings** chuyển cài đặt, quick command, layout, automation, máy chủ SSH, danh sách plugin và tham số agent sang máy khác trong một tệp JSON. Mật khẩu, token và thông tin đăng nhập không bao giờ được xuất; văn bản giống bí mật được che bằng `[redacted]`. Khi nhập, Kelpie liệt kê mọi thứ quyết định chương trình nào sẽ chạy và chờ bạn xác nhận.
+**Xuất và nhập cài đặt.** Với *Export and import settings* trong Settings → Session Daemon, bạn chuyển cài đặt, quick command, bố cục, automation, máy chủ SSH, danh sách plugin và tham số agent sang máy khác trong một tệp JSON. Kelpie không bao giờ xuất mật khẩu, token hay thông tin đăng nhập, và văn bản trông giống bí mật được thay bằng `[redacted]`. Khi nhập, ứng dụng liệt kê mọi mục quyết định chương trình nào sẽ chạy và chờ bạn xác nhận.
 
-Chi tiết: [Agent setup](user-guide.md#agent-setup), [Plugins](user-guide.md#plugins), [Voice dictation](user-guide.md#voice-dictation), [Export and import settings](user-guide.md#export-and-import-settings), [Settings](user-guide.md#settings).
+Chi tiết nằm ở các phần [Agent setup](user-guide.md#agent-setup), [Plugins](user-guide.md#plugins), [Voice dictation](user-guide.md#voice-dictation), [Export and import settings](user-guide.md#export-and-import-settings) và [Settings](user-guide.md#settings).
 
 ## Phím tắt
 
-Phím tắt của Kelpie dùng `Ctrl+Shift` trên Windows để các phím `Ctrl+chữ` vẫn tới được giao diện terminal của agent. Mọi phím tắt đều có thể đổi trong Settings → Shortcuts.
+Trên Windows, phím tắt của Kelpie dùng `Ctrl+Shift` để các tổ hợp `Ctrl+chữ` vẫn tới được giao diện terminal của agent. Bạn có thể đổi mọi phím tắt trong Settings → Shortcuts.
 
 | Thao tác | Windows / Linux | macOS |
 |---|---|---|
@@ -234,8 +234,8 @@ Phím tắt của Kelpie dùng `Ctrl+Shift` trên Windows để các phím `Ctrl
 | Terminal mới | Ctrl+Shift+T | ⌘T |
 | Phiên mới… | Ctrl+Shift+N | ⌘⇧N |
 | Chia phải / chia xuống | Ctrl+Shift+D / Ctrl+Shift+S | ⌘D / ⌘⇧D |
-| Đóng pane | Ctrl+Shift+W | ⌘W |
-| Phóng to / thu nhỏ pane | Ctrl+Shift+Enter | ⌘⇧↩ |
+| Đóng khung | Ctrl+Shift+W | ⌘W |
+| Phóng to / thu nhỏ khung | Ctrl+Shift+Enter | ⌘⇧↩ |
 | Menu layout | Ctrl+Shift+L | ⌘⇧L |
 | Run | Ctrl+Shift+R | ⌘⇧R |
 | Mở trình duyệt | Ctrl+Shift+U | ⌘⇧U |
@@ -246,11 +246,11 @@ Phím tắt của Kelpie dùng `Ctrl+Shift` trên Windows để các phím `Ctrl
 | Yêu cầu sub-session đang mở | Ctrl+Shift+A | ⌘⇧A |
 | Cài đặt | Ctrl+, | ⌘, |
 
-Trong terminal, `Ctrl+C` sao chép khi có vùng chọn và gửi tín hiệu ngắt khi không có, `Ctrl+V` dán, `Shift+Enter` xuống dòng trong prompt của agent, và `Ctrl+click` mở liên kết. Bạn kéo tệp từ Explorer hoặc Finder vào terminal để dán đường dẫn. Bảng đầy đủ: [Keyboard shortcuts](user-guide.md#keyboard-shortcuts).
+Trong terminal, `Ctrl+C` sao chép khi có vùng chọn và gửi tín hiệu ngắt khi không có vùng chọn. Phím `Ctrl+V` dán, `Shift+Enter` xuống dòng khi bạn gõ yêu cầu cho agent, còn `Ctrl+click` mở liên kết. Nếu kéo tệp từ Explorer hoặc Finder vào terminal, bạn sẽ dán được đường dẫn của tệp đó. Bảng đầy đủ nằm ở phần [Keyboard shortcuts](user-guide.md#keyboard-shortcuts).
 
 ## Điều khiển bằng CLI
 
-Agent và script có thể điều khiển Kelpie qua `kelpied`:
+Agent và script có thể điều khiển Kelpie qua `kelpied` bằng các lệnh như sau:
 
 ```bash
 kelpied terminal list                         # liệt kê phiên
@@ -265,15 +265,15 @@ kelpied sub spawn codex "sửa #1" --worktree   # mở sub-session
 kelpied call session.list                     # gọi trực tiếp daemon
 ```
 
-Bên trong một phiên Kelpie, `kelpied` nói thay cho phiên đó. Cài đặt, automation, agent tuỳ chỉnh và truy cập từ điện thoại không bao giờ điều khiển được từ bên trong một phiên; bạn chạy `kelpied` từ terminal bên ngoài Kelpie cho những việc đó.
+Khi chạy bên trong một phiên Kelpie, `kelpied` hành động thay mặt phiên đó, còn cài đặt, automation, agent tuỳ chỉnh và truy cập từ điện thoại thì không bao giờ điều khiển được từ bên trong một phiên. Với những việc này, bạn cần chạy `kelpied` từ một terminal bên ngoài Kelpie.
 
-Chi tiết: [Terminals](user-guide.md#terminals), [Automation](user-guide.md#automation).
+Chi tiết nằm ở các phần [Terminals](user-guide.md#terminals) và [Automation](user-guide.md#automation).
 
 ## Khi gặp sự cố
 
-- **Agent không hiện trong launcher.** Bạn kiểm tra rằng CLI chạy được trong terminal, rồi mở Settings → Agents để xem Kelpie có tìm thấy nó không. Trên macOS và Linux, Kelpie tìm agent qua login shell, nên `PATH` phải được đặt trong profile của shell.
-- **Phiên hiện *interrupted* sau khi khởi động lại máy.** Đây là hành vi bình thường. Theo Settings → Agents → *Resume after a restart*, agent tiếp tục khi bạn mở phiên, tiếp tục tất cả cùng lúc, hoặc chờ bạn nhấn **Resume**.
-- **Một tính năng mới chưa xuất hiện sau khi cập nhật.** Một số tính năng cần daemon mới. Settings → Session Daemon hoặc thông báo *Switch now* khởi động lại daemon; agent có khả năng resume sẽ tiếp tục cuộc hội thoại.
-- **Điện thoại báo "Not paired here".** Máy tính không nhận ra điện thoại hoặc không trả lời. Điện thoại tự thử lại. Nếu bạn đã gỡ điện thoại có chủ đích, hãy nhấn *Forget this device* rồi ghép đôi lại.
+- **Nếu agent không hiện trong danh sách khởi chạy**, bạn hãy kiểm tra xem CLI có chạy được trong terminal không, rồi mở Settings → Agents để xem Kelpie có tìm thấy nó không. Trên macOS và Linux, Kelpie tìm agent qua login shell, nên `PATH` phải được đặt trong profile của shell.
+- **Nếu phiên hiện *interrupted* sau khi khởi động lại máy**, đó là hành vi bình thường. Tuỳ theo Settings → Agents → *Resume after a restart*, agent sẽ tiếp tục khi bạn mở phiên, tiếp tục tất cả cùng lúc, hoặc chờ bạn nhấn *Resume*.
+- **Nếu một tính năng mới chưa xuất hiện sau khi cập nhật**, có thể tính năng đó cần daemon mới. Bạn khởi động lại daemon trong Settings → Session Daemon hoặc qua thông báo *Switch now*, và agent nào có khả năng resume sẽ tiếp tục cuộc hội thoại.
+- **Nếu điện thoại báo "Not paired here"**, điều đó nghĩa là máy tính không nhận ra điện thoại hoặc không trả lời. Điện thoại sẽ tự thử lại; tuy nhiên, nếu bạn đã gỡ điện thoại này có chủ đích, hãy nhấn *Forget this device* rồi ghép đôi lại.
 
-Nếu bạn cần chi tiết hơn, [user guide tiếng Anh](user-guide.md) và tài liệu [kiến trúc](architecture.md) mô tả đầy đủ mọi hành vi.
+Nếu cần chi tiết hơn, [bản hướng dẫn tiếng Anh](user-guide.md) và tài liệu [kiến trúc](architecture.md) mô tả đầy đủ mọi hành vi.

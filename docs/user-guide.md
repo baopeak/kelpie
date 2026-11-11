@@ -1,8 +1,9 @@
 # Kelpie — user guide
 
 Kelpie runs many coding agents (Claude Code, Codex, OMP) and shells across many projects.
-Sessions live in a background daemon (`kelpied`): switching projects, closing the window or a
-UI crash never stops them. Only the project you are looking at is rendered.
+Sessions live in a background daemon (`kelpied`): switching projects, updating Kelpie or a
+UI crash never stops them. Closing Kelpie stops them by default, after asking when something still
+runs (see Install). Only the project you are looking at is rendered.
 
 Architecture and protocol: [architecture.md](architecture.md).
 
