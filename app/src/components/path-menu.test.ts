@@ -18,6 +18,9 @@ vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 import { absolutePath, fileRefMenuItems, pathMenuItems, sessionFiles } from "./path-menu";
+import { isMac } from "../lib/platform";
+
+const REVEAL = isMac ? "Reveal in Finder" : "Reveal in Explorer";
 
 const local = { id: "p1", name: "proj", path: "D:\\proj", color: "#fff" } as any;
 const remote = { id: "p2", name: "srv", path: "ssh://box/srv/app", color: "#fff", remote: { dest: "box", path: "/srv/app", tmux: false } } as any;
@@ -51,7 +54,7 @@ describe("absolutePath", () => {
 describe("pathMenuItems", () => {
   it("copies the relative path, the full path and the name", async () => {
     const items = pathMenuItems(local, "src/a.ts");
-    expect(labels(items)).toEqual(["Copy Relative Path", "Copy Path", "Copy Name", "Reveal in Explorer"]);
+    expect(labels(items)).toEqual(["Copy Relative Path", "Copy Path", "Copy Name", REVEAL]);
     run(items, "Copy Relative Path");
     run(items, "Copy Path");
     run(items, "Copy Name");
@@ -72,7 +75,7 @@ describe("fileRefMenuItems", () => {
     });
     quickOpen.mockResolvedValue([{ path: "sub/x.py", score: 1, indices: [], is_dir: false }]);
     const items = fileRefMenuItems(local, { path: "x.py" });
-    expect(labels(items)).toEqual(["Open", "-", "Copy Relative Path", "Copy Path", "Copy Name", "Reveal in Explorer"]);
+    expect(labels(items)).toEqual(["Open", "-", "Copy Relative Path", "Copy Path", "Copy Name", REVEAL]);
     expect(readFile).not.toHaveBeenCalled();
     run(items, "Copy Name");
     run(items, "Copy Relative Path");
