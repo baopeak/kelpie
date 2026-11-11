@@ -1010,7 +1010,9 @@ fn a_failed_read_of_a_channels_secret_is_tried_again_and_loses_nothing() {
 
 #[test]
 fn switching_a_channel_off_ends_what_it_had_to_send() {
-    let service = PushService::start(&[Answer::Status(503)]);
+    // The retry is a second away (the service asks for it), so the switch below always comes first, and it falls inside the wait that
+    // would see it: a first retry of its own may come after 100 ms, before a slow runner has switched the channel off.
+    let service = PushService::start(&[Answer::RetryAfter(503, "1")]);
     let r = rig();
     let mut c = r.notifier.config();
     c.ntfy.enabled = true;
