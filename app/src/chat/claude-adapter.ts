@@ -18,6 +18,7 @@
 import { produce } from "solid-js/store";
 import { type AgentRun, applyRunResult, applyRunTaskEvent, applySubagentMessage, isAgentTool, startRun, stopRunning } from "./agent-runs";
 import { type Adapter, type AdapterContext, type AskQuestion, type ChatCommand, type ChatItem, type UserImage, logQuestionAnswers, loggedImage, putSetting, sentImages, setSettingValue, slashCommand, summarize, textOf } from "./chat-model";
+import { realModel } from "./agent-settings";
 import { lineDiff, planStatus } from "./tool-view";
 import { t } from "../lib/i18n";
 
@@ -460,7 +461,7 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
     // Claude reports its model only with a turn, and its effort never: until then, the ones the
     // conversation ran with (it was started with them as flags).
     seed(s) {
-      model ??= s.model ?? null;
+      model ??= realModel(s.model);
       effort ??= s.effort ?? null;
       refreshSettings();
     },
