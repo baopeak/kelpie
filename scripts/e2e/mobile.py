@@ -17,7 +17,7 @@ headless Edge with mobile emulation, driven through msedgedriver on port 9515.
 
 Covers: off by default; turning it on (status, URL); Settings → Mobile (every option's lines, the safe defaults, the summary, Advanced, each switch reaching the daemon, a change that fails; with no relay the hosted app's row says the relay comes first, and with this network's listeners off no browser here is offered pairing); Pair a phone (the three ways,
 each with what it needs, allows and trusts, why one cannot pair now with a way to its row, and the one recommended); the approval's Same phone as (two records listed
-as one phone, a line per way) and Replace that pairing (the same browser paired again from this listener's other name, so with a key of its own: the old
+as one phone, a line per way, the record connected now saying how, patched in place as the phone goes and comes back) and Replace that pairing (the same browser paired again from this listener's other name, so with a key of its own: the old
 record removed by Kelpie's revoke once the new one is approved, the new one kept, and the grouping forgetting the old one); the phone's screen before pairing naming its way; security headers and the embedded phone client
 (SolidJS, app/phone); pairing with a QR link, typing the phone's code on the desktop, the device list, nothing readable on the wire, no CSP
 violation; the phone's
@@ -1005,6 +1005,11 @@ for n in (1, 2, 3):
         shown_as_one = None
     run.check("…and Settings lists them as one phone, a line per way with its own permission and Unpair", bool(shown_as_one) and "This network" in shown_as_one and "last seen" in shown_as_one
               and d.js("return document.querySelectorAll('[data-phone-group] [data-device] [data-permission]').length") == 2, str(shown_as_one)[:300])
+    # How each record is connected now, patched in place by `mobile.connection`: this page, at this computer's own address, is the one connected.
+    device_row = "const r = document.querySelector(`[data-device=\"${arguments[0]}\"]`); return r ? [r.dataset.connection, r.textContent] : null"
+    secure_row = lambda: d.js(device_row, listed.get("id", "")) or [None, ""]  # noqa: E731
+    run.check("…the record connected now says so, and how: through this computer", bool(wait(lambda: secure_row()[0] == "local", 15)) and "connected now · through this computer" in secure_row()[1], str(secure_row()))
+    run.check("…and the other says when it was last seen", restart_phone is not None and (d.js(device_row, restart_phone["id"]) or [None])[0] == "none", str(restart_phone and d.js(device_row, restart_phone["id"])))
     run.shot("20b-one-phone-two-ways")
     run.check("the phone paired over plain HTTP is not one", all(x["secure_origin"] is False for x in daemon(d, "mobile.status")["devices"] if x["name"] != "Secure phone"))
     run.check("…and nothing says this page may only read", not phone.js("return !!document.querySelector('[data-banner=plain-http]')"))
@@ -1117,10 +1122,13 @@ for n in (1, 2, 3):
     signs = passkeys()[0]["signCount"]
     phone.js("window.dispatchEvent(new Event('offline'))")
     phone.wait("return document.querySelector('.conn')?.dataset.state !== 'live'", 10)
+    # The desktop's list, still open on the paired phones, changes the row in place: not connected while the phone is away, connected once it is back.
+    run.check("the desktop's row of a phone that went says it is not connected now", bool(wait(lambda: secure_row()[0] == "none", 15)) and "last seen" in secure_row()[1], str(secure_row()))
     phone.js("window.dispatchEvent(new Event('online'))")
     flap_live = bool(phone.wait(LIVE, 30))
     flap_open = bool(phone.wait(open_js, 15))
     run.check("a network flap in the foreground comes back open, asking nothing", flap_live and flap_open and passkeys()[0]["signCount"] == signs, str({"live": flap_live, "open": flap_open, "signs": [signs, passkeys()[0]["signCount"]], "lock": phone.js("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen ?? null"), "cover": phone.js("return !!document.querySelector('[data-lock-cover]')"), "state": phone.js(STATE)}))
+    run.check("…and the desktop's row says it is connected again", bool(wait(lambda: secure_row()[0] == "local", 15)) and "connected now" in secure_row()[1], str(secure_row()))
 
     # A reload has lost the window's secret, which was only in the page's memory, so it asks again. Navigating away also hides the page, which sends `lock_now`, so whether the window is still open at
     # the computer depends on that frame getting out. The program with a copied key above is what shows a window held open without the secret is refused.
@@ -1220,7 +1228,8 @@ for n in (1, 2, 3):
     run.check("the connection card says how this phone was paired and the way it takes now", fact("paired-through") == "This computer (localhost)" and fact("live-path") == "this computer", str([fact("paired-through"), fact("live-path")]))
     run.check("…the computer, this device and what it may do", fact("computer") is not None and fact("this-device") == "Secure phone · may type", str([fact("computer"), fact("this-device")]))
     run.check("…the round trip, once one was measured", bool(phone.wait("return /^\\d+ ms$/.test(document.querySelector('[data-setting=\"rtt\"] dd')?.textContent ?? '')", 30)), str(fact("rtt")))
-    run.check("…and why the computer's screen is not offered: this phone may type, not take control", "May take control" in (fact("screen") or ""), str(fact("screen")))
+    run.check("…and why the computer's screen is not offered, as the computer says (`not_granted`): this phone may type, not take control", "May take control" in (fact("screen") or ""), str(fact("screen")))
+    run.check("…and no word of Tailscale, which only the hosted app is told", not phone.js("return !!document.querySelector('[data-setting=\"tailscale-hint\"]')"))
     run.check("…and the app lock as the computer set it", fact("lock-on") == "On" and fact("lock-idle") == "5 min", str([fact("lock-on"), fact("lock-idle")]))
     phone.js("const s = document.querySelector('[data-setting=\"text-size\"] select'); s.value = 'xl'; s.dispatchEvent(new Event('change', {bubbles: true}));")
     phone.js("document.querySelector('[data-key-shown=\"esc\"]').click()")

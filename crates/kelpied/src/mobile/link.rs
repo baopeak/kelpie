@@ -118,6 +118,20 @@ impl Peer {
     }
 }
 
+/// How a connection reaches this computer, as the desktop names it: `relay`, `tailscale` (through Tailscale Serve, or from a Tailscale address), `local`
+/// (from this machine itself) or `lan` (anything else: this network). Serve's listener is on loopback, so it is looked at before loopback is.
+pub fn route_of(peer: &Peer) -> &'static str {
+    if peer.via_relay() {
+        "relay"
+    } else if peer.through_serve || listen::tailscale(peer.ip()) {
+        "tailscale"
+    } else if peer.ip().is_loopback() {
+        "local"
+    } else {
+        "lan"
+    }
+}
+
 /// The address serve put in `X-Forwarded-For`: the last one, nearest to us, and only a Tailscale address, which is all a tailnet peer
 /// can be. Should serve ever pass on what a phone sent, the worst a phone can do is pick another tailnet address, not pass for this machine.
 fn forwarded_client(headers: &HeaderMap) -> Option<IpAddr> {
@@ -733,6 +747,24 @@ mod tests {
         for kind in [PageKind::Ts, PageKind::Own, PageKind::Plain] {
             assert!(code_fits(&page(kind, "https://192.168.1.2:4817"), &direct, false), "{kind:?} on /link as before");
         }
+    }
+
+    #[test]
+    fn each_way_a_phone_comes_in_is_named_for_the_desktop() {
+        let direct = |addr: &str, tls: bool| route_of(&Peer::direct(addr.parse().unwrap(), tls));
+        assert_eq!(direct("192.168.1.9:5000", false), "lan", "plain HTTP on this network");
+        assert_eq!(direct("192.168.1.9:5000", true), "lan", "HTTPS on this network");
+        assert_eq!(direct("100.101.102.103:5000", false), "tailscale", "a Tailscale address, straight to the listener");
+        assert_eq!(direct("[fd7a:115c:a1e0::5]:5000", true), "tailscale");
+        assert_eq!(direct("127.0.0.1:5000", false), "local");
+        assert_eq!(direct("[::1]:5000", false), "local");
+        let serve = Peer::behind_serve("127.0.0.1:5000".parse().unwrap());
+        assert_eq!(route_of(&serve), "tailscale", "Tailscale Serve, though its listener is on loopback");
+        let mut told = serve.clone();
+        told.client = Some("100.101.102.103".parse().unwrap());
+        assert_eq!(route_of(&told), "tailscale");
+        assert_eq!(route_of(&relayed(Some(TS))), "relay");
+        assert_eq!(route_of(&relayed(None)), "relay");
     }
 
     #[test]

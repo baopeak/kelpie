@@ -60,7 +60,12 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// lets in (`origins`) and naming the phone's (`o`); an older daemon has none of it, so the app offers the hosted app only at 34.
 /// 35: an agent asks for a web page (`page.open {url, title?}` from a program in a session, the `kelpie_open_page` tool and `kelpied sub open`), and
 /// the daemon tells the app's windows alone with the `page.open` event; an older daemon has no such method, and an older app ignores the event.
-pub const API_LEVEL: u32 = 35;
+/// 36: how each phone is connected now and why it may not take control: `connection` (`{route, since}` or null, `route` being
+/// `relay`, `tailscale`, `lan` or `local`) on a device in `mobile.status`, the `mobile.connection {id, route}` event when a device's connection opens,
+/// closes (`route` null) or changes way, and in the phone's hello `device.control` (`ok`, or the first of `hosted_app`, `not_granted`, `plain_page`,
+/// `via_relay`, `lock_off`, `no_passkey`, `locked`) and `ts` (this computer is published over Tailscale). An older daemon sends none of them, so the
+/// app shows when a phone was last seen and the phone works out why on its own.
+pub const API_LEVEL: u32 = 36;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

@@ -96,7 +96,35 @@ export function methodLines(method: PageMethod, t: Translate): { way: PairWay; s
 }
 
 /** What keeps the screen from this phone, the first that applies. */
-export type ScreenBlock = "unknown" | "older" | "hosted" | "not_control" | "relay" | "lock";
+export type ScreenBlock = "unknown" | "older" | "hosted" | "not_control" | "plain_page" | "relay" | "lock";
+
+/** What the computer says about control on this connection (`device.control`), as what keeps the screen from this phone: null for `ok`, for a computer that
+ *  does not say, and for a reason this app does not know, so that what the phone works out applies. The lock's three reasons read as one. */
+export function computerBlock(control: string | undefined): ScreenBlock | null {
+  switch (control) {
+    case "hosted_app":
+      return "hosted";
+    case "not_granted":
+      return "not_control";
+    case "plain_page":
+      return "plain_page";
+    case "via_relay":
+      return "relay";
+    case "lock_off":
+    case "no_passkey":
+    case "locked":
+      return "lock";
+    default:
+      return null;
+  }
+}
+
+/** On the hosted app, when the computer is also published over Tailscale (`ts` in its hello): where the screen is. Null otherwise. */
+export function tailscaleHint(method: PageMethod, ts: boolean, t: Translate): string | null {
+  return method === "hosted" && ts
+    ? t("This computer also has Tailscale. To see its screen from this phone, pair the Tailscale app: Kelpie on your computer → Settings → Mobile → Pair a phone → Tailscale.")
+    : null;
+}
 
 export interface ScreenFacts {
   /** What the computer itself says stands in the way, where it says so: it comes before anything the phone works out. */
@@ -137,6 +165,8 @@ export function screenWhy(f: ScreenFacts, t: Translate): string | null {
       return t("This app comes from the relay; seeing the screen needs the app from your computer over Tailscale.");
     case "not_control":
       return t("Choose \"May take control\" for this phone in Kelpie → Settings → Mobile.");
+    case "plain_page":
+      return t("This phone was paired over plain HTTP; seeing the screen needs the app from your computer over Tailscale.");
     case "relay":
       return t("Seeing the screen needs Tailscale; this phone is on the relay now.");
     case "lock":

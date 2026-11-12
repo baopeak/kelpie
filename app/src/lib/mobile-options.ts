@@ -421,18 +421,37 @@ export function deviceMethodLabel(d: MobileDevice, r: RelayStatus | undefined): 
   }
 }
 
+export type MobileRoute = NonNullable<MobileDevice["connection"]>["route"];
+
+/** The way a device is connected now, as the daemon names it, in the words the phone uses for its own. */
+export function routeLabel(route: MobileRoute): string {
+  switch (route) {
+    case "relay":
+      return t("the relay");
+    case "tailscale":
+      return t("Tailscale");
+    case "lan":
+      return t("this network");
+    case "local":
+      return t("this computer");
+  }
+}
+
 /** How a record is connected now, as the daemon says. */
 export function connectionLine(c: NonNullable<MobileDevice["connection"]>): string {
-  switch (c.route) {
-    case "relay":
-      return t("connected now through the relay");
-    case "tailscale":
-      return t("connected now through Tailscale");
-    case "lan":
-      return t("connected now through this network");
-    case "local":
-      return t("connected now through this computer");
-  }
+  return t("connected now · through {route}", { route: routeLabel(c.route) });
+}
+
+/** The list after `mobile.connection` (`route` null: the device is not connected now), with the device's row changed in place; the same list when it
+ *  is not in it. `since` is this computer's clock: close enough to the daemon's, which is on the same machine. */
+export function withConnection(devices: MobileDevice[], id: string, route: MobileRoute | null, now: number): MobileDevice[] {
+  const at = devices.findIndex((d) => d.id === id);
+  if (at < 0) return devices;
+  const d = devices[at];
+  if ((d.connection?.route ?? null) === route) return devices;
+  const next = devices.slice();
+  next[at] = { ...d, connection: route ? { route, since: now } : null };
+  return next;
 }
 
 /** A phone in the device list: the records joined in `phoneGroups` (`group` set) while two or more of them are still paired, else one record as before. */

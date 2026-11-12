@@ -26,10 +26,13 @@ connects only to the relay: it is never given the daemon's own address. Nothing 
 8. With the relay cut off from the daemon, a phone is removed; a phone socket the relay still admits hears `desktop_offline`; once the
    daemon is back, the relay closes it (4002) before it reaches anything, and the token is refused from then on.
 9. A phone removed while connected through the relay hears `revoked` in its session, and is closed by the computer (4401).
-10. The kill switch tells a phone on the relay it was removed, and the relay refuses its token after.
-11. A relay whose answer names no version (the first version's, played by a tap that strips `x-kelpie-relay-version`) is told the single
+10. `mobile.status` lists a phone as connected through the relay, then through Tailscale once it connects again through Tailscale Serve's
+    listener, then as not connected. Its hello says why it may not take control: `not_granted` while its record may type, and `via_relay`
+    on the relay once it was given control (its passkey set up over Tailscale, the lock on); `ts` says the computer is on Tailscale.
+11. The kill switch tells a phone on the relay it was removed, and the relay refuses its token after.
+12. A relay whose answer names no version (the first version's, played by a tap that strips `x-kelpie-relay-version`) is told the single
     origin and never the list, and phones pair and connect through it as before.
-12. Turning the relay off closes the daemon's socket and dials nothing again.
+13. Turning the relay off closes the daemon's socket and dials nothing again.
 """
 import asyncio
 import glob
@@ -434,6 +437,32 @@ async def main(d, phone_tap, desk_tap, registration_key, open_tap, open_port, v1
     check("a phone removed while connected through the relay is told so inside its session", any(m["type"] == "revoked" for m in phone_c.log), [m["type"] for m in phone_c.log][-4:])
     check("…before its socket is closed by the computer (4401), not by the relay (4002)", phone_c.closed == 4401, phone_c.closed)
 
+    # ---------- how the desktop sees a phone connected, and why the phone may not take control ----------
+    # A fresh connection, as below: the one from before the relay was cut was told `desktop_offline`.
+    await phone.close()
+    phone, hello = await through_relay(device, ticket, token)
+    check("the desktop lists the phone as connected through the relay", await until(lambda: _route_is(call, device.id, "relay"), 10), await _route_of(call, device.id))
+    check("…and the phone hears that its record is below control, and that this computer is on Tailscale", hello["device"].get("control") == "not_granted" and hello.get("ts") is True, (hello["device"], hello.get("ts")))
+    # The direct route returns: Tailscale Serve's listener, as serve calls it. The newer connection takes over from the relay's.
+    serve_port = int([c for c in ps.fake_tailscale_calls(TS[2]) if c.startswith("serve --bg")][-1].rsplit(":", 1)[1])
+    held = dict(host="127.0.0.1", port=serve_port, additional_headers={"X-Forwarded-For": "100.101.102.103"})
+    direct = ps.Phone(f"http://{ORIGIN.removeprefix('https://')}/", device, origin=ORIGIN, **held)
+    await direct.open()
+    check("…then through Tailscale once the direct route is back", await until(lambda: _route_is(call, device.id, "tailscale"), 10), await _route_of(call, device.id))
+    # Given control (its passkey set up over Tailscale, with the lock on), the relay is what keeps the screen from it.
+    await call("mobile.set_lock", {"on": True})
+    passkey = ps.SoftPasskey(ORIGIN)
+    enrolled = await direct.ask(type="lock_enrol", **passkey.create((await direct.ask(type="lock_challenge"))["lock"]["challenge"]))
+    check("the phone sets up its passkey over Tailscale", (enrolled or {}).get("result") == "ok", enrolled)
+    await call("mobile.set_permission", {"id": device.id, "permission": "control"})
+    await direct.close()
+    phone, hello = await through_relay(device, ticket, token)
+    check("a phone given control hears through the relay that the relay is what keeps the screen from it", hello["device"].get("control") == "via_relay" and hello["device"]["permission"] != "control", hello["device"])
+    await phone.close()
+    check("…and once it goes, the desktop lists it as not connected", await until(lambda: _route_is(call, device.id, None), 10), await _route_of(call, device.id))
+    await call("mobile.set_permission", {"id": device.id, "permission": "write"})
+    await call("mobile.set_lock", {"on": False})
+
     # ---------- the kill switch ----------
     # A fresh connection: the one from before the relay was cut was told `desktop_offline`, which the page acts on by connecting again.
     await phone.close()
@@ -492,6 +521,16 @@ async def _connected_at(status, url, tap):
 
 async def _closed(phone):
     return phone.closed is not None
+
+
+async def _route_of(call, device_id):
+    """How the desktop lists a device as connected now (`connection.route` in `mobile.status`), None when it is not."""
+    listed = next((x for x in (await call("mobile.status"))["devices"] if x["id"] == device_id), {})
+    return (listed.get("connection") or {}).get("route")
+
+
+async def _route_is(call, device_id, route):
+    return await _route_of(call, device_id) == route
 
 
 async def _not_connected(status):

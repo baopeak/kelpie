@@ -25,7 +25,7 @@ import { browserReloadEnv, ShellReload, SHELL_CHANGED } from "./shell-reload";
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
 import { lockGrace, vibrate } from "./prefs";
-import { isLocalHost, isTailscaleHost, livePath, pageMethod, screenWhy } from "./conn-path";
+import { computerBlock, isLocalHost, isTailscaleHost, livePath, pageMethod, screenWhy } from "./conn-path";
 import { screenNow } from "./install-guide";
 import { afterFailedPairing, movedTo, platformOf, relayMovedTo } from "./install-state";
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
@@ -89,9 +89,15 @@ export const canTakeOver = () => device()?.permission === "control" && daemonApi
 export const [takeover, setTakeover] = createSignal<TakeoverState | null>(null);
 /** This phone may see the computer's screen (the same rule as a pane's takeover, at a computer that has it). */
 export const canSeeScreen = () => device()?.permission === "control" && daemonApi() >= SCREEN_API;
-/** Null when the computer's screen can be seen from here; otherwise the sentence that says why not (Settings). */
+/** The computer is also published over Tailscale, as its last hello said. */
+export const [computerOnTailscale, setComputerOnTailscale] = createSignal(false);
+/** Null when the computer's screen can be seen from here; otherwise the sentence that says why not (Settings). The computer's own reason comes first, once it
+ *  has said anything on this page (a device kept from an earlier visit may say what no longer holds). */
 export const screenWhyNow = () =>
-  screenWhy({ known: daemonApi() > 0, older: daemonApi() < SCREEN_API, hosted: HOSTED, permission: device()?.permission, route: route(), unlocked: lockShown().face === "open" }, t);
+  screenWhy({
+    computer: daemonApi() > 0 ? computerBlock(device()?.control) : null,
+    known: daemonApi() > 0, older: daemonApi() < SCREEN_API, hosted: HOSTED, permission: device()?.permission, route: route(), unlocked: lockShown().face === "open",
+  }, t);
 /** The computer's screen seen from here, or being picked (null: none). Its media goes to the view directly (`onScreenMedia`), not through a signal. */
 export const [remoteScreen, setRemoteScreen] = createSignal<ScreenState | null>(null);
 let screenMediaSink: ((bytes: Uint8Array) => void) | null = null;
@@ -227,6 +233,7 @@ const link = new Link(browserEnv(), () => {
     batch(() => {
       setDevice(h.device);
       setDaemonApi(h.api);
+      setComputerOnTailscale(!!h.ts);
       setSessions(h.sessions);
       setProjects(h.projects);
       setPaintedFrom(null);

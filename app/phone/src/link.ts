@@ -59,7 +59,12 @@ export interface DeviceInfo {
   permission?: "read" | "write" | "control";
   kind?: "app" | "pwa";
   capped?: boolean;
+  /** Why this connection may not take control, as the computer says: `ok`, or the first reason that holds (absent from a computer below API 36). */
+  control?: ControlReason;
 }
+
+/** What the computer says about control on this connection (`device.control`). A reason this app does not know is read as none. */
+export type ControlReason = "ok" | "hosted_app" | "not_granted" | "plain_page" | "via_relay" | "lock_off" | "no_passkey" | "locked";
 
 /** Where the computer listens, newest `seq` wins. */
 export interface AddrsMsg {
@@ -88,6 +93,8 @@ export interface Hello {
   /** The computer reads padded chunks: this phone pads what it sends from now on (absent from a computer before the relay). */
   pad?: boolean;
   lock?: LockInfo;
+  /** The computer is also published over Tailscale (absent from a computer below API 36). */
+  ts?: boolean;
 }
 
 export interface SessionsMsg {

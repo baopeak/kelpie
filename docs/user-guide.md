@@ -1122,6 +1122,12 @@ phone, with a line per way that keeps its own permission and its own *Unpair*. T
 stay and Kelpie says so. This grouping is kept by the Kelpie app on this computer only. Before it is paired, and in its own Settings under
 *Connection*, the phone app says which way it connects and lists the other ways.
 
+The device list also says how each phone is connected at this moment, for example *connected now · through Tailscale* (or *the relay*, *this
+network*, *this computer*), next to the way it paired, and *last seen …* once it goes. The line changes as the phone connects, goes or
+switches way, without reloading the page. On the phone, Settings → *Connection* → *Computer screen* gives the computer's own reason when the
+screen cannot be seen from there: the hosted app, no control allowed for this phone, a pairing over plain HTTP, the relay, or the app lock.
+When the phone uses the relay's app and this computer also has Tailscale, that card adds how to pair the Tailscale app to see the screen.
+
 **Pair a phone with the Kelpie app (no Tailscale).**
 
 1. In Settings → Mobile, turn on *Mobile access*. In a new setup (one that never had phone access) this also turns on the relay, Kelpie's

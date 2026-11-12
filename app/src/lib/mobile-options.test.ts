@@ -5,8 +5,8 @@ import { HOSTED_API, LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./
 import { translated } from "./i18n";
 import {
   alreadyRemoved, approvalChoices, approveWithReplace, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
-  OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, samePhoneSuggestion, screenPolicyLine,
-  telegramChoice, turnOnAccess, type AccessCalls, type ApprovalCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
+  OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, routeLabel, samePhoneSuggestion, screenPolicyLine,
+  telegramChoice, turnOnAccess, withConnection, type AccessCalls, type ApprovalCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
 } from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
 import { emptyPushConfig, type PushState } from "./push-config";
@@ -678,8 +678,21 @@ describe("one phone paired several ways", () => {
   it("names each record's way and how it is connected now", () => {
     expect([a, b, c, device({ page_kind: "own" }), device({ kind: "app" })].map((d) => deviceMethodLabel(d, hostedRelay()))).toEqual(["Tailscale", "Kelpie's relay", "This network", "This network, over HTTPS", "Kelpie app"]);
     expect(deviceMethodLabel(b, hostedRelay({ url: "wss://mine.example" }))).toBe("Your relay at mine.example");
-    const routes = (["relay", "tailscale", "lan", "local"] as const).map((route) => connectionLine({ route, since: 0 }));
-    expect(routes).toEqual(["connected now through the relay", "connected now through Tailscale", "connected now through this network", "connected now through this computer"]);
-    for (const line of routes) expect(translated(line), line).toBeTruthy();
+    const routes = ["relay", "tailscale", "lan", "local"] as const;
+    expect(routes.map(routeLabel)).toEqual(["the relay", "Tailscale", "this network", "this computer"]);
+    expect(routes.map((route) => connectionLine({ route, since: 0 }))).toEqual(["connected now · through the relay", "connected now · through Tailscale", "connected now · through this network", "connected now · through this computer"]);
+    for (const text of [...routes.map(routeLabel), "connected now · through {route}", "paired {when} · {connection}"]) expect(translated(text), text).toBeTruthy();
+  });
+
+  it("changes one row in place when a phone connects, changes its way or goes, and leaves the list be otherwise", () => {
+    const list = [device({ id: "a" }), device({ id: "b", connection: { route: "relay", since: 5 } })];
+    const on = withConnection(list, "a", "tailscale", 100);
+    expect(on.map((d) => d.connection ?? null)).toEqual([{ route: "tailscale", since: 100 }, { route: "relay", since: 5 }]);
+    expect(on[1], "the other row is the same object").toBe(list[1]);
+    expect(withConnection(on, "b", "lan", 200)[1].connection).toEqual({ route: "lan", since: 200 });
+    expect(withConnection(on, "b", null, 200)[1].connection).toBeNull();
+    expect(withConnection(list, "b", "relay", 300), "the same way: nothing changes, not even since when").toBe(list);
+    expect(withConnection(list, "a", null, 300), "not connected already").toBe(list);
+    expect(withConnection(list, "gone", "relay", 300), "a device not listed").toBe(list);
   });
 });
