@@ -146,7 +146,8 @@ function TrustSheet(props: { onClose: () => void }) {
   );
 }
 
-/** The connection in a sentence, Reconnect, and the way to Settings (behind the lock, like everything else). */
+/** The connection in a sentence, Reconnect, and the way to Settings (behind the lock, like everything else). Locked, the sheet still
+ *  forgets the pairing: a phone whose computer is gone for good could not unpair otherwise, and forgetting harms only its owner. */
 function Sheet(props: { onClose: () => void; onSettings: () => void }) {
   const info = () => describeConn(conn(), livePathNow());
   return (
@@ -156,7 +157,9 @@ function Sheet(props: { onClose: () => void; onSettings: () => void }) {
         <p class="muted">{info().detail}</p>
         <div class="actions">
           <button class="btn" onClick={() => { link.kick(); props.onClose(); }}>{t("Reconnect now")}</button>
-          <Show when={lockShown().clear}>
+          <Show when={lockShown().clear} fallback={
+            <button class="btn danger" data-sheet-forget onClick={() => { if (confirm(t("Forget this pairing on this device?"))) { forgetDevice(); props.onClose(); } }}>{t("Forget this device")}</button>
+          }>
             <button class="btn" data-sheet-settings onClick={() => { props.onClose(); props.onSettings(); }}>{t("Settings")}</button>
           </Show>
         </div>
@@ -174,7 +177,7 @@ export function App() {
   window.addEventListener("popstate", onPop);
   onCleanup(() => window.removeEventListener("popstate", onPop));
   const openSettings = () => {
-    // A screen or a pane under control ends: seeing them again asks for the passkey in any case.
+    // A screen or a pane under control ends (the gear is not shown over them; the sheet's Settings button can still lead here).
     remoteScreens.close();
     takeovers.close();
     if (!settings()) history.pushState({ settings: true }, "");
@@ -209,8 +212,8 @@ export function App() {
         </Show>
         <h1>{title()}</h1>
         <Show when={!openId() && !inSettings() && badge() > 0}><span class="badge" aria-label={t("Sessions that need you")}>{badge()}</span></Show>
-        <Show when={paired() && lockShown().clear && !inSettings()}>
-          <button class="gear" data-open-settings aria-label={t("Settings")} onClick={openSettings}>⚙</button>
+        <Show when={paired() && lockShown().clear && !inSettings() && !remoteScreen() && !takeover()}>
+          <button class="gear" data-open-settings aria-label={t("Settings")} onClick={openSettings}><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg></button>
         </Show>
         <Show when={paired()}><ConnIndicator onClick={() => setSheet(true)} /></Show>
       </header>

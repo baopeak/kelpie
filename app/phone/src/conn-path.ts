@@ -9,7 +9,7 @@ type Translate = (text: string, vars?: Record<string, string | number>) => strin
 export type PageMethod = "hosted" | "tailscale" | "https" | "http" | "local";
 
 /** The way the connection takes now. */
-export type LivePath = "relay" | "tailscale" | "network" | "computer";
+export type LivePath = "relay" | "tailscale" | "network" | "address" | "computer";
 
 /** A Tailscale address: 100.64.0.0/10, a `.ts.net` name, or Tailscale's IPv6 range. */
 export function isTailscaleHost(host: string): boolean {
@@ -34,6 +34,8 @@ export function livePath(route: "direct" | "relay", method: PageMethod): LivePat
   if (route === "relay" || method === "hosted") return "relay";
   if (method === "tailscale") return "tailscale";
   if (method === "local") return "computer";
+  // Another HTTPS name may be reached from outside this network too: what is sure is that it is the computer's own address.
+  if (method === "https") return "address";
   return "network";
 }
 
@@ -60,17 +62,21 @@ export function pathText(path: LivePath, t: Translate): string {
       return t("Tailscale");
     case "network":
       return t("this network");
+    case "address":
+      return t("this computer's address");
     case "computer":
       return t("this computer");
   }
 }
 
 /** What keeps the screen from this phone, the first that applies. */
-export type ScreenBlock = "older" | "hosted" | "not_control" | "relay" | "lock";
+export type ScreenBlock = "unknown" | "older" | "hosted" | "not_control" | "relay" | "lock";
 
 export interface ScreenFacts {
   /** What the computer itself says stands in the way, where it says so: it comes before anything the phone works out. */
   computer?: ScreenBlock | null;
+  /** The computer has said what it is (a hello came): until then nothing about it is known. */
+  known: boolean;
   /** The computer's feature level is below the screen's. */
   older: boolean;
   hosted: boolean;
@@ -82,10 +88,12 @@ export interface ScreenFacts {
 
 export function screenBlock(f: ScreenFacts): ScreenBlock | null {
   if (f.computer) return f.computer;
+  if (!f.known) return "unknown";
   if (f.older) return "older";
   if (f.hosted) return "hosted";
-  if (f.permission !== "control") return "not_control";
+  // Before the permission: through the relay the computer caps every phone below control, so a phone that has it would be told to ask for it.
   if (f.route === "relay") return "relay";
+  if (f.permission !== "control") return "not_control";
   if (!f.unlocked) return "lock";
   return null;
 }
@@ -95,6 +103,8 @@ export function screenWhy(f: ScreenFacts, t: Translate): string | null {
   switch (screenBlock(f)) {
     case null:
       return null;
+    case "unknown":
+      return t("Connect to your computer to see whether its screen can be shown here.");
     case "older":
       return t("Update Kelpie on your computer to see its screen from here.");
     case "hosted":

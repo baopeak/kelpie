@@ -91,7 +91,7 @@ export const [takeover, setTakeover] = createSignal<TakeoverState | null>(null);
 export const canSeeScreen = () => device()?.permission === "control" && daemonApi() >= SCREEN_API;
 /** Null when the computer's screen can be seen from here; otherwise the sentence that says why not (Settings). */
 export const screenWhyNow = () =>
-  screenWhy({ older: daemonApi() < SCREEN_API, hosted: HOSTED, permission: device()?.permission, route: route(), unlocked: lockShown().face === "open" }, t);
+  screenWhy({ known: daemonApi() > 0, older: daemonApi() < SCREEN_API, hosted: HOSTED, permission: device()?.permission, route: route(), unlocked: lockShown().face === "open" }, t);
 /** The computer's screen seen from here, or being picked (null: none). Its media goes to the view directly (`onScreenMedia`), not through a signal. */
 export const [remoteScreen, setRemoteScreen] = createSignal<ScreenState | null>(null);
 let screenMediaSink: ((bytes: Uint8Array) => void) | null = null;

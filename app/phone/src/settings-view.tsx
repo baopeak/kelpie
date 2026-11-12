@@ -245,15 +245,15 @@ function DataSection() {
   const [done, setDone] = createSignal<string | null>(null);
   const clear = async () => {
     await clearKept(drafts());
-    setDone(drafts() ? t("Cleared, drafts too. This phone stays paired.") : t("Cleared. This phone stays paired."));
+    setDone(drafts() ? t("Cleared, drafts and messages not sent too. This phone stays paired.") : t("Cleared. This phone stays paired."));
   };
   return (
     <section class="card" data-settings-section="data">
       <h2>{t("Data on this phone")}</h2>
-      <p class="muted">{t("This phone keeps the session list and the last screens it saw, to show them at once when it opens.")}</p>
+      <p class="muted">{t("This phone keeps the session list and the last screens it saw, to show them at once when it opens. Clearing removes them now; while it is connected, it saves the list as it is again.")}</p>
       <label class="row-check">
         <input type="checkbox" data-clear-drafts checked={drafts()} onChange={(e) => setDrafts(e.currentTarget.checked)} />
-        <span>{t("Drafts too")}</span>
+        <span>{t("Drafts and messages not sent too")}</span>
       </label>
       <div class="actions"><button class="btn" data-setting="clear-kept" onClick={() => void clear()}>{t("Clear what this phone keeps")}</button></div>
       <Show when={done()}><p class="muted" role="status" data-cleared>{done()}</p></Show>

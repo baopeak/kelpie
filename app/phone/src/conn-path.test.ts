@@ -47,19 +47,20 @@ describe("the way the connection takes now", () => {
     expect(livePath("direct", "tailscale")).toBe("tailscale");
     expect(livePath("direct", "local")).toBe("computer");
     expect(livePath("direct", "http")).toBe("network");
-    expect(livePath("direct", "https")).toBe("network");
+    expect(livePath("direct", "https"), "another HTTPS name may be reached from outside this network").toBe("address");
   });
 
   it("says each in words", () => {
     expect(pathText("relay", fill)).toBe("the relay");
     expect(pathText("tailscale", fill)).toBe("Tailscale");
     expect(pathText("network", fill)).toBe("this network");
+    expect(pathText("address", fill)).toBe("this computer's address");
     expect(pathText("computer", fill)).toBe("this computer");
   });
 });
 
 describe("why the screen is not offered here", () => {
-  const ok: ScreenFacts = { older: false, hosted: false, permission: "control", route: "direct", unlocked: true };
+  const ok: ScreenFacts = { known: true, older: false, hosted: false, permission: "control", route: "direct", unlocked: true };
 
   it("offers it when nothing stands in the way", () => {
     expect(screenBlock(ok)).toBeNull();
@@ -67,6 +68,7 @@ describe("why the screen is not offered here", () => {
   });
 
   it("names each reason with what would change it", () => {
+    expect(screenWhy({ ...ok, known: false }, fill)).toMatch(/Connect to your computer/);
     expect(screenWhy({ ...ok, older: true }, fill)).toMatch(/Update Kelpie on your computer/);
     expect(screenWhy({ ...ok, hosted: true }, fill)).toMatch(/comes from the relay/);
     expect(screenWhy({ ...ok, permission: "write" }, fill)).toMatch(/May take control.*Settings → Mobile/);
@@ -75,15 +77,19 @@ describe("why the screen is not offered here", () => {
     expect(screenWhy({ ...ok, unlocked: false }, fill)).toMatch(/app lock on and unlocked/);
   });
 
-  it("checks in order: an older computer, the hosted app, the permission, the relay, the lock", () => {
-    let f: ScreenFacts = { older: true, hosted: true, permission: "read", route: "relay", unlocked: false };
+  it("checks in order: nothing heard yet, an older computer, the hosted app, the relay, the permission, the lock", () => {
+    let f: ScreenFacts = { known: false, older: true, hosted: true, permission: "read", route: "relay", unlocked: false };
     const seen: (string | null)[] = [];
-    for (const clear of [{ older: false }, { hosted: false }, { permission: "control" as const }, { route: "direct" as const }, { unlocked: true }]) {
+    for (const clear of [{ known: true }, { older: false }, { hosted: false }, { route: "direct" as const }, { permission: "control" as const }, { unlocked: true }]) {
       seen.push(screenBlock(f));
       f = { ...f, ...clear };
     }
     seen.push(screenBlock(f));
-    expect(seen).toEqual(["older", "hosted", "not_control", "relay", "lock", null]);
+    expect(seen).toEqual(["unknown", "older", "hosted", "relay", "not_control", "lock", null]);
+  });
+
+  it("on the relay, says Tailscale is needed even to a phone the computer capped below control there", () => {
+    expect(screenBlock({ ...ok, permission: "write", route: "relay" })).toBe("relay");
   });
 
   it("puts what the computer says first", () => {
