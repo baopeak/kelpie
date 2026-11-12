@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { Alerts, alertsUnavailable, readAlertLink, type AlertsEnv, type AlertsFacts, type HeldSubscription } from "./push";
-import type { Outcome } from "./link";
+import { ALERT_KINDS, Alerts, alertsUnavailable, choosesKind, prefsRequest, readAlertLink, tzChanged, withKind, type AlertsEnv, type AlertsFacts, type HeldSubscription } from "./push";
+import type { AlertPrefs, Outcome } from "./link";
 
 const KEY = "the-computers-key";
 
@@ -15,7 +15,7 @@ function sub(key: string | null = KEY, endpoint = "https://fcm.googleapis.com/fc
 }
 
 /** A browser and a computer, as much as the state machine sees of them. */
-function rig(over: { facts?: Partial<AlertsFacts>; held?: ReturnType<typeof sub> | null; wanted?: boolean; marked?: boolean; answers?: Record<string, Outcome>; subscribeThrows?: boolean; permissionAnswer?: AlertsFacts["permission"] } = {}) {
+function rig(over: { facts?: Partial<AlertsFacts>; held?: ReturnType<typeof sub> | null; wanted?: boolean; marked?: boolean; answers?: Record<string, Outcome>; subscribeThrows?: boolean; permissionAnswer?: AlertsFacts["permission"]; tz?: number } = {}) {
   const asked: Record<string, unknown>[] = [];
   const state = { held: over.held ?? null, wanted: over.wanted ?? false, marked: over.marked ?? false, permission: over.facts?.permission ?? ("default" as AlertsFacts["permission"]), subscribed: 0, askedPermission: 0, changes: 0 };
   const env: AlertsEnv = {
@@ -42,10 +42,16 @@ function rig(over: { facts?: Partial<AlertsFacts>; held?: ReturnType<typeof sub>
     },
     lang: () => "vi",
     origin: () => "https://desk.tail1234.ts.net:8443",
+    tzOffset: () => over.tz ?? 420,
     ask: async (m) => {
       asked.push(m);
       const scripted = over.answers?.[String(m.type)];
       if (scripted) return scripted;
+      if (m.type === "push_prefs") {
+        // What the computer keeps is what it was sent, as it would answer.
+        const kept = m.kinds === null && m.quiet === null ? null : ({ kinds: m.kinds, quiet: m.quiet } as AlertPrefs);
+        return { t: "ack", result: "ok", prefs: kept } as Outcome;
+      }
       return m.type === "push_info" ? ({ t: "ack", vapid: KEY } as Outcome) : ({ t: "ack" } as Outcome);
     },
   };
@@ -257,6 +263,83 @@ describe("turning off, testing, forgetting", () => {
     expect(held.ended).toBe(true);
     expect(r.state.wanted).toBe(false);
     expect(r.asked).toEqual([]);
+  });
+});
+
+describe("which alerts this phone chooses", () => {
+  const night = { from: "22:00", to: "07:00", tz_min: 60, needs_you_through: false };
+
+  it("turns a kind off and on, and every kind on is following the computer", () => {
+    const noDone = withKind(null, "done", false);
+    expect(noDone).toEqual({ kinds: ["needs_you", "approval", "failed", "automation", "cost"], quiet: null });
+    expect(choosesKind(noDone, "done")).toBe(false);
+    expect(choosesKind(noDone, "failed")).toBe(true);
+    expect(choosesKind(null, "done")).toBe(true);
+    const fewer = withKind(noDone, "cost", false);
+    expect(fewer.kinds).toEqual(["needs_you", "approval", "failed", "automation"]);
+    expect(withKind(withKind(fewer, "done", true), "cost", true)).toEqual({ kinds: null, quiet: null });
+    // Quiet hours stay as they were.
+    expect(withKind({ kinds: null, quiet: night }, "approval", false)).toEqual({ kinds: ["needs_you", "failed", "done", "automation", "cost"], quiet: night });
+    // Turning off every kind is a choice too: no alert at all.
+    const none = ALERT_KINDS.reduce<AlertPrefs | null>((p, k) => withKind(p, k, false), null);
+    expect(none).toEqual({ kinds: [], quiet: null });
+  });
+
+  it("sends quiet hours in this phone's time zone as it is now", () => {
+    expect(prefsRequest({ kinds: ["needs_you"], quiet: night }, 420)).toEqual({ type: "push_prefs", kinds: ["needs_you"], quiet: { ...night, tz_min: 420 } });
+    expect(prefsRequest({ kinds: null, quiet: null }, 420)).toEqual({ type: "push_prefs", kinds: null, quiet: null });
+  });
+
+  it("knows when the time zone moved under quiet hours", () => {
+    expect(tzChanged({ kinds: null, quiet: night }, 60)).toBeNull();
+    expect(tzChanged({ kinds: null, quiet: night }, 120)).toEqual({ kinds: null, quiet: night });
+    expect(tzChanged({ kinds: ["done"], quiet: null }, 120)).toBeNull();
+    expect(tzChanged(null, 120)).toBeNull();
+    expect(tzChanged(undefined, 120)).toBeNull();
+  });
+
+  it("a hello with quiet hours set in another time zone sends them again in this one, once", async () => {
+    const r = rig({ tz: 420 });
+    await r.alerts.heard({ vapid: KEY, subscribed: true, prefs: { kinds: ["needs_you"], quiet: night }, events: ["needs_you", "done"] });
+    expect(r.sent("push_prefs")).toEqual([{ type: "push_prefs", kinds: ["needs_you"], quiet: { ...night, tz_min: 420 } }]);
+    expect(r.alerts.prefs).toEqual({ kinds: ["needs_you"], quiet: { ...night, tz_min: 420 } });
+    expect(r.alerts.events).toEqual(["needs_you", "done"]);
+    // The next hello carries what was kept: nothing more to send.
+    await r.alerts.heard({ vapid: KEY, subscribed: true, prefs: r.alerts.prefs, events: ["needs_you", "done"] });
+    expect(r.sent("push_prefs")).toHaveLength(1);
+  });
+
+  it("a hello in the same time zone, with no quiet hours, or from an older computer sends nothing", async () => {
+    for (const push of [
+      { vapid: KEY, subscribed: true, prefs: { kinds: null, quiet: { ...night, tz_min: 420 } } },
+      { vapid: KEY, subscribed: true, prefs: { kinds: ["done"], quiet: null } },
+      { vapid: KEY, subscribed: true, prefs: null },
+      { vapid: KEY, subscribed: true },
+    ]) {
+      const r = rig({ tz: 420 });
+      await r.alerts.heard(push);
+      expect(r.sent("push_prefs")).toEqual([]);
+    }
+    const older = rig();
+    await older.alerts.heard({ vapid: KEY, subscribed: true });
+    expect([older.alerts.prefs, older.alerts.events]).toEqual([null, null]);
+  });
+
+  it("a choice is kept as the computer says, and a refusal is said", async () => {
+    const r = rig({ tz: -300 });
+    expect(await r.alerts.choose({ kinds: null, quiet: night })).toBeNull();
+    expect(r.alerts.prefs).toEqual({ kinds: null, quiet: { ...night, tz_min: -300 } });
+    const refused = rig({ answers: { push_prefs: { t: "error", code: "bad_request", message: "quiet hours are from and to, each HH:MM" } as Outcome } });
+    expect(await refused.alerts.choose({ kinds: null, quiet: night })).toBe("quiet hours are from and to, each HH:MM");
+    expect(refused.alerts.prefs).toBeNull();
+    expect(await rig({ answers: { push_prefs: { t: "offline" } as Outcome } }).alerts.choose({ kinds: ["done"], quiet: null })).toBe("offline");
+  });
+
+  it("forgetting the pairing forgets the choices here too", async () => {
+    const r = rig();
+    await r.alerts.heard({ vapid: KEY, subscribed: true, prefs: { kinds: ["done"], quiet: null }, events: ["done"] });
+    await r.alerts.forget();
+    expect([r.alerts.prefs, r.alerts.events]).toEqual([null, null]);
   });
 });
 

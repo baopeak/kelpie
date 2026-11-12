@@ -553,6 +553,14 @@ keeps it up while agents work.
   and opens the session when tapped; no project, session or command text is in it. Plain `http://` pages
   cannot get alerts: the browser does not offer them there, and the sheet says so. Removing the phone in
   Settings → Mobile ends its alerts.
+- **Which alerts each phone gets**: with alerts on, the phone's Settings lists each kind of alert with a
+  checkbox, and the computer sends that phone only the kinds you keep checked. A kind switched off on the
+  computer (the list below) is greyed out on the phone, with the reason. *Quiet hours* stops every alert to that
+  phone between two times, for example 22:00 to 07:00, unless you tick *Still alert when an agent needs you*.
+  The times follow the phone's clock, and the phone tells the computer again when its time zone changes. Each
+  phone keeps its own choices, also while its alerts are off, and the session list still shows what happened
+  when you open the app. A test alert always arrives. A computer running an older Kelpie sends every alert,
+  and the phone greys these rows out and asks you to update Kelpie on the computer.
 - **ntfy**: switch it on, install the ntfy app and subscribe to the topic Kelpie shows (*Show topic*).
   The topic is 128 random bits only you know; use *New topic* if you shared it by accident. An
   access token is optional, and the server can be your own.

@@ -182,7 +182,7 @@ impl Rig {
         let (secret, p256dh, auth) = web_push::test_subscription();
         self.secrets.set(&auth_key(id), &auth).unwrap();
         let mut all = self.dests.shared.devices.lock().clone();
-        all.insert(id.to_string(), Target { endpoint: format!("{}/push/{id}", service.base), p256dh, lang: lang.into(), origin: origin.map(str::to_string) });
+        all.insert(id.to_string(), Target { endpoint: format!("{}/push/{id}", service.base), p256dh, lang: lang.into(), origin: origin.map(str::to_string), prefs: None });
         self.dests.set_devices(all);
         Phone { secret, auth: B64.decode(auth).unwrap() }
     }
@@ -785,7 +785,7 @@ fn a_late_answer_about_an_address_the_phone_left_keeps_what_it_has_to_send() {
         let (secret, p256dh, auth) = web_push::test_subscription();
         r.secrets.set(&auth_key("d1"), &auth).unwrap();
         let mut all = r.dests.shared.devices.lock().clone();
-        all.insert("d1".to_string(), Target { endpoint: format!("{}/push/new", service.base), p256dh, lang: "en".into(), origin: None });
+        all.insert("d1".to_string(), Target { endpoint: format!("{}/push/new", service.base), p256dh, lang: "en".into(), origin: None, prefs: None });
         r.dests.set_devices(all);
         Phone { secret, auth: B64.decode(auth).unwrap() }
     };
@@ -1096,6 +1096,145 @@ fn the_signing_key_is_made_once_and_kept() {
     r.dests.forget_vapid();
     r.secrets.delete(K_VAPID).unwrap();
     assert_ne!(r.dests.vapid_public(true).unwrap().unwrap(), first, "after a reset, another");
+}
+
+// ---------- each phone's own choices ----------
+
+/// Milliseconds since the epoch of `HH:MM` UTC on 1 January 1970.
+fn at(h: u64, m: u64) -> u64 {
+    (h * 60 + m) * 60_000
+}
+
+fn quiet(from: &str, to: &str, tz_min: i32, needs_you_through: bool) -> AlertPrefs {
+    AlertPrefs { kinds: None, quiet: Some(QuietHours { from: from.into(), to: to.into(), tz_min, needs_you_through }) }
+}
+
+#[test]
+fn a_phone_gets_only_the_kinds_it_chose_and_nothing_chosen_is_everything() {
+    let all = AlertPrefs::default();
+    for kind in Kind::ALL {
+        assert!(all.wants(kind, at(12, 0)), "{kind:?}");
+    }
+    let some = AlertPrefs { kinds: Some(vec!["needs_you".into(), "cost".into()]), quiet: None };
+    let wanted: Vec<Kind> = Kind::ALL.into_iter().filter(|k| some.wants(*k, at(12, 0))).collect();
+    assert_eq!(wanted, [Kind::Waiting, Kind::Cost]);
+    let none = AlertPrefs { kinds: Some(vec![]), quiet: None };
+    assert!(Kind::ALL.into_iter().all(|k| !none.wants(k, at(12, 0))), "an empty list is none at all");
+    assert_eq!(Kind::ALL.map(Kind::choice), ["needs_you", "approval", "failed", "done", "automation", "cost"]);
+}
+
+#[test]
+fn quiet_hours_hold_every_alert_in_the_phones_own_time_and_may_let_needs_you_through() {
+    // 22:00 to 07:00 spans midnight.
+    let night = quiet("22:00", "07:00", 0, false);
+    for (h, m, held) in [(21, 59, false), (22, 0, true), (23, 30, true), (0, 0, true), (6, 59, true), (7, 0, false), (12, 0, false)] {
+        assert_eq!(!night.wants(Kind::Finished, at(h, m)), held, "{h:02}:{m:02}");
+        assert_eq!(!night.wants(Kind::Waiting, at(h, m)), held, "every alert, needs you too, by default: {h:02}:{m:02}");
+    }
+    // Within one day.
+    let lunch = quiet("12:00", "13:30", 0, false);
+    assert!(!lunch.wants(Kind::Error, at(12, 45)) && lunch.wants(Kind::Error, at(13, 30)) && lunch.wants(Kind::Error, at(11, 59)));
+    // The same time for both is no window.
+    let none = quiet("08:00", "08:00", 0, false);
+    assert!((0..24).all(|h| none.wants(Kind::Finished, at(h, 0))));
+    // Needs you through, if the person said so; nothing else is.
+    let through = quiet("22:00", "07:00", 0, true);
+    assert!(through.wants(Kind::Waiting, at(23, 0)));
+    for kind in [Kind::Approval, Kind::Error, Kind::Finished, Kind::Automation, Kind::Cost] {
+        assert!(!through.wants(kind, at(23, 0)), "{kind:?}");
+    }
+    // The phone's time is UTC plus its offset, to the widest there is either way.
+    let east = quiet("22:00", "07:00", 840, false);
+    assert!(!east.wants(Kind::Finished, at(8, 0)), "08:00 UTC is 22:00 at UTC+14");
+    assert!(east.wants(Kind::Finished, at(17, 0)), "17:00 UTC is 07:00 the next day there");
+    let west = quiet("22:00", "07:00", -840, false);
+    assert!(!west.wants(Kind::Finished, at(12, 0)), "12:00 UTC is 22:00 the day before at UTC-14");
+    assert!(west.wants(Kind::Finished, at(21, 0)), "21:00 UTC is 07:00 there");
+    let vietnam = quiet("22:00", "07:00", 420, false);
+    assert!(!vietnam.wants(Kind::Finished, at(15, 0)) && vietnam.wants(Kind::Finished, at(0, 0)), "UTC+7");
+    // Kinds and hours together: a kind not chosen stays out after the hours too.
+    let both = AlertPrefs { kinds: Some(vec!["failed".into()]), ..quiet("22:00", "07:00", 0, true) };
+    assert!(!both.wants(Kind::Waiting, at(23, 0)), "let through the hours, not past the kinds");
+    assert!(both.wants(Kind::Error, at(12, 0)) && !both.wants(Kind::Error, at(23, 0)));
+    // Times edited by hand into something unreadable hold nothing.
+    assert!(quiet("25:00", "07:00", 0, false).wants(Kind::Finished, at(23, 0)));
+}
+
+#[test]
+fn what_a_phone_sends_is_checked_and_put_in_order() {
+    use serde_json::json;
+    let got = AlertPrefs::from_request(&json!({"kinds": ["cost", "needs_you", "cost"], "quiet": {"from": "22:30", "to": "06:00", "tz_min": -300}})).unwrap().unwrap();
+    assert_eq!(got.kinds.as_deref(), Some(&["needs_you".to_string(), "cost".to_string()][..]));
+    assert_eq!(got.quiet, Some(QuietHours { from: "22:30".into(), to: "06:00".into(), tz_min: -300, needs_you_through: false }));
+    let through = AlertPrefs::from_request(&json!({"kinds": null, "quiet": {"from": "00:00", "to": "23:59", "tz_min": 840, "needs_you_through": true}})).unwrap().unwrap();
+    assert!(through.kinds.is_none() && through.quiet.unwrap().needs_you_through);
+    assert_eq!(AlertPrefs::from_request(&json!({"kinds": null, "quiet": null})), Ok(None), "follow the computer");
+    assert_eq!(AlertPrefs::from_request(&json!({})), Ok(None));
+    assert_eq!(AlertPrefs::from_request(&json!({"kinds": []})).unwrap().unwrap().kinds, Some(vec![]));
+    let q = |over: serde_json::Value| {
+        let mut quiet = json!({"from": "22:00", "to": "07:00", "tz_min": 0});
+        quiet.as_object_mut().unwrap().extend(over.as_object().unwrap().clone());
+        json!({"kinds": null, "quiet": quiet})
+    };
+    for bad in [
+        json!({"kinds": "done"}),
+        json!({"kinds": ["done", "waiting"]}),
+        json!({"kinds": ["cost_cap"]}),
+        json!({"kinds": [1]}),
+        json!({"quiet": "22:00-07:00"}),
+        q(json!({"from": "24:00"})),
+        q(json!({"to": "7:00"})),
+        q(json!({"from": "22:60"})),
+        q(json!({"from": "22:00:00"})),
+        q(json!({"to": null})),
+        q(json!({"tz_min": 841})),
+        q(json!({"tz_min": -841})),
+        q(json!({"tz_min": "60"})),
+        q(json!({"tz_min": 60.5})),
+        q(json!({"tz_min": i64::MIN})),
+        q(json!({"tz_min": null})),
+        q(json!({"needs_you_through": "yes"})),
+    ] {
+        assert!(AlertPrefs::from_request(&bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_phone_that_chose_not_to_hear_of_an_event_is_sent_nothing_and_the_others_are() {
+    let (r, service) = (rig(), PushService::start(&[]));
+    r.phone("d1", &service, "en");
+    r.phone("d2", &service, "en");
+    let mut all = r.dests.shared.devices.lock().clone();
+    all.get_mut("d1").unwrap().prefs = Some(AlertPrefs { kinds: Some(Kind::ALL.into_iter().filter(|k| *k != Kind::Finished).map(|k| k.choice().to_string()).collect()), quiet: None });
+    r.dests.set_devices(all);
+    r.notifier.send(&Raised { session: Some("s1".into()), ..Raised::bare(Kind::Finished) }, &Context::default());
+    let got = service.wait_for(1, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(service.count(), 1, "one push");
+    assert_eq!(got[0].path, "/push/d2");
+    assert!(!r.outbox(&Dest::Device("d1".into())).exists(), "nothing was queued for the phone that opted out");
+    // What it did choose still reaches it, and a test alert ignores its choices.
+    r.notifier.send(&waiting("s2"), &Context::default());
+    let got = service.wait_for(3, Duration::from_secs(5));
+    let mut paths: Vec<&str> = got[1..].iter().map(|g| g.path.as_str()).collect();
+    paths.sort();
+    assert_eq!(paths, ["/push/d1", "/push/d2"]);
+    let mut all = r.dests.shared.devices.lock().clone();
+    all.get_mut("d1").unwrap().prefs = Some(AlertPrefs { kinds: Some(vec![]), quiet: None });
+    r.dests.set_devices(all);
+    r.dests.test_device("d1").unwrap();
+    assert_eq!(service.count(), 4);
+}
+
+#[test]
+fn a_phone_hears_which_kinds_the_computer_sends_at_all() {
+    let r = rig();
+    assert_eq!(r.dests.sent_kinds(), ["needs_you", "approval", "failed", "done", "automation", "cost"]);
+    let mut c = r.notifier.config();
+    c.events.done = false;
+    c.events.cost_cap = false;
+    r.notifier.update(Some(c), &Value::Null).unwrap();
+    assert_eq!(r.dests.sent_kinds(), ["needs_you", "approval", "failed", "automation"]);
 }
 
 #[test]

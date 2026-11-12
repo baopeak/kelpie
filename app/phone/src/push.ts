@@ -1,7 +1,7 @@
 // Alerts on this phone: the browser's push subscription and what the computer knows of it. The computer sends each alert itself
 // (crates/kelpied/src/notify/web_push.rs), so all this keeps straight is that the two agree: looked at every time the app opens, since
 // a browser may end or renew a subscription whenever it likes. Asking for the permission takes a tap; renewing once it is given does not.
-import type { Outcome } from "./link";
+import type { AlertPrefs, Outcome } from "./link";
 
 export type AlertsState =
   /** A page that could have been swapped on the way: no browser gives it push, and neither would the computer. */
@@ -47,13 +47,44 @@ export interface AlertsEnv {
   lang(): string;
   /** Where this page is: where this phone's pairing is, and so where its alerts must lead. */
   origin(): string;
+  /** This phone's offset from UTC now, in minutes east (`-getTimezoneOffset()`). */
+  tzOffset(): number;
   ask(msg: Record<string, unknown>): Promise<Outcome>;
 }
 
-/** What the computer said in its `hello`. */
+/** What the computer said in its `hello`. `prefs` and `events` are absent from a computer below `ALERT_PREFS_API`. */
 export interface PushFacts {
   vapid: string | null;
   subscribed: boolean;
+  prefs?: AlertPrefs | null;
+  events?: string[];
+}
+
+/** The kinds of alert this phone can choose among, in the order Settings lists them. */
+export const ALERT_KINDS = ["needs_you", "approval", "failed", "done", "automation", "cost"] as const;
+export type AlertKind = (typeof ALERT_KINDS)[number];
+
+/** Quiet hours as they start when the person turns them on. */
+export const DEFAULT_QUIET = { from: "22:00", to: "07:00", needs_you_through: false };
+
+/** Whether these choices let alerts of `kind` through (quiet hours aside). */
+export const choosesKind = (p: AlertPrefs | null, kind: AlertKind) => !p?.kinds || p.kinds.includes(kind);
+
+/** The choices with `kind` turned on or off. Every kind on is no list at all: the phone follows the computer, new kinds included. */
+export function withKind(p: AlertPrefs | null, kind: AlertKind, on: boolean): AlertPrefs {
+  const now = p?.kinds ?? [...ALERT_KINDS];
+  const kinds = ALERT_KINDS.filter((k) => (k === kind ? on : now.includes(k)));
+  return { kinds: kinds.length === ALERT_KINDS.length ? null : kinds, quiet: p?.quiet ?? null };
+}
+
+/** The `push_prefs` request for these choices, with quiet hours in this phone's time zone as it is now. */
+export function prefsRequest(p: AlertPrefs, tzMin: number): Record<string, unknown> {
+  return { type: "push_prefs", kinds: p.kinds, quiet: p.quiet && { ...p.quiet, tz_min: tzMin } };
+}
+
+/** The choices to send again because this phone's time zone is no longer the one its quiet hours were set in (daylight saving, travel); null when they hold. */
+export function tzChanged(p: AlertPrefs | null | undefined, tzMin: number): AlertPrefs | null {
+  return p?.quiet && p.quiet.tz_min !== tzMin ? p : null;
 }
 
 /** Why this page cannot have alerts at all, if it cannot. On an iPhone's browser tab push is simply missing, so that comes before "no support". */
@@ -69,6 +100,10 @@ export class Alerts {
   state: AlertsState = "off";
   /** What went wrong, for the person. */
   error: string | null = null;
+  /** This phone's choices as the computer keeps them (null: everything it sends). */
+  prefs: AlertPrefs | null = null;
+  /** The kinds the computer sends at all; null until a computer that says so has. */
+  events: string[] | null = null;
   private busy = false;
 
   constructor(private env: AlertsEnv, private changed: () => void) {}
@@ -121,6 +156,26 @@ export class Alerts {
     await held?.unsubscribe().catch(() => {});
     const failed = errorOf(await this.env.ask({ type: "push_unsub" }));
     this.set("off", failed);
+  }
+
+  /** What the computer said in its hello of this phone's choices. Quiet hours set in another time zone are sent again in this one, so that they keep to this phone's clock. */
+  async heard(push: PushFacts | null | undefined) {
+    if (!push) return;
+    this.prefs = push.prefs ?? null;
+    this.events = push.events ?? null;
+    this.changed();
+    const again = tzChanged(push.prefs, this.env.tzOffset());
+    if (again) await this.choose(again);
+  }
+
+  /** Sends this phone's choices: null when the computer kept them, else what went wrong. */
+  async choose(p: AlertPrefs): Promise<string | null> {
+    const got = await this.env.ask(prefsRequest(p, this.env.tzOffset()));
+    if (got.t === "ack" && got.prefs !== undefined) {
+      this.prefs = got.prefs;
+      this.changed();
+    }
+    return errorOf(got);
   }
 
   /** What the computer makes of a test alert: null when its push service took it. */
@@ -176,6 +231,8 @@ export class Alerts {
     this.env.setWanted(false);
     const held = await this.env.current().catch(() => null);
     await held?.unsubscribe().catch(() => {});
+    this.prefs = null;
+    this.events = null;
     this.set("off");
   }
 }
@@ -207,6 +264,7 @@ export function browserAlerts(env: Pick<AlertsEnv, "lang" | "ask">, page: { ios:
   return {
     ...env,
     origin: () => location.origin,
+    tzOffset: () => -new Date().getTimezoneOffset(),
     facts: () => ({
       secure: window.isSecureContext,
       supported: "serviceWorker" in navigator && "PushManager" in window && "Notification" in window,

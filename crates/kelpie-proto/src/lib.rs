@@ -65,7 +65,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// closes (`route` null) or changes way, and in the phone's hello `device.control` (`ok`, or the first of `hosted_app`, `not_granted`, `plain_page`,
 /// `via_relay`, `lock_off`, `no_passkey`, `locked`) and `ts` (this computer is published over Tailscale). An older daemon sends none of them, so the
 /// app shows when a phone was last seen and the phone works out why on its own.
-pub const API_LEVEL: u32 = 36;
+/// 37: each phone's own alert choices: the phone's `push_prefs {kinds, quiet}` (`kinds` of `needs_you`, `approval`, `failed`, `done`, `automation`,
+/// `cost`, or null for whatever the computer sends; `quiet` as `{from, to, tz_min, needs_you_through}` in the phone's time, or null), `prefs` and
+/// `events` (the kinds this computer sends at all) in the hello's `push`, and `alerts` on a device in `mobile.status`; the daemon skips a phone whose
+/// choices leave an event out before anything is queued for it. An older daemon sends every alert to every phone, so the phone offers the choices only at 37.
+pub const API_LEVEL: u32 = 37;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

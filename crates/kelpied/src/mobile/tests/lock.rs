@@ -68,7 +68,7 @@ async fn unlock(r: &mut Rig, a: &mut Authenticator) -> Value {
     r.ask_write(unlock_message(a, &c)).await
 }
 
-const NOT_WHILE_LOCKED: [&str; 16] = ["list", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_test"];
+const NOT_WHILE_LOCKED: [&str; 17] = ["list", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test"];
 
 #[tokio::test]
 async fn while_locked_only_keeping_the_line_up_and_the_locks_own_verbs_are_answered() {

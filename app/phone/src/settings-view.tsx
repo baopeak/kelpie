@@ -10,7 +10,10 @@ import { PairWays } from "./install-guide";
 import type { InboxOrder } from "./inbox-order";
 import { KEYS } from "./key-bar";
 import { currentPairing } from "./pairing-store";
-import { alertsError, alertsState, clearKept, computerOnTailscale, connected, daemonApi, device, forgetDevice, link, livePathNow, lockAppNow, lockInfo, lockShown, PAGE_METHOD, rtt, screenWhyNow, setTrustOpen, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
+import { ALERT_PREFS_API } from "../../src/lib/attention";
+import type { AlertPrefs, QuietHours } from "./link";
+import { ALERT_KINDS, choosesKind, DEFAULT_QUIET, withKind, type AlertKind } from "./push";
+import { alertEvents, alertPrefs, alertsError, alertsState, chooseAlerts, clearKept, computerOnTailscale, connected, daemonApi, device, forgetDevice, link, livePathNow, lockAppNow, lockInfo, lockShown, PAGE_METHOD, rtt, screenWhyNow, setTrustOpen, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
 import { applyDisplay, confirmCtrlC, defaultKeyBar, INBOX_VIEWS, inboxView, keyBar, LOCK_GRACE_CHOICES, lockGrace, moveKey, order, showStopped, TEXT_SIZES, textSize, toggleKey, vibrate, wrapLines, type InboxView, type LockGrace, type TextSize } from "./prefs";
 import { setTheme, theme, type ThemeSetting } from "./theme";
 
@@ -53,6 +56,81 @@ function AlertsRow() {
         </Show>
       </div>
       <Show when={tested()}><p class="muted" role="status" data-alerts-tested>{tested()}</p></Show>
+      <Show when={alertsState() === "on"}><AlertChoices /></Show>
+    </div>
+  );
+}
+
+/** Which alerts this phone gets, and its quiet hours. The computer keeps them and leaves out what this phone did not choose before it sends anything. */
+function AlertChoices() {
+  const older = () => daemonApi() < ALERT_PREFS_API;
+  const [saving, setSaving] = createSignal(false);
+  const [failed, setFailed] = createSignal<string | null>(null);
+  const prefs = alertPrefs;
+  const quiet = () => prefs()?.quiet ?? null;
+  /** The computer sends this kind at all (a computer that did not say is taken to send every kind). */
+  const sent = (k: AlertKind) => alertEvents()?.includes(k) ?? true;
+  const kindName = (k: AlertKind) =>
+    ({
+      needs_you: t("An agent needs you"),
+      approval: t("A run waits for your approval"),
+      failed: t("An agent failed"),
+      done: t("An agent finished"),
+      automation: t("An automation ran"),
+      cost: t("A session passed its cost cap"),
+    })[k];
+  /** Sends the choices. When they were not kept, `undo` puts the control back as the computer still has it. */
+  const save = async (p: AlertPrefs, undo: () => void) => {
+    setSaving(true);
+    const why = await chooseAlerts(p);
+    setSaving(false);
+    setFailed(why ? t("Not saved: {error}", { error: why }) : null);
+    if (why) undo();
+  };
+  const flipBack = (box: HTMLInputElement) => () => (box.checked = !box.checked);
+  const setQuiet = (q: QuietHours | null, undo: () => void) => void save({ kinds: prefs()?.kinds ?? null, quiet: q }, undo);
+  const setTime = (which: "from" | "to", box: HTMLInputElement) => {
+    const q = quiet();
+    if (!q || q[which] === box.value) return;
+    const was = q[which];
+    if (/^\d{2}:\d{2}$/.test(box.value)) setQuiet({ ...q, [which]: box.value }, () => (box.value = was));
+    else box.value = was;
+  };
+  const off = () => older() || saving();
+  return (
+    <div class="alert-choices" data-alert-choices>
+      <p class="muted">{t("Alert this phone when")}</p>
+      <For each={ALERT_KINDS}>
+        {(k) => (
+          <label class="row-check" data-alert-kind={k}>
+            <input type="checkbox" checked={sent(k) && choosesKind(prefs(), k)} disabled={off() || !sent(k)} onChange={(e) => void save(withKind(prefs(), k, e.currentTarget.checked), flipBack(e.currentTarget))} />
+            <span>{kindName(k)}<Show when={!older() && !sent(k)}><span class="muted block">{t("Your computer does not send this kind. Turn it on in Kelpie → Settings → Notifications.")}</span></Show></span>
+          </label>
+        )}
+      </For>
+      <label class="row-check" data-setting="quiet-hours">
+        <input type="checkbox" checked={!!quiet()} disabled={off()} onChange={(e) => setQuiet(e.currentTarget.checked ? { ...DEFAULT_QUIET, tz_min: 0 } : null, flipBack(e.currentTarget))} />
+        <span>{t("Quiet hours")}<span class="muted block">{t("Your computer sends no alert during these hours. The session list still shows what happened when you open the app.")}</span></span>
+      </label>
+      <Show when={quiet()}>
+        {(q) => (
+          <>
+            <label class="row-setting" data-setting="quiet-from">{t("From")}
+              <input type="time" class="field" value={q().from} disabled={off()} onChange={(e) => setTime("from", e.currentTarget)} />
+            </label>
+            <label class="row-setting" data-setting="quiet-to">{t("Until")}
+              <input type="time" class="field" value={q().to} disabled={off()} onChange={(e) => setTime("to", e.currentTarget)} />
+            </label>
+            <label class="row-check" data-setting="quiet-needs-you">
+              <input type="checkbox" checked={q().needs_you_through} disabled={off()} onChange={(e) => setQuiet({ ...q(), needs_you_through: e.currentTarget.checked }, flipBack(e.currentTarget))} />
+              <span>{t("Still alert when an agent needs you")}</span>
+            </label>
+            <p class="muted">{t("Times follow this phone's clock.")}</p>
+          </>
+        )}
+      </Show>
+      <Show when={older()}><p class="muted" data-alert-choices-why>{t("Update Kelpie on your computer to choose this.")}</p></Show>
+      <Show when={failed()}><p class="muted" role="status" data-alert-choices-failed>{failed()}</p></Show>
     </div>
   );
 }

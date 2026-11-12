@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn a_device_on_the_relay_goes_by_the_page_it_paired_on() {
-        let mut d = Device { id: "d".into(), name: "n".into(), pk: String::new(), permission: super::super::Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: true, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, verified: true };
+        let mut d = Device { id: "d".into(), name: "n".into(), pk: String::new(), permission: super::super::Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: true, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, alerts: None, verified: true };
         // From before pages: the room's Tailscale origin, as always, and no other page the relay names.
         assert_eq!(relay_page(&d, Some(TS), Some(TS)), Some(Some(TS.to_string())));
         assert_eq!(relay_page(&d, None, Some(TS)), Some(Some(TS.to_string())), "a relay of the first version, or no Origin");

@@ -35,7 +35,8 @@ code gets no answer, too many unknown phones are rate limited and the desktop sa
 (last, so the limiter cannot refuse a pairing above). On an HTTPS origin (a certificate of this run's own, at `localhost` on 127.0.0.1, which the phone's browser
 is told to accept; needs Python's `cryptography`): the install step, no camera falling back to pasting the link, a pairing that is a secure origin. The app lock on it, with real WebAuthn ceremonies through CDP's virtual authenticator (`WebAuthn.addVirtualAuthenticator`, Blink's and not WebKit's, and no person's face): set up, a copied key refused at the daemon, hide locks, a network flap asks nothing, the idle time locks, the dangerous re-check, the reset, a restart. Then it may
 type, and the phone's Settings there: the connection card and the live label naming the way it takes, a text size and a hidden key, and clearing
-what the phone keeps with the pairing kept. Ctrl+C from the key bar asks first and sends only on Send. The link the daemon really gives there, at 127.0.0.1, unrewritten: a phone paired from it reads, with no lock in its way, since a passkey needs a name. Alerts on a real service worker (`KELPIE_PUSH_TEST_BASE` in tauri-driver's environment, a port this script serves as a stand-in for a push service, which the daemon really POSTs to): the button in the phone's Settings, a test alert
+what the phone keeps with the pairing kept. Ctrl+C from the key bar asks first and sends only on Send. The link the daemon really gives there, at 127.0.0.1, unrewritten: a phone paired from it reads, with no lock in its way, since a passkey needs a name. Alerts on a real service worker (`KELPIE_PUSH_TEST_BASE` in tauri-driver's environment, a port this script serves as a stand-in for a push service, which the daemon really POSTs to): the button in the phone's Settings, a test alert,
+the phone's own choices (a kind unticked, quiet hours in its time zone, needs you let through) kept by the computer and shown again after a reconnect, a test alert still arriving,
 and a needs-you event taken from the stand-in, opened with the browser's keys and handed to the worker through CDP's `ServiceWorker.deliverPushMessage`, which shows the notification; a tap on it, as a synthetic `notificationclick` in the worker. The browser's own `pushManager.subscribe` is replaced in the page, since it would reach a real push service, which tests never do. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, never the real one): each state's instruction, the two-step dialog, off.
 """
 import asyncio
@@ -1365,6 +1366,37 @@ for n in (1, 2, 3):
         phone.js("document.querySelector('[data-alerts-test]').click()")
         run.check("a test alert reaches the stand-in", wait(lambda: len(push.at("/push/page")) >= 1, 15) is True, str(len(push.at("/push/page"))))
         run.check("…and Settings says it went", "Sent" in (phone.wait("return document.querySelector('[data-alerts-tested]')?.textContent?.includes('Sent') && document.querySelector('[data-alerts-tested]').textContent", 15) or ""))
+        tested_at = time.time()
+
+        # Which alerts this phone gets: chosen on the phone, kept by the computer for this phone only, and a test alert still arrives.
+        def choose(selector):
+            # A choice being saved holds every row still: wait until this one can be clicked again.
+            phone.wait(f"return document.querySelector('{selector} input') && !document.querySelector('{selector} input').disabled", 10)
+            phone.js(f"document.querySelector('{selector} input').click()")
+        mine = lambda: next((x for x in daemon(d, "mobile.status")["devices"] if x["id"] == alert_device["id"]), {}).get("alerts") if alert_device else None  # noqa: E731
+        run.check("with alerts on, Settings lists a choice per kind", phone.wait("return document.querySelectorAll('[data-alert-choices] [data-alert-kind]').length", 10) == 6)
+        choose("[data-alert-kind=\"done\"]")
+        run.check("unticking a kind is kept by the computer, for this phone", wait(lambda: (mine() or {}).get("kinds") == ["needs_you", "approval", "failed", "automation", "cost"], 10) is True, str(mine()))
+        choose("[data-setting=\"quiet-hours\"]")
+        tz = phone.js("return -new Date().getTimezoneOffset()")
+        run.check("quiet hours are kept in this phone's time zone, holding every alert by default", wait(lambda: (mine() or {}).get("quiet") == {"from": "22:00", "to": "07:00", "tz_min": tz, "needs_you_through": False}, 10) is True, str(mine()))
+        run.check("…and Settings says the times follow this phone's clock", "this phone's clock" in (phone.wait("return document.querySelector('[data-setting=\"quiet-from\"]') && document.querySelector('[data-alert-choices]').textContent", 10) or ""))
+        choose("[data-setting=\"quiet-needs-you\"]")
+        run.check("needs you can be let through them", wait(lambda: ((mine() or {}).get("quiet") or {}).get("needs_you_through") is True, 10) is True, str(mine()))
+        # A new connection's hello carries them: the page shows them as the computer keeps them.
+        phone.js("document.querySelector('[data-setting=\"reconnect\"]').click()")
+        time.sleep(2)
+        shown = phone.wait("return !!document.querySelector('[data-setting=\"quiet-needs-you\"] input')?.checked && !document.querySelector('[data-alert-kind=\"done\"] input').checked && document.querySelector('[data-alert-kind=\"failed\"] input').checked", 15)
+        run.check("…and after a reconnect the phone shows what the computer keeps", shown is True)
+        time.sleep(max(0, tested_at + 5.5 - time.time()))
+        tests_before = len(push.at("/push/page"))
+        phone.js("document.querySelector('[data-alerts-test]').click()")
+        run.check("a test alert still arrives, whatever was chosen", wait(lambda: len(push.at("/push/page")) > tests_before, 15) is True, str(len(push.at("/push/page")) - tests_before))
+        # Back to following the computer, for the needs-you event below.
+        choose("[data-setting=\"quiet-hours\"]")
+        wait(lambda: (mine() or {}).get("quiet") is None, 10)
+        choose("[data-alert-kind=\"done\"]")
+        run.check("every kind ticked and no quiet hours is following the computer", wait(lambda: mine() is None, 10) is True, str(mine()))
         phone.js("document.querySelector('header .icon').click()")
         phone.wait("return !document.querySelector('[data-settings]')", 10)
 

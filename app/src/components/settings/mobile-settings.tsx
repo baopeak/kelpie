@@ -43,6 +43,8 @@ export interface MobileDevice extends MobileDevicePage {
   secure_origin?: boolean;
   /** It turned alerts on (absent below `PHONE_API`). */
   push?: boolean;
+  /** Which alerts it chose on the phone, kept while its alerts are off (null: everything; absent below `ALERT_PREFS_API`). */
+  alerts?: { kinds: string[] | null; quiet: { from: string; to: string; tz_min: number; needs_you_through: boolean } | null } | null;
   /** Its passkey is on record, it may set up a new one now, it is unlocked now (absent below `LOCK_API`). */
   passkey?: boolean;
   lock_reset?: boolean;

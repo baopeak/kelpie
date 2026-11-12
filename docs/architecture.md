@@ -309,6 +309,8 @@ construction.
 
 The endpoint comes from a phone and the daemon POSTs to it, so it is held to a closed list: `https`, no port, no login, `fcm.googleapis.com`, `*.push.apple.com`, `*.push.services.mozilla.com`, `*.notify.windows.com` (the last two from the browsers' documentation, not yet seen from a real phone), no redirects. It is checked when it arrives and again before every request, and no error says it back. Only with `KELPIE_E2E` set may `KELPIE_PUSH_TEST_BASE` name one loopback address besides. A 404 or 410 ends the subscription; a revoke, reset, expiry or the kill switch ends it before returning, with its secret and what it had left to send; phone access off stops sending and keeps it for when access is back. The browser's side is looked at every time the app opens, and renewed with no tap once permission is given. A failed read of `notify.json`, the device store or its key deletes no outbox file at the start. A phone may change its subscription 10 times a minute.
 
+**Each phone's choices** (API 37). `push_prefs {kinds, quiet}` (read permission, secure transport, like `push_sub`) sets which alerts this phone wants: `kinds` is a subset of `needs_you`, `approval`, `failed`, `done`, `automation`, `cost`, or null for whatever the computer sends, and `quiet` is `{from: "HH:MM", to: "HH:MM", tz_min, needs_you_through}` or null. `tz_min` is the phone's offset east of UTC (−840 to 840), and anything else is `bad_request`. The reply carries the stored `prefs`. They are kept as `alerts` on the device record, unsealed and outside every HMAC, because they can only narrow what the computer sends: an edited file at worst changes which alerts arrive, and an older daemon ignores the field and sends everything. They outlive turning alerts off and on and go with the record. The hello's `push` adds `prefs` and `events` (the kinds the `Events` switches send at all, so the phone greys out the rest), and `mobile.status` lists `alerts` on each device. `Notifier::send` filters before enqueueing, so a skipped event never reaches the phone's outbox or a summary: a phone is left out when its `kinds` exclude the event, or when the time there (UTC plus `tz_min`) is inside its quiet hours (`from` after `to` spans midnight; equal times are no window). Quiet hours hold every alert unless `needs_you_through` lets "needs you" through; a test alert ignores the choices. The phone sends its choices again whenever a hello's `tz_min` differs from its own offset now (daylight saving, travel).
+
 A computer that is asleep sends nothing, and a computer that lost contact cannot say so: that needs someone else's server, and stays deferred. Real delivery to phones is not yet measured.
 
 **Channels** (Settings → Notifications → *Off this computer*, all through the app's connection,
@@ -441,7 +443,7 @@ Turning access off is therefore not how to cut a phone off: `mobile.enable` stay
 `phone_access_on`), and every paired phone then has its access back with no prompt. `mobile.revoke` and `mobile.revoke_all` remove it.
 
 - **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `hb`, `ack`, `sub`, `unsub`, `chat_sub`, and
-  `push_info`, `push_sub`, `push_unsub`, `push_test` (refused `insecure` where `transport_cap` would not let a page type), and
+  `push_info`, `push_sub`, `push_unsub`, `push_prefs`, `push_test` (refused `insecure` where `transport_cap` would not let a page type), and
   `lock_challenge`, `lock_enrol`, `lock_unlock`, `lock_now`, `lock_touch` need
   *read*; `input`, `key`, `answer`, `chat_answer`, `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume` need *write*;
   anything else is `unknown_verb`. The
@@ -450,7 +452,7 @@ Turning access off is therefore not how to cut a phone off: `mobile.enable` stay
   and, for write verbs, the `epoch` it was made under (refused as `epoch` after a daemon restart).
 - **Addressing and epoch**: sessions are addressed by `spec.id`. Handles restart at 1 and are reassigned
   by a restart, so a write by handle could land in another session. `hello {v: 2, api, daemon_epoch, rev,
-  device, sessions, projects, locked, lock, ts}` (`device.control` and `ts` from API 36, see "Permissions"); `daemon_epoch` is random per daemon start, and a phone that sees it
+  device, sessions, projects, locked, lock, ts, push}` (`device.control` and `ts` from API 36, see "Permissions"; `push.prefs` and `push.events` from API 37, see "Each phone's choices"); `daemon_epoch` is random per daemon start, and a phone that sees it
   change drops every position and frame number it holds and re-resolves its ids.
 - **The list is pushed**: the connection's adapter turns `session.updated|closed` events into a wake-up;
   it then rebuilds the list and sends `sessions {rev, sessions, projects}` only if it changed. Nothing

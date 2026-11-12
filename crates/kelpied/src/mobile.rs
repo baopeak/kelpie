@@ -53,7 +53,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
 use crate::daemon::{Daemon, Entry};
 use crate::load::{Level, Load};
-use crate::notify::destinations::{self, Destinations, Target};
+use crate::notify::destinations::{self, AlertPrefs, Destinations, Target};
 use crate::notify::web_push;
 use crate::notify::SecretStore;
 use crate::persist::write_atomic;
@@ -641,7 +641,7 @@ impl Mobile {
         let targets: HashMap<String, Target> = {
             let c = self.config.lock();
             let usable = |d: &&Device| d.verified && d.push.is_some() && key.as_ref().is_some_and(|k| store::push_holds(d, k));
-            let target = |d: &Device| d.push.as_ref().filter(|p| web_push::endpoint_allowed(&p.endpoint, test_base.as_deref())).map(|p| (d.id.clone(), Target { endpoint: p.endpoint.clone(), p256dh: p.p256dh.clone(), lang: p.lang.clone(), origin: p.origin.clone() }));
+            let target = |d: &Device| d.push.as_ref().filter(|p| web_push::endpoint_allowed(&p.endpoint, test_base.as_deref())).map(|p| (d.id.clone(), Target { endpoint: p.endpoint.clone(), p256dh: p.p256dh.clone(), lang: p.lang.clone(), origin: p.origin.clone(), prefs: d.alerts.clone() }));
             if c.enabled && !broken { c.devices.iter().filter(usable).filter_map(target).collect() } else { HashMap::new() }
         };
         self.destinations.set_devices(targets);
@@ -761,10 +761,28 @@ impl Mobile {
         true
     }
 
-    /// What a phone is told about its alerts.
+    /// What a phone is told about its alerts: the signing key, whether it is sent to, its own choices (null: everything) and which kinds this computer sends at all.
     fn push_facts(&self, device: &str) -> Value {
+        let prefs = self.config.lock().devices.iter().find(|d| d.id == device).and_then(|d| d.alerts.clone());
         // What is being sent to, not what the file says: a subscription that does not verify gets nothing, and the phone should make a new one.
-        json!({"vapid": self.destinations.vapid_public(false).ok().flatten(), "subscribed": self.destinations.has_device(device)})
+        json!({"vapid": self.destinations.vapid_public(false).ok().flatten(), "subscribed": self.destinations.has_device(device), "prefs": prefs, "events": self.destinations.sent_kinds()})
+    }
+
+    /// Keeps which alerts this phone wants (`push_prefs`; None: everything the computer sends). They stay while its alerts are off, for when they are on again.
+    /// What the computer already has costs no write. True when they changed.
+    fn set_alert_prefs(&self, device: &str, prefs: Option<AlertPrefs>) -> std::result::Result<bool, Refusal> {
+        let changed = {
+            let mut c = self.config.lock();
+            let d = c.devices.iter_mut().find(|d| d.id == device && d.verified).ok_or_else(|| refuse("no_device", "This device is no longer paired."))?;
+            let changed = d.alerts != prefs;
+            d.alerts = prefs;
+            changed
+        };
+        if changed {
+            self.publish_push();
+            self.keep();
+        }
+        Ok(changed)
     }
 
     /// The key device records are MAC'd with. Made when `create` and only when the store says it has none: a read that failed,
@@ -988,7 +1006,7 @@ impl Mobile {
                 let (lock_reset, unlocked) = self.lock_facts(&d.id);
                 json!({
                     "id": d.id, "name": d.name, "permission": d.permission.name(), "kind": d.kind.name(), "can_write": d.permission >= Permission::Write,
-                    "created_at": d.created_at, "last_seen": d.last_seen, "secure_origin": d.secure_origin, "push": d.push.is_some(), "state": if d.verified { "ok" } else if key_unreadable { "unchecked" } else { "unverified" },
+                    "created_at": d.created_at, "last_seen": d.last_seen, "secure_origin": d.secure_origin, "push": d.push.is_some(), "alerts": d.alerts, "state": if d.verified { "ok" } else if key_unreadable { "unchecked" } else { "unverified" },
                     "passkey": d.lock.is_some(), "lock_reset": lock_reset, "unlocked": unlocked, "may_control": d.verified && record_ceiling(d, options.on) == Permission::Control,
                     "page": d.page, "page_kind": d.page_kind.map(PageKind::name),
                     "connection": open.get(&d.id),
@@ -1364,7 +1382,7 @@ impl Mobile {
     /// A paired device as `approve` makes one (its record sealed with this store's key).
     fn add_test_device(&self, id: &str, name: &str, pk: [u8; 32], permission: Permission, kind: Kind) {
         let key = self.mac_key(true).expect("a readable store").expect("a key");
-        let mut d = Device { id: id.into(), name: name.into(), pk: kelpie_link::b64(&pk), permission, kind, created_at: 1, last_seen: now_millis(), mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, verified: false };
+        let mut d = Device { id: id.into(), name: name.into(), pk: kelpie_link::b64(&pk), permission, kind, created_at: 1, last_seen: now_millis(), mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, alerts: None, verified: false };
         store::seal(&mut d, &key);
         self.config.lock().devices.push(d);
     }
@@ -1597,7 +1615,7 @@ impl Mobile {
         };
         let mut device = Device {
             id: uuid::Uuid::new_v4().to_string(), name: p.name.clone(), pk: kelpie_link::b64(&p.pk), permission: wanted, kind: p.kind, created_at: now_millis(), last_seen: now_millis(), mac: String::new(),
-            secure_origin: p.secure_origin, secure_mac: String::new(), page: Some(p.page.origin.clone()), page_kind: Some(p.page.kind), page_mac: String::new(), push: None, lock: None, verified: false,
+            secure_origin: p.secure_origin, secure_mac: String::new(), page: Some(p.page.origin.clone()), page_kind: Some(p.page.kind), page_mac: String::new(), push: None, lock: None, alerts: None, verified: false,
         };
         store::seal(&mut device, &key);
         let replaced: Vec<(String, String)> = {
@@ -2883,6 +2901,15 @@ impl Conn {
                 }
                 return Ok(Some(json!({"type": "ack", "result": if had { "ok" } else { "noop" }})));
             }
+            Verb::PushPrefs => {
+                self.secure_transport()?;
+                let prefs = AlertPrefs::from_request(req).map_err(|why| refuse("bad_request", why))?;
+                let (daemon, device, kept) = (self.daemon.clone(), self.device.clone(), prefs.clone());
+                if tokio::task::spawn_blocking(move || daemon.mobile.set_alert_prefs(&device, kept)).await.map_err(|_| refuse("not_kept", "That did not finish."))?? {
+                    self.daemon.broadcast("mobile.updated", json!({}));
+                }
+                return Ok(Some(json!({"type": "ack", "result": "ok", "prefs": prefs})));
+            }
             // Handled by `reply`, which sends what it comes to when it is known.
             Verb::PushTest => return Err(refuse("bad_request", "not here")),
             Verb::LockChallenge => {
@@ -3685,7 +3712,7 @@ mod tests {
         assert_eq!(transport_cap(Kind::Pwa, false, &at("192.168.1.9:5000", true)), Permission::Write, "a page paired as one stays one");
         assert_eq!(transport_cap(Kind::Pwa, true, &at("127.0.0.1:5000", false)), Permission::Write, "no network between: nothing to swap the page");
         // What the phone hears.
-        let mut d = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
+        let mut d = Device { alerts: None, push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
         let capped = device_hello(&d, d.permission, Permission::Read, "not_granted");
         assert_eq!((capped["permission"].as_str(), capped["can_write"].as_bool(), capped["capped"].as_bool(), capped["control"].as_str()), (Some("read"), Some(false), Some(true), Some("not_granted")));
         d.permission = Permission::Read;
@@ -3695,7 +3722,7 @@ mod tests {
 
     #[test]
     fn a_browser_device_may_be_given_control_only_once_paired_on_https_with_its_lock_set_up_and_on() {
-        let mut d = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
+        let mut d = Device { alerts: None, push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
         assert_eq!(record_ceiling(&d, true), Permission::Write, "paired over plain HTTP");
         d.secure_origin = true;
         assert_eq!(record_ceiling(&d, true), Permission::Write, "no passkey yet");
@@ -3720,7 +3747,7 @@ mod tests {
             let page = d.secure_origin && d.page_kind != Some(PageKind::Hosted) && d.lock.is_some() && lock_on;
             path == LockPath::Passkey && gate == Gate::Open && page
         }
-        let base = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Read, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
+        let base = Device { alerts: None, push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Read, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
         let mut checked = 0;
         for kind in [Kind::App, Kind::Pwa] {
             for permission in [Permission::Read, Permission::Write, Permission::Control] {
@@ -3790,7 +3817,7 @@ mod tests {
 
     #[test]
     fn the_phone_hears_the_first_reason_it_may_not_take_control() {
-        let ready = Device { push: None, lock: Some(passkey()), id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Control, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: true, secure_mac: String::new(), page: None, page_kind: Some(PageKind::Ts), page_mac: String::new(), verified: true };
+        let ready = Device { alerts: None, push: None, lock: Some(passkey()), id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Control, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: true, secure_mac: String::new(), page: None, page_kind: Some(PageKind::Ts), page_mac: String::new(), verified: true };
         let word = |d: &Device, lock_on: bool, gate: Gate, cap: Permission, relay: bool| control_word(control_rule(d, lock_on, LockPath::Passkey, gate, true), d.permission, cap, relay);
         let open = |d: &Device| word(d, true, Gate::Open, Permission::Control, false);
         assert_eq!(open(&ready), "ok");
@@ -7912,7 +7939,8 @@ mod tests {
         assert!(file.contains(ENDPOINT) && !file.contains(sub["auth"].as_str().unwrap()));
         let status = r.daemon.mobile.status(true).to_string();
         assert!(status.contains("\"push\":true") && !status.contains(ENDPOINT), "the desktop hears whether, not where");
-        assert_eq!(r.daemon.mobile.push_facts("phone"), json!({"vapid": vapid, "subscribed": true}));
+        let all = json!(["needs_you", "approval", "failed", "done", "automation", "cost"]);
+        assert_eq!(r.daemon.mobile.push_facts("phone"), json!({"vapid": vapid, "subscribed": true, "prefs": null, "events": all}));
         let audit = r.daemon.mobile.audit_entries(50).to_string();
         assert!(audit.contains("push_on") && !audit.contains(ENDPOINT));
     }
@@ -8165,6 +8193,76 @@ mod tests {
         assert!(edited.destinations.device_ids().is_empty());
         assert_eq!(edited.permission("d"), Some(Permission::Read), "the pairing itself was not touched");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn prefs_of(r: &Rig) -> Option<AlertPrefs> {
+        r.daemon.mobile.config.lock().devices[0].alerts.clone()
+    }
+
+    #[tokio::test]
+    async fn a_phone_chooses_its_alerts_with_read_permission_and_they_outlive_alerts_off_and_on() {
+        let mut r = rig();
+        let chosen = json!({"type": "push_prefs", "kinds": ["done", "needs_you"], "quiet": {"from": "22:00", "to": "07:00", "tz_min": 420}});
+        let got = r.ask(Permission::Read, chosen.clone()).await;
+        assert_eq!(got["result"], "ok", "{got}");
+        let stored = json!({"kinds": ["needs_you", "done"], "quiet": {"from": "22:00", "to": "07:00", "tz_min": 420, "needs_you_through": false}});
+        assert_eq!(got["prefs"], stored, "the reply is what is kept, in order");
+        assert_eq!(json!(prefs_of(&r)), stored);
+        let file = std::fs::read_to_string(store::path(&r.daemon.mobile.dir)).unwrap();
+        assert!(file.contains("\"alerts\"") && file.contains("22:00"), "kept in the file");
+        // The hello and the desktop hear them.
+        assert_eq!(r.daemon.mobile.push_facts("phone")["prefs"], stored);
+        let listed = r.daemon.mobile.status(true)["devices"][0]["alerts"].clone();
+        assert_eq!(listed, stored);
+        // Said again, they cost no write.
+        let path = store::path(&r.daemon.mobile.dir);
+        std::fs::write(&path, b"marker").unwrap();
+        assert_eq!(r.ask(Permission::Read, chosen).await["result"], "ok");
+        assert_eq!(std::fs::read(&path).unwrap(), b"marker", "no write");
+        // A subscription takes them; alerts off and on keep them.
+        r.ask(Permission::Read, subscription(ENDPOINT)).await;
+        let prefs = r.daemon.mobile.destinations.devices_wanting(crate::notify::Kind::Error, 0);
+        assert!(prefs.is_empty(), "failed is not among the kinds chosen");
+        assert_eq!(r.daemon.mobile.destinations.devices_wanting(crate::notify::Kind::Waiting, 12 * 3_600_000), ["phone"], "12:00 UTC is 19:00 at UTC+7");
+        assert!(r.daemon.mobile.destinations.devices_wanting(crate::notify::Kind::Waiting, 16 * 3_600_000).is_empty(), "16:00 UTC is 23:00 there, in the quiet hours");
+        r.ask(Permission::Read, json!({"type": "push_unsub"})).await;
+        assert_eq!(json!(prefs_of(&r)), stored, "kept while alerts are off");
+        r.ask(Permission::Read, subscription(ENDPOINT)).await;
+        assert!(r.daemon.mobile.destinations.devices_wanting(crate::notify::Kind::Error, 0).is_empty(), "and in force again when they are on");
+        // Following the computer again is no choices at all.
+        let got = r.ask(Permission::Read, json!({"type": "push_prefs", "kinds": null, "quiet": null})).await;
+        assert_eq!((got["result"].as_str(), got["prefs"].clone()), (Some("ok"), Value::Null));
+        assert_eq!(prefs_of(&r), None);
+        assert_eq!(r.daemon.mobile.destinations.devices_wanting(crate::notify::Kind::Error, 0), ["phone"]);
+    }
+
+    #[tokio::test]
+    async fn choices_a_phone_cannot_make_are_refused_and_change_nothing() {
+        let mut r = rig();
+        r.ask(Permission::Read, json!({"type": "push_prefs", "kinds": ["failed"], "quiet": null})).await;
+        for bad in [
+            json!({"type": "push_prefs", "kinds": ["failed", "everything"]}),
+            json!({"type": "push_prefs", "kinds": "failed"}),
+            json!({"type": "push_prefs", "quiet": {"from": "22:00", "to": "7", "tz_min": 0}}),
+            json!({"type": "push_prefs", "quiet": {"from": "22:00", "to": "07:00", "tz_min": 1000}}),
+            json!({"type": "push_prefs", "quiet": {"from": "22:00", "to": "07:00"}}),
+        ] {
+            assert_eq!(r.ask(Permission::Read, bad.clone()).await["code"], "bad_request", "{bad}");
+        }
+        assert_eq!(prefs_of(&r).and_then(|p| p.kinds), Some(vec!["failed".to_string()]), "the choices it had stay");
+        // Over plain HTTP, as every alert verb is.
+        r.conn.cap = Permission::Read;
+        assert_eq!(r.ask(Permission::Read, json!({"type": "push_prefs", "kinds": null, "quiet": null})).await["code"], "insecure");
+        assert!(prefs_of(&r).is_some());
+    }
+
+    #[tokio::test]
+    async fn the_kinds_the_computer_sends_at_all_reach_the_phone() {
+        let r = rig();
+        let mut c = r.daemon.notifier.config();
+        c.events.automation = false;
+        r.daemon.notifier.update(Some(c), &Value::Null).unwrap();
+        assert_eq!(r.daemon.mobile.push_facts("phone")["events"], json!(["needs_you", "approval", "failed", "done", "cost"]));
     }
 
     #[tokio::test]

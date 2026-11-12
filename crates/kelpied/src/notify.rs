@@ -248,6 +248,9 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// Every kind, in the order a phone lists its alert choices.
+    pub const ALL: [Kind; 6] = [Kind::Waiting, Kind::Approval, Kind::Error, Kind::Finished, Kind::Automation, Kind::Cost];
+
     pub fn parse(code: &str) -> Option<Kind> {
         [Kind::Waiting, Kind::Finished, Kind::Error, Kind::Automation, Kind::Approval, Kind::Cost].into_iter().find(|k| k.code() == code)
     }
@@ -282,6 +285,14 @@ impl Kind {
             Kind::Automation => "automation",
             Kind::Approval => "approval",
             Kind::Cost => "cost_cap",
+        }
+    }
+
+    /// What a phone calls this kind when it chooses its alerts (`destinations::AlertPrefs`).
+    pub fn choice(self) -> &'static str {
+        match self {
+            Kind::Cost => "cost",
+            other => other.status(),
         }
     }
 
@@ -962,7 +973,8 @@ impl Notifier {
                 self.destinations.enqueue(destinations::Dest::Channel(ch), entry(Some(payload), 0));
             }
         }
-        for device in self.destinations.device_ids() {
+        // Each phone's own choices are applied here, before anything is queued for it: a skipped event never reaches its outbox or a summary.
+        for device in self.destinations.devices_wanting(ev.kind, ev.at) {
             self.destinations.enqueue(destinations::Dest::Device(device), entry(None, hold));
         }
     }

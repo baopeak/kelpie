@@ -66,6 +66,21 @@ export interface DeviceInfo {
 /** What the computer says about control on this connection (`device.control`). A reason this app does not know is read as none. */
 export type ControlReason = "ok" | "hosted_app" | "not_granted" | "plain_page" | "via_relay" | "lock_off" | "no_passkey" | "locked";
 
+/** Hours with no alert, in this phone's time: `HH:MM` each, `from` after `to` spanning midnight. `tz_min` is the phone's offset east of UTC in minutes. */
+export interface QuietHours {
+  from: string;
+  to: string;
+  tz_min: number;
+  /** "Needs you" still alerts during them (off: quiet hours hold every alert). */
+  needs_you_through: boolean;
+}
+
+/** Which alerts this phone wants (`push_prefs`). `kinds` null: whatever the computer sends. */
+export interface AlertPrefs {
+  kinds: string[] | null;
+  quiet: QuietHours | null;
+}
+
 /** Where the computer listens, newest `seq` wins. */
 export interface AddrsMsg {
   /** Every way to reach the computer, the Tailscale origin first (`list` holds the direct addresses alone). */
@@ -86,8 +101,9 @@ export interface Hello {
   load: LoadStatus;
   server_ts: number;
   hb?: { idle_s: number; pong_s: number; dead_s: number; legacy: boolean };
-  /** Alerts, where this connection may have them (absent over plain HTTP, and from a computer below `PHONE_API`). */
-  push?: { vapid: string | null; subscribed: boolean };
+  /** Alerts, where this connection may have them (absent over plain HTTP, and from a computer below `PHONE_API`). `prefs` and `events` from
+   *  `ALERT_PREFS_API` on: this phone's own choices (null: everything) and the kinds the computer sends at all. */
+  push?: { vapid: string | null; subscribed: boolean; prefs?: AlertPrefs | null; events?: string[] };
   /** The computer holds this phone locked: the rest says nothing of any session. */
   locked?: boolean;
   /** The computer reads padded chunks: this phone pads what it sends from now on (absent from a computer before the relay). */
@@ -158,8 +174,9 @@ export interface ReplyError {
 
 /** What became of a request: the daemon's reply, or why there was none. */
 export type Outcome =
-  /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; targets?: TargetRow[] }
+  /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with.
+   *  `prefs` with a `push_prefs`: the choices the computer keeps. */
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; targets?: TargetRow[] }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -1315,7 +1332,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, targets: m.targets });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, targets: m.targets });
     }
     this.h.changed();
     return true;
