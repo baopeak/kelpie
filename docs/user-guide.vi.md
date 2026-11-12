@@ -157,7 +157,7 @@ Chi tiết nằm ở các phần [Specs and tasks](user-guide.md#specs-and-tasks
 
 **Trình duyệt (`Ctrl+Shift+U`).** Khung trình duyệt có thanh địa chỉ, công cụ nhà phát triển và chức năng chụp màn hình trang. Ở chế độ *Design mode*, bạn nhấp các phần tử trên trang, thêm ghi chú rồi gửi tất cả cho agent trong một yêu cầu.
 
-**Tiến trình.** Khi một agent trên màn hình khởi động một trang web (dev server, bảng điều khiển…), Kelpie mở trang đó trong một tab nền và báo ngắn cho bạn. Tab *Processes* trong panel bên phải liệt kê những gì mỗi phiên đang chạy dưới dạng cây, kèm PID, bộ nhớ, CPU và cổng. Bạn nhấp một cổng để mở trang tương ứng trong tab trình duyệt. Nút *Kill* dừng một chương trình cùng những gì nó đã khởi động, còn *Kill children* dừng những gì một phiên đã khởi động nhưng vẫn giữ phiên đó. Cả hai nút đều hỏi trước và nói rõ cổng nào sẽ được giải phóng.
+**Tiến trình.** Nếu bạn bật Settings → Terminal → *Mở trang web của agent trong một tab* (khi mới cài thì mục này tắt), mỗi khi một agent trên màn hình khởi động một trang web (dev server, bảng điều khiển…), Kelpie mở trang đó trong một tab nền và báo ngắn cho bạn. Tab *Processes* trong panel bên phải liệt kê những gì mỗi phiên đang chạy dưới dạng cây, kèm PID, bộ nhớ, CPU và cổng. Bạn nhấp một cổng để mở trang tương ứng trong tab trình duyệt. Nút *Kill* dừng một chương trình cùng những gì nó đã khởi động, còn *Kill children* dừng những gì một phiên đã khởi động nhưng vẫn giữ phiên đó. Cả hai nút đều hỏi trước và nói rõ cổng nào sẽ được giải phóng.
 
 Chi tiết nằm ở các phần [Files](user-guide.md#files), [Composer](user-guide.md#composer), [Browser panes](user-guide.md#browser-panes-and-design-mode) và [Processes](user-guide.md#processes-ports-and-preview).
 
