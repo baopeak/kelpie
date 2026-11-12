@@ -121,6 +121,7 @@ function AlertChoices() {
             <label class="row-setting" data-setting="quiet-to">{t("Until")}
               <input type="time" class="field" value={q().to} disabled={off()} onChange={(e) => setTime("to", e.currentTarget)} />
             </label>
+            <Show when={q().from === q().to}><p class="muted" role="status" data-quiet-same>{t("The same time at both ends means no quiet hours, so every alert still arrives.")}</p></Show>
             <label class="row-check" data-setting="quiet-needs-you">
               <input type="checkbox" checked={q().needs_you_through} disabled={off()} onChange={(e) => setQuiet({ ...q(), needs_you_through: e.currentTarget.checked }, flipBack(e.currentTarget))} />
               <span>{t("Still alert when an agent needs you")}</span>

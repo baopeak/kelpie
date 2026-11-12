@@ -134,6 +134,9 @@ const DEDUPE_PER_DEVICE: usize = 512;
 const PUSH_TEST_GAP: Duration = Duration::from_secs(5);
 /// Changes to one phone's subscription in a minute: each writes to the credential store and the audit log, and a phone that may only read could otherwise fill the log.
 const PUSH_CHANGES_PER_MINUTE: usize = 10;
+/// Changes to which alerts one phone wants in a minute: each rewrites the store and has every open window look again. A person going through the
+/// choices makes several in a row, so this is more than for the subscription.
+const PREFS_CHANGES_PER_MINUTE: usize = 30;
 
 /// Credential-store keys: the desktop's Noise static key, and the key device records are MAC'd with.
 const K_LINK: &str = "mobile-link-key";
@@ -438,6 +441,8 @@ pub struct Mobile {
     push_tested: Mutex<HashMap<String, Instant>>,
     /// When each phone last changed its subscription.
     push_changes: Mutex<HashMap<String, VecDeque<Instant>>>,
+    /// When each phone last changed which alerts it wants: a bucket of its own, so choosing them cannot use up the subscription's.
+    prefs_changes: Mutex<HashMap<String, VecDeque<Instant>>>,
     /// How Tailscale is asked (see `tailscale`).
     tailscale_cli: Mutex<Arc<dyn tailscale::Cli>>,
     /// Held while Tailscale is looked at: one child at a time.
@@ -582,6 +587,7 @@ impl Mobile {
             destinations,
             push_tested: Mutex::new(HashMap::new()),
             push_changes: Mutex::new(HashMap::new()),
+            prefs_changes: Mutex::new(HashMap::new()),
             #[cfg(not(test))]
             tailscale_cli: Mutex::new(Arc::new(tailscale::Program)),
             #[cfg(test)]
@@ -717,16 +723,7 @@ impl Mobile {
 
     /// Whether this phone may change its subscription now (`PUSH_CHANGES_PER_MINUTE`).
     fn push_change_allowed(&self, device: &str) -> bool {
-        let now = Instant::now();
-        let mut changes = self.push_changes.lock();
-        changes.retain(|_, at| at.back().is_some_and(|last| now.duration_since(*last) < Duration::from_secs(60)));
-        let at = changes.entry(device.to_string()).or_default();
-        at.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
-        if at.len() >= PUSH_CHANGES_PER_MINUTE {
-            return false;
-        }
-        at.push_back(now);
-        true
+        change_allowed(&self.push_changes, device, PUSH_CHANGES_PER_MINUTE)
     }
 
     /// Ends a phone's alerts; true when it had them.
@@ -769,12 +766,15 @@ impl Mobile {
     }
 
     /// Keeps which alerts this phone wants (`push_prefs`; None: everything the computer sends). They stay while its alerts are off, for when they are on again.
-    /// What the computer already has costs no write. True when they changed.
+    /// What the computer already has costs no write and is never held back (`PREFS_CHANGES_PER_MINUTE` counts changes only). True when they changed.
     fn set_alert_prefs(&self, device: &str, prefs: Option<AlertPrefs>) -> std::result::Result<bool, Refusal> {
         let changed = {
             let mut c = self.config.lock();
             let d = c.devices.iter_mut().find(|d| d.id == device && d.verified).ok_or_else(|| refuse("no_device", "This device is no longer paired."))?;
             let changed = d.alerts != prefs;
+            if changed && !change_allowed(&self.prefs_changes, device, PREFS_CHANGES_PER_MINUTE) {
+                return Err(refuse("rate_limited", "The alerts this device wants were changed many times just now: wait a minute."));
+            }
             d.alerts = prefs;
             changed
         };
@@ -2072,6 +2072,20 @@ fn tls_acceptor(cert: &str, key: &str) -> Result<tokio_rustls::TlsAcceptor> {
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+
+/// Whether `device` may make one more change of the kind `changes` counts, at most `per_minute` in any minute; counts it when it may.
+fn change_allowed(changes: &Mutex<HashMap<String, VecDeque<Instant>>>, device: &str, per_minute: usize) -> bool {
+    let now = Instant::now();
+    let mut changes = changes.lock();
+    changes.retain(|_, at| at.back().is_some_and(|last| now.duration_since(*last) < Duration::from_secs(60)));
+    let at = changes.entry(device.to_string()).or_default();
+    at.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+    if at.len() >= per_minute {
+        return false;
+    }
+    at.push_back(now);
+    true
 }
 
 /// `scheme://host[:port]` and nothing else: what goes in front of the link in an alert.
@@ -8254,6 +8268,25 @@ mod tests {
         r.conn.cap = Permission::Read;
         assert_eq!(r.ask(Permission::Read, json!({"type": "push_prefs", "kinds": null, "quiet": null})).await["code"], "insecure");
         assert!(prefs_of(&r).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_phone_changing_its_choices_again_and_again_is_stopped_but_may_say_them_again() {
+        let mut r = rig();
+        let some = json!({"type": "push_prefs", "kinds": ["done"], "quiet": null});
+        let all = json!({"type": "push_prefs", "kinds": null, "quiet": null});
+        for i in 0..PREFS_CHANGES_PER_MINUTE {
+            let got = r.ask(Permission::Read, if i % 2 == 0 { some.clone() } else { all.clone() }).await;
+            assert_eq!(got["result"], "ok", "{i}: {got}");
+        }
+        // The last one made was everything: one more change is too many, and changes nothing.
+        assert_eq!(prefs_of(&r), None);
+        assert_eq!(r.ask(Permission::Read, some).await["code"], "rate_limited");
+        assert_eq!(prefs_of(&r), None, "the choices it had stay");
+        // Saying what the computer already has is no change.
+        assert_eq!(r.ask(Permission::Read, all).await["result"], "ok");
+        // The subscription has a count of its own.
+        assert_eq!(r.ask(Permission::Read, subscription(ENDPOINT)).await["result"], "ok");
     }
 
     #[tokio::test]

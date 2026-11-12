@@ -41,7 +41,8 @@ pub struct Target {
 }
 
 /// Which alerts a phone wants, and when it wants none (the phone's `push_prefs`). It can only narrow what the computer sends, so it is kept
-/// outside every MAC of the device's record: an edit in the file at worst changes which alerts arrive.
+/// outside every MAC of the device's record: a well-formed edit in the file at worst changes which alerts arrive. A value of the wrong
+/// type stops the whole store from loading, as one in any other field does.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AlertPrefs {
     /// The kinds that alert this phone, by `Kind::choice`. None: whatever the computer sends.

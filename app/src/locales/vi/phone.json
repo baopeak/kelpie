@@ -157,6 +157,7 @@
   "Quiet hours": "Giờ yên lặng",
   "Your computer sends no alert during these hours. The session list still shows what happened when you open the app.": "Máy tính của bạn không gửi cảnh báo nào trong những giờ này. Khi bạn mở ứng dụng, danh sách phiên vẫn cho thấy những gì đã xảy ra.",
   "Until": "Đến",
+  "The same time at both ends means no quiet hours, so every alert still arrives.": "Khi giờ bắt đầu và giờ kết thúc trùng nhau thì không có giờ yên lặng nào, nên mọi cảnh báo vẫn được gửi đến.",
   "Still alert when an agent needs you": "Vẫn cảnh báo khi có agent cần bạn",
   "Times follow this phone's clock.": "Giờ được tính theo đồng hồ của điện thoại này.",
   "Update Kelpie on your computer to choose this.": "Hãy cập nhật Kelpie trên máy tính để chọn mục này.",

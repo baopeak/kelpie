@@ -1383,19 +1383,27 @@ for n in (1, 2, 3):
         run.check("…and Settings says the times follow this phone's clock", "this phone's clock" in (phone.wait("return document.querySelector('[data-setting=\"quiet-from\"]') && document.querySelector('[data-alert-choices]').textContent", 10) or ""))
         choose("[data-setting=\"quiet-needs-you\"]")
         run.check("needs you can be let through them", wait(lambda: ((mine() or {}).get("quiet") or {}).get("needs_you_through") is True, 10) is True, str(mine()))
-        # A new connection's hello carries them: the page shows them as the computer keeps them.
-        phone.js("document.querySelector('[data-setting=\"reconnect\"]').click()")
-        time.sleep(2)
+        # A new connection's hello carries them: the page shows them as the computer keeps them. The connection goes and comes back first,
+        # so what is read below is from the new hello and not the page as it was.
+        phone.js("window.dispatchEvent(new Event('offline'))")
+        dropped = phone.wait("return document.querySelector('.conn')?.dataset.state !== 'live'", 10)
+        phone.js("window.dispatchEvent(new Event('online'))")
+        run.check("the phone connects again", bool(dropped) and bool(phone.wait(LIVE, 30)), str(phone.js(STATE)))
         shown = phone.wait("return !!document.querySelector('[data-setting=\"quiet-needs-you\"] input')?.checked && !document.querySelector('[data-alert-kind=\"done\"] input').checked && document.querySelector('[data-alert-kind=\"failed\"] input').checked", 15)
         run.check("…and after a reconnect the phone shows what the computer keeps", shown is True)
         time.sleep(max(0, tested_at + 5.5 - time.time()))
         tests_before = len(push.at("/push/page"))
         phone.js("document.querySelector('[data-alerts-test]').click()")
         run.check("a test alert still arrives, whatever was chosen", wait(lambda: len(push.at("/push/page")) > tests_before, 15) is True, str(len(push.at("/push/page")) - tests_before))
-        # Back to following the computer, for the needs-you event below.
-        choose("[data-setting=\"quiet-hours\"]")
+        # Back to following the computer, for the needs-you event below. Each box is clicked only when it is not yet as it must be, so a step
+        # above that failed cannot have this turn quiet hours on or untick a kind.
+        def make(selector, checked):
+            phone.wait(f"return document.querySelector('{selector} input') && !document.querySelector('{selector} input').disabled", 10)
+            if phone.js(f"return document.querySelector('{selector} input')?.checked") is not checked:
+                phone.js(f"document.querySelector('{selector} input').click()")
+        make("[data-setting=\"quiet-hours\"]", False)
         wait(lambda: (mine() or {}).get("quiet") is None, 10)
-        choose("[data-alert-kind=\"done\"]")
+        make("[data-alert-kind=\"done\"]", True)
         run.check("every kind ticked and no quiet hours is following the computer", wait(lambda: mine() is None, 10) is True, str(mine()))
         phone.js("document.querySelector('header .icon').click()")
         phone.wait("return !document.querySelector('[data-settings]')", 10)

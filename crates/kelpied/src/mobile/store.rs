@@ -179,8 +179,9 @@ pub struct Device {
     /// The passkey that unlocks this phone, with its own tag: a record paired here still verifies for an older Kelpie, which ignores this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock: Option<LockCredential>,
-    /// Which alerts this phone chose (`push_prefs`). Outside every tag: it can only narrow what the computer sends, so an edit in the file at worst
-    /// changes which alerts arrive, and an older Kelpie ignores it and sends everything. Kept while alerts are off, and gone with the record.
+    /// Which alerts this phone chose (`push_prefs`). Outside every tag: it can only narrow what the computer sends, so a well-formed edit in the file at
+    /// worst changes which alerts arrive (a value of the wrong type stops the store from loading, as in `push` or `lock`), and an older Kelpie
+    /// ignores it and sends everything. Kept while alerts are off, and gone with the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerts: Option<AlertPrefs>,
     /// Set when the record was loaded or made here and its MACs checked out.
