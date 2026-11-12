@@ -54,7 +54,7 @@ export const defaultSettings: Settings = {
   activeAccounts: {},
   integrations: { linear: false, jira: null, gitlabHosts: [] },
   localhostInBrowser: true,
-  agentWebTabs: true,
+  agentWebTabs: false,
   sshConfig: "",
   voice: { model: null, language: "auto", device: null },
   language: "system",

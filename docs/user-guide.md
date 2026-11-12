@@ -896,12 +896,11 @@ open in the pane.
 
 ### Processes, ports and preview
 
-When an agent on screen starts a web page (a dev server, a studio, a dashboard), the page gets a tab
+With Settings → Terminal → *Open an agent's web pages in a tab* turned on (it is off on a new install), when an agent on screen starts a web page (a dev server, a studio, a dashboard), the page gets a tab
 of its own in the background and a short message says so: the agent stays in view and keeps the
 keyboard, and the highlighted tab is one click away. Only a port that answers with a page counts;
 one that answers *Not Found* or is not a website gets no tab. A tab you never opened goes when the
-page stops, and a page you closed does not come back until the app restarts. Turn this off with
-Settings → Terminal → *Open an agent's web pages in a tab*. Servers you start yourself in a shell
+page stops, and a page you closed does not come back until the app restarts. Servers you start yourself in a shell
 get no tab. The **Processes** tab of the right panel (palette: *Processes and Ports*) lists what
 each running session of the project runs, as a tree with PID, memory, CPU and ports. Click a port
 to show it in a browser tab, the one already on it if there is one. **Kill** stops a program and what it started. **Kill children** stops what a
