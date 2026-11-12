@@ -32,6 +32,8 @@ mod automation;
 mod process;
 mod sub_rpc;
 
+pub(crate) use sub_rpc::existing_folder;
+
 /// What delivery of alerts asks of the daemon, from the destinations' own threads.
 struct NotifyHost(std::sync::Weak<Daemon>);
 
@@ -1246,6 +1248,14 @@ impl Daemon {
         self.create_inner(params, None)
     }
 
+    /// `create`, for a session the phone `device` (named `name`) started from the launch catalogue (`mobile`'s `new_session`). The app hears
+    /// `mobile.session_started` and says which phone started what; phones see the new session in their list, as any other.
+    pub fn create_for_phone(&self, params: Value, device: &str, name: &str) -> Result<SessionInfo> {
+        let info = self.create_inner(params, None)?;
+        self.broadcast("mobile.session_started", json!({"id": info.spec.id, "device": device, "name": name, "kind": info.spec.kind, "project_id": info.spec.project_id}));
+        Ok(info)
+    }
+
     /// `create`, for a session a program opened with `sub.spawn`: `lineage` is its parent's id and its own depth.
     /// Only the daemon sets it; `session.create` has no such parameter.
     fn create_inner(&self, params: Value, lineage: Option<(String, u8)>) -> Result<SessionInfo> {
@@ -2274,6 +2284,11 @@ impl Daemon {
             }
             "mobile.set_projects" => {
                 self.mobile.set_projects(&params);
+                json!(true)
+            }
+            // What phones may start, as the app resolved it from its profiles; the whole catalogue each time, in memory only.
+            "mobile.set_launch" => {
+                self.mobile.set_launch(&params)?;
                 json!(true)
             }
             // The verified app only (`auth::APP_ONLY`). Turning the relay off asks nobody; turning it on is checked first (an address, a registration key when

@@ -47,6 +47,7 @@ export function trustText(t: Translate): string[] {
   return [
     t("This app comes from Kelpie's relay on Cloudflare, not from your computer."),
     t("Whoever controls that Cloudflare account, or Kelpie's release deploy, could send this phone different code. That code could read and type in your sessions while the app is unlocked."),
+    t("A phone that may type can also start agents in your projects with your computer's settings, bypass mode included. Changed code could do that too while the app is unlocked."),
     t("Each Kelpie release publishes this app's fingerprint and how to check it against what the relay serves."),
     t("This screen cannot prove what this phone runs: changed code could show anything here."),
     t("For an app served only by your computer, use Tailscale mode in Kelpie → Settings → Mobile."),

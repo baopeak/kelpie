@@ -39,6 +39,10 @@ export const HOSTED_API = 34;
  *  `mobile.status`). Below it the phone shows the choices disabled and says the computer needs an update. */
 export const ALERT_PREFS_API = 37;
 
+/** Daemon API level that starts sessions from a phone (`mobile.set_launch`, the phone's `new_options` and `new_session`, the `mobile.session_started`
+ *  event). Below it the app sends no launch catalogue and the phone shows no "+". */
+export const NEW_SESSION_API = 38;
+
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;
 

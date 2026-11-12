@@ -32,7 +32,8 @@ import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
 import { KIND_VIDEO, ScreenSession, type ScreenState } from "./screen";
-import { SCREEN_API, TAKEOVER_API } from "../../src/lib/attention";
+import { NEW_SESSION_API, SCREEN_API, TAKEOVER_API } from "../../src/lib/attention";
+import { newSessionRequest, optionsOutcome, startOutcome, type OptionsResult, type StartResult } from "./start-session";
 
 // ---------- signals the views read ----------
 
@@ -85,6 +86,8 @@ export const canType = () => !!device()?.can_write;
 export const [daemonApi, setDaemonApi] = createSignal(0);
 /** This phone may take over the computer's browser panes here (a device given control, on this computer's HTTPS address, unlocked). */
 export const canTakeOver = () => device()?.permission === "control" && daemonApi() >= TAKEOVER_API;
+/** "+" in the inbox: this connection may type and the computer starts sessions for phones. */
+export const canStartSessions = () => canType() && daemonApi() >= NEW_SESSION_API;
 /** A pane taken over, or being picked (null: none). */
 export const [takeover, setTakeover] = createSignal<TakeoverState | null>(null);
 /** This phone may see the computer's screen (the same rule as a pane's takeover, at a computer that has it). */
@@ -556,7 +559,7 @@ function watchSender(id: string, kind: string) {
         },
         connected,
         now: () => Date.now(),
-        newCid: () => globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`,
+        newCid,
         // What the person still has to decide about outlives a reload (kept-messages.ts); what could not be kept says so.
         save: (kept) => {
           const row = sessions().find((s) => s.id === id);
@@ -576,6 +579,9 @@ function watchSender(id: string, kind: string) {
 }
 
 let unwatchSender: (() => void) | undefined;
+
+/** A name for one write the computer recognises when it comes again (a chat message, a start). */
+const newCid = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 
 /** What the daemon said to a `chat_send`, as the sender reads it. */
 export function sendOutcome(o: Outcome): SendOutcome {
@@ -665,6 +671,19 @@ export async function sendKey(id: string, key: string): Promise<SendResult> {
   if (o.t === "ack") return { ok: true, entered: true };
   if (o.t === "error") return { ok: false, reason: "error", message: refusalText(o) };
   return { ok: false, reason: o.t };
+}
+
+/** What this phone may start now (the "+" sheet). */
+export async function loadNewOptions(): Promise<OptionsResult> {
+  return optionsOutcome(await link.newOptions());
+}
+
+/** Starts `kind` in project `projectId` with the computer's settings for it and an optional first prompt, and opens the new session. Nothing is
+ *  kept to send later: offline, it says so. */
+export async function startSession(projectId: string, kind: string, prompt: string): Promise<StartResult> {
+  const r = startOutcome(await link.newSession(newSessionRequest(projectId, kind, prompt, newCid())));
+  if (r.ok) openSession(r.id);
+  return r;
 }
 
 /** Answers the prompt a terminal session waits on with one of its keys. */

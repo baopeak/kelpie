@@ -237,8 +237,8 @@ export function hostedTrust(r: RelayStatus): string | null {
   if (!origin) return null;
   const host = origin.replace(/^https:\/\//, "");
   return r.url === r.default_url
-    ? t("The phone app comes from Kelpie's relay at {host}, on Cloudflare. Whoever controls that Cloudflare account or Kelpie's release deploy could send your phone different code that reads your sessions and types into them while the app is unlocked. Each release publishes the app's fingerprint so anyone can check what the relay serves; nobody can check what one phone received. For a phone app served only by this computer, use Tailscale mode.", { host })
-    : t("The phone app comes from the relay at {host}, not from Kelpie's. Whoever runs that relay or can deploy to it could send your phone different code that reads your sessions and types into them while the app is unlocked. The fingerprints Kelpie publishes describe the app on Kelpie's relay, not this one. For a phone app served only by this computer, use Tailscale mode.", { host });
+    ? t("The phone app comes from Kelpie's relay at {host}, on Cloudflare. Whoever controls that Cloudflare account or Kelpie's release deploy could send your phone different code that reads your sessions and types into them while the app is unlocked. Typing also lets a phone start agents in your projects with this computer's settings, bypass mode included, so that code could do that too. Each release publishes the app's fingerprint so anyone can check what the relay serves; nobody can check what one phone received. For a phone app served only by this computer, use Tailscale mode.", { host })
+    : t("The phone app comes from the relay at {host}, not from Kelpie's. Whoever runs that relay or can deploy to it could send your phone different code that reads your sessions and types into them while the app is unlocked. Typing also lets a phone start agents in your projects with this computer's settings, bypass mode included, so that code could do that too. The fingerprints Kelpie publishes describe the app on Kelpie's relay, not this one. For a phone app served only by this computer, use Tailscale mode.", { host });
 }
 
 /** Said before the relay moves to another address while phones use the app at the present one: it is their only way to this computer. */
@@ -356,7 +356,7 @@ function networkWay(f: OptionFacts): WayState {
 export function pairMethods(f: OptionFacts): PairMethod[] {
   const s = f.status;
   const r = s?.relay;
-  const reading = t("Reading, typing and approvals, from anywhere.");
+  const reading = t("Reading, typing, approvals and starting agents, from anywhere.");
   const ways: Omit<PairMethod, "recommended" | "available">[] = [
     {
       id: "tailscale",
@@ -380,7 +380,7 @@ export function pairMethods(f: OptionFacts): PairMethod[] {
       id: "network",
       label: t("This network"),
       needs: t("The same Wi-Fi as this computer, with this network's listeners on."),
-      allows: `${s?.tls ? t("Reading, typing and approvals, over HTTPS with your certificate.") : t("Reading only, over plain HTTP. With a certificate set, typing too.")} ${screenPolicyLine("network")}`,
+      allows: `${s?.tls ? t("Reading, typing, approvals and starting agents, over HTTPS with your certificate.") : t("Reading only, over plain HTTP. With a certificate set, typing too.")} ${screenPolicyLine("network")}`,
       trusts: s?.tls ? t("This computer, which serves the app, and your certificate.") : t("Everyone on this network, not to swap the page: it comes over plain HTTP."),
       ...networkWay(f),
     },
@@ -563,7 +563,7 @@ export async function approveWithReplace(choice: { same: string | null; replace:
  *  app gets reading by default and the line on what typing from it means; control is never asked for there. */
 export function approvalChoices(r: { want: MobilePermission; origin_kind?: MobilePageKind }): { choices: ("read" | "write")[]; primary: "read" | "write"; asks: MobilePermission; typing: string | null } {
   if (r.origin_kind === "hosted") {
-    return { choices: ["read", "write"], primary: "read", asks: r.want === "read" ? "read" : "write", typing: t("Typing from the hosted app lets code served by Kelpie's relay type into your sessions while the phone is unlocked.") };
+    return { choices: ["read", "write"], primary: "read", asks: r.want === "read" ? "read" : "write", typing: t("Typing from the hosted app lets code served by Kelpie's relay type into your sessions and start agents in your projects with this computer's settings, bypass mode included, while the phone is unlocked.") };
   }
   return { choices: ["read", "write"], primary: r.want === "read" ? "read" : "write", asks: r.want, typing: null };
 }

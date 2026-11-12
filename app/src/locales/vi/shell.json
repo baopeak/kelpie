@@ -396,5 +396,9 @@
   "To keep them running with the window closed, choose Keep it running in the background in Settings → Session Daemon.": "Để chúng tiếp tục chạy khi cửa sổ đóng, chọn Giữ chạy nền trong Cài đặt → Daemon phiên.",
   "Don't ask again": "Không hỏi lại",
   "Close and stop": "Đóng và dừng",
-  "Could not close Kelpie: {error}": "Không đóng được Kelpie: {error}"
+  "Could not close Kelpie: {error}": "Không đóng được Kelpie: {error}",
+  "{phone} started {agent} in {project}": "{phone} đã khởi động {agent} trong {project}",
+  "A phone": "Một điện thoại",
+  "a project": "một dự án",
+  "Started from a phone with this computer's settings for the agent.": "Phiên này được khởi động từ điện thoại với cài đặt của máy tính này cho agent."
 }

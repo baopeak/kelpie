@@ -27,7 +27,8 @@ Checks, in order:
   stays paired; the app says what it trusts and the bundle's fingerprint.
 - lock: a passkey (CDP virtual authenticator, rpId `localhost`) set up in the window approval opens; a reload is locked; unlocking brings the
   sessions; a program with the phone's own key copied out of the browser and no passkey gets no session data, also with the lock switch off.
-- typing: the phone types into a shell; `mobile.set_permission control` is refused; a hosted device with its passkey is refused `tk_start`,
+- typing: the phone types into a shell; with the launch catalogue sent as the app would and no window, its + sheet starts a fake plugin agent
+  in a project with the catalogue's arguments, environment and a first prompt, audited as `session_new`; `mobile.set_permission control` is refused; a hosted device with its passkey is refused `tk_start`,
   `screens` and `sc_start`.
 - alerts: the stand-in push service gets an alert whose link is the hosted page's `#s=`; the real service worker shows it, and a synthetic
   `notificationclick` opens that session on the hosted page.
@@ -732,6 +733,41 @@ for line in sys.stdin:
 
 # ---------- the run ----------
 
+def started_new_session(phone, dA):
+    """The hosted app, which may type, starts a session through the relay with no window on this computer: the script sends the launch catalogue
+    the app would (a fake plugin agent that is this Python, never a real agent), and the page's + sheet starts it with a first prompt."""
+    log = os.path.join(WORK, "hosted-started-agent.log")
+    agent = os.path.join(WORK, "hosted_started_agent.py")
+    with open(agent, "w", encoding="utf-8") as f:
+        f.write("import json, os, sys\n"
+                "open(sys.argv[1], 'a', encoding='utf-8').write(json.dumps({'argv': sys.argv[2:], 'key': os.environ.get('PHONE_FAKE_KEY')}) + '\\n')\n"
+                "print('started agent ready', flush=True)\n"
+                "sys.stdin.readline()\n")
+    dA.call("agent.set_custom", {"agents": [{"id": "phone-fake", "label": "Fake agent", "bin": sys.executable, "launch": [agent, log], "yolo": ["--yes"], "resume_latest": [], "prompt": "argv", "acp": []}]})
+    dA.call("mobile.set_launch", {"projects": [{"id": "hosted-proj", "name": "Hosted project", "path": WORK}],
+                                  "agents": [{"kind": "phone-fake", "label": "Fake agent", "args": ["--from-profile", "--yes"], "env": {"PHONE_FAKE_KEY": "hosted-secret-7"}}]})
+    phone.wait("const b = document.querySelector('[data-open-new-session]'); if (!b || b.disabled) return null; b.click(); return true", 15)
+    offered = phone.wait("const s = document.querySelector('[data-new-agent]'); return s && [...s.options].some(o => o.value === 'phone-fake') ? true : null", 20)
+    check("the hosted app, which may type, has + and offers this computer's agent and project", bool(offered) and phone.js("return document.querySelector('[data-new-project]')?.value") == "hosted-proj",
+          phone.js("return document.querySelector('[data-new-session]')?.textContent ?? null"))
+    check("…saying it does not ask before acting, as on the computer", bool(phone.js("return !!document.querySelector('[data-new-skips]')")))
+    phone.js("document.querySelector('[data-new-prompt]').value = 'hello from the hosted app'; document.querySelector('[data-new-start]').click();")
+    opened = phone.wait("const id = document.querySelector('.session')?.dataset.id; return !document.querySelector('[data-new-session]') && id ? id : null", 30)
+    row = next((x for x in dA.call("session.list") if x["id"] == opened), {})
+    check("Start opens a new session of the fake agent in the project, with the catalogue's arguments and environment",
+          row.get("kind") == "phone-fake" and row.get("project_id") == "hosted-proj" and row.get("args") == ["--from-profile", "--yes"] and (row.get("env") or {}).get("PHONE_FAKE_KEY") == "hosted-secret-7",
+          (opened, phone.js("return document.querySelector('[data-new-error]')?.textContent ?? null"), {k: row.get(k) for k in ("kind", "project_id", "args")}))
+    runs = wait_for(lambda: [json.loads(line) for line in open(log, encoding="utf-8").read().splitlines()] if os.path.exists(log) else None, 30) or []
+    check("…and the agent got them with the first prompt", bool(runs) and runs[-1]["argv"][-3:] == ["--from-profile", "--yes", "hello from the hosted app"] and runs[-1]["key"] == "hosted-secret-7", runs)
+    notes = [e for e in dA.call("mobile.audit", {"limit": 50})["entries"] if e["action"] == "session_new"]
+    check("the audit log records session_new for the hosted phone, never the prompt", [e["summary"] for e in notes] == ["Fake agent in Hosted project"] and "hello from the hosted app" not in json.dumps(notes), notes)
+    if row:
+        dA.call("session.close", {"handle": row["handle"]})
+    dA.call("agent.set_custom", {"agents": []})
+    phone.js("history.back()")
+    phone.wait("return !!document.querySelector('.row')", 15)
+
+
 def main(phone_box, push, dA, wrangler, bundle_a, manifest_a, bundle_b, manifest_b, copy_main):
     # ---------- setup ----------
     section("setup: a new user, relay only")
@@ -848,6 +884,7 @@ def main(phone_box, push, dA, wrangler, bundle_a, manifest_a, bundle_b, manifest
     check("the hosted phone types into a shell, and the shell runs it", bool(wait_for(lambda: f"{MARKER[::-1]}-42" in dA.call("session.read", {"handle": shell["handle"], "lines": 60})["text"], 20)))
     phone.js("history.back()")
     phone.wait("return !!document.querySelector('.row')", 15)
+    started_new_session(phone, dA)
     raised = refused(lambda: dA.call("mobile.set_permission", {"id": dev["id"], "permission": "control"}))
     check("raising it to control is refused, saying why", raised and "hosted app can read and type" in raised and device(dA, PHONE_NAME)["permission"] == "write", raised)
 
@@ -1328,7 +1365,7 @@ def run():
             traceback.print_exc()
             check("the limits ran to completion", False, e)
         section("what the relay kept")
-        files, found = search_state([p for p in (persist_main, persist_limits) if p], [MARKER, MARKER[::-1], PHONE_NAME, SHELL_NAME, DRAFT, "hosted-chat", "hello from the hosted chat"])
+        files, found = search_state([p for p in (persist_main, persist_limits) if p], [MARKER, MARKER[::-1], PHONE_NAME, SHELL_NAME, DRAFT, "hosted-chat", "hello from the hosted chat", "hello from the hosted app"])
         check("nothing a session said, typed or was called, and no phone's name, is in the relay's state", files > 0 and not found, (files, found))
     finally:
         if phone_box.get("phone"):

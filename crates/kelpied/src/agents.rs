@@ -98,6 +98,10 @@ pub fn preset_for(kind: &str) -> Option<&'static Preset> {
 /// it happens when plugins change, not per session.
 static CUSTOM: parking_lot::RwLock<Vec<&'static Preset>> = parking_lot::RwLock::new(Vec::new());
 
+/// Held by a test that sets the plugin agents, which are one list for the whole process: tests that run at once would replace each other's.
+#[cfg(test)]
+pub(crate) static CUSTOM_IN_TEST: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// A plugin's agent, as the app sends it.
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
 pub struct AgentDef {
@@ -1099,6 +1103,7 @@ mod custom_tests {
 
     #[test]
     fn plugin_agents_launch_and_resume_like_presets() {
+        let _plugins = CUSTOM_IN_TEST.lock();
         // A program that exists everywhere (Windows resolves the binary on PATH at launch).
         let bin = if cfg!(windows) { "cmd" } else { "sh" };
         let def = AgentDef { id: "acme-bot".into(), label: "Acme Bot".into(), bin: bin.into(), launch: vec!["chat".into()], yolo: vec!["--yes".into()], resume_latest: vec!["--continue".into()], prompt: "flag:--ask".into(), acp: vec!["acp".into()] };

@@ -11,7 +11,7 @@ import { t } from "../lib/i18n";
 import { subRequests } from "../lib/sub-sessions";
 import { SubRequestCard } from "./sub-request-card";
 
-const ICON: Record<InboxItem["kind"], string> = { finished: "check", waiting: "bell", automation: "clock", worktree: "branch", error: "close", cost: "alert" };
+const ICON: Record<InboxItem["kind"], string> = { finished: "check", waiting: "bell", automation: "clock", worktree: "branch", error: "close", cost: "alert", phone: "terminal" };
 
 export function InboxPanel(props: { onClose: () => void }) {
   const [filter, setFilter] = createSignal<"all" | "unread">("all");

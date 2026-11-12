@@ -445,7 +445,7 @@ Turning access off is therefore not how to cut a phone off: `mobile.enable` stay
 - **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `hb`, `ack`, `sub`, `unsub`, `chat_sub`, and
   `push_info`, `push_sub`, `push_unsub`, `push_prefs`, `push_test` (refused `insecure` where `transport_cap` would not let a page type), and
   `lock_challenge`, `lock_enrol`, `lock_unlock`, `lock_now`, `lock_touch` need
-  *read*; `input`, `key`, `answer`, `chat_answer`, `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume` need *write*;
+  *read*; `input`, `key`, `answer`, `chat_answer`, `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume`, `new_options`, `new_session` need *write*;
   anything else is `unknown_verb`. The
   permission is read from the device's record on every message, so a revoked or downgraded device is
   cut off at once, and the lock is checked before anything else (see "App lock"). A request may carry `req` (echoed in its `ack` or `error {code, reason?, message}`)
@@ -548,6 +548,23 @@ record (another tab) is told to forget a pairing that stands. A close frame that
   `chat_queue {id, items: [{qid, cid, by, mine, kind, text}], paused, held, in_flight, dropped?}`: the whole state each time, once
   after `chat_sub` and on every change. Revoking a device, or taking its write permission away, drops what it has waiting
   (`dropped` with the reason `revoked`); a turn already written runs on.
+- **Starting a session** (API 38; `mobile/launch.rs`): the app resolves what its launchers would start and pushes it as the launch catalogue,
+  `mobile.set_launch {projects: [{id, name, path}], agents: [{kind, label, args, env}]}` (a user-token method, through the generic `daemon_call`).
+  It is built by `buildLaunchCatalogue` (`app/src/lib/phone-launch.ts`) from the app's projects without the remote (SSH) ones and from the
+  launchers' agents without the hidden and the chat-only (ACP registry) ones, each agent with `profileLaunch`'s arguments and environment
+  (profile arguments, permission mode or Yolo, profile and account environment). The app sends the whole catalogue on every connection and,
+  debounced, after any change of those; the daemon replaces what it held, keeps it in memory only (profile environments can hold keys, so it is
+  never written again and never logged) and refuses one over 500 projects, 64 agents, 64 arguments for an agent or 256 KiB. A daemon that has
+  not heard from the app since it started has none. `new_options` answers `{ready, projects: [{id, name}], agents: [{kind, label, skips}], why?}`:
+  the projects in the catalogue's order (never a folder), the agents that are also installed (`agents::installed_presets`), `skips` read from their
+  arguments as for sub-sessions (`subs::args_skip_permissions`), and `ready: false` with `why` while there is no catalogue.
+  `new_session {project_id, kind, prompt?, cid}` starts the agent in the project's folder with exactly the catalogue's `args` and `env`, nothing of
+  the phone's but the prompt (through `typed_text`, at most `subs::MAX_TASK` characters), at 120 × 32, and answers `ack {result: ok, id}`. It is
+  refused as `not_ready`, `no_project`, `no_agent`, `not_installed`, `no_folder`, `too_long`, `busy` (load L3), `rate_limited` (three at once, then
+  one every 10 s per device) or `not_started`, besides `read_only`, `epoch` and `locked`. A repeat of its `cid` within 10 minutes gets the first
+  reply, marked `dup`, and starts nothing. The start is audited as `session_new` ("{agent} in {project}", never the prompt) and broadcast as
+  `mobile.session_started {id, device, name, kind, project_id}`, which the app shows as a toast and an Activity entry with Show; phones see the
+  new session in their list. It works with the window closed: the daemon owns the session.
 - **One-shot approvals**: a phone's answer holds for this one request. For a chat the daemon keeps a list of the answer shapes
   known to be one-shot for each kind of request (`chat::answer_is_one_shot`: Claude's allow or deny, Codex's `accept`, `decline`,
   `cancel` or a permission grant for this `turn`, ACP's `allow_once` and `reject_once`, a form's answers) and refuses anything else as

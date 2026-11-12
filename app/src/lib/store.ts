@@ -16,6 +16,7 @@ import { disposeView, peekView, resetStreams, setInputFanout } from "./terminal-
 import { CORE_AGENTS, isAgentKind, kindInfo, kindShortName, loadAgentPresets, presetFor } from "./agents";
 import type { SettingsSection } from "./settings-catalog";
 import { accountEnv, accountHomes, sessionHome } from "./accounts";
+import { profileLaunchOf } from "./phone-launch";
 import { closeBrowser } from "./browser";
 import { projectTarget, sessionTarget, targetEnv, targetRemote } from "./remote";
 import { agentFolder, agentsAt, hostOf, isHostKeyError, layoutTarget, layoutTargetFor } from "./ssh-hosts";
@@ -511,6 +512,14 @@ function createAppStore() {
         // Read by lib/agent-web-pages.ts (the store must not import it: it imports the store).
         window.dispatchEvent(new CustomEvent("kelpie:open-page", { detail: p }));
         break;
+      case "mobile.session_started": {
+        // A phone started an agent here: said, and kept in Activity. The session is in the sidebar; it opens in a tab only when asked (Show).
+        const project = state.projects.find((x) => x.id === p.project_id);
+        const text = t("{phone} started {agent} in {project}", { phone: p.name || t("A phone"), agent: kindInfo(p.kind).label, project: project?.name ?? t("a project") });
+        addInbox({ kind: "phone", title: text, body: t("Started from a phone with this computer's settings for the agent."), sessionId: p.id, projectId: p.project_id ?? undefined });
+        notify(text, { label: t("Show"), run: () => revealSession(p.id) }, 10000);
+        break;
+      }
       case "scheduled.updated":
         // Read by lib/limits.ts (the store must not import it: it imports the store).
         window.dispatchEvent(new CustomEvent("kelpie:scheduled", { detail: p }));
@@ -1403,15 +1412,8 @@ function createAppStore() {
   /** Launch arguments and environment of an agent profile, permission mode included. */
   /** `yolo: false`: without the Yolo flags (chat view asks Allow / Deny itself). */
   function profileLaunch(kind: SessionKind, opts: { yolo?: boolean; account?: string | null } = {}): { args: string[]; env?: Record<string, string> } {
-    const p = state.settings.profiles.find((x) => x.kind === kind);
-    const args = [...(p?.args ?? [])];
-    if (p?.permission && kind === "claude") args.push("--permission-mode", p.permission);
-    if (p?.permission && kind === "codex") args.push("-c", `approval_policy=${p.permission}`);
     // Yolo applies to agents without an explicit per-agent permission choice.
-    const yolo = presetFor(kind)?.yolo ?? [];
-    if (opts.yolo !== false && state.settings.agentPermissions === "yolo" && !p?.permission && yolo.length && !yolo.every((a) => args.includes(a))) args.push(...yolo);
-    const env = { ...(p?.env ?? {}), ...(accountEnv(kind, opts.account) ?? {}) };
-    return { args, env: Object.keys(env).length ? env : undefined };
+    return profileLaunchOf(state.settings, kind, presetFor(kind)?.yolo ?? [], accountEnv(kind, opts.account), opts.yolo !== false);
   }
 
   /** Edits an agent profile in place (rows bound to it stay mounted); preset agents get one

@@ -55,6 +55,9 @@ import { initNotifySync } from "../lib/notify-sync";
 import { initLimits } from "../lib/limits";
 import { initTakeover } from "../lib/takeover";
 import { initScreen } from "../lib/screen";
+import { agentPresets } from "../lib/agents";
+import { NEW_SESSION_API } from "../lib/attention";
+import { buildLaunchCatalogue } from "../lib/phone-launch";
 
 const Board = lazy(() => import("./board").then((m) => ({ default: m.Board })));
 const SavedReplyDialog = lazy(() => import("./bookmarks-panel").then((m) => ({ default: m.SavedReplyDialog })));
@@ -85,6 +88,15 @@ export function App() {
   createEffect(() => {
     const names = Object.fromEntries(store.state.projects.map((p) => [p.id, p.name]));
     if (store.connected()) void daemonCall("mobile.set_projects", { projects: names }).catch(() => {});
+  });
+  // Phones start sessions as this computer's launchers would (phone-launch.ts). The daemon keeps that in memory only, so it goes on every
+  // connection and after any change to the projects, profiles, permission mode, accounts, hidden agents or presets, a moment later.
+  let launchTimer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(() => {
+    if (!store.connected() || store.daemonApi() < NEW_SESSION_API) return;
+    const catalogue = buildLaunchCatalogue(store.state, agentPresets(), (kind) => store.profileLaunch(kind));
+    clearTimeout(launchTimer);
+    launchTimer = setTimeout(() => void daemonCall("mobile.set_launch", catalogue).catch(() => {}), 400);
   });
   // Remote projects' ssh calls use the configured SSH config file.
   createEffect(() => void remoteConfigure(store.state.settings.sshConfig?.trim() || null).catch(() => {}));

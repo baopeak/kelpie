@@ -47,7 +47,7 @@ fn caller_of(method: &str, params: &Value) -> Result<String> {
 }
 
 /// A folder as the rest of Kelpie compares them: canonical, without Windows' `\\?\` prefix (`\\?\UNC\server\share` is `\\server\share`).
-fn existing_folder(base: &str, given: &str) -> Result<String> {
+pub(crate) fn existing_folder(base: &str, given: &str) -> Result<String> {
     let path = std::path::Path::new(given);
     let full = if path.is_absolute() { path.to_path_buf() } else { std::path::Path::new(base).join(path) };
     let real = std::fs::canonicalize(&full).map_err(|_| anyhow!("cwd `{given}` does not exist"))?;

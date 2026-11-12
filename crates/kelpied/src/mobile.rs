@@ -21,6 +21,7 @@
 
 pub mod audit;
 mod lanes;
+mod launch;
 mod link;
 mod listen;
 mod lock;
@@ -399,6 +400,10 @@ pub struct Mobile {
     paired_at: Mutex<Option<Instant>>,
     /// Project names from the app (the daemon only knows ids).
     projects: Mutex<HashMap<String, String>>,
+    /// What a phone may start, as the app resolved it (`launch`); none until the app has sent it since this daemon started.
+    launch: Mutex<Option<launch::Catalogue>>,
+    /// How fast each device has been starting sessions (see `allow_start`).
+    start_rate: Mutex<HashMap<String, SendBucket>>,
     /// Devices added, changed, removed: their own sockets close or reconnect, the other phones are told.
     revoked: broadcast::Sender<DeviceEvent>,
     /// How fast each device has been sending chat messages (see `allow_send`).
@@ -509,8 +514,29 @@ fn take_token(buckets: &Mutex<HashMap<IpAddr, SendBucket>>, ip: IpAddr, rate: f6
     true
 }
 
+/// Takes one from the bucket of `device`, which fills at `rate` a second up to `burst`. False when it is empty. Past 256 devices the buckets that
+/// have filled up again are forgotten (they say nothing).
+fn take_device_token(buckets: &Mutex<HashMap<String, SendBucket>>, device: &str, rate: f64, burst: f64) -> bool {
+    let now = Instant::now();
+    let mut buckets = buckets.lock();
+    if buckets.len() > 256 {
+        buckets.retain(|_, b| b.tokens + now.duration_since(b.at).as_secs_f64() * rate < burst);
+    }
+    let b = buckets.entry(device.to_string()).or_insert(SendBucket { tokens: burst, at: now });
+    b.tokens = (b.tokens + now.duration_since(b.at).as_secs_f64() * rate).min(burst);
+    b.at = now;
+    if b.tokens < 1.0 {
+        return false;
+    }
+    b.tokens -= 1.0;
+    true
+}
+
 /// Chat messages one device may send: this many at once, then one a second.
 const SEND_BURST: f64 = 3.0;
+/// Sessions one device may start: this many at once, then one every ten seconds.
+const START_BURST: f64 = 3.0;
+const START_RATE: f64 = 0.1;
 
 struct SendBucket {
     tokens: f64,
@@ -564,6 +590,8 @@ impl Mobile {
             waiting: Mutex::new(HashMap::new()),
             paired_at: Mutex::new(None),
             projects: Mutex::new(HashMap::new()),
+            launch: Mutex::new(None),
+            start_rate: Mutex::new(HashMap::new()),
             revoked: broadcast::channel(16).0,
             send_rate: Mutex::new(HashMap::new()),
             link_key: Mutex::new(None),
@@ -839,19 +867,19 @@ impl Mobile {
     /// (`refund_send`: too long, a command for the computer, a full queue) costs nothing: only a message that gets in spends one.
     /// The limiter is as strong as it was for what gets in.
     fn allow_send(&self, device: &str) -> bool {
-        let now = Instant::now();
-        let mut buckets = self.send_rate.lock();
-        if buckets.len() > 256 {
-            buckets.retain(|_, b| now.duration_since(b.at) < Duration::from_secs(5));
+        take_device_token(&self.send_rate, device, 1.0, SEND_BURST)
+    }
+
+    /// Whether `device` may start a session now: three at once, then one every ten seconds. Only a start that is carried out spends one
+    /// (`refund_start` gives back the token of one that failed).
+    fn allow_start(&self, device: &str) -> bool {
+        take_device_token(&self.start_rate, device, START_RATE, START_BURST)
+    }
+
+    fn refund_start(&self, device: &str) {
+        if let Some(b) = self.start_rate.lock().get_mut(device) {
+            b.tokens = (b.tokens + 1.0).min(START_BURST);
         }
-        let b = buckets.entry(device.to_string()).or_insert(SendBucket { tokens: SEND_BURST, at: now });
-        b.tokens = (b.tokens + now.duration_since(b.at).as_secs_f64()).min(SEND_BURST);
-        b.at = now;
-        if b.tokens < 1.0 {
-            return false;
-        }
-        b.tokens -= 1.0;
-        true
     }
 
     /// Writes the store, unless the file on disk could not be read (it is never written over then). A slow disk holds up only other
@@ -1420,6 +1448,19 @@ impl Mobile {
     pub fn set_projects(&self, params: &Value) {
         let map = params.get("projects").and_then(Value::as_object).map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
         *self.projects.lock() = map;
+    }
+
+    /// `mobile.set_launch`: the whole launch catalogue in place of the last (`launch`). Kept in memory only, and never logged: profile
+    /// environments can hold keys. A catalogue that is refused leaves the last one as it was.
+    pub fn set_launch(&self, params: &Value) -> Result<()> {
+        let c = launch::parse(params).map_err(|e| anyhow!(e))?;
+        *self.launch.lock() = Some(c);
+        Ok(())
+    }
+
+    /// The phone's `new_options`, with `installed` the agents found on this computer.
+    fn launch_options(&self, installed: &[&str]) -> Value {
+        launch::options(self.launch.lock().as_ref(), installed)
     }
 
     /// The Tailscale origin (`<name>:8443`) while this computer is published.
@@ -2504,12 +2545,12 @@ impl Conn {
         }
         let granted = if gate == Gate::ReadOnly { granted.min(Permission::Read) } else { granted };
         let granted = if granted >= Permission::Control && !self.daemon.mobile.control_now(&self.device, self.lock_path, gate, self.page_origin.is_some()) { Permission::Write } else { granted };
-        // Typing and answers may carry a `cid`: a repeat of one (a retry after a lost reply, over this or another connection
+        // Typing, answers and starting a session may carry a `cid`: a repeat of one (a retry after a lost reply, over this or another connection
         // of the device) gets the first reply again, marked `dup`, and is not carried out twice. The daemon run's memory
         // only: a phone that sees `daemon_epoch` change starts over anyway.
         let window = match Verb::parse(name) {
             Some(v @ (Verb::Input | Verb::Key)) if v.needs() <= granted => Some(INPUT_DEDUPE),
-            Some(v @ (Verb::Answer | Verb::ChatAnswer)) if v.needs() <= granted => Some(ANSWER_DEDUPE),
+            Some(v @ (Verb::Answer | Verb::ChatAnswer | Verb::NewSession)) if v.needs() <= granted => Some(ANSWER_DEDUPE),
             _ => None,
         };
         let cid = window.and(req.get("cid").and_then(Value::as_str).filter(|c| !c.is_empty() && c.len() <= 64));
@@ -2538,6 +2579,10 @@ impl Conn {
     fn note(&self, name: &str, req: &Value, reply: Option<&Value>) {
         // What a takeover sends never goes in the log: the broker notes its start and its end.
         if reply.is_some_and(|r| r["type"] == "error" || r["result"] == "dup") || !matches!(Verb::parse(name), Some(v) if v.needs() >= Permission::Write && !v.takeover()) {
+            return;
+        }
+        // Looking at what may be started changes nothing, and a start is noted by its handler (`session_new`), which knows the agent and the project.
+        if matches!(name, "new_options" | "new_session") {
             return;
         }
         let id = req["id"].as_str().unwrap_or_default();
@@ -2880,6 +2925,13 @@ impl Conn {
                 chat.resume();
                 return Ok(Some(json!({"type": "ack", "result": "ok"})));
             }
+            Verb::NewOptions => {
+                // Which agents are installed is a look on disk (through the login shell on Unix): off this task.
+                let daemon = self.daemon.clone();
+                let options = tokio::task::spawn_blocking(move || daemon.mobile.launch_options(&crate::agents::installed_presets()));
+                return options.await.map(Some).map_err(|_| refuse("not_kept", "That did not finish."));
+            }
+            Verb::NewSession => return self.new_session(req).await.map(Some),
             Verb::PushInfo => {
                 self.secure_transport()?;
                 let (daemon, device) = (self.daemon.clone(), self.device.clone());
@@ -2973,6 +3025,43 @@ impl Conn {
             }
         }
         Ok(None)
+    }
+
+    /// A phone starts an agent in a project (`new_session`): with what the launch catalogue holds for them, as the desktop's launchers would,
+    /// and nothing of the phone's but the first prompt. The agent must be installed and the folder there; a busy computer and a phone that
+    /// starts too many are refused. The audit log and the app hear which agent in which project, never the prompt.
+    async fn new_session(&self, req: &Value) -> Result<Value, Refusal> {
+        req["cid"].as_str().filter(|c| !c.is_empty() && c.len() <= 64).ok_or_else(|| refuse("bad_request", "missing cid"))?;
+        let planned = launch::plan(self.daemon.mobile.launch.lock().as_ref(), req).map_err(|(code, message)| refuse(code, message))?;
+        let (kind, path) = (planned.agent.kind.clone(), planned.project.path.clone());
+        let found = tokio::task::spawn_blocking(move || {
+            let installed = crate::agents::installed_presets();
+            let known: Vec<&str> = crate::agents::all_presets().into_iter().map(|p| p.id).collect();
+            crate::subs::check_agent(&kind, &known, &installed).map_err(|_| refuse("not_installed", "That agent is not installed on this computer."))?;
+            crate::daemon::existing_folder(&path, &path).map_err(|_| refuse("no_folder", "That project's folder is not on this computer any more."))
+        });
+        let cwd = found.await.map_err(|_| refuse("not_kept", "That did not finish."))??;
+        if self.daemon.mobile.load.level() >= Level::L3 {
+            return Err(refuse("busy", "The computer is too busy to start a session now. Try again in a minute."));
+        }
+        if !self.daemon.mobile.allow_start(&self.device) {
+            return Err(refuse("rate_limited", "Starting sessions too fast: wait a moment."));
+        }
+        let (daemon, params, device, name) = (self.daemon.clone(), planned.create_params(&cwd), self.device.clone(), self.name.clone());
+        match tokio::task::spawn_blocking(move || daemon.create_for_phone(params, &device, &name)).await {
+            Ok(Ok(info)) => {
+                self.daemon.mobile.audit(&self.device, "session_new", &planned.summary());
+                Ok(json!({"type": "ack", "result": "ok", "id": info.spec.id}))
+            }
+            failed => {
+                self.daemon.mobile.refund_start(&self.device);
+                let why = match failed {
+                    Ok(Err(e)) => format!("{e:#}"),
+                    _ => "it did not finish".into(),
+                };
+                Err(refuse("not_started", format!("The session could not be started: {why}")))
+            }
+        }
     }
 
     /// The phone was locked: nothing it followed or watched goes on. What it had confirmed stays for a while (`sync`), in this daemon's memory only, so that it picks up where it was.
@@ -3692,6 +3781,7 @@ mod tests {
     use super::*;
 
     mod lock;
+    mod new_session;
     mod relay;
     mod takeover;
 
@@ -6294,7 +6384,7 @@ mod tests {
     async fn no_phone_permission_reaches_anything_the_computer_keeps_for_itself() {
         let mut r = rig();
         let forbidden = [
-            "mobile.approve", "mobile.revoke", "mobile.revoke_all", "mobile.reset", "mobile.set_permission", "mobile.set_write", "mobile.pair_start", "mobile.enable", "mobile.disable", "mobile.set_options", "mobile.audit",
+            "mobile.approve", "mobile.revoke", "mobile.revoke_all", "mobile.reset", "mobile.set_permission", "mobile.set_write", "mobile.pair_start", "mobile.enable", "mobile.disable", "mobile.set_options", "mobile.audit", "mobile.set_launch",
             "pair", "approve", "revoke", "upgrade", "set_permission", "settings", "set_settings", "daemon.set_policy", "daemon.set_theme", "daemon.shutdown",
             "agent.set_custom", "agent.run", "hook.report", "mcp", "plugin", "automation.save", "automation.approve", "automation.delete", "automation.set_paused", "always_allow", "notify.set", "notify.telegram_bind",
             "session.create", "session.close", "session.update", "session.attach", "run.approve", "meta.set",

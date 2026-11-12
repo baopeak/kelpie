@@ -20,7 +20,12 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
 8. Chat: watching it from a phone does not clear the desktop's unread; the phone answers a permission,
    the agent gets exactly one answer whoever is first, the other side is told (`chat_resolved`,
    `chat.resolved`); a watcher resumes with a delta.
-9. A daemon restart gives a new epoch; the session ids still resolve; a request from the old epoch is refused.
+8c. Starting a session from the phone, with no app window at all: nothing until a launch catalogue comes (`mobile.set_launch`, from the
+    user token); then the catalogue's projects and installed agents, never a folder or an environment; every refusal starts nothing; a start
+    runs a fake plugin agent (this Python) with exactly the catalogue's arguments, environment and the first prompt; a repeat of its `cid` gets
+    the same session; the desktop hears `mobile.session_started`; the audit has `session_new` without the prompt; three at once, then wait.
+9. A daemon restart gives a new epoch; the session ids still resolve; a request from the old epoch is refused; the restarted daemon has no
+   launch catalogue (`new_options` says to open Kelpie).
 10. Sending to a chat from the phone (the daemon's queue): an idle agent gets the message once, a busy one
     after its turn; phone and desktop messages go out in the order received, with the window attached or
     gone; a retry under the same `cid` makes no second message; either side cancels the other's; a stop
@@ -97,6 +102,47 @@ open(CHAT_AGENT, "w", encoding="utf-8").write(
 # A Claude-style chat agent that takes one turn at a time (phone_support.TURN_AGENT_SOURCE): it traces when a message arrives (ARRIVE)
 # and when its turn ends (END), holds a turn while TURN_HOLD exists, and ends it early on an interrupt.
 TURN_AGENT, TURN_TRACE, TURN_HOLD = ps.write_turn_agent(work)
+
+# An agent a phone starts (a plugin agent that is this Python, never a real agent): it logs the arguments it was started with and the
+# environment variable its profile sets, then waits. One more whose program is nowhere, so that it is known and not installed.
+STARTED_LOG = os.path.join(work, "started-agent.log")
+STARTED_AGENT = os.path.join(work, "started_agent.py")
+open(STARTED_AGENT, "w", encoding="utf-8").write(
+    "import json, os, sys\n"
+    "open(sys.argv[1], 'a', encoding='utf-8').write(json.dumps({'argv': sys.argv[2:], 'key': os.environ.get('PHONE_FAKE_KEY')}) + '\\n')\n"
+    "print('started agent ready', flush=True)\n"
+    "sys.stdin.readline()\n")
+PHONE_FAKE = {"id": "phone-fake", "label": "Fake agent", "bin": sys.executable, "launch": [STARTED_AGENT, STARTED_LOG], "yolo": ["--yes"], "resume_latest": [], "prompt": "argv", "acp": []}
+PHONE_ABSENT = {**PHONE_FAKE, "id": "phone-absent", "label": "Absent agent", "bin": "kelpie-no-such-program-anywhere", "launch": []}
+# What the app would send (`mobile.set_launch`): a project here, one whose folder is gone, the fake agent with its profile's flags and environment.
+LAUNCH = {
+    "projects": [{"id": "proj-shop", "name": "Shop", "path": work}, {"id": "proj-gone", "name": "Gone", "path": os.path.join(work, "not-there")}],
+    "agents": [{"kind": "phone-fake", "label": "Fake agent", "args": ["--yes", "--from-profile"], "env": {"PHONE_FAKE_KEY": "profile-secret-42"}},
+               {"kind": "phone-absent", "label": "Absent agent", "args": [], "env": {}}],
+}
+
+
+def started_runs():
+    return [json.loads(line) for line in open(STARTED_LOG, encoding="utf-8").read().splitlines()] if os.path.exists(STARTED_LOG) else []
+
+
+class Listener(threading.Thread):
+    """A desktop-like client of the user token that keeps every event the daemon broadcasts to it."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.conn = ps.kc.Conn()
+        self.events = []
+        self.start()
+
+    def run(self):
+        try:
+            while True:
+                kind, body = self.conn.frame()
+                if kind == 1:
+                    self.events.append(json.loads(body))
+        except Exception:  # noqa: BLE001
+            pass
 ACP_LOG = os.path.join(work, "acp-agent.log")
 FAKE_ACP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_acp_agent.py")
 
@@ -734,6 +780,62 @@ async def main(d):
     code = (await phone.ask(type="chat_send", id=ca["id"], cid="acp-new", text="/new"))
     check("a command only the client runs is refused for ACP", code["type"] == "error" and code["code"] == "command_needs_desktop", code)
 
+    # ---------- 8c. starting a session from the phone (no app window at all: the daemon starts it alone) ----------
+    d.call("agent.set_custom", {"agents": [PHONE_FAKE, PHONE_ABSENT]})
+    none = await phone.ask(type="new_options")
+    check("before the app sends its launch catalogue the phone may start nothing, and is told why", none.get("ready") is False and "Open Kelpie on your computer" in (none.get("why") or ""), none)
+    early = await phone.ask(type="new_session", project_id="proj-shop", kind="phone-fake", cid="early")
+    check("…and a start is refused as not ready", early.get("code") == "not_ready", early)
+    plain = ps.kc.Conn()
+    check("a client of the user token sends the catalogue (the app does, through its generic daemon call)", refused(plain, "mobile.set_launch", LAUNCH) is None)
+    opts = await phone.ask(type="new_options")
+    check("the phone sees the catalogue's projects in its order and the installed agents, with whether they ask first",
+          opts.get("ready") is True and opts.get("projects") == [{"id": "proj-shop", "name": "Shop"}, {"id": "proj-gone", "name": "Gone"}]
+          and opts.get("agents") == [{"kind": "phone-fake", "label": "Fake agent", "skips": True}], opts)
+    check("…never a folder or an environment", work not in json.dumps(opts) and "profile-secret-42" not in json.dumps(opts))
+    big = {"projects": [], "agents": [{"kind": "phone-fake", "label": "F", "env": {"K": "x" * 300_000}}]}
+    check("an oversized catalogue is refused", "too large" in (refused(plain, "mobile.set_launch", big) or ""))
+    check("…and the last one stays", (await phone.ask(type="new_options")).get("projects") == opts.get("projects"))
+    before = len(d.call("session.list"))
+    for req, want in [
+        (dict(project_id="ssh-project", kind="phone-fake"), "no_project"),
+        (dict(project_id="proj-shop", kind="claude"), "no_agent"),
+        (dict(project_id="proj-shop", kind="phone-absent"), "not_installed"),
+        (dict(project_id="proj-gone", kind="phone-fake"), "no_folder"),
+        (dict(project_id="proj-shop", kind="phone-fake", prompt="x" * 16_001), "too_long"),
+        (dict(project_id="proj-shop", kind="phone-fake", epoch="an older run"), "epoch"),
+    ]:
+        r = await phone.ask(type="new_session", cid=f"refused-{want}", **req)
+        check(f"a start is refused as {want}", r.get("type") == "error" and r.get("code") == want, r)
+    check("…and none of them started anything", len(d.call("session.list")) == before)
+    events = Listener()
+    started = await phone.ask(type="new_session", project_id="proj-shop", kind="phone-fake", prompt="hello from the phone", cid="start-1", epoch=epoch)
+    sid = started.get("id")
+    check("a start is answered with the new session's id", started.get("type") == "ack" and started.get("result") == "ok" and bool(sid), started)
+    row = info(d, sid)
+    check("it runs in the project's folder with exactly the profile's arguments and environment",
+          row.get("kind") == "phone-fake" and row.get("project_id") == "proj-shop" and row.get("args") == ["--yes", "--from-profile"]
+          and row.get("env") == {"PHONE_FAKE_KEY": "profile-secret-42"} and os.path.normcase(row.get("cwd", "")) == os.path.normcase(os.path.realpath(work)), row)
+    ran = ps.wait_for(lambda: started_runs(), 30)
+    check("the agent got the profile's flags, the first prompt and the profile's environment",
+          bool(ran) and ran[-1]["argv"][-3:] == ["--yes", "--from-profile", "hello from the phone"] and ran[-1]["key"] == "profile-secret-42", ran)
+    listed = await phone.wait(lambda m: m["type"] == "sessions" and any(s["id"] == sid for s in m["sessions"]), 10)
+    check("the phone sees the new session in its list", listed is not None)
+    again = await phone.ask(type="new_session", project_id="proj-shop", kind="phone-fake", prompt="hello from the phone", cid="start-1", epoch=epoch)
+    fakes = [x for x in d.call("session.list") if x["kind"] == "phone-fake"]
+    check("a repeat of the same start gets the same session and starts no second one", again.get("id") == sid and again.get("dup") is True and len(fakes) == 1, (again, len(fakes)))
+    told = ps.wait_for(lambda: [e["params"] for e in events.events if e.get("event") == "mobile.session_started"], 10) or []
+    check("the desktop hears which phone started which agent in which project", told[:1] == [{"id": sid, "device": writer_id, "name": "Writer", "kind": "phone-fake", "project_id": "proj-shop"}], told)
+    log = d.call("mobile.audit", {"limit": 50})
+    notes = [e for e in log["entries"] if e["action"] == "session_new"]
+    check("the audit log says which agent in which project, once, and never the prompt", [e["summary"] for e in notes] == ["Fake agent in Shop"] and "hello from the phone" not in json.dumps(log), notes)
+    # Three at once, then one every ten seconds: the repeat cost nothing, so two more go and the next is refused.
+    more = [await phone.ask(type="new_session", project_id="proj-shop", kind="phone-fake", cid=f"start-{n}") for n in (2, 3, 4)]
+    check("a phone starts three at once, then is told to wait", [m.get("result") for m in more[:2]] == ["ok", "ok"] and more[2].get("code") == "rate_limited", more)
+    for x in d.call("session.list"):
+        if x["kind"] == "phone-fake":
+            d.call("session.close", {"handle": x["handle"]})
+
     # ---------- 9. a daemon restart ----------
     handles = {x["id"]: x["handle"] for x in d.call("session.list")}
     await phone.close()
@@ -753,6 +855,9 @@ async def main(d):
     check("the daemon epoch changed", ok and hello2["daemon_epoch"] != epoch, ok and hello2["daemon_epoch"])
     ids = [s["id"] for s in hello2["sessions"]] if ok else []
     check("the sessions come back under the same ids", a["id"] in ids and b["id"] in ids, ids)
+    if ok:
+        after = await phone.ask(type="new_options")
+        check("a restarted daemon has no launch catalogue until the app sends it again, and the phone is told to open Kelpie", (after or {}).get("ready") is False and "Open Kelpie" in ((after or {}).get("why") or ""), after)
     moved = [x["id"] for x in d.call("session.list") if x["id"] in handles and handles[x["id"]] != x["handle"]]
     check("handles are renumbered by the restart, ids are not", bool(moved), {k: (handles[k], info(d, k).get("handle")) for k in handles})
     mark = phone.mark()

@@ -405,7 +405,8 @@ export interface MemoryStats {
 export interface InboxItem {
   id: string;
   at: number;
-  kind: "finished" | "waiting" | "automation" | "worktree" | "error" | "cost";
+  /** `phone`: a phone started a session here. */
+  kind: "finished" | "waiting" | "automation" | "worktree" | "error" | "cost" | "phone";
   title: string;
   body: string;
   sessionId?: string;
