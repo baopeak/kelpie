@@ -66,6 +66,62 @@ fn name_from_task(task: &str) -> String {
     subs::cut(line, 40)
 }
 
+/// The longest address `page.open` takes.
+const MAX_PAGE_URL: usize = 4096;
+
+/// The address an agent asked to show, checked: `http` or `https` with a host, no user name or password, nothing that is not printed
+/// (control characters, spaces). The window parses it again before it opens anything.
+fn page_url(given: &str) -> Result<String, String> {
+    let url = given.trim();
+    if url.is_empty() {
+        return Err("missing `url`".into());
+    }
+    if url.chars().count() > MAX_PAGE_URL {
+        return Err(format!("the address is longer than {MAX_PAGE_URL} characters"));
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("the address has spaces or control characters in it; encode them (%20) or leave them out".into());
+    }
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Err(format!("`{url}` is not a web address: give one that starts with http:// or https://"));
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(format!("only http:// and https:// pages can be opened, not {scheme}://"));
+    }
+    // Browsers end the host at `\` as they do at `/`.
+    let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or_default();
+    if authority.contains('@') {
+        return Err("the address carries a user name or password (`user:pass@`); Kelpie does not open those, leave them out".into());
+    }
+    // `host`, `host:port`, `[v6]` or `[v6]:port`.
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']') {
+            Some((h, "")) => (h, None),
+            Some((h, after)) if after.starts_with(':') => (h, Some(&after[1..])),
+            _ => ("", None),
+        },
+        None => match authority.split_once(':') {
+            Some((h, port)) => (h, Some(port)),
+            None => (authority, None),
+        },
+    };
+    if host.is_empty() {
+        return Err(format!("`{url}` names no host"));
+    }
+    if let Some(port) = port.filter(|p| !p.is_empty()) {
+        if port.parse::<u16>().is_err() {
+            return Err(format!("`{port}` is not a port number"));
+        }
+    }
+    Ok(url.to_string())
+}
+
+/// A page title as the notice shows it: one line, without control characters, at most 120 characters.
+fn page_title(given: &str) -> String {
+    let line: String = given.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    subs::cut(&line.split_whitespace().collect::<Vec<_>>().join(" "), 120)
+}
+
 /// The part of a branch name that comes from a name: `runs::slug`, but a name with no letters it can keep is not "run".
 fn branch_slug(name: &str) -> String {
     let slug = runs::slug(name);
@@ -529,6 +585,27 @@ impl Daemon {
         anyhow::ensure!(self.is_descendant(&sid, &target.spec), "{} is not one of your sub-sessions; a session can close only the sub-sessions it opened", self.session_tag(&target));
         self.close(target.handle)?;
         Ok(json!(true))
+    }
+
+    /// `page.open {url, title?}`: the calling session asks the person's window to show a web page in a background tab of the session's
+    /// project. Only the app's windows hear of it (`page.open` event); with none open the agent is told so, to tell the person itself.
+    pub(super) fn page_open(&self, params: &Value) -> Result<Value> {
+        let sid = caller_of("page.open", params)?;
+        let url = page_url(params.get("url").and_then(Value::as_str).unwrap_or_default()).map_err(|e| anyhow!(e))?;
+        let title = params.get("title").and_then(Value::as_str).map(page_title).filter(|t| !t.is_empty());
+        let spec = self.by_id(&sid).ok_or_else(|| anyhow!("the calling session no longer exists"))?.spec();
+        let project = spec.project_id.filter(|p| !p.is_empty()).ok_or_else(|| anyhow!("this session belongs to no project in Kelpie's window, so there is no tab to open the page in; give the person the address instead: {url}"))?;
+        let told = self.tell_apps("page.open", json!({"session_id": sid, "project_id": project, "url": url, "title": title}));
+        anyhow::ensure!(told > 0, "Kelpie's window is not open, so the page cannot be shown; tell the person the address instead: {url}");
+        Ok(json!({"url": url, "title": title, "project_id": project}))
+    }
+
+    /// Sends an event to the app's windows alone (not to scripts holding the user token, nor to sessions); how many got it.
+    fn tell_apps(&self, event: &str, params: Value) -> usize {
+        let msg = json_out(&json!({"event": event, "params": params}));
+        let apps = self.app_clients();
+        let clients = self.clients.lock();
+        apps.iter().filter_map(|id| clients.get(id)).filter(|tx| tx.send(crate::session::Outgoing { data: msg.data.clone(), credit: None }).is_ok()).count()
     }
 
     /// `spec` is a child, grandchild… of `ancestor`, through sessions that are still open: once a middle session is closed the

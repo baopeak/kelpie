@@ -58,7 +58,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// and `relay.version` in `mobile.status`, and `new_store` and `lan` beside them; `page` and `page_kind` on a device and `origin_kind` on a pairing request
 /// and `mobile.pair_request`; `mobile.enable {lan}`), rooms made with no registration key, and a relay of the second version told every page origin it
 /// lets in (`origins`) and naming the phone's (`o`); an older daemon has none of it, so the app offers the hosted app only at 34.
-pub const API_LEVEL: u32 = 34;
+/// 35: an agent asks for a web page (`page.open {url, title?}` from a program in a session, the `kelpie_open_page` tool and `kelpied sub open`), and
+/// the daemon tells the app's windows alone with the `page.open` event; an older daemon has no such method, and an older app ignores the event.
+pub const API_LEVEL: u32 = 35;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

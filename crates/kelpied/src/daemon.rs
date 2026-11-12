@@ -1904,6 +1904,7 @@ impl Daemon {
             }
             "sub.spawn" => return self.sub_spawn(tx, id, &params),
             m if m.starts_with("sub.") => self.sub_rpc(m, &params)?,
+            "page.open" => self.page_open(&params)?,
             "daemon.set_theme" => {
                 let light = params.get("theme").and_then(Value::as_str) == Some("light");
                 match params.get("palette").filter(|p| p.is_object()) {

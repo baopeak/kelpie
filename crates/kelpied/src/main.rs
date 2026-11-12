@@ -12,7 +12,7 @@
 //!   kelpied terminal list|read|send|wait …   drive sessions from a script or another agent
 //!   kelpied worktree get|set …               this folder's comment / board status
 //!   kelpied review add|list …                review notes on this worktree's diff
-//!   kelpied sub agents|spawn|list|send|read|wait|report|inbox|close …   sub-sessions (`kelpied sub --help`)
+//!   kelpied sub agents|spawn|list|send|read|wait|report|inbox|close|open …   sub-sessions and web pages (`kelpied sub --help`)
 //!   kelpied mcp                              the same as an MCP server on stdio (Kelpie injects it into Claude and Codex)
 
 mod agents;

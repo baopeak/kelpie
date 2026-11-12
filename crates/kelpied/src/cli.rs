@@ -363,6 +363,7 @@ usage: kelpied sub <command> [--json]
   report <status> <summary…>                    to the session that opened you: progress|done|failed|blocked|needs_user
   inbox                                         take the mail waiting for you
   close <session>                               close a sub-session you opened
+  open <url> [--title T]                        show an http(s) page to the person in a background tab of your project
 <session> is a handle, an id or a name. Run inside a session started by Kelpie.";
 
 /// The options of a command that ends in free text (`spawn`, `send`, `report`): `fixed` words come first (the agent, the session,
@@ -476,6 +477,13 @@ fn parse_sub(args: &[String]) -> Result<(&'static str, Value, bool)> {
                 "agents" => ("kelpie_agents", json!({})),
                 "inbox" => ("kelpie_inbox", json!({})),
                 "close" => ("kelpie_close", json!({"session": args.first().ok_or_else(|| usage("close <session>"))?})),
+                "open" => {
+                    let title = take_opt(&mut args, "--title");
+                    match args.as_slice() {
+                        [url] => ("kelpie_open_page", json!({"url": url, "title": title})),
+                        _ => return Err(usage("open <url> [--title T]")),
+                    }
+                }
                 _ => bail!("{SUB_USAGE}\n\n{}", crate::sub_guide::GUIDE),
             }
         }
@@ -527,6 +535,8 @@ mod tests {
         assert_eq!(parse("report done all tests pass").unwrap(), ("kelpie_report", json!({"status": "done", "summary": "all tests pass"}), false));
         assert_eq!(parse("inbox").unwrap().0, "kelpie_inbox");
         assert_eq!(parse("close 4").unwrap().1, json!({"session": "4"}));
+        assert_eq!(parse("open http://localhost:5173/").unwrap(), ("kelpie_open_page", json!({"url": "http://localhost:5173/", "title": null}), false));
+        assert_eq!(words(&["open", "--title", "The studio", "https://example.com", "--json"]).unwrap(), ("kelpie_open_page", json!({"url": "https://example.com", "title": "The studio"}), true));
     }
 
 
@@ -559,7 +569,7 @@ mod tests {
 
     #[test]
     fn sub_arguments_are_checked() {
-        for bad in ["spawn codex", "send 3", "read", "read x --lines many", "report done", "close", "wait --timeout-s soon"] {
+        for bad in ["spawn codex", "send 3", "read", "read x --lines many", "report done", "close", "wait --timeout-s soon", "open", "open a b"] {
             assert!(parse(bad).is_err(), "{bad}");
         }
         let help = parse("").unwrap_err().to_string();

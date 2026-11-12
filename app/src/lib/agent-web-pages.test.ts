@@ -3,11 +3,13 @@ import { createRoot, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import type { Port } from "./processes";
 
-vi.stubGlobal("window", {});
+// A window that carries events: the daemon's `page.open` reaches the module as `kelpie:open-page`.
+vi.stubGlobal("window", new EventTarget());
 
 const h = vi.hoisted(() => ({
   sessions: {} as Record<string, { id: string; kind: string; project_id: string | null }>,
   settings: { agentWebTabs: true as boolean },
+  projects: [{ id: "p" }] as { id: string }[],
   tabs: [] as { id: string; root: { paneId: string } }[],
   probe: vi.fn(),
   addTab: vi.fn(),
@@ -15,6 +17,7 @@ const h = vi.hoisted(() => ({
   focusPane: vi.fn(),
   notify: vi.fn(),
   paneOnPort: vi.fn(() => null as { tabId: string; paneId: string } | null),
+  paneShowing: vi.fn(() => null as { tabId: string; paneId: string } | null),
   setBrowserState: vi.fn(),
 }));
 
@@ -25,7 +28,7 @@ vi.mock("./store", () => ({
   sessionLabel: (s: { kind: string }) => s.kind,
   store: {
     sessions: h.sessions,
-    state: { settings: h.settings },
+    state: { settings: h.settings, projects: h.projects },
     workspace: () => ({ tabs: h.tabs }),
     addTab: h.addTab,
     closePane: h.closePane,
@@ -45,6 +48,8 @@ vi.mock("./processes", () => ({
 vi.mock("./browser", () => ({
   browserProbe: h.probe,
   browserPaneOnPort: h.paneOnPort,
+  browserPaneShowing: h.paneShowing,
+  isLocalUrl: (u: string) => ["localhost", "127.0.0.1"].includes(new URL(u).hostname),
   setBrowserState: h.setBrowserState,
   freshPages: () => fresh(),
   markPageFresh: (id: string) => setFresh((s) => new Set(s).add(id)),
@@ -71,6 +76,8 @@ describe("web pages an agent starts", () => {
     h.closePane.mockImplementation(async () => {});
     h.paneOnPort.mockReset();
     h.paneOnPort.mockReturnValue(null);
+    h.paneShowing.mockReset();
+    h.paneShowing.mockReturnValue(null);
     h.addTab.mockImplementation((_p: string, pane: { id: string }) => {
       const tab = { id: `tab-${pane.id}`, root: { paneId: pane.id } };
       h.tabs.push(tab);
@@ -175,5 +182,73 @@ describe("web pages an agent starts", () => {
     setPorts(s, { children: 0, ports: [] });
     await settle();
     expect(h.closePane).not.toHaveBeenCalled();
+  });
+});
+
+describe("web pages an agent asks for", () => {
+  const ask = (detail: Record<string, unknown>) => window.dispatchEvent(new CustomEvent("kelpie:open-page", { detail }));
+
+  beforeEach(() => {
+    h.settings.agentWebTabs = true;
+    h.tabs.length = 0;
+    for (const f of [h.addTab, h.focusPane, h.notify, h.setBrowserState, h.paneOnPort, h.paneShowing]) f.mockReset();
+    h.paneOnPort.mockReturnValue(null);
+    h.paneShowing.mockReturnValue(null);
+    h.addTab.mockImplementation((_p: string, pane: { id: string }) => {
+      const tab = { id: `tab-${pane.id}`, root: { paneId: pane.id } };
+      h.tabs.push(tab);
+      return tab;
+    });
+  });
+
+  it("opens the page in a background tab of the session's project, even with automatic tabs off, and says so", () => {
+    h.settings.agentWebTabs = false;
+    const s = session();
+    ask({ session_id: s, project_id: "p", url: "http://localhost:5173", title: "Studio" });
+    expect(h.addTab).toHaveBeenCalledTimes(1);
+    const [projectId, pane, opts] = h.addTab.mock.calls[0];
+    expect(projectId).toBe("p");
+    expect(pane).toMatchObject({ kind: "browser", url: "http://localhost:5173/" });
+    expect(opts).toEqual({ background: true });
+    expect(h.setBrowserState).toHaveBeenCalledWith(pane.id, { title: "Studio", url: "http://localhost:5173/", design: false, notes: [] });
+    expect(fresh().has(pane.id)).toBe(true);
+    expect(h.notify.mock.calls[0][0]).toBe("claude opened a web page: Studio");
+    expect(h.focusPane).not.toHaveBeenCalled();
+    h.notify.mock.calls[0][1].run();
+    expect(h.focusPane).toHaveBeenCalledWith("p", `tab-${pane.id}`, pane.id);
+  });
+
+  it("names the page by its address when the agent gave no title", () => {
+    ask({ session_id: session(), project_id: "p", url: "https://example.com/docs?x=1", title: null });
+    expect(h.addTab.mock.calls[0][1]).toMatchObject({ url: "https://example.com/docs?x=1" });
+    expect(h.notify.mock.calls[0][0]).toBe("claude opened a web page: https://example.com/docs?x=1");
+  });
+
+  it("does not open a page twice: a local server's port or the same address already shown is said, and nothing takes the focus", () => {
+    h.paneOnPort.mockReturnValue({ tabId: "t", paneId: "q" });
+    ask({ session_id: session(), project_id: "p", url: "http://127.0.0.1:3000/other", title: "App" });
+    expect(h.paneOnPort).toHaveBeenCalledWith("p", 3000);
+    h.paneOnPort.mockReturnValue(null);
+    h.paneShowing.mockReturnValue({ tabId: "t2", paneId: "q2" });
+    ask({ session_id: session(), project_id: "p", url: "https://example.com/", title: null });
+    expect(h.paneShowing).toHaveBeenCalledWith("p", "https://example.com/");
+    expect(h.addTab).not.toHaveBeenCalled();
+    expect(h.notify.mock.calls.map((c) => c[0])).toEqual([
+      "claude asked to show App, which is already open in a tab",
+      "claude asked to show https://example.com/, which is already open in a tab",
+    ]);
+    expect(h.focusPane).not.toHaveBeenCalled();
+    h.notify.mock.calls[1][1].run();
+    expect(h.focusPane).toHaveBeenCalledWith("p", "t2", "q2");
+  });
+
+  it("opens nothing that is not an http(s) page without credentials, nor in a project this window does not have", () => {
+    const s = session();
+    for (const url of ["javascript:alert(1)", "file:///C:/Windows/win.ini", "http://user:pass@example.com/", "not a url"]) {
+      ask({ session_id: s, project_id: "p", url, title: null });
+    }
+    ask({ session_id: s, project_id: "gone", url: "http://localhost:5173/", title: null });
+    expect(h.addTab).not.toHaveBeenCalled();
+    expect(h.notify).not.toHaveBeenCalled();
   });
 });

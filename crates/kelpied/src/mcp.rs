@@ -257,7 +257,7 @@ pub async fn handle_message<C: Connector>(message: &Value, connector: &C) -> Opt
 
 // ---------- tools ----------
 
-pub const TOOL_NAMES: [&str; 8] = ["kelpie_agents", "kelpie_spawn", "kelpie_sessions", "kelpie_message", "kelpie_read", "kelpie_wait", "kelpie_report", "kelpie_close"];
+pub const TOOL_NAMES: [&str; 9] = ["kelpie_agents", "kelpie_spawn", "kelpie_sessions", "kelpie_message", "kelpie_read", "kelpie_wait", "kelpie_report", "kelpie_close", "kelpie_open_page"];
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str], read_only: bool) -> Value {
     json!({
@@ -344,6 +344,16 @@ pub fn tool_list() -> Vec<Value> {
             &["session"],
             false,
         ),
+        tool(
+            "kelpie_open_page",
+            "Open a web page for the person in Kelpie's window: a browser tab in your project, in the background (it takes neither the focus nor the keyboard from you), with a short notice they can click. Use it when the person asks to see a page, or when you started a server whose page they should look at. Only http:// and https:// addresses, without a user name or password. A page already open in the project is not opened twice. Refused when Kelpie's window is not open: then give the person the address.",
+            json!({
+                "url": {"type": "string", "description": "The page's address, e.g. http://localhost:5173/."},
+                "title": {"type": "string", "description": "A short name for the notice and the tab. Default: the address."},
+            }),
+            &["url"],
+            false,
+        ),
     ]
 }
 
@@ -400,6 +410,7 @@ async fn dispatch<B: Backend>(b: &mut B, name: &str, args: &Value) -> Result<Too
         "kelpie_wait" => wait(b, args).await,
         "kelpie_report" => report(b, args).await,
         "kelpie_close" => close(b, args).await,
+        "kelpie_open_page" => open_page(b, args).await,
         "kelpie_inbox" => inbox(b).await,
         other => Err(format!("unknown tool `{other}`")),
     }
@@ -729,6 +740,20 @@ async fn close<B: Backend>(b: &mut B, args: &Value) -> Result<ToolOut, String> {
     let target = req_session(args, "session")?;
     ask(b, "sub.close", json!({"session": target})).await?;
     Ok(ToolOut::ok(format!("Closed {target}. Its worktree, if it had one, stays for you to review or finish."), json!({"closed": target})))
+}
+
+/// The daemon checks the address and the caller; the window opens the tab, or tells the person the page is already open.
+async fn open_page<B: Backend>(b: &mut B, args: &Value) -> Result<ToolOut, String> {
+    let mut params = json!({"url": req_str(args, "url")?});
+    if let Some(title) = opt_str(args, "title")? {
+        params["title"] = json!(title);
+    }
+    let r = ask(b, "page.open", params).await?;
+    let text = format!(
+        "Asked Kelpie's window to open {} in a background tab of your project; the person gets a notice to look at it. If a tab there already shows it, none is added.",
+        str_of(&r, "url")
+    );
+    Ok(ToolOut::ok(text, r))
 }
 
 #[cfg(test)]

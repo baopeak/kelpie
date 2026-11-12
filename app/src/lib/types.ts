@@ -57,6 +57,15 @@ export interface SubReport {
   auto?: boolean;
 }
 
+/** The daemon's `page.open` event (API 35): an agent session asks this window to show a web page in its project. The daemon checked
+ *  the address (http/https, no credentials); the window parses it again. */
+export interface OpenPageRequest {
+  session_id: string;
+  project_id: string;
+  url: string;
+  title: string | null;
+}
+
 export type WorkStatus = "todo" | "progress" | "review" | "done";
 
 export interface Project {

@@ -319,6 +319,29 @@ async fn close_and_inbox() {
     assert!(dropped.text.contains("3 older mails were dropped"), "{}", dropped.text);
 }
 
+#[tokio::test]
+async fn open_page_asks_the_daemon_and_passes_its_refusal_on() {
+    let fake = Fake::new("me").reply("page.open", json!({"url": "http://localhost:5173/", "title": "Studio", "project_id": "p"}));
+    let out = run_tool(&mut fake.clone(), "kelpie_open_page", &json!({"url": " http://localhost:5173/ ", "title": "Studio"})).await;
+    assert!(!out.is_error, "{}", out.text);
+    assert_eq!(fake.calls_of("page.open"), vec![json!({"url": "http://localhost:5173/", "title": "Studio"})]);
+    assert!(out.text.contains("http://localhost:5173/") && out.text.contains("background tab"), "{}", out.text);
+    assert_eq!(out.data["project_id"], "p");
+    // No title is not sent; a missing or mistyped argument reaches no daemon.
+    run_tool(&mut fake.clone(), "kelpie_open_page", &json!({"url": "https://example.com", "title": ""})).await;
+    assert_eq!(fake.calls_of("page.open")[1], json!({"url": "https://example.com"}));
+    assert!(run_tool(&mut fake.clone(), "kelpie_open_page", &json!({})).await.text.contains("missing `url`"));
+    assert!(run_tool(&mut fake.clone(), "kelpie_open_page", &json!({"url": 5})).await.text.contains("`url` must be text"));
+    assert!(run_tool(&mut fake.clone(), "kelpie_open_page", &json!({"url": "http://x", "title": []})).await.text.contains("`title` must be text"));
+    assert_eq!(fake.calls_of("page.open").len(), 2);
+    let reason = "Kelpie's window is not open, so the page cannot be shown; tell the person the address instead: http://localhost:5173/";
+    let refused = run_tool(&mut Fake::new("me").refuse("page.open", reason), "kelpie_open_page", &json!({"url": "http://localhost:5173/"})).await;
+    assert!(refused.is_error);
+    assert_eq!(refused.text, reason);
+    // The guide names it, with when to use it.
+    assert!(crate::sub_guide::GUIDE.contains("kelpie_open_page") && crate::sub_guide::GUIDE.contains("asks to see a page"));
+}
+
 #[test]
 fn output_is_capped() {
     let out = ToolOut::ok("x".repeat(MAX_OUT * 2), json!({}));

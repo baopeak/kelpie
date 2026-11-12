@@ -1440,3 +1440,98 @@ fn a_new_turn_clears_a_blocked_row_but_not_a_verdict_and_not_the_report_just_mad
     let _ = std::fs::remove_dir_all(dir);
 }
 
+
+#[test]
+fn a_page_address_is_http_or_https_with_a_host_and_nothing_hidden_in_it() {
+    for ok in ["http://localhost:5173/", "https://example.com", "HTTPS://Example.com/a?b=c#d", "http://127.0.0.1:8080/x", "http://[::1]:3000/", "http://[::1]/", "https://host:/path"] {
+        assert_eq!(page_url(&format!(" {ok} ")).as_deref(), Ok(ok), "{ok}");
+    }
+    for (bad, why) in [
+        ("", "missing `url`"),
+        ("file:///C:/Windows/win.ini", "only http:// and https://"),
+        ("javascript://alert(1)", "only http:// and https://"),
+        ("ftp://host/x", "only http:// and https://"),
+        ("example.com", "not a web address"),
+        ("http://user:pass@example.com/", "user name or password"),
+        ("http://user@example.com/", "user name or password"),
+        ("http://example.com\u{0}/", "control characters"),
+        ("http://exa mple.com/", "spaces"),
+        ("http://example.com/\u{7f}", "control characters"),
+        ("http:///path", "names no host"),
+        ("http://:80/", "names no host"),
+        ("http://[::1", "names no host"),
+        ("http://host:99999/", "not a port number"),
+        ("http://host:1:2/", "not a port number"),
+    ] {
+        let err = page_url(bad).unwrap_err();
+        assert!(err.contains(why), "{bad:?}: {err}");
+    }
+    // `\` ends the host as a browser reads it, so what follows it is not taken for credentials, and a long address is refused.
+    assert!(page_url("http://example.com\\@other.com/").is_ok());
+    assert!(page_url(&format!("http://h/{}", "a".repeat(MAX_PAGE_URL))).unwrap_err().contains("longer than"));
+    assert_eq!(page_title(" Docs\n\u{1b}[31m   page "), "Docs [31m page");
+}
+
+#[test]
+fn an_agent_asks_for_a_page_and_only_the_apps_windows_hear_of_it() {
+    let (d, dir) = daemon("page-open");
+    let (session, _) = add(&d, 1, "p", "claude", None);
+    session.spec.lock().project_id = Some("proj".into());
+    let ask = |params: Value| call(&d, "page.open", params);
+    // No window: the agent is told, with the address to pass on.
+    let err = ask(json!({"session_id": "p", "url": "http://localhost:5173/"})).unwrap_err().to_string();
+    assert!(err.contains("window is not open") && err.contains("http://localhost:5173/"), "{err}");
+    // The app's window, a script holding the user token and a program in a session.
+    let (app_tx, mut app_rx) = crate::session::client_channel();
+    d.register_client(7, app_tx);
+    d.set_client_role(7, &Role::User);
+    d.mark_app(7, true);
+    let (user_tx, mut user_rx) = crate::session::client_channel();
+    d.register_client(8, user_tx);
+    d.set_client_role(8, &Role::User);
+    d.mark_app(8, false);
+    let (program_tx, mut program_rx) = crate::session::client_channel();
+    d.register_client(9, program_tx);
+    d.set_client_role(9, &Role::Session("p".into()));
+    let out = ask(json!({"session_id": "p", "url": " https://example.com/a?b#c ", "title": "Docs\n page"})).unwrap();
+    assert_eq!(out, json!({"url": "https://example.com/a?b#c", "title": "Docs page", "project_id": "proj"}));
+    assert_eq!(decoded(&mut app_rx), vec![json!({"event": "page.open", "params": {"session_id": "p", "project_id": "proj", "url": "https://example.com/a?b#c", "title": "Docs page"}})]);
+    assert!(decoded(&mut user_rx).is_empty() && decoded(&mut program_rx).is_empty(), "the window alone hears of it");
+    // No title is null; a bad address reaches no window.
+    ask(json!({"session_id": "p", "url": "http://localhost:3000"})).unwrap();
+    assert_eq!(decoded(&mut app_rx)[0]["params"]["title"], Value::Null);
+    assert!(ask(json!({"session_id": "p", "url": "file:///etc/passwd"})).unwrap_err().to_string().contains("only http:// and https://"));
+    assert!(decoded(&mut app_rx).is_empty());
+    // Only a program in a session asks (the user's own connection names no session); a session with no project has nowhere to show it.
+    assert!(ask(json!({"url": "http://localhost:3000"})).unwrap_err().to_string().contains("for programs running in a Kelpie session"));
+    session.spec.lock().project_id = None;
+    let err = ask(json!({"session_id": "p", "url": "http://localhost:3000"})).unwrap_err().to_string();
+    assert!(err.contains("no project"), "{err}");
+    assert!(decoded(&mut app_rx).is_empty());
+    // The window that closes is no longer told.
+    session.spec.lock().project_id = Some("proj".into());
+    d.unregister_client(7);
+    assert!(ask(json!({"session_id": "p", "url": "http://localhost:3000"})).unwrap_err().to_string().contains("window is not open"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_page_is_asked_for_by_the_calling_session_only() {
+    let (d, dir) = daemon("page-open-auth");
+    let (restricted, _) = add(&d, 1, "r", "claude", None);
+    restricted.spec.lock().restricted = true;
+    add(&d, 2, "c", "codex", None);
+    // The id is the caller's whatever it says, restricted or not, and whether or not it may script other sessions.
+    for me in ["r", "c"] {
+        let mut forged = json!({"session_id": "someone-else", "url": "http://localhost:1"});
+        crate::auth::authorize(&d, &Role::Session(me.into()), "page.open", &mut forged).unwrap();
+        assert_eq!(forged["session_id"], me);
+    }
+    // A claimed id (its token went missing) proves nothing.
+    assert!(crate::auth::authorize(&d, &Role::Claimed("c".into()), "page.open", &mut json!({})).is_err());
+    // The event is never one a program hears.
+    for role in [Role::Session("c".into()), Role::Claimed("c".into()), Role::Anonymous] {
+        assert!(matches!(crate::auth::event_visibility(&d, &role, "page.open", &json!({}), None), crate::auth::EventVisibility::Hidden), "{role:?}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
