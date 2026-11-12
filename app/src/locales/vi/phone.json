@@ -284,5 +284,7 @@
   "Off: the inbox leaves them out and says how many it hides.": "Khi tắt mục này, danh sách không hiện các phiên đã dừng mà chỉ cho biết có bao nhiêu phiên bị ẩn.",
   "{n} stopped hidden": "{n} phiên đã dừng đang bị ẩn",
   "ended {ago}": "kết thúc {ago}",
+  "ended just now": "vừa kết thúc",
+  "{n} d ago": "{n} ngày trước",
   "Other folders": "Thư mục khác"
 }

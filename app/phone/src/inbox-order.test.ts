@@ -39,6 +39,7 @@ describe("inbox", () => {
   it("names a session by its name, a short title, or its kind, and finds its project", () => {
     expect(labelOf(row({ name: "build" }))).toBe("build");
     expect(labelOf(row({ title: "✳ Fix the login bug" }))).toBe("Fix the login bug");
+    expect(labelOf(row({ title: "✳ Đăng nhập lỗi" })), "a title that starts with a letter outside ASCII keeps it").toBe("Đăng nhập lỗi");
     expect(labelOf(row({ title: "x".repeat(60), kind: "claude" }))).toBe("claude");
     expect(whereOf(row({ project_id: "p1" }), { p1: "Kelpie" })).toBe("Kelpie");
     expect(whereOf(row({ cwd: "C:\\Users\\me\\proj" }), {})).toBe("proj");
@@ -77,6 +78,7 @@ describe("the inbox by workspace", () => {
   it("lists a session under its project, else the folder it runs in, else Other folders", () => {
     expect(workspaceOf(row({ project_id: "p1" }), projects)).toEqual({ key: "p1", name: "Kelpie" });
     expect(workspaceOf(row({ project_id: "gone", cwd: "C:\\code\\tools\\" }), projects)).toEqual({ key: "folder:tools", name: "tools" });
+    expect(workspaceOf(row({ cwd: "C:\\Code\\Tools" }), projects).key, "the same folder written in another case").toBe("folder:tools");
     expect(workspaceOf(row({ project_id: null, cwd: "" }), projects)).toEqual({ key: "other", name: null });
   });
 

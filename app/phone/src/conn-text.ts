@@ -16,7 +16,13 @@ export function ago(ms: number, at = Date.now()): string {
   if (s < 10) return t("just now");
   if (s < 60) return t("{n} s ago", { n: s });
   if (s < 3600) return t("{n} min ago", { n: Math.floor(s / 60) });
-  return t("{n} h ago", { n: Math.floor(s / 3600) });
+  if (s < 86400) return t("{n} h ago", { n: Math.floor(s / 3600) });
+  return t("{n} d ago", { n: Math.floor(s / 86400) });
+}
+
+/** "ended 5 min ago", for a session that stopped at `ms`. */
+export function endedAgo(ms: number, at = Date.now()): string {
+  return at - ms < 10_000 ? t("ended just now") : t("ended {ago}", { ago: ago(ms, at) });
 }
 
 /** Why the computer is busy, in a sentence. */

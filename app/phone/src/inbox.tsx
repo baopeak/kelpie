@@ -1,7 +1,7 @@
 // The inbox: every session across projects, grouped by what it needs from you (the longest waiting first) or by the workspace it
 // runs in, as chosen above the list or in Settings.
 import { createSignal, For, Show } from "solid-js";
-import { ago } from "./conn-text";
+import { endedAgo } from "./conn-text";
 import { intlLocale, msg, t } from "./i18n";
 import { groupByWorkspace, groupOf, groupSessions, labelOf, shownRows, whereOf, type GroupKey } from "./inbox-order";
 import type { SessionRow } from "./link";
@@ -71,7 +71,7 @@ function SessionItem(props: { s: SessionRow; byWorkspace: boolean }) {
     return [
       props.byWorkspace ? t(TITLES[group()]) : "",
       // A stopped session says when it ended (its last activity), not only that it did.
-      !s.alive && s.last_activity > 0 ? t("ended {ago}", { ago: ago(s.last_activity, now()) }) : "",
+      !s.alive && s.last_activity > 0 ? endedAgo(s.last_activity, now()) : "",
       s.kind,
       props.byWorkspace ? "" : whereOf(s, projects()),
       s.chat ? t("chat") : "",

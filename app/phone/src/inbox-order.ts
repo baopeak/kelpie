@@ -44,14 +44,15 @@ export function shownRows(rows: readonly SessionRow[], showStopped: boolean): { 
 export const needsCount = (rows: readonly SessionRow[]) => rows.filter((s) => groupOf(s) === "needs").length;
 
 /** What a session is called: its name, else a short title, else its kind. */
-export const labelOf = (s: SessionRow): string => s.name || (s.title && s.title.length < 48 ? s.title.replace(/^[^\w(]+\s*/u, "") : "") || s.kind;
+export const labelOf = (s: SessionRow): string => s.name || (s.title && s.title.length < 48 ? s.title.replace(/^[^\p{L}\p{N}(]+\s*/u, "") : "") || s.kind;
 
 /** Where a session runs, for the inbox's sections: its project when the computer named it, else the last folder of its working
  *  directory, else nothing (the inbox says "Other folders"). `key` tells the sections apart. */
 export function workspaceOf(s: SessionRow, projects: Record<string, string>): { key: string; name: string | null } {
   if (s.project_id && projects[s.project_id]) return { key: s.project_id, name: projects[s.project_id] };
   const folder = (s.cwd || "").split(/[\\/]/).filter(Boolean).pop();
-  return folder ? { key: `folder:${folder}`, name: folder } : { key: "other", name: null };
+  // Folder names compare without case: Windows writes the same folder either way.
+  return folder ? { key: `folder:${folder.toLowerCase()}`, name: folder } : { key: "other", name: null };
 }
 
 export const whereOf = (s: SessionRow, projects: Record<string, string>): string => workspaceOf(s, projects).name ?? "";

@@ -855,7 +855,7 @@ for n in (1, 2, 3):
     run.check("the inbox is by status at first: the live shells in their groups, the stopped one under Stopped", bool(by_status), str(phone.js(inbox_sections)))
     ended_sub = phone.js("return [...document.querySelectorAll('.row')].find((r) => r.textContent.includes('view-ended'))?.querySelector('.sub')?.textContent ?? ''")
     run.check("…a stopped session says when it ended, with a grey dot", "ended" in ended_sub and phone.js("return [...document.querySelectorAll('.row')].find((r) => r.textContent.includes('view-ended')).querySelector('.dot').classList.contains('exited')"), ended_sub)
-    phone.js("document.querySelector('.view-switch [data-view=\"workspace\"]').click()")
+    phone.js("document.querySelector('.view-switch [data-view=\"workspace\"]')?.click()")
     # The sections are keyed by project id, which the page learns with the computer's project names.
     by_workspace = wait(lambda: phone.js("return document.querySelector('.view-switch')?.dataset.inboxView === 'workspace' && !document.querySelector('section[data-group]') && !!document.querySelector(`section[data-workspace=\"${arguments[0]}\"]`) && !!document.querySelector(`section[data-workspace=\"${arguments[1]}\"]`)", pid, pid_b), 20)
     in_a = phone.js(names_in, f'section[data-workspace="{pid}"]') or []
@@ -868,7 +868,7 @@ for n in (1, 2, 3):
     phone.js("document.querySelector('[data-open-settings]').click()")
     phone.wait("return !!document.querySelector('[data-setting=\"show-stopped\"] input')", 10)
     run.check("Settings → Inbox shows the view chosen above the list, and stopped sessions shown", phone.js("return document.querySelector('[data-setting=\"inbox-view\"] select').value === 'workspace' && document.querySelector('[data-setting=\"show-stopped\"] input').checked") is True)
-    phone.js("document.querySelector('[data-setting=\"show-stopped\"] input').click()")
+    phone.js("document.querySelector('[data-setting=\"show-stopped\"] input')?.click()")
     phone.js("document.querySelector('header .icon').click()")
     stopped_n = sum(1 for x in daemon(d, "session.list") if not x["alive"])
     hidden_js = "const r = [...document.querySelectorAll('.row .name')].map((n) => n.textContent); return !document.querySelector('[data-settings]') && r.includes('view-b') && !r.includes('view-ended') ? (document.querySelector('[data-stopped-hidden]')?.dataset.stoppedHidden ?? null) : null"
@@ -879,10 +879,10 @@ for n in (1, 2, 3):
     phone.wait(LIVE, 60)
     kept_view = wait(lambda: phone.js("return document.querySelector('.view-switch')?.dataset.inboxView === 'workspace' && !!document.querySelector(`section[data-workspace=\"${arguments[0]}\"]`) && !!document.querySelector('[data-stopped-hidden]') && ![...document.querySelectorAll('.row')].some((r) => r.textContent.includes('view-ended'))", pid_b), 30)
     run.check("…and a reload keeps both choices", bool(kept_view), str(phone.js(inbox_sections)))
-    phone.js("document.querySelector('[data-stopped-hidden]').click()")
+    phone.js("document.querySelector('[data-stopped-hidden]')?.click()")
     run.check("the line turns stopped sessions back on", bool(phone.wait("return [...document.querySelectorAll('.row')].some((r) => r.textContent.includes('view-ended')) && !document.querySelector('[data-stopped-hidden]') && localStorage.getItem('kelpie-show-stopped') === '1'", 10)))
     # Back to the defaults: later checks read the status groups.
-    phone.js("document.querySelector('.view-switch [data-view=\"status\"]').click()")
+    phone.js("document.querySelector('.view-switch [data-view=\"status\"]')?.click()")
     run.check("…and one tap goes back to the inbox by status", bool(phone.wait("return document.querySelector('.view-switch')?.dataset.inboxView === 'status' && !!document.querySelector('section[data-group]') && !document.querySelector('section[data-workspace]')", 10)))
     for s in (view_a, view_b, view_ended):
         daemon(d, "session.close", {"handle": s["handle"]})
