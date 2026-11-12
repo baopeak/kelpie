@@ -1039,7 +1039,9 @@ for n in (1, 2, 3):
     phone.js("window.dispatchEvent(new Event('offline'))")
     phone.wait("return document.querySelector('.conn')?.dataset.state !== 'live'", 10)
     phone.js("window.dispatchEvent(new Event('online'))")
-    run.check("a network flap in the foreground comes back open, asking nothing", bool(phone.wait(LIVE, 30)) and bool(phone.wait(open_js, 15)) and passkeys()[0]["signCount"] == signs)
+    flap_live = bool(phone.wait(LIVE, 30))
+    flap_open = bool(phone.wait(open_js, 15))
+    run.check("a network flap in the foreground comes back open, asking nothing", flap_live and flap_open and passkeys()[0]["signCount"] == signs, str({"live": flap_live, "open": flap_open, "signs": [signs, passkeys()[0]["signCount"]], "lock": phone.js("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen ?? null"), "cover": phone.js("return !!document.querySelector('[data-lock-cover]')"), "state": phone.js(STATE)}))
 
     # A reload has lost the window's secret, which was only in the page's memory, so it asks again. Navigating away also hides the page, which sends `lock_now`, so whether the window is still open at
     # the computer depends on that frame getting out. The program with a copied key above is what shows a window held open without the secret is refused.

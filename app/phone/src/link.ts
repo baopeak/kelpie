@@ -493,7 +493,19 @@ export class Link {
       this.checkDirect();
       return;
     }
-    if (now - this.lastKickAt < KICK_GAP_MS) return;
+    if (now - this.lastKickAt < KICK_GAP_MS) {
+      // Too soon to go at once. With nothing else on its way (the network was just gone, so no retry was counted down), it goes when the gap ends:
+      // a page that is not left waiting for nothing.
+      if (!this.facts.connecting && this.timers.retry === null) {
+        const wait = this.lastKickAt + KICK_GAP_MS - now;
+        this.facts.nextAt = now + wait;
+        this.timers.retry = this.env.setTimeout(() => {
+          this.timers.retry = null;
+          this.kick();
+        }, wait);
+      }
+      return;
+    }
     this.lastKickAt = now;
     this.open();
   }

@@ -575,6 +575,20 @@ describe("Link reconnecting", () => {
     expect(r.sockets).toHaveLength(2);
   });
 
+  it("a network that comes back within 2 s of the last connect still connects again, a little later", () => {
+    const r = rig();
+    r.link.start();
+    r.connect();
+    r.setOnline(false);
+    r.link.setOnline(false);
+    r.advance(300);
+    r.setOnline(true);
+    r.link.setOnline(true);
+    expect(r.sockets, "too soon after the last attempt to go at once").toHaveLength(1);
+    r.advance(2_000);
+    expect(r.sockets, "but not left waiting for nothing").toHaveLength(2);
+  });
+
   it("tells a captive portal and an unreachable computer apart from a plain reconnect", async () => {
     const r = rig();
     r.setReach("portal");
