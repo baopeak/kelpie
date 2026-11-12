@@ -960,11 +960,10 @@ for n in (1, 2, 3):
     run.check("coming back within the grace shows the sessions with no passkey asked", bool(phone.wait(open_js, 10)) and passkeys()[0]["signCount"] == signs and lock_device().get("unlocked") is True, str(lock_device()))
     # Out of sight longer than the grace: the page's clock is moved on, since nobody waits five minutes in a test.
     phone.js(set_hidden, True)
-    phone.js("window.__realNow = window.__realNow || Date.now; const real = window.__realNow; Date.now = () => real() + 6 * 60 * 1000;")
-    phone.js(set_hidden, False)
+    # Only the return runs on the moved clock: anything the page stamped with a time in the future would hold its own timers back afterwards.
+    phone.js("const real = Date.now; Date.now = () => real() + 6 * 60 * 1000; try { Object.defineProperty(document, 'hidden', {value: false, configurable: true}); Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true}); document.dispatchEvent(new Event('visibilitychange')); } finally { Date.now = real; }")
     run.check("coming back after the grace shows the lock, and no session", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 15) == "unlock" and not phone.js("return !!document.querySelector('.row') || document.title.startsWith('(')"))
     run.check("…and the computer locks it", bool(wait(lambda: lock_device().get("unlocked") is False, 10)), str(lock_device()))
-    phone.js("Date.now = window.__realNow")
     phone.shot(os.path.join(shots, "26-phone-lock.png"))
     phone.js("document.querySelector('[data-lock-go]').click()")
     run.check("the passkey opens it again, with a signature the computer counted", bool(phone.wait(open_js, 20)) and passkeys()[0]["signCount"] > signs, str(phone.js(lock_error)))

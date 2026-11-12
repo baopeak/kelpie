@@ -313,6 +313,77 @@ describe("the grace after leaving", () => {
     expect(lockNow).not.toHaveBeenCalled();
   });
 
+  it("a reconnect while out of sight keeps the cover up until the page is shown", () => {
+    const { lock } = open();
+    lock.left();
+    lock.told({ state: "open", idle_s: 900 });
+    expect(lock.covered).toBe(true);
+    expect(lock.clear()).toBe(false);
+    lock.back();
+    expect(lock.clear()).toBe(true);
+  });
+
+  it("what needs a fresh unlock waits for the passkey, then runs once", async () => {
+    const { lock, lockNow, state } = rig();
+    state.grace = GRACE;
+    lock.told(UNLOCK);
+    await lock.go();
+    lock.told({ state: "open" });
+    const go = vi.fn();
+    lock.whenFresh(go);
+    await Promise.resolve();
+    expect(go, "fresh from the passkey: at once").toHaveBeenCalledTimes(1);
+    lock.left();
+    lock.back();
+    lock.whenFresh(go);
+    expect(lockNow).toHaveBeenCalledTimes(1);
+    expect(lock.face).toBe("unknown");
+    await Promise.resolve();
+    expect(go).toHaveBeenCalledTimes(1);
+    lock.told({ state: "open" });
+    await Promise.resolve();
+    expect(go, "a reconnect that says open is not the passkey").toHaveBeenCalledTimes(1);
+    lock.told(UNLOCK);
+    await lock.go();
+    lock.told({ state: "open" });
+    await Promise.resolve();
+    expect(go).toHaveBeenCalledTimes(2);
+    lock.told({ state: "open" });
+    await Promise.resolve();
+    expect(go, "once only").toHaveBeenCalledTimes(2);
+  });
+
+  it("what waits on a fresh unlock is dropped by leaving, forgetting the pairing or the lock going away", async () => {
+    for (const end of ["left", "forget", "none"] as const) {
+      const { lock, state } = rig();
+      state.grace = GRACE;
+      lock.told(UNLOCK);
+      await lock.go();
+      lock.told({ state: "open" });
+      lock.left();
+      lock.back();
+      const go = vi.fn();
+      lock.whenFresh(go);
+      if (end === "left") lock.left();
+      if (end === "forget") lock.forget();
+      if (end === "none") lock.told({ state: "none" });
+      lock.back();
+      lock.told(UNLOCK);
+      await lock.go();
+      lock.told({ state: "open" });
+      await Promise.resolve();
+      expect(go, end).not.toHaveBeenCalled();
+    }
+  });
+
+  it("with no passkey lock here, what asks for a fresh unlock runs at once", () => {
+    const { lock } = rig();
+    lock.told({ state: "none" });
+    const go = vi.fn();
+    lock.whenFresh(go);
+    expect(go).toHaveBeenCalledTimes(1);
+  });
+
   it("seeing the computer after any time away asks for the passkey again, even within the grace", async () => {
     const { lock, lockNow, setResume, state } = rig();
     state.grace = GRACE;

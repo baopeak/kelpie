@@ -131,9 +131,6 @@ export const [lockShown, setLockShown] = createSignal<{ clear: boolean; face: st
 /** What the computer last said of the lock (its idle time and the re-check of dangerous approvals), for Settings. */
 export const [lockInfo, setLockInfo] = createSignal<LockInfo>({ state: "unknown" });
 
-/** What the person asked for that needs the passkey again first: done once it has opened the phone. */
-let afterUnlock: (() => void) | null = null;
-
 const lock = new LockModel({
   credentials: browserCredentials(),
   ask: (m) => link.lockAsk(m),
@@ -151,27 +148,14 @@ const lock = new LockModel({
 }, () => {
   setLockShown({ clear: lock.clear(), face: lock.face, asking: lock.asking, error: lock.error, covered: lock.covered });
   setLockInfo(lock.lastInfo());
-  // Outside the model's own call, so what opens never runs inside its update.
-  if (afterUnlock) queueMicrotask(runAfterUnlock);
 });
 export const lockGo = () => lock.go();
 setLockShown({ clear: lock.clear(), face: lock.face, asking: false, error: null, covered: false });
 
 /** Seeing or controlling the computer asks for the passkey again after any time out of sight, even within the lock's grace (owner rule 2026-11-12):
  *  the lock screen comes back, and what was asked for opens once it is unlocked. */
-function withFreshUnlock(go: () => void) {
-  if (lock.face !== "open" || lock.fresh()) return go();
-  afterUnlock = go;
-  lock.relock();
-}
-function runAfterUnlock() {
-  if (!afterUnlock || !lock.fresh()) return;
-  const go = afterUnlock;
-  afterUnlock = null;
-  go();
-}
-export const openScreenPicker = () => withFreshUnlock(() => void remoteScreens.openPicker());
-export const openTakeoverPicker = (project: string | null) => withFreshUnlock(() => void takeovers.openPicker(project));
+export const openScreenPicker = () => lock.whenFresh(() => void remoteScreens.openPicker());
+export const openTakeoverPicker = (project: string | null) => lock.whenFresh(() => void takeovers.openPicker(project));
 /** Locks the app now, from Settings: the computer is told, and the lock screen asks for the passkey. */
 export const lockAppNow = () => lock.relock();
 
@@ -869,11 +853,19 @@ export function startApp() {
     // First: the system may take its picture of the app for the switcher at any moment from here.
     if (document.hidden) lock.left();
     else lock.back();
-    // Leaving the app ends a screen or a takeover at once, whatever the lock's grace (owner rule 2026-11-06).
-    if (document.hidden) {
-      afterUnlock = null;
+    // Leaving the app ends a screen or a takeover at once, whatever the lock's grace (owner rule 2026-11-06). With no grace the lock
+    // does it (the computer stops them on `lock_now`, and the screen says it ended when the phone locked).
+    if (document.hidden && lockGrace.get() > 0) {
       remoteScreens.close();
       takeovers.close();
+    }
+    // A session asked for while out of sight (a tap on an alert) opens on the way back: within the grace no new hello comes to open it.
+    if (!document.hidden && wantSession && connected() && lock.clear()) {
+      const want = wantSession;
+      const waited = wantFromAlert;
+      wantSession = null;
+      wantFromAlert = false;
+      openWanted(want, waited);
     }
     link.setHidden(document.hidden);
     // Nothing goes out from a hidden page, not even a late acknowledgement.

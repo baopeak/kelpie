@@ -94,10 +94,14 @@ function rig(replies: Partial<Record<"panes" | "start" | "stop" | "text" | "rebi
   const acks: number[] = [];
   const texts: { text: string; w: number }[] = [];
   const states: (TakeoverState | null)[] = [];
+  const stopped: string[] = [];
   const port: TakeoverPort = {
     panes: async () => replies.panes ?? { t: "ack", panes: [{ pane: "browser-b", title: "Other", host: "x.example", project: "p2", project_name: "B", held: false }, { pane: "browser-a", title: "Sign in", host: "accounts.example", project: "p1", project_name: "A", held: false }] },
     start: async () => replies.start ?? { t: "ack", result: "ok", tk: "tk1", title: "Sign in", host: "accounts.example" },
-    stop: async () => replies.stop ?? { t: "ack" },
+    stop: async (tk) => {
+      stopped.push(tk);
+      return replies.stop ?? { t: "ack" };
+    },
     text: async (_tk, text, _st, w) => {
       texts.push({ text, w });
       return replies.text ?? { t: "ack", result: "sent" };
@@ -130,10 +134,20 @@ function rig(replies: Partial<Record<"panes" | "start" | "stop" | "text" | "rebi
     now = end;
   };
   const session = new TakeoverSession(port, (s) => states.push(s));
-  return { session, sent, acks, texts, advance, state: () => session.state };
+  return { session, sent, acks, texts, stopped, advance, state: () => session.state };
 }
 
 describe("a takeover from the phone", () => {
+  it("a pane the computer hands over after the phone closed the takeover is let go at once", async () => {
+    const r = rig();
+    await r.session.openPicker(null);
+    const starting = r.session.pick("browser-a");
+    r.session.close();
+    await starting;
+    expect(r.stopped).toEqual(["tk1"]);
+    expect(r.state()).toBeNull();
+  });
+
   it("lists the panes of the session's project first, and starts live", async () => {
     const r = rig();
     await r.session.openPicker("p1");

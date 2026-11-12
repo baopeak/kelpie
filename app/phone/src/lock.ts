@@ -132,6 +132,10 @@ export class LockModel {
   private hiddenAt: number | null = null;
   /** The page has been hidden since the passkey last opened it: seeing or controlling the computer asks for it again first. */
   private hidSinceUnlock = false;
+  /** The page is out of sight with its cover up: nothing the computer says lifts the cover until the page is shown again. */
+  private away = false;
+  /** What the person asked for that needs a fresh unlock (`whenFresh`): it runs once the passkey has opened the phone again. */
+  private pending: (() => void) | null = null;
   private clockOffset = 0;
 
   constructor(private env: LockEnv, private changed: () => void) {
@@ -171,17 +175,24 @@ export class LockModel {
       this.hiddenAt = null;
     }
     if (face === "open" || face === "none" || face === "read_only") {
-      this.covered = false;
+      // A reconnect while out of sight (within the grace) says it is open: what is behind the lock still waits for the page to be shown.
+      if (!this.away) this.covered = false;
       this.error = null;
     }
+    // No passkey lock here any more: nothing asked for waits on one.
+    if (!["open", "unlock", "enrol", "unknown"].includes(face)) this.pending = null;
     this.env.store.set(SEEN, face === "none" || face === "read_only" ? "off" : "on");
     this.changed();
+    this.runPending();
   }
 
   /** The page was hidden. A ceremony's own sheet does that too, and is not leaving. */
   left() {
     if (this.asking || !["open", "unlock", "enrol", "unknown"].includes(this.face)) return;
     this.covered = true;
+    this.away = true;
+    // What was asked for is not wanted any more once the person has left.
+    this.pending = null;
     if (this.face === "open") {
       this.hidSinceUnlock = true;
       if (this.env.grace() > 0) {
@@ -201,6 +212,7 @@ export class LockModel {
   back() {
     if (this.asking) return;
     this.covered = false;
+    this.away = false;
     if (this.hiddenAt !== null) {
       const now = this.env.now();
       const idleMs = (this.info.idle_s ?? Infinity) * 1000;
@@ -231,6 +243,22 @@ export class LockModel {
     this.lockOut();
     this.face = "unknown";
     this.changed();
+  }
+
+  /** Runs `go` now if the passkey opened this page and it has not been out of sight since, or if no passkey lock applies here. Otherwise the page locks,
+   *  and `go` runs once the passkey has opened it again; leaving the app or forgetting the pairing drops it. */
+  whenFresh(go: () => void) {
+    if (this.face !== "open" || this.fresh()) return go();
+    this.pending = go;
+    this.relock();
+  }
+
+  /** Outside the call that made the page fresh, so what opens never runs inside the model's own update. */
+  private runPending() {
+    if (!this.pending || !this.fresh()) return;
+    const go = this.pending;
+    this.pending = null;
+    queueMicrotask(go);
   }
 
   private sendTouch(now: number) {
@@ -285,6 +313,7 @@ export class LockModel {
     } finally {
       this.asking = false;
       this.changed();
+      this.runPending();
     }
   }
 
@@ -337,6 +366,8 @@ export class LockModel {
     this.leftOpen = false;
     this.hiddenAt = null;
     this.hidSinceUnlock = false;
+    this.away = false;
+    this.pending = null;
     this.error = null;
     this.changed();
   }

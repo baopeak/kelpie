@@ -798,10 +798,20 @@ def main(phone_box, push, dA, wrangler, bundle_a, manifest_a, bundle_b, manifest
     phone.js(SET_HIDDEN, False)
     check("…and coming back within the grace opens it with no passkey asked, the computer still unlocked", bool(phone.wait(OPEN_WITH, 15, SHELL_NAME)) and passkeys()[0].get("signCount") == signs and device(dA, PHONE_NAME).get("unlocked") is True, device(dA, PHONE_NAME))
     phone.js(SET_HIDDEN, True)
-    phone.js("window.__realNow = window.__realNow || Date.now; const real = window.__realNow; Date.now = () => real() + 6 * 60 * 1000;")
-    phone.js(SET_HIDDEN, False)
+    phone.js("const real = Date.now; Date.now = () => real() + 6 * 60 * 1000; try { Object.defineProperty(document, 'hidden', {value: false, configurable: true}); Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true}); document.dispatchEvent(new Event('visibilitychange')); } finally { Date.now = real; }")
     check("coming back after the grace shows the lock, and the computer locks", phone.wait(LOCK_SCREEN + " === 'unlock'", 15) is True and bool(wait_for(lambda: device(dA, PHONE_NAME).get("unlocked") is False, 15)), phone.js(LOCK_SCREEN))
-    phone.js("Date.now = window.__realNow")
+    stuck = unlock(phone, SHELL_NAME)
+    check("…which the passkey opens", stuck is None, stuck)
+    # "Immediately": leaving locks at once, as it always did. The choice is read when the app starts, so it takes a reload; the key goes again after,
+    # and the next reload below is back to the default.
+    phone.js("localStorage.setItem('kelpie-lock-grace', '0')")
+    phone.go(ORIGIN + "/")
+    stuck = unlock(phone, SHELL_NAME)
+    phone.js(SET_HIDDEN, True)
+    check("with the grace set to Immediately, hiding the hosted app locks it at the computer", stuck is None and bool(wait_for(lambda: device(dA, PHONE_NAME).get("unlocked") is False, 15)), stuck or device(dA, PHONE_NAME))
+    phone.js(SET_HIDDEN, False)
+    check("…and coming back shows the lock", phone.wait(LOCK_SCREEN + " === 'unlock'", 15) is True, phone.js(LOCK_SCREEN))
+    phone.js("localStorage.removeItem('kelpie-lock-grace')")
     stuck = unlock(phone, SHELL_NAME)
     check("…which the passkey opens", stuck is None, stuck)
 
