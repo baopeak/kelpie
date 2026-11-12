@@ -507,6 +507,10 @@ function createAppStore() {
       case "notify.event":
         onNotifyEvent(p as NotifyEvent);
         break;
+      case "page.open":
+        // Read by lib/agent-web-pages.ts (the store must not import it: it imports the store).
+        window.dispatchEvent(new CustomEvent("kelpie:open-page", { detail: p }));
+        break;
       case "scheduled.updated":
         // Read by lib/limits.ts (the store must not import it: it imports the store).
         window.dispatchEvent(new CustomEvent("kelpie:scheduled", { detail: p }));

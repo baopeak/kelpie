@@ -4,7 +4,11 @@
 pub const GUIDE: &str = "\
 Kelpie sub-sessions: you can open other agent sessions (any installed agent) to do parts of the work, steer them and \
 get their reports back. Tools: kelpie_agents, kelpie_spawn, kelpie_sessions, kelpie_message, kelpie_read, kelpie_wait, \
-kelpie_report, kelpie_close. Without the tools, the same operations are the command `sub agents|spawn|list|send|read|wait|report|inbox|close` of the program in the KELPIE_CLI variable: `\"$KELPIE_CLI\" sub …` in bash, `& $env:KELPIE_CLI sub …` in PowerShell, `\"%KELPIE_CLI%\" sub …` in cmd.
+kelpie_report, kelpie_close. Without the tools, the same operations are the command `sub agents|spawn|list|send|read|wait|report|inbox|close|open` of the program in the KELPIE_CLI variable: `\"$KELPIE_CLI\" sub …` in bash, `& $env:KELPIE_CLI sub …` in PowerShell, `\"%KELPIE_CLI%\" sub …` in cmd.
+
+Web pages: kelpie_open_page (`sub open <url> [--title T]`) opens an http(s) page for the person in a background tab of your project in \
+Kelpie's window. Use it when the person asks to see a page, or when you started a server whose page they should look at; it never takes \
+the focus from you. If Kelpie's window is not open it says so: then give the person the address.
 
 How to coordinate:
 - Spawn, then end your turn. A child's report arrives in your session as a new message when you are idle; you do not have to look for it. \

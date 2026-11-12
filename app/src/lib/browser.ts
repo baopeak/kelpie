@@ -132,6 +132,23 @@ export function browserPaneOnPort(projectId: string, port: number): { tabId: str
   return null;
 }
 
+/** The browser pane of a project that shows `href` (a parsed URL's `href`): the address it was opened with or the one it is on now. */
+export function browserPaneShowing(projectId: string, href: string): { tabId: string; paneId: string } | null {
+  const same = (u: string | undefined) => {
+    try {
+      return !!u && new URL(u).href === href;
+    } catch {
+      return false;
+    }
+  };
+  for (const tab of store.workspace(projectId).tabs) {
+    for (const pane of allPanes(tab.root)) {
+      if (pane.kind === "browser" && (same(pane.url) || same(browserState[pane.id]?.url))) return { tabId: tab.id, paneId: pane.id };
+    }
+  }
+  return null;
+}
+
 /** Opens a browser pane in the active project: a new tab, or split next to the focused pane. */
 export function openBrowser(url = "", where: "tab" | "right" | "down" = "tab", projectId = store.state.activeProject) {
   if (!projectId) return;

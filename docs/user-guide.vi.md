@@ -91,6 +91,8 @@ Một agent có thể mở các phiên agent khác để chia việc. Khác vớ
 
 **Giới hạn.** Sub-session được lồng sâu tối đa 3 cấp, mỗi phiên có tối đa 10 phiên con đang chạy, và toàn máy còn có một giới hạn chung do Kelpie đặt tự động hoặc do bạn chọn. Một sub-session không bao giờ có nhiều quyền hơn phiên đã mở nó. Trong Settings → Agents → *Sub-sessions*, bạn chọn một trong ba chế độ Off, Ask (mặc định) và Allow.
 
+**Công cụ mở trang web.** Cùng với các công cụ sub-session, agent còn có công cụ `kelpie_open_page` để mở một trang web cho bạn xem trong tab nền của project. Cách công cụ này hoạt động được mô tả ở mục *Trang web do agent mở* trong phần [Tệp, trình duyệt và tiến trình](#tệp-trình-duyệt-và-tiến-trình).
+
 Chi tiết nằm ở phần [Sub-sessions](user-guide.md#sub-sessions).
 
 ## Worktree và board
@@ -158,6 +160,8 @@ Chi tiết nằm ở các phần [Specs and tasks](user-guide.md#specs-and-tasks
 **Trình duyệt (`Ctrl+Shift+U`).** Khung trình duyệt có thanh địa chỉ, công cụ nhà phát triển và chức năng chụp màn hình trang. Ở chế độ *Design mode*, bạn nhấp các phần tử trên trang, thêm ghi chú rồi gửi tất cả cho agent trong một yêu cầu.
 
 **Tiến trình.** Nếu bạn bật Settings → Terminal → *Mở trang web của agent trong một tab* (khi mới cài thì mục này tắt), mỗi khi một agent trên màn hình khởi động một trang web (dev server, bảng điều khiển…), Kelpie mở trang đó trong một tab nền và báo ngắn cho bạn. Tab *Processes* trong panel bên phải liệt kê những gì mỗi phiên đang chạy dưới dạng cây, kèm PID, bộ nhớ, CPU và cổng. Bạn nhấp một cổng để mở trang tương ứng trong tab trình duyệt. Nút *Kill* dừng một chương trình cùng những gì nó đã khởi động, còn *Kill children* dừng những gì một phiên đã khởi động nhưng vẫn giữ phiên đó. Cả hai nút đều hỏi trước và nói rõ cổng nào sẽ được giải phóng.
+
+**Trang web do agent mở.** Dù cài đặt mở tab tự động đang bật hay tắt, agent vẫn có thể tự mở một trang web khi bạn yêu cầu, ví dụ *"mở trang đó cho tôi xem"*, hoặc khi agent vừa khởi động một server mà bạn cần xem. Để làm việc này, agent dùng công cụ `kelpie_open_page` (hoặc lệnh `"$KELPIE_CLI" sub open <url>`), và Kelpie mở trang trong một tab nền của project chứa phiên đó, kèm một thông báo ngắn có nút *View*. Kelpie chỉ mở địa chỉ `http://` hoặc `https://` không chứa tên đăng nhập hay mật khẩu. Nếu project đã có một tab hiện đúng địa chỉ đó, Kelpie không mở thêm tab mà chỉ báo cho bạn biết; một trang khác của cùng server vẫn được mở trong tab riêng, và tab tự động mà agent yêu cầu theo cách này sẽ được giữ lại khi server dừng. Khi cửa sổ không mở được trang được gửi tới, chẳng hạn vì project đã bị xóa, thông báo sẽ cho bạn biết agent đã yêu cầu gì và vì sao trang không được mở. Mỗi phiên chỉ được mở tối đa 10 trang trong một phút. Công cụ này chỉ có ở các phiên chạy trên máy này, còn agent trong phiên SSH thì không có, vì vậy `localhost` trong địa chỉ luôn là máy của bạn. Khi cửa sổ Kelpie đang đóng, agent nhận được thông báo lỗi và sẽ đưa địa chỉ trang cho bạn.
 
 Chi tiết nằm ở các phần [Files](user-guide.md#files), [Composer](user-guide.md#composer), [Browser panes](user-guide.md#browser-panes-and-design-mode) và [Processes](user-guide.md#processes-ports-and-preview).
 

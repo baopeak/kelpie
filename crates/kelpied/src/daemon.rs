@@ -188,6 +188,8 @@ pub struct Daemon {
     clients: Mutex<HashMap<u64, ClientTx>>,
     /// Who each authenticated connection is (see `set_client_role`).
     client_roles: Mutex<HashMap<u64, crate::auth::Role>>,
+    /// When each session last asked for a web page (`page.open`), within the last minute: an agent that loops cannot fill the window.
+    page_opens: Mutex<HashMap<String, Vec<Instant>>>,
     store: Store,
     pub data_dir: PathBuf,
     /// Path of this executable; agents call it back as `kelpied hook …`.
@@ -356,6 +358,7 @@ impl Daemon {
                 next_handle: AtomicU32::new(1),
                 clients: Mutex::new(HashMap::new()),
                 client_roles: Mutex::new(HashMap::new()),
+                page_opens: Mutex::new(HashMap::new()),
                 store: Store::new(&data_dir),
                 workspace_meta: Mutex::new(MetaStore::load(&data_dir)),
                 notes: Mutex::new(NoteStore::load(&data_dir)),
@@ -1904,6 +1907,7 @@ impl Daemon {
             }
             "sub.spawn" => return self.sub_spawn(tx, id, &params),
             m if m.starts_with("sub.") => self.sub_rpc(m, &params)?,
+            "page.open" => self.page_open(&params)?,
             "daemon.set_theme" => {
                 let light = params.get("theme").and_then(Value::as_str) == Some("light");
                 match params.get("palette").filter(|p| p.is_object()) {

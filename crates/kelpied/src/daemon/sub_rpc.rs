@@ -66,6 +66,59 @@ fn name_from_task(task: &str) -> String {
     subs::cut(line, 40)
 }
 
+/// The longest address `page.open` takes.
+const MAX_PAGE_URL: usize = 4096;
+
+/// How many pages one session may ask for in a minute (`page.open`).
+const PAGE_OPENS_PER_MINUTE: usize = 10;
+
+/// The address an agent asked to show, checked and normalized: read by the WHATWG URL rules (the `url` crate), which the window's
+/// `new URL()` follows too, so the daemon accepts nothing the window would refuse; then `http` or `https` with a host, no user name or
+/// password, nothing that is not printed (control characters, spaces). What the window is sent is the normalized address.
+fn page_url(given: &str) -> Result<String, String> {
+    let given = given.trim();
+    if given.is_empty() {
+        return Err("missing `url`".into());
+    }
+    let too_long = |s: &str| s.chars().count() > MAX_PAGE_URL;
+    if too_long(given) {
+        return Err(format!("the address is longer than {MAX_PAGE_URL} characters"));
+    }
+    if given.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("the address has spaces or control characters in it; encode them (%20) or leave them out".into());
+    }
+    let url = url::Url::parse(given).map_err(|e| match e {
+        url::ParseError::RelativeUrlWithoutBase => format!("`{given}` is not a web address: give one that starts with http:// or https://"),
+        e => format!("`{given}` is not an address a browser can open ({e})"),
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("only http:// and https:// pages can be opened, not {}:", url.scheme()));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("the address carries a user name or password (`user:pass@`); Kelpie does not open those, leave them out".into());
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(format!("`{given}` names no host"));
+    }
+    let href = String::from(url);
+    if too_long(&href) {
+        return Err(format!("the address is longer than {MAX_PAGE_URL} characters"));
+    }
+    Ok(href)
+}
+
+/// Characters that are not shown but change how the text around them reads: bidirectional controls (an "evil.com" shown backwards)
+/// and zero-width ones.
+fn hidden_char(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+}
+
+/// A page title as the notice shows it: one line, without control, bidirectional or zero-width characters, at most 120 characters.
+fn page_title(given: &str) -> String {
+    let line: String = given.chars().filter(|c| !hidden_char(*c)).map(|c| if c.is_control() { ' ' } else { c }).collect();
+    subs::cut(&line.split_whitespace().collect::<Vec<_>>().join(" "), 120)
+}
+
 /// The part of a branch name that comes from a name: `runs::slug`, but a name with no letters it can keep is not "run".
 fn branch_slug(name: &str) -> String {
     let slug = runs::slug(name);
@@ -529,6 +582,47 @@ impl Daemon {
         anyhow::ensure!(self.is_descendant(&sid, &target.spec), "{} is not one of your sub-sessions; a session can close only the sub-sessions it opened", self.session_tag(&target));
         self.close(target.handle)?;
         Ok(json!(true))
+    }
+
+    /// `page.open {url, title?}`: the calling session asks the person's window to show a web page in a background tab of the session's
+    /// project. Only the app's windows hear of it (`page.open` event); with none open the agent is told so, to tell the person itself.
+    pub(super) fn page_open(&self, params: &Value) -> Result<Value> {
+        let sid = caller_of("page.open", params)?;
+        let url = page_url(params.get("url").and_then(Value::as_str).unwrap_or_default()).map_err(|e| anyhow!(e))?;
+        let title = params.get("title").and_then(Value::as_str).map(page_title).filter(|t| !t.is_empty());
+        let spec = self.by_id(&sid).ok_or_else(|| anyhow!("the calling session no longer exists"))?.spec();
+        let project = spec.project_id.filter(|p| !p.is_empty()).ok_or_else(|| anyhow!("this session belongs to no project in Kelpie's window, so there is no tab to open the page in; give the person the address instead: {url}"))?;
+        self.count_page_open(&sid, Instant::now())?;
+        let told = self.tell_apps("page.open", json!({"session_id": sid, "project_id": project, "url": url, "title": title}));
+        anyhow::ensure!(told > 0, "Kelpie's window is not open, so the page cannot be shown; tell the person the address instead: {url}");
+        Ok(json!({"url": url, "title": title, "project_id": project}))
+    }
+
+    /// Counts a page that session `sid` asks for at `now`, or refuses it once the session asked for `PAGE_OPENS_PER_MINUTE` in the last
+    /// minute. A refused one does not count, nor one refused before it (a bad address, no project).
+    fn count_page_open(&self, sid: &str, now: Instant) -> Result<()> {
+        let minute = Duration::from_secs(60);
+        let mut opens = self.page_opens.lock();
+        // Sessions that asked for nothing for a minute, closed ones among them, are forgotten.
+        opens.retain(|_, at| {
+            at.retain(|t| now.saturating_duration_since(*t) < minute);
+            !at.is_empty()
+        });
+        let at = opens.entry(sid.to_string()).or_default();
+        anyhow::ensure!(
+            at.len() < PAGE_OPENS_PER_MINUTE,
+            "this session already asked for {PAGE_OPENS_PER_MINUTE} pages in the last minute; open no more for now, and tell the person the address instead if they need it"
+        );
+        at.push(now);
+        Ok(())
+    }
+
+    /// Sends an event to the app's windows alone (not to scripts holding the user token, nor to sessions); how many got it.
+    fn tell_apps(&self, event: &str, params: Value) -> usize {
+        let msg = json_out(&json!({"event": event, "params": params}));
+        let apps = self.app_clients();
+        let clients = self.clients.lock();
+        apps.iter().filter_map(|id| clients.get(id)).filter(|tx| tx.send(crate::session::Outgoing { data: msg.data.clone(), credit: None }).is_ok()).count()
     }
 
     /// `spec` is a child, grandchild… of `ancestor`, through sessions that are still open: once a middle session is closed the

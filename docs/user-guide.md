@@ -811,7 +811,7 @@ automatically. Other agents see a short brief in the child's prompt and `$KELPIE
 environment; the same operations are a command, in bash `"$KELPIE_CLI" sub spawn codex "fix #1"
 --worktree` and in PowerShell `& $env:KELPIE_CLI sub spawn codex "fix #1" --worktree`.
 `kelpied sub --help` lists them (`agents`, `spawn`, `list`, `send`, `read`, `wait`, `report`,
-`inbox`, `close`). `--worktree` gives the child its own branch `kelpie/sub-<name>-<tag>` (`<tag>` is four
+`inbox`, `close`, and `open`, which shows you a web page: see "Processes, ports and preview"). `--worktree` gives the child its own branch `kelpie/sub-<name>-<tag>` (`<tag>` is four
 random characters, so two children with the same task never share a branch), which closing
 never removes (Finish and Review do). Switching a parent between terminal and chat keeps its
 children.
@@ -901,7 +901,17 @@ of its own in the background and a short message says so: the agent stays in vie
 keyboard, and the highlighted tab is one click away. Only a port that answers with a page counts;
 one that answers *Not Found* or is not a website gets no tab. A tab you never opened goes when the
 page stops, and a page you closed does not come back until the app restarts. Servers you start yourself in a shell
-get no tab. The **Processes** tab of the right panel (palette: *Processes and Ports*) lists what
+get no tab. Whatever that setting says, an agent can also open a page when you ask it to (*"show me
+the page"*) or when it started a server you should look at: it uses the `kelpie_open_page` tool (or
+`"$KELPIE_CLI" sub open <url>`), and the page opens the same way, as a background tab of the
+session's project with a short message and *View*. Only `http://` and `https://` addresses without a
+user name or password are opened; a tab of the project already on the same address is not opened
+twice, the message says so instead (another page of the same server gets its own tab, and an
+automatic tab the agent asked for this way stays when its server stops). When the window cannot open a
+page it was sent (its project was removed, say), the message says what was asked and why. One session
+can open at most 10 pages a minute. The tool is offered only to sessions on this computer (an SSH
+session's agent does not have it), so `localhost` in the address is this computer. If Kelpie's window is
+not open, the agent is told so and gives you the address. The **Processes** tab of the right panel (palette: *Processes and Ports*) lists what
 each running session of the project runs, as a tree with PID, memory, CPU and ports. Click a port
 to show it in a browser tab, the one already on it if there is one. **Kill** stops a program and what it started. **Kill children** stops what a
 session started while the session itself keeps running; in an agent session the agent also keeps
@@ -1575,10 +1585,10 @@ The `kelpied` command groups, described in their sections above:
 | `kelpied worktree get\|set` | Reads or sets a folder's comment and board status ([Worktrees](#worktrees-and-the-workspace-board)). |
 | `kelpied review add\|list` | Leaves or lists notes on the worktree's diff ([Review with another agent](#review-with-another-agent-and-best-of-several)). |
 | `kelpied run create\|list\|show\|approve\|retry\|done\|skip\|cancel\|delete\|report\|wait` | Creates and drives orchestration runs ([Orchestration runs](#orchestration-runs)). |
-| `kelpied sub agents\|spawn\|list\|send\|read\|wait\|report\|inbox\|close` | Opens and steers sub-sessions ([Sub-sessions](#sub-sessions)). |
+| `kelpied sub agents\|spawn\|list\|send\|read\|wait\|report\|inbox\|close\|open` | Opens and steers sub-sessions ([Sub-sessions](#sub-sessions)); `open` shows you a web page ([Processes, ports and preview](#processes-ports-and-preview)). |
 | `kelpied ping` | Prints the running daemon's version and API level. |
 | `kelpied stop [--kill-sessions] [--wait [--timeout-ms N]]` | Asks the daemon to exit; with `--kill-sessions` its sessions end too, and `--wait` waits until the process is gone. |
-| `kelpied mcp` | The MCP server Kelpie gives Claude Code and Codex for sub-sessions (started by the agents, not by hand). |
+| `kelpied mcp` | The MCP server Kelpie gives Claude Code and Codex for sub-sessions and web pages (started by the agents, not by hand). |
 | `kelpied call <method> [json]` | Calls any daemon method directly. |
 
 `kelpied call` talks to the running daemon directly, e.g.

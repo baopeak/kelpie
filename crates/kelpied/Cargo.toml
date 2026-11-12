@@ -39,6 +39,8 @@ kelpie-link = { path = "../kelpie-link" }
 # A phone's screen (screen.rs): the media messages' format and the input checks, shared with the helper. Its pure modules only.
 kelpie-screen = { path = "../kelpie-screen", default-features = false }
 regex = "1"
+# The address an agent asks the window to open (`page.open`), read by the WHATWG rules the window's own parser follows.
+url = "2.5"
 # SSH passwords / key passphrases saved by the app, read when ssh asks (askpass.rs).
 keyring = { version = "3.6", default-features = false, features = ["windows-native", "apple-native"] }
 if-addrs = "0.15"

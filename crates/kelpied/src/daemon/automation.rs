@@ -164,6 +164,11 @@ impl Daemon {
         self.auto_rt.app.lock().contains(&client)
     }
 
+    /// The connections of the app's windows, now.
+    pub(super) fn app_clients(&self) -> Vec<u64> {
+        self.auto_rt.app.lock().iter().copied().collect()
+    }
+
     fn app_only(&self, client: u64, method: &str) -> Result<()> {
         anyhow::ensure!(self.is_app(client), "{method} is only available to the Kelpie app");
         Ok(())
