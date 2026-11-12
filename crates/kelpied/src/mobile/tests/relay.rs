@@ -274,6 +274,9 @@ async fn a_secure_phone_works_through_a_slot_gets_its_token_and_is_closed_when_r
     let hello = hear(&mut ws, 4, &mut session, &mut others).await.unwrap();
     assert_eq!(hello["type"], "hello");
     assert_eq!(hello["device"]["permission"], "write", "a secure device types through the relay: {hello}");
+    assert_eq!((hello["device"]["control"].as_str(), hello["ts"].as_bool()), (Some("not_granted"), Some(false)), "its record is below control, and Tailscale is off: {hello}");
+    let listed = network.rig.daemon.mobile.status(true)["devices"].as_array().unwrap().iter().find(|d| d["id"] == "phone").unwrap()["connection"].clone();
+    assert_eq!(listed["route"], "relay", "the desktop sees how it is connected: {listed}");
     let addrs = hear(&mut ws, 4, &mut session, &mut others).await.unwrap();
     assert!(addrs["endpoints"].as_array().unwrap().iter().any(|e| e["t"] == "relay" && e["r"] == format!("{ROOM}.ticket")), "{addrs}");
     let given = hear(&mut ws, 4, &mut session, &mut others).await.unwrap();

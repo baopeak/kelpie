@@ -28,7 +28,9 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
     agent (fake_acp_agent.py) shows the prompt through `kelpie_sent`, and a stop cancels its permission.
 11. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, a script here: never the real Tailscale): each state is told, a port used by
     something else is refused and left as it was, publishing runs the one command and off removes only our entry, a page through the
-    loopback listener pairs as a secure origin with its address from `X-Forwarded-For`, and the plain user token can change none of it. Such a phone is locked at the daemon until a passkey's signature passes (software keys, real signatures): every verb but the lock's own refused, a forged or unverified assertion and a used challenge refused, a reconnect inside the window not asked again if it holds the window's secret, and locked if it does not.
+    loopback listener pairs as a secure origin with its address from `X-Forwarded-For`, and the plain user token can change none of it. Its hello says why it
+    may not take control (`not_granted`, its record may type) and that the computer is on Tailscale (`ts`), and `mobile.status` lists it as connected through
+    Tailscale until it goes. Such a phone is locked at the daemon until a passkey's signature passes (software keys, real signatures): every verb but the lock's own refused, a forged or unverified assertion and a used challenge refused, a reconnect inside the window not asked again if it holds the window's secret, and locked if it does not.
 12. Alerts, with no window open, against a local stand-in for a push service that the daemon really POSTs to (`KELPIE_PUSH_TEST_BASE`): the closed list refuses
     what is no push service; a test alert and a needs-you event are signed, encrypted, content-free when opened with the browser's keys, and accepted within 2 s; one call per
     destination; 503 and 429 retried as asked, a session answered meanwhile not told; a hanging ntfy does not delay Web Push; a timeout is said with no address; 404 and 410 end
@@ -1170,6 +1172,9 @@ async def security(d):
     hello = await locked.open()
     check("a secure origin's phone starts locked, with a passkey to set up", hello.get("locked") is True and hello["lock"]["state"] == "enrol" and hello["lock"]["rp_id"] == fqdn, hello.get("lock"))
     check("…and its hello says nothing of any session or project", hello["sessions"] == [] and hello["projects"] == {} and hello["rev"] == 0 and hello.get("push") is None, hello)
+    check("…but says why it may not take control, its record being below it, and that this computer is on Tailscale", hello["device"].get("control") == "not_granted" and hello.get("ts") is True, (hello["device"], hello.get("ts")))
+    route = lambda: (next((x for x in d.call("mobile.status")["devices"] if x["name"] == "Over Tailscale"), {}).get("connection") or {}).get("route")
+    check("the desktop lists it as connected through Tailscale", await ps.async_wait_for(lambda: route() == "tailscale", 10), route())
     for name in ("list", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_test"):
         reply = await locked.ask(type=name, id="nothing", text="x", key="enter")
         check(f"…{name} is refused while locked", (reply or {}).get("code") == "locked", reply)
@@ -1189,6 +1194,7 @@ async def security(d):
     check("leaving locks it at once", (told or {}).get("lock", {}).get("state") == "unlock" and bool(told["lock"].get("challenge")), told)
     check("…and reading is refused again", (await locked.ask(type="list"))["code"] == "locked")
     await locked.close()
+    check("…and once it goes, as not connected", await ps.async_wait_for(lambda: route() is None, 10), route())
 
     thief = ps.Phone(f"http://{origin}/", copied, origin=f"https://{origin}", **held)
     hello = await thief.open()

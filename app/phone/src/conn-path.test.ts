@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isLocalHost, isTailscaleHost, livePath, methodLines, methodText, pageMethod, pairWay, pathText, screenBlock, screenWhy, type ScreenFacts } from "./conn-path";
+import { computerBlock, isLocalHost, isTailscaleHost, livePath, methodLines, methodText, pageMethod, pairWay, pathText, screenBlock, screenWhy, tailscaleHint, type ScreenFacts } from "./conn-path";
 
 const fill = (text: string, vars?: Record<string, string | number>) => (vars ? text.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m)) : text);
 const page = (url: string) => {
@@ -131,5 +131,22 @@ describe("why the screen is not offered here", () => {
     expect(screenBlock({ ...ok, computer: "not_control" })).toBe("not_control");
     expect(screenBlock({ ...ok, older: true, computer: "relay" })).toBe("relay");
     expect(screenBlock({ ...ok, computer: null })).toBeNull();
+  });
+
+  it("reads each of the computer's reasons as the phone's own, and works it out itself for ok, an older computer or a reason it does not know", () => {
+    const codes = ["hosted_app", "not_granted", "plain_page", "via_relay", "lock_off", "no_passkey", "locked"];
+    expect(codes.map(computerBlock)).toEqual(["hosted", "not_control", "plain_page", "relay", "lock", "lock", "lock"]);
+    for (const none of ["ok", undefined, "a_later_reason"]) expect(computerBlock(none), String(none)).toBeNull();
+    expect(screenWhy({ ...ok, computer: computerBlock("plain_page") }, fill)).toMatch(/did not come from your computer over HTTPS/);
+    expect(screenWhy({ ...ok, unlocked: false, computer: computerBlock("ok") }, fill), "ok, and locked here since").toMatch(/app lock on and unlocked/);
+    expect(screenWhy({ ...ok, permission: "write", computer: computerBlock("not_granted") }, fill)).toBe(screenWhy({ ...ok, permission: "write" }, fill));
+  });
+});
+
+describe("where the screen is, from the hosted app", () => {
+  it("says to pair the Tailscale app when the computer has Tailscale, on the hosted app only", () => {
+    expect(tailscaleHint("hosted", true, fill)).toMatch(/also has Tailscale.*Pair a phone → Tailscale/);
+    expect(tailscaleHint("hosted", false, fill)).toBeNull();
+    for (const m of ["tailscale", "https", "http", "local"] as const) expect(tailscaleHint(m, true, fill), m).toBeNull();
   });
 });

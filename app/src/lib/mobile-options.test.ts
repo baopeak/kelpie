@@ -5,8 +5,8 @@ import { HOSTED_API, LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./
 import { translated } from "./i18n";
 import {
   alreadyRemoved, approvalChoices, approveWithReplace, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
-  OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, samePhoneSuggestion, screenPolicyLine,
-  telegramChoice, turnOnAccess, type AccessCalls, type ApprovalCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
+  OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, routeLabel, samePhoneSuggestion, screenPolicyLine,
+  telegramChoice, turnOnAccess, withConnection, withNewerConnections, type AccessCalls, type ConnectionNews, type MobileRoute, type ApprovalCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
 } from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
 import { emptyPushConfig, type PushState } from "./push-config";
@@ -678,8 +678,45 @@ describe("one phone paired several ways", () => {
   it("names each record's way and how it is connected now", () => {
     expect([a, b, c, device({ page_kind: "own" }), device({ kind: "app" })].map((d) => deviceMethodLabel(d, hostedRelay()))).toEqual(["Tailscale", "Kelpie's relay", "This network", "This network, over HTTPS", "Kelpie app"]);
     expect(deviceMethodLabel(b, hostedRelay({ url: "wss://mine.example" }))).toBe("Your relay at mine.example");
-    const routes = (["relay", "tailscale", "lan", "local"] as const).map((route) => connectionLine({ route, since: 0 }));
-    expect(routes).toEqual(["connected now through the relay", "connected now through Tailscale", "connected now through this network", "connected now through this computer"]);
-    for (const line of routes) expect(translated(line), line).toBeTruthy();
+    const routes = ["relay", "tailscale", "lan", "local"] as const;
+    expect(routes.map(routeLabel)).toEqual(["the relay", "Tailscale", "this network", "this computer"]);
+    expect(routes.map((route) => connectionLine({ route, since: 0 }))).toEqual(["connected now · through the relay", "connected now · through Tailscale", "connected now · through this network", "connected now · through this computer"]);
+    for (const text of [...routes.map((route) => routeLabel(route)!), "connected now · through {route}", "paired {when} · {connection}"]) expect(translated(text), text).toBeTruthy();
+  });
+
+  it("changes one row in place when a phone connects, changes its way or goes, and leaves the list be otherwise", () => {
+    const list = [device({ id: "a" }), device({ id: "b", connection: { route: "relay", since: 5 } })];
+    const on = withConnection(list, "a", "tailscale", 100);
+    expect(on.map((d) => d.connection ?? null)).toEqual([{ route: "tailscale", since: 100 }, { route: "relay", since: 5 }]);
+    expect(on[1], "the other row is the same object").toBe(list[1]);
+    expect(withConnection(on, "b", "lan", 200)[1].connection).toEqual({ route: "lan", since: 200 });
+    expect(withConnection(on, "b", null, 200)[1].connection).toBeNull();
+    expect(withConnection(list, "b", "relay", 300), "the same way: nothing changes, not even since when").toBe(list);
+    expect(withConnection(list, "a", null, 300), "not connected already").toBe(list);
+    expect(withConnection(list, "gone", "relay", 300), "a device not listed").toBe(list);
+  });
+
+  it("says plainly that a phone is connected when the daemon names a way this app does not know", () => {
+    const route = "cloud" as unknown as MobileRoute;
+    expect(routeLabel(route)).toBeNull();
+    expect(connectionLine({ route, since: 0 })).toBe("connected now");
+    expect(translated("connected now")).toBeTruthy();
+  });
+
+  it("keeps what a phone's connection said after a full read started, over that read's older reply", () => {
+    // The reply was read before "a" went and "b" came; "c" changed before the read started, so the reply already holds it.
+    const reply = [device({ id: "a", connection: { route: "tailscale", since: 5 } }), device({ id: "b" }), device({ id: "c", connection: { route: "lan", since: 7 } })];
+    const news = new Map<string, ConnectionNews>([
+      ["a", { route: null, since: 100, seq: 3 }],
+      ["b", { route: "relay", since: 110, seq: 4 }],
+      ["c", { route: null, since: 50, seq: 1 }],
+      ["gone", { route: "relay", since: 120, seq: 5 }],
+    ]);
+    const out = withNewerConnections(reply, news, 2);
+    expect(out.map((d) => d.connection ?? null)).toEqual([null, { route: "relay", since: 110 }, { route: "lan", since: 7 }]);
+    expect(out[2], "a row nothing newer is heard about is the reply's own").toBe(reply[2]);
+    expect(withNewerConnections(reply, news, 5), "nothing heard since the read started").toBe(reply);
+    const same = new Map<string, ConnectionNews>([["a", { route: "tailscale", since: 200, seq: 9 }]]);
+    expect(withNewerConnections(reply, same, 0)[0].connection, "the same way keeps the daemon's since").toEqual({ route: "tailscale", since: 5 });
   });
 });

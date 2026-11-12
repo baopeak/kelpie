@@ -383,7 +383,9 @@ pub struct Mobile {
     /// it had in flight belong to the daemon before.
     epoch: String,
     /// The open connection of each device: a newer one for the same device ends the older.
-    connections: Mutex<HashMap<String, (u64, Arc<Notify>)>>,
+    connections: Mutex<HashMap<String, OpenConn>>,
+    /// Held while a connection is added or removed and the desktop told (`mobile.connection`), so that it hears them in the order they happened.
+    connection_news: Mutex<()>,
     /// What each phone was last sent of each session, and the renders they share (see `sync`).
     views: Arc<sync::Views>,
     /// How busy the computer is; measured only while phone access is on.
@@ -551,6 +553,7 @@ impl Mobile {
             reconnects: Mutex::new(HashMap::new()),
             epoch: uuid::Uuid::new_v4().simple().to_string(),
             connections: Mutex::new(HashMap::new()),
+            connection_news: Mutex::new(()),
             views: Arc::new(sync::Views::new(load.clone())),
             load,
             waiting: Mutex::new(HashMap::new()),
@@ -960,6 +963,7 @@ impl Mobile {
         let key_unreadable = *self.key_unreadable.lock();
         let options = self.lock_options();
         let relay = self.relay_status();
+        let open: HashMap<String, Value> = self.connections.lock().iter().map(|(id, o)| (id.clone(), json!({"route": o.route, "since": o.since}))).collect();
         let c = self.config.lock();
         let running = self.running.lock();
         let now = Instant::now();
@@ -987,6 +991,7 @@ impl Mobile {
                     "created_at": d.created_at, "last_seen": d.last_seen, "secure_origin": d.secure_origin, "push": d.push.is_some(), "state": if d.verified { "ok" } else if key_unreadable { "unchecked" } else { "unverified" },
                     "passkey": d.lock.is_some(), "lock_reset": lock_reset, "unlocked": unlocked, "may_control": d.verified && record_ceiling(d, options.on) == Permission::Control,
                     "page": d.page, "page_kind": d.page_kind.map(PageKind::name),
+                    "connection": open.get(&d.id),
                 })
             }).collect::<Vec<_>>(),
             "legacy": c.legacy.iter().map(|d| json!({"id": d.id, "name": d.name, "created_at": d.created_at})).collect::<Vec<_>>(),
@@ -2100,24 +2105,61 @@ fn ceiling_refusal(d: &Device, permission: Permission) -> String {
     }
 }
 
+/// Why a connection of this lock path may not take control as things are at this moment, the first reason that holds; Ok when it may. A connection
+/// from a page in a browser (`browser`) is held to the page's rule whatever its record's kind, an app record used from a browser too: paired on a secure
+/// origin that is not the hosted app, a passkey on record, the lock on, and a window its passkey opened. Only the native app's own connection is not.
+/// The reasons are what the phone is told (`control_word`).
+fn control_rule(d: &Device, lock_on: bool, path: LockPath, gate: Gate, browser: bool) -> Result<(), &'static str> {
+    if d.kind == Kind::App && !browser {
+        return Ok(());
+    }
+    if d.page_kind == Some(PageKind::Hosted) {
+        Err("hosted_app")
+    } else if !d.secure_origin {
+        Err("plain_page")
+    } else if !lock_on {
+        Err("lock_off")
+    } else if d.lock.is_none() {
+        Err("no_passkey")
+    } else if path != LockPath::Passkey || gate != Gate::Open {
+        Err("locked")
+    } else {
+        Ok(())
+    }
+}
+
 /// What a page's control rests on, whatever its record's kind: paired on a secure origin that is not the hosted app, a passkey on record and the lock on.
 fn page_may_control(d: &Device, lock_on: bool) -> bool {
-    d.secure_origin && d.page_kind != Some(PageKind::Hosted) && d.lock.is_some() && lock_on
+    control_rule(d, lock_on, LockPath::Passkey, Gate::Open, true).is_ok()
+}
+
+/// What the phone is told about control on this connection (`device.control` in its hello): "ok", or the first reason that holds, in this order:
+/// `hosted_app`, `not_granted` (its record is below control), `plain_page` (not paired on a secure origin, or this connection's page is not one),
+/// `via_relay`, `lock_off`, `no_passkey`, `locked`. `rule` is `control_rule`'s answer and `cap` the transport's (`transport_cap`), held to reading
+/// where the lock's gate is (`Gate::ReadOnly`).
+fn control_word(rule: Result<(), &'static str>, record: Permission, cap: Permission, via_relay: bool) -> &'static str {
+    match rule {
+        Err("hosted_app") => "hosted_app",
+        _ if record < Permission::Control => "not_granted",
+        Err("plain_page") => "plain_page",
+        _ if via_relay => "via_relay",
+        _ if cap < Permission::Control => "plain_page",
+        Err(reason) => reason,
+        Ok(()) => "ok",
+    }
 }
 
 impl Mobile {
-    /// Whether `device` may take control on a connection of this lock path, as things are at this moment. A connection from a page in a browser
-    /// (`browser`) is held to the page's rule whatever its record's kind, an app record used from a browser too: control only while its passkey has
-    /// opened it. Only the native app's own connection is not.
-    fn control_now(&self, device: &str, path: LockPath, gate: Gate, browser: bool) -> bool {
+    /// Why `device` may not take control on a connection of this lock path, as things are at this moment (`control_rule`); Ok when it may.
+    fn control_reason(&self, device: &str, path: LockPath, gate: Gate, browser: bool) -> Result<(), &'static str> {
         let lock_on = self.lock_options().on;
         let c = self.config.lock();
-        c.devices.iter().find(|d| d.id == device).is_some_and(|d| {
-            if d.kind == Kind::App && !browser {
-                return true;
-            }
-            path == LockPath::Passkey && gate == Gate::Open && page_may_control(d, lock_on)
-        })
+        c.devices.iter().find(|d| d.id == device).map_or(Err("not_granted"), |d| control_rule(d, lock_on, path, gate, browser))
+    }
+
+    /// Whether `device` may take control on a connection of this lock path, as things are at this moment.
+    fn control_now(&self, device: &str, path: LockPath, gate: Gate, browser: bool) -> bool {
+        self.control_reason(device, path, gate, browser).is_ok()
     }
 
     /// Whether `device` still holds what a takeover rests on, read again as the hold goes (`takeover::watch`): a verified record with `control`, and for a page
@@ -2380,6 +2422,8 @@ struct Conn {
     overflowed: Arc<AtomicBool>,
     /// The most this connection may do whatever the device's record says (`transport_cap`).
     cap: Permission,
+    /// How it reaches this computer (`link::route_of`).
+    route: &'static str,
     list: Option<(Value, Value)>,
     rev: u64,
     /// The `Origin` this connection came with, if it is a page.
@@ -2915,8 +2959,11 @@ impl Conn {
         self.media_locked.store(self.locked, Ordering::SeqCst);
         self.lock_told = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
         let cap = if gate == Gate::ReadOnly { self.cap.min(Permission::Read) } else { self.cap };
-        // Control only while it holds (`Mobile::control_now`): the phone offers takeover from what it hears here.
-        let cap = if cap >= Permission::Control && !m.control_now(&self.device, self.lock_path, gate, self.page_origin.is_some()) { Permission::Write } else { cap };
+        // Control only while it holds (`Mobile::control_now`): the phone offers takeover from what it hears here, and says why not from `control`.
+        // The reason goes by what this connection may do with the lock's gate applied: one held to reading over plain HTTP hears `plain_page`.
+        let rule = m.control_reason(&self.device, self.lock_path, gate, self.page_origin.is_some());
+        let control = control_word(rule, record, cap, self.route == "relay");
+        let cap = if cap >= Permission::Control && rule.is_err() { Permission::Write } else { cap };
         let first = self.publish(true);
         // Only where it can be used (`Conn::secure_transport`). Read each time, off this task: until there is a key it asks the credential store, which can be slow.
         let push = if !self.locked && self.cap >= Permission::Write {
@@ -2931,7 +2978,9 @@ impl Conn {
         };
         json!({
             "type": "hello", "v": 2, "api": kelpie_proto::API_LEVEL, "daemon_epoch": m.epoch, "rev": rev, "pad": true,
-            "device": device_hello(device, record, cap),
+            "device": device_hello(device, record, cap, control),
+            // This computer is also published over Tailscale: a fact, with no address, so a page the relay hosts can say where the screen is.
+            "ts": m.tailscale_origin().is_some(),
             "push": push,
             "locked": self.locked,
             "lock": m.lock_info(&self.device, self.lock_told, self.secure_page.as_deref()),
@@ -3000,6 +3049,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
         wire.session().set_padding(true);
     }
     let cap = transport_cap(device.kind, browser, &peer);
+    let route = link::route_of(&peer);
     let lock_path = daemon.mobile.lock_path(&device, &peer);
     let secure_page = peer.origin.clone().filter(|_| peer.secure_origin);
     // The daemon's events reach the phone through an adapter: a connection is a client like the app,
@@ -3016,14 +3066,13 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     let mut conn = Conn {
         daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(), media: lanes.media.clone(), ctl: lanes.ctl.clone(), media_locked: Arc::new(AtomicBool::new(false)),
         followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(), chat_at: HashMap::new(), waiting, overflowed,
-        cap, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, lock_path, secure_page, resume: first["resume"].as_str().filter(|r| r.len() <= 64).map(str::to_string), locked: false, lock_told: "",
+        cap, route, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, lock_path, secure_page, resume: first["resume"].as_str().filter(|r| r.len() <= 64).map(str::to_string), locked: false, lock_told: "",
         relay_offer: daemon.mobile.relay_grant(&device, &first), _phone: Some(daemon.mobile.load.phone()),
     };
     // The device's older connection, if any, is told it was replaced.
     let replaced = Arc::new(Notify::new());
-    if let Some((_, older)) = daemon.mobile.connections.lock().insert(device.id.clone(), (id, replaced.clone())) {
-        older.notify_one();
-    }
+    connection_opened(&daemon, &device.id, OpenConn { conn: id, replaced: replaced.clone(), route, since: now_millis() });
+    let open = OpenGuard { daemon: daemon.clone(), device: device.id.clone(), conn: id };
     let mut wires = Wires { bulk_rx: lanes.bulk_rx, ctl_rx: lanes.ctl_rx, media_rx: Some(lanes.media_rx), slow: lanes.slow, dirty, replaced };
     // Dropping serve cancels an in-flight request/send, then the common cleanup still runs.
     tokio::select! {
@@ -3031,19 +3080,75 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
         _ = generation.cancelled() => {}
         _ = serve(&mut conn, &mut wire, &device, &mut wires, &mut adapter, &generation) => {}
     }
+    // The device is not connected now: said before anything more is awaited.
+    drop(open);
     // Turned off because every device was removed (kill switch, reset): the phone forgets a pairing that no longer exists,
     // instead of trying a computer that stays silent. Plain "phone access off" keeps the record, and with it the pairing.
     if generation.is_cancelled() && daemon.mobile.removed(&device.id) {
         wire.close(NOT_PAIRED, "revoked").await;
     }
     adapter.abort();
-    {
-        let mut open = daemon.mobile.connections.lock();
-        if open.get(&device.id).is_some_and(|(c, _)| *c == id) {
-            open.remove(&device.id);
-        }
-    }
     conn.end();
+}
+
+/// Takes a connection out of `Mobile::connections` (`connection_closed`) however its task ends: a panic, or the task dropped, as well as a
+/// plain return. A device must not stay "connected now" after its connection is gone.
+struct OpenGuard {
+    daemon: Arc<Daemon>,
+    device: String,
+    conn: u64,
+}
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        connection_closed(&self.daemon, &self.device, self.conn);
+    }
+}
+
+/// A device's open connection (`Mobile::connections`).
+struct OpenConn {
+    conn: u64,
+    /// How it hears that a newer connection of the same device took over.
+    replaced: Arc<Notify>,
+    /// How it reaches this computer (`link::route_of`), and since when it has been connected that way.
+    route: &'static str,
+    since: u64,
+}
+
+/// `open` is now its device's connection; the older one, if any, is told it was replaced. The desktop hears of it (`mobile.connection`) unless the
+/// device was connected the same way already: a connection that takes over from its older one is no gap, and keeps its `since`.
+fn connection_opened(daemon: &Daemon, device: &str, mut open: OpenConn) {
+    let _order = daemon.mobile.connection_news.lock();
+    let route = open.route;
+    let older = {
+        let mut map = daemon.mobile.connections.lock();
+        if let Some(o) = map.get(device).filter(|o| o.route == route) {
+            open.since = o.since;
+        }
+        map.insert(device.to_string(), open)
+    };
+    if let Some(older) = &older {
+        older.replaced.notify_one();
+    }
+    if older.map(|o| o.route) != Some(route) {
+        daemon.broadcast("mobile.connection", json!({"id": device, "route": route}));
+    }
+}
+
+/// Connection `conn` of `device` ended. Unless a newer one took over from it (and said so), the device is not connected now, and the desktop hears of it.
+fn connection_closed(daemon: &Daemon, device: &str, conn: u64) {
+    let _order = daemon.mobile.connection_news.lock();
+    let gone = {
+        let mut map = daemon.mobile.connections.lock();
+        let ours = map.get(device).is_some_and(|o| o.conn == conn);
+        if ours {
+            map.remove(device);
+        }
+        ours
+    };
+    if gone {
+        daemon.broadcast("mobile.connection", json!({"id": device, "route": null}));
+    }
 }
 
 /// Whether the first message (`{caps}`) says the phone acknowledges frames and answers heartbeats. A client that says
@@ -3106,11 +3211,12 @@ fn pair_link(scheme: &str, host: &str, mut payload: kelpie_link::QrPayload) -> R
     }
 }
 
-/// What the phone is told about itself: what it may do on this connection, and whether the transport holds it below its record.
-fn device_hello(device: &Device, record: Permission, cap: Permission) -> Value {
+/// What the phone is told about itself: what it may do on this connection, whether the transport holds it below its record, and why it may not take
+/// control (`control`, see `control_word`).
+fn device_hello(device: &Device, record: Permission, cap: Permission, control: &str) -> Value {
     let effective = record.min(cap);
     // `capped` says the address holds it back from typing; control held back by its lock is another matter, and its permission says so.
-    json!({"id": device.id, "name": device.name, "can_write": effective >= Permission::Write, "permission": effective.name(), "kind": device.kind.name(), "capped": effective.min(Permission::Write) < record.min(Permission::Write)})
+    json!({"id": device.id, "name": device.name, "can_write": effective >= Permission::Write, "permission": effective.name(), "kind": device.kind.name(), "capped": effective.min(Permission::Write) < record.min(Permission::Write), "control": control})
 }
 
 /// Where this computer can be reached, for a phone to dial next time (after an address change above all). `list` is what a page from
@@ -3580,10 +3686,10 @@ mod tests {
         assert_eq!(transport_cap(Kind::Pwa, true, &at("127.0.0.1:5000", false)), Permission::Write, "no network between: nothing to swap the page");
         // What the phone hears.
         let mut d = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
-        let capped = device_hello(&d, d.permission, Permission::Read);
-        assert_eq!((capped["permission"].as_str(), capped["can_write"].as_bool(), capped["capped"].as_bool()), (Some("read"), Some(false), Some(true)));
+        let capped = device_hello(&d, d.permission, Permission::Read, "not_granted");
+        assert_eq!((capped["permission"].as_str(), capped["can_write"].as_bool(), capped["capped"].as_bool(), capped["control"].as_str()), (Some("read"), Some(false), Some(true), Some("not_granted")));
         d.permission = Permission::Read;
-        assert_eq!(device_hello(&d, d.permission, Permission::Read)["capped"], false, "it may only read anyway");
+        assert_eq!(device_hello(&d, d.permission, Permission::Read, "not_granted")["capped"], false, "it may only read anyway");
         assert_eq!(fingerprint(&[0u8; 32]), "6668 7AAD F862 BD77", "the phone computes the same (noise.test.ts)");
     }
 
@@ -3598,6 +3704,120 @@ mod tests {
         assert_eq!(record_ceiling(&d, true), Permission::Control);
         d.kind = Kind::App;
         assert_eq!(record_ceiling(&Device { secure_origin: false, lock: None, ..d }, false), Permission::Control, "the native app");
+    }
+
+    fn passkey() -> store::LockCredential {
+        store::LockCredential { cred_id: "c".into(), spki: "s".into(), origin: "https://desk.tail1234.ts.net:8443".into(), sign_count: 0, created_at: 0, mac: String::new() }
+    }
+
+    #[test]
+    fn saying_why_control_is_missing_changes_nobody_s_control() {
+        // The rule as it stood before it said why: whatever comes of the reasons must give the same answer for every device, lock and connection.
+        fn before(d: &Device, lock_on: bool, path: LockPath, gate: Gate, browser: bool) -> bool {
+            if d.kind == Kind::App && !browser {
+                return true;
+            }
+            let page = d.secure_origin && d.page_kind != Some(PageKind::Hosted) && d.lock.is_some() && lock_on;
+            path == LockPath::Passkey && gate == Gate::Open && page
+        }
+        let base = Device { push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Read, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
+        let mut checked = 0;
+        for kind in [Kind::App, Kind::Pwa] {
+            for permission in [Permission::Read, Permission::Write, Permission::Control] {
+                for secure_origin in [false, true] {
+                    for page_kind in [None, Some(PageKind::Ts), Some(PageKind::Own), Some(PageKind::Plain), Some(PageKind::Hosted)] {
+                        for lock in [None, Some(passkey())] {
+                            let d = Device { kind, permission, secure_origin, page_kind, lock: lock.clone(), ..base.clone() };
+                            for lock_on in [false, true] {
+                                assert_eq!(page_may_control(&d, lock_on), d.secure_origin && d.page_kind != Some(PageKind::Hosted) && d.lock.is_some() && lock_on);
+                                for path in [LockPath::Passkey, LockPath::PasskeyAlways, LockPath::Plain, LockPath::Local] {
+                                    for gate in [Gate::Open, Gate::ReadOnly, Gate::Locked] {
+                                        for browser in [false, true] {
+                                            assert_eq!(control_rule(&d, lock_on, path, gate, browser).is_ok(), before(&d, lock_on, path, gate, browser), "{kind:?} {permission:?} {secure_origin} {page_kind:?} {} {lock_on} {path:?} {gate:?} {browser}", d.lock.is_some());
+                                            checked += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 2 * 3 * 2 * 5 * 2 * 2 * 4 * 3 * 2);
+    }
+
+    #[tokio::test]
+    async fn the_desktop_hears_a_phone_connect_change_its_way_and_go_but_no_gap_when_a_connection_takes_over() {
+        let r = rig();
+        let (tx, mut events) = crate::session::client_channel();
+        r.daemon.register_client(9, tx);
+        r.daemon.set_client_role(9, &crate::auth::Role::App);
+        let mut told = || {
+            let mut out = Vec::new();
+            while let Ok(o) = events.try_recv() {
+                let v: Value = serde_json::from_slice(&o.data[5..]).unwrap_or_default();
+                if v["event"] == "mobile.connection" {
+                    out.push(v["params"].clone());
+                }
+            }
+            out
+        };
+        let listed = || r.daemon.mobile.status(true)["devices"].as_array().unwrap().iter().find(|d| d["id"] == "phone").unwrap()["connection"].clone();
+        let open = |conn: u64, route: &'static str| {
+            let replaced = Arc::new(Notify::new());
+            connection_opened(&r.daemon, "phone", OpenConn { conn, replaced: replaced.clone(), route, since: conn * 1000 });
+            replaced
+        };
+        assert_eq!(listed(), Value::Null, "not connected");
+        let first = open(1, "relay");
+        assert_eq!(told(), [json!({"id": "phone", "route": "relay"})]);
+        assert_eq!(listed(), json!({"route": "relay", "since": 1000}));
+        // A newer connection the same way takes over: the older hears it, the desktop hears nothing, and the phone has been connected since the first.
+        open(2, "relay");
+        assert!(within(Duration::from_secs(1), first.notified()).await);
+        connection_closed(&r.daemon, "phone", 1);
+        assert_eq!(told(), Vec::<Value>::new(), "no gap");
+        assert_eq!(listed(), json!({"route": "relay", "since": 1000}));
+        // Another way: said, and connected since then.
+        open(3, "tailscale");
+        assert_eq!(told(), [json!({"id": "phone", "route": "tailscale"})]);
+        assert_eq!(listed(), json!({"route": "tailscale", "since": 3000}));
+        connection_closed(&r.daemon, "phone", 3);
+        assert_eq!(told(), [json!({"id": "phone", "route": null})]);
+        assert_eq!(listed(), Value::Null);
+    }
+
+    #[test]
+    fn the_phone_hears_the_first_reason_it_may_not_take_control() {
+        let ready = Device { push: None, lock: Some(passkey()), id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Control, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: true, secure_mac: String::new(), page: None, page_kind: Some(PageKind::Ts), page_mac: String::new(), verified: true };
+        let word = |d: &Device, lock_on: bool, gate: Gate, cap: Permission, relay: bool| control_word(control_rule(d, lock_on, LockPath::Passkey, gate, true), d.permission, cap, relay);
+        let open = |d: &Device| word(d, true, Gate::Open, Permission::Control, false);
+        assert_eq!(open(&ready), "ok");
+        assert_eq!(open(&Device { page_kind: Some(PageKind::Hosted), permission: Permission::Write, secure_origin: false, lock: None, ..ready.clone() }), "hosted_app", "before anything else");
+        assert_eq!(open(&Device { permission: Permission::Write, secure_origin: false, lock: None, ..ready.clone() }), "not_granted", "before the page");
+        assert_eq!(open(&Device { secure_origin: false, page_kind: Some(PageKind::Plain), ..ready.clone() }), "plain_page");
+        assert_eq!(word(&Device { secure_origin: false, ..ready.clone() }, false, Gate::Locked, Permission::Write, true), "plain_page", "before the relay");
+        assert_eq!(word(&ready, false, Gate::Locked, Permission::Write, true), "via_relay", "before the lock");
+        assert_eq!(word(&ready, true, Gate::Open, Permission::Write, false), "plain_page", "this connection's page is not a secure one");
+        assert_eq!(word(&ready, false, Gate::Open, Permission::Control, false), "lock_off");
+        assert_eq!(word(&Device { lock: None, ..ready.clone() }, true, Gate::Open, Permission::Control, false), "no_passkey");
+        assert_eq!(word(&ready, true, Gate::Locked, Permission::Control, false), "locked");
+        let app = Device { kind: Kind::App, secure_origin: false, lock: None, page_kind: None, ..ready.clone() };
+        assert_eq!(control_word(control_rule(&app, false, LockPath::Plain, Gate::Locked, false), app.permission, Permission::Control, false), "ok", "the native app");
+        assert_eq!(control_word(control_rule(&app, false, LockPath::Plain, Gate::Locked, false), Permission::Write, Permission::Control, false), "not_granted");
+        assert_eq!(control_word(control_rule(&app, true, LockPath::Plain, Gate::ReadOnly, false), app.permission, Permission::Read, false), "plain_page", "the native app held to reading over plain HTTP");
+    }
+
+    #[tokio::test]
+    async fn a_connection_held_to_reading_over_plain_http_hears_its_page_is_why_it_may_not_take_control() {
+        // The native app with control on its record, connected over plain HTTP from elsewhere: the lock (on, reading allowed) holds it to reading.
+        let mut r = rig();
+        r.conn.lock_path = LockPath::Plain;
+        let device = r.daemon.mobile.config.lock().devices.iter().find(|d| d.id == "phone").cloned().unwrap();
+        let hello = r.conn.hello(&device, Permission::Control).await;
+        assert_eq!(hello["device"]["permission"], "read");
+        assert_eq!(hello["device"]["control"], "plain_page", "not ok: it may only read");
     }
 
     #[tokio::test]
@@ -3701,7 +3921,7 @@ mod tests {
         let (out_tx, out) = mpsc::channel(16);
         let conn = Conn {
             daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, media: mpsc::channel(4).0, ctl: mpsc::channel(4).0, media_locked: Arc::new(AtomicBool::new(false)), followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
-            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, route: "local", list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         };
         Rig { daemon, conn, out, term, typed, chat, phone }
     }
@@ -5364,7 +5584,7 @@ mod tests {
         let (out, _out_rx) = mpsc::channel(16);
         Conn {
             daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, media: mpsc::channel(4).0, ctl: mpsc::channel(4).0, media_locked: Arc::new(AtomicBool::new(false)), followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
-            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
+            chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, route: "local", list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         }
     }
 
@@ -5937,7 +6157,7 @@ mod tests {
         assert_eq!(m.permission("old"), None);
         assert_eq!(m.permission("phone"), Some(Permission::Write), "89 days is not 90");
         // A connected device is in use, whatever its last handshake.
-        m.connections.lock().insert("phone".into(), (1, Arc::new(Notify::new())));
+        m.connections.lock().insert("phone".into(), OpenConn { conn: 1, replaced: Arc::new(Notify::new()), route: "lan", since: 0 });
         assert!(m.expire_dormant(now_millis() + 200 * day).is_empty());
         m.connections.lock().clear();
         // Never, by setting; and the setting is kept.

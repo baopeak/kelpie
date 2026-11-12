@@ -450,7 +450,7 @@ Turning access off is therefore not how to cut a phone off: `mobile.enable` stay
   and, for write verbs, the `epoch` it was made under (refused as `epoch` after a daemon restart).
 - **Addressing and epoch**: sessions are addressed by `spec.id`. Handles restart at 1 and are reassigned
   by a restart, so a write by handle could land in another session. `hello {v: 2, api, daemon_epoch, rev,
-  device, sessions, projects, locked, lock}`; `daemon_epoch` is random per daemon start, and a phone that sees it
+  device, sessions, projects, locked, lock, ts}` (`device.control` and `ts` from API 36, see "Permissions"); `daemon_epoch` is random per daemon start, and a phone that sees it
   change drops every position and frame number it holds and re-resolves its ids.
 - **The list is pushed**: the connection's adapter turns `session.updated|closed` events into a wake-up;
   it then rebuilds the list and sends `sessions {rev, sessions, projects}` only if it changed. Nothing
@@ -628,6 +628,16 @@ third implementation for the tests, and all three are checked against the crate'
   person's verification, this connection is this computer's own HTTPS page and not the relay (`transport_cap`), and the passkey has opened it now (`Mobile::control_now`,
   read on every message; a connection from a page is held to this rule whatever its record's kind, an app record used from a browser too). That grant is also the confirmation of the device's first takeover: no other prompt. Turning the app lock off (`set_lock`) lowers every such
   record to `write` (sealed, audited, its connection starts again); turning it back on does not restore it, a new grant does. Owner decisions, 2026-11-05.
+- **Why not control, and how each phone is connected** (API 36): the hello's `device.control` is `ok` or the first reason that holds, in this order:
+  `hosted_app`, `not_granted` (the record is below `control`), `plain_page` (not paired on a secure origin, or this connection's page is not one), `via_relay`,
+  `lock_off`, `no_passkey`, `locked`. It comes from the function `control_now` asks (`control_rule`), so the phone's sentence follows the daemon's policy instead of
+  working it out again; a computer below 36 says nothing and the phone works it out itself. `ts` in the hello says this computer is published over Tailscale (a
+  fact with no address), so the hosted app can say where the screen is. Each open connection keeps its route (`link::route_of`: `relay`; `tailscale` through
+  Tailscale Serve or from a Tailscale address; `local` from this machine; else `lan`) and since when. `mobile.status` lists it on each device as
+  `connection {route, since}` or null, and the `mobile.connection {id, route}` event (`route` null once it closes) tells the app's windows and clients
+  holding the user token when a device's connection opens, closes or changes way, so the device list changes one row and asks the daemon nothing; a full
+  read already under way keeps the rows such events changed after it started. A connection that takes over from its device's older one the same way
+  reports no gap and keeps its `since`; a connection's entry is removed however its task ends, a panic included. Phones do not hear the event.
 - **Tailscale mode** (`mobile/tailscale.rs`, off by default): `tailscale serve --bg --https=8443 http://127.0.0.1:<port>` publishes the
   page at `https://<fqdn>:8443` to the person's own tailnet, and forwards to one loopback listener that exists only while the mode is on and
   follows the same `Generation` stop as the others, with its own for what came through it, so turning it off cuts those phones and no

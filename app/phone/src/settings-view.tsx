@@ -2,7 +2,7 @@
 // vibration, how this phone reaches its computer, what it keeps, and what this app is. Everything here is kept on this phone, but for
 // alerts (the computer sends them) and the lock's own facts (changed on the computer only).
 import { createSignal, For, Show } from "solid-js";
-import { methodText, pathText } from "./conn-path";
+import { methodText, pathText, tailscaleHint } from "./conn-path";
 import { APP_VERSION, HOSTED } from "./hosted";
 import { localeSetting, setLocale, t, type LocaleSetting } from "./i18n";
 import { inboxViewName } from "./inbox";
@@ -10,7 +10,7 @@ import { PairWays } from "./install-guide";
 import type { InboxOrder } from "./inbox-order";
 import { KEYS } from "./key-bar";
 import { currentPairing } from "./pairing-store";
-import { alertsError, alertsState, clearKept, connected, daemonApi, device, forgetDevice, link, livePathNow, lockAppNow, lockInfo, lockShown, PAGE_METHOD, rtt, screenWhyNow, setTrustOpen, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
+import { alertsError, alertsState, clearKept, computerOnTailscale, connected, daemonApi, device, forgetDevice, link, livePathNow, lockAppNow, lockInfo, lockShown, PAGE_METHOD, rtt, screenWhyNow, setTrustOpen, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
 import { applyDisplay, confirmCtrlC, defaultKeyBar, INBOX_VIEWS, inboxView, keyBar, LOCK_GRACE_CHOICES, lockGrace, moveKey, order, showStopped, TEXT_SIZES, textSize, toggleKey, vibrate, wrapLines, type InboxView, type LockGrace, type TextSize } from "./prefs";
 import { setTheme, theme, type ThemeSetting } from "./theme";
 
@@ -233,6 +233,7 @@ function ConnectionSection(props: { onClose: () => void }) {
         </Show>
         <Fact name={t("Computer screen")} setting="screen">{screenWhyNow() ?? t("Available from here")}</Fact>
       </dl>
+      <Show when={tailscaleHint(PAGE_METHOD, computerOnTailscale(), t)}>{(hint) => <p class="muted" data-setting="tailscale-hint">{hint()}</p>}</Show>
       <div class="actions">
         <button class="btn" data-setting="reconnect" onClick={() => link.kick()}>{t("Reconnect now")}</button>
         <button class="btn danger" data-setting="forget" onClick={forget}>{t("Forget this computer")}</button>

@@ -421,18 +421,55 @@ export function deviceMethodLabel(d: MobileDevice, r: RelayStatus | undefined): 
   }
 }
 
-/** How a record is connected now, as the daemon says. */
-export function connectionLine(c: NonNullable<MobileDevice["connection"]>): string {
-  switch (c.route) {
+export type MobileRoute = NonNullable<MobileDevice["connection"]>["route"];
+
+/** The way a device is connected now, as the daemon names it, in the words the phone uses for its own; null for a way a newer daemon named. */
+export function routeLabel(route: MobileRoute): string | null {
+  switch (route) {
     case "relay":
-      return t("connected now through the relay");
+      return t("the relay");
     case "tailscale":
-      return t("connected now through Tailscale");
+      return t("Tailscale");
     case "lan":
-      return t("connected now through this network");
+      return t("this network");
     case "local":
-      return t("connected now through this computer");
+      return t("this computer");
+    default:
+      return null;
   }
+}
+
+/** How a record is connected now, as the daemon says; a way this app does not know is left unnamed. */
+export function connectionLine(c: NonNullable<MobileDevice["connection"]>): string {
+  const route = routeLabel(c.route);
+  return route ? t("connected now · through {route}", { route }) : t("connected now");
+}
+
+/** The list after `mobile.connection` (`route` null: the device is not connected now), with the device's row changed in place; the same list when it
+ *  is not in it. `since` is this computer's clock: close enough to the daemon's, which is on the same machine. */
+export function withConnection(devices: MobileDevice[], id: string, route: MobileRoute | null, now: number): MobileDevice[] {
+  const at = devices.findIndex((d) => d.id === id);
+  if (at < 0) return devices;
+  const d = devices[at];
+  if ((d.connection?.route ?? null) === route) return devices;
+  const next = devices.slice();
+  next[at] = { ...d, connection: route ? { route, since: now } : null };
+  return next;
+}
+
+/** The last `mobile.connection` heard for a device: `seq` counts the events in the order they arrived, `since` is when. */
+export interface ConnectionNews {
+  route: MobileRoute | null;
+  since: number;
+  seq: number;
+}
+
+/** A device list fetched in full, with what `mobile.connection` said after the fetch started (`seq` above `after`) laid over it: a reply sent
+ *  before a phone came or went must not undo the row the event already changed. */
+export function withNewerConnections(devices: MobileDevice[], news: ReadonlyMap<string, ConnectionNews>, after: number): MobileDevice[] {
+  let out = devices;
+  for (const [id, n] of news) if (n.seq > after) out = withConnection(out, id, n.route, n.since);
+  return out;
 }
 
 /** A phone in the device list: the records joined in `phoneGroups` (`group` set) while two or more of them are still paired, else one record as before. */

@@ -16,7 +16,8 @@ import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_API, TAILSCALE_API, TAKEOVER_AP
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import {
   approvalChoices, approveWithReplace, connectionLine, deviceMethodLabel, groupDevices, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel,
-  pairMethods, permissionChoices, prunePhoneGroups, samePhoneSuggestion, telegramChoice, turnOnAccess, type OptionFacts, type OptionId, type PairMethodId, type PhoneGroup,
+  pairMethods, permissionChoices, prunePhoneGroups, samePhoneSuggestion, telegramChoice, turnOnAccess, withConnection, withNewerConnections, type ConnectionNews, type MobileRoute, type OptionFacts, type OptionId,
+  type PairMethodId, type PhoneGroup,
 } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
 import { catalogEntry, entryMatches } from "../../lib/settings-catalog";
@@ -51,7 +52,7 @@ export interface MobileDevice extends MobileDevicePage {
   /** `unverified`: its record was changed outside Kelpie (or the key that checks it is gone): it must be paired again.
    *  `unchecked`: the key that checks it cannot be read right now; nothing is concluded, and it is checked again when it can be. */
   state: "ok" | "unverified" | "unchecked";
-  /** How it is connected now (null: not connected; absent from a daemon that does not say). */
+  /** How it is connected now and since when, kept current by the `mobile.connection` event (null: not connected; absent below API 36, which does not say). */
   connection?: { route: "relay" | "tailscale" | "lan" | "local"; since: number } | null;
 }
 
@@ -163,7 +164,18 @@ const telegramWarning = () =>
   t("Telegram can read these messages: a bot chat is not end-to-end encrypted. A tap in Telegram asks for no Face ID, and anyone who has this Telegram account can approve. Only requests Kelpie labels low risk get buttons, each for one time and five minutes.");
 
 export function MobileSettings() {
-  const [status, { refetch }] = createResource(() => store.connected(), () => mobileStatus().catch(() => null));
+  // The last `mobile.connection` per device, numbered as heard. A full read that started before one of them answers with the daemon's
+  // older view, so those that came after its start are laid over the reply.
+  let connectionSeq = 0;
+  const connectionNews = new Map<string, ConnectionNews>();
+  const [status, { refetch, mutate }] = createResource(
+    () => store.connected(),
+    async () => {
+      const started = connectionSeq;
+      const s = await mobileStatus().catch(() => null);
+      return s && { ...s, devices: withNewerConnections(s.devices, connectionNews, started) };
+    },
+  );
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [hotkeyError, setHotkeyError] = createSignal<string | null>(null);
@@ -206,8 +218,15 @@ export function MobileSettings() {
   });
   onMount(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
-    const un = onEvent<{ event: string; params?: { change?: string } }>("daemon-event", (m) => {
+    const un = onEvent<{ event: string; params?: { change?: string; id?: string; route?: MobileRoute | null } }>("daemon-event", (m) => {
       if (m.event === "mobile.updated" || m.event === "mobile.pair_request" || m.event === "mobile.device_changed") void refetch();
+      // A phone connected, went, or changed its way: its row alone changes, with nothing asked of the daemon.
+      const id = m.params?.id;
+      if (m.event === "mobile.connection" && id) {
+        const news = { route: m.params?.route ?? null, since: Date.now(), seq: ++connectionSeq };
+        connectionNews.set(id, news);
+        mutate((cur) => (cur ? { ...cur, devices: withConnection(cur.devices, id, news.route, news.since) } : cur));
+      }
       // A phone turned its alerts on or off, or was removed.
       if (m.event === "mobile.updated") void loadPush();
       // Approvals from Telegram changed on their own: an account was bound, the code ran out, or they stopped.
@@ -793,12 +812,14 @@ export function MobileSettings() {
               <For each={groupDevices(s()!.devices, store.state.settings.phoneGroups ?? {})} fallback={<div class="muted-inline">{t("No paired devices.")}</div>}>
                 {(g) => (
                   <Show when={g.group} fallback={
-                    <div class="saved-layout" data-device={g.devices[0].id} data-state={g.devices[0].state}>
+                    <div class="saved-layout" data-device={g.devices[0].id} data-state={g.devices[0].state} data-connection={g.devices[0].connection?.route ?? "none"}>
                       <Icon name="server" size={16} />
                       <div class="saved-layout-main">
                         <div>{g.devices[0].name} <Show when={pageKindLabel(g.devices[0].page_kind)}><span class="chip" data-page-kind={g.devices[0].page_kind}>{pageKindLabel(g.devices[0].page_kind)}</span> </Show><span class="muted-inline">· {g.devices[0].kind === "app" ? t("Kelpie app") : t("Browser")}{deviceNotes(g.devices[0])}</span></div>
-                        <div class="muted-inline" style={{ "font-size": "11.5px" }}>
-                          {stateLine(g.devices[0]) ?? t("paired {when} · last seen {seen}", { when: formatRelative(g.devices[0].created_at), seen: formatRelative(g.devices[0].last_seen) })}
+                        <div class="muted-inline" style={{ "font-size": "11.5px" }} data-device-line>
+                          {stateLine(g.devices[0]) ?? (g.devices[0].connection
+                            ? t("paired {when} · {connection}", { when: formatRelative(g.devices[0].created_at), connection: connectionLine(g.devices[0].connection) })
+                            : t("paired {when} · last seen {seen}", { when: formatRelative(g.devices[0].created_at), seen: formatRelative(g.devices[0].last_seen) }))}
                         </div>
                       </div>
                       {deviceControls(g.devices[0], false)}
@@ -808,7 +829,7 @@ export function MobileSettings() {
                       <div class="phone-group-head"><Icon name="server" size={16} /> {phoneName(g)} <span class="muted-inline">· {t("one phone, paired {n} ways", { n: g.devices.length })}</span></div>
                       <For each={g.devices}>
                         {(d) => (
-                          <div class="saved-layout" data-device={d.id} data-state={d.state}>
+                          <div class="saved-layout" data-device={d.id} data-state={d.state} data-connection={d.connection?.route ?? "none"}>
                             <div class="saved-layout-main">
                               <div data-device-way>{deviceMethodLabel(d, s()!.relay)} <span class="muted-inline">· {stateLine(d) ?? (d.connection ? connectionLine(d.connection) : t("last seen {seen}", { seen: formatRelative(d.last_seen) }))}{deviceNotes(d)}</span></div>
                             </div>

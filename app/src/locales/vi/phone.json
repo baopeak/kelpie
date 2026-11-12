@@ -226,6 +226,8 @@
   "This app comes from the relay; seeing the screen needs the app from your computer over Tailscale.": "Ứng dụng này do relay phục vụ, trong khi việc xem màn hình cần ứng dụng do chính máy tính của bạn phục vụ qua Tailscale.",
   "Choose \"May take control\" for this phone in Kelpie → Settings → Mobile.": "Hãy chọn \"Được điều khiển\" cho điện thoại này trong Kelpie → Cài đặt → Di động.",
   "Seeing the screen needs Tailscale; this phone is on the relay now.": "Việc xem màn hình cần Tailscale, nhưng lúc này điện thoại đang kết nối qua relay.",
+  "This page did not come from your computer over HTTPS; seeing the screen needs the app from your computer over Tailscale.": "Máy tính của bạn không phục vụ trang này qua HTTPS, trong khi việc xem màn hình cần ứng dụng do chính máy tính đó phục vụ qua Tailscale.",
+  "This computer also has Tailscale. To see its screen from this phone, pair the Tailscale app: Kelpie on your computer → Settings → Mobile → Pair a phone → Tailscale.": "Máy tính này cũng đang dùng Tailscale. Để xem màn hình của máy từ điện thoại này, bạn hãy ghép đôi ứng dụng qua Tailscale trong Kelpie trên máy tính → Cài đặt → Di động → Ghép đôi điện thoại → Tailscale.",
   "Needs the app lock on and unlocked.": "Việc xem màn hình cần khóa ứng dụng đang bật và đã được mở khóa.",
   "Live · through {path}": "Trực tiếp · qua {path}",
   "Connected to Kelpie on your computer through {path}.": "Đã kết nối với Kelpie trên máy tính qua {path}.",
