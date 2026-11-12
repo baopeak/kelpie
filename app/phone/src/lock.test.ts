@@ -12,7 +12,7 @@ const ENROL = { state: "enrol", challenge: toB64(new Uint8Array(32).fill(9)), rp
 function rig(seen?: string) {
   const kept = new Map<string, string>(seen ? [["kelpie-lock-seen", seen]] : []);
   const asked: Record<string, unknown>[] = [];
-  const state = { connected: true, now: 1000, refusal: null as Outcome | null, denied: null as string | null, spki: new Uint8Array(91) as Uint8Array | null };
+  const state = { grace: 0, connected: true, now: 1000, refusal: null as Outcome | null, denied: null as string | null, spki: new Uint8Array(91) as Uint8Array | null };
   const lockNow = vi.fn();
   const touch = vi.fn();
   const setResume = vi.fn();
@@ -41,6 +41,7 @@ function rig(seen?: string) {
     },
     lockNow,
     touch,
+    grace: () => state.grace,
     setResume,
     connected: () => state.connected,
     now: () => state.now,
@@ -195,6 +196,142 @@ describe("leaving the app", () => {
     lock.left();
     expect(lockNow).not.toHaveBeenCalled();
     expect(lock.clear()).toBe(true);
+  });
+});
+
+describe("the grace after leaving", () => {
+  const GRACE = 300_000;
+  function open() {
+    const r = rig();
+    r.state.grace = GRACE;
+    r.lock.told({ state: "open", idle_s: 900 });
+    return r;
+  }
+
+  it("coming back within it shows everything again, with no lock and the secret kept", () => {
+    const { lock, lockNow, setResume, state } = open();
+    lock.left();
+    expect(lock.covered).toBe(true);
+    expect(lock.clear()).toBe(false);
+    state.now += GRACE - 1;
+    lock.back();
+    expect(lock.covered).toBe(false);
+    expect(lock.face).toBe("open");
+    expect(lock.clear()).toBe(true);
+    expect(lockNow).not.toHaveBeenCalled();
+    expect(setResume).not.toHaveBeenCalled();
+  });
+
+  it("coming back after it locks as leaving did before", () => {
+    const { lock, lockNow, setResume, state } = open();
+    lock.left();
+    state.now += GRACE;
+    lock.back();
+    expect(lockNow).toHaveBeenCalledTimes(1);
+    expect(setResume).toHaveBeenCalledWith(null);
+    expect(lock.face).toBe("unknown");
+    expect(lock.clear()).toBe(false);
+    lock.told(UNLOCK);
+    expect(lock.face).toBe("unlock");
+  });
+
+  it("is never longer than the computer's idle time", () => {
+    const r = rig();
+    r.state.grace = GRACE;
+    r.lock.told({ state: "open", idle_s: 60 });
+    r.lock.left();
+    r.state.now += 60_000;
+    r.lock.back();
+    expect(r.lockNow).toHaveBeenCalledTimes(1);
+    expect(r.lock.face).toBe("unknown");
+  });
+
+  it("counts the computer's idle time from the last touch it heard of", () => {
+    const r = rig();
+    r.state.grace = GRACE;
+    r.lock.told({ state: "open", idle_s: 120 });
+    r.state.now += 100_000;
+    r.lock.touched();
+    expect(r.touch).toHaveBeenCalledTimes(1);
+    r.lock.left();
+    r.state.now += 119_000;
+    r.lock.back();
+    expect(r.lockNow).not.toHaveBeenCalled();
+    expect(r.lock.clear()).toBe(true);
+  });
+
+  it("Immediately is leaving as it always was", () => {
+    const { lock, lockNow, state } = open();
+    state.grace = 0;
+    lock.left();
+    expect(lockNow).toHaveBeenCalledTimes(1);
+    lock.back();
+    expect(lock.face).toBe("unknown");
+  });
+
+  it("tells the computer once, on leaving, of what the person did that it has not heard about", () => {
+    const { lock, touch, state } = open();
+    lock.touched();
+    expect(touch).toHaveBeenCalledTimes(1);
+    state.now += 5_000;
+    lock.touched();
+    expect(touch).toHaveBeenCalledTimes(1);
+    lock.left();
+    expect(touch).toHaveBeenCalledTimes(2);
+    lock.back();
+    lock.left();
+    expect(touch).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends no touch on leaving when nothing happened since the last one", () => {
+    const { lock, touch } = open();
+    lock.left();
+    expect(touch).not.toHaveBeenCalled();
+  });
+
+  it("a lock that came while away is on the screen when the person is back", () => {
+    const { lock, setResume } = open();
+    lock.left();
+    lock.told(UNLOCK);
+    expect(setResume).toHaveBeenCalledWith(null);
+    lock.back();
+    expect(lock.face).toBe("unlock");
+    expect(lock.clear()).toBe(false);
+  });
+
+  it("a ceremony's own system sheet is still not leaving", async () => {
+    const { lock, get, lockNow } = rig();
+    lock.told(UNLOCK);
+    let finish = () => {};
+    get.mockImplementationOnce(() => new Promise<Asserted>((resolve) => (finish = () => resolve({ authData: new Uint8Array(1), clientData: new Uint8Array(1), signature: new Uint8Array(1) }))));
+    const going = lock.go();
+    lock.left();
+    finish();
+    await going;
+    lock.told({ state: "open" });
+    expect(lock.fresh()).toBe(true);
+    expect(lockNow).not.toHaveBeenCalled();
+  });
+
+  it("seeing the computer after any time away asks for the passkey again, even within the grace", async () => {
+    const { lock, lockNow, setResume, state } = rig();
+    state.grace = GRACE;
+    lock.told(UNLOCK);
+    await lock.go();
+    lock.told({ state: "open" });
+    expect(lock.fresh()).toBe(true);
+    lock.left();
+    lock.back();
+    expect(lock.clear()).toBe(true);
+    expect(lock.fresh()).toBe(false);
+    lock.relock();
+    expect(lockNow).toHaveBeenCalledTimes(1);
+    expect(setResume).toHaveBeenLastCalledWith(null);
+    expect(lock.face).toBe("unknown");
+    lock.told(UNLOCK);
+    await lock.go();
+    lock.told({ state: "open" });
+    expect(lock.fresh()).toBe(true);
   });
 });
 

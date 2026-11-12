@@ -24,6 +24,7 @@ import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneC
 import { browserReloadEnv, ShellReload, SHELL_CHANGED } from "./shell-reload";
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
+import { lockGrace } from "./prefs";
 import { screenNow } from "./install-guide";
 import { afterFailedPairing, movedTo, platformOf, relayMovedTo } from "./install-state";
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
@@ -120,6 +121,9 @@ export function plainHttpOrigin(): boolean {
 /** How the app lock stands, for the views: whether what is behind it may be shown, and the state of its screen. */
 export const [lockShown, setLockShown] = createSignal<{ clear: boolean; face: string; asking: boolean; error: string | null; covered: boolean }>({ clear: false, face: "unknown", asking: false, error: null, covered: false });
 
+/** What the person asked for that needs the passkey again first: done once it has opened the phone. */
+let afterUnlock: (() => void) | null = null;
+
 const lock = new LockModel({
   credentials: browserCredentials(),
   ask: (m) => link.lockAsk(m),
@@ -129,13 +133,34 @@ const lock = new LockModel({
     link.lockNow();
   },
   touch: () => link.lockTouch(),
+  grace: () => lockGrace.get() * 1000,
   setResume: (secret) => link.setResume(secret),
   connected: () => link.ready,
   now: () => Date.now(),
   store,
-}, () => setLockShown({ clear: lock.clear(), face: lock.face, asking: lock.asking, error: lock.error, covered: lock.covered }));
+}, () => {
+  setLockShown({ clear: lock.clear(), face: lock.face, asking: lock.asking, error: lock.error, covered: lock.covered });
+  // Outside the model's own call, so what opens never runs inside its update.
+  if (afterUnlock) queueMicrotask(runAfterUnlock);
+});
 export const lockGo = () => lock.go();
 setLockShown({ clear: lock.clear(), face: lock.face, asking: false, error: null, covered: false });
+
+/** Seeing or controlling the computer asks for the passkey again after any time out of sight, even within the lock's grace (owner rule 2026-11-12):
+ *  the lock screen comes back, and what was asked for opens once it is unlocked. */
+function withFreshUnlock(go: () => void) {
+  if (lock.face !== "open" || lock.fresh()) return go();
+  afterUnlock = go;
+  lock.relock();
+}
+function runAfterUnlock() {
+  if (!afterUnlock || !lock.fresh()) return;
+  const go = afterUnlock;
+  afterUnlock = null;
+  go();
+}
+export const openScreenPicker = () => withFreshUnlock(() => void remoteScreens.openPicker());
+export const openTakeoverPicker = (project: string | null) => withFreshUnlock(() => void takeovers.openPicker(project));
 
 /** What the daemon said of each open request of the chats followed (by chat and request id). */
 export const [requestInfo, setRequestInfo] = createSignal<Record<string, ChatRequestInfo>>({});
@@ -819,6 +844,12 @@ export function startApp() {
     // First: the system may take its picture of the app for the switcher at any moment from here.
     if (document.hidden) lock.left();
     else lock.back();
+    // Leaving the app ends a screen or a takeover at once, whatever the lock's grace (owner rule 2026-11-06).
+    if (document.hidden) {
+      afterUnlock = null;
+      remoteScreens.close();
+      takeovers.close();
+    }
     link.setHidden(document.hidden);
     // Nothing goes out from a hidden page, not even a late acknowledgement.
     if (document.hidden) for (const s of syncs.values()) s.dispose();

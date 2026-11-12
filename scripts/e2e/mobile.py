@@ -944,15 +944,39 @@ for n in (1, 2, 3):
 
     # Leaving: `document.hidden` is set by hand, since a headless browser has no app switcher. All that follows it is the page's and the computer's.
     set_hidden = "Object.defineProperty(document, 'hidden', {value: arguments[0], configurable: true}); Object.defineProperty(document, 'visibilityState', {value: arguments[0] ? 'hidden' : 'visible', configurable: true}); document.dispatchEvent(new Event('visibilitychange'));"
-    phone.js(set_hidden, True)
-    run.check("hiding the page puts an opaque cover up at once", bool(phone.js("return !!document.querySelector('[data-lock-cover]')")))
-    run.check("…and the computer locks it", bool(wait(lambda: lock_device().get("unlocked") is False, 10)), str(lock_device()))
-    phone.js(set_hidden, False)
-    run.check("coming back shows the lock, and no session", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 15) == "unlock" and not phone.js("return !!document.querySelector('.row') || document.title.startsWith('(')"))
-    phone.shot(os.path.join(shots, "26-phone-lock.png"))
+    # Within the lock's grace (5 minutes unless changed), coming back asks nothing.
     signs = passkeys()[0]["signCount"]
+    phone.js(set_hidden, True)
+    run.check("hiding the page puts an opaque cover up at once", bool(phone.js("return !!document.querySelector('[data-lock-cover]') && !document.querySelector('.row')")))
+    time.sleep(2)
+    run.check("…and within the grace the computer stays unlocked", lock_device().get("unlocked") is True, str(lock_device()))
+    phone.js(set_hidden, False)
+    run.check("coming back within the grace shows the sessions with no passkey asked", bool(phone.wait(open_js, 10)) and passkeys()[0]["signCount"] == signs and lock_device().get("unlocked") is True, str(lock_device()))
+    # Out of sight longer than the grace: the page's clock is moved on, since nobody waits five minutes in a test.
+    phone.js(set_hidden, True)
+    phone.js("window.__realNow = window.__realNow || Date.now; const real = window.__realNow; Date.now = () => real() + 6 * 60 * 1000;")
+    phone.js(set_hidden, False)
+    run.check("coming back after the grace shows the lock, and no session", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 15) == "unlock" and not phone.js("return !!document.querySelector('.row') || document.title.startsWith('(')"))
+    run.check("…and the computer locks it", bool(wait(lambda: lock_device().get("unlocked") is False, 10)), str(lock_device()))
+    phone.js("Date.now = window.__realNow")
+    phone.shot(os.path.join(shots, "26-phone-lock.png"))
     phone.js("document.querySelector('[data-lock-go]').click()")
     run.check("the passkey opens it again, with a signature the computer counted", bool(phone.wait(open_js, 20)) and passkeys()[0]["signCount"] > signs, str(phone.js(lock_error)))
+
+    # "Immediately": leaving locks as it always did. The choice is read when the app starts, so it takes a reload, which asks again in any case.
+    phone.js("localStorage.setItem('kelpie-lock-grace', '0')")
+    signs = passkeys()[0]["signCount"]
+    phone.go(secure)
+    run.check("a reload asks again", bool(phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen === 'unlock'", 20)) and not phone.js("return !!document.querySelector('.row')"), str(lock_device()))
+    phone.js("document.querySelector('[data-lock-go]').click()")
+    run.check("…and the passkey opens it", bool(phone.wait(open_js, 20)) and passkeys()[0]["signCount"] > signs, str(phone.js(lock_error)))
+    phone.js(set_hidden, True)
+    run.check("with the grace set to Immediately, hiding the page locks it at the computer", bool(wait(lambda: lock_device().get("unlocked") is False, 10)), str(lock_device()))
+    phone.js(set_hidden, False)
+    run.check("…and coming back shows the lock", phone.wait("return document.querySelector('[data-lock-screen]')?.dataset.lockScreen", 15) == "unlock")
+    signs = passkeys()[0]["signCount"]
+    phone.js("document.querySelector('[data-lock-go]').click()")
+    run.check("…which the passkey opens", bool(phone.wait(open_js, 20)) and passkeys()[0]["signCount"] > signs, str(phone.js(lock_error)))
 
     # A network flap in the foreground: the connection goes and comes, and nothing asks.
     signs = passkeys()[0]["signCount"]
