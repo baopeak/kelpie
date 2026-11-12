@@ -269,5 +269,18 @@
   "Drafts too": "Xóa cả bản nháp",
   "Clear what this phone keeps": "Xóa dữ liệu điện thoại đang lưu",
   "App version": "Phiên bản ứng dụng",
-  "The computer's feature level": "Mức tính năng của máy tính"
+  "The computer's feature level": "Mức tính năng của máy tính",
+  "Inbox": "Danh sách phiên",
+  "Inbox view": "Cách nhóm phiên",
+  "By status": "Theo trạng thái",
+  "By workspace": "Theo dự án",
+  "Order inside a group": "Thứ tự trong mỗi nhóm",
+  "Recent activity": "Hoạt động gần nhất",
+  "Name A–Z": "Tên từ A đến Z",
+  "Sessions that need you always come first, the longest wait first.": "Các phiên cần bạn luôn đứng đầu, và phiên chờ lâu nhất được xếp trước.",
+  "Show stopped sessions": "Hiện các phiên đã dừng",
+  "Off: the inbox leaves them out and says how many it hides.": "Khi tắt mục này, danh sách không hiện các phiên đã dừng mà chỉ cho biết có bao nhiêu phiên bị ẩn.",
+  "{n} stopped hidden": "{n} phiên đã dừng đang bị ẩn",
+  "ended {ago}": "kết thúc {ago}",
+  "Other folders": "Thư mục khác"
 }

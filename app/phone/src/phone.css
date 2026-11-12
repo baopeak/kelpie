@@ -73,6 +73,15 @@ a.btn { display: inline-block; text-decoration: none; color: inherit; }
 .row .sub { color: var(--dim); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .waited { font-size: 12px; color: var(--waiting); }
 .painted { opacity: .65; }
+/* The inbox's view, one tap: two halves of one control, the chosen one filled. */
+.view-switch { display: flex; margin: 10px 16px 2px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
+.view-switch button { flex: 1; min-width: 0; min-height: 36px; padding: 6px 8px; border: 0; background: none; color: var(--dim); font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.view-switch button + button { border-left: 1px solid var(--border); }
+.view-switch button.on { background: var(--elev); color: var(--text); font-weight: 600; }
+/* A workspace's name is shown as it is written, not upper-cased like a status heading. */
+.workspace .group { text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stopped-hidden { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 44px; padding: 10px 16px; border: 0; border-bottom: 1px solid var(--border); background: none; color: var(--dim); font-size: 13px; text-align: left; }
+.stopped-hidden .show { flex: none; color: var(--accent); font-weight: 600; }
 
 .session { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .session.dim .screen, .session.dim .chat-log { opacity: .6; }

@@ -1,14 +1,16 @@
-// The phone's Settings: the app lock as the computer set it and how soon leaving locks it here, alerts, how text looks, the key bar,
+// The phone's Settings: the app lock as the computer set it and how soon leaving locks it here, alerts, how text looks, how the inbox lists sessions, the key bar,
 // vibration, how this phone reaches its computer, what it keeps, and what this app is. Everything here is kept on this phone, but for
 // alerts (the computer sends them) and the lock's own facts (changed on the computer only).
 import { createSignal, For, Show } from "solid-js";
 import { methodText, pathText } from "./conn-path";
 import { APP_VERSION, HOSTED } from "./hosted";
 import { localeSetting, setLocale, t, type LocaleSetting } from "./i18n";
+import { inboxViewName } from "./inbox";
+import type { InboxOrder } from "./inbox-order";
 import { KEYS } from "./key-bar";
 import { currentPairing } from "./pairing-store";
 import { alertsError, alertsState, clearKept, connected, daemonApi, device, forgetDevice, link, livePathNow, lockAppNow, lockInfo, lockShown, PAGE_METHOD, rtt, screenWhyNow, setTrustOpen, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
-import { applyDisplay, confirmCtrlC, defaultKeyBar, keyBar, LOCK_GRACE_CHOICES, lockGrace, moveKey, TEXT_SIZES, textSize, toggleKey, vibrate, wrapLines, type LockGrace, type TextSize } from "./prefs";
+import { applyDisplay, confirmCtrlC, defaultKeyBar, INBOX_VIEWS, inboxView, keyBar, LOCK_GRACE_CHOICES, lockGrace, moveKey, order, showStopped, TEXT_SIZES, textSize, toggleKey, vibrate, wrapLines, type InboxView, type LockGrace, type TextSize } from "./prefs";
 import { setTheme, theme, type ThemeSetting } from "./theme";
 
 /** Alerts on this phone, with the computer's own push: what state they are in and the one thing to do next. */
@@ -138,6 +140,30 @@ function DisplaySection() {
   );
 }
 
+function InboxSection() {
+  return (
+    <section class="card" data-settings-section="inbox">
+      <h2>{t("Inbox")}</h2>
+      <label class="row-setting" data-setting="inbox-view">{t("Inbox view")}
+        <select class="field" value={inboxView.get()} onChange={(e) => inboxView.set(e.currentTarget.value as InboxView)}>
+          <For each={INBOX_VIEWS}>{(v) => <option value={v}>{inboxViewName(v)}</option>}</For>
+        </select>
+      </label>
+      <label class="row-setting" data-setting="inbox-order">{t("Order inside a group")}
+        <select class="field" value={order.get()} onChange={(e) => order.set(e.currentTarget.value as InboxOrder)}>
+          <option value="recent">{t("Recent activity")}</option>
+          <option value="name">{t("Name A–Z")}</option>
+        </select>
+      </label>
+      <p class="muted">{t("Sessions that need you always come first, the longest wait first.")}</p>
+      <label class="row-check" data-setting="show-stopped">
+        <input type="checkbox" checked={showStopped.get()} onChange={(e) => showStopped.set(e.currentTarget.checked)} />
+        <span>{t("Show stopped sessions")}<span class="muted block">{t("Off: the inbox leaves them out and says how many it hides.")}</span></span>
+      </label>
+    </section>
+  );
+}
+
 function KeysSection() {
   const s = keyBar.get;
   return (
@@ -258,6 +284,7 @@ export function SettingsView(props: { onClose: () => void }) {
         <section class="card" data-settings-section="alerts" data-setting="alerts"><AlertsRow /></section>
       </Show>
       <DisplaySection />
+      <InboxSection />
       <KeysSection />
       <VibrationSection />
       <ConnectionSection onClose={props.onClose} />

@@ -1,6 +1,7 @@
 // The phone's own preferences, kept in this browser per app address (a hosted app and the app from the computer each have their own).
 // A stored value this build does not know reads as the default, so an older or newer bundle never breaks on what another one kept.
 import { createSignal, type Accessor } from "solid-js";
+import type { InboxOrder } from "./inbox-order";
 import { store } from "./storage";
 
 export interface Pref<T> {
@@ -53,6 +54,18 @@ export const confirmCtrlC = flag("kelpie-confirm-ctrl-c", true);
 
 /** A buzz when a session starts needing the person, while the app is open (where the phone can buzz at all). */
 export const vibrate = flag("kelpie-vibrate", true);
+
+/** The inbox lists sessions by what they ask of the person, or by the workspace they run in. */
+export const INBOX_VIEWS = ["status", "workspace"] as const;
+export type InboxView = (typeof INBOX_VIEWS)[number];
+export const inboxView = choice<InboxView>("kelpie-inbox-view", INBOX_VIEWS, "status");
+
+/** Stopped sessions are listed; off, the inbox leaves them out and says how many. */
+export const showStopped = flag("kelpie-show-stopped", true);
+
+/** The order inside a group of the inbox (sessions that need the person always put the longest wait first). */
+export const INBOX_ORDERS: readonly InboxOrder[] = ["recent", "name"];
+export const order = choice<InboxOrder>("kelpie-inbox-order", INBOX_ORDERS, "recent");
 
 /** The key bar's keys after Ctrl, which always comes first: the daemon's names for them, in the usual order. */
 export const KEY_IDS = ["esc", "tab", "shift-tab", "left", "up", "down", "right", "pgup", "pgdn", "ctrl-c", "enter"] as const;

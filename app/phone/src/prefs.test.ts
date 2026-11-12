@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { choice, confirmCtrlC, defaultKeyBar, flag, KEY_IDS, keyBar, lockGrace, moveKey, pref, readKeyBar, shownKeys, textSize, toggleKey, vibrate, wrapLines } from "./prefs";
+import { choice, confirmCtrlC, defaultKeyBar, flag, INBOX_ORDERS, INBOX_VIEWS, inboxView, KEY_IDS, keyBar, lockGrace, moveKey, order, pref, readKeyBar, showStopped, shownKeys, textSize, toggleKey, vibrate, wrapLines } from "./prefs";
 import { store } from "./storage";
 
 describe("a preference", () => {
@@ -39,6 +39,24 @@ describe("the defaults", () => {
     expect(vibrate.get()).toBe(true);
     expect(keyBar.get()).toEqual(defaultKeyBar());
     expect(shownKeys(keyBar.get())).toEqual([...KEY_IDS]);
+  });
+
+  it("the inbox by status, stopped sessions shown, the most recent first", () => {
+    expect(inboxView.get()).toBe("status");
+    expect(showStopped.get()).toBe(true);
+    expect(order.get()).toBe("recent");
+  });
+});
+
+describe("the inbox's choices", () => {
+  it("keep what is set, and read what they do not know as the default", () => {
+    const view = choice("test-inbox-view", INBOX_VIEWS, "status");
+    view.set("workspace");
+    expect(choice("test-inbox-view", INBOX_VIEWS, "status").get()).toBe("workspace");
+    store.set("test-inbox-order", "size");
+    expect(choice("test-inbox-order", INBOX_ORDERS, "recent").get()).toBe("recent");
+    store.set("test-inbox-order", "name");
+    expect(choice("test-inbox-order", INBOX_ORDERS, "recent").get()).toBe("name");
   });
 });
 

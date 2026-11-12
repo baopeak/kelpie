@@ -26,7 +26,8 @@ a desktop message only the computer can send holding the queue is explained on t
 noticed on the desktop outside the chat pane), a `#s=` deep link, the page coming back by itself after the
 server went away; a read-only device cannot type; a socket from another origin is refused; unpairing
 disconnects the phone; turning it off stops the server; after the computer restarted, what waited is shown
-as lost with its text in the stopped chat, also after a reload, until discarded; a used or wrong pairing
+as lost with its text in the stopped chat, also after a reload, until discarded; the inbox by status and by workspace (one
+section per project), stopped sessions hidden from Settings with a line counting them, both choices kept across a reload; a used or wrong pairing
 code gets no answer, too many unknown phones are rate limited and the desktop says so, the kill switch and the audit list
 (last, so the limiter cannot refuse a pairing above). On an HTTPS origin (a certificate of this run's own, at `localhost` on 127.0.0.1, which the phone's browser
 is told to accept; needs Python's `cryptography`): the install step, no camera falling back to pasting the link, a pairing that is a secure origin. The app lock on it, with real WebAuthn ceremonies through CDP's virtual authenticator (`WebAuthn.addVirtualAuthenticator`, Blink's and not WebKit's, and no person's face): set up, a copied key refused at the daemon, hide locks, a network flap asks nothing, the idle time locks, the dangerous re-check, the reset, a restart. Then it may
@@ -836,6 +837,56 @@ for n in (1, 2, 3):
     run.check("Discard lets it go", bool(phone.wait("return !document.querySelector('.not-sent')", 15)))
     run.check("…for good: nothing of it is kept on the phone", not phone.js("return Object.keys(localStorage).some(k => k.startsWith('kelpie-draft:chat-pending:'))"))
     hold(False)
+
+    # ---------- the inbox's views: by status or by workspace, stopped sessions hidden, both kept across a reload ----------
+    # Two projects, a live shell in each and a stopped one in the second. Other sessions of this run (the chats, stopped since
+    # the restart) are in the first project, so every check looks for these rows by name rather than counting rows.
+    proj_b = os.path.join(scratch, "mobile-proj-b")
+    os.makedirs(proj_b, exist_ok=True)
+    pid_b = d.js(f"return {S}.addProject(arguments[0], {{ open: false }})", proj_b)
+    view_a = daemon(d, "session.create", {"kind": "shell", "cwd": proj, "name": "view-a", "project_id": pid})
+    view_b = daemon(d, "session.create", {"kind": "shell", "cwd": proj_b, "name": "view-b", "project_id": pid_b})
+    view_ended = daemon(d, "session.create", {"kind": "shell", "cwd": proj_b, "name": "view-ended", "project_id": pid_b})
+    daemon(d, "session.kill", {"handle": view_ended["handle"]})
+    wait(lambda: not next(x for x in daemon(d, "session.list") if x["id"] == view_ended["id"])["alive"], 15)
+    names_in = "return [...document.querySelectorAll(arguments[0] + ' .row .name')].map((n) => n.textContent)"
+    inbox_sections = "return {groups: [...document.querySelectorAll('section[data-group]')].map((s) => s.dataset.group), workspaces: [...document.querySelectorAll('section[data-workspace]')].map((s) => s.dataset.workspace), rows: [...document.querySelectorAll('.row')].map((r) => r.textContent.slice(0, 60))}"
+    by_status = phone.wait("const n = (sel) => [...document.querySelectorAll(sel + ' .row .name')].map((e) => e.textContent); return document.querySelector('.view-switch')?.dataset.inboxView === 'status' && !document.querySelector('section[data-workspace]') && n('section[data-group=\"stopped\"]').includes('view-ended') && n('section[data-group]:not([data-group=\"stopped\"])').includes('view-a') && n('section[data-group]:not([data-group=\"stopped\"])').includes('view-b')", 30)
+    run.check("the inbox is by status at first: the live shells in their groups, the stopped one under Stopped", bool(by_status), str(phone.js(inbox_sections)))
+    ended_sub = phone.js("return [...document.querySelectorAll('.row')].find((r) => r.textContent.includes('view-ended'))?.querySelector('.sub')?.textContent ?? ''")
+    run.check("…a stopped session says when it ended, with a grey dot", "ended" in ended_sub and phone.js("return [...document.querySelectorAll('.row')].find((r) => r.textContent.includes('view-ended')).querySelector('.dot').classList.contains('exited')"), ended_sub)
+    phone.js("document.querySelector('.view-switch [data-view=\"workspace\"]').click()")
+    # The sections are keyed by project id, which the page learns with the computer's project names.
+    by_workspace = wait(lambda: phone.js("return document.querySelector('.view-switch')?.dataset.inboxView === 'workspace' && !document.querySelector('section[data-group]') && !!document.querySelector(`section[data-workspace=\"${arguments[0]}\"]`) && !!document.querySelector(`section[data-workspace=\"${arguments[1]}\"]`)", pid, pid_b), 20)
+    in_a = phone.js(names_in, f'section[data-workspace="{pid}"]') or []
+    in_b = phone.js(names_in, f'section[data-workspace="{pid_b}"]') or []
+    run.check("one tap shows the inbox by workspace: a section per project, each with its own sessions", bool(by_workspace) and "view-a" in in_a and "view-b" not in in_a and "view-ended" not in in_a and "view-b" in in_b and "view-ended" in in_b and "view-a" not in in_b, str({"a": in_a, "b": in_b, "page": phone.js(inbox_sections)}))
+    head_b = phone.js("return document.querySelector(`section[data-workspace=\"${arguments[0]}\"] .group`)?.textContent ?? ''", pid_b)
+    ended_word = phone.js("return [...document.querySelectorAll('.row')].find((r) => r.textContent.includes('view-ended'))?.querySelector('.sub')?.textContent ?? ''")
+    run.check("…named after the project, and each row says its state in a word", "mobile-proj-b" in head_b and ended_word.startswith("Stopped"), f"{head_b!r} {ended_word!r}")
+    phone.shot(os.path.join(shots, "11-phone-inbox-workspace.png"))
+    phone.js("document.querySelector('[data-open-settings]').click()")
+    phone.wait("return !!document.querySelector('[data-setting=\"show-stopped\"] input')", 10)
+    run.check("Settings → Inbox shows the view chosen above the list, and stopped sessions shown", phone.js("return document.querySelector('[data-setting=\"inbox-view\"] select').value === 'workspace' && document.querySelector('[data-setting=\"show-stopped\"] input').checked") is True)
+    phone.js("document.querySelector('[data-setting=\"show-stopped\"] input').click()")
+    phone.js("document.querySelector('header .icon').click()")
+    stopped_n = sum(1 for x in daemon(d, "session.list") if not x["alive"])
+    hidden_js = "const r = [...document.querySelectorAll('.row .name')].map((n) => n.textContent); return !document.querySelector('[data-settings]') && r.includes('view-b') && !r.includes('view-ended') ? (document.querySelector('[data-stopped-hidden]')?.dataset.stoppedHidden ?? null) : null"
+    hidden = phone.wait(hidden_js, 15)
+    run.check("with stopped sessions off, the stopped row is gone and a line says how many are hidden", hidden == str(stopped_n) and str(stopped_n) in (phone.js("return document.querySelector('[data-stopped-hidden]')?.textContent ?? ''") or ""), f"{hidden!r} of {stopped_n}: {phone.js(inbox_sections)}")
+    phone.go("about:blank")
+    phone.go(base)
+    phone.wait(LIVE, 60)
+    kept_view = wait(lambda: phone.js("return document.querySelector('.view-switch')?.dataset.inboxView === 'workspace' && !!document.querySelector(`section[data-workspace=\"${arguments[0]}\"]`) && !!document.querySelector('[data-stopped-hidden]') && ![...document.querySelectorAll('.row')].some((r) => r.textContent.includes('view-ended'))", pid_b), 30)
+    run.check("…and a reload keeps both choices", bool(kept_view), str(phone.js(inbox_sections)))
+    phone.js("document.querySelector('[data-stopped-hidden]').click()")
+    run.check("the line turns stopped sessions back on", bool(phone.wait("return [...document.querySelectorAll('.row')].some((r) => r.textContent.includes('view-ended')) && !document.querySelector('[data-stopped-hidden]') && localStorage.getItem('kelpie-show-stopped') === '1'", 10)))
+    # Back to the defaults: later checks read the status groups.
+    phone.js("document.querySelector('.view-switch [data-view=\"status\"]').click()")
+    run.check("…and one tap goes back to the inbox by status", bool(phone.wait("return document.querySelector('.view-switch')?.dataset.inboxView === 'status' && !!document.querySelector('section[data-group]') && !document.querySelector('section[data-workspace]')", 10)))
+    for s in (view_a, view_b, view_ended):
+        daemon(d, "session.close", {"handle": s["handle"]})
+    d.js(f"{S}.removeProject(arguments[0])", pid_b)
 
     # ---------- a secure origin: the install step, no camera, the pasted link, typing ----------
     cert_file, key_file = certificate_for_loopback(scratch)
