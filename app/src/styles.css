@@ -1433,6 +1433,12 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .warn-note { color: var(--waiting); margin-top: 6px; }
 .mobile-approve { z-index: 120; }
 .mobile-url { white-space: nowrap; word-break: normal; align-self: center; }
+.pair-methods { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; max-height: 60vh; overflow-y: auto; }
+.pair-method { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); font-size: 12.5px; }
+.pair-method.first { border-color: var(--accent); }
+.pair-method-head { display: flex; align-items: center; gap: 8px; }
+.phone-group { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.phone-group-head { display: flex; align-items: center; gap: 6px; }
 
 /* Settings → Plugins */
 .plugin-list { display: flex; flex-direction: column; gap: 8px; }

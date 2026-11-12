@@ -9,7 +9,7 @@ import { APP_VERSION, HOSTED, servedVersion, trustText, type ServedVersion } fro
 import { PaneTakeover } from "./pane-takeover";
 import { ScreenView } from "./screen-view";
 import { LockCover, LockScreen, RecheckSheet } from "./lock-screen";
-import { InstallGuide, ScanCode, screenNow } from "./install-guide";
+import { InstallGuide, PairWays, ScanCode, screenNow } from "./install-guide";
 import { labelOf, needsCount } from "./inbox-order";
 import { SessionView } from "./session-view";
 import { SettingsView } from "./settings-view";
@@ -22,15 +22,21 @@ function guessName(): string {
   return t("Browser");
 }
 
-/** What a page that is not paired shows: installing first on a secure origin, then the code, then naming this device. */
+/** What a page that is not paired shows: installing first on a secure origin, then the code, then naming this device. Until a code is in hand, it
+ *  also says which way this app connects and the other ways to pair this phone. */
 function NotPaired() {
   const screen = () => screenNow(paired(), !!pairing());
   return (
-    <Show when={screen() !== "install"} fallback={<InstallGuide />}>
-      <Show when={screen() !== "scan"} fallback={<ScanCode done={setPairing} message={notPairedMessage()} />}>
-        <Pairing />
+    <>
+      <Show when={screen() !== "install"} fallback={<InstallGuide />}>
+        <Show when={screen() !== "scan"} fallback={<ScanCode done={setPairing} message={notPairedMessage()} />}>
+          <Pairing />
+        </Show>
       </Show>
-    </Show>
+      <Show when={!pairing()}>
+        <div class="card"><PairWays self /></div>
+      </Show>
+    </>
   );
 }
 

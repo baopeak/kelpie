@@ -1103,14 +1103,33 @@ with the Kelpie app from Kelpie's relay, which needs no Tailscale (the next subs
 by this computer, over Tailscale; or as a browser on your network. Each phone is paired with a one-time code and approved on this
 computer, and what it sees and sends is end-to-end encrypted.
 
+**Ways to connect a phone.** Every pairing starts at *Pair a phone* in Settings → Mobile, which lists the three ways below. Each way
+shows what it needs, what it allows and what it trusts, and whether it can pair now. A way that cannot says why, with a button that
+leads to the row that turns on what it needs. One way is marked *Recommended*: Tailscale while phones can use it, else the relay's app
+while the relay serves it, else this network.
+
+| Way | Needs | Allows | Trusts |
+| --- | --- | --- | --- |
+| *Tailscale* | Tailscale on this computer and on the phone, with *Reach this computer with Tailscale* on | Reading, typing and approvals from anywhere; the screen and browser panes too, once you allow control for the phone and its app lock is on | This computer, which serves the app, and Tailscale |
+| *Kelpie's relay* (*Your relay at …* for another relay) | The relay on and serving the phone app | Reading, typing and approvals from anywhere; never the screen or browser panes | Whoever deploys the relay's app (see *What the hosted app trusts* below) |
+| *This network* | The same Wi-Fi as this computer, with *Pair browsers on this network* on | Reading, typing and approvals over HTTPS with your certificate, reading only over plain HTTP; the screen and browser panes only over HTTPS, once you allow control and the app lock is on | This computer and your certificate; over plain HTTP, also everyone on the network not to swap the page |
+
+Each way pairs the phone as a device of its own, with its own key, page and permission. A browser keeps its pairing per address, so the
+relay's app and the Tailscale app on one phone are two installed apps. When you approve a phone, Kelpie's dialog asks *Same phone as*: it
+suggests a phone already paired under the same name another way, or you choose *A new device*. Settings then lists those records as one
+phone, with a line per way that keeps its own permission and its own *Unpair*. To move a phone to another way, pair it the new way and tick
+*Replace that pairing*: Kelpie asks you to confirm, and removes the old record only after the new one is approved. If removing it fails, both
+stay and Kelpie says so. This grouping is kept by the Kelpie app on this computer only. Before it is paired, and in its own Settings under
+*Connection*, the phone app says which way it connects and lists the other ways.
+
 **Pair a phone with the Kelpie app (no Tailscale).**
 
 1. In Settings → Mobile, turn on *Mobile access*. In a new setup (one that never had phone access) this also turns on the relay, Kelpie's
    own on Cloudflare, and leaves this network's listeners off, so nothing on this computer is opened to your network. Kelpie asks you to
    confirm once, as described below, for the relay. There is no account and no registration key. In a setup from before, turn on *Reach this
-   computer through the relay* yourself; *Pair a phone* under *Hosted phone app* then appears once Kelpie has found the relay serving the app.
-2. **Step 1: Install** opens by itself after the switch in a new setup; otherwise press *Pair a phone*. Scan its code with the phone's camera; it holds no
-   secret. The page that opens shows how to install Kelpie on the phone (Share → Add to Home Screen on an iPhone, the Install button or the
+   computer through the relay* yourself; *Pair a phone* then offers *Kelpie's relay* once Kelpie has found the relay serving the app.
+2. In a new setup *Pair a phone* opens by itself after the switch, with the relay first; otherwise press *Pair a phone*. Press *Pair this way*
+   under *Kelpie's relay*. **Step 1: Install** shows a code: scan it with the phone's camera; it holds no secret. The page that opens shows how to install Kelpie on the phone (Share → Add to Home Screen on an iPhone, the Install button or the
    browser's menu on Android). Open Kelpie from the Home Screen, then press *Already installed: Step 2* on the computer. A phone that
    cannot install can press *Continue in this browser*, but a browser tab and the installed app keep their pairings apart, on an iPhone
    especially: pair in the place you will use.
@@ -1163,7 +1182,7 @@ off for a new one), Settings → Mobile also serves a small web app for your pho
 address — never every interface; HTTPS with your own certificate, e.g. from `tailscale cert`, or from Tailscale itself as described below).
 Off, nothing on this computer listens on your network, and phones come through the relay or Tailscale; turning it off closes the port at
 once, and phones paired on this network then reach this computer only when it is on again. Settings does not let you turn it off while
-neither the relay nor Tailscale is on, since nothing else would reach this computer. **Pair a browser on this network** (offered only while
+neither the relay nor Tailscale is on, since nothing else would reach this computer. *Pair a phone* → **This network** (offered only while
 it is on) shows a QR code valid
 for two minutes; scan it, name the phone, and type the six digits it shows into Kelpie. Windows then
 asks you to confirm with Windows Hello or your password (Touch ID or your password on a Mac). Read
@@ -1227,7 +1246,7 @@ exactly what to do if Tailscale is missing, stopped, not signed in, or your tail
 (turn on MagicDNS and HTTPS in the DNS page of the Tailscale admin console). If something else already uses port 8443
 of `tailscale serve`, Kelpie says so and leaves it alone; turning this off removes only Kelpie's own entry.
 
-Pairing then takes two steps. *Pair a phone over Tailscale* shows **Step 1: Install**, a code with no secret: scan
+Pairing then takes two steps. *Pair a phone* → *Tailscale* shows **Step 1: Install**, a code with no secret: scan
 it with the phone's camera and install the app from the page that opens (Share → Add to Home Screen on an
 iPhone, the Install button or the browser's menu on Android). The very first visit can take up to a minute while Tailscale gets its
 certificate. **Step 2: Pair** shows the pairing code: open Kelpie from the

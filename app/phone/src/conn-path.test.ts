@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isLocalHost, isTailscaleHost, livePath, methodText, pageMethod, pathText, screenBlock, screenWhy, type ScreenFacts } from "./conn-path";
+import { isLocalHost, isTailscaleHost, livePath, methodLines, methodText, pageMethod, pairWay, pathText, screenBlock, screenWhy, type ScreenFacts } from "./conn-path";
 
 const fill = (text: string, vars?: Record<string, string | number>) => (vars ? text.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m)) : text);
 const page = (url: string) => {
@@ -34,6 +34,28 @@ describe("how the app was paired, from where its page comes", () => {
     expect(methodText("https", fill)).toMatch(/HTTPS/);
     expect(methodText("http", fill)).toMatch(/plain HTTP/);
     expect(methodText("local", fill)).toMatch(/localhost/);
+  });
+});
+
+describe("which app this is, and the other ways to connect this phone", () => {
+  it("knows the way from the page", () => {
+    expect(["hosted", "tailscale", "https", "http", "local"].map((m) => pairWay(m as Parameters<typeof pairWay>[0]))).toEqual(["relay", "tailscale", "network", "network", "network"]);
+  });
+
+  it("names this app's way", () => {
+    expect(methodLines("hosted", fill).self).toBe("This is the app from Kelpie's relay.");
+    expect(methodLines("tailscale", fill).self).toBe("This is the app from your computer over Tailscale.");
+    for (const m of ["https", "http", "local"] as const) expect(methodLines(m, fill).self, m).toBe("This is the app on this network.");
+  });
+
+  it("lists the two other ways in one line each, and where to choose one", () => {
+    const hosted = methodLines("hosted", fill);
+    expect(hosted.others).toHaveLength(2);
+    expect(hosted.others[0]).toMatch(/^Tailscale:/);
+    expect(hosted.others[1]).toMatch(/^This network:/);
+    expect(methodLines("tailscale", fill).others.map((l) => l.split(":")[0])).toEqual(["Kelpie's relay", "This network"]);
+    expect(methodLines("http", fill).others.map((l) => l.split(":")[0])).toEqual(["Tailscale", "Kelpie's relay"]);
+    expect(hosted.choose).toContain("Settings → Mobile → Pair a phone");
   });
 });
 

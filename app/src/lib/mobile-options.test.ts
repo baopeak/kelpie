@@ -4,8 +4,9 @@ import type { RelayStatus } from "../components/settings/mobile-relay-settings";
 import { HOSTED_API, LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
 import {
-  approvalChoices, asksForKey, hostedLine, hostedPairing, hostedReason, hostedTrust, mobileSummary, movingRelayWarning, offerNewRoom, OPTION_IDS, optionState, pageKindLabel,
-  permissionChoices, plainPairing, relayServesApp, telegramChoice, turnOnAccess, type AccessCalls, type OptionFacts, type OptionId,
+  approvalChoices, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
+  OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, samePhoneSuggestion, screenPolicyLine,
+  telegramChoice, turnOnAccess, type AccessCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
 } from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
 import { emptyPushConfig, type PushState } from "./push-config";
@@ -482,5 +483,138 @@ describe("the summary of a computer with the hosted app", () => {
     expect(entryMatches(catalogEntry("mobile-lan")!, "network listen")).toBe(true);
     const vi = translated(e.safety!)!.split(" ").slice(0, 4).join(" ");
     expect(entryMatches(e, vi)).toBe(true);
+  });
+});
+
+describe("choosing how a phone pairs", () => {
+  const ways = (f: Partial<OptionFacts> = {}) => Object.fromEntries(pairMethods(facts(f)).map((m) => [m.id, m])) as Record<PairMethodId, PairMethod>;
+  const ts = { on: true, origin: "pc.tail1.ts.net:8443" };
+  const recommended = (f: Partial<OptionFacts> = {}) => pairMethods(facts(f)).filter((m) => m.recommended).map((m) => m.id);
+
+  it("lists Tailscale, the relay and this network, each with what it needs, allows and trusts, in English and Vietnamese", () => {
+    const all = pairMethods(facts({ status: status({ tailscale: ts, relay: hostedRelay() }) }));
+    expect(all.map((m) => m.id)).toEqual(["tailscale", "relay", "network"]);
+    for (const m of all) {
+      for (const line of [m.needs, m.allows, m.trusts]) expect(line, m.id).toBeTruthy();
+      expect(translated(m.needs), m.needs).toBeTruthy();
+      expect(translated(m.trusts), m.trusts).toBeTruthy();
+    }
+    expect(all.map((m) => m.label)).toEqual(["Tailscale", "Kelpie's relay", "This network"]);
+  });
+
+  it("names another relay by its host", () => {
+    expect(relayLabel(hostedRelay({ url: "wss://relay.mine.example/x" }))).toBe("Your relay at relay.mine.example");
+    expect(relayLabel(hostedRelay())).toBe("Kelpie's relay");
+    expect(ways({ status: status({ relay: hostedRelay({ url: "wss://mine.example" }) }) }).relay.trusts).toBe("Whoever runs that relay and deploys its app.");
+  });
+
+  it("says what each may do with the screen from one sentence each, and never offers it through the relay", () => {
+    const w = ways({ status: status({ tailscale: ts, relay: hostedRelay() }) });
+    for (const id of ["tailscale", "relay", "network"] as const) {
+      expect(w[id].allows, id).toContain(screenPolicyLine(id));
+      expect(translated(screenPolicyLine(id)), id).toBeTruthy();
+    }
+    expect(screenPolicyLine("relay")).toMatch(/^Never the screen/);
+    expect(screenPolicyLine("network")).toContain("never over plain HTTP");
+  });
+
+  it("says this network reads only over plain HTTP, and types with a certificate", () => {
+    expect(ways().network.allows).toContain("Reading only, over plain HTTP");
+    expect(ways().network.trusts).toContain("not to swap the page");
+    expect(ways({ status: status({ tls: true }) }).network.allows).toContain("over HTTPS with your certificate");
+    expect(ways({ status: status({ tls: true }) }).network.trusts).toContain("your certificate");
+  });
+
+  it("offers each way only while it can pair, says why not, and leads to the row that turns it on", () => {
+    const w = ways();
+    expect(w.tailscale).toMatchObject({ available: false, why: "Tailscale mode is off.", fix: { row: "mobile-tailscale" } });
+    expect(w.relay).toMatchObject({ available: false, why: "The relay is off.", fix: { row: "mobile-relay" } });
+    expect(w.network).toMatchObject({ available: true, why: null, fix: null });
+    const on = ways({ status: status({ tailscale: ts, relay: hostedRelay() }) });
+    expect([on.tailscale.available, on.relay.available]).toEqual([true, true]);
+  });
+
+  it("says why for each shape of the status", () => {
+    expect(ways({ status: status({ tailscale: { on: true, origin: null } }) }).tailscale.why).toContain("cannot use it right now");
+    expect(ways({ status: status({ tailscale: ts, running: false }) }).tailscale.why).toContain("not running");
+    const checking = ways({ status: status({ relay: hostedRelay({ hosted: { ...hostedRelay().hosted!, available: false, reason: "not checked yet" } }) }) }).relay;
+    expect(checking).toMatchObject({ available: false, fix: null });
+    expect(checking.why).toContain("checking");
+    const refused = ways({ status: status({ relay: hostedRelay({ hosted: { ...hostedRelay().hosted!, available: false, reason: "only a wss:// relay serves the phone app" } }) }) }).relay;
+    expect(refused).toMatchObject({ available: false, why: "This relay does not serve the phone app: pair phones over Tailscale.", fix: { row: "mobile-relay" } });
+    expect(ways({ status: status({ lan: false, relay: hostedRelay() }) }).network).toMatchObject({ available: false, why: "This network's listeners are off.", fix: { row: "mobile-lan" } });
+    expect(ways({ status: status({ running: false }) }).network.why).toContain("not running");
+    for (const id of ["tailscale", "relay", "network"] as const) {
+      expect(ways({ status: status({ enabled: false, running: false }) })[id], id).toMatchObject({ available: false, why: "Turn on phone access first.", fix: null });
+      expect(ways({ status: status({ store_error: "bad" }) })[id].why, id).toContain("reset phone access");
+      expect(ways({ status: null })[id].why, id).toContain(RESTART);
+    }
+    for (const line of ["Tailscale mode is off.", "The relay is off.", "This network's listeners are off.", "Phone access is on, but not running: see the message at the top of this page."]) expect(translated(line), line).toBeTruthy();
+  });
+
+  it("asks for a restart from a daemon older than the way", () => {
+    expect(ways({ api: TAILSCALE_API - 1, status: status({ tailscale: ts }) }).tailscale.why).toContain(RESTART);
+    expect(ways({ api: HOSTED_API - 1, status: status({ relay: hostedRelay() }) }).relay.why).toContain(RESTART);
+    expect(ways({ status: status({ tailscale: undefined, relay: { ...hostedRelay(), hosted: undefined } }) }).relay.why, "no hosted app in the status").toContain(RESTART);
+    expect(ways({ status: status({ tailscale: undefined }) }).tailscale.why, "no Tailscale in the status").toContain(RESTART);
+    expect(ways({ api: HOSTED_API - 1, status: status({ lan: undefined }) }).network.available, "an older daemon always listens").toBe(true);
+  });
+
+  it("agrees with the hosted row on when the relay's app pairs", () => {
+    for (const f of [facts({ status: status({ relay: hostedRelay() }) }), facts(), facts({ api: HOSTED_API - 1, status: status({ relay: hostedRelay() }) }), facts({ status: status({ enabled: false, relay: hostedRelay() }) })]) {
+      expect(pairMethods(f).find((m) => m.id === "relay")!.available).toBe(hostedPairing(f));
+    }
+  });
+
+  it("recommends Tailscale while phones can use it, else the relay's app while it is served, else this network", () => {
+    expect(recommended({ status: status({ tailscale: ts, relay: hostedRelay() }) })).toEqual(["tailscale"]);
+    expect(recommended({ status: status({ tailscale: { on: true, origin: null }, relay: hostedRelay() }) })).toEqual(["relay"]);
+    expect(recommended({ status: status({ relay: hostedRelay({ url: "wss://mine.example" }) }) })).toEqual(["relay"]);
+    expect(recommended()).toEqual(["network"]);
+    expect(recommended({ status: status({ lan: false }) })).toEqual(["network"]);
+  });
+});
+
+describe("one phone paired several ways", () => {
+  const a = device({ id: "a", name: "Pixel", page_kind: "ts" });
+  const b = device({ id: "b", name: "Pixel", page_kind: "hosted" });
+  const c = device({ id: "c", name: "iPad", page_kind: "plain" });
+
+  it("lists the records of one group as one phone, at the place of the first", () => {
+    expect(groupDevices([c, a, b], { a: "g", b: "g" })).toEqual([{ group: null, devices: [c] }, { group: "g", devices: [a, b] }]);
+    expect(groupDevices([a, c, b], { a: "g", b: "g" })).toEqual([{ group: "g", devices: [a, b] }, { group: null, devices: [c] }]);
+  });
+
+  it("leaves ungrouped records, and a group with one record left, as they were", () => {
+    expect(groupDevices([a, b, c], {})).toEqual([a, b, c].map((d) => ({ group: null, devices: [d] })));
+    expect(groupDevices([a, c], { a: "g", b: "g" })).toEqual([{ group: null, devices: [a] }, { group: null, devices: [c] }]);
+  });
+
+  it("suggests the record of the same name paired another way, and nothing else", () => {
+    expect(samePhoneSuggestion({ name: " pixel ", origin_kind: "hosted" }, [c, a])).toBe("a");
+    expect(samePhoneSuggestion({ name: "Pixel", origin_kind: "ts" }, [a]), "the same way is not another way").toBeNull();
+    expect(samePhoneSuggestion({ name: "iPad", origin_kind: "own" }, [c]), "HTTPS and plain HTTP are both this network").toBeNull();
+    expect(samePhoneSuggestion({ name: "Galaxy", origin_kind: "hosted" }, [a, c])).toBeNull();
+    expect(samePhoneSuggestion({ name: "Pixel", origin_kind: "hosted" }, [device({ ...a, state: "unverified" })]), "a record to pair again").toBeNull();
+    expect([pairMethodOf("hosted"), pairMethodOf("ts"), pairMethodOf("own"), pairMethodOf("plain"), pairMethodOf(null)]).toEqual(["relay", "tailscale", "network", "network", null]);
+  });
+
+  it("joins a new record to the chosen phone's group, or makes one named after it", () => {
+    expect(joinGroup({}, "b", "a")).toEqual({ a: "a", b: "a" });
+    expect(joinGroup({ a: "g", x: "g" }, "b", "a")).toEqual({ a: "g", x: "g", b: "g" });
+  });
+
+  it("forgets the records no longer paired, and says when nothing changes", () => {
+    expect(prunePhoneGroups({ a: "g", b: "g", z: "g" }, ["a", "b", "c"])).toEqual({ a: "g", b: "g" });
+    expect(prunePhoneGroups({ a: "g", b: "g" }, ["a", "b"])).toBeNull();
+    expect(prunePhoneGroups({}, [])).toBeNull();
+  });
+
+  it("names each record's way and how it is connected now", () => {
+    expect([a, b, c, device({ page_kind: "own" }), device({ kind: "app" })].map((d) => deviceMethodLabel(d, hostedRelay()))).toEqual(["Tailscale", "Kelpie's relay", "This network", "This network, over HTTPS", "Kelpie app"]);
+    expect(deviceMethodLabel(b, hostedRelay({ url: "wss://mine.example" }))).toBe("Your relay at mine.example");
+    const routes = (["relay", "tailscale", "lan", "local"] as const).map((route) => connectionLine({ route, since: 0 }));
+    expect(routes).toEqual(["connected now through the relay", "connected now through Tailscale", "connected now through this network", "connected now through this computer"]);
+    for (const line of routes) expect(translated(line), line).toBeTruthy();
   });
 });

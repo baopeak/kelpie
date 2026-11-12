@@ -69,6 +69,27 @@ export function pathText(path: LivePath, t: Translate): string {
   }
 }
 
+/** The ways a phone pairs, as Kelpie on the computer offers them under Pair a phone. */
+export type PairWay = "tailscale" | "relay" | "network";
+
+/** The way this app paired: the relay's app, the computer's over Tailscale, or the computer's on this network (HTTPS, plain HTTP or the computer itself). */
+export function pairWay(method: PageMethod): PairWay {
+  return method === "hosted" ? "relay" : method === "tailscale" ? "tailscale" : "network";
+}
+
+/** Which app this is, the other ways to connect this phone in one line each, and how to choose one: for the screens before pairing and for Settings. */
+export function methodLines(method: PageMethod, t: Translate): { way: PairWay; self: string; others: string[]; choose: string } {
+  const way = pairWay(method);
+  const self = way === "relay" ? t("This is the app from Kelpie's relay.") : way === "tailscale" ? t("This is the app from your computer over Tailscale.") : t("This is the app on this network.");
+  const lines: Record<PairWay, string> = {
+    tailscale: t("Tailscale: the app from your computer, from anywhere, with Tailscale on this phone and on the computer."),
+    relay: t("Kelpie's relay: the app from the relay, from anywhere, with no Tailscale needed."),
+    network: t("This network: the app from your computer, on the same Wi-Fi."),
+  };
+  const others = (["tailscale", "relay", "network"] as const).filter((w) => w !== way).map((w) => lines[w]);
+  return { way, self, others, choose: t("To use another way, choose it in Kelpie on your computer → Settings → Mobile → Pair a phone. It is paired as an app of its own, and this one stays as it is.") };
+}
+
 /** What keeps the screen from this phone, the first that applies. */
 export type ScreenBlock = "unknown" | "older" | "hosted" | "not_control" | "relay" | "lock";
 

@@ -35,6 +35,7 @@ export const defaultSettings: Settings = {
   prioritizeVisible: true,
   screenStopHotkey: "Ctrl+Alt+Shift+K",
   screenCrispText: true,
+  phoneGroups: {},
   checkpoints: false,
   agentsScripting: true,
   notificationSound: false,

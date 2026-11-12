@@ -14,7 +14,8 @@ connects only to the relay: it is never given the daemon's own address. Nothing 
 
 1. On a relay open to every install (no registration key) the daemon makes its room with no key; the relay says it is of the second
    version, the daemon tells it the pages it lets in (`origins`, never the single `origin`), the relay names the page a phone came from
-   (`o` in `open`), a phone pairs there, and a phone whose page is elsewhere is refused.
+   (`o` in `open`), a phone pairs there, and a phone whose page is elsewhere is refused. The same phone paired again is a record of its own (what
+   the desktop lists as one phone), and removing the first, as Replace that pairing does, leaves the second paired and working.
 2. The daemon makes its room with the registration key and connects; the relay holds the Tailscale origin.
 3. Three phones pair through the relay with the QR code's single-use token, from the Tailscale origin; the request names "the relay";
    the pairing gives each a relay token. A second use of a pairing token is refused.
@@ -276,9 +277,9 @@ async def main(d, phone_tap, desk_tap, registration_key, open_tap, open_port, v1
     def phone_url(ticket, token):
         return f"ws://127.0.0.1:{phone_tap.port}/v1/phone?t={ticket}&k={token}"
 
-    async def through_relay(device, ticket, token):
+    async def through_relay(device, ticket, token, port=None):
         phone = ps.Phone(BASE, device, origin=ORIGIN)
-        phone.url = phone_url(ticket, token)
+        phone.url = f"ws://127.0.0.1:{port}/v1/phone?t={ticket}&k={token}" if port else phone_url(ticket, token)
         phone.caps = ["ack", "hb", "relay", "pad"]
         # As the app does: which token it holds, so that the computer does not rotate the one in use.
         phone.greeting = {"relay_token": hashlib.sha256(ln.unb64(token)).hexdigest()}
@@ -312,7 +313,18 @@ async def main(d, phone_tap, desk_tap, registration_key, open_tap, open_port, v1
     except websockets.exceptions.InvalidHandshake as e:
         check("a phone from a page the room does not let in is refused", ps.status_of(e) == 403, ps.status_of(e))
     if open_paired:
+        # The same phone paired again (another way, in the app): a record of its own, which the desktop lists with the first under "Same phone as".
+        # "Replace that pairing" then removes the old record with `mobile.revoke`, only once the new one is approved, and the new one keeps working.
+        again = await pair_through_relay(PHONE_NAME + " open", via=open_port, relay_url=open_url)
+        same_name = [x["id"] for x in (await call("mobile.status"))["devices"] if x["name"] == PHONE_NAME + " open"]
+        check("the same phone paired again is a record of its own, beside the first", bool(again) and len(same_name) == 2 and again[0].id in same_name and open_paired[0].id in same_name, same_name)
         await call("mobile.revoke", {"id": open_paired[0].id})
+        if again:
+            kept, kept_hello = await through_relay(again[0], again[2], again[1], port=open_port)
+            check("…and removing the old one leaves the new one paired and working", kept_hello.get("type") == "hello" and await answers(kept, 31)
+                  and [x["id"] for x in (await call("mobile.status"))["devices"] if x["name"] == PHONE_NAME + " open"] == [again[0].id])
+            await kept.close()
+            await call("mobile.revoke", {"id": again[0].id})
 
     # ---------- a relay that asks for a registration key ----------
     wrong = await asyncio.to_thread(lambda: _refused(d, "mobile.set_relay", {"on": True, "url": url, "operator_key": "not-the-key"}))

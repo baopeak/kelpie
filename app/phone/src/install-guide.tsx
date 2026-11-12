@@ -1,5 +1,7 @@
-// The steps before pairing on a secure origin: install the app, then scan the pairing code inside it (or paste the link).
+// The steps before pairing on a secure origin: install the app, then scan the pairing code inside it (or paste the link). Before pairing, and in
+// Settings, the phone also says which way this app connects and how to pair it another way.
 import { createSignal, For, onCleanup, Show } from "solid-js";
+import { methodLines, pageMethod } from "./conn-path";
 import { HOSTED } from "./hosted";
 import { t } from "./i18n";
 import { firstScreen, platformOf, readCode, type CodeReading, type FirstScreen } from "./install-state";
@@ -40,6 +42,19 @@ function codeProblem(r: CodeReading & { ok: false }): string {
   if (r.why === "install_code") return t("That is the code of the first step. Press Step 2: Pair in Kelpie on your computer and scan the code it shows then.");
   if (r.why === "other_address") return t("This code is for {host}, and this app belongs to another address. Show a new code in Kelpie on your computer.", { host: r.host ?? "" });
   return t("That is not a Kelpie pairing code. Show a new one in Kelpie on your computer.");
+}
+
+/** Which way this app connects (with `self`), and the other ways to connect this phone in one line each, with where to choose one. */
+export function PairWays(props: { self: boolean }) {
+  const lines = () => methodLines(pageMethod(HOSTED, location), t);
+  return (
+    <div data-pair-ways={lines().way}>
+      <Show when={props.self}><p data-pair-self>{lines().self}</p></Show>
+      <h3>{t("Other ways to connect this phone")}</h3>
+      <ul class="steps"><For each={lines().others}>{(l) => <li>{l}</li>}</For></ul>
+      <p class="muted">{lines().choose}</p>
+    </div>
+  );
 }
 
 /** How to install, for this kind of phone. */

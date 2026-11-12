@@ -6,6 +6,7 @@ import { methodText, pathText } from "./conn-path";
 import { APP_VERSION, HOSTED } from "./hosted";
 import { localeSetting, setLocale, t, type LocaleSetting } from "./i18n";
 import { inboxViewName } from "./inbox";
+import { PairWays } from "./install-guide";
 import type { InboxOrder } from "./inbox-order";
 import { KEYS } from "./key-bar";
 import { currentPairing } from "./pairing-store";
@@ -236,6 +237,7 @@ function ConnectionSection(props: { onClose: () => void }) {
         <button class="btn" data-setting="reconnect" onClick={() => link.kick()}>{t("Reconnect now")}</button>
         <button class="btn danger" data-setting="forget" onClick={forget}>{t("Forget this computer")}</button>
       </div>
+      <div data-setting="other-ways"><PairWays self={false} /></div>
     </section>
   );
 }

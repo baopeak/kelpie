@@ -286,5 +286,13 @@
   "ended {ago}": "kết thúc {ago}",
   "ended just now": "vừa kết thúc",
   "{n} d ago": "{n} ngày trước",
-  "Other folders": "Thư mục khác"
+  "Other folders": "Thư mục khác",
+  "This is the app from Kelpie's relay.": "Đây là ứng dụng từ relay của Kelpie.",
+  "This is the app from your computer over Tailscale.": "Đây là ứng dụng từ máy tính của bạn, qua Tailscale.",
+  "This is the app on this network.": "Đây là ứng dụng trong mạng này.",
+  "Tailscale: the app from your computer, from anywhere, with Tailscale on this phone and on the computer.": "Tailscale: ứng dụng từ máy tính của bạn, dùng được ở bất cứ đâu khi Tailscale bật trên điện thoại này và trên máy tính.",
+  "Kelpie's relay: the app from the relay, from anywhere, with no Tailscale needed.": "Relay của Kelpie: ứng dụng từ relay, dùng được ở bất cứ đâu mà không cần Tailscale.",
+  "This network: the app from your computer, on the same Wi-Fi.": "Mạng này: ứng dụng từ máy tính của bạn, khi điện thoại dùng cùng mạng Wi-Fi.",
+  "To use another way, choose it in Kelpie on your computer → Settings → Mobile → Pair a phone. It is paired as an app of its own, and this one stays as it is.": "Để dùng cách khác, bạn chọn nó trong Kelpie trên máy tính → Cài đặt → Di động → Ghép đôi điện thoại. Cách đó được ghép đôi thành một ứng dụng riêng, còn ứng dụng này vẫn giữ nguyên.",
+  "Other ways to connect this phone": "Các cách khác để kết nối điện thoại này"
 }
