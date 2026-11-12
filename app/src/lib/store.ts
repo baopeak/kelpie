@@ -6,7 +6,8 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as ipc from "./ipc";
 import { olderVersion } from "./version";
-import { ANSWER_API, nextWaiting, setAnswering } from "./attention";
+import { ANSWER_API, NEW_SESSION_API, nextWaiting, setAnswering } from "./attention";
+import { missedPhoneStarts, type AuditEntry } from "./phone-starts";
 import { NOTIFY_API, createRepeatGuard, describeNotify, worthPopup, type NotifyEvent } from "./notify-events";
 import { t } from "./i18n";
 import { allPanes, autoGrid, buildGrid, cellCount, equalize, findPane, fromTemplate, insertBeside, leaf, migrateLayout, moveGutter, movePane, removePane, replacePane, splitPane, swapPanes, templateLeaves, toTemplate, type GridSpec, type Side } from "./layout";
@@ -350,6 +351,38 @@ function createAppStore() {
     for (const id of [...requestInbox.keys()]) if (!subRequests().some((r) => r.id === id)) requestGone(id);
   }
 
+  /** A phone's start in Activity: "{phone} started {agent} in {project}", which it opens. `what` is the audit log's own words, for a start
+   *  whose session is gone by now (its agent and project are no longer known here). Returns the title. */
+  function addPhoneStart(phone: string | undefined, sessionId: string | undefined, kind: string | undefined, projectId: string | null | undefined, what?: string): string {
+    const project = state.projects.find((x) => x.id === projectId);
+    const who = phone || t("A phone");
+    const title =
+      kind || !what
+        ? t("{phone} started {agent} in {project}", { phone: who, agent: kindInfo(kind ?? "").label, project: project?.name ?? t("a project") })
+        : t("{phone} started {what}", { phone: who, what });
+    addInbox({ kind: "phone", title, body: t("Started from a phone with this computer's settings for the agent."), sessionId, projectId: projectId ?? undefined });
+    return title;
+  }
+
+  /** Starts by phones while no window was open (the live notice reaches an open one only): read back from the phones' audit log when the
+   *  window connects, each put in Activity once, without a popup. */
+  async function loadPhoneStarts() {
+    if (daemonApi() < NEW_SESSION_API) return;
+    const audit = await ipc.daemon<{ entries: AuditEntry[] }>("mobile.audit", { limit: 200 }).catch(() => null);
+    if (!audit) return;
+    const shown = new Set((state.inbox ?? []).filter((i) => i.kind === "phone" && i.sessionId).map((i) => i.sessionId!));
+    const { starts, newest } = missedPhoneStarts(audit.entries, state.phoneStartsSeen, shown);
+    if (starts.length) {
+      const status = await ipc.daemon<{ devices?: { id: string; name: string }[] }>("mobile.status").catch(() => null);
+      const nameOf = (id: string) => status?.devices?.find((d) => d.id === id)?.name;
+      for (const s of starts) {
+        const session = s.sessionId ? sessions[s.sessionId] : undefined;
+        addPhoneStart(nameOf(s.device), s.sessionId, session?.kind, session?.project_id, s.what);
+      }
+    }
+    update((st) => (st.phoneStartsSeen = Math.max(st.phoneStartsSeen ?? 0, newest)));
+  }
+
   // ---------- inbox (notifications & activity) ----------
   function addInbox(item: Omit<InboxItem, "id" | "at" | "read">): string {
     const id = uid();
@@ -514,10 +547,10 @@ function createAppStore() {
         break;
       case "mobile.session_started": {
         // A phone started an agent here: said, and kept in Activity. The session is in the sidebar; it opens in a tab only when asked (Show).
-        const project = state.projects.find((x) => x.id === p.project_id);
-        const text = t("{phone} started {agent} in {project}", { phone: p.name || t("A phone"), agent: kindInfo(p.kind).label, project: project?.name ?? t("a project") });
-        addInbox({ kind: "phone", title: text, body: t("Started from a phone with this computer's settings for the agent."), sessionId: p.id, projectId: p.project_id ?? undefined });
+        const text = addPhoneStart(p.name, p.id, p.kind, p.project_id);
         notify(text, { label: t("Show"), run: () => revealSession(p.id) }, 10000);
+        // Its audit line went in before this was sent: reading the log back later does not show it again.
+        update((s) => (s.phoneStartsSeen = Math.max(s.phoneStartsSeen ?? 0, Date.now())));
         break;
       }
       case "scheduled.updated":
@@ -1619,6 +1652,7 @@ function createAppStore() {
     void ipc.daemon("daemon.set_priority", { enabled: state.settings.prioritizeVisible ?? true }).catch(() => {});
     void ipc.daemon("daemon.set_policy", { agents_control_others: state.settings.agentsScripting ?? true }).catch(() => {});
     void loadSubState();
+    void loadPhoneStarts();
     resumeInterrupted();
   }
 

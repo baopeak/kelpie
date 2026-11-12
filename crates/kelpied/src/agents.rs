@@ -349,8 +349,9 @@ pub fn build_remote_launch(kind: &str, user_args: &[String], resume: Resume, pro
             if let Some(text) = prompt.filter(|t| !t.trim().is_empty()) {
                 let fits = text.len() <= 8000;
                 match p.prompt {
+                    // A prompt that looks like an option is typed, also where a flag would carry it.
                     PromptMode::Argv if fits && !text.starts_with('-') => rest.push(text.to_string()),
-                    PromptMode::Flag(flag) if fits => rest.extend([flag.to_string(), text.to_string()]),
+                    PromptMode::Flag(flag) if fits && !text.starts_with('-') => rest.extend([flag.to_string(), text.to_string()]),
                     _ => typed_prompt = Some(TypedPrompt { text: text.to_string(), paste: true }),
                 }
             }
@@ -523,9 +524,10 @@ fn build_launch_with(
         // the agent submits it itself instead of racing a typed Enter against its start-up.
         let fits = text.len() <= 8000;
         match preset.map_or(PromptMode::Typed, |p| p.prompt) {
-            // A prompt that looks like an option would be parsed as one.
+            // A prompt that looks like an option would be parsed as one, also after the prompt
+            // flag (`gemini -i --yolo` turns on YOLO and leaves `-i` empty): such a prompt is typed.
             PromptMode::Argv if fits && !text.starts_with('-') => argv.push(text.to_string()),
-            PromptMode::Flag(flag) if fits => argv.extend([flag.to_string(), text.to_string()]),
+            PromptMode::Flag(flag) if fits && !text.starts_with('-') => argv.extend([flag.to_string(), text.to_string()]),
             _ => typed_prompt = Some(TypedPrompt { text: text.to_string(), paste: true }),
         }
     }
@@ -1114,6 +1116,10 @@ mod custom_tests {
         let l = build_launch("acme-bot", &[], Resume::None, Some("do it"), Path::new("kelpied"), &dir, false).unwrap();
         let j = command_line(&l.argv);
         assert!(j.contains("chat --ask do it"), "{j}");
+        // An option-like prompt is never placed after the prompt flag, where the agent would parse it as an option.
+        let l = build_launch("acme-bot", &[], Resume::None, Some("--yes"), Path::new("kelpied"), &dir, false).unwrap();
+        assert!(!l.argv.iter().any(|a| a == "--yes" || a == "--ask"), "{:?}", l.argv);
+        assert_eq!(l.typed_prompt.map(|t| t.text).as_deref(), Some("--yes"));
         let l = build_launch("acme-bot", &[], Resume::Latest, None, Path::new("kelpied"), &dir, false).unwrap();
         assert!(command_line(&l.argv).contains("chat --continue"));
         assert!(set_custom(&[AgentDef { id: "claude".into(), ..def.clone() }]).is_err(), "built-in ids are taken");
@@ -1205,6 +1211,19 @@ mod sub_tool_tests {
         let shell = launch("shell", &[], None, "/k/kelpied", &dir, true);
         assert_eq!(shell.env.len(), 1);
         assert!(launch("gemini", &[], None, "/k/kelpied", &dir, false).env.is_empty());
+    }
+
+    #[test]
+    fn a_prompt_that_looks_like_an_option_is_typed_even_after_the_prompt_flag() {
+        let dir = data_dir();
+        let plain_prompt = launch("gemini", &[], Some("fix it"), "/k/kelpied", &dir, false);
+        assert_eq!(plain_prompt.argv, ["gemini", "-i", "fix it"]);
+        assert!(plain_prompt.typed_prompt.is_none());
+        for kind in ["gemini", "opencode", "copilot"] {
+            let l = launch(kind, &[], Some("--yolo"), "/k/kelpied", &dir, false);
+            assert!(!l.argv.iter().any(|a| a == "--yolo"), "{kind}: {:?}", l.argv);
+            assert_eq!(l.typed_prompt.map(|t| t.text).as_deref(), Some("--yolo"), "{kind}");
+        }
     }
 
     #[test]

@@ -51,15 +51,45 @@ async fn a_phone_sees_what_it_may_start_only_once_the_app_has_said_and_never_a_f
     assert_eq!(o["projects"], json!([{"id": "p1", "name": "Shop"}, {"id": "gone", "name": "Gone"}]));
     assert_eq!(o["agents"], json!([{"kind": "phone-fake", "label": "Fake Agent", "skips": true}]), "the absent agent is not installed: {o}");
     assert!(!o.to_string().contains(&path) && !o.to_string().contains("sk-phone-secret"));
-    // The whole catalogue each time: one sent later replaces it, and one refused leaves the last.
+    // The whole catalogue each time: one sent later replaces it.
     set_launch(&r.daemon, json!({"projects": [{"id": "p9", "name": "Other", "path": path}], "agents": []})).unwrap();
     let o = r.ask_write(json!({"type": "new_options"})).await;
     assert_eq!((o["projects"].clone(), o["agents"].clone()), (json!([{"id": "p9", "name": "Other"}]), json!([])));
-    let big = json!({"projects": [], "agents": [{"kind": "phone-fake", "label": "F", "env": {"K": "x".repeat(launch::MAX_MESSAGE)}}]});
-    assert!(set_launch(&r.daemon, big).unwrap_err().to_string().contains("too large"));
-    assert_eq!(r.ask_write(json!({"type": "new_options"})).await["projects"], json!([{"id": "p9", "name": "Other"}]));
     // A device that may only read is told so, as for any typing.
     assert_eq!(code(&r.ask(Permission::Read, json!({"type": "new_options"})).await), Some("read_only"));
+    // Asking over and over is held back, a few times a second at most.
+    r.daemon.mobile.options_rate.lock().clear();
+    for _ in 0..OPTIONS_BURST as usize {
+        assert!(r.daemon.mobile.allow_options("phone"));
+    }
+    assert_eq!(code(&r.ask_write(json!({"type": "new_options"})).await), Some("rate_limited"));
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn a_refused_catalogue_clears_the_one_before_it_so_nothing_starts_with_settings_since_changed() {
+    let _plugins = fake_agents();
+    let mut r = rig();
+    let path = folder("refused-catalogue");
+    set_launch(&r.daemon, catalogue(&path)).unwrap();
+    assert_eq!(r.ask_write(json!({"type": "new_options"})).await["ready"], true);
+    // The app turned bypass off, and the same push carries a project the daemon refuses: the old catalogue, bypass and all, is gone.
+    let refused = json!({"projects": [{"id": "p1", "name": "a\u{7}b", "path": path}], "agents": [{"kind": "phone-fake", "label": "Fake Agent"}]});
+    let why = set_launch(&r.daemon, refused).unwrap_err().to_string();
+    assert!(why.contains("control characters"), "the app is told why: {why}");
+    let before = r.daemon.list().len();
+    for req in [json!({"type": "new_options"}), start("p1", "phone-fake", "after-refusal")] {
+        let reply = r.ask_write(req.clone()).await;
+        assert_eq!(code(&reply), Some("launch_refused"), "{req}: {reply}");
+        assert_eq!(reply["message"], launch::REFUSED);
+    }
+    assert_eq!(r.daemon.list().len(), before);
+    // The next one accepted is used again.
+    set_launch(&r.daemon, catalogue(&path)).unwrap();
+    assert_eq!(r.ask_write(json!({"type": "new_options"})).await["ready"], true);
+    let big = json!({"projects": [], "agents": [{"kind": "phone-fake", "label": "F", "env": {"K": "x".repeat(launch::MAX_MESSAGE)}}]});
+    assert!(set_launch(&r.daemon, big).unwrap_err().to_string().contains("too large"));
+    assert_eq!(code(&r.ask_write(json!({"type": "new_options"})).await), Some("launch_refused"));
     let _ = std::fs::remove_dir_all(path);
 }
 
@@ -93,6 +123,12 @@ async fn every_way_a_start_is_refused_starts_nothing() {
         assert!(r.daemon.mobile.allow_start("phone"));
     }
     assert_eq!(code(&r.ask_write(start("p1", "phone-fake", "c9")).await), Some("rate_limited"));
+    // The refusals above that came after the rate's token was taken gave it back: none of them used one up.
+    r.daemon.mobile.start_rate.lock().clear();
+    for cid in ["r1", "r2", "r3", "r4"] {
+        assert_eq!(code(&r.ask_write(start("gone", "phone-fake", cid)).await), Some("no_folder"));
+    }
+    assert!(r.daemon.mobile.allow_start("phone"));
     assert_eq!(r.daemon.list().len(), before, "nothing was started");
     assert!(!r.daemon.mobile.audit_entries(50).to_string().contains("session_new"));
     let _ = std::fs::remove_dir_all(path);
@@ -114,7 +150,7 @@ async fn a_start_takes_the_catalogues_arguments_and_environment_is_done_once_and
     let spec = info.spec.clone();
     assert_eq!((spec.kind.as_str(), spec.project_id.as_deref(), spec.args.clone()), ("phone-fake", Some("p1"), vec!["--yes".to_string(), "--model".into(), "m1".into()]));
     assert_eq!(spec.env, std::collections::BTreeMap::from([("FAKE_AGENT_KEY".to_string(), "sk-phone-secret".to_string())]));
-    assert_eq!(spec.cwd, crate::daemon::existing_folder(&path, &path).unwrap());
+    assert_eq!(spec.cwd, path, "the project's folder as the app names it, as the desktop starts in it");
     // A retry of the same start (a lost reply) gets the same session, and no second one.
     let sessions = r.daemon.list().len();
     let again = r.ask_write(start("p1", "phone-fake", "same")).await;
@@ -131,10 +167,63 @@ async fn a_start_takes_the_catalogues_arguments_and_environment_is_done_once_and
     assert_eq!(told, [json!({"id": id, "device": "phone", "name": "Phone", "kind": "phone-fake", "project_id": "p1"})]);
     let audit = r.daemon.mobile.audit_entries(50);
     let notes: Vec<(String, String)> = audit["entries"].as_array().unwrap().iter().filter(|e| e["action"] == "session_new").map(|e| (e["device"].as_str().unwrap_or_default().to_string(), e["summary"].as_str().unwrap_or_default().to_string())).collect();
-    assert_eq!(notes, [("phone".to_string(), "Fake Agent in Shop".to_string())], "{audit}");
+    assert_eq!(notes, [("phone".to_string(), format!("Fake Agent in Shop (session {id})"))], "{audit}");
     assert!(!audit.to_string().contains("phone-started") && !audit.to_string().contains("sk-phone-secret"));
     let _ = r.daemon.close(info.handle);
     let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn a_start_sent_again_while_the_first_still_runs_waits_for_it_and_never_starts_a_second() {
+    let _plugins = fake_agents();
+    let mut r = rig();
+    let path = folder("in-flight");
+    set_launch(&r.daemon, catalogue(&path)).unwrap();
+    // The same start over two connections of the phone at once (a reconnect re-sent it while the computer was still starting it).
+    let mut second = other_conn(&r, "phone", "Phone", 7);
+    let mut req = start("p1", "phone-fake", "twice");
+    req["req"] = json!(1);
+    let (a, b) = tokio::join!(r.conn.handle(Permission::Write, &req), second.handle(Permission::Write, &req));
+    let (a, b) = (a.expect("a reply"), b.expect("a reply"));
+    assert_eq!(a["result"], "ok", "{a}");
+    assert_eq!(a["id"], b["id"], "{a} {b}");
+    assert_eq!((a["dup"].as_bool(), b["dup"].as_bool()), (None, Some(true)), "the second got the first's reply: {a} {b}");
+    let starts = |r: &Rig| r.daemon.mobile.audit_entries(50)["entries"].as_array().unwrap().iter().filter(|e| e["action"] == "session_new").count();
+    assert_eq!(starts(&r), 1, "one session was started");
+    assert!(r.daemon.mobile.in_flight.lock().is_empty(), "nothing is left reserved");
+    let id = a["id"].as_str().unwrap().to_string();
+    if let Some(info) = r.daemon.list().into_iter().find(|i| i.spec.id == id) {
+        let _ = r.daemon.close(info.handle);
+    }
+
+    // A first that takes longer than a repeat may wait: the repeat is told it is still under way, starts nothing, and is not kept,
+    // so the same cid asked again gets the first one's reply once it is there.
+    let first = CidTurn::take(&r.daemon.mobile.in_flight, "phone", "slow", CID_WAIT).await.unwrap();
+    let busy = r.ask_write(start("p1", "phone-fake", "slow")).await;
+    assert_eq!(code(&busy), Some("in_progress"), "{busy}");
+    r.daemon.mobile.remember_reply("phone", "slow", ANSWER_DEDUPE, &json!({"type": "ack", "result": "ok", "id": "the-first"}));
+    drop(first);
+    let again = r.ask_write(start("p1", "phone-fake", "slow")).await;
+    assert_eq!((again["id"].as_str(), again["dup"].as_bool()), (Some("the-first"), Some(true)), "{again}");
+    assert_eq!(starts(&r), 1, "neither started one");
+    assert!(r.daemon.mobile.in_flight.lock().is_empty());
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn whether_a_phone_may_still_start_is_read_again_after_the_look_on_disk() {
+    let mut r = rig();
+    assert!(r.conn.may_still_start().is_ok());
+    r.daemon.mobile.set_write("phone", false).unwrap();
+    assert_eq!(r.conn.may_still_start().err().map(|e| e.code), Some("read_only"), "downgraded meanwhile");
+    r.daemon.mobile.set_write("phone", true).unwrap();
+    // A connection whose phone's unlocked window is over (here: there never was one).
+    r.conn.lock_path = LockPath::PasskeyAlways;
+    assert_eq!(r.conn.may_still_start().err().map(|e| e.code), Some("locked"), "locked meanwhile");
+    r.conn.lock_path = LockPath::Local;
+    assert!(r.conn.may_still_start().is_ok());
+    r.daemon.mobile.revoke("phone").unwrap();
+    assert_eq!(r.conn.may_still_start().err().map(|e| e.code), Some("unpaired"), "revoked meanwhile");
 }
 
 /// What the daemon's log was given while `f` ran on this thread.
@@ -176,8 +265,8 @@ fn the_catalogues_environment_never_reaches_the_log() {
         let _ = set_launch(&r.daemon, json!({"projects": [], "agents": [{"kind": "phone-fake", "label": "F", "env": {"K": "sk-phone-secret"}, "args": 3}]}));
         set_launch(&r.daemon, catalogue(&path)).unwrap();
         let _ = r.daemon.mobile.launch_options(&["phone-fake"]);
-        let planned = launch::plan(r.daemon.mobile.launch.lock().as_ref(), &start("p1", "phone-fake", "c")).ok().unwrap();
-        let info = r.daemon.create_for_phone(planned.create_params(&path), "phone", "Phone").unwrap();
+        let planned = launch::plan(r.daemon.mobile.launch.lock().as_ref().map_err(|m| *m), &start("p1", "phone-fake", "c")).ok().unwrap();
+        let info = r.daemon.create_for_phone(planned.create_params(), "phone", "Phone", |id| planned.summary(id)).unwrap();
         let _ = r.daemon.close(info.handle);
     });
     assert!(log.contains("capture on"), "the capture sees the log: {log}");

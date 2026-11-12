@@ -21,11 +21,12 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
    the agent gets exactly one answer whoever is first, the other side is told (`chat_resolved`,
    `chat.resolved`); a watcher resumes with a delta.
 8c. Starting a session from the phone, with no app window at all: nothing until a launch catalogue comes (`mobile.set_launch`, from the
-    user token); then the catalogue's projects and installed agents, never a folder or an environment; every refusal starts nothing; a start
-    runs a fake plugin agent (this Python) with exactly the catalogue's arguments, environment and the first prompt; a repeat of its `cid` gets
-    the same session; the desktop hears `mobile.session_started`; the audit has `session_new` without the prompt; three at once, then wait.
+    user token); then the catalogue's projects and installed agents, never a folder or an environment; a refused catalogue clears the one
+    before it; every refusal starts nothing; a start runs a fake plugin agent (this Python) in the catalogue's folder as given, with exactly
+    the catalogue's arguments, environment and the first prompt; a repeat of its `cid` gets the same session; the desktop hears
+    `mobile.session_started`; the audit has `session_new` without the prompt; starts sent back to back are refused after a few.
 9. A daemon restart gives a new epoch; the session ids still resolve; a request from the old epoch is refused; the restarted daemon has no
-   launch catalogue (`new_options` says to open Kelpie).
+   launch catalogue (`new_options` says to open an up-to-date Kelpie).
 10. Sending to a chat from the phone (the daemon's queue): an idle agent gets the message once, a busy one
     after its turn; phone and desktop messages go out in the order received, with the window attached or
     gone; a retry under the same `cid` makes no second message; either side cancels the other's; a stop
@@ -783,7 +784,7 @@ async def main(d):
     # ---------- 8c. starting a session from the phone (no app window at all: the daemon starts it alone) ----------
     d.call("agent.set_custom", {"agents": [PHONE_FAKE, PHONE_ABSENT]})
     none = await phone.ask(type="new_options")
-    check("before the app sends its launch catalogue the phone may start nothing, and is told why", none.get("ready") is False and "Open Kelpie on your computer" in (none.get("why") or ""), none)
+    check("before the app sends its launch catalogue the phone may start nothing, and is told why", none.get("ready") is False and "Open an up-to-date Kelpie on your computer" in (none.get("why") or ""), none)
     early = await phone.ask(type="new_session", project_id="proj-shop", kind="phone-fake", cid="early")
     check("…and a start is refused as not ready", early.get("code") == "not_ready", early)
     plain = ps.kc.Conn()
@@ -795,7 +796,9 @@ async def main(d):
     check("…never a folder or an environment", work not in json.dumps(opts) and "profile-secret-42" not in json.dumps(opts))
     big = {"projects": [], "agents": [{"kind": "phone-fake", "label": "F", "env": {"K": "x" * 300_000}}]}
     check("an oversized catalogue is refused", "too large" in (refused(plain, "mobile.set_launch", big) or ""))
-    check("…and the last one stays", (await phone.ask(type="new_options")).get("projects") == opts.get("projects"))
+    cleared = await phone.ask(type="new_options")
+    check("…and the one before it is cleared: the phone starts nothing until one is accepted", cleared.get("code") == "launch_refused", cleared)
+    check("the catalogue sent again is accepted", refused(plain, "mobile.set_launch", LAUNCH) is None and (await phone.ask(type="new_options")).get("projects") == opts.get("projects"))
     before = len(d.call("session.list"))
     for req, want in [
         (dict(project_id="ssh-project", kind="phone-fake"), "no_project"),
@@ -813,9 +816,9 @@ async def main(d):
     sid = started.get("id")
     check("a start is answered with the new session's id", started.get("type") == "ack" and started.get("result") == "ok" and bool(sid), started)
     row = info(d, sid)
-    check("it runs in the project's folder with exactly the profile's arguments and environment",
+    check("it runs in the project's folder as the catalogue names it (as the desktop does), with exactly the profile's arguments and environment",
           row.get("kind") == "phone-fake" and row.get("project_id") == "proj-shop" and row.get("args") == ["--yes", "--from-profile"]
-          and row.get("env") == {"PHONE_FAKE_KEY": "profile-secret-42"} and os.path.normcase(row.get("cwd", "")) == os.path.normcase(os.path.realpath(work)), row)
+          and row.get("env") == {"PHONE_FAKE_KEY": "profile-secret-42"} and row.get("cwd") == work, row)
     ran = ps.wait_for(lambda: started_runs(), 30)
     check("the agent got the profile's flags, the first prompt and the profile's environment",
           bool(ran) and ran[-1]["argv"][-3:] == ["--yes", "--from-profile", "hello from the phone"] and ran[-1]["key"] == "profile-secret-42", ran)
@@ -828,10 +831,17 @@ async def main(d):
     check("the desktop hears which phone started which agent in which project", told[:1] == [{"id": sid, "device": writer_id, "name": "Writer", "kind": "phone-fake", "project_id": "proj-shop"}], told)
     log = d.call("mobile.audit", {"limit": 50})
     notes = [e for e in log["entries"] if e["action"] == "session_new"]
-    check("the audit log says which agent in which project, once, and never the prompt", [e["summary"] for e in notes] == ["Fake agent in Shop"] and "hello from the phone" not in json.dumps(log), notes)
-    # Three at once, then one every ten seconds: the repeat cost nothing, so two more go and the next is refused.
-    more = [await phone.ask(type="new_session", project_id="proj-shop", kind="phone-fake", cid=f"start-{n}") for n in (2, 3, 4)]
-    check("a phone starts three at once, then is told to wait", [m.get("result") for m in more[:2]] == ["ok", "ok"] and more[2].get("code") == "rate_limited", more)
+    check("the audit log says which agent in which project and which session, once, and never the prompt",
+          [e["summary"] for e in notes] == [f"Fake agent in Shop (session {sid})"] and "hello from the phone" not in json.dumps(log), notes)
+    # Three at once, then one every ten seconds. However long the steps above took on this machine, the bucket holds three at most and
+    # refills a tenth of a start each second: starts sent back to back are refused by the fourth.
+    more = []
+    for n in range(2, 8):
+        more.append(await phone.ask(type="new_session", project_id="proj-shop", kind="phone-fake", cid=f"start-{n}"))
+        if more[-1].get("code") == "rate_limited":
+            break
+    check("a phone starts a few at once, then is told to wait", more[-1].get("code") == "rate_limited" and len(more) <= 4
+          and all(m.get("result") == "ok" for m in more[:-1]), more)
     for x in d.call("session.list"):
         if x["kind"] == "phone-fake":
             d.call("session.close", {"handle": x["handle"]})
@@ -857,7 +867,7 @@ async def main(d):
     check("the sessions come back under the same ids", a["id"] in ids and b["id"] in ids, ids)
     if ok:
         after = await phone.ask(type="new_options")
-        check("a restarted daemon has no launch catalogue until the app sends it again, and the phone is told to open Kelpie", (after or {}).get("ready") is False and "Open Kelpie" in ((after or {}).get("why") or ""), after)
+        check("a restarted daemon has no launch catalogue until the app sends it again, and the phone is told to open Kelpie", (after or {}).get("ready") is False and "Open an up-to-date Kelpie" in ((after or {}).get("why") or ""), after)
     moved = [x["id"] for x in d.call("session.list") if x["id"] in handles and handles[x["id"]] != x["handle"]]
     check("handles are renumbered by the restart, ids are not", bool(moved), {k: (handles[k], info(d, k).get("handle")) for k in handles})
     mark = phone.mark()

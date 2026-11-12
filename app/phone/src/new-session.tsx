@@ -66,7 +66,7 @@ export function NewSessionSheet(props: { onClose: () => void }) {
         </Show>
         <Show when={message()}><p class="notice" role="status" data-new-error>{message()}</p></Show>
         <div class="actions">
-          <button class="btn primary" data-new-start disabled={busy() || !connected() || !project() || !kind()} onClick={() => void start()}>{busy() ? t("Starting…") : t("Start")}</button>
+          <button class="btn primary" data-new-start disabled={busy() || !connected() || !project() || !kind()} onClick={() => void start()}>{busy() ? t("Starting the session…") : t("Start session")}</button>
           <button class="btn" onClick={props.onClose}>{t("Cancel")}</button>
         </div>
       </div>

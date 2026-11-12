@@ -4,7 +4,8 @@
 //! environment exactly as its own launchers would, and the daemon keeps the result. A phone then starts a session with those and nothing
 //! else, also while the window is closed. The catalogue lives in memory only, like the project names: profile environments can hold API
 //! keys, and none of them is written again or logged. A daemon that has not heard from the app since it started has none, and a phone is
-//! told to open Kelpie on the computer once.
+//! told to open an up-to-date Kelpie on the computer. A catalogue the daemon refuses clears the one it held: a phone must never start with
+//! settings the person has since changed (Yolo turned off, say), so until the app sends one that is accepted, phones can start nothing.
 //!
 //! Remote (SSH) projects and chat-only agents are never in it: the first need the app's saved secrets and a dialog, the second the app's
 //! chat front-end.
@@ -21,8 +22,37 @@ pub const MAX_AGENTS: usize = 64;
 pub const MAX_ARGS: usize = 64;
 pub const MAX_MESSAGE: usize = 256 * 1024;
 
-/// What the phone is told while there is no catalogue.
-pub const NOT_READY: &str = "Open Kelpie on your computer once so this phone can start sessions.";
+/// What the phone is told while there is no catalogue. An app from before phones could start sessions sends none either, hence "up-to-date".
+pub const NOT_READY: &str = "Open an up-to-date Kelpie on your computer so this phone can start sessions.";
+/// What the phone is told after the app sent a catalogue the daemon refused (the app says why on the computer).
+pub const REFUSED: &str = "Kelpie on your computer could not offer its projects to this phone. Open Kelpie there to see why.";
+
+/// Why there is no catalogue to start from.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Missing {
+    /// The app has not sent one since this daemon started.
+    NotSent,
+    /// The last one the app sent was refused, and the one before it dropped.
+    Refused,
+}
+
+impl Missing {
+    /// The refusal a phone gets: (code, message).
+    pub fn refusal(self) -> (&'static str, String) {
+        match self {
+            Missing::NotSent => ("not_ready", NOT_READY.to_string()),
+            Missing::Refused => ("launch_refused", REFUSED.to_string()),
+        }
+    }
+}
+
+/// Most bytes of a project's id, name and folder, and of an agent's kind and label. The app trims to these before it sends
+/// (`app/src/lib/phone-launch.ts` keeps the same numbers).
+pub const MAX_PROJECT_ID: usize = 128;
+pub const MAX_PROJECT_NAME: usize = 256;
+pub const MAX_PATH: usize = 4096;
+pub const MAX_KIND: usize = 64;
+pub const MAX_LABEL: usize = 128;
 
 #[derive(Deserialize, Clone, PartialEq, Debug)]
 pub struct Project {
@@ -68,15 +98,16 @@ pub fn parse(params: &Value) -> Result<Catalogue, String> {
     if c.agents.len() > MAX_AGENTS {
         return Err(format!("at most {MAX_AGENTS} agents"));
     }
-    let plain = |s: &str, most: usize| !s.is_empty() && s.len() <= most && !s.chars().any(char::is_control);
+    let text = |s: &str, most: usize| s.len() <= most && !s.chars().any(char::is_control);
+    let plain = |s: &str, most: usize| !s.is_empty() && text(s, most);
     for p in &c.projects {
-        if !plain(&p.id, 128) || p.name.len() > 256 || !plain(&p.path, 4096) {
-            return Err("each project needs an id (at most 128 bytes), a name (at most 256) and a folder".into());
+        if !plain(&p.id, MAX_PROJECT_ID) || !text(&p.name, MAX_PROJECT_NAME) || !plain(&p.path, MAX_PATH) {
+            return Err(format!("each project needs an id (at most {MAX_PROJECT_ID} bytes), a name (at most {MAX_PROJECT_NAME}) and a folder, without control characters"));
         }
     }
     for a in &c.agents {
-        if !plain(&a.kind, 64) || a.label.len() > 128 {
-            return Err("each agent needs a kind (at most 64 bytes) and a label (at most 128)".into());
+        if !plain(&a.kind, MAX_KIND) || !text(&a.label, MAX_LABEL) {
+            return Err(format!("each agent needs a kind (at most {MAX_KIND} bytes) and a label (at most {MAX_LABEL}), without control characters"));
         }
         if a.args.len() > MAX_ARGS {
             return Err(format!("at most {MAX_ARGS} arguments for one agent"));
@@ -87,9 +118,13 @@ pub fn parse(params: &Value) -> Result<Catalogue, String> {
 
 /// The phone's `new_options`: the projects in the catalogue's order (their folders stay here), and the catalogue's agents that are
 /// installed, each saying whether it runs without asking before it acts (as `sub_rpc::skips_permissions` reads a session's arguments).
-pub fn options(c: Option<&Catalogue>, installed: &[&str]) -> Value {
-    let Some(c) = c else {
-        return json!({"type": "new_options", "ready": false, "projects": [], "agents": [], "why": NOT_READY});
+/// While none was sent it is an answer that says so (`ready: false`, as phones before a refusal code know it); after one was refused, a
+/// refusal (code, message).
+pub fn options(c: Result<&Catalogue, Missing>, installed: &[&str]) -> Result<Value, (&'static str, String)> {
+    let c = match c {
+        Ok(c) => c,
+        Err(Missing::NotSent) => return Ok(json!({"type": "new_options", "ready": false, "projects": [], "agents": [], "why": NOT_READY})),
+        Err(refused) => return Err(refused.refusal()),
     };
     let projects: Vec<Value> = c.projects.iter().map(|p| json!({"id": p.id, "name": p.name})).collect();
     let agents: Vec<Value> = c
@@ -101,7 +136,7 @@ pub fn options(c: Option<&Catalogue>, installed: &[&str]) -> Value {
             json!({"kind": a.kind, "label": a.label, "skips": crate::subs::args_skip_permissions(&a.kind, yolo, &a.args)})
         })
         .collect();
-    json!({"type": "new_options", "ready": true, "projects": projects, "agents": agents})
+    Ok(json!({"type": "new_options", "ready": true, "projects": projects, "agents": agents}))
 }
 
 /// A `new_session` as checked against the catalogue, before what needs the disk (the agent installed, the folder there).
@@ -114,25 +149,27 @@ pub struct Planned {
 
 impl Planned {
     /// What it is started with: the catalogue's arguments and environment, nothing of the phone's but the prompt, at the size the desktop's
-    /// launchers use. `cwd` is the project's folder as it is on disk now.
-    pub fn create_params(&self, cwd: &str) -> Value {
+    /// launchers use, in the project's folder as the app gives it. That is the folder the desktop starts in too: a canonical one (a mapped
+    /// drive resolved to its share, a symlink to its target) would be another folder to the agents, which key their history and trust by it.
+    pub fn create_params(&self) -> Value {
         json!({
-            "kind": self.agent.kind, "cwd": cwd, "project_id": self.project.id, "args": self.agent.args, "env": self.agent.env,
+            "kind": self.agent.kind, "cwd": self.project.path, "project_id": self.project.id, "args": self.agent.args, "env": self.agent.env,
             "prompt": self.prompt, "cols": 120, "rows": 32,
         })
     }
 
-    /// The audit log's line: which agent in which project. Never the prompt.
-    pub fn summary(&self) -> String {
+    /// The audit log's line for the session `id` it started: which agent in which project, and the session (the app reads it back to show
+    /// starts it missed while it was closed, `app/src/lib/phone-starts.ts`). Never the prompt.
+    pub fn summary(&self, id: &str) -> String {
         let label = if self.agent.label.is_empty() { &self.agent.kind } else { &self.agent.label };
         let project = if self.project.name.is_empty() { &self.project.id } else { &self.project.name };
-        format!("{label} in {project}")
+        format!("{label} in {project} (session {id})")
     }
 }
 
 /// Checks a phone's `new_session` against the catalogue: (code, message) when it is refused.
-pub fn plan(c: Option<&Catalogue>, req: &Value) -> Result<Planned, (&'static str, String)> {
-    let c = c.ok_or(("not_ready", NOT_READY.to_string()))?;
+pub fn plan(c: Result<&Catalogue, Missing>, req: &Value) -> Result<Planned, (&'static str, String)> {
+    let c = c.map_err(Missing::refusal)?;
     let text = |k: &str| req.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
     let project_id = text("project_id").ok_or(("bad_request", "missing project_id".to_string()))?;
     let kind = text("kind").ok_or(("bad_request", "missing kind".to_string()))?;
@@ -181,7 +218,20 @@ mod tests {
         assert!(parse(&json!({"projects": [], "agents": [args]})).unwrap_err().contains("arguments"));
         let heavy = json!({"kind": "claude", "label": "C", "env": {"BIG": "x".repeat(MAX_MESSAGE)}});
         assert!(parse(&json!({"projects": [], "agents": [heavy]})).unwrap_err().contains("too large"));
-        for bad in [json!({}), json!({"projects": [], "agents": [{"kind": "", "label": "C"}]}), json!({"projects": [{"id": "p", "name": "n", "path": ""}], "agents": []}), json!({"projects": [], "agents": [{"kind": "claude", "label": "C", "env": {"K": 1}}]})] {
+        let named = |name: &str, label: &str| json!({"projects": [{"id": "p", "name": name, "path": "/p"}], "agents": [{"kind": "claude", "label": label}]});
+        assert!(parse(&named(&"n".repeat(MAX_PROJECT_NAME), &"l".repeat(MAX_LABEL))).is_ok(), "at the bounds");
+        assert!(parse(&named("", "")).is_ok(), "an empty name or label is shown as the id or the kind");
+        for bad in [
+            json!({}),
+            json!({"projects": [], "agents": [{"kind": "", "label": "C"}]}),
+            json!({"projects": [{"id": "p", "name": "n", "path": ""}], "agents": []}),
+            json!({"projects": [], "agents": [{"kind": "claude", "label": "C", "env": {"K": 1}}]}),
+            named(&"n".repeat(MAX_PROJECT_NAME + 1), "C"),
+            named("n", &"l".repeat(MAX_LABEL + 1)),
+            named("a\u{7}b", "C"),
+            named("n", "C\nD"),
+            json!({"projects": [{"id": "p", "name": "n", "path": "/p\u{0}q"}], "agents": []}),
+        ] {
             assert!(parse(&bad).is_err(), "{bad}");
         }
         // What a refusal says never quotes what was sent.
@@ -191,22 +241,24 @@ mod tests {
 
     #[test]
     fn options_list_the_projects_without_folders_and_the_installed_agents_with_whether_they_ask() {
-        assert_eq!(options(None, &["claude"]), json!({"type": "new_options", "ready": false, "projects": [], "agents": [], "why": NOT_READY}));
+        assert_eq!(options(Err(Missing::NotSent), &["claude"]), Ok(json!({"type": "new_options", "ready": false, "projects": [], "agents": [], "why": NOT_READY})));
+        assert_eq!(options(Err(Missing::Refused), &["claude"]), Err(("launch_refused", REFUSED.to_string())));
         let c = parse(&catalogue()).unwrap();
-        let o = options(Some(&c), &["claude", "codex", "omp"]);
+        let o = options(Ok(&c), &["claude", "codex", "omp"]).unwrap();
         assert_eq!(o["ready"], true);
         assert_eq!(o["projects"], json!([{"id": "p1", "name": "Shop"}, {"id": "p2", "name": "Docs"}]), "in the catalogue's order");
         assert!(!o.to_string().contains("work/shop") && !o.to_string().contains("sk-secret"), "neither folders nor environments go to a phone");
         assert_eq!(o["agents"], json!([{"kind": "claude", "label": "Claude Code", "skips": true}, {"kind": "codex", "label": "Codex", "skips": false}]), "gemini is not installed; omp is not offered");
-        assert_eq!(options(Some(&c), &[])["agents"], json!([]));
-        assert_eq!(options(Some(&Catalogue::default()), &["claude"])["ready"], true, "an empty catalogue was still sent by the app");
+        assert_eq!(options(Ok(&c), &[]).unwrap()["agents"], json!([]));
+        assert_eq!(options(Ok(&Catalogue::default()), &["claude"]).unwrap()["ready"], true, "an empty catalogue was still sent by the app");
     }
 
     #[test]
     fn a_start_is_checked_against_the_catalogue_and_takes_its_arguments_and_environment_only() {
         let c = parse(&catalogue()).unwrap();
-        let ask = |req: Value| plan(Some(&c), &req).map(|p| p.create_params("C:/real/shop")).map_err(|(code, _)| code);
-        assert_eq!(plan(None, &json!({"project_id": "p1", "kind": "claude"})).err().map(|e| e.0), Some("not_ready"));
+        let ask = |req: Value| plan(Ok(&c), &req).map(|p| p.create_params()).map_err(|(code, _)| code);
+        assert_eq!(plan(Err(Missing::NotSent), &json!({"project_id": "p1", "kind": "claude"})).err().map(|e| e.0), Some("not_ready"));
+        assert_eq!(plan(Err(Missing::Refused), &json!({"project_id": "p1", "kind": "claude"})).err().map(|e| e.0), Some("launch_refused"));
         assert_eq!(ask(json!({"project_id": "nope", "kind": "claude"})).err(), Some("no_project"));
         assert_eq!(ask(json!({"project_id": "p1", "kind": "omp"})).err(), Some("no_agent"));
         assert_eq!(ask(json!({"kind": "claude"})).err(), Some("bad_request"));
@@ -215,9 +267,10 @@ mod tests {
         assert!(ask(json!({"project_id": "p1", "kind": "claude", "prompt": "é".repeat(crate::subs::MAX_TASK)})).is_ok(), "characters, not bytes");
         // What the phone sends besides the project, the agent and the prompt changes nothing.
         let params = ask(json!({"project_id": "p1", "kind": "claude", "prompt": "  fix the build\x1b[201~\r\n ", "args": ["--evil"], "env": {"X": "y"}, "cwd": "/"})).unwrap();
-        assert_eq!(params, json!({"kind": "claude", "cwd": "C:/real/shop", "project_id": "p1", "args": ["--dangerously-skip-permissions"], "env": {"ANTHROPIC_API_KEY": "sk-secret"}, "prompt": "fix the build[201~", "cols": 120, "rows": 32}));
+        // The folder is the catalogue's, as the desktop starts in it.
+        assert_eq!(params, json!({"kind": "claude", "cwd": "C:/work/shop", "project_id": "p1", "args": ["--dangerously-skip-permissions"], "env": {"ANTHROPIC_API_KEY": "sk-secret"}, "prompt": "fix the build[201~", "cols": 120, "rows": 32}));
         assert_eq!(ask(json!({"project_id": "p2", "kind": "codex", "prompt": "   "})).unwrap()["prompt"], Value::Null, "a blank prompt is none");
-        let planned = plan(Some(&c), &json!({"project_id": "p1", "kind": "claude", "prompt": "the secret plan"})).unwrap();
-        assert_eq!(planned.summary(), "Claude Code in Shop");
+        let planned = plan(Ok(&c), &json!({"project_id": "p1", "kind": "claude", "prompt": "the secret plan"})).unwrap();
+        assert_eq!(planned.summary("s-1"), "Claude Code in Shop (session s-1)");
     }
 }

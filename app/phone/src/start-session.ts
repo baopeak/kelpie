@@ -17,8 +17,27 @@ export function newSessionRequest(projectId: string, kind: string, prompt: strin
   return { project_id: projectId, kind, ...(first ? { prompt: first } : {}), cid };
 }
 
-/** What the phone says while the computer has no launch catalogue (the daemon started and the app has not been opened since). */
-export const notReadyText = () => t("Open Kelpie on your computer once so this phone can start sessions.");
+/** What the phone says while the computer has no launch catalogue: the daemon started and the app has not been opened since, or the app
+ *  open there is from before phones could start sessions. */
+export const notReadyText = () => t("Open an up-to-date Kelpie on your computer so this phone can start sessions.");
+
+/** What the phone says after the app on the computer sent settings the computer refused: it starts nothing until that is fixed there. */
+export const refusedText = () => t("Kelpie on your computer could not offer its projects to this phone. Open Kelpie there to see why.");
+
+/** How long to wait between asking again about a start the computer is still carrying out, and how many times. */
+export const STILL_STARTING_MS = 1000;
+export const STILL_STARTING_TRIES = 20;
+
+/** Sends a start. While the computer says that very start is still under way (`in_progress`: this phone sent it again, after a reconnect,
+ *  while the first was running), asks again with the same request, so the same cid: once the first one is done, that is its answer. */
+export async function sendStart(send: () => Promise<Outcome>, wait: (ms: number) => Promise<void>): Promise<Outcome> {
+  let o = await send();
+  for (let i = 0; i < STILL_STARTING_TRIES && o.t === "error" && o.code === "in_progress"; i++) {
+    await wait(STILL_STARTING_MS);
+    o = await send();
+  }
+  return o;
+}
 
 /** Why something is not offered here, said once under the choices. */
 export const notOfferedText = () => t("Projects on other computers (SSH) and chat-only agents cannot be started from the phone.");
@@ -61,6 +80,12 @@ function refusal(code: string, message: string): string {
   switch (code) {
     case "not_ready":
       return notReadyText();
+    case "launch_refused":
+      return refusedText();
+    case "in_progress":
+      return t("Your computer is still starting it. Look in the list in a moment.");
+    case "not_started":
+      return t("The session could not be started on your computer. Look there to see why.");
     case "busy":
       return t("Your computer is too busy to start a session now. Try again in a minute.");
     case "rate_limited":

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./ipc", () => ({ daemon: vi.fn() }));
 
-const { buildLaunchCatalogue, profileLaunchOf } = await import("./phone-launch");
+const { buildLaunchCatalogue, profileLaunchOf, LAUNCH_LIMITS } = await import("./phone-launch");
 type Preset = Parameters<typeof buildLaunchCatalogue>[1][number];
 
 const preset = (id: string, label: string, yolo: string[], installed = true): Preset => ({ id, label, bin: id, yolo, resume_latest: true, installed });
@@ -70,6 +70,36 @@ describe("the launch catalogue a phone starts from", () => {
     expect(c.agents.map((a) => a.kind)).toContain("gemini");
     const bypass = state({ profiles: [{ kind: "claude", label: "Claude Code", args: [], permission: "bypassPermissions" }] });
     expect(buildLaunchCatalogue(bypass, PRESETS, launchOf(bypass)).agents[0].args).toEqual(["--permission-mode", "bypassPermissions"]);
+  });
+
+  it("fits the daemon's bounds, so that one odd project or agent never keeps phones from starting the rest", () => {
+    const bytes = (s: string) => new TextEncoder().encode(s).length;
+    const s = state({ hiddenAgents: [], registryAgents: [] });
+    const longName = "Dự án ".repeat(80);
+    s.projects = [
+      { id: "p1", name: `Shop\u0007\nfront`, path: "C:/work/shop" },
+      { id: "p2", name: longName, path: "C:/work/docs" },
+      { id: "", name: "No id", path: "C:/work/x" },
+      { id: "p3", name: "Bad folder", path: "C:/work/a\u0000b" },
+      { id: "p4", name: "Long folder", path: "C:/" + "x".repeat(LAUNCH_LIMITS.path) },
+      { id: "p".repeat(LAUNCH_LIMITS.projectId + 1), name: "Long id", path: "C:/work/y" },
+    ];
+    const odd = [...PRESETS, preset("bad\u0001kind", "Odd", []), preset("many", "Many args", []), preset("long", "L".repeat(200) + "\u001b[31m", [])];
+    const launch = (kind: string) => (kind === "many" ? { args: Array(LAUNCH_LIMITS.args + 1).fill("-x") } : launchOf(s)(kind));
+    const c = buildLaunchCatalogue(s, odd, launch);
+    expect(c.projects.map((p) => p.id)).toEqual(["p1", "p2"]);
+    expect(c.projects[0].name).toBe("Shopfront");
+    expect(bytes(c.projects[1].name)).toBeLessThanOrEqual(LAUNCH_LIMITS.projectName);
+    expect(longName.startsWith(c.projects[1].name), "cut on a character, never inside one").toBe(true);
+    const kinds = c.agents.map((a) => a.kind);
+    expect(kinds).not.toContain("bad\u0001kind");
+    expect(kinds, "its arguments are never cut: it is left out").not.toContain("many");
+    expect(c.agents.find((a) => a.kind === "long")!.label).toBe("L".repeat(LAUNCH_LIMITS.label));
+    // Past the most the daemon keeps, the rest are left out.
+    const crowded = { ...s, projects: Array.from({ length: LAUNCH_LIMITS.projects + 3 }, (_, i) => ({ id: `p${i}`, name: `P${i}`, path: `C:/p${i}` })) };
+    expect(buildLaunchCatalogue(crowded, PRESETS, launchOf(s)).projects).toHaveLength(LAUNCH_LIMITS.projects);
+    const manyAgents = Array.from({ length: LAUNCH_LIMITS.agents + 5 }, (_, i) => preset(`agent-${i}`, `Agent ${i}`, []));
+    expect(buildLaunchCatalogue(s, manyAgents, launchOf(s)).agents).toHaveLength(LAUNCH_LIMITS.agents);
   });
 
   it("leaves the profile's flags alone when they already hold Yolo's, and the chat view's launch without them", () => {

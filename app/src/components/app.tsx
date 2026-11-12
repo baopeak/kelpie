@@ -1,5 +1,5 @@
 import { Match, Show, Switch, createEffect, createMemo, lazy, on, onMount } from "solid-js";
-import { errorText } from "../lib/i18n";
+import { errorText, t } from "../lib/i18n";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { store } from "../lib/store";
 import { peekView } from "../lib/terminal-host";
@@ -91,12 +91,27 @@ export function App() {
   });
   // Phones start sessions as this computer's launchers would (phone-launch.ts). The daemon keeps that in memory only, so it goes on every
   // connection and after any change to the projects, profiles, permission mode, accounts, hidden agents or presets, a moment later.
+  // A catalogue the daemon refuses leaves phones with none (it never keeps the one before, which may hold settings since changed): said
+  // once for each reason, until one is accepted.
   let launchTimer: ReturnType<typeof setTimeout> | undefined;
+  let launchRefused: string | null = null;
   createEffect(() => {
     if (!store.connected() || store.daemonApi() < NEW_SESSION_API) return;
     const catalogue = buildLaunchCatalogue(store.state, agentPresets(), (kind) => store.profileLaunch(kind));
     clearTimeout(launchTimer);
-    launchTimer = setTimeout(() => void daemonCall("mobile.set_launch", catalogue).catch(() => {}), 400);
+    launchTimer = setTimeout(
+      () =>
+        void daemonCall("mobile.set_launch", catalogue).then(
+          () => (launchRefused = null),
+          (e) => {
+            const why = errorText(e);
+            console.warn("phones cannot start sessions: the launch catalogue was refused:", why);
+            if (why !== launchRefused) store.notify(t("Phones cannot start sessions until this is fixed: {error}", { error: why }), undefined, 10000);
+            launchRefused = why;
+          },
+        ),
+      400,
+    );
   });
   // Remote projects' ssh calls use the configured SSH config file.
   createEffect(() => void remoteConfigure(store.state.settings.sshConfig?.trim() || null).catch(() => {}));

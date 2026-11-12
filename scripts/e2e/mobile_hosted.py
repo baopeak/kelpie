@@ -760,7 +760,7 @@ def started_new_session(phone, dA):
     runs = wait_for(lambda: [json.loads(line) for line in open(log, encoding="utf-8").read().splitlines()] if os.path.exists(log) else None, 30) or []
     check("…and the agent got them with the first prompt", bool(runs) and runs[-1]["argv"][-3:] == ["--from-profile", "--yes", "hello from the hosted app"] and runs[-1]["key"] == "hosted-secret-7", runs)
     notes = [e for e in dA.call("mobile.audit", {"limit": 50})["entries"] if e["action"] == "session_new"]
-    check("the audit log records session_new for the hosted phone, never the prompt", [e["summary"] for e in notes] == ["Fake agent in Hosted project"] and "hello from the hosted app" not in json.dumps(notes), notes)
+    check("the audit log records session_new for the hosted phone, never the prompt", [e["summary"] for e in notes] == [f"Fake agent in Hosted project (session {opened})"] and "hello from the hosted app" not in json.dumps(notes), notes)
     if row:
         dA.call("session.close", {"handle": row["handle"]})
     dA.call("agent.set_custom", {"agents": []})

@@ -33,7 +33,7 @@ import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
 import { KIND_VIDEO, ScreenSession, type ScreenState } from "./screen";
 import { NEW_SESSION_API, SCREEN_API, TAKEOVER_API } from "../../src/lib/attention";
-import { newSessionRequest, optionsOutcome, startOutcome, type OptionsResult, type StartResult } from "./start-session";
+import { newSessionRequest, optionsOutcome, sendStart, startOutcome, type OptionsResult, type StartResult } from "./start-session";
 
 // ---------- signals the views read ----------
 
@@ -681,7 +681,8 @@ export async function loadNewOptions(): Promise<OptionsResult> {
 /** Starts `kind` in project `projectId` with the computer's settings for it and an optional first prompt, and opens the new session. Nothing is
  *  kept to send later: offline, it says so. */
 export async function startSession(projectId: string, kind: string, prompt: string): Promise<StartResult> {
-  const r = startOutcome(await link.newSession(newSessionRequest(projectId, kind, prompt, newCid())));
+  const req = newSessionRequest(projectId, kind, prompt, newCid());
+  const r = startOutcome(await sendStart(() => link.newSession(req), (ms) => new Promise((done) => setTimeout(done, ms))));
   if (r.ok) openSession(r.id);
   return r;
 }

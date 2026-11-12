@@ -35,17 +35,50 @@ export interface LaunchState {
   settings: { hiddenAgents?: string[]; registryAgents?: { id: string }[] };
 }
 
+/** The daemon's bounds on a catalogue, in bytes for the texts (`crates/kelpied/src/mobile/launch.rs` keeps the same numbers). The daemon
+ *  refuses a whole catalogue that breaks one, and then phones can start nothing: the catalogue is made to fit before it is sent. */
+export const LAUNCH_LIMITS = { projects: 500, agents: 64, args: 64, projectId: 128, projectName: 256, path: 4096, kind: 64, label: 128 } as const;
+
+/** Control characters, as Rust's `char::is_control` has them (Unicode Cc). */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+const bytes = (s: string) => new TextEncoder().encode(s).length;
+/** A text the daemon takes as it is: not empty, within `most` bytes, without control characters. */
+const plain = (s: string, most: number) => s.length > 0 && bytes(s) <= most && !CONTROL.test(s);
+/** A name as the daemon takes it: control characters dropped, cut at `most` bytes on a character. */
+function fitName(s: string, most: number): string {
+  let out = "";
+  let used = 0;
+  for (const ch of s.replace(new RegExp(CONTROL.source, "g"), "")) {
+    used += bytes(ch);
+    if (used > most) break;
+    out += ch;
+  }
+  return out;
+}
+
 /** The catalogue from the app's state. Projects on another machine (SSH) are left out: they need saved secrets and a dialog here. So are
  *  chat-only agents (saved from the ACP registry: they need this window's chat front-end) and agents hidden from the launchers. `profileLaunch`
- *  is the store's: the profile's arguments, the permission mode or Yolo, and the profile's and the active account's environment. */
+ *  is the store's: the profile's arguments, the permission mode or Yolo, and the profile's and the active account's environment.
+ *
+ *  It is made to fit the daemon's bounds (`LAUNCH_LIMITS`), so that one odd project does not keep phones from starting anything: a name or a
+ *  label too long or with control characters is trimmed; a project whose id or folder could not be used, and an agent whose kind could not or
+ *  with more arguments than allowed, is left out (its arguments are never cut: that would start it otherwise than the desktop does); past
+ *  the most projects or agents, the rest are left out. */
 export function buildLaunchCatalogue(state: LaunchState, presets: AgentPreset[], profileLaunch: (kind: string) => { args: string[]; env?: Record<string, string> }): LaunchCatalogue {
   const chatOnly = new Set((state.settings.registryAgents ?? []).map((a) => a.id));
-  const kinds = launchableAgents(state.settings.hiddenAgents ?? [], presets).filter((k) => !chatOnly.has(k));
+  const kinds = launchableAgents(state.settings.hiddenAgents ?? [], presets).filter((k) => !chatOnly.has(k) && plain(k, LAUNCH_LIMITS.kind));
+  const L = LAUNCH_LIMITS;
   return {
-    projects: state.projects.filter((p) => !p.remote).map((p) => ({ id: p.id, name: p.name, path: p.path })),
-    agents: kinds.map((kind) => {
-      const launch = profileLaunch(kind);
-      return { kind, label: presets.find((p) => p.id === kind)?.label ?? kind, args: launch.args, env: launch.env ?? {} };
-    }),
+    projects: state.projects
+      .filter((p) => !p.remote && plain(p.id, L.projectId) && plain(p.path, L.path))
+      .slice(0, L.projects)
+      .map((p) => ({ id: p.id, name: fitName(p.name, L.projectName), path: p.path })),
+    agents: kinds
+      .map((kind) => {
+        const launch = profileLaunch(kind);
+        return { kind, label: fitName(presets.find((p) => p.id === kind)?.label ?? kind, L.label), args: launch.args, env: launch.env ?? {} };
+      })
+      .filter((a) => a.args.length <= L.args)
+      .slice(0, L.agents),
   };
 }

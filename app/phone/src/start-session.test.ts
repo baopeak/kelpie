@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Outcome } from "./link";
-import { newSessionRequest, notReadyText, optionsOutcome, projectChoices, startOutcome } from "./start-session";
+import { newSessionRequest, notReadyText, optionsOutcome, projectChoices, refusedText, sendStart, startOutcome, STILL_STARTING_MS, STILL_STARTING_TRIES } from "./start-session";
 
 vi.mock("./i18n", () => ({ t: (s: string) => s }));
 
@@ -20,14 +20,34 @@ describe("starting a session from the phone", () => {
     const said = (code: string) => (refused(code) as { message: string }).message;
     expect(said("busy")).toBe("Your computer is too busy to start a session now. Try again in a minute.");
     expect(said("not_installed")).toBe("That agent is not installed on your computer.");
-    expect(said("not_ready")).toBe("Open Kelpie on your computer once so this phone can start sessions.");
+    expect(said("not_ready")).toBe("Open an up-to-date Kelpie on your computer so this phone can start sessions.");
+    expect(said("launch_refused")).toBe(refusedText());
+    expect(said("in_progress")).toContain("still starting it");
     expect(said("rate_limited")).toBe("Starting sessions too fast: wait a few seconds and try again.");
     expect(said("no_project")).toContain("runs over SSH");
     expect(said("no_agent")).toContain("chat-only");
     expect(said("no_folder")).toBe("That project's folder is not on your computer any more.");
     expect(said("read_only")).toContain("cannot start sessions");
-    expect(said("not_started")).toBe("English from the computer");
+    expect(said("not_started"), "in the phone's words, never anything of the computer's").toBe("The session could not be started on your computer. Look there to see why.");
+    expect(said("some_new_code")).toBe("English from the computer");
     for (const code of ["busy", "not_installed", "not_ready", "rate_limited", "no_project"]) expect(refused(code).ok).toBe(false);
+  });
+
+  it("asks again with the same request while the computer is still carrying out that very start, and stops at its answer", async () => {
+    const sent: number[] = [];
+    const waits: number[] = [];
+    const answers: Outcome[] = [{ t: "error", code: "in_progress", message: "x" } as Outcome, { t: "error", code: "in_progress", message: "x" } as Outcome, { t: "ack", result: "ok", id: "s1", dup: true }];
+    const o = await sendStart(async () => answers[sent.push(1) - 1], async (ms) => void waits.push(ms));
+    expect(o).toEqual({ t: "ack", result: "ok", id: "s1", dup: true });
+    expect(sent.length).toBe(3);
+    expect(waits).toEqual([STILL_STARTING_MS, STILL_STARTING_MS]);
+    // Any other answer is the answer at once; one that stays "still under way" is given up on.
+    let n = 0;
+    expect(await sendStart(async () => (n++, { t: "error", code: "busy", message: "x" } as Outcome), async () => {})).toMatchObject({ code: "busy" });
+    expect(n).toBe(1);
+    n = 0;
+    expect(startOutcome(await sendStart(async () => (n++, { t: "error", code: "in_progress", message: "x" } as Outcome), async () => {})).ok).toBe(false);
+    expect(n).toBe(STILL_STARTING_TRIES + 1);
   });
 
   it("says nothing started when it cannot know, and never keeps a start to send later", () => {
@@ -42,7 +62,8 @@ describe("what the phone may start", () => {
     const projects = [{ id: "p1", name: "Shop" }];
     const agents = [{ kind: "claude", label: "Claude Code", skips: true }];
     expect(optionsOutcome({ t: "ack", ready: true, projects, agents })).toEqual({ ok: true, options: { ready: true, projects, agents } });
-    expect(optionsOutcome({ t: "ack", ready: false, projects: [], agents: [], why: "Open Kelpie on your computer once so this phone can start sessions." })).toEqual({ ok: false, message: notReadyText() });
+    expect(optionsOutcome({ t: "ack", ready: false, projects: [], agents: [], why: "Open an up-to-date Kelpie on your computer so this phone can start sessions." })).toEqual({ ok: false, message: notReadyText() });
+    expect(optionsOutcome({ t: "error", code: "launch_refused", message: "x" } as Outcome)).toEqual({ ok: false, message: refusedText() });
     expect(optionsOutcome({ t: "error", code: "read_only", message: "x" } as Outcome).ok).toBe(false);
     expect(optionsOutcome({ t: "offline" }).ok).toBe(false);
   });

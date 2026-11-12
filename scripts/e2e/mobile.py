@@ -761,6 +761,7 @@ for n in (1, 2, 3):
     daemon(d, "agent.set_custom", {"agents": [fake_agent]})
     js_await("window.__kelpie.agents.loadAgentPresets()")
     was_permissions = d.js(f"return {S}.state.settings.agentPermissions")
+    was_profiles = d.js(f"return JSON.parse(JSON.stringify({S}.state.settings.profiles ?? []))")
     d.js(f"{S}.setProfile('phone-fake', {{ args: ['--from-profile'], env: {{ PHONE_FAKE_KEY: 'profile-secret-42' }} }}); {S}.setSettings({{ agentPermissions: 'yolo' }});")
     phone.go(base)
     phone.wait(LIVE, 30)
@@ -798,10 +799,12 @@ for n in (1, 2, 3):
     run.check("Show opens it on the desktop", bool(d.wait(f"return !!{S}.paneLocation(arguments[0])", 10, 0.25, opened)))
     run.shot("08c-desktop-phone-started")
     notes = [e for e in daemon(d, "mobile.audit", {"limit": 30})["entries"] if e["action"] == "session_new"]
-    run.check("the audit log records session_new with the agent and the project, never the prompt", [e["summary"] for e in notes] == ["Fake agent in mobile-proj"] and "hello from the phone" not in json.dumps(notes), str(notes))
+    run.check("the audit log records session_new with the agent, the project and the session, never the prompt",
+              [e["summary"] for e in notes] == [f"Fake agent in mobile-proj (session {opened})"] and "hello from the phone" not in json.dumps(notes), str(notes))
     if row:
         daemon(d, "session.close", {"handle": row["handle"]})
-    d.js(f"{S}.setSettings({{ agentPermissions: arguments[0] }})", was_permissions)
+    # The settings as they were: the permission mode, and the profiles without the fake agent's.
+    d.js(f"{S}.setSettings({{ agentPermissions: arguments[0], profiles: arguments[1] }})", was_permissions, was_profiles)
     daemon(d, "agent.set_custom", {"agents": []})
     js_await("window.__kelpie.agents.loadAgentPresets()")
 

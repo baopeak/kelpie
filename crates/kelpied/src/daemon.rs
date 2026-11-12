@@ -1248,10 +1248,13 @@ impl Daemon {
         self.create_inner(params, None)
     }
 
-    /// `create`, for a session the phone `device` (named `name`) started from the launch catalogue (`mobile`'s `new_session`). The app hears
-    /// `mobile.session_started` and says which phone started what; phones see the new session in their list, as any other.
-    pub fn create_for_phone(&self, params: Value, device: &str, name: &str) -> Result<SessionInfo> {
+    /// `create`, for a session the phone `device` (named `name`) started from the launch catalogue (`mobile`'s `new_session`). The audit log
+    /// gets `summary` of the new session's id (`session_new`), and only then the app hears `mobile.session_started` and says which phone
+    /// started what: an app that heard it has already seen its audit line go by, and does not show it again when it reads back the starts it
+    /// missed while closed. Phones see the new session in their list, as any other.
+    pub fn create_for_phone(&self, params: Value, device: &str, name: &str, summary: impl FnOnce(&str) -> String) -> Result<SessionInfo> {
         let info = self.create_inner(params, None)?;
+        self.mobile.audit(device, "session_new", &summary(&info.spec.id));
         self.broadcast("mobile.session_started", json!({"id": info.spec.id, "device": device, "name": name, "kind": info.spec.kind, "project_id": info.spec.project_id}));
         Ok(info)
     }

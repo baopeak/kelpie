@@ -527,6 +527,9 @@ export interface AppState {
   /** Sessions Kelpie stopped to save memory (hibernation, sleeping worktrees): resumed when shown. */
   hibernated: string[];
   inbox: InboxItem[];
+  /** The newest phone start (the audit log's time) already in Activity or seen: those newer are added when the window connects
+   *  (`phone-starts.ts`). Unset until it is first remembered. */
+  phoneStartsSeen?: number;
   /** Diff review notes by project id: only those of a daemon older than API 13 (it keeps them from there). */
   reviewNotes: Record<string, ReviewNote[]>;
   /** Prompts sent from the composer, newest first, by project id. */

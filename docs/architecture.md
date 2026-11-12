@@ -554,17 +554,30 @@ record (another tab) is told to forget a pairing that stands. A close frame that
   launchers' agents without the hidden and the chat-only (ACP registry) ones, each agent with `profileLaunch`'s arguments and environment
   (profile arguments, permission mode or Yolo, profile and account environment). The app sends the whole catalogue on every connection and,
   debounced, after any change of those; the daemon replaces what it held, keeps it in memory only (profile environments can hold keys, so it is
-  never written again and never logged) and refuses one over 500 projects, 64 agents, 64 arguments for an agent or 256 KiB. A daemon that has
-  not heard from the app since it started has none. `new_options` answers `{ready, projects: [{id, name}], agents: [{kind, label, skips}], why?}`:
-  the projects in the catalogue's order (never a folder), the agents that are also installed (`agents::installed_presets`), `skips` read from their
-  arguments as for sub-sessions (`subs::args_skip_permissions`), and `ready: false` with `why` while there is no catalogue.
-  `new_session {project_id, kind, prompt?, cid}` starts the agent in the project's folder with exactly the catalogue's `args` and `env`, nothing of
-  the phone's but the prompt (through `typed_text`, at most `subs::MAX_TASK` characters), at 120 × 32, and answers `ack {result: ok, id}`. It is
-  refused as `not_ready`, `no_project`, `no_agent`, `not_installed`, `no_folder`, `too_long`, `busy` (load L3), `rate_limited` (three at once, then
-  one every 10 s per device) or `not_started`, besides `read_only`, `epoch` and `locked`. A repeat of its `cid` within 10 minutes gets the first
-  reply, marked `dup`, and starts nothing. The start is audited as `session_new` ("{agent} in {project}", never the prompt) and broadcast as
+  never written again and never logged) and refuses one over 500 projects, 64 agents, 64 arguments for an agent or 256 KiB, or with a project
+  id, name or folder, or an agent kind or label, over its byte bound or holding a control character. A refused catalogue also clears the one
+  held before it (which may hold settings the person has just changed, Yolo turned off for one): phones start nothing until the app sends one
+  that is accepted, and the app shows the reason once as a toast. The app trims names and labels and leaves out entries that would be refused
+  (`LAUNCH_LIMITS`, the same bounds) before it sends, so one odd project does not block the rest. A daemon that has not heard from the app
+  since it started has none. `new_options` answers `{ready, projects: [{id, name}], agents: [{kind, label, skips}], why?}`: the projects in the
+  catalogue's order (never a folder), the agents that are also installed (`agents::installed_presets`), `skips` read from their arguments as for
+  sub-sessions (`subs::args_skip_permissions`), and `ready: false` with `why` while none was sent; after a refused one it is refused as
+  `launch_refused`. It is held to a few a second per device (`rate_limited`). `new_session {project_id, kind, prompt?, cid}` starts the agent in
+  the project's folder as the catalogue names it (as the desktop does; it is only checked to exist, never resolved, since agents key history and
+  trust by the folder) with exactly the catalogue's `args` and `env`, nothing of the phone's but the prompt (through `typed_text`, at most
+  `subs::MAX_TASK` characters; one that starts with `-` is typed, never passed where the agent would read it as an option), at 120 × 32, and
+  answers `ack {result: ok, id}`. The checks that cost nothing come first, then the look on disk (installed, folder), then the device is checked
+  again (still paired, may type, not locked) before the session is created. It is refused as `not_ready`, `launch_refused`, `no_project`,
+  `no_agent`, `not_installed`, `no_folder`, `too_long`, `busy` (load L3), `rate_limited` (three at once, then one every 10 s per device; a start
+  refused after its token was taken gives it back), `unpaired` or `not_started` (a plain sentence: the cause, which can name the command line,
+  stays in the daemon's log), besides `read_only`, `epoch` and `locked`. A repeat of its `cid` within 10 minutes gets the first reply, marked
+  `dup`, and starts nothing; a repeat that comes while the first is still running (over another connection, after a reconnect) waits for it up
+  to 2 s and is otherwise refused as `in_progress`, not kept, which the phone asks again with the same `cid`. The start is audited as
+  `session_new` ("{agent} in {project} (session {id})", never the prompt), and only then broadcast as
   `mobile.session_started {id, device, name, kind, project_id}`, which the app shows as a toast and an Activity entry with Show; phones see the
-  new session in their list. It works with the window closed: the daemon owns the session.
+  new session in their list. It works with the window closed: the daemon owns the session, and the app, when it next connects, reads
+  `mobile.audit` and adds each `session_new` newer than the time it remembers (`phoneStartsSeen`, also moved by the live event) to Activity once,
+  without a popup (`app/src/lib/phone-starts.ts`).
 - **One-shot approvals**: a phone's answer holds for this one request. For a chat the daemon keeps a list of the answer shapes
   known to be one-shot for each kind of request (`chat::answer_is_one_shot`: Claude's allow or deny, Codex's `accept`, `decline`,
   `cancel` or a permission grant for this `turn`, ACP's `allow_once` and `reject_once`, a form's answers) and refuses anything else as

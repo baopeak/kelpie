@@ -400,5 +400,7 @@
   "{phone} started {agent} in {project}": "{phone} đã khởi động {agent} trong {project}",
   "A phone": "Một điện thoại",
   "a project": "một dự án",
-  "Started from a phone with this computer's settings for the agent.": "Phiên này được khởi động từ điện thoại với cài đặt của máy tính này cho agent."
+  "Started from a phone with this computer's settings for the agent.": "Phiên này được khởi động từ điện thoại với cài đặt của máy tính này cho agent.",
+  "{phone} started {what}": "{phone} đã khởi động {what}",
+  "Phones cannot start sessions until this is fixed: {error}": "Điện thoại chưa khởi động được phiên cho đến khi lỗi này được khắc phục: {error}"
 }
