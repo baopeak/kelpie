@@ -288,7 +288,8 @@ def type_code(digits):
 
 def pair_plain():
     """Pair a phone → This network: the QR code a browser on this network pairs with, in the row."""
-    d.js("document.querySelector('[data-pair-open]').click()")
+    # The row comes back with phone access turned on, which the desktop hears a moment after the daemon.
+    d.wait("const b = document.querySelector('[data-pair-open]'); if (!b || b.disabled) return null; b.click(); return true", 15)
     d.wait("const b = document.querySelector('[data-plain-pair]'); return !!b && !b.disabled", 15)
     d.js("document.querySelector('[data-plain-pair]').click()")
 
@@ -375,7 +376,7 @@ try:
     hosted_row = d.js("return document.querySelector('[data-setting=\"mobile-hosted\"]')?.textContent ?? null")
     run.check("without the relay the hosted app's row says the relay comes first, and offers no pairing", "Turn on the relay first" in (hosted_row or "") and not d.js("return !!document.querySelector('[data-hosted-pair]')"), str(hosted_row)[:200])
     # One Pair a phone: every way with what it needs, allows and trusts; Tailscale and the relay off say why, with a way to their rows.
-    d.js("document.querySelector('[data-pair-open]').click()")
+    d.wait("const b = document.querySelector('[data-pair-open]'); if (!b || b.disabled) return null; b.click(); return true", 15)
     d.wait("return !!document.querySelector('[data-pair-chooser] [data-pair-method]')", 10)
     run.shot("01b-pair-chooser")
     ways = d.js(WAYS)
@@ -1480,7 +1481,7 @@ for n in (1, 2, 3):
     if not published:
         raise TimeoutError("Tailscale mode did not turn on")
     run.check("…and says where", ps.FAKE_TAILNET_NAME in d.js(ts_text))
-    d.js("document.querySelector('[data-pair-open]').click()")
+    d.wait("const b = document.querySelector('[data-pair-open]'); if (!b || b.disabled) return null; b.click(); return true", 15)
     d.wait("return !!document.querySelector('[data-tailscale-pair]')", 10)
     ways = {w["id"]: w for w in d.js(WAYS)}
     run.check("Pair a phone offers Tailscale now, and recommends it", ways["tailscale"]["available"] and ways["tailscale"]["recommended"] and d.js("return document.querySelector('[data-tailscale-pair]').classList.contains('primary')") is True, str(ways.get("tailscale")))
