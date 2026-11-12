@@ -4,9 +4,9 @@ import type { RelayStatus } from "../components/settings/mobile-relay-settings";
 import { HOSTED_API, LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
 import {
-  approvalChoices, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
+  alreadyRemoved, approvalChoices, approveWithReplace, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
   OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, samePhoneSuggestion, screenPolicyLine,
-  telegramChoice, turnOnAccess, type AccessCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
+  telegramChoice, turnOnAccess, type AccessCalls, type ApprovalCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
 } from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
 import { emptyPushConfig, type PushState } from "./push-config";
@@ -608,6 +608,71 @@ describe("one phone paired several ways", () => {
     expect(prunePhoneGroups({ a: "g", b: "g", z: "g" }, ["a", "b", "c"])).toEqual({ a: "g", b: "g" });
     expect(prunePhoneGroups({ a: "g", b: "g" }, ["a", "b"])).toBeNull();
     expect(prunePhoneGroups({}, [])).toBeNull();
+  });
+
+  describe("approving a phone as the same phone as a record, and replacing that record", () => {
+    /** Records each call in order; `approve` and `revoke` say how the daemon answers, `listed` which records its status lists afterwards. */
+    function calls(answers: { approve?: Error; revoke?: Error; listed?: string[] | null; storeError?: boolean } = {}) {
+      const seen: string[] = [];
+      const call: ApprovalCalls = {
+        approve: async () => {
+          seen.push("approve");
+          if (answers.approve) throw answers.approve;
+          return { id: "new" };
+        },
+        join: (id, same) => void seen.push(`join ${id} ${same}`),
+        revoke: async (id) => {
+          seen.push(`revoke ${id}`);
+          if (answers.revoke) throw answers.revoke;
+        },
+        status: async () => {
+          seen.push("status");
+          if (answers.listed === null) throw new Error("the daemon is gone");
+          return status({ devices: (answers.listed ?? ["new"]).map((id) => device({ id })), store_error: answers.storeError ? "unreadable" : null });
+        },
+        keepOnly: (paired) => void seen.push(`keep ${paired.join(",")}`),
+      };
+      return { seen, call };
+    }
+
+    it("approves first, then groups, then removes the old record, then keeps the grouping to what is listed", async () => {
+      const d = calls();
+      expect(await approveWithReplace({ same: "old", replace: "old" }, d.call)).toEqual({ id: "new", kept: null });
+      expect(d.seen).toEqual(["approve", "join new old", "revoke old", "status", "keep new"]);
+    });
+
+    it("does nothing more when the approval fails: no group, no removal", async () => {
+      const d = calls({ approve: new Error("wrong code") });
+      await expect(approveWithReplace({ same: "old", replace: "old" }, d.call)).rejects.toThrow("wrong code");
+      expect(d.seen).toEqual(["approve"]);
+    });
+
+    it("keeps both records and says why when the removal is refused", async () => {
+      const refused = new Error("Removed for now, but this could not be saved: it will come back after a restart unless this is fixed.");
+      const d = calls({ revoke: refused, listed: ["new", "old"] });
+      expect(await approveWithReplace({ same: "old", replace: "old" }, d.call)).toEqual({ id: "new", kept: { error: refused } });
+      expect(d.seen).toEqual(["approve", "join new old", "revoke old", "status", "keep new,old"]);
+    });
+
+    it("takes a record gone already as removed: the daemon replaces a record with the same key itself", async () => {
+      const d = calls({ revoke: new Error("no such device") });
+      expect(await approveWithReplace({ same: "old", replace: "old" }, d.call)).toEqual({ id: "new", kept: null });
+      expect(d.seen).toEqual(["approve", "join new old", "revoke old", "status", "keep new"]);
+      expect([alreadyRemoved("Error: no such device"), alreadyRemoved(new Error("could not be saved"))]).toEqual([true, false]);
+    });
+
+    it("groups without removing anything unless asked, and leaves the grouping be when the list cannot be read", async () => {
+      const d = calls();
+      await approveWithReplace({ same: "old", replace: null }, d.call);
+      expect(d.seen).toEqual(["approve", "join new old", "status", "keep new"]);
+      for (const unreadable of [calls({ listed: null }), calls({ storeError: true })]) {
+        await approveWithReplace({ same: "old", replace: null }, unreadable.call);
+        expect(unreadable.seen).toEqual(["approve", "join new old", "status"]);
+      }
+      const alone = calls();
+      expect(await approveWithReplace({ same: null, replace: null }, alone.call)).toEqual({ id: "new", kept: null });
+      expect(alone.seen, "a new device: only the approval").toEqual(["approve"]);
+    });
   });
 
   it("names each record's way and how it is connected now", () => {

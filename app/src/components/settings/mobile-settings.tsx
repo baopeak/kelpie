@@ -15,7 +15,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import {
-  approvalChoices, connectionLine, deviceMethodLabel, groupDevices, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel,
+  approvalChoices, approveWithReplace, connectionLine, deviceMethodLabel, groupDevices, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel,
   pairMethods, permissionChoices, prunePhoneGroups, samePhoneSuggestion, telegramChoice, turnOnAccess, type OptionFacts, type OptionId, type PairMethodId, type PhoneGroup,
 } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
@@ -351,8 +351,12 @@ export function MobileSettings() {
   const relay = createRelayForm(run);
   // The phone just removed while the relay was on: a new room is offered, and nothing happens unless the person makes it.
   const [roomOffer, setRoomOffer] = createSignal<string | null>(null);
-  const unpair = async (d: MobileDevice) => {
-    if (!(await confirmDialog(t("Unpair “{name}”? It is disconnected at once.", { name: d.name })))) return;
+  // A line of a phone paired several ways names its way too: those lines usually share the phone's name.
+  const unpair = async (d: MobileDevice, grouped: boolean) => {
+    const question = grouped
+      ? t("Unpair “{name}” ({way})? That way is disconnected at once; the phone's other ways stay paired.", { name: d.name, way: deviceMethodLabel(d, s()?.relay) })
+      : t("Unpair “{name}”? It is disconnected at once.", { name: d.name });
+    if (!(await confirmDialog(question))) return;
     const offer = offerNewRoom(s(), store.daemonApi());
     await run(() => daemon("mobile.revoke", { id: d.id }));
     if (offer && !s()?.devices.some((x) => x.id === d.id)) setRoomOffer(d.name);
@@ -448,7 +452,7 @@ export function MobileSettings() {
       <Show when={d.kind === "pwa" && d.secure_origin && !d.may_control && d.page_kind !== "hosted" && store.daemonApi() >= TAKEOVER_API}> · {t("may take control once its app lock is set up and on")}</Show>
     </>
   );
-  const deviceControls = (d: MobileDevice) => (
+  const deviceControls = (d: MobileDevice, grouped: boolean) => (
     <>
       <Show when={d.state === "ok"}>
         <select class="text-input" data-permission value={d.permission} disabled={busy()} onChange={(e) => void setPermission(d, e.currentTarget.value as MobilePermission)}>
@@ -458,7 +462,7 @@ export function MobileSettings() {
       <Show when={d.state === "ok" && d.secure_origin && store.daemonApi() >= LOCK_API}>
         <button class="btn" data-reset-lock disabled={busy()} onClick={() => void resetLock(d)}>{t("Reset this phone's lock")}</button>
       </Show>
-      <button class="btn" onClick={() => void unpair(d)}>{t("Unpair")}</button>
+      <button class="btn" onClick={() => void unpair(d, grouped)}>{t("Unpair")}</button>
     </>
   );
   /** A phone paired several ways, by the names its records have (usually one). */
@@ -797,7 +801,7 @@ export function MobileSettings() {
                           {stateLine(g.devices[0]) ?? t("paired {when} · last seen {seen}", { when: formatRelative(g.devices[0].created_at), seen: formatRelative(g.devices[0].last_seen) })}
                         </div>
                       </div>
-                      {deviceControls(g.devices[0])}
+                      {deviceControls(g.devices[0], false)}
                     </div>
                   }>
                     <div class="phone-group" data-phone-group={g.group!}>
@@ -808,7 +812,7 @@ export function MobileSettings() {
                             <div class="saved-layout-main">
                               <div data-device-way>{deviceMethodLabel(d, s()!.relay)} <span class="muted-inline">· {stateLine(d) ?? (d.connection ? connectionLine(d.connection) : t("last seen {seen}", { seen: formatRelative(d.last_seen) }))}{deviceNotes(d)}</span></div>
                             </div>
-                            {deviceControls(d)}
+                            {deviceControls(d, true)}
                           </div>
                         )}
                       </For>
@@ -888,22 +892,22 @@ export function MobileApprovals() {
     if (!s.store_error) setPaired(s);
   };
   const groups = () => store.state.settings.phoneGroups ?? {};
-  const forget = (ids: string[]) => {
-    const kept = prunePhoneGroups(groups(), Object.keys(groups()).filter((id) => !ids.includes(id)));
+  const keepOnly = (paired: string[]) => {
+    const kept = prunePhoneGroups(groups(), paired);
     if (kept) store.setSettings({ phoneGroups: kept });
   };
-  // Records removed while this app was closed leave the grouping when it next reads the list. Only then: a list read while an approval is under
-  // way may not have the new record yet. Removals while it runs come as events.
+  const forget = (ids: string[]) => keepOnly(Object.keys(groups()).filter((id) => !ids.includes(id)));
+  // The paired records, and the requests waiting already (this window was reloaded, or came up after the phone scanned), each time the daemon connects.
+  // The grouping is not pruned from this list: a development app pointed at another daemon shares these settings and would drop this daemon's groups.
+  // It is pruned on the removals this app hears and after an approval it makes; an id left by a record removed while the app was closed lists nothing.
   createEffect(() => {
-    if (!store.loaded() || !store.connected()) return;
+    if (!store.connected()) return;
     void mobileStatus().then((s) => {
       known(s);
-      if (!s.store_error) forget(Object.keys(groups()).filter((id) => !s.devices.some((d) => d.id === id)));
+      s.pending.forEach(add);
     }).catch(() => {});
   });
   onMount(() => {
-    // Requests waiting already: this window was reloaded, or came up after the phone scanned.
-    void mobileStatus().then((s) => s.pending.forEach(add)).catch(() => {});
     const un = onEvent<{ event: string; params: any }>("daemon-event", (m) => {
       if (m.event === "mobile.pair_request") add({ id: m.params.id, name: m.params.name, kind: m.params.kind ?? "pwa", fingerprint: m.params.fingerprint ?? "", want: m.params.want ?? "read", address: m.params.address ?? "", origin_kind: m.params.origin_kind ?? undefined });
       if (m.event === "mobile.lockout") {
@@ -917,7 +921,9 @@ export function MobileApprovals() {
       }
       if (m.event === "mobile.device_changed") {
         const p = m.params as { id?: string; name: string; change: string; permission: MobilePermission | null };
-        if (p.id && (p.change === "removed" || p.change === "replaced")) forget([p.id]);
+        // A revoke is announced as `removed`. A record the daemon replaces itself (the same key paired again) is told only to phones, never here:
+        // the approval that caused it prunes the grouping from the list it reads afterwards.
+        if (p.id && p.change === "removed") forget([p.id]);
         const what = p.permission === "control" ? t("may take control") : p.permission === "write" ? t("may type") : t("may read");
         if (p.change === "lock_enrolled") return store.notify(t("Phone “{name}” set up its app lock. If that was not you, unpair it.", { name: p.name }), undefined, 10000);
         store.notify(p.change === "added" ? t("Phone “{name}” was paired ({what}).", { name: p.name, what }) : p.change === "removed" ? t("Phone “{name}” was removed.", { name: p.name }) : t("Phone “{name}” now {what}.", { name: p.name, what }), undefined, 6000);
@@ -931,8 +937,8 @@ export function MobileApprovals() {
     void mobileSecure("mobile.approve", { id, allow: false }).catch((e) => store.notify(errorText(e)));
   };
   const wayOf = (d: MobileDevice) => deviceMethodLabel(d, paired()?.relay);
-  // After the approval: the new record joins the phone chosen, then that phone's old record goes if asked. The old one is removed only once the new one
-  // is paired; if that fails, both stay, and the person hears so.
+  // After the approval: the new record joins the phone chosen, then that phone's old record goes if asked (`approveWithReplace`). The old one is removed
+  // only once the new one is paired; if that is refused, both stay, and the person hears so.
   const allow = async (r: MobilePairRequest, permission: MobilePermission) => {
     const code = (codes()[r.id] ?? "").replace(/\D/g, "");
     if (code.length !== 6) return setErrors((e) => ({ ...e, [r.id]: t("Type the six digits the phone shows.") }));
@@ -942,17 +948,16 @@ export function MobileApprovals() {
     if (old && !(await confirmDialog(t("Remove “{name}” ({way}) once this phone is paired? That pairing is disconnected at once.", { name: old.name, way: wayOf(old) })))) return;
     setAllowing(r.id);
     try {
-      const done = await mobileSecure<{ id?: string } | null>("mobile.approve", { id: r.id, allow: true, code, permission });
+      const { kept } = await approveWithReplace({ same: sameId || null, replace: old?.id ?? null }, {
+        approve: () => mobileSecure<{ id?: string } | null>("mobile.approve", { id: r.id, allow: true, code, permission }),
+        join: (id, same) => store.setSettings({ phoneGroups: joinGroup(groups(), id, same) }),
+        revoke: (id) => daemon("mobile.revoke", { id }),
+        status: () => mobileStatus(),
+        keepOnly,
+      });
       close(r.id);
-      if (sameId && done?.id) store.setSettings({ phoneGroups: joinGroup(groups(), done.id, sameId) });
-      if (old) {
-        try {
-          await daemon("mobile.revoke", { id: old.id });
-        } catch (e) {
-          // Gone already (the daemon replaces a record with the same key itself) is not a failure.
-          const still = await mobileStatus().then((s) => s.devices.some((d) => d.id === old.id), () => true);
-          if (still) store.notify(t("“{name}” is paired, but its old pairing ({way}) could not be removed, so both stay ({error}). Remove it under Settings → Mobile → Paired devices.",{ name: old.name, way: wayOf(old), error: errorText(e) }), undefined, 12000);
-        }
+      if (old && kept) {
+        store.notify(t("“{name}” is paired, but “{old}” ({way}) could not be removed, so both stay ({error}). Remove it under Settings → Mobile → Paired devices.", { name: r.name, old: old.name, way: wayOf(old), error: errorText(kept.error) }), undefined, 12000);
       }
     } catch (e) {
       setErrors((x) => ({ ...x, [r.id]: errorText(e) }));
@@ -982,9 +987,15 @@ export function MobileApprovals() {
               <Show when={okDevices().length}>
                 <div class="inline-fields" style={{ "align-items": "center", margin: "8px 0 0" }} data-same-phone>
                   <span>{t("Same phone as")}</span>
-                  <select class="text-input" data-same-phone-select value={sameOf(r)} disabled={allowing() === r.id} onChange={(e) => setSame((x) => ({ ...x, [r.id]: e.currentTarget.value }))}>
-                    <option value="">{t("A new device")}</option>
-                    <For each={okDevices()}>{(d) => <option value={d.id}>{`${d.name} (${wayOf(d)})`}</option>}</For>
+                  {/* Each option says whether it is the one applied: the list is drawn again whenever the paired records are read again, and a select
+                      whose options are new would otherwise show its first one while another is applied. Another choice drops the Replace tick. */}
+                  <select class="text-input" data-same-phone-select value={sameOf(r)} disabled={allowing() === r.id} onChange={(e) => {
+                    const id = e.currentTarget.value;
+                    setSame((x) => ({ ...x, [r.id]: id }));
+                    setReplace((x) => ({ ...x, [r.id]: false }));
+                  }}>
+                    <option value="" selected={sameOf(r) === ""}>{t("A new device")}</option>
+                    <For each={okDevices()}>{(d) => <option value={d.id} selected={d.id === sameOf(r)}>{`${d.name} (${wayOf(d)})`}</option>}</For>
                   </select>
                 </div>
                 <Show when={okDevices().find((d) => d.id === sameOf(r))}>

@@ -124,7 +124,7 @@ export const PAGE_METHOD = pageMethod(HOSTED, location);
 export const [route, setRoute] = createSignal<"direct" | "relay">("direct");
 export const [rtt, setRtt] = createSignal<number | null>(null);
 /** The way to the computer now, in the terms a person knows: the relay, Tailscale, this network or this computer. */
-export const livePathNow = () => livePath(route(), PAGE_METHOD);
+export const livePathNow = () => livePath(route(), PAGE_METHOD, location.hostname);
 
 /** How the app lock stands, for the views: whether what is behind it may be shown, and the state of its screen. */
 export const [lockShown, setLockShown] = createSignal<{ clear: boolean; face: string; asking: boolean; error: string | null; covered: boolean }>({ clear: false, face: "unknown", asking: false, error: null, covered: false });

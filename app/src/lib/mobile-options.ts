@@ -483,6 +483,45 @@ export function prunePhoneGroups(groups: Record<string, string>, paired: string[
   return kept.length === Object.keys(groups).length ? null : Object.fromEntries(kept);
 }
 
+/** The calls approving a pairing request makes. `approve` is `mobile.approve` (the person verifies first) and answers the new record's id; `join` lists
+ *  record `id` as the same phone as record `same`, and `keepOnly` keeps in that grouping only the records given (both in this app's settings). */
+export interface ApprovalCalls {
+  approve: () => Promise<{ id?: string } | null>;
+  join: (id: string, same: string) => void;
+  revoke: (id: string) => Promise<unknown>;
+  status: () => Promise<MobileStatus | null>;
+  keepOnly: (paired: string[]) => void;
+}
+
+/** `mobile.revoke` refused because the record is not there: it is gone already, which is what was wanted. */
+export function alreadyRemoved(error: unknown): boolean {
+  return /no such device/i.test(String(error));
+}
+
+/** Approves a pairing request, lists the new record with the phone chosen (`same`), then removes that phone's old record when asked (`replace`). A failed
+ *  approval throws and nothing follows it. The old record goes only once the new one is paired: one gone already is no failure, and any other refusal
+ *  leaves both records and comes back in `kept`. Last, the grouping keeps only the records the daemon lists then: a record the daemon replaced itself
+ *  (the same key paired again) went with no event this app hears. */
+export async function approveWithReplace(choice: { same: string | null; replace: string | null }, call: ApprovalCalls): Promise<{ id: string | null; kept: { error: unknown } | null }> {
+  const done = await call.approve();
+  const id = done?.id ?? null;
+  if (choice.same && id) call.join(id, choice.same);
+  let kept: { error: unknown } | null = null;
+  if (choice.replace) {
+    try {
+      await call.revoke(choice.replace);
+    } catch (error) {
+      if (!alreadyRemoved(error)) kept = { error };
+    }
+  }
+  if (choice.same || choice.replace) {
+    const s = await call.status().catch(() => null);
+    // A store that could not be read lists no device, which says nothing about the records grouped here.
+    if (s && !s.store_error) call.keepOnly(s.devices.map((d) => d.id));
+  }
+  return { id, kept };
+}
+
 /** The approval's two buttons: which one is the default, what the phone asks for as it can have it, and the line said with typing. A phone on the hosted
  *  app gets reading by default and the line on what typing from it means; control is never asked for there. */
 export function approvalChoices(r: { want: MobilePermission; origin_kind?: MobilePageKind }): { choices: ("read" | "write")[]; primary: "read" | "write"; asks: MobilePermission; typing: string | null } {

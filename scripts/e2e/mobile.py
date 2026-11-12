@@ -17,7 +17,8 @@ headless Edge with mobile emulation, driven through msedgedriver on port 9515.
 
 Covers: off by default; turning it on (status, URL); Settings → Mobile (every option's lines, the safe defaults, the summary, Advanced, each switch reaching the daemon, a change that fails; with no relay the hosted app's row says the relay comes first, and with this network's listeners off no browser here is offered pairing); Pair a phone (the three ways,
 each with what it needs, allows and trusts, why one cannot pair now with a way to its row, and the one recommended); the approval's Same phone as (two records listed
-as one phone, a line per way) and Replace that pairing (the old record removed once the new one is approved); the phone's screen before pairing naming its way; security headers and the embedded phone client
+as one phone, a line per way) and Replace that pairing (the same browser paired again from this listener's other name, so with a key of its own: the old
+record removed by Kelpie's revoke once the new one is approved, the new one kept, and the grouping forgetting the old one); the phone's screen before pairing naming its way; security headers and the embedded phone client
 (SolidJS, app/phone); pairing with a QR link, typing the phone's code on the desktop, the device list, nothing readable on the wire, no CSP
 violation; the phone's
 inbox (a session that needs you comes first), a session's screen, typing and quick keys reaching the
@@ -772,26 +773,38 @@ for n in (1, 2, 3):
     run.check("the screen keeps following the session after the reconnect", bool(phone.wait("return document.querySelector('.screen').textContent.includes('after-reconnect')", 20)))
 
     # ---------- read-only device, bad requests ----------
-    # The same browser pairs again as "Reader": the same phone as "Test phone", whose pairing it replaces.
+    # The same browser pairs again as "Reader": the same phone as "Test phone", whose pairing it replaces. It pairs from the other name of this
+    # listener (`localhost`, not 127.0.0.1): a browser keeps its pairing per origin, so this is a key of its own. Paired from the same origin it would
+    # reuse Test phone's key, and the daemon would replace that record by itself before Kelpie's own removal ran, which would then prove nothing.
     d.js("window.confirm = () => true")
     pair_plain()
     link2 = d.wait("return document.querySelector('.mobile-qr-code')?.dataset.link", 10)
-    phone.go(link2)
+    phone.go(link2.replace(f"http://127.0.0.1:{PORT}/", f"http://localhost:{PORT}/"))
     phone.wait("return !!document.querySelector('.card .btn.primary')")
     phone.js("document.querySelector('.card input').value = 'Reader'; document.querySelector('.card .btn.primary').click()")
     d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Reader'))", 15)
     test_phone = next(x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Test phone")
+    reader_key = phone.wait("return document.querySelector('[data-pair-key]')?.textContent", 15)
+    run.check("pairing from another origin of the same browser shows a key of its own", bool(reader_key) and reader_key != phone_key, f"{reader_key!r} vs {phone_key!r}")
     same_default = d.js("return document.querySelector('.mobile-approve [data-same-phone-select]')?.value ?? null")
     run.check("the approval asks Same phone as, and with no record of that name paired another way it suggests a new device", same_default == "", str(same_default))
     same_phone("Reader", test_phone["id"], replace=True)
     replace_text = d.js("return document.querySelector('.mobile-approve [data-replace-pairing]')?.textContent ?? ''")
-    run.check("…choosing a phone offers Replace that pairing, off, naming the record", "Test phone" in replace_text and "This network" in replace_text, replace_text)
+    run.check("…choosing a phone offers Replace that pairing, naming the record", "Test phone" in replace_text and "This network" in replace_text, replace_text)
     type_code(phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15))
     d.js("document.querySelector('.mobile-approve [data-allow=read]').click()")
     phone.wait(LIVE, 20)
-    replaced = wait(lambda: (lambda names: "Reader" in names and "Test phone" not in names)([x["name"] for x in daemon(d, "mobile.status")["devices"]]), 15)
-    run.check("Replace removes the old record once the new one is approved", bool(replaced), str([x["name"] for x in daemon(d, "mobile.status")["devices"]]))
-    run.check("…and the grouping forgets the record that went", bool(wait(lambda: test_phone["id"] not in (d.js(f"return {S}.state.settings.phoneGroups") or {}), 10)), str(d.js(f"return {S}.state.settings.phoneGroups")))
+    listed_names = lambda: [x["name"] for x in daemon(d, "mobile.status")["devices"]]  # noqa: E731
+    replaced = wait(lambda: "Reader" in listed_names() and "Test phone" not in listed_names(), 15)
+    run.check("Replace removes the old record once the new one is approved, and the new one stays", bool(replaced), str(listed_names()))
+    # Removed by Kelpie's own revoke, after the approval: the audit has the new pairing first, then a revoke of the old record (newest first).
+    trail = daemon(d, "mobile.audit", {"limit": 20})["entries"]
+    reader_id = next((x["id"] for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Reader"), None)
+    paired_at = next((i for i, a in enumerate(trail) if a["device"] == reader_id and a["action"] == "pair"), None)
+    revoked_at = next((i for i, a in enumerate(trail) if a["device"] == test_phone["id"] and a["action"] == "revoke"), None)
+    run.check("…by Kelpie's revoke, after the new pairing", paired_at is not None and revoked_at is not None and revoked_at < paired_at, str([(a["device"][:8], a["action"]) for a in trail[:6]]))
+    groups_now = lambda: d.js(f"return {S}.state.settings.phoneGroups") or {}  # noqa: E731
+    run.check("…and the grouping forgets the record that went", bool(wait(lambda: test_phone["id"] not in groups_now(), 10)), str(groups_now()))
     phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-shell'))", 15)
     phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-shell')).click()")
     ro = phone.wait("return document.querySelector('.readonly')?.textContent ?? null")
@@ -947,7 +960,7 @@ for n in (1, 2, 3):
     run.check("…with no way yet to send a code", not phone.js("return !!document.querySelector('[data-scan]')"))
     ways_shown = phone.js("const w = document.querySelector('[data-pair-ways]'); return w ? {way: w.dataset.pairWays, text: w.textContent} : null")
     run.check("…saying which way this app connects, and the other ways in one line each with where to choose them", bool(ways_shown) and ways_shown["way"] == "network" and "This is the app on this network" in ways_shown["text"]
-              and "Tailscale:" in ways_shown["text"] and "Kelpie's relay:" in ways_shown["text"] and "Pair a phone" in ways_shown["text"], str(ways_shown))
+              and "Tailscale:" in ways_shown["text"] and "The relay:" in ways_shown["text"] and "Pair a phone" in ways_shown["text"], str(ways_shown))
     phone.shot(os.path.join(shots, "21-phone-install.png"))
     phone.js("document.querySelector('[data-stay-in-browser]').click()")
     phone.wait("return !!document.querySelector('[data-scan]')", 10)

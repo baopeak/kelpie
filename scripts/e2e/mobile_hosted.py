@@ -41,7 +41,7 @@ Checks, in order:
   saying a key is needed.
 - relay state: nothing a session said, and no phone's name, is in wrangler's persisted state.
 - GUI (`--gui`): a new user turns phone access on in Settings → Mobile; Pair a phone opens with Kelpie's relay first and recommended, the other ways
-  saying why they cannot pair now; its guide: Step 1's install link, whose page says it is the app from Kelpie's relay and lists the other ways, Step 2's
+  saying why they cannot pair now; its guide: Step 1's install link, whose page says it is the app from the relay and lists the other ways, Step 2's
   link opened in Edge pairs; the approval offers no control; the device is badged as the hosted app; "What this trusts" is there.
 """
 import argparse
@@ -1220,8 +1220,8 @@ def gui():
         # Opened from Step 1's address, before any code: the app says which way it is, and the other ways to pair this phone.
         phone.go(ORIGIN + "/")
         hosted_ways = phone.wait("const w = document.querySelector('[data-pair-ways]'); return w && {way: w.dataset.pairWays, text: w.textContent}", 30)
-        check("before pairing, the hosted app says it is the app from Kelpie's relay, and lists the other ways with where to choose them", bool(hosted_ways) and hosted_ways["way"] == "relay"
-              and "This is the app from Kelpie's relay" in hosted_ways["text"] and "Tailscale:" in hosted_ways["text"] and "This network:" in hosted_ways["text"] and "Pair a phone" in hosted_ways["text"], hosted_ways)
+        check("before pairing, the hosted app says it is the app from the relay, and lists the other ways with where to choose them", bool(hosted_ways) and hosted_ways["way"] == "relay"
+              and "This is the app from the relay" in hosted_ways["text"] and "Tailscale:" in hosted_ways["text"] and "This network:" in hosted_ways["text"] and "Pair a phone" in hosted_ways["text"], hosted_ways)
         phone.go("about:blank")
         phone.go(link)
         if phone.wait("return !!document.querySelector('[data-stay-in-browser]')", 20):
