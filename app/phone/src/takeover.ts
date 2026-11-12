@@ -271,7 +271,11 @@ export class TakeoverSession {
     if (!this.state || this.state.phase !== "pick") return;
     this.patch({ phase: "starting", message: null });
     const r = await this.port.start(pane);
-    if (this.phase() !== "starting") return;
+    if (this.phase() !== "starting") {
+      // Closed while the computer was starting it (the person left the app): the pane would stay taken with nobody there.
+      if (r.t === "ack" && r.tk) void this.port.stop(r.tk);
+      return;
+    }
     if (r.t !== "ack" || !r.tk) {
       this.patch({ phase: "pick", message: r.t === "error" ? r.message : this.t("Not connected.") });
       return;

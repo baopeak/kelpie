@@ -1,10 +1,10 @@
 // The phone app's frame: header with the connection indicator, the banners that say what is wrong,
-// and the inbox or the open session below.
-import { createSignal, For, Show } from "solid-js";
+// and the inbox, the open session or Settings below.
+import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
 import { Inbox } from "./inbox";
-import { localeSetting, setLocale, t, type LocaleSetting } from "./i18n";
-import { alertsError, alertsState, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, remoteScreen, remoteScreens, sessions, setPairing, setTrustOpen, takeover, takeovers, testAlert, trustOpen, turnAlertsOff, turnAlertsOn } from "./phone-state";
+import { t } from "./i18n";
+import { closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, livePathNow, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, remoteScreen, remoteScreens, sessions, setPairing, setTrustOpen, takeover, takeovers, trustOpen } from "./phone-state";
 import { APP_VERSION, HOSTED, servedVersion, trustText, type ServedVersion } from "./hosted";
 import { PaneTakeover } from "./pane-takeover";
 import { ScreenView } from "./screen-view";
@@ -12,7 +12,7 @@ import { LockCover, LockScreen, RecheckSheet } from "./lock-screen";
 import { InstallGuide, ScanCode, screenNow } from "./install-guide";
 import { labelOf, needsCount } from "./inbox-order";
 import { SessionView } from "./session-view";
-import { setTheme, theme, type ThemeSetting } from "./theme";
+import { SettingsView } from "./settings-view";
 
 function guessName(): string {
   const ua = navigator.userAgent;
@@ -71,7 +71,7 @@ function Pairing() {
 
 /** The always-visible connection indicator: a dot and a short word, the whole thing a button. */
 function ConnIndicator(props: { onClick: () => void }) {
-  const info = () => describeConn(conn());
+  const info = () => describeConn(conn(), livePathNow());
   return (
     <button class={`conn ${info().tone}`} onClick={props.onClick} aria-label={t("Connection")} data-state={conn().kind}>
       <span class="dot" />
@@ -82,7 +82,7 @@ function ConnIndicator(props: { onClick: () => void }) {
 
 /** Under the header whenever what is on screen is not the computer as it is now. */
 function StateBanner() {
-  const info = () => describeConn(conn());
+  const info = () => describeConn(conn(), livePathNow());
   const shown = () => !["live", "connecting"].includes(conn().kind) || (conn().kind === "connecting" && paintedFrom() !== null);
   const asOf = () => {
     const at = paintedFrom() ?? lastLiveAt();
@@ -123,49 +123,6 @@ function SecurityBanner() {
   );
 }
 
-/** Alerts on this phone, with the computer's own push: what state they are in and the one thing to do next. */
-function AlertsRow() {
-  const [tested, setTested] = createSignal<string | null>(null);
-  const test = async () => {
-    setTested(t("Sending…"));
-    const failed = await testAlert();
-    setTested(failed ? t("Failed: {error}", { error: failed }) : t("Sent: it should show on this phone in a moment."));
-  };
-  const why = () => {
-    switch (alertsState()) {
-      case "plain_http":
-        return t("Alerts need HTTPS, which a plain http:// page does not have. Open Kelpie through Tailscale, or use ntfy from Kelpie → Settings → Notifications.");
-      case "install_first":
-        return t("On an iPhone, alerts only work in the installed app: add Kelpie to the Home Screen and open it from there.");
-      case "no_support":
-        return t("This browser cannot receive alerts. ntfy or Telegram work instead: Kelpie → Settings → Notifications.");
-      case "blocked":
-        return t("Alerts are blocked for this app. Allow notifications for it in this phone's settings, then come back.");
-      case "failed":
-        return t("Alerts could not be turned on: {error}", { error: alertsError() ?? "" });
-      case "on":
-        return t("Alerts are on. They say only that a session needs you, and tapping one opens it.");
-      default:
-        return t("Get an alert on this phone when a session needs you, with the app closed and the phone locked. This computer has to be awake to send it.");
-    }
-  };
-  return (
-    <div class="alerts-row" data-alerts={alertsState()}>
-      <h2>{t("Alerts")}</h2>
-      <p class="muted">{why()}</p>
-      <div class="actions">
-        <Show when={["off", "failed"].includes(alertsState())}><button class="btn primary" data-alerts-on onClick={() => void turnAlertsOn()}>{t("Turn on alerts")}</button></Show>
-        <Show when={alertsState() === "asking"}><button class="btn" disabled>{t("Asking…")}</button></Show>
-        <Show when={alertsState() === "on"}>
-          <button class="btn" data-alerts-test onClick={() => void test()}>{t("Send a test alert")}</button>
-          <button class="btn" data-alerts-off onClick={() => void turnAlertsOff()}>{t("Turn off alerts")}</button>
-        </Show>
-      </div>
-      <Show when={tested()}><p class="muted" role="status" data-alerts-tested>{tested()}</p></Show>
-    </div>
-  );
-}
-
 /** What the hosted app trusts, its version, and the fingerprint the relay says it serves (asked of the network each time). */
 function TrustSheet(props: { onClose: () => void }) {
   const [served, setServed] = createSignal<ServedVersion | null | undefined>(undefined);
@@ -189,33 +146,22 @@ function TrustSheet(props: { onClose: () => void }) {
   );
 }
 
-function Sheet(props: { onClose: () => void; onTrust: () => void }) {
-  const info = () => describeConn(conn());
+/** The connection in a sentence, Reconnect, and the way to Settings (behind the lock, like everything else). Locked, the sheet still
+ *  forgets the pairing: a phone whose computer is gone for good could not unpair otherwise, and forgetting harms only its owner. */
+function Sheet(props: { onClose: () => void; onSettings: () => void }) {
+  const info = () => describeConn(conn(), livePathNow());
   return (
     <div class="sheet-back" onClick={props.onClose}>
       <div class="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={t("Connection")}>
         <h2>{info().label}</h2>
         <p class="muted">{info().detail}</p>
-        <Show when={device()}><p class="muted">{t("This device: {name}", { name: device()!.name })} · {device()!.can_write ? t("can type") : t("read only")}</p></Show>
-        <Show when={device() && lockShown().clear}><AlertsRow /></Show>
-        <label class="row-setting">{t("Language")}
-          <select class="field" value={localeSetting()} onChange={(e) => setLocale(e.currentTarget.value as LocaleSetting)}>
-            <option value="auto">{t("Automatic")}</option>
-            <option value="en">English</option>
-            <option value="vi">Tiếng Việt</option>
-          </select>
-        </label>
-        <label class="row-setting">{t("Theme")}
-          <select class="field" value={theme()} onChange={(e) => setTheme(e.currentTarget.value as ThemeSetting)}>
-            <For each={["auto", "light", "dark"] as const}>{(v) => <option value={v}>{v === "auto" ? t("Automatic") : v === "light" ? t("Light") : t("Dark")}</option>}</For>
-          </select>
-        </label>
-        <Show when={HOSTED}>
-          <div class="actions"><button class="btn" data-trust-open onClick={() => { props.onClose(); props.onTrust(); }}>{t("What this app trusts")}</button></div>
-        </Show>
         <div class="actions">
           <button class="btn" onClick={() => { link.kick(); props.onClose(); }}>{t("Reconnect now")}</button>
-          <button class="btn danger" onClick={() => { if (confirm(t("Forget this pairing on this device?"))) { forgetDevice(); props.onClose(); } }}>{t("Forget this device")}</button>
+          <Show when={lockShown().clear} fallback={
+            <button class="btn danger" data-sheet-forget onClick={() => { if (confirm(t("Forget this pairing on this device?"))) { forgetDevice(); props.onClose(); } }}>{t("Forget this device")}</button>
+          }>
+            <button class="btn" data-sheet-settings onClick={() => { props.onClose(); props.onSettings(); }}>{t("Settings")}</button>
+          </Show>
         </div>
         <button class="btn" onClick={props.onClose}>{t("Close")}</button>
       </div>
@@ -225,9 +171,31 @@ function Sheet(props: { onClose: () => void; onTrust: () => void }) {
 
 export function App() {
   const [sheet, setSheet] = createSignal(false);
+  const [settings, setSettings] = createSignal(false);
+  // Settings has an entry of its own in the history, so the phone's own Back leaves it for where the person was.
+  const onPop = () => setSettings(!!(history.state as { settings?: boolean } | null)?.settings);
+  window.addEventListener("popstate", onPop);
+  onCleanup(() => window.removeEventListener("popstate", onPop));
+  const openSettings = () => {
+    // A screen or a pane under control ends (the gear is not shown over them; the sheet's Settings button can still lead here).
+    remoteScreens.close();
+    takeovers.close();
+    if (!settings()) history.pushState({ settings: true }, "");
+    setSettings(true);
+  };
+  const closeSettings = () => {
+    if ((history.state as { settings?: boolean } | null)?.settings) history.back();
+    setSettings(false);
+  };
+  // A pairing that ends (forgotten, or removed on the computer) leaves no Settings behind for the next one.
+  createEffect(() => {
+    if (!paired()) setSettings(false);
+  });
   // Behind the lock nothing says what is there: not a session's name, not how many need the person.
   const open = () => !paired() || lockShown().clear;
+  const inSettings = () => settings() && paired() && open();
   const title = () => {
+    if (inSettings()) return t("Settings");
     if (takeover() && open()) return t("Browser pane");
     if (remoteScreen() && open()) return t("Computer screen");
     const id = openId();
@@ -235,15 +203,18 @@ export function App() {
     return s ? labelOf(s) : "Kelpie";
   };
   const badge = () => (open() ? needsCount(sessions()) : 0);
-  const back = () => (remoteScreen() ? remoteScreens.close() : takeover() ? takeovers.close() : history.state?.s ? history.back() : closeSession());
+  const back = () => (inSettings() ? closeSettings() : remoteScreen() ? remoteScreens.close() : takeover() ? takeovers.close() : history.state?.s ? history.back() : closeSession());
   return (
     <>
       <header id="top">
-        <Show when={(openId() || takeover() || remoteScreen()) && open()}>
+        <Show when={(inSettings() || openId() || takeover() || remoteScreen()) && open()}>
           <button class="icon" aria-label={t("Back")} onClick={back}>‹</button>
         </Show>
         <h1>{title()}</h1>
-        <Show when={!openId() && badge() > 0}><span class="badge" aria-label={t("Sessions that need you")}>{badge()}</span></Show>
+        <Show when={!openId() && !inSettings() && badge() > 0}><span class="badge" aria-label={t("Sessions that need you")}>{badge()}</span></Show>
+        <Show when={paired() && lockShown().clear && !inSettings() && !remoteScreen() && !takeover()}>
+          <button class="gear" data-open-settings aria-label={t("Settings")} onClick={openSettings}><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg></button>
+        </Show>
         <Show when={paired()}><ConnIndicator onClick={() => setSheet(true)} /></Show>
       </header>
       <StateBanner />
@@ -251,15 +222,17 @@ export function App() {
       <main id="view">
         <Show when={paired()} fallback={<NotPaired />}>
           <Show when={lockShown().clear} fallback={<LockScreen />}>
-            <Show when={!remoteScreen()} fallback={<ScreenView />}>
-              <Show when={!takeover()} fallback={<PaneTakeover />}>
-                <Show when={openId()} keyed fallback={<Inbox />}>{(id) => <SessionView id={id} />}</Show>
+            <Show when={!settings()} fallback={<SettingsView onClose={closeSettings} />}>
+              <Show when={!remoteScreen()} fallback={<ScreenView />}>
+                <Show when={!takeover()} fallback={<PaneTakeover />}>
+                  <Show when={openId()} keyed fallback={<Inbox />}>{(id) => <SessionView id={id} />}</Show>
+                </Show>
               </Show>
             </Show>
           </Show>
         </Show>
       </main>
-      <Show when={sheet()}><Sheet onClose={() => setSheet(false)} onTrust={() => setTrustOpen(true)} /></Show>
+      <Show when={sheet()}><Sheet onClose={() => setSheet(false)} onSettings={openSettings} /></Show>
       <Show when={HOSTED && trustOpen()}><TrustSheet onClose={() => setTrustOpen(false)} /></Show>
       <RecheckSheet />
       <LockCover />

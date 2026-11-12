@@ -8,7 +8,7 @@ import { Composer } from "./composer";
 import { KeyBar } from "./key-bar";
 import { PromptCard } from "./prompt-card";
 import { TerminalText } from "./terminal-text";
-import { canSeeScreen, canTakeOver, canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, paintedFrom, remoteScreens, screen, sessions, takeovers } from "./phone-state";
+import { canSeeScreen, canTakeOver, canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, openScreenPicker, openTakeoverPicker, paintedFrom, screen, sessions } from "./phone-state";
 import { promptKey } from "./screen-sync";
 import { t } from "./i18n";
 
@@ -26,8 +26,8 @@ function TakeOverButton(props: { project: string | null }) {
   return (
     <Show when={canTakeOver() || canSeeScreen()}>
       <div class="takeover-entry">
-        <Show when={canTakeOver()}><button class="btn" data-take-over disabled={!connected()} onClick={() => void takeovers.openPicker(props.project)}>{t("Take over a browser pane")}</button></Show>
-        <Show when={canSeeScreen()}><button class="btn" data-see-screen disabled={!connected()} onClick={() => void remoteScreens.openPicker()}>{t("See the computer's screen")}</button></Show>
+        <Show when={canTakeOver()}><button class="btn" data-take-over disabled={!connected()} onClick={() => openTakeoverPicker(props.project)}>{t("Take over a browser pane")}</button></Show>
+        <Show when={canSeeScreen()}><button class="btn" data-see-screen disabled={!connected()} onClick={openScreenPicker}>{t("See the computer's screen")}</button></Show>
       </div>
     </Show>
   );

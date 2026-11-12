@@ -257,10 +257,14 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
   const resumed: string[] = [];
   const texts: string[] = [];
   const states: (ScreenState | null)[] = [];
+  const stopped: string[] = [];
   const port: ScreenPort = {
     targets: async () => replies.targets ?? { t: "ack", targets: [{ id: "m:\\\\.\\DISPLAY1", kind: "monitor", title: "Screen 1", app: "", shortcut: null, w: 1920, h: 1080, minimized: false, primary: true }] },
     start: async () => replies.start ?? { t: "ack", result: "ok", sc: "sc1", title: "main.rs — kelpie", kind: "window", encoder: "hw" },
-    stop: async () => replies.stop ?? { t: "ack" },
+    stop: async (sc) => {
+      stopped.push(sc);
+      return replies.stop ?? { t: "ack" };
+    },
     text: async (_sc, text) => {
       texts.push(text);
       return replies.text ?? { t: "ack", result: "sent" };
@@ -295,10 +299,20 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
     now = end;
   };
   const s = new ScreenSession(port, (x) => states.push(x));
-  return { s, sent, acks, keyframes, resumed, texts, states, advance };
+  return { s, sent, acks, keyframes, resumed, texts, states, stopped, advance };
 }
 
 describe("one screen from the phone", () => {
+  it("a screen the computer starts after the phone closed it is stopped at once", async () => {
+    const r = rig();
+    await r.s.openPicker();
+    const starting = r.s.pick("w:1:2");
+    r.s.close();
+    await starting;
+    expect(r.stopped).toEqual(["sc1"]);
+    expect(r.s.state).toBeNull();
+  });
+
   it("lists what can be seen, starts, acknowledges decoded frames and stops", async () => {
     const r = rig();
     await r.s.openPicker();

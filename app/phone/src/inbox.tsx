@@ -1,8 +1,12 @@
-// The inbox: every session across projects, grouped by what it needs from you, the longest waiting first.
+// The inbox: every session across projects, grouped by what it needs from you (the longest waiting first) or by the workspace it
+// runs in, as chosen above the list or in Settings.
 import { createSignal, For, Show } from "solid-js";
-import { msg, t } from "./i18n";
-import { groupSessions, labelOf, whereOf, type GroupKey } from "./inbox-order";
-import { canSeeScreen, connected, discardNotSent, notSent, now, openSession, paintedFrom, projects, remoteScreens, sessions } from "./phone-state";
+import { endedAgo } from "./conn-text";
+import { intlLocale, msg, t } from "./i18n";
+import { groupByWorkspace, groupOf, groupSessions, labelOf, shownRows, whereOf, type GroupKey } from "./inbox-order";
+import type { SessionRow } from "./link";
+import { canSeeScreen, connected, discardNotSent, notSent, now, openScreenPicker, openSession, paintedFrom, projects, sessions } from "./phone-state";
+import { INBOX_VIEWS, inboxView, order, showStopped, type InboxView } from "./prefs";
 import { waitedFor } from "../../src/lib/attention";
 
 /** Messages this phone sent to chats that are gone from the computer's list (closed, or resumed as a new session) and that were
@@ -54,34 +58,81 @@ const TITLES: Record<GroupKey, string> = {
   stopped: msg("Stopped"),
 };
 
+const Empty = () => <div class="card"><p class="muted">{t("No sessions are running.")}</p></div>;
+
+/** The name of an inbox view, here and in Settings. */
+export const inboxViewName = (v: InboxView) => (v === "status" ? t("By status") : t("By workspace"));
+
+/** One session in the list. By workspace, the section already says where it runs, so the row says its state in a word instead. */
+function SessionItem(props: { s: SessionRow; byWorkspace: boolean }) {
+  const group = () => groupOf(props.s);
+  const sub = () => {
+    const s = props.s;
+    return [
+      props.byWorkspace ? t(TITLES[group()]) : "",
+      // A stopped session says when it ended (its last activity), not only that it did.
+      !s.alive && s.last_activity > 0 ? endedAgo(s.last_activity, now()) : "",
+      s.kind,
+      props.byWorkspace ? "" : whereOf(s, projects()),
+      s.chat ? t("chat") : "",
+    ].filter(Boolean).join(" · ");
+  };
+  return (
+    <div class="row" data-id={props.s.id} role="button" tabIndex={0} onClick={() => openSession(props.s.id)} onKeyDown={(e) => e.key === "Enter" && openSession(props.s.id)}>
+      <span class={`dot ${props.s.alive ? props.s.status : "exited"}`} />
+      <div class="main">
+        <div class="name">{labelOf(props.s)}</div>
+        <div class="sub">{sub()}</div>
+      </div>
+      <Show when={group() === "needs" && props.s.waiting_since}><span class="waited">{waitedFor(props.s.waiting_since!, now())}</span></Show>
+      <Show when={props.s.unread && group() !== "needs"}><span class="badge">{t("new")}</span></Show>
+    </div>
+  );
+}
+
 export function Inbox() {
-  const groups = () => groupSessions(sessions());
+  const shown = () => shownRows(sessions(), showStopped.get());
+  const groups = () => groupSessions(shown().rows, order.get(), intlLocale());
+  const workspaces = () => groupByWorkspace(shown().rows, projects(), order.get(), intlLocale());
   return (
     <div classList={{ painted: paintedFrom() !== null }}>
       {/* The computer's screen is reached from here too, not only from a session (a dialog may have nothing to do with one). */}
       <Show when={canSeeScreen()}>
-        <div class="takeover-entry"><button class="btn" data-see-screen disabled={!connected()} onClick={() => void remoteScreens.openPicker()}>{t("See the computer's screen")}</button></div>
+        <div class="takeover-entry"><button class="btn" data-see-screen disabled={!connected()} onClick={openScreenPicker}>{t("See the computer's screen")}</button></div>
       </Show>
-      <For each={groups()} fallback={<div class="card"><p class="muted">{t("No sessions are running.")}</p></div>}>
-        {(g) => (
-          <section data-group={g.key}>
-            <div class="group">{t(TITLES[g.key])} · {g.rows.length}</div>
-            <For each={g.rows}>
-              {(s) => (
-                <div class="row" data-id={s.id} role="button" tabIndex={0} onClick={() => openSession(s.id)} onKeyDown={(e) => e.key === "Enter" && openSession(s.id)}>
-                  <span class={`dot ${s.alive ? s.status : "exited"}`} />
-                  <div class="main">
-                    <div class="name">{labelOf(s)}</div>
-                    <div class="sub">{s.kind} · {whereOf(s, projects())}{s.chat ? ` · ${t("chat")}` : ""}</div>
-                  </div>
-                  <Show when={g.key === "needs" && s.waiting_since}><span class="waited">{waitedFor(s.waiting_since!, now())}</span></Show>
-                  <Show when={s.unread && g.key !== "needs"}><span class="badge">{t("new")}</span></Show>
-                </div>
-              )}
-            </For>
-          </section>
-        )}
-      </For>
+      <div class="view-switch" role="group" aria-label={t("Inbox view")} data-inbox-view={inboxView.get()}>
+        <For each={INBOX_VIEWS}>
+          {(v) => <button classList={{ on: inboxView.get() === v }} data-view={v} aria-pressed={inboxView.get() === v} onClick={() => inboxView.set(v)}>{inboxViewName(v)}</button>}
+        </For>
+      </div>
+      <Show
+        when={inboxView.get() === "workspace"}
+        fallback={
+          <For each={groups()} fallback={<Empty />}>
+            {(g) => (
+              <section data-group={g.key}>
+                <div class="group">{t(TITLES[g.key])} · {g.rows.length}</div>
+                <For each={g.rows}>{(s) => <SessionItem s={s} byWorkspace={false} />}</For>
+              </section>
+            )}
+          </For>
+        }
+      >
+        <For each={workspaces()} fallback={<Empty />}>
+          {(w) => (
+            <section class="workspace" data-workspace={w.key}>
+              <div class="group">{w.name ?? t("Other folders")} · {w.rows.length}</div>
+              <For each={w.rows}>{(s) => <SessionItem s={s} byWorkspace />}</For>
+            </section>
+          )}
+        </For>
+      </Show>
+      <Show when={shown().hidden}>
+        <button class="stopped-hidden" data-stopped-hidden={shown().hidden} onClick={() => showStopped.set(true)}>
+          <span>{t("{n} stopped hidden", { n: shown().hidden })}</span>
+          <span class="show">{t("Show")}</span>
+        </button>
+      </Show>
       <NotSent />
     </div>
   );

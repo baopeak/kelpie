@@ -24,6 +24,8 @@ import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneC
 import { browserReloadEnv, ShellReload, SHELL_CHANGED } from "./shell-reload";
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
+import { lockGrace, vibrate } from "./prefs";
+import { isLocalHost, isTailscaleHost, livePath, pageMethod, screenWhy } from "./conn-path";
 import { screenNow } from "./install-guide";
 import { afterFailedPairing, movedTo, platformOf, relayMovedTo } from "./install-state";
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
@@ -87,6 +89,9 @@ export const canTakeOver = () => device()?.permission === "control" && daemonApi
 export const [takeover, setTakeover] = createSignal<TakeoverState | null>(null);
 /** This phone may see the computer's screen (the same rule as a pane's takeover, at a computer that has it). */
 export const canSeeScreen = () => device()?.permission === "control" && daemonApi() >= SCREEN_API;
+/** Null when the computer's screen can be seen from here; otherwise the sentence that says why not (Settings). */
+export const screenWhyNow = () =>
+  screenWhy({ known: daemonApi() > 0, older: daemonApi() < SCREEN_API, hosted: HOSTED, permission: device()?.permission, route: route(), unlocked: lockShown().face === "open" }, t);
 /** The computer's screen seen from here, or being picked (null: none). Its media goes to the view directly (`onScreenMedia`), not through a signal. */
 export const [remoteScreen, setRemoteScreen] = createSignal<ScreenState | null>(null);
 let screenMediaSink: ((bytes: Uint8Array) => void) | null = null;
@@ -110,15 +115,21 @@ let listSaved = 0;
 /** The page's origin is plain HTTP and not Tailscale: anyone on the network could have swapped this page, so it may only read. */
 export function plainHttpOrigin(): boolean {
   if (location.protocol !== "http:") return false;
-  const host = location.hostname;
-  const v4 = host.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
-  const tailscale = (v4 && +v4[1] === 100 && +v4[2] >= 64 && +v4[2] < 128) || host.endsWith(".ts.net") || /^\[?fd7a:115c:a1e0:/i.test(host);
-  const local = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
-  return !tailscale && !local;
+  return !isTailscaleHost(location.hostname) && !isLocalHost(location.hostname);
 }
+
+/** How this app was paired, from where its page comes (it never changes while the page lives). */
+export const PAGE_METHOD = pageMethod(HOSTED, location);
+/** The route the connection takes now, or took last, and its last round trip in ms. */
+export const [route, setRoute] = createSignal<"direct" | "relay">("direct");
+export const [rtt, setRtt] = createSignal<number | null>(null);
+/** The way to the computer now, in the terms a person knows: the relay, Tailscale, this network or this computer. */
+export const livePathNow = () => livePath(route(), PAGE_METHOD);
 
 /** How the app lock stands, for the views: whether what is behind it may be shown, and the state of its screen. */
 export const [lockShown, setLockShown] = createSignal<{ clear: boolean; face: string; asking: boolean; error: string | null; covered: boolean }>({ clear: false, face: "unknown", asking: false, error: null, covered: false });
+/** What the computer last said of the lock (its idle time and the re-check of dangerous approvals), for Settings. */
+export const [lockInfo, setLockInfo] = createSignal<LockInfo>({ state: "unknown" });
 
 const lock = new LockModel({
   credentials: browserCredentials(),
@@ -129,13 +140,24 @@ const lock = new LockModel({
     link.lockNow();
   },
   touch: () => link.lockTouch(),
+  grace: () => lockGrace.get() * 1000,
   setResume: (secret) => link.setResume(secret),
   connected: () => link.ready,
   now: () => Date.now(),
   store,
-}, () => setLockShown({ clear: lock.clear(), face: lock.face, asking: lock.asking, error: lock.error, covered: lock.covered }));
+}, () => {
+  setLockShown({ clear: lock.clear(), face: lock.face, asking: lock.asking, error: lock.error, covered: lock.covered });
+  setLockInfo(lock.lastInfo());
+});
 export const lockGo = () => lock.go();
 setLockShown({ clear: lock.clear(), face: lock.face, asking: false, error: null, covered: false });
+
+/** Seeing or controlling the computer asks for the passkey again after any time out of sight, even within the lock's grace (owner rule 2026-11-12):
+ *  the lock screen comes back, and what was asked for opens once it is unlocked. */
+export const openScreenPicker = () => lock.whenFresh(() => void remoteScreens.openPicker());
+export const openTakeoverPicker = (project: string | null) => lock.whenFresh(() => void takeovers.openPicker(project));
+/** Locks the app now, from Settings: the computer is told, and the lock screen asks for the passkey. */
+export const lockAppNow = () => lock.relock();
 
 /** What the daemon said of each open request of the chats followed (by chat and request id). */
 export const [requestInfo, setRequestInfo] = createSignal<Record<string, ChatRequestInfo>>({});
@@ -252,8 +274,8 @@ const link = new Link(browserEnv(), () => {
       setSessions(m.sessions);
       setProjects(m.projects ?? projects());
     });
-    // A buzz when something starts needing you.
-    if (m.sessions.some((s) => s.alive && s.status === "waiting" && before.get(s.id) !== "waiting")) navigator.vibrate?.(200);
+    // A buzz when something starts needing you, unless the person turned it off.
+    if (vibrate.get() && m.sessions.some((s) => s.alive && s.status === "waiting" && before.get(s.id) !== "waiting")) navigator.vibrate?.(200);
     forgetGoneChats(m.sessions.map((s) => s.id));
     refreshNotSent();
     persistList();
@@ -415,6 +437,8 @@ function recompute() {
     setConn((cur) => (JSON.stringify(cur) === JSON.stringify(next) ? cur : next));
     setDataState(dataAge(link.facts.ready ? link.facts.lagMs : 0, silent));
     setLastLiveAt(link.facts.lastLiveAt);
+    setRoute(link.facts.route);
+    setRtt(link.facts.rttMs);
     setNow(at);
   });
 }
@@ -749,6 +773,16 @@ export function forgetDevice() {
   setPaired(false);
 }
 
+/** Forgets the list and the screens this phone saved, and with `drafts` what was typed here too; the pairing stays. */
+export async function clearKept(drafts: boolean): Promise<void> {
+  await clearCache();
+  if (drafts) {
+    wipeTypedText();
+    forgetHistory();
+    refreshNotSent();
+  }
+}
+
 /** The kept messages of chats the computer no longer lists (closed, or resumed as a new session): shown in the inbox under
  *  "Not sent", with their text, until the person lets them go (or a week after they last changed). */
 export const [notSent, setNotSent] = createSignal<GoneChat[]>([]);
@@ -819,6 +853,20 @@ export function startApp() {
     // First: the system may take its picture of the app for the switcher at any moment from here.
     if (document.hidden) lock.left();
     else lock.back();
+    // Leaving the app ends a screen or a takeover at once, whatever the lock's grace (owner rule 2026-11-06). With no grace the lock
+    // does it (the computer stops them on `lock_now`, and the screen says it ended when the phone locked).
+    if (document.hidden && lockGrace.get() > 0) {
+      remoteScreens.close();
+      takeovers.close();
+    }
+    // A session asked for while out of sight (a tap on an alert) opens on the way back: within the grace no new hello comes to open it.
+    if (!document.hidden && wantSession && connected() && lock.clear()) {
+      const want = wantSession;
+      const waited = wantFromAlert;
+      wantSession = null;
+      wantFromAlert = false;
+      openWanted(want, waited);
+    }
     link.setHidden(document.hidden);
     // Nothing goes out from a hidden page, not even a late acknowledgement.
     if (document.hidden) for (const s of syncs.values()) s.dispose();

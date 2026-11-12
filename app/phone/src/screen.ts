@@ -849,7 +849,11 @@ export class ScreenSession {
     this.early = 0;
     this.earlyKey = false;
     const r = await this.port.start(target);
-    if (this.phase() !== "starting") return;
+    if (this.phase() !== "starting") {
+      // Closed while the computer was starting it (the person left the app): it would go on capturing with nobody watching.
+      if (r.t === "ack" && r.sc) void this.port.stop(r.sc);
+      return;
+    }
     if (r.t !== "ack" || !r.sc) {
       this.patch({ phase: "pick", message: r.t === "error" ? r.message : this.t("Not connected.") });
       return;

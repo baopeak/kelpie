@@ -1,5 +1,6 @@
 // Words for the connection state. "Your connection is slow" and "the computer is busy" are different
 // things and read differently; so are "no network" and "the computer does not answer".
+import { pathText, type LivePath } from "./conn-path";
 import type { ConnState } from "./conn-state";
 import { HOSTED } from "./hosted";
 import { intlLocale, t } from "./i18n";
@@ -15,7 +16,13 @@ export function ago(ms: number, at = Date.now()): string {
   if (s < 10) return t("just now");
   if (s < 60) return t("{n} s ago", { n: s });
   if (s < 3600) return t("{n} min ago", { n: Math.floor(s / 60) });
-  return t("{n} h ago", { n: Math.floor(s / 3600) });
+  if (s < 86400) return t("{n} h ago", { n: Math.floor(s / 3600) });
+  return t("{n} d ago", { n: Math.floor(s / 86400) });
+}
+
+/** "ended 5 min ago", for a session that stopped at `ms`. */
+export function endedAgo(ms: number, at = Date.now()): string {
+  return at - ms < 10_000 ? t("ended just now") : t("ended {ago}", { ago: ago(ms, at) });
 }
 
 /** Why the computer is busy, in a sentence. */
@@ -25,14 +32,16 @@ export function busyText(reasons: string[]): string {
   return t("The computer is busy, so updates are slower. Typing still works.");
 }
 
-export function describeConn(state: ConnState): { label: string; detail: string; tone: Tone } {
+/** The state in words. `path`, when known, is the way the connection takes, which a live connection names. */
+export function describeConn(state: ConnState, path?: LivePath): { label: string; detail: string; tone: Tone } {
   // The hosted app has no Tailscale route to speak of: the relay is its only way.
   const s: ConnState = HOSTED && (state.kind === "no_tailnet" || state.kind === "no_path") ? { kind: "relay_unreachable" } : state;
   switch (s.kind) {
     case "connecting":
       return { label: t("Connecting…"), detail: t("Reaching Kelpie on your computer."), tone: "idle" };
     case "live":
-      return { label: t("Live"), detail: t("Connected to Kelpie on your computer."), tone: "ok" };
+      if (!path) return { label: t("Live"), detail: t("Connected to Kelpie on your computer."), tone: "ok" };
+      return { label: t("Live · through {path}", { path: pathText(path, t) }), detail: t("Connected to Kelpie on your computer through {path}.", { path: pathText(path, t) }), tone: "ok" };
     case "degraded":
       return s.why === "slow"
         ? { label: t("Slow connection"), detail: t("Your connection is slow, so what you see may be a little behind."), tone: "warn" }
