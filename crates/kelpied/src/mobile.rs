@@ -2135,7 +2135,8 @@ fn page_may_control(d: &Device, lock_on: bool) -> bool {
 
 /// What the phone is told about control on this connection (`device.control` in its hello): "ok", or the first reason that holds, in this order:
 /// `hosted_app`, `not_granted` (its record is below control), `plain_page` (not paired on a secure origin, or this connection's page is not one),
-/// `via_relay`, `lock_off`, `no_passkey`, `locked`. `rule` is `control_rule`'s answer and `cap` the transport's (`transport_cap`).
+/// `via_relay`, `lock_off`, `no_passkey`, `locked`. `rule` is `control_rule`'s answer and `cap` the transport's (`transport_cap`), held to reading
+/// where the lock's gate is (`Gate::ReadOnly`).
 fn control_word(rule: Result<(), &'static str>, record: Permission, cap: Permission, via_relay: bool) -> &'static str {
     match rule {
         Err("hosted_app") => "hosted_app",
@@ -2959,8 +2960,9 @@ impl Conn {
         self.lock_told = m.lock_state(&self.device, self.lock_path, gate, self.secure_page.as_deref());
         let cap = if gate == Gate::ReadOnly { self.cap.min(Permission::Read) } else { self.cap };
         // Control only while it holds (`Mobile::control_now`): the phone offers takeover from what it hears here, and says why not from `control`.
+        // The reason goes by what this connection may do with the lock's gate applied: one held to reading over plain HTTP hears `plain_page`.
         let rule = m.control_reason(&self.device, self.lock_path, gate, self.page_origin.is_some());
-        let control = control_word(rule, record, self.cap, self.route == "relay");
+        let control = control_word(rule, record, cap, self.route == "relay");
         let cap = if cap >= Permission::Control && rule.is_err() { Permission::Write } else { cap };
         let first = self.publish(true);
         // Only where it can be used (`Conn::secure_transport`). Read each time, off this task: until there is a key it asks the credential store, which can be slow.
@@ -3070,6 +3072,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     // The device's older connection, if any, is told it was replaced.
     let replaced = Arc::new(Notify::new());
     connection_opened(&daemon, &device.id, OpenConn { conn: id, replaced: replaced.clone(), route, since: now_millis() });
+    let open = OpenGuard { daemon: daemon.clone(), device: device.id.clone(), conn: id };
     let mut wires = Wires { bulk_rx: lanes.bulk_rx, ctl_rx: lanes.ctl_rx, media_rx: Some(lanes.media_rx), slow: lanes.slow, dirty, replaced };
     // Dropping serve cancels an in-flight request/send, then the common cleanup still runs.
     tokio::select! {
@@ -3077,14 +3080,29 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
         _ = generation.cancelled() => {}
         _ = serve(&mut conn, &mut wire, &device, &mut wires, &mut adapter, &generation) => {}
     }
+    // The device is not connected now: said before anything more is awaited.
+    drop(open);
     // Turned off because every device was removed (kill switch, reset): the phone forgets a pairing that no longer exists,
     // instead of trying a computer that stays silent. Plain "phone access off" keeps the record, and with it the pairing.
     if generation.is_cancelled() && daemon.mobile.removed(&device.id) {
         wire.close(NOT_PAIRED, "revoked").await;
     }
     adapter.abort();
-    connection_closed(&daemon, &device.id, id);
     conn.end();
+}
+
+/// Takes a connection out of `Mobile::connections` (`connection_closed`) however its task ends: a panic, or the task dropped, as well as a
+/// plain return. A device must not stay "connected now" after its connection is gone.
+struct OpenGuard {
+    daemon: Arc<Daemon>,
+    device: String,
+    conn: u64,
+}
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        connection_closed(&self.daemon, &self.device, self.conn);
+    }
 }
 
 /// A device's open connection (`Mobile::connections`).
@@ -3788,6 +3806,18 @@ mod tests {
         let app = Device { kind: Kind::App, secure_origin: false, lock: None, page_kind: None, ..ready.clone() };
         assert_eq!(control_word(control_rule(&app, false, LockPath::Plain, Gate::Locked, false), app.permission, Permission::Control, false), "ok", "the native app");
         assert_eq!(control_word(control_rule(&app, false, LockPath::Plain, Gate::Locked, false), Permission::Write, Permission::Control, false), "not_granted");
+        assert_eq!(control_word(control_rule(&app, true, LockPath::Plain, Gate::ReadOnly, false), app.permission, Permission::Read, false), "plain_page", "the native app held to reading over plain HTTP");
+    }
+
+    #[tokio::test]
+    async fn a_connection_held_to_reading_over_plain_http_hears_its_page_is_why_it_may_not_take_control() {
+        // The native app with control on its record, connected over plain HTTP from elsewhere: the lock (on, reading allowed) holds it to reading.
+        let mut r = rig();
+        r.conn.lock_path = LockPath::Plain;
+        let device = r.daemon.mobile.config.lock().devices.iter().find(|d| d.id == "phone").cloned().unwrap();
+        let hello = r.conn.hello(&device, Permission::Control).await;
+        assert_eq!(hello["device"]["permission"], "read");
+        assert_eq!(hello["device"]["control"], "plain_page", "not ok: it may only read");
     }
 
     #[tokio::test]

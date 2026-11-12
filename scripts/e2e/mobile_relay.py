@@ -451,17 +451,26 @@ async def main(d, phone_tap, desk_tap, registration_key, open_tap, open_port, v1
     check("…then through Tailscale once the direct route is back", await until(lambda: _route_is(call, device.id, "tailscale"), 10), await _route_of(call, device.id))
     # Given control (its passkey set up over Tailscale, with the lock on), the relay is what keeps the screen from it.
     await call("mobile.set_lock", {"on": True})
-    passkey = ps.SoftPasskey(ORIGIN)
-    enrolled = await direct.ask(type="lock_enrol", **passkey.create((await direct.ask(type="lock_challenge"))["lock"]["challenge"]))
-    check("the phone sets up its passkey over Tailscale", (enrolled or {}).get("result") == "ok", enrolled)
-    await call("mobile.set_permission", {"id": device.id, "permission": "control"})
-    await direct.close()
-    phone, hello = await through_relay(device, ticket, token)
-    check("a phone given control hears through the relay that the relay is what keeps the screen from it", hello["device"].get("control") == "via_relay" and hello["device"]["permission"] != "control", hello["device"])
-    await phone.close()
-    check("…and once it goes, the desktop lists it as not connected", await until(lambda: _route_is(call, device.id, None), 10), await _route_of(call, device.id))
-    await call("mobile.set_permission", {"id": device.id, "permission": "write"})
-    await call("mobile.set_lock", {"on": False})
+    try:
+        # The window to set up a passkey is opened afresh: the one the approval opened lasts five minutes, which a slow run of the above may outlast.
+        await call("mobile.reset_lock", {"id": device.id})
+        passkey = ps.SoftPasskey(ORIGIN)
+        asked = await direct.ask(type="lock_challenge")
+        challenge = ((asked or {}).get("lock") or {}).get("challenge")
+        check("the phone is given a challenge to set up its passkey", challenge, asked)
+        enrolled = await direct.ask(type="lock_enrol", **passkey.create(challenge)) if challenge else None
+        check("the phone sets up its passkey over Tailscale", (enrolled or {}).get("result") == "ok", enrolled)
+        await call("mobile.set_permission", {"id": device.id, "permission": "control"})
+        await direct.close()
+        phone, hello = await through_relay(device, ticket, token)
+        check("a phone given control hears through the relay that the relay is what keeps the screen from it", hello["device"].get("control") == "via_relay" and hello["device"]["permission"] != "control", hello["device"])
+        await phone.close()
+        check("…and once it goes, the desktop lists it as not connected", await until(lambda: _route_is(call, device.id, None), 10), await _route_of(call, device.id))
+    finally:
+        # What the rest of the run expects, whatever happened above: typing, with the lock off.
+        await direct.close()
+        await call("mobile.set_permission", {"id": device.id, "permission": "write"})
+        await call("mobile.set_lock", {"on": False})
 
     # ---------- the kill switch ----------
     # A fresh connection: the one from before the relay was cut was told `desktop_offline`, which the page acts on by connecting again.

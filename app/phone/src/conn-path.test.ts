@@ -137,7 +137,7 @@ describe("why the screen is not offered here", () => {
     const codes = ["hosted_app", "not_granted", "plain_page", "via_relay", "lock_off", "no_passkey", "locked"];
     expect(codes.map(computerBlock)).toEqual(["hosted", "not_control", "plain_page", "relay", "lock", "lock", "lock"]);
     for (const none of ["ok", undefined, "a_later_reason"]) expect(computerBlock(none), String(none)).toBeNull();
-    expect(screenWhy({ ...ok, computer: computerBlock("plain_page") }, fill)).toMatch(/paired over plain HTTP/);
+    expect(screenWhy({ ...ok, computer: computerBlock("plain_page") }, fill)).toMatch(/did not come from your computer over HTTPS/);
     expect(screenWhy({ ...ok, unlocked: false, computer: computerBlock("ok") }, fill), "ok, and locked here since").toMatch(/app lock on and unlocked/);
     expect(screenWhy({ ...ok, permission: "write", computer: computerBlock("not_granted") }, fill)).toBe(screenWhy({ ...ok, permission: "write" }, fill));
   });

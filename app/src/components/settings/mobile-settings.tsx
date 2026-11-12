@@ -16,8 +16,8 @@ import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_API, TAILSCALE_API, TAKEOVER_AP
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import {
   approvalChoices, approveWithReplace, connectionLine, deviceMethodLabel, groupDevices, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel,
-  pairMethods, permissionChoices, prunePhoneGroups, samePhoneSuggestion, telegramChoice, turnOnAccess, withConnection, type MobileRoute, type OptionFacts, type OptionId, type PairMethodId,
-  type PhoneGroup,
+  pairMethods, permissionChoices, prunePhoneGroups, samePhoneSuggestion, telegramChoice, turnOnAccess, withConnection, withNewerConnections, type ConnectionNews, type MobileRoute, type OptionFacts, type OptionId,
+  type PairMethodId, type PhoneGroup,
 } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
 import { catalogEntry, entryMatches } from "../../lib/settings-catalog";
@@ -164,7 +164,18 @@ const telegramWarning = () =>
   t("Telegram can read these messages: a bot chat is not end-to-end encrypted. A tap in Telegram asks for no Face ID, and anyone who has this Telegram account can approve. Only requests Kelpie labels low risk get buttons, each for one time and five minutes.");
 
 export function MobileSettings() {
-  const [status, { refetch, mutate }] = createResource(() => store.connected(), () => mobileStatus().catch(() => null));
+  // The last `mobile.connection` per device, numbered as heard. A full read that started before one of them answers with the daemon's
+  // older view, so those that came after its start are laid over the reply.
+  let connectionSeq = 0;
+  const connectionNews = new Map<string, ConnectionNews>();
+  const [status, { refetch, mutate }] = createResource(
+    () => store.connected(),
+    async () => {
+      const started = connectionSeq;
+      const s = await mobileStatus().catch(() => null);
+      return s && { ...s, devices: withNewerConnections(s.devices, connectionNews, started) };
+    },
+  );
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [hotkeyError, setHotkeyError] = createSignal<string | null>(null);
@@ -211,7 +222,11 @@ export function MobileSettings() {
       if (m.event === "mobile.updated" || m.event === "mobile.pair_request" || m.event === "mobile.device_changed") void refetch();
       // A phone connected, went, or changed its way: its row alone changes, with nothing asked of the daemon.
       const id = m.params?.id;
-      if (m.event === "mobile.connection" && id) mutate((cur) => (cur ? { ...cur, devices: withConnection(cur.devices, id, m.params?.route ?? null, Date.now()) } : cur));
+      if (m.event === "mobile.connection" && id) {
+        const news = { route: m.params?.route ?? null, since: Date.now(), seq: ++connectionSeq };
+        connectionNews.set(id, news);
+        mutate((cur) => (cur ? { ...cur, devices: withConnection(cur.devices, id, news.route, news.since) } : cur));
+      }
       // A phone turned its alerts on or off, or was removed.
       if (m.event === "mobile.updated") void loadPush();
       // Approvals from Telegram changed on their own: an account was bound, the code ran out, or they stopped.

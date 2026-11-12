@@ -166,7 +166,8 @@ export function screenWhy(f: ScreenFacts, t: Translate): string | null {
     case "not_control":
       return t("Choose \"May take control\" for this phone in Kelpie → Settings → Mobile.");
     case "plain_page":
-      return t("This phone was paired over plain HTTP; seeing the screen needs the app from your computer over Tailscale.");
+      // Paired over plain HTTP, or this page is not a secure one: either way, the page did not come from the computer over HTTPS.
+      return t("This page did not come from your computer over HTTPS; seeing the screen needs the app from your computer over Tailscale.");
     case "relay":
       return t("Seeing the screen needs Tailscale; this phone is on the relay now.");
     case "lock":

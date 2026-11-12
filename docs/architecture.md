@@ -634,9 +634,10 @@ third implementation for the tests, and all three are checked against the crate'
   working it out again; a computer below 36 says nothing and the phone works it out itself. `ts` in the hello says this computer is published over Tailscale (a
   fact with no address), so the hosted app can say where the screen is. Each open connection keeps its route (`link::route_of`: `relay`; `tailscale` through
   Tailscale Serve or from a Tailscale address; `local` from this machine; else `lan`) and since when. `mobile.status` lists it on each device as
-  `connection {route, since}` or null, and the `mobile.connection {id, route}` event (`route` null once it closes) tells the app's windows when a device's
-  connection opens, closes or changes way, so the device list changes one row and asks the daemon nothing. A connection that takes over from its device's
-  older one the same way reports no gap and keeps its `since`. Phones do not hear the event.
+  `connection {route, since}` or null, and the `mobile.connection {id, route}` event (`route` null once it closes) tells the app's windows and clients
+  holding the user token when a device's connection opens, closes or changes way, so the device list changes one row and asks the daemon nothing; a full
+  read already under way keeps the rows such events changed after it started. A connection that takes over from its device's older one the same way
+  reports no gap and keeps its `since`; a connection's entry is removed however its task ends, a panic included. Phones do not hear the event.
 - **Tailscale mode** (`mobile/tailscale.rs`, off by default): `tailscale serve --bg --https=8443 http://127.0.0.1:<port>` publishes the
   page at `https://<fqdn>:8443` to the person's own tailnet, and forwards to one loopback listener that exists only while the mode is on and
   follows the same `Generation` stop as the others, with its own for what came through it, so turning it off cuts those phones and no
