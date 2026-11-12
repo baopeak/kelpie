@@ -245,6 +245,9 @@ export interface Settings {
   screenStopHotkey: string;
   /** Still regions of a shared screen are sent once more as crisp images over the video. */
   screenCrispText: boolean;
+  /** Paired phone records (`mobile.status` device ids) the person said are one phone paired several ways: record id → group id. Only how Settings →
+   *  Mobile lists them; each record keeps its own key and permission. Entries go when their record is removed. */
+  phoneGroups: Record<string, string>;
   /** Snapshot an agent's working folder when each turn ends (git folders on this computer), for
    *  the Turns panel and undo. */
   checkpoints: boolean;

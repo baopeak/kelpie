@@ -8,6 +8,6 @@
     "integrations", "localhostInBrowser", "agentWebTabs", "voice", "language", "screenStopHotkey", "screenCrispText"
   ],
   "excluded": [
-    "profiles", "quickCommands", "layouts", "accounts", "activeAccounts", "sshConfig", "rootYoloOk", "skippedUpdate", "registryAgents"
+    "profiles", "quickCommands", "layouts", "accounts", "activeAccounts", "sshConfig", "rootYoloOk", "skippedUpdate", "registryAgents", "phoneGroups"
   ]
 }

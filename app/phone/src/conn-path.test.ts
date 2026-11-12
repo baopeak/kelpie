@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isLocalHost, isTailscaleHost, livePath, methodText, pageMethod, pathText, screenBlock, screenWhy, type ScreenFacts } from "./conn-path";
+import { isLocalHost, isTailscaleHost, livePath, methodLines, methodText, pageMethod, pairWay, pathText, screenBlock, screenWhy, type ScreenFacts } from "./conn-path";
 
 const fill = (text: string, vars?: Record<string, string | number>) => (vars ? text.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m)) : text);
 const page = (url: string) => {
@@ -12,12 +12,18 @@ describe("how the app was paired, from where its page comes", () => {
     expect(pageMethod(true, page("https://phone.kelpie.example/"))).toBe("hosted");
   });
 
-  it("knows a Tailscale address by name, by its IPv4 range and by its IPv6 range", () => {
+  it("knows the app Tailscale publishes by its HTTPS .ts.net name, and a Tailscale address by name and by its IPv4 and IPv6 ranges", () => {
     expect(pageMethod(false, page("https://desk.tail1234.ts.net:8443/"))).toBe("tailscale");
-    expect(pageMethod(false, page("http://100.101.102.103:48170/"))).toBe("tailscale");
-    expect(pageMethod(false, page("http://[fd7a:115c:a1e0::1]:48170/"))).toBe("tailscale");
+    expect([isTailscaleHost("desk.tail1234.ts.net"), isTailscaleHost("100.101.102.103"), isTailscaleHost("[fd7a:115c:a1e0::1]")]).toEqual([true, true, true]);
     expect(isTailscaleHost("100.63.0.1")).toBe(false);
     expect(isTailscaleHost("100.128.0.1")).toBe(false);
+  });
+
+  it("calls the computer's own listener at a Tailscale address this network, as Kelpie on the computer lists it", () => {
+    expect(pageMethod(false, page("http://100.101.102.103:48170/"))).toBe("http");
+    expect(pageMethod(false, page("http://[fd7a:115c:a1e0::1]:48170/"))).toBe("http");
+    expect(pageMethod(false, page("https://100.101.102.103:48170/"))).toBe("https");
+    expect(pairWay(pageMethod(false, page("http://100.101.102.103:48170/")))).toBe("network");
   });
 
   it("tells this computer, another HTTPS name and plain HTTP on this network apart", () => {
@@ -37,6 +43,28 @@ describe("how the app was paired, from where its page comes", () => {
   });
 });
 
+describe("which app this is, and the other ways to connect this phone", () => {
+  it("knows the way from the page", () => {
+    expect(["hosted", "tailscale", "https", "http", "local"].map((m) => pairWay(m as Parameters<typeof pairWay>[0]))).toEqual(["relay", "tailscale", "network", "network", "network"]);
+  });
+
+  it("names this app's way", () => {
+    expect(methodLines("hosted", fill).self, "the phone cannot tell whose relay it is").toBe("This is the app from the relay.");
+    expect(methodLines("tailscale", fill).self).toBe("This is the app from your computer over Tailscale.");
+    for (const m of ["https", "http", "local"] as const) expect(methodLines(m, fill).self, m).toBe("This is the app on this network.");
+  });
+
+  it("lists the two other ways in one line each, and where to choose one", () => {
+    const hosted = methodLines("hosted", fill);
+    expect(hosted.others).toHaveLength(2);
+    expect(hosted.others[0]).toMatch(/^Tailscale:/);
+    expect(hosted.others[1]).toMatch(/^This network:/);
+    expect(methodLines("tailscale", fill).others.map((l) => l.split(":")[0])).toEqual(["The relay", "This network"]);
+    expect(methodLines("http", fill).others.map((l) => l.split(":")[0])).toEqual(["Tailscale", "The relay"]);
+    expect(hosted.choose).toContain("Settings → Mobile → Pair a phone");
+  });
+});
+
 describe("the way the connection takes now", () => {
   it("is the relay on the relay, and on the hosted app always", () => {
     for (const m of ["tailscale", "https", "http", "local", "hosted"] as const) expect(livePath("relay", m)).toBe("relay");
@@ -48,6 +76,13 @@ describe("the way the connection takes now", () => {
     expect(livePath("direct", "local")).toBe("computer");
     expect(livePath("direct", "http")).toBe("network");
     expect(livePath("direct", "https"), "another HTTPS name may be reached from outside this network").toBe("address");
+  });
+
+  it("is Tailscale to a page at a Tailscale address, whatever way the app paired", () => {
+    expect(livePath("direct", "http", "100.101.102.103")).toBe("tailscale");
+    expect(livePath("direct", "https", "[fd7a:115c:a1e0::1]")).toBe("tailscale");
+    expect(livePath("direct", "http", "192.168.1.20")).toBe("network");
+    expect(livePath("relay", "http", "100.101.102.103")).toBe("relay");
   });
 
   it("says each in words", () => {

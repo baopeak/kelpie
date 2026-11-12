@@ -22,17 +22,21 @@ export function isLocalHost(host: string): boolean {
   return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
 }
 
+/** As the computer names the way a phone paired: Tailscale is the app Tailscale Serve publishes, always over HTTPS at the computer's `.ts.net` name. A page
+ *  at a Tailscale address by number, or over plain HTTP, is the computer's own listener, which Kelpie on the computer lists as this network. */
 export function pageMethod(hosted: boolean, page: { protocol: string; hostname: string }): PageMethod {
   if (hosted) return "hosted";
-  if (isTailscaleHost(page.hostname)) return "tailscale";
+  const https = page.protocol === "https:";
+  if (https && page.hostname.endsWith(".ts.net")) return "tailscale";
   if (isLocalHost(page.hostname)) return "local";
-  return page.protocol === "https:" ? "https" : "http";
+  return https ? "https" : "http";
 }
 
-/** The direct route is the page's own origin; the relay is the relay, whatever the page. */
-export function livePath(route: "direct" | "relay", method: PageMethod): LivePath {
+/** The direct route is the page's own origin (`host`), which goes over Tailscale whenever it is a Tailscale address, whatever way the app paired; the
+ *  relay is the relay, whatever the page. */
+export function livePath(route: "direct" | "relay", method: PageMethod, host = ""): LivePath {
   if (route === "relay" || method === "hosted") return "relay";
-  if (method === "tailscale") return "tailscale";
+  if (method === "tailscale" || isTailscaleHost(host)) return "tailscale";
   if (method === "local") return "computer";
   // Another HTTPS name may be reached from outside this network too: what is sure is that it is the computer's own address.
   if (method === "https") return "address";
@@ -67,6 +71,28 @@ export function pathText(path: LivePath, t: Translate): string {
     case "computer":
       return t("this computer");
   }
+}
+
+/** The ways a phone pairs, as Kelpie on the computer offers them under Pair a phone. */
+export type PairWay = "tailscale" | "relay" | "network";
+
+/** The way this app paired: the relay's app, the computer's over Tailscale, or the computer's on this network (HTTPS, plain HTTP or the computer itself). */
+export function pairWay(method: PageMethod): PairWay {
+  return method === "hosted" ? "relay" : method === "tailscale" ? "tailscale" : "network";
+}
+
+/** Which app this is, the other ways to connect this phone in one line each, and how to choose one: for the screens before pairing and for Settings.
+ *  The relay is named plainly: the phone cannot tell Kelpie's relay from one the person runs, which Kelpie on the computer names. */
+export function methodLines(method: PageMethod, t: Translate): { way: PairWay; self: string; others: string[]; choose: string } {
+  const way = pairWay(method);
+  const self = way === "relay" ? t("This is the app from the relay.") : way === "tailscale" ? t("This is the app from your computer over Tailscale.") : t("This is the app on this network.");
+  const lines: Record<PairWay, string> = {
+    tailscale: t("Tailscale: the app from your computer, from anywhere, with Tailscale on this phone and on the computer."),
+    relay: t("The relay: the app the relay hosts, from anywhere, with no Tailscale needed."),
+    network: t("This network: the app from your computer, on the same Wi-Fi."),
+  };
+  const others = (["tailscale", "relay", "network"] as const).filter((w) => w !== way).map((w) => lines[w]);
+  return { way, self, others, choose: t("To use another way, choose it in Kelpie on your computer → Settings → Mobile → Pair a phone. It is paired as an app of its own, and this one stays as it is.") };
 }
 
 /** What keeps the screen from this phone, the first that applies. */

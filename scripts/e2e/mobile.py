@@ -15,7 +15,10 @@ and the Tailscale checks fail saying so. It never reaches the real one either wa
 The server is bound to 127.0.0.1 (no firewall prompt on the test machine). The phone is
 headless Edge with mobile emulation, driven through msedgedriver on port 9515.
 
-Covers: off by default; turning it on (status, URL); Settings → Mobile (every option's lines, the safe defaults, the summary, Advanced, each switch reaching the daemon, a change that fails; with no relay the hosted app's row says the relay comes first, and with this network's listeners off no browser here is offered pairing); security headers and the embedded phone client
+Covers: off by default; turning it on (status, URL); Settings → Mobile (every option's lines, the safe defaults, the summary, Advanced, each switch reaching the daemon, a change that fails; with no relay the hosted app's row says the relay comes first, and with this network's listeners off no browser here is offered pairing); Pair a phone (the three ways,
+each with what it needs, allows and trusts, why one cannot pair now with a way to its row, and the one recommended); the approval's Same phone as (two records listed
+as one phone, a line per way) and Replace that pairing (the same browser paired again from this listener's other name, so with a key of its own: the old
+record removed by Kelpie's revoke once the new one is approved, the new one kept, and the grouping forgetting the old one); the phone's screen before pairing naming its way; security headers and the embedded phone client
 (SolidJS, app/phone); pairing with a QR link, typing the phone's code on the desktop, the device list, nothing readable on the wire, no CSP
 violation; the phone's
 inbox (a session that needs you comes first), a session's screen, typing and quick keys reaching the
@@ -283,6 +286,29 @@ def type_code(digits):
     d.js("const i = document.querySelector('.mobile-approve-code'); i.value = arguments[0]; i.dispatchEvent(new Event('input', {bubbles: true}));", digits)
 
 
+def pair_plain():
+    """Pair a phone → This network: the QR code a browser on this network pairs with, in the row."""
+    # The row comes back with phone access turned on, which the desktop hears a moment after the daemon.
+    d.wait("const b = document.querySelector('[data-pair-open]'); if (!b || b.disabled) return null; b.click(); return true", 15)
+    d.wait("const b = document.querySelector('[data-plain-pair]'); return !!b && !b.disabled", 15)
+    d.js("document.querySelector('[data-plain-pair]').click()")
+
+
+# Each way Pair a phone lists: its id, whether it pairs now, why not, the row it leads to, and its three lines.
+WAYS = """return [...document.querySelectorAll('[data-pair-method]')].map((m) => ({id: m.dataset.pairMethod, available: m.dataset.available === 'true',
+  recommended: m.hasAttribute('data-recommended'), why: m.querySelector('[data-pair-why]')?.textContent ?? null, fix: !!m.querySelector('[data-pair-fix]'),
+  lines: ['needs', 'allows', 'trusts'].filter((l) => m.querySelector(`[data-pair-${l}] dd`)?.textContent.trim()).length}))"""
+
+
+def same_phone(name, device_id, replace=False):
+    """In the approval of `name`: Same phone as the record `device_id`, and Replace that pairing if asked."""
+    approval = "[...document.querySelectorAll('.mobile-approve')].find(a => a.textContent.includes(arguments[0]))"
+    d.js(f"const s = {approval}.querySelector('[data-same-phone-select]'); s.value = arguments[1]; s.dispatchEvent(new Event('change', {{bubbles: true}}));", name, device_id)
+    if replace:
+        d.wait(f"return !!{approval}?.querySelector('[data-replace-pairing] input')", 10, 0.25, name)
+        d.js(f"{approval}.querySelector('[data-replace-pairing] input').click()", name)
+
+
 def js_await(expr, *args):
     return d.js_async(f"const done = arguments[arguments.length-1]; Promise.resolve().then(() => {expr}).then(v => done(v === undefined ? null : v), e => done({{err: String(e)}}));", *args)
 
@@ -325,7 +351,7 @@ try:
     sw_status, sw_headers, _ = http_get(base + "sw.js")
     run.check("the service worker and the manifest are served; the old page's script is gone", sw_status == 200 and "javascript" in sw_headers.get("content-type", "") and http_get(base + "manifest.webmanifest")[0] == 200 and http_get(base + "app.js")[0] == 404)
     d.js(f"{S}.openSettings('mobile')")
-    d.wait("return !!document.querySelector('[data-setting=\"mobile-pair\"] .btn.primary')", 10)
+    d.wait("return !!document.querySelector('[data-pair-open]')", 10)
     run.shot("01-mobile-settings")
 
     # ---------- what the page says before anything was changed: every option with its lines, the safe defaults, the summary ----------
@@ -349,19 +375,31 @@ try:
     # ---------- with no relay the hosted app is not offered; with this network's listeners off no browser here is paired ----------
     hosted_row = d.js("return document.querySelector('[data-setting=\"mobile-hosted\"]')?.textContent ?? null")
     run.check("without the relay the hosted app's row says the relay comes first, and offers no pairing", "Turn on the relay first" in (hosted_row or "") and not d.js("return !!document.querySelector('[data-hosted-pair]')"), str(hosted_row)[:200])
-    run.check("…while a browser on this network can be paired", d.js("return !!document.querySelector('[data-plain-pair]')") is True)
+    # One Pair a phone: every way with what it needs, allows and trusts; Tailscale and the relay off say why, with a way to their rows.
+    d.wait("const b = document.querySelector('[data-pair-open]'); if (!b || b.disabled) return null; b.click(); return true", 15)
+    d.wait("return !!document.querySelector('[data-pair-chooser] [data-pair-method]')", 10)
+    run.shot("01b-pair-chooser")
+    ways = d.js(WAYS)
+    by = {w["id"]: w for w in ways}
+    run.check("Pair a phone lists Tailscale, the relay and this network, each saying what it needs, allows and trusts", [w["id"] for w in ways] == ["tailscale", "relay", "network"] and all(w["lines"] == 3 for w in ways), str(ways))
+    run.check("…Tailscale mode off: not offered, saying why, with a way to its row", not by["tailscale"]["available"] and "Tailscale mode is off" in (by["tailscale"]["why"] or "") and by["tailscale"]["fix"], str(by.get("tailscale")))
+    run.check("…the relay off: not offered, saying why, with a way to its row", not by["relay"]["available"] and "relay is off" in (by["relay"]["why"] or "") and by["relay"]["fix"] and not d.js("return !!document.querySelector('[data-hosted-pair]')"), str(by.get("relay")))
+    run.check("…while a browser on this network can be paired, and is the one recommended", by["network"]["available"] and by["network"]["recommended"] and d.js("return !!document.querySelector('[data-plain-pair]')") is True, str(by.get("network")))
     lan_off = d.invoke("daemon_call", {"method": "mobile.enable", "params": {"lan": False}})
     run.check("this network's listeners off with nothing else reaching this computer is refused, saying so", "nothing else reaches this computer" in str(lan_off.get("err", "")), str(lan_off)[:200])
-    run.check("…and Settings no longer offers to pair a browser on this network", d.wait("return !document.querySelector('[data-plain-pair]') && !document.querySelector('[data-setting=\"mobile-pair\"]')", 10) is True)
+    gone = "return !document.querySelector('[data-plain-pair]') && (document.querySelector('[data-pair-method=network] [data-pair-why]')?.textContent ?? '').includes(\"listeners are off\") && !!document.querySelector('[data-pair-fix=network]')"
+    run.check("…and Pair a phone no longer offers this network, saying why, with a way to its row", d.wait(gone, 10) is True, str(d.js(WAYS)))
     daemon(d, "mobile.enable", {"lan": True, "ip": "127.0.0.1", "port": PORT})
     run.check("…and offers it again once they are back on", d.wait("return !!document.querySelector('[data-plain-pair]')", 10) is True and daemon(d, "mobile.status")["running"])
+    d.js("document.querySelector('[data-pair-close]').click()")
+    d.wait("return !document.querySelector('[data-pair-chooser]')", 5)
 
     # ---------- pairing ----------
     run.check("the settings know this window is the verified app", daemon(d, "mobile.status").get("app") is True)
     refused = d.invoke("daemon_call", {"method": "mobile.reset", "params": {}})
     run.check("the webview cannot reach an app-only decision through the plain call", "err" in refused, str(refused)[:120])
     d.js("window.confirm = () => true")
-    d.js("document.querySelector('[data-setting=\"mobile-pair\"] .btn.primary').click()")
+    pair_plain()
     link = d.wait("return document.querySelector('.mobile-qr-code')?.dataset.link", 10)
     run.check("Pair a phone shows a QR code with a one-time link", bool(link) and "#p=" in link and d.js("return !!document.querySelector('.mobile-qr-code svg')"))  # never the link in the log: it holds the pairing secret
     run.shot("02-mobile-qr")
@@ -736,15 +774,38 @@ for n in (1, 2, 3):
     run.check("the screen keeps following the session after the reconnect", bool(phone.wait("return document.querySelector('.screen').textContent.includes('after-reconnect')", 20)))
 
     # ---------- read-only device, bad requests ----------
-    d.js("document.querySelector('[data-setting=\"mobile-pair\"] .btn.primary')?.click()")
+    # The same browser pairs again as "Reader": the same phone as "Test phone", whose pairing it replaces. It pairs from the other name of this
+    # listener (`localhost`, not 127.0.0.1): a browser keeps its pairing per origin, so this is a key of its own. Paired from the same origin it would
+    # reuse Test phone's key, and the daemon would replace that record by itself before Kelpie's own removal ran, which would then prove nothing.
+    d.js("window.confirm = () => true")
+    pair_plain()
     link2 = d.wait("return document.querySelector('.mobile-qr-code')?.dataset.link", 10)
-    phone.go(link2)
+    phone.go(link2.replace(f"http://127.0.0.1:{PORT}/", f"http://localhost:{PORT}/"))
     phone.wait("return !!document.querySelector('.card .btn.primary')")
     phone.js("document.querySelector('.card input').value = 'Reader'; document.querySelector('.card .btn.primary').click()")
     d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Reader'))", 15)
+    test_phone = next(x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Test phone")
+    reader_key = phone.wait("return document.querySelector('[data-pair-key]')?.textContent", 15)
+    run.check("pairing from another origin of the same browser shows a key of its own", bool(reader_key) and reader_key != phone_key, f"{reader_key!r} vs {phone_key!r}")
+    same_default = d.js("return document.querySelector('.mobile-approve [data-same-phone-select]')?.value ?? null")
+    run.check("the approval asks Same phone as, and with no record of that name paired another way it suggests a new device", same_default == "", str(same_default))
+    same_phone("Reader", test_phone["id"], replace=True)
+    replace_text = d.js("return document.querySelector('.mobile-approve [data-replace-pairing]')?.textContent ?? ''")
+    run.check("…choosing a phone offers Replace that pairing, naming the record", "Test phone" in replace_text and "This network" in replace_text, replace_text)
     type_code(phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15))
     d.js("document.querySelector('.mobile-approve [data-allow=read]').click()")
     phone.wait(LIVE, 20)
+    listed_names = lambda: [x["name"] for x in daemon(d, "mobile.status")["devices"]]  # noqa: E731
+    replaced = wait(lambda: "Reader" in listed_names() and "Test phone" not in listed_names(), 15)
+    run.check("Replace removes the old record once the new one is approved, and the new one stays", bool(replaced), str(listed_names()))
+    # Removed by Kelpie's own revoke, after the approval: the audit has the new pairing first, then a revoke of the old record (newest first).
+    trail = daemon(d, "mobile.audit", {"limit": 20})["entries"]
+    reader_id = next((x["id"] for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Reader"), None)
+    paired_at = next((i for i, a in enumerate(trail) if a["device"] == reader_id and a["action"] == "pair"), None)
+    revoked_at = next((i for i, a in enumerate(trail) if a["device"] == test_phone["id"] and a["action"] == "revoke"), None)
+    run.check("…by Kelpie's revoke, after the new pairing", paired_at is not None and revoked_at is not None and revoked_at < paired_at, str([(a["device"][:8], a["action"]) for a in trail[:6]]))
+    groups_now = lambda: d.js(f"return {S}.state.settings.phoneGroups") or {}  # noqa: E731
+    run.check("…and the grouping forgets the record that went", bool(wait(lambda: test_phone["id"] not in groups_now(), 10)), str(groups_now()))
     phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-shell'))", 15)
     phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-shell')).click()")
     ro = phone.wait("return document.querySelector('.readonly')?.textContent ?? null")
@@ -779,8 +840,7 @@ for n in (1, 2, 3):
 
     # ---------- after the computer restarted: what waited is shown as lost, with its text ----------
     daemon(d, "mobile.enable", {"ip": "127.0.0.1", "port": PORT})
-    d.wait("const b = document.querySelector('[data-setting=\"mobile-pair\"] .btn.primary'); return !!b && !b.disabled", 15)
-    d.js("document.querySelector('[data-setting=\"mobile-pair\"] .btn.primary').click()")
+    pair_plain()
     phone.go(d.wait("return document.querySelector('.mobile-qr-code')?.dataset.link", 10))
     phone.wait("return !!document.querySelector('.card .btn.primary')")
     phone.js("document.querySelector('.card input').value = 'Restart phone'; document.querySelector('.card .btn.primary').click()")
@@ -899,6 +959,9 @@ for n in (1, 2, 3):
     run.check("in a browser on a secure origin, installing comes first", phone.wait("return document.querySelector('[data-install]')?.dataset.install", 20) == "android")
     run.check("…on a page browsers trust as secure", phone.js("return window.isSecureContext") is True)
     run.check("…with no way yet to send a code", not phone.js("return !!document.querySelector('[data-scan]')"))
+    ways_shown = phone.js("const w = document.querySelector('[data-pair-ways]'); return w ? {way: w.dataset.pairWays, text: w.textContent} : null")
+    run.check("…saying which way this app connects, and the other ways in one line each with where to choose them", bool(ways_shown) and ways_shown["way"] == "network" and "This is the app on this network" in ways_shown["text"]
+              and "Tailscale:" in ways_shown["text"] and "The relay:" in ways_shown["text"] and "Pair a phone" in ways_shown["text"], str(ways_shown))
     phone.shot(os.path.join(shots, "21-phone-install.png"))
     phone.js("document.querySelector('[data-stay-in-browser]').click()")
     phone.wait("return !!document.querySelector('[data-scan]')", 10)
@@ -922,11 +985,27 @@ for n in (1, 2, 3):
     phone.wait("return !!document.querySelector('.card input.field') && !document.querySelector('[data-scan]')", 10)
     phone.js("document.querySelector('.card input').value = 'Secure phone'; document.querySelector('.card .btn.primary').click()")
     d.wait("return [...document.querySelectorAll('.mobile-approve h2')].some(h => h.textContent.includes('Secure phone'))", 15)
+    # The same browser, paired over plain HTTP as "Restart phone" before: the same phone, another page, kept as a second record.
+    restart_phone = next((x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Restart phone"), None)
+    if restart_phone:
+        same_phone("Secure phone", restart_phone["id"])
     type_code(phone.wait("return document.querySelector('[data-pair-code]')?.textContent", 15))
     d.js("[...document.querySelectorAll('.mobile-approve')].find(a => a.textContent.includes('Secure phone')).querySelector('[data-allow=write]').click()")
     run.check("the pasted link pairs, and the phone connects", bool(phone.wait(LIVE, 30)))
     listed = next((x for x in daemon(d, "mobile.status")["devices"] if x["name"] == "Secure phone"), {})
     run.check("…as a secure origin", listed.get("secure_origin") is True and listed.get("can_write") is True, str(listed))
+    groups = d.js(f"return {S}.state.settings.phoneGroups") or {}
+    run.check("Same phone as groups the two records, and both stay paired", bool(restart_phone) and groups.get(listed.get("id")) is not None and groups.get(listed.get("id")) == groups.get(restart_phone["id"])
+              and any(x["id"] == restart_phone["id"] for x in daemon(d, "mobile.status")["devices"]), str((groups, restart_phone)))
+    d.js(f"{S}.openSettings('mobile', 'mobile-devices')")
+    one_phone = "const g = document.querySelector(`[data-phone-group] [data-device=\"${arguments[0]}\"]`)?.closest('[data-phone-group]'); return !!g && !!g.querySelector(`[data-device=\"${arguments[1]}\"]`) && g.textContent"
+    try:
+        shown_as_one = d.wait(one_phone, 15, 0.25, listed.get("id", ""), restart_phone["id"] if restart_phone else "")
+    except TimeoutError:
+        shown_as_one = None
+    run.check("…and Settings lists them as one phone, a line per way with its own permission and Unpair", bool(shown_as_one) and "This network" in shown_as_one and "last seen" in shown_as_one
+              and d.js("return document.querySelectorAll('[data-phone-group] [data-device] [data-permission]').length") == 2, str(shown_as_one)[:300])
+    run.shot("20b-one-phone-two-ways")
     run.check("the phone paired over plain HTTP is not one", all(x["secure_origin"] is False for x in daemon(d, "mobile.status")["devices"] if x["name"] != "Secure phone"))
     run.check("…and nothing says this page may only read", not phone.js("return !!document.querySelector('[data-banner=plain-http]')"))
     typed_here = daemon(d, "session.create", {"kind": "shell", "cwd": proj, "name": "secure-shell", "project_id": pid})
@@ -1402,7 +1481,10 @@ for n in (1, 2, 3):
     if not published:
         raise TimeoutError("Tailscale mode did not turn on")
     run.check("…and says where", ps.FAKE_TAILNET_NAME in d.js(ts_text))
+    d.wait("const b = document.querySelector('[data-pair-open]'); if (!b || b.disabled) return null; b.click(); return true", 15)
     d.wait("return !!document.querySelector('[data-tailscale-pair]')", 10)
+    ways = {w["id"]: w for w in d.js(WAYS)}
+    run.check("Pair a phone offers Tailscale now, and recommends it", ways["tailscale"]["available"] and ways["tailscale"]["recommended"] and d.js("return document.querySelector('[data-tailscale-pair]').classList.contains('primary')") is True, str(ways.get("tailscale")))
     d.js("document.querySelector('[data-tailscale-pair]').click()")
     install_link = d.wait("return document.querySelector('[data-tailscale-guide=\"1\"] [data-install-link]')?.dataset.installLink", 10)
     run.check("Step 1 shows the page's address, with no secret", install_link == f"https://{ps.FAKE_TAILNET_NAME}:8443/" and d.js("return !!document.querySelector('[data-tailscale-guide=\"1\"] svg')"), str(install_link))

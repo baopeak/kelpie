@@ -40,8 +40,9 @@ Checks, in order:
 - limits: on a relay with `ROOMS_PER_NETWORK_DAY` 2 the third room is refused saying so; with `REGISTRATION_KEY` set, a room without it is refused
   saying a key is needed.
 - relay state: nothing a session said, and no phone's name, is in wrangler's persisted state.
-- GUI (`--gui`): a new user turns phone access on in Settings → Mobile; the guide opens on the hosted app: Step 1's install link, Step 2's link
-  opened in Edge pairs; the approval offers no control; the device is badged as the hosted app; "What this trusts" is there.
+- GUI (`--gui`): a new user turns phone access on in Settings → Mobile; Pair a phone opens with Kelpie's relay first and recommended, the other ways
+  saying why they cannot pair now; its guide: Step 1's install link, whose page says it is the app from the relay and lists the other ways, Step 2's
+  link opened in Edge pairs; the approval offers no control; the device is badged as the hosted app; "What this trusts" is there.
 """
 import argparse
 import asyncio
@@ -1178,10 +1179,25 @@ def gui():
         no_relay = d.js("return document.querySelector('[data-setting=\"mobile-hosted\"]')?.textContent ?? ''")
         check("before: the hosted row says what comes first, and offers no pairing", ("Turn on the relay first" in no_relay or "Turn on phone access first" in no_relay) and not d.js("return !!document.querySelector('[data-hosted-pair]')"), no_relay[:200])
         d.js("document.querySelector('[data-setting=\"mobile-access\"] .switch').click()")
+        # A new setup lands on Pair a phone with the relay first; the relay's way is offered once Kelpie has found the app served.
+        try:
+            d.wait("return !!document.querySelector('[data-pair-chooser] [data-pair-method=relay][data-preselected]')", 60)
+            d.wait("return !!document.querySelector('[data-hosted-pair]')", 60)
+        except TimeoutError:
+            pass
+        ways = d.js("""return [...document.querySelectorAll('[data-pair-method]')].map((m) => ({id: m.dataset.pairMethod, available: m.dataset.available === 'true',
+          recommended: m.hasAttribute('data-recommended'), preselected: m.hasAttribute('data-preselected'), why: m.querySelector('[data-pair-why]')?.textContent ?? null,
+          label: m.querySelector('.pair-method-head b')?.textContent ?? ''}))""")
+        by = {w["id"]: w for w in ways or []}
+        check("a new setup lands on Pair a phone with Kelpie's relay first, offered now and recommended", by.get("relay", {}).get("preselected") and by["relay"]["available"] and by["relay"]["recommended"] and by["relay"]["label"] == "Kelpie's relay"
+              and d.js("return document.querySelector('[data-hosted-pair]')?.classList.contains('primary') ?? false") is True, ways)
+        check("…Tailscale and this network are listed, each saying why it cannot pair now", not by.get("tailscale", {}).get("available", True) and bool(by["tailscale"]["why"])
+              and not by.get("network", {}).get("available", True) and "listeners are off" in (by["network"]["why"] or ""), ways)
         step1 = None
         try:
+            d.js("document.querySelector('[data-hosted-pair]').click()")
             step1 = d.wait("return document.querySelector('[data-hosted-guide=\"1\"] [data-install-link]')?.dataset.installLink", 60)
-        except TimeoutError:
+        except Exception:  # noqa: BLE001
             pass
         status = app_call(d, "mobile.status")
         audit = app_call(d, "mobile.audit", {"limit": 100})
@@ -1201,6 +1217,12 @@ def gui():
         if not link:
             raise RuntimeError("no pairing code in Step 2")
         phone = EdgePhone(PHONE_DRIVER, os.path.join(RUN, "gui-phone-profile"))
+        # Opened from Step 1's address, before any code: the app says which way it is, and the other ways to pair this phone.
+        phone.go(ORIGIN + "/")
+        hosted_ways = phone.wait("const w = document.querySelector('[data-pair-ways]'); return w && {way: w.dataset.pairWays, text: w.textContent}", 30)
+        check("before pairing, the hosted app says it is the app from the relay, and lists the other ways with where to choose them", bool(hosted_ways) and hosted_ways["way"] == "relay"
+              and "This is the app from the relay" in hosted_ways["text"] and "Tailscale:" in hosted_ways["text"] and "This network:" in hosted_ways["text"] and "Pair a phone" in hosted_ways["text"], hosted_ways)
+        phone.go("about:blank")
         phone.go(link)
         if phone.wait("return !!document.querySelector('[data-stay-in-browser]')", 20):
             phone.js("document.querySelector('[data-stay-in-browser]').click()")

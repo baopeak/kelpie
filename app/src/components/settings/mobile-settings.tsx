@@ -5,14 +5,19 @@
 // The page: a summary, one `OptionRow` per option, and the address, certificate, the shared screen's stop hotkey and paired phones under Advanced.
 // Revoke all stays outside Advanced: a lost phone is when it is needed, and it must not take a search to find.
 // A new setup (the daemon's `new_store`) turns phone access on with the relay and the phone app it hosts, and this network's listeners off; an existing
-// one keeps what it had. One two-step guide pairs a phone on the hosted app or over Tailscale: install from the page's address, then scan the code.
+// one keeps what it had. One Pair a phone button opens the choice of way (Tailscale, the relay's app, this network), each saying what it needs, allows and
+// trusts. Then one two-step guide pairs a phone on the hosted app or over Tailscale (install from the page's address, then scan the code), and a browser
+// on this network scans a code in the row. Records of one phone paired several ways are listed together (`phoneGroups`, kept by this app only).
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
 import { invoke } from "@tauri-apps/api/core";
 import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
-import { approvalChoices, hostedPairing, hostedReason, hostedTrust, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel, permissionChoices, plainPairing, telegramChoice, turnOnAccess, type OptionFacts, type OptionId } from "../../lib/mobile-options";
+import {
+  approvalChoices, approveWithReplace, connectionLine, deviceMethodLabel, groupDevices, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel,
+  pairMethods, permissionChoices, prunePhoneGroups, samePhoneSuggestion, telegramChoice, turnOnAccess, type OptionFacts, type OptionId, type PairMethodId, type PhoneGroup,
+} from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
 import { catalogEntry, entryMatches } from "../../lib/settings-catalog";
 import type { MobileDevicePage, MobileHostedFields, MobilePairRequest, MobilePairStart } from "../../lib/types";
@@ -46,6 +51,8 @@ export interface MobileDevice extends MobileDevicePage {
   /** `unverified`: its record was changed outside Kelpie (or the key that checks it is gone): it must be paired again.
    *  `unchecked`: the key that checks it cannot be read right now; nothing is concluded, and it is checked again when it can be. */
   state: "ok" | "unverified" | "unchecked";
+  /** How it is connected now (null: not connected; absent from a daemon that does not say). */
+  connection?: { route: "relay" | "tailscale" | "lan" | "local"; since: number } | null;
 }
 
 /** `mobile.status`; `lan` and `new_store` absent below `HOSTED_API`. */
@@ -165,6 +172,8 @@ export function MobileSettings() {
   // The two steps of pairing on the hosted app or over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
   const [guide, setGuide] = createSignal<Guide | null>(null);
   const guideStep = () => guide()?.step ?? null;
+  // The choice of way, open; `preselected` is the one shown first (a new setup's relay), else the recommended one.
+  const [chooser, setChooser] = createSignal<{ preselected: PairMethodId | null } | null>(null);
   // A new setup whose relay would not make a room: Tailscale is offered instead.
   const [hostedRefused, setHostedRefused] = createSignal(false);
   // Only while phone access is on and this page is open; looked at again when what the daemon holds changes, or when asked.
@@ -245,8 +254,8 @@ export function MobileSettings() {
   };
   const enable = (patch: Record<string, unknown> = {}) => run(() => daemon("mobile.enable", patch));
   const facts = (): OptionFacts => ({ api: store.daemonApi(), status: s() ?? null, push: push() ?? null });
-  // The switch. A new setup gets the relay with it and the guide opens once the relay is on; if the relay would not make a room, it says why and
-  // Tailscale is offered.
+  // The switch. A new setup gets the relay with it and the choice of way opens with the relay first once it is on; if the relay would not make a room,
+  // it says why and Tailscale is offered.
   const turnOn = async () => {
     const f = facts();
     const fresh = newSetup(f);
@@ -261,7 +270,7 @@ export function MobileSettings() {
       }
     });
     // After `run` has read the status again, which has the relay's page now.
-    if (hosted) openGuide("hosted");
+    if (hosted) openChooser("relay");
   };
   // Instead of the relay: this network's listeners back on, which Tailscale mode needs running, then Tailscale mode (the person verifies).
   const useTailscaleInstead = () =>
@@ -287,6 +296,12 @@ export function MobileSettings() {
   const pairInGuide = () =>
     run(async () => {
       const via = guide()?.via ?? "tailscale";
+      // `{}` pairs at the Tailscale origin only while there is one; without it the daemon would pick another page by itself.
+      if (via === "tailscale" && !s()?.tailscale?.origin) {
+        setQr(null);
+        setGuide(null);
+        throw new Error(t("Tailscale is not publishing this computer right now, so no code was shown. See what Settings says, then try again."));
+      }
       const r = await daemon<MobilePairStart>("mobile.pair_start", via === "hosted" ? { hosted: true } : {});
       // The origin went while this was asked for: a code for another page is one the installed app refuses.
       if (via === "tailscale" && !r.tailscale) {
@@ -311,6 +326,21 @@ export function MobileSettings() {
     setGuide(null);
     setQr(null);
   };
+  const openChooser = (preselected: PairMethodId | null) => {
+    setError(null);
+    setChooser({ preselected });
+  };
+  // The way chosen: its own flow, as it always was.
+  const choose = (id: PairMethodId) => {
+    setChooser(null);
+    if (id === "network") void pairBrowser();
+    else openGuide(id === "relay" ? "hosted" : "tailscale");
+  };
+  // A way that cannot be used now: to the row that turns on what it needs.
+  const goFix = (row: OptionId) => {
+    setChooser(null);
+    store.openSettings("mobile", row);
+  };
   const setTailscaleMode = (on: boolean) =>
     run(async () => {
       await mobileSecure("mobile.set_tailscale", { on });
@@ -321,8 +351,12 @@ export function MobileSettings() {
   const relay = createRelayForm(run);
   // The phone just removed while the relay was on: a new room is offered, and nothing happens unless the person makes it.
   const [roomOffer, setRoomOffer] = createSignal<string | null>(null);
-  const unpair = async (d: MobileDevice) => {
-    if (!(await confirmDialog(t("Unpair “{name}”? It is disconnected at once.", { name: d.name })))) return;
+  // A line of a phone paired several ways names its way too: those lines usually share the phone's name.
+  const unpair = async (d: MobileDevice, grouped: boolean) => {
+    const question = grouped
+      ? t("Unpair “{name}” ({way})? That way is disconnected at once; the phone's other ways stay paired.", { name: d.name, way: deviceMethodLabel(d, s()?.relay) })
+      : t("Unpair “{name}”? It is disconnected at once.", { name: d.name });
+    if (!(await confirmDialog(question))) return;
     const offer = offerNewRoom(s(), store.daemonApi());
     await run(() => daemon("mobile.revoke", { id: d.id }));
     if (offer && !s()?.devices.some((x) => x.id === d.id)) setRoomOffer(d.name);
@@ -403,6 +437,36 @@ export function MobileSettings() {
     const n = push()?.webpush?.devices ?? 0;
     return n === 0 ? t("Off") : n === 1 ? t("On for 1 phone") : t("On for {n} phones", { n });
   };
+  // A paired device's parts, the same for a phone of its own and for each way of a phone paired several ways.
+  const stateLine = (d: MobileDevice) =>
+    d.state === "unverified"
+      ? t("Its record was changed outside Kelpie: pair it again.")
+      : d.state === "unchecked"
+        ? t("Kelpie cannot read the key that checks this record right now. It will check again; the phone stays paired.")
+        : null;
+  const deviceNotes = (d: MobileDevice) => (
+    <>
+      <Show when={d.push}> · {t("alerts on")}</Show>
+      <Show when={d.passkey}> · {t("app lock set up")}</Show>
+      <Show when={d.lock_reset}> · {t("may set up a passkey")}</Show>
+      <Show when={d.kind === "pwa" && d.secure_origin && !d.may_control && d.page_kind !== "hosted" && store.daemonApi() >= TAKEOVER_API}> · {t("may take control once its app lock is set up and on")}</Show>
+    </>
+  );
+  const deviceControls = (d: MobileDevice, grouped: boolean) => (
+    <>
+      <Show when={d.state === "ok"}>
+        <select class="text-input" data-permission value={d.permission} disabled={busy()} onChange={(e) => void setPermission(d, e.currentTarget.value as MobilePermission)}>
+          <For each={permissionChoices(d, store.daemonApi())}>{(p) => <option value={p}>{p === "read" ? t("May read") : p === "write" ? t("May type") : t("May take control")}</option>}</For>
+        </select>
+      </Show>
+      <Show when={d.state === "ok" && d.secure_origin && store.daemonApi() >= LOCK_API}>
+        <button class="btn" data-reset-lock disabled={busy()} onClick={() => void resetLock(d)}>{t("Reset this phone's lock")}</button>
+      </Show>
+      <button class="btn" onClick={() => void unpair(d, grouped)}>{t("Unpair")}</button>
+    </>
+  );
+  /** A phone paired several ways, by the names its records have (usually one). */
+  const phoneName = (g: PhoneGroup) => [...new Set(g.devices.map((d) => d.name))].join(" / ");
   const query = () => settingsQuery().trim();
   const advancedMatches = () => ADVANCED.some((id) => entryMatches(catalogEntry(id)!, query()));
   // Advanced opens by itself for what would otherwise be out of sight: a search or a link that leads into it, or a phone that must be paired again.
@@ -452,9 +516,7 @@ export function MobileSettings() {
       </Show>
       <Show when={s()}>
         <OptionRow id="mobile-hosted" state={option("mobile-hosted")} control={
-          <Show when={hostedPairing(facts())}>
-            <button class="btn primary" data-hosted-pair disabled={busy()} onClick={() => openGuide("hosted")}><Icon name="plus" size={13} /> {t("Pair a phone")}</button>
-          </Show>
+          <span class="muted-inline" data-hosted-ready>{hostedPairing(facts()) ? t("Ready: choose it in Pair a phone") : ""}</span>
         }>
           <Show when={store.daemonApi() >= HOSTED_API && s()!.relay?.on && hostedReason(s()!.relay!)}>
             <div class="muted-inline" data-hosted-reason>{errorText(hostedReason(s()!.relay!))}</div>
@@ -493,9 +555,6 @@ export function MobileSettings() {
               </Show>
               <Show when={s()!.tailscale?.to_remove && !["left_behind", "port_busy"].includes(tailscale()?.serve ?? "")}>
                 <div class="form-note warn-note" data-tailscale-to-remove>{t("An entry of Kelpie's is still in Tailscale Serve, leading nowhere. Kelpie removes it once Tailscale answers: start Tailscale, then check again.")}</div>
-              </Show>
-              <Show when={tailscale()?.origin}>
-                <button class="btn primary" data-tailscale-pair disabled={busy() || !s()!.running} onClick={() => openGuide("tailscale")}><Icon name="plus" size={13} /> {t("Pair a phone over Tailscale")}</button>
               </Show>
             </Show>
           </Show>
@@ -553,28 +612,69 @@ export function MobileSettings() {
             </div>
           </div>
         </Show>
-        <Show when={plainPairing(facts())}>
-          <SettingRow id="mobile-pair" wide>
-            <Show when={!s()!.app}>
-              <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot approve phones or raise what they may do.")}</div>
-            </Show>
-            <Show when={qr() && !guideStep() && qr()!.until > now()} fallback={
-              <button class="btn primary" data-plain-pair disabled={!s()!.running || busy()} onClick={() => void pairBrowser()}><Icon name="plus" size={13} /> {t("Pair a browser on this network")}</button>
-            }>
-              <div class="mobile-qr">
-                <div class="mobile-qr-code" innerHTML={qr()!.qr} data-link={qr()!.url} />
-                <div>
-                  <div>{t("Scan with the phone's camera. The phone then shows six digits: type them here when Kelpie asks.")}</div>
-                  <div class="muted-inline">{t("The code works once and expires in {n} s.", { n: Math.max(0, Math.round((qr()!.until - now()) / 1000)) })}</div>
-                  <Show when={!qr()!.tls}><div class="form-note warn-note">{t("Plain HTTP: a browser paired this way can only read. With the app lock off, it can type over a Tailscale address.")}</div></Show>
-                  <Show when={qr()!.tls && qr()!.passkey === false}><div class="form-note warn-note" data-pair-no-passkey>{t("This address is a number, and a passkey needs a name, so a phone paired here can only read while the app lock is on.")}</div></Show>
-                  <div class="mono mobile-qr-url">{qr()!.url.split("#")[0]}</div>
-                  <button class="btn" onClick={() => setQr(null)}>{t("Cancel")}</button>
-                </div>
+        <Show when={chooser()}>
+          <div class="overlay" data-pair-chooser>
+            <div class="modal" style={{ width: "640px" }}>
+              <h2>{t("Pair a phone")}</h2>
+              <div style={{ color: "var(--text-dim)" }}>{t("Choose how the phone connects. Each way is a pairing of its own: you can add another way later, and remove one without the others.")}</div>
+              <div class="pair-methods">
+                <For each={pairMethods(facts())}>
+                  {(m) => {
+                    const first = () => (chooser()?.preselected ?? null) === m.id || (!chooser()?.preselected && m.recommended);
+                    return (
+                      <div class="pair-method" classList={{ first: first() }} data-pair-method={m.id} data-available={String(m.available)} data-recommended={m.recommended ? "" : undefined} data-preselected={chooser()?.preselected === m.id ? "" : undefined}>
+                        <div class="pair-method-head">
+                          <b>{m.label}</b>
+                          <Show when={m.recommended}><span class="chip" data-pair-recommended>{t("Recommended")}</span></Show>
+                        </div>
+                        <dl class="option-lines">
+                          <div data-pair-needs><dt>{t("Needs")}</dt><dd>{m.needs}</dd></div>
+                          <div data-pair-allows><dt>{t("Allows")}</dt><dd>{m.allows}</dd></div>
+                          <div data-pair-trusts><dt>{t("Trusts")}</dt><dd>{m.trusts}</dd></div>
+                        </dl>
+                        <Show when={m.available} fallback={
+                          <div class="inline-fields" style={{ "align-items": "center" }}>
+                            <span class="muted-inline" data-pair-why>{m.why}</span>
+                            <Show when={m.fix}><button class="btn" data-pair-fix={m.id} onClick={() => goFix(m.fix!.row)}>{m.fix!.label}</button></Show>
+                          </div>
+                        }>
+                          <div class="inline-fields" style={{ "align-items": "center" }}>
+                            <span class="muted-inline" data-pair-ready>{t("Available now.")}</span>
+                            <button class={first() ? "btn primary" : "btn"} disabled={busy()} onClick={() => choose(m.id)}
+                              data-tailscale-pair={m.id === "tailscale" ? "" : undefined} data-hosted-pair={m.id === "relay" ? "" : undefined} data-plain-pair={m.id === "network" ? "" : undefined}>
+                              {t("Pair this way")}
+                            </button>
+                          </div>
+                        </Show>
+                      </div>
+                    );
+                  }}
+                </For>
               </div>
-            </Show>
-          </SettingRow>
+              <div class="footer"><span style={{ flex: 1 }} /><button class="btn" data-pair-close onClick={() => setChooser(null)}>{t("Close")}</button></div>
+            </div>
+          </div>
         </Show>
+        <SettingRow id="mobile-pair" wide>
+          <Show when={!s()!.app}>
+            <div class="form-note warn-note">{t("This window is not the installed Kelpie app, so it cannot approve phones or raise what they may do.")}</div>
+          </Show>
+          <Show when={qr() && !guideStep() && qr()!.until > now()} fallback={
+            <button class="btn primary" data-pair-open disabled={busy()} onClick={() => openChooser(null)}><Icon name="plus" size={13} /> {t("Pair a phone")}</button>
+          }>
+            <div class="mobile-qr">
+              <div class="mobile-qr-code" innerHTML={qr()!.qr} data-link={qr()!.url} />
+              <div>
+                <div>{t("Scan with the phone's camera. The phone then shows six digits: type them here when Kelpie asks.")}</div>
+                <div class="muted-inline">{t("The code works once and expires in {n} s.", { n: Math.max(0, Math.round((qr()!.until - now()) / 1000)) })}</div>
+                <Show when={!qr()!.tls}><div class="form-note warn-note">{t("Plain HTTP: a browser paired this way can only read. With the app lock off, it can type over a Tailscale address.")}</div></Show>
+                <Show when={qr()!.tls && qr()!.passkey === false}><div class="form-note warn-note" data-pair-no-passkey>{t("This address is a number, and a passkey needs a name, so a phone paired here can only read while the app lock is on.")}</div></Show>
+                <div class="mono mobile-qr-url">{qr()!.url.split("#")[0]}</div>
+                <button class="btn" onClick={() => setQr(null)}>{t("Cancel")}</button>
+              </div>
+            </div>
+          </Show>
+        </SettingRow>
       </Show>
       <Show when={s()}>
         <Show when={push() !== undefined}>
@@ -690,30 +790,34 @@ export function MobileSettings() {
               <NewRoomOffer name={roomOffer()!} busy={busy()} onMake={() => void makeRoom()} onSkip={() => setRoomOffer(null)} />
             </Show>
             <div class="saved-layouts">
-              <For each={s()!.devices} fallback={<div class="muted-inline">{t("No paired devices.")}</div>}>
-                {(d) => (
-                  <div class="saved-layout" data-device={d.id} data-state={d.state}>
-                    <Icon name="server" size={16} />
-                    <div class="saved-layout-main">
-                      <div>{d.name} <Show when={pageKindLabel(d.page_kind)}><span class="chip" data-page-kind={d.page_kind}>{pageKindLabel(d.page_kind)}</span> </Show><span class="muted-inline">· {d.kind === "app" ? t("Kelpie app") : t("Browser")}<Show when={d.push}> · {t("alerts on")}</Show><Show when={d.passkey}> · {t("app lock set up")}</Show><Show when={d.lock_reset}> · {t("may set up a passkey")}</Show><Show when={d.kind === "pwa" && d.secure_origin && !d.may_control && d.page_kind !== "hosted" && store.daemonApi() >= TAKEOVER_API}> · {t("may take control once its app lock is set up and on")}</Show></span></div>
-                      <div class="muted-inline" style={{ "font-size": "11.5px" }}>
-                        {d.state === "unverified"
-                          ? t("Its record was changed outside Kelpie: pair it again.")
-                          : d.state === "unchecked"
-                            ? t("Kelpie cannot read the key that checks this record right now. It will check again; the phone stays paired.")
-                            : t("paired {when} · last seen {seen}", { when: formatRelative(d.created_at), seen: formatRelative(d.last_seen) })}
+              <For each={groupDevices(s()!.devices, store.state.settings.phoneGroups ?? {})} fallback={<div class="muted-inline">{t("No paired devices.")}</div>}>
+                {(g) => (
+                  <Show when={g.group} fallback={
+                    <div class="saved-layout" data-device={g.devices[0].id} data-state={g.devices[0].state}>
+                      <Icon name="server" size={16} />
+                      <div class="saved-layout-main">
+                        <div>{g.devices[0].name} <Show when={pageKindLabel(g.devices[0].page_kind)}><span class="chip" data-page-kind={g.devices[0].page_kind}>{pageKindLabel(g.devices[0].page_kind)}</span> </Show><span class="muted-inline">· {g.devices[0].kind === "app" ? t("Kelpie app") : t("Browser")}{deviceNotes(g.devices[0])}</span></div>
+                        <div class="muted-inline" style={{ "font-size": "11.5px" }}>
+                          {stateLine(g.devices[0]) ?? t("paired {when} · last seen {seen}", { when: formatRelative(g.devices[0].created_at), seen: formatRelative(g.devices[0].last_seen) })}
+                        </div>
                       </div>
+                      {deviceControls(g.devices[0], false)}
                     </div>
-                    <Show when={d.state === "ok"}>
-                      <select class="text-input" data-permission value={d.permission} disabled={busy()} onChange={(e) => void setPermission(d, e.currentTarget.value as MobilePermission)}>
-                        <For each={permissionChoices(d, store.daemonApi())}>{(p) => <option value={p}>{p === "read" ? t("May read") : p === "write" ? t("May type") : t("May take control")}</option>}</For>
-                      </select>
-                    </Show>
-                    <Show when={d.state === "ok" && d.secure_origin && store.daemonApi() >= LOCK_API}>
-                      <button class="btn" data-reset-lock disabled={busy()} onClick={() => void resetLock(d)}>{t("Reset this phone's lock")}</button>
-                    </Show>
-                    <button class="btn" onClick={() => void unpair(d)}>{t("Unpair")}</button>
-                  </div>
+                  }>
+                    <div class="phone-group" data-phone-group={g.group!}>
+                      <div class="phone-group-head"><Icon name="server" size={16} /> {phoneName(g)} <span class="muted-inline">· {t("one phone, paired {n} ways", { n: g.devices.length })}</span></div>
+                      <For each={g.devices}>
+                        {(d) => (
+                          <div class="saved-layout" data-device={d.id} data-state={d.state}>
+                            <div class="saved-layout-main">
+                              <div data-device-way>{deviceMethodLabel(d, s()!.relay)} <span class="muted-inline">· {stateLine(d) ?? (d.connection ? connectionLine(d.connection) : t("last seen {seen}", { seen: formatRelative(d.last_seen) }))}{deviceNotes(d)}</span></div>
+                            </div>
+                            {deviceControls(d, true)}
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
                 )}
               </For>
               <For each={s()!.legacy ?? []}>
@@ -776,17 +880,50 @@ export function MobileApprovals() {
   /** The request being allowed: a second click would burn another of its three tries and raise a second prompt. */
   const [allowing, setAllowing] = createSignal<string | null>(null);
   const add = (p: MobilePairRequest) => setRequests((r) => (r.some((x) => x.id === p.id) ? r : [...r, p]));
+  // The paired records, for "Same phone as": a request may be a phone already paired another way. Per request: the record chosen ("" a new device;
+  // absent, the suggestion) and whether that record is removed once this one is approved.
+  const [paired, setPaired] = createSignal<MobileStatus | null>(null);
+  const [same, setSame] = createSignal<Record<string, string>>({});
+  const [replace, setReplace] = createSignal<Record<string, boolean>>({});
+  const okDevices = () => (paired()?.devices ?? []).filter((d) => d.state === "ok");
+  const sameOf = (r: MobilePairRequest) => same()[r.id] ?? samePhoneSuggestion(r, okDevices()) ?? "";
+  const known = (s: MobileStatus) => {
+    // A store that could not be read lists no device, which says nothing about the ones grouped here.
+    if (!s.store_error) setPaired(s);
+  };
+  const groups = () => store.state.settings.phoneGroups ?? {};
+  const keepOnly = (paired: string[]) => {
+    const kept = prunePhoneGroups(groups(), paired);
+    if (kept) store.setSettings({ phoneGroups: kept });
+  };
+  const forget = (ids: string[]) => keepOnly(Object.keys(groups()).filter((id) => !ids.includes(id)));
+  // The paired records, and the requests waiting already (this window was reloaded, or came up after the phone scanned), each time the daemon connects.
+  // The grouping is not pruned from this list: a development app pointed at another daemon shares these settings and would drop this daemon's groups.
+  // It is pruned on the removals this app hears and after an approval it makes; an id left by a record removed while the app was closed lists nothing.
+  createEffect(() => {
+    if (!store.connected()) return;
+    void mobileStatus().then((s) => {
+      known(s);
+      s.pending.forEach(add);
+    }).catch(() => {});
+  });
   onMount(() => {
-    // Requests waiting already: this window was reloaded, or came up after the phone scanned.
-    void mobileStatus().then((s) => s.pending.forEach(add)).catch(() => {});
     const un = onEvent<{ event: string; params: any }>("daemon-event", (m) => {
       if (m.event === "mobile.pair_request") add({ id: m.params.id, name: m.params.name, kind: m.params.kind ?? "pwa", fingerprint: m.params.fingerprint ?? "", want: m.params.want ?? "read", address: m.params.address ?? "", origin_kind: m.params.origin_kind ?? undefined });
       if (m.event === "mobile.lockout") {
         store.notify(m.params.reason === "sas" ? t("A pairing request was declined after three wrong codes.") : t("Too many failed phone connections from {address}: that address is blocked for a while.", { address: m.params.address ?? "" }), undefined, 10000);
       }
-      if (m.event === "mobile.updated") void mobileStatus().then((s) => setRequests((r) => r.filter((x) => s.pending.some((p) => p.id === x.id)))).catch(() => {});
+      if (m.event === "mobile.updated") {
+        void mobileStatus().then((s) => {
+          known(s);
+          setRequests((r) => r.filter((x) => s.pending.some((p) => p.id === x.id)));
+        }).catch(() => {});
+      }
       if (m.event === "mobile.device_changed") {
-        const p = m.params as { name: string; change: string; permission: MobilePermission | null };
+        const p = m.params as { id?: string; name: string; change: string; permission: MobilePermission | null };
+        // A revoke is announced as `removed`. A record the daemon replaces itself (the same key paired again) is told only to phones, never here:
+        // the approval that caused it prunes the grouping from the list it reads afterwards.
+        if (p.id && p.change === "removed") forget([p.id]);
         const what = p.permission === "control" ? t("may take control") : p.permission === "write" ? t("may type") : t("may read");
         if (p.change === "lock_enrolled") return store.notify(t("Phone “{name}” set up its app lock. If that was not you, unpair it.", { name: p.name }), undefined, 10000);
         store.notify(p.change === "added" ? t("Phone “{name}” was paired ({what}).", { name: p.name, what }) : p.change === "removed" ? t("Phone “{name}” was removed.", { name: p.name }) : t("Phone “{name}” now {what}.", { name: p.name, what }), undefined, 6000);
@@ -799,14 +936,29 @@ export function MobileApprovals() {
     close(id);
     void mobileSecure("mobile.approve", { id, allow: false }).catch((e) => store.notify(errorText(e)));
   };
-  const allow = async (r: { id: string; name: string }, permission: MobilePermission) => {
+  const wayOf = (d: MobileDevice) => deviceMethodLabel(d, paired()?.relay);
+  // After the approval: the new record joins the phone chosen, then that phone's old record goes if asked (`approveWithReplace`). The old one is removed
+  // only once the new one is paired; if that is refused, both stay, and the person hears so.
+  const allow = async (r: MobilePairRequest, permission: MobilePermission) => {
     const code = (codes()[r.id] ?? "").replace(/\D/g, "");
     if (code.length !== 6) return setErrors((e) => ({ ...e, [r.id]: t("Type the six digits the phone shows.") }));
     if (allowing()) return;
+    const sameId = sameOf(r);
+    const old = sameId && replace()[r.id] ? okDevices().find((d) => d.id === sameId) : undefined;
+    if (old && !(await confirmDialog(t("Remove “{name}” ({way}) once this phone is paired? That pairing is disconnected at once.", { name: old.name, way: wayOf(old) })))) return;
     setAllowing(r.id);
     try {
-      await mobileSecure("mobile.approve", { id: r.id, allow: true, code, permission });
+      const { kept } = await approveWithReplace({ same: sameId || null, replace: old?.id ?? null }, {
+        approve: () => mobileSecure<{ id?: string } | null>("mobile.approve", { id: r.id, allow: true, code, permission }),
+        join: (id, same) => store.setSettings({ phoneGroups: joinGroup(groups(), id, same) }),
+        revoke: (id) => daemon("mobile.revoke", { id }),
+        status: () => mobileStatus(),
+        keepOnly,
+      });
       close(r.id);
+      if (old && kept) {
+        store.notify(t("“{name}” is paired, but “{old}” ({way}) could not be removed, so both stay ({error}). Remove it under Settings → Mobile → Paired devices.", { name: r.name, old: old.name, way: wayOf(old), error: errorText(kept.error) }), undefined, 12000);
+      }
     } catch (e) {
       setErrors((x) => ({ ...x, [r.id]: errorText(e) }));
       // A request declined after three wrong codes is gone.
@@ -832,6 +984,32 @@ export function MobileApprovals() {
                 <Show when={r.address}><div>{t("From address: {address}", { address: r.address })}</div></Show>
               </div>
               <Show when={choice.typing}><div class="form-note warn-note" data-request-typing>{choice.typing}</div></Show>
+              <Show when={okDevices().length}>
+                <div class="inline-fields" style={{ "align-items": "center", margin: "8px 0 0" }} data-same-phone>
+                  <span>{t("Same phone as")}</span>
+                  {/* Each option says whether it is the one applied: the list is drawn again whenever the paired records are read again, and a select
+                      whose options are new would otherwise show its first one while another is applied. Another choice drops the Replace tick. */}
+                  <select class="text-input" data-same-phone-select value={sameOf(r)} disabled={allowing() === r.id} onChange={(e) => {
+                    const id = e.currentTarget.value;
+                    setSame((x) => ({ ...x, [r.id]: id }));
+                    setReplace((x) => ({ ...x, [r.id]: false }));
+                  }}>
+                    <option value="" selected={sameOf(r) === ""}>{t("A new device")}</option>
+                    <For each={okDevices()}>{(d) => <option value={d.id} selected={d.id === sameOf(r)}>{`${d.name} (${wayOf(d)})`}</option>}</For>
+                  </select>
+                </div>
+                <Show when={okDevices().find((d) => d.id === sameOf(r))}>
+                  {(old) => (
+                    <>
+                      <div class="muted-inline" data-same-phone-note>{t("Settings lists the two as one phone, each way with its own permission and its own Unpair.")}</div>
+                      <label class="inline-fields" style={{ "align-items": "center", margin: "6px 0 0" }} data-replace-pairing>
+                        <input type="checkbox" checked={!!replace()[r.id]} disabled={allowing() === r.id} onChange={(e) => setReplace((x) => ({ ...x, [r.id]: e.currentTarget.checked }))} />
+                        <span>{t("Replace that pairing: remove “{name}” ({way}) once this one is approved", { name: old().name, way: wayOf(old()) })}</span>
+                      </label>
+                    </>
+                  )}
+                </Show>
+              </Show>
               <input class="text-input mono mobile-approve-code" inputmode="numeric" maxlength="7" autocomplete="off" placeholder="000000" style={{ "font-size": "20px", "letter-spacing": "4px", width: "160px", margin: "12px 0" }}
                 value={codes()[r.id] ?? ""} onInput={(e) => setCodes((c) => ({ ...c, [r.id]: e.currentTarget.value }))} />
               <Show when={errors()[r.id]}><div class="form-note error">{errors()[r.id]}</div></Show>
