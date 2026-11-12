@@ -7,9 +7,11 @@ import { needsCount } from "./inbox-order";
 import { lockShown, paired, sessions, shellReload, startApp } from "./phone-state";
 import { watchWorker } from "./shell-reload";
 import { applyTheme } from "./theme";
+import { applyDisplay } from "./prefs";
 import "./phone.css";
 
 applyTheme();
+applyDisplay();
 watchInstall();
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
 

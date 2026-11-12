@@ -8,9 +8,8 @@
 // keyboard).
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { checkSend, EnterGuard, isLongPaste, looksLikePasswordPrompt, MAX_SEND_CHARS, SendLatch, unsentRest } from "../../src/lib/composer-core";
-import { ctrlArmed, ctrlKey, setCtrlArmed } from "./key-bar";
-import { keyResultText } from "./notice";
-import { cancelQueued, chat, chatPending, connected, discardChat, resumeChat, retryChat, screen, sendChat, sendKey, sendText, stopChat, stopping, takeChat, setStopping } from "./phone-state";
+import { ctrlArmed, ctrlKey, pressKey, setCtrlArmed } from "./key-bar";
+import { cancelQueued, chat, chatPending, connected, discardChat, resumeChat, retryChat, screen, sendChat, sendText, stopChat, stopping, takeChat, setStopping } from "./phone-state";
 import { chipView, type PendingSend, type SendResult as ChatSendResult } from "./chat-send";
 import { history } from "./history";
 import { store } from "./storage";
@@ -106,7 +105,7 @@ export function Composer(props: { id: string; notice: string | null; setNotice: 
     setCtrlArmed(false);
     if (!key) return;
     e.preventDefault();
-    void sendKey(props.id, key).then((r) => props.setNotice(keyResultText(r)));
+    pressKey(props.id, key, props.setNotice);
   };
 
   const onPaste = (e: ClipboardEvent) => {

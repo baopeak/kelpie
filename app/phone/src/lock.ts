@@ -143,6 +143,11 @@ export class LockModel {
     return !this.covered && ["none", "open", "read_only"].includes(this.face);
   }
 
+  /** What the computer last said of the lock: its state, its idle time and whether dangerous approvals ask again. */
+  lastInfo(): LockInfo {
+    return this.info;
+  }
+
   sawServerClock(serverTs: number | undefined) {
     if (typeof serverTs === "number") this.clockOffset = serverTs - this.env.now();
   }

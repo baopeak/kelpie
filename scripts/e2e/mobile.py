@@ -30,7 +30,8 @@ as lost with its text in the stopped chat, also after a reload, until discarded;
 code gets no answer, too many unknown phones are rate limited and the desktop says so, the kill switch and the audit list
 (last, so the limiter cannot refuse a pairing above). On an HTTPS origin (a certificate of this run's own, at `localhost` on 127.0.0.1, which the phone's browser
 is told to accept; needs Python's `cryptography`): the install step, no camera falling back to pasting the link, a pairing that is a secure origin. The app lock on it, with real WebAuthn ceremonies through CDP's virtual authenticator (`WebAuthn.addVirtualAuthenticator`, Blink's and not WebKit's, and no person's face): set up, a copied key refused at the daemon, hide locks, a network flap asks nothing, the idle time locks, the dangerous re-check, the reset, a restart. Then it may
-type. The link the daemon really gives there, at 127.0.0.1, unrewritten: a phone paired from it reads, with no lock in its way, since a passkey needs a name. Alerts on a real service worker (`KELPIE_PUSH_TEST_BASE` in tauri-driver's environment, a port this script serves as a stand-in for a push service, which the daemon really POSTs to): the sheet's button, a test alert
+type, and the phone's Settings there: the connection card and the live label naming the way it takes, a text size and a hidden key, and clearing
+what the phone keeps with the pairing kept. Ctrl+C from the key bar asks first and sends only on Send. The link the daemon really gives there, at 127.0.0.1, unrewritten: a phone paired from it reads, with no lock in its way, since a passkey needs a name. Alerts on a real service worker (`KELPIE_PUSH_TEST_BASE` in tauri-driver's environment, a port this script serves as a stand-in for a push service, which the daemon really POSTs to): the button in the phone's Settings, a test alert
 and a needs-you event taken from the stand-in, opened with the browser's keys and handed to the worker through CDP's `ServiceWorker.deliverPushMessage`, which shows the notification; a tap on it, as a synthetic `notificationclick` in the worker. The browser's own `pushManager.subscribe` is replaced in the page, since it would reach a real push service, which tests never do. Tailscale mode against a fake CLI (`KELPIE_TAILSCALE_BIN`, never the real one): each state's instruction, the two-step dialog, off.
 """
 import asyncio
@@ -422,12 +423,17 @@ try:
     wait(lambda: "Pinging" in daemon(d, "session.read", {"handle": handle, "lines": 40})["text"] if os.name == "nt" else True, 30)
     time.sleep(0.5)
     phone.js("[...document.querySelectorAll('.keys button')].find(b => b.textContent === 'Ctrl+C').click()")
+    stopped_mark = "Control-C" if os.name == "nt" else "^C"
+    # Ctrl+C stops what the agent is doing, so by default the phone asks first, and nothing goes until Send.
+    run.check("Ctrl+C asks first: Send Ctrl+C?", bool(phone.wait("return document.querySelector('[data-ctrl-c-confirm]')?.textContent.includes('Send Ctrl+C?')", 10)))
+    time.sleep(1.5)
+    run.check("…and nothing is sent while it asks", stopped_mark not in daemon(d, "session.read", {"handle": handle, "lines": 40})["text"].split("ping")[-1])
+    phone.js("document.querySelector('[data-ctrl-c-send]').click()")
     # The next command is typed only once the Ctrl+C has stopped the running one: the phone's key and this script's input
     # take different ways to the PTY, and a console drops what was typed ahead when it handles Ctrl+C. A fixed pause raced
     # the phone's round trip on a busy host (the echo went first and was dropped, although the Ctrl+C had worked).
-    stopped_mark = "Control-C" if os.name == "nt" else "^C"
     stopped = wait(lambda: stopped_mark in daemon(d, "session.read", {"handle": handle, "lines": 40})["text"].split("ping")[-1], 15)
-    run.check("quick keys (Ctrl+C) reach the terminal: the running command stops", bool(stopped), str(phone.js("return document.querySelector('.notice')?.textContent ?? null")))
+    run.check("…and Send sends it: quick keys (Ctrl+C) reach the terminal, and the running command stops", bool(stopped) and not phone.js("return !!document.querySelector('[data-ctrl-c-confirm]')"), str(phone.js("return document.querySelector('.notice')?.textContent ?? null")))
     # The mark comes before the shell is back, and what is typed between the two is dropped too: wait for its prompt.
     if os.name == "nt":
         wait(lambda: daemon(d, "session.read", {"handle": handle, "lines": 40})["text"].split(stopped_mark)[-1].strip().endswith(">"), 15)
@@ -1069,6 +1075,62 @@ for n in (1, 2, 3):
     phone.js("const t = document.querySelector('.send textarea'); t.value = 'echo secure-$((6*7))';")
     phone.js("document.querySelector('.send .btn.primary').click()")
     run.check("a secure origin may type", bool(wait(lambda: "secure-42" in daemon(d, "session.read", {"handle": typed_here["handle"], "lines": 40})["text"], 20)))
+
+    # ---------- the phone's Settings: the connection as it is, the text size, the key bar, what the phone keeps ----------
+    # The lock's grace is "Immediately" here, so nothing below hides the page.
+    live_label = phone.wait("return document.querySelector('.conn')?.dataset.state === 'live' && document.querySelector('.conn .conn-label').textContent", 15)
+    run.check("the live label names the way the connection takes: this page is the computer's own address", live_label == "Live · through this computer", str(live_label))
+    screen_px = "return parseFloat(getComputedStyle(document.querySelector('.screen')).fontSize)"
+    px_before = phone.js(screen_px)
+    back_from_settings = "document.querySelector('header .icon').click()"
+    phone.js("document.querySelector('[data-open-settings]').click()")
+    run.check("the gear opens the phone's Settings in place of the session", bool(phone.wait("return !!document.querySelector('[data-settings]') && !document.querySelector('.session')", 10)))
+    fact = lambda name: phone.js("return document.querySelector(`[data-setting=\"${arguments[0]}\"] dd`)?.textContent ?? null", name)  # noqa: E731
+    run.check("the connection card says how this phone was paired and the way it takes now", fact("paired-through") == "This computer (localhost)" and fact("live-path") == "this computer", str([fact("paired-through"), fact("live-path")]))
+    run.check("…the computer, this device and what it may do", fact("computer") is not None and fact("this-device") == "Secure phone · may type", str([fact("computer"), fact("this-device")]))
+    run.check("…the round trip, once one was measured", bool(phone.wait("return /^\\d+ ms$/.test(document.querySelector('[data-setting=\"rtt\"] dd')?.textContent ?? '')", 30)), str(fact("rtt")))
+    run.check("…and why the computer's screen is not offered: this phone may type, not take control", "May take control" in (fact("screen") or ""), str(fact("screen")))
+    run.check("…and the app lock as the computer set it", fact("lock-on") == "On" and fact("lock-idle") == "5 min", str([fact("lock-on"), fact("lock-idle")]))
+    phone.js("const s = document.querySelector('[data-setting=\"text-size\"] select'); s.value = 'xl'; s.dispatchEvent(new Event('change', {bubbles: true}));")
+    phone.js("document.querySelector('[data-key-shown=\"esc\"]').click()")
+    phone.js(back_from_settings)
+    phone.wait("return !document.querySelector('[data-settings]') && !!document.querySelector('.screen')", 10)
+    px_after = phone.js(screen_px)
+    run.check("Back returns to the session, and a larger text size makes the terminal's text larger", (px_after or 0) > (px_before or 0) and phone.js("return document.documentElement.dataset.textSize") == "xl", f"{px_before} -> {px_after}")
+    key_labels = "return [...document.querySelectorAll('.keys button')].map((b) => b.textContent.trim())"
+    shown_keys = phone.js(key_labels)
+    run.check("a key hidden in Settings is gone from the key bar, and Ctrl stays first", "Esc" not in shown_keys and shown_keys[0] == "Ctrl" and "Tab" in shown_keys, str(shown_keys))
+    phone.js("document.querySelector('[data-open-settings]').click()")
+    phone.wait("return !!document.querySelector('[data-key-bar-reset]')", 10)
+    phone.js("document.querySelector('[data-key-bar-reset]').click()")
+    phone.js("const s = document.querySelector('[data-setting=\"text-size\"] select'); s.value = 'm'; s.dispatchEvent(new Event('change', {bubbles: true}));")
+    # What the phone keeps: the list it saved is gone, a draft stays unless asked, and the pairing stays.
+    kept_list = """const done = arguments[0];
+      indexedDB.databases().then((dbs) => {
+        if (!dbs.some((x) => x.name === 'kelpie-phone')) return done([]);
+        const o = indexedDB.open('kelpie-phone');
+        o.onupgradeneeded = () => o.result.createObjectStore('kv');
+        o.onerror = () => done(null);
+        o.onsuccess = () => {
+          const db = o.result;
+          if (!db.objectStoreNames.contains('kv')) { db.close(); return done([]); }
+          const g = db.transaction('kv').objectStore('kv').get('list');
+          g.onsuccess = () => { db.close(); done((g.result?.sessions ?? []).map((s) => s.name)); };
+          g.onerror = () => { db.close(); done(null); };
+        };
+      }, () => done(null));"""
+    saved_names = lambda: phone.req("POST", f"/session/{phone.sid}/execute/async", {"script": kept_list, "args": []})  # noqa: E731
+    run.check("the phone has saved the list, with the open session in it", bool(wait(lambda: "secure-shell" in (saved_names() or []), 15)), str(saved_names()))
+    phone.js("localStorage.setItem('kelpie-draft:e2e-kept', 'a draft')")
+    phone.js("document.querySelector('[data-setting=\"clear-kept\"]').click()")
+    run.check("Clear what this phone keeps says it is done", bool(phone.wait("return document.querySelector('[data-cleared]')?.textContent.includes('stays paired')", 10)))
+    run.check("…the saved list is gone", saved_names() == [], str(saved_names()))
+    run.check("…a draft stays, since drafts were not asked for", phone.js("return localStorage.getItem('kelpie-draft:e2e-kept')") == "a draft")
+    run.check("…and the pairing stays: still paired and connected", phone.js("return localStorage.getItem('kelpie-paired')") == "1" and bool(phone.wait(CONNECTED, 15)), str(phone.js(STATE)))
+    phone.js("localStorage.removeItem('kelpie-draft:e2e-kept')")
+    phone.js(back_from_settings)
+    phone.wait("return !document.querySelector('[data-settings]') && !!document.querySelector('.screen')", 10)
+    run.check("the key bar is whole again after Reset", "Esc" in (phone.js(key_labels) or []), str(phone.js(key_labels)))
     daemon(d, "session.close", {"handle": typed_here["handle"]})
     # A phone paired, with no passkey yet, when the computer restarts: the way approval opened is gone with it.
     no_window = asyncio.run(paired_by_a_program("No window"))
@@ -1153,8 +1215,8 @@ for n in (1, 2, 3):
         page_cdp = Cdp(phone.debugger, "page", origin)
         phone.req("POST", f"/session/{phone.sid}/permissions", {"descriptor": {"name": "notifications"}, "state": "granted"})
         run.check("the app's service worker runs here", bool(phone.wait("return navigator.serviceWorker.ready.then(() => true) && !!navigator.serviceWorker.controller || navigator.serviceWorker.getRegistration().then((r) => !!r)", 20)))
-        phone.js("document.querySelector('.conn').click()")
-        run.check("the sheet offers alerts on a page that can have them", phone.wait("return document.querySelector('[data-alerts]')?.dataset.alerts", 15) == "off" and bool(phone.js("return !!document.querySelector('[data-alerts-on]')")), str(phone.js("return document.querySelector('[data-alerts]')?.dataset.alerts")))
+        phone.js("document.querySelector('[data-open-settings]').click()")
+        run.check("Settings offers alerts on a page that can have them", phone.wait("return document.querySelector('[data-alerts]')?.dataset.alerts", 15) == "off" and bool(phone.js("return !!document.querySelector('[data-alerts-on]')")), str(phone.js("return document.querySelector('[data-alerts]')?.dataset.alerts")))
         phone.js("document.querySelector('[data-alerts-on]').click()")
         run.check("turning alerts on subscribes", phone.wait("return document.querySelector('[data-alerts]')?.dataset.alerts === 'on'", 20) is True, str(phone.js("return document.querySelector('.alerts-row')?.textContent")))
         alert_device = next((x for x in daemon(d, "mobile.status")["devices"] if x.get("push")), None)
@@ -1162,8 +1224,9 @@ for n in (1, 2, 3):
         run.check("…and Settings counts it", daemon(d, "notify.get")["webpush"]["devices"] == 1)
         phone.js("document.querySelector('[data-alerts-test]').click()")
         run.check("a test alert reaches the stand-in", wait(lambda: len(push.at("/push/page")) >= 1, 15) is True, str(len(push.at("/push/page"))))
-        run.check("…and the sheet says it went", "Sent" in (phone.wait("return document.querySelector('[data-alerts-tested]')?.textContent?.includes('Sent') && document.querySelector('[data-alerts-tested]').textContent", 15) or ""))
-        phone.js("[...document.querySelectorAll('.sheet .btn')].find((b) => b.textContent === 'Close').click()")
+        run.check("…and Settings says it went", "Sent" in (phone.wait("return document.querySelector('[data-alerts-tested]')?.textContent?.includes('Sent') && document.querySelector('[data-alerts-tested]').textContent", 15) or ""))
+        phone.js("document.querySelector('header .icon').click()")
+        phone.wait("return !document.querySelector('[data-settings]')", 10)
 
         # What the service would hand the browser goes to the real worker, which shows it.
         page_cdp.call("ServiceWorker.enable")
@@ -1250,11 +1313,12 @@ for n in (1, 2, 3):
         if sw_cdp:
             sw_cdp.close()
         daemon(d, "session.close", {"handle": shell_alert["handle"]})
-        phone.js("document.querySelector('.conn').click()")
+        phone.js("document.querySelector('[data-open-settings]').click()")
         phone.wait("return !!document.querySelector('[data-alerts-off]')", 10)
         phone.js("document.querySelector('[data-alerts-off]').click()")
         run.check("turning alerts off ends it on both sides", wait(lambda: daemon(d, "notify.get")["webpush"]["devices"] == 0, 10) is True and phone.wait("return document.querySelector('[data-alerts]')?.dataset.alerts === 'off'", 10) is True)
-        phone.js("[...document.querySelectorAll('.sheet .btn')].find((b) => b.textContent === 'Close').click()")
+        phone.js("document.querySelector('header .icon').click()")
+        phone.wait("return !document.querySelector('[data-settings]')", 10)
         page_cdp.close()
         push.stop()
 

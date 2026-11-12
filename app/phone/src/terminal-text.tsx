@@ -1,5 +1,6 @@
 // A terminal session as text: the daemon's rows in a monospace block that follows the bottom while you
-// are there, with pinch zoom. (The phone gets rows of text from the daemon, never a terminal emulator.)
+// are there, with pinch zoom. (The phone gets rows of text from the daemon, never a terminal emulator.) The pinch sets the
+// size the stylesheet starts from; the text size in Settings scales it.
 import { createEffect, createSignal, onCleanup } from "solid-js";
 import { store } from "./storage";
 
@@ -55,7 +56,7 @@ export function TerminalText(props: { rows: string[]; dim?: boolean }) {
       ref={pre}
       class="screen"
       classList={{ dim: props.dim }}
-      style={{ "font-size": `${size()}px` }}
+      style={{ "--term-size": `${size()}px` }}
       onPointerDown={down}
       onPointerMove={move}
       onPointerUp={up}
