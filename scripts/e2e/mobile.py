@@ -784,8 +784,12 @@ for n in (1, 2, 3):
     lost_chat = daemon(d, "session.create", {"kind": "claude", "cwd": proj, "chat_argv": [sys.executable, "-u", turn_agent, turn_trace, turn_hold], "name": "phone-lost", "project_id": pid})
     phone.go("about:blank")
     phone.go(base)
-    phone.wait(LIVE, 30)
-    phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-lost'))", 20)
+    phone.wait(LIVE, 60)
+    # Said, with what the phone shows, rather than stopping the scenario at a row that is not there.
+    listed = phone.wait("return [...document.querySelectorAll('.row')].some(r => r.textContent.includes('phone-lost'))", 30)
+    run.check("the reloaded phone lists the chat made just before", bool(listed), "" if listed else str({"state": phone.js(STATE), "rows": phone.js("return [...document.querySelectorAll('.row')].map(r => r.textContent.slice(0, 60))"), "page": phone.js("return document.body.innerText.slice(0, 300)")}))
+    if not listed:
+        raise RuntimeError("the phone does not list phone-lost: the restart checks cannot run")
     phone.js("[...document.querySelectorAll('.row')].find(r => r.textContent.includes('phone-lost')).click()")
     phone.wait("return !!document.querySelector('.chat-composer textarea')", 20)
     hold(True)

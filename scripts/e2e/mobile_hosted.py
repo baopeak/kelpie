@@ -457,7 +457,10 @@ class Cdp:
         target = next((t for t in listed if t["type"] == kind and t["url"].startswith(url_start)), None)
         if not target:
             raise RuntimeError(f"no {kind} at {url_start}: {[(t['type'], t['url'][:60]) for t in listed]}")
-        self.ws = connect(target["webSocketDebuggerUrl"], max_size=None, open_timeout=10)
+        # A session can stay open for the whole run with nobody reading it (the stand-in's script lives as long as its session): its events are
+        # kept unbounded, as a bounded queue stops reading the socket once full, and then the keepalive's pong is never read and the session is
+        # closed (1011), taking the stand-in off the next page load. DevTools is on this machine: no keepalive is needed.
+        self.ws = connect(target["webSocketDebuggerUrl"], max_size=None, max_queue=None, ping_interval=None, open_timeout=10)
         self.n = 0
         self.events = []
 

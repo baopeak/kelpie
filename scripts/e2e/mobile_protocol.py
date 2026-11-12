@@ -322,7 +322,14 @@ async def main(d):
     await asyncio.sleep(2)
     check("nor does one the phone let go of", not [m for m in phone.log[mark:] if m["type"] == "screen"])
 
+    def settled(word):
+        # The shell printed `word` on a line of its own and shows its prompt again: nothing more is on its way. A loaded machine can take
+        # seconds to run a command, and a frame still coming as the phone goes would leave the reconnect on a screen it no longer holds.
+        lines = [line.rstrip() for line in read(d, a["id"], 50)["text"].split("\n") if line.strip()]
+        return bool(lines) and word in lines and lines[-1].startswith("PS ") and lines[-1].endswith(">")
+
     # resume: a phone that reconnects carries on from its last frame
+    await ps.async_wait_for(lambda: settled("after-unsub"), 60)
     await phone.ask(type="sub", id=a["id"], height=50)
     await phone.wait(lambda m: m["type"] == "screen" and "after-unsub" in phone.text(a["id"]), 10, phone.mark() - 1)
     await ps.async_wait_for(lambda: phone.acked.get(a["id"]) == phone.rev[a["id"]], 3)
@@ -330,7 +337,8 @@ async def main(d):
     old = phone
     await phone.close()
     d.call("session.input", {"handle": info(d, a["id"])["handle"], "data": "echo while-away\r"})
-    await asyncio.sleep(1)
+    # What changed while away is on the terminal before the phone is back.
+    away = await ps.async_wait_for(lambda: settled("while-away"), 60)
     phone = ps.Phone(BASE, token)
     await phone.open()
     phone.resume_from(old)
@@ -338,7 +346,7 @@ async def main(d):
     await phone.ask(type="sub", id=a["id"], height=50, have_rev=last_rev)
     resumed = await phone.wait(lambda m: m["type"] == "screen" and m["id"] == a["id"], 5, mark)
     check("a reconnecting phone carries on from the last frame it acknowledged", resumed and resumed["base"] == last_rev and len(resumed["rows"]) < 10, resumed and (resumed["base"], len(resumed["rows"])))
-    check("…and its screen is the terminal's again", "while-away" in phone.text(a["id"]) and not phone.lost)
+    check("…and its screen is the terminal's again", away and "while-away" in phone.text(a["id"]) and not phone.lost, (bool(away), [m["rev"] for m in phone.lost], phone.lines.get(a["id"], [])[-3:]))
     mark = phone.mark()
     await phone.ask(type="sub", id=a["id"], height=50, have_rev=last_rev + 99)
     whole = await phone.wait(lambda m: m["type"] == "screen" and m["id"] == a["id"], 5, mark)
@@ -1234,7 +1242,8 @@ async def security(d):
     # Phone access off ends the mode; on again publishes nothing.
     d.call("mobile.set_tailscale", {"on": True})
     d.call("mobile.disable")
-    ps.wait_for(lambda: serve_now() == "{}", 20)
+    # The fake takes the entry off before it exits, and the daemon counts it removed once the command has returned: wait for both.
+    ps.wait_for(lambda: serve_now() == "{}" and not d.call("mobile.status")["tailscale"]["to_remove"], 20)
     check("turning phone access off ends the mode and removes the entry", serve_now() == "{}", serve_now())
     count = len(ts_changes())
     d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
