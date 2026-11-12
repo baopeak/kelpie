@@ -3046,6 +3046,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq 3.4.2",
+ "url",
  "uuid",
  "webpki-roots 1.0.10",
  "windows",

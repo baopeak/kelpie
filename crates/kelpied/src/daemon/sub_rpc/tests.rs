@@ -1440,11 +1440,24 @@ fn a_new_turn_clears_a_blocked_row_but_not_a_verdict_and_not_the_report_just_mad
     let _ = std::fs::remove_dir_all(dir);
 }
 
-
 #[test]
 fn a_page_address_is_http_or_https_with_a_host_and_nothing_hidden_in_it() {
-    for ok in ["http://localhost:5173/", "https://example.com", "HTTPS://Example.com/a?b=c#d", "http://127.0.0.1:8080/x", "http://[::1]:3000/", "http://[::1]/", "https://host:/path"] {
-        assert_eq!(page_url(&format!(" {ok} ")).as_deref(), Ok(ok), "{ok}");
+    // What the window is sent is the address as a browser reads it (WHATWG): the window's own parser takes it as it is.
+    for (ok, href) in [
+        ("http://localhost:5173/", "http://localhost:5173/"),
+        ("https://example.com", "https://example.com/"),
+        ("HTTPS://Example.com/a?b=c#d", "https://example.com/a?b=c#d"),
+        ("http://127.0.0.1:8080/x", "http://127.0.0.1:8080/x"),
+        ("http://[::1]:3000/", "http://[::1]:3000/"),
+        ("http://[::1]/", "http://[::1]/"),
+        ("http://[0:0:0:0:0:0:0:1]:80/", "http://[::1]/"),
+        ("https://host:/path", "https://host/path"),
+        ("http://bücher.example/", "http://xn--bcher-kva.example/"),
+        ("http://localhost:5173/a/../b?q=a%20b", "http://localhost:5173/b?q=a%20b"),
+        // `\` ends the host as a browser reads it, so what follows it is a path, not credentials.
+        ("http://example.com\\@other.com/", "http://example.com/@other.com/"),
+    ] {
+        assert_eq!(page_url(&format!(" {ok} ")).as_deref(), Ok(href), "{ok}");
     }
     for (bad, why) in [
         ("", "missing `url`"),
@@ -1457,19 +1470,28 @@ fn a_page_address_is_http_or_https_with_a_host_and_nothing_hidden_in_it() {
         ("http://example.com\u{0}/", "control characters"),
         ("http://exa mple.com/", "spaces"),
         ("http://example.com/\u{7f}", "control characters"),
-        ("http:///path", "names no host"),
-        ("http://:80/", "names no host"),
-        ("http://[::1", "names no host"),
-        ("http://host:99999/", "not a port number"),
-        ("http://host:1:2/", "not a port number"),
+        ("http://:80/", "not an address a browser can open"),
+        ("http://[::1", "not an address a browser can open"),
+        ("http://host:99999/", "not an address a browser can open"),
+        ("http://host:1:2/", "not an address a browser can open"),
+        // A port is ASCII digits only, a bracketed host an IPv6 address, and a host has no forbidden code points.
+        ("http://h:+80/", "not an address a browser can open"),
+        ("http://[zz]/", "not an address a browser can open"),
+        ("http://[fe80::1%25eth0]/", "not an address a browser can open"),
+        ("http://a^b/", "not an address a browser can open"),
+        ("http://a|b/", "not an address a browser can open"),
+        ("http://a<b/", "not an address a browser can open"),
+        ("http://a%zz/", "not an address a browser can open"),
     ] {
         let err = page_url(bad).unwrap_err();
         assert!(err.contains(why), "{bad:?}: {err}");
     }
-    // `\` ends the host as a browser reads it, so what follows it is not taken for credentials, and a long address is refused.
-    assert!(page_url("http://example.com\\@other.com/").is_ok());
     assert!(page_url(&format!("http://h/{}", "a".repeat(MAX_PAGE_URL))).unwrap_err().contains("longer than"));
+    // Percent-encoding can make an address longer than it was given: the normalized one is held to the cap too.
+    assert!(page_url(&format!("http://h/{}", "é".repeat(MAX_PAGE_URL - 9))).unwrap_err().contains("longer than"));
     assert_eq!(page_title(" Docs\n\u{1b}[31m   page "), "Docs [31m page");
+    // Nothing in a title turns the text around it or hides in it.
+    assert_eq!(page_title("GitHub\u{202E}moc.live\u{202C} sign\u{200B}-in\u{2066}\u{FEFF}"), "GitHubmoc.live sign-in");
 }
 
 #[test]
@@ -1520,7 +1542,7 @@ fn a_page_is_asked_for_by_the_calling_session_only() {
     let (d, dir) = daemon("page-open-auth");
     let (restricted, _) = add(&d, 1, "r", "claude", None);
     restricted.spec.lock().restricted = true;
-    add(&d, 2, "c", "codex", None);
+    let (c, _) = add(&d, 2, "c", "codex", None);
     // The id is the caller's whatever it says, restricted or not, and whether or not it may script other sessions.
     for me in ["r", "c"] {
         let mut forged = json!({"session_id": "someone-else", "url": "http://localhost:1"});
@@ -1529,9 +1551,50 @@ fn a_page_is_asked_for_by_the_calling_session_only() {
     }
     // A claimed id (its token went missing) proves nothing.
     assert!(crate::auth::authorize(&d, &Role::Claimed("c".into()), "page.open", &mut json!({})).is_err());
-    // The event is never one a program hears.
-    for role in [Role::Session("c".into()), Role::Claimed("c".into()), Role::Anonymous] {
-        assert!(matches!(crate::auth::event_visibility(&d, &role, "page.open", &json!({}), None), crate::auth::EventVisibility::Hidden), "{role:?}");
+    // The event goes to the connections that said they are the app at `auth` (`tell_apps`), and to no program connected as a
+    // session, a claimed id or nobody, whatever `event_visibility` would let them see.
+    c.spec.lock().project_id = Some("proj".into());
+    let (app_tx, mut app_rx) = crate::session::client_channel();
+    d.register_client(10, app_tx);
+    d.set_client_role(10, &Role::App);
+    d.mark_app(10, true);
+    let mut programs = Vec::new();
+    for (id, role) in [(11, Role::Session("c".into())), (12, Role::Claimed("c".into())), (13, Role::Anonymous)] {
+        let (tx, rx) = crate::session::client_channel();
+        d.register_client(id, tx);
+        d.set_client_role(id, &role);
+        programs.push((role, rx));
     }
+    call(&d, "page.open", json!({"session_id": "c", "url": "http://localhost:1"})).unwrap();
+    assert_eq!(decoded(&mut app_rx).len(), 1);
+    for (role, mut rx) in programs {
+        assert!(decoded(&mut rx).is_empty(), "{role:?}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_session_asks_for_at_most_ten_pages_a_minute() {
+    let (d, dir) = daemon("page-open-cap");
+    for (handle, id) in [(1, "a"), (2, "b")] {
+        add(&d, handle, id, "claude", None).0.spec.lock().project_id = Some("proj".into());
+    }
+    let (app_tx, mut app_rx) = crate::session::client_channel();
+    d.register_client(7, app_tx);
+    d.set_client_role(7, &Role::App);
+    d.mark_app(7, true);
+    let ask = |sid: &str, n: usize| call(&d, "page.open", json!({"session_id": sid, "url": format!("http://localhost:{}/", 3000 + n)}));
+    // A refused address does not count.
+    assert!(ask("a", 99999).is_err());
+    for n in 0..PAGE_OPENS_PER_MINUTE {
+        ask("a", n).unwrap();
+    }
+    let err = ask("a", 10).unwrap_err().to_string();
+    assert!(err.contains("already asked for 10 pages in the last minute") && err.contains("tell the person the address"), "{err}");
+    assert_eq!(decoded(&mut app_rx).len(), PAGE_OPENS_PER_MINUTE, "the window hears of none past the cap");
+    // Another session has its own count; a minute later the first may ask again.
+    ask("b", 0).unwrap();
+    assert!(d.count_page_open("a", Instant::now() + Duration::from_secs(61)).is_ok());
+    assert!(d.page_opens.lock().get("b").is_none(), "a session that asked for nothing for a minute is forgotten");
     let _ = std::fs::remove_dir_all(dir);
 }

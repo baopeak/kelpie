@@ -346,7 +346,7 @@ pub fn tool_list() -> Vec<Value> {
         ),
         tool(
             "kelpie_open_page",
-            "Open a web page for the person in Kelpie's window: a browser tab in your project, in the background (it takes neither the focus nor the keyboard from you), with a short notice they can click. Use it when the person asks to see a page, or when you started a server whose page they should look at. Only http:// and https:// addresses, without a user name or password. A page already open in the project is not opened twice. Refused when Kelpie's window is not open: then give the person the address.",
+            "Open a web page for the person in Kelpie's window: a browser tab in your project, in the background (it takes neither the focus nor the keyboard from you), with a short notice they can click. Use it when the person asks to see a page, or when you started a server whose page they should look at. Only http:// and https:// addresses, without a user name or password; at most 10 pages a minute. A tab already showing the same address is not opened twice. Refused when Kelpie's window is not open: then give the person the address.",
             json!({
                 "url": {"type": "string", "description": "The page's address, e.g. http://localhost:5173/."},
                 "title": {"type": "string", "description": "A short name for the notice and the tab. Default: the address."},
@@ -750,7 +750,7 @@ async fn open_page<B: Backend>(b: &mut B, args: &Value) -> Result<ToolOut, Strin
     }
     let r = ask(b, "page.open", params).await?;
     let text = format!(
-        "Asked Kelpie's window to open {} in a background tab of your project; the person gets a notice to look at it. If a tab there already shows it, none is added.",
+        "Asked Kelpie's window to open {} in a background tab of your project (none is added when a tab there already shows that address); the person gets a notice either way, also when the window cannot open it. The window does not confirm, so when you tell the person about the page, give the address too.",
         str_of(&r, "url")
     );
     Ok(ToolOut::ok(text, r))

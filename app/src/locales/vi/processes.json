@@ -29,5 +29,10 @@
   "{session} opened a web page: {page}": "{session} đã mở trang web: {page}",
   "View": "Xem",
   "{session} asked to show {page}, which is already open in a tab": "{session} yêu cầu hiển thị {page}, nhưng trang này đã mở sẵn trong một tab",
-  "An agent": "Một agent"
+  "An agent": "Một agent",
+  "{session} asked to open {page}, but {reason}": "{session} yêu cầu mở {page}, nhưng {reason}",
+  "it is not a web address": "đó không phải là một địa chỉ web",
+  "only http and https pages open in Kelpie": "Kelpie chỉ mở các trang http và https",
+  "addresses with a user name or password are not opened": "Kelpie không mở địa chỉ có chứa tên người dùng hoặc mật khẩu",
+  "its project is no longer in this window": "dự án của phiên này không còn trong cửa sổ"
 }

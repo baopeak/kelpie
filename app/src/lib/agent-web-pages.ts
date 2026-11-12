@@ -7,7 +7,7 @@
 import { createEffect, createRoot } from "solid-js";
 import { findPane } from "./layout";
 import { isAgentKind } from "./agents";
-import { browserPaneOnPort, browserPaneShowing, browserProbe, freshPages, isLocalUrl, markPageFresh, markPageSeen, setBrowserState } from "./browser";
+import { browserPaneOnPort, browserPaneShowing, browserProbe, freshPages, markPageFresh, markPageSeen, setBrowserState } from "./browser";
 import { portUrl, sessionPorts, uniquePorts, type Port } from "./processes";
 import { sessionLabel, store } from "./store";
 import { uid } from "./platform";
@@ -44,29 +44,36 @@ function openInBackground(projectId: string, sessionName: string, url: string, t
   return paneId;
 }
 
-/** The browser pane of the project that already shows this page: the same address, or for a local server the same port. */
-function paneShowing(projectId: string, url: URL) {
-  return (isLocalUrl(url.href) && url.port && browserPaneOnPort(projectId, Number(url.port))) || browserPaneShowing(projectId, url.href);
-}
+/** Not shown but changes how the text around it reads: bidirectional controls and zero-width characters (as the daemon strips them). */
+const HIDDEN = /[؜᠎​-‏‪-‮⁠-⁩﻿]/g;
+const cleanTitle = (title: string | null | undefined) => (title ?? "").replace(HIDDEN, "").trim();
 
 /** A page an agent asked to show (`kelpie_open_page`): opened whatever the setting for automatic tabs says, but never twice in a
- *  project; then the person is told it is already open, and nothing takes the focus. */
+ *  project (a tab already on the same address: the person is told it is already open, and nothing takes the focus). A request this
+ *  window cannot carry out is never dropped silently: the person is told what was asked and why nothing opened. */
 export function openRequestedPage(req: OpenPageRequest) {
+  const session = store.sessions[req.session_id];
+  const name = session ? sessionLabel(session) : t("An agent");
+  const title = cleanTitle(req.title);
+  const refuse = (why: string) =>
+    store.notify(t("{session} asked to open {page}, but {reason}", { session: name, page: String(req.url ?? "").replace(HIDDEN, ""), reason: why }), undefined, 8000);
   let url: URL;
   try {
     url = new URL(req.url);
   } catch {
-    return;
+    return refuse(t("it is not a web address"));
   }
   // The daemon checked the address; this window opens nothing else whatever it is sent.
-  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) return;
+  if (url.protocol !== "http:" && url.protocol !== "https:") return refuse(t("only http and https pages open in Kelpie"));
+  if (url.username || url.password) return refuse(t("addresses with a user name or password are not opened"));
   const projectId = req.project_id;
-  if (!store.state.projects.some((p) => p.id === projectId)) return;
-  const session = store.sessions[req.session_id];
-  const name = session ? sessionLabel(session) : t("An agent");
-  const page = req.title || url.href;
-  const shown = paneShowing(projectId, url);
+  if (!store.state.projects.some((p) => p.id === projectId)) return refuse(t("its project is no longer in this window"));
+  const page = title || url.href;
+  // Only the same address: another page of the same server is another page, and gets its own tab.
+  const shown = browserPaneShowing(projectId, url.href);
   if (shown) {
+    // Asked for now: an automatic tab that showed it is no longer one to close when its server stops.
+    unseen.delete(shown.paneId);
     store.notify(
       t("{session} asked to show {page}, which is already open in a tab", { session: name, page }),
       { label: t("View"), run: () => store.focusPane(projectId, shown.tabId, shown.paneId) },
@@ -74,7 +81,7 @@ export function openRequestedPage(req: OpenPageRequest) {
     );
     return;
   }
-  openInBackground(projectId, name, url.href, req.title ?? "", page);
+  openInBackground(projectId, name, url.href, title, page);
 }
 
 async function openIfWebPage(sessionId: string, port: Port) {

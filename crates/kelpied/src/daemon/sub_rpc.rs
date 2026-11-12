@@ -69,56 +69,53 @@ fn name_from_task(task: &str) -> String {
 /// The longest address `page.open` takes.
 const MAX_PAGE_URL: usize = 4096;
 
-/// The address an agent asked to show, checked: `http` or `https` with a host, no user name or password, nothing that is not printed
-/// (control characters, spaces). The window parses it again before it opens anything.
+/// How many pages one session may ask for in a minute (`page.open`).
+const PAGE_OPENS_PER_MINUTE: usize = 10;
+
+/// The address an agent asked to show, checked and normalized: read by the WHATWG URL rules (the `url` crate), which the window's
+/// `new URL()` follows too, so the daemon accepts nothing the window would refuse; then `http` or `https` with a host, no user name or
+/// password, nothing that is not printed (control characters, spaces). What the window is sent is the normalized address.
 fn page_url(given: &str) -> Result<String, String> {
-    let url = given.trim();
-    if url.is_empty() {
+    let given = given.trim();
+    if given.is_empty() {
         return Err("missing `url`".into());
     }
-    if url.chars().count() > MAX_PAGE_URL {
+    let too_long = |s: &str| s.chars().count() > MAX_PAGE_URL;
+    if too_long(given) {
         return Err(format!("the address is longer than {MAX_PAGE_URL} characters"));
     }
-    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    if given.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err("the address has spaces or control characters in it; encode them (%20) or leave them out".into());
     }
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return Err(format!("`{url}` is not a web address: give one that starts with http:// or https://"));
-    };
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-        return Err(format!("only http:// and https:// pages can be opened, not {scheme}://"));
+    let url = url::Url::parse(given).map_err(|e| match e {
+        url::ParseError::RelativeUrlWithoutBase => format!("`{given}` is not a web address: give one that starts with http:// or https://"),
+        e => format!("`{given}` is not an address a browser can open ({e})"),
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("only http:// and https:// pages can be opened, not {}:", url.scheme()));
     }
-    // Browsers end the host at `\` as they do at `/`.
-    let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or_default();
-    if authority.contains('@') {
+    if !url.username().is_empty() || url.password().is_some() {
         return Err("the address carries a user name or password (`user:pass@`); Kelpie does not open those, leave them out".into());
     }
-    // `host`, `host:port`, `[v6]` or `[v6]:port`.
-    let (host, port) = match authority.strip_prefix('[') {
-        Some(v6) => match v6.split_once(']') {
-            Some((h, "")) => (h, None),
-            Some((h, after)) if after.starts_with(':') => (h, Some(&after[1..])),
-            _ => ("", None),
-        },
-        None => match authority.split_once(':') {
-            Some((h, port)) => (h, Some(port)),
-            None => (authority, None),
-        },
-    };
-    if host.is_empty() {
-        return Err(format!("`{url}` names no host"));
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(format!("`{given}` names no host"));
     }
-    if let Some(port) = port.filter(|p| !p.is_empty()) {
-        if port.parse::<u16>().is_err() {
-            return Err(format!("`{port}` is not a port number"));
-        }
+    let href = String::from(url);
+    if too_long(&href) {
+        return Err(format!("the address is longer than {MAX_PAGE_URL} characters"));
     }
-    Ok(url.to_string())
+    Ok(href)
 }
 
-/// A page title as the notice shows it: one line, without control characters, at most 120 characters.
+/// Characters that are not shown but change how the text around them reads: bidirectional controls (an "evil.com" shown backwards)
+/// and zero-width ones.
+fn hidden_char(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+}
+
+/// A page title as the notice shows it: one line, without control, bidirectional or zero-width characters, at most 120 characters.
 fn page_title(given: &str) -> String {
-    let line: String = given.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let line: String = given.chars().filter(|c| !hidden_char(*c)).map(|c| if c.is_control() { ' ' } else { c }).collect();
     subs::cut(&line.split_whitespace().collect::<Vec<_>>().join(" "), 120)
 }
 
@@ -595,9 +592,29 @@ impl Daemon {
         let title = params.get("title").and_then(Value::as_str).map(page_title).filter(|t| !t.is_empty());
         let spec = self.by_id(&sid).ok_or_else(|| anyhow!("the calling session no longer exists"))?.spec();
         let project = spec.project_id.filter(|p| !p.is_empty()).ok_or_else(|| anyhow!("this session belongs to no project in Kelpie's window, so there is no tab to open the page in; give the person the address instead: {url}"))?;
+        self.count_page_open(&sid, Instant::now())?;
         let told = self.tell_apps("page.open", json!({"session_id": sid, "project_id": project, "url": url, "title": title}));
         anyhow::ensure!(told > 0, "Kelpie's window is not open, so the page cannot be shown; tell the person the address instead: {url}");
         Ok(json!({"url": url, "title": title, "project_id": project}))
+    }
+
+    /// Counts a page that session `sid` asks for at `now`, or refuses it once the session asked for `PAGE_OPENS_PER_MINUTE` in the last
+    /// minute. A refused one does not count, nor one refused before it (a bad address, no project).
+    fn count_page_open(&self, sid: &str, now: Instant) -> Result<()> {
+        let minute = Duration::from_secs(60);
+        let mut opens = self.page_opens.lock();
+        // Sessions that asked for nothing for a minute, closed ones among them, are forgotten.
+        opens.retain(|_, at| {
+            at.retain(|t| now.saturating_duration_since(*t) < minute);
+            !at.is_empty()
+        });
+        let at = opens.entry(sid.to_string()).or_default();
+        anyhow::ensure!(
+            at.len() < PAGE_OPENS_PER_MINUTE,
+            "this session already asked for {PAGE_OPENS_PER_MINUTE} pages in the last minute; open no more for now, and tell the person the address instead if they need it"
+        );
+        at.push(now);
+        Ok(())
     }
 
     /// Sends an event to the app's windows alone (not to scripts holding the user token, nor to sessions); how many got it.

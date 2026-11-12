@@ -905,8 +905,12 @@ get no tab. Whatever that setting says, an agent can also open a page when you a
 the page"*) or when it started a server you should look at: it uses the `kelpie_open_page` tool (or
 `"$KELPIE_CLI" sub open <url>`), and the page opens the same way, as a background tab of the
 session's project with a short message and *View*. Only `http://` and `https://` addresses without a
-user name or password are opened; a page already shown in the project (the same address, or for a
-local server the same port) is not opened twice, the message says so instead. If Kelpie's window is
+user name or password are opened; a tab of the project already on the same address is not opened
+twice, the message says so instead (another page of the same server gets its own tab, and an
+automatic tab the agent asked for this way stays when its server stops). When the window cannot open a
+page it was sent (its project was removed, say), the message says what was asked and why. One session
+can open at most 10 pages a minute. The tool is offered only to sessions on this computer (an SSH
+session's agent does not have it), so `localhost` in the address is this computer. If Kelpie's window is
 not open, the agent is told so and gives you the address. The **Processes** tab of the right panel (palette: *Processes and Ports*) lists what
 each running session of the project runs, as a tree with PID, memory, CPU and ports. Click a port
 to show it in a browser tab, the one already on it if there is one. **Kill** stops a program and what it started. **Kill children** stops what a
