@@ -12,7 +12,7 @@ import { ChatSender, type PendingSend, type SendResult as ChatSendResult } from 
 import { NOTICE_SHOWN_MS, NoticeBoard, refusalText, type Notice } from "./notice";
 import { clearCache, loadList, loadScreen, saveList, saveScreen } from "./cache";
 import { canAct, dataAge, deriveConn, type ConnState } from "./conn-state";
-import { browserEnv, Link, linkCodec, type ChatMsg, type ChatQueueMsg, type ChatRequestInfo, type ChatResolved, type DeviceInfo, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
+import { browserEnv, Link, linkCodec, type AlertPrefs, type ChatMsg, type ChatQueueMsg, type ChatRequestInfo, type ChatResolved, type DeviceInfo, type Hello, type Outcome, type SessionRow, type SessionsMsg } from "./link";
 import { browserCredentials, LockModel, type LockInfo, type Proof } from "./lock";
 import { pair, type HostedPairing, type PairSocket } from "./pair";
 import { currentPairing, forgetPairing, loadPairing, relayUrl, savePairing, seemsPaired } from "./pairing-store";
@@ -253,6 +253,7 @@ const link = new Link(browserEnv(), () => {
     refreshNotSent();
     persistList();
     void alerts.recheck(h.push);
+    void alerts.heard(h.push);
     const asked = wantSession;
     wantSession = null;
     const wanted = asked && h.sessions.find((s) => s.id === asked);
@@ -392,17 +393,25 @@ export { remoteScreens };
 
 export const [alertsState, setAlertsState] = createSignal<AlertsState>("off");
 export const [alertsError, setAlertsError] = createSignal<string | null>(null);
+/** This phone's alert choices as the computer keeps them, and the kinds it sends at all (null: it did not say). */
+export const [alertPrefs, setAlertPrefs] = createSignal<AlertPrefs | null>(null);
+export const [alertEvents, setAlertEvents] = createSignal<string[] | null>(null);
 const alerts = new Alerts(
   browserAlerts(
     { lang: () => locale(), ask: (m) => link.request(m, { write: false }) },
     { ios: platformOf(navigator.userAgent, navigator.maxTouchPoints ?? 0) === "ios", installed: () => matchMedia("(display-mode: standalone)").matches || (navigator as Navigator & { standalone?: boolean }).standalone === true, store },
   ),
   () => {
-    setAlertsState(alerts.state);
-    setAlertsError(alerts.error);
+    batch(() => {
+      setAlertsState(alerts.state);
+      setAlertsError(alerts.error);
+      setAlertPrefs(alerts.prefs);
+      setAlertEvents(alerts.events);
+    });
   },
 );
 export const turnAlertsOn = () => alerts.turnOn();
+export const chooseAlerts = (p: AlertPrefs) => alerts.choose(p);
 export const turnAlertsOff = () => alerts.turnOff();
 export const testAlert = () => alerts.test();
 

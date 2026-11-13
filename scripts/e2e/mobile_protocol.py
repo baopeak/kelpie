@@ -34,7 +34,8 @@ Daemon only (no app, no browser): its own endpoint and data folder, phone access
 12. Alerts, with no window open, against a local stand-in for a push service that the daemon really POSTs to (`KELPIE_PUSH_TEST_BASE`): the closed list refuses
     what is no push service; a test alert and a needs-you event are signed, encrypted, content-free when opened with the browser's keys, and accepted within 2 s; one call per
     destination; 503 and 429 retried as asked, a session answered meanwhile not told; a hanging ntfy does not delay Web Push; a timeout is said with no address; 404 and 410 end
-    the subscription; a revoke ends it. No real push service is contacted.
+    the subscription; a phone's own choices (`push_prefs`) are checked, kept, listed and told in its hello with the kinds the computer sends, quiet hours around now skip
+    that phone while a test alert still arrives, and needs you can be let through; a revoke ends it. No real push service is contacted.
 """
 import asyncio
 import hashlib
@@ -1090,6 +1091,43 @@ async def security(d):
         check("…which it can", got.get("result") == "ok", got)
     check("the audit log has it, with no address", any(e["action"] == "push_gone" for e in d.call("mobile.audit", {"limit": 50})["entries"]) and PUSH.base not in json.dumps(d.call("mobile.audit", {"limit": 50})))
 
+    # Each phone's own choices: checked, kept, told in the hello, and applied before anything is sent to it.
+    for bad in ({"kinds": ["done", "everything"]}, {"kinds": "done"}, {"quiet": {"from": "22:00", "to": "7:00", "tz_min": 0}}, {"quiet": {"from": "22:00", "to": "07:00", "tz_min": 900}}, {"quiet": {"from": "22:00", "to": "07:00"}}):
+        got = await alerts.ask(type="push_prefs", **bad) or {}
+        check(f"a choice a phone cannot make is refused: {bad}", got.get("code") == "bad_request", got)
+    got = await alerts.ask(type="push_prefs", kinds=["failed", "needs_you"], quiet=None) or {}
+    chosen = {"kinds": ["needs_you", "failed"], "quiet": None}
+    check("a phone's choice of kinds is kept and said back in order", got.get("result") == "ok" and got.get("prefs") == chosen, got)
+    listed = next(x for x in d.call("mobile.status")["devices"] if x["id"] == alert_id)
+    check("…and the desktop lists it", listed.get("alerts") == chosen, listed.get("alerts"))
+    await alerts.close()
+    alerts = ps.Phone(BASE, alert_key, origin=BASE.rstrip("/"))
+    hello = await alerts.open() or {}
+    told = hello.get("push") or {}
+    check("the next hello carries it, with the kinds this computer sends at all (done is off here)", told.get("prefs") == chosen and told.get("events") == ["needs_you", "approval", "failed", "automation", "cost"], told)
+    # Quiet hours around now, in UTC: the phone is skipped, and a test alert is not.
+    minute = time.gmtime().tm_hour * 60 + time.gmtime().tm_min
+    hhmm = lambda m: f"{(m // 60) % 24:02d}:{m % 60:02d}"  # noqa: E731
+    quiet = {"from": hhmm(minute + 24 * 60 - 60), "to": hhmm(minute + 60), "tz_min": 0}
+    got = await alerts.ask(type="push_prefs", kinds=None, quiet=quiet) or {}
+    check("quiet hours are kept, holding every alert unless said otherwise", got.get("prefs") == {"kinds": None, "quiet": {**quiet, "needs_you_through": False}}, got)
+    before = len(PUSH.at("/push/alerts"))
+    s, _, _ = await needs_you("alert-quiet")
+    await asyncio.sleep(3)
+    check("a needs-you event inside that phone's quiet hours sends it nothing", len(PUSH.at("/push/alerts")) == before, len(PUSH.at("/push/alerts")) - before)
+    d.call("session.close", {"handle": info(d, s["id"])["handle"]})
+    got = await alerts.ask(timeout=15, type="push_test") or {}
+    check("…while a test alert still arrives", got.get("result") == "ok" and len(PUSH.at("/push/alerts")) == before + 1, (got, len(PUSH.at("/push/alerts")) - before))
+    got = await alerts.ask(type="push_prefs", kinds=None, quiet={**quiet, "needs_you_through": True}) or {}
+    check("needs you may be let through the quiet hours", (got.get("prefs") or {}).get("quiet", {}).get("needs_you_through") is True, got)
+    before = len(PUSH.at("/push/alerts"))
+    s, _, _ = await needs_you("alert-quiet-through")
+    check("…and then it arrives", bool(await ps.async_wait_for(lambda: len(PUSH.at("/push/alerts")) > before, 15)), len(PUSH.at("/push/alerts")) - before)
+    d.call("session.close", {"handle": info(d, s["id"])["handle"]})
+    got = await alerts.ask(type="push_prefs", kinds=None, quiet=None) or {}
+    listed = next(x for x in d.call("mobile.status")["devices"] if x["id"] == alert_id)
+    check("following the computer again is no choice at all", got.get("result") == "ok" and got.get("prefs") is None and listed.get("alerts") is None, (got, listed.get("alerts")))
+
     # Taking the phone away ends its alerts at once.
     d.call("mobile.revoke", {"id": alert_id})
     check("a revoke ends the subscription with it", d.call("notify.get")["webpush"]["devices"] == 0)
@@ -1175,7 +1213,7 @@ async def security(d):
     check("…but says why it may not take control, its record being below it, and that this computer is on Tailscale", hello["device"].get("control") == "not_granted" and hello.get("ts") is True, (hello["device"], hello.get("ts")))
     route = lambda: (next((x for x in d.call("mobile.status")["devices"] if x["name"] == "Over Tailscale"), {}).get("connection") or {}).get("route")
     check("the desktop lists it as connected through Tailscale", await ps.async_wait_for(lambda: route() == "tailscale", 10), route())
-    for name in ("list", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_test"):
+    for name in ("list", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test"):
         reply = await locked.ask(type=name, id="nothing", text="x", key="enter")
         check(f"…{name} is refused while locked", (reply or {}).get("code") == "locked", reply)
     check("…while a heartbeat and the lock's own verbs pass", (await locked.ask(type="hb", n=1))["type"] == "hb" and (await locked.ask(type="lock_challenge"))["lock"]["state"] == "enrol")

@@ -12,6 +12,7 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 use super::outbox::{Attempt, Entry, Outbox, Pick};
 use super::telegram_poll::{Answered, Approval, Approvals};
@@ -35,6 +36,105 @@ pub struct Target {
     pub lang: String,
     /// The origin of the page that subscribed, which is where its pairing is. None for a subscription from before it was recorded.
     pub origin: Option<String>,
+    /// Which alerts this phone chose. None: every one the computer sends.
+    pub prefs: Option<AlertPrefs>,
+}
+
+/// Which alerts a phone wants, and when it wants none (the phone's `push_prefs`). It can only narrow what the computer sends, so it is kept
+/// outside every MAC of the device's record: a well-formed edit in the file at worst changes which alerts arrive. A value of the wrong
+/// type stops the whole store from loading, as one in any other field does.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AlertPrefs {
+    /// The kinds that alert this phone, by `Kind::choice`. None: whatever the computer sends.
+    #[serde(default)]
+    pub kinds: Option<Vec<String>>,
+    #[serde(default)]
+    pub quiet: Option<QuietHours>,
+}
+
+/// Hours with no alert, in the phone's own time.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuietHours {
+    /// `HH:MM`. A `from` after `to` spans midnight; the same time for both is no quiet window at all.
+    pub from: String,
+    pub to: String,
+    /// The phone's offset from UTC in minutes, east positive: the time there is UTC plus this. The phone says it again when it changes.
+    pub tz_min: i32,
+    /// "Needs you" still alerts during these hours. Off by default: quiet hours hold every alert.
+    #[serde(default)]
+    pub needs_you_through: bool,
+}
+
+/// The widest offset from UTC there is (UTC+14:00), either way.
+const TZ_LIMIT: i64 = 840;
+
+/// Minutes after midnight of `HH:MM`.
+fn minutes(hhmm: &str) -> Option<u32> {
+    let b = hhmm.as_bytes();
+    if b.len() != 5 || b[2] != b':' || ![b[0], b[1], b[3], b[4]].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let (h, m) = (u32::from(b[0] - b'0') * 10 + u32::from(b[1] - b'0'), u32::from(b[3] - b'0') * 10 + u32::from(b[4] - b'0'));
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+impl QuietHours {
+    /// Whether `now_ms` (UTC) is inside them. Times that do not read are no window: a file edited by hand sends alerts rather than holds them.
+    pub fn covers(&self, now_ms: u64) -> bool {
+        let (Some(from), Some(to)) = (minutes(&self.from), minutes(&self.to)) else { return false };
+        let local = ((now_ms / 60_000) as i64 + i64::from(self.tz_min)).rem_euclid(24 * 60) as u32;
+        match from.cmp(&to) {
+            std::cmp::Ordering::Equal => false,
+            std::cmp::Ordering::Less => from <= local && local < to,
+            std::cmp::Ordering::Greater => local >= from || local < to,
+        }
+    }
+}
+
+impl AlertPrefs {
+    /// Whether an event of `kind` happening at `now_ms` (UTC) alerts this phone.
+    pub fn wants(&self, kind: Kind, now_ms: u64) -> bool {
+        if self.kinds.as_ref().is_some_and(|kinds| !kinds.iter().any(|k| k == kind.choice())) {
+            return false;
+        }
+        match &self.quiet {
+            Some(q) if q.covers(now_ms) => q.needs_you_through && kind == Kind::Waiting,
+            _ => true,
+        }
+    }
+
+    /// The choices a phone sent with `push_prefs` (`kinds` and `quiet`, each null for none), checked and in a fixed order. Err names what is wrong.
+    /// Nothing chosen is `None`: the phone follows the computer.
+    pub fn from_request(req: &serde_json::Value) -> Result<Option<AlertPrefs>, &'static str> {
+        let kinds = match &req["kinds"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::Array(names) => {
+                let mut chosen = Vec::new();
+                for name in names {
+                    let kind = name.as_str().and_then(|n| Kind::ALL.into_iter().find(|k| k.choice() == n)).ok_or("kinds are needs_you, approval, failed, done, automation or cost")?;
+                    chosen.push(kind);
+                }
+                Some(Kind::ALL.into_iter().filter(|k| chosen.contains(k)).map(|k| k.choice().to_string()).collect())
+            }
+            _ => return Err("kinds is a list, or null"),
+        };
+        let quiet = match &req["quiet"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::Object(q) => {
+                let time = |key: &str| q.get(key).and_then(|v| v.as_str()).filter(|t| minutes(t).is_some()).map(str::to_string).ok_or("quiet hours are from and to, each HH:MM");
+                let (from, to) = (time("from")?, time("to")?);
+                let tz_min = q.get("tz_min").and_then(|v| v.as_i64()).filter(|t| (-TZ_LIMIT..=TZ_LIMIT).contains(t)).ok_or("tz_min is whole minutes from UTC, at most 840 either way")?;
+                let needs_you_through = match q.get("needs_you_through") {
+                    None | Some(serde_json::Value::Null) => false,
+                    Some(serde_json::Value::Bool(b)) => *b,
+                    Some(_) => return Err("needs_you_through is true or false"),
+                };
+                Some(QuietHours { from, to, tz_min: tz_min as i32, needs_you_through })
+            }
+            _ => return Err("quiet is an object, or null"),
+        };
+        Ok((kinds.is_some() || quiet.is_some()).then_some(AlertPrefs { kinds, quiet }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -206,6 +306,17 @@ impl Destinations {
 
     pub fn device_ids(&self) -> Vec<String> {
         self.shared.devices.lock().keys().cloned().collect()
+    }
+
+    /// The phones with alerts on whose own choices take an event of `kind` at `now_ms` (UTC).
+    pub fn devices_wanting(&self, kind: Kind, now_ms: u64) -> Vec<String> {
+        self.shared.devices.lock().iter().filter(|(_, t)| t.prefs.as_ref().is_none_or(|p| p.wants(kind, now_ms))).map(|(id, _)| id.clone()).collect()
+    }
+
+    /// The kinds this computer sends at all (its `Events` switches), as a phone names them: what a phone may choose among.
+    pub fn sent_kinds(&self) -> Vec<&'static str> {
+        let events = self.shared.config.lock().events.clone();
+        Kind::ALL.into_iter().filter(|k| k.enabled(&events)).map(Kind::choice).collect()
     }
 
     /// The phones that have alerts on, as the store says now. One that is no longer among them stops here, before this returns: its

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use super::verbs::Permission;
+use crate::notify::destinations::AlertPrefs;
 
 pub const FILE: &str = "mobile.v2.json";
 pub const LEGACY_FILE: &str = "mobile.json";
@@ -178,6 +179,11 @@ pub struct Device {
     /// The passkey that unlocks this phone, with its own tag: a record paired here still verifies for an older Kelpie, which ignores this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock: Option<LockCredential>,
+    /// Which alerts this phone chose (`push_prefs`). Outside every tag: it can only narrow what the computer sends, so a well-formed edit in the file at
+    /// worst changes which alerts arrive (a value of the wrong type stops the store from loading, as in `push` or `lock`), and an older Kelpie
+    /// ignores it and sends everything. Kept while alerts are off, and gone with the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerts: Option<AlertPrefs>,
     /// Set when the record was loaded or made here and its MACs checked out.
     #[serde(skip)]
     pub verified: bool,
@@ -525,7 +531,7 @@ mod tests {
     }
 
     fn device(key: &[u8; 32]) -> Device {
-        let mut d = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, verified: false };
+        let mut d = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, alerts: None, verified: false };
         seal(&mut d, key);
         d
     }
@@ -731,6 +737,31 @@ mod tests {
         assert!(!json.contains("push"));
         let back: Device = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
         assert_eq!(back.push, on.push);
+    }
+
+    #[test]
+    fn a_phones_alert_choices_are_outside_every_tag_and_an_older_record_reads_as_before() {
+        use crate::notify::destinations::QuietHours;
+        let key = [3u8; 32];
+        let mut on = device(&key);
+        on.push = Some(PushSub { endpoint: "https://fcm.googleapis.com/fcm/send/a".into(), p256dh: "k".into(), lang: "en".into(), created_at: 1, origin: None, mac: String::new() });
+        seal(&mut on, &key);
+        let sealed = on.clone();
+        on.alerts = Some(AlertPrefs { kinds: Some(vec!["needs_you".into()]), quiet: Some(QuietHours { from: "22:00".into(), to: "07:00".into(), tz_min: 420, needs_you_through: true }) });
+        assert!(verify(&on, &key) && push_holds(&on, &key), "set after the seal, every tag still holds");
+        seal(&mut on, &key);
+        assert_eq!((on.mac.as_str(), on.push.as_ref().unwrap().mac.as_str()), (sealed.mac.as_str(), sealed.push.as_ref().unwrap().mac.as_str()), "no tag covers them");
+        let back: Device = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert_eq!(back.alerts, on.alerts);
+        assert!(verify(&back, &key) && push_holds(&back, &key), "read back, it still verifies");
+        let mut edited = back.clone();
+        edited.alerts.as_mut().unwrap().kinds = None;
+        assert!(verify(&edited, &key) && push_holds(&edited, &key), "an edit in the file changes only which alerts arrive");
+        // A record from before the field: nothing is written for it, and it loads and verifies with no choices.
+        let json = serde_json::to_string(&sealed).unwrap();
+        assert!(!json.contains("alerts"), "{json}");
+        let older: Device = serde_json::from_str(&json).unwrap();
+        assert!(older.alerts.is_none() && verify(&older, &key) && push_holds(&older, &key));
     }
 
     #[test]

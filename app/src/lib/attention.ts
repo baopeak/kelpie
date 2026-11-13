@@ -35,6 +35,10 @@ export const SCREEN_API = 29;
  *  device, `origin_kind` on a pairing request, `mobile.enable {lan}`) and makes rooms with no registration key. Below it the hosted app is not offered. */
 export const HOSTED_API = 34;
 
+/** Daemon API level that has each phone's own alert choices (the phone's `push_prefs`, `prefs` and `events` in its hello's `push`, `alerts` on a device in
+ *  `mobile.status`). Below it the phone shows the choices disabled and says the computer needs an update. */
+export const ALERT_PREFS_API = 37;
+
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;
 
