@@ -4,8 +4,9 @@
 // Nothing waits to be shown: a decoded frame is drawn as it comes out of the decoder (no smoothing buffer), on a low-latency canvas where the
 // browser offers one, and a frame the decoder is too far behind for is skipped. The cursor the finger moves is drawn at once (local echo).
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { avcChunk, Backlog, canDecode, clampView, fitView, FrameTimes, followHostCursor, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
-import { connected, onScreenMedia, remoteScreen, remoteScreens } from "./phone-state";
+import { avcChunk, Backlog, canDecode, clampView, detailsText, fitView, FrameTimes, followHostCursor, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
+import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens } from "./phone-state";
+import { pathText } from "./conn-path";
 import { t } from "./i18n";
 
 const KEY_LABELS: Record<(typeof KEYS)[number], string> = { Escape: "Esc", Tab: "⇥", Enter: "⏎", Backspace: "⌫", Delete: "Del", ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→", Home: "Home", End: "End", PageUp: "PgUp", PageDown: "PgDn", F5: "F5", ContextMenu: "☰", Meta: "⊞" };
@@ -93,7 +94,7 @@ function Live() {
   let skipToKey = true;
   let src = { w: 0, h: 0 };
   let cursor = { shape: 0, visible: false, x: 0, y: 0 };
-  const pending = new Map<number, { unpaint: { x: number; y: number; w: number; h: number }[]; unpaintAll: boolean; srcW: number; srcH: number }>();
+  const pending = new Map<number, { unpaint: { x: number; y: number; w: number; h: number }[]; unpaintAll: boolean; srcW: number; srcH: number; captureMs: number }>();
   const overlay = new Overlay<ImageBitmap>((b) => b.close());
   let shownSeq = 0;
   let drawQueued = false;
@@ -162,6 +163,7 @@ function Live() {
         const p = pending.get(seq);
         pending.delete(seq);
         if (p) {
+          remoteScreens.presented(p.captureMs);
           overlay.onFrame({ seq, ...p });
           if (p.srcW !== src.w || p.srcH !== src.h) {
             src = { w: p.srcW, h: p.srcH };
@@ -234,7 +236,7 @@ function Live() {
       times.backlogSkips++;
       return skip();
     }
-    pending.set(m.seq, { unpaint: m.unpaint, unpaintAll: m.unpaintAll, srcW: m.srcW, srcH: m.srcH });
+    pending.set(m.seq, { unpaint: m.unpaint, unpaintAll: m.unpaintAll, srcW: m.srcW, srcH: m.srcH, captureMs: m.captureMs });
     if (pending.size > 30) pending.delete(pending.keys().next().value!);
     times.decoding(m.seq, performance.now());
     decoder.decode(new EncodedVideoChunk({ type: m.key ? "key" : "delta", timestamp: m.seq, data: avcChunk(m.au) }));
@@ -297,6 +299,8 @@ function Live() {
     }
     if (await remoteScreens.type(value)) setText("");
   };
+  // The part shown now, sent crisp once (while crisp text is off for a slow connection).
+  const sharpen = () => remoteScreens.sharpen(visibleRect(frame().el, src.w, src.h, view()));
   const resetView = () => {
     setView(clampView(frame().el, src.w, src.h, fitView(src.w, src.h)));
     redraw();
@@ -313,13 +317,25 @@ function Live() {
       <div class="takeover-screen screen-canvas" ref={box} style={{ "touch-action": "none" }} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel}>
         <canvas ref={canvas} aria-label={t("The computer's screen")} />
         <Show when={remoteText(s().remote, t)}>{(line) => <div class="takeover-lost" role="status" data-remote-state={s().remote}>{line()}</div>}</Show>
-        <Show when={s().phase === "frozen" || !connected()}><div class="takeover-lost" role="status">{t("Connection lost: nothing is sent until the picture is back.")}</div></Show>
+        <Show when={s().phase === "frozen" || !connected()}>
+          <div class="takeover-lost" role="status" data-screen-reconnecting>
+            {s().graceLeft !== null ? t("Reconnecting… the computer keeps this screen for {s} s more. Nothing is sent until the picture is back.", { s: s().graceLeft ?? 0 }) : t("Connection lost: nothing is sent until the picture is back.")}
+          </div>
+        </Show>
         <Show when={s().phase === "live" && s().stuck}><div class="takeover-lost" role="status" data-screen-stuck>{t("The picture is stuck: asking the computer for a fresh one.")}</div></Show>
         <Show when={debug()}>
-          <pre class="screen-debug">{JSON.stringify({ ...s().stats, queue: queue(), shown: shownSeq, tiles: overlay.count, encoder: s().encoder, phone: { ...times.snapshot(), desynchronized: lowLatency() } }, null, 1)}</pre>
+          <pre class="screen-debug">{JSON.stringify({ ...s().stats, age_ms_p50: s().age, queue: queue(), shown: shownSeq, tiles: overlay.count, encoder: s().encoder, phone: { ...times.snapshot(), desynchronized: lowLatency() } }, null, 1)}</pre>
         </Show>
       </div>
-      <p class="muted screen-quality" onClick={() => setDebug(!debug())}>{qualityText(s().stats, t)}<Show when={s().encoder === "sw"}> · {t("software encoder")}</Show></p>
+      <p class="muted screen-quality" onClick={() => setDebug(!debug())}>
+        {qualityText(s().stats, t)}
+        <Show when={s().encoder === "sw"}> · {t("software encoder")}</Show>
+        <Show when={s().stats?.crisp === false && live() && canSharpen()}>
+          {" "}
+          <button class="btn" data-screen-sharpen onClick={(e) => { e.stopPropagation(); sharpen(); }}>{t("Sharpen")}</button>
+        </Show>
+      </p>
+      <p class="muted screen-details" data-screen-details>{detailsText(s().stats, connected() ? pathText(livePathNow(), t) : null, s().age, t)}</p>
       <div class="composer">
         <div class="keybar">
           <For each={MODS}>{(m) => <button class="btn" classList={{ primary: mods().includes(m) }} aria-pressed={mods().includes(m)} disabled={!live()} onClick={() => toggleMod(m)}>{MOD_LABELS[m]}</button>}</For>

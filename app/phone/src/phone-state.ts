@@ -32,7 +32,7 @@ import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
 import { KIND_VIDEO, ScreenSession, type ScreenState } from "./screen";
-import { NEW_SESSION_API, SCREEN_API, TAKEOVER_API } from "../../src/lib/attention";
+import { NEW_SESSION_API, SCREEN_API, SCREEN_FLOW_API, TAKEOVER_API } from "../../src/lib/attention";
 import { newSessionRequest, optionsOutcome, sendStart, startOutcome, type OptionsResult, type StartResult } from "./start-session";
 
 // ---------- signals the views read ----------
@@ -92,6 +92,8 @@ export const canStartSessions = () => canType() && daemonApi() >= NEW_SESSION_AP
 export const [takeover, setTakeover] = createSignal<TakeoverState | null>(null);
 /** This phone may see the computer's screen (the same rule as a pane's takeover, at a computer that has it). */
 export const canSeeScreen = () => device()?.permission === "control" && daemonApi() >= SCREEN_API;
+/** The computer takes Sharpen (`sc_sharpen`). */
+export const canSharpen = () => daemonApi() >= SCREEN_FLOW_API;
 /** The computer is also published over Tailscale, as its last hello said. */
 export const [computerOnTailscale, setComputerOnTailscale] = createSignal(false);
 /** Null when the computer's screen can be seen from here; otherwise the sentence that says why not (Settings). The computer's own reason comes first, once it
@@ -385,6 +387,8 @@ const remoteScreens = new ScreenSession({
   input: (sc, ops, st) => link.scInput(sc, ops, st),
   ack: (sc, seq) => link.scAck(sc, seq),
   keyframe: (sc) => link.scKey(sc),
+  sharpen: (sc, rect) => link.scSharpen(sc, rect),
+  kick: () => link.nudge(),
   serverNow: () => link.serverNow(),
   now: () => Date.now(),
   setTimeout: (fn, ms) => setTimeout(fn, ms),

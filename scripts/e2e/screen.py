@@ -29,89 +29,27 @@ The phone here is emulated: it gets the binary media messages and acknowledges e
 """
 import asyncio
 import ctypes
-import ctypes.wintypes as wt
 import json
 import os
 import secrets
-import shutil
-import socket
-import struct
-import subprocess
 import sys
 import time
 import traceback
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import screen_support as ss  # noqa: E402
+from screen_support import ScreenPhone, check, cursor, frame_bounds, now_ms, spawn, stop, to_front, until  # noqa: E402
+
+SETUP = ss.prepare("screen", __doc__)
 import phone_support as ps  # noqa: E402
 
-if len(sys.argv) < 3 or os.name != "nt":
-    raise SystemExit(__doc__)
-scratch = os.path.abspath(sys.argv[1])
-app = os.path.abspath(sys.argv[2])
-kelpied = os.path.join(os.path.dirname(app), "kelpied.exe")
-helper = os.path.join(os.path.dirname(app), "kelpie-screen.exe")
-os.makedirs(scratch, exist_ok=True)
-WORK = os.path.join(scratch, f"screen-{os.getpid()}")
-os.makedirs(WORK)
-DATA = ps.isolate("screen")
-os.environ["KELPIE_DAEMON_PATH"] = kelpied
-os.environ["KELPIE_SCREEN_PATH"] = helper
-os.environ["KELPIE_E2E"] = "1"
-for k in ("KELPIE_ALLOW_REAL_DAEMON",):
-    os.environ.pop(k, None)
-
-from smoke_support import Run, daemon as app_daemon, native_driver, native_driver_hint, tauri_driver  # noqa: E402
-
-NATIVE, TAURI_DRIVER = native_driver(), tauri_driver()
-if not NATIVE or not TAURI_DRIVER:
-    raise SystemExit(f"needs tauri-driver (PATH or ~/.cargo/bin) and {native_driver_hint()}")
-for what, path in (("app", app), ("daemon next to the app", kelpied), ("screen helper next to the app", helper)):
-    if not os.path.exists(path):
-        raise SystemExit(f"no {what}: {path}")
-
-PORT = 48900 + os.getpid() % 400
-BASE = f"http://127.0.0.1:{PORT}/"
-FQDN = ps.FAKE_TAILNET_NAME
-ORIGIN = f"{FQDN}:8443"
+app, kelpied, helper, WORK, DATA = SETUP.app, SETUP.kelpied, SETUP.helper, SETUP.work, SETUP.data
+BASE, ORIGIN = SETUP.base, SETUP.origin
 TITLE = "Kelpie screen test " + secrets.token_hex(3)
 TYPED = "typed-" + secrets.token_hex(6)
 TYPED2 = "again-" + secrets.token_hex(6)
 EVENTS = os.path.join(WORK, "window-events.txt")
-
-results = []
-
-
-def check(name, ok, detail=""):
-    results.append((name, bool(ok)))
-    detail = str(detail).encode("ascii", "replace").decode()
-    print(("PASS " if ok else "FAIL ") + name + (f"  ({detail[:300]})" if detail and not ok else ""), flush=True)
-
-
-def port_open(port):
-    with socket.socket() as s:
-        return s.connect_ex(("127.0.0.1", port)) == 0
-
-
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def until(fn, timeout=30, step=0.2):
-    end = time.time() + timeout
-    while time.time() < end:
-        v = fn()
-        if v:
-            return v
-        time.sleep(step)
-    return None
-
-
-def now_ms():
-    return int(time.time() * 1000)
-
+results = ss.results
 
 # ---------- the window the phone sees ----------
 
@@ -214,24 +152,6 @@ def geometry(name):
     return None
 
 
-class RECT(ctypes.Structure):
-    _fields_ = [("left", wt.LONG), ("top", wt.LONG), ("right", wt.LONG), ("bottom", wt.LONG)]
-
-
-def frame_bounds(hwnd):
-    """The window as DWM draws it: what the screen helper captures, so the picture's pixel (0, 0) is its corner."""
-    r = RECT()
-    ctypes.windll.dwmapi.DwmGetWindowAttribute(wt.HWND(hwnd), 9, ctypes.byref(r), ctypes.sizeof(r))  # DWMWA_EXTENDED_FRAME_BOUNDS
-    return r.left, r.top, r.right - r.left, r.bottom - r.top
-
-
-def cursor():
-    """Where the pointer is, in physical pixels whatever this process's DPI awareness."""
-    p = wt.POINT()
-    ctypes.windll.user32.GetPhysicalCursorPos(ctypes.byref(p))
-    return p.x, p.y
-
-
 def helper_cpu(seconds):
     """The screen helper's CPU over `seconds`, as a share of one core, or None without psutil."""
     try:
@@ -244,19 +164,6 @@ def helper_cpu(seconds):
             time.sleep(seconds)
             return p.cpu_percent(None)
     return None
-
-
-def to_front(hwnd):
-    """Brings a window to the front from this process, as the screen helper does: attached for a moment to the thread in front."""
-    u = ctypes.windll.user32
-    fg = u.GetForegroundWindow()
-    them, me = u.GetWindowThreadProcessId(fg, None), ctypes.windll.kernel32.GetCurrentThreadId()
-    attached = bool(them) and u.AttachThreadInput(me, them, True)
-    u.BringWindowToTop(hwnd)
-    u.SetForegroundWindow(hwnd)
-    if attached:
-        u.AttachThreadInput(me, them, False)
-    return True
 
 
 def why_not(phone):
@@ -285,82 +192,6 @@ def press_hotkey():
         user32.keybd_event(k, 0, 2, 0)
 
 
-# ---------- processes this script starts ----------
-
-procs = {}
-
-
-def spawn(name, argv):
-    procs[name] = subprocess.Popen(argv, env=os.environ.copy(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def stop(name):
-    p = procs.get(name)
-    if p is not None and p.poll() is None:
-        subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True)
-        try:
-            p.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            print(f"{name} (pid {p.pid}) did not stop", flush=True)
-
-
-def media_header(b):
-    """What the screen's binary message says (crates/kelpie-screen/src/wire.rs), without its picture."""
-    kind = b[1]
-    if kind == 1:
-        n = b[3]
-        seq, capture = struct.unpack_from("<II", b, 4)
-        src_w, src_h, coded_w, coded_h = struct.unpack_from("<HHHH", b, 12)
-        au = bytes(b[20 + n * 8:])
-        nals = [au[i + 3] & 0x1F for i in range(len(au) - 3) if au[i:i + 3] == b"\x00\x00\x01"]
-        return {"type": "sc_media", "kind": "video", "key": bool(b[2] & 1), "seq": seq, "src": (src_w, src_h), "coded": (coded_w, coded_h), "nals": nals, "_size": len(b)}
-    if kind == 2:
-        return {"type": "sc_media", "kind": "tile", "format": b[2], "seq": struct.unpack_from("<I", b, 4)[0], "_size": len(b)}
-    if kind == 3:
-        return {"type": "sc_media", "kind": "cursor", "visible": b[3] == 1}
-    return {"type": "sc_media", "kind": "unknown"}
-
-
-class ScreenPhone(ps.Phone):
-    """A phone that reads the screen's binary messages and acknowledges each video frame as a decoder would, and keeps its lock's window open."""
-
-    async def _read(self):
-        try:
-            async for raw in self.ws:
-                whole = self.session.open(raw)
-                if whole is None:
-                    continue
-                if whole[:1] == b"\x01":
-                    m = media_header(whole)
-                    m["_t"] = time.monotonic()
-                    self.log.append(m)
-                    if m["kind"] == "video" and getattr(self, "sc", None):
-                        await self.send(type="sc_ack", sc=self.sc, seq=m["seq"])
-                    elif m["kind"] == "video":
-                        # Before the start's answer (the picture can overtake it): acknowledged once the screen is known, as the page does.
-                        self.early = max(getattr(self, "early", 0), m["seq"])
-                    continue
-                m = json.loads(whole)
-                m["_t"] = time.monotonic()
-                self.log.append(m)
-                if m["type"] == "hb" and not m.get("echo") and self.auto_hb:
-                    await self.send(type="hb", echo=True, n=m.get("n"))
-        except Exception as e:  # noqa: BLE001 - the socket closed under it
-            rcvd = getattr(e, "rcvd", None)
-            self.closed = rcvd.code if rcvd else 1006
-        finally:
-            self.closed = self.closed or 1006
-
-    async def touch(self):
-        await self.send(type="lock_touch")
-
-    async def click(self, x, y, st=None):
-        await self.send(type="sc_input", sc=self.sc, ops=[{"k": "click", "x": x, "y": y, "b": "left"}], st=st if st is not None else now_ms())
-
-    async def media(self, since, pred=lambda m: True, timeout=10):
-        return await self.wait(lambda m: m["type"] == "sc_media" and pred(m), timeout, since)
-
-
 def refused(d, method, params):
     try:
         d.call(method, params)
@@ -369,28 +200,8 @@ def refused(d, method, params):
         return str(e)
 
 
-TS_BIN = TS_STATE = TS_LOG = None
-
-
 async def control_phone(d, call, serve_port, name):
-    """A phone paired on the Tailscale origin, its passkey set up, given control on the desktop, connected again unlocked."""
-    made = await call("mobile.pair_start")
-    through = dict(host="127.0.0.1", port=serve_port, origin=f"https://{ORIGIN}", additional_headers={"X-Forwarded-For": "100.101.102.103"})
-    asking = await ps.PairAttempt(f"http://{ORIGIN}/", made["url"], name, "write", **through).start()
-    request = await asyncio.to_thread(ps.pending_request, d, name)
-    await call("mobile.approve", {"id": request["id"], "allow": True, "code": asking.code(), "permission": "write"})
-    told = await asking.outcome(15)
-    device = ps.Device(asking.priv, asking.pub, asking.dpk, (told or {}).get("device", {}).get("id"))
-    held = dict(host="127.0.0.1", port=serve_port, additional_headers={"X-Forwarded-For": "100.101.102.103"})
-    phone = ScreenPhone(f"http://{ORIGIN}/", device, origin=f"https://{ORIGIN}", **held)
-    await phone.open()
-    passkey = ps.SoftPasskey(f"https://{ORIGIN}")
-    challenge = (await phone.ask(type="lock_challenge"))["lock"]["challenge"]
-    enrolled = await phone.ask(type="lock_enrol", **passkey.create(challenge))
-    await call("mobile.set_permission", {"id": device.id, "permission": "control"})
-    await phone.close()
-    phone = ScreenPhone(f"http://{ORIGIN}/", device, origin=f"https://{ORIGIN}", resume=enrolled["resume"], **held)
-    hello = await phone.open()
+    phone, device, hello, passkey, _ = await ss.control_phone(SETUP, d, call, serve_port, name)
     return phone, device, hello, passkey
 
 
@@ -410,11 +221,7 @@ async def scenario(run, d):
     check("a second screen provider is refused", "already provides" in (second or ""), second)
 
     # ---------- 2. phones ----------
-    await call("mobile.enable", {"ip": "127.0.0.1", "port": PORT})
-    ps.fake_tailscale_says(TS_STATE, status=ps.FAKE_TAILSCALE_READY)
-    await call("mobile.set_tailscale", {"on": True})
-    changes = [c for c in ps.fake_tailscale_calls(TS_LOG) if c.startswith("serve --bg")]
-    serve_port = int(changes[-1].rsplit(":", 1)[1])
+    serve_port = await ss.phones_on(SETUP, call)
     phone, device, hello, _ = await control_phone(d, call, serve_port, "Screen phone")
     check("the phone comes back unlocked, with control", hello.get("locked") is False and hello["device"]["permission"] == "control", hello.get("device"))
     spare, spare_device, _, spare_key = await control_phone(d, call, serve_port, "Spare phone")
@@ -653,20 +460,9 @@ async def scenario(run, d):
 
 
 def main():
-    global TS_BIN, TS_STATE, TS_LOG
-    TS_BIN, TS_STATE, TS_LOG = ps.write_fake_tailscale(WORK)
-    d = ps.Daemon(kelpied, env={"KELPIE_LOAD_FORCE": "L0:calm", "KELPIE_E2E": "1", "KELPIE_TAILSCALE_BIN": TS_BIN}).start()
-    procs["daemon"] = d.proc
-    driver_port = free_port()
-    os.environ["KELPIE_E2E_DRIVER"] = f"http://127.0.0.1:{driver_port}"
-    run = None
+    d = run = None
     try:
-        spawn("driver", [TAURI_DRIVER, "--port", str(driver_port), "--native-port", str(free_port()), "--native-driver", NATIVE])
-        if not until(lambda: port_open(driver_port), 30):
-            raise SystemExit("tauri-driver did not open its port")
-        run = Run(os.path.join(scratch, "shots"), app=app)
-        info = app_daemon(run.d, "daemon.info") if until(lambda: run.d.js("return !!(window.__kelpie && window.__kelpie.store.connected())"), 60) else {}
-        check("the app is connected to this script's daemon", info.get("pid") == d.pid, info.get("pid"))
+        d, run = ss.start(SETUP)
         asyncio.run(scenario(run, d))
     except SystemExit:
         raise
@@ -674,17 +470,7 @@ def main():
         traceback.print_exc()
         check("scenario ran to completion", False)
     finally:
-        if run is not None and run.d is not None:
-            try:
-                run.d.quit()
-            except Exception:  # noqa: BLE001
-                pass
-        stop("window")
-        stop("decoy")
-        stop("driver")
-        assert os.environ["KELPIE_ENDPOINT"].startswith("kelpie-screen-")
-        d.stop()
-        shutil.rmtree(WORK, ignore_errors=True)
+        ss.finish(SETUP, d, run, "window", "decoy")
     failed = [r for r in results if not r[1]]
     print(json.dumps({"passed": len(results) - len(failed), "failed": len(failed)}))
     sys.exit(1 if failed else 0)

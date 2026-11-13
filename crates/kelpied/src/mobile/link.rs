@@ -35,7 +35,7 @@ use axum::http::{header, HeaderMap};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
-use super::lanes::SLOW_AFTER;
+use super::lanes::{CursorSlot, SLOW_AFTER};
 use super::store::{Device, Kind, PageKind};
 use super::{listen, webauthn, Generation, HandshakeSlot, KeyLookup, CLOSE_TIMEOUT, CODE_TTL, NOT_PAIRED, RECONNECT, UNCONFIRMED};
 use crate::session::now_millis as now;
@@ -242,8 +242,9 @@ impl CarrierTx {
 enum Outgoing {
     /// A whole message, sealed by the writer as it goes (so that the session's numbering is the socket's order).
     Message(Vec<u8>),
-    /// The screen's media lane: taken only when no message waits, and dropped while `locked` (nothing of it goes to a locked phone).
-    Media(mpsc::Receiver<Vec<u8>>, Arc<AtomicBool>),
+    /// The screen's media lane and cursor slot: media taken only when no message waits, the cursor before it, both dropped while `locked`
+    /// (nothing of them goes to a locked phone).
+    Media(mpsc::Receiver<Vec<u8>>, CursorSlot, Arc<AtomicBool>),
     Close(u16, &'static str, oneshot::Sender<()>),
 }
 
@@ -335,9 +336,10 @@ impl Wire {
         self.bulk.capacity() > 0
     }
 
-    /// Hands the screen's media lane to the writer: sent behind every other message, and dropped while `locked` is set.
-    pub async fn attach_media(&mut self, media: mpsc::Receiver<Vec<u8>>, locked: Arc<AtomicBool>) -> bool {
-        matches!(tokio::time::timeout(SLOW_AFTER, self.out.send(Outgoing::Media(media, locked))).await, Ok(Ok(())))
+    /// Hands the screen's media lane and its cursor slot to the writer: the cursor behind control and bulk messages, media behind every other
+    /// message, both dropped while `locked` is set.
+    pub async fn attach_media(&mut self, media: mpsc::Receiver<Vec<u8>>, cursor: CursorSlot, locked: Arc<AtomicBool>) -> bool {
+        matches!(tokio::time::timeout(SLOW_AFTER, self.out.send(Outgoing::Media(media, cursor, locked))).await, Ok(Ok(())))
     }
 
     /// Opens one message from the socket.
@@ -387,10 +389,14 @@ impl Wire {
     }
 }
 
-/// The writer: control messages first, in order, then bulk, then the screen's media when nothing else waits. Each message is sealed as it goes and must be on
+/// The writer: control messages first, in order, then bulk, then the screen's cursor (its latest position), then the screen's media when nothing
+/// else waits. Each message is sealed as it goes and must be on
 /// the socket within `SLOW_AFTER`; a socket that takes longer, or is gone, ends the writer, and with it the connection.
 async fn write(mut tx: CarrierTx, session: Arc<parking_lot::Mutex<kelpie_link::Session>>, mut queue: mpsc::Receiver<Outgoing>, mut bulk: mpsc::Receiver<Vec<u8>>, _alive: oneshot::Sender<()>) {
-    let mut media: Option<(mpsc::Receiver<Vec<u8>>, Arc<AtomicBool>)> = None;
+    // The screen's media lane and cursor slot, once attached, and whether the phone is locked (nothing of either goes then).
+    let mut media: Option<mpsc::Receiver<Vec<u8>>> = None;
+    let mut cursor: Option<CursorSlot> = None;
+    let mut locked = Arc::new(AtomicBool::new(false));
     loop {
         let next = tokio::select! {
             biased;
@@ -399,15 +405,25 @@ async fn write(mut tx: CarrierTx, session: Arc<parking_lot::Mutex<kelpie_link::S
                 None => return,
             },
             Some(b) = bulk.recv() => Outgoing::Message(b),
-            Some(m) = async { media.as_mut()?.0.recv().await }, if media.is_some() => {
-                if media.as_ref().is_some_and(|(_, locked)| locked.load(Ordering::SeqCst)) {
+            Some(c) = async { let slot = cursor.as_ref()?; slot.ready().await; slot.take() }, if cursor.is_some() => {
+                if locked.load(Ordering::SeqCst) {
+                    continue;
+                }
+                Outgoing::Message(c)
+            }
+            Some(m) = async { media.as_mut()?.recv().await }, if media.is_some() => {
+                if locked.load(Ordering::SeqCst) {
                     continue;
                 }
                 Outgoing::Message(m)
             }
         };
         match next {
-            Outgoing::Media(rx, locked) => media = Some((rx, locked)),
+            Outgoing::Media(rx, slot, lock) => {
+                media = Some(rx);
+                cursor = Some(slot);
+                locked = lock;
+            }
             Outgoing::Close(code, reason, done) => {
                 let _ = tokio::time::timeout(CLOSE_TIMEOUT, tx.send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))).await;
                 let _ = done.send(());
@@ -812,7 +828,7 @@ mod tests {
         let (media_tx, media_rx) = mpsc::channel(6);
         let locked = Arc::new(AtomicBool::new(false));
         media_tx.try_send(b"\x01first frame".to_vec()).unwrap();
-        assert!(wire.attach_media(media_rx, locked.clone()).await);
+        assert!(wire.attach_media(media_rx, CursorSlot::default(), locked.clone()).await);
         assert!(wire.send("one").await && wire.send("two").await);
         // The writer is held by the phone's slow side: the connection still reads what the phone sends meanwhile.
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -874,7 +890,7 @@ mod queue_tests {
         let mut keyframe = vec![0x01u8];
         keyframe.resize(300_000, 7);
         media_tx.try_send(keyframe.clone()).unwrap();
-        assert!(wire.attach_media(media_rx, Arc::new(AtomicBool::new(false))).await);
+        assert!(wire.attach_media(media_rx, CursorSlot::default(), Arc::new(AtomicBool::new(false))).await);
         // The writer starts on the keyframe and waits on the slow phone, part of it written.
         tokio::time::sleep(Duration::from_millis(30)).await;
         // Bulk fills its queue without the connection ever waiting on it; a reply goes on the control queue.
@@ -900,6 +916,43 @@ mod queue_tests {
         assert_eq!(got[0], keyframe, "the message being written is finished first");
         assert_eq!(got[1], b"reply".to_vec(), "then the reply, ahead of every bulk message");
         assert_eq!(got[2], b"bulk 0".to_vec());
+    }
+
+    #[tokio::test]
+    async fn the_cursor_goes_ahead_of_the_video_queued_before_it_and_only_its_latest_place() {
+        let (ours, mut phone) = sessions();
+        let (_frames_tx, frames_rx) = mpsc::channel::<Inbound>(8);
+        let (out_tx, mut out_rx) = mpsc::channel::<Out>(1);
+        let mut wire = Wire::new(Carrier::Relay(Slot::for_test(frames_rx, out_tx)), ours);
+        let (media_tx, media_rx) = mpsc::channel(12);
+        // A large frame being written, and six more behind it.
+        let mut first = vec![0x01u8, 1];
+        first.resize(200_000, 7);
+        media_tx.try_send(first.clone()).unwrap();
+        for i in 0..6u8 {
+            media_tx.try_send(vec![0x01, 1, i]).unwrap();
+        }
+        let cursor = CursorSlot::default();
+        assert!(wire.attach_media(media_rx, cursor.clone(), Arc::new(AtomicBool::new(false))).await);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Two places while the frames wait: only the newer goes, and before every frame not yet begun.
+        cursor.put(vec![0x01, 3, 0]);
+        cursor.put(vec![0x01, 3, 1]);
+        let mut got = Vec::new();
+        for _ in 0..200 {
+            while let Ok(Out::Frame(_, _, frame)) = out_rx.try_recv() {
+                if let Some(msg) = phone.open(&frame, now()).unwrap() {
+                    got.push(msg);
+                }
+            }
+            if got.len() >= 8 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(got[0], first, "the frame being written is finished first");
+        assert_eq!(got[1], vec![0x01, 3, 1], "then the cursor's latest place, ahead of the frames queued before it");
+        assert_eq!(got[2..].to_vec(), (0..6u8).map(|i| vec![0x01, 1, i]).collect::<Vec<_>>(), "and no older place after them");
     }
 
     #[tokio::test]

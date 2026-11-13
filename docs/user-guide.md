@@ -1361,9 +1361,15 @@ screens, then Kelpie and the code editors that are open, then the other windows.
 a tap clicks where the pointer is, holding still then moving drags, and a long press right-clicks; *Direct touch* clicks under your finger instead. Two fingers
 scroll, pinching zooms the phone's view (not the computer's), and two fingers tapped together right-click. The key row has Ctrl, Shift, Alt and Win (tap one,
 then a key, or type one letter with it held for a shortcut such as Ctrl+S or Win+E), Esc, Tab, Enter, the arrows, ⊞ (the Windows key alone, for Start) and a few more; the text field types on the computer and
-the phone says *Typed on the computer* or *Not sent*. Under the picture the phone says how it is going (`720p · 15 fps · reduced: computer busy`); tap that
-line for details. When text stands still it is sent once more as a sharp picture (*Crisp text* in Settings → Mobile → Advanced, on by default; it uses more
-data, so it turns itself off while the connection is slow, mobile data included, and the phone says *crisp text off: slow connection*).
+the phone says *Typed on the computer* or *Not sent*. Under the picture the phone says how it is going (`720p · 15 fps · reduced: computer busy`), and a
+second line the way it connects, the round trip, the data rate, the frames a second, the size and how old the picture is (`Tailscale · 85 ms round trip ·
+1200 kbps · 30 fps · 1080p · 120 ms old`); tap the first line for more. When text stands still it is sent once more as a sharp picture (*Crisp text* in
+Settings → Mobile → Advanced, on by default; it uses more data, so it turns itself off while the connection is slow, mobile data included, and the phone says
+*crisp text off: slow connection*). Then *Sharpen* sends the part you see sharp once, when you need to read it. On a slow connection the picture gets fewer
+frames first, then smaller, down to about 360p at 5 frames a second (a window stays at least 540 lines tall).
+
+If the connection drops (from Wi-Fi to mobile data, say), the picture freezes, nothing is sent, and the phone says *Reconnecting…* with the seconds left:
+the computer keeps the screen for 45 seconds, and the phone gets it back by itself as soon as it reconnects.
 
 On the computer an orange border goes around what is shared, with a badge naming the phone and the stop hotkey, and the status bar says *Shared with <phone>*
 with *Stop*. **Ctrl+Alt+Shift+K stops it from anywhere**; it is always on (you can pick another key in Settings → Mobile → Advanced, not turn it off, and Kelpie

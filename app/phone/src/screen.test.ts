@@ -13,11 +13,13 @@ import {
   clampView,
   coalesce,
   codecString,
+  detailsText,
   endedText,
   fitView,
   FREEZE_MS,
   Gestures,
   KEYS,
+  KICK_EVERY_MS,
   LONG_PRESS_MS,
   MODS,
   nalType,
@@ -25,13 +27,16 @@ import {
   Overlay,
   parseMedia,
   qualityText,
+  REBIND_GRACE_MS,
   remoteText,
   sameSetup,
   ScreenSession,
   setupFor,
+  SHARPEN_GAP_MS,
   STUCK_MS,
   toClient,
   toSource,
+  visibleRect,
   zoomAt,
   type Frame,
   type Reply,
@@ -258,6 +263,8 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
   const texts: string[] = [];
   const states: (ScreenState | null)[] = [];
   const stopped: string[] = [];
+  const kicks: number[] = [];
+  const sharpened: { sc: string; rect: { x: number; y: number; w: number; h: number } }[] = [];
   const port: ScreenPort = {
     targets: async () => replies.targets ?? { t: "ack", targets: [{ id: "m:\\\\.\\DISPLAY1", kind: "monitor", title: "Screen 1", app: "", shortcut: null, w: 1920, h: 1080, minimized: false, primary: true }] },
     start: async () => replies.start ?? { t: "ack", result: "ok", sc: "sc1", title: "main.rs — kelpie", kind: "window", encoder: "hw" },
@@ -274,6 +281,8 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
     input: (sc, ops, st) => sent.push({ sc, ops, st }),
     ack: (_sc, seq) => acks.push(seq),
     keyframe: () => keyframes.push(now),
+    sharpen: (sc, rect) => sharpened.push({ sc, rect }),
+    kick: () => kicks.push(now),
     serverNow: () => now + 5,
     now: () => now,
     setTimeout: (fn, ms) => {
@@ -299,7 +308,7 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
     now = end;
   };
   const s = new ScreenSession(port, (x) => states.push(x));
-  return { s, sent, acks, keyframes, resumed, texts, states, stopped, advance };
+  return { s, sent, acks, keyframes, resumed, texts, states, stopped, kicks, sharpened, advance, now: () => now };
 }
 
 describe("one screen from the phone", () => {
@@ -468,6 +477,75 @@ describe("one screen from the phone", () => {
     expect(await r.s.type("hunter2")).toBe(false);
     expect(r.s.state?.text).toBe("not_sent");
     expect(r.texts).toEqual(["hunter2"]);
+  });
+
+  it("a frozen picture checks the connection every two seconds and counts down the time the computer keeps the screen", async () => {
+    const r = rig();
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    r.advance(FREEZE_MS + 250);
+    expect(r.s.state).toMatchObject({ phase: "frozen", graceLeft: REBIND_GRACE_MS / 1000 });
+    expect(r.kicks.length, "checked at once").toBe(1);
+    r.advance(KICK_EVERY_MS - 250);
+    expect(r.kicks.length, "not again within two seconds").toBe(1);
+    r.advance(250);
+    expect(r.kicks.length).toBe(2);
+    r.advance(10_000);
+    expect(r.kicks.length, "no more than one every two seconds").toBe(7);
+    expect(r.s.state?.graceLeft).toBe(Math.ceil((REBIND_GRACE_MS - 12_000) / 1000));
+    r.advance(60_000);
+    expect(r.s.state?.graceLeft, "never below nothing").toBe(0);
+    await r.s.reconnected();
+    expect(r.s.state).toMatchObject({ phase: "live", graceLeft: null });
+    const kicked = r.kicks.length;
+    r.advance(1000);
+    expect(r.kicks.length, "a live picture is not checked").toBe(kicked);
+  });
+
+  it("each shown picture's age is taken by the computer's clock from the stream's start, and its median is shown each second", async () => {
+    const r = rig({ start: { t: "ack", result: "ok", sc: "sc1", title: "Screen 1", kind: "monitor", encoder: "hw", t0: 500 } });
+    await r.s.openPicker();
+    await r.s.pick("m:1");
+    expect(r.s.state?.t0).toBe(500);
+    // serverNow is now + 5 = 1005: captured at 400 ms after 500, 105 ms old; at 300, 205; at 450, 55.
+    for (const c of [400, 300, 450]) r.s.presented(c);
+    r.s.onMessage({ type: "sc_stats", sc: "sc1", fps: 30, h: 1080, kbps: 1200, stages: { ack_rtt_ms_p50: 84.6 } });
+    expect(r.s.state?.age).toBe(105);
+    expect(detailsText(r.s.state!.stats, "Tailscale", r.s.state!.age, (x, v) => x.replace("{ms}", String(v?.ms)))).toBe("Tailscale · 85 ms round trip · 1200 kbps · 30 fps · 1080p · 105 ms old");
+    r.s.onMessage({ type: "sc_stats", sc: "sc1", fps: 30, h: 1080 });
+    expect(r.s.state?.age, "a second with no picture shown has no age").toBeNull();
+    // A computer that does not say its clock: no age at all.
+    const old = rig();
+    await old.s.openPicker();
+    await old.s.pick("m:1");
+    old.s.presented(400);
+    old.s.onMessage({ type: "sc_stats", sc: "sc1", fps: 30, h: 1080 });
+    expect(old.s.state).toMatchObject({ t0: null, age: null });
+    expect(detailsText(null, null, null, (x) => x)).toBe("");
+  });
+
+  it("Sharpen asks for the part shown once, only while crisp text is off for a slow link, and at most every three seconds", async () => {
+    const r = rig();
+    await r.s.openPicker();
+    await r.s.pick("m:1");
+    const rect = { x: 0, y: 0, w: 960, h: 540 };
+    r.s.onMessage({ type: "sc_stats", sc: "sc1", fps: 30, h: 1080, crisp: true });
+    expect(r.s.sharpen(rect), "crisp text is on: nothing to sharpen").toBe(false);
+    r.s.onMessage({ type: "sc_stats", sc: "sc1", fps: 8, h: 540, crisp: false });
+    expect(r.s.sharpen(rect)).toBe(true);
+    expect(r.s.sharpen(rect), "not again within three seconds").toBe(false);
+    r.advance(SHARPEN_GAP_MS);
+    r.s.media();
+    expect(r.s.sharpen(null), "no picture shown: nothing").toBe(false);
+    expect(r.s.sharpen(rect)).toBe(true);
+    expect(r.sharpened).toEqual([{ sc: "sc1", rect }, { sc: "sc1", rect }]);
+  });
+
+  it("the part shown is the whole picture at zoom 1 and the zoomed part otherwise, in whole source pixels", () => {
+    const el = { left: 0, top: 0, width: 400, height: 225 };
+    expect(visibleRect(el, 1920, 1080, fitView(1920, 1080))).toEqual({ x: 0, y: 0, w: 1920, h: 1080 });
+    expect(visibleRect(el, 1920, 1080, { zoom: 4, cx: 480, cy: 270 })).toEqual({ x: 240, y: 135, w: 480, h: 270 });
+    expect(visibleRect(el, 0, 0, fitView(0, 0))).toBeNull();
   });
 
   it("a connection back asks for the screen again, and says so when it is gone", async () => {

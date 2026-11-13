@@ -28,6 +28,14 @@ export const TAP_SLOP = 10;
 /** Trackpad mode: the cursor moves this many times as far on the picture as the finger moves on the glass. */
 export const TRACKPAD_GAIN = 1.2;
 export const MAX_ZOOM = 6;
+/** How long the computer keeps a screen whose connection dropped, for this phone's next connection: counted down while the phone reconnects. */
+export const REBIND_GRACE_MS = 45_000;
+/** While the picture is frozen, the connection is checked (and made again when it is gone) at most this often. */
+export const KICK_EVERY_MS = 2000;
+/** One Sharpen at most this often (the computer holds to it too). */
+export const SHARPEN_GAP_MS = 3000;
+/** Pictures' ages kept between two of the computer's stats. */
+const AGES_KEPT = 120;
 
 export interface Rect {
   x: number;
@@ -275,6 +283,18 @@ export function zoomAt(el: Box, srcW: number, srcH: number, v: View, factor: num
   const cx = before.x - (clientX - (el.left + el.width / 2)) / s;
   const cy = before.y - (clientY - (el.top + el.height / 2)) / s;
   return clampView(el, srcW, srcH, { zoom, cx, cy });
+}
+
+/** The part of the picture the phone shows now, in source pixels (whole pixels, inside the picture): what Sharpen sends crisp. */
+export function visibleRect(el: Box, srcW: number, srcH: number, v: View): Rect | null {
+  const a = toSourceRaw(el.left, el.top, el, srcW, srcH, v);
+  const b = toSourceRaw(el.left + el.width, el.top + el.height, el, srcW, srcH, v);
+  if (!a || !b) return null;
+  const x = Math.max(0, Math.floor(a.x));
+  const y = Math.max(0, Math.floor(a.y));
+  const w = Math.min(srcW, Math.ceil(b.x)) - x;
+  const h = Math.min(srcH, Math.ceil(b.y)) - y;
+  return w > 0 && h > 0 ? { x, y, w, h } : null;
 }
 
 function toSourceRaw(clientX: number, clientY: number, el: Box, srcW: number, srcH: number, v: View) {
@@ -666,7 +686,7 @@ export interface TargetRow {
 }
 
 export type Reply =
-  | { t: "ack"; result?: string; sc?: string; title?: string; kind?: string; w?: number; h?: number; encoder?: string; targets?: TargetRow[] }
+  | { t: "ack"; result?: string; sc?: string; title?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[] }
   | { t: "error"; code: string; message: string }
   | { t: "offline" }
   | { t: "unknown" };
@@ -681,6 +701,10 @@ export interface ScreenPort {
   input(sc: string, ops: ScOp[], st: number): void;
   ack(sc: string, seq: number): void;
   keyframe(sc: string): void;
+  /** The crisp tiles of `rect` (source pixels) once, while crisp text is off for a slow connection. */
+  sharpen(sc: string, rect: Rect): void;
+  /** The connection is checked now, and made again when it is gone, leaving one being made to finish (`Link.nudge`). */
+  kick(): void;
   serverNow(): number;
   now(): number;
   setTimeout(fn: () => void, ms: number): unknown;
@@ -719,9 +743,15 @@ export interface ScreenState {
   text: "sending" | "sent" | "not_sent" | null;
   /** The computer says it sends frames, the heartbeat goes on, and none has been shown for a while: the picture is stuck. */
   stuck: boolean;
+  /** The computer's clock when the stream started (ms): a frame's capture time is counted from it. Null from a computer that does not say. */
+  t0: number | null;
+  /** How old the pictures shown over the last second were when shown, the median (ms): from their capture on the computer. */
+  age: number | null;
+  /** Frozen: the seconds the computer still keeps the screen for this phone while it reconnects. */
+  graceLeft: number | null;
 }
 
-const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null, stuck: false });
+const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null, stuck: false, t0: null, age: null, graceLeft: null });
 
 /** Why a screen ended, in the phone's words; the reason codes are the daemon's and the helper's. */
 export function endedText(reason: string, t: (s: string) => string): string {
@@ -792,6 +822,18 @@ export function qualityText(s: Stats | null, t: (s: string) => string): string {
   return parts.join(" · ");
 }
 
+/** The details line: the way, the round trip, the rate, the frames, the size and the pictures' age: `Tailscale · 85 ms · 1200 kbps · 30 fps · 1080p · 120 ms old`. */
+export function detailsText(s: Stats | null, path: string | null, age: number | null, t: (s: string, vars?: Record<string, string | number>) => string): string {
+  const parts: string[] = [];
+  if (path) parts.push(path);
+  const rtt = s?.stages?.ack_rtt_ms_p50;
+  if (typeof rtt === "number") parts.push(t("{ms} ms round trip", { ms: Math.round(rtt) }));
+  if (typeof s?.kbps === "number") parts.push(`${Math.round(s.kbps)} kbps`);
+  if (s?.h) parts.push(`${Math.round(s.fps ?? 0)} fps`, `${Math.round(s.h)}p`);
+  if (age !== null) parts.push(t("{ms} ms old", { ms: Math.round(age) }));
+  return parts.join(" · ");
+}
+
 /** Whether this browser can show the screen: WebCodecs, and an H.264 decoder that takes the low-latency setting. */
 export async function canDecode(env: { VideoDecoder?: { isConfigSupported(c: unknown): Promise<{ supported?: boolean }> } }): Promise<boolean> {
   const D = env.VideoDecoder;
@@ -818,6 +860,10 @@ export class ScreenSession {
   private early = 0;
   private earlyKey = false;
   private keyAskedAt = 0;
+  private frozenAt = 0;
+  private kickedAt = -Infinity;
+  private sharpenedAt = -Infinity;
+  private ages: number[] = [];
 
   constructor(private port: ScreenPort, private changed: (s: ScreenState | null) => void, private t: (s: string) => string = (s) => s) {}
 
@@ -860,7 +906,8 @@ export class ScreenSession {
     }
     const now = this.port.now();
     this.heardAt = this.mediaAt = this.decodedAt = now;
-    this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", encoder: r.encoder ?? "hw" });
+    this.ages = [];
+    this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", encoder: r.encoder ?? "hw", t0: typeof r.t0 === "number" ? r.t0 : null });
     if (this.early) this.port.ack(r.sc, this.early);
     this.early = 0;
     if (this.earlyKey) {
@@ -879,8 +926,11 @@ export class ScreenSession {
     this.heardAt = this.port.now();
     if (m.type === "sc_state" && m.state === "encoder") this.patch({ encoder: m.encoder === "sw" ? "sw" : "hw" });
     else if (m.type === "sc_state" && m.state) this.patch({ remote: m.state });
-    else if (m.type === "sc_stats") this.patch({ stats: { fps: m.fps, w: m.w, h: m.h, kbps: m.kbps, encode_ms_p95: m.encode_ms_p95, dropped: m.dropped, reason: m.reason, degraded: m.degraded, level: m.level, encoder: m.encoder, crisp: m.crisp, stages: m.stages } });
-    if (this.state?.phase === "frozen") this.patch({ phase: "live" });
+    else if (m.type === "sc_stats") {
+      this.patch({ stats: { fps: m.fps, w: m.w, h: m.h, kbps: m.kbps, encode_ms_p95: m.encode_ms_p95, dropped: m.dropped, reason: m.reason, degraded: m.degraded, level: m.level, encoder: m.encoder, crisp: m.crisp, stages: m.stages }, age: quantile([...this.ages].sort((a, b) => a - b), 0.5) });
+      this.ages = [];
+    }
+    this.thawed();
   }
 
   /** A media message arrived (the view decodes it). Only video says frames are coming: the cursor moves on its own. */
@@ -888,7 +938,29 @@ export class ScreenSession {
     const now = this.port.now();
     this.heardAt = now;
     if (video) this.mediaAt = now;
-    if (this.state?.phase === "frozen") this.patch({ phase: "live" });
+    this.thawed();
+  }
+
+  private thawed() {
+    if (this.state?.phase === "frozen") this.patch({ phase: "live", graceLeft: null });
+  }
+
+  /** A video frame captured `captureMs` after the stream started was shown: how old it was, by the computer's clock. */
+  presented(captureMs: number) {
+    const t0 = this.state?.t0;
+    if (t0 == null) return;
+    const age = this.port.serverNow() - (t0 + captureMs);
+    if (Number.isFinite(age) && age >= 0 && this.ages.length < AGES_KEPT) this.ages.push(age);
+  }
+
+  /** Sharpen: the part of the picture shown now (`rect`, source pixels) sent crisp once, at most every `SHARPEN_GAP_MS`, and only while
+   *  crisp text is off for a slow connection. False when nothing was asked. */
+  sharpen(rect: Rect | null): boolean {
+    const now = this.port.now();
+    if (!rect || !this.live() || !this.state?.sc || this.state.stats?.crisp !== false || now - this.sharpenedAt < SHARPEN_GAP_MS) return false;
+    this.sharpenedAt = now;
+    this.port.sharpen(this.state.sc, rect);
+    return true;
   }
 
   /** Video frame `seq` came out of the decoder: the computer may send more. */
@@ -976,7 +1048,7 @@ export class ScreenSession {
     if (this.state?.sc !== sc) return;
     if (r.t === "ack") {
       this.heardAt = this.mediaAt = this.decodedAt = this.port.now();
-      this.patch({ phase: "live" });
+      this.patch({ phase: "live", graceLeft: null });
     } else if (r.t === "error") this.ended(endedText("link_lost", this.t));
   }
 
@@ -1000,7 +1072,18 @@ export class ScreenSession {
       const now = this.port.now();
       if (this.state?.phase === "live" && now - this.heardAt > FREEZE_MS) {
         this.queue = [];
-        this.patch({ phase: "frozen" });
+        this.frozenAt = now;
+        this.patch({ phase: "frozen", graceLeft: Math.ceil(REBIND_GRACE_MS / 1000) });
+      }
+      // Frozen: the connection is checked, and made again when it is gone (then the screen is asked for again on it), while the computer
+      // keeps it; the person sees how long that is.
+      if (this.state?.phase === "frozen") {
+        if (now - this.kickedAt >= KICK_EVERY_MS) {
+          this.kickedAt = now;
+          this.port.kick();
+        }
+        const left = Math.max(0, Math.ceil((REBIND_GRACE_MS - (now - this.frozenAt)) / 1000));
+        if (left !== this.state.graceLeft) this.patch({ graceLeft: left });
       }
       if (this.state?.phase === "live" && this.mediaAt - this.decodedAt > STUCK_MS) this.needKeyframe();
       // Heartbeats come and the computer says it sends frames, yet nothing has been shown: say so, and ask for a fresh picture.

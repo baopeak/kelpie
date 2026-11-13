@@ -46,6 +46,9 @@ export const NEW_SESSION_API = 38;
 /** Daemon API level that lets agents use browser panes (`browser.call` forwarded to this window, the policy keys `browser_agents`, `browser_eval`,
  *  `browser_sites`, `browser.audit`). Below it Settings shows no Browser panes section and panes offer no sharing with agents. */
 export const BROWSER_AGENT_API = 39;
+/** Daemon API level whose screen sends the stream's clock (`t0`), sizes its window of frames to the link and takes the phone's `sc_sharpen`.
+ *  Below it the phone shows no Sharpen and no picture age. */
+export const SCREEN_FLOW_API = 40;
 
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;

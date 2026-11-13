@@ -49,6 +49,12 @@ pub struct Providers {
     inner: Mutex<Inner>,
 }
 
+/// A request sent to a provider (`Providers::begin`), whose answer is still to come.
+pub struct Asked {
+    id: u64,
+    rx: oneshot::Receiver<Result<Value, String>>,
+}
+
 /// What a registration came to.
 #[derive(Debug, PartialEq)]
 pub enum Registration {
@@ -99,20 +105,30 @@ impl Providers {
     }
 
     pub async fn request_within(&self, kind: &str, method: &str, params: Value, limit: Duration) -> Result<Value> {
-        let (id, rx) = {
-            let mut inner = self.inner.lock();
-            let Some(r) = inner.by_kind.get(kind) else { bail!("the Kelpie app is not open on the computer") };
-            let (client, tx) = (r.client, r.tx.clone());
-            inner.next += 1;
-            let id = inner.next;
-            let (reply, rx) = oneshot::channel();
-            inner.waiting.insert(id, Waiting { client, reply });
-            if tx.send(json_out(&json!({"preq": id, "method": method, "params": params}))).is_err() {
-                inner.waiting.remove(&id);
-                bail!("the Kelpie app is not open on the computer");
-            }
-            (id, rx)
-        };
+        let asked = self.begin(kind, method, params)?;
+        self.answer(asked, limit).await
+    }
+
+    /// Sends a request to the provider of `kind` now, before anything else is said to it: its answer is awaited with `answer`, so that what is
+    /// sent after this call reaches the app after the request, while the caller goes on meanwhile.
+    pub fn begin(&self, kind: &str, method: &str, params: Value) -> Result<Asked> {
+        let mut inner = self.inner.lock();
+        let Some(r) = inner.by_kind.get(kind) else { bail!("the Kelpie app is not open on the computer") };
+        let (client, tx) = (r.client, r.tx.clone());
+        inner.next += 1;
+        let id = inner.next;
+        let (reply, rx) = oneshot::channel();
+        inner.waiting.insert(id, Waiting { client, reply });
+        if tx.send(json_out(&json!({"preq": id, "method": method, "params": params}))).is_err() {
+            inner.waiting.remove(&id);
+            bail!("the Kelpie app is not open on the computer");
+        }
+        Ok(Asked { id, rx })
+    }
+
+    /// The answer to a request `begin` sent, within `limit`.
+    pub async fn answer(&self, asked: Asked, limit: Duration) -> Result<Value> {
+        let Asked { id, rx } = asked;
         // A caller that is dropped before the answer (its connection closed) leaves nothing waiting behind.
         let _forget = Forget(self, id);
         match tokio::time::timeout(limit, rx).await {

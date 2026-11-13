@@ -136,10 +136,22 @@ impl Grid {
     /// Still regions to paint now, up to `max_cells` cells in all, as rectangles of up to `MAX_RUN`×`MAX_ROWS` cells. They count as painted
     /// from now on (a tile that could not be sent is undone with `forget_painted`).
     pub fn due(&mut self, now: u64, max_cells: usize) -> Vec<Rect> {
+        self.due_within(now, max_cells, None)
+    }
+
+    /// `due`, of the cells that `within` touches only (all of them for `None`).
+    pub fn due_within(&mut self, now: u64, max_cells: usize, within: Option<Rect>) -> Vec<Rect> {
         if !self.seen {
             return Vec::new();
         }
-        let ready = |g: &Grid, i: usize| !g.painted[i] && now.saturating_sub(g.changed[i]) >= STABLE_MS;
+        let inside: Option<Vec<bool>> = within.map(|r| {
+            let mut v = vec![false; self.hash.len()];
+            for (col, row) in self.cells_in(r) {
+                v[row * self.cols + col] = true;
+            }
+            v
+        });
+        let ready = |g: &Grid, i: usize| !g.painted[i] && now.saturating_sub(g.changed[i]) >= STABLE_MS && inside.as_ref().is_none_or(|v| v[i]);
         let mut out = Vec::new();
         let mut budget = max_cells;
         for row in 0..self.rows {
@@ -188,6 +200,49 @@ impl Grid {
     #[cfg(test)]
     fn painted_count(&self) -> usize {
         self.painted.iter().filter(|p| **p).count()
+    }
+}
+
+/// Sharpen: while crisp text is off for a slow link, the phone may ask once in a while for the part it shows (`rect`, source pixels) to be
+/// sent crisp, within a budget of its own: a still picture's top-off passes, then its tiles of that part only.
+#[derive(Debug, Default)]
+pub struct Sharpen {
+    at: Option<u64>,
+    /// The part asked for, while its tiles are being sent.
+    pub rect: Option<Rect>,
+    budget: usize,
+}
+
+/// One Sharpen at most this often.
+pub const SHARPEN_GAP_MS: u64 = 3000;
+/// What one Sharpen may send in tiles.
+pub const SHARPEN_BUDGET: usize = 256 * 1024;
+
+impl Sharpen {
+    /// The phone asked at `now`. Nothing when crisp tiles go anyway (`crisp_on`), or within `SHARPEN_GAP_MS` of the last one. True when it starts.
+    pub fn ask(&mut self, rect: Rect, crisp_on: bool, now: u64) -> bool {
+        if crisp_on || rect.w <= 0 || rect.h <= 0 || self.at.is_some_and(|at| now.saturating_sub(at) < SHARPEN_GAP_MS) {
+            return false;
+        }
+        self.at = Some(now);
+        self.rect = Some(rect);
+        self.budget = SHARPEN_BUDGET;
+        true
+    }
+
+    /// A tile of `bytes` may go: true, and it is taken from the budget; false, and this Sharpen is over.
+    pub fn spend(&mut self, bytes: usize) -> bool {
+        if self.rect.is_none() || bytes > self.budget {
+            self.rect = None;
+            return false;
+        }
+        self.budget -= bytes;
+        true
+    }
+
+    /// Every tile of the part has gone (or the picture changed under it).
+    pub fn done(&mut self) {
+        self.rect = None;
     }
 }
 
@@ -264,6 +319,35 @@ mod tests {
         g2.update(&p.px, p.stride, 0, None);
         p.set(300, 10, 9);
         assert!(g2.update(&p.px, p.stride, 10, None).is_empty());
+    }
+
+    #[test]
+    fn a_rect_limits_the_cells_painted_to_those_it_touches() {
+        let p = Picture::new(640, 256);
+        let mut g = Grid::new(640, 256, 0);
+        g.update(&p.px, p.stride, 0, None);
+        // The part the phone shows: columns 1 and 2, rows 0 and 1.
+        assert_eq!(g.due_within(STABLE_MS, 1000, Some(Rect::new(100, 30, 50, 60))), [Rect::new(64, 0, 128, 128)]);
+        assert_eq!(g.painted_count(), 4, "only those");
+        assert_eq!(g.due_within(STABLE_MS, 1000, Some(Rect::new(1000, 1000, 10, 10))), [], "nothing outside the picture");
+        assert_eq!(g.due(STABLE_MS, 1000).len(), 3, "the rest is left for the usual painting");
+    }
+
+    #[test]
+    fn sharpen_goes_once_in_three_seconds_within_its_budget_and_not_while_crisp_text_is_on() {
+        let mut s = Sharpen::default();
+        let r = Rect::new(0, 0, 640, 360);
+        assert!(!s.ask(r, true, 0), "crisp tiles go anyway");
+        assert!(s.ask(r, false, 0));
+        assert_eq!(s.rect, Some(r));
+        assert!(!s.ask(r, false, SHARPEN_GAP_MS - 1), "not again within three seconds");
+        assert!(s.spend(200 * 1024));
+        assert!(!s.spend(100 * 1024), "past its budget: over");
+        assert_eq!(s.rect, None);
+        assert!(s.ask(r, false, SHARPEN_GAP_MS));
+        s.done();
+        assert!(!s.spend(1), "nothing after it is done");
+        assert!(!s.ask(Rect::new(0, 0, 0, 10), false, 10 * SHARPEN_GAP_MS), "an empty part");
     }
 
     #[test]

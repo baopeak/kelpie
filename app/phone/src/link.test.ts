@@ -549,6 +549,19 @@ describe("Link reconnecting", () => {
     expect(deriveConn(r.link.facts, r.now()).kind).not.toBe("not_paired_here");
   });
 
+  it("a nudge leaves a connection being made to finish, and checks a live one or makes a lost one again", () => {
+    const r = rig();
+    r.link.start();
+    expect(r.sockets).toHaveLength(1);
+    r.advance(3000);
+    r.link.nudge();
+    expect(r.sockets, "a slow handshake is not started over").toHaveLength(1);
+    r.connect();
+    r.advance(3000);
+    r.link.nudge();
+    expect(r.sockets, "a live one is checked, not made again").toHaveLength(1);
+  });
+
   it("a replaced connection waits until the page is looked at", () => {
     const r = rig();
     r.link.start();
