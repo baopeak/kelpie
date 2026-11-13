@@ -29,10 +29,11 @@ use crate::session::{json_out, now_millis, Answer, AnswerError, By, ClientTx, Se
 use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, turn_event};
 
 mod automation;
+mod browser_rpc;
 mod process;
 mod sub_rpc;
 
-pub(crate) use sub_rpc::existing_folder;
+pub(crate) use sub_rpc::{existing_folder, page_url, MAX_PAGE_URL};
 
 /// What delivery of alerts asks of the daemon, from the destinations' own threads.
 struct NotifyHost(std::sync::Weak<Daemon>);
@@ -231,6 +232,8 @@ pub struct Daemon {
     pub files: Arc<crate::files::service::Files>,
     /// The app's connection, asked for what only the window can do (`provider`).
     pub providers: crate::provider::Providers,
+    /// Agents using browser panes: the policy, a rate per session, the audit (`browser.*`, `browser_agent`).
+    pub browser: crate::browser_agent::State,
     /// Phones that took over a browser pane (`takeover`).
     pub takeover: crate::takeover::Broker,
     /// Phones that see this computer's screen (`screen`).
@@ -381,6 +384,7 @@ impl Daemon {
                 procs: crate::procs::Procs::default(),
                 files,
                 providers: crate::provider::Providers::default(),
+                browser: crate::browser_agent::State::new(policy.browser, &data_dir),
                 takeover: crate::takeover::Broker::default(),
                 screen: crate::screen::Broker::default(),
                 me: weak,
@@ -1301,9 +1305,9 @@ impl Daemon {
             // A chat switched to bypass is started again with the flag in this command line, not in `args`.
             let yolo = agents::preset_for(&spec.kind).map_or(&[][..], |p| p.yolo);
             let (skips, bypass) = crate::subs::launch_permissions(&spec.kind, yolo, &argv);
-            // Kelpie's sub-session tools, while the policy allows them. The permission check above looks at the command line as the
-            // app sent it: what is added here is not a permission.
-            let tools = self.sub_tools_on() && spec.remote.is_none();
+            // Kelpie's tools, while sub-sessions or browser control are allowed. The permission check above looks at the command line as
+            // the app sent it: what is added here is not a permission.
+            let tools = self.agent_tools_on() && spec.remote.is_none();
             let argv = if tools { agents::chat_with_sub_tools(argv, &self.exe, &self.data_dir)? } else { argv };
             let env = if tools { vec![("KELPIE_CLI".to_string(), self.exe.to_string_lossy().into_owned())] } else { Vec::new() };
             let spec_id = spec.id.clone();
@@ -1324,7 +1328,7 @@ impl Daemon {
                 Some(_) => Self::resume_for(&spec),
                 None => Resume::None,
             };
-            let launch = Self::launch_for(&spec, resume, p.prompt.as_deref(), &self.exe, &self.data_dir, self.sub_tools_on())?;
+            let launch = Self::launch_for(&spec, resume, p.prompt.as_deref(), &self.exe, &self.data_dir, self.agent_tools_on())?;
             let session = Session::new(handle, spec, p.cols, p.rows);
             session.spawn(&launch)?;
             Entry::Term(session)
@@ -1401,7 +1405,7 @@ impl Daemon {
             }
             spec.clone()
         };
-        let launch = Self::launch_for(&spec, Self::resume_for(&spec), None, &self.exe, &self.data_dir, self.sub_tools_on())?;
+        let launch = Self::launch_for(&spec, Self::resume_for(&spec), None, &self.exe, &self.data_dir, self.agent_tools_on())?;
         self.drop_timer(&spec.id, "restarted");
         // The program starts below the old output, which stays readable above it. A resumed agent
         // redraws only the latest part of its conversation (Claude Code shows about a screenful),
@@ -1624,10 +1628,7 @@ impl Daemon {
 
     fn session_label(&self, sid: &str) -> String {
         match self.by_id(sid) {
-            Some(e) => {
-                let spec = e.spec();
-                spec.name.filter(|n| !n.is_empty()).unwrap_or_else(|| format!("{} {}", spec.kind, sid.chars().take(6).collect::<String>()))
-            }
+            Some(e) => label_of(&e.spec()),
             None => format!("a closed session ({})", sid.chars().take(6).collect::<String>()),
         }
     }
@@ -1907,13 +1908,17 @@ impl Daemon {
             }),
             "daemon.policy" => self.policy_json(),
             "daemon.set_policy" => {
-                // The sub-session settings are checked before anything is applied: a bad value changes nothing.
+                // The sub-session and browser settings are checked before anything is applied: a bad value changes nothing.
                 let sub = self.requested_sub_policy(&params)?;
+                let browser = crate::browser_agent::Policy::requested(&params, &self.browser.policy.read())?;
                 if let Some(on) = params.get("agents_control_others").and_then(Value::as_bool) {
                     self.agents_control_others.store(on, Ordering::Relaxed);
                 }
                 if let Some(sub) = sub {
                     *self.subs.policy.write() = sub;
+                }
+                if let Some(browser) = browser {
+                    *self.browser.policy.write() = browser;
                 }
                 self.persist_policy();
                 self.policy_json()
@@ -1921,6 +1926,12 @@ impl Daemon {
             "sub.spawn" => return self.sub_spawn(tx, id, &params),
             m if m.starts_with("sub.") => self.sub_rpc(m, &params)?,
             "page.open" => self.page_open(&params)?,
+            "browser.call" => return self.browser_call(tx, id, &params),
+            "browser.policy" => self.browser_policy(),
+            "browser.audit" => {
+                self.browser_audit(tx, id, &params);
+                return Ok(None);
+            }
             "daemon.set_theme" => {
                 let light = params.get("theme").and_then(Value::as_str) == Some("light");
                 match params.get("palette").filter(|p| p.is_object()) {
@@ -2535,6 +2546,11 @@ impl Daemon {
     }
 }
 
+/// A session's name, or its kind and the start of its id.
+fn label_of(spec: &SessionSpec) -> String {
+    spec.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| format!("{} {}", spec.kind, spec.id.chars().take(6).collect::<String>()))
+}
+
 const POLICY_FILE: &str = "policy.json";
 
 /// What `policy.json` holds. A file from before sub-sessions has only the first key.
@@ -2542,6 +2558,8 @@ struct Policy {
     /// Programs in a session may script other sessions (on unless the user turned it off).
     agents_control_others: bool,
     sub: crate::subs::SubPolicy,
+    /// Agents using browser panes (off unless the user turned it on).
+    browser: crate::browser_agent::Policy,
 }
 
 fn load_policy(data_dir: &std::path::Path) -> Policy {
@@ -2553,6 +2571,7 @@ fn load_policy(data_dir: &std::path::Path) -> Policy {
             mode: get("sub_sessions").and_then(Value::as_str).and_then(crate::subs::Mode::parse).unwrap_or_default(),
             max: get("sub_max").and_then(Value::as_u64).map_or(0, |n| n.min(u64::from(crate::subs::MAX_SUB_CAP)) as u32),
         },
+        browser: crate::browser_agent::Policy::from_file(file.as_ref()),
     }
 }
 
@@ -2571,6 +2590,7 @@ fn save_policy(data_dir: &std::path::Path, policy: &Policy) {
     file["agents_control_others"] = json!(policy.agents_control_others);
     file["sub_sessions"] = json!(policy.sub.mode.as_str());
     file["sub_max"] = json!(policy.sub.max);
+    policy.browser.write_into(&mut file);
     if let Err(e) = write_atomic(&path, file.to_string().as_bytes()) {
         tracing::warn!("save {POLICY_FILE}: {e:#}");
     }

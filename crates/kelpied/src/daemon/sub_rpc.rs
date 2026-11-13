@@ -67,7 +67,7 @@ fn name_from_task(task: &str) -> String {
 }
 
 /// The longest address `page.open` takes.
-const MAX_PAGE_URL: usize = 4096;
+pub(crate) const MAX_PAGE_URL: usize = 4096;
 
 /// How many pages one session may ask for in a minute (`page.open`).
 const PAGE_OPENS_PER_MINUTE: usize = 10;
@@ -75,7 +75,7 @@ const PAGE_OPENS_PER_MINUTE: usize = 10;
 /// The address an agent asked to show, checked and normalized: read by the WHATWG URL rules (the `url` crate), which the window's
 /// `new URL()` follows too, so the daemon accepts nothing the window would refuse; then `http` or `https` with a host, no user name or
 /// password, nothing that is not printed (control characters, spaces). What the window is sent is the normalized address.
-fn page_url(given: &str) -> Result<String, String> {
+pub(crate) fn page_url(given: &str) -> Result<String, String> {
     let given = given.trim();
     if given.is_empty() {
         return Err("missing `url`".into());
@@ -182,19 +182,23 @@ impl Daemon {
     /// `daemon.policy`: what the user allows programs in sessions to do.
     pub(super) fn policy_json(&self) -> Value {
         let sub = *self.subs.policy.read();
+        let browser = self.browser.policy.read().clone();
         json!({
             "agents_control_others": self.agents_control_others(),
             "sub_sessions": sub.mode.as_str(),
             "sub_max": sub.max,
             // What 0 means on this computer, for the settings page to show.
             "sub_auto_max": subs::machine_cap(),
+            "browser_agents": browser.mode.as_str(),
+            "browser_eval": browser.eval,
+            "browser_sites": browser.sites,
         })
     }
 
     pub(super) fn persist_policy(&self) {
         // One writer at a time, each taking its snapshot inside the lock: the last write is the newest.
         let _writing = self.subs.policy_file.lock();
-        save_policy(&self.data_dir, &Policy { agents_control_others: self.agents_control_others(), sub: *self.subs.policy.read() });
+        save_policy(&self.data_dir, &Policy { agents_control_others: self.agents_control_others(), sub: *self.subs.policy.read(), browser: self.browser.policy.read().clone() });
     }
 
     /// The sub-session policy `daemon.set_policy` asks for, checked as a whole; `None` when it names neither key.
@@ -648,9 +652,15 @@ impl Daemon {
         self.meta_dirty.store(true, Ordering::Relaxed);
     }
 
-    /// Whether a new session gets the sub-session tools: while the policy allows sub-sessions at all.
+    /// Whether the policy allows sub-sessions at all.
     pub(super) fn sub_tools_on(&self) -> bool {
         self.subs.policy.read().mode != Mode::Off
+    }
+
+    /// Whether a new session gets Kelpie's tools (the MCP server, `KELPIE_CLI`): while sub-sessions or browser control are allowed. The
+    /// server lists each group of tools only while its own policy allows it (`browser.policy`).
+    pub(super) fn agent_tools_on(&self) -> bool {
+        self.sub_tools_on() || self.browser.policy.read().mode != crate::browser_agent::Mode::Off
     }
 
     /// How a sub-session ended, for the routing hints. The first end counts (a session closed after it reported done is `done`);

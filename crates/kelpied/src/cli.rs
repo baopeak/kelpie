@@ -10,6 +10,7 @@
 //!   kelpied review add <file>:<line> "<text>" [--old] [--base REF]    a review note on this worktree's diff
 //!   kelpied review list [--json]
 //!   kelpied run create|list|show|approve|retry|done|skip|cancel|delete|report|wait …  (see `run`)
+//!   kelpied browser tabs|snapshot|click|type|press|navigate|wait|screenshot|console|network|eval …  (see `browser`)
 //!
 //! `<session>` is a handle number, a session id (or its prefix) or a session name.
 
@@ -511,12 +512,187 @@ pub async fn sub(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+const BROWSER_USAGE: &str = "\
+usage: kelpied browser <tool> [--pane P] [--json]
+  tabs                                          the panes you may use
+  snapshot [--mode compact|full] [--root REF] [--max-chars N]
+  click <ref> [--button left|right] [--double] [--dialog accept|dismiss] [--snapshot-after none|diff|full]
+  type <ref> <text…> [--clear false] [--submit] [--dialog D] [--snapshot-after S]     (`type <ref> \"\"` empties the field)
+  press <key> [--modifiers Control,Shift] [--ref REF] [--dialog D] [--snapshot-after S]
+  navigate <url>|back|forward|reload [--timeout-s N]
+  wait --text T | --text-gone T | --selector S | --url-contains U | --load   [--timeout-s N]
+  screenshot [--ref REF] [--full-page]          prints where the picture was saved
+  console [--level error|warning|all] [--since N] [--max N]
+  network [--filter F] [--failed-only] [--since N] [--max N]
+  eval <expression…>
+Run inside a session started by Kelpie, while browser control is on (Settings → Agents → Browser panes). What you type and the
+scripts you run are on this command line, where other programs can see them: for a secret, use the kelpie_browser_* tools.";
+
+/// What a value of an option of `kelpied browser` is.
+#[derive(Clone, Copy)]
+enum BrowserOpt {
+    Text,
+    Number,
+    /// A word that is true or false (`--clear false`).
+    Bool,
+    /// Present means true.
+    Flag,
+    /// A comma-separated list.
+    List,
+}
+
+/// The options of each browser tool (the MCP arguments, `--` and dashes for underscores) besides `--pane`, and the arguments its words
+/// fill in order; the last of `words` takes the rest of the line when `rest` is set.
+fn browser_spec(tool: &str) -> Option<(&'static [&'static str], bool, &'static [(&'static str, BrowserOpt)])> {
+    use BrowserOpt::*;
+    Some(match tool {
+        "tabs" => (&[], false, &[]),
+        "snapshot" => (&[], false, &[("mode", Text), ("root", Text), ("max_chars", Number)]),
+        "click" => (&["ref"], false, &[("button", Text), ("double", Flag), ("dialog", Text), ("snapshot_after", Text)]),
+        "type" => (&["ref", "text"], true, &[("clear", Bool), ("submit", Flag), ("dialog", Text), ("snapshot_after", Text)]),
+        "press" => (&["key"], false, &[("modifiers", List), ("ref", Text), ("dialog", Text), ("snapshot_after", Text)]),
+        "navigate" => (&["url"], false, &[("timeout_s", Number)]),
+        "wait" => (&[], false, &[("text", Text), ("text_gone", Text), ("selector", Text), ("url_contains", Text), ("load", Flag), ("timeout_s", Number)]),
+        "screenshot" => (&[], false, &[("ref", Text), ("full_page", Flag)]),
+        "console" => (&[], false, &[("level", Text), ("since", Number), ("max", Number)]),
+        "network" => (&[], false, &[("filter", Text), ("failed_only", Flag), ("since", Number), ("max", Number)]),
+        "eval" => (&["expression"], true, &[]),
+        _ => return None,
+    })
+}
+
+/// `kelpied browser …` as the tool and arguments it stands for (`mcp::run_tool`), and whether to print JSON.
+fn parse_browser(args: &[String]) -> Result<(&'static str, Value, bool)> {
+    let mut args = args.to_vec();
+    let tool = if args.is_empty() { String::new() } else { args.remove(0) };
+    let (words, rest, opts) = browser_spec(&tool).ok_or_else(|| anyhow!("{BROWSER_USAGE}"))?;
+    let name = crate::mcp::browser::NAMES.into_iter().find(|n| crate::mcp::browser::short(n) == Some(tool.as_str())).ok_or_else(|| anyhow!("{BROWSER_USAGE}"))?;
+    let flag_of = |key: &str| format!("--{}", key.replace('_', "-"));
+    let all: Vec<(&str, BrowserOpt)> = opts.iter().copied().chain([("pane", BrowserOpt::Text)]).collect();
+    let valued: Vec<String> = all.iter().filter(|(_, k)| !matches!(k, BrowserOpt::Flag)).map(|(key, _)| flag_of(key)).collect();
+    let mut flags: Vec<String> = all.iter().filter(|(_, k)| matches!(k, BrowserOpt::Flag)).map(|(key, _)| flag_of(key)).collect();
+    flags.push("--json".into());
+    // Options, then the words; a command that ends in free text reads its options the way `sub send` does.
+    let (lead, tail, found) = if rest {
+        let valued: Vec<&str> = valued.iter().map(String::as_str).collect();
+        let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+        // An empty argument is an empty text given on purpose (`type e3 ""` empties the field), not a missing one.
+        let empty_given = args.iter().any(String::is_empty);
+        let (lead, text, found) = text_command(&mut args, words.len() - 1, &valued, &flags)?;
+        let given = !text.is_empty() || (empty_given && lead.len() + 1 == words.len());
+        (lead, given.then_some(text), found)
+    } else {
+        let mut found = serde_json::Map::new();
+        for f in &flags {
+            if take_flag(&mut args, f) {
+                found.insert(f.trim_start_matches('-').into(), json!(true));
+            }
+        }
+        for f in &valued {
+            if let Some(i) = args.iter().position(|a| a == f) {
+                anyhow::ensure!(i + 1 < args.len(), "{f} needs a value");
+                let v = args.remove(i + 1);
+                args.remove(i);
+                found.insert(f.trim_start_matches('-').into(), json!(v));
+            }
+        }
+        anyhow::ensure!(args.len() <= words.len(), "{BROWSER_USAGE}");
+        (args, None, found)
+    };
+    let mut out = serde_json::Map::new();
+    let mut json_out = false;
+    for (flag, value) in found {
+        if flag == "json" {
+            json_out = true;
+            continue;
+        }
+        let key = flag.replace('-', "_");
+        let kind = all.iter().find(|(k, _)| *k == key).map(|(_, kind)| *kind).ok_or_else(|| anyhow!("{BROWSER_USAGE}"))?;
+        let text = value.as_str().unwrap_or_default().to_string();
+        let value = match kind {
+            BrowserOpt::Flag => json!(true),
+            BrowserOpt::Text => json!(text),
+            BrowserOpt::Number => json!(text.parse::<u64>().map_err(|_| anyhow!("--{flag} takes a whole number"))?),
+            BrowserOpt::Bool => json!(match text.as_str() {
+                "true" | "yes" => true,
+                "false" | "no" => false,
+                _ => bail!("--{flag} takes true or false"),
+            }),
+            BrowserOpt::List => json!(text.split(',').map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>()),
+        };
+        out.insert(key, value);
+    }
+    for (word, value) in words.iter().zip(lead.into_iter().chain(tail)) {
+        out.insert(word.to_string(), json!(value));
+    }
+    // `navigate back` is an action, anything else an address.
+    if let Some(action) = out.get("url").and_then(Value::as_str).filter(|u| matches!(*u, "back" | "forward" | "reload")).map(str::to_string) {
+        out.remove("url");
+        out.insert("action".into(), json!(action));
+    }
+    Ok((name, Value::Object(out), json_out))
+}
+
+/// `kelpied browser …`: the browser tools for agents without them and for scripts. A screenshot prints where it was saved, never the picture.
+pub async fn browser(args: &[String]) -> Result<()> {
+    if args.is_empty() || matches!(args[0].as_str(), "help" | "--help" | "-h") {
+        println!("{BROWSER_USAGE}\n\n{}", crate::browser_guide::GUIDE);
+        return Ok(());
+    }
+    let (tool, params, json_out) = parse_browser(args)?;
+    let mut live = crate::mcp::Live::connect(false).await?;
+    let out = crate::mcp::run_tool(&mut live, tool, &params).await;
+    if out.is_error {
+        bail!("{}", out.text);
+    }
+    if json_out && out.images.is_empty() {
+        println!("{}", serde_json::to_string_pretty(&out.data)?);
+    } else {
+        println!("{}", out.text);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(line: &str) -> Result<(&'static str, Value, bool)> {
         parse_sub(&line.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+    }
+
+    fn browser_words(args: &[&str]) -> Result<(&'static str, Value, bool)> {
+        parse_browser(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn browser_commands_map_to_the_tools() {
+        assert_eq!(browser_words(&["tabs", "--json"]).unwrap(), ("kelpie_browser_tabs", json!({}), true));
+        assert_eq!(browser_words(&["snapshot", "--mode", "full", "--max-chars", "9000", "--pane", "p2"]).unwrap().1, json!({"mode": "full", "max_chars": 9000, "pane": "p2"}));
+        assert_eq!(browser_words(&["click", "e6", "--double", "--snapshot-after", "none"]).unwrap(), ("kelpie_browser_click", json!({"ref": "e6", "double": true, "snapshot_after": "none"}), false));
+        assert_eq!(browser_words(&["type", "e3", "hello", "world"]).unwrap().1, json!({"ref": "e3", "text": "hello world"}));
+        assert_eq!(browser_words(&["type", "e3", ""]).unwrap().1, json!({"ref": "e3", "text": ""}), "an empty text empties the field");
+        assert_eq!(browser_words(&["type", "e3"]).unwrap().1, json!({"ref": "e3"}), "no text is left for the tool to refuse");
+        assert_eq!(browser_words(&["type", "--clear", "false", "--submit", "e3", "a --submit b"]).unwrap().1, json!({"ref": "e3", "text": "a --submit b", "clear": false, "submit": true}));
+        assert_eq!(browser_words(&["press", "Enter", "--modifiers", "Control, Shift"]).unwrap().1, json!({"key": "Enter", "modifiers": ["Control", "Shift"]}));
+        assert_eq!(browser_words(&["navigate", "http://localhost:3000", "--timeout-s", "20"]).unwrap().1, json!({"url": "http://localhost:3000", "timeout_s": 20}));
+        assert_eq!(browser_words(&["navigate", "back"]).unwrap().1, json!({"action": "back"}));
+        assert_eq!(browser_words(&["wait", "--text-gone", "Loading", "--timeout-s", "5"]).unwrap().1, json!({"text_gone": "Loading", "timeout_s": 5}));
+        assert_eq!(browser_words(&["wait", "--load"]).unwrap().1, json!({"load": true}));
+        assert_eq!(browser_words(&["screenshot", "--full-page"]).unwrap(), ("kelpie_browser_screenshot", json!({"full_page": true}), false));
+        assert_eq!(browser_words(&["console", "--level", "error", "--since", "4"]).unwrap().1, json!({"level": "error", "since": 4}));
+        assert_eq!(browser_words(&["network", "--failed-only", "--filter", "/api"]).unwrap().1, json!({"failed_only": true, "filter": "/api"}));
+        assert_eq!(browser_words(&["eval", "document.title", "+", "1"]).unwrap(), ("kelpie_browser_eval", json!({"expression": "document.title + 1"}), false));
+    }
+
+    #[test]
+    fn browser_arguments_are_checked() {
+        for bad in [&["drag"][..], &[""], &["snapshot", "--max-chars", "lots"], &["type", "--clear", "maybe", "e1", "x"], &["click", "e1", "e2"], &["console", "--bogus", "1"], &["wait", "--timeout-s"]] {
+            assert!(browser_words(bad).is_err(), "{bad:?}");
+        }
+        assert!(browser_words(&["drag"]).unwrap_err().to_string().contains("usage: kelpied browser"));
+        // What the words leave out is the daemon's to refuse, with the tool's wording.
+        assert_eq!(browser_words(&["click"]).unwrap().1, json!({}));
     }
 
     #[test]

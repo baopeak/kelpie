@@ -490,7 +490,7 @@ fn build_launch_with(
             return Ok(Launch { argv: wrap_for_platform(user_args.to_vec())?, typed_prompt: startup(), env });
         }
         "claude" => {
-            let settings = write_claude_hook_settings(hook_exe, data_dir, sub_tools)?;
+            let settings = write_claude_hook_settings(hook_exe, data_dir, sub_tools, full_bypass("claude", user_args))?;
             let mut argv = vec!["claude".to_string()];
             if sub_tools {
                 // First: `--mcp-config` takes every argument up to the next flag, so the prompt must not follow it.
@@ -504,7 +504,7 @@ fn build_launch_with(
             let exe = hook_exe.to_string_lossy().replace('\\', "/");
             let mut argv = vec!["codex".to_string(), "-c".into(), format!("notify=['{exe}','hook','codex']")];
             if sub_tools {
-                argv.extend(codex_mcp_args(&exe));
+                argv.extend(codex_mcp_args(&exe, !full_bypass("codex", user_args)));
             }
             argv
         }
@@ -558,9 +558,10 @@ pub fn claude_args_pick_conversation(args: &[String]) -> bool {
 /// Claude Code merges `--settings` hooks with the user's own settings, so we never touch
 /// `~/.claude/settings.json`. One command handles every event (name comes in the payload).
 ///
-/// `allow_kelpie_tools` also allows Kelpie's own MCP tools: Kelpie asks the user (sub-session policy), so Claude must not
-/// ask a second time. It is a file of its own, so a running session never sees its rules change when the policy is switched.
-fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path, allow_kelpie_tools: bool) -> Result<PathBuf> {
+/// `allow_kelpie_tools` also allows Kelpie's own MCP tools ([`kelpie_allow_rules`]; `bypass`: the session runs with permission checks
+/// off): Kelpie asks the user about sub-sessions itself, so Claude must not ask a second time. Each is a file of its own, so a running
+/// session never sees its rules change when the policy is switched.
+fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path, allow_kelpie_tools: bool, bypass: bool) -> Result<PathBuf> {
     let exe = hook_exe.to_string_lossy().replace('\\', "/");
     let command = format!("\"{exe}\" hook claude");
     let entry = serde_json::json!([{ "hooks": [{ "type": "command", "command": command, "timeout": 5 }] }]);
@@ -582,8 +583,8 @@ fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path, allow_kelpie_too
     }
     let mut settings = serde_json::json!({ "hooks": hooks });
     let name = if allow_kelpie_tools {
-        settings["permissions"] = serde_json::json!({ "allow": [KELPIE_MCP_RULE] });
-        "claude-hooks-sub.json"
+        settings["permissions"] = serde_json::json!({ "allow": kelpie_allow_rules(bypass) });
+        if bypass { "claude-hooks-sub-bypass.json" } else { "claude-hooks-sub.json" }
     } else {
         "claude-hooks.json"
     };
@@ -592,6 +593,21 @@ fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path, allow_kelpie_too
 
 /// Claude's permission rule that covers every tool of the `kelpie` MCP server.
 const KELPIE_MCP_RULE: &str = "mcp__kelpie";
+
+/// The agent `kind` started with `args` runs with permission checks off.
+fn full_bypass(kind: &str, args: &[String]) -> bool {
+    crate::subs::args_full_bypass(kind, preset_for(kind).map_or(&[][..], |p| p.yolo), args)
+}
+
+/// Claude's allow rules for Kelpie's tools. With permission checks off, the whole server. Otherwise each tool that only looks or
+/// that Kelpie asks the user about itself (the sub-session tools), by name: acting on a web page, or running a script in one, asks in
+/// Claude like any other action.
+pub fn kelpie_allow_rules(bypass: bool) -> Vec<String> {
+    if bypass {
+        return vec![KELPIE_MCP_RULE.to_string()];
+    }
+    crate::mcp::TOOL_NAMES.into_iter().chain(crate::mcp::browser::read_names()).map(|name| format!("{KELPIE_MCP_RULE}__{name}")).collect()
+}
 
 /// Claude Code's MCP configuration with Kelpie's sub-session server. No `env` block: Claude passes its own environment
 /// (`KELPIE_SESSION_ID`, `_TOKEN`, `_ENDPOINT`) to a stdio server, so the token is never written to disk.
@@ -618,8 +634,10 @@ fn toml_string(text: &str) -> String {
 
 /// Codex's `-c` overrides for the `kelpie` MCP server. Codex gives a stdio server only a small environment, so the
 /// session's variables are named (`env_vars`): by name, never by value; `KELPIE_ENDPOINT` so that a daemon with an endpoint of its own is the one reached. `kelpie_wait` may block for half an hour,
-/// which Codex's default tool timeout (60 s) would cut.
-fn codex_mcp_args(exe: &str) -> Vec<String> {
+/// which Codex's default tool timeout (60 s) would cut. `ask_acting`: the browser tools that act on a page or run a script in one ask in
+/// Codex (per-tool `approval_mode`), as any other action does; the rest Kelpie asks the user about itself, or they only look.
+fn codex_mcp_args(exe: &str, ask_acting: bool) -> Vec<String> {
+    let acting = crate::mcp::browser::acting_names().filter(|_| ask_acting).map(|name| format!("mcp_servers.kelpie.tools.{name}.approval_mode=\"prompt\""));
     [
         format!("mcp_servers.kelpie.command={}", toml_string(exe)),
         "mcp_servers.kelpie.args=[\"mcp\"]".to_string(),
@@ -629,24 +647,28 @@ fn codex_mcp_args(exe: &str) -> Vec<String> {
         "mcp_servers.kelpie.default_tools_approval_mode=\"approve\"".to_string(),
     ]
     .into_iter()
+    .chain(acting)
     .flat_map(|c| ["-c".to_string(), c])
     .collect()
 }
 
 /// A chat's command line with Kelpie's sub-session tools: Claude's stream-json process gets the MCP configuration and a settings
-/// file that only allows `mcp__kelpie` (not the terminal's hook settings, which would report a terminal's status for a chat; and no
-/// `--allowedTools`, which would make the chat count as one that skips prompts); Codex's app-server gets the `-c` overrides. Any
-/// other command line (the ACP agents, which the app configures itself) is returned as it was.
+/// file that only allows Kelpie's tools (`kelpie_allow_rules`; not the terminal's hook settings, which would report a terminal's status
+/// for a chat; and no `--allowedTools`, which would make the chat count as one that skips prompts); Codex's app-server gets the `-c`
+/// overrides with every tool approved, since the chat view has no card for Codex's approval of an MCP tool. Any other command line
+/// (the ACP agents, which the app configures itself) is returned as it was.
 pub fn chat_with_sub_tools(mut argv: Vec<String>, hook_exe: &Path, data_dir: &Path) -> Result<Vec<String>> {
     let program = argv.first().map(|a| Path::new(a).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()).unwrap_or_default();
     let exe = hook_exe.to_string_lossy().replace('\\', "/");
     if program == "claude" && argv.iter().any(|a| a == "stream-json") {
         let mcp = write_claude_mcp_config(hook_exe, data_dir)?;
-        let settings = write_if_changed(&data_dir.join("claude-chat-sub.json"), &serde_json::to_vec_pretty(&serde_json::json!({ "permissions": { "allow": [KELPIE_MCP_RULE] } }))?)?;
+        let bypass = full_bypass("claude", &argv);
+        let name = if bypass { "claude-chat-sub-bypass.json" } else { "claude-chat-sub.json" };
+        let settings = write_if_changed(&data_dir.join(name), &serde_json::to_vec_pretty(&serde_json::json!({ "permissions": { "allow": kelpie_allow_rules(bypass) } }))?)?;
         let flags = ["--mcp-config".to_string(), mcp.to_string_lossy().into_owned(), "--settings".to_string(), settings.to_string_lossy().into_owned()];
         argv.splice(1..1, flags);
     } else if program == "codex" && argv.get(1).is_some_and(|a| a == "app-server") {
-        argv.splice(2..2, codex_mcp_args(&exe));
+        argv.splice(2..2, codex_mcp_args(&exe, false));
     }
     Ok(argv)
 }
@@ -824,7 +846,7 @@ mod tests {
     #[test]
     fn claude_is_told_to_report_what_ends_a_request() {
         let dir = std::env::temp_dir().join(format!("kelpie-hooks-events-{}", uuid::Uuid::new_v4()));
-        let path = write_claude_hook_settings(Path::new("/fixture/kelpied"), &dir, false).unwrap();
+        let path = write_claude_hook_settings(Path::new("/fixture/kelpied"), &dir, false, false).unwrap();
         let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         for event in ["PermissionRequest", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop"] {
             assert!(settings["hooks"].get(event).is_some(), "{event}");
@@ -837,7 +859,7 @@ mod tests {
         use std::sync::{atomic::{AtomicUsize, Ordering}, Barrier};
 
         let dir = std::env::temp_dir().join(format!("kelpie-hooks-atomic-{}", uuid::Uuid::new_v4()));
-        let path = write_claude_hook_settings(Path::new("/fixture/initial/kelpied"), &dir, false).unwrap();
+        let path = write_claude_hook_settings(Path::new("/fixture/initial/kelpied"), &dir, false, false).unwrap();
         let start = Barrier::new(3);
         let done = AtomicUsize::new(0);
         let mut incomplete = false;
@@ -848,7 +870,7 @@ mod tests {
                     start.wait();
                     for revision in 0..128 {
                         let exe = PathBuf::from(format!("/fixture/{writer}/{revision}/kelpied"));
-                        write_claude_hook_settings(&exe, dir, false).unwrap();
+                        write_claude_hook_settings(&exe, dir, false, false).unwrap();
                     }
                     done.fetch_add(1, Ordering::Release);
                 });
@@ -1169,9 +1191,32 @@ mod sub_tool_tests {
         assert_eq!(mcp, serde_json::json!({"mcpServers": {"kelpie": {"command": "/opt/kel pie/kelpied", "args": ["mcp"]}}}));
         assert!(mcp.to_string().find("TOKEN").is_none(), "no secret, no env block: Claude passes its environment on");
         let settings: Value = serde_json::from_slice(&std::fs::read(dir.join("claude-hooks-sub.json")).unwrap()).unwrap();
-        assert_eq!(settings["permissions"]["allow"], serde_json::json!(["mcp__kelpie"]));
+        assert_eq!(settings["permissions"]["allow"], serde_json::json!(kelpie_allow_rules(false)));
         assert!(settings["hooks"]["Stop"].is_array());
+        // With permission checks off, the whole server, in a file of its own.
+        let yolo = launch("claude", &["--dangerously-skip-permissions"], None, "/k/kelpied", &dir, true);
+        let path = dir.join("claude-hooks-sub-bypass.json").to_string_lossy().into_owned();
+        assert!(yolo.argv.contains(&path), "{:?}", yolo.argv);
+        let settings: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(settings["permissions"]["allow"], serde_json::json!(["mcp__kelpie"]));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claude_allows_every_kelpie_tool_but_acting_on_a_page_by_name() {
+        let rules = kelpie_allow_rules(false);
+        for name in crate::mcp::TOOL_NAMES.into_iter().chain(crate::mcp::browser::read_names()) {
+            assert!(rules.contains(&format!("mcp__kelpie__{name}")), "{name}");
+        }
+        for name in crate::mcp::browser::acting_names() {
+            assert!(!rules.iter().any(|r| r.ends_with(name)), "{name}");
+        }
+        assert!(!rules.contains(&"mcp__kelpie".to_string()), "no rule for the whole server");
+        assert_eq!(rules.len(), crate::mcp::TOOL_NAMES.len() + 6);
+        for name in ["kelpie_spawn", "kelpie_message", "kelpie_open_page", "kelpie_browser_snapshot", "kelpie_browser_screenshot"] {
+            assert!(rules.contains(&format!("mcp__kelpie__{name}")), "{name}");
+        }
+        assert_eq!(kelpie_allow_rules(true), ["mcp__kelpie"]);
     }
 
     #[test]
@@ -1194,12 +1239,26 @@ mod sub_tool_tests {
             "mcp_servers.kelpie.tool_timeout_sec=1900",
             "-c",
             "mcp_servers.kelpie.default_tools_approval_mode=\"approve\"",
+            "-c",
+            "mcp_servers.kelpie.tools.kelpie_browser_click.approval_mode=\"prompt\"",
+            "-c",
+            "mcp_servers.kelpie.tools.kelpie_browser_type.approval_mode=\"prompt\"",
+            "-c",
+            "mcp_servers.kelpie.tools.kelpie_browser_press.approval_mode=\"prompt\"",
+            "-c",
+            "mcp_servers.kelpie.tools.kelpie_browser_navigate.approval_mode=\"prompt\"",
+            "-c",
+            "mcp_servers.kelpie.tools.kelpie_browser_eval.approval_mode=\"prompt\"",
             "--model",
             "m",
             "go",
         ];
         assert_eq!(on.argv, expected);
         assert_eq!(on.env[0].0, "KELPIE_CLI");
+        // With permission checks off nothing asks.
+        let yolo = launch("codex", &["--dangerously-bypass-approvals-and-sandbox"], None, "/k/kelpied", &dir, true);
+        assert!(!yolo.argv.iter().any(|a| a.contains(".tools.")), "{:?}", yolo.argv);
+        assert!(yolo.argv.iter().any(|a| a.starts_with("mcp_servers.kelpie.default_tools_approval_mode")));
     }
 
     #[test]
@@ -1238,7 +1297,7 @@ mod sub_tool_tests {
         assert_eq!(&out[..5], ["claude", "--mcp-config", &mcp, "--settings", &settings].map(str::to_string));
         assert_eq!(out[5..], claude[1..]);
         let rules: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
-        assert_eq!(rules, serde_json::json!({"permissions": {"allow": ["mcp__kelpie"]}}), "no hooks of the terminal's status, only the rule");
+        assert_eq!(rules, serde_json::json!({"permissions": {"allow": kelpie_allow_rules(false)}}), "no hooks of the terminal's status, only the rules");
         assert!(!out.iter().any(|a| a == "--allowedTools"));
         // The rule is not a bypass: the permission classifier sees the same thing before and after.
         assert_eq!(crate::subs::launch_permissions("claude", &[], &out), crate::subs::launch_permissions("claude", &[], &claude));
@@ -1248,6 +1307,7 @@ mod sub_tool_tests {
         assert!(codex[3].starts_with("mcp_servers.kelpie.command=\"/opt/kelpie/kelpied\""), "{codex:?}");
         assert_eq!(codex[codex.len() - 2..], ["-c".to_string(), "model=\"m\"".to_string()]);
         assert!(codex.iter().any(|a| a.starts_with("mcp_servers.kelpie.default_tools_approval_mode")));
+        assert!(!codex.iter().any(|a| a.contains(".tools.")), "the chat view cannot show Codex's approval of a tool");
 
         // ACP agents are configured by the app; a Claude or Codex command that is not the chat protocol is not touched either.
         for other in [own(&["gemini", "--experimental-acp"]), own(&["claude", "--version"]), own(&["codex", "exec"])] {

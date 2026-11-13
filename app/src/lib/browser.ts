@@ -7,6 +7,7 @@ import { createRoot, createSignal } from "solid-js";
 import { store } from "./store";
 import { allPanes } from "./layout";
 import { uid } from "./platform";
+import type { AgentCallContext } from "./agent-browser-panes";
 
 export interface Rect { x: number; y: number; width: number; height: number }
 
@@ -70,15 +71,38 @@ function inOrder<T>(label: string, run: () => Promise<T>): Promise<T> {
   return result;
 }
 
-export const browserOpen = (label: string, url: string, rect: Rect) => inOrder(label, () => invoke<void>("browser_open", { label, url, rect }));
+/** Labels whose webview exists now: opened and not closed since (a pane on another tab keeps its webview, hidden). */
+const webviews = new Set<string>();
+export const hasWebview = (label: string) => webviews.has(label);
+
+/** `hidden`: the webview is created without being shown, for an agent that uses a pane nobody has opened yet; mounting the pane later
+ *  moves it into place and shows it. A hidden open of a webview that exists by its turn does nothing: the pane may have been opened on
+ *  screen meanwhile, and moving that one away would leave the pane blank. `agent`: the pane was opened for an agent, so its page keeps a
+ *  console log for the agent from the start (fixed when the webview is created). */
+export const browserOpen = (label: string, url: string, rect: Rect, opts: { hidden?: boolean; agent?: boolean } = {}) =>
+  inOrder(label, async () => {
+    if (opts.hidden && webviews.has(label)) return;
+    await invoke<void>("browser_open", { label, url, rect, ...(opts.hidden ? { hidden: true } : {}), ...(opts.agent ? { agent: true } : {}) });
+    webviews.add(label);
+  });
 export const browserBounds = (label: string, rect: Rect) => invoke<void>("browser_bounds", { label, rect });
 export const browserVisible = (label: string, visible: boolean) => inOrder(label, () => invoke<void>("browser_visible", { label, visible }));
 export const browserNavigate = (label: string, url: string) => invoke<string>("browser_navigate", { label, url });
 export const browserGo = (label: string, delta: -1 | 0 | 1) => invoke<void>("browser_go", { label, delta });
 export const browserDesign = (label: string, on: boolean) => invoke<void>("browser_design", { label, on });
 export const browserDevtools = (label: string) => invoke<void>("browser_devtools", { label });
-export const browserClose = (label: string) => inOrder(label, () => invoke<void>("browser_close", { label })).catch(() => {});
+export const browserClose = (label: string) =>
+  inOrder(label, () => {
+    webviews.delete(label);
+    return invoke<void>("browser_close", { label });
+  }).catch(() => {});
 export const browserScreenshot = (label: string, clip?: Rect) => invoke<{ path: string; data: string }>("browser_screenshot", { label, clip });
+
+/** Runs one browser tool of an agent in the pane `label`. Rust answers the daemon's request `preq` itself; a failure here means it did not. */
+export const browserAgentRun = (preq: number, label: string, tool: string, args: Record<string, unknown>, ctx: AgentCallContext) =>
+  invoke<void>("browser_agent_run", { preq, label, tool, args, ctx });
+/** Ends any agent's use of the pane `label` (the banner's Stop). */
+export const browserAgentStop = (label: string) => invoke<void>("browser_agent_stop", { label });
 
 /** Whether a local port answers with a web page, and its title. */
 export const browserProbe = (host: string, port: number) => invoke<{ title: string | null } | null>("browser_probe", { host, port });
@@ -96,16 +120,23 @@ export const markPageSeen = (paneId: string) =>
 
 const handlers = new Map<string, (e: BrowserEvent) => void>();
 let listening = false;
+/** Starts the one listener for `browser-event`s (once). Every event is also dispatched on `window` as `kelpie:browser-event`. */
+export function listenBrowserEvents() {
+  if (listening) return;
+  listening = true;
+  void listen<BrowserEvent>("browser-event", (e) => {
+    handlers.get(e.payload.label)?.(e.payload);
+    // Observable for tests and anything else interested (the page itself is out of reach).
+    window.dispatchEvent(new CustomEvent("kelpie:browser-event", { detail: e.payload }));
+  });
+}
+
+/** Whether a mounted pane handles the events of the webview `label` (an unmounted pane's page still loads and changes its title). */
+export const browserMounted = (label: string) => handlers.has(label);
+
 /** Routes `browser-event`s of one webview to `fn` (returns the unsubscribe). */
 export function onBrowserEvent(label: string, fn: (e: BrowserEvent) => void) {
-  if (!listening) {
-    listening = true;
-    void listen<BrowserEvent>("browser-event", (e) => {
-      handlers.get(e.payload.label)?.(e.payload);
-      // Observable for tests and anything else interested (the page itself is out of reach).
-      window.dispatchEvent(new CustomEvent("kelpie:browser-event", { detail: e.payload }));
-    });
-  }
+  listenBrowserEvents();
   handlers.set(label, fn);
   return () => {
     if (handlers.get(label) === fn) handlers.delete(label);

@@ -30,11 +30,11 @@ const holds = (sessionId: string, port: number) => {
 };
 
 /** Shows `url` in a new browser tab of the project, in the background, marked until it is looked at, with a notice that offers to
- *  show it. Returns the pane's id. */
-function openInBackground(projectId: string, sessionName: string, url: string, title: string, page: string): string {
+ *  show it. The pane is recorded as opened for `sessionId`, whose agent may then use it with the browser tools. Returns the pane's id. */
+function openInBackground(projectId: string, sessionId: string, sessionName: string, url: string, title: string, page: string): string {
   const paneId = uid();
   setBrowserState(paneId, { title, url, design: false, notes: [] });
-  const tab = store.addTab(projectId, { id: paneId, kind: "browser", url }, { background: true });
+  const tab = store.addTab(projectId, { id: paneId, kind: "browser", url, openedBy: sessionId }, { background: true });
   markPageFresh(paneId);
   store.notify(
     t("{session} opened a web page: {page}", { session: sessionName, page }),
@@ -81,7 +81,8 @@ export function openRequestedPage(req: OpenPageRequest) {
     );
     return;
   }
-  openInBackground(projectId, name, url.href, title, page);
+  // A tab that already showed the address stays the person's (above): only a new one is the agent's.
+  openInBackground(projectId, req.session_id, name, url.href, title, page);
 }
 
 async function openIfWebPage(sessionId: string, port: Port) {
@@ -94,7 +95,7 @@ async function openIfWebPage(sessionId: string, port: Port) {
     const projectId = session?.project_id;
     if (!projectId || !holds(sessionId, port.port) || store.state.settings.agentWebTabs === false) return;
     if (browserPaneOnPort(projectId, port.port)) return;
-    const paneId = openInBackground(projectId, sessionLabel(session), portUrl(port), page.title ?? "", page.title ?? `${port.host}:${port.port}`);
+    const paneId = openInBackground(projectId, sessionId, sessionLabel(session), portUrl(port), page.title ?? "", page.title ?? `${port.host}:${port.port}`);
     unseen.set(paneId, { projectId, sessionId, port: port.port });
     return;
   }

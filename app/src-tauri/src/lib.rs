@@ -534,6 +534,7 @@ pub fn run() {
             app.manage(index);
             app.manage(browser::Browsers::default());
             app.manage(browser::Takeovers::default());
+            app.manage(browser::AgentPanes::default());
             app.manage(screen::Screens::default());
             app.manage(ssh_hosts::Forwards::default());
             app.manage(sftp_edit::EditSessions::default());
@@ -693,6 +694,8 @@ pub fn run() {
             browser::takeover::browser_takeover_start,
             browser::takeover::browser_takeover_stop,
             browser::takeover::provider_reply,
+            browser::agent::browser_agent_run,
+            browser::agent::browser_agent_stop,
             screen::screen_stop,
             screen::screen_prefs,
             screen::screen_viewers,

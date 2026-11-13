@@ -48,11 +48,11 @@ export function Toggle(props: { on: boolean; onChange: (on: boolean) => void; la
   );
 }
 
-export function Choice<T extends string | number>(props: { value: T; options: [T, string][]; onChange: (v: T) => void }) {
+export function Choice<T extends string | number>(props: { value: T; options: [T, string][]; onChange: (v: T) => void; disabled?: boolean }) {
   return (
     <div class="seg">
       <For each={props.options}>
-        {([v, label]) => <button class={props.value === v ? "on" : ""} onClick={() => props.onChange(v)}>{label}</button>}
+        {([v, label]) => <button class={props.value === v ? "on" : ""} disabled={props.disabled} onClick={() => props.onChange(v)}>{label}</button>}
       </For>
     </div>
   );

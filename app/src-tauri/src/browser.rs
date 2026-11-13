@@ -10,6 +10,8 @@
 //! `window.opener` and gets the sign-in back; any other new window opens in the pane. A pane and its popups are one group for a phone that takes the
 //! pane over (`takeover`).
 
+pub(crate) mod agent;
+mod agent_snapshot;
 pub(crate) mod takeover;
 
 use std::collections::HashMap;
@@ -25,9 +27,12 @@ use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, Webv
 use crate::fs_ops::{err, CmdResult};
 
 const PICKER: &str = include_str!("browser_picker.js");
+/// The engine agents act through (`agent`).
+const AGENT_ENGINE: &str = include_str!("browser_agent.js");
 const SENTINEL_HOST: &str = "kelpie-pick.invalid";
 
 // The commands are registered by their own path (`browser::takeover::…`): `generate_handler!` needs the macros `#[tauri::command]` puts beside them.
+pub use agent::AgentPanes;
 pub use takeover::Takeovers;
 
 /// Nonce of each browser webview (by label); reports carrying another one are ignored. The popups each pane opened, oldest first, and their pages' titles.
@@ -37,6 +42,10 @@ pub struct Browsers {
     popups: Mutex<HashMap<String, Vec<String>>>,
     popup_titles: Mutex<HashMap<String, String>>,
     next_popup: AtomicU64,
+    /// Main-frame navigations of each pane: started, and finished by then (`agent` waits on them).
+    navs: Mutex<HashMap<String, (u64, u64)>>,
+    /// The nonce each pane's agent engine answers to (`browser_agent.js`): the page cannot call it.
+    agent_nonces: Mutex<HashMap<String, String>>,
 }
 
 impl Browsers {
@@ -48,6 +57,24 @@ impl Browsers {
         self.popup_titles.lock().unwrap().get(popup).cloned().unwrap_or_default()
     }
 
+    fn agent_nonce(&self, pane: &str) -> Option<String> {
+        self.agent_nonces.lock().unwrap().get(pane).cloned()
+    }
+
+    fn navs(&self, pane: &str) -> (u64, u64) {
+        self.navs.lock().unwrap().get(pane).copied().unwrap_or_default()
+    }
+
+    fn nav_started(&self, pane: &str) {
+        self.navs.lock().unwrap().entry(pane.to_string()).or_default().0 += 1;
+    }
+
+    fn nav_finished(&self, pane: &str) {
+        let mut navs = self.navs.lock().unwrap();
+        let n = navs.entry(pane.to_string()).or_default();
+        n.1 = n.0;
+    }
+
     fn forget_popup(&self, pane: &str, popup: &str) {
         if let Some(list) = self.popups.lock().unwrap().get_mut(pane) {
             list.retain(|p| p != popup);
@@ -56,13 +83,18 @@ impl Browsers {
     }
 }
 
-/// A request or a notice of the daemon for this window (`takeover`).
+/// A request or a notice of the daemon for this window: an agent's browser tool (`agent`), else a phone's takeover (`takeover`).
 pub fn provider_message(app: &AppHandle, msg: Value) {
+    if let (Some(preq), Some("browser.agent")) = (msg["preq"].as_u64(), msg["method"].as_str()) {
+        agent::on_request(app, preq, msg["params"].clone());
+        return;
+    }
     takeover::on_message(app, msg);
 }
 
 /// The daemon's connection dropped.
 pub fn daemon_gone(app: &AppHandle) {
+    agent::daemon_gone(app);
     takeover::daemon_gone(app);
 }
 
@@ -201,13 +233,20 @@ pub struct Rect {
     height: f64,
 }
 
-/// Creates the pane's webview (or moves and shows the existing one).
+/// Creates the pane's webview (or moves and shows the existing one). `hidden`: for an agent that uses a pane nobody has opened yet, the
+/// webview is made at `rect` (off screen) and hidden at once; an existing one is left exactly as it is (the pane may be mounting). `agent`:
+/// the pane was opened for an agent, so its page keeps its console for it from the start; fixed when the webview is made.
 #[tauri::command]
-pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, label: String, url: String, rect: Rect) -> CmdResult<()> {
+pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, label: String, url: String, rect: Rect, hidden: Option<bool>, agent: Option<bool>) -> CmdResult<()> {
     valid_label(&label)?;
+    let hidden = hidden == Some(true);
     if let Some(wv) = app.get_webview(&label) {
+        if hidden {
+            return Ok(());
+        }
         wv.set_position(LogicalPosition::new(rect.x, rect.y)).map_err(err)?;
         wv.set_size(LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0))).map_err(err)?;
+        app.state::<Takeovers>().set_visible(&label, true);
         wv.show().map_err(err)?;
         crate::webview_memory::fit(&wv);
         return Ok(());
@@ -216,21 +255,36 @@ pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, lab
     let window = app.get_window("main").ok_or("no main window")?;
     let nonce = new_nonce();
     state.nonces.lock().unwrap().insert(label.clone(), nonce.clone());
+    let agent_nonce = new_nonce();
+    state.agent_nonces.lock().unwrap().insert(label.clone(), agent_nonce.clone());
+    let engine = AGENT_ENGINE.replace("__KELPIE_AGENT_NONCE__", &agent_nonce).replace("__KELPIE_AGENT_PANE__", if agent == Some(true) { "true" } else { "false" });
     let (nav_app, load_app, title_app, popup_app) = (app.clone(), app.clone(), app.clone(), app.clone());
     let (nav_label, load_label, title_label, popup_label) = (label.clone(), label.clone(), label.clone(), label.clone());
     let popup_nonce = nonce.clone();
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(url))
         .initialization_script(PICKER.replace("__KELPIE_NONCE__", &nonce))
+        .initialization_script(engine)
         .on_navigation(move |u| {
             if u.host_str() == Some(SENTINEL_HOST) {
                 return false;
             }
             emit(&nav_app, &nav_label, "nav", Some(u.to_string()), None, None);
             // Pages stay on the web: no file:, javascript: or app schemes.
-            matches!(u.scheme(), "http" | "https" | "about" | "data" | "blob")
+            let allowed = matches!(u.scheme(), "http" | "https" | "about" | "data" | "blob");
+            // WebView2 asks here for the main frame only; WebKit asks for frames too, so there the start of a load counts instead.
+            #[cfg(windows)]
+            if allowed {
+                nav_app.state::<Browsers>().nav_started(&nav_label);
+            }
+            allowed
         })
         .on_page_load(move |_wv, payload| {
+            #[cfg(not(windows))]
+            if matches!(payload.event(), PageLoadEvent::Started) {
+                load_app.state::<Browsers>().nav_started(&load_label);
+            }
             if matches!(payload.event(), PageLoadEvent::Finished) {
+                load_app.state::<Browsers>().nav_finished(&load_label);
                 emit(&load_app, &load_label, "load", Some(payload.url().to_string()), None, None);
             }
         })
@@ -254,6 +308,10 @@ pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, lab
     let wv = window
         .add_child(builder, LogicalPosition::new(rect.x, rect.y), LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0)))
         .map_err(err)?;
+    if hidden {
+        app.state::<Takeovers>().set_visible(&label, false);
+        wv.hide().map_err(err)?;
+    }
     crate::webview_memory::fit(&wv);
     Ok(())
 }
@@ -327,6 +385,9 @@ pub async fn browser_info(app: AppHandle, label: String) -> CmdResult<Value> {
 #[tauri::command]
 pub async fn browser_close(app: AppHandle, state: tauri::State<'_, Browsers>, label: String) -> CmdResult<()> {
     state.nonces.lock().unwrap().remove(&label);
+    state.navs.lock().unwrap().remove(&label);
+    state.agent_nonces.lock().unwrap().remove(&label);
+    agent::pane_closed(&app, &label);
     // A takeover of the pane ends, and its popups go with it.
     takeover::pane_closed(&app, &label).await;
     let popups = state.popups.lock().unwrap().remove(&label).unwrap_or_default();

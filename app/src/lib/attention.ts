@@ -43,6 +43,10 @@ export const ALERT_PREFS_API = 37;
  *  event). Below it the app sends no launch catalogue and the phone shows no "+". */
 export const NEW_SESSION_API = 38;
 
+/** Daemon API level that lets agents use browser panes (`browser.call` forwarded to this window, the policy keys `browser_agents`, `browser_eval`,
+ *  `browser_sites`, `browser.audit`). Below it Settings shows no Browser panes section and panes offer no sharing with agents. */
+export const BROWSER_AGENT_API = 39;
+
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;
 

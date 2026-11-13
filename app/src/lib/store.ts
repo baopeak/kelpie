@@ -340,7 +340,7 @@ function createAppStore() {
       return;
     }
     const asked = Date.now();
-    const [pending, policy] = await Promise.all([ipc.subPending().catch(() => null), ipc.subPolicyGet().catch(() => null)]);
+    const [pending, policy] = await Promise.all([ipc.subPending().catch(() => null), ipc.policyGet().catch(() => null)]);
     setSubPolicy(toSubPolicy(policy));
     if (!pending) return;
     const list = pending.map(toSubRequest).filter((r): r is SubRequest => !!r);

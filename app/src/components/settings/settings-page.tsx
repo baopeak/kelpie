@@ -5,7 +5,7 @@ import { Dynamic } from "solid-js/web";
 import { store } from "../../lib/store";
 import { t } from "../../lib/i18n";
 import { isMac } from "../../lib/platform";
-import { settingsCatalog, settingsSections, entryMatches, type SettingsSection } from "../../lib/settings-catalog";
+import { settingsCatalog, settingsSections, entryAvailable, entryMatches, type SettingsSection } from "../../lib/settings-catalog";
 import { QuickCommandsEditor } from "../quick-commands";
 import { Icon } from "../icons";
 import { SettingRow, setSettingsQuery, settingsQuery } from "./setting-row";
@@ -58,7 +58,7 @@ const SECTIONS: Record<SettingsSection, () => JSX.Element> = {
 };
 
 const sectionMatches = (id: SettingsSection, q: string) =>
-  id === "shortcuts" ? shortcutsMatch(q) : settingsCatalog.some((e) => e.section === id && entryMatches(e, q));
+  id === "shortcuts" ? shortcutsMatch(q) : settingsCatalog.some((e) => e.section === id && entryAvailable(e, store.daemonApi()) && entryMatches(e, q));
 
 export function SettingsPage() {
   let search!: HTMLInputElement;

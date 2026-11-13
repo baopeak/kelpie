@@ -18,9 +18,16 @@ export const mobileSecure = <T = unknown>(method: "mobile.approve" | "mobile.set
 export const subAnswer = (id: string, decision: "once" | "session" | "always" | "deny") => daemon<unknown>("sub.answer", { id, decision });
 /** Requests still waiting for the user (the daemon keeps them for 5 minutes). */
 export const subPending = () => daemon<unknown[]>("sub.pending");
-/** The sub-session part of the daemon's policy: `sub_sessions` off|ask|allow, `sub_max` (0: automatic), read-only `sub_auto_max`. */
-export const subPolicyGet = () => daemon<unknown>("daemon.policy");
+/** The daemon's policy. The sub-session part: `sub_sessions` off|ask|allow, `sub_max` (0: automatic), read-only `sub_auto_max`. The browser-pane
+ *  part: `browser_agents` off|read|act, `browser_eval`, `browser_sites` (origins). */
+export const policyGet = () => daemon<unknown>("daemon.policy");
 export const subPolicySet = (patch: { sub_sessions?: "off" | "ask" | "allow"; sub_max?: number }) => daemon<unknown>("daemon.set_policy", patch);
+export const browserPolicySet = (patch: { browser_agents?: "off" | "read" | "act"; browser_eval?: boolean; browser_sites?: string[] }) => daemon<unknown>("daemon.set_policy", patch);
+/** The latest things agents did in browser panes, as the daemon logged them: `{entries: [{at, session, label, tool, host, target, ok, error}]}`. */
+export const browserAudit = (limit: number) => daemon<unknown>("browser.audit", { limit });
+
+/** Answers a request the daemon sent this window (`preq`): a result, or an error the daemon passes on. */
+export const providerReply = (preq: number, result: unknown, error: string | null) => invoke<void>("provider_reply", { preq, result, error });
 
 export const listSessions = () => daemon<SessionInfo[]>("session.list");
 

@@ -54,6 +54,7 @@ import { CHECKPOINT_API } from "../lib/checkpoint-api";
 import { initNotifySync } from "../lib/notify-sync";
 import { initLimits } from "../lib/limits";
 import { initTakeover } from "../lib/takeover";
+import { initAgentBrowser } from "../lib/agent-browser";
 import { initScreen } from "../lib/screen";
 import { agentPresets } from "../lib/agents";
 import { NEW_SESSION_API } from "../lib/attention";
@@ -160,6 +161,7 @@ export function App() {
   onMount(() => {
     initRuns();
     initTakeover();
+    initAgentBrowser();
     initScreen();
     initSessionUsage();
     initReviewWatch();

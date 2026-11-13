@@ -6,7 +6,7 @@ import { store, sessionLabel } from "../lib/store";
 import { chordOf, commands } from "../lib/commands";
 import { basename, chordLabel, relTime } from "../lib/platform";
 import { quickOpen, type QuickOpenHit } from "../lib/ipc";
-import { settingsCatalog } from "../lib/settings-catalog";
+import { entryAvailable, settingsCatalog } from "../lib/settings-catalog";
 import { quickCommandsFor, runQuickCommand } from "../lib/quick-commands";
 import { searchHistory } from "../lib/prompt-history";
 import { composeWith } from "../lib/send-to-agent";
@@ -230,6 +230,7 @@ export function Palette(props: { scope: SearchScope }) {
     }
     if (sc === "all" || sc === "settings") {
       const items = settingsCatalog
+        .filter((c) => entryAvailable(c, store.daemonApi()))
         .map((c) => ({ c, shown: t(c.label) }))
         .map(({ c, shown }) => ({ c, shown, m: fuzzy(q, `${shown} ${c.label} ${c.keywords}`) }))
         .filter((x) => x.m)

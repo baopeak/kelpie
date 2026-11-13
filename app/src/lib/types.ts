@@ -130,6 +130,9 @@ export interface Pane {
   line?: number;
   /** Browser panes: the page shown. */
   url?: string;
+  /** Browser panes an agent asked for or Kelpie opened for an agent's server: the session they were opened for. That session and its
+   *  sub-sessions may use the pane with the browser tools; Stop on the pane's banner clears it. */
+  openedBy?: string;
   /** Empty panes: the host their launcher starts on (copied from the pane that was split). */
   target?: SessionTarget;
 }

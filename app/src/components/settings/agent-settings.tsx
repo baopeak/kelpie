@@ -2,10 +2,13 @@
 // environment, the agent for AI actions, hibernation and keep-awake.
 import { For, Show, createEffect, createSignal } from "solid-js";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { store } from "../../lib/store";
-import { subPolicyGet, subPolicySet } from "../../lib/ipc";
+import { sessionLabel, store } from "../../lib/store";
+import { browserAudit, browserPolicySet, policyGet, subPolicySet } from "../../lib/ipc";
 import { SUB_MAX_LIMIT, SUB_SESSIONS_API, parseSubMax, setSubPolicy, subPolicy, toSubPolicy } from "../../lib/sub-sessions";
-import { msg, t } from "../../lib/i18n";
+import { formatDateTime, msg, t } from "../../lib/i18n";
+import { BROWSER_AGENT_API } from "../../lib/attention";
+import { browserPolicy, refreshBrowserPolicy, setBrowserPolicy } from "../../lib/agent-browser";
+import { MAX_SITES, addSite, toAuditEntries, toBrowserPolicy, type AuditEntry, type BrowserMode, type SiteError } from "../../lib/agent-browser-panes";
 import { LoadBar } from "../load-bar";
 import { CORE_AGENTS, agentPresets, kindInfo, loadAgentPresets } from "../../lib/agents";
 import { Icon, KindGlyph } from "../icons";
@@ -104,7 +107,7 @@ function SubSessionSettings() {
   const supported = () => store.daemonApi() >= SUB_SESSIONS_API;
   const [busy, setBusy] = createSignal(false);
   createEffect(() => {
-    if (store.connected() && supported()) void subPolicyGet().then((r) => setSubPolicy(toSubPolicy(r)), () => {});
+    if (store.connected() && supported()) void policyGet().then((r) => setSubPolicy(toSubPolicy(r)), () => {});
   });
   const send = async (patch: { sub_sessions?: "off" | "ask" | "allow"; sub_max?: number }) => {
     if (busy()) return;
@@ -151,6 +154,100 @@ function SubSessionSettings() {
   );
 }
 
+const siteErrors: Record<SiteError, string> = {
+  scheme: msg("Type the site with http:// or https:// in front, such as https://example.com."),
+  invalid: msg("That is not a site address."),
+  path: msg("Type only the site, without a path, such as https://example.com."),
+  duplicate: msg("That site is already in the list."),
+  full: msg("The list holds {n} sites at most."),
+};
+
+/** The daemon's browser policy (kept in policy.json, like the sub-session policy): what agents may do in browser panes, whether they may
+ *  run scripts, the sites they may open, and what they did lately. Shown only by a daemon that has it. */
+function BrowserAgentSettings() {
+  const supported = () => store.daemonApi() >= BROWSER_AGENT_API;
+  const [busy, setBusy] = createSignal(false);
+  const [site, setSite] = createSignal("");
+  const [siteError, setSiteError] = createSignal<string | null>(null);
+  const [audit, setAudit] = createSignal<AuditEntry[] | null>(null);
+  const loadAudit = () => void browserAudit(50).then((r) => setAudit(toAuditEntries(r)), () => setAudit([]));
+  createEffect(() => {
+    if (!store.connected() || !supported()) return;
+    void refreshBrowserPolicy();
+    loadAudit();
+  });
+  const send = async (patch: { browser_agents?: BrowserMode; browser_eval?: boolean; browser_sites?: string[] }) => {
+    if (busy()) return false;
+    setBusy(true);
+    try {
+      setBrowserPolicy(toBrowserPolicy(await browserPolicySet(patch)));
+      return true;
+    } catch (e) {
+      store.notify(String(e).replace(/^Error: /, ""), undefined, 8000);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const p = () => browserPolicy();
+  const sites = () => p()?.sites ?? [];
+  const add = async () => {
+    const next = addSite(sites(), site());
+    if ("error" in next) return setSiteError(t(siteErrors[next.error], { n: MAX_SITES }));
+    setSiteError(null);
+    if (await send({ browser_sites: next.sites })) setSite("");
+  };
+  const who = (id: string) => (store.sessions[id] ? sessionLabel(store.sessions[id]) : id.slice(0, 8));
+  return (
+    <Show when={supported()}>
+      <SettingRow id="browser-agents" wide>
+        <div class="inline-fields" style={{ "align-items": "center", "flex-wrap": "wrap" }}>
+          <Choice value={p()?.mode ?? "off"} options={[["off", t("Off")], ["read", t("Read only")], ["act", t("Read and act")]]} disabled={busy()} onChange={(v) => void send({ browser_agents: v })} />
+          <span class="muted-inline">{t("Applies to agents started after the change.")}</span>
+        </div>
+      </SettingRow>
+      <SettingRow id="browser-agents-eval">
+        <Toggle on={p()?.eval ?? false} disabled={busy() || p()?.mode !== "act"} onChange={(on) => void send({ browser_eval: on })} label={t("Agents may run scripts in pages")} />
+      </SettingRow>
+      <SettingRow id="browser-agents-sites" wide>
+        <div class="browser-sites">
+          <For each={sites()}>
+            {(s) => (
+              <span class="chip browser-site">
+                <span class="mono">{s}</span>
+                <button class="icon-btn" title={t("Remove")} disabled={busy()} onClick={() => void send({ browser_sites: sites().filter((x) => x !== s) })}><Icon name="close" size={10} /></button>
+              </span>
+            )}
+          </For>
+        </div>
+        <form class="inline-fields" onSubmit={(e) => { e.preventDefault(); void add(); }}>
+          <input class="text-input" style={{ width: "260px" }} value={site()} placeholder="https://example.com" spellcheck={false}
+            onInput={(e) => { setSite(e.currentTarget.value); setSiteError(null); }} />
+          <button class="btn" type="submit" disabled={busy() || !site().trim()}>{t("Add")}</button>
+        </form>
+        <Show when={siteError()}><div class="form-note error">{siteError()}</div></Show>
+      </SettingRow>
+      <SettingRow id="browser-agents-audit" wide>
+        <div class="browser-audit">
+          <For each={audit() ?? []} fallback={<div class="muted">{audit() ? t("No agent has acted in a browser pane yet.") : t("Loading…")}</div>}>
+            {(e) => (
+              <div class="browser-audit-row" data-ok={e.ok}>
+                <span class="muted-inline">{formatDateTime(e.at)}</span>
+                <span>{who(e.session)}</span>
+                <span class="mono">{e.tool}</span>
+                <span class="mono muted-inline">{e.host}</span>
+                <span class="browser-audit-target">{e.target}</span>
+                <Show when={!e.ok}><span class="form-note error">{e.error ? t("Not done: {error}", { error: e.error }) : t("Not done")}</span></Show>
+              </div>
+            )}
+          </For>
+        </div>
+        <button class="btn" style={{ "align-self": "flex-start" }} onClick={loadAudit}>{t("Refresh")}</button>
+      </SettingRow>
+    </Show>
+  );
+}
+
 /** A daemon that predates sub-sessions: the controls would do nothing, so they are not shown. */
 function DaemonTooOld() {
   return (
@@ -181,6 +278,7 @@ export function AgentSettings() {
         <AgentList />
       </SettingRow>
       <SubSessionSettings />
+      <BrowserAgentSettings />
       <SettingRow id="ai-agent">
         <Choice value={s().aiAgent ?? "claude"} options={[["claude", "Claude Code"], ["codex", "Codex"]]} onChange={(v) => store.setSettings({ aiAgent: v })} />
       </SettingRow>

@@ -93,7 +93,7 @@ describe("web pages an agent starts", () => {
     expect(h.addTab).toHaveBeenCalledTimes(1);
     const [projectId, pane, opts] = h.addTab.mock.calls[0];
     expect(projectId).toBe("p");
-    expect(pane).toMatchObject({ kind: "browser", url: "http://localhost:3002/" });
+    expect(pane).toMatchObject({ kind: "browser", url: "http://localhost:3002/", openedBy: s });
     expect(opts).toEqual({ background: true });
     expect(fresh().has(pane.id)).toBe(true);
     expect(h.notify.mock.calls[0][0]).toContain("Studio");
@@ -208,7 +208,7 @@ describe("web pages an agent asks for", () => {
     expect(h.addTab).toHaveBeenCalledTimes(1);
     const [projectId, pane, opts] = h.addTab.mock.calls[0];
     expect(projectId).toBe("p");
-    expect(pane).toMatchObject({ kind: "browser", url: "http://localhost:5173/" });
+    expect(pane).toMatchObject({ kind: "browser", url: "http://localhost:5173/", openedBy: s });
     expect(opts).toEqual({ background: true });
     expect(h.setBrowserState).toHaveBeenCalledWith(pane.id, { title: "Studio", url: "http://localhost:5173/", design: false, notes: [] });
     expect(fresh().has(pane.id)).toBe(true);
