@@ -445,11 +445,10 @@ def main():
     site = ThreadingHTTPServer(("127.0.0.1", 0), Site)
     SITE_PORT = site.server_address[1]
     threading.Thread(target=site.serve_forever, daemon=True).start()
+    if port_open(1427):
+        raise SystemExit("port 1427 is taken (another Vite dev server?): this script starts the app's own; stop that one first")
     d = ps.Daemon(kelpied, env={"KELPIE_E2E": "1"}).start()
     procs["daemon"] = d.proc
-    if port_open(1427):
-        d.stop()
-        raise SystemExit("port 1427 is taken (another Vite dev server?): this script starts the app's own; stop that one first")
     procs["vite"] = subprocess.Popen(["cmd", "/c", "pnpm", "exec", "vite", "--port", "1427", "--strictPort"] if os.name == "nt" else ["pnpm", "exec", "vite", "--port", "1427", "--strictPort"], cwd=os.path.join(REPO, "app"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     until(lambda: port_open(1427), 60)
     driver_port = free_port()
@@ -463,6 +462,8 @@ def main():
         run.boot()
         info = run.d.invoke("daemon_call", {"method": "daemon.info", "params": {}}).get("ok") or {}
         check("the app is connected to this script's daemon", info.get("pid") == d.proc.pid, info.get("pid"))
+        if info.get("pid") != d.proc.pid:
+            raise SystemExit("the app is not on this script's daemon: stopping before any scenario")
         m1 = scenario(run, d)
         # The app goes away (ending the WebDriver session closes it): a call fails fast and says why.
         run.d.quit()
@@ -494,6 +495,7 @@ def main():
         d.stop()
         site.shutdown()
         shutil.rmtree(os.path.join(scratch, f"agent-browser-{os.getpid()}"), ignore_errors=True)
+        shutil.rmtree(DATA, ignore_errors=True)
     failed = [r for r in results if not r[1]]
     print(json.dumps({"passed": len(results) - len(failed), "failed": len(failed)}))
     sys.exit(1 if failed else 0)
