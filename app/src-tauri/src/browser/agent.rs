@@ -28,7 +28,8 @@ use base64::Engine as _;
 
 use super::agent_cdp::{self as cdp, Fallback};
 use super::agent_snapshot::{self as snap, Kind, Refs, Snapshot, STALE};
-use super::{valid_label, Browsers, Takeovers, NOT_SHOWN};
+use super::native_shot;
+use super::{valid_label, Browsers, Takeovers, NOT_SHOWN, SCREENSHOTS};
 use crate::daemon_client::DaemonClient;
 use crate::fs_ops::CmdResult;
 
@@ -38,6 +39,11 @@ const IDLE: Duration = Duration::from_secs(20);
 const PERSON: Duration = Duration::from_secs(10);
 /// How long one call into the page may take.
 const PAGE_CALL: Duration = Duration::from_secs(3);
+/// Whether a picture can reach beyond the visible page: the DevTools protocol (Windows) and WebKitGTK's whole document (Linux) can,
+/// WKWebView (macOS) cannot.
+const BEYOND_VIEW: bool = cdp::AVAILABLE || native_shot::DOCUMENT;
+const WHOLE_PAGE: &str = "A picture of the whole page is not available on this platform; picture the visible page, or one element (ref).";
+const TOO_LARGE: &str = "The page is too large to picture whole here; picture the visible page, or one element (ref).";
 const POLL: Duration = Duration::from_millis(250);
 /// What is kept back from the daemon's wait, so that the answer reaches it in time.
 const MARGIN: Duration = Duration::from_secs(2);
@@ -520,7 +526,7 @@ pub async fn browser_agent_run(app: AppHandle, preq: u64, label: String, tool: S
 
 async fn run(app: &AppHandle, label: &str, tool: &str, args: &Value, ctx: &Ctx, p: &Pending) -> Result<Value, String> {
     class_of(tool).ok_or_else(|| format!("unknown browser tool `{tool}`"))?;
-    if !cdp::AVAILABLE && matches!(tool, "screenshot" | "network") {
+    if (tool == "network" && !cdp::AVAILABLE) || (tool == "screenshot" && !SCREENSHOTS) {
         return Err(format!("kelpie_browser_{tool} is not available in this version of Kelpie yet."));
     }
     let wv = app.get_webview(label).ok_or("The pane's page is not open.")?;
@@ -947,14 +953,18 @@ impl Call<'_> {
     /// One DevTools protocol call within `limit` and the call's time. `guarded`: only while the computer shows the pane, no phone holds it
     /// and agents' use of it has not ended since the call came, as the window thread finds right before it (else `NOT_SHOWN`).
     async fn cdp(&self, method: &'static str, params: Value, guarded: bool, limit: Duration) -> Result<Value, String> {
-        let hidden: Option<cdp::Hidden> = guarded.then(|| {
-            let (app, label, pane, received) = (self.app.clone(), self.label.to_string(), self.pane.clone(), self.received);
-            Box::new(move || {
-                let t = app.state::<Takeovers>();
-                t.hidden(&label) || t.pane_held(&label) || pane.state.lock().ended.is_some_and(|(at, _)| at > received)
-            }) as cdp::Hidden
-        });
+        let hidden: Option<cdp::Hidden> = guarded.then(|| self.hides());
         cdp::call(&self.wv, method, params, hidden, limit.min(self.left())).await
+    }
+
+    /// Looked at on the window thread right before a guarded call: whether the window hides the pane, a phone holds it, or agents' use of
+    /// it ended since the call came.
+    fn hides(&self) -> Box<dyn FnOnce() -> bool + Send> {
+        let (app, label, pane, received) = (self.app.clone(), self.label.to_string(), self.pane.clone(), self.received);
+        Box::new(move || {
+            let t = app.state::<Takeovers>();
+            t.hidden(&label) || t.pane_held(&label) || pane.state.lock().ended.is_some_and(|(at, _)| at > received)
+        })
     }
     /// Keeps the pane's requests from the first agent call on; waits a little for that to start, so that what this call does is in them.
     async fn record_network(&self) {
@@ -1365,9 +1375,19 @@ impl Call<'_> {
         let r = args["ref"].as_str();
         let id = r.map(|r| self.resolve(r, &info.doc)).transpose()?;
         let full = args["full_page"].as_bool() == Some(true) && id.is_none();
+        if full && !BEYOND_VIEW {
+            return Err(WHOLE_PAGE.into());
+        }
         let g = self.engine("geometry", json!({"doc": info.doc, "id": id}), true).await?;
         let g: cdp::Geometry = serde_json::from_value(g).map_err(|e| e.to_string())?;
+        // WebKitGTK renders the whole document for a picture beyond the visible page: not for a document too large for that.
+        let beyond_view = cdp::AVAILABLE || (BEYOND_VIEW && native_shot::document_fits(g.dw.max(g.w), g.dh.max(g.h), g.dpr));
+        if full && !beyond_view {
+            return Err(TOO_LARGE.into());
+        }
         let mut shot = cdp::plan_shot(&g, full);
+        // Where only the visible page can be pictured, an element larger than it is cut to it.
+        let cut_to_view = shot.beyond && !beyond_view;
         let unreadable = || "the page sent a picture Kelpie cannot read".to_string();
         let mut png = self.capture(&shot, None).await?;
         let (mut width, mut height) = cdp::png_size(&png).ok_or_else(unreadable)?;
@@ -1408,6 +1428,9 @@ impl Call<'_> {
             None => "Screenshot of the visible page".into(),
         };
         let mut text = format!("{what}{}.", if shot.cut { ", cut at 8000 px high" } else { "" });
+        if cut_to_view {
+            text.push_str(" Only its part within the visible page: the rest is outside it.");
+        }
         if mime == "image/jpeg" {
             text.push_str(" A JPEG: the PNG was over 1.5 MB.");
         }
@@ -1435,8 +1458,14 @@ impl Call<'_> {
 
     /// The picture `shot` (a PNG, or a JPEG of quality `jpeg`), within the call's time; refused when the pane cannot be pictured.
     async fn capture(&self, shot: &cdp::Shot, jpeg: Option<u8>) -> Result<Vec<u8>, String> {
-        let v = self.cdp("Page.captureScreenshot", shot.params(jpeg), true, self.left()).await.map_err(|e| if e == NOT_SHOWN { self.not_shown() } else { e })?;
-        base64::engine::general_purpose::STANDARD.decode(v["data"].as_str().ok_or("the page sent no picture")?).map_err(|e| e.to_string())
+        let refused = |e: String| if e == NOT_SHOWN { self.not_shown() } else { e };
+        if cdp::AVAILABLE {
+            let v = self.cdp("Page.captureScreenshot", shot.params(jpeg), true, self.left()).await.map_err(refused)?;
+            return base64::engine::general_purpose::STANDARD.decode(v["data"].as_str().ok_or("the page sent no picture")?).map_err(|e| e.to_string());
+        }
+        // WebKit's snapshot of the region, drawn at the shot's scale, encoded as asked.
+        let clip = [shot.x, shot.y, shot.width, shot.height];
+        native_shot::take(&self.wv, Some(clip), shot.scale, jpeg, Some(self.hides()), self.left()).await.map_err(refused)
     }
 
     /// The requests kept since an agent first used the pane (`kelpie_browser_network`): only those made by a page on a site this call may
