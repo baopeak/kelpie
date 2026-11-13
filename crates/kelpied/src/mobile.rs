@@ -3489,8 +3489,15 @@ fn device_hello(device: &Device, record: Permission, cap: Permission, control: &
 }
 
 /// Where this computer can be reached, for a phone to dial next time (after an address change above all). `list` is what a page from
-/// before `endpoints` reads: the direct addresses only.
-fn addrs_message(a: &Addrs) -> String {
+/// before `endpoints` reads: the direct addresses only. A page the relay hosts and a locked phone (`whole` false, see `addrs_whole`) hear
+/// the relay alone, marked `partial`: it is what keeps such a phone reaching this computer when its room changes, and they are told
+/// nothing of the Tailscale name, this network's addresses or this computer's hostname. A phone takes the relay from a `partial` one and
+/// keeps the rest of what it knows.
+fn addrs_message(a: &Addrs, whole: bool) -> String {
+    if !whole {
+        let endpoints: Vec<kelpie_link::Endpoint> = a.relay.iter().cloned().collect();
+        return json!({"type": "addrs", "seq": a.seq, "list": [], "endpoints": endpoints, "partial": true}).to_string();
+    }
     let endpoints: Vec<kelpie_link::Endpoint> = a.ts.iter().map(|o| kelpie_link::Endpoint::tailscale(o)).chain(a.relay.clone()).chain(a.list.iter().map(|l| kelpie_link::Endpoint::lan(l))).collect();
     json!({"type": "addrs", "seq": a.seq, "list": a.list, "endpoints": endpoints, "hostname": listen::hostname()}).to_string()
 }
@@ -3505,6 +3512,27 @@ async fn no_access(wire: &mut Wire, m: &Mobile, device: &Device) {
     } else {
         wire.close(RECONNECT, "off").await;
     }
+}
+
+/// Whether this connection may hear every address this computer has (`addrs_message`): not a page the relay hosts, and not while locked.
+fn addrs_whole(conn: &Conn, device: &Device) -> bool {
+    !conn.locked && device.page_kind != Some(PageKind::Hosted)
+}
+
+/// Tells the phone how its lock now stands, if that changed. Unlocked, it then hears where this computer is, as much of it as this connection
+/// may (`addrs_whole`), which it was not told while locked.
+async fn tell_lock_change(conn: &mut Conn, wire: &mut Wire, device: &Device, record: Permission, addrs: &watch::Receiver<Addrs>) -> bool {
+    let Some(told) = conn.lock_change(device, record).await else {
+        return true;
+    };
+    if !wire.send(&told.to_string()).await {
+        return false;
+    }
+    if told["type"] != "hello" {
+        return true;
+    }
+    let msg = addrs_message(&addrs.borrow(), addrs_whole(conn, device));
+    wire.send(&msg).await
 }
 
 async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wires, adapter: &mut tokio::task::JoinHandle<()>, generation: &Generation) {
@@ -3527,7 +3555,7 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
         return;
     }
     let told = addrs.borrow_and_update().clone();
-    if !wire.send(&addrs_message(&told)).await {
+    if !wire.send(&addrs_message(&told, addrs_whole(conn, device))).await {
         return;
     }
     if let Some(offer) = conn.relay_offer.take() {
@@ -3581,10 +3609,8 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                     },
                     OnEvent::Lock | OnEvent::Nothing => {}
                 }
-                if let Some(told) = conn.lock_change(device, record).await {
-                    if !wire.send(&told.to_string()).await {
-                        return;
-                    }
+                if !tell_lock_change(conn, wire, device, record, &addrs).await {
+                    return;
                 }
             }
             // The writer stopped (the socket is gone, or a message took longer than it may): this connection is over, whatever it is reading.
@@ -3608,10 +3634,8 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                     return;
                 }
                 // A window that ran out: this connection hears within a tick, whatever the sweep has got to.
-                if let Some(told) = conn.lock_change(device, record).await {
-                    if !wire.send(&told.to_string()).await {
-                        return;
-                    }
+                if !tell_lock_change(conn, wire, device, record, &addrs).await {
+                    return;
                 }
                 let level = load.level();
                 let beat = live.tick(Instant::now(), level.patience(), |since| load.healthy_since(since));
@@ -3652,7 +3676,7 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                     return;
                 }
                 let now = addrs.borrow_and_update().clone();
-                if !wire.send(&addrs_message(&now)).await {
+                if !wire.send(&addrs_message(&now, addrs_whole(conn, device))).await {
                     return;
                 }
             }
@@ -3687,10 +3711,8 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
                     }
                 }
                 // What it asked for may have locked or unlocked it, and it hears that after the reply.
-                if let Some(told) = conn.lock_change(device, record).await {
-                    if !wire.send(&told.to_string()).await {
-                        return;
-                    }
+                if !tell_lock_change(conn, wire, device, record, &addrs).await {
+                    return;
                 }
             }
             // A screen's own messages, on the writer's control queue: never behind the bulk lane or media.
@@ -7097,9 +7119,13 @@ mod tests {
         assert!(url.starts_with("http://127.0.0.1:"), "{url}");
         assert_eq!(kelpie_link::QrPayload::decode(url.split("#p=").nth(1).unwrap()).unwrap().endpoints, [kelpie_link::Endpoint::lan(&network.addr.to_string())]);
         // Phones are told, and a page from before `endpoints` still reads `list`.
-        let told: Value = serde_json::from_str(&addrs_message(&d.mobile.addrs.borrow())).unwrap();
+        let told: Value = serde_json::from_str(&addrs_message(&d.mobile.addrs.borrow(), true)).unwrap();
         assert_eq!(told["list"], json!([network.addr.to_string()]));
         assert_eq!(told["endpoints"], json!([{"t": "ts", "a": ORIGIN}, {"t": "lan", "a": network.addr.to_string()}]));
+        // A hosted or locked phone is told none of it: the relay alone, off here.
+        let held_back = addrs_message(&d.mobile.addrs.borrow(), false);
+        assert_eq!(serde_json::from_str::<Value>(&held_back).unwrap(), json!({"type": "addrs", "seq": told["seq"], "list": [], "endpoints": [], "partial": true}));
+        assert!(!held_back.contains(ORIGIN) && !held_back.contains(&network.addr.ip().to_string()), "{held_back}");
 
         // The page answers on the loopback listener.
         {

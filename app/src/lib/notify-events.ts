@@ -60,11 +60,11 @@ export function describeNotify(ev: NotifyEvent, ctx: NotifyContext): Described {
 }
 
 /** Why a "continue at reset" timer was dropped, as the daemon reports it. */
-/** Desktop popups are for what needs the user: input or an approval, a failure, the cost cap. A
+/** Desktop popups are for what needs the user: input or an approval, a failure, the cost cap, an agent a phone started here. A
  *  finished turn pops up only when the user asked for it (Settings → Notifications); the rest
  *  (automation started, worktree notes) stays in the inbox. */
 export function worthPopup(kind: InboxItem["kind"], notifyFinished: boolean): boolean {
-  return kind === "waiting" || kind === "error" || kind === "cost" || (kind === "finished" && notifyFinished);
+  return kind === "waiting" || kind === "error" || kind === "cost" || kind === "phone" || (kind === "finished" && notifyFinished);
 }
 
 /** Lets the same popup through once per `windowMs` (a session finishing turn after turn, a status

@@ -97,7 +97,11 @@ export interface AddrsMsg {
   endpoints?: Endpoint[];
   seq: number;
   list: string[];
-  hostname: string;
+  /** Left out of a `partial` one. */
+  hostname?: string;
+  /** Sent to a page the relay hosts and to a locked phone: the relay alone (or none, when it is off), and nothing of the computer's other
+   *  addresses. The phone takes the relay from it and keeps the rest of what it knows. */
+  partial?: boolean;
 }
 
 export interface Hello {

@@ -50,8 +50,8 @@ describe("describeCancelled", () => {
 
 // Desktop popups: only what needs the user, and the same one at most once per window.
 describe("worthPopup", () => {
-  it("pops up for input, approvals, failures and the cost cap", () => {
-    for (const k of ["waiting", "error", "cost"] as const) expect(worthPopup(k, false)).toBe(true);
+  it("pops up for input, approvals, failures, the cost cap and an agent a phone started", () => {
+    for (const k of ["waiting", "error", "cost", "phone"] as const) expect(worthPopup(k, false)).toBe(true);
   });
 
   it("keeps a finished turn in the inbox unless asked for", () => {

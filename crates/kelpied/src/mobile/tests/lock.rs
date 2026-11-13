@@ -125,7 +125,9 @@ async fn a_copied_key_on_a_real_socket_reaches_nothing_and_the_passkey_opens_it(
     }
     let text = bare.to_string();
     assert!(!text.contains("t1") && !text.contains("c1"), "no session in it: {text}");
-    assert_eq!(phone_recv(&mut thief).await.unwrap()["type"], "addrs");
+    // Nor where this computer is: the relay alone, which is off here.
+    let addrs = phone_recv(&mut thief).await.unwrap();
+    assert_eq!(addrs, json!({"type": "addrs", "seq": addrs["seq"], "list": [], "endpoints": [], "partial": true}), "a locked phone hears no address: {addrs}");
     for (i, name) in NOT_WHILE_LOCKED.iter().enumerate() {
         phone_send(&mut thief, json!({"type": name, "id": "t1", "text": "x", "req": i})).await.unwrap();
         let reply = phone_recv(&mut thief).await.unwrap();
@@ -154,6 +156,10 @@ async fn a_copied_key_on_a_real_socket_reaches_nothing_and_the_passkey_opens_it(
     assert_eq!((fresh["type"].as_str(), fresh["locked"].as_bool(), fresh["lock"]["state"].as_str()), (Some("hello"), Some(false), Some("open")));
     assert_eq!(fresh["sessions"].as_array().unwrap().len(), 2);
     assert_eq!(fresh["device"]["can_write"], true);
+    // Unlocked, it hears what it was not told while locked.
+    let whole = phone_recv(&mut thief).await.unwrap();
+    assert_eq!((whole["type"].as_str(), whole.get("partial"), whole["list"][0].as_str()), (Some("addrs"), None, Some(network.addr.to_string().as_str())), "{whole}");
+    assert!(whole["hostname"].is_string(), "{whole}");
 
     // Going away and back inside the window, holding its secret, asks nothing: a flap of the network.
     drop(thief);
@@ -162,7 +168,8 @@ async fn a_copied_key_on_a_real_socket_reaches_nothing_and_the_passkey_opens_it(
     phone_send(&mut back, json!({"caps": ["ack", "hb"], "resume": opened["resume"]})).await.unwrap();
     let hello = phone_recv(&mut back).await.unwrap();
     assert_eq!((hello["locked"].as_bool(), hello["sessions"].as_array().unwrap().len()), (Some(false), 2));
-    assert_eq!(phone_recv(&mut back).await.unwrap()["type"], "addrs");
+    let whole = phone_recv(&mut back).await.unwrap();
+    assert_eq!((whole["type"].as_str(), whole.get("partial")), (Some("addrs"), None), "an unlocked page hears every address: {whole}");
 
     // Leaving locks at once, on this connection, and it stops hearing.
     phone_send(&mut back, json!({"type": "lock_now", "req": "left"})).await.unwrap();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { afterFailedPairing, firstScreen, movedTo, platformOf, readCode, relayMovedTo, type PageFacts } from "./install-state";
+import { afterFailedPairing, applyAddrs, firstScreen, movedTo, platformOf, readCode, relayMovedTo, type PageFacts } from "./install-state";
 import { b64url, randomBytes } from "./noise";
 
 const facts = (over: Partial<PageFacts> = {}): PageFacts => ({ https: true, tailnet: true, hosted: false, installed: false, paired: false, hasCode: false, stayInBrowser: false, ...over });
@@ -109,5 +109,45 @@ describe("the computer's relay, on the app the relay serves", () => {
     expect(relayMovedTo([{ t: "relay", a: `wss://${RELAY_HOST}:8443`, r: "ticket" }], RELAY_HOST)).toBe(`${RELAY_HOST}:8443`);
     expect(relayMovedTo([{ t: "ts", a: HERE }], RELAY_HOST)).toBeNull();
     expect(relayMovedTo([{ t: "relay", a: "not a url" }], RELAY_HOST)).toBeNull();
+  });
+});
+
+describe("where the computer is, as an addrs message tells it", () => {
+  const TS = { t: "ts", a: HERE };
+  const LAN = { t: "lan", a: "192.168.1.5:4817" };
+  const RELAY = { t: "relay", a: "wss://relay.example", r: "room.ticket" };
+  const NEW_RELAY = { t: "relay", a: "wss://relay.example", r: "new.ticket" };
+
+  it("takes a whole newer list in place of all it held", () => {
+    const held = { endpoints: [TS, LAN, RELAY], addrsSeq: 3 };
+    expect(applyAddrs(held, { endpoints: [TS, NEW_RELAY], list: [], seq: 4 })).toEqual({ known: [TS, NEW_RELAY], keep: { endpoints: [TS, NEW_RELAY], addrsSeq: 4 } });
+    expect(applyAddrs(held, { endpoints: [TS], list: [], seq: 3 }).keep).toBeNull();
+    // A computer from before `endpoints` sends the direct addresses alone, and the relay stays.
+    expect(applyAddrs(held, { list: ["10.0.0.2:4817"], seq: 4 }).keep).toEqual({ endpoints: [{ t: "lan", a: "10.0.0.2:4817" }, RELAY], addrsSeq: 4 });
+  });
+
+  it("takes only the relay from a partial one, keeps the rest and leaves the sequence for the whole list", () => {
+    const held = { endpoints: [TS, LAN, RELAY], addrsSeq: 3 };
+    const locked = applyAddrs(held, { endpoints: [NEW_RELAY], list: [], seq: 4, partial: true });
+    expect(locked).toEqual({ known: [TS, LAN, NEW_RELAY], keep: { endpoints: [TS, LAN, NEW_RELAY], addrsSeq: 3 } });
+    // Unlocked, the same number brings the whole list, and it is taken.
+    expect(applyAddrs({ ...held, ...locked.keep! }, { endpoints: [TS, NEW_RELAY], list: [], seq: 4 }).keep).toEqual({ endpoints: [TS, NEW_RELAY], addrsSeq: 4 });
+    // The relay turned off; nothing new; an older message.
+    expect(applyAddrs(held, { endpoints: [], list: [], seq: 4, partial: true }).keep).toEqual({ endpoints: [TS, LAN], addrsSeq: 3 });
+    expect(applyAddrs(held, { endpoints: [RELAY], list: [], seq: 3, partial: true }).keep).toBeNull();
+    expect(applyAddrs(held, { endpoints: [NEW_RELAY], list: [], seq: 2, partial: true }).keep).toBeNull();
+    expect(applyAddrs(null, { endpoints: [RELAY], list: [], seq: 1, partial: true })).toEqual({ known: [RELAY], keep: null });
+    // In the order the computer sends them, the relay keeps its place: nothing new is nothing written.
+    const asSent = { endpoints: [TS, RELAY, LAN], addrsSeq: 3 };
+    expect(applyAddrs(asSent, { endpoints: [RELAY], list: [], seq: 3, partial: true })).toEqual({ known: [TS, RELAY, LAN], keep: null });
+    expect(applyAddrs(asSent, { endpoints: [NEW_RELAY], list: [], seq: 3, partial: true }).keep).toEqual({ endpoints: [TS, NEW_RELAY, LAN], addrsSeq: 3 });
+  });
+
+  it("keeps nothing but the relay on the page the relay hosts, whatever a computer from before told it", () => {
+    const held = { endpoints: [TS, LAN, RELAY], addrsSeq: 3 };
+    expect(applyAddrs(held, { endpoints: [RELAY], list: [], seq: 3, partial: true }, true).keep).toEqual({ endpoints: [RELAY], addrsSeq: 3 });
+    expect(applyAddrs(held, { endpoints: [TS, LAN, NEW_RELAY], list: ["192.168.1.5:4817"], seq: 4 }, true)).toEqual({ known: [NEW_RELAY], keep: { endpoints: [NEW_RELAY], addrsSeq: 3 } });
+    // A computer that restarted counts from nothing again: its new room is still taken.
+    expect(applyAddrs({ endpoints: [RELAY], addrsSeq: 9 }, { endpoints: [NEW_RELAY], list: [], seq: 0, partial: true }, true).keep).toEqual({ endpoints: [NEW_RELAY], addrsSeq: 9 });
   });
 });

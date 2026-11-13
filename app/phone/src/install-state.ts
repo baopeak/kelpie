@@ -72,6 +72,34 @@ export function movedTo(endpoints: readonly Endpoint[], here: string): string | 
   return ts && ts !== here ? ts : null;
 }
 
+/** What an `addrs` message makes of the endpoints a pairing holds (`held`, none before it is kept): `known` to judge a move by, and what to
+ *  keep (`keep`, null when nothing changes). A whole one replaces them all once it is newer; one from a computer from before `endpoints` replaces
+ *  the direct addresses only. A `partial` one, which a page the relay hosts and a locked phone hear, brings the relay alone: it replaces the relay,
+ *  keeps the rest, and leaves the sequence where it was, so that the whole list, heard once unlocked under the same number, is still taken. The
+ *  page the relay hosts (`hosted`) can use nothing but the relay, and keeps nothing else, whatever a computer from before told it. */
+export function applyAddrs(
+  held: { endpoints: readonly Endpoint[]; addrsSeq: number } | null,
+  m: { endpoints?: Endpoint[]; list: string[]; seq: number; partial?: boolean },
+  hosted = false,
+): { known: Endpoint[]; keep: { endpoints: Endpoint[]; addrsSeq: number } | null } {
+  if (m.partial || hosted) {
+    const relay = (m.endpoints ?? []).filter((e) => e.t === "relay");
+    // The relay goes where it was, so a list that did not change is not written again.
+    const base = hosted ? [] : (held?.endpoints ?? []);
+    const at = base.findIndex((e) => e.t === "relay");
+    const rest = base.filter((e) => e.t !== "relay");
+    const known = at < 0 ? [...rest, ...relay] : [...rest.slice(0, at), ...relay, ...rest.slice(at)];
+    // The hosted page goes by the newest it hears, whatever its number: the computer counts again from nothing after a restart, and a new
+    // room told then must not be missed.
+    const changed = !!held && (hosted || m.seq >= held.addrsSeq) && JSON.stringify(known) !== JSON.stringify(held.endpoints);
+    return { known, keep: changed ? { endpoints: known, addrsSeq: held.addrsSeq } : null };
+  }
+  const known = m.endpoints ?? m.list.map((a) => ({ t: "lan", a }));
+  if (!held || m.seq <= held.addrsSeq) return { known, keep: null };
+  const endpoints = m.endpoints ? known : [...known, ...held.endpoints.filter((e) => e.t !== "lan" && e.t !== "ts")];
+  return { known, keep: { endpoints, addrsSeq: m.seq } };
+}
+
 /** On the hosted app: the host of the computer's relay when it is not this page's. The app works only through the relay that serves it, so the
  *  computer moved and this phone must be paired again (at that relay's app, when it serves one). */
 export function relayMovedTo(endpoints: readonly Endpoint[], here: string): string | null {
