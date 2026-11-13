@@ -13,6 +13,7 @@
 //!   kelpied worktree get|set …               this folder's comment / board status
 //!   kelpied review add|list …                review notes on this worktree's diff
 //!   kelpied sub agents|spawn|list|send|read|wait|report|inbox|close|open …   sub-sessions and web pages (`kelpied sub --help`)
+//!   kelpied browser tabs|snapshot|click|type|press|navigate|wait|screenshot|console|network|eval …   the browser panes (`kelpied browser --help`)
 //!   kelpied mcp                              the same as an MCP server on stdio (Kelpie injects it into Claude and Codex)
 
 mod agents;
@@ -21,6 +22,8 @@ mod auth;
 mod automations;
 mod awake;
 mod bench;
+mod browser_agent;
+mod browser_guide;
 mod chat;
 mod checkpoints;
 mod choices;
@@ -114,6 +117,7 @@ fn main() -> Result<()> {
         Some("run") => runtime()?.block_on(cli::run(&args[1..])),
         Some("review") => runtime()?.block_on(cli::review(&args[1..])),
         Some("sub") => runtime()?.block_on(cli::sub(&args[1..])),
+        Some("browser") => runtime()?.block_on(cli::browser(&args[1..])),
         Some("mcp") => mcp::serve(),
         // ssh runs its SSH_ASKPASS program with the prompt as the only argument.
         Some(prompt) if std::env::var_os("KELPIE_ASKPASS").is_some() => std::process::exit(askpass::run(prompt)),

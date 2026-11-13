@@ -1,5 +1,6 @@
 //! `kelpied mcp`: Kelpie's sub-session tools as a stdio MCP server (JSON-RPC 2.0, one message per line), and the tool
-//! operations themselves, which `kelpied sub …` (cli.rs) runs with the same wording.
+//! operations themselves, which `kelpied sub …` (cli.rs) runs with the same wording. The browser tools (`browser.rs`) are listed
+//! only while the user allows browser control (`browser.policy`, asked when the agent lists the tools).
 //!
 //! The server holds no state and keeps no connection: each tool call connects to the daemon as the session it runs in
 //! (`KELPIE_SESSION_ID` / `_TOKEN` / `_ENDPOINT` from the agent's environment) and the daemon decides what is allowed. Outside a
@@ -14,6 +15,8 @@ use serde_json::{json, Value};
 
 use crate::client::Client;
 use crate::subs::{self, Named};
+
+pub mod browser;
 
 /// Versions of the protocol this server speaks (it uses nothing that differs between them).
 const KNOWN_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -228,17 +231,17 @@ pub async fn handle_message<C: Connector>(message: &Value, connector: &C) -> Opt
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "kelpie", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": crate::sub_guide::GUIDE,
+                    "instructions": instructions(offered(connector).await),
                 }),
             )
         }
         "ping" => rpc_result(id, json!({})),
-        "tools/list" => rpc_result(id, json!({"tools": tool_list()})),
+        "tools/list" => rpc_result(id, json!({"tools": listed(offered(connector).await)})),
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return Some(rpc_error(id, -32602, "missing tool `name`"));
             };
-            if !TOOL_NAMES.contains(&name) {
+            if !TOOL_NAMES.contains(&name) && browser::short(name).is_none() {
                 return Some(rpc_error(id, -32602, &format!("unknown tool `{name}`")));
             }
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
@@ -255,8 +258,56 @@ pub async fn handle_message<C: Connector>(message: &Value, connector: &C) -> Opt
     })
 }
 
+/// Which groups of tools the user allows now, asked when the agent lists them: (sub-sessions, browser control).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Offered {
+    subs: bool,
+    browser: bool,
+}
+
+/// One `browser.policy` call. A daemon that cannot be reached, or one older than browser control, offers the sub-session tools as before
+/// and no browser tools; one that does not say whether sub-sessions are allowed offers them too.
+async fn offered<C: Connector>(connector: &C) -> Offered {
+    let asked = async {
+        let mut b = connector.connect().await.ok()?;
+        ask(&mut b, "browser.policy", json!({})).await.ok()
+    };
+    let policy = tokio::time::timeout(Duration::from_secs(3), asked).await.ok().flatten().unwrap_or(Value::Null);
+    let on = |key: &str, missing: bool| policy.get(key).and_then(Value::as_str).map_or(missing, |m| m != "off");
+    Offered { subs: on("sub_sessions", true), browser: on("mode", false) }
+}
+
+/// The tools offered: the sub-session tools while sub-sessions are allowed, the browser tools while browser control is, and
+/// `kelpie_open_page` (where using a page starts) while either is.
+fn listed(offered: Offered) -> Vec<Value> {
+    let mut tools: Vec<Value> = tool_list()
+        .into_iter()
+        .filter(|t| if t["name"] == "kelpie_open_page" { offered.subs || offered.browser } else { offered.subs })
+        .collect();
+    if offered.browser {
+        tools.extend(browser::tool_list());
+    }
+    tools
+}
+
+/// The server's `instructions`: the guide of each group offered.
+fn instructions(offered: Offered) -> String {
+    let mut parts = Vec::new();
+    if offered.subs {
+        parts.push(crate::sub_guide::GUIDE);
+    }
+    if offered.browser {
+        parts.push(crate::browser_guide::GUIDE);
+    }
+    if parts.is_empty() {
+        return "Kelpie's tools are turned off in Kelpie's settings (Agents).".into();
+    }
+    parts.join("\n\n")
+}
+
 // ---------- tools ----------
 
+/// The sub-session tools, always listed (the browser tools are `browser::NAMES`).
 pub const TOOL_NAMES: [&str; 9] = ["kelpie_agents", "kelpie_spawn", "kelpie_sessions", "kelpie_message", "kelpie_read", "kelpie_wait", "kelpie_report", "kelpie_close", "kelpie_open_page"];
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str], read_only: bool) -> Value {
@@ -363,6 +414,9 @@ pub struct ToolOut {
     pub text: String,
     pub data: Value,
     pub is_error: bool,
+    /// Pictures as (media type, base64), shown before the text. A result with one carries no structured copy: Codex would show the
+    /// model only that.
+    pub images: Vec<(String, String)>,
 }
 
 impl ToolOut {
@@ -376,16 +430,22 @@ impl ToolOut {
                 data = json!({"message": text, "truncated": true});
             }
         }
-        ToolOut { text, data, is_error: false }
+        ToolOut { text, data, is_error: false, images: Vec::new() }
+    }
+
+    fn image(text: String, mime: String, data: String) -> ToolOut {
+        ToolOut { text: subs::cut(&text, MAX_OUT), data: Value::Null, is_error: false, images: vec![(mime, data)] }
     }
 
     pub fn error(text: String) -> ToolOut {
-        ToolOut { text: subs::cut(&text, MAX_OUT), data: Value::Null, is_error: true }
+        ToolOut { text: subs::cut(&text, MAX_OUT), data: Value::Null, is_error: true, images: Vec::new() }
     }
 
     fn to_result(&self) -> Value {
-        let mut result = json!({"content": [{"type": "text", "text": self.text}], "isError": self.is_error});
-        if !self.is_error && self.data.is_object() {
+        let mut content: Vec<Value> = self.images.iter().map(|(mime, data)| json!({"type": "image", "data": data, "mimeType": mime})).collect();
+        content.push(json!({"type": "text", "text": self.text}));
+        let mut result = json!({"content": content, "isError": self.is_error});
+        if !self.is_error && self.images.is_empty() && self.data.is_object() {
             result["structuredContent"] = self.data.clone();
         }
         result
@@ -412,7 +472,10 @@ async fn dispatch<B: Backend>(b: &mut B, name: &str, args: &Value) -> Result<Too
         "kelpie_close" => close(b, args).await,
         "kelpie_open_page" => open_page(b, args).await,
         "kelpie_inbox" => inbox(b).await,
-        other => Err(format!("unknown tool `{other}`")),
+        other => match browser::short(other) {
+            Some(tool) => browser::run(b, tool, args).await,
+            None => Err(format!("unknown tool `{other}`")),
+        },
     }
 }
 

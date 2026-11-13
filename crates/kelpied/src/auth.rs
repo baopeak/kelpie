@@ -8,7 +8,8 @@
 //!   the programs a session runs. They get the documented scripting surface (`kelpied terminal`,
 //!   `worktree`, `run`, `call session.*`) unless the user turned that off or the session was
 //!   started restricted; then only their own session, plus `sub.report` (to the session that opened them),
-//!   `sub.inbox` (their own mail) and `page.open` (a web page in their own project). Hook, run, sub-session and page calls always speak for the caller's own session;
+//!   `sub.inbox` (their own mail), `page.open` (a web page in their own project) and `browser.call` / `browser.policy` (the browser panes the
+//!   window lets them use). Hook, run, sub-session, page and browser calls always speak for the caller's own session; `browser.audit` is the user's;
 //!   answering a sub-session request (`sub.answer`) is the user's. Admin methods (custom agents, automations, phone access, daemon
 //!   settings, closing sessions, turn checkpoints and their undo, notification channels, timers
 //!   that type into a session, changing a session's account, resolving review notes, listing and stopping a session's processes…) are the user's only. Other sessions' environments are left
@@ -129,10 +130,11 @@ const SCRIPTING: &[&str] = &[
     "daemon.info", "agent.presets", "session.list", "session.read", "session.input", "session.create",
     "meta.list", "meta.get", "meta.set", "run.list", "run.get", "run.create", "run.retry",
     "run.task_done", "run.task_skip", "run.cancel", "run.report", "hook.report", "note.add", "note.list",
-    "sub.spawn", "sub.message", "sub.report", "sub.inbox", "sub.close", "page.open",
+    "sub.spawn", "sub.message", "sub.report", "sub.inbox", "sub.close", "page.open", "browser.call", "browser.policy",
 ];
-/// Methods a restricted session's programs may call, on their own session only. `page.open` shows a page in the session's own project.
-const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report", "note.add", "note.list", "sub.report", "sub.inbox", "page.open"];
+/// Methods a restricted session's programs may call, on their own session only. `page.open` shows a page in the session's own project;
+/// `browser.call` uses the panes the window lets this session use, under the same policy as any other session.
+const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report", "note.add", "note.list", "sub.report", "sub.inbox", "page.open", "browser.call", "browser.policy"];
 /// Methods of a session whose token went missing.
 const CLAIMED: &[&str] = &["daemon.info", "hook.report"];
 
@@ -183,8 +185,8 @@ pub fn authorize(d: &Daemon, role: &Role, method: &str, params: &mut Value) -> R
     }
     // `sub.*` speak for the caller's own session too: a program cannot report as, read the mail of, close
     // the sub-sessions of, or message as another session. `sub.answer` and `sub.pending` are the user's. A page is opened in the
-    // caller's own project.
-    if matches!(method, "hook.report" | "run.report" | "sub.spawn" | "sub.message" | "sub.report" | "sub.inbox" | "sub.close" | "page.open") {
+    // caller's own project, and browser panes are used as the caller.
+    if matches!(method, "hook.report" | "run.report" | "sub.spawn" | "sub.message" | "sub.report" | "sub.inbox" | "sub.close" | "page.open" | "browser.call") {
         if let Some(obj) = params.as_object_mut() {
             obj.insert("session_id".into(), Value::String(id.clone()));
             // Whether the caller proved it is that session (a claimed id proves nothing).
@@ -524,6 +526,14 @@ mod tests {
         // A web page in the caller's own project: any session that proved itself, never a claimed id or a stranger.
         assert!(allowed(&s, true, "page.open") && allowed(&s, false, "page.open"));
         assert!(!allowed(&claimed, true, "page.open") && !allowed(&Role::Anonymous, false, "page.open"));
+        // Browser panes: any session that proved itself, restricted ones too; the audit is the user's.
+        for m in ["browser.call", "browser.policy"] {
+            assert!(allowed(&s, true, m) && allowed(&s, false, m), "session: {m}");
+            assert!(allowed(&user, false, m), "user: {m}");
+            assert!(!allowed(&claimed, true, m) && !allowed(&Role::Anonymous, false, m), "{m}");
+        }
+        assert!(allowed(&user, false, "browser.audit") && allowed(&Role::App, false, "browser.audit"));
+        assert!(!allowed(&s, true, "browser.audit") && !allowed(&s, false, "browser.audit") && !allowed(&claimed, true, "browser.audit"));
         for m in ["sub.answer", "sub.pending"] {
             assert!(allowed(&user, false, m) && allowed(&Role::App, false, m), "the user decides: {m}");
             assert!(!allowed(&s, true, m) && !allowed(&s, false, m) && !allowed(&claimed, true, m) && !allowed(&Role::Anonymous, false, m), "{m}");

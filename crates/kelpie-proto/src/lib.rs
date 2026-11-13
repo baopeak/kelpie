@@ -76,7 +76,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// `mobile.session_started {id, device, name, kind, project_id}` event, and the `session_new` audit line ending in "(session {id})", which the app
 /// reads back for the starts it missed while closed (`mobile.audit {limit, action: "session_new"}`: `action` keeps one kind of line, left out every
 /// kind as before; `from` in the answer says older lines were left out). An older daemon has none of it, so the phone offers "+" only at 38.
-pub const API_LEVEL: u32 = 38;
+/// 39: agents use browser panes: `browser.call {tool, args}` and `browser.policy` from a program in a session (the `kelpie_browser_*` tools and
+/// `kelpied browser`), the daemon's `browser.agent` request to the app's `browser` provider, `browser.audit {limit}` for the user, and the
+/// `daemon.policy` / `daemon.set_policy` keys `browser_agents` (`off|read|act`), `browser_eval` and `browser_sites`; an older daemon has none of
+/// it, so the app offers the settings only at 39.
+pub const API_LEVEL: u32 = 39;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.
