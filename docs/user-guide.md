@@ -901,7 +901,8 @@ to an agent** as one prompt. With Settings → Terminal → *Open localhost link
 pane*, `Ctrl/⌘+click` on a dev-server address in a terminal opens it next to the terminal.
 A page that opens a sign-in window of a set size (an OAuth "Continue with…" window) gets it as a
 window of its own, so the sign-in can hand back to the page; other links that open a new window
-open in the pane.
+open in the pane. Agents can read and use these pages too, once you allow it: see "Letting agents
+use browser panes".
 
 ### Processes, ports and preview
 
@@ -936,6 +937,100 @@ session but still runs is listed under *Left the session*. If a port is still in
 Kelpie says which program holds it. Kelpie looks at processes only while this tab is open, or for a
 visible session: when it appears, shortly after its terminal prints something (at most every 2
 seconds), and every 3 seconds while programs run under it. Needs a daemon of API level 16.
+
+### Letting agents use browser panes
+
+An agent can read and use the web pages in Kelpie's browser panes: check what its dev server shows,
+fill in a form, follow a page to the next step, or read the console after a click. It works through
+Kelpie's own tools `kelpie_browser_tabs`, `_snapshot`, `_click`, `_type`, `_press`, `_navigate`,
+`_wait`, `_screenshot`, `_console`, `_network` and `_eval`, which Claude Code, Codex and ACP chats
+started by Kelpie get automatically. Other agents and scripts run the same tools as a command,
+`"$KELPIE_CLI" browser <tool>` (`kelpied browser --help` lists them); text typed that way is on a
+command line other programs can see, so the MCP tools are the way to type a secret. A snapshot
+gives the agent the page as a list of elements with references such as `e12`, so it acts on the
+right button without a screenshot. Needs a daemon of API level 39.
+
+**Turning it on.** Settings → Agents → *Browser panes* is *Off* on a new install, and then agents
+get no browser tools at all. *Read only* lets them read pages (snapshots, waits, screenshots, the
+console and the network list); *Read and act* also lets them click, type, press keys and go to
+other pages. The tools appear to agents started after the change. Every call is checked against
+the setting of that moment, so switching to *Off* refuses the next call of an agent that is
+already running. *Agents may run scripts in pages* (off by default, only with *Read and act*) lets
+an agent run its own JavaScript, only in tabs opened for it or for a session above it, never in a
+tab you shared.
+
+**Which tabs an agent can use.** A session may use the tabs opened for it or for a session above it
+(the one that started it as a sub-session): the page it opened with `kelpie_open_page`, or the tab
+of a dev server it started (when Kelpie opens those automatically). It may also use a tab you
+share. While *Browser panes* is not *Off*, each browser pane's toolbar has a sparkle button, *Let
+agents use this page*, that shares the page with the sessions of that project; click it again to
+stop sharing. Kelpie does not keep shares across a restart. A session that runs restricted gets
+only the tabs opened for it or above it, never a shared one. Tabs of other projects stay
+invisible. An agent can use a tab you have not opened since Kelpie started: Kelpie creates its page
+hidden, and showing the tab later shows it.
+
+**A shared tab stays on its site.** An agent may use a shared tab only on the site it showed when
+you shared it and on this computer's own servers (`localhost`, `127.x.x.x`, `[::1]`). Navigating
+elsewhere is refused. If an agent's action takes the page to another site, the share ends and
+Kelpie tells you; share it again if you want. A page that gets there later is treated like one you
+took elsewhere yourself: agents can neither see nor use the tab until it is back on that site.
+
+**Seeing and stopping an agent.** While a session acts in a page, a banner above the page says
+*<session> is using this page* with *Stop*, and the tab shows a small badge. The first time a
+session uses a tab that is not on screen, a notice names the tab with *View*. Stop ends the agent's
+access before its next call, and the tab is no longer usable by agents until you share it (a tab
+opened for an agent is no longer its tab, though its page stays in the private session until the
+tab closes). One session acts in a tab at a time; another session is refused until the first has
+been idle for 20 seconds. Your own input comes first: for 10 seconds after you click, type or
+scroll in the page, agents can still read it but cannot act. While a phone controls the tab (see
+"Phone access"), every agent call there is refused.
+
+**Secrets.** Kelpie never returns the value of a password, one-time-code, card or other secret
+field to an agent; the agent can still type into it. What an agent types, and the scripts it runs,
+are never logged. Page text an agent reads arrives marked as a page's content rather than
+instructions, with text that looks like a token redacted.
+
+**The agents' private session.** While *Browser panes* is not *Off*, a tab opened for an agent uses
+a private browser session: none of your sign-ins and cookies are there, and the tab's globe icon is
+marked, with the tooltip *Private browser session for agents*. Because nothing of yours is in it,
+such a tab may go to any http(s) site. If you sign in to a site in that tab, the agents that may
+use it can use that account too. On Windows all agents' private tabs share one InPrivate session,
+across projects, which is forgotten when the last of them closes; a sign-in in one is therefore
+present in the others. On macOS and Linux each tab has its own session, forgotten when the tab
+closes. On Windows a private tab can still sign in to intranet sites with your Windows account
+(integrated sign-in), as an Edge InPrivate window does. Downloads from an agent's tab follow the
+system web view's default: on Windows they are saved to your Downloads folder; on macOS and Linux
+this has not been checked.
+
+Kelpie decides whether a tab is private when it creates the tab's page: when you first show the
+tab, when an agent first uses it, and again after Kelpie restarts. A tab whose page was created
+while the setting was *Off* (or on a WebView2 runtime too old for private sessions) is an ordinary
+page that keeps your sign-ins, and `kelpie_browser_tabs` does not call it private. Agents may take
+such a tab only to this computer's own servers and to *Sites agents may open* (Settings → Agents,
+up to 50 sites such as `https://example.com`).
+
+**What agents can do on each platform.**
+
+| | Windows | macOS and Linux |
+|---|---|---|
+| Input | Trusted (the page cannot tell it from yours) in the tab on screen at 100 % zoom; synthetic DOM events in a background tab, and for a right click, a key with Ctrl, Alt or Meta, a choice in a list, a number or date field, or an element in a frame | Synthetic DOM events |
+| Screenshots | The tab on screen, at most 1280 px wide | The tab on screen; on macOS only the part that is visible |
+| Network list | Requests since an agent first used the tab | Not available |
+
+`kelpie_browser_tabs` tells the agent, for each tab, what it supports at that moment. Some pages
+ignore synthetic events; showing the tab on Windows gives the agent trusted input there.
+
+**Approvals and the record.** Claude Code (terminal and chat) and Codex in a terminal ask you
+before a browser tool clicks, types, presses a key, navigates or runs a script, unless the session
+runs with permission checks off; the tools that only read are approved in advance. A Codex chat
+has no card for this question, so it does not ask, and the setting above is the only gate there;
+an ACP agent may ask once per tool. Settings → Agents → *Recent agent actions in browser panes*
+lists what agents did (clicks, typing, keys, navigation and scripts; reads are not recorded): time,
+session, tool, site, the element (its role and name) and whether it worked. The same record is
+`browser-audit.jsonl` in the data folder (past 1 MB it moves to `browser-audit.jsonl.1`). It never
+holds typed text or scripts; it keeps only the host of a site, and any address in an element's
+name or an error loses its query and fragment. Screenshots agents take are saved under
+`browser-shots/agent` in the data folder, which keeps the newest 200.
 
 ### Remote projects (SSH)
 
@@ -1565,7 +1660,9 @@ a setting.
   permission mode (Claude) or approval policy (Codex) and environment variables (stored in
   plain text) — used by terminal and chat sessions; which agent CLIs launchers show; the agent
   for AI actions; hibernation; turn snapshots; prioritize visible terminals; keep computer awake;
-  *Sub-sessions* (Off / Ask / Allow and how many run at once, see "Sub-sessions").
+  *Sub-sessions* (Off / Ask / Allow and how many run at once, see "Sub-sessions"); *Browser panes*
+  (Off / Read only / Read and act, scripts, sites and recent agent actions, see "Letting agents use
+  browser panes").
 - **Agent setup**: MCP servers, instruction files, skills and the ACP registry (see above).
 - **Accounts**, **Integrations**, **Remote (SSH)**, **Mobile**, **Voice**, **Plugins**,
   **Layouts**, **Quick Commands**, **Automations**, **Shortcuts**: see above.
@@ -1655,9 +1752,10 @@ The `kelpied` command groups, described in their sections above:
 | `kelpied review add\|list` | Leaves or lists notes on the worktree's diff ([Review with another agent](#review-with-another-agent-and-best-of-several)). |
 | `kelpied run create\|list\|show\|approve\|retry\|done\|skip\|cancel\|delete\|report\|wait` | Creates and drives orchestration runs ([Orchestration runs](#orchestration-runs)). |
 | `kelpied sub agents\|spawn\|list\|send\|read\|wait\|report\|inbox\|close\|open` | Opens and steers sub-sessions ([Sub-sessions](#sub-sessions)); `open` shows you a web page ([Processes, ports and preview](#processes-ports-and-preview)). |
+| `kelpied browser tabs\|snapshot\|click\|type\|press\|navigate\|wait\|screenshot\|console\|network\|eval` | Lets an agent read and use the browser panes it may use ([Letting agents use browser panes](#letting-agents-use-browser-panes)). |
 | `kelpied ping` | Prints the running daemon's version and API level. |
 | `kelpied stop [--kill-sessions] [--wait [--timeout-ms N]]` | Asks the daemon to exit; with `--kill-sessions` its sessions end too, and `--wait` waits until the process is gone. |
-| `kelpied mcp` | The MCP server Kelpie gives Claude Code and Codex for sub-sessions and web pages (started by the agents, not by hand). |
+| `kelpied mcp` | The MCP server Kelpie gives Claude Code and Codex for sub-sessions, web pages and browser panes (started by the agents, not by hand). |
 | `kelpied call <method> [json]` | Calls any daemon method directly. |
 
 `kelpied call` talks to the running daemon directly, e.g.

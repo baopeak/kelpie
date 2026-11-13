@@ -861,6 +861,83 @@ DevTools protocol; macOS is the later window-capture phase). Over Tailscale or t
 - **Limits**: a dialog over the pane hides it (the native view would cover the dialog), and then the phone's picture stops and its input is not sent until the pane shows again; coordinates under browser zoom are
   untested; the window-thread time per frame and the L2 CPU cut are not measured (the phase file has the numbers that are).
 
+### Agent browser control
+
+An agent session reads and drives the browser panes the person sees through `kelpie_browser_*` (API 39; MCP side in "Agent surface", the RPC,
+policy keys and audit line under the RPC list, private pages in the Browser panes row of the components table). Inert at the default policy
+(`browser_agents: off`).
+
+- **Path.** `kelpied mcp` (`mcp/browser.rs`) → `browser.call` → the daemon's gate (`daemon/browser_rpc.rs`, `browser_agent.rs`: policy,
+  rate, arguments; act and `eval` calls audited) → provider request `browser.agent` (kind `browser`, the takeover's channel) → app
+  `browser::provider_message` → `browser/agent.rs::on_request`, which records the request (`Pending`: tool, session, the daemon's policy,
+  deadline, daemon connection number) and emits `agent-browser-request` to `main` → the window (`lib/agent-browser.ts`; the rules are
+  pure functions in `lib/agent-browser-panes.ts`) answers `tabs` itself (`provider_reply`, privacy from `browser_private`), and for any
+  other tool picks the pane, refuses or creates the pane's page hidden (`browser_open {hidden, agent}`, off screen at 1280 × 800) when
+  its tab was never opened, plans again, then calls `browser_agent_run {preq, label, tool, args, ctx}` → Rust checks that `preq` is
+  pending with the same tool and session, runs the tool in the page (injected engine; on Windows also the DevTools protocol) and
+  answers the daemon itself. Every path answers once: the window when Rust did not take the call, Rust after.
+- **Deadlines.** The daemon waits 15 s (`wait` and `navigate`: their `timeout_s` + 5); Rust keeps 2 s of that back. A call queued
+  behind another in the same pane (one `turn` mutex per pane) starts only with 2 s left and acts only with 3 s left, so the person never
+  sees an action the agent was told failed. Each call into the page has 3 s; read calls are tried once more. A daemon reconnect bumps
+  the connection number and clears the pending requests, so an answer never reaches the next daemon. While an agent uses a pane its
+  page keeps the normal memory target (`webview_memory::keep_normal`) until 20 s without a call.
+- **Which panes** (window, `usablePanes`): a browser pane on an http(s) page whose `openedBy` is the calling session or one above it
+  (`kelpie_open_page` and the automatic dev-server tabs set `openedBy`; Stop clears it), or one shared in the session's own project
+  (`paneShares`: the origin shown when shared, this window only, never saved). `session.restricted` gets no shared panes. Panes the
+  person stopped are left out until shared again. A shared pane whose page the person took to another origin is `offSite`: not listed,
+  not usable, its address and title not told. The window also refuses a pane a phone holds or one in design mode.
+- **Engine** (`browser_agent.js`, injected in every pane's main frame at document start, beside the picker): one frozen global
+  answering only with the page's nonce, platform functions taken at document start, synchronous JSON answers (`{ok}` or `{error}`)
+  because `eval_with_callback` does not await promises; waits are polled from Rust. From document start it records page errors and the
+  time of the person's trusted pointer, key and wheel input; the console (ring of 300) from document start in a pane opened for an
+  agent (`__KELPIE_AGENT_PANE__`), elsewhere from the first agent call. Dialogs are answered (default dismiss) only during an agent's
+  action. `eval` runs the expression as page script without the nonce (a page-replaced function it calls could read its source); the
+  engine only turns the value into JSON, cut at 8 KB.
+- **Refs and documents** (`agent_snapshot.rs`): a snapshot is compact (interactive elements and headings) or full, with `eN` refs that
+  stay with an element for the life of its document; a ref of another document is refused as stale. An action takes a compact snapshot
+  before and after when time allows and returns the difference (20 lines at most; a new document lists the new page), with the value of
+  the field typed into masked. Secret fields: the engine's `password`/`secret` flags, plus labels and values that look secret
+  (`SECRET_LABEL`, `SECRET_VALUE`); secret-looking query parameters and OAuth fragments are taken out of addresses.
+- **Arbitration** (`agent.rs::decide`, before every call, on facts read then): a phone holding the pane refuses every tool. Act and
+  `eval` also need the daemon's policy `act` (`eval`: its `eval`, the window's `mayEval` and a pane opened for the session), no other
+  session holding the pane's lease (idle under 20 s), and no person input in the last 10 s. A session takes the lease once its call is
+  sure to act; the lease ends after 20 s idle, on Stop (`browser_agent_stop`), a takeover start (`takeover.rs` → `preempted`), the pane
+  closing or a shared page leaving its site. Each end is timestamped, and a call received before it is refused even if it is running
+  (`alive`). `agent-browser-lease {label, session, name, active, reason}` drives the banner, the tab badge and, for `left-site`, the
+  window dropping the share with a notice.
+- **Sites** (`site_allowed`, every tool): `about:blank`; loopback (`localhost`, `*.localhost`, 127/8, `[::1]`) always; a pane opened
+  for the session: any http(s) origin when its webview is private, else `browser_sites`; a shared pane: its shared origin. `navigate`
+  checks the target first; every tool checks the page's site first (`decide`), and actions, navigation, waits, snapshots, screenshots
+  and `eval` also check where it ended (`landed`), where a shared pane found elsewhere is ended (`left-site`).
+  Errors never name an origin the agent may not use. Whether a page is private is Rust's record of what the platform made, never the
+  window's word; `ctx.sites` and `ctx.isolated` are not trusted, the daemon's own policy from `Pending` is used.
+- **Windows (DevTools protocol, `agent_cdp.rs`, `AVAILABLE = cfg!(windows)`).** Trusted input only while the pane is shown (not hidden
+  by the window, window not minimised; checked again on the window thread right before each step, `devtools_when`), at 100 % zoom, on
+  an element of the top document, for a left click, a key without Control, Alt or Meta (nor F5, F7, F11, F12), and a field that takes
+  free text; otherwise synthetic events, with the reason in the reply. Around each step the engine's `busy` window (3.5 s) marks the
+  input as Kelpie's, so it does not count as the person's, and checks that the element is still at the press point or holds the focus;
+  a press is always followed by its release. A step refused before anything acted falls back to synthetic events; one refused after
+  part of the action stops and says what went. The main window's keyboard focus is given back. Screenshots: `Page.captureScreenshot`
+  of a shown pane, at most 1280 px wide, a full page cut at 8000 px, JPEG when the PNG is over 1.5 MB as base64, refused if the document
+  changed meanwhile, saved under `<data>/browser-shots/agent` (newest 200). Network: `Network.enable` from the first agent call (waited
+  for 1.5 s at most) until agents' use ends (Stop, phone, left site, pane closed) or the main frame starts loading a page the agent may
+  not use; only requests of documents on allowed sites are listed, addresses scrubbed as above.
+- **macOS and Linux**: the engine's synthetic events only; `network` answers that it is not available in this version of Kelpie. Screenshots come from the
+  view itself (`browser/native_shot.rs`): WKWebView `takeSnapshotWithConfiguration` on macOS (only what is on screen, so a full page is
+  refused) and WebKitGTK `get_snapshot` on Linux (visible region, or the full document when the clip reaches outside the view), under the
+  same hidden-pane rule, size cap and re-check as on Windows; the person's screenshot button and design-mode picks use the same path.
+
+| Capability | Windows | macOS, Linux |
+|---|---|---|
+| Input | Trusted (CDP) in a shown pane under the rules above; synthetic otherwise | Synthetic (engine) |
+| Screenshot | Shown pane only | Shown pane only (macOS: what is on screen, no full page) |
+| Network list | Yes | No |
+
+Private agent pages per platform: the Browser panes row of the components table; approvals per agent: "Injection".
+
+- **Never logged or returned**: typed text (a `type` reply gives only the character count; argument errors never repeat a value),
+  `eval` source, secret field values and page content (audit fields under the RPC list).
+
 ### The computer's screen on a phone
 
 **Through the relay** (API 41, `mobile/screen_policy.rs`, `mobile/screen_access.rs`): off unless the person turns on *See and control the screen without
@@ -2197,7 +2274,7 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
 | Accounts | `app/src-tauri/src/accounts.rs`, `lib/accounts.ts` | One config home per account under `<data>/accounts/<agent>/<id>`, passed as `CLAUDE_CONFIG_DIR` / `CODEX_HOME` to every launch (terminal, chat, automations, runs, one-shot AI actions); history and usage read each home. A stopped terminal session can move to another account (`account_transcript` copies the conversation, `session.set_env_restart` restarts it there; see "Notifications and limit actions"). |
 | Orchestration | `crates/kelpied/src/runs.rs` | A run is a task DAG (cycle-checked) persisted in `runs.json`. `Runs::step` starts ready tasks (deps done, approval given) as ordinary sessions, optionally in a new worktree; tasks end on `kelpied run report`, session exit, or idle after working (default 300 s). A run may carry `materialize` (ignored files its worktrees get) and a task records its `base` branch and what it `brought`; see "Cross-review and best-of-N". |
 | Integrations | `app/src-tauri/src/integrations.rs` | Linear GraphQL, Jira REST (Cloud v3 `search/jql`, Server v2), GitLab REST v4. Tokens live in the OS keyring (`keyring`, service `Kelpie (<endpoint>)`) and never reach the webview. |
-| Browser panes | `app/src-tauri/src/browser.rs`, `browser_picker.js` | Tauri child webviews positioned over the pane (hidden while an overlay covers them). Design mode injects a picker; picks travel through a cancelled navigation to a sentinel URL, are redacted and size-capped, and the element screenshot uses the WebView2 DevTools protocol (end-to-end tests also send trusted page input through it, `browser_test_input`, dev / e2e builds only). A sized `window.open` opens as a window of its own on the pane's WebView2 environment; a phone may take a pane over (see Browser pane takeover). A pane opened for an agent while browser control is not `off` (`browser_open {agent: true}`: a pane with `openedBy`, created while the window's policy, or the agent call that creates it, says control is on) is made private when its webview is created (`incognito`: InPrivate on Windows, a non-persistent data store on macOS, an ephemeral context on Linux), and so are its sized popups. None of the person's sign-ins are there. On Windows all private panes share one InPrivate session (across projects and sessions), forgotten once the last of them closes; on macOS and Linux each pane has its own store (its sized popups share it), forgotten when it closes. A webview keeps what it was made with; Rust records what the platform made (on Windows read back from the WebView2 profile, `IsInPrivateModeEnabled`; unreadable counts as not private) in `Browsers` (`browser_private {labels}`), and the agents' site rule (private: any http(s) site; not private: loopback and `browser_sites`) and `kelpie_browser_tabs` (`private profile`, `isolated`) take it from there. With control `off` (the default) agent-opened preview tabs are ordinary pages, as before. |
+| Browser panes | `app/src-tauri/src/browser.rs`, `browser_picker.js` | Tauri child webviews positioned over the pane (hidden while an overlay covers them). Design mode injects a picker; picks travel through a cancelled navigation to a sentinel URL, are redacted and size-capped, and the element screenshot uses the WebView2 DevTools protocol on Windows and the view's native snapshot on macOS and Linux (`browser/native_shot.rs`) (end-to-end tests also send trusted page input through the DevTools protocol, `browser_test_input`, dev / e2e builds only). A sized `window.open` opens as a window of its own on the pane's WebView2 environment; a phone may take a pane over (see Browser pane takeover). A pane opened for an agent while browser control is not `off` (`browser_open {agent: true}`: a pane with `openedBy`, created while the window's policy, or the agent call that creates it, says control is on) is made private when its webview is created (`incognito`: InPrivate on Windows, a non-persistent data store on macOS, an ephemeral context on Linux), and so are its sized popups. None of the person's sign-ins are there. On Windows all private panes share one InPrivate session (across projects and sessions), forgotten once the last of them closes; on macOS and Linux each pane has its own store (its sized popups share it), forgotten when it closes. A webview keeps what it was made with; Rust records what the platform made (on Windows read back from the WebView2 profile, `IsInPrivateModeEnabled`; unreadable counts as not private) in `Browsers` (`browser_private {labels}`), and the agents' site rule (private: any http(s) site; not private: loopback and `browser_sites`) and `kelpie_browser_tabs` (`private profile`, `isolated`) take it from there. With control `off` (the default) agent-opened preview tabs are ordinary pages, as before. |
 | Remote (SSH) | `app/src-tauri/src/remote.rs`, `agents.rs` `build_remote_launch` | The system OpenSSH client (on Windows `System32\OpenSSH`, never a Git Bash one from PATH): sessions run `ssh -t host` with a login shell, inside `tmux new-session -A` when available; files, search and git run as remote commands with quoted arguments. Commands never prompt: secrets come from askpass, anything else fails. |
 | SSH hosts | `app/src-tauri/src/ssh_hosts.rs`, `crates/kelpied/src/askpass.rs`, `app/src/components/hosts-page.tsx` | Saved hosts and forward rules in `<data>/ssh/hosts.json`, rendered into `<data>/ssh/config` (one `Host` per saved host, then `Match all` + `Include` of the user's config) that every Kelpie `ssh` / `scp` reads with `-F`. Passwords and key passphrases live in the OS keyring (service `Kelpie (<endpoint>)`); ssh gets them through `SSH_ASKPASS=kelpied` + `SSH_ASKPASS_REQUIRE=force` + `KELPIE_ASKPASS=<host id>` — `kelpied` answers password / passphrase prompts and declines host-key questions, which the page settles with `ssh-keyscan` fingerprints first. Connecting to a host opens a remote project on it. Port forwards are `ssh -N` children of the app (stopped with it; auto-start rules restart on launch); transfers go through the daemon's queue over SFTP (see File transfer). Keys, agent and known hosts go through `ssh-keygen` / `ssh-add` and the known_hosts file. `KELPIE_SSH_DIR` replaces `~/.ssh` for the tests. |
 | Phone server | `crates/kelpied/src/mobile.rs`, `crates/kelpied/mobile/` | axum on a chosen address (default port 4817), optional rustls (ring). Pairing: a one-time secret shown as a QR (2 min), then the phone's six digits typed into the verified app (see "Phone link"); devices are Noise public keys in a MAC'd store; Origin checks, CSP, failed attempts limited per source address; revoking closes the device's sockets. Protocol v2 (verbs, state sync, answers, chat): `mobile/verbs.rs`, `mobile/sync.rs`, `mobile/lanes.rs`, machine load in `load.rs`, and "Phone protocol (v2)". |
