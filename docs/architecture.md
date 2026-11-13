@@ -953,7 +953,8 @@ by the way it started on: a phone that comes back the other way ends it (`route_
 (`screen_relay_use`), refusing a new one and ending one under way (`relay_budget_spent`) past `relay_ws_month_mb` (1 GB of the room's 2 GB).
 Through the relay `screens` names a window by its program, never its title (the list needs no Face ID). `screens` answers `paths` (auto,
 tailscale, relay: available or why not) and `relay` (`{ours, host}`); `sc_start {target, via, recheck}` answers its `via`; the hello's `device.screen`
-says `ok` or why not; the audit line reads `monitor via relay`. A pane's takeover keeps `transport_cap`: never through the relay.
+says `ok` or why not (a hosted device below `control` is told what its raise waits on, `screen_remote_off`, `method_off`, `lock_off` or `no_passkey`,
+before `not_granted`); the audit line reads `monitor via relay`. A pane's takeover keeps `transport_cap`: never through the relay.
 
 A phone with `control` sees a monitor or one window of this computer as H.264 video and drives it (API 29, Windows; macOS later). The same rules as a
 pane's takeover over a direct link (Tailscale or this computer's HTTPS address), the grant on the desktop with the person's verification
