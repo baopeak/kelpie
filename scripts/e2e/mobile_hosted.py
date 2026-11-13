@@ -929,7 +929,8 @@ def main(phone_box, push, dA, wrangler, bundle_a, manifest_a, bundle_b, manifest
     check("the live label says the connection goes through the relay", live_label == "Live · through the relay", live_label)
     phone.js("document.querySelector('[data-open-settings]').click()")
     card = phone.wait("const f = (n) => document.querySelector(`[data-setting=\"${n}\"] dd`)?.textContent; return f('paired-through') && [f('paired-through'), f('live-path'), f('screen')]", 15)
-    check("the phone's Settings say the hosted app was paired through the relay, goes through it now, and why the screen is not here", bool(card) and card[0] == "The hosted app, through the relay" and card[1] == "the relay" and "comes from the relay" in card[2], card)
+    # The screen through the relay is off (the default), and a hosted app is given control only once it is on: that switch is the step to name.
+    check("the phone's Settings say the hosted app was paired through the relay, goes through it now, and that the screen waits on the switch for it", bool(card) and card[0] == "The hosted app, through the relay" and card[1] == "the relay" and "See and control the screen without Tailscale" in card[2], card)
     check("Settings offers alerts", phone.wait("return document.querySelector('[data-alerts]')?.dataset.alerts", 20) == "off", phone.js("return document.querySelector('[data-alerts]')?.dataset.alerts"))
     phone.js("document.querySelector('[data-alerts-on]').click()")
     check("turning alerts on subscribes, and the computer has it", phone.wait("return document.querySelector('[data-alerts]')?.dataset.alerts === 'on'", 20) is True and bool(wait_for(lambda: device(dA, PHONE_NAME).get("push"), 10)))

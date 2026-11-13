@@ -142,7 +142,10 @@ fn lock_rule(f: &Facts) -> Result<(), Reason> {
 /// on as it goes (with `opts` as they are now). The way: `relay` for a connection through the relay, else direct.
 pub fn allowed(f: &Facts, opts: &ScreenOptions) -> Result<(), Reason> {
     if f.record < Permission::Control {
-        return Err(Reason::NotGranted);
+        // A page on the relay's hosted app cannot be given control until `hosted_ceiling` allows it: say that step, since "may take control"
+        // is not offered for it yet.
+        let step = if f.hosted && !f.native { hosted_block(opts, f.lock_on, f.passkey) } else { None };
+        return Err(step.unwrap_or(Reason::NotGranted));
     }
     if f.native {
         return Ok(());
@@ -185,10 +188,25 @@ pub fn may_start(f: &Facts, opts: &ScreenOptions, via: Via, uv: Uv) -> Result<Vi
 /// The record a page may be raised to over and above the lock's own rule: one paired on the relay's hosted app may be given control (the screen
 /// only) once the screen is allowed through the relay, with the lock on and a passkey on record.
 pub fn hosted_ceiling(opts: &ScreenOptions, lock_on: bool, passkey: bool) -> Permission {
-    if opts.remote && opts.methods.relay_ws && lock_on && passkey {
+    if hosted_block(opts, lock_on, passkey).is_none() {
         Permission::Control
     } else {
         Permission::Write
+    }
+}
+
+/// What keeps a page on the relay's hosted app from being given control, the first that applies; None once it may be.
+fn hosted_block(opts: &ScreenOptions, lock_on: bool, passkey: bool) -> Option<Reason> {
+    if !opts.remote {
+        Some(Reason::ScreenRemoteOff)
+    } else if !opts.methods.relay_ws {
+        Some(Reason::MethodOff)
+    } else if !lock_on {
+        Some(Reason::LockOff)
+    } else if !passkey {
+        Some(Reason::NoPasskey)
+    } else {
+        None
     }
 }
 
@@ -241,7 +259,18 @@ mod tests {
                                                         } else if !relay && !tailscale && !native {
                                                             Err(Reason::MethodOff)
                                                         } else if record < Permission::Control {
-                                                            Err(Reason::NotGranted)
+                                                            // A hosted page is told the step before control can be given it.
+                                                            if hosted && !remote {
+                                                                Err(Reason::ScreenRemoteOff)
+                                                            } else if hosted && !relay_ws {
+                                                                Err(Reason::MethodOff)
+                                                            } else if hosted && !lock_on {
+                                                                Err(Reason::LockOff)
+                                                            } else if hosted && !passkey {
+                                                                Err(Reason::NoPasskey)
+                                                            } else {
+                                                                Err(Reason::NotGranted)
+                                                            }
                                                         } else if native {
                                                             Ok(if relay { Via::Relay } else { Via::Tailscale })
                                                         } else if !relay {
@@ -300,6 +329,13 @@ mod tests {
         let f = Facts { record: Permission::Control, native: false, secure_origin: true, hosted: false, lock_on: true, passkey: true, window: true, relay: false };
         assert_eq!(may_start(&f, &off, Via::Auto, Uv::Missing), Ok(Via::Tailscale));
         assert_eq!(may_start(&Facts { relay: true, ..f }, &off, Via::Auto, Uv::Fresh), Err(Reason::ScreenRemoteOff));
+        // A hosted page that may type is told the switch, which control waits on, not a "may take control" the computer does not offer yet;
+        // once control may be given, that is what it is told.
+        let hosted = Facts { record: Permission::Write, hosted: true, relay: true, ..f };
+        assert_eq!(allowed(&hosted, &off), Err(Reason::ScreenRemoteOff));
+        assert_eq!(allowed(&Facts { passkey: false, ..hosted }, &on), Err(Reason::NoPasskey));
+        assert_eq!(allowed(&hosted, &on), Err(Reason::NotGranted));
+        assert_eq!(allowed(&Facts { hosted: false, ..hosted }, &off), Err(Reason::NotGranted), "a page from this computer can be given control");
     }
 
     #[test]
