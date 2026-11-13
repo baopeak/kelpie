@@ -1166,6 +1166,7 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .tab-panes i.on { width: 12px; opacity: 1; }
 .broadcast-badge { background: var(--waiting); padding: 0 6px; }
 .agent-browser-badge { background: var(--accent); padding: 0 4px; }
+.tab-private { display: inline-flex; color: var(--accent); }
 .browser-sites { display: flex; flex-wrap: wrap; gap: 6px; }
 .browser-sites:empty { display: none; }
 .browser-site { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 1px 2px 1px 8px; }

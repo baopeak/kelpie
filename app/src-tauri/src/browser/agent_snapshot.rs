@@ -302,8 +302,8 @@ pub fn loopback(url: &Url) -> bool {
     host == "localhost" || host.ends_with(".localhost") || host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
-/// Whether agents may use a pane whose page is at `url`: a pane opened for agents with a profile of its own (`isolated`) on any http(s)
-/// site, one without on this computer's own sites and the user's allowed `sites`; a shared pane on the sites it was shared on
+/// Whether agents may use a pane whose page is at `url`: a pane opened for agents and made private (`isolated`) on any http(s) site,
+/// one that is not private on this computer's own sites and the user's allowed `sites`; a shared pane on the sites it was shared on
 /// (`shared`) and this computer's own. An empty page counts as allowed: there is nothing on it.
 pub fn site_allowed(url: &str, kind: Kind, isolated: bool, shared: &[String], sites: &[String]) -> Result<(), String> {
     if url == "about:blank" {
@@ -522,7 +522,7 @@ mod tests {
         assert!(site_allowed("https://staging.example.com:8443/", Kind::Opened, false, &[], &sites).is_err());
         // The page's own site is not named: it may be one the agent must not learn of.
         assert!(!site_allowed("https://example.com/", Kind::Opened, false, &[], &sites).unwrap_err().contains("example.com"));
-        // With a profile of its own, any web site.
+        // A private page, any web site.
         assert_eq!(site_allowed("https://example.com/", Kind::Opened, true, &[], &[]), Ok(()));
         assert!(site_allowed("file:///C:/x", Kind::Opened, true, &[], &[]).is_err());
         assert_eq!(site_allowed("about:blank", Kind::Opened, false, &[], &[]), Ok(()));

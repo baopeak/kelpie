@@ -405,5 +405,6 @@
   "Phones may have started more sessions than Activity lists": "Điện thoại có thể đã khởi động nhiều phiên hơn những phiên được liệt kê trong Hoạt động",
   "Some sessions phones started while Kelpie was closed may not be listed here. See Settings → Mobile → What phones did.": "Một số phiên mà điện thoại khởi động trong lúc Kelpie đóng có thể không được liệt kê ở đây. Bạn hãy xem Cài đặt → Di động → Điện thoại đã làm gì.",
   "Phones cannot start sessions until this is fixed: {error}": "Điện thoại chưa khởi động được phiên cho đến khi lỗi này được khắc phục: {error}",
-  "{name} is using a page in this tab": "{name} đang dùng một trang trong tab này"
+  "{name} is using a page in this tab": "{name} đang dùng một trang trong tab này",
+  "Private browser session for agents": "Phiên trình duyệt riêng tư dành cho agent"
 }

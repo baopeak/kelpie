@@ -68,7 +68,7 @@ impl Mode {
     }
 }
 
-/// The user's choices. `sites` are the origins agents may also use besides the local computer, for panes that have no profile of their own.
+/// The user's choices. `sites` are the origins agents may also use besides the local computer, for panes opened for agents whose page is not private.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Policy {
     pub mode: Mode,

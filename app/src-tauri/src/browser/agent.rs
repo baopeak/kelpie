@@ -73,8 +73,8 @@ const READ_ONLY: &str = "Browser control is set to read only: agents may look at
 const EVAL_OFF: &str = "Running JavaScript is allowed only in panes opened for agents, and only when the user turned it on in Kelpie → Settings → Agents → Browser panes.";
 
 /// What the window says about a call: who calls, how the pane came to be usable (`opened` for the session, or `shared`), the sites a
-/// shared pane may stay on, and whether scripts may run. The window also sends `isolated`, `sites` and `project`: not taken from it, this
-/// side knows how it made the pane and has the daemon's own policy (`Policy`).
+/// shared pane may stay on, and whether scripts may run. The window also sends `sites` and `project` (and an older window `isolated`): not
+/// taken from it, this side knows how it made the pane (`isolated`) and has the daemon's own policy (`Policy`).
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Ctx {
@@ -133,7 +133,7 @@ pub struct Facts<'a> {
     pub person: Option<Duration>,
     /// The page's address now.
     pub url: &'a str,
-    /// The pane has a browser profile of its own, as this side made it.
+    /// The pane's webview is private (agents' own session), as this side made it.
     pub isolated: bool,
 }
 
@@ -166,9 +166,10 @@ pub fn decide(f: &Facts, ctx: &Ctx, policy: &Policy) -> Result<(), String> {
     snap::site_allowed(f.url, ctx.kind(), f.isolated, &ctx.origins, &policy.sites)
 }
 
-/// Whether pane `label` was made with a browser profile of its own. None is yet: every pane shares the person's profile.
-fn isolated(_label: &str) -> bool {
-    false
+/// Whether pane `label`'s webview was made private, apart from the person's sign-ins (`browser_open` for a pane opened for an agent). A pane
+/// keeps what it was made with: sharing it, or opening it for an agent once it exists, changes nothing.
+fn isolated(app: &AppHandle, label: &str) -> bool {
+    app.state::<Browsers>().is_private(label)
 }
 
 /// How long this side has for a request: what the daemon waits for it (15 s; a wait or a navigation its own timeout and 5 s more), less
@@ -531,7 +532,7 @@ async fn run(app: &AppHandle, label: &str, tool: &str, args: &Value, ctx: &Ctx, 
     may_start(call.left())?;
     call.alive()?;
     call.touch();
-    pane.state.lock().net_scope = Some(Scope { kind: ctx.kind(), isolated: isolated(label), origins: ctx.origins.clone(), sites: p.policy.sites.clone() });
+    pane.state.lock().net_scope = Some(Scope { kind: ctx.kind(), isolated: isolated(app, label), origins: ctx.origins.clone(), sites: p.policy.sites.clone() });
     call.record_network().await;
     let out = match tool {
         "snapshot" => call.snapshot(args).await,
@@ -756,7 +757,7 @@ impl Call<'_> {
             lease: lease.as_ref().map(|(s, n, idle)| (s.as_str(), n.as_str(), *idle)),
             person: u64::try_from(info.person).ok().map(Duration::from_millis),
             url: &info.url,
-            isolated: isolated(self.label),
+            isolated: isolated(self.app, self.label),
         };
         decide(&facts, self.ctx, self.policy)?;
         Ok(info)
@@ -785,7 +786,7 @@ impl Call<'_> {
     /// The page ended on `url`: if the pane may not be there, a shared pane loses its agents (`left-site`), and the call fails without
     /// naming the site.
     fn landed(&self, url: &str) -> Result<(), String> {
-        let Err(why) = snap::site_allowed(url, self.ctx.kind(), isolated(self.label), &self.ctx.origins, &self.policy.sites) else { return Ok(()) };
+        let Err(why) = snap::site_allowed(url, self.ctx.kind(), isolated(self.app, self.label), &self.ctx.origins, &self.policy.sites) else { return Ok(()) };
         if self.ctx.kind() == Kind::Shared {
             end(self.app, self.label, "left-site");
             return Err(LEFT_SITE.into());
@@ -1210,7 +1211,7 @@ impl Call<'_> {
         let action = args["action"].as_str();
         let url = args["url"].as_str().map(super::parse_url).transpose()?;
         if let Some(url) = &url {
-            snap::site_allowed(url.as_str(), self.ctx.kind(), isolated(self.label), &self.ctx.origins, &self.policy.sites)?;
+            snap::site_allowed(url.as_str(), self.ctx.kind(), isolated(self.app, self.label), &self.ctx.origins, &self.policy.sites)?;
         } else if !matches!(action, Some("back" | "forward" | "reload")) {
             return Err("give either `url` or `action` (back, forward or reload)".into());
         }
@@ -1454,7 +1455,7 @@ impl Call<'_> {
             max: args["max"].as_u64().unwrap_or(50).clamp(1, 300) as usize,
         };
         let origin = tauri::Url::parse(&info.url).map(|u| u.origin().ascii_serialization()).unwrap_or_default();
-        let own = isolated(self.label);
+        let own = isolated(self.app, self.label);
         let allowed = |doc: &str| snap::site_allowed(doc, self.ctx.kind(), own, &self.ctx.origins, &self.policy.sites).is_ok();
         let text = log.lock().render(&q, &origin, &allowed);
         Ok(json!({"text": text, "page": page_of(&info.url, &info.title)}))
@@ -1597,12 +1598,38 @@ mod tests {
         assert!(decide(&Facts { class: Class::Act, ..away }, &ctx("opened"), &act_policy()).is_err());
         let on_site = Facts { url: "https://app.example.com/home", ..facts(Class::Act) };
         assert_eq!(decide(&on_site, &ctx("shared"), &act_policy()), Ok(()));
-        // An opened pane: the allowlist, or any site with a profile of its own.
+        // An opened pane: the allowlist, or any site when private.
         let allowed = Policy { sites: vec!["https://elsewhere.example.org".into()], ..act_policy() };
         assert_eq!(decide(&Facts { class: Class::Act, ..away }, &ctx("opened"), &allowed), Ok(()));
         assert_eq!(decide(&Facts { class: Class::Act, isolated: true, ..away }, &ctx("opened"), &act_policy()), Ok(()));
-        // A shared pane does not widen with a profile of its own.
+        // A shared pane does not widen when its page is private.
         assert!(decide(&Facts { class: Class::Act, isolated: true, ..away }, &ctx("shared"), &act_policy()).is_err());
+    }
+
+    #[test]
+    fn the_sites_follow_whether_the_pane_was_made_private() {
+        let browsers = Browsers::default();
+        browsers.set_private("browser-agent", true);
+        browsers.set_private("browser-person", false);
+        let away = |label: &str| Facts { url: "https://example.com/", isolated: browsers.is_private(label), ..facts(Class::Act) };
+        let local = |label: &str| Facts { isolated: browsers.is_private(label), ..facts(Class::Act) };
+        // Opened for the agent and private: any http(s) site.
+        assert_eq!(decide(&away("browser-agent"), &ctx("opened"), &act_policy()), Ok(()));
+        // Opened for the agent but not private (made while browser control was off): this computer's own sites and the allowed ones only.
+        let e = decide(&away("browser-person"), &ctx("opened"), &act_policy()).unwrap_err();
+        assert!(e.contains("localhost") && !e.contains("example.com"), "{e}");
+        assert_eq!(decide(&local("browser-person"), &ctx("opened"), &act_policy()), Ok(()));
+        let allowed = Policy { sites: vec!["https://example.com".into()], ..act_policy() };
+        assert_eq!(decide(&away("browser-person"), &ctx("opened"), &allowed), Ok(()));
+        // Shared: the sites it was shared on and this computer's, private or not.
+        for label in ["browser-agent", "browser-person"] {
+            assert!(decide(&away(label), &ctx("shared"), &allowed).is_err(), "{label}");
+            assert_eq!(decide(&local(label), &ctx("shared"), &act_policy()), Ok(()), "{label}");
+        }
+        // A pane never made, or closed: not private.
+        assert!(!browsers.is_private("browser-other"));
+        browsers.set_private("browser-agent", false);
+        assert!(decide(&away("browser-agent"), &ctx("opened"), &act_policy()).is_err());
     }
 
     #[test]

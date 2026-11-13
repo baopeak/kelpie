@@ -75,15 +75,30 @@ function inOrder<T>(label: string, run: () => Promise<T>): Promise<T> {
 const webviews = new Set<string>();
 export const hasWebview = (label: string) => webviews.has(label);
 
+/** Labels whose webview is private, as Rust made it (a pane opened for an agent): the tab says so. */
+export const [privateWebviews, setPrivateWebviews] = createRoot(() => createSignal<ReadonlySet<string>>(new Set()));
+const markPrivate = (label: string, on: boolean) =>
+  setPrivateWebviews((s) => {
+    if (s.has(label) === on) return s;
+    const next = new Set(s);
+    if (on) next.add(label);
+    else next.delete(label);
+    return next;
+  });
+
 /** `hidden`: the webview is created without being shown, for an agent that uses a pane nobody has opened yet; mounting the pane later
  *  moves it into place and shows it. A hidden open of a webview that exists by its turn does nothing: the pane may have been opened on
- *  screen meanwhile, and moving that one away would leave the pane blank. `agent`: the pane was opened for an agent, so its page keeps a
- *  console log for the agent from the start (fixed when the webview is created). */
-export const browserOpen = (label: string, url: string, rect: Rect, opts: { hidden?: boolean; agent?: boolean } = {}) =>
+ *  screen meanwhile, and moving that one away would leave the pane blank. `agent`: the pane was opened for an agent while browser control
+ *  is on, so its page is private (a private session, none of the person's sign-ins) and keeps a console log for agents from the start;
+ *  both are fixed when the webview is created, and an existing webview keeps what it was created with. It may be a promise (the policy
+ *  being read): it is awaited in the label's turn, so that nothing asked after this open overtakes it. */
+export const browserOpen = (label: string, url: string, rect: Rect, opts: { hidden?: boolean; agent?: boolean | Promise<boolean> } = {}) =>
   inOrder(label, async () => {
     if (opts.hidden && webviews.has(label)) return;
-    await invoke<void>("browser_open", { label, url, rect, ...(opts.hidden ? { hidden: true } : {}), ...(opts.agent ? { agent: true } : {}) });
+    const agent = opts.agent instanceof Promise ? (await opts.agent.catch(() => false)) === true : opts.agent === true;
+    const made = await invoke<boolean>("browser_open", { label, url, rect, ...(opts.hidden ? { hidden: true } : {}), ...(agent ? { agent: true } : {}) });
     webviews.add(label);
+    markPrivate(label, made === true);
   });
 export const browserBounds = (label: string, rect: Rect) => invoke<void>("browser_bounds", { label, rect });
 export const browserVisible = (label: string, visible: boolean) => inOrder(label, () => invoke<void>("browser_visible", { label, visible }));
@@ -94,6 +109,7 @@ export const browserDevtools = (label: string) => invoke<void>("browser_devtools
 export const browserClose = (label: string) =>
   inOrder(label, () => {
     webviews.delete(label);
+    markPrivate(label, false);
     return invoke<void>("browser_close", { label });
   }).catch(() => {});
 export const browserScreenshot = (label: string, clip?: Rect) => invoke<{ path: string; data: string }>("browser_screenshot", { label, clip });
@@ -103,6 +119,8 @@ export const browserAgentRun = (preq: number, label: string, tool: string, args:
   invoke<void>("browser_agent_run", { preq, label, tool, args, ctx });
 /** Ends any agent's use of the pane `label` (the banner's Stop). */
 export const browserAgentStop = (label: string) => invoke<void>("browser_agent_stop", { label });
+/** Of `labels`, those whose webview exists now, each with whether Rust made it private. A label left out has no webview yet. */
+export const browserPrivate = (labels: string[]) => invoke<Record<string, boolean>>("browser_private", { labels });
 
 /** Whether a local port answers with a web page, and its title. */
 export const browserProbe = (host: string, port: number) => invoke<{ title: string | null } | null>("browser_probe", { host, port });
