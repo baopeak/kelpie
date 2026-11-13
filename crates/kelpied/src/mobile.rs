@@ -59,6 +59,7 @@ use crate::notify::web_push;
 use crate::notify::SecretStore;
 use crate::persist::write_atomic;
 use crate::session::{bounded_client_channel, next_client_id, now_millis, Answer, AnswerError, By, ClientTx, Outgoing, Resolution};
+pub use lanes::CursorSlot;
 use lanes::{Beat, Liveness, SLOW_AFTER};
 use link::{Opened, Peer, Wire};
 use lock::{Gate, LockMemory, LockPath};
@@ -2559,6 +2560,8 @@ struct Conn {
     out: mpsc::Sender<String>,
     /// Where a screen's binary media waits for the socket, behind everything else (`screen`).
     media: mpsc::Sender<Vec<u8>>,
+    /// Where a screen's cursor waits for the socket: its latest place only, ahead of the media (`lanes::CursorSlot`).
+    cursor: lanes::CursorSlot,
     /// Where a screen's own messages wait: the writer's control queue, ahead of the bulk lane and media (`lanes::Lanes::ctl`).
     ctl: mpsc::Sender<String>,
     /// Whether this phone is locked, for the wire's writer: set wherever `locked` is, so not one media message follows the `locked` message.
@@ -2691,6 +2694,9 @@ impl Conn {
         if name == "push_test" {
             return self.push_test(tag);
         }
+        if name == "sc_text" {
+            return self.screen_text(granted, req, tag);
+        }
         match self.run(granted, name, req).await {
             Ok(Some(mut reply)) => {
                 if let Some(t) = tag {
@@ -2807,9 +2813,8 @@ impl Conn {
         Ok(())
     }
 
-    /// Carries out one request of the verb table; `Some` is a reply with content, `None` a plain ack.
-    async fn run(&mut self, granted: Permission, name: &str, req: &Value) -> Result<Option<Value>, Refusal> {
-        let verb = Verb::parse(name).ok_or_else(|| refuse("unknown_verb", format!("unknown request {name:?}")))?;
+    /// A control verb (a pane's takeover or the screen) this connection may not use now, and why.
+    fn control_refused(&self, verb: Verb, granted: Permission) -> Result<(), Refusal> {
         if verb.takeover() && verb.needs() > granted {
             if self.daemon.mobile.permission(&self.device).is_some_and(|record| record >= Permission::Control) {
                 let what = if verb.screen() { "Seeing the computer's screen" } else { "Taking over a pane" };
@@ -2817,8 +2822,43 @@ impl Conn {
             }
             return Err(refuse("no_control", "This device may not take control. Allow it in Kelpie → Settings → Mobile."));
         }
+        Ok(())
+    }
+
+    /// Text typed on the shared screen: its answer comes once the computer has typed it, on the screen's control queue, while this connection
+    /// goes on reading the phone (its acknowledgements above all, which a long text must not hold back). Input that comes meanwhile waits for
+    /// the text on the computer (`screen::Broker::text_begin`), so that text then Enter keep their order.
+    fn screen_text(&self, granted: Permission, req: &Value, tag: Option<Value>) -> Option<Value> {
+        let refused = |r: Refusal| Some(json!({"type": "error", "req": tag, "code": r.code, "reason": r.reason, "message": r.message}));
+        if let Err(r) = self.control_refused(Verb::ScText, granted) {
+            return refused(r);
+        }
+        let phone = crate::screen::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.ctl, media: &self.media, cursor: &self.cursor };
+        let typing = match self.daemon.screen.text_begin(&self.daemon, phone, req) {
+            Ok(typing) => typing,
+            Err(r) => return refused(refuse(r.code, r.message)),
+        };
+        let out = self.ctl.clone();
+        tokio::spawn(async move {
+            let reply = match typing.await {
+                Ok(mut reply) => {
+                    reply["req"] = tag.unwrap_or(Value::Null);
+                    reply
+                }
+                Err(r) => json!({"type": "error", "req": tag, "code": r.code, "reason": null, "message": r.message}),
+            };
+            // Waits for room: an answer is never dropped (the queue is a few messages a second at most).
+            let _ = tokio::time::timeout(lanes::SLOW_AFTER, out.send(reply.to_string())).await;
+        });
+        None
+    }
+
+    /// Carries out one request of the verb table; `Some` is a reply with content, `None` a plain ack.
+    async fn run(&mut self, granted: Permission, name: &str, req: &Value) -> Result<Option<Value>, Refusal> {
+        let verb = Verb::parse(name).ok_or_else(|| refuse("unknown_verb", format!("unknown request {name:?}")))?;
+        self.control_refused(verb, granted)?;
         if verb.screen() {
-            let phone = crate::screen::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.ctl, media: &self.media };
+            let phone = crate::screen::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.ctl, media: &self.media, cursor: &self.cursor };
             return self.daemon.screen.phone_verb(&self.daemon, phone, name, req).await.map_err(|r| refuse(r.code, r.message));
         }
         if verb.takeover() {
@@ -3100,7 +3140,7 @@ impl Conn {
             Verb::LockTouch => self.daemon.mobile.lock_touch(&self.device, self.resume.as_deref()),
             // Carried out by the broker above.
             Verb::Panes | Verb::TkStart | Verb::TkInput | Verb::TkText | Verb::TkAck | Verb::TkStop | Verb::TkRebind => return Err(refuse("bad_request", "not here")),
-            Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume => return Err(refuse("bad_request", "not here")),
+            Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen => return Err(refuse("bad_request", "not here")),
             Verb::ChatAnswer => {
                 let (_, chat) = self.chat(req)?;
                 let request_id = req.get("request_id").filter(|r| r.is_string() || r.is_number()).ok_or_else(|| refuse("bad_request", "missing request_id"))?;
@@ -3333,7 +3373,7 @@ async fn client(daemon: Arc<Daemon>, mut wire: Wire, generation: Arc<Generation>
     let waiting = Arc::new(AtomicUsize::new(0));
     daemon.mobile.waiting.lock().insert(id, waiting.clone());
     let mut conn = Conn {
-        daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(), media: lanes.media.clone(), ctl: lanes.ctl.clone(), media_locked: Arc::new(AtomicBool::new(false)),
+        daemon: daemon.clone(), device: device.id.clone(), name: device.name.clone(), id, tx, out: lanes.bulk.clone(), media: lanes.media.clone(), cursor: lanes.cursor.clone(), ctl: lanes.ctl.clone(), media_locked: Arc::new(AtomicBool::new(false)),
         followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(), chat_at: HashMap::new(), waiting, overflowed,
         cap, route, list: None, rev: 0, page_origin: peer.origin.clone(), legacy, lock_path, secure_page, resume: first["resume"].as_str().filter(|r| r.len() <= 64).map(str::to_string), locked: false, lock_told: "",
         relay_offer: daemon.mobile.relay_grant(&device, &first), _phone: Some(daemon.mobile.load.phone()),
@@ -3398,12 +3438,21 @@ fn connection_opened(daemon: &Daemon, device: &str, mut open: OpenConn) {
     };
     if let Some(older) = &older {
         older.replaced.notify_one();
+        // Its holds wait for this connection from now on: it may take a while to close (its socket may be stalled), and this one's first
+        // request may be to take them over (`sc_rebind`).
+        daemon.takeover.link_closed(older.conn);
+        daemon.screen.link_closed(daemon, older.conn);
     }
     if older.map(|o| o.route) != Some(route) {
         daemon.broadcast("mobile.connection", json!({"id": device, "route": route}));
     }
 }
 
+/// `connection_opened` for other modules' tests: connection `conn` of `device` opens, over Tailscale.
+#[cfg(test)]
+pub(crate) fn connection_opened_for_test(daemon: &Daemon, device: &str, conn: u64) {
+    connection_opened(daemon, device, OpenConn { conn, replaced: Arc::new(Notify::new()), route: "tailscale", since: 0 });
+}
 /// Connection `conn` of `device` ended. Unless a newer one took over from it (and said so), the device is not connected now, and the desktop hears of it.
 fn connection_closed(daemon: &Daemon, device: &str, conn: u64) {
     let _order = daemon.mobile.connection_news.lock();
@@ -3566,7 +3615,7 @@ async fn serve(conn: &mut Conn, wire: &mut Wire, device: &Device, wires: &mut Wi
     // A screen's media goes from the wire's own writer, behind every other message, and none of it to a locked phone: the writer reads
     // `media_locked`, which is set wherever `conn.locked` is.
     if let Some(media) = wires.media_rx.take() {
-        if !wire.attach_media(media, conn.media_locked.clone()).await {
+        if !wire.attach_media(media, conn.cursor.clone(), conn.media_locked.clone()).await {
             return;
         }
     }
@@ -4212,7 +4261,7 @@ mod tests {
         let (tx, _rx, overflowed) = bounded_client_channel(8);
         let (out_tx, out) = mpsc::channel(16);
         let conn = Conn {
-            daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, media: mpsc::channel(4).0, ctl: mpsc::channel(4).0, media_locked: Arc::new(AtomicBool::new(false)), followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
+            daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, media: mpsc::channel(4).0, cursor: lanes::CursorSlot::default(), ctl: mpsc::channel(4).0, media_locked: Arc::new(AtomicBool::new(false)), followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
             chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, route: "local", list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         };
         Rig { daemon, conn, out, term, typed, chat, phone }
@@ -5875,7 +5924,7 @@ mod tests {
         let (tx, _rx, overflowed) = bounded_client_channel(8);
         let (out, _out_rx) = mpsc::channel(16);
         Conn {
-            daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, media: mpsc::channel(4).0, ctl: mpsc::channel(4).0, media_locked: Arc::new(AtomicBool::new(false)), followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
+            daemon: r.daemon.clone(), device: device.into(), name: name.into(), id, tx, out, media: mpsc::channel(4).0, cursor: lanes::CursorSlot::default(), ctl: mpsc::channel(4).0, media_locked: Arc::new(AtomicBool::new(false)), followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
             chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, route: "local", list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         }
     }

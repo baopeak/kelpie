@@ -7,20 +7,27 @@
 //!
 //! - **A hold** is keyed by its device, the link connection and the provider's connection, rests on a grant flag (`Mobile::grant`) that a
 //!   revoke, a lower permission, the app lock and phone access going off clear at once, and on the record as it is now (`control_held`, looked
-//!   at again by its task); every input checks it, and its own task lets go within `WATCH`. A dropped link keeps it `REBIND_WINDOW` for the same
-//!   device's next connection only (the same connection asking again is no change). **One screen at a time**: a start reserves the screen for
-//!   its whole length, so a second one that comes meanwhile is refused as in use, and the first holder keeps it.
-//! - **Flow:** the link is TCP, so nothing is lost and nothing should pile up. The helper encodes only while fewer than 3 frames wait for the
-//!   phone's acknowledgement (`sc_ack`, forwarded with its round trip as `screen.flow`, which also says how long the link's window has been full,
-//!   counted here: the helper's bitrate is cut for that, never for its own count, which holds this computer's part of the way). Should the
-//!   lane still be full, or more than `MAX_UNACKED_BYTES` wait, video is dropped up to the next keyframe, which is asked for at most once a
-//!   second: a decoder given a frame whose reference never came would show garbage. **What is dropped is said**: `screen.flow` carries `dropped_through`, so the helper never
-//!   waits for an acknowledgement that cannot come, and `lost_tiles`, since a dropped frame may have carried the unpaint of a crisp tile.
-//!   Tiles and the cursor go only while the lane has room for video beside them. `screen.flow` also carries the bytes on the wire for the bytes
-//!   of media (the link pads every message), so the encoder is asked for what the link really carries.
+//!   at again by its task); every input checks it, and its own task lets go within `WATCH`. A dropped link keeps it `SCREEN_REBIND_WINDOW` for
+//!   the same device's next connection only (the same connection asking again is no change; a newer connection of the device takes it over at
+//!   once, `mobile::connection_opened`). **One screen at a time**: a start reserves the screen for its whole length, so a second one that comes
+//!   meanwhile is refused as in use, and the first holder keeps it.
+//! - **Flow:** the link is TCP, so nothing is lost and nothing should pile up. The helper encodes only while fewer frames than its window wait
+//!   for the phone's acknowledgement (`sc_ack`, forwarded with its round trip as `screen.flow`, which also says how long the link's window has
+//!   been full, counted here: the helper's bitrate is cut for that, never for its own count, which holds this computer's part of the way). The
+//!   window is 3 frames and 192 KiB until the helper says otherwise (`window`): with `win` in each flow the daemon says it takes that, and the
+//!   helper then sizes it to the round trip and the frame rate (`kelpie_screen::control::Controller::window`). Should the lane still be full, or
+//!   more than the window's bytes wait, video is dropped up to the next keyframe, which is asked for at most once a second: a decoder given a
+//!   frame whose reference never came would show garbage. **What is dropped is said**: `screen.flow` carries `dropped_through`, so the helper
+//!   never waits for an acknowledgement that cannot come, and `lost_tiles`, since a dropped frame may have carried the unpaint of a crisp tile.
+//!   Tiles go only while the lane has room for video beside them; the cursor never waits behind video: its latest place goes in a slot the
+//!   writer takes before the media lane (`mobile::CursorSlot`). `screen.flow` also carries the bytes on the wire for the bytes of media (the link
+//!   pads every message), so the encoder is asked for what the link really carries.
 //! - **Input** older than 1 s by the computer's clock is dropped, and so is input while the phone's picture is stale (a frame unacknowledged
-//!   for `STALE_AFTER`, or a keyframe owed for as long); at most `INPUT_PER_SECOND` messages a second. Text goes with an answer of its own.
+//!   for `STALE_AFTER`, or a keyframe owed for as long); at most `INPUT_PER_SECOND` messages a second. Text goes with an answer of its own,
+//!   which the phone's connection does not wait for (`text_begin`): input that comes while text is typed waits for it here, in order.
 //!   None of it is logged: the audit log has the start (the program, or a monitor) and the end.
+//! - **Sharpen** (`sc_sharpen`): while crisp text is off for a slow link, the part of the picture the phone shows is sent crisp once, at most
+//!   every `SHARPEN_GAP`.
 //!
 //! Never over the relay: `control` is never granted on a relayed connection (`mobile::transport_cap`).
 
@@ -30,7 +37,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
-use kelpie_screen::wire::{self, KIND_TILE, KIND_VIDEO};
+use kelpie_screen::control::{MAX_WINDOW, MAX_WINDOW_BYTES, MIN_WINDOW, MIN_WINDOW_BYTES};
+use kelpie_screen::wire::{self, KIND_CURSOR, KIND_TILE, KIND_VIDEO};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
@@ -38,16 +46,22 @@ use tokio::time::Instant;
 
 use crate::daemon::Daemon;
 use crate::load::Level;
+use crate::mobile::CursorSlot;
 use crate::session::now_millis;
-use crate::takeover::{Refused, IDLE_STOP, INPUT_PER_SECOND, REBIND_WINDOW};
+use crate::takeover::{Refused, IDLE_STOP, INPUT_PER_SECOND, INPUT_TTL_MS};
 
 const WATCH: Duration = Duration::from_millis(250);
 pub const HEARTBEAT: Duration = Duration::from_secs(1);
-/// Media sent and not acknowledged, at most.
-pub const MAX_UNACKED_BYTES: usize = 192 * 1024;
+/// A dropped link keeps a screen this long for the same device's next connection: long enough for a phone moving from Wi-Fi to mobile data, or
+/// a relay that restarts. A pane's takeover keeps its own, shorter one (`takeover::REBIND_WINDOW`).
+pub const SCREEN_REBIND_WINDOW: Duration = Duration::from_secs(45);
+/// One Sharpen at most this often.
+pub const SHARPEN_GAP: Duration = Duration::from_secs(3);
+/// Input messages that wait for a text being typed, at most (more are dropped: the phone sends a few a second).
+const MAX_AFTER_TEXT: usize = 32;
 /// The phone's picture is stale when a frame waited this long for its acknowledgement, or a keyframe has been owed this long: input is not sent.
 pub const STALE_AFTER: Duration = Duration::from_secs(2);
-/// Room the media lane keeps for video: a tile or the cursor goes only with at least this many places free.
+/// Room the media lane keeps for video: a tile goes only with at least this many places free.
 pub const ROOM_FOR_VIDEO: usize = 3;
 const KEY_GAP: Duration = Duration::from_secs(1);
 /// Starting the helper and its first look can take a while on a busy machine. The app answers within its own shorter budget.
@@ -64,19 +78,37 @@ pub struct Phone<'a> {
     pub device: &'a str,
     pub name: &'a str,
     pub conn: u64,
-    /// Its JSON lane and its media lane.
+    /// Its JSON lane, its media lane and its cursor slot.
     pub out: &'a mpsc::Sender<String>,
     pub media: &'a mpsc::Sender<Vec<u8>>,
+    pub cursor: &'a CursorSlot,
+}
+
+/// The connection a hold sends on.
+#[derive(Clone)]
+struct Link {
+    conn: u64,
+    out: mpsc::Sender<String>,
+    media: mpsc::Sender<Vec<u8>>,
+    cursor: CursorSlot,
+}
+
+impl Link {
+    fn of(phone: &Phone<'_>) -> Link {
+        Link { conn: phone.conn, out: phone.out.clone(), media: phone.media.clone(), cursor: phone.cursor.clone() }
+    }
 }
 
 struct State {
-    conn: Option<(u64, mpsc::Sender<String>, mpsc::Sender<Vec<u8>>)>,
+    conn: Option<Link>,
     gone_at: Option<Instant>,
     /// Video frames sent and not acknowledged: number, when, size.
     sent: VecDeque<(u32, Instant, usize)>,
     /// Since when the link's window has been full (`note_window`): what the helper's controller cuts for, measured here, where frames
     /// leave for the phone and its acknowledgements arrive, so that neither the way to the helper nor its own loop counts as the link.
     full_since: Option<Instant>,
+    /// The window the helper keeps: frames and bytes sent and not acknowledged, at most (3 and 192 KiB until it says otherwise).
+    window: (u32, usize),
     unacked: usize,
     acked: u32,
     /// The last video frame dropped here: the helper hears it, and stops counting those frames as in flight.
@@ -103,6 +135,12 @@ struct State {
     /// The number of the last pause or resume told to the app: those are sent after the lock is let go, so two may arrive out of order, and the
     /// app keeps the newest.
     version: u64,
+    /// When the phone last asked for Sharpen.
+    sharpened: Option<Instant>,
+    /// A text is being typed: input that comes meanwhile waits for it (`after_text`, with when it came), so that text then Enter keep their
+    /// order; what has waited longer than the 1 s any input may be old is dropped then, as it would have been on its own.
+    typing: bool,
+    after_text: Vec<(Instant, Vec<Value>)>,
 }
 
 pub struct Hold {
@@ -188,7 +226,7 @@ const STATES: &[&str] = &["live", "locked", "secure_desktop", "closed", "minimiz
 /// The stage timings a stats event may carry (`kelpie_screen::control::Stages`).
 const STAGE_FIELDS: &[&str] = &[
     "capture_to_send_ms_p50", "capture_to_send_ms_p95", "convert_ms_p95", "encode_ms_p50", "send_interval_ms_p95", "ack_rtt_ms_p50", "ack_rtt_ms_p95", "top_off", "big_frames", "held", "first_output_ms", "dxgi_first_full",
-    "link_cuts", "link_cuts_queueing", "link_cuts_window", "link_cuts_size", "last_cut_queueing_ms", "last_cut_link_full_ms", "last_cut_inflight",
+    "link_cuts", "link_cuts_queueing", "link_cuts_window", "link_cuts_size", "last_cut_queueing_ms", "last_cut_link_full_ms", "last_cut_inflight", "inflight_limit",
 ];
 
 fn target_row(t: &Value) -> Option<Value> {
@@ -211,7 +249,7 @@ impl Broker {
         if !hold.live() {
             return Err(refused("sc_gone", "That screen has ended."));
         }
-        if hold.state.lock().conn.as_ref().map(|(c, ..)| *c) != Some(phone.conn) {
+        if hold.state.lock().conn.as_ref().map(|l| l.conn) != Some(phone.conn) {
             return Err(refused("sc_elsewhere", "That screen is on another connection."));
         }
         Ok(hold)
@@ -241,7 +279,7 @@ impl Broker {
         }
         hold.wake.notify_one();
         let conn = hold.state.lock().conn.take();
-        if let Some((_, out, _)) = conn {
+        if let Some(Link { out, .. }) = conn {
             if let Err(mpsc::error::TrySendError::Full(msg)) = out.try_send(end_message(sc, reason)) {
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
                     rt.spawn(async move {
@@ -264,7 +302,7 @@ impl Broker {
             .values()
             .filter_map(|h| {
                 let mut st = h.state.lock();
-                if !st.conn.as_ref().is_some_and(|(c, ..)| *c == conn) {
+                if !st.conn.as_ref().is_some_and(|l| l.conn == conn) {
                     return None;
                 }
                 Self::set_gone(&mut st);
@@ -276,9 +314,9 @@ impl Broker {
         }
     }
 
-    /// The link's window is full from when `MAX_INFLIGHT` video frames sent from here wait for the phone, until fewer do.
+    /// The link's window is full from when as many video frames as the helper's window sent from here wait for the phone, until fewer do.
     fn note_window(st: &mut State) {
-        if st.sent.len() >= kelpie_screen::control::MAX_INFLIGHT as usize {
+        if st.sent.len() >= st.window.0 as usize {
             st.full_since.get_or_insert_with(Instant::now);
         } else {
             st.full_since = None;
@@ -328,6 +366,14 @@ impl Broker {
                 let Some(bytes) = params["data"].as_str().and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok()) else { return };
                 self.media(d, &hold, bytes);
             }
+            // The helper's window, sized to the link (only after this daemon said it takes one): within the bounds whatever it says.
+            Some("window") => {
+                let frames = params["frames"].as_u64().map_or(MIN_WINDOW, |f| f.clamp(u64::from(MIN_WINDOW), u64::from(MAX_WINDOW)) as u32);
+                let bytes = params["bytes"].as_u64().map_or(MIN_WINDOW_BYTES, |b| b.clamp(MIN_WINDOW_BYTES as u64, MAX_WINDOW_BYTES as u64) as usize);
+                let mut st = hold.state.lock();
+                st.window = (frames, bytes);
+                Self::note_window(&mut st);
+            }
             Some("state") => {
                 if let Some(state) = params["state"].as_str().filter(|s| STATES.contains(s)) {
                     self.tell(&hold, json!({"type": "sc_state", "sc": sc, "state": state, "server_ts": now_millis()}));
@@ -366,8 +412,8 @@ impl Broker {
 
     /// A JSON message to the hold's phone, if it is connected; one that finds no room is dropped (the next state or stats replaces it).
     fn tell(&self, hold: &Hold, msg: Value) {
-        if let Some((_, out, _)) = hold.state.lock().conn.as_ref() {
-            let _ = out.try_send(msg.to_string());
+        if let Some(link) = hold.state.lock().conn.as_ref() {
+            let _ = link.out.try_send(msg.to_string());
         }
     }
 
@@ -393,18 +439,27 @@ impl Broker {
     fn media(&self, d: &Daemon, hold: &Hold, bytes: Vec<u8>) {
         let Some(peek) = wire::peek(&bytes) else { return };
         let mut st = hold.state.lock();
-        let Some((_, _, lane)) = st.conn.clone() else { return };
+        let Some(Link { media: lane, cursor, .. }) = st.conn.clone() else { return };
         if !hold.live() {
+            return;
+        }
+        // The cursor: its latest place, never behind video and never in its way.
+        if peek.kind == KIND_CURSOR {
+            st.raw += bytes.len() as u64;
+            st.wire += wire_len(bytes.len()) as u64;
+            cursor.put(bytes);
             return;
         }
         let video = peek.kind == KIND_VIDEO;
         if video && st.need_key && !peek.key {
             return self.drop_video(d, hold, &mut st, peek.seq);
         }
-        if video && st.unacked + bytes.len() > MAX_UNACKED_BYTES && !st.sent.is_empty() {
+        // The window's bytes already wait: the helper sends a frame while fewer wait, whatever its size, and so a frame is taken here on the same
+        // terms (dropping one it sent within its window would cost a keyframe for nothing).
+        if video && st.unacked >= st.window.1 && !st.sent.is_empty() {
             return self.drop_video(d, hold, &mut st, peek.seq);
         }
-        // A tile or the cursor never takes the room a video frame needs: it goes only with room to spare, and a tile that does not is painted again.
+        // A tile never takes the room a video frame needs: it goes only with room to spare, and one that does not is painted again.
         if !video && lane.capacity() < ROOM_FOR_VIDEO {
             if peek.kind == KIND_TILE {
                 st.lost_tiles = true;
@@ -443,7 +498,8 @@ impl Broker {
             let lost_tiles = std::mem::take(&mut st.lost_tiles);
             let (raw, wire) = (std::mem::take(&mut st.raw), std::mem::take(&mut st.wire));
             let link_full_ms = st.full_since.map_or(0, |s| s.elapsed().as_millis() as u64);
-            json!({"sc": hold.sc, "acked": st.acked, "dropped_through": st.dropped_through, "rtt_ms": rtt_ms, "level": st.level.number(), "lost_tiles": lost_tiles, "raw": raw, "wire": wire, "link_full_ms": link_full_ms})
+            // `win`: this daemon takes the helper's window (`window`), so the helper may size it to the link.
+            json!({"sc": hold.sc, "acked": st.acked, "dropped_through": st.dropped_through, "rtt_ms": rtt_ms, "level": st.level.number(), "lost_tiles": lost_tiles, "raw": raw, "wire": wire, "link_full_ms": link_full_ms, "win": true})
         };
         d.providers.notify("screen", "screen.flow", msg);
     }
@@ -492,41 +548,57 @@ impl Broker {
                     // A button pressed before is let go all the same, so it is never left pressed on the computer (keys go down and up in one
                     // message): one `release` at most, with no place (the pointer does not move to where a stale picture put it), and only
                     // while a press is outstanding, so a flood of late `up`s is one release or nothing.
-                    let release = ops.iter().any(|op| op["k"] == "up" || op["k"] == "release") && std::mem::take(&mut hold.state.lock().held);
+                    let mut st = hold.state.lock();
+                    let release = ops.iter().any(|op| op["k"] == "up" || op["k"] == "release") && std::mem::take(&mut st.held);
                     if release && hold.live() {
-                        d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": [{"k": "release"}], "t": now_millis()}));
+                        // While a text is typed the release waits behind what waits with it, so that it never overtakes a press there.
+                        if st.typing {
+                            st.after_text.push((Instant::now(), vec![json!({"k": "release"})]));
+                        } else {
+                            d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": [{"k": "release"}], "t": now_millis()}));
+                        }
                     }
                     return Ok(None);
                 }
                 if !hold.live() {
                     return Err(refused("sc_gone", "That screen has ended."));
                 }
-                {
-                    let mut st = hold.state.lock();
-                    st.last_input = Instant::now();
-                    st.held = kelpie_screen::input::held_after(st.held, &ops);
+                let mut st = hold.state.lock();
+                // More than a phone sends while a text is typed: dropped whole, so that what is told as pressed stays what the computer has.
+                if st.typing && st.after_text.len() >= MAX_AFTER_TEXT {
+                    return Ok(None);
                 }
-                d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": ops, "t": now_millis()}));
+                st.last_input = Instant::now();
+                st.held = kelpie_screen::input::held_after(st.held, &ops);
+                // A text is being typed: this goes after it. Otherwise now, told under the hold's lock so that input that comes meanwhile, or
+                // what waited for a text, never overtakes it.
+                if st.typing {
+                    st.after_text.push((Instant::now(), ops));
+                } else {
+                    d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": ops, "t": now_millis()}));
+                }
                 Ok(None)
             }
-            "sc_text" => {
+            "sc_text" => self.text_begin(d, phone, req)?.await.map(Some),
+            "sc_sharpen" => {
                 let hold = self.held_here(&phone, req)?;
-                let text = req["text"].as_str().and_then(kelpie_screen::input::checked_text).ok_or_else(|| refused("bad_request", "missing or too long text"))?;
-                if !kelpie_screen::input::fresh(req["st"].as_u64(), now_millis()) {
-                    return Err(refused("not_sent", "Not sent: it came too late. Check the screen, then type it again."));
+                let r = &req["rect"];
+                let n = |k: &str| r[k].as_u64().filter(|v| *v <= u64::from(u16::MAX));
+                let (Some(x), Some(y), Some(w), Some(h)) = (n("x"), n("y"), n("w"), n("h")) else { return Err(refused("bad_request", "missing rect")) };
+                if w == 0 || h == 0 {
+                    return Err(refused("bad_request", "an empty rect"));
                 }
-                hold.state.lock().last_input = Instant::now();
-                if !hold.live() {
-                    return Err(refused("sc_gone", "That screen has ended."));
+                {
+                    let mut st = hold.state.lock();
+                    // More often than that is dropped without a word: the phone holds to it too.
+                    if st.sharpened.is_some_and(|at| at.elapsed() < SHARPEN_GAP) {
+                        return Ok(None);
+                    }
+                    st.sharpened = Some(Instant::now());
+                    st.last_input = Instant::now();
                 }
-                match d.providers.request("screen", "screen.text", json!({"sc": hold.sc, "text": text, "t": now_millis()})).await {
-                    Ok(_) => Ok(Some(json!({"type": "ack", "result": "sent"}))),
-                    // The helper types only into the shared window, in front: anywhere else, nothing is typed, and the phone says so.
-                    Err(e) if e.to_string().starts_with("covered_dialog") => Err(refused("covered", "Not typed: a dialog of another program is in front of the shared window, and this phone cannot see it. Share the whole monitor to type into this dialog.")),
-                    Err(e) if e.to_string().starts_with("not_front_partial") => Err(refused("not_front", "Stopped partway: another window took the focus on the computer. Check what was typed before typing again.")),
-                    Err(e) if e.to_string().starts_with("not_front") => Err(refused("not_front", "Not typed: the shared window is not in front on the computer. Tap it, then type again.")),
-                    Err(e) => Err(refused("not_sent", format!("Not sent: {e}. Check the screen, then type it again."))),
-                }
+                d.providers.notify("screen", "screen.sharpen", json!({"sc": hold.sc, "rect": {"x": x, "y": y, "w": w, "h": h}}));
+                Ok(None)
             }
             "sc_key" => {
                 let hold = self.held_here(&phone, req)?;
@@ -543,6 +615,61 @@ impl Broker {
             "sc_rebind" => self.rebind(d, &phone, req).map(|()| None),
             _ => Err(refused("unknown_verb", format!("unknown request {verb:?}"))),
         }
+    }
+
+    /// Text for the shared screen, sent to the app now; what is returned is its answer, which the caller may await elsewhere (the phone's
+    /// connection does: its acknowledgements must not wait for typing). Input that comes for the screen meanwhile waits for the text, and goes
+    /// once it is typed, in order. One text at a time.
+    pub fn text_begin(&self, d: &Arc<Daemon>, phone: Phone<'_>, req: &Value) -> Result<impl std::future::Future<Output = Result<Value, Refused>> + Send + 'static, Refused> {
+        let hold = self.held_here(&phone, req)?;
+        let text = req["text"].as_str().and_then(kelpie_screen::input::checked_text).ok_or_else(|| refused("bad_request", "missing or too long text"))?;
+        if !kelpie_screen::input::fresh(req["st"].as_u64(), now_millis()) {
+            return Err(refused("not_sent", "Not sent: it came too late. Check the screen, then type it again."));
+        }
+        if hold.state.lock().typing {
+            return Err(refused("not_sent", "Not sent: the text before it is still being typed. Check the screen, then type it again."));
+        }
+        hold.state.lock().last_input = Instant::now();
+        if !hold.live() {
+            return Err(refused("sc_gone", "That screen has ended."));
+        }
+        let asked = d.providers.begin("screen", "screen.text", json!({"sc": hold.sc, "text": text, "t": now_millis()})).map_err(|e| refused("not_sent", format!("Not sent: {e}. Check the screen, then type it again.")))?;
+        hold.state.lock().typing = true;
+        let d = d.clone();
+        Ok(async move {
+            let answer = d.providers.answer(asked, crate::provider::TIMEOUT).await;
+            // What came meanwhile goes now, after the text, in order and under the hold's lock (new input waits for it). What waited longer
+            // than any input may be old is dropped, as it would have been on its own; a press among it is let go, so that no button stays
+            // pressed on the computer.
+            {
+                let mut st = hold.state.lock();
+                st.typing = false;
+                let waited = std::mem::take(&mut st.after_text);
+                if hold.live() {
+                    let mut let_go = false;
+                    for (at, ops) in waited {
+                        let release_only = ops.iter().all(|op| op["k"] == "release");
+                        if !release_only && at.elapsed() > Duration::from_millis(INPUT_TTL_MS) {
+                            let_go |= ops.iter().any(|op| matches!(op["k"].as_str(), Some("down" | "up" | "release")));
+                            continue;
+                        }
+                        d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": ops, "t": now_millis()}));
+                    }
+                    if let_go {
+                        st.held = false;
+                        d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": [{"k": "release"}], "t": now_millis()}));
+                    }
+                }
+            }
+            match answer {
+                Ok(_) => Ok(json!({"type": "ack", "result": "sent"})),
+                // The helper types only into the shared window, in front: anywhere else, nothing is typed, and the phone says so.
+                Err(e) if e.to_string().starts_with("covered_dialog") => Err(refused("covered", "Not typed: a dialog of another program is in front of the shared window, and this phone cannot see it. Share the whole monitor to type into this dialog.")),
+                Err(e) if e.to_string().starts_with("not_front_partial") => Err(refused("not_front", "Stopped partway: another window took the focus on the computer. Check what was typed before typing again.")),
+                Err(e) if e.to_string().starts_with("not_front") => Err(refused("not_front", "Not typed: the shared window is not in front on the computer. Tap it, then type again.")),
+                Err(e) => Err(refused("not_sent", format!("Not sent: {e}. Check the screen, then type it again."))),
+            }
+        })
     }
 
     async fn targets(&self, d: &Arc<Daemon>) -> Result<Value, Refused> {
@@ -596,10 +723,11 @@ impl Broker {
         }
         let now = Instant::now();
         let mut state = State {
-            conn: Some((phone.conn, phone.out.clone(), phone.media.clone())),
+            conn: Some(Link::of(phone)),
             gone_at: None,
             sent: VecDeque::new(),
             full_since: None,
+            window: (MIN_WINDOW, MIN_WINDOW_BYTES),
             unacked: 0,
             acked: 0,
             dropped_through: 0,
@@ -614,10 +742,13 @@ impl Broker {
             inputs: (now, 0),
             level,
             idle: IDLE_STOP,
-            rebind: REBIND_WINDOW,
+            rebind: SCREEN_REBIND_WINDOW,
             version: 0,
             held: false,
             last_seq: 0,
+            sharpened: None,
+            typing: false,
+            after_text: Vec::new(),
         };
         // The link closed while the app was starting: the hold waits for the same device's next connection, like one whose link dropped.
         let link_gone = phone.out.is_closed() || phone.media.is_closed();
@@ -652,7 +783,9 @@ impl Broker {
         tracing::info!(encoder = %short(started.get("encoder_name"), 80), kind = %short(started.get("encoder"), 4), refused = ?refused, "screen encoder");
         tokio::spawn(watch(d.clone(), hold));
         let n = |k: &str| started[k].as_u64().unwrap_or(0).min(100_000);
-        Ok(json!({"type": "ack", "result": "ok", "sc": sc, "kind": kind, "title": title, "w": n("w"), "h": n("h"), "encoder": if started["encoder"] == "sw" { "sw" } else { "hw" }}))
+        // `t0`: the computer's clock when the stream started, from which each frame's capture time is counted (the phone works out how old a
+        // picture is from it).
+        Ok(json!({"type": "ack", "result": "ok", "sc": sc, "kind": kind, "title": title, "w": n("w"), "h": n("h"), "encoder": if started["encoder"] == "sw" { "sw" } else { "hw" }, "t0": started["t0"].as_u64()}))
     }
 
     fn rebind(&self, d: &Daemon, phone: &Phone<'_>, req: &Value) -> Result<(), Refused> {
@@ -661,14 +794,14 @@ impl Broker {
         let params = {
             let mut st = hold.state.lock();
             // The connection that holds it already (a hello after an unlock, on the same connection): nothing to do.
-            if st.conn.as_ref().is_some_and(|(c, ..)| *c == phone.conn) {
+            if st.conn.as_ref().is_some_and(|l| l.conn == phone.conn) {
                 return Ok(());
             }
             let window = st.rebind;
             if st.conn.is_some() || st.gone_at.is_none_or(|at| at.elapsed() >= window) {
                 return Err(refused("sc_gone", "That screen has ended."));
             }
-            st.conn = Some((phone.conn, phone.out.clone(), phone.media.clone()));
+            st.conn = Some(Link::of(phone));
             st.gone_at = None;
             st.sent.clear();
             st.full_since = None;
@@ -715,8 +848,8 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
                 (Some("idle"), false)
             } else if now.duration_since(st.last_beat) >= HEARTBEAT {
                 st.last_beat = now;
-                if let Some((_, out, _)) = st.conn.as_ref() {
-                    let _ = out.try_send(json!({"type": "sc_fhb", "sc": hold.sc, "server_ts": now_millis()}).to_string());
+                if let Some(link) = st.conn.as_ref() {
+                    let _ = link.out.try_send(json!({"type": "sc_fhb", "sc": hold.sc, "server_ts": now_millis()}).to_string());
                 }
                 (None, true)
             } else {

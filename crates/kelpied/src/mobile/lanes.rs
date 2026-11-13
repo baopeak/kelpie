@@ -31,9 +31,10 @@ const DEAD: Duration = Duration::from_secs(45);
 /// but a phone that has not been heard from for this long is gone whatever the machine was doing.
 const EXCUSE_LIMIT: Duration = Duration::from_secs(600);
 
-/// Binary media messages of a screen the phone sees (`screen`), behind everything else: a few frames, and
-/// a full lane drops video up to the next keyframe (the screen broker's rule) rather than making anything wait.
-const MEDIA_CAPACITY: usize = 6;
+/// Binary media messages of a screen the phone sees (`screen`), behind everything else: a few frames (as many as the deepest window of frames
+/// in flight the screen allows, `kelpie_screen::control::MAX_WINDOW`), and a full lane drops video up to the next keyframe (the screen broker's
+/// rule) rather than making anything wait.
+const MEDIA_CAPACITY: usize = 12;
 /// A screen's control messages waiting: a few a second at most; one that finds no room is dropped (the next replaces it).
 const CTL_CAPACITY: usize = 16;
 
@@ -47,6 +48,8 @@ pub struct Lanes {
     pub ctl_rx: mpsc::Receiver<String>,
     pub media: mpsc::Sender<Vec<u8>>,
     pub media_rx: mpsc::Receiver<Vec<u8>>,
+    /// The screen's cursor: the latest position only, written ahead of the media lane.
+    pub cursor: CursorSlot,
     /// Fires when something decided the consumer is too slow.
     pub slow: Arc<Notify>,
 }
@@ -55,7 +58,36 @@ pub fn lanes() -> Lanes {
     let (bulk, bulk_rx) = mpsc::channel(BULK_CAPACITY);
     let (ctl, ctl_rx) = mpsc::channel(CTL_CAPACITY);
     let (media, media_rx) = mpsc::channel(MEDIA_CAPACITY);
-    Lanes { bulk, bulk_rx, ctl, ctl_rx, media, media_rx, slow: Arc::new(Notify::new()) }
+    Lanes { bulk, bulk_rx, ctl, ctl_rx, media, media_rx, cursor: CursorSlot::default(), slow: Arc::new(Notify::new()) }
+}
+
+/// The screen's cursor messages: one slot that a newer position replaces while it waits, taken by the writer after control and bulk messages
+/// and before the media lane, so that the pointer never waits behind video and never queues up positions that are already old.
+#[derive(Clone, Default)]
+pub struct CursorSlot(Arc<CursorInner>);
+
+#[derive(Default)]
+struct CursorInner {
+    latest: parking_lot::Mutex<Option<Vec<u8>>>,
+    ready: Notify,
+}
+
+impl CursorSlot {
+    /// The newest position: it replaces one not yet written.
+    pub fn put(&self, msg: Vec<u8>) {
+        *self.0.latest.lock() = Some(msg);
+        self.0.ready.notify_one();
+    }
+
+    /// The position waiting, if any.
+    pub fn take(&self) -> Option<Vec<u8>> {
+        self.0.latest.lock().take()
+    }
+
+    /// Resolves once a position may be waiting (a wake-up is never lost: one that comes while nobody waits is kept for the next).
+    pub async fn ready(&self) {
+        self.0.ready.notified().await;
+    }
 }
 
 /// Whether the phone on the other end is there. Anything it sends counts; the daemon asks (`Beat::Ping`)
@@ -205,5 +237,15 @@ mod tests {
             lanes.media.try_send(vec![1]).unwrap();
         }
         assert!(lanes.media.try_send(vec![1]).is_err(), "the media lane too");
+    }
+
+    #[tokio::test]
+    async fn a_newer_cursor_replaces_one_not_yet_written() {
+        let slot = CursorSlot::default();
+        slot.put(vec![1]);
+        slot.put(vec![2]);
+        tokio::time::timeout(Duration::from_millis(100), slot.ready()).await.expect("woken");
+        assert_eq!(slot.take(), Some(vec![2]), "only the latest");
+        assert_eq!(slot.take(), None);
     }
 }

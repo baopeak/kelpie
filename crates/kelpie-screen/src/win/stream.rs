@@ -42,7 +42,7 @@ use crate::input::{fresh, parse_hotkey, Hotkey, QUEUE};
 use crate::sps;
 use crate::states::{input_policy, InputPolicy, State, Tracker};
 use crate::targets::{self, TargetId};
-use crate::tiles::Grid;
+use crate::tiles::{Grid, Sharpen};
 use crate::tile_image;
 use crate::wire::{self, Video};
 
@@ -68,9 +68,12 @@ fn emit(out: &SyncSender<Vec<u8>>, v: Value) {
 }
 
 enum Cmd {
-    /// `link_full_ms`: how long the daemon has seen the link's window full (`Bandwidth::on_link_window`).
-    Flow { acked: u32, rtt_ms: u32, level: u8, lost_tiles: bool, dropped_through: u32, raw: u64, wire: u64, link_full_ms: u64 },
+    /// `link_full_ms`: how long the daemon has seen the link's window full (`Bandwidth::on_link_window`); `win`: the daemon takes a window
+    /// sized to the link (`Controller::window`), said with the `window` event.
+    Flow { acked: u32, rtt_ms: u32, level: u8, lost_tiles: bool, dropped_through: u32, raw: u64, wire: u64, link_full_ms: u64, win: bool },
     Keyframe,
+    /// The part of the picture the phone shows, sent crisp once (`tiles::Sharpen`).
+    Sharpen(Rect),
     Pause(bool),
     ResumeLoad,
     Stop(String),
@@ -254,7 +257,16 @@ impl Host {
                     raw: n("raw"),
                     wire: n("wire"),
                     link_full_ms: n("link_full_ms").min(3_600_000),
+                    win: req["win"].as_bool() == Some(true),
                 });
+                None
+            }
+            "sharpen" => {
+                let rect = &req["rect"];
+                let v = |k: &str| rect[k].as_u64().filter(|v| *v <= u64::from(u16::MAX)).map(|v| v as i32);
+                if let (Some(x), Some(y), Some(w), Some(h)) = (v("x"), v("y"), v("w"), v("h")) {
+                    let _ = r.cmds.send(Cmd::Sharpen(Rect::new(x, y, w, h)));
+                }
                 None
             }
             "keyframe" => {
@@ -345,6 +357,8 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     };
     let mut src = (rect.w.max(2) as u32 & !1, rect.h.max(2) as u32 & !1);
     let started_at = Instant::now();
+    // The wall clock at the start, from which each frame's capture time is counted: the phone tells how old a picture is with it.
+    let t0 = wall_ms();
     let now_ms = || started_at.elapsed().as_millis() as u64;
     let mut ctl = Controller::new(src, window, false, 0);
     ctl.set_level(opts.level, 0);
@@ -393,7 +407,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         let (shared, out, stopping) = (shared.clone(), out.clone(), stopping.clone());
         InputGuard { stopping: stopping.clone(), thread: Some(std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping))) }
     };
-    let _ = started.send(Ok(json!({"kind": if window { "window" } else { "monitor" }, "title": title, "exe": exe, "w": src.0, "h": src.1, "encoder": if encoder.hardware { "hw" } else { "sw" }, "encoder_name": encoder.name, "refused": encoder.refused})));
+    let _ = started.send(Ok(json!({"kind": if window { "window" } else { "monitor" }, "title": title, "exe": exe, "w": src.0, "h": src.1, "encoder": if encoder.hardware { "hw" } else { "sw" }, "encoder_name": encoder.name, "refused": encoder.refused, "t0": t0})));
     emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": if encoder.hardware { "hw" } else { "sw" }, "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms}));
 
     let mut tracker = Tracker::default();
@@ -405,6 +419,9 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let mut pacer = Pacer::default();
     let mut top_off = TopOff::default();
     let mut big = BigFrame::default();
+    let mut sharpen = Sharpen::default();
+    // The window last told to the app (frames, bytes), once the daemon takes one.
+    let mut window_told: Option<(u32, usize)> = None;
     let mut rate = EncoderRate::new(params.kbps);
     // A big frame's bitrate dip, undone however that frame leaves the encoder.
     let mut dip = Dip::default();
@@ -426,7 +443,8 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         loop {
             match cmds.try_recv() {
                 Ok(Cmd::Stop(r)) => break 'stream r,
-                Ok(Cmd::Flow { acked, rtt_ms, level, lost_tiles, dropped_through, raw, wire, link_full_ms }) => {
+                Ok(Cmd::Flow { acked, rtt_ms, level, lost_tiles, dropped_through, raw, wire, link_full_ms, win }) => {
+                    ctl.set_win(win);
                     flight.acked(acked);
                     ctl.bandwidth.on_link_window(link_full_ms);
                     // Frames the daemon dropped will never be acknowledged: they no longer count as in flight.
@@ -445,6 +463,15 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                     }
                 }
                 Ok(Cmd::Keyframe) => flight.ask_key(now),
+                // Only with crisp tiles on in Settings, only while they are off for the link (else they go anyway), and not on a machine at L3,
+                // which has no CPU for them.
+                Ok(Cmd::Sharpen(r)) => {
+                    if grid.is_some() && ctl.level() < 3 && sharpen.ask(r, ctl.crisp_ok(flight.inflight(), now), now) {
+                        top_off.again(now);
+                        // Paced as tiles are, at their share of the video's rate: no burst ahead of the video on the slow link it is for.
+                        tile_tokens = tile_tokens.min(f64::from(params.kbps) * 1000.0 / 8.0 * TILE_SHARE);
+                    }
+                }
                 Ok(Cmd::Pause(p)) => {
                     link_paused = p;
                     top_off.stop();
@@ -526,6 +553,12 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         if let Some(Event::PausedForLoad) = ctl.tick(flight.inflight(), now) {
             emit(&out, json!({"event": "paused", "sc": opts.sc, "reason": "load"}));
         }
+        // The window sized to the link, said to the daemon when it changes (only to one that takes it).
+        let window = ctl.window();
+        if ctl.win() && window_told != Some(window) {
+            window_told = Some(window);
+            emit(&out, json!({"event": "window", "sc": opts.sc, "frames": window.0, "bytes": window.1}));
+        }
         // What the ladder says now: a new size is a new converter and encoder; a new bitrate is set live, when it is worth a reconfiguration
         // (`pace::EncoderRate`), and not while a big frame's dip holds.
         let next = ctl.params();
@@ -580,9 +613,9 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         let interval = ctl.interval_ms();
         let due = pacer.due_in(interval, now, encoder.asks_for_input());
         // Room for a frame on the link, nothing gating a keyframe, a picture that may move: then the pacer says when.
-        let ready = !link_paused && !flight.gated() && tracker.state().picture_moves() && ctl.may_encode(flight.inflight(), None);
+        let ready = !link_paused && !flight.gated() && tracker.state().picture_moves() && ctl.may_encode(flight.inflight(), flight.inflight_bytes(), None);
         let may = ready && due == Some(0);
-        let top_off_due = may && top_off.due(now) && ctl.crisp_ok(flight.inflight(), now) && last_picture.is_some();
+        let top_off_due = may && top_off.due(now) && (ctl.crisp_ok(flight.inflight(), now) || sharpen.rect.is_some()) && last_picture.is_some();
         // A keyframe owed on a still window: the last picture again, at most once a second (`pace::ReencodeGate`).
         let reencode_due = may && flight.wants_key() && last_picture.is_some() && reencode.ready(now);
         // While a frame is in the encoder the loop comes back within a few milliseconds to take it, so that its time is the encoder's own;
@@ -703,7 +736,8 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                 // A keyframe is the whole picture: guarded too, so that no media message takes most of the link for long (a reply waits for at
                 // most the one being written).
                 let area = if key { u64::from(src.0) * u64::from(src.1) } else { area };
-                if !pass && !dip.active() && big.check(area, params.kbps, interval) {
+                // On a slow link (the lowest rungs) a keyframe always takes the dip, so that it stays small.
+                if !pass && !dip.active() && (big.check(area, params.kbps, interval) || ctl.key_dip(key)) {
                     encoder.set_bitrate((params.kbps * BIG_FRAME_PERCENT / 100).max(MIN_KBPS));
                     dip.start(time, rate.applied);
                     stats.big_frames += 1;
@@ -801,7 +835,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         stats.dropped_link += 1;
                         continue;
                     }
-                    flight.sent();
+                    flight.sent(msg.len());
                     ctl.bandwidth.on_sent(now);
                     stats.frame(msg.len(), key, encode_ms);
                     let _ = out.send(wire::out_media(&opts.sc, &msg));
@@ -824,8 +858,27 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
             let rate_bytes = f64::from(params.kbps) * 1000.0 / 8.0 * TILE_SHARE;
             tile_tokens = (tile_tokens + rate_bytes * now.saturating_sub(tile_at) as f64 / 1000.0).min(TILE_BURST);
             tile_at = now;
+            let tiles_may = flight.seq() > 0 && !flight.wants_key() && !top_off.active() && !link_paused && readback.stride > 0 && g.size() == src;
+            // Sharpen: the part the phone shows, once its top-off is done, within its own budget whatever the link says of crisp tiles, and
+            // at the tiles' share of the rate.
+            if tiles_may && sharpen.rect.is_some() {
+                let parts = if tile_tokens > 32_768.0 { g.due_within(now, TILE_CELLS_AT_ONCE, sharpen.rect) } else { Vec::new() };
+                if parts.is_empty() && tile_tokens > 32_768.0 {
+                    sharpen.done();
+                }
+                for r in parts {
+                    match tile_image::encode(&readback.buf, readback.stride, r) {
+                        Some((format, image)) if (image.len() as f64) <= tile_tokens && sharpen.spend(image.len()) => {
+                            tile_id = tile_id.wrapping_add(1);
+                            tile_tokens -= image.len() as f64;
+                            let _ = out.send(wire::out_media(&opts.sc, &wire::tile(flight.seq(), tile_id, r, format, &image)));
+                        }
+                        _ => g.unmark(r),
+                    }
+                }
+            }
             // Off by itself while the link is slow or was just cut (`Controller::crisp_ok`): the video needs the room.
-            if flight.seq() > 0 && !flight.wants_key() && !top_off.active() && !link_paused && ctl.crisp_ok(flight.inflight(), now) && readback.stride > 0 && tile_tokens > 32_768.0 && g.any_due(now) && g.size() == src {
+            else if tiles_may && ctl.crisp_ok(flight.inflight(), now) && tile_tokens > 32_768.0 && g.any_due(now) {
                 for r in g.due(now, TILE_CELLS_AT_ONCE) {
                     match tile_image::encode(&readback.buf, readback.stride, r) {
                         Some((format, image)) if (image.len() as f64) <= tile_tokens => {
@@ -854,6 +907,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
             stats.cut(c);
         }
         stats.link_cuts = ctl.bandwidth.cut_counts;
+        stats.inflight_limit = window.0;
         if let Some(r) = stats.report_with(now, &params, ctl.level(), ctl.software(), crisp, encoder.held(), encoder.first_output_ms) {
             let mut v = serde_json::to_value(&r).unwrap_or_default();
             v["event"] = json!("stats");

@@ -80,7 +80,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// `kelpied browser`), the daemon's `browser.agent` request to the app's `browser` provider, `browser.audit {limit}` for the user, and the
 /// `daemon.policy` / `daemon.set_policy` keys `browser_agents` (`off|read|act`), `browser_eval` and `browser_sites`; an older daemon has none of
 /// it, so the app offers the settings only at 39.
-pub const API_LEVEL: u32 = 39;
+/// 40: the screen's flow: `t0` (the computer's clock when the stream started) in the `sc_start` answer, the phone's `sc_sharpen {sc, rect}`, and to
+/// the app `win` in `screen.flow`, the `screen.sharpen` notice and `provider.event` with kind `window {frames, bytes}` (the helper's window of frames
+/// in flight, sized to the link). An older daemon has none of it, so its helper keeps 3 frames, and the phone offers Sharpen and the picture's age
+/// only at 40.
+pub const API_LEVEL: u32 = 40;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

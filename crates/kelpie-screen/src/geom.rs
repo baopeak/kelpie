@@ -144,11 +144,15 @@ pub fn from_absolute(nx: i32, ny: i32, desktop: Rect) -> (i32, i32) {
 /// The encoder's picture for a source at `scale` percent: even sides (NV12 and H.264 need them), never larger than the source, and no taller
 /// than `max_lines`; `min_lines` (a window's floor) wins over the scale but not over the source or `max_lines`.
 pub fn scaled(src_w: u32, src_h: u32, scale: u8, min_lines: u32, max_lines: u32) -> (u32, u32) {
+    fitted(src_w, src_h, (u64::from(src_h) * u64::from(scale.clamp(1, 100)) / 100) as u32, min_lines, max_lines)
+}
+
+/// The same for a picture `lines` tall before the bounds.
+pub fn fitted(src_w: u32, src_h: u32, lines: u32, min_lines: u32, max_lines: u32) -> (u32, u32) {
     if src_w == 0 || src_h == 0 {
         return (0, 0);
     }
-    let mut h = u64::from(src_h) * u64::from(scale.clamp(1, 100)) / 100;
-    h = h.max(u64::from(min_lines)).min(u64::from(max_lines)).min(u64::from(src_h));
+    let h = u64::from(lines).max(u64::from(min_lines)).min(u64::from(max_lines)).min(u64::from(src_h));
     let w = (u64::from(src_w) * h / u64::from(src_h)).max(2);
     let even = |v: u64| ((v & !1).max(2)) as u32;
     (even(w), even(h.max(2)))

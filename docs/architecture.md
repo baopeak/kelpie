@@ -930,10 +930,12 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   which is how the page tells them apart on the link): video (key and unpaint-all flags, unpaint rectangles, `seq`, capture time, source and coded size, an
   Annex B access unit), a tile (PNG or JPEG q90, the `seq` it matches, its rectangle in source pixels), the cursor (shape, visible, position). On the local pipe
   app → daemon they are base64 in `provider.event`, as a pane's frames are; on the link they are binary (`Wire::send_bytes`). A message is at most 1000 KiB.
-  A video frame's capture time is when its picture was taken (ms since the stream started).
+  A video frame's capture time is when its picture was taken (ms since the stream started); the start's answer says when that was (`t0`, the
+  computer's clock), so the phone tells how old each picture is when it shows it.
 - **Broker** (`crates/kelpied/src/screen.rs`): a hold keyed by device, link connection and provider connection, one screen at a time for one device, resting on
-  `Mobile::grant`: input checks it every time and the hold's task ends within 250 ms (`revoked`). 15 s for the same device's next connection (`sc_rebind`),
-  after which the helper sends a keyframe first; 10 minutes with no input ends it. New screens are refused at load L2+ and with under 20 % memory free
+  `Mobile::grant`: input checks it every time and the hold's task ends within 250 ms (`revoked`). A dropped link keeps it 45 s for the same device's next
+  connection (`sc_rebind`; a pane's takeover keeps 15 s), after which the helper sends a keyframe first; a newer connection of the device lets go of the
+  older one's holds at once (`connection_opened`), so its rebind never waits for the older socket to close. 10 minutes with no input ends it. New screens are refused at load L2+ and with under 20 % memory free
   (`host_busy`; the `KELPIE_LOAD_FORCE` test hook stands for the memory too, in a debug build or an e2e run only, never in a release daemon), without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper
   are checked again (known ids and kinds, short titles). A start reserves the screen for its whole length: a second start meanwhile, by any device, is
   refused as in use (`sc_taken`), and the first holder keeps it; a failed or timed-out start tells the app to stop; a link that closes during a start leaves a
@@ -943,28 +945,38 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   is hidden, or its idle time running out) clears the grant like a revoke, with no grace, and the page ends its view at once.
 - **Flow on TCP**: nothing is lost on the link, only delayed, so frames are dropped before encoding, never after (a dropped P-frame would break every frame
   after it). The phone acknowledges each frame as it decodes (`sc_ack`); the broker forwards `{acked, rtt_ms, level}` (`screen.flow`, also once a second) and
-  the helper encodes only while fewer than 3 frames are in flight. **What the phone sends never waits for what goes to it**: the link's `Wire` sends from a
+  the helper encodes only while fewer frames and bytes than its window are in flight. The window is 3 frames and 192 KiB until the round trip is known
+  (and with a daemon that does not say `win` in its flow); then `ceil(fps × (rtt + 50 ms)) + 1` frames (3 to 12) and the rate × (rtt + 100 ms) in bytes
+  (192 KiB to 2 MiB), from the round trip's ten-second floor and the rung's frame rate (`Controller::window`): three frames cost 7.5 fps at 100 ms. The
+  helper says it with a `window {frames, bytes}` event when it changes, and the broker counts the link's window full and drops video by it.
+  **What the phone sends never waits for what goes to it**: the link's `Wire` sends from a
   writer task of its own (`mobile/link.rs`), which seals each message as it writes it and takes, in this order, control messages (replies, the lock,
   heartbeats, and the screen's own `sc_state`, `sc_stats`, `sc_fhb` and `sc_end`, which have a lane of their own), bulk (the connection's task moves bulk only
-  while the writer has room for it, so it never waits there) and the media lane (`mobile/lanes.rs`, 6 messages). So a click, an acknowledgement or a
+  while the writer has room for it, so it never waits there), the cursor's latest place (`CursorSlot`: a newer place replaces one not yet written) and the
+  media lane (`mobile/lanes.rs`, 12 messages). Text typed on the screen (`sc_text`) is sent to the app at once and its answer comes back on the screen's
+  lane when typed (`Broker::text_begin`), so the connection goes on reading meanwhile; input that comes while it is typed waits for it, in order (text then
+  Enter), and what waited over 1 s is dropped then as any late input is, a press in it let go. So a click, an acknowledgement or a
   heartbeat is read while a keyframe is on its way to a slow phone (one used to hold the connection's task for most of a second), a reply waits at most for
   the one message being written, and a writer that stops (the socket gone, a message over `SLOW_AFTER`) ends the connection at once. Nothing of the media
-  lane goes to a locked phone (the writer drops it, by a flag set wherever the lock is); when it is full or more than 192 KiB wait unacknowledged, video is
-  dropped up to the next keyframe, asked for at most once a second.
+  lane goes to a locked phone (the writer drops it, by a flag set wherever the lock is); when it is full or the window's bytes already wait
+  unacknowledged (the helper sends a frame while fewer wait, whatever its size), video is dropped up to the next keyframe, asked for at most once a second.
   **Lost frames never hold the stream** (`control::Flight`): `screen.flow` carries `dropped_through`, the last frame dropped, and the helper stops counting
   those as in flight; a keyframe request gives up every frame in flight; while a keyframe is owed but not yet allowed, nothing else is encoded, and once it is
   allowed a still window's last picture is encoded again, at most once a second whatever owes it (a window that does not change sends no frames, and input
   waits while a keyframe is owed); an acknowledgement is never taken past the highest frame sent; the phone
-  acknowledges frames it skips or its decoder fails on. A tile or the cursor goes only while the lane has 3 places free, so it never takes video's room.
+  acknowledges frames it skips or its decoder fails on. A tile goes only while the lane has 3 places free, so it never takes video's room.
   `screen.flow` also carries the bytes the media took on the wire (the link pads each message to a few sizes: a 5 KB frame goes as 16 KB), and the encoder is
   asked for the link's rate divided by that factor. The phone calls its picture **stuck** when the computer says it sends frames, the heartbeat goes on and
   nothing has been shown for 2 s, and asks for a fresh one; input onto a stale picture (a frame unacknowledged, or a keyframe owed, for 2 s) is not sent.
-- **Quality** (`control.rs`): one ladder, frames a second first, then size (30/20/15/10/8 fps at 100 %, then 8 fps 75 %, 6 and 4 fps 67 %, 4 fps 50 %; a window
-  never under 540 lines). Three things move along it and the lowest wins: the encoder's own load (EMA of encode time over the frame interval, over 0.85 for 2 s
-  down, under 0.42 for 10 s up), the link (queueing: the round trip's floor over the last 500 ms, counted from after the last cut, more than 50 ms over its
+- **Quality** (`control.rs`): one ladder, frames a second first, then size (30/20/15/10/8 fps at 100 %, then 8 fps 75 %, 6 fps 67 %, 6 fps 50 %, 5 fps 33 %;
+  the size is a share of the top rung's picture, so a 4K monitor at 50 % is 540 lines, not 1080; a window never under 540 lines). The bitrate picks the rung
+  (≥ 1.2 Mbps the top, ≥ 800 kbps 15 fps, ≥ 500 8 fps, ≥ 380 75 %, ≥ 300 67 %, ≥ 220 half, else a third: about 360p at 5 fps for a monitor), and from
+  the half rung down a keyframe always takes the big frame's dip so that it stays small. Three things move along it and the lowest wins: the encoder's own load (EMA of encode time over the frame interval, over 0.85 for 2 s
+  down, under 0.42 for 10 s up), the link (queueing: the round trip's floor over the last 500 ms or three frames, whichever is longer, with three samples or
+  two below 12 fps, counted from after the last cut, more than 40 ms over its
   floor of 10 s cuts 15 % at once; after a cut a floor that rose further cuts again half a second later, one that fell is a queue draining, and one that
   held for a second is a new base (another route, a slower decoder), taken as the floor rather than cut for; three queueing cuts in ten seconds at most, and
-  a new connection forgets the round trips before it; the link's window of frames full for a second cuts the same, full as the daemon counts it, from a
+  a new connection forgets the round trips before it; the link's window of frames full for twice the round trip (half a second to a second) cuts the same, full as the daemon counts it, from a
   frame leaving for the phone to its acknowledgement arriving (`screen.flow`'s `link_full_ms`, sent at every look of the hold's task while it is full), never
   as the helper counts it, since the helper's count also holds the way through the app and its own loop, which a busy computer (a game, a build) slows while
   the link is fine: that slowness is the encoder's controller and the window's gate, never a bandwidth cut; 10
@@ -975,7 +987,7 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   dropped, reason, degraded, level, encoder, idr_ratio, crisp, stages}`, `stages` the helper's timings for the measurement plan (`control::Stages`: picture
   taken → message out p50/p95, conversion p95, encoder p50, send interval p95, daemon queue → phone acknowledgement p50/p95, top-off passes, big frames,
   frames held in the encoder, its first output's delay, the bitrate's cuts in all and by rule (`queueing`, `window`, `size`: a frame too large for one
-  message) with what the last one saw). Each cut also goes with the stats to the daemon, which logs it (`screen bandwidth cut`, its rule, the rates, the
+  message) with what the last one saw, and the window of frames in flight, `inflight_limit`). Each cut also goes with the stats to the daemon, which logs it (`screen bandwidth cut`, its rule, the rates, the
   round trip's recent and ten-second floors, how long the link's window was full, the helper's own count in flight).
   `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS` adds encode time to drive the ladder without a GPU.
 - **Crisp text** (`tiles.rs`, `tile_image.rs`): the picture read back is hashed in 64×64 cells; cells still for 300 ms are sent once more as tiles of up to
@@ -984,7 +996,9 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   makes the helper paint every still cell again (`lost_tiles`, then unpaint-all), a frame not sent puts its unpaint back on the next one, and the phone refuses
   a tile whose region a later frame changed while its image was still being decoded. Tiles take at most half the video's rate. Off with *Crisp text* in Settings
   (on by default), and off by itself while the link is slow: under 1 Mbps, lagging, or within 10 s of a bitrate cut, and at L3 (`Controller::crisp_ok`).
-  It is measured, so cellular counts like any slow link (an iPhone page cannot tell cellular from Wi-Fi); `sc_stats.crisp` says so (`false`).
+  It is measured, so cellular counts like any slow link (an iPhone page cannot tell cellular from Wi-Fi); `sc_stats.crisp` says so (`false`). While it is
+  off for the link the phone offers **Sharpen** (`sc_sharpen {sc, rect}`, the part it shows in source pixels; once in 3 s, by the phone, the daemon and the
+  helper): the helper tops off the still picture once and sends the tiles of that part only, within 256 KiB of its own and at the tiles' share of the rate, not at a machine at L3 (`tiles::Sharpen`).
 - **States, never a silent freeze** (`states.rs`): four looks a second at the input desktop (`OpenInputDesktop`: the secure desktop of UAC and the lock screen
   cannot be opened from the user's session), the session's lock (`WTSSessionInfoEx`), the integrity level of the window in front or of the target, and the
   target window (closed, minimized); a change held for two looks is told (`sc_state`), a lock or a secure desktop at once. What input may do follows: nothing on a
@@ -998,7 +1012,10 @@ phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb ·
   computer's cursor messages, a round trip old, leave its position alone for 400 ms after a local move and then follow it, a difference of 3 px or less
   taken as none; a trackpad tap clicks where the cursor is drawn (`followHostCursor`), never at an older position. The page measures each frame (`FrameTimes`: inter-arrival and inter-present p50/p95/p99, gaps
   over 100 and 250 ms, decoder time, receive → present, frames never shown), shown with the computer's stages in the debug view (tap the quality line) and
-  read by a test driver as `__kelpieScreenTimes()`. Trackpad (default) or direct touch, two-finger scroll,
+  read by a test driver as `__kelpieScreenTimes()`. Under the quality line a details line says the way (Tailscale, this network, the relay), the round trip,
+  the rate, frames a second, the size and how old the pictures were when shown (median, from `t0` and their capture times). A picture frozen for 3 s checks
+  the connection every 2 s (`Link.kick`: a probe, then a new connection that asks for the screen again) and counts down the 45 s the computer keeps it;
+  input is dropped meanwhile. Trackpad (default) or direct touch, two-finger scroll,
   pinch zoom and pan of the view only, a key bar with Ctrl, Shift, Alt and the Windows key (`meta`, alone for Start or held), text with an answer of its
   own. The entry is in the inbox and in a session's view. Input older than 1 s by the
   computer's clock is dropped by the daemon and by the helper; 3 s without media or heartbeat dims the picture; frames that come and do not decode for 1 s

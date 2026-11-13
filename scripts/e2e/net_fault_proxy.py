@@ -7,6 +7,7 @@ bad on demand. Python and the standard library only.
     proxy.latency = 0.3                        # seconds each way (plus `jitter`)
     proxy.bandwidth["down"] = 20_000           # bytes a second, daemon -> phone
     proxy.blackhole(10)                        # nothing passes either way for 10 s, then all of it does
+    proxy.loss, proxy.rto = 0.01, 0.2          # a model of TCP loss: 1 % of pieces held 200 ms, and all behind them
     proxy.stall("up", 30)                      # half-open: only phone -> daemon stops
     proxy.kill_all()                           # reset every connection now (RST)
     proxy.rst_storm(1.0, 10)                   # reset everything every second for 10 s
@@ -16,11 +17,16 @@ or from a shell, with the faults fixed for the run:
 
     python net_fault_proxy.py --target 4817 [--listen 4900] [--latency 0.2] [--jitter 0.05]
                               [--down-bps 20000] [--up-bps 20000] [--blackhole-after 5 --blackhole-for 30]
+                              [--loss 0.01 --rto 0.2]
 
 A blackhole is a stall, not a loss: the proxy stops reading, so the kernel buffers fill and the sender
 backs up exactly as it does on a path that dropped packets and retransmits, and what was held is delivered
 when the path comes back (or finds the other end closed). Directions are `up` (phone -> daemon) and `down`
 (daemon -> phone). It forwards bytes; it knows nothing of WebSocket.
+
+Loss is a model, not a drop: TCP never loses bytes, it delays them. Each piece read is, with probability `loss`, held `rto` seconds longer
+before it is written, and everything behind it in that direction waits too: head-of-line blocking after a retransmission. Real packet loss
+over UDP is another thing, measured elsewhere.
 """
 import argparse
 import asyncio
@@ -61,6 +67,9 @@ class FaultProxy:
         self.latency = 0.0
         self.jitter = 0.0
         self.bandwidth = {"up": None, "down": None}  # bytes a second
+        self.loss = 0.0  # the share of pieces held `rto` seconds, in both directions
+        self.rto = 0.2
+        self.held = {"up": 0, "down": 0}  # pieces held so
         self._stalled_until = {"up": 0.0, "down": 0.0}
         self.links = []
         self.bytes = {"up": 0, "down": 0}
@@ -135,6 +144,10 @@ class FaultProxy:
                 if data is None:
                     break
                 wait = due - time.monotonic()
+                if self.loss and random.random() < self.loss:
+                    # Lost and sent again: this piece, and every one behind it, comes `rto` later.
+                    self.held[direction] += 1
+                    wait += self.rto
                 if wait > 0:
                     await asyncio.sleep(wait)
                 writer.write(data)
@@ -186,10 +199,13 @@ async def _main():
     ap.add_argument("--up-bps", type=int)
     ap.add_argument("--blackhole-after", type=float)
     ap.add_argument("--blackhole-for", type=float, default=30.0)
+    ap.add_argument("--loss", type=float, default=0.0, help="share of pieces held --rto seconds (a model of TCP loss)")
+    ap.add_argument("--rto", type=float, default=0.2)
     args = ap.parse_args()
     proxy = FaultProxy(args.target, listen_port=args.listen)
     proxy.latency, proxy.jitter = args.latency, args.jitter
     proxy.bandwidth = {"up": args.up_bps, "down": args.down_bps}
+    proxy.loss, proxy.rto = args.loss, args.rto
     port = await proxy.start()
     print(f"proxying 127.0.0.1:{port} -> 127.0.0.1:{args.target}", flush=True)
     if args.blackhole_after is not None:

@@ -175,6 +175,13 @@ impl TopOff {
         self.next_at = now + Self::gap_ms(interval_ms);
     }
 
+    /// Asked for at once (Sharpen): passes from now on, as for a new picture.
+    pub fn again(&mut self, now: u64) {
+        self.active = true;
+        self.passes = 0;
+        self.next_at = now;
+    }
+
     /// Nothing to refine any longer (a keyframe owed, the stream paused, a new size).
     pub fn stop(&mut self) {
         self.active = false;

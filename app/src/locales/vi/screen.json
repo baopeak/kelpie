@@ -56,5 +56,9 @@
   "Screen ended": "Màn hình đã kết thúc",
   "Computer screen": "Màn hình máy tính",
   "This computer's screen on a phone": "Màn hình máy tính này trên điện thoại",
-  "A phone allowed to take control can see a screen or one window of this computer and use it. An orange border and a badge show what is shared, the status bar has Stop, and this hotkey, which is always on, stops it from anywhere. Crisp text sends still parts of the screen once more as sharp images, which uses more data; it turns itself off while the connection is slow.": "Một điện thoại được phép điều khiển có thể xem và dùng một màn hình hoặc một cửa sổ của máy tính này. Viền cam và một nhãn cho biết phần đang chia sẻ, thanh trạng thái có nút Dừng, và phím tắt này, luôn bật, dừng được từ bất cứ đâu. Chữ sắc nét gửi lại những phần đứng yên của màn hình dưới dạng ảnh sắc nét, tốn thêm dữ liệu; nó tự tắt khi kết nối chậm."
+  "A phone allowed to take control can see a screen or one window of this computer and use it. An orange border and a badge show what is shared, the status bar has Stop, and this hotkey, which is always on, stops it from anywhere. Crisp text sends still parts of the screen once more as sharp images, which uses more data; it turns itself off while the connection is slow.": "Một điện thoại được phép điều khiển có thể xem và dùng một màn hình hoặc một cửa sổ của máy tính này. Viền cam và một nhãn cho biết phần đang chia sẻ, thanh trạng thái có nút Dừng, và phím tắt này, luôn bật, dừng được từ bất cứ đâu. Chữ sắc nét gửi lại những phần đứng yên của màn hình dưới dạng ảnh sắc nét, tốn thêm dữ liệu; nó tự tắt khi kết nối chậm.",
+  "Reconnecting… the computer keeps this screen for {s} s more. Nothing is sent until the picture is back.": "Đang kết nối lại… máy tính còn giữ màn hình này thêm {s} giây. Không gửi gì cho đến khi hình ảnh trở lại.",
+  "Sharpen": "Làm nét",
+  "{ms} ms round trip": "khứ hồi {ms} ms",
+  "{ms} ms old": "trễ {ms} ms"
 }

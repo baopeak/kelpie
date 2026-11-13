@@ -18,6 +18,7 @@ struct Rig {
     d: Arc<Daemon>,
     out: mpsc::Sender<String>,
     media: mpsc::Sender<Vec<u8>>,
+    cursor: CursorSlot,
     phone: mpsc::Receiver<String>,
     frames: mpsc::Receiver<Vec<u8>>,
     notes: Arc<Mutex<Vec<Value>>>,
@@ -73,6 +74,11 @@ fn rig_with(lane: usize, start: Start) -> Rig {
                             "elsewhere" => json!({"error": {"message": "not_front: the shared window is not in front on the computer, so nothing was typed"}}),
                             "moved" => json!({"error": {"message": "not_front_partial: another window took the focus after 3 characters; the rest was not typed"}}),
                             "dialog" => json!({"error": {"message": "covered_dialog: a dialog of another program is in front of the shared window, so nothing was typed"}}),
+                            // A long text: typed for a while.
+                            "slow" => {
+                                tokio::time::sleep(Duration::from_millis(400)).await;
+                                json!({"result": true})
+                            }
                             _ => json!({"result": true}),
                         },
                         _ => json!({"result": true}),
@@ -88,7 +94,7 @@ fn rig_with(lane: usize, start: Start) -> Rig {
     });
     let (out, phone) = mpsc::channel(32);
     let (media, frames) = mpsc::channel(lane);
-    Rig { d, out, media, phone, frames, notes }
+    Rig { d, out, media, cursor: CursorSlot::default(), phone, frames, notes }
 }
 
 fn rig() -> Rig {
@@ -107,7 +113,7 @@ fn tile(seq: u32) -> Vec<u8> {
 
 impl Rig {
     fn phone(&self) -> Phone<'_> {
-        Phone { device: "phone", name: "Phone", conn: 1, out: &self.out, media: &self.media }
+        Phone { device: "phone", name: "Phone", conn: 1, out: &self.out, media: &self.media, cursor: &self.cursor }
     }
 
     async fn verb(&self, verb: &str, req: Value) -> Result<Option<Value>, Refused> {
@@ -171,7 +177,8 @@ async fn targets_come_from_the_app_checked_and_the_stream_goes_on_the_media_lane
     r.send(&sc, &tile(2));
     r.send(&sc, &wire::cursor(wire::Shape::Arrow, true, 5, 5));
     let got = r.frames();
-    assert_eq!(got.iter().map(|p| (p.kind, p.seq)).collect::<Vec<_>>(), [(KIND_VIDEO, 1), (KIND_VIDEO, 2), (KIND_TILE, 2), (wire::KIND_CURSOR, 0)]);
+    assert_eq!(got.iter().map(|p| (p.kind, p.seq)).collect::<Vec<_>>(), [(KIND_VIDEO, 1), (KIND_VIDEO, 2), (KIND_TILE, 2)]);
+    assert_eq!(r.cursor.take(), Some(wire::cursor(wire::Shape::Arrow, true, 5, 5)), "the cursor in its own slot, ahead of the media lane");
     // The acknowledgement goes to the helper with its round trip and what the wire took.
     r.verb("sc_ack", json!({"sc": sc, "seq": 2})).await.unwrap();
     let flow = r.told_now("screen.flow").await;
@@ -330,9 +337,9 @@ async fn a_dropped_link_pauses_the_helper_and_keeps_the_screen_for_the_same_devi
     assert_eq!(r.told_now("screen.pause").await[0]["paused"], true);
     let (out2, mut phone2) = mpsc::channel(8);
     let (media2, mut frames2) = mpsc::channel(8);
-    let other = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2 };
+    let other = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default() };
     assert_eq!(r.d.screen.phone_verb(&r.d, other, "sc_rebind", &json!({"sc": sc})).await.unwrap_err().code, "sc_gone", "another device cannot take it");
-    let back = Phone { device: "phone", name: "Phone", conn: 3, out: &out2, media: &media2 };
+    let back = Phone { device: "phone", name: "Phone", conn: 3, out: &out2, media: &media2, cursor: &CursorSlot::default() };
     r.d.screen.phone_verb(&r.d, back, "sc_rebind", &json!({"sc": sc})).await.unwrap();
     assert_eq!(r.told_now("screen.pause").await.last().unwrap()["paused"], false);
     // Never a frame from before the gap: a P-frame waits for the keyframe the helper sends first.
@@ -355,7 +362,7 @@ async fn a_link_that_closes_during_a_start_leaves_a_screen_waiting_for_the_devic
     let r = rig_with(8, Start::Slow(300));
     let (out, out_rx) = mpsc::channel(8);
     let (media, media_rx) = mpsc::channel(8);
-    let dying = Phone { device: "phone", name: "Phone", conn: 5, out: &out, media: &media };
+    let dying = Phone { device: "phone", name: "Phone", conn: 5, out: &out, media: &media, cursor: &CursorSlot::default() };
     let d = r.d.clone();
     let req = json!({"target": "w:66:7"});
     let starting = d.screen.phone_verb(&d, dying, "sc_start", &req);
@@ -388,7 +395,7 @@ async fn two_starts_at_once_the_first_keeps_the_screen_and_the_second_is_told_it
     let r = rig_with(8, Start::Slow(300));
     let (out2, _rx2) = mpsc::channel(8);
     let (media2, _m2) = mpsc::channel(8);
-    let tablet = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2 };
+    let tablet = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default() };
     let d = r.d.clone();
     let first = r.verb("sc_start", json!({"target": "w:66:7"}));
     let second = async {
@@ -403,7 +410,7 @@ async fn two_starts_at_once_the_first_keeps_the_screen_and_the_second_is_told_it
     let again = r.verb("sc_start", json!({"target": "w:66:7"}));
     let twice = async {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        r.d.screen.phone_verb(&r.d, Phone { device: "phone", name: "Phone", conn: 9, out: &r.out, media: &r.media }, "sc_start", &json!({"target": "w:66:7"})).await
+        r.d.screen.phone_verb(&r.d, Phone { device: "phone", name: "Phone", conn: 9, out: &r.out, media: &r.media, cursor: &r.cursor }, "sc_start", &json!({"target": "w:66:7"})).await
     };
     let (again, twice) = tokio::join!(again, twice);
     assert!(again.is_ok());
@@ -431,7 +438,7 @@ async fn late_stale_or_flooding_input_is_dropped_and_only_input_a_screen_takes_g
         r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "move", "x": 1, "y": 1}], "st": now_millis()})).await.unwrap();
     }
     assert!(r.told_now("screen.input").await.len() <= INPUT_PER_SECOND as usize + 1, "a flood is cut");
-    let other = Phone { device: "phone", name: "Phone", conn: 9, out: &r.out, media: &r.media };
+    let other = Phone { device: "phone", name: "Phone", conn: 9, out: &r.out, media: &r.media, cursor: &r.cursor };
     assert_eq!(r.d.screen.phone_verb(&r.d, other, "sc_input", &json!({"sc": sc, "ops": [{"k": "move", "x": 1, "y": 1}], "st": now_millis()})).await.unwrap_err().code, "sc_elsewhere");
 }
 
@@ -466,7 +473,7 @@ async fn a_busy_computer_starts_no_screen_one_device_at_a_time_and_none_without_
     let first = r.start().await;
     let (out2, _rx) = mpsc::channel(4);
     let (media2, _frames) = mpsc::channel(4);
-    let tablet = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2 };
+    let tablet = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default() };
     assert_eq!(r.d.screen.phone_verb(&r.d, tablet, "sc_start", &json!({"target": "w:66:7"})).await.unwrap_err().code, "sc_taken");
     let second = r.start().await;
     assert_ne!(first, second);
@@ -554,7 +561,7 @@ async fn typing_the_focus_refused_says_why_to_the_phone() {
         let (d, sc) = (r.d.clone(), sc.clone());
         let (out, media) = (r.out.clone(), r.media.clone());
         async move {
-            let phone = Phone { device: "phone", name: "Phone", conn: 1, out: &out, media: &media };
+            let phone = Phone { device: "phone", name: "Phone", conn: 1, out: &out, media: &media, cursor: &CursorSlot::default() };
             d.screen.phone_verb(&d, phone, "sc_text", &json!({"sc": sc, "text": text, "st": now_millis()})).await.unwrap_err()
         }
     };
@@ -615,4 +622,156 @@ async fn frames_that_come_before_the_hold_exists_bring_a_keyframe_request_once_i
     let quiet = rig();
     quiet.start().await;
     assert!(quiet.told_now("screen.keyframe").await.is_empty());
+}
+
+#[tokio::test]
+async fn the_helper_s_window_sizes_the_link_s_full_mark_and_the_bytes_that_may_wait_within_bounds() {
+    let mut r = rig_with(64, Start::Ok);
+    let sc = r.start().await;
+    let window = |r: &Rig, frames: u64, bytes: u64| r.d.screen.on_event(&r.d, APP, &json!({"sc": sc, "kind": "window", "frames": frames, "bytes": bytes}));
+    // The flow says this daemon takes a window.
+    r.send(&sc, &video(1, true, 100));
+    r.verb("sc_ack", json!({"sc": sc, "seq": 1})).await.unwrap();
+    assert_eq!(r.told_now("screen.flow").await.last().unwrap()["win"], true);
+    window(&r, 6, 400 * 1024);
+    for seq in 2..=6 {
+        r.send(&sc, &video(seq, false, 100));
+    }
+    assert!(r.d.screen.hold(&sc).unwrap().state.lock().full_since.is_none(), "five of six: not full");
+    r.send(&sc, &video(7, false, 100));
+    assert!(r.d.screen.hold(&sc).unwrap().state.lock().full_since.is_some(), "six: full");
+    // Bytes: a frame goes while fewer than the window's 400 KiB wait, whatever its size (as the helper sends it); once they wait, the next does not.
+    r.verb("sc_ack", json!({"sc": sc, "seq": 7})).await.unwrap();
+    r.frames();
+    r.send(&sc, &video(8, false, 300 * 1024));
+    r.send(&sc, &video(9, false, 150 * 1024));
+    r.send(&sc, &video(10, false, 10 * 1024));
+    assert_eq!(r.frames().iter().map(|p| p.seq).collect::<Vec<_>>(), [8, 9]);
+    // Whatever the helper says, within 3..=12 frames and 192 KiB..=2 MiB.
+    window(&r, 100, 100 * 1024 * 1024);
+    assert_eq!(r.d.screen.hold(&sc).unwrap().state.lock().window, (MAX_WINDOW, MAX_WINDOW_BYTES));
+    window(&r, 0, 0);
+    assert_eq!(r.d.screen.hold(&sc).unwrap().state.lock().window, (MIN_WINDOW, MIN_WINDOW_BYTES));
+}
+
+#[tokio::test]
+async fn the_cursor_never_waits_behind_video_and_only_its_latest_place_is_kept() {
+    let mut r = rig_with(2, Start::Ok);
+    let sc = r.start().await;
+    r.send(&sc, &video(1, true, 100));
+    r.send(&sc, &video(2, false, 100));
+    // The lane is full: a cursor still goes, to its own slot.
+    r.send(&sc, &wire::cursor(wire::Shape::Arrow, true, 10, 20));
+    r.send(&sc, &wire::cursor(wire::Shape::Arrow, true, 30, 40));
+    assert_eq!(r.frames().len(), 2, "the video only on the media lane");
+    assert_eq!(r.cursor.take(), Some(wire::cursor(wire::Shape::Arrow, true, 30, 40)));
+    assert_eq!(r.cursor.take(), None);
+}
+
+#[tokio::test]
+async fn input_that_comes_while_text_is_typed_goes_after_it_and_acknowledgements_do_not_wait() {
+    let r = rig();
+    let sc = r.start().await;
+    r.send(&sc, &video(1, true, 100));
+    let typing = r.d.screen.text_begin(&r.d, r.phone(), &json!({"sc": sc, "text": "slow", "st": now_millis()})).unwrap();
+    assert_eq!(r.told_now("screen.text").await.len(), 0, "a request, not a notice");
+    // While it is typed: an acknowledgement is taken at once, and Enter waits.
+    let at = std::time::Instant::now();
+    r.verb("sc_ack", json!({"sc": sc, "seq": 1})).await.unwrap();
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "key", "key": "Enter", "mods": []}], "st": now_millis()})).await.unwrap();
+    assert!(at.elapsed() < Duration::from_millis(200), "{:?}", at.elapsed());
+    assert!(r.told_now("screen.input").await.is_empty(), "Enter waits for the text");
+    assert_eq!(r.d.screen.text_begin(&r.d, r.phone(), &json!({"sc": sc, "text": "again", "st": now_millis()})).err().map(|e| e.code), Some("not_sent"), "one text at a time");
+    assert_eq!(typing.await.unwrap()["result"], "sent");
+    let input = r.told_now("screen.input").await;
+    assert_eq!(input.len(), 1, "then it goes");
+    assert_eq!(input[0]["ops"][0]["key"], "Enter");
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "move", "x": 1, "y": 1}], "st": now_millis()})).await.unwrap();
+    assert_eq!(r.told_now("screen.input").await.len(), 2, "and input goes at once again");
+}
+
+#[tokio::test]
+async fn sharpen_goes_to_the_helper_at_most_every_three_seconds_and_needs_a_part_of_the_picture() {
+    let r = rig();
+    let sc = r.start().await;
+    let rect = json!({"x": 0, "y": 0, "w": 600, "h": 400});
+    r.verb("sc_sharpen", json!({"sc": sc, "rect": rect})).await.unwrap();
+    r.verb("sc_sharpen", json!({"sc": sc, "rect": rect})).await.unwrap();
+    let told = r.told_now("screen.sharpen").await;
+    assert_eq!(told.len(), 1, "once in three seconds");
+    assert_eq!(told[0]["rect"], rect);
+    for bad in [json!({"x": 0, "y": 0, "w": 0, "h": 4}), json!({"x": 0, "y": 0, "w": 70000, "h": 4}), json!(null)] {
+        assert_eq!(r.verb("sc_sharpen", json!({"sc": sc, "rect": bad})).await.unwrap_err().code, "bad_request");
+    }
+}
+
+#[tokio::test]
+async fn the_start_says_the_stream_s_clock_and_a_dropped_link_keeps_the_screen_forty_five_seconds() {
+    let r = rig();
+    let reply = r.verb("sc_start", json!({"target": "w:66:7"})).await.unwrap().unwrap();
+    assert!(reply.as_object().unwrap().contains_key("t0"), "null from an app that does not say it");
+    let sc = reply["sc"].as_str().unwrap();
+    assert_eq!(r.d.screen.hold(sc).unwrap().state.lock().rebind, SCREEN_REBIND_WINDOW);
+    assert_eq!(SCREEN_REBIND_WINDOW, Duration::from_secs(45));
+    assert!(crate::takeover::REBIND_WINDOW < SCREEN_REBIND_WINDOW, "a pane's takeover keeps its own");
+}
+
+#[tokio::test]
+async fn input_that_waited_too_long_behind_a_text_is_dropped_and_a_press_in_it_let_go() {
+    let r = rig();
+    let sc = r.start().await;
+    r.send(&sc, &video(1, true, 100));
+    r.verb("sc_ack", json!({"sc": sc, "seq": 1})).await.unwrap();
+    let typing = r.d.screen.text_begin(&r.d, r.phone(), &json!({"sc": sc, "text": "slow", "st": now_millis()})).unwrap();
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "down", "x": 1, "y": 1, "b": "left"}], "st": now_millis()})).await.unwrap();
+    // As if it had waited over a second.
+    r.d.screen.hold(&sc).unwrap().state.lock().after_text[0].0 -= Duration::from_millis(1500);
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "move", "x": 2, "y": 2}], "st": now_millis()})).await.unwrap();
+    typing.await.unwrap();
+    let sent: Vec<Value> = r.told_now("screen.input").await.iter().map(|n| n["ops"][0]["k"].clone()).collect();
+    assert_eq!(sent, [json!("move"), json!("release")], "the old press dropped and let go; the recent move goes");
+    assert!(!r.d.screen.hold(&sc).unwrap().state.lock().held);
+}
+
+#[tokio::test]
+async fn while_text_is_typed_a_late_up_never_overtakes_its_press_and_a_full_queue_changes_nothing() {
+    let r = rig();
+    let sc = r.start().await;
+    r.send(&sc, &video(1, true, 100));
+    r.verb("sc_ack", json!({"sc": sc, "seq": 1})).await.unwrap();
+    let typing = r.d.screen.text_begin(&r.d, r.phone(), &json!({"sc": sc, "text": "slow", "st": now_millis()})).unwrap();
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "down", "x": 1, "y": 1, "b": "left"}], "st": now_millis()})).await.unwrap();
+    // A late `up`: its release waits behind the press.
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "up", "x": 1, "y": 1, "b": "left"}], "st": now_millis() - 5000})).await.unwrap();
+    assert!(r.told_now("screen.input").await.is_empty());
+    {
+        let hold = r.d.screen.hold(&sc).unwrap();
+        let mut st = hold.state.lock();
+        while st.after_text.len() < MAX_AFTER_TEXT {
+            st.after_text.push((Instant::now(), vec![json!({"k": "move", "x": 3, "y": 3})]));
+        }
+    }
+    r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "down", "x": 1, "y": 1, "b": "left"}], "st": now_millis()})).await.unwrap();
+    assert!(!r.d.screen.hold(&sc).unwrap().state.lock().held, "a press past the queue's bound is dropped whole");
+    typing.await.unwrap();
+    let kinds: Vec<Value> = r.told_now("screen.input").await.iter().map(|n| n["ops"][0]["k"].clone()).collect();
+    assert_eq!(&kinds[..2], [json!("down"), json!("release")]);
+    assert_eq!(kinds.len(), MAX_AFTER_TEXT);
+}
+
+#[tokio::test]
+async fn a_newer_connection_of_the_device_takes_the_screen_over_at_once() {
+    let r = rig();
+    let sc = r.start().await;
+    crate::mobile::connection_opened_for_test(&r.d, "phone", 1);
+    // The device connects again while its older connection is not closed yet (a stalled socket): the older one's hold waits for it at once.
+    crate::mobile::connection_opened_for_test(&r.d, "phone", 3);
+    assert_eq!(r.told_now("screen.pause").await[0]["paused"], true);
+    let (out2, _phone2) = mpsc::channel(8);
+    let (media2, _frames2) = mpsc::channel(8);
+    let back = Phone { device: "phone", name: "Phone", conn: 3, out: &out2, media: &media2, cursor: &CursorSlot::default() };
+    r.d.screen.phone_verb(&r.d, back, "sc_rebind", &json!({"sc": sc})).await.unwrap();
+    // The older connection ending later changes nothing for it.
+    r.d.screen.link_closed(&r.d, 1);
+    assert_eq!(r.d.screen.hold(&sc).unwrap().state.lock().conn.as_ref().map(|l| l.conn), Some(3));
 }

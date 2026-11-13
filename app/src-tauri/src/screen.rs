@@ -334,6 +334,8 @@ fn on_output(app: &AppHandle, h: &Helper, out: Out) {
                 Some("input_blocked") => event(app, json!({"sc": sc, "kind": "state", "state": "blocked"})),
                 Some("input_refused") => event(app, json!({"sc": sc, "kind": "state", "state": "not_front"})),
                 Some("stats") => event(app, json!({"sc": sc, "kind": "stats", "stats": v})),
+                // The frames and bytes the helper lets wait for the phone, sized to the link.
+                Some("window") => event(app, json!({"sc": sc, "kind": "window", "frames": v["frames"], "bytes": v["bytes"]})),
                 Some("encoder") => {
                     // Which encoder, and which of its low-latency settings it refused or did not keep (read back after each is set): the daemon logs it.
                     event(app, json!({"sc": sc, "kind": "encoder", "encoder": v["encoder"], "name": v["name"], "refused": v["refused"], "first_output_ms": v["first_output_ms"]}));
@@ -382,8 +384,9 @@ pub fn provider_message(app: &AppHandle, msg: Value) {
     let sc = params["sc"].clone();
     match note {
         "screen.input" => send(&h, json!({"cmd": "input", "sc": sc, "ops": params["ops"], "t": params["t"]})),
-        "screen.flow" => send(&h, json!({"cmd": "flow", "sc": sc, "acked": params["acked"], "dropped_through": params["dropped_through"], "rtt_ms": params["rtt_ms"], "level": params["level"], "lost_tiles": params["lost_tiles"], "raw": params["raw"], "wire": params["wire"], "link_full_ms": params["link_full_ms"]})),
+        "screen.flow" => send(&h, json!({"cmd": "flow", "sc": sc, "acked": params["acked"], "dropped_through": params["dropped_through"], "rtt_ms": params["rtt_ms"], "level": params["level"], "lost_tiles": params["lost_tiles"], "raw": params["raw"], "wire": params["wire"], "link_full_ms": params["link_full_ms"], "win": params["win"]})),
         "screen.keyframe" => send(&h, json!({"cmd": "keyframe", "sc": sc})),
+        "screen.sharpen" => send(&h, json!({"cmd": "sharpen", "sc": sc, "rect": params["rect"]})),
         "screen.pause" => {
             let take = sc.as_str().is_some_and(|sc| app.state::<Screens>().viewers.lock().get_mut(sc).is_none_or(|v| newer(&mut v.pause_v, params["v"].as_u64())));
             if take {
