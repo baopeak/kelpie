@@ -11,6 +11,7 @@
 //! pane over (`takeover`).
 
 pub(crate) mod agent;
+mod agent_cdp;
 mod agent_snapshot;
 pub(crate) mod takeover;
 
@@ -275,6 +276,7 @@ pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, lab
             #[cfg(windows)]
             if allowed {
                 nav_app.state::<Browsers>().nav_started(&nav_label);
+                agent::navigating(&nav_app, &nav_label, u.as_str());
             }
             allowed
         })
@@ -455,18 +457,35 @@ pub async fn browser_probe(host: String, port: u16) -> CmdResult<Option<WebPage>
 pub async fn browser_screenshot(app: AppHandle, label: String, clip: Option<Rect>) -> CmdResult<Value> {
     let wv = webview(&app, &label)?;
     let png = capture(&wv, clip).await?;
+    let path = save_shot(None, &png, "png")?;
+    Ok(json!({"path": path.to_string_lossy(), "data": base64::engine::general_purpose::STANDARD.encode(&png)}))
+}
+
+/// Saves a screenshot (`ext` png or jpg) under `<data>/browser-shots`, or its subfolder `sub` (agents' own, pruned apart from the person's),
+/// where agents can open it; its path.
+pub(crate) fn save_shot(sub: Option<&str>, bytes: &[u8], ext: &str) -> CmdResult<std::path::PathBuf> {
     let dir = kelpie_proto::data_dir().join("browser-shots");
+    let dir = match sub {
+        Some(sub) => dir.join(sub),
+        None => dir,
+    };
     std::fs::create_dir_all(&dir).map_err(err)?;
     prune_shots(&dir);
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
-    let path = dir.join(format!("{stamp}.png"));
-    std::fs::write(&path, &png).map_err(err)?;
-    Ok(json!({"path": path.to_string_lossy(), "data": base64::engine::general_purpose::STANDARD.encode(&png)}))
+    let path = dir.join(format!("{stamp}.{ext}"));
+    std::fs::write(&path, bytes).map_err(err)?;
+    Ok(path)
+}
+
+/// `Page.captureScreenshot`'s `clip`: a region in CSS pixels of the document, drawn at `scale`.
+pub(crate) fn clip(x: f64, y: f64, width: f64, height: f64, scale: f64) -> Value {
+    json!({"x": x.max(0.0), "y": y.max(0.0), "width": width.max(1.0), "height": height.max(1.0), "scale": scale})
 }
 
 /// Keeps the newest 200 screenshots.
 fn prune_shots(dir: &std::path::Path) {
-    let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "png")).collect();
+    let mut files: Vec<_> =
+        std::fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "png" || x == "jpg")).collect();
     if files.len() <= 200 {
         return;
     }
@@ -482,7 +501,7 @@ async fn capture(wv: &tauri::Webview, clip: Option<Rect>) -> CmdResult<Vec<u8>> 
     if let Some(r) = clip {
         // Page.captureScreenshot clips in document coordinates; the picker reports the
         // viewport box, so the page's scroll offset is added by the caller's rect origin.
-        params["clip"] = json!({"x": r.x.max(0.0), "y": r.y.max(0.0), "width": r.width.max(1.0), "height": r.height.max(1.0), "scale": 1});
+        params["clip"] = self::clip(r.x, r.y, r.width, r.height, 1.0);
         params["captureBeyondViewport"] = json!(true);
     }
     let v = devtools(wv, "Page.captureScreenshot", params).await?;
@@ -551,6 +570,48 @@ pub(crate) async fn devtools_when(wv: &tauri::Webview, method: &'static str, par
     .map_err(err)?;
     let json = tokio::time::timeout(std::time::Duration::from_secs(15), rx).await.map_err(|_| format!("{method} timed out"))?.map_err(|_| format!("{method} cancelled"))??;
     serde_json::from_str(&json).map_err(err)
+}
+
+/// Hands each DevTools protocol `event` of the page to `on` (its parameters as JSON, on the window's thread); the registration's token.
+#[cfg(windows)]
+pub(crate) async fn devtools_subscribe(wv: &tauri::Webview, event: &'static str, on: impl Fn(String) + Send + 'static) -> CmdResult<i64> {
+    use webview2_com::DevToolsProtocolEventReceivedEventHandler;
+    use windows::core::{HSTRING, PWSTR};
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<i64, String>>();
+    wv.with_webview(move |pv| unsafe {
+        let attached = (|| -> windows::core::Result<i64> {
+            let core = pv.controller().CoreWebView2()?;
+            let receiver = core.GetDevToolsProtocolEventReceiver(&HSTRING::from(event))?;
+            let handler = DevToolsProtocolEventReceivedEventHandler::create(Box::new(move |_sender, args| {
+                if let Some(args) = args {
+                    let mut json = PWSTR::null();
+                    if args.ParameterObjectAsJson(&mut json).is_ok() {
+                        on(webview2_com::take_pwstr(json));
+                    }
+                }
+                Ok(())
+            }));
+            let mut token = 0i64;
+            receiver.add_DevToolsProtocolEventReceived(&handler, &mut token)?;
+            Ok(token)
+        })();
+        let _ = tx.send(attached.map_err(|e| e.to_string()));
+    })
+    .map_err(err)?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx).await.map_err(|_| "the page did not answer".to_string())?.map_err(|_| "cancelled".to_string())?
+}
+
+/// Ends a `devtools_subscribe` registration.
+#[cfg(windows)]
+pub(crate) fn devtools_unsubscribe(wv: &tauri::Webview, event: &'static str, token: i64) {
+    use windows::core::HSTRING;
+    let _ = wv.with_webview(move |pv| unsafe {
+        if let Ok(core) = pv.controller().CoreWebView2() {
+            if let Ok(receiver) = core.GetDevToolsProtocolEventReceiver(&HSTRING::from(event)) {
+                let _ = receiver.remove_DevToolsProtocolEventReceived(token);
+            }
+        }
+    });
 }
 
 /// End-to-end tests only (dev builds or KELPIE_E2E): trusted mouse / key input into the page

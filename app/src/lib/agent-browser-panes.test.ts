@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  BROWSER_FEATURES, NO_PANE, addSite, callContext, isLoopback, openedForSession, planCall, paneCapabilities, parseSite, refusal, resolvePane, sharedOrigins, tabLine, tabsReply, toAuditEntries,
+  BROWSER_FEATURES, NO_PANE, addSite, browserFeatures, callContext, isLoopback, openedForSession, planCall, paneCapabilities, parseSite, refusal, resolvePane, sharedOrigins, tabLine, tabsReply, toAuditEntries,
   toBrowserPolicy, usablePanes, webOrigin, type PaneShare, type SessionRow, type UsablePane,
 } from "./agent-browser-panes";
+import { isWindows } from "./platform";
 import type { LayoutNode, Pane, Project, Workspace } from "./types";
 
 const leaf = (pane: Pane): LayoutNode => ({ type: "leaf", id: `l-${pane.id}`, pane });
@@ -149,9 +150,11 @@ describe("the sites a share records", () => {
 describe("what an agent can do in a pane", () => {
   const all = { trustedInput: true, screenshot: true, network: true };
 
-  it("has everything off until a backend turns it on", () => {
-    expect(BROWSER_FEATURES).toEqual({ trustedInput: false, screenshot: false, network: false });
-    expect(paneCapabilities(true)).toEqual({ input: "synthetic", screenshot: false, network: false });
+  it("has trusted input, screenshots and the network list on Windows only", () => {
+    expect(browserFeatures(true)).toEqual({ trustedInput: true, screenshot: true, network: true });
+    expect(browserFeatures(false)).toEqual({ trustedInput: false, screenshot: false, network: false });
+    expect(paneCapabilities(true, browserFeatures(false))).toEqual({ input: "synthetic", screenshot: false, network: false });
+    expect(BROWSER_FEATURES).toEqual(browserFeatures(isWindows));
   });
 
   it("gives trusted input and screenshots only in a pane that is shown", () => {
@@ -162,10 +165,15 @@ describe("what an agent can do in a pane", () => {
 
 describe("the tabs an agent is shown", () => {
   it("writes one line per pane", () => {
-    const text = tabsReply([pane("dev", { title: "Studio", url: "http://localhost:5173/", shown: true }), pane("mine", { title: 'Say "hi"\n', url: "https://a.example/", kind: "shared", held: true })]).text;
-    expect(text.split("\n")).toEqual([
+    const panes = [pane("dev", { title: "Studio", url: "http://localhost:5173/", shown: true }), pane("mine", { title: 'Say "hi"\n', url: "https://a.example/", kind: "shared", held: true })];
+    expect(tabsReply(panes, browserFeatures(false)).text.split("\n")).toEqual([
       'dev "Studio" http://localhost:5173/ — opened by you, shown, input: synthetic, screenshot: no, network: no',
       'mine "Say \\"hi\\"" https://a.example/ — shared, background tab, input: synthetic, screenshot: no, network: no, a phone controls it',
+    ]);
+    // On Windows: trusted input and screenshots in the tab shown, the network list in both.
+    expect(tabsReply(panes, browserFeatures(true)).text.split("\n")).toEqual([
+      'dev "Studio" http://localhost:5173/ — opened by you, shown, input: trusted, screenshot: yes, network: yes',
+      'mine "Say \\"hi\\"" https://a.example/ — shared, background tab, input: synthetic, screenshot: no, network: yes, a phone controls it',
     ]);
   });
 

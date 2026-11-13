@@ -134,7 +134,7 @@ impl Takeovers {
         }
     }
 
-    fn hidden(&self, label: &str) -> bool {
+    pub(super) fn hidden(&self, label: &str) -> bool {
         self.hidden.lock().contains(label)
     }
 
@@ -863,7 +863,7 @@ async fn inputs(app: AppHandle, tk: String, rx: mpsc::Receiver<Queued>, pressed:
 }
 
 /// `(key, code, Windows virtual key, text)` of the keys the daemon lets through.
-fn key_info(key: &str) -> Option<(&'static str, &'static str, u32, Option<&'static str>)> {
+pub(super) fn key_info(key: &str) -> Option<(&'static str, &'static str, u32, Option<&'static str>)> {
     Some(match key {
         "Enter" => ("Enter", "Enter", 13, Some("\r")),
         "Tab" => ("Tab", "Tab", 9, None),
@@ -963,30 +963,10 @@ fn ack(_wv: &tauri::Webview, _session_id: Value) {}
 /// Attaches a `Page.screencastFrame` receiver to the page; its registration token. The handler runs on the window's thread and only hands the event's JSON on.
 #[cfg(windows)]
 async fn subscribe(wv: &tauri::Webview, sink: FrameSink, tk: String, generation: u64) -> CmdResult<i64> {
-    use webview2_com::DevToolsProtocolEventReceivedEventHandler;
-    use windows::core::{HSTRING, PWSTR};
-    let (tx, rx) = tokio::sync::oneshot::channel::<Result<i64, String>>();
-    wv.with_webview(move |pv| unsafe {
-        let attached = (|| -> windows::core::Result<i64> {
-            let core = pv.controller().CoreWebView2()?;
-            let receiver = core.GetDevToolsProtocolEventReceiver(&HSTRING::from("Page.screencastFrame"))?;
-            let handler = DevToolsProtocolEventReceivedEventHandler::create(Box::new(move |_sender, args| {
-                if let Some(args) = args {
-                    let mut json = PWSTR::null();
-                    if args.ParameterObjectAsJson(&mut json).is_ok() {
-                        let _ = sink.send((tk.clone(), generation, webview2_com::take_pwstr(json)));
-                    }
-                }
-                Ok(())
-            }));
-            let mut token = 0i64;
-            receiver.add_DevToolsProtocolEventReceived(&handler, &mut token)?;
-            Ok(token)
-        })();
-        let _ = tx.send(attached.map_err(|e| e.to_string()));
+    super::devtools_subscribe(wv, "Page.screencastFrame", move |json| {
+        let _ = sink.send((tk.clone(), generation, json));
     })
-    .map_err(crate::fs_ops::err)?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), rx).await.map_err(|_| "the page did not answer".to_string())?.map_err(|_| "cancelled".to_string())?
+    .await
 }
 
 #[cfg(not(windows))]
@@ -996,14 +976,7 @@ async fn subscribe(_wv: &tauri::Webview, _sink: FrameSink, _tk: String, _generat
 
 #[cfg(windows)]
 fn unsubscribe(wv: &tauri::Webview, token: i64) {
-    use windows::core::HSTRING;
-    let _ = wv.with_webview(move |pv| unsafe {
-        if let Ok(core) = pv.controller().CoreWebView2() {
-            if let Ok(receiver) = core.GetDevToolsProtocolEventReceiver(&HSTRING::from("Page.screencastFrame")) {
-                let _ = receiver.remove_DevToolsProtocolEventReceived(token);
-            }
-        }
-    });
+    super::devtools_unsubscribe(wv, "Page.screencastFrame", token);
 }
 
 #[cfg(not(windows))]
