@@ -139,3 +139,45 @@ Checks run: `pnpm exec vitest run phone/src/screen.test.ts` (38/38 pass), `pnpm 
 
 - Should input queued behind a long text be replayed at all after about 1 s, or dropped as before? This is a product call between the "text then Enter" order and the 1 s safety rule.
 - Is the Sharpen burst size (256 KiB) meant to be unpaced, given the 300 kbps age target?
+
+## Re-review (3b272d1, fixes only)
+
+Checks run: `pnpm exec vitest run phone/src/screen.test.ts phone/src/link.test.ts` (118/118 pass). I did not run cargo.
+
+### Status of the original findings
+| Finding | Verdict | Evidence |
+|---|---|---|
+| H1 | Fixed | `Link.nudge()` (`app/phone/src/link.ts:554-557`) returns while `facts.connecting && !facts.ready`. `connecting` is cleared on hello (`:1304`) and on close (`:1160`), so it cannot stick. `ScreenPort.kick` maps to `nudge` (`phone-state.ts:391`); pageshow and online keep `kick`. Test at `link.test.ts:552`. |
+| H2 | Fixed | `after_text` keeps the arrival `Instant`. At flush, entries older than `INPUT_TTL_MS` are dropped, with one `release` if a press-type op was among them (`screen.rs:644-662`). Test `input_that_waited_too_long…`. |
+| M1 | Fixed | The flush and the live `sc_input` notify both run under `hold.state` (`screen.rs:566-579`, `:645-662`). The lock order hold.state → providers.inner is the same one `ask_key` already used, and nothing takes them in reverse. |
+| M2 | Fixed (see R2) | A late `up`'s release is queued behind the press (`:555-556`). Overflow drops the whole message and leaves `held` alone (`:568-570`). Test `while_text_is_typed_a_late_up…`. |
+| M3 | Fixed | `st.unacked >= st.window.1` (`screen.rs:459`) mirrors the helper's `inflight_bytes < bytes` gate. Overshoot is bounded by one frame. |
+| M4 / L8 | Fixed (see R1) | Sharpen tiles spend `tile_tokens`, which are capped to one second of `TILE_SHARE` at start (`win/stream.rs:468-473`, `:864-879`). Sharpen is refused at L3. The docs say so (`architecture.md:1000`). |
+| M5 | Fixed (see R3) | `start` wraps the driver and app startup and calls `finish(s, d, None)` on any `BaseException` (`screen_support.py`). A second `finish` from `main` is harmless. |
+| M6 | Mostly fixed | `Controller::key_dip` has a unit test (`control.rs:713`, `:1402-1409`). The replacement test (`screen/tests.rs:763`) covers rebind at once, and that the older connection closing later changes nothing. Still missing: a Conn-level `sc_text` test (reply later on ctl with its `req` tag). |
+| Window-cut spacing | OK | The first cut still comes after `full_for_ms`. Later cuts in the same spell need `at + FULL_FOR_MS` (`control.rs:421`), and the test was updated (`:1160`). This restores the old 1 s spacing for later cuts, consistent with the blackhole measurement. |
+
+### Remaining issues
+
+**Medium: none.**
+
+**Low**
+- **R1. Sharpen adds load on a link that is already full.** The tiles go at `TILE_SHARE` (half) of the video's rate, on top of a video bitrate already sized to the link. So for the length of a Sharpen (up to 256 KiB, about 16 s at 250 kbps) the link carries about 150 % of its rate.
+  - The queueing rule then cuts the video (up to 3 cuts per 10 s).
+  - Recovery afterwards is +10 % per 10 s, so each Sharpen on a slow link leaves a lower rung for a while.
+  - Separately, a tile larger than `tile_tokens` is encoded again on every loop iteration until the tokens catch up. This CPU churn also exists in the normal crisp path, but there it only runs at ≥ 1 Mbps.
+  - Options: lower the encoder's target by the tile share while Sharpen runs; cap the budget at about the rate × 2 s; remember a too-large tile's size and skip it until the tokens reach it.
+- **R2. The flush's `release` comes after newer input.** The single `release` for dropped stale presses is sent after the newer entries that were forwarded (`screen.rs:658-661`). If a newer `down` (a drag the person started after the stale press) was forwarded, that release ends the new drag partway through. The computer and `held` stay consistent (no stuck button); only that gesture breaks.
+  - Overflow can still leave a press on the computer until the phone's next input or the end of the hold. This happens when the `up` arrives after 32 queued messages; `held` stays true, so the end of the hold releases it.
+  - Both are rare (more than 1 s, or more than 32 messages, behind a text).
+  - Option: send the release at the position of the last dropped press-type entry instead of at the end.
+- **R3. One startup step can still leak the daemon.** In `screen_support.start`, `until(lambda: run.d.js(...))` and `app_daemon(...)` run outside the `try`. A WebDriver exception there propagates with `main`'s `d` still `None`, so the daemon is not stopped. Extend the `try` to the end of `start`.
+- **R4. Small items unchanged from the first review.**
+  - A dropped `text_begin` future would leave `typing` stuck. Only the `phone_verb` path awaits it inline, and only tests use that.
+  - `Asked` has no `Forget` guard until `answer` is polled.
+  - `typing` is checked and set under two separate lock acquisitions.
+  - Original items L2-L7 still apply: cursor bandwidth, countdown start, age excludes the one-way delay, the proxy's loss model, screen_net heuristics, the takeover docs note.
+- **R5. Test gap.** No Conn-level `sc_text` test: that `reply()` returns `None`, the answer arrives later on `ctl` with `req`, and the error shape is unchanged.
+
+Status: DONE
+Summary: H1, H2 and M1-M5 are fixed as described; M6 is fixed except the Conn-level `sc_text` test. What remains is Low only: Sharpen's extra 50 % of the rate on a slow link, the flush release coming after newer input, one startup step outside the e2e cleanup, and the earlier small items.

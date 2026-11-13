@@ -239,6 +239,88 @@ pub struct Store {
     /// file only closes a port, and turning them on is what an older store does anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lan: Option<bool>,
+    /// The ways this computer's screen may go to a phone, and whether it may go through the relay at all. `None`: never set, as
+    /// `ScreenOptions::default` (off through the relay).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<ScreenOptions>,
+    /// What the screen sent through the relay this calendar month. Not sealed: a program that winds it back gets the phone more of the
+    /// relay's allowance for itself, nothing more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_relay_use: Option<MonthUse>,
+}
+
+/// The ways the screen may go (Settings → Mobile → Advanced). The relay's are used only while `ScreenOptions::remote` is on.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenMethods {
+    #[serde(default = "yes")]
+    pub tailscale: bool,
+    #[serde(default = "yes")]
+    pub p2p: bool,
+    #[serde(default = "yes")]
+    pub relay_turn: bool,
+    #[serde(default = "yes")]
+    pub relay_ws: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for ScreenMethods {
+    fn default() -> ScreenMethods {
+        ScreenMethods { tailscale: true, p2p: true, relay_turn: true, relay_ws: true }
+    }
+}
+
+/// Whether this computer's screen may be seen and controlled through the relay (off by default), the ways it may go, and the relay
+/// WebSocket's own limits. Sealed with the device key, as the lock's options are: a program that edits the file cannot turn it on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ScreenOptions {
+    #[serde(default)]
+    pub remote: bool,
+    #[serde(default)]
+    pub methods: ScreenMethods,
+    /// The most the screen sends through the relay WebSocket (kbps).
+    #[serde(default = "relay_ws_kbps")]
+    pub relay_ws_kbps: u32,
+    /// What it may send that way in a calendar month (MB).
+    #[serde(default = "relay_ws_month_mb")]
+    pub relay_ws_month_mb: u32,
+    /// HMAC-SHA256 (hex) over the fields above.
+    #[serde(default)]
+    pub mac: String,
+}
+
+pub const RELAY_WS_KBPS: u32 = 500;
+pub const RELAY_WS_MONTH_MB: u32 = 1024;
+
+fn relay_ws_kbps() -> u32 {
+    RELAY_WS_KBPS
+}
+
+fn relay_ws_month_mb() -> u32 {
+    RELAY_WS_MONTH_MB
+}
+
+impl Default for ScreenOptions {
+    fn default() -> ScreenOptions {
+        ScreenOptions { remote: false, methods: ScreenMethods::default(), relay_ws_kbps: RELAY_WS_KBPS, relay_ws_month_mb: RELAY_WS_MONTH_MB, mac: String::new() }
+    }
+}
+
+impl ScreenOptions {
+    /// Whether going from `self` to `next` lets the screen go more ways than before: the person verifies that.
+    pub fn widened_by(&self, next: &ScreenOptions) -> bool {
+        let (a, b) = (self.methods, next.methods);
+        (next.remote && !self.remote) || (b.tailscale && !a.tailscale) || (b.p2p && !a.p2p) || (b.relay_turn && !a.relay_turn) || (b.relay_ws && !a.relay_ws) || next.relay_ws_kbps > self.relay_ws_kbps || next.relay_ws_month_mb > self.relay_ws_month_mb
+    }
+}
+
+/// Bytes used in one calendar month (`YYYY-MM`, the computer's local time).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct MonthUse {
+    pub month: String,
+    pub bytes: u64,
 }
 
 impl Store {
@@ -427,6 +509,19 @@ pub fn lock_holds(d: &Device, key: &[u8; 32]) -> bool {
 
 fn options_input(o: &LockOptions) -> Vec<u8> {
     format!("kelpie-lock-options/1|{}|{}|{}|{}", o.on, o.idle_s, o.recheck, o.plain_read).into_bytes()
+}
+
+fn screen_input(o: &ScreenOptions) -> Vec<u8> {
+    let m = o.methods;
+    format!("kelpie-screen-options/1|{}|{}|{}|{}|{}|{}|{}", o.remote, m.tailscale, m.p2p, m.relay_turn, m.relay_ws, o.relay_ws_kbps, o.relay_ws_month_mb).into_bytes()
+}
+
+pub fn seal_screen(o: &mut ScreenOptions, key: &[u8; 32]) {
+    o.mac = tag(key, &screen_input(o));
+}
+
+pub fn screen_holds(o: &ScreenOptions, key: &[u8; 32]) -> bool {
+    tag_holds(key, &screen_input(o), &o.mac)
 }
 
 pub fn seal_options(o: &mut LockOptions, key: &[u8; 32]) {

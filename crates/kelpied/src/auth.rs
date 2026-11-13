@@ -57,7 +57,7 @@ impl Role {
 
 /// Decisions about phone access that only the verified app may ask for (the daemon then verifies the person): a program that
 /// holds the user token cannot add a phone or raise what one may do, nor raise the prompt that would.
-pub const APP_ONLY: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale", "mobile.set_lock", "mobile.reset_lock", "mobile.set_relay", "mobile.relay_recreate", "notify.telegram_bind", "provider.register"];
+pub const APP_ONLY: &[&str] = &["mobile.approve", "mobile.set_permission", "mobile.set_write", "mobile.reset", "mobile.set_tailscale", "mobile.set_lock", "mobile.set_screen", "mobile.reset_lock", "mobile.set_relay", "mobile.relay_recreate", "notify.telegram_bind", "provider.register"];
 
 /// The role an `auth` with the user token gets: App when it says it is the app and its peer process is the installed app.
 pub fn user_role(says_app: bool, peer: Option<u32>) -> Role {

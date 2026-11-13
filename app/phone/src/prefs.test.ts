@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { choice, confirmCtrlC, defaultKeyBar, flag, INBOX_ORDERS, INBOX_VIEWS, inboxView, KEY_IDS, keyBar, lockGrace, moveKey, order, pref, readKeyBar, showStopped, shownKeys, textSize, toggleKey, vibrate, wrapLines } from "./prefs";
+import { choice, confirmCtrlC, defaultKeyBar, flag, INBOX_ORDERS, INBOX_VIEWS, inboxView, KEY_IDS, keyBar, lockGrace, moveKey, order, pref, readKeyBar, rememberedVia, rememberVia, showStopped, shownKeys, textSize, toggleKey, vibrate, wrapLines } from "./prefs";
 import { store } from "./storage";
+import { viaKey } from "./screen-paths";
 
 describe("a preference", () => {
   it("starts from what is kept, and keeps what is set", () => {
@@ -84,5 +85,18 @@ describe("the key bar", () => {
     expect(moveKey(s, "tab", 1).order.slice(1, 3)).toEqual(["shift-tab", "tab"]);
     expect(moveKey(s, "esc", -1)).toBe(s);
     expect(moveKey(s, "enter", 1)).toBe(s);
+  });
+});
+
+describe("the way the screen connected last", () => {
+  it("is kept for each pairing on its own, and read as nothing when it is not kept or not known", () => {
+    expect(rememberedVia("pairing-a")).toBeNull();
+    rememberVia("pairing-a", "relay");
+    rememberVia("pairing-b", "tailscale");
+    expect(rememberedVia("pairing-a")).toBe("relay");
+    expect(rememberedVia("pairing-b")).toBe("tailscale");
+    expect(store.get("kelpie.screen.via.pairing-a")).toBe("relay");
+    store.set(viaKey("pairing-c"), "webrtc");
+    expect(rememberedVia("pairing-c")).toBeNull();
   });
 });

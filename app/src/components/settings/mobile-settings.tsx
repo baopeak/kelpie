@@ -12,16 +12,16 @@ import { For, Show, createEffect, createResource, createSignal, onCleanup, onMou
 import { store } from "../../lib/store";
 import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
 import { invoke } from "@tauri-apps/api/core";
-import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
+import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_API, SCREEN_REMOTE_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import {
   approvalChoices, approveWithReplace, connectionLine, deviceMethodLabel, groupDevices, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel,
-  pairMethods, permissionChoices, prunePhoneGroups, samePhoneSuggestion, telegramChoice, turnOnAccess, withConnection, withNewerConnections, type ConnectionNews, type MobileRoute, type OptionFacts, type OptionId,
+  pairMethods, permissionChoices, permissionLabel, prunePhoneGroups, samePhoneSuggestion, screenDoubtedNote, screenMethodRows, screenRemoteShown, screenUsageLine, telegramChoice, turnOnAccess, withConnection, withNewerConnections, type ConnectionNews, type MobileRoute, type OptionFacts, type OptionId,
   type PairMethodId, type PhoneGroup,
 } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
 import { catalogEntry, entryMatches } from "../../lib/settings-catalog";
-import type { MobileDevicePage, MobileHostedFields, MobilePairRequest, MobilePairStart } from "../../lib/types";
+import type { MobileDevicePage, MobileHostedFields, MobilePairRequest, MobilePairStart, MobileScreenStatus } from "../../lib/types";
 import { LoadBar } from "../load-bar";
 import { Icon } from "../icons";
 import { OptionRow } from "./option-row";
@@ -86,6 +86,8 @@ export interface MobileStatus extends Partial<MobileHostedFields> {
   lock?: { on: boolean; idle_s: number; recheck: boolean; plain_read: boolean };
   /** The relay, as the daemon holds it (absent below `RELAY_API`). */
   relay?: RelayStatus;
+  /** The screen without Tailscale (absent below `SCREEN_REMOTE_API`). */
+  screen?: MobileScreenStatus;
   /** This window is the verified Kelpie app: it may approve phones and raise what they may do. */
   app: boolean;
 }
@@ -154,7 +156,7 @@ interface MobileAudit {
 const DORMANT_DAYS = [30, 90, 180, 0];
 const IDLE_SECONDS = [60, 300, 900, 1800, 3600];
 /** The rows under Advanced. */
-const ADVANCED = ["mobile-lan", "mobile-network", "mobile-tls", "mobile-screen", "mobile-devices"];
+const ADVANCED = ["mobile-lan", "mobile-network", "mobile-tls", "mobile-screen", "mobile-screen-ways", "mobile-devices"];
 
 /** The pairing guide's two steps, for the page phones install from: the app the relay hosts, or this computer's Tailscale origin. */
 type Guide = { via: "hosted" | "tailscale"; step: 1 | 2 };
@@ -369,6 +371,8 @@ export function MobileSettings() {
     });
   // What takes protection away asks the person, and is back to what holds now if they did not verify: the status did not change, so nothing else redraws it.
   const setLock = (patch: Partial<NonNullable<MobileStatus["lock"]>>) => run(() => mobileSecure("mobile.set_lock", patch));
+  // The same for the screen without Tailscale: the daemon asks the person when it is turned on or a way is added, and nothing when it is turned off.
+  const setScreen = (patch: { remote?: boolean; methods?: Partial<NonNullable<MobileStatus["screen"]>["methods"]> }) => run(() => mobileSecure("mobile.set_screen", patch));
   const relay = createRelayForm(run);
   // The phone just removed while the relay was on: a new room is offered, and nothing happens unless the person makes it.
   const [roomOffer, setRoomOffer] = createSignal<string | null>(null);
@@ -452,6 +456,8 @@ export function MobileSettings() {
   const deviceName = (id: string) => s()?.devices.find((d) => d.id === id)?.name ?? id;
   const hasAccess = () => !!s() && (s()!.enabled || s()!.devices.length > 0 || (s()!.legacy ?? []).length > 0);
   const option = (id: OptionId) => optionState(id, facts());
+  // The screen without Tailscale is on: a phone on the hosted app may then be given control, and it means the screen only.
+  const screenRemoteOn = () => store.daemonApi() >= SCREEN_REMOTE_API && !!s()?.screen?.remote;
   const trust = () => (store.daemonApi() >= HOSTED_API && s()?.relay ? hostedTrust(s()!.relay!) : null);
   const summary = () => mobileSummary(s()!, push() ?? null);
   const alertsOn = () => {
@@ -477,7 +483,7 @@ export function MobileSettings() {
     <>
       <Show when={d.state === "ok"}>
         <select class="text-input" data-permission value={d.permission} disabled={busy()} onChange={(e) => void setPermission(d, e.currentTarget.value as MobilePermission)}>
-          <For each={permissionChoices(d, store.daemonApi())}>{(p) => <option value={p}>{p === "read" ? t("May read") : p === "write" ? t("May type") : t("May take control")}</option>}</For>
+          <For each={permissionChoices(d, store.daemonApi(), screenRemoteOn())}>{(p) => <option value={p}>{permissionLabel(p, d, screenRemoteOn())}</option>}</For>
         </select>
       </Show>
       <Show when={d.state === "ok" && d.secure_origin && store.daemonApi() >= LOCK_API}>
@@ -716,6 +722,11 @@ export function MobileSettings() {
         } />
         <OptionRow id="mobile-lock-recheck" state={option("mobile-lock-recheck")} onChange={(recheck) => void setLock({ recheck })} />
         <OptionRow id="mobile-lock-plain" state={option("mobile-lock-plain")} onChange={(plain_read) => void setLock({ plain_read })} />
+        <Show when={screenRemoteShown(store.daemonApi())}>
+          <OptionRow id="mobile-screen-remote" state={option("mobile-screen-remote")} onChange={(remote) => void setScreen({ remote })}>
+            <Show when={screenDoubtedNote(facts())}>{(note) => <div class="form-note warn-note" data-screen-doubted>{note()}</div>}</Show>
+          </OptionRow>
+        </Show>
         <Show when={push() !== undefined}>
           <OptionRow id="mobile-ntfy" state={option("mobile-ntfy")} onChange={(on) => void setChannel("ntfy", on)}>
             <button class="link-btn" data-open-notifications onClick={() => store.openSettings("notifications", "push-ntfy")}>{t("Server, topic and token: Settings → Notifications")}</button>
@@ -804,6 +815,28 @@ export function MobileSettings() {
                 <Toggle on={store.state.settings.screenCrispText} label={t("Crisp text")} onChange={(on) => store.setSettings({ screenCrispText: on })} />
               </div>
               <Show when={hotkeyError()}><div class="form-note error">{hotkeyError()}</div></Show>
+            </SettingRow>
+          </Show>
+          <Show when={screenRemoteShown(store.daemonApi()) && s()!.screen}>
+            <SettingRow id="mobile-screen-ways" wide>
+              <For each={screenMethodRows(facts())}>
+                {(m) => (
+                  <div data-screen-method={m.id}>
+                    <label class="inline-fields" style={{ "align-items": "center" }}>
+                      <input type="checkbox" checked={m.on} disabled={busy() || !!m.disabled} onChange={(e) => {
+                        const box = e.currentTarget;
+                        // Back to what holds now when the person did not verify (the status did not change, so nothing else redraws it).
+                        void setScreen({ methods: { [m.id]: box.checked } }).then(() => { box.checked = s()?.screen?.methods[m.id] !== false; });
+                      }} />
+                      <span>{m.label}</span>
+                    </label>
+                    <Show when={m.note}><div class="muted-inline" data-screen-method-note>{m.note}</div></Show>
+                  </div>
+                )}
+              </For>
+              <Show when={option("mobile-screen-remote").disabled}><div class="form-note warn-note" data-screen-ways-disabled>{option("mobile-screen-remote").disabled}</div></Show>
+              <div class="muted-inline" data-screen-usage>{screenUsageLine(s()!.screen)}</div>
+              <div class="muted-inline">{t("Turning a way on asks you to verify first.")}</div>
             </SettingRow>
           </Show>
           <SettingRow id="mobile-devices" wide>

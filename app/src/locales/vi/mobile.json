@@ -211,5 +211,22 @@
   "Same phone as": "Cùng điện thoại với",
   "A new device": "Một thiết bị mới",
   "Settings lists the two as one phone, each way with its own permission and its own Unpair.": "Cài đặt sẽ liệt kê hai bản ghi này như một điện thoại, và mỗi cách vẫn có quyền riêng và nút Hủy ghép đôi riêng.",
-  "Replace that pairing: remove “{name}” ({way}) once this one is approved": "Thay lần ghép đôi đó: gỡ “{name}” ({way}) sau khi lần này được duyệt"
+  "Replace that pairing: remove “{name}” ({way}) once this one is approved": "Thay lần ghép đôi đó: gỡ “{name}” ({way}) sau khi lần này được duyệt",
+  "See and control the screen without Tailscale": "Xem và điều khiển màn hình mà không cần Tailscale",
+  "A phone may see this computer's screen and control it through the relay, from anywhere, with no Tailscale: a phone on the hosted app, or one paired over Tailscale while it is away from it. On the hosted app, control then means the screen only: it never takes over a browser pane. Off until you turn it on.": "Điện thoại có thể xem và điều khiển màn hình máy tính này qua relay, từ bất cứ đâu và không cần Tailscale, dù đó là điện thoại dùng ứng dụng trên relay hay điện thoại đã ghép đôi qua Tailscale nhưng đang ở xa. Với ứng dụng trên relay, quyền điều khiển chỉ áp dụng cho màn hình, và điện thoại không bao giờ tiếp quản khung trình duyệt. Tính năng này tắt cho tới khi bạn bật nó.",
+  "Anyone who can change what the relay serves could see and control this computer while your phone is unlocked and you approve Face ID.": "Bất kỳ ai thay đổi được nội dung mà relay phục vụ đều có thể xem và điều khiển máy tính này, miễn là điện thoại của bạn đang mở khóa và bạn đã chấp thuận bằng Face ID.",
+  "An orange border shows what is shared, the stop hotkey and Stop in the status bar end it at once, it stops after 10 minutes with nothing done, and every start is written to the log of what phones did. Each session asks for Face ID on the phone.": "Một viền màu cam cho biết phần nào đang được chia sẻ, phím tắt dừng và nút Dừng trên thanh trạng thái kết thúc phiên ngay lập tức, phiên tự dừng sau 10 phút không có thao tác nào, và mỗi lần bắt đầu đều được ghi vào nhật ký những việc điện thoại đã làm. Mỗi phiên đều hỏi Face ID trên điện thoại.",
+  "Phones given control whose app lock is set up and on, through the relay. A phone that reaches this computer over Tailscale keeps working as before, with no extra Face ID.": "Các điện thoại được cấp quyền điều khiển và đã thiết lập, bật khóa ứng dụng, khi kết nối qua relay. Điện thoại kết nối tới máy tính này qua Tailscale vẫn hoạt động như trước và không phải dùng thêm Face ID.",
+  "Ways the screen may connect": "Các cách màn hình được phép kết nối",
+  "Which ways a phone may use to see this computer's screen: Tailscale, a direct link between the phone and this computer, a relay that forwards the video, or the relay's WebSocket. A way that is turned off is never offered on the phone, and the relay ways count only while seeing the screen without Tailscale is on.": "Đây là những cách điện thoại được dùng để xem màn hình của máy tính này: Tailscale, liên kết trực tiếp giữa điện thoại và máy tính, relay chuyển tiếp video, hoặc WebSocket của relay. Cách nào đã tắt thì điện thoại không bao giờ được đề nghị cách đó, và các cách qua relay chỉ có tác dụng khi tính năng xem màn hình không cần Tailscale đang bật.",
+  "The stored setting for the screen without Tailscale failed its check, so Kelpie treats it as off. Nothing was overwritten: set it again to go on.": "Cài đặt đã lưu cho việc xem màn hình không cần Tailscale không qua được bước kiểm tra, nên Kelpie coi nó là đang tắt. Kelpie không ghi đè lên cài đặt đó, vì vậy bạn hãy đặt lại để tiếp tục.",
+  "Direct link (P2P)": "Liên kết trực tiếp (P2P)",
+  "Relay (TURN)": "Relay (TURN)",
+  "Relay WebSocket": "WebSocket của relay",
+  "Not available yet: it comes in a later update.": "Chưa dùng được: cách này sẽ có trong một bản cập nhật sau.",
+  "Counts only while seeing the screen without Tailscale is on.": "Cách này chỉ có tác dụng khi tính năng xem màn hình không cần Tailscale đang bật.",
+  "{used} MB of {total} MB this month": "{used} MB trên tổng {total} MB trong tháng này",
+  "May take control (screen only)": "Được điều khiển (chỉ màn hình)",
+  "The screen too, with Face ID for every session and once you allow control for this phone; never browser panes, which need the app from this computer.": "Cả màn hình, với Face ID cho mỗi phiên và sau khi bạn cho phép điều khiển với điện thoại này; riêng khung trình duyệt thì không bao giờ, vì khung đó cần ứng dụng từ máy tính này.",
+  "Turning a way on asks you to verify first.": "Bật thêm một cách sẽ yêu cầu bạn xác minh trước."
 }

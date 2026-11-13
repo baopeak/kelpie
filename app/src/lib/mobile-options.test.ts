@@ -1,18 +1,18 @@
 import { describe, expect, it } from "vitest";
 import type { MobileDevice, MobileStatus } from "../components/settings/mobile-settings";
 import type { RelayStatus } from "../components/settings/mobile-relay-settings";
-import { HOSTED_API, LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
+import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_REMOTE_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
 import {
   alreadyRemoved, approvalChoices, approveWithReplace, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
-  OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, routeLabel, samePhoneSuggestion, screenPolicyLine,
+  OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, permissionLabel, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, routeLabel, samePhoneSuggestion, screenDoubtedNote, screenMethodRows, screenPolicyLine, screenRemoteShown, screenUsageLine,
   telegramChoice, turnOnAccess, withConnection, withNewerConnections, type AccessCalls, type ConnectionNews, type MobileRoute, type ApprovalCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
 } from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
 import { emptyPushConfig, type PushState } from "./push-config";
 import { catalogEntry, entryMatches } from "./settings-catalog";
 
-const API = HOSTED_API;
+const API = SCREEN_REMOTE_API;
 const RESTART = "Restart Kelpie's background service";
 
 /** A new install with phone access just turned on, as the daemon reports it. */
@@ -22,6 +22,7 @@ function status(patch: Partial<MobileStatus> = {}): MobileStatus {
     devices: [], legacy: [], pairing_expires_in: null, pending: [], dormant_days: 90,
     tailscale: { on: false, origin: null },
     lock: { on: true, idle_s: 300, recheck: false, plain_read: true },
+    screen: { remote: false, methods: { tailscale: true, p2p: true, relay_turn: true, relay_ws: true }, relay_ws_kbps: 500, relay_ws_month_mb: 1024, relay_ws_used_mb: 0, doubted: false },
     relay: {
       on: false, url: "wss://relay.example", default_url: "wss://relay.example", room: false, origin: null, operator_key: false, connected: false, error: null, rtt_ms: null, slow: false, phones: 0,
       version: null, hosted: { available: false, origin: "https://relay.example", version: null, reason: "not checked yet", install_qr: "<svg/>" }, hosted_devices: 0,
@@ -44,12 +45,12 @@ const facts = (patch: Partial<OptionFacts> = {}): OptionFacts => ({ api: API, st
 const state = (id: OptionId, patch: Partial<OptionFacts> = {}) => optionState(id, facts(patch));
 
 /** The options the daemon keeps with phone access, and the level that brought each. */
-const PHONE_ROWS: [OptionId, number][] = [["mobile-tailscale", TAILSCALE_API], ["mobile-relay", RELAY_API], ["mobile-lock", LOCK_API], ["mobile-lock-idle", LOCK_API], ["mobile-lock-recheck", LOCK_API], ["mobile-lock-plain", LOCK_API]];
+const PHONE_ROWS: [OptionId, number][] = [["mobile-tailscale", TAILSCALE_API], ["mobile-relay", RELAY_API], ["mobile-lock", LOCK_API], ["mobile-lock-idle", LOCK_API], ["mobile-lock-recheck", LOCK_API], ["mobile-lock-plain", LOCK_API], ["mobile-screen-remote", SCREEN_REMOTE_API]];
 
 describe("a new install", () => {
   it("has the safe defaults", () => {
     const on = Object.fromEntries(OPTION_IDS.map((id) => [id, state(id).on]));
-    expect(on).toEqual({ "mobile-access": true, "mobile-hosted": false, "mobile-tailscale": false, "mobile-relay": false, "mobile-webpush": false, "mobile-lock": true, "mobile-lock-idle": true, "mobile-lock-recheck": false, "mobile-lock-plain": true, "mobile-ntfy": false, "mobile-telegram": false, "mobile-lan": true });
+    expect(on).toEqual({ "mobile-access": true, "mobile-hosted": false, "mobile-tailscale": false, "mobile-relay": false, "mobile-webpush": false, "mobile-lock": true, "mobile-lock-idle": true, "mobile-lock-recheck": false, "mobile-lock-plain": true, "mobile-screen-remote": false, "mobile-ntfy": false, "mobile-telegram": false, "mobile-lan": true });
     expect(state("mobile-access", { status: status({ enabled: false }) }).on).toBe(false);
   });
 
@@ -100,6 +101,7 @@ describe("when an option cannot be changed", () => {
   it("says so too when the daemon's status has no such field, whatever its level says", () => {
     expect(state("mobile-tailscale", { status: status({ tailscale: undefined }) }).disabled).toContain(RESTART);
     expect(state("mobile-lock", { status: status({ lock: undefined }) }).disabled).toContain(RESTART);
+    expect(state("mobile-screen-remote", { status: status({ screen: undefined }) }).disabled).toContain(RESTART);
     expect(state("mobile-relay", { status: status({ relay: undefined }) }).disabled).toContain(RESTART);
     const { webpush: _, ...older } = push();
     expect(state("mobile-webpush", { push: older }).disabled).toContain(RESTART);
@@ -435,7 +437,80 @@ describe("approving a phone", () => {
   });
 });
 
+describe("the screen without Tailscale", () => {
+  const screen = (patch: Partial<NonNullable<MobileStatus["screen"]>>) => ({ status: status({ screen: { ...status().screen!, ...patch } }) });
+
+  it("is off by default, asks for verification to turn on and nothing to turn off", () => {
+    expect(state("mobile-screen-remote").on).toBe(false);
+    expect(state("mobile-screen-remote").presence).toBe("Turning this on asks you to verify first.");
+    expect(state("mobile-screen-remote", screen({ remote: true })).on).toBe(true);
+    expect(state("mobile-screen-remote", screen({ remote: true })).presence).toBeNull();
+  });
+
+  it("is shown only from a daemon that has it", () => {
+    expect(screenRemoteShown(SCREEN_REMOTE_API)).toBe(true);
+    expect(screenRemoteShown(SCREEN_REMOTE_API - 1)).toBe(false);
+  });
+
+  it("says when the daemon could not trust what it stored, and says nothing from an older one", () => {
+    expect(screenDoubtedNote(facts())).toBeNull();
+    expect(screenDoubtedNote(facts(screen({ doubted: true })))).toContain("failed its check");
+    expect(screenDoubtedNote(facts({ ...screen({ doubted: true }), api: SCREEN_REMOTE_API - 1 }))).toBeNull();
+  });
+
+  it("lists the ways in order, as they are set, and says which are not built yet", () => {
+    const rows = screenMethodRows(facts(screen({ methods: { tailscale: true, p2p: false, relay_turn: true, relay_ws: false } })));
+    expect(rows.map((r) => [r.id, r.label, r.on])).toEqual([["tailscale", "Tailscale", true], ["p2p", "Direct link (P2P)", false], ["relay_turn", "Relay (TURN)", true], ["relay_ws", "Relay WebSocket", false]]);
+    expect(rows.find((r) => r.id === "p2p")!.note).toContain("later update");
+    expect(rows.find((r) => r.id === "relay_turn")!.note).toContain("later update");
+    expect(rows.find((r) => r.id === "tailscale")!.note).toBeNull();
+    expect(rows.every((r) => r.disabled === null)).toBe(true);
+  });
+
+  it("says the relay WebSocket counts only while the switch is on, and blocks the ways like the switch", () => {
+    expect(screenMethodRows(facts()).find((r) => r.id === "relay_ws")!.note).toContain("only while");
+    expect(screenMethodRows(facts(screen({ remote: true }))).find((r) => r.id === "relay_ws")!.note).toBeNull();
+    for (const r of screenMethodRows(facts({ api: SCREEN_REMOTE_API - 1 }))) expect(r.disabled).toContain(RESTART);
+    for (const r of screenMethodRows(facts({ status: status({ app: false }) }))) expect(r.disabled).toContain("not the installed Kelpie app");
+  });
+
+  it("shows the relay WebSocket's use this month", () => {
+    expect(screenUsageLine({ ...status().screen!, relay_ws_used_mb: 120.4, relay_ws_month_mb: 1024 })).toBe("120 MB of 1024 MB this month");
+    expect(screenUsageLine(undefined)).toBeNull();
+  });
+
+  it("is found by search in English and Vietnamese", () => {
+    const e = catalogEntry("mobile-screen-remote")!;
+    for (const q of ["screen", "without tailscale", "face id", "relay"]) expect(entryMatches(e, q), q).toBe(true);
+    expect(entryMatches(catalogEntry("mobile-screen-ways")!, "websocket")).toBe(true);
+    expect(e.api).toBe(SCREEN_REMOTE_API);
+    expect(catalogEntry("mobile-screen-ways")!.api).toBe(SCREEN_REMOTE_API);
+  });
+
+  it("says what the relay way of pairing allows once it is on", () => {
+    expect(screenPolicyLine("relay", true)).toContain("Face ID");
+    expect(screenPolicyLine("relay", false)).toContain("Never the screen");
+    const way = (patch: Partial<OptionFacts>) => pairMethods(facts({ status: status({ relay: hostedRelay() }), ...patch })).find((m) => m.id === "relay")!.allows;
+    expect(way({})).toContain("Never the screen");
+    expect(way(screen({ remote: true }))).toContain("Face ID");
+    expect(way({ ...screen({ remote: true }), api: SCREEN_REMOTE_API - 1 })).toContain("Never the screen");
+  });
+});
+
 describe("the paired devices", () => {
+  it("offer control to a phone on the hosted app only while the screen without Tailscale is on, and call it screen only", () => {
+    const hosted = device({ page_kind: "hosted", page: "https://relay.example", secure_origin: true, may_control: true });
+    expect(permissionChoices(hosted, API, true)).toEqual(["read", "write", "control"]);
+    expect(permissionChoices(hosted, API, false)).toEqual(["read", "write"]);
+    expect(permissionChoices(hosted, SCREEN_REMOTE_API - 1, true)).toEqual(["read", "write"]);
+    expect(permissionChoices(device({ page_kind: "hosted", may_control: false }), API, true)).toEqual(["read", "write"]);
+    expect(permissionChoices(device({ page_kind: "ts", secure_origin: true, may_control: true }), API, true)).toEqual(["read", "write", "control"]);
+    expect(permissionLabel("control", hosted, true)).toBe("May take control (screen only)");
+    expect(permissionLabel("control", hosted, false)).toBe("May take control");
+    expect(permissionLabel("control", device({ page_kind: "ts" }), true)).toBe("May take control");
+    expect([permissionLabel("read", hosted, true), permissionLabel("write", hosted, true)]).toEqual(["May read", "May type"]);
+  });
+
   it("never offer control to a phone on the hosted app", () => {
     expect(permissionChoices(device({ page_kind: "hosted", page: "https://relay.example", secure_origin: true, may_control: true }), API)).toEqual(["read", "write"]);
     expect(permissionChoices(device({ page_kind: "ts", secure_origin: true, may_control: true }), API)).toEqual(["read", "write", "control"]);

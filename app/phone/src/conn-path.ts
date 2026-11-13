@@ -96,7 +96,57 @@ export function methodLines(method: PageMethod, t: Translate): { way: PairWay; s
 }
 
 /** What keeps the screen from this phone, the first that applies. */
-export type ScreenBlock = "unknown" | "older" | "hosted" | "not_control" | "plain_page" | "relay" | "lock";
+export type ScreenBlock = "unknown" | "older" | "hosted" | "not_control" | "plain_page" | "relay" | "lock" | "reason";
+
+/** What the computer says about the screen on this connection (`device.screen`), and the reasons a way to it may be refused (`paths`, `sc_start`): the
+ *  words of each are `screenReasonText`. */
+const SCREEN_REASONS = ["not_granted", "plain_page", "method_off", "no_direct_link", "not_on_relay", "screen_remote_off", "lock_off", "no_passkey", "locked", "needs_face_id", "relay_off", "relay_budget_spent", "hosted_app_no_tailscale"] as const;
+
+/** The reason in words, with what would change it; null for a code this app does not know. */
+export function screenReasonText(code: string, t: Translate): string | null {
+  switch (code) {
+    case "not_granted":
+      return t("Choose \"May take control\" for this phone in Kelpie → Settings → Mobile.");
+    case "plain_page":
+      return t("This page did not come from your computer over HTTPS; seeing the screen needs the app from your computer over Tailscale.");
+    case "method_off":
+      return t("Turned off on the computer.");
+    case "no_direct_link":
+      return t("Tailscale is off on this phone or not reachable now.");
+    case "not_on_relay":
+      return t("This phone is not connected through the relay now.");
+    case "screen_remote_off":
+      return t("Turn on \"See and control the screen without Tailscale\" in Kelpie → Settings → Mobile.");
+    case "lock_off":
+      return t("The app lock is off on the computer: turn it on in Kelpie → Settings → Mobile.");
+    case "no_passkey":
+      return t("This phone has no app lock set up yet: set it up first.");
+    case "locked":
+      return t("Needs the app lock on and unlocked.");
+    case "needs_face_id":
+      return t("Face ID is asked for each time the screen starts through the relay.");
+    case "relay_off":
+      return t("The relay is off on the computer.");
+    case "relay_budget_spent":
+      return t("The screen data the relay may carry this month is used up.");
+    case "hosted_app_no_tailscale":
+      return t("This app came from the relay, so it can reach the computer only through the relay.");
+    default:
+      return null;
+  }
+}
+
+/** The computer's word `device.screen` is one this app knows. */
+export const knownScreenReason = (code: string | null | undefined): code is string => code === "ok" || (!!code && (SCREEN_REASONS as readonly string[]).includes(code));
+
+/** The screen may be started from here as the computer says: `ok`, or only Face ID is left, which is asked for at the start. */
+export const screenReady = (code: string) => code === "ok" || code === "needs_face_id";
+
+/** The screen's entry is offered: from a computer that says so (`device.screen`) by its word, otherwise by the permission, as before. */
+export function screenOffered(f: { older: boolean; screen?: string | null; permission: "read" | "write" | "control" | undefined }): boolean {
+  if (f.older) return false;
+  return knownScreenReason(f.screen) ? screenReady(f.screen) : f.permission === "control";
+}
 
 /** What the computer says about control on this connection (`device.control`), as what keeps the screen from this phone: null for `ok`, for a computer that
  *  does not say, and for a reason this app does not know, so that what the phone works out applies. The lock's three reasons read as one. */
@@ -127,6 +177,8 @@ export function tailscaleHint(method: PageMethod, ts: boolean, t: Translate): st
 }
 
 export interface ScreenFacts {
+  /** What the computer says about the screen on this connection (`device.screen`, from API level 41): its word comes before everything else. */
+  screen?: string | null;
   /** What the computer itself says stands in the way, where it says so: it comes before anything the phone works out. */
   computer?: ScreenBlock | null;
   /** The computer has said what it is (a hello came): until then nothing about it is known. */
@@ -141,6 +193,7 @@ export interface ScreenFacts {
 }
 
 export function screenBlock(f: ScreenFacts): ScreenBlock | null {
+  if (knownScreenReason(f.screen)) return screenReady(f.screen) ? (f.unlocked ? null : "lock") : "reason";
   if (f.computer) return f.computer;
   if (!f.known) return "unknown";
   if (f.older) return "older";
@@ -172,5 +225,7 @@ export function screenWhy(f: ScreenFacts, t: Translate): string | null {
       return t("Seeing the screen needs Tailscale; this phone is on the relay now.");
     case "lock":
       return t("Needs the app lock on and unlocked.");
+    case "reason":
+      return screenReasonText(f.screen ?? "", t);
   }
 }

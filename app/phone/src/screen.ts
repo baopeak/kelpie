@@ -4,6 +4,8 @@
 // when their region changes, where a finger lands on the picture under zoom, the two touch modes, input merged and stamped with the computer's
 // clock, frames acknowledged once decoded, and a stream counted lost after a few silent seconds. screen-view.tsx draws it.
 
+import { chooseVia, needsProof, pathRows, startRefusal, viaText, type PathInfo, type RelayInfo, type ViaId } from "./screen-paths";
+
 export const MEDIA = 0x01;
 export const KIND_VIDEO = 1;
 export const KIND_TILE = 2;
@@ -686,14 +688,15 @@ export interface TargetRow {
 }
 
 export type Reply =
-  | { t: "ack"; result?: string; sc?: string; title?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[] }
+  | { t: "ack"; result?: string; sc?: string; title?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string }
   | { t: "error"; code: string; message: string }
   | { t: "offline" }
   | { t: "unknown" };
 
 export interface ScreenPort {
   targets(): Promise<Reply>;
-  start(target: string): Promise<Reply>;
+  /** `via`: the way chosen (null: the computer does not offer a choice). `recheck`: the passkey assertion a start through the relay needs. */
+  start(target: string, via: ViaId | null, recheck?: Record<string, unknown>): Promise<Reply>;
   stop(sc: string): Promise<Reply>;
   text(sc: string, text: string, st: number): Promise<Reply>;
   rebind(sc: string): Promise<Reply>;
@@ -705,6 +708,14 @@ export interface ScreenPort {
   sharpen(sc: string, rect: Rect): void;
   /** The connection is checked now, and made again when it is gone, leaving one being made to finish (`Link.nudge`). */
   kick(): void;
+  /** The way this phone's connection takes now, and whether this app came from the relay (the only way it can reach the computer). */
+  route(): "direct" | "relay";
+  hosted(): boolean;
+  /** The way chosen last for this pairing, and keeping a new choice. */
+  remembered(): ViaId | null;
+  remember(via: ViaId): void;
+  /** The person's Face ID over the screen's challenge: the assertion `sc_start` takes as `recheck`; null when they did not give it. */
+  proof(target: string): Promise<Record<string, unknown> | null>;
   serverNow(): number;
   now(): number;
   setTimeout(fn: () => void, ms: number): unknown;
@@ -749,9 +760,15 @@ export interface ScreenState {
   age: number | null;
   /** Frozen: the seconds the computer still keeps the screen for this phone while it reconnects. */
   graceLeft: number | null;
+  /** The ways the computer lists for the screen, the relay's name, and the one chosen (`pick`; null paths: a computer that offers no choice). */
+  paths: PathInfo[] | null;
+  relay: RelayInfo | null;
+  via: ViaId;
+  /** The way the computer used for the screen that started (`ack.via`). */
+  usedVia: string | null;
 }
 
-const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null, stuck: false, t0: null, age: null, graceLeft: null });
+const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null, stuck: false, t0: null, age: null, graceLeft: null, paths: null, relay: null, via: "auto", usedVia: null });
 
 /** Why a screen ended, in the phone's words; the reason codes are the daemon's and the helper's. */
 export function endedText(reason: string, t: (s: string) => string): string {
@@ -768,6 +785,10 @@ export function endedText(reason: string, t: (s: string) => string): string {
       return t("Stopped after 10 minutes with nothing done.");
     case "link_lost":
       return t("The connection was lost for too long.");
+    case "route_changed":
+      return t("The connection now goes another way: see the screen again.");
+    case "relay_budget_spent":
+      return t("This month's screen allowance through the relay is used up. It starts again next month, or use Tailscale.");
     case "replaced":
       return t("Another screen was opened instead.");
     case "display_changed":
@@ -823,9 +844,11 @@ export function qualityText(s: Stats | null, t: (s: string) => string): string {
 }
 
 /** The details line: the way, the round trip, the rate, the frames, the size and the pictures' age: `Tailscale · 85 ms · 1200 kbps · 30 fps · 1080p · 120 ms old`. */
-export function detailsText(s: Stats | null, path: string | null, age: number | null, t: (s: string, vars?: Record<string, string | number>) => string): string {
+export function detailsText(s: Stats | null, path: string | null, age: number | null, t: (s: string, vars?: Record<string, string | number>) => string, via: string | null = null): string {
   const parts: string[] = [];
-  if (path) parts.push(path);
+  // The way the computer says it used, else the phone's own reading of its connection.
+  const way = viaText(via, t) ?? path;
+  if (way) parts.push(way);
   const rtt = s?.stages?.ack_rtt_ms_p50;
   if (typeof rtt === "number") parts.push(t("{ms} ms round trip", { ms: Math.round(rtt) }));
   if (typeof s?.kbps === "number") parts.push(`${Math.round(s.kbps)} kbps`);
@@ -885,29 +908,52 @@ export class ScreenSession {
     this.set(fresh());
     const r = await this.port.targets();
     if (this.phase() !== "pick") return;
-    if (r.t === "ack") this.patch({ targets: r.targets ?? [] });
-    else this.patch({ targets: [], message: r.t === "error" ? r.message : this.t("Not connected.") });
+    if (r.t === "ack") {
+      const paths = r.paths ?? null;
+      const relay = r.relay ?? null;
+      const via = chooseVia(pathRows(paths, relay, { hosted: this.port.hosted() }, this.t), this.port.remembered());
+      this.patch({ targets: r.targets ?? [], paths, relay, via });
+    } else this.patch({ targets: [], message: r.t === "error" ? r.message : this.t("Not connected.") });
+  }
+
+  /** The way to connect, chosen in the list; kept for the next time on this pairing. */
+  choosePath(via: ViaId) {
+    if (this.state?.phase !== "pick" || !this.state.paths?.some((p) => p.id === via)) return;
+    this.patch({ via });
+    this.port.remember(via);
   }
 
   async pick(target: string) {
     if (this.state?.phase !== "pick") return;
+    const via = this.state.paths ? this.state.via : null;
     this.patch({ phase: "starting", message: null });
     this.early = 0;
     this.earlyKey = false;
-    const r = await this.port.start(target);
+    // Through the relay the computer wants the person's Face ID for this very screen, asked for now, while the tap that started it is fresh.
+    let recheck: Record<string, unknown> | undefined;
+    if (via && needsProof(via, this.port.route())) {
+      const proof = await this.port.proof(target);
+      if (this.phase() !== "starting") return;
+      if (!proof) {
+        this.patch({ phase: "pick", message: this.t("Not verified, so the screen was not started. Try again when you are ready.") });
+        return;
+      }
+      recheck = proof;
+    }
+    const r = await this.port.start(target, via, recheck);
     if (this.phase() !== "starting") {
       // Closed while the computer was starting it (the person left the app): it would go on capturing with nobody watching.
       if (r.t === "ack" && r.sc) void this.port.stop(r.sc);
       return;
     }
     if (r.t !== "ack" || !r.sc) {
-      this.patch({ phase: "pick", message: r.t === "error" ? r.message : this.t("Not connected.") });
+      this.patch({ phase: "pick", message: r.t === "error" ? startRefusal(r.code, r.message, this.t) : this.t("Not connected.") });
       return;
     }
     const now = this.port.now();
     this.heardAt = this.mediaAt = this.decodedAt = now;
     this.ages = [];
-    this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", encoder: r.encoder ?? "hw", t0: typeof r.t0 === "number" ? r.t0 : null });
+    this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", encoder: r.encoder ?? "hw", t0: typeof r.t0 === "number" ? r.t0 : null, usedVia: r.via ?? null });
     if (this.early) this.port.ack(r.sc, this.early);
     this.early = 0;
     if (this.earlyKey) {
@@ -1049,7 +1095,7 @@ export class ScreenSession {
     if (r.t === "ack") {
       this.heardAt = this.mediaAt = this.decodedAt = this.port.now();
       this.patch({ phase: "live", graceLeft: null });
-    } else if (r.t === "error") this.ended(endedText("link_lost", this.t));
+    } else if (r.t === "error") this.ended(endedText(r.code === "route_changed" ? "route_changed" : "link_lost", this.t));
   }
 
   close() {

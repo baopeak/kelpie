@@ -60,5 +60,7 @@
   "Reconnecting… the computer keeps this screen for {s} s more. Nothing is sent until the picture is back.": "Đang kết nối lại… máy tính còn giữ màn hình này thêm {s} giây. Không gửi gì cho đến khi hình ảnh trở lại.",
   "Sharpen": "Làm nét",
   "{ms} ms round trip": "khứ hồi {ms} ms",
-  "{ms} ms old": "trễ {ms} ms"
+  "{ms} ms old": "trễ {ms} ms",
+  "The connection now goes another way: see the screen again.": "Kết nối giờ đi theo một đường khác, vì vậy bạn hãy mở lại màn hình.",
+  "This month's screen allowance through the relay is used up. It starts again next month, or use Tailscale.": "Hạn mức xem màn hình qua relay của tháng này đã dùng hết. Hạn mức sẽ có lại vào tháng sau, hoặc bạn có thể dùng Tailscale."
 }

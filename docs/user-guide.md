@@ -1120,7 +1120,7 @@ while the relay serves it, else this network.
 | Way | Needs | Allows | Trusts |
 | --- | --- | --- | --- |
 | *Tailscale* | Tailscale on this computer and on the phone, with *Reach this computer with Tailscale* on | Reading, typing, approvals and starting agents from anywhere; the screen and browser panes too, once you allow control for the phone and its app lock is on | This computer, which serves the app, and Tailscale |
-| *Kelpie's relay* (*Your relay at …* for another relay) | The relay on and serving the phone app | Reading, typing, approvals and starting agents from anywhere; never the screen or browser panes | Whoever deploys the relay's app (see *What the hosted app trusts* below) |
+| *Kelpie's relay* (*Your relay at …* for another relay) | The relay on and serving the phone app | Reading, typing, approvals and starting agents from anywhere; the screen only once you allow it through the relay, and never browser panes | Whoever deploys the relay's app (see *What the hosted app trusts* below) |
 | *This network* | The same Wi-Fi as this computer, with *Pair browsers on this network* on | Reading, typing, approvals and starting agents over HTTPS with your certificate, reading only over plain HTTP; the screen and browser panes only over HTTPS, once you allow control and the app lock is on | This computer and your certificate; over plain HTTP, also everyone on the network not to swap the page |
 
 Each way pairs the phone as a device of its own, with its own key, page and permission. A browser keeps its pairing per address, so the
@@ -1153,10 +1153,25 @@ When the phone uses the relay's app and this computer also has Tailscale, that c
    the first choice, and *Allow reading and typing*; confirming comes next, as below.
 4. The phone then asks to set up its app lock with Face ID, a fingerprint or its passcode. Do it right away (see *The app lock* below).
 
-**What a phone on the hosted app may do.** It can read your sessions and, if you allow it, type into them. It is never given *May take
-control* (Settings does not offer it, and the computer refuses it), so it cannot take over a browser pane or see and drive the computer's
-screen; those stay with Tailscale or your own HTTPS address. Its app lock is always on, even with *Lock Kelpie on phones* turned off. A
-phone gets alerts like any other (the hosted app's Settings, *Turn on alerts*), and the link in an alert opens the hosted app.
+**What a phone on the hosted app may do.** It can read your sessions and, if you allow it, type into them. It never takes over a browser
+pane. It can see and drive the computer's screen only once you turn on *See and control the screen without Tailscale* (below); then
+Settings offers it *May take control (screen only)*, and each screen asks for Face ID on the phone. Its app lock is always on, even with
+*Lock Kelpie on phones* turned off. A phone gets alerts like any other (the hosted app's Settings, *Turn on alerts*), and the link in an
+alert opens the hosted app.
+
+**Seeing the screen without Tailscale.** Settings → Mobile → *See and control the screen without Tailscale* is off by default. Turned on (your
+computer asks you to verify), a phone you allow to take control can see and use this computer's screen through the relay, as Chrome Remote
+Desktop does through Google's servers. **Using Kelpie's relay for the screen means trusting whoever operates it**, as Chrome Remote Desktop
+means trusting Google: someone who can change what the relay serves could see and control this computer while your phone is unlocked and you
+approve Face ID. Protect the operator's GitHub and Cloudflare accounts with two-factor sign-in. To be your own operator, run your own relay
+([self-hosting the relay](relay-self-host.md)). What keeps it in check: every screen through the relay needs Face ID (or the phone's passkey)
+on the phone at its start, the app lock must be on and unlocked, the orange border and the stop hotkey stay, 10 minutes with nothing done
+end it, the audit log says each screen's way (`monitor via relay`), and turning the switch off ends every screen through the relay within a
+second. A screen through the relay goes over the relay's own connection, at most 500 kbps and 1 GB a month (Settings → Mobile → Advanced
+shows this month's use), so that the relay's monthly allowance stays for the link itself; once that is used up, the screen through the relay
+stops until next month. Through the relay the phone lists windows by their program, never by their titles. A screen started over Tailscale
+ends if the phone comes back through the relay (and the other way round): see it again, with Face ID through the relay. Under Advanced, *Ways the screen may connect*
+can turn any way off.
 
 **The relay is always in the path.** The hosted app has no direct route to this computer, even on the same Wi-Fi: every message goes
 through the relay, end-to-end encrypted, so the phone needs the internet and the relay must be up. If it is not, the app says
@@ -1178,9 +1193,10 @@ computer's settings, bypass mode included, so that code could do that too. What 
   could claim any.
 - **The app lock is checked by your computer.** A key copied by changed code reaches nothing, and changed code acts only while you have the
   app unlocked; while it is unlocked it can see and send whatever that phone may.
-- **Typing is the ceiling.** Changed code cannot drive the computer's screen or a browser pane, but it can type into the terminals and chats the
-  phone may write to, and so run commands through a session, and it can start agents in your projects with your desktop settings, bypass mode
-  included. Allow typing only on phones you would trust at your keyboard.
+- **Typing is the ceiling, unless you allow the screen.** Changed code cannot drive a browser pane, and it cannot drive the computer's screen
+  while *See and control the screen without Tailscale* is off; with it on, it could, once you approve Face ID for a screen. It can type into the
+  terminals and chats the phone may write to, and so run commands through a session, and it can start agents in your projects with your
+  desktop settings, bypass mode included. Allow typing only on phones you would trust at your keyboard.
 - **The relay itself** sees that a phone and this computer are connected, their internet addresses, when and how much they send, and the
   room's number, never what is said. While this computer is on Tailscale, the room is also told its Tailscale address, as a page it lets
   in. It keeps no logs of what passes.
@@ -1375,7 +1391,8 @@ On the computer an orange border goes around what is shared, with a badge naming
 with *Stop*. **Ctrl+Alt+Shift+K stops it from anywhere**; it is always on (you can pick another key in Settings → Mobile → Advanced, not turn it off, and Kelpie
 tells you if another program holds it). Stop on the phone ends it too, and so do 10 minutes with nothing done, the phone locking or leaving the app (at once,
 with no grace), removing the phone or lowering what it may do (within a second), and closing the shared window. It needs the Kelpie app open on the computer (the phone says so otherwise), works over Tailscale or your HTTPS
-address and never through the relay, and one phone at a time. If the computer is very busy a new screen waits, and after five very busy minutes the picture
+address, or through the relay once you allow it (*Seeing the screen without Tailscale* above), and one phone at a time. Before it starts the
+phone asks which way to connect (*Automatic*, Tailscale, or the relay), says which are available now and why not, and remembers your choice. If the computer is very busy a new screen waits, and after five very busy minutes the picture
 pauses until you tap it. The phone says when the computer is locked, when a Windows security prompt (UAC) is up, when an app running as administrator is in
 front, and when the window is minimized: those cannot be seen or answered from the phone. What is typed or clicked is not recorded anywhere: *What phones
 did* says which program was shared (such as `Code.exe`, never the window's title) or that it was a whole screen, when, and why it ended.

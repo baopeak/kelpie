@@ -33,6 +33,8 @@ const RESET_WINDOW: Duration = Duration::from_secs(300);
 const FAILURES_PER_MINUTE: usize = 10;
 /// How far ahead a dangerous approval's assertion may hold.
 const RECHECK_MAX_MS: u64 = 120_000;
+/// How far ahead a screen's passkey check may expire: it is asked for just before the screen starts.
+const SCREEN_RECHECK_MAX_MS: u64 = 60_000;
 
 /// What a connection's lock goes by, from who it is and how it came.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +83,8 @@ pub struct LockMemory {
     /// Until when a device may set up a passkey.
     resets: Mutex<HashMap<String, Instant>>,
     failures: Mutex<HashMap<String, VecDeque<Instant>>>,
+    /// The screens' passkey checks used, with when each expires: each is good once.
+    screen_checks: Mutex<Vec<([u8; 32], u64)>>,
 }
 
 impl LockMemory {
@@ -400,6 +404,43 @@ impl Mobile {
         self.keep_count(device, count);
         self.audit.add(device, "recheck", "");
         Ok(())
+    }
+
+    /// A new screen through the relay: the passkey checked again with user verification (Face ID) over this screen's own challenge
+    /// (`webauthn::recheck_challenge("screen:" + target, via, expiry)`), at most a minute ahead, and used once. Blocking, as `lock_unlock` is.
+    pub(super) fn screen_recheck(&self, device: &str, proof: &Value, target: &str, via: &str) -> super::screen_policy::Uv {
+        use super::screen_policy::Uv;
+        if !proof.is_object() {
+            return Uv::Missing;
+        }
+        if !self.lock_attempt_allowed(device) {
+            return Uv::Stale;
+        }
+        let now = now_millis();
+        let Some(expiry) = proof["expiry"].as_u64().filter(|e| *e > now && *e <= now + SCREEN_RECHECK_MAX_MS) else { return Uv::Stale };
+        let challenge = webauthn::recheck_challenge(&format!("screen:{target}"), via, expiry);
+        {
+            let mut used = self.lock_memory.screen_checks.lock();
+            used.retain(|(_, e)| *e > now);
+            if used.iter().any(|(c, _)| *c == challenge) {
+                return Uv::Replayed;
+            }
+        }
+        match self.check_passkey(device, proof, &challenge) {
+            Ok(count) => {
+                // Taken as used before anything else may look: a second start with the same check, on any connection, is a replay.
+                let mut used = self.lock_memory.screen_checks.lock();
+                if used.iter().any(|(c, _)| *c == challenge) {
+                    return Uv::Replayed;
+                }
+                used.push((challenge, expiry));
+                drop(used);
+                self.keep_count(device, count);
+                self.audit.add(device, "recheck", "screen");
+                Uv::Fresh
+            }
+            Err(_) => Uv::Stale,
+        }
     }
 
     /// `device` is locked from now on: its control stops first, then its connection hears.

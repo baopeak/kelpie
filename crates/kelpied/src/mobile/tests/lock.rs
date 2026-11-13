@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::mobile::risk;
+use crate::mobile::screen_policy::Via;
 use crate::mobile::webauthn::soft::Authenticator;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
@@ -1264,18 +1265,23 @@ async fn a_hosted_phone_is_locked_with_the_lock_off_and_may_set_up_its_passkey_t
 }
 
 #[tokio::test]
-async fn a_hosted_phone_never_goes_past_typing() {
+async fn a_hosted_phone_goes_past_typing_only_for_the_screen_once_it_is_allowed_through_the_relay() {
     let mut r = rig();
     let held = r.daemon.clone();
     let m = &held.mobile;
     let device = hosted(&r.daemon);
-    assert_eq!(record_ceiling(&device, true), Permission::Write);
+    let off = store::ScreenOptions::default();
+    let on = store::ScreenOptions { remote: true, ..store::ScreenOptions::default() };
+    assert_eq!(record_ceiling(&device, true, &off), Permission::Write);
     let mut with_passkey = device.clone();
     with_passkey.lock = Some(store::LockCredential { cred_id: "c".into(), spki: "s".into(), origin: HOSTED.into(), sign_count: 0, created_at: 0, mac: String::new() });
-    assert_eq!(record_ceiling(&with_passkey, true), Permission::Write, "not even with its passkey and the lock on");
-    assert!(!page_may_control(&with_passkey, true));
+    assert_eq!(record_ceiling(&with_passkey, true, &off), Permission::Write, "not even with its passkey and the lock on, while the screen is off through the relay");
+    assert_eq!(record_ceiling(&with_passkey, true, &on), Permission::Control, "with it on: for the screen");
+    assert_eq!(record_ceiling(&with_passkey, false, &on), Permission::Write, "never with the lock off");
+    assert_eq!(record_ceiling(&device, true, &on), Permission::Write, "never without a passkey");
+    assert!(!page_may_control(&with_passkey, true), "a pane's takeover: never");
     let refused = m.raise_prompt("phone", Permission::Control).unwrap_err().to_string();
-    assert_eq!(refused, "a phone using the hosted app can read and type; taking control needs Tailscale or this computer's own HTTPS address");
+    assert!(refused.starts_with("a phone using the hosted app can read and type; it may see and control the screen only with"), "{refused}");
     assert!(m.raise_prompt("phone", Permission::Write).unwrap().is_none(), "typing it has");
     assert!(m.set_permission("phone", Permission::Control).is_err());
     // Unlocked, and asked with control whatever its connection says: takeover and the screen are refused.
@@ -1289,4 +1295,85 @@ async fn a_hosted_phone_never_goes_past_typing() {
     }
     assert!(!m.control_now("phone", LockPath::PasskeyAlways, Gate::Open, true));
     assert!(!m.control_held("phone"));
+}
+
+/// The rig's phone given control on its record, as the desktop would after verifying.
+fn controller(d: &Daemon) {
+    let key = d.mobile.mac_key(true).unwrap().unwrap();
+    let mut c = d.mobile.config.lock();
+    let phone = c.devices.iter_mut().find(|x| x.id == "phone").unwrap();
+    phone.permission = Permission::Control;
+    store::seal(phone, &key);
+}
+
+#[tokio::test]
+async fn the_screen_through_the_relay_needs_the_switch_and_a_fresh_face_id_used_once_and_stays_within_its_month() {
+    let (r, mut a) = enrolled().await;
+    controller(&r.daemon);
+    let m = &r.daemon.mobile;
+    let start = |via: Via, relay: bool, proof: &Value| m.screen_may_start("phone", true, relay, via, "m:1", proof).map_err(|(code, _)| code);
+    let soon = || now_millis() + 30_000;
+    // Over a direct link: today's rule, no Face ID.
+    assert_eq!(start(Via::Auto, false, &Value::Null), Ok((Via::Tailscale, None)));
+    // Through the relay: off by default.
+    assert_eq!(start(Via::Auto, true, &proof(&mut a, "screen:m:1", "relay", soon())), Err("screen_remote_off"));
+    assert!(!m.screen_held("phone", true, true));
+    m.set_screen(store::ScreenOptions { remote: true, ..m.screen_options() }).unwrap();
+    assert!(m.screen_held("phone", true, true), "a hold through the relay rests on the switch");
+    assert_eq!(start(Via::Auto, true, &Value::Null), Err("needs_face_id"));
+    assert_eq!(start(Via::Auto, true, &proof(&mut a, "screen:m:2", "relay", soon())), Err("needs_face_id"), "over another screen's challenge");
+    assert_eq!(start(Via::Auto, true, &proof(&mut a, "screen:m:1", "relay", now_millis() + 120_000)), Err("needs_face_id"), "more than a minute ahead");
+    let good = proof(&mut a, "screen:m:1", "relay", soon());
+    assert_eq!(start(Via::Auto, true, &good), Ok((Via::Relay, Some(store::RELAY_WS_KBPS))), "held to the relay WebSocket's rate");
+    assert_eq!(start(Via::Auto, true, &good), Err("needs_face_id"), "used once");
+    assert_eq!(start(Via::Tailscale, true, &good), Err("no_direct_link"));
+    // The month's allowance spent: refused before any Face ID is asked for.
+    m.count_relay_screen(u64::from(store::RELAY_WS_MONTH_MB) * 1024 * 1024);
+    assert!(m.relay_screen_spent());
+    assert_eq!(start(Via::Auto, true, &proof(&mut a, "screen:m:1", "relay", soon())), Err("relay_budget_spent"));
+    assert_eq!(m.screen_status()["relay_ws_used_mb"], store::RELAY_WS_MONTH_MB);
+    // Turned off again: holds through the relay let go; a direct one is untouched.
+    m.set_screen(store::ScreenOptions { remote: false, ..m.screen_options() }).unwrap();
+    assert!(!m.screen_held("phone", true, true) && m.screen_held("phone", true, false));
+    let audit = m.audit_entries(50).to_string();
+    assert!(audit.contains("screen without Tailscale: true (was false)") && audit.contains("screen without Tailscale: false (was true)"), "{audit}");
+}
+
+#[tokio::test]
+async fn a_hosted_phone_given_the_screen_goes_back_to_typing_when_the_switch_goes_off() {
+    let (r, _a) = enrolled().await;
+    let m = &r.daemon.mobile;
+    {
+        let key = m.mac_key(true).unwrap().unwrap();
+        let mut c = m.config.lock();
+        let phone = c.devices.iter_mut().find(|x| x.id == "phone").unwrap();
+        phone.kind = Kind::Pwa;
+        phone.page = Some(HOSTED.into());
+        phone.page_kind = Some(PageKind::Hosted);
+        store::seal(phone, &key);
+    }
+    assert!(m.raise_prompt("phone", Permission::Control).is_err(), "not while the screen is off through the relay");
+    m.set_screen(store::ScreenOptions { remote: true, ..m.screen_options() }).unwrap();
+    assert!(m.raise_prompt("phone", Permission::Control).unwrap().is_some(), "the desktop may raise it now, verified");
+    m.set_permission("phone", Permission::Control).unwrap();
+    assert_eq!(m.status(true)["devices"][0]["may_control"], true);
+    m.set_screen(store::ScreenOptions { remote: false, ..m.screen_options() }).unwrap();
+    assert_eq!(m.permission("phone"), Some(Permission::Write), "back to typing: a new grant, verified, gives it the screen again");
+}
+
+#[tokio::test]
+async fn screen_options_that_do_not_verify_are_off_through_the_relay_and_said_so() {
+    let r = rig();
+    let m = &r.daemon.mobile;
+    m.set_screen(store::ScreenOptions { remote: true, ..store::ScreenOptions::default() }).unwrap();
+    assert_eq!(m.screen_status()["doubted"], false);
+    m.config.lock().screen.as_mut().unwrap().relay_ws_month_mb = 1_000_000;
+    m.check_screen_options();
+    assert!(!m.screen_options().remote, "a file edited by another program turns nothing on");
+    assert_eq!(m.screen_options().relay_ws_month_mb, store::RELAY_WS_MONTH_MB, "and none of its values is taken: the defaults");
+    assert_eq!(m.screen_status()["doubted"], true);
+    assert_eq!(m.config.lock().screen.as_ref().map(|s| s.relay_ws_month_mb), Some(1_000_000), "and is not written over until the person sets it again");
+    assert!(m.requested_screen(&json!({"relay_ws_kbps": 4000})).is_err(), "the relay WebSocket is held to 500 kbps at most");
+    assert!(!m.screen_options().widened_by(&store::ScreenOptions::default()));
+    assert!(store::ScreenOptions::default().widened_by(&store::ScreenOptions { remote: true, ..store::ScreenOptions::default() }), "turning it on is verified");
 }

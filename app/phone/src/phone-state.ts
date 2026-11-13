@@ -24,15 +24,15 @@ import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneC
 import { browserReloadEnv, ShellReload, SHELL_CHANGED } from "./shell-reload";
 import { labelOf } from "./inbox-order";
 import { hadOldToken, store, wipeTypedText } from "./storage";
-import { lockGrace, vibrate } from "./prefs";
-import { computerBlock, isLocalHost, isTailscaleHost, livePath, pageMethod, screenWhy } from "./conn-path";
+import { lockGrace, rememberedVia, rememberVia, vibrate } from "./prefs";
+import { computerBlock, isLocalHost, isTailscaleHost, livePath, pageMethod, screenOffered, screenWhy } from "./conn-path";
 import { screenNow } from "./install-guide";
 import { afterFailedPairing, applyAddrs, movedTo, platformOf, relayMovedTo } from "./install-state";
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
 import { KIND_VIDEO, ScreenSession, type ScreenState } from "./screen";
-import { NEW_SESSION_API, SCREEN_API, SCREEN_FLOW_API, TAKEOVER_API } from "../../src/lib/attention";
+import { NEW_SESSION_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_REMOTE_API, TAKEOVER_API } from "../../src/lib/attention";
 import { newSessionRequest, optionsOutcome, sendStart, startOutcome, type OptionsResult, type StartResult } from "./start-session";
 
 // ---------- signals the views read ----------
@@ -91,7 +91,11 @@ export const canStartSessions = () => canType() && daemonApi() >= NEW_SESSION_AP
 /** A pane taken over, or being picked (null: none). */
 export const [takeover, setTakeover] = createSignal<TakeoverState | null>(null);
 /** This phone may see the computer's screen (the same rule as a pane's takeover, at a computer that has it). */
-export const canSeeScreen = () => device()?.permission === "control" && daemonApi() >= SCREEN_API;
+export const canSeeScreen = () => screenOffered({ older: daemonApi() < SCREEN_API, screen: screenWord(), permission: device()?.permission });
+/** What the computer says about the screen on this connection, from the level that says it. */
+function screenWord(): string | undefined {
+  return daemonApi() >= SCREEN_REMOTE_API ? device()?.screen : undefined;
+}
 /** The computer takes Sharpen (`sc_sharpen`). */
 export const canSharpen = () => daemonApi() >= SCREEN_FLOW_API;
 /** The computer is also published over Tailscale, as its last hello said. */
@@ -101,6 +105,7 @@ export const [computerOnTailscale, setComputerOnTailscale] = createSignal(false)
 export const screenWhyNow = () =>
   screenWhy({
     computer: daemonApi() > 0 ? computerBlock(device()?.control) : null,
+    screen: screenWord(),
     known: daemonApi() > 0, older: daemonApi() < SCREEN_API, hosted: HOSTED, permission: device()?.permission, route: route(), unlocked: lockShown().face === "open",
   }, t);
 /** The computer's screen seen from here, or being picked (null: none). Its media goes to the view directly (`onScreenMedia`), not through a signal. */
@@ -379,7 +384,7 @@ export { takeovers };
 
 const remoteScreens = new ScreenSession({
   targets: () => link.screens(),
-  start: (target) => link.scStart(target),
+  start: (target, via, recheck) => link.scStart(target, via, recheck),
   stop: (sc) => link.scStop(sc),
   text: (sc, text, st) => link.scText(sc, text, st),
   rebind: (sc) => link.scRebind(sc),
@@ -389,6 +394,17 @@ const remoteScreens = new ScreenSession({
   keyframe: (sc) => link.scKey(sc),
   sharpen: (sc, rect) => link.scSharpen(sc, rect),
   kick: () => link.nudge(),
+  route: () => route(),
+  hosted: () => HOSTED,
+  remembered: () => {
+    const id = currentPairing()?.deviceId;
+    return id ? rememberedVia(id) : null;
+  },
+  remember: (via) => {
+    const id = currentPairing()?.deviceId;
+    if (id) rememberVia(id, via);
+  },
+  proof: (target) => lock.screenProof(target),
   serverNow: () => link.serverNow(),
   now: () => Date.now(),
   setTimeout: (fn, ms) => setTimeout(fn, ms),

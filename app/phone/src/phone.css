@@ -207,6 +207,10 @@ a.btn { display: inline-block; text-decoration: none; color: inherit; }
 .takeover-entry { padding: 6px 12px; border-bottom: 1px solid var(--border); }
 .takeover-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); }
 .takeover-row-main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* Connect through: a radio per way, with whether it can be used and why not under its name. */
+.connect-row { border-bottom: 0; padding: 8px 0; }
+.connect-row.off { opacity: .65; cursor: default; }
+.connect-row .takeover-row-main { display: flex; flex-direction: column; }
 .takeover { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .takeover-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
 .takeover-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }

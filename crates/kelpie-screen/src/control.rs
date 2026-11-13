@@ -193,6 +193,8 @@ pub struct Bandwidth {
     /// a trend, and how many frames in flight mean the helper's own window is full.
     pub fps: u8,
     pub window: u32,
+    /// The most this stream may send (`set_cap`).
+    cap: u32,
 }
 
 /// Which rule cut the bitrate.
@@ -257,7 +259,14 @@ impl Bandwidth {
             wire: 1.0,
             fps: RUNGS[0].fps,
             window: MIN_WINDOW,
+            cap: MAX_KBPS,
         }
+    }
+
+    /// The most this stream may send, whatever the link carries (a way held to a rate): the rate is lowered to it now, and never raised past it.
+    pub fn set_cap(&mut self, kbps: u32) {
+        self.cap = kbps.clamp(MIN_KBPS, MAX_KBPS);
+        self.kbps = self.kbps.min(self.cap);
     }
 
     /// The round trip's floor over the last ten seconds (ms), once there is one.
@@ -445,8 +454,8 @@ impl Bandwidth {
                 self.up_wait = UP_WAIT_MS;
             }
         }
-        if now.saturating_sub(self.clean_since) >= self.up_wait && self.kbps < MAX_KBPS {
-            self.kbps = (self.kbps * 11 / 10).max(self.kbps + 50).min(MAX_KBPS);
+        if now.saturating_sub(self.clean_since) >= self.up_wait && self.kbps < self.cap {
+            self.kbps = (self.kbps * 11 / 10).max(self.kbps + 50).min(self.cap);
             self.last_up = Some(now);
             self.clean_since = now;
             return true;
@@ -1394,6 +1403,23 @@ mod tests {
         let mut k = Controller::new((3840, 2160), false, false, 0);
         k.bandwidth.kbps = 250;
         assert_eq!((k.params().w, k.params().h, k.params().degraded), (960, 540, true));
+    }
+
+    #[test]
+    fn a_capped_stream_starts_at_its_cap_and_never_climbs_past_it() {
+        let mut b = Bandwidth::new(0);
+        b.set_cap(500);
+        assert_eq!(b.kbps, 500);
+        let mut t = 0;
+        while t < 120_000 {
+            b.on_sent(t);
+            b.tick(0, t);
+            t += 500;
+        }
+        assert_eq!(b.kbps, 500, "ten clean seconds add nothing past the cap");
+        assert_eq!(b.rung(), 4, "500 kbps: 8 fps");
+        b.set_cap(10);
+        assert_eq!(b.kbps, MIN_KBPS, "never under the floor");
     }
 
     #[test]
