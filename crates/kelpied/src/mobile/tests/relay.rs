@@ -218,7 +218,7 @@ async fn with_the_relay_off_nothing_dials_out() {
     let network = relay_rig(&fake, true, false).await;
     assert!(tokio::time::timeout(Duration::from_secs(2), fake.accepted.recv()).await.is_err(), "no socket while it is off");
     assert!(network.rig.daemon.mobile.relay_endpoint().is_none());
-    let told: Value = serde_json::from_str(&addrs_message(&network.rig.daemon.mobile.addrs.borrow())).unwrap();
+    let told: Value = serde_json::from_str(&addrs_message(&network.rig.daemon.mobile.addrs.borrow(), true)).unwrap();
     assert!(!told["endpoints"].as_array().unwrap().iter().any(|e| e["t"] == "relay"), "phones are not told of a relay that is off: {told}");
 }
 
@@ -726,6 +726,12 @@ async fn a_hosted_phone_comes_only_from_its_page_and_its_alerts_lead_there() {
     say(&mut ws, 3, &mut session, json!({"caps": ["ack", "hb", "relay"], "resume": resume})).await;
     let hello = hear(&mut ws, 3, &mut session, &mut others).await.unwrap();
     assert_eq!((hello["type"].as_str(), hello["locked"].as_bool(), hello["device"]["permission"].as_str()), (Some("hello"), Some(false), Some("write")), "{hello}");
+    // Unlocked, the hosted page still hears only the relay: not the Tailscale name, this network's addresses or the computer's hostname.
+    let addrs = hear(&mut ws, 3, &mut session, &mut others).await.unwrap();
+    assert_eq!((addrs["type"].as_str(), addrs["partial"].as_bool(), addrs["list"].clone(), addrs.get("hostname")), (Some("addrs"), Some(true), json!([]), None), "{addrs}");
+    let endpoints = addrs["endpoints"].as_array().unwrap();
+    assert!(!endpoints.is_empty() && endpoints.iter().all(|e| e["t"] == "relay"), "{addrs}");
+    assert!(!d.mobile.addrs.borrow().list.is_empty(), "the computer has addresses it kept back");
     let refused = ask_slot(&mut ws, 3, &mut session, &mut others, subscription_from(ORIGIN, 1)).await;
     assert_eq!(refused["code"], "bad_origin", "the Tailscale page is not where this phone is: {refused}");
     let taken = ask_slot(&mut ws, 3, &mut session, &mut others, subscription_from(&hosted, 2)).await;

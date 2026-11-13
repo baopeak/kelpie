@@ -27,7 +27,7 @@ import { hadOldToken, store, wipeTypedText } from "./storage";
 import { lockGrace, vibrate } from "./prefs";
 import { computerBlock, isLocalHost, isTailscaleHost, livePath, pageMethod, screenWhy } from "./conn-path";
 import { screenNow } from "./install-guide";
-import { afterFailedPairing, movedTo, platformOf, relayMovedTo } from "./install-state";
+import { afterFailedPairing, applyAddrs, movedTo, platformOf, relayMovedTo } from "./install-state";
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
@@ -315,15 +315,15 @@ const link = new Link(browserEnv(), () => {
   addrs(m) {
     // Kept for a client that can dial another address (a page's origin cannot change; the native app's can). What this page can do with
     // them is say so when the computer's Tailscale origin is not where it is.
-    const known = m.endpoints ?? m.list.map((a) => ({ t: "lan", a }));
-    setMovedHost(movedHere(known));
     const p = currentPairing();
-    // `endpoints` is the whole list, the relay's included (or left out, when it was turned off); a computer from before sends the direct addresses only.
-    if (p && m.seq > p.addrsSeq) {
+    // `endpoints` is the whole list, the relay's included (or left out, when it was turned off); a computer from before sends the direct addresses
+    // only; a hosted or locked page hears the relay alone (`partial`).
+    const { known, keep } = applyAddrs(p ?? null, m, HOSTED);
+    setMovedHost(movedHere(known));
+    if (p && keep) {
       const relayBefore = JSON.stringify(p.endpoints.find((e) => e.t === "relay") ?? null);
-      const endpoints = m.endpoints ? known : [...known, ...p.endpoints.filter((e) => e.t !== "lan" && e.t !== "ts")];
-      void savePairing({ ...p, endpoints, addrsSeq: m.seq });
-      if (JSON.stringify(endpoints.find((e) => e.t === "relay") ?? null) !== relayBefore) refreshShell();
+      void savePairing({ ...p, ...keep });
+      if (JSON.stringify(keep.endpoints.find((e) => e.t === "relay") ?? null) !== relayBefore) refreshShell();
     }
   },
   relay(m) {

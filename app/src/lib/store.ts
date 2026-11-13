@@ -351,6 +351,9 @@ function createAppStore() {
     for (const id of [...requestInbox.keys()]) if (!subRequests().some((r) => r.id === id)) requestGone(id);
   }
 
+  /** What a phone's start says under its title, in Activity and in the desktop notification. */
+  const PHONE_START_BODY = () => t("Started from a phone with this computer's settings for the agent.");
+
   /** A phone's start in Activity: "{phone} started {agent} in {project}", which it opens. `what` is the audit log's own words, for a start
    *  whose session is gone by now (its agent and project are no longer known here). Returns the title. */
   function addPhoneStart(phone: string | undefined, sessionId: string | undefined, kind: string | undefined, projectId: string | null | undefined, what?: string): string {
@@ -360,7 +363,7 @@ function createAppStore() {
       kind || !what
         ? t("{phone} started {agent} in {project}", { phone: who, agent: kindInfo(kind ?? "").label, project: project?.name ?? t("a project") })
         : t("{phone} started {what}", { phone: who, what });
-    addInbox({ kind: "phone", title, body: t("Started from a phone with this computer's settings for the agent."), sessionId, projectId: projectId ?? undefined });
+    addInbox({ kind: "phone", title, body: PHONE_START_BODY(), sessionId, projectId: projectId ?? undefined });
     return title;
   }
 
@@ -555,6 +558,8 @@ function createAppStore() {
         // A phone started an agent here: said, and kept in Activity. The session is in the sidebar; it opens in a tab only when asked (Show).
         const text = addPhoneStart(p.name, p.id, p.kind, p.project_id);
         notify(text, { label: t("Show"), run: () => revealSession(p.id) }, 10000);
+        // And by the operating system when the window is not looking, as the person's notification settings allow.
+        if (!document.hasFocus()) void desktopNotify(text, PHONE_START_BODY(), "phone");
         // Its audit line went in before this was sent: reading the log back later does not show it again.
         update((s) => (s.phoneStartsSeen = Math.max(s.phoneStartsSeen ?? 0, Date.now())));
         break;

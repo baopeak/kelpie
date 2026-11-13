@@ -36,7 +36,7 @@ The JSON messages inside the session are the phone protocol, described in archit
 
 - `{type: "relay", url, ticket, token, expires}` from the computer, after the hello (and in `paired` as `relay`): this phone's token for the
   relay, base64url of 32 random bytes, good until `expires` (ms). The computer keeps only its SHA-256 and replaces it after 7 days.
-- `addrs` carries the relay as an endpoint while it is on, and leaves it out when it is turned off.
+- `addrs` carries the relay as an endpoint while it is on, and leaves it out when it is turned off. A page the relay hosts and a locked phone hear `addrs {partial: true}`: the relay alone, nothing of the computer's other addresses or its hostname (the hosted page still has the computer's name from its QR code, and the room is told the Tailscale origin among the pages it lets in).
 
 ## The relay
 
