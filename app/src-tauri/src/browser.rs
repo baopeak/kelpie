@@ -17,6 +17,7 @@
 pub(crate) mod agent;
 mod agent_cdp;
 mod agent_snapshot;
+mod native_shot;
 pub(crate) mod takeover;
 
 use std::collections::{HashMap, HashSet};
@@ -587,8 +588,11 @@ fn prune_shots(dir: &std::path::Path) {
     }
 }
 
+/// The page through the DevTools protocol, only while the pane is shown (as on macOS and Linux).
 #[cfg(windows)]
 async fn capture(wv: &tauri::Webview, clip: Option<Rect>) -> CmdResult<Vec<u8>> {
+    let (app, label) = (wv.app_handle().clone(), wv.label().to_string());
+    let hidden: Box<dyn FnOnce() -> bool + Send> = Box::new(move || app.state::<Takeovers>().hidden(&label));
     let mut params = json!({"format": "png"});
     if let Some(r) = clip {
         // Page.captureScreenshot clips in document coordinates; the picker reports the
@@ -596,7 +600,7 @@ async fn capture(wv: &tauri::Webview, clip: Option<Rect>) -> CmdResult<Vec<u8>> 
         params["clip"] = self::clip(r.x, r.y, r.width, r.height, 1.0);
         params["captureBeyondViewport"] = json!(true);
     }
-    let v = devtools(wv, "Page.captureScreenshot", params).await?;
+    let v = devtools_when(wv, "Page.captureScreenshot", params, Some(hidden)).await?;
     base64::engine::general_purpose::STANDARD.decode(v["data"].as_str().ok_or("no screenshot data")?).map_err(err)
 }
 
@@ -737,9 +741,16 @@ async fn test_input(_wv: &tauri::Webview, _method: &'static str, _params: Value)
     Err("not available on this platform yet".into())
 }
 
+/// Whether panes can be pictured on this platform: through the DevTools protocol on Windows, WebKit's snapshots on macOS and Linux.
+pub(crate) const SCREENSHOTS: bool = cfg!(windows) || native_shot::AVAILABLE;
+
+/// WebKit's snapshot of the page (`native_shot`), only while the pane is shown; a `clip` outside the visible page comes from the whole
+/// document where WebKit pictures it (Linux), else is cut to the visible page (macOS).
 #[cfg(not(windows))]
-async fn capture(_wv: &tauri::Webview, _clip: Option<Rect>) -> CmdResult<Vec<u8>> {
-    Err("browser screenshots are not available on this platform yet".into())
+async fn capture(wv: &tauri::Webview, clip: Option<Rect>) -> CmdResult<Vec<u8>> {
+    let (app, label) = (wv.app_handle().clone(), wv.label().to_string());
+    let hidden: native_shot::Hidden = Box::new(move || app.state::<Takeovers>().hidden(&label));
+    native_shot::take(wv, clip.map(|r| [r.x, r.y, r.width, r.height]), 1.0, None, Some(hidden), native_shot::TIMEOUT).await
 }
 
 #[cfg(test)]

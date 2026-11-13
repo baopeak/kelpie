@@ -150,10 +150,11 @@ describe("the sites a share records", () => {
 describe("what an agent can do in a pane", () => {
   const all = { trustedInput: true, screenshot: true, network: true };
 
-  it("has trusted input, screenshots and the network list on Windows only", () => {
+  it("has trusted input and the network list on Windows only, screenshots everywhere", () => {
     expect(browserFeatures(true)).toEqual({ trustedInput: true, screenshot: true, network: true });
-    expect(browserFeatures(false)).toEqual({ trustedInput: false, screenshot: false, network: false });
-    expect(paneCapabilities(true, browserFeatures(false))).toEqual({ input: "synthetic", screenshot: false, network: false });
+    expect(browserFeatures(false)).toEqual({ trustedInput: false, screenshot: true, network: false });
+    expect(paneCapabilities(true, browserFeatures(false))).toEqual({ input: "synthetic", screenshot: true, network: false });
+    expect(paneCapabilities(false, browserFeatures(false))).toEqual({ input: "synthetic", screenshot: false, network: false });
     expect(BROWSER_FEATURES).toEqual(browserFeatures(isWindows));
   });
 
@@ -166,8 +167,9 @@ describe("what an agent can do in a pane", () => {
 describe("the tabs an agent is shown", () => {
   it("writes one line per pane", () => {
     const panes = [pane("dev", { title: "Studio", url: "http://localhost:5173/", shown: true }), pane("mine", { title: 'Say "hi"\n', url: "https://a.example/", kind: "shared", held: true })];
+    // On macOS and Linux: screenshots of the tab shown.
     expect(tabsReply(panes, browserFeatures(false)).text.split("\n")).toEqual([
-      'dev "Studio" http://localhost:5173/ — opened by you, shown, input: synthetic, screenshot: no, network: no',
+      'dev "Studio" http://localhost:5173/ — opened by you, shown, input: synthetic, screenshot: yes, network: no',
       'mine "Say \\"hi\\"" https://a.example/ — shared, background tab, input: synthetic, screenshot: no, network: no, a phone controls it',
     ]);
     // On Windows: trusted input and screenshots in the tab shown, the network list in both.

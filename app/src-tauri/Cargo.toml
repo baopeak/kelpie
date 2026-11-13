@@ -53,9 +53,20 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Linux: the freedesktop Secret Service (GNOME Keyring, KWallet) over D-Bus, as in kelpie-proto.
+# macOS: browser pane screenshots through WKWebView's snapshots (browser/native_shot.rs); the versions wry already uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+block2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSObject", "NSString", "NSValue"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSResponder", "NSView", "NSWindow"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "objc2-app-kit", "block2", "WKSnapshotConfiguration", "WKWebView"] }
+
+# Linux: the freedesktop Secret Service (GNOME Keyring, KWallet) over D-Bus, as in kelpie-proto. Browser pane screenshots through
+# WebKitGTK's snapshots, encoded with gdk-pixbuf (browser/native_shot.rs); the versions wry already uses.
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+webkit2gtk = "2.0.2"
+gtk = "0.18"
 
 [features]
 # Test-only: lets the end-to-end tests point the updater at a local server and skip the

@@ -18,10 +18,10 @@ export interface BrowserFeatures {
   network: boolean;
 }
 
-/** What the app can do in a pane on a platform: Windows drives its panes through the DevTools protocol; elsewhere input is synthetic and
- *  there are no screenshots or network list yet. */
+/** What the app can do in a pane on a platform: Windows drives its panes through the DevTools protocol; elsewhere input is synthetic,
+ *  screenshots are WebKit's snapshots and there is no network list yet. */
 export function browserFeatures(windows: boolean): BrowserFeatures {
-  return { trustedInput: windows, screenshot: windows, network: windows };
+  return { trustedInput: windows, screenshot: true, network: windows };
 }
 
 /** The one place that says what this build can do, on the platform it runs on. */

@@ -1,4 +1,5 @@
-"""Minimal GUI smoke of an app build: boots, opens a shell, types `echo hello`, sees the output, closes.
+"""Minimal GUI smoke of an app build: boots, opens a shell, types `echo hello`, sees the output, closes; then pictures a local page in a
+browser pane through the app's `browser_screenshot` (skipped where the platform has no screenshots).
 Records cold start and idle CPU / memory as numbers to compare with this platform's own baseline.
 
     python scripts/e2e/boot_smoke.py <scratch-dir> <app> [--out result.json] [--baseline baseline.json] [--idle 30]
@@ -238,6 +239,107 @@ def scenario(run, t_launch):
     daemon(d, "session.close", {"handle": handle})
     gone = until(lambda: not any(s["handle"] == handle for s in daemon(d, "session.list")), 10)
     run.check("the session closes", bool(gone))
+
+    browser_screenshot(run)
+
+
+# A page of colour and text, taller than the pane, so a picture of it is not a few hundred bytes of one colour.
+PAGE = (
+    "<!doctype html><html><head><title>Smoke page</title><style>"
+    "body{margin:0;height:2000px;font:16px sans-serif;background:linear-gradient(135deg,#d33,#33d 50%,#3b3)}"
+    "p{margin:0;padding:8px 12px;color:#fff}</style></head><body>"
+    + "".join(f"<p>Line {i}: the quick brown fox jumps over the lazy dog</p>" for i in range(40))
+    + "</body></html>"
+).encode()
+
+
+def serve_page():
+    """The page on a free port of this computer, in a thread; the server and whether the page was asked for."""
+    import http.server
+    import threading
+
+    asked = threading.Event()
+
+    class Page(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - the http.server name
+            asked.set()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(PAGE)))
+            self.end_headers()
+            self.wfile.write(PAGE)
+
+        def log_message(self, *_):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, asked
+
+
+def png_size(png):
+    """A PNG's width and height from its header; none for anything that is not a PNG."""
+    import struct
+
+    if len(png) < 24 or png[:8] != b"\x89PNG\r\n\x1a\n" or png[12:16] != b"IHDR":
+        return None
+    return struct.unpack(">II", png[16:24])
+
+
+def browser_screenshot(run):
+    """A browser pane on a local page, pictured through the app's own `browser_screenshot`: the visible page, a region of it and a region
+    below it (scrolled out of view). Skipped where the platform has no screenshots."""
+    import base64
+
+    d = run.d
+    label = "browser-smoke"
+    server, asked = serve_page()
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    try:
+        r = d.invoke("browser_open", {"label": label, "url": url, "rect": {"x": 40, "y": 80, "width": 640, "height": 400}})
+        run.check("a browser pane opens on a local page", "ok" in r, str(r.get("err", "")))
+        if "ok" not in r:
+            return
+        run.check("…and the page is asked for", asked.wait(20))
+
+        def shot(clip=None):
+            r = d.invoke("browser_screenshot", {"label": label, "clip": clip})
+            if "err" in r:
+                return r["err"], None
+            return None, base64.b64decode(r["ok"]["data"])
+
+        # The page draws a moment after it is asked for: until the picture is more than an empty pane.
+        state = {}
+
+        def drawn():
+            err, png = shot()
+            state["err"], state["png"] = err, png
+            return err is None and png is not None and len(png) > 4000
+
+        until(drawn, 20, 0.5)
+        if state.get("err") and "not available" in state["err"]:
+            print(f"browser screenshots: skipped ({state['err']})", flush=True)
+            return
+        png = state.get("png") or b""
+        size = png_size(png)
+        run.check("the pane's screenshot is a PNG of the page", size is not None and size[0] >= 300 and size[1] >= 200 and len(png) > 4000,
+                  f"{len(png)} bytes, size {size}, error {state.get('err')}")
+        for name, clip in (("a region of it", {"x": 20, "y": 30, "width": 200, "height": 100}),
+                           ("a region below the visible page", {"x": 20, "y": 1500, "width": 200, "height": 100})):
+            if sys.platform == "darwin" and clip["y"] >= 400:
+                continue  # WKWebView pictures only what is on screen
+            err, png = shot(clip)
+            size = png_size(png or b"")
+            # 200 × 100 CSS px, at the screen's scale.
+            ok = err is None and size is not None and size[0] >= 200 and abs(size[0] - 2 * size[1]) <= 2
+            run.check(f"…and of {name}", ok, f"error {err}, size {size}")
+        run.shot("02-browser-pane")
+    finally:
+        try:
+            d.invoke("browser_close", {"label": label})
+        except Exception:  # noqa: BLE001 - the app may be gone; the server still stops
+            pass
+        server.shutdown()
 
 
 def compare(baseline_path):
