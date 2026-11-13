@@ -158,7 +158,7 @@ impl Host {
         let hotkey_text = req["hotkey"].as_str().unwrap_or(crate::input::DEFAULT_HOTKEY).to_string();
         // The stop hotkey is always on: a screen is not shared without one that works.
         let hotkey = parse_hotkey(&hotkey_text).ok_or("the stop hotkey in Settings → Mobile is not one that can be used")?;
-        let opts = Opts { sc: sc.clone(), target, device, hotkey, hotkey_text, level: req["level"].as_u64().unwrap_or(0).min(3) as u8, tiles: req["tiles"].as_bool() != Some(false) };
+        let opts = Opts { sc: sc.clone(), target, device, hotkey, hotkey_text, level: req["level"].as_u64().unwrap_or(0).min(3) as u8, tiles: req["tiles"].as_bool() != Some(false), max_kbps: req["max_kbps"].as_u64().map(|k| k.clamp(u64::from(crate::control::MIN_KBPS), u64::from(crate::control::MAX_KBPS)) as u32) };
         let (cmds, cmd_rx) = channel();
         let (input, input_rx) = sync_channel(QUEUE);
         let (started_tx, started_rx) = channel();
@@ -294,6 +294,8 @@ struct Opts {
     hotkey_text: String,
     level: u8,
     tiles: bool,
+    /// The most the stream may send (kbps), for a way that is held to a rate (the relay WebSocket).
+    max_kbps: Option<u32>,
 }
 
 /// `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS`: added to every encode, to drive the ladder where there is no GPU worth measuring.
@@ -362,6 +364,9 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let now_ms = || started_at.elapsed().as_millis() as u64;
     let mut ctl = Controller::new(src, window, false, 0);
     ctl.set_level(opts.level, 0);
+    if let Some(cap) = opts.max_kbps {
+        ctl.bandwidth.set_cap(cap);
+    }
     let mut params: Params = ctl.params();
     let delay = test_delay();
     let mut encoder = match Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, true).or_else(|_| Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false)) {

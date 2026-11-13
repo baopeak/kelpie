@@ -44,6 +44,7 @@ import {
   type ScreenPort,
   type ScreenState,
 } from "./screen";
+import type { ViaId } from "./screen-paths";
 
 const bytes = (...b: number[]) => new Uint8Array(b);
 
@@ -252,7 +253,15 @@ describe("what fingers do", () => {
 });
 
 /** A computer that answers as told, and a clock this test moves. */
-function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "rebind", Reply>> = {}) {
+interface RigOptions {
+  route?: "direct" | "relay";
+  hosted?: boolean;
+  remembered?: ViaId | null;
+  /** What the person's Face ID gives: an assertion, or null when they did not give it. */
+  proof?: Record<string, unknown> | null;
+}
+
+function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "rebind", Reply>> = {}, opts: RigOptions = {}) {
   let now = 1000;
   const timers: { at: number; fn: () => void; id: number }[] = [];
   let nextId = 0;
@@ -265,9 +274,15 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
   const stopped: string[] = [];
   const kicks: number[] = [];
   const sharpened: { sc: string; rect: { x: number; y: number; w: number; h: number } }[] = [];
+  const starts: { target: string; via: ViaId | null; recheck?: Record<string, unknown> }[] = [];
+  const remembered: ViaId[] = [];
+  const proofs: string[] = [];
   const port: ScreenPort = {
     targets: async () => replies.targets ?? { t: "ack", targets: [{ id: "m:\\\\.\\DISPLAY1", kind: "monitor", title: "Screen 1", app: "", shortcut: null, w: 1920, h: 1080, minimized: false, primary: true }] },
-    start: async () => replies.start ?? { t: "ack", result: "ok", sc: "sc1", title: "main.rs — kelpie", kind: "window", encoder: "hw" },
+    start: async (target, via, recheck) => {
+      starts.push({ target, via, recheck });
+      return replies.start ?? { t: "ack", result: "ok", sc: "sc1", title: "main.rs — kelpie", kind: "window", encoder: "hw" };
+    },
     stop: async (sc) => {
       stopped.push(sc);
       return replies.stop ?? { t: "ack" };
@@ -283,6 +298,14 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
     keyframe: () => keyframes.push(now),
     sharpen: (sc, rect) => sharpened.push({ sc, rect }),
     kick: () => kicks.push(now),
+    route: () => opts.route ?? "direct",
+    hosted: () => opts.hosted ?? false,
+    remembered: () => opts.remembered ?? null,
+    remember: (via) => remembered.push(via),
+    proof: async (target) => {
+      proofs.push(target);
+      return opts.proof === undefined ? { expiry: 1, auth_data: "a", client_data: "c", signature: "s" } : opts.proof;
+    },
     serverNow: () => now + 5,
     now: () => now,
     setTimeout: (fn, ms) => {
@@ -308,7 +331,7 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
     now = end;
   };
   const s = new ScreenSession(port, (x) => states.push(x));
-  return { s, sent, acks, keyframes, resumed, texts, states, stopped, kicks, sharpened, advance, now: () => now };
+  return { s, sent, acks, keyframes, resumed, texts, states, stopped, kicks, sharpened, starts, remembered, proofs, advance, now: () => now };
 }
 
 describe("one screen from the phone", () => {
@@ -647,5 +670,98 @@ describe("a decoder that is behind", () => {
     const c = new Backlog();
     c.skip(0, 0);
     expect([3, 3, 3].map((n, i) => c.skip(n, 10 + i * 33))).toEqual([false, false, true]);
+  });
+});
+describe("choosing how the screen connects", () => {
+  const paths = [{ id: "auto", ok: true }, { id: "tailscale", ok: false, why: "no_direct_link" }, { id: "relay", ok: true }] as const;
+  const targets: Reply = { t: "ack", targets: [{ id: "w:1:2", kind: "window", title: "Code", app: "Code.exe", shortcut: "ide", w: 100, h: 100, minimized: false, primary: false }], paths: [...paths], relay: { ours: true, host: "relay.example" } };
+
+  it("preselects Automatic, or the way chosen last when it can be used, and keeps a new choice", async () => {
+    const plain = rig({ targets });
+    await plain.s.openPicker();
+    expect(plain.s.state).toMatchObject({ via: "auto", relay: { ours: true, host: "relay.example" } });
+    const kept = rig({ targets }, { remembered: "relay" });
+    await kept.s.openPicker();
+    expect(kept.s.state?.via).toBe("relay");
+    const gone = rig({ targets }, { remembered: "tailscale" });
+    await gone.s.openPicker();
+    expect(gone.s.state?.via, "a remembered way that cannot be used now is not preselected").toBe("auto");
+    kept.s.choosePath("auto");
+    expect(kept.s.state?.via).toBe("auto");
+    expect(kept.remembered).toEqual(["auto"]);
+    kept.s.choosePath("webrtc" as ViaId);
+    expect(kept.remembered, "a way the computer did not list is ignored").toEqual(["auto"]);
+  });
+
+  it("starts through Tailscale without Face ID, and says which way was used", async () => {
+    const r = rig({ targets, start: { t: "ack", result: "ok", sc: "sc1", title: "Code", kind: "window", via: "tailscale" } }, { route: "direct" });
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.proofs).toEqual([]);
+    expect(r.starts).toEqual([{ target: "w:1:2", via: "auto", recheck: undefined }]);
+    expect(r.s.state).toMatchObject({ phase: "live", usedVia: "tailscale" });
+  });
+
+  it("asks for Face ID over the screen before a start through the relay, and sends it with the start", async () => {
+    const r = rig({ targets, start: { t: "ack", result: "ok", sc: "sc1", title: "Code", kind: "window", via: "relay" } }, { route: "relay", hosted: true });
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.proofs).toEqual(["w:1:2"]);
+    expect(r.starts[0]).toMatchObject({ via: "auto", recheck: { auth_data: "a", signature: "s" } });
+    expect(r.s.state?.usedVia).toBe("relay");
+    const chosen = rig({ targets }, { route: "direct" });
+    await chosen.s.openPicker();
+    chosen.s.choosePath("relay");
+    await chosen.s.pick("w:1:2");
+    expect(chosen.proofs, "the relay chosen on a direct link needs it too").toEqual(["w:1:2"]);
+  });
+
+  it("does not start when Face ID was not given, and the person can try again", async () => {
+    const r = rig({ targets }, { route: "relay", proof: null });
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.starts).toEqual([]);
+    expect(r.s.state).toMatchObject({ phase: "pick" });
+    expect(r.s.state?.message).toMatch(/Not verified/);
+  });
+
+  it("says Face ID was needed, and shows the computer's words for the other refusals", async () => {
+    const face = rig({ targets, start: { t: "error", code: "needs_face_id", message: "Needs Face ID." } }, { route: "relay" });
+    await face.s.openPicker();
+    await face.s.pick("w:1:2");
+    expect(face.s.state).toMatchObject({ phase: "pick" });
+    expect(face.s.state?.message).toMatch(/Face ID did not reach your computer in time/);
+    for (const code of ["relay_budget_spent", "screen_remote_off"]) {
+      const r = rig({ targets, start: { t: "error", code, message: `computer says ${code}` } }, { route: "relay" });
+      await r.s.openPicker();
+      await r.s.pick("w:1:2");
+      expect(r.s.state?.message).toBe(`computer says ${code}`);
+    }
+  });
+
+  it("a computer that lists no ways is asked as before: no choice, no Face ID", async () => {
+    const r = rig({}, { route: "relay" });
+    await r.s.openPicker();
+    expect(r.s.state?.paths).toBeNull();
+    await r.s.pick("w:1:2");
+    expect(r.proofs).toEqual([]);
+    expect(r.starts).toEqual([{ target: "w:1:2", via: null, recheck: undefined }]);
+  });
+
+  it("a screen closed while Face ID is asked is not started", async () => {
+    const r = rig({ targets }, { route: "relay" });
+    await r.s.openPicker();
+    const starting = r.s.pick("w:1:2");
+    r.s.close();
+    await starting;
+    expect(r.starts).toEqual([]);
+  });
+
+  it("the details line names the way the computer used, else the phone's own", () => {
+    const t = (x: string) => x;
+    expect(detailsText({ kbps: 400 }, "this network", null, t, "relay")).toBe("the relay · 400 kbps");
+    expect(detailsText({ kbps: 400 }, "the relay", null, t, "tailscale")).toBe("Tailscale · 400 kbps");
+    expect(detailsText({ kbps: 400 }, "Tailscale", null, t, "webrtc")).toBe("Tailscale · 400 kbps");
+    expect(detailsText({ kbps: 400 }, "Tailscale", null, t)).toBe("Tailscale · 400 kbps");
   });
 });

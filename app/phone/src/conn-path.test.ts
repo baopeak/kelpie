@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computerBlock, isLocalHost, isTailscaleHost, livePath, methodLines, methodText, pageMethod, pairWay, pathText, screenBlock, screenWhy, tailscaleHint, type ScreenFacts } from "./conn-path";
+import { computerBlock, isLocalHost, isTailscaleHost, knownScreenReason, livePath, methodLines, methodText, pageMethod, pairWay, pathText, screenBlock, screenOffered, screenReasonText, screenReady, screenWhy, tailscaleHint, type ScreenFacts } from "./conn-path";
 
 const fill = (text: string, vars?: Record<string, string | number>) => (vars ? text.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m)) : text);
 const page = (url: string) => {
@@ -148,5 +148,51 @@ describe("where the screen is, from the hosted app", () => {
     expect(tailscaleHint("hosted", true, fill)).toMatch(/also has Tailscale.*Pair a phone → Tailscale/);
     expect(tailscaleHint("hosted", false, fill)).toBeNull();
     for (const m of ["tailscale", "https", "http", "local"] as const) expect(tailscaleHint(m, true, fill), m).toBeNull();
+  });
+});
+
+describe("what the computer says about the screen on this connection", () => {
+  const ok: ScreenFacts = { known: true, older: false, hosted: true, permission: "write", route: "relay", unlocked: true };
+  const REASONS = ["not_granted", "plain_page", "method_off", "no_direct_link", "not_on_relay", "screen_remote_off", "lock_off", "no_passkey", "locked", "needs_face_id", "relay_off", "relay_budget_spent", "hosted_app_no_tailscale"];
+
+  it("says each reason in words, and nothing for one it does not know", () => {
+    for (const code of REASONS) expect(screenReasonText(code, fill), code).toBeTruthy();
+    expect(screenReasonText("a_later_reason", fill)).toBeNull();
+    expect(screenReasonText("screen_remote_off", fill)).toBe("Turn on \"See and control the screen without Tailscale\" in Kelpie → Settings → Mobile.");
+    expect(screenReasonText("hosted_app_no_tailscale", fill)).toBe("This app came from the relay, so it can reach the computer only through the relay.");
+    expect(screenReasonText("no_direct_link", fill)).toMatch(/Tailscale is off on this phone or not reachable now/);
+  });
+
+  it("knows ok and the reasons, and is ready for ok and for Face ID alone", () => {
+    for (const code of ["ok", ...REASONS]) expect(knownScreenReason(code), code).toBe(true);
+    expect([knownScreenReason("later"), knownScreenReason(undefined), knownScreenReason(null)]).toEqual([false, false, false]);
+    expect(REASONS.filter(screenReady)).toEqual(["needs_face_id"]);
+    expect(screenReady("ok")).toBe(true);
+  });
+
+  it("a hosted phone is offered the screen when the computer says ok, else it gets the reason", () => {
+    expect(screenBlock({ ...ok, screen: "ok" })).toBeNull();
+    expect(screenWhy({ ...ok, screen: "ok" }, fill)).toBeNull();
+    expect(screenBlock({ ...ok, screen: "ok", unlocked: false }), "ok, and locked here since").toBe("lock");
+    expect(screenBlock({ ...ok, screen: "needs_face_id" })).toBeNull();
+    expect(screenWhy({ ...ok, screen: "screen_remote_off" }, fill)).toMatch(/See and control the screen without Tailscale.*Settings → Mobile/);
+    expect(screenWhy({ ...ok, screen: "no_passkey" }, fill)).toMatch(/app lock/);
+  });
+
+  it("goes by the old rules when the computer does not say, or says what this app does not know", () => {
+    expect(screenWhy(ok, fill)).toMatch(/comes from the relay/);
+    expect(screenWhy({ ...ok, screen: undefined }, fill)).toMatch(/comes from the relay/);
+    expect(screenWhy({ ...ok, screen: "a_later_reason" }, fill)).toMatch(/comes from the relay/);
+    expect(screenWhy({ ...ok, hosted: false, route: "direct", permission: "control", screen: null }, fill)).toBeNull();
+  });
+
+  it("offers the entry by the computer's word, and by the permission from one that does not say", () => {
+    expect(screenOffered({ older: false, screen: "ok", permission: "write" })).toBe(true);
+    expect(screenOffered({ older: false, screen: "needs_face_id", permission: "write" })).toBe(true);
+    expect(screenOffered({ older: false, screen: "screen_remote_off", permission: "control" })).toBe(false);
+    expect(screenOffered({ older: false, screen: undefined, permission: "control" })).toBe(true);
+    expect(screenOffered({ older: false, screen: undefined, permission: "write" })).toBe(false);
+    expect(screenOffered({ older: false, screen: "a_later_reason", permission: "control" })).toBe(true);
+    expect(screenOffered({ older: true, screen: "ok", permission: "control" })).toBe(false);
   });
 });

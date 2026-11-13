@@ -1,7 +1,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { describe, expect, it, vi } from "vitest";
 import { commandParts, escapeCommand, levelClass, levelText, tagText } from "./command-text";
-import { fromB64, LockModel, recheckChallenge, toB64, type Asserted, type Enrolled, type LockEnv } from "./lock";
+import { fromB64, LockModel, recheckChallenge, screenChallenge, toB64, type Asserted, type Enrolled, type LockEnv } from "./lock";
 import type { Outcome } from "./link";
 
 vi.mock("./i18n", () => ({ t: (s: string) => s }));
@@ -531,6 +531,38 @@ describe("a dangerous approval", () => {
     expect(await lock.recheck("r1", "ls")).toBeNull();
     expect(lock.error).toBeTruthy();
     expect(lock.asking).toBe(false);
+  });
+});
+
+describe("starting the screen through the relay", () => {
+  it("the challenge is a dangerous approval's, over this screen and the relay, until the time", () => {
+    expect(screenChallenge("w:1:2", 1000)).toEqual(recheckChallenge("screen:w:1:2", "relay", 1000));
+    expect(screenChallenge("w:1:3", 1000), "another screen").not.toEqual(screenChallenge("w:1:2", 1000));
+    expect(screenChallenge("w:1:2", 1001), "another time").not.toEqual(screenChallenge("w:1:2", 1000));
+    expect(screenChallenge("w:1:2", 1000), "not good for a dangerous approval").not.toEqual(recheckChallenge("w:1:2", "relay", 1000));
+  });
+
+  it("asks Face ID over it, by the computer's clock, within the minute the computer takes, and gives nothing when the person refuses", async () => {
+    const { lock, state, get } = rig();
+    lock.told({ state: "open", rp_id: "relay.example", cred_id: toB64(new Uint8Array([1])) });
+    lock.sawServerClock(state.now + 5000);
+    const proof = await lock.screenProof("m:DISPLAY1");
+    expect(proof?.expiry).toBe(state.now + 5000 + 45_000);
+    expect(Object.keys(proof!).sort()).toEqual(["auth_data", "client_data", "expiry", "signature"]);
+    const options = (get.mock.calls as unknown as [{ challenge: Uint8Array; rpId: string }][])[0][0];
+    expect(options.rpId).toBe("relay.example");
+    expect(options.challenge).toEqual(screenChallenge("m:DISPLAY1", proof!.expiry));
+    state.denied = "NotAllowedError";
+    expect(await lock.screenProof("m:DISPLAY1")).toBeNull();
+    expect(lock.error).toBeTruthy();
+    expect(lock.asking).toBe(false);
+  });
+
+  it("cannot ask before the computer has said which passkey", async () => {
+    const { lock, get } = rig();
+    expect(await lock.screenProof("m:DISPLAY1")).toBeNull();
+    expect(get).not.toHaveBeenCalled();
+    expect(lock.error).toBeTruthy();
   });
 });
 

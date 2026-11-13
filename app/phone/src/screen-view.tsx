@@ -5,12 +5,42 @@
 // browser offers one, and a frame the decoder is too far behind for is skipped. The cursor the finger moves is drawn at once (local echo).
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { avcChunk, Backlog, canDecode, clampView, detailsText, fitView, FrameTimes, followHostCursor, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
-import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens } from "./phone-state";
+import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens, route } from "./phone-state";
 import { pathText } from "./conn-path";
+import { needsProof, pathRows } from "./screen-paths";
+import { HOSTED } from "./hosted";
 import { t } from "./i18n";
 
 const KEY_LABELS: Record<(typeof KEYS)[number], string> = { Escape: "Esc", Tab: "⇥", Enter: "⏎", Backspace: "⌫", Delete: "Del", ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→", Home: "Home", End: "End", PageUp: "PgUp", PageDown: "PgDn", F5: "F5", ContextMenu: "☰", Meta: "⊞" };
 const MOD_LABELS: Record<Mod, string> = { ctrl: "Ctrl", shift: "Shift", alt: "Alt", meta: "Win" };
+
+/** The ways the computer lists for the screen, as the rows of Connect through (none from a computer that offers no choice). */
+const connectRows = () => pathRows(remoteScreen()?.paths, remoteScreen()?.relay, { hosted: HOSTED }, t);
+/** The way chosen can be used now (always, from a computer that offers no choice). */
+const startable = () => !connectRows().length || !!connectRows().find((r) => r.id === remoteScreen()?.via)?.ok;
+
+/** Connect through: Automatic, Tailscale and the relay, each with whether it can be used and why not. The choice is kept for this pairing. */
+function ConnectThrough() {
+  const s = () => remoteScreen()!;
+  return (
+    <Show when={connectRows().length}>
+      <h3 class="muted">{t("Connect through")}</h3>
+      <div class="connect-through" role="radiogroup" aria-label={t("Connect through")} data-connect-through>
+        <For each={connectRows()}>
+          {(r) => (
+            <label class="row connect-row" classList={{ off: !r.ok }} data-via={r.id} data-ok={String(r.ok)}>
+              <input type="radio" name="screen-via" checked={s().via === r.id} disabled={!r.ok || s().phase !== "pick"} onChange={() => remoteScreens.choosePath(r.id)} />
+              <span class="takeover-row-main">
+                <span>{r.label}<Show when={r.recommended}> <span class="chip" data-via-recommended>{t("Recommended")}</span></Show></span>
+                <span class="muted">{r.ok ? t("Available") : r.why}</span>
+              </span>
+            </label>
+          )}
+        </For>
+      </div>
+    </Show>
+  );
+}
 
 function Group(props: { title: string; rows: TargetRow[] }) {
   const s = () => remoteScreen()!;
@@ -22,9 +52,9 @@ function Group(props: { title: string; rows: TargetRow[] }) {
           <div class="row takeover-row" data-target={r.id}>
             <div class="takeover-row-main">
               <div>{r.title}</div>
-              <div class="muted">{r.kind === "monitor" ? `${r.w}×${r.h}${r.primary ? ` · ${t("main screen")}` : ""}` : r.app}{r.minimized ? ` · ${t("minimized")}` : ""}</div>
+              <div class="muted">{r.kind === "monitor" ? `${r.w}×${r.h}${r.primary ? ` · ${t("main screen")}` : ""}` : r.title === r.app ? "" : r.app}{r.minimized ? ` · ${t("minimized")}` : ""}</div>
             </div>
-            <button class="btn primary" disabled={s().phase !== "pick" || !connected()} onClick={() => void remoteScreens.pick(r.id)}>{t("See it")}</button>
+            <button class="btn primary" disabled={s().phase !== "pick" || !connected() || !startable()} onClick={() => void remoteScreens.pick(r.id)}>{t("See it")}</button>
           </div>
         )}
       </For>
@@ -41,6 +71,10 @@ function Picker() {
       <p class="muted">{t("Pick a screen or one window. The computer shows a border around what you see and can stop it at any time; Windows security prompts and the lock screen cannot be seen or answered from here.")}</p>
       <Show when={s().message}><p class="banner bad" role="status">{s().message}</p></Show>
       <Show when={s().targets} fallback={<p class="muted">{t("Asking the computer…")}</p>}>
+        <ConnectThrough />
+        <Show when={connectRows().length && needsProof(s().via, route())}>
+          <p class="muted" data-face-id-note>{t("Starting through the relay asks for Face ID once for the screen you pick.")}</p>
+        </Show>
         <Group title={t("Screens")} rows={rows((r) => r.kind === "monitor")} />
         <Group title={t("Kelpie and code editors")} rows={rows((r) => r.kind === "window" && !!r.shortcut)} />
         <Group title={t("Windows")} rows={rows((r) => r.kind === "window" && !r.shortcut)} />
@@ -335,7 +369,7 @@ function Live() {
           <button class="btn" data-screen-sharpen onClick={(e) => { e.stopPropagation(); sharpen(); }}>{t("Sharpen")}</button>
         </Show>
       </p>
-      <p class="muted screen-details" data-screen-details>{detailsText(s().stats, connected() ? pathText(livePathNow(), t) : null, s().age, t)}</p>
+      <p class="muted screen-details" data-screen-details>{detailsText(s().stats, connected() ? pathText(livePathNow(), t) : null, s().age, t, s().usedVia)}</p>
       <div class="composer">
         <div class="keybar">
           <For each={MODS}>{(m) => <button class="btn" classList={{ primary: mods().includes(m) }} aria-pressed={mods().includes(m)} disabled={!live()} onClick={() => toggleMod(m)}>{MOD_LABELS[m]}</button>}</For>

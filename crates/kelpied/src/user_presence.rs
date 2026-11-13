@@ -112,6 +112,8 @@ pub enum Prompt {
     Relay,
     /// Make this computer a new room at the relay.
     RelayRoom,
+    /// Let this computer's screen go more ways: through the relay, or by a way that was turned off.
+    RemoteScreen,
 }
 
 /// The languages the daemon's prompts are written in.
@@ -164,7 +166,9 @@ impl Prompt {
             (Prompt::Relay, Lang::En) => "Kelpie: let phones paired over Tailscale reach this computer through the relay, which carries what they say without being able to read it.".to_string(),
             (Prompt::RelayRoom, Lang::En) => "Kelpie: make a new room for this computer at the relay. Phones move to it by themselves, and the old room is removed.".to_string(),
             (Prompt::RelayRoom, Lang::Vi) => "Kelpie: tạo một phòng mới cho máy tính này trên relay. Điện thoại tự chuyển sang, và phòng cũ bị xóa.".to_string(),
-            (Prompt::Relay, Lang::Vi) => "Kelpie: cho phép các điện thoại đã ghép đôi qua Tailscale kết nối tới máy tính này qua relay, nơi chuyển tiếp dữ liệu mà không đọc được nội dung.".to_string(),
+            (Prompt::RemoteScreen, Lang::En) => "Kelpie: let your phones see and control this computer's screen without Tailscale, through the relay. Whoever runs the relay must be trusted with it; each phone still confirms with Face ID.".to_string(),
+        (Prompt::RemoteScreen, Lang::Vi) => "Kelpie: cho phép điện thoại của bạn xem và điều khiển màn hình máy tính này qua relay, không cần Tailscale. Bạn cần tin tưởng người vận hành relay, và mỗi lần điện thoại vẫn phải xác nhận bằng Face ID.".to_string(),
+        (Prompt::Relay, Lang::Vi) => "Kelpie: cho phép các điện thoại đã ghép đôi qua Tailscale kết nối tới máy tính này qua relay, nơi chuyển tiếp dữ liệu mà không đọc được nội dung.".to_string(),
         }
     }
 }
@@ -972,6 +976,7 @@ mod tests {
             Prompt::TelegramApprovals,
             Prompt::Relay,
             Prompt::RelayRoom,
+        Prompt::RemoteScreen,
         ];
         for p in &prompts {
             let (en, vi) = (p.text(Lang::En), p.text(Lang::Vi));

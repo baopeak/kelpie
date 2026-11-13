@@ -27,6 +27,8 @@ mod listen;
 mod lock;
 pub mod relay;
 pub mod risk;
+mod screen_access;
+pub(crate) mod screen_policy;
 mod store;
 mod sync;
 pub mod tailscale;
@@ -466,6 +468,8 @@ pub struct Mobile {
     relay: relay::Runtime,
     /// The app lock's windows, challenges and settings as checked (`lock`).
     lock_memory: LockMemory,
+    /// The screen's ways as checked, and its use of the relay (`screen_access`).
+    screen_memory: screen_access::ScreenMemory,
     /// A test on the only address it can bind holds this machine to the limits for an address.
     #[cfg(test)]
     loopback_is_remote: AtomicBool,
@@ -688,6 +692,7 @@ impl Mobile {
             tailscale_change: tokio::sync::Mutex::new(()),
             relay: relay::Runtime::default(),
             lock_memory: LockMemory::default(),
+            screen_memory: screen_access::ScreenMemory::default(),
             #[cfg(test)]
             loopback_is_remote: AtomicBool::new(false),
         };
@@ -704,6 +709,7 @@ impl Mobile {
     /// (called when the app looks and when such a phone connects).
     fn verify_devices(&self) {
         self.check_lock_options();
+        self.check_screen_options();
         if self.config.lock().devices.iter().all(|d| d.verified) {
             *self.key_unreadable.lock() = false;
             return;
@@ -1076,6 +1082,9 @@ impl Mobile {
         self.verify_devices();
         let key_unreadable = *self.key_unreadable.lock();
         let options = self.lock_options();
+        let screen = self.screen_options();
+        // Read before the store's lock is taken below: it takes it itself.
+        let screen_status = self.screen_status();
         let relay = self.relay_status();
         let open: HashMap<String, Value> = self.connections.lock().iter().map(|(id, o)| (id.clone(), json!({"route": o.route, "since": o.since}))).collect();
         let c = self.config.lock();
@@ -1103,7 +1112,7 @@ impl Mobile {
                 json!({
                     "id": d.id, "name": d.name, "permission": d.permission.name(), "kind": d.kind.name(), "can_write": d.permission >= Permission::Write,
                     "created_at": d.created_at, "last_seen": d.last_seen, "secure_origin": d.secure_origin, "push": d.push.is_some(), "alerts": d.alerts, "state": if d.verified { "ok" } else if key_unreadable { "unchecked" } else { "unverified" },
-                    "passkey": d.lock.is_some(), "lock_reset": lock_reset, "unlocked": unlocked, "may_control": d.verified && record_ceiling(d, options.on) == Permission::Control,
+                    "passkey": d.lock.is_some(), "lock_reset": lock_reset, "unlocked": unlocked, "may_control": d.verified && record_ceiling(d, options.on, &screen) == Permission::Control,
                     "page": d.page, "page_kind": d.page_kind.map(PageKind::name),
                     "connection": open.get(&d.id),
                 })
@@ -1116,6 +1125,7 @@ impl Mobile {
             "dormant_days": c.dormant_days.unwrap_or(store::DEFAULT_DORMANT_DAYS),
             "tailscale": {"on": c.tailscale, "origin": running.as_ref().and_then(|r| r.ts_origin.clone()), "to_remove": c.tailscale_remove},
             "lock": {"on": options.on, "idle_s": options.idle_s, "recheck": options.recheck, "plain_read": options.plain_read},
+            "screen": screen_status,
             "relay": relay,
             "app": app,
         })
@@ -1776,7 +1786,7 @@ impl Mobile {
         let c = self.config.lock();
         let d = c.devices.iter().find(|d| d.id == id).ok_or_else(|| anyhow!("no such device"))?;
         anyhow::ensure!(d.verified, "this device must be paired again");
-        anyhow::ensure!(permission <= record_ceiling(d, lock_on), "{}", ceiling_refusal(d, permission));
+        anyhow::ensure!(permission <= record_ceiling(d, lock_on, &self.screen_options()), "{}", ceiling_refusal(d, permission));
         Ok((permission > d.permission).then(|| crate::user_presence::Prompt::Raise { name: d.name.clone(), permission }))
     }
 
@@ -1805,12 +1815,13 @@ impl Mobile {
     pub fn set_permission(&self, id: &str, permission: Permission) -> Result<DeviceEvent> {
         let key = self.mac_key(true)?.ok_or_else(|| anyhow!("the credential store did not keep the device key"))?;
         let lock_on = self.lock_options().on;
+        let screen = self.screen_options();
         let lower = {
             let c = self.config.lock();
             let d = c.devices.iter().find(|d| d.id == id).ok_or_else(|| anyhow!("no such device"))?;
             anyhow::ensure!(d.verified, "this device must be paired again");
             // Lowering is always allowed, whatever the device could be raised to now.
-            anyhow::ensure!(permission <= d.permission || permission <= record_ceiling(d, lock_on), "{}", ceiling_refusal(d, permission));
+            anyhow::ensure!(permission <= d.permission || permission <= record_ceiling(d, lock_on, &screen), "{}", ceiling_refusal(d, permission));
             permission < d.permission
         };
         // What it controls stops before anything else changes.
@@ -1920,8 +1931,10 @@ impl Mobile {
             // Sealed with the key that just went: back to the strictest.
             c.lock = None;
             c.relay = None;
+            c.screen = None;
         }
         self.check_lock_options();
+        self.check_screen_options();
         *self.broken.lock() = None;
         self.keep();
         self.audit.add("-", "reset", "phone access reset: devices forgotten, new keys");
@@ -2241,11 +2254,12 @@ fn transport_cap(kind: Kind, browser: bool, peer: &Peer) -> Permission {
 
 /// The most a device's record may be raised to. A page in a browser may be given control once it paired on this computer's HTTPS origin and its app
 /// lock is set up and on: control then rests on its passkey as well as on its key, and an auto-lock lets go of it like a revoke.
-/// A device paired on the app the relay hosts never goes past typing: whoever deploys that page could change it, and control is the screen and the browser panes.
-fn record_ceiling(d: &Device, lock_on: bool) -> Permission {
+/// A device paired on the app the relay hosts goes past typing only once the screen is allowed through the relay (`screen_policy::hosted_ceiling`),
+/// and then for the screen alone: whoever deploys that page could change it, so it never takes over a pane (`transport_cap`).
+fn record_ceiling(d: &Device, lock_on: bool, screen: &store::ScreenOptions) -> Permission {
     match d.kind {
         Kind::App => Permission::Control,
-        _ if d.page_kind == Some(PageKind::Hosted) => Permission::Write,
+        _ if d.page_kind == Some(PageKind::Hosted) => screen_policy::hosted_ceiling(screen, lock_on, d.lock.is_some()),
         Kind::Pwa if d.secure_origin && d.lock.is_some() && lock_on => Permission::Control,
         Kind::Pwa => Permission::Write,
     }
@@ -2253,7 +2267,7 @@ fn record_ceiling(d: &Device, lock_on: bool) -> Permission {
 
 fn ceiling_refusal(d: &Device, permission: Permission) -> String {
     if permission == Permission::Control && d.page_kind == Some(PageKind::Hosted) {
-        "a phone using the hosted app can read and type; taking control needs Tailscale or this computer's own HTTPS address".into()
+        "a phone using the hosted app can read and type; it may see and control the screen only with \"See and control the screen without Tailscale\" on, the app lock on and a passkey set up, and never takes over a pane".into()
     } else if permission == Permission::Control {
         "a page in a browser can be given control only once it was paired over HTTPS (Tailscale), and its app lock is set up and on".into()
     } else {
@@ -2830,10 +2844,10 @@ impl Conn {
     /// the text on the computer (`screen::Broker::text_begin`), so that text then Enter keep their order.
     fn screen_text(&self, granted: Permission, req: &Value, tag: Option<Value>) -> Option<Value> {
         let refused = |r: Refusal| Some(json!({"type": "error", "req": tag, "code": r.code, "reason": r.reason, "message": r.message}));
-        if let Err(r) = self.control_refused(Verb::ScText, granted) {
+        if let Err(r) = self.screen_refused(Verb::ScText, granted) {
             return refused(r);
         }
-        let phone = crate::screen::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.ctl, media: &self.media, cursor: &self.cursor };
+        let phone = self.screen_phone();
         let typing = match self.daemon.screen.text_begin(&self.daemon, phone, req) {
             Ok(typing) => typing,
             Err(r) => return refused(refuse(r.code, r.message)),
@@ -2853,14 +2867,33 @@ impl Conn {
         None
     }
 
+    /// Whether this connection may use the screen now, `granted` being what it may do as its transport and its lock's gate allow
+    /// (`Conn::handle`). Over a direct link it is control's own rule, as it always was. Through the relay (`screen_policy`): only with the screen
+    /// allowed through it, a connection that may type (its gate open), the lock on and a window open; refused as `no_control` with the
+    /// reason, which an older phone ignores.
+    fn screen_refused(&self, verb: Verb, granted: Permission) -> Result<(), Refusal> {
+        if self.route != "relay" {
+            return self.control_refused(verb, granted);
+        }
+        let rule = if granted < Permission::Write { Err(screen_policy::Reason::Locked) } else { self.daemon.mobile.screen_allowed(&self.device, self.page_origin.is_some(), true) };
+        rule.map_err(|r| Refusal { reason: Some(r.code()), ..refuse("no_control", r.message()) })
+    }
+
+    /// The screen broker's view of this connection.
+    fn screen_phone(&self) -> crate::screen::Phone<'_> {
+        crate::screen::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.ctl, media: &self.media, cursor: &self.cursor, browser: self.page_origin.is_some(), relay: self.route == "relay" }
+    }
+
     /// Carries out one request of the verb table; `Some` is a reply with content, `None` a plain ack.
     async fn run(&mut self, granted: Permission, name: &str, req: &Value) -> Result<Option<Value>, Refusal> {
         let verb = Verb::parse(name).ok_or_else(|| refuse("unknown_verb", format!("unknown request {name:?}")))?;
-        self.control_refused(verb, granted)?;
+        // The screen goes by its own rule (`screen_policy`); a pane's takeover by control's (never through the relay).
         if verb.screen() {
-            let phone = crate::screen::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.ctl, media: &self.media, cursor: &self.cursor };
+            self.screen_refused(verb, granted)?;
+            let phone = self.screen_phone();
             return self.daemon.screen.phone_verb(&self.daemon, phone, name, req).await.map_err(|r| refuse(r.code, r.message));
         }
+        self.control_refused(verb, granted)?;
         if verb.takeover() {
             let phone = crate::takeover::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.out };
             return self.daemon.takeover.phone_verb(&self.daemon, phone, name, req).await.map_err(|r| refuse(r.code, r.message));
@@ -3287,7 +3320,12 @@ impl Conn {
         };
         json!({
             "type": "hello", "v": 2, "api": kelpie_proto::API_LEVEL, "daemon_epoch": m.epoch, "rev": rev, "pad": true,
-            "device": device_hello(device, record, cap, control),
+            "device": ({
+                let mut d = device_hello(device, record, cap, control);
+                // Whether the screen may be seen on this connection, and why not (`screen_policy`): the hosted app's screen goes by it.
+                d["screen"] = json!(if self.route == "relay" { m.screen_allowed(&self.device, self.page_origin.is_some(), true).err().map_or("ok", |r| r.code()) } else { control });
+                d
+            }),
             // This computer is also published over Tailscale: a fact, with no address, so a page the relay hosts can say where the screen is.
             "ts": m.tailscale_origin().is_some(),
             "push": push,
@@ -4037,14 +4075,14 @@ mod tests {
     #[test]
     fn a_browser_device_may_be_given_control_only_once_paired_on_https_with_its_lock_set_up_and_on() {
         let mut d = Device { alerts: None, push: None, lock: None, id: "d".into(), name: "n".into(), pk: String::new(), permission: Permission::Write, kind: Kind::Pwa, created_at: 0, last_seen: 0, mac: String::new(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), verified: true };
-        assert_eq!(record_ceiling(&d, true), Permission::Write, "paired over plain HTTP");
+        assert_eq!(record_ceiling(&d, true, &store::ScreenOptions::default()), Permission::Write, "paired over plain HTTP");
         d.secure_origin = true;
-        assert_eq!(record_ceiling(&d, true), Permission::Write, "no passkey yet");
+        assert_eq!(record_ceiling(&d, true, &store::ScreenOptions::default()), Permission::Write, "no passkey yet");
         d.lock = Some(store::LockCredential { cred_id: "c".into(), spki: "s".into(), origin: "https://desk.tail1234.ts.net:8443".into(), sign_count: 0, created_at: 0, mac: String::new() });
-        assert_eq!(record_ceiling(&d, false), Permission::Write, "the lock turned off");
-        assert_eq!(record_ceiling(&d, true), Permission::Control);
+        assert_eq!(record_ceiling(&d, false, &store::ScreenOptions::default()), Permission::Write, "the lock turned off");
+        assert_eq!(record_ceiling(&d, true, &store::ScreenOptions::default()), Permission::Control);
         d.kind = Kind::App;
-        assert_eq!(record_ceiling(&Device { secure_origin: false, lock: None, ..d }, false), Permission::Control, "the native app");
+        assert_eq!(record_ceiling(&Device { secure_origin: false, lock: None, ..d }, false, &store::ScreenOptions::default()), Permission::Control, "the native app");
     }
 
     fn passkey() -> store::LockCredential {

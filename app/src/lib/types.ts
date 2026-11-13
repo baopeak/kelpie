@@ -728,6 +728,17 @@ export interface MobileHostedFields {
   new_store: boolean;
 }
 
+/** The screen without Tailscale, as `mobile.status` says it (`screen`). `doubted`: the stored setting failed its integrity check and counts as off until it
+ *  is set again. The relay WebSocket's use is counted per calendar month on this computer. */
+export interface MobileScreenStatus {
+  remote: boolean;
+  methods: { tailscale: boolean; p2p: boolean; relay_turn: boolean; relay_ws: boolean };
+  relay_ws_kbps: number;
+  relay_ws_month_mb: number;
+  relay_ws_used_mb: number;
+  doubted: boolean;
+}
+
 /** `mobile.pair_start`'s answer. */
 export interface MobilePairStart {
   url: string;

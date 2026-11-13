@@ -87,6 +87,8 @@ const TOUCH_MS = 30_000;
 const CHALLENGE_FRESH_MS = 45_000;
 /** A dangerous approval's assertion holds this long. */
 const RECHECK_MS = 60_000;
+/** A screen's check expires sooner: the computer takes one at most a minute ahead, and this leaves room for a clock that is a little off. */
+const SCREEN_RECHECK_MS = 45_000;
 
 const encoder = new TextEncoder();
 
@@ -110,6 +112,12 @@ export function recheckChallenge(request: string, command: string, expiry: numbe
     at += p.length;
   }
   return sha256(all);
+}
+
+/** What a screen's start through the relay is over: this screen, the way (the relay), until this time. It is a dangerous approval's challenge with the screen in
+ *  the request's place, and the computer works out the same from what it holds; a proof for one screen is no good for another, or after it expires. */
+export function screenChallenge(target: string, expiry: number): Uint8Array {
+  return recheckChallenge(`screen:${target}`, "relay", expiry);
 }
 
 export class LockModel {
@@ -347,6 +355,28 @@ export class LockModel {
     this.error = null;
     try {
       const got = await this.env.credentials.get({ rpId, credentialId: fromB64(credId), challenge: recheckChallenge(request, command, expiry) });
+      return { expiry, auth_data: toB64(got.authData), client_data: toB64(got.clientData), signature: toB64(got.signature) };
+    } catch (e) {
+      this.error = whyNot(e);
+      return null;
+    } finally {
+      this.asking = false;
+    }
+  }
+
+  /** The assertion a screen's start through the relay needs (`sc_start`'s `recheck`): Face ID over `screenChallenge`, good for a minute by the computer's clock.
+   *  Null when the person did not give it; `error` says why. */
+  async screenProof(target: string): Promise<Proof | null> {
+    const { rp_id: rpId, cred_id: credId } = this.info;
+    if (!rpId || !credId || !this.env.credentials.available()) {
+      this.error = t("This browser cannot use a passkey here.");
+      return null;
+    }
+    const expiry = this.env.now() + this.clockOffset + SCREEN_RECHECK_MS;
+    this.asking = true;
+    this.error = null;
+    try {
+      const got = await this.env.credentials.get({ rpId, credentialId: fromB64(credId), challenge: screenChallenge(target, expiry) });
       return { expiry, auth_data: toB64(got.authData), client_data: toB64(got.clientData), signature: toB64(got.signature) };
     } catch (e) {
       this.error = whyNot(e);

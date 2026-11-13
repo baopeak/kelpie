@@ -2263,6 +2263,25 @@ impl Daemon {
                 self.broadcast("mobile.updated", json!({}));
                 v
             }
+            // The screen's ways (`mobile::screen_policy`). What lets it go more ways (through the relay above all) needs the person; what takes ways
+            // away does not.
+            "mobile.set_screen" => {
+                if !self.is_verified_app(client) {
+                    bail!("this needs the Kelpie app: phone access is decided in Kelpie → Settings → Mobile");
+                }
+                let next = self.mobile.requested_screen(&params)?;
+                if self.mobile.screen_options().widened_by(&next) {
+                    self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::RemoteScreen, move |me| {
+                        let v = me.mobile.set_screen(next)?;
+                        me.broadcast("mobile.updated", json!({}));
+                        Ok(v)
+                    })?;
+                    return Ok(None);
+                }
+                let v = self.mobile.set_screen(next)?;
+                self.broadcast("mobile.updated", json!({}));
+                v
+            }
             // Lets a phone set up a new passkey for five minutes: the one way past a passkey that exists, so a stolen phone key cannot.
             "mobile.reset_lock" => {
                 let device = param(&params, "id")?.as_str().unwrap_or_default().to_string();

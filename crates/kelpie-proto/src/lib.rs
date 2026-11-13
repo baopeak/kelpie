@@ -84,7 +84,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// the app `win` in `screen.flow`, the `screen.sharpen` notice and `provider.event` with kind `window {frames, bytes}` (the helper's window of frames
 /// in flight, sized to the link). An older daemon has none of it, so its helper keeps 3 frames, and the phone offers Sharpen and the picture's age
 /// only at 40.
-pub const API_LEVEL: u32 = 40;
+/// 41: the screen through the relay: `mobile.set_screen {remote?, methods?: {tailscale, p2p, relay_turn, relay_ws}, relay_ws_kbps?, relay_ws_month_mb?}`
+/// (the app only; turning `remote` on or adding a way is verified), `screen` in `mobile.status` (`remote`, `methods`, `relay_ws_kbps`, `relay_ws_month_mb`,
+/// `relay_ws_used_mb`, `doubted`), `device.screen` in the phone's hello (`ok` or why not), `paths` (`[{id: auto|tailscale|relay, ok, why?}]`) and `relay`
+/// (`{ours, host}`) in the `screens` answer, the phone's `sc_start {target, via?, recheck?}` (`recheck`: a passkey assertion with user verification
+/// over `recheck_challenge("screen:" + target, "relay", expiry)`, at most a minute ahead, used once) answered with `via`, the refusals
+/// `screen_remote_off`, `needs_face_id`, `relay_budget_spent`, `no_direct_link`, `not_on_relay`, and `max_kbps` in `screen.start` to the app. An older
+/// daemon never shows the screen through the relay, so the phone offers it only at 41.
+pub const API_LEVEL: u32 = 41;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

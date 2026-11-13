@@ -29,7 +29,9 @@
 //! - **Sharpen** (`sc_sharpen`): while crisp text is off for a slow link, the part of the picture the phone shows is sent crisp once, at most
 //!   every `SHARPEN_GAP`.
 //!
-//! Never over the relay: `control` is never granted on a relayed connection (`mobile::transport_cap`).
+//! Through the relay only when the person allowed it on the computer (*See and control the screen without Tailscale*), with the phone's lock on, a
+//! window open and a fresh Face ID for each new screen (`mobile::screen_policy`); such a screen is held to the relay WebSocket's rate and monthly
+//! allowance, and ends within a look of its task when the switch goes off. A pane's takeover never goes through the relay.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +48,7 @@ use tokio::time::Instant;
 
 use crate::daemon::Daemon;
 use crate::load::Level;
+use crate::mobile::screen_policy::Via;
 use crate::mobile::CursorSlot;
 use crate::session::now_millis;
 use crate::takeover::{Refused, IDLE_STOP, INPUT_PER_SECOND, INPUT_TTL_MS};
@@ -82,6 +85,9 @@ pub struct Phone<'a> {
     pub out: &'a mpsc::Sender<String>,
     pub media: &'a mpsc::Sender<Vec<u8>>,
     pub cursor: &'a CursorSlot,
+    /// A page in a browser (its rule is a page's whatever its record), and a connection through the relay.
+    pub browser: bool,
+    pub relay: bool,
 }
 
 /// The connection a hold sends on.
@@ -141,12 +147,18 @@ struct State {
     /// order; what has waited longer than the 1 s any input may be old is dropped then, as it would have been on its own.
     typing: bool,
     after_text: Vec<(Instant, Vec<Value>)>,
+    /// What went on the wire through the relay since the hold's task last counted it (`Mobile::count_relay_screen`).
+    relay_bytes: u64,
 }
 
 pub struct Hold {
     sc: String,
     device: String,
     provider: u64,
+    /// What it rests on: the phone's page and the way it started (`Mobile::screen_held`). A screen stays on that way: a phone that comes back the
+    /// other way ends it (`Broker::rebind`), so that a screen through the relay is always held to the relay's rule, rate and count.
+    browser: bool,
+    relay: bool,
     grant: Arc<AtomicBool>,
     ended: AtomicBool,
     wake: Notify,
@@ -292,6 +304,11 @@ impl Broker {
             d.providers.notify("screen", "screen.stop", json!({"sc": sc, "reason": reason}));
         }
         d.mobile.audit(&hold.device, "screen_stop", reason);
+        if hold.relay {
+            let left = std::mem::take(&mut hold.state.lock().relay_bytes);
+            d.mobile.count_relay_screen(left);
+            d.mobile.save_relay_screen_use();
+        }
     }
 
     /// The link connection `conn` closed: its holds wait for the same device's next one, and the helper stops encoding meanwhile.
@@ -447,6 +464,9 @@ impl Broker {
         if peek.kind == KIND_CURSOR {
             st.raw += bytes.len() as u64;
             st.wire += wire_len(bytes.len()) as u64;
+            if hold.relay {
+                st.relay_bytes += wire_len(bytes.len()) as u64;
+            }
             cursor.put(bytes);
             return;
         }
@@ -471,6 +491,9 @@ impl Broker {
             Ok(()) => {
                 st.raw += len as u64;
                 st.wire += wire_len(len) as u64;
+                if hold.relay {
+                    st.relay_bytes += wire_len(len) as u64;
+                }
                 if video {
                     st.sent.push_back((peek.seq, Instant::now(), len));
                     Self::note_window(&mut st);
@@ -507,7 +530,7 @@ impl Broker {
     /// The phone's screen verbs. `Some` is a reply with content, `None` a plain ack.
     pub async fn phone_verb(&self, d: &Arc<Daemon>, phone: Phone<'_>, verb: &str, req: &Value) -> Result<Option<Value>, Refused> {
         match verb {
-            "screens" => self.targets(d).await.map(Some),
+            "screens" => self.targets(d, &phone).await.map(Some),
             "sc_start" => self.start(d, &phone, req).await.map(Some),
             "sc_stop" => {
                 let hold = self.held_here(&phone, req)?;
@@ -672,13 +695,21 @@ impl Broker {
         })
     }
 
-    async fn targets(&self, d: &Arc<Daemon>) -> Result<Value, Refused> {
+    /// What may be seen, and the ways this phone may choose now (`paths`: each with whether it is available, and why not), and how the relay is named.
+    async fn targets(&self, d: &Arc<Daemon>, phone: &Phone<'_>) -> Result<Value, Refused> {
         if d.providers.provider("screen").is_none() {
             return Err(refused("no_app", "Open Kelpie on the computer to see its screen."));
         }
         let got = d.providers.request_within("screen", "screen.targets", json!({}), START_LIMIT).await.map_err(|e| refused("no_app", format!("{e}")))?;
-        let rows: Vec<Value> = got["targets"].as_array().map(|a| a.iter().take(kelpie_screen::targets::MAX_TARGETS).filter_map(target_row).collect()).unwrap_or_default();
-        Ok(json!({"type": "ack", "result": "ok", "targets": rows}))
+        let mut rows: Vec<Value> = got["targets"].as_array().map(|a| a.iter().take(kelpie_screen::targets::MAX_TARGETS).filter_map(target_row).collect()).unwrap_or_default();
+        // Through the relay a window is named by its program, never by its title (a document's name): the list is asked for with no Face ID.
+        if phone.relay {
+            for row in rows.iter_mut().filter(|r| r["kind"] == "window") {
+                row["title"] = row["app"].clone();
+            }
+        }
+        let paths = d.mobile.screen_paths(phone.device, phone.browser, phone.relay);
+        Ok(json!({"type": "ack", "result": "ok", "targets": rows, "paths": paths, "relay": d.mobile.relay_label()}))
     }
 
     async fn start(&self, d: &Arc<Daemon>, phone: &Phone<'_>, req: &Value) -> Result<Value, Refused> {
@@ -702,13 +733,21 @@ impl Broker {
             *starting = true;
             Starting(self)
         };
+        // Who may start one, which way, and with what Face ID (`screen_policy`): the passkey's check is blocking, and is used once.
+        let via = Via::parse(req["via"].as_str()).ok_or_else(|| refused("bad_request", "unknown way"))?;
+        let (dd, device, browser, relay, proof, tgt) = (d.clone(), phone.device.to_string(), phone.browser, phone.relay, req["recheck"].clone(), target.clone());
+        let (via, max_kbps) = tokio::task::spawn_blocking(move || dd.mobile.screen_may_start(&device, browser, relay, via, &tgt, &proof))
+            .await
+            .map_err(|_| refused("not_kept", "That did not finish."))?
+            .map_err(|(code, message)| refused(code, message))?;
         let mine: Vec<String> = self.holds.lock().values().map(|h| h.sc.clone()).collect();
         for sc in mine {
             self.end(d, &sc, "replaced", true);
         }
         let grant = d.mobile.grant(phone.device);
         let sc = uuid::Uuid::new_v4().simple().to_string();
-        let params = json!({"sc": sc, "target": target, "device": phone.name, "level": level.number()});
+        // `max_kbps`: a screen through the relay WebSocket is held to its rate (an older app ignores it, and the daemon still counts the month).
+        let params = json!({"sc": sc, "target": target, "device": phone.name, "level": level.number(), "max_kbps": max_kbps});
         let started = match d.providers.request_within("screen", "screen.start", params, START_LIMIT).await {
             Ok(v) => v,
             Err(e) => {
@@ -749,6 +788,7 @@ impl Broker {
             sharpened: None,
             typing: false,
             after_text: Vec::new(),
+            relay_bytes: 0,
         };
         // The link closed while the app was starting: the hold waits for the same device's next connection, like one whose link dropped.
         let link_gone = phone.out.is_closed() || phone.media.is_closed();
@@ -756,7 +796,7 @@ impl Broker {
             Self::set_gone(&mut state);
             pause_notice(&mut state, &sc, true)
         });
-        let hold = Arc::new(Hold { sc: sc.clone(), device: phone.device.to_string(), provider, grant, ended: AtomicBool::new(false), wake: Notify::new(), state: Mutex::new(state) });
+        let hold = Arc::new(Hold { sc: sc.clone(), device: phone.device.to_string(), provider, browser: phone.browser, relay: via == Via::Relay, grant, ended: AtomicBool::new(false), wake: Notify::new(), state: Mutex::new(state) });
         self.holds.lock().insert(sc.clone(), hold.clone());
         // Frames that came before this hold were dropped unseen: the helper gives them up with a keyframe asked for now.
         let lost = {
@@ -775,7 +815,7 @@ impl Broker {
         let title = short(started.get("title"), 80);
         let kind = if started["kind"] == "window" { "window" } else { "monitor" };
         // The program, never the window's title, which can name a document.
-        let what = if kind == "window" { format!("window: {}", program(started.get("exe"))) } else { "monitor".to_string() };
+        let what = format!("{} via {}", if kind == "window" { format!("window: {}", program(started.get("exe"))) } else { "monitor".to_string() }, via.word());
         d.mobile.audit(phone.device, "screen_start", &what);
         // Which encoder, and which low-latency settings it refused or did not keep (the per-vendor table): its own report may come before the
         // hold exists, so the start's answer says it too.
@@ -785,12 +825,20 @@ impl Broker {
         let n = |k: &str| started[k].as_u64().unwrap_or(0).min(100_000);
         // `t0`: the computer's clock when the stream started, from which each frame's capture time is counted (the phone works out how old a
         // picture is from it).
-        Ok(json!({"type": "ack", "result": "ok", "sc": sc, "kind": kind, "title": title, "w": n("w"), "h": n("h"), "encoder": if started["encoder"] == "sw" { "sw" } else { "hw" }, "t0": started["t0"].as_u64()}))
+        Ok(json!({"type": "ack", "result": "ok", "sc": sc, "kind": kind, "title": title, "w": n("w"), "h": n("h"), "encoder": if started["encoder"] == "sw" { "sw" } else { "hw" }, "t0": started["t0"].as_u64(), "via": via.word()}))
     }
 
     fn rebind(&self, d: &Daemon, phone: &Phone<'_>, req: &Value) -> Result<(), Refused> {
         let sc = req["sc"].as_str().unwrap_or_default();
         let hold = self.hold(sc).filter(|h| h.device == phone.device && h.live()).ok_or_else(|| refused("sc_gone", "That screen has ended."))?;
+        // A screen goes by the rule, the rate and the count of the way it started on (a screen through the relay asked Face ID, and is held to
+        // the relay's rate and month): one whose phone came back the other way ends, and the phone starts it again.
+        if hold.relay != phone.relay {
+            let sc = hold.sc.clone();
+            drop(hold);
+            self.end(d, &sc, "route_changed", true);
+            return Err(refused("route_changed", "The connection now goes another way: see the screen again."));
+        }
         let params = {
             let mut st = hold.state.lock();
             // The connection that holds it already (a hello after an unlock, on the same connection): nothing to do.
@@ -834,8 +882,17 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
             return;
         }
         // The grant first, then what it rests on as it is now: every path that takes control away clears the grant; this holds whatever a later one forgets.
-        if !hold.grant.load(Ordering::SeqCst) || !d.mobile.control_held(&hold.device) {
+        if !hold.grant.load(Ordering::SeqCst) || !d.mobile.screen_held(&hold.device, hold.browser, hold.relay) {
             return d.screen.end(&d, &hold.sc, "revoked", true);
+        }
+        // What went through the relay since the last look, counted outside the hold's lock (the store may be saved); the month's allowance spent
+        // ends the screen, whatever was left of it at its start.
+        let relay_bytes = std::mem::take(&mut hold.state.lock().relay_bytes);
+        if relay_bytes > 0 {
+            d.mobile.count_relay_screen(relay_bytes);
+            if d.mobile.relay_screen_spent() {
+                return d.screen.end(&d, &hold.sc, "relay_budget_spent", true);
+            }
         }
         let now = Instant::now();
         let level = d.mobile.load.level();

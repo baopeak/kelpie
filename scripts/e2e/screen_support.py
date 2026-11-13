@@ -284,11 +284,11 @@ def start(s, daemon_env=None):
         if not until(lambda: port_open(driver_port), 30):
             raise SystemExit("tauri-driver did not open its port")
         run = Run(os.path.join(s.scratch, "shots"), app=s.app)
+        info = app_daemon(run.d, "daemon.info") if until(lambda: run.d.js("return !!(window.__kelpie && window.__kelpie.store.connected())"), 60) else {}
     except BaseException:
-        # Nothing of this script's may outlive it: the driver and this script's own daemon stop before the error goes on.
-        finish(s, d, None)
+        # Nothing of this script's may outlive it: the app, the driver and this script's own daemon stop before the error goes on.
+        finish(s, d, locals().get("run"))
         raise
-    info = app_daemon(run.d, "daemon.info") if until(lambda: run.d.js("return !!(window.__kelpie && window.__kelpie.store.connected())"), 60) else {}
     check("the app is connected to this script's daemon", info.get("pid") == d.pid, info.get("pid"))
     return d, run
 

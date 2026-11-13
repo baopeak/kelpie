@@ -113,7 +113,7 @@ fn tile(seq: u32) -> Vec<u8> {
 
 impl Rig {
     fn phone(&self) -> Phone<'_> {
-        Phone { device: "phone", name: "Phone", conn: 1, out: &self.out, media: &self.media, cursor: &self.cursor }
+        Phone { device: "phone", name: "Phone", conn: 1, out: &self.out, media: &self.media, cursor: &self.cursor, browser: false, relay: false }
     }
 
     async fn verb(&self, verb: &str, req: Value) -> Result<Option<Value>, Refused> {
@@ -337,9 +337,9 @@ async fn a_dropped_link_pauses_the_helper_and_keeps_the_screen_for_the_same_devi
     assert_eq!(r.told_now("screen.pause").await[0]["paused"], true);
     let (out2, mut phone2) = mpsc::channel(8);
     let (media2, mut frames2) = mpsc::channel(8);
-    let other = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default() };
+    let other = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default(), browser: false, relay: false };
     assert_eq!(r.d.screen.phone_verb(&r.d, other, "sc_rebind", &json!({"sc": sc})).await.unwrap_err().code, "sc_gone", "another device cannot take it");
-    let back = Phone { device: "phone", name: "Phone", conn: 3, out: &out2, media: &media2, cursor: &CursorSlot::default() };
+    let back = Phone { device: "phone", name: "Phone", conn: 3, out: &out2, media: &media2, cursor: &CursorSlot::default(), browser: false, relay: false };
     r.d.screen.phone_verb(&r.d, back, "sc_rebind", &json!({"sc": sc})).await.unwrap();
     assert_eq!(r.told_now("screen.pause").await.last().unwrap()["paused"], false);
     // Never a frame from before the gap: a P-frame waits for the keyframe the helper sends first.
@@ -362,7 +362,7 @@ async fn a_link_that_closes_during_a_start_leaves_a_screen_waiting_for_the_devic
     let r = rig_with(8, Start::Slow(300));
     let (out, out_rx) = mpsc::channel(8);
     let (media, media_rx) = mpsc::channel(8);
-    let dying = Phone { device: "phone", name: "Phone", conn: 5, out: &out, media: &media, cursor: &CursorSlot::default() };
+    let dying = Phone { device: "phone", name: "Phone", conn: 5, out: &out, media: &media, cursor: &CursorSlot::default(), browser: false, relay: false };
     let d = r.d.clone();
     let req = json!({"target": "w:66:7"});
     let starting = d.screen.phone_verb(&d, dying, "sc_start", &req);
@@ -395,7 +395,7 @@ async fn two_starts_at_once_the_first_keeps_the_screen_and_the_second_is_told_it
     let r = rig_with(8, Start::Slow(300));
     let (out2, _rx2) = mpsc::channel(8);
     let (media2, _m2) = mpsc::channel(8);
-    let tablet = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default() };
+    let tablet = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default(), browser: false, relay: false };
     let d = r.d.clone();
     let first = r.verb("sc_start", json!({"target": "w:66:7"}));
     let second = async {
@@ -410,7 +410,7 @@ async fn two_starts_at_once_the_first_keeps_the_screen_and_the_second_is_told_it
     let again = r.verb("sc_start", json!({"target": "w:66:7"}));
     let twice = async {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        r.d.screen.phone_verb(&r.d, Phone { device: "phone", name: "Phone", conn: 9, out: &r.out, media: &r.media, cursor: &r.cursor }, "sc_start", &json!({"target": "w:66:7"})).await
+        r.d.screen.phone_verb(&r.d, Phone { device: "phone", name: "Phone", conn: 9, out: &r.out, media: &r.media, cursor: &r.cursor, browser: false, relay: false }, "sc_start", &json!({"target": "w:66:7"})).await
     };
     let (again, twice) = tokio::join!(again, twice);
     assert!(again.is_ok());
@@ -438,7 +438,7 @@ async fn late_stale_or_flooding_input_is_dropped_and_only_input_a_screen_takes_g
         r.verb("sc_input", json!({"sc": sc, "ops": [{"k": "move", "x": 1, "y": 1}], "st": now_millis()})).await.unwrap();
     }
     assert!(r.told_now("screen.input").await.len() <= INPUT_PER_SECOND as usize + 1, "a flood is cut");
-    let other = Phone { device: "phone", name: "Phone", conn: 9, out: &r.out, media: &r.media, cursor: &r.cursor };
+    let other = Phone { device: "phone", name: "Phone", conn: 9, out: &r.out, media: &r.media, cursor: &r.cursor, browser: false, relay: false };
     assert_eq!(r.d.screen.phone_verb(&r.d, other, "sc_input", &json!({"sc": sc, "ops": [{"k": "move", "x": 1, "y": 1}], "st": now_millis()})).await.unwrap_err().code, "sc_elsewhere");
 }
 
@@ -473,7 +473,7 @@ async fn a_busy_computer_starts_no_screen_one_device_at_a_time_and_none_without_
     let first = r.start().await;
     let (out2, _rx) = mpsc::channel(4);
     let (media2, _frames) = mpsc::channel(4);
-    let tablet = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default() };
+    let tablet = Phone { device: "tablet", name: "Tablet", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default(), browser: false, relay: false };
     assert_eq!(r.d.screen.phone_verb(&r.d, tablet, "sc_start", &json!({"target": "w:66:7"})).await.unwrap_err().code, "sc_taken");
     let second = r.start().await;
     assert_ne!(first, second);
@@ -561,7 +561,7 @@ async fn typing_the_focus_refused_says_why_to_the_phone() {
         let (d, sc) = (r.d.clone(), sc.clone());
         let (out, media) = (r.out.clone(), r.media.clone());
         async move {
-            let phone = Phone { device: "phone", name: "Phone", conn: 1, out: &out, media: &media, cursor: &CursorSlot::default() };
+            let phone = Phone { device: "phone", name: "Phone", conn: 1, out: &out, media: &media, cursor: &CursorSlot::default(), browser: false, relay: false };
             d.screen.phone_verb(&d, phone, "sc_text", &json!({"sc": sc, "text": text, "st": now_millis()})).await.unwrap_err()
         }
     };
@@ -769,9 +769,24 @@ async fn a_newer_connection_of_the_device_takes_the_screen_over_at_once() {
     assert_eq!(r.told_now("screen.pause").await[0]["paused"], true);
     let (out2, _phone2) = mpsc::channel(8);
     let (media2, _frames2) = mpsc::channel(8);
-    let back = Phone { device: "phone", name: "Phone", conn: 3, out: &out2, media: &media2, cursor: &CursorSlot::default() };
+    let back = Phone { device: "phone", name: "Phone", conn: 3, out: &out2, media: &media2, cursor: &CursorSlot::default(), browser: false, relay: false };
     r.d.screen.phone_verb(&r.d, back, "sc_rebind", &json!({"sc": sc})).await.unwrap();
     // The older connection ending later changes nothing for it.
     r.d.screen.link_closed(&r.d, 1);
     assert_eq!(r.d.screen.hold(&sc).unwrap().state.lock().conn.as_ref().map(|l| l.conn), Some(3));
+}
+
+#[tokio::test]
+async fn a_screen_whose_phone_comes_back_another_way_ends_and_is_started_again() {
+    let mut r = rig();
+    let sc = r.start().await;
+    r.d.screen.link_closed(&r.d, 1);
+    let (out2, _phone2) = mpsc::channel(8);
+    let (media2, _frames2) = mpsc::channel(8);
+    // Started over a direct link; back through the relay: not the same rule, rate and count, so not the same screen.
+    let through_relay = Phone { device: "phone", name: "Phone", conn: 3, out: &out2, media: &media2, cursor: &CursorSlot::default(), browser: false, relay: true };
+    let err = r.d.screen.phone_verb(&r.d, through_relay, "sc_rebind", &json!({"sc": sc})).await.unwrap_err();
+    assert_eq!(err.code, "route_changed", "the phone says why");
+    assert_eq!(r.d.screen.count(), 0, "ended");
+    assert_eq!(r.told_now("screen.stop").await.last().map(|s| s["reason"].clone()), Some(json!("route_changed")));
 }

@@ -1,7 +1,7 @@
 // What each option of Settings → Mobile can do now, and the page's summary, from what the daemon said (`mobile.status`, `notify.get`).
 // Pure, so that every row is tested at every daemon level. The daemon enforces all of it; this only says so ahead of time:
 // `presence` follows `LockOptions::weakened_by` and `mobile.set_tailscale`, and a change it does not mention can still be refused.
-import { HOSTED_API, LOCK_API, RELAY_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
+import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_REMOTE_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { t } from "./i18n";
 import { NOTIFY_API } from "./notify-events";
 import { pushSummary, type PushState, type TelegramMode } from "./push-config";
@@ -10,7 +10,7 @@ import type { MobilePageKind } from "./types";
 import type { MobileDevice, MobilePermission, MobileStatus } from "../components/settings/mobile-settings";
 import type { RelayStatus } from "../components/settings/mobile-relay-settings";
 
-export const OPTION_IDS = ["mobile-access", "mobile-hosted", "mobile-tailscale", "mobile-relay", "mobile-webpush", "mobile-lock", "mobile-lock-idle", "mobile-lock-recheck", "mobile-lock-plain", "mobile-ntfy", "mobile-telegram", "mobile-lan"] as const;
+export const OPTION_IDS = ["mobile-access", "mobile-hosted", "mobile-tailscale", "mobile-relay", "mobile-webpush", "mobile-lock", "mobile-lock-idle", "mobile-lock-recheck", "mobile-lock-plain", "mobile-screen-remote", "mobile-ntfy", "mobile-telegram", "mobile-lan"] as const;
 export type OptionId = (typeof OPTION_IDS)[number];
 
 /** What is known. `status` or `push` is null when the daemon could not say. */
@@ -85,6 +85,11 @@ export function optionState(id: OptionId, f: OptionFacts): OptionState {
     // With the lock off nothing stands in such a page's way, so this would change nothing.
     case "mobile-lock-plain":
       return { on: !!lock?.plain_read, disabled: lockBlocked() ?? (lock?.on ? null : t("This counts only while the app lock is on. With the lock off such a page reads anyway: turn the lock on first.")), presence: lock?.plain_read ? null : t("Turning this on asks you to verify first.") };
+    // Off by default. Turning it on asks the person to verify; the daemon treats a setting that failed its check as off.
+    case "mobile-screen-remote": {
+      const on = !!s?.screen?.remote;
+      return { on, disabled: blocked(f, SCREEN_REMOTE_API, !!s?.screen, true), presence: on ? null : t("Turning this on asks you to verify first.") };
+    }
     case "mobile-ntfy":
       return channel(f, !!f.push?.config.ntfy.enabled);
     case "mobile-telegram":
@@ -273,9 +278,63 @@ export function pageKindLabel(kind: MobilePageKind | null | undefined): string |
   }
 }
 
-/** What a paired device may be given in its list. Control never for one on the hosted app: the daemon refuses it, whatever its lock. */
-export function permissionChoices(d: MobileDevice, api: number): MobilePermission[] {
-  return d.page_kind !== "hosted" && offersControl(d, api) ? ["read", "write", "control"] : ["read", "write"];
+/** The row about the screen without Tailscale is shown: the daemon has it. */
+export function screenRemoteShown(api: number): boolean {
+  return api >= SCREEN_REMOTE_API;
+}
+
+/** Said under the row when the daemon could not trust what it stored: it counts as off until the person sets it again, and nothing was overwritten. */
+export function screenDoubtedNote(f: OptionFacts): string | null {
+  return f.api >= SCREEN_REMOTE_API && f.status?.screen?.doubted
+    ? t("The stored setting for the screen without Tailscale failed its check, so Kelpie treats it as off. Nothing was overwritten: set it again to go on.")
+    : null;
+}
+
+/** The ways the screen may connect, in the order Settings lists them. */
+export const SCREEN_METHODS = ["tailscale", "p2p", "relay_turn", "relay_ws"] as const;
+export type ScreenMethod = (typeof SCREEN_METHODS)[number];
+
+export interface ScreenMethodRow {
+  id: ScreenMethod;
+  label: string;
+  on: boolean;
+  /** Why it cannot be changed now; null when it can. */
+  disabled: string | null;
+  /** One line under it: what is true of this way now; null when there is nothing to add. */
+  note: string | null;
+}
+
+/** The checkboxes under Advanced. The relay ways count only while the screen without Tailscale is on; a direct link and the relay's TURN are not built yet,
+ *  and the choice is kept for when they are. */
+export function screenMethodRows(f: OptionFacts): ScreenMethodRow[] {
+  const sc = f.status?.screen;
+  const disabled = blocked(f, SCREEN_REMOTE_API, !!sc, true);
+  const labels: Record<ScreenMethod, string> = { tailscale: t("Tailscale"), p2p: t("Direct link (P2P)"), relay_turn: t("Relay (TURN)"), relay_ws: t("Relay WebSocket") };
+  const note = (id: ScreenMethod): string | null => {
+    if (id === "p2p" || id === "relay_turn") return t("Not available yet: it comes in a later update.");
+    if (id === "relay_ws" && !sc?.remote) return t("Counts only while seeing the screen without Tailscale is on.");
+    return null;
+  };
+  return SCREEN_METHODS.map((id) => ({ id, label: labels[id], on: sc?.methods[id] !== false, disabled, note: note(id) }));
+}
+
+/** The relay WebSocket's use this month: `120 MB of 1024 MB this month`; null from a daemon that does not count it. */
+export function screenUsageLine(sc: MobileStatus["screen"]): string | null {
+  return sc ? t("{used} MB of {total} MB this month", { used: Math.round(sc.relay_ws_used_mb), total: Math.round(sc.relay_ws_month_mb) }) : null;
+}
+
+/** What a paired device may be given in its list. Control for one on the hosted app only while the screen without Tailscale is on, and then it means the
+ *  screen only: the daemon refuses it otherwise, whatever its lock. */
+export function permissionChoices(d: MobileDevice, api: number, screenRemote = false): MobilePermission[] {
+  const control = d.page_kind === "hosted" ? screenRemote && api >= SCREEN_REMOTE_API && (d.may_control === true || d.permission === "control") : offersControl(d, api);
+  return control ? ["read", "write", "control"] : ["read", "write"];
+}
+
+/** A choice in a device's list, in words. */
+export function permissionLabel(p: MobilePermission, d: MobileDevice, screenRemote: boolean): string {
+  if (p === "read") return t("May read");
+  if (p === "write") return t("May type");
+  return d.page_kind === "hosted" && screenRemote ? t("May take control (screen only)") : t("May take control");
 }
 
 // ---------- choosing how a phone pairs ----------
@@ -302,12 +361,14 @@ export interface PairMethod {
 
 /** What a phone paired this way may do with this computer's screen and browser panes. The one place this sentence lives: when the screen's policy
  *  changes, it changes here. */
-export function screenPolicyLine(method: PairMethodId): string {
+export function screenPolicyLine(method: PairMethodId, screenRemote = false): string {
   switch (method) {
     case "tailscale":
       return t("The screen and browser panes too, once you allow control for this phone and its app lock is on.");
     case "relay":
-      return t("Never the screen or browser panes: those need the app from this computer, over Tailscale or HTTPS.");
+      return screenRemote
+        ? t("The screen too, with Face ID for every session and once you allow control for this phone; never browser panes, which need the app from this computer.")
+        : t("Never the screen or browser panes: those need the app from this computer, over Tailscale or HTTPS.");
     case "network":
       return t("Over HTTPS, the screen and browser panes too, once you allow control for this phone and its app lock is on; never over plain HTTP.");
   }
@@ -357,6 +418,7 @@ export function pairMethods(f: OptionFacts): PairMethod[] {
   const s = f.status;
   const r = s?.relay;
   const reading = t("Reading, typing, approvals and starting agents, from anywhere.");
+  const screenRemote = f.api >= SCREEN_REMOTE_API && !!s?.screen?.remote;
   const ways: Omit<PairMethod, "recommended" | "available">[] = [
     {
       id: "tailscale",
@@ -370,7 +432,7 @@ export function pairMethods(f: OptionFacts): PairMethod[] {
       id: "relay",
       label: relayLabel(r),
       needs: t("The relay on, and serving the phone app."),
-      allows: `${reading} ${screenPolicyLine("relay")}`,
+      allows: `${reading} ${screenPolicyLine("relay", screenRemote)}`,
       trusts: !r || r.url === r.default_url
         ? t("Whoever deploys the app on Kelpie's relay: see What this trusts, under Hosted phone app.")
         : t("Whoever runs that relay and deploys its app."),

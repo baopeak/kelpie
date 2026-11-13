@@ -2,6 +2,7 @@
 // A stored value this build does not know reads as the default, so an older or newer bundle never breaks on what another one kept.
 import { createSignal, type Accessor } from "solid-js";
 import type { InboxOrder } from "./inbox-order";
+import { readVia, viaKey, type ViaId } from "./screen-paths";
 import { store } from "./storage";
 
 export interface Pref<T> {
@@ -66,6 +67,10 @@ export const showStopped = flag("kelpie-show-stopped", true);
 /** The order inside a group of the inbox (sessions that need the person always put the longest wait first). */
 export const INBOX_ORDERS: readonly InboxOrder[] = ["recent", "name"];
 export const order = choice<InboxOrder>("kelpie-inbox-order", INBOX_ORDERS, "recent");
+
+/** The way the screen connected last, kept per pairing (the key holds the pairing's device id): preselected the next time. */
+export const rememberedVia = (pairingId: string): ViaId | null => readVia(store.get(viaKey(pairingId)));
+export const rememberVia = (pairingId: string, via: ViaId) => store.set(viaKey(pairingId), via);
 
 /** The key bar's keys after Ctrl, which always comes first: the daemon's names for them, in the usual order. */
 export const KEY_IDS = ["esc", "tab", "shift-tab", "left", "up", "down", "right", "pgup", "pgdn", "ctrl-c", "enter"] as const;

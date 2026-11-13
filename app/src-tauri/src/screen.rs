@@ -424,7 +424,7 @@ async fn request(app: &AppHandle, method: &str, params: Value) -> Result<Value, 
             let prefs = app.state::<Screens>().prefs.lock().clone();
             let sc = params["sc"].as_str().filter(|s| !s.is_empty() && s.len() <= 64).ok_or("bad screen")?.to_string();
             let device: String = params["device"].as_str().unwrap_or("a phone").chars().take(40).collect();
-            let started = ask_within(&h, json!({"cmd": "start", "sc": sc, "target": params["target"], "device": device, "level": params["level"], "hotkey": prefs.hotkey, "tiles": prefs.tiles}), START_WAIT).await;
+            let started = ask_within(&h, json!({"cmd": "start", "sc": sc, "target": params["target"], "device": device, "level": params["level"], "hotkey": prefs.hotkey, "tiles": prefs.tiles, "max_kbps": params["max_kbps"]}), START_WAIT).await;
             let started = match started {
                 Ok(v) => v,
                 Err(e) => {

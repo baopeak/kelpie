@@ -27,6 +27,7 @@ import type { NewSessionRequest } from "./start-session";
 import type { ScreenFrame } from "./screen-sync";
 import type { PaneRow, TkOp } from "./takeover";
 import { MEDIA as SCREEN_MEDIA, type ScOp, type TargetRow } from "./screen";
+import type { PathInfo, RelayInfo, ViaId } from "./screen-paths";
 
 // ---------- what the daemon sends ----------
 
@@ -62,6 +63,9 @@ export interface DeviceInfo {
   capped?: boolean;
   /** Why this connection may not take control, as the computer says: `ok`, or the first reason that holds (absent from a computer below API 36). */
   control?: ControlReason;
+  /** Why this connection may not see or control the computer's screen, as the computer says: `ok`, or the first reason that holds (from API level 41; the
+   *  words are in conn-path.ts, and a reason this app does not know is read as none). */
+  screen?: string;
 }
 
 /** What the computer says about control on this connection (`device.control`). A reason this app does not know is read as none. */
@@ -191,7 +195,7 @@ export type Outcome =
   /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with.
    *  `prefs` with a `push_prefs`: the choices the computer keeps. `ready`, `projects`, `agents` and `why` with a `new_options`; `id` with a `new_session` (the session
    *  started), `dup` when that start was asked for before. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean }
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -790,8 +794,9 @@ export class Link {
     return this.request({ type: "screens" }, { write: false });
   }
 
-  scStart(target: string) {
-    return this.request({ type: "sc_start", target }, { write: false });
+  /** `via`: the way chosen (the computer picks when it is left out). `recheck`: the person's Face ID over this screen, which a start through the relay needs. */
+  scStart(target: string, via?: ViaId | null, recheck?: Record<string, unknown>) {
+    return this.request({ type: "sc_start", target, ...(via ? { via } : {}), ...(recheck ? { recheck } : {}) }, { write: false });
   }
 
   scStop(sc: string) {
@@ -1369,7 +1374,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, paths: m.paths, relay: m.relay, via: m.via, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup });
     }
     this.h.changed();
     return true;
