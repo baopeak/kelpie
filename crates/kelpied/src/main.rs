@@ -314,7 +314,9 @@ fn init_logging(data_dir: &std::path::Path) {
 /// The level asked for, except that the HTTP client logs the address of each request (a bot token is part of Telegram's): never,
 /// whatever level the user asks for.
 pub(crate) fn log_filter(mut filter: tracing_subscriber::EnvFilter) -> tracing_subscriber::EnvFilter {
-    for quiet in ["ureq=warn", "ureq_proto=warn"] {
+    // portable-pty writes a failed spawn's whole command line into its own log lines (on Windows), and an agent's arguments can hold a key:
+    // the daemon logs its own word on a failed start instead.
+    for quiet in ["ureq=warn", "ureq_proto=warn", "portable_pty=off"] {
         filter = filter.add_directive(quiet.parse().expect("log directive"));
     }
     filter

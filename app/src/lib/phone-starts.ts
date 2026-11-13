@@ -78,7 +78,10 @@ export interface PhoneStartsIo {
 /** Reads back the starts the window missed and puts them in Activity. `seen` is the remembered time as it was when the window connected,
  *  read before any wait: a phone's start heard live meanwhile moves the remembered time to now, and must not hide older starts this reads
  *  back. What Activity shows is read again just before the starts go in: one heard live meanwhile is not put in twice. */
-export async function loadMissedPhoneStarts(seen: number | undefined, io: PhoneStartsIo): Promise<void> {
+export async function loadMissedPhoneStarts(seen: number | undefined, io: PhoneStartsIo, now: () => number = Date.now): Promise<void> {
+  // Everything up to the read is in it, and what comes after reaches this connected window live: the read's time is remembered too, so
+  // a log rotated later is not taken for starts missed before it.
+  const readAt = now();
   const read = await io.audit();
   if (!read) return;
   const { starts, newest, cutOff } = missedPhoneStarts(read, seen, io.shown());
@@ -88,5 +91,5 @@ export async function loadMissedPhoneStarts(seen: number | undefined, io: PhoneS
     for (const s of starts) if (!s.sessionId || !shown.has(s.sessionId)) io.add(s, nameOf(s.device));
   }
   if (cutOff) io.cutOff();
-  io.remember(newest);
+  io.remember(Math.max(newest, readAt));
 }

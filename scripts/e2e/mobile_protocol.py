@@ -441,8 +441,8 @@ async def main(d):
     waiting = await phone.wait(lambda m: m["type"] == "screen" and m["id"] == m1["id"] and m["prompt"] and m["waiting_since"], 30)
     check("the screen frame carries the menu prompt and the wait", waiting and waiting["prompt"]["keys"] == ["1", "2", "3"] and "proceed" in (waiting["prompt"]["question"] or ""), waiting and waiting["prompt"])
     since = waiting["waiting_since"]
-    refused = await phone.ask(type="input", id=m1["id"], text="hello", enter=True)
-    check("typing a message is refused while the menu shows", refused["type"] == "error" and refused["code"] == "prompt", refused)
+    typed = await phone.ask(type="input", id=m1["id"], text="hello", enter=True)
+    check("typing a message is refused while the menu shows", typed["type"] == "error" and typed["code"] == "prompt", typed)
     lasting = await phone.ask(type="answer", id=m1["id"], waiting_since=since, text="2", enter=True)
     check("a menu's choice that lasts (\"don't ask again\") is refused on a phone", lasting["type"] == "error" and lasting["code"] == "one_shot", lasting)
     a1, a2 = await asyncio.gather(
@@ -560,8 +560,8 @@ async def main(d):
         '{"jsonrpc":"2.0","id":7,"result":{},"method":"session/cancel"}',
         '{"jsonrpc":"2.0","id":7,"result":{}}\n{"type":"user","message":{"content":"second line"}}',
     ]
-    refused = [await phone.ask(type="chat_answer", id=c2["id"], request_id=7, line=line) for line in exploits]
-    check("lines that are more than the answer are refused and never written", all(r["type"] == "error" and r["code"] == "bad_answer" for r in refused) and not os.path.exists(CHAT_LOG + "2"), refused)
+    tried = [await phone.ask(type="chat_answer", id=c2["id"], request_id=7, line=line) for line in exploits]
+    check("lines that are more than the answer are refused and never written", all(r["type"] == "error" and r["code"] == "bad_answer" for r in tried) and not os.path.exists(CHAT_LOG + "2"), tried)
     d.call("session.input", {"handle": c2["handle"], "data": answer_line + "\n"})
     told = await phone.wait(lambda m: m["type"] == "chat_resolved" and m["id"] == c2["id"], 5, mark)
     check("when the desktop answers first the phone is told", told is not None)

@@ -1724,6 +1724,8 @@ function createAppStore() {
         // Views must forget their stream before anything can re-attach.
         resetStreams();
         setConnected(false);
+        // Phones' starts up to now reached this window live: only those after it are read back on the next connection.
+        if (state.phoneStartsSeen !== undefined) update((st) => (st.phoneStartsSeen = Math.max(st.phoneStartsSeen ?? 0, Date.now())));
         if (s.error) notify(s.error);
         return;
       }

@@ -3155,10 +3155,13 @@ impl Conn {
         match tokio::task::spawn_blocking(move || daemon.create_for_phone(params, &device, &name, |id| planned.summary(id))).await {
             Ok(Ok(info)) => Ok(json!({"type": "ack", "result": "ok", "id": info.spec.id})),
             failed => {
-                // The cause stays on this computer. The log gets the agent, the project and the error's own cause only: the error's
-                // context names the command line, whose arguments (a profile's) can hold a key.
+                // The cause stays on this computer. The log gets the agent, the project and the system's error only: the error's text
+                // names the command line (on Windows even its root cause does), whose arguments (a profile's) can hold a key.
                 match failed {
-                    Ok(Err(e)) => tracing::warn!(kind = %kind, project = %project, "a phone's start of an agent failed: {}", e.root_cause()),
+                    Ok(Err(e)) => {
+                        let os = e.chain().find_map(|c| c.downcast_ref::<std::io::Error>()).map(|io| format!("{:?} (os error {:?})", io.kind(), io.raw_os_error()));
+                        tracing::warn!(kind = %kind, project = %project, "a phone's start of an agent failed: {}", os.as_deref().unwrap_or("not a system error"));
+                    }
                     Err(e) => tracing::warn!(kind = %kind, project = %project, "a phone's start of an agent did not finish: {e}"),
                     Ok(Ok(_)) => {}
                 }

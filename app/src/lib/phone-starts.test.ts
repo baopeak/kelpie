@@ -82,7 +82,7 @@ describe("phone starts the window missed while it was closed", () => {
       remember: (newest) => (remembered = Math.max(remembered, newest)),
     });
     // A live start while the log is read: it moves the remembered time to now, and still the older ones are shown.
-    await loadMissedPhoneStarts(150, io(READ, { audit: () => live("s-9") }));
+    await loadMissedPhoneStarts(150, io(READ, { audit: () => live("s-9") }), () => 9_000);
     expect(added).toEqual(["live s-9", "Phone ph1: s-2", "Phone ph1: s-3", "Phone ph2: s-5"]);
     expect(remembered).toBe(10_000);
     // A live start whose line is in the answer, heard while the phones' names are asked for: shown once.
@@ -108,5 +108,16 @@ describe("phone starts the window missed while it was closed", () => {
     expect(full.cutOff).toBe(true);
     expect(full.starts.map((s) => s.sessionId)).toEqual(["s-9"]);
     expect(missedPhoneStarts({ entries: typing.slice(1) }, 500, new Set()).cutOff, "fewer lines than asked for: all of them").toBe(false);
+  });
+
+  it("remember the time of the read, so a log rotated after it is not taken for starts missed while the window was closed", async () => {
+    let remembered = 0;
+    const remember = (newest: number) => (remembered = Math.max(remembered, newest));
+    const quiet: PhoneStartsIo = { audit: async () => ({ entries: [] }), names: async () => () => undefined, shown: () => new Set(), add: () => {}, cutOff: () => {}, remember };
+    await loadMissedPhoneStarts(100, quiet, () => 5_000);
+    expect(remembered, "nothing started, and still everything up to the read was seen").toBe(5_000);
+    // Later the log rotates (lots of typing while the window is open): its oldest line is newer than any start, but older than the read.
+    expect(missedPhoneStarts({ entries: [], from: 4_000 }, remembered, new Set()).cutOff).toBe(false);
+    expect(missedPhoneStarts({ entries: [], from: 6_000 }, remembered, new Set()).cutOff, "rotated after the read: some may be missing").toBe(true);
   });
 });

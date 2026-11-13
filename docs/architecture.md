@@ -572,7 +572,7 @@ record (another tab) is told to forget a pairing that stands. A close frame that
   session is created. It is refused as `not_ready`, `launch_refused`, `no_project`, `no_agent`, `not_installed`, `no_folder`, `too_long`,
   `busy` (load L3), `rate_limited` (three at once, then one every 10 s per device; the token is spent once the cheap checks pass, by a start the
   look on disk refuses too, and given back only when a start that passed every check could not be created), `mobile_off`, `unpaired`,
-  `launch_changed` or `not_started` (a plain sentence: the daemon's log gets the agent, the project and the error's own cause, never the command
+  `launch_changed` or `not_started` (a plain sentence: the daemon's log gets the agent, the project and the system's error, never the command
   line), besides `read_only`, `epoch` and `locked`. A repeat of its `cid` within 10 minutes gets the first reply, marked `dup`, and starts
   nothing; a repeat that comes while the first is still running (over another connection, after a reconnect) waits for it up to 1 s (it holds
   up its connection's heartbeats meanwhile) and is otherwise refused as `in_progress`, not kept, which the phone asks again with the same `cid`;
