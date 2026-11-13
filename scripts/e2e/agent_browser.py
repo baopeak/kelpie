@@ -14,7 +14,9 @@ snapshots it (compact, no password value), types and clicks through a sign-in an
 never printed), reads console errors, waits for text, reloads, gets a confirm() dismissed and reported; eval refused until turned on, then only
 in a pane opened for the agent; refusals: another project's session sees nothing, a same-project session cannot use the agent's pane, a pane
 the person shares is usable by the project's sessions but not for leaving its site, act within 10 s of the person's input, a second session
-while the first holds the pane, Stop on the banner ends access; the audit has a line per act call with no typed text, and no file of the data
+while the first holds the pane, Stop on the banner ends access; pages opened for agents are private (tabs says so, the person's pane
+does not): the agent's sign-in on the fixture (a cookie) is not in the person's pane, the person's sign-in is not in an agent page opened
+after it, and a private agent page may go to https://example.com/ (without network only the absence of a refusal is checked); the audit has a line per act call with no typed text, and no file of the data
 folder holds the password; with the app gone a call fails fast and says so; timing of snapshot and click (printed, checked against budgets).
 On Windows also: in the tab shown a click is trusted (the page sees event.isTrusted) and a screenshot is a PNG at most 1280 px wide, saved
 to a file; the network list has the sign-in request; with the tab in the background a screenshot is refused and a click is synthetic.
@@ -32,6 +34,7 @@ import sys
 import threading
 import time
 import traceback
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -139,17 +142,31 @@ class Site(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body, ctype="text/html; charset=utf-8"):
+    def _send(self, code, body, ctype="text/html; charset=utf-8", headers=()):
         data = body.encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        for k, v in headers:
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
 
     def do_GET(self):
         if self.path.startswith("/login"):
             return self._send(200, LOGIN)
+        if self.path.startswith("/whoami"):
+            # Who the browser's cookie says signed in: the sign-in form (`f-`, the agent's sign-in) or the link (`l-`, the person's).
+            jar = SimpleCookie()
+            try:
+                jar.load(self.headers.get("Cookie") or "")
+            except CookieError:
+                pass
+            sid = jar["sid"].value if "sid" in jar else ""
+            state = "Signed out" if not sid else "Signed in by the sign-in form" if sid.startswith("f-") else "Signed in by the link"
+            return self._send(200, f"<!doctype html><title>Who am I</title><h1>{state}</h1>")
+        if self.path.startswith("/signin"):
+            return self._send(302, "", headers=(("Set-Cookie", f"sid=l-{secrets.token_hex(8)}; Path=/"), ("Location", "/whoami")))
         return self._send(200, "<!doctype html><title>Other page</title><h1>Other page</h1>")
 
     def do_POST(self):
@@ -159,7 +176,7 @@ class Site(BaseHTTPRequestHandler):
                 LOGINS.append(json.loads(body))
             except ValueError:
                 pass
-            return self._send(200, '{"ok":true}', "application/json")
+            return self._send(200, '{"ok":true}', "application/json", (("Set-Cookie", f"sid=f-{secrets.token_hex(8)}; Path=/"),))
         self._send(404, "no")
 
 
@@ -330,6 +347,10 @@ def scenario(run, d):
     ref = lambda text, role, name: next((ln.split("[ref=")[1].split("]")[0] for ln in text.splitlines() if f'{role} "{name}"' in ln and "[ref=" in ln), None)  # noqa: E731
     email, pw, sign_in = ref(snap, "textbox", "Email"), ref(snap, "textbox", "Password"), ref(snap, "button", "Sign in")
     check("snapshot lists the email and password fields and the button", bool(email and pw and sign_in), snap)
+    # The page exists now: tabs reports what Rust recorded when it made it, not the window's expectation.
+    ok, text, res = m1.call("kelpie_browser_tabs")
+    entry = next((t for t in (res.get("structuredContent") or {}).get("tabs") or [] if t.get("pane") == pane), {})
+    check("tabs says the agent's page is private", ok and "private profile" in text and entry.get("isolated") is True, text)
 
     ok, text, _ = m1.call("kelpie_browser_type", {"ref": email, "text": EMAIL})
     check("type into the email field (text not echoed)", ok and EMAIL not in text, text)
@@ -426,6 +447,8 @@ def scenario(run, d):
     ok, text, _ = m2.call("kelpie_browser_tabs")
     check("another project's session does not see the shared pane", own not in text, text)
 
+    private_session(w, m1, m3, pane, own, base, label_of)
+
     step("lease")
     # One session acts in a pane at a time.
     ok, snap, _ = m3.call("kelpie_browser_snapshot", {"pane": own})
@@ -461,6 +484,70 @@ def scenario(run, d):
     for x in (m2, m3):
         x.close()
     return m1
+
+
+def private_session(w, m1, m3, pane, own, base, label_of):
+    """Pages opened for agents are private: the agent's sign-in stays out of the person's pane, the person's stays out of an agent page opened
+    after it, and a private agent page may go to a site on the web. Read through snapshots, as an agent sees the page."""
+    step("private session for agents")
+    # The person signs in on this computer's other name, so that only the person's cookie could ever show on an agent page there.
+    local = base.replace("127.0.0.1", "localhost")
+    line_of = lambda text, p: (text.split(p) + ["", ""])[1].split("\n")[0]  # noqa: E731
+
+    def shows(m, p, want, timeout=10):
+        """Whether pane `p`'s page says `want` within `timeout`, and what it said last."""
+        last = [""]
+
+        def read():
+            ok, snap, _ = m.call("kelpie_browser_snapshot", {"pane": p})
+            last[0] = next((ln.strip() for ln in snap.splitlines() if "Signed" in ln), snap[:160]) if ok else snap[:200]
+            return want in last[0]
+
+        return bool(until(read, timeout, 0.5)), last[0]
+
+    ok, text, _ = m3.call("kelpie_browser_tabs")
+    check("the person's shared pane is not private", own in text and "private profile" not in line_of(text, own), line_of(text, own))
+
+    # The agent signed in through the fixture's form in its own page: its private session has the cookie.
+    ok, text, _ = m1.call("kelpie_browser_navigate", {"pane": pane, "url": base + "/whoami"})
+    seen, said = shows(m1, pane, "Signed in by the sign-in form")
+    check("the agent's page keeps the agent's sign-in", ok and seen, said or text[:200])
+    ok, text, _ = m3.call("kelpie_browser_navigate", {"pane": own, "url": base + "/whoami"})
+    seen, said = shows(m3, own, "Signed out")
+    check("the person's own pane does not carry the agent's sign-in", ok and seen, said or text[:200])
+
+    # The person signs in in their own pane (the window navigates it, as its address bar does).
+    w.invoke("browser_navigate", {"label": label_of(own), "url": local + "/signin"})
+    seen, said = shows(m3, own, "Signed in by the link")
+    check("the person's pane is signed in once the person signs in", seen, said)
+    ok, text, _ = m3.call("kelpie_browser_navigate", {"pane": own, "url": base + "/login"})
+    check("the shared pane goes back to the sign-in page", ok and "/login" in text, text[:200])
+
+    ok, text, _ = m1.call("kelpie_open_page", {"url": local + "/whoami", "title": "Who am I"})
+    check("the agent opens another page after the person signed in", ok, text)
+
+    def fresh_tab():
+        _, _, res = m1.call("kelpie_browser_tabs")
+        tabs = (res.get("structuredContent") or {}).get("tabs") or []
+        return next((t for t in tabs if t.get("kind") == "opened" and t.get("url", "").startswith(local + "/whoami")), None)
+
+    fresh = until(fresh_tab, 20)
+    fresh_id = fresh["pane"] if fresh else ""
+    seen, said = shows(m1, fresh_id, "Signed out", 15) if fresh_id else (False, "no such tab")
+    check("an agent page opened after the person signed in is signed out", seen, said)
+    # Asked again once the snapshot created the page, so that Rust's record answers.
+    made = fresh_tab() if fresh_id else None
+    check("the new agent page is listed as private", made and made.get("isolated") is True, made)
+
+    # A private agent page may go to any site on the web: the policy must not refuse it. Whether the site loads depends on the network.
+    ok, text, _ = m1.call("kelpie_browser_navigate", {"pane": fresh_id, "url": "https://example.com/", "timeout_s": 15}, timeout=60) if fresh_id else (False, "no such tab", {})
+    # The call itself must work: it lands, or says the page did not load or is still loading (no network). A refusal or an error fails.
+    went = ok and "Now at" in text
+    check("a private agent page is not refused a site on the web", fresh_id and went and "may use only this computer's own sites" not in text, text[:200])
+    if went and "example.com" in text and "(loaded)" in text:
+        check("the private agent page went to the site on the web", True, text[:120])
+    else:
+        print("NOTE https://example.com/ did not load (no network?); only the absence of the policy's refusal was checked: " + text[:160].encode("ascii", "replace").decode(), flush=True)
 
 
 def windows_cdp(w, m1, pane, pa, pb, ref):

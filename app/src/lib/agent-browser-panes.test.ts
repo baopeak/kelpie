@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  BROWSER_FEATURES, NO_PANE, addSite, browserFeatures, callContext, isLoopback, openedForSession, planCall, paneCapabilities, parseSite, refusal, resolvePane, sharedOrigins, tabLine, tabsReply, toAuditEntries,
-  toBrowserPolicy, usablePanes, webOrigin, type PaneShare, type SessionRow, type UsablePane,
+  BROWSER_FEATURES, NO_PANE, PRIVACY_WAIT_MS, addSite, browserFeatures, callContext, decidePrivate, isLoopback, openedForSession, planCall, paneCapabilities, parseSite, refusal, resolvePane, sharedOrigins, tabLine, tabsReply, toAuditEntries,
+  toBrowserPolicy, usablePanes, webOrigin, withPrivacy, type BrowserMode, type PaneShare, type PrivacyInputs, type SessionRow, type UsablePane,
 } from "./agent-browser-panes";
 import { isWindows } from "./platform";
 import type { LayoutNode, Pane, Project, Workspace } from "./types";
@@ -95,7 +95,7 @@ describe("which panes a session may use", () => {
 });
 
 const pane = (id: string, extra: Partial<UsablePane> = {}): UsablePane => ({
-  id, label: `browser-${id}`, projectId: "shop", tabId: "t", title: "T", url: "http://localhost:1/", kind: "opened", origins: [], offSite: false, shown: false, held: false, ...extra,
+  id, label: `browser-${id}`, projectId: "shop", tabId: "t", title: "T", url: "http://localhost:1/", kind: "opened", origins: [], offSite: false, shown: false, held: false, isolated: false, ...extra,
 });
 
 describe("which pane a tool call is about", () => {
@@ -179,12 +179,43 @@ describe("the tabs an agent is shown", () => {
 
   it("gives the same panes as data", () => {
     const reply = tabsReply([pane("dev", { shown: true })], { trustedInput: true, screenshot: true, network: false });
-    expect(reply.data.tabs).toEqual([{ pane: "dev", title: "T", url: "http://localhost:1/", kind: "opened", shown: true, held: false, input: "trusted", screenshot: true, network: false }]);
+    expect(reply.data.tabs).toEqual([{ pane: "dev", title: "T", url: "http://localhost:1/", kind: "opened", shown: true, held: false, input: "trusted", screenshot: true, network: false, isolated: false }]);
     expect(tabLine(reply.data.tabs[0])).toBe('dev "T" http://localhost:1/ — opened by you, shown, input: trusted, screenshot: yes, network: no');
   });
 
   it("says how to get a pane when there is none", () => {
     expect(tabsReply([])).toEqual({ text: NO_PANE, data: { tabs: [] } });
+  });
+
+  it("says which panes have a private page", () => {
+    const reply = tabsReply([pane("dev", { isolated: true }), pane("mine", { kind: "shared", held: true })], browserFeatures(false));
+    expect(reply.text.split("\n")).toEqual([
+      'dev "T" http://localhost:1/ — opened by you, background tab, input: synthetic, screenshot: no, network: no, private profile',
+      'mine "T" http://localhost:1/ — shared, background tab, input: synthetic, screenshot: no, network: no, a phone controls it',
+    ]);
+    expect(reply.data.tabs.map((e) => [e.pane, e.isolated])).toEqual([["dev", true], ["mine", false]]);
+  });
+});
+
+describe("whether a pane's page is private", () => {
+  it("expects a private page for a pane opened for an agent, whichever session lists it", () => {
+    const shared = { dev: { origins: ["http://localhost:5173"] }, mine: { origins: ["https://accounts.example.com"] } };
+    const [dev] = usablePanes("lead", projects, workspace, sessions, pages, none, new Set());
+    const listed = usablePanes("peer", projects, workspace, sessions, pages, shared, new Set());
+    expect(dev.isolated).toBe(true);
+    expect(listed.map((p) => [p.id, p.kind, p.isolated])).toEqual([["dev", "shared", true], ["mine", "shared", false]]);
+  });
+
+  it("takes Rust's word for the pages that exist", () => {
+    const panes = [pane("made", { isolated: true }), pane("before", { isolated: true }), pane("later", { isolated: true }), pane("person")];
+    const made = { "browser-made": true, "browser-before": false, "browser-person": false };
+    expect(withPrivacy(panes, made).map((p) => [p.id, p.isolated])).toEqual([["made", true], ["before", false], ["later", true], ["person", false]]);
+  });
+
+  it("lists the panes with Rust's word in tabs", () => {
+    const panes = [pane("a", { isolated: true }), pane("b", { isolated: true })];
+    const plan = planCall("tabs", {}, panes, { made: { "browser-a": false } });
+    expect("answer" in plan && plan.answer.data.tabs.map((e) => e.isolated)).toEqual([false, true]);
   });
 });
 
@@ -283,15 +314,15 @@ describe("what the window tells Rust about a call", () => {
   it("gives an opened pane the policy's sites and a shared pane its own sites", () => {
     const policy = { eval: false, sites: ["https://docs.example", 7] };
     expect(callContext(pane("a"), policy, who)).toEqual({
-      session: "s1", sessionName: "Claude", kind: "opened", origins: [], sites: ["https://docs.example"], mayEval: false, project: "shop", isolated: false,
+      session: "s1", sessionName: "Claude", kind: "opened", origins: [], sites: ["https://docs.example"], mayEval: false, project: "shop",
     });
     const shared = callContext(pane("b", { kind: "shared", origins: ["https://a.example"], projectId: "docs" }), policy, who);
     expect([shared.kind, shared.origins, shared.sites, shared.project]).toEqual(["shared", ["https://a.example"], ["https://docs.example"], "docs"]);
     expect(callContext(pane("a"), { mode: "act" }, who).sites).toEqual([]);
   });
 
-  it("never claims a profile of its own for a pane", () => {
-    expect(callContext(pane("a"), { eval: true }, who).isolated).toBe(false);
+  it("leaves whether the page is private to Rust, which made it", () => {
+    expect(callContext(pane("a", { isolated: true }), { eval: true }, who)).not.toHaveProperty("isolated");
   });
 });
 
@@ -344,5 +375,60 @@ describe("a restricted session", () => {
     const panes = usablePanes("peer", projects, workspace, sessions, pages, shared, new Set(), { restricted: true });
     expect(planCall("tabs", {}, panes)).toEqual({ answer: { text: NO_PANE, data: { tabs: [] } } });
     expect(planCall("snapshot", { pane: "mine" }, panes, { exists: () => true })).toMatchObject({ error: expect.stringContaining("neither opened for this session") });
+  });
+});
+describe("whether a page made for an agent's pane is private", () => {
+  const API = 39;
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+  /** A window that connects at `connectAt` ms, learns the API level at `apiAt`, and has the policy read in `readMs`. */
+  const fakeWindow = (o: { connectAt?: number; apiAt?: number; api?: number; mode?: BrowserMode | null; readMode?: BrowserMode | null; readMs?: number; readFails?: boolean } = {}) => {
+    const t0 = Date.now();
+    let mode = o.mode ?? null;
+    const reads = { n: 0 };
+    const io: PrivacyInputs = {
+      connected: () => Date.now() - t0 >= (o.connectAt ?? 0),
+      api: () => (Date.now() - t0 >= (o.apiAt ?? 0) ? (o.api ?? API) : 0),
+      mode: () => mode,
+      read: () => {
+        reads.n++;
+        return new Promise((ok, fail) => setTimeout(() => (o.readFails ? fail(new Error("no")) : ok((mode = o.readMode ?? null))), o.readMs ?? 0));
+      },
+    };
+    return { io, reads };
+  };
+  const decide = async (io: PrivacyInputs, advance = PRIVACY_WAIT_MS + 1000) => {
+    const out = decidePrivate(io, API);
+    await vi.advanceTimersByTimeAsync(advance);
+    return out;
+  };
+
+  it("is private while browser control is on, and not while it is off", async () => {
+    expect(await decide(fakeWindow({ mode: "act" }).io)).toBe(true);
+    expect(await decide(fakeWindow({ mode: "read" }).io)).toBe(true);
+    expect(await decide(fakeWindow({ mode: "off" }).io)).toBe(false);
+  });
+
+  it("waits for the first connection and the daemon's API level at start, then reads the policy", async () => {
+    const w = fakeWindow({ connectAt: 1500, apiAt: 2500, readMode: "act", readMs: 300 });
+    expect(await decide(w.io)).toBe(true);
+    expect(w.reads.n).toBe(1);
+  });
+
+  it("is not private when the daemon is not known within the wait, or has no browser control", async () => {
+    expect(await decide(fakeWindow({ connectAt: PRIVACY_WAIT_MS + 500, mode: "act" }).io)).toBe(false);
+    expect(await decide(fakeWindow({ apiAt: PRIVACY_WAIT_MS + 500, mode: "act" }).io)).toBe(false);
+    expect(await decide(fakeWindow({ api: API - 1, mode: "act" }).io)).toBe(false);
+  });
+
+  it("does not wait for a policy read past the bound, and a failed read is not private", async () => {
+    const slow = fakeWindow({ connectAt: 2000, readMode: "act", readMs: 40_000 });
+    const out = decidePrivate(slow.io, API);
+    let done = false;
+    void out.then(() => (done = true));
+    await vi.advanceTimersByTimeAsync(PRIVACY_WAIT_MS);
+    expect(done).toBe(true);
+    expect(await out).toBe(false);
+    expect(await decide(fakeWindow({ readFails: true, readMode: "act" }).io)).toBe(false);
   });
 });

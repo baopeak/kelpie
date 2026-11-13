@@ -10,7 +10,7 @@ import { SplitView, paneDrag, startTabDrag } from "./split-view";
 import { StatusDot } from "./sidebar";
 import { Launcher } from "./welcome";
 import { openLayoutMenu } from "./layout-menu";
-import { browserState, freshPages, openBrowser } from "../lib/browser";
+import { browserLabel, browserState, freshPages, openBrowser, privateWebviews } from "../lib/browser";
 import { agentLeases } from "../lib/agent-browser";
 import { HostChip } from "./host-target";
 import { projectTarget, sessionTarget } from "../lib/remote";
@@ -54,7 +54,12 @@ function TabTitle(props: { tab: Tab; project: Project }) {
   };
   return (
     <>
-      <Show when={session()} fallback={<Icon name={focus()?.kind === "diff" ? "git" : focus()?.kind === "browser" ? "globe" : "files"} size={14} />}>
+      <Show when={session()} fallback={
+        <Show when={focus()?.kind === "browser" && privateWebviews().has(browserLabel(focus()!.id))} fallback={<Icon name={focus()?.kind === "diff" ? "git" : focus()?.kind === "browser" ? "globe" : "files"} size={14} />}>
+          {/* A pane opened for an agent while browser control was on: its page is a private session, with none of the person's sign-ins. */}
+          <span class="tab-private" data-agent-private title={t("Private browser session for agents")}><Icon name="globe" size={14} /></span>
+        </Show>
+      }>
         {(s) => <StatusDot s={s()} />}
       </Show>
       <Show when={session()}>{(s) => <KindGlyph kind={s().kind} size={14} />}</Show>

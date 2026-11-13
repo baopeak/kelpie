@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 vi.mock("./store", () => ({ store: {} }));
 
-import { browserClose, browserOpen, browserPaneOnPort, browserPaneShowing, browserVisible, setBrowserState } from "./browser";
+import { browserClose, browserOpen, browserPaneOnPort, browserPaneShowing, browserVisible, privateWebviews, setBrowserState } from "./browser";
 import { store } from "./store";
 
 const rect = { x: 0, y: 0, width: 100, height: 100 };
@@ -77,6 +77,44 @@ describe("browser webview lifecycle order", () => {
     expect(sent()).toEqual(["browser_open", "visible:false"]);
     calls[0].finish();
     calls[1].finish();
+  });
+
+  it("waits for whether a page is private in its turn, so a hide asked meanwhile still comes after the open", async () => {
+    let decide!: (on: boolean) => void;
+    void browserOpen("browser-i", "http://localhost:1", rect, { agent: new Promise<boolean>((r) => (decide = r)) });
+    void browserVisible("browser-i", false);
+    await settle();
+    expect(sent()).toEqual([]);
+    decide(true);
+    await settle();
+    expect(sent()).toEqual(["browser_open"]);
+    expect(calls[0].args).toMatchObject({ label: "browser-i", agent: true });
+    calls[0].finish();
+    await settle();
+    expect(sent()).toEqual(["browser_open", "visible:false"]);
+    calls[1].finish();
+  });
+
+  it("opens an ordinary page when browser control is off", async () => {
+    void browserOpen("browser-j", "http://localhost:1", rect, { agent: Promise.resolve(false) });
+    await settle();
+    expect(calls[0].args).not.toHaveProperty("agent");
+    calls[0].finish();
+  });
+
+  it("knows which webviews Rust made private, until they close", async () => {
+    invoke.mockImplementationOnce(() => Promise.resolve(true as unknown as void));
+    await browserOpen("browser-g", "http://localhost:1", rect, { agent: true });
+    expect(invoke).toHaveBeenLastCalledWith("browser_open", expect.objectContaining({ label: "browser-g", agent: true }));
+    expect(privateWebviews().has("browser-g")).toBe(true);
+    // Rust's word counts, not what was asked: a webview that already existed keeps what it was made with.
+    invoke.mockImplementationOnce(() => Promise.resolve(false as unknown as void));
+    await browserOpen("browser-h", "http://localhost:1", rect, { agent: true });
+    expect(privateWebviews().has("browser-h")).toBe(false);
+    void browserClose("browser-g");
+    await settle();
+    expect(privateWebviews().has("browser-g")).toBe(false);
+    calls[calls.length - 1]?.finish();
   });
 });
 

@@ -13,7 +13,7 @@ import {
   type Annotation, type Rect,
 } from "../lib/browser";
 import { held, stopTakeover } from "../lib/takeover";
-import { agentLeases, browserAgentsOn, paneShares, sharePane, stopAgentsInPane, unsharePane } from "../lib/agent-browser";
+import { agentLeases, browserAgentsOn, paneShares, privateForAgents, sharePane, stopAgentsInPane, unsharePane } from "../lib/agent-browser";
 import { webOrigin } from "../lib/agent-browser-panes";
 import { Icon } from "./icons";
 import { LoadBar } from "./load-bar";
@@ -67,7 +67,7 @@ export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; foc
     setError(null);
     try {
       if (!opened()) {
-        await browserOpen(label, url, rect(), { agent: !!props.pane.openedBy });
+        await browserOpen(label, url, rect(), { agent: !!props.pane.openedBy && privateForAgents() });
         setOpened(true);
         setAddress(url);
       } else setAddress(await browserNavigate(label, url));

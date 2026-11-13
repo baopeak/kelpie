@@ -101,6 +101,10 @@ export interface UsablePane {
   shown: boolean;
   /** A phone controls it now. */
   held: boolean;
+  /** Its page is private: a private session, with none of the person's sign-ins. Rust decides it when it creates the page (for a pane
+   *  opened for an agent while browser control is on) and is asked when it matters (`withPrivacy`); here, what a page not created yet
+   *  will be once an agent's call creates it. */
+  isolated: boolean;
 }
 
 /** How the window sees panes now (which are on screen, which a phone controls), and whether the calling session runs restricted. */
@@ -149,11 +153,19 @@ export function usablePanes(
           offSite: !opened && !origins.includes(origin) && !isLoopback(url),
           shown: view.shown?.(p.id, tab.id, pane.id) ?? false,
           held: !!view.held?.[pane.id],
+          isolated: !!pane.openedBy,
         });
       }
     }
   }
   return out;
+}
+
+/** The panes with Rust's word on their pages (`browser_private`: by webview label, for the pages that exist). A page keeps what it was
+ *  created with: a pane whose page was made while browser control was off stays on the person's session, and one whose page is not created yet
+ *  will be private when it was opened for an agent. */
+export function withPrivacy(usable: UsablePane[], made: Readonly<Record<string, boolean>>): UsablePane[] {
+  return usable.map((p) => (p.label in made ? { ...p, isolated: made[p.label] === true } : p));
 }
 
 /** What an agent is told when it has no pane to use. */
@@ -199,14 +211,11 @@ export interface AgentCallContext {
   kind: "opened" | "shared";
   /** A shared pane's sites (empty for a pane opened for the session). */
   origins: string[];
-  /** The policy's allowed sites, for a pane opened for the session without a profile of its own. */
+  /** The policy's allowed sites, for a pane opened for the session whose page is not private. */
   sites: string[];
   mayEval: boolean;
   /** The pane's project. */
   project: string;
-  /** The pane's page has a browser profile of its own. Always false until panes record the profile their page was created with: a
-   *  build setting cannot tell, since a page the person opened uses the person's profile whatever the build can do. */
-  isolated: boolean;
 }
 
 /** The policy as the daemon forwards it with a call. */
@@ -227,15 +236,20 @@ export function callContext(pane: UsablePane, policy: CallPolicy | null | undefi
     sites,
     mayEval: policy?.eval === true && pane.kind === "opened",
     project: pane.projectId,
-    isolated: false,
   };
 }
 
 /** What the window does with one call: answer it (`tabs`), refuse it, or run it in a pane. */
 export type CallPlan = { answer: ReturnType<typeof tabsReply> } | { error: string } | { pane: UsablePane };
 
-export function planCall(tool: string, args: Readonly<Record<string, unknown>>, usable: UsablePane[], state: { exists?: (paneId: string) => boolean; design?: (paneId: string) => boolean } = {}): CallPlan {
-  if (tool === "tabs") return { answer: tabsReply(usable) };
+/** `made`: Rust's word on which pages are private (`withPrivacy`), asked for `tabs`. */
+export function planCall(
+  tool: string,
+  args: Readonly<Record<string, unknown>>,
+  usable: UsablePane[],
+  state: { exists?: (paneId: string) => boolean; design?: (paneId: string) => boolean; made?: Readonly<Record<string, boolean>> } = {},
+): CallPlan {
+  if (tool === "tabs") return { answer: tabsReply(withPrivacy(usable, state.made ?? {})) };
   const picked = resolvePane(args.pane, usable, state.exists);
   if ("error" in picked) return picked;
   const why = refusal(picked.pane, { design: state.design?.(picked.pane.id) });
@@ -253,11 +267,13 @@ export interface TabEntry {
   screenshot: boolean;
   network: boolean;
   held: boolean;
+  /** A private page: a private session with none of the person's sign-ins; any http(s) site is open to it. */
+  isolated: boolean;
 }
 
 const yesNo = (b: boolean) => (b ? "yes" : "no");
 
-/** One line of `kelpie_browser_tabs`: `<id> "<title>" <url> — opened by you|shared, shown|background tab, input: …, screenshot: …, network: …[, a phone controls it]`. */
+/** One line of `kelpie_browser_tabs`: `<id> "<title>" <url> — opened by you|shared, shown|background tab, input: …, screenshot: …, network: …[, private profile][, a phone controls it]`. */
 export function tabLine(e: TabEntry): string {
   const title = JSON.stringify(e.title.replace(/\s+/g, " ").trim());
   const parts = [
@@ -266,6 +282,7 @@ export function tabLine(e: TabEntry): string {
     `input: ${e.input}`,
     `screenshot: ${yesNo(e.screenshot)}`,
     `network: ${yesNo(e.network)}`,
+    ...(e.isolated ? ["private profile"] : []),
     ...(e.held ? ["a phone controls it"] : []),
   ];
   return `${e.pane} ${title} ${e.url} — ${parts.join(", ")}`;
@@ -274,8 +291,48 @@ export function tabLine(e: TabEntry): string {
 /** The answer to `kelpie_browser_tabs`: one line per usable pane (or how to get one), and the same as data. A shared pane on another site
  *  is left out: its address and title are the person's business. */
 export function tabsReply(usable: UsablePane[], features: BrowserFeatures = BROWSER_FEATURES): { text: string; data: { tabs: TabEntry[] } } {
-  const tabs = usable.filter((p) => !p.offSite).map((p): TabEntry => ({ pane: p.id, title: p.title, url: p.url, kind: p.kind, shown: p.shown, held: p.held, ...paneCapabilities(p.shown, features) }));
+  const tabs = usable.filter((p) => !p.offSite).map((p): TabEntry => ({ pane: p.id, title: p.title, url: p.url, kind: p.kind, shown: p.shown, held: p.held, ...paneCapabilities(p.shown, features), isolated: p.isolated }));
   return { text: tabs.length ? tabs.map(tabLine).join("\n") : NO_PANE, data: { tabs } };
+}
+
+// ---------- whether a page made for an agent is private ----------
+
+/** What deciding needs of the window: the daemon connection, its API level (0 until known), the browser mode as last read (null: not read),
+ *  and a way to read it. */
+export interface PrivacyInputs {
+  connected: () => boolean;
+  api: () => number;
+  mode: () => BrowserMode | null;
+  read: () => Promise<BrowserMode | null>;
+}
+
+/** The longest a pane's page waits for the daemon before it is made: past it, the page is not private. */
+export const PRIVACY_WAIT_MS = 10_000;
+const PRIVACY_POLL_MS = 100;
+
+/** Whether a page made now for a pane opened for an agent is private: browser control is on (not off). A pane restored at start mounts
+ *  before the window knows the daemon: this waits for the first connection and its API level, then for the policy, all within `waitMs`
+ *  (the pane's page waits that long at most). Not known by then, or a daemon without browser control: not private (the allowed-sites rule
+ *  governs the pane). */
+export async function decidePrivate(io: PrivacyInputs, apiNeeded: number, waitMs = PRIVACY_WAIT_MS): Promise<boolean> {
+  const end = Date.now() + waitMs;
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  while (!(io.connected() && io.api() > 0)) {
+    const left = end - Date.now();
+    if (left <= 0) return false;
+    await sleep(Math.min(PRIVACY_POLL_MS, left));
+  }
+  if (io.api() < apiNeeded) return false;
+  let mode = io.mode();
+  if (mode === null) {
+    const left = end - Date.now();
+    if (left <= 0) return false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), left)));
+    mode = await Promise.race([io.read().catch(() => null), late]);
+    clearTimeout(timer);
+  }
+  return mode === "read" || mode === "act";
 }
 
 // ---------- the daemon's policy (Settings → Agents → Browser panes) ----------

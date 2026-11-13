@@ -9,13 +9,17 @@
 //! A `window.open` that asks for a size (an OAuth or sign-in window) opens as a window of its own on the pane's WebView2 environment, so the page keeps
 //! `window.opener` and gets the sign-in back; any other new window opens in the pane. A pane and its popups are one group for a phone that takes the
 //! pane over (`takeover`).
+//!
+//! A pane opened for an agent while browser control is on is made private (`incognito`: InPrivate on Windows, a non-persistent data store on
+//! macOS, an ephemeral context on Linux), and so are its popups: agents do not get the person's sign-ins, and what they sign in to is
+//! forgotten when their panes close. On Windows all such panes share one private session; elsewhere each pane has its own.
 
 pub(crate) mod agent;
 mod agent_cdp;
 mod agent_snapshot;
 pub(crate) mod takeover;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -47,9 +51,38 @@ pub struct Browsers {
     navs: Mutex<HashMap<String, (u64, u64)>>,
     /// The nonce each pane's agent engine answers to (`browser_agent.js`): the page cannot call it.
     agent_nonces: Mutex<HashMap<String, String>>,
+    /// Panes whose webview is private (opened for an agent while browser control was on), as the platform made it: none of the person's
+    /// sign-ins, and forgotten when it closes. On Windows these panes and their popups share one private session (forgotten once the last of
+    /// them closes); on macOS and Linux each pane has its own, its sized popups included. Fixed for the webview's life.
+    private: Mutex<HashSet<String>>,
+    /// Held while `browser_open` looks for a pane's webview and makes it: two opens of one label (the window's order does not hold across a
+    /// reload of the window) never both make it, nor overwrite the nonces and the record of the one that exists.
+    opening: tokio::sync::Mutex<()>,
 }
 
 impl Browsers {
+    /// Whether pane `label`'s webview was made private.
+    fn is_private(&self, label: &str) -> bool {
+        self.private.lock().unwrap().contains(label)
+    }
+
+    fn set_private(&self, label: &str, private: bool) {
+        let mut set = self.private.lock().unwrap();
+        if private {
+            set.insert(label.to_string());
+        } else {
+            set.remove(label);
+        }
+    }
+
+    /// Pane `label`'s webview is closing: its page's reports and agent calls are no longer taken. Whether it is private is kept until it
+    /// is gone (`set_private`): a popup it opens meanwhile still gets its session.
+    fn forget(&self, label: &str) {
+        self.nonces.lock().unwrap().remove(label);
+        self.navs.lock().unwrap().remove(label);
+        self.agent_nonces.lock().unwrap().remove(label);
+    }
+
     fn popups_of(&self, pane: &str) -> Vec<String> {
         self.popups.lock().unwrap().get(pane).cloned().unwrap_or_default()
     }
@@ -99,8 +132,9 @@ pub fn daemon_gone(app: &AppHandle) {
     takeover::daemon_gone(app);
 }
 
-/// A sized `window.open` of pane `pane` as a window of its own, on the pane's WebView2 environment (`window_features` carries it). Like the pane it has no IPC
-/// (the app's capability covers the main webview only) and stays on the web; it opens nothing further. None when it could not be made: the pane opens it instead.
+/// A sized `window.open` of pane `pane` as a window of its own, on the pane's WebView2 environment (`window_features` carries it), private when
+/// the pane is, so that a sign-in there reaches the pane's own session. Like the pane it has no IPC (the app's capability covers the main
+/// webview only) and stays on the web; it opens nothing further. None when it could not be made: the pane opens it instead.
 fn open_popup(app: &AppHandle, pane: &str, url: &Url, features: NewWindowFeatures) -> Option<tauri::WebviewWindow> {
     let state = app.state::<Browsers>();
     let label = format!("{pane}-popup-{}", state.next_popup.fetch_add(1, Ordering::Relaxed) + 1);
@@ -108,6 +142,7 @@ fn open_popup(app: &AppHandle, pane: &str, url: &Url, features: NewWindowFeature
     let (title_app, title_label, title_pane) = (app.clone(), label.clone(), pane.to_string());
     let window = tauri::WebviewWindowBuilder::new(app, &label, WebviewUrl::External(Url::parse("about:blank").ok()?))
         .window_features(features)
+        .incognito(state.is_private(pane))
         .title(url.host_str().unwrap_or_default())
         .on_navigation(|u| u.host_str() != Some(SENTINEL_HOST) && matches!(u.scheme(), "http" | "https" | "about" | "data" | "blob"))
         .on_new_window(|_, _| NewWindowResponse::Deny)
@@ -236,33 +271,40 @@ pub struct Rect {
 
 /// Creates the pane's webview (or moves and shows the existing one). `hidden`: for an agent that uses a pane nobody has opened yet, the
 /// webview is made at `rect` (off screen) and hidden at once; an existing one is left exactly as it is (the pane may be mounting). `agent`:
-/// the pane was opened for an agent, so its page keeps its console for it from the start; fixed when the webview is made.
+/// the pane was opened for an agent while browser control is on, so its page is private (a private session, none of the person's
+/// sign-ins) and keeps its console for agents from the start; fixed when the webview is made, so an existing webview keeps what it was made
+/// with. Returns whether the pane's webview is private, as the platform made it.
 #[tauri::command]
-pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, label: String, url: String, rect: Rect, hidden: Option<bool>, agent: Option<bool>) -> CmdResult<()> {
+pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, label: String, url: String, rect: Rect, hidden: Option<bool>, agent: Option<bool>) -> CmdResult<bool> {
     valid_label(&label)?;
     let hidden = hidden == Some(true);
+    let _opening = state.opening.lock().await;
     if let Some(wv) = app.get_webview(&label) {
         if hidden {
-            return Ok(());
+            return Ok(state.is_private(&label));
         }
         wv.set_position(LogicalPosition::new(rect.x, rect.y)).map_err(err)?;
         wv.set_size(LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0))).map_err(err)?;
         app.state::<Takeovers>().set_visible(&label, true);
         wv.show().map_err(err)?;
         crate::webview_memory::fit(&wv);
-        return Ok(());
+        return Ok(state.is_private(&label));
     }
     let url = parse_url(&url)?;
     let window = app.get_window("main").ok_or("no main window")?;
+    let asked = agent == Some(true);
     let nonce = new_nonce();
     state.nonces.lock().unwrap().insert(label.clone(), nonce.clone());
     let agent_nonce = new_nonce();
     state.agent_nonces.lock().unwrap().insert(label.clone(), agent_nonce.clone());
-    let engine = AGENT_ENGINE.replace("__KELPIE_AGENT_NONCE__", &agent_nonce).replace("__KELPIE_AGENT_PANE__", if agent == Some(true) { "true" } else { "false" });
+    // Recorded before the page exists: its first sized `window.open` already asks for it. Corrected below to what the platform made.
+    state.set_private(&label, asked);
+    let engine = AGENT_ENGINE.replace("__KELPIE_AGENT_NONCE__", &agent_nonce).replace("__KELPIE_AGENT_PANE__", if asked { "true" } else { "false" });
     let (nav_app, load_app, title_app, popup_app) = (app.clone(), app.clone(), app.clone(), app.clone());
     let (nav_label, load_label, title_label, popup_label) = (label.clone(), label.clone(), label.clone(), label.clone());
     let popup_nonce = nonce.clone();
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(url))
+        .incognito(asked)
         .initialization_script(PICKER.replace("__KELPIE_NONCE__", &nonce))
         .initialization_script(engine)
         .on_navigation(move |u| {
@@ -307,15 +349,65 @@ pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, lab
             }
             NewWindowResponse::Deny
         });
-    let wv = window
-        .add_child(builder, LogicalPosition::new(rect.x, rect.y), LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0)))
-        .map_err(err)?;
+    let wv = match window.add_child(builder, LogicalPosition::new(rect.x, rect.y), LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0))) {
+        Ok(wv) => wv,
+        Err(e) => {
+            state.forget(&label);
+            state.set_private(&label, false);
+            return Err(err(e));
+        }
+    };
+    // What the platform made counts, not what was asked: an older WebView2 makes a normal page without a word, and the agents' site rule
+    // must not widen for a page that has the person's sign-ins. Recorded whatever was recorded before.
+    let private = asked && recorded_private(made_private(&wv).await);
+    state.set_private(&label, private);
     if hidden {
         app.state::<Takeovers>().set_visible(&label, false);
         wv.hide().map_err(err)?;
     }
     crate::webview_memory::fit(&wv);
-    Ok(())
+    Ok(private)
+}
+
+/// Whether a page asked to be private is recorded as private: only when the platform says it is. Unknown counts as not private.
+fn recorded_private(made: Option<bool>) -> bool {
+    made == Some(true)
+}
+
+/// Whether a webview asked to be private is: on Windows its WebView2 profile says (`IsInPrivateModeEnabled`), None when that cannot be read
+/// (a runtime without profiles, or no answer within 5 s).
+#[cfg(windows)]
+async fn made_private(wv: &tauri::Webview) -> Option<bool> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_13;
+    use windows::core::Interface;
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<bool>>();
+    let tx = Mutex::new(Some(tx));
+    wv.with_webview(move |pv| unsafe {
+        let read = || -> windows::core::Result<bool> {
+            let core = pv.controller().CoreWebView2()?.cast::<ICoreWebView2_13>()?;
+            let mut on = windows::core::BOOL::default();
+            core.Profile()?.IsInPrivateModeEnabled(&mut on)?;
+            Ok(on.as_bool())
+        };
+        if let Some(tx) = tx.lock().unwrap().take() {
+            let _ = tx.send(read().ok());
+        }
+    })
+    .ok()?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx).await.ok()?.ok()?
+}
+
+/// Elsewhere wry makes what was asked (a non-persistent data store on macOS, an ephemeral context on Linux), and nothing reads it back.
+#[cfg(not(windows))]
+async fn made_private(_wv: &tauri::Webview) -> Option<bool> {
+    Some(true)
+}
+
+/// Which of `labels` have a webview now, and whether it is private (made for an agent, as the platform made it). A label left out has no
+/// webview yet.
+#[tauri::command]
+pub async fn browser_private(app: AppHandle, state: tauri::State<'_, Browsers>, labels: Vec<String>) -> CmdResult<HashMap<String, bool>> {
+    Ok(labels.into_iter().filter(|l| valid_label(l).is_ok() && app.get_webview(l).is_some()).map(|l| (l.clone(), state.is_private(&l))).collect())
 }
 
 fn webview(app: &AppHandle, label: &str) -> CmdResult<tauri::Webview> {
@@ -386,9 +478,7 @@ pub async fn browser_info(app: AppHandle, label: String) -> CmdResult<Value> {
 
 #[tauri::command]
 pub async fn browser_close(app: AppHandle, state: tauri::State<'_, Browsers>, label: String) -> CmdResult<()> {
-    state.nonces.lock().unwrap().remove(&label);
-    state.navs.lock().unwrap().remove(&label);
-    state.agent_nonces.lock().unwrap().remove(&label);
+    state.forget(&label);
     agent::pane_closed(&app, &label);
     // A takeover of the pane ends, and its popups go with it.
     takeover::pane_closed(&app, &label).await;
@@ -398,10 +488,12 @@ pub async fn browser_close(app: AppHandle, state: tauri::State<'_, Browsers>, la
             let _ = w.close();
         }
     }
-    match app.get_webview(&label) {
+    let closed = match app.get_webview(&label) {
         Some(wv) => wv.close().map_err(err),
         None => Ok(()),
-    }
+    };
+    state.set_private(&label, false);
+    closed
 }
 
 /// What a local port serves when it serves a web page.
@@ -661,6 +753,26 @@ mod tests {
         assert!(parse_url("file:///C:/x").is_err());
         assert!(parse_url("javascript:alert(1)").is_err());
         assert_eq!(parse_url("").unwrap().as_str(), "about:blank");
+    }
+
+    #[test]
+    fn a_page_counts_as_private_only_when_the_platform_says_so() {
+        assert!(recorded_private(Some(true)));
+        // A runtime that made a normal page, or one that could not be asked: the page has the person's sign-ins.
+        assert!(!recorded_private(Some(false)));
+        assert!(!recorded_private(None));
+    }
+
+    #[test]
+    fn the_private_record_follows_the_webview() {
+        let b = Browsers::default();
+        b.set_private("browser-a", true);
+        assert!(b.is_private("browser-a") && !b.is_private("browser-b"));
+        // Closing forgets the page's reports and agent calls first, and its privacy only once it is gone.
+        b.forget("browser-a");
+        assert!(b.is_private("browser-a"));
+        b.set_private("browser-a", false);
+        assert!(!b.is_private("browser-a"));
     }
 
     #[test]

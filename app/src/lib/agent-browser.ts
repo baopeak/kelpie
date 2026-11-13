@@ -8,7 +8,7 @@
 import { createEffect, createRoot, createSignal } from "solid-js";
 import { onEvent, policyGet, providerReply } from "./ipc";
 import {
-  browserAgentRun, browserAgentStop, browserLabel, browserMounted, browserOpen, browserState, hasWebview, listenBrowserEvents, setBrowserState, type BrowserEvent,
+  browserAgentRun, browserAgentStop, browserLabel, browserMounted, browserOpen, browserPrivate, browserState, hasWebview, listenBrowserEvents, setBrowserState, type BrowserEvent,
 } from "./browser";
 import { findPane, hostOf } from "./takeover-panes";
 import { findPane as paneIn } from "./layout";
@@ -18,7 +18,7 @@ import { sessionLabel, store } from "./store";
 import { t } from "./i18n";
 import { BROWSER_AGENT_API } from "./attention";
 import {
-  callContext, planCall, sharedOrigins, toBrowserPolicy, usablePanes, type BrowserPolicy, type CallPlan, type CallPolicy, type PaneShare, type UsablePane,
+  callContext, decidePrivate, planCall, sharedOrigins, toBrowserPolicy, usablePanes, type BrowserPolicy, type CallPlan, type CallPolicy, type PaneShare, type UsablePane,
 } from "./agent-browser-panes";
 
 /** A browser tool call of an agent session, as Rust passes it on from the daemon. The daemon checked the arguments and its policy. */
@@ -58,6 +58,24 @@ export const browserAgentsOn = () => store.daemonApi() >= BROWSER_AGENT_API && (
 export async function refreshBrowserPolicy() {
   if (store.daemonApi() < BROWSER_AGENT_API) return;
   await policyGet().then((r) => setBrowserPolicy(toBrowserPolicy(r)), () => {});
+}
+
+/** Whether a page created now for a pane opened for an agent is made private: only while browser control is on, so that with it off (the
+ *  default) preview and dev-server tabs keep the person's sign-ins as before. A pane restored at start may mount before the window knows
+ *  the daemon: this waits for it, 10 s at most (`decidePrivate`). */
+export function privateForAgents(): Promise<boolean> {
+  return decidePrivate(
+    {
+      connected: store.connected,
+      api: store.daemonApi,
+      mode: () => browserPolicy()?.mode ?? null,
+      read: async () => {
+        await refreshBrowserPolicy();
+        return browserPolicy()?.mode ?? null;
+      },
+    },
+    BROWSER_AGENT_API,
+  );
 }
 
 const paneIdOf = (label: string) => (label.startsWith("browser-") ? label.slice("browser-".length) : null);
@@ -140,17 +158,25 @@ async function onRequest(r: AgentRequest) {
     const session = typeof raw === "string" ? { id: raw } : raw;
     if (!session?.id) return reply(null, "The request names no session.");
     const args = r.args ?? {};
-    const plan = (): CallPlan =>
-      planCall(r.tool, args, usableFor(session.id, session.parent, session.restricted === true), { exists: (id) => !!locate(id), design: (id) => !!browserState[id]?.design });
+    const usable = () => usableFor(session.id, session.parent, session.restricted === true);
+    // Which pages are private is Rust's to say: it made them. Unanswered, none is said to be.
+    let made: Record<string, boolean> | undefined;
+    if (r.tool === "tabs") {
+      const labels = usable().map((p) => p.label);
+      made = await browserPrivate(labels).catch(() => Object.fromEntries(labels.map((l) => [l, false])));
+    }
+    const plan = (): CallPlan => planCall(r.tool, args, usable(), { exists: (id) => !!locate(id), design: (id) => !!browserState[id]?.design, made });
     const first = plan();
     if ("answer" in first) return reply(first.answer, null);
     if ("error" in first) return reply(null, first.error);
 
     const label = first.pane.label;
     // A pane in a tab nobody has opened since the app started has no page yet: it is created hidden, and showing its tab later shows it.
+    // One opened for an agent (whichever session calls) gets a private page, as mounting it would: the daemon sent this call, so browser
+    // control is on.
     if (!hasWebview(label)) {
       try {
-        await browserOpen(label, first.pane.url, OFFSCREEN, { hidden: true, agent: first.pane.kind === "opened" });
+        await browserOpen(label, first.pane.url, OFFSCREEN, { hidden: true, agent: !!locate(first.pane.id)?.pane.openedBy });
       } catch (e) {
         return reply(null, `The page of pane ${first.pane.id} could not be opened: ${String(e).replace(/^Error: /, "")}`);
       }
