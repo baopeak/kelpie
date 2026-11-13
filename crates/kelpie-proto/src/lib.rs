@@ -69,7 +69,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// `cost`, or null for whatever the computer sends; `quiet` as `{from, to, tz_min, needs_you_through}` in the phone's time, or null), `prefs` and
 /// `events` (the kinds this computer sends at all) in the hello's `push`, and `alerts` on a device in `mobile.status`; the daemon skips a phone whose
 /// choices leave an event out before anything is queued for it. An older daemon sends every alert to every phone, so the phone offers the choices only at 37.
-pub const API_LEVEL: u32 = 37;
+/// 38: starting sessions from a phone: `mobile.set_launch {projects: [{id, name, path}], agents: [{kind, label, args, env}]}` (the app's launch catalogue,
+/// resolved from its profiles, the whole of it each time, kept in memory only; a refused one clears the one before), the phone's `new_options` (`ready`,
+/// `projects` as `{id, name}`, the installed `agents` as `{kind, label, skips}`, `why` when not ready; `launch_refused` after a refused catalogue) and
+/// `new_session {project_id, kind, prompt?, cid}` (answered `{id}`; `in_progress` while the same `cid` is still being started), the
+/// `mobile.session_started {id, device, name, kind, project_id}` event, and the `session_new` audit line ending in "(session {id})", which the app
+/// reads back for the starts it missed while closed (`mobile.audit {limit, action: "session_new"}`: `action` keeps one kind of line, left out every
+/// kind as before; `from` in the answer says older lines were left out). An older daemon has none of it, so the phone offers "+" only at 38.
+pub const API_LEVEL: u32 = 38;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

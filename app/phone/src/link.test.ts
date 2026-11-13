@@ -906,6 +906,27 @@ describe("Link requests: nothing is queued while offline", () => {
     expect(r.sockets.flatMap((s) => s.sent).filter((m) => m.type === "chat_send")).toHaveLength(2);
   });
 
+  it("a start goes out with its cid and the daemon's epoch, once more after a drop, and the session it names is the answer", async () => {
+    r.connect();
+    let out: Outcome | null = null;
+    void r.link.newSession({ project_id: "p1", kind: "claude", prompt: "fix it", cid: "start-1" }).then((o) => (out = o));
+    expect(r.last().sent.at(-1)).toMatchObject({ type: "new_session", project_id: "p1", kind: "claude", prompt: "fix it", cid: "start-1", epoch: "e1" });
+    r.last().die();
+    r.advance(300);
+    r.connect();
+    const again = r.last().sent.filter((m) => m.type === "new_session");
+    expect(again.map((m) => m.cid)).toEqual(["start-1"]);
+    r.last().say({ type: "ack", req: again[0].req, result: "ok", id: "s9", dup: true });
+    await Promise.resolve();
+    expect(out).toMatchObject({ t: "ack", id: "s9", dup: true });
+    void r.link.newOptions().then((o) => (out = o));
+    const asked = r.last().sent.at(-1)!;
+    expect(asked).toMatchObject({ type: "new_options", epoch: "e1" });
+    r.last().say({ type: "new_options", req: asked.req, ready: true, projects: [{ id: "p1", name: "Shop" }], agents: [{ kind: "claude", label: "Claude Code", skips: false }] });
+    await Promise.resolve();
+    expect(out).toMatchObject({ t: "ack", ready: true, projects: [{ id: "p1", name: "Shop" }], agents: [{ kind: "claude", label: "Claude Code", skips: false }] });
+  });
+
   it("a chat message is not sent again into another run of the daemon, or after a second loss", async () => {
     r.connect();
     let restarted: Outcome | null = null;

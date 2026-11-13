@@ -32,6 +32,8 @@ mod automation;
 mod process;
 mod sub_rpc;
 
+pub(crate) use sub_rpc::existing_folder;
+
 /// What delivery of alerts asks of the daemon, from the destinations' own threads.
 struct NotifyHost(std::sync::Weak<Daemon>);
 
@@ -1246,6 +1248,17 @@ impl Daemon {
         self.create_inner(params, None)
     }
 
+    /// `create`, for a session the phone `device` (named `name`) started from the launch catalogue (`mobile`'s `new_session`). The audit log
+    /// gets `summary` of the new session's id (`session_new`), and only then the app hears `mobile.session_started` and says which phone
+    /// started what: an app that heard it has already seen its audit line go by, and does not show it again when it reads back the starts it
+    /// missed while closed. Phones see the new session in their list, as any other.
+    pub fn create_for_phone(&self, params: Value, device: &str, name: &str, summary: impl FnOnce(&str) -> String) -> Result<SessionInfo> {
+        let info = self.create_inner(params, None)?;
+        self.mobile.audit(device, "session_new", &summary(&info.spec.id));
+        self.broadcast("mobile.session_started", json!({"id": info.spec.id, "device": device, "name": name, "kind": info.spec.kind, "project_id": info.spec.project_id}));
+        Ok(info)
+    }
+
     /// `create`, for a session a program opened with `sub.spawn`: `lineage` is its parent's id and its own depth.
     /// Only the daemon sets it; `session.create` has no such parameter.
     fn create_inner(&self, params: Value, lineage: Option<(String, u8)>) -> Result<SessionInfo> {
@@ -2250,8 +2263,13 @@ impl Daemon {
                 })?;
                 return Ok(None);
             }
-            // What phones did: newest first, and whether the log's hash chain holds.
-            "mobile.audit" => self.mobile.audit_entries(params.get("limit").and_then(Value::as_u64).unwrap_or(200) as usize),
+            // What phones did: newest first, and whether the log's hash chain holds. `action` keeps one kind of line only (the app reads
+            // back the phones' starts, `session_new`, among a line for every key typed); left out, every kind as before. `from` says
+            // older lines were left out.
+            "mobile.audit" => {
+                let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(200) as usize;
+                self.mobile.audit_of(limit, params.get("action").and_then(Value::as_str).filter(|a| !a.is_empty()))
+            }
             // Forget every phone, make new keys, turn phone access off (also the way out of an unreadable store file). Always verified.
             "mobile.reset" => {
                 self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::Reset, |me| {
@@ -2274,6 +2292,11 @@ impl Daemon {
             }
             "mobile.set_projects" => {
                 self.mobile.set_projects(&params);
+                json!(true)
+            }
+            // What phones may start, as the app resolved it from its profiles; the whole catalogue each time, in memory only.
+            "mobile.set_launch" => {
+                self.mobile.set_launch(&params)?;
                 json!(true)
             }
             // The verified app only (`auth::APP_ONLY`). Turning the relay off asks nobody; turning it on is checked first (an address, a registration key when

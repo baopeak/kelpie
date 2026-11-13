@@ -6,7 +6,8 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as ipc from "./ipc";
 import { olderVersion } from "./version";
-import { ANSWER_API, nextWaiting, setAnswering } from "./attention";
+import { ANSWER_API, NEW_SESSION_API, nextWaiting, setAnswering } from "./attention";
+import { loadMissedPhoneStarts, PHONE_STARTS_READ, type AuditRead } from "./phone-starts";
 import { NOTIFY_API, createRepeatGuard, describeNotify, worthPopup, type NotifyEvent } from "./notify-events";
 import { t } from "./i18n";
 import { allPanes, autoGrid, buildGrid, cellCount, equalize, findPane, fromTemplate, insertBeside, leaf, migrateLayout, moveGutter, movePane, removePane, replacePane, splitPane, swapPanes, templateLeaves, toTemplate, type GridSpec, type Side } from "./layout";
@@ -16,6 +17,7 @@ import { disposeView, peekView, resetStreams, setInputFanout } from "./terminal-
 import { CORE_AGENTS, isAgentKind, kindInfo, kindShortName, loadAgentPresets, presetFor } from "./agents";
 import type { SettingsSection } from "./settings-catalog";
 import { accountEnv, accountHomes, sessionHome } from "./accounts";
+import { profileLaunchOf } from "./phone-launch";
 import { closeBrowser } from "./browser";
 import { projectTarget, sessionTarget, targetEnv, targetRemote } from "./remote";
 import { agentFolder, agentsAt, hostOf, isHostKeyError, layoutTarget, layoutTargetFor } from "./ssh-hosts";
@@ -349,6 +351,44 @@ function createAppStore() {
     for (const id of [...requestInbox.keys()]) if (!subRequests().some((r) => r.id === id)) requestGone(id);
   }
 
+  /** A phone's start in Activity: "{phone} started {agent} in {project}", which it opens. `what` is the audit log's own words, for a start
+   *  whose session is gone by now (its agent and project are no longer known here). Returns the title. */
+  function addPhoneStart(phone: string | undefined, sessionId: string | undefined, kind: string | undefined, projectId: string | null | undefined, what?: string): string {
+    const project = state.projects.find((x) => x.id === projectId);
+    const who = phone || t("A phone");
+    const title =
+      kind || !what
+        ? t("{phone} started {agent} in {project}", { phone: who, agent: kindInfo(kind ?? "").label, project: project?.name ?? t("a project") })
+        : t("{phone} started {what}", { phone: who, what });
+    addInbox({ kind: "phone", title, body: t("Started from a phone with this computer's settings for the agent."), sessionId, projectId: projectId ?? undefined });
+    return title;
+  }
+
+  /** Starts by phones while no window was open (the live notice reaches an open one only): read back from the phones' audit log when the
+   *  window connects, each put in Activity once, without a popup. `seen` is the remembered time as it was when the window connected. */
+  async function loadPhoneStarts(seen: number | undefined) {
+    if (daemonApi() < NEW_SESSION_API) return;
+    await loadMissedPhoneStarts(seen, {
+      audit: () => ipc.daemon<AuditRead>("mobile.audit", { ...PHONE_STARTS_READ }).catch(() => null),
+      names: async () => {
+        const status = await ipc.daemon<{ devices?: { id: string; name: string }[] }>("mobile.status").catch(() => null);
+        return (id) => status?.devices?.find((d) => d.id === id)?.name;
+      },
+      shown: () => new Set((state.inbox ?? []).filter((i) => i.kind === "phone" && i.sessionId).map((i) => i.sessionId!)),
+      add: (s, phone) => {
+        const session = s.sessionId ? sessions[s.sessionId] : undefined;
+        addPhoneStart(phone, s.sessionId, session?.kind, session?.project_id, s.what);
+      },
+      cutOff: () =>
+        addInbox({
+          kind: "phone",
+          title: t("Phones may have started more sessions than Activity lists"),
+          body: t("Some sessions phones started while Kelpie was closed may not be listed here. See Settings → Mobile → What phones did."),
+        }),
+      remember: (newest) => update((st) => (st.phoneStartsSeen = Math.max(st.phoneStartsSeen ?? 0, newest))),
+    });
+  }
+
   // ---------- inbox (notifications & activity) ----------
   function addInbox(item: Omit<InboxItem, "id" | "at" | "read">): string {
     const id = uid();
@@ -511,6 +551,14 @@ function createAppStore() {
         // Read by lib/agent-web-pages.ts (the store must not import it: it imports the store).
         window.dispatchEvent(new CustomEvent("kelpie:open-page", { detail: p }));
         break;
+      case "mobile.session_started": {
+        // A phone started an agent here: said, and kept in Activity. The session is in the sidebar; it opens in a tab only when asked (Show).
+        const text = addPhoneStart(p.name, p.id, p.kind, p.project_id);
+        notify(text, { label: t("Show"), run: () => revealSession(p.id) }, 10000);
+        // Its audit line went in before this was sent: reading the log back later does not show it again.
+        update((s) => (s.phoneStartsSeen = Math.max(s.phoneStartsSeen ?? 0, Date.now())));
+        break;
+      }
       case "scheduled.updated":
         // Read by lib/limits.ts (the store must not import it: it imports the store).
         window.dispatchEvent(new CustomEvent("kelpie:scheduled", { detail: p }));
@@ -1403,15 +1451,8 @@ function createAppStore() {
   /** Launch arguments and environment of an agent profile, permission mode included. */
   /** `yolo: false`: without the Yolo flags (chat view asks Allow / Deny itself). */
   function profileLaunch(kind: SessionKind, opts: { yolo?: boolean; account?: string | null } = {}): { args: string[]; env?: Record<string, string> } {
-    const p = state.settings.profiles.find((x) => x.kind === kind);
-    const args = [...(p?.args ?? [])];
-    if (p?.permission && kind === "claude") args.push("--permission-mode", p.permission);
-    if (p?.permission && kind === "codex") args.push("-c", `approval_policy=${p.permission}`);
     // Yolo applies to agents without an explicit per-agent permission choice.
-    const yolo = presetFor(kind)?.yolo ?? [];
-    if (opts.yolo !== false && state.settings.agentPermissions === "yolo" && !p?.permission && yolo.length && !yolo.every((a) => args.includes(a))) args.push(...yolo);
-    const env = { ...(p?.env ?? {}), ...(accountEnv(kind, opts.account) ?? {}) };
-    return { args, env: Object.keys(env).length ? env : undefined };
+    return profileLaunchOf(state.settings, kind, presetFor(kind)?.yolo ?? [], accountEnv(kind, opts.account), opts.yolo !== false);
   }
 
   /** Edits an agent profile in place (rows bound to it stay mounted); preset agents get one
@@ -1608,6 +1649,8 @@ function createAppStore() {
 
   /** Per-connection setup: feature check, agent table, folder notes, keep-awake mode. */
   async function onConnected() {
+    // Before any wait: a phone's start heard live meanwhile moves it on (`loadPhoneStarts`).
+    const phoneStartsSeen = state.phoneStartsSeen;
     // Before resuming interrupted agents: a hand-over decision must see them start.
     await checkDaemonApi();
     void loadAgentPresets();
@@ -1617,6 +1660,7 @@ function createAppStore() {
     void ipc.daemon("daemon.set_priority", { enabled: state.settings.prioritizeVisible ?? true }).catch(() => {});
     void ipc.daemon("daemon.set_policy", { agents_control_others: state.settings.agentsScripting ?? true }).catch(() => {});
     void loadSubState();
+    void loadPhoneStarts(phoneStartsSeen);
     resumeInterrupted();
   }
 
@@ -1680,6 +1724,8 @@ function createAppStore() {
         // Views must forget their stream before anything can re-attach.
         resetStreams();
         setConnected(false);
+        // Phones' starts up to now reached this window live: only those after it are read back on the next connection.
+        if (state.phoneStartsSeen !== undefined) update((st) => (st.phoneStartsSeen = Math.max(st.phoneStartsSeen ?? 0, Date.now())));
         if (s.error) notify(s.error);
         return;
       }

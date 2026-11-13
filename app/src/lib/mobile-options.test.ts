@@ -395,6 +395,7 @@ describe("what the hosted app trusts", () => {
     expect(text).toContain("use Tailscale mode");
     expect(text).not.toMatch(/verified|guarantee/i);
     const other = hostedTrust(hostedRelay({ url: "wss://mine.example" }))!;
+    for (const t of [text, other]) expect(t, "typing starts agents too, bypass mode included").toMatch(/start agents in your projects with this computer's settings, bypass mode included/);
     expect(other).toContain("The phone app comes from the relay at relay.example, not from Kelpie's.");
     expect(other).toContain("not this one");
     expect(other).not.toMatch(/verified|guarantee/i);
@@ -417,7 +418,7 @@ describe("approving a phone", () => {
       expect(c.choices).toEqual(["read", "write"]);
       expect(c.choices).not.toContain("control");
       expect(c.primary).toBe("read");
-      expect(c.typing).toBe("Typing from the hosted app lets code served by Kelpie's relay type into your sessions while the phone is unlocked.");
+      expect(c.typing).toBe("Typing from the hosted app lets code served by Kelpie's relay type into your sessions and start agents in your projects with this computer's settings, bypass mode included, while the phone is unlocked.");
       expect(translated(c.typing!)).toBeTruthy();
     }
     expect(approvalChoices({ want: "control", origin_kind: "hosted" }).asks).toBe("write");
@@ -516,6 +517,13 @@ describe("choosing how a phone pairs", () => {
     }
     expect(screenPolicyLine("relay")).toMatch(/^Never the screen/);
     expect(screenPolicyLine("network")).toContain("never over plain HTTP");
+  });
+
+  it("says that a phone which may type starts agents too, wherever it types from", () => {
+    const w = ways({ status: status({ tailscale: ts, relay: hostedRelay(), tls: true }) });
+    for (const id of ["tailscale", "relay", "network"] as const) expect(w[id].allows, id).toContain("starting agents");
+    expect(ways().network.allows, "not over plain HTTP, which only reads").not.toContain("starting agents");
+    for (const line of ["Reading, typing, approvals and starting agents, from anywhere.", "Reading, typing, approvals and starting agents, over HTTPS with your certificate."]) expect(translated(line), line).toBeTruthy();
   });
 
   it("says this network reads only over plain HTTP, and types with a certificate", () => {

@@ -4,7 +4,8 @@ import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
 import { Inbox } from "./inbox";
 import { t } from "./i18n";
-import { closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, livePathNow, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, remoteScreen, remoteScreens, sessions, setPairing, setTrustOpen, takeover, takeovers, trustOpen } from "./phone-state";
+import { canStartSessions, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, livePathNow, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, remoteScreen, remoteScreens, sessions, setPairing, setTrustOpen, takeover, takeovers, trustOpen } from "./phone-state";
+import { NewSessionSheet } from "./new-session";
 import { APP_VERSION, HOSTED, servedVersion, trustText, type ServedVersion } from "./hosted";
 import { PaneTakeover } from "./pane-takeover";
 import { ScreenView } from "./screen-view";
@@ -178,6 +179,7 @@ function Sheet(props: { onClose: () => void; onSettings: () => void }) {
 export function App() {
   const [sheet, setSheet] = createSignal(false);
   const [settings, setSettings] = createSignal(false);
+  const [starting, setStarting] = createSignal(false);
   // Settings has an entry of its own in the history, so the phone's own Back leaves it for where the person was.
   const onPop = () => setSettings(!!(history.state as { settings?: boolean } | null)?.settings);
   window.addEventListener("popstate", onPop);
@@ -218,6 +220,10 @@ export function App() {
         </Show>
         <h1>{title()}</h1>
         <Show when={!openId() && !inSettings() && badge() > 0}><span class="badge" aria-label={t("Sessions that need you")}>{badge()}</span></Show>
+        {/* Start a session: on the inbox, when this phone may type and the computer starts sessions for phones. */}
+        <Show when={paired() && lockShown().clear && !inSettings() && !openId() && !remoteScreen() && !takeover() && canStartSessions()}>
+          <button class="gear new-session" data-open-new-session aria-label={t("Start a session")} disabled={!connected()} onClick={() => setStarting(true)}>+</button>
+        </Show>
         <Show when={paired() && lockShown().clear && !inSettings() && !remoteScreen() && !takeover()}>
           <button class="gear" data-open-settings aria-label={t("Settings")} onClick={openSettings}><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg></button>
         </Show>
@@ -239,6 +245,7 @@ export function App() {
         </Show>
       </main>
       <Show when={sheet()}><Sheet onClose={() => setSheet(false)} onSettings={openSettings} /></Show>
+      <Show when={starting() && open() && canStartSessions()}><NewSessionSheet onClose={() => setStarting(false)} /></Show>
       <Show when={HOSTED && trustOpen()}><TrustSheet onClose={() => setTrustOpen(false)} /></Show>
       <RecheckSheet />
       <LockCover />

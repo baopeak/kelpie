@@ -23,6 +23,7 @@ import type { LockInfo } from "./lock";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { Initiator, MODE_RECONNECT, unb64url, type Endpoint, type Session } from "./noise";
 import type { Pairing } from "./pairing-store";
+import type { NewSessionRequest } from "./start-session";
 import type { ScreenFrame } from "./screen-sync";
 import type { PaneRow, TkOp } from "./takeover";
 import { MEDIA as SCREEN_MEDIA, type ScOp, type TargetRow } from "./screen";
@@ -79,6 +80,15 @@ export interface QuietHours {
 export interface AlertPrefs {
   kinds: string[] | null;
   quiet: QuietHours | null;
+}
+
+/** What this phone may start (`new_options`): the computer's projects (never their folders) and its installed agents, each saying whether it runs
+ *  without asking before it acts, as on the computer. `ready` false: the computer has not heard from its app since it started (`why` says so). */
+export interface NewOptions {
+  ready: boolean;
+  projects: { id: string; name: string }[];
+  agents: { kind: string; label: string; skips: boolean }[];
+  why?: string;
 }
 
 /** Where the computer listens, newest `seq` wins. */
@@ -175,8 +185,9 @@ export interface ReplyError {
 /** What became of a request: the daemon's reply, or why there was none. */
 export type Outcome =
   /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with.
-   *  `prefs` with a `push_prefs`: the choices the computer keeps. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; targets?: TargetRow[] }
+   *  `prefs` with a `push_prefs`: the choices the computer keeps. `ready`, `projects`, `agents` and `why` with a `new_options`; `id` with a `new_session` (the session
+   *  started), `dup` when that start was asked for before. */
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; targets?: TargetRow[]; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -691,6 +702,17 @@ export class Link {
    *  same `cid`, after the next hello, and the daemon answers `dup` for a message it has (never a second one). */
   chatSend(id: string, cid: string, text: string) {
     return this.request({ type: "chat_send", id, cid, text }, { retry: true });
+  }
+
+  /** What this phone may start: the projects and installed agents of the computer's launch catalogue. */
+  newOptions() {
+    return this.request({ type: "new_options" });
+  }
+
+  /** Starts an agent in a project with the computer's settings for it. Sent once more after a dropped connection, with the same `cid`: the
+   *  computer answers a repeat with the session it started (`dup`), never a second one. */
+  newSession(req: NewSessionRequest) {
+    return this.request({ type: "new_session", ...req }, { retry: true });
   }
 
   chatCancel(id: string, qid: string) {
@@ -1332,7 +1354,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, targets: m.targets });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, targets: m.targets, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup });
     }
     this.h.changed();
     return true;

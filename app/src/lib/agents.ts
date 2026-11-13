@@ -94,8 +94,8 @@ export function projectAgents(project: { remote?: { agents?: string[] } } | null
   return launchableAgents(hidden);
 }
 
-/** Agents for launchers: the core three plus installed presets the user has not hidden. */
-export function launchableAgents(hidden: string[] = []): string[] {
-  const extra = presets().filter((p) => p.installed && !CORE_AGENTS.includes(p.id) && !hidden.includes(p.id)).map((p) => p.id);
+/** Agents for launchers: the core three plus installed presets the user has not hidden (`list`: the daemon's presets, as last read). */
+export function launchableAgents(hidden: string[] = [], list: AgentPreset[] = presets()): string[] {
+  const extra = list.filter((p) => p.installed && !CORE_AGENTS.includes(p.id) && !hidden.includes(p.id)).map((p) => p.id);
   return [...CORE_AGENTS.filter((k) => !hidden.includes(k)), ...extra];
 }

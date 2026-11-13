@@ -44,6 +44,7 @@ describe("the words", () => {
   it("say where the app comes from, who could change it, how to check, what this screen cannot prove, and the way without it", () => {
     const text = trustText(fill).join("\n");
     for (const part of [/relay on Cloudflare/, /Cloudflare account/, /release deploy/, /read and type/, /while the app is unlocked/, /fingerprint/, /cannot prove/, /Tailscale/]) expect(text).toMatch(part);
+    expect(text, "starting agents with the computer's settings, bypass included").toMatch(/start agents in your projects with your computer's settings, bypass mode included/);
   });
 
   it("ask before another computer takes this app, naming both", () => {

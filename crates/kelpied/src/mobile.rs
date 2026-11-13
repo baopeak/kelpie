@@ -21,6 +21,7 @@
 
 pub mod audit;
 mod lanes;
+mod launch;
 mod link;
 mod listen;
 mod lock;
@@ -399,6 +400,15 @@ pub struct Mobile {
     paired_at: Mutex<Option<Instant>>,
     /// Project names from the app (the daemon only knows ids).
     projects: Mutex<HashMap<String, String>>,
+    /// What a phone may start, as the app resolved it (`launch`); none until the app has sent it since this daemon started, and none
+    /// again after it sent one that was refused.
+    launch: Mutex<Result<launch::Catalogue, launch::Missing>>,
+    /// How fast each device has been starting sessions (see `allow_start`).
+    start_rate: Mutex<HashMap<String, SendBucket>>,
+    /// How fast each device has been asking what it may start (see `allow_options`).
+    options_rate: Mutex<HashMap<String, SendBucket>>,
+    /// Requests with a `cid` being carried out now, by (device, cid) (see `CidTurn`).
+    in_flight: InFlight,
     /// Devices added, changed, removed: their own sockets close or reconnect, the other phones are told.
     revoked: broadcast::Sender<DeviceEvent>,
     /// How fast each device has been sending chat messages (see `allow_send`).
@@ -509,12 +519,88 @@ fn take_token(buckets: &Mutex<HashMap<IpAddr, SendBucket>>, ip: IpAddr, rate: f6
     true
 }
 
+/// Takes one from the bucket of `device`, which fills at `rate` a second up to `burst`. False when it is empty. Past 256 devices the buckets that
+/// have filled up again are forgotten (they say nothing).
+fn take_device_token(buckets: &Mutex<HashMap<String, SendBucket>>, device: &str, rate: f64, burst: f64) -> bool {
+    let now = Instant::now();
+    let mut buckets = buckets.lock();
+    if buckets.len() > 256 {
+        buckets.retain(|_, b| b.tokens + now.duration_since(b.at).as_secs_f64() * rate < burst);
+    }
+    let b = buckets.entry(device.to_string()).or_insert(SendBucket { tokens: burst, at: now });
+    b.tokens = (b.tokens + now.duration_since(b.at).as_secs_f64() * rate).min(burst);
+    b.at = now;
+    if b.tokens < 1.0 {
+        return false;
+    }
+    b.tokens -= 1.0;
+    true
+}
+
 /// Chat messages one device may send: this many at once, then one a second.
 const SEND_BURST: f64 = 3.0;
+/// Sessions one device may start: this many at once, then one every ten seconds.
+const START_BURST: f64 = 3.0;
+const START_RATE: f64 = 0.1;
+/// Times one device may ask what it may start (each a look on disk, through the login shell on Unix): this many at once, then two a second.
+const OPTIONS_BURST: f64 = 4.0;
+const OPTIONS_RATE: f64 = 2.0;
 
 struct SendBucket {
     tokens: f64,
     at: Instant,
+}
+
+/// How long a repeat of a request waits for the first one with its `cid` to finish before it is told that one is still under way
+/// (`in_progress`). Short: the repeat holds up its connection's other requests meanwhile, heartbeats among them, and a phone that hears
+/// no heartbeat for 3 s takes the connection for dropped. The phone asks again after an `in_progress` anyway.
+const CID_WAIT: Duration = Duration::from_secs(1);
+
+type InFlight = Arc<Mutex<HashMap<(String, String), Arc<tokio::sync::Mutex<()>>>>>;
+
+/// A request with a `cid` being carried out: one at a time for each (device, cid), over every connection of the device. A repeat sent
+/// while the first is still running (a reconnect that re-sends a start the computer is still starting) waits for it here, then finds its
+/// reply among the kept ones, and is never carried out beside it. Dropped once the reply is kept; the last one out takes the entry away.
+struct CidTurn {
+    map: InFlight,
+    key: (String, String),
+    held: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl CidTurn {
+    /// Waits up to `wait` for the turn of (device, cid); `None` when the first is still running then.
+    async fn take(map: &InFlight, device: &str, cid: &str, wait: Duration) -> Option<CidTurn> {
+        let key = (device.to_string(), cid.to_string());
+        let slot = map.lock().entry(key.clone()).or_default().clone();
+        // Its own statement: the wait, and the slot it holds, are gone before the entry is looked at again.
+        let got = tokio::time::timeout(wait, slot.lock_owned()).await;
+        match got {
+            Ok(held) => Some(CidTurn { map: map.clone(), key, held: Some(held) }),
+            Err(_) => {
+                Self::leave(map, &key);
+                None
+            }
+        }
+    }
+
+    /// Takes the entry of `key` away when nobody holds or waits for it any more: only the map has it then. Each one that holds or waits
+    /// has its own handle on the slot, let go of before it calls this, and a handle is only ever made under the map's lock, which is held
+    /// here. So whoever comes last, a turn that ends or a repeat that gave up waiting, finds the map's handle alone, and no entry is left.
+    fn leave(map: &InFlight, key: &(String, String)) {
+        let mut map = map.lock();
+        if map.get(key).is_some_and(|slot| Arc::strong_count(slot) == 1) {
+            map.remove(key);
+        }
+    }
+}
+
+impl Drop for CidTurn {
+    fn drop(&mut self) {
+        // Let go of the turn first (a waiting repeat takes it now), then look whether anybody is left.
+        let Some(held) = self.held.take() else { return };
+        drop(held);
+        Self::leave(&self.map, &self.key);
+    }
 }
 
 /// Compares two strings in time independent of where they differ.
@@ -564,6 +650,10 @@ impl Mobile {
             waiting: Mutex::new(HashMap::new()),
             paired_at: Mutex::new(None),
             projects: Mutex::new(HashMap::new()),
+            launch: Mutex::new(Err(launch::Missing::NotSent)),
+            start_rate: Mutex::new(HashMap::new()),
+            options_rate: Mutex::new(HashMap::new()),
+            in_flight: Arc::default(),
             revoked: broadcast::channel(16).0,
             send_rate: Mutex::new(HashMap::new()),
             link_key: Mutex::new(None),
@@ -839,19 +929,24 @@ impl Mobile {
     /// (`refund_send`: too long, a command for the computer, a full queue) costs nothing: only a message that gets in spends one.
     /// The limiter is as strong as it was for what gets in.
     fn allow_send(&self, device: &str) -> bool {
-        let now = Instant::now();
-        let mut buckets = self.send_rate.lock();
-        if buckets.len() > 256 {
-            buckets.retain(|_, b| now.duration_since(b.at) < Duration::from_secs(5));
+        take_device_token(&self.send_rate, device, 1.0, SEND_BURST)
+    }
+
+    /// Whether `device` may start a session now: three at once, then one every ten seconds. Only a start that is carried out spends one
+    /// (`refund_start` gives back the token of one refused after it was taken, or that failed).
+    fn allow_start(&self, device: &str) -> bool {
+        take_device_token(&self.start_rate, device, START_RATE, START_BURST)
+    }
+
+    /// Whether `device` may ask what it may start now (`OPTIONS_BURST`, `OPTIONS_RATE`).
+    fn allow_options(&self, device: &str) -> bool {
+        take_device_token(&self.options_rate, device, OPTIONS_RATE, OPTIONS_BURST)
+    }
+
+    fn refund_start(&self, device: &str) {
+        if let Some(b) = self.start_rate.lock().get_mut(device) {
+            b.tokens = (b.tokens + 1.0).min(START_BURST);
         }
-        let b = buckets.entry(device.to_string()).or_insert(SendBucket { tokens: SEND_BURST, at: now });
-        b.tokens = (b.tokens + now.duration_since(b.at).as_secs_f64()).min(SEND_BURST);
-        b.at = now;
-        if b.tokens < 1.0 {
-            return false;
-        }
-        b.tokens -= 1.0;
-        true
     }
 
     /// Writes the store, unless the file on disk could not be read (it is never written over then). A slow disk holds up only other
@@ -1143,6 +1238,11 @@ impl Mobile {
         self.audit.read(limit)
     }
 
+    /// `mobile.audit`: the newest `limit` entries, of one action only when `action` names one (`audit::AuditLog::read_of`).
+    pub fn audit_of(&self, limit: usize, action: Option<&str>) -> Value {
+        self.audit.read_of(limit, action)
+    }
+
     /// What the prompt asks when `days` keeps unused phones longer than now (never counts as longest); None when it does not.
     pub fn dormant_prompt(&self, days: u32) -> Option<crate::user_presence::Prompt> {
         let now = self.config.lock().dormant_days.unwrap_or(store::DEFAULT_DORMANT_DAYS);
@@ -1420,6 +1520,29 @@ impl Mobile {
     pub fn set_projects(&self, params: &Value) {
         let map = params.get("projects").and_then(Value::as_object).map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default();
         *self.projects.lock() = map;
+    }
+
+    /// `mobile.set_launch`: the whole launch catalogue in place of the last (`launch`). Kept in memory only, and never logged: profile
+    /// environments can hold keys. A catalogue that is refused clears the last one too: what it held may be what the person just changed
+    /// (bypass turned off), so phones start nothing until the app sends one that is accepted. The error says why, for the app to show.
+    pub fn set_launch(&self, params: &Value) -> Result<()> {
+        let parsed = launch::parse(params);
+        let mut held = self.launch.lock();
+        match parsed {
+            Ok(c) => {
+                *held = Ok(c);
+                Ok(())
+            }
+            Err(why) => {
+                *held = Err(launch::Missing::Refused);
+                Err(anyhow!(why))
+            }
+        }
+    }
+
+    /// The phone's `new_options`, with `installed` the agents found on this computer.
+    fn launch_options(&self, installed: &[&str]) -> Result<Value, (&'static str, String)> {
+        launch::options(self.launch.lock().as_ref().map_err(|m| *m), installed)
     }
 
     /// The Tailscale origin (`<name>:8443`) while this computer is published.
@@ -2504,16 +2627,23 @@ impl Conn {
         }
         let granted = if gate == Gate::ReadOnly { granted.min(Permission::Read) } else { granted };
         let granted = if granted >= Permission::Control && !self.daemon.mobile.control_now(&self.device, self.lock_path, gate, self.page_origin.is_some()) { Permission::Write } else { granted };
-        // Typing and answers may carry a `cid`: a repeat of one (a retry after a lost reply, over this or another connection
+        // Typing, answers and starting a session may carry a `cid`: a repeat of one (a retry after a lost reply, over this or another connection
         // of the device) gets the first reply again, marked `dup`, and is not carried out twice. The daemon run's memory
         // only: a phone that sees `daemon_epoch` change starts over anyway.
         let window = match Verb::parse(name) {
             Some(v @ (Verb::Input | Verb::Key)) if v.needs() <= granted => Some(INPUT_DEDUPE),
-            Some(v @ (Verb::Answer | Verb::ChatAnswer)) if v.needs() <= granted => Some(ANSWER_DEDUPE),
+            Some(v @ (Verb::Answer | Verb::ChatAnswer | Verb::NewSession)) if v.needs() <= granted => Some(ANSWER_DEDUPE),
             _ => None,
         };
         let cid = window.and(req.get("cid").and_then(Value::as_str).filter(|c| !c.is_empty() && c.len() <= 64));
+        // Held until the reply is kept (dropped on return): a repeat that comes while this one runs, over another connection, waits for it.
+        let mut _turn = None;
         if let Some(cid) = cid {
+            match CidTurn::take(&self.daemon.mobile.in_flight, &self.device, cid, CID_WAIT).await {
+                Some(turn) => _turn = Some(turn),
+                // Not kept: the phone asks again with the same cid, and gets the first one's reply once there is one.
+                None => return Some(json!({"type": "error", "req": tag, "code": "in_progress", "reason": null, "message": "That is still being done on the computer."})),
+            }
             if let Some(mut reply) = self.daemon.mobile.repeated(&self.device, cid) {
                 reply["dup"] = json!(true);
                 if let Some(t) = tag {
@@ -2538,6 +2668,10 @@ impl Conn {
     fn note(&self, name: &str, req: &Value, reply: Option<&Value>) {
         // What a takeover sends never goes in the log: the broker notes its start and its end.
         if reply.is_some_and(|r| r["type"] == "error" || r["result"] == "dup") || !matches!(Verb::parse(name), Some(v) if v.needs() >= Permission::Write && !v.takeover()) {
+            return;
+        }
+        // Looking at what may be started changes nothing, and a start is noted by its handler (`session_new`), which knows the agent and the project.
+        if matches!(name, "new_options" | "new_session") {
             return;
         }
         let id = req["id"].as_str().unwrap_or_default();
@@ -2880,6 +3014,17 @@ impl Conn {
                 chat.resume();
                 return Ok(Some(json!({"type": "ack", "result": "ok"})));
             }
+            Verb::NewOptions => {
+                if !self.daemon.mobile.allow_options(&self.device) {
+                    return Err(refuse("rate_limited", "Asking too often: wait a moment."));
+                }
+                // Which agents are installed is a look on disk (through the login shell on Unix): off this task.
+                let daemon = self.daemon.clone();
+                let options = tokio::task::spawn_blocking(move || daemon.mobile.launch_options(&crate::agents::installed_presets()));
+                let options = options.await.map_err(|_| refuse("not_kept", "That did not finish."))?;
+                return options.map(Some).map_err(|(code, message)| refuse(code, message));
+            }
+            Verb::NewSession => return self.new_session(req).await.map(Some),
             Verb::PushInfo => {
                 self.secure_transport()?;
                 let (daemon, device) = (self.daemon.clone(), self.device.clone());
@@ -2973,6 +3118,89 @@ impl Conn {
             }
         }
         Ok(None)
+    }
+
+    /// A phone starts an agent in a project (`new_session`): with what the launch catalogue holds for them, as the desktop's launchers would,
+    /// and nothing of the phone's but the first prompt. The agent must be installed and the folder there; a busy computer and a phone that
+    /// starts too many are refused. The audit log and the app hear which agent in which project, never the prompt.
+    ///
+    /// What costs nothing is checked first (the catalogue, the prompt, the load, the rate), then what looks on disk (through the login shell
+    /// on Unix), and after that wait whether this phone may still start anything at all: a revoke, a downgrade or a lock may have come
+    /// meanwhile, or the person changed the settings the catalogue was made from. The rate's token is spent once the cheap checks pass,
+    /// also by a start the look on disk refuses (that look is what the rate holds back); only a start that passed every check and then
+    /// could not be created gives it back.
+    async fn new_session(&self, req: &Value) -> Result<Value, Refusal> {
+        req["cid"].as_str().filter(|c| !c.is_empty() && c.len() <= 64).ok_or_else(|| refuse("bad_request", "missing cid"))?;
+        let planned = launch::plan(self.daemon.mobile.launch.lock().as_ref().map_err(|m| *m), req).map_err(|(code, message)| refuse(code, message))?;
+        if self.daemon.mobile.load.level() >= Level::L3 {
+            return Err(refuse("busy", "The computer is too busy to start a session now. Try again in a minute."));
+        }
+        if !self.daemon.mobile.allow_start(&self.device) {
+            return Err(refuse("rate_limited", "Starting sessions too fast: wait a moment."));
+        }
+        let (kind, path) = (planned.agent.kind.clone(), planned.project.path.clone());
+        let checked = path.clone();
+        let found = tokio::task::spawn_blocking(move || {
+            let installed = crate::agents::installed_presets();
+            let known: Vec<&str> = crate::agents::all_presets().into_iter().map(|p| p.id).collect();
+            crate::subs::check_agent(&kind, &known, &installed).map_err(|_| refuse("not_installed", "That agent is not installed on this computer."))?;
+            // Whether the folder is there only: the session starts in it as the catalogue names it (`Planned::create_params`).
+            crate::daemon::existing_folder(&path, &path).map(drop).map_err(|_| refuse("no_folder", "That project's folder is not on this computer any more."))
+        });
+        found.await.map_err(|_| refuse("not_kept", "That did not finish.")).and_then(|r| r)?;
+        self.may_still_start()?;
+        let planned = self.still_planned(req, &checked)?;
+        let (daemon, params, device, name) = (self.daemon.clone(), planned.create_params(), self.device.clone(), self.name.clone());
+        let (kind, project) = (planned.agent.kind.clone(), planned.project.id.clone());
+        match tokio::task::spawn_blocking(move || daemon.create_for_phone(params, &device, &name, |id| planned.summary(id))).await {
+            Ok(Ok(info)) => Ok(json!({"type": "ack", "result": "ok", "id": info.spec.id})),
+            failed => {
+                // The cause stays on this computer. The log gets the agent, the project and the system's error only: the error's text
+                // names the command line (on Windows even its root cause does), whose arguments (a profile's) can hold a key.
+                match failed {
+                    Ok(Err(e)) => {
+                        let os = e.chain().find_map(|c| c.downcast_ref::<std::io::Error>()).map(|io| format!("{:?} (os error {:?})", io.kind(), io.raw_os_error()));
+                        tracing::warn!(kind = %kind, project = %project, "a phone's start of an agent failed: {}", os.as_deref().unwrap_or("not a system error"));
+                    }
+                    Err(e) => tracing::warn!(kind = %kind, project = %project, "a phone's start of an agent did not finish: {e}"),
+                    Ok(Ok(_)) => {}
+                }
+                self.daemon.mobile.refund_start(&self.device);
+                Err(refuse("not_started", "The session could not be started on the computer. Look there to see why."))
+            }
+        }
+    }
+
+    /// The start planned again from the catalogue as it is now, after the look on disk: the person may have turned bypass off, hidden the
+    /// agent or removed the project meanwhile (or the app's latest catalogue was refused), and a phone never starts with settings since
+    /// changed. Its arguments and environment are the ones the session gets. Refused as well when the project's folder is no longer the one
+    /// that was looked at (`checked`).
+    fn still_planned(&self, req: &Value, checked: &str) -> Result<launch::Planned, Refusal> {
+        launch::plan(self.daemon.mobile.launch.lock().as_ref().map_err(|m| *m), req)
+            .ok()
+            .filter(|p| p.project.path == checked)
+            .ok_or_else(|| refuse("launch_changed", "Your computer's settings changed; try again."))
+    }
+
+    /// Whether this phone may still start a session, read again after a wait: phone access is on, it is still paired, may type at this
+    /// address and is not locked. What `handle` checked before the wait may have changed since.
+    fn may_still_start(&self) -> Result<(), Refusal> {
+        let m = &self.daemon.mobile;
+        if !m.is_on() {
+            return Err(refuse("mobile_off", "Phone access was turned off on the computer."));
+        }
+        let Some(record) = m.permission(&self.device) else {
+            return Err(refuse("unpaired", "This phone is no longer paired with the computer."));
+        };
+        match m.lock_gate(&self.device, self.lock_path, self.resume.as_deref()) {
+            Gate::Locked => return Err(refuse("locked", "Kelpie is locked on this phone.")),
+            Gate::ReadOnly => return Err(refuse("read_only", "This device may read but not type.")),
+            Gate::Open => {}
+        }
+        if record.min(self.cap) < Permission::Write {
+            return Err(refuse("read_only", "This device may read but not type. Allow it in Kelpie → Settings → Mobile."));
+        }
+        Ok(())
     }
 
     /// The phone was locked: nothing it followed or watched goes on. What it had confirmed stays for a while (`sync`), in this daemon's memory only, so that it picks up where it was.
@@ -3692,6 +3920,7 @@ mod tests {
     use super::*;
 
     mod lock;
+    mod new_session;
     mod relay;
     mod takeover;
 
@@ -6294,7 +6523,7 @@ mod tests {
     async fn no_phone_permission_reaches_anything_the_computer_keeps_for_itself() {
         let mut r = rig();
         let forbidden = [
-            "mobile.approve", "mobile.revoke", "mobile.revoke_all", "mobile.reset", "mobile.set_permission", "mobile.set_write", "mobile.pair_start", "mobile.enable", "mobile.disable", "mobile.set_options", "mobile.audit",
+            "mobile.approve", "mobile.revoke", "mobile.revoke_all", "mobile.reset", "mobile.set_permission", "mobile.set_write", "mobile.pair_start", "mobile.enable", "mobile.disable", "mobile.set_options", "mobile.audit", "mobile.set_launch",
             "pair", "approve", "revoke", "upgrade", "set_permission", "settings", "set_settings", "daemon.set_policy", "daemon.set_theme", "daemon.shutdown",
             "agent.set_custom", "agent.run", "hook.report", "mcp", "plugin", "automation.save", "automation.approve", "automation.delete", "automation.set_paused", "always_allow", "notify.set", "notify.telegram_bind",
             "session.create", "session.close", "session.update", "session.attach", "run.approve", "meta.set",

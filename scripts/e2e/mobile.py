@@ -26,7 +26,9 @@ terminal, a prompt answered with one tap, a chat permission answered from the ph
 exactly one answer), a message sent to a chat from the phone (the desktop shows the phone's chip, then the
 transcript item with its origin; Stop works; either side cancels; a read-only device has no message box;
 a desktop message only the computer can send holding the queue is explained on the phone's own chip, with Skip, and
-noticed on the desktop outside the chat pane), a `#s=` deep link, the page coming back by itself after the
+noticed on the desktop outside the chat pane), a new session started from the phone's + sheet (a fake plugin agent, never a real one, with
+the profile's arguments, Yolo's flag, its environment and the first prompt; the sheet saying it does not ask first; the desktop's toast with
+Show and its Activity entry; the audit's session_new without the prompt), a `#s=` deep link, the page coming back by itself after the
 server went away; a read-only device cannot type; a socket from another origin is refused; unpairing
 disconnects the phone; turning it off stops the server; after the computer restarted, what waited is shown
 as lost with its text in the stopped chat, also after a reload, until discarded; the inbox by status and by workspace (one
@@ -742,6 +744,69 @@ for n in (1, 2, 3):
     run.check("…and it never reached the agent", "cancelled while away" not in arrivals())
     phone.js("[...[...document.querySelectorAll('.chat-composer .chip')].find(c => c.textContent.includes('cancelled while away')).querySelectorAll('.link-btn')].find(b => b.textContent === 'Discard').click()")
     hold(False)
+
+    # ---------- a new session from the phone: a fake agent with this computer's profile for it, and the desktop told ----------
+    # The agent is a plugin agent that is this Python (never a real agent): it logs what it was started with and waits. The app's own launch
+    # catalogue carries it, with the profile's flags and environment and, Yolo being on, the agent's own skip-permission flag.
+    started_log = os.path.join(scratch, "phone_started_agent.log")
+    started_agent = os.path.join(scratch, "phone_started_agent.py")
+    if os.path.exists(started_log):
+        os.remove(started_log)
+    open(started_agent, "w", encoding="utf-8").write(
+        "import json, os, sys\n"
+        "open(sys.argv[1], 'a', encoding='utf-8').write(json.dumps({'argv': sys.argv[2:], 'key': os.environ.get('PHONE_FAKE_KEY')}) + '\\n')\n"
+        "print('started agent ready', flush=True)\n"
+        "sys.stdin.readline()\n")
+    fake_agent = {"id": "phone-fake", "label": "Fake agent", "bin": sys.executable, "launch": [started_agent, started_log], "yolo": ["--yes"], "resume_latest": [], "prompt": "argv", "acp": []}
+    daemon(d, "agent.set_custom", {"agents": [fake_agent]})
+    js_await("window.__kelpie.agents.loadAgentPresets()")
+    was_permissions = d.js(f"return {S}.state.settings.agentPermissions")
+    was_profiles = d.js(f"return JSON.parse(JSON.stringify({S}.state.settings.profiles ?? []))")
+    d.js(f"{S}.setProfile('phone-fake', {{ args: ['--from-profile'], env: {{ PHONE_FAKE_KEY: 'profile-secret-42' }} }}); {S}.setSettings({{ agentPermissions: 'yolo' }});")
+    phone.go(base)
+    phone.wait(LIVE, 30)
+
+    def sheet_offers_fake():
+        """Opens the + sheet; true once it offers the fake agent (the app sends its catalogue a moment after a change), else closes it for the next look."""
+        phone.js("document.querySelector('[data-new-session] .actions .btn:not(.primary)')?.click()")
+        if not phone.wait("const b = document.querySelector('[data-open-new-session]'); if (!b || b.disabled) return null; b.click(); return true", 10):
+            return None
+        return phone.wait("const s = document.querySelector('[data-new-agent]'); return s && [...s.options].some(o => o.value === 'phone-fake') ? true : null", 5)
+
+    offered = wait(sheet_offers_fake, 40, 1)
+    run.check("a phone that may type has + on its inbox, and its sheet offers this computer's agent", bool(offered), str(phone.js("return document.querySelector('[data-new-session]')?.textContent ?? null")))
+    run.check("…and this computer's project, by name", bool(phone.js("return [...(document.querySelector('[data-new-project]')?.options ?? [])].some(o => o.value === arguments[0] && o.textContent === 'mobile-proj')", pid)))
+    phone.js("const p = document.querySelector('[data-new-project]'); p.value = arguments[0]; p.dispatchEvent(new Event('change', {bubbles: true}));"
+             "const a = document.querySelector('[data-new-agent]'); a.value = 'phone-fake'; a.dispatchEvent(new Event('change', {bubbles: true}));"
+             "document.querySelector('[data-new-prompt]').value = 'hello from the phone';", pid)
+    run.check("the sheet says the agent does not ask before acting, as on the computer (Yolo is on there)", bool(phone.wait("return document.querySelector('[data-new-skips]')?.textContent.includes('Does not ask before acting') ?? null", 5)))
+    phone.shot(os.path.join(shots, "08c-phone-new-session.png"))
+    before_ids = {x["id"] for x in daemon(d, "session.list")}
+    phone.js("document.querySelector('[data-new-start]').click()")
+    opened = phone.wait("const id = document.querySelector('.session')?.dataset.id; return !document.querySelector('[data-new-session]') && id ? id : null", 20)
+    run.check("Start opens the new session on the phone", bool(opened) and opened not in before_ids, str(phone.js("return document.querySelector('[data-new-error]')?.textContent ?? null")))
+    row = next((x for x in daemon(d, "session.list") if x["id"] == opened), {})
+    run.check("it runs the fake agent in the project, with the profile's arguments and Yolo's flag and the profile's environment",
+              row.get("kind") == "phone-fake" and row.get("project_id") == pid and row.get("args") == ["--from-profile", "--yes"] and (row.get("env") or {}).get("PHONE_FAKE_KEY") == "profile-secret-42", str({k: row.get(k) for k in ("kind", "project_id", "args")}))
+    runs = wait(lambda: [json.loads(line) for line in open(started_log, encoding="utf-8").read().splitlines()] if os.path.exists(started_log) else None, 30) or []
+    run.check("…and the agent got those flags, the first prompt and the environment", bool(runs) and runs[-1]["argv"][-3:] == ["--from-profile", "--yes", "hello from the phone"] and runs[-1]["key"] == "profile-secret-42", str(runs)[:300])
+    toast = d.wait("const t = document.querySelector('.toast'); return t && t.textContent.includes('started') ? t.textContent : null", 15)
+    run.check("the desktop says which phone started which agent in which project, with Show", bool(toast) and "Test phone started Fake agent in mobile-proj" in toast and "Show" in toast, str(toast))
+    entry = d.js(f"return {S}.state.inbox.find(i => i.sessionId === arguments[0]) ?? null", opened)
+    run.check("…and keeps it in Activity", bool(entry) and entry.get("kind") == "phone" and entry.get("title") == "Test phone started Fake agent in mobile-proj", str(entry))
+    run.check("…while the session is not placed in a layout until asked", not d.js(f"return !!{S}.paneLocation(arguments[0])", opened))
+    d.js("[...document.querySelectorAll('.toast .btn')].find(b => b.textContent === 'Show')?.click()")
+    run.check("Show opens it on the desktop", bool(d.wait(f"return !!{S}.paneLocation(arguments[0])", 10, 0.25, opened)))
+    run.shot("08c-desktop-phone-started")
+    notes = [e for e in daemon(d, "mobile.audit", {"limit": 30})["entries"] if e["action"] == "session_new"]
+    run.check("the audit log records session_new with the agent, the project and the session, never the prompt",
+              [e["summary"] for e in notes] == [f"Fake agent in mobile-proj (session {opened})"] and "hello from the phone" not in json.dumps(notes), str(notes))
+    if row:
+        daemon(d, "session.close", {"handle": row["handle"]})
+    # The settings as they were: the permission mode, and the profiles without the fake agent's.
+    d.js(f"{S}.setSettings({{ agentPermissions: arguments[0], profiles: arguments[1] }})", was_permissions, was_profiles)
+    daemon(d, "agent.set_custom", {"agents": []})
+    js_await("window.__kelpie.agents.loadAgentPresets()")
 
     # ---------- deep link ----------
     sid = next(x["id"] for x in daemon(d, "session.list") if x["handle"] == handle)

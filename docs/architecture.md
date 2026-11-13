@@ -445,7 +445,7 @@ Turning access off is therefore not how to cut a phone off: `mobile.enable` stay
 - **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `hb`, `ack`, `sub`, `unsub`, `chat_sub`, and
   `push_info`, `push_sub`, `push_unsub`, `push_prefs`, `push_test` (refused `insecure` where `transport_cap` would not let a page type), and
   `lock_challenge`, `lock_enrol`, `lock_unlock`, `lock_now`, `lock_touch` need
-  *read*; `input`, `key`, `answer`, `chat_answer`, `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume` need *write*;
+  *read*; `input`, `key`, `answer`, `chat_answer`, `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume`, `new_options`, `new_session` need *write*;
   anything else is `unknown_verb`. The
   permission is read from the device's record on every message, so a revoked or downgraded device is
   cut off at once, and the lock is checked before anything else (see "App lock"). A request may carry `req` (echoed in its `ack` or `error {code, reason?, message}`)
@@ -548,6 +548,43 @@ record (another tab) is told to forget a pairing that stands. A close frame that
   `chat_queue {id, items: [{qid, cid, by, mine, kind, text}], paused, held, in_flight, dropped?}`: the whole state each time, once
   after `chat_sub` and on every change. Revoking a device, or taking its write permission away, drops what it has waiting
   (`dropped` with the reason `revoked`); a turn already written runs on.
+- **Starting a session** (API 38; `mobile/launch.rs`): the app resolves what its launchers would start and pushes it as the launch catalogue,
+  `mobile.set_launch {projects: [{id, name, path}], agents: [{kind, label, args, env}]}` (a user-token method, through the generic `daemon_call`).
+  It is built by `buildLaunchCatalogue` (`app/src/lib/phone-launch.ts`) from the app's projects without the remote (SSH) ones and from the
+  launchers' agents without the hidden and the chat-only (ACP registry) ones, each agent with `profileLaunch`'s arguments and environment
+  (profile arguments, permission mode or Yolo, profile and account environment). The app sends the whole catalogue on every connection and,
+  debounced, after any change of those; the daemon replaces what it held, keeps it in memory only (profile environments can hold keys, so it is
+  never written again and never logged) and refuses one over 500 projects, 64 agents, 64 arguments for an agent or 256 KiB, or with a project
+  id, name or folder, or an agent kind or label, over its byte bound or holding a control character. A refused catalogue also clears the one
+  held before it (which may hold settings the person has just changed, Yolo turned off for one): phones start nothing until the app sends one
+  that is accepted, and the app shows the reason once as a toast. The app trims names and labels and leaves out entries that would be refused
+  (`LAUNCH_LIMITS`, the same bounds) before it sends, so one odd project does not block the rest. A daemon that has not heard from the app
+  since it started has none. `new_options` answers `{ready, projects: [{id, name}], agents: [{kind, label, skips}], why?}`: the projects in the
+  catalogue's order (never a folder), the agents that are also installed (`agents::installed_presets`), `skips` read from their arguments as for
+  sub-sessions (`subs::args_skip_permissions`), and `ready: false` with `why` while none was sent; after a refused one it is refused as
+  `launch_refused`. It is held to a few a second per device (`rate_limited`). `new_session {project_id, kind, prompt?, cid}` starts the agent in
+  the project's folder as the catalogue names it (as the desktop does; it is only checked to exist, never resolved, since agents key history and
+  trust by the folder) with exactly the catalogue's `args` and `env`, nothing of the phone's but the prompt (through `typed_text`, at most
+  `subs::MAX_TASK` characters; one that starts with `-` is typed, never passed where the agent would read it as an option), at 120 × 32, and
+  answers `ack {result: ok, id}`. The checks that cost nothing come first, then the look on disk (installed, folder), then the device is checked
+  again (phone access on, still paired, may type, not locked) and the start is planned again from the catalogue as it is then, whose `args` and
+  `env` the session gets (a project or agent gone, or a folder that is not the one looked at, is refused as `launch_changed`), before the
+  session is created. It is refused as `not_ready`, `launch_refused`, `no_project`, `no_agent`, `not_installed`, `no_folder`, `too_long`,
+  `busy` (load L3), `rate_limited` (three at once, then one every 10 s per device; the token is spent once the cheap checks pass, by a start the
+  look on disk refuses too, and given back only when a start that passed every check could not be created), `mobile_off`, `unpaired`,
+  `launch_changed` or `not_started` (a plain sentence: the daemon's log gets the agent, the project and the system's error, never the command
+  line), besides `read_only`, `epoch` and `locked`. A repeat of its `cid` within 10 minutes gets the first reply, marked `dup`, and starts
+  nothing; a repeat that comes while the first is still running (over another connection, after a reconnect) waits for it up to 1 s (it holds
+  up its connection's heartbeats meanwhile) and is otherwise refused as `in_progress`, not kept, which the phone asks again with the same `cid`;
+  once told `in_progress`, the phone says a dropped link or a lost reply as "still starting it", never as something to start again. The start is
+  audited as `session_new` ("{agent} in {project} (session {id})", never the prompt), and only then broadcast as
+  `mobile.session_started {id, device, name, kind, project_id}`, which the app shows as a toast and an Activity entry with Show; phones see the
+  new session in their list. It works with the window closed: the daemon owns the session, and the app, when it next connects, reads the starts
+  back with `mobile.audit {action: "session_new", limit: 2000}` (`action` keeps one kind of line, since every key a phone types has a line too;
+  left out, every kind as before) and adds each one newer than the time it remembered when it connected (`phoneStartsSeen`, also moved by the
+  live event) to Activity once, without a popup (`app/src/lib/phone-starts.ts`). When the answer says older lines were left out (`from`: past
+  the limit, or in the rotated file) and begins after that time, one Activity line says some starts may not be listed and points to
+  Settings → Mobile → What phones did.
 - **One-shot approvals**: a phone's answer holds for this one request. For a chat the daemon keeps a list of the answer shapes
   known to be one-shot for each kind of request (`chat::answer_is_one_shot`: Claude's allow or deny, Codex's `accept`, `decline`,
   `cancel` or a permission grant for this `turn`, ACP's `allow_once` and `reject_once`, a form's answers) and refuses anything else as
