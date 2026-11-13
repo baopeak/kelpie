@@ -552,8 +552,9 @@ struct SendBucket {
 }
 
 /// How long a repeat of a request waits for the first one with its `cid` to finish before it is told that one is still under way
-/// (`in_progress`). Short: the repeat holds up its connection's other requests meanwhile, heartbeats among them.
-const CID_WAIT: Duration = Duration::from_secs(2);
+/// (`in_progress`). Short: the repeat holds up its connection's other requests meanwhile, heartbeats among them, and a phone that hears
+/// no heartbeat for 3 s takes the connection for dropped. The phone asks again after an `in_progress` anyway.
+const CID_WAIT: Duration = Duration::from_secs(1);
 
 type InFlight = Arc<Mutex<HashMap<(String, String), Arc<tokio::sync::Mutex<()>>>>>;
 
@@ -571,21 +572,34 @@ impl CidTurn {
     async fn take(map: &InFlight, device: &str, cid: &str, wait: Duration) -> Option<CidTurn> {
         let key = (device.to_string(), cid.to_string());
         let slot = map.lock().entry(key.clone()).or_default().clone();
-        let held = tokio::time::timeout(wait, slot.lock_owned()).await.ok()?;
-        Some(CidTurn { map: map.clone(), key, held: Some(held) })
+        // Its own statement: the wait, and the slot it holds, are gone before the entry is looked at again.
+        let got = tokio::time::timeout(wait, slot.lock_owned()).await;
+        match got {
+            Ok(held) => Some(CidTurn { map: map.clone(), key, held: Some(held) }),
+            Err(_) => {
+                Self::leave(map, &key);
+                None
+            }
+        }
+    }
+
+    /// Takes the entry of `key` away when nobody holds or waits for it any more: only the map has it then. Each one that holds or waits
+    /// has its own handle on the slot, let go of before it calls this, and a handle is only ever made under the map's lock, which is held
+    /// here. So whoever comes last, a turn that ends or a repeat that gave up waiting, finds the map's handle alone, and no entry is left.
+    fn leave(map: &InFlight, key: &(String, String)) {
+        let mut map = map.lock();
+        if map.get(key).is_some_and(|slot| Arc::strong_count(slot) == 1) {
+            map.remove(key);
+        }
     }
 }
 
 impl Drop for CidTurn {
     fn drop(&mut self) {
+        // Let go of the turn first (a waiting repeat takes it now), then look whether anybody is left.
         let Some(held) = self.held.take() else { return };
-        let mut map = self.map.lock();
-        // The map's and this turn's: nobody else waits, and a newcomer can only come in through the map, which is held.
-        if map.get(&self.key).is_some_and(|slot| Arc::ptr_eq(slot, tokio::sync::OwnedMutexGuard::mutex(&held)) && Arc::strong_count(slot) == 2) {
-            map.remove(&self.key);
-        }
-        drop(map);
         drop(held);
+        Self::leave(&self.map, &self.key);
     }
 }
 
@@ -1222,6 +1236,11 @@ impl Mobile {
     /// What the audit log holds (reads a file: off the event loop).
     pub fn audit_entries(&self, limit: usize) -> Value {
         self.audit.read(limit)
+    }
+
+    /// `mobile.audit`: the newest `limit` entries, of one action only when `action` names one (`audit::AuditLog::read_of`).
+    pub fn audit_of(&self, limit: usize, action: Option<&str>) -> Value {
+        self.audit.read_of(limit, action)
     }
 
     /// What the prompt asks when `days` keeps unused phones longer than now (never counts as longest); None when it does not.
@@ -3107,7 +3126,9 @@ impl Conn {
     ///
     /// What costs nothing is checked first (the catalogue, the prompt, the load, the rate), then what looks on disk (through the login shell
     /// on Unix), and after that wait whether this phone may still start anything at all: a revoke, a downgrade or a lock may have come
-    /// meanwhile. A start refused after it took its token gives it back.
+    /// meanwhile, or the person changed the settings the catalogue was made from. The rate's token is spent once the cheap checks pass,
+    /// also by a start the look on disk refuses (that look is what the rate holds back); only a start that passed every check and then
+    /// could not be created gives it back.
     async fn new_session(&self, req: &Value) -> Result<Value, Refusal> {
         req["cid"].as_str().filter(|c| !c.is_empty() && c.len() <= 64).ok_or_else(|| refuse("bad_request", "missing cid"))?;
         let planned = launch::plan(self.daemon.mobile.launch.lock().as_ref().map_err(|m| *m), req).map_err(|(code, message)| refuse(code, message))?;
@@ -3117,11 +3138,8 @@ impl Conn {
         if !self.daemon.mobile.allow_start(&self.device) {
             return Err(refuse("rate_limited", "Starting sessions too fast: wait a moment."));
         }
-        let refunded = |r: Refusal| {
-            self.daemon.mobile.refund_start(&self.device);
-            r
-        };
         let (kind, path) = (planned.agent.kind.clone(), planned.project.path.clone());
+        let checked = path.clone();
         let found = tokio::task::spawn_blocking(move || {
             let installed = crate::agents::installed_presets();
             let known: Vec<&str> = crate::agents::all_presets().into_iter().map(|p| p.id).collect();
@@ -3129,28 +3147,45 @@ impl Conn {
             // Whether the folder is there only: the session starts in it as the catalogue names it (`Planned::create_params`).
             crate::daemon::existing_folder(&path, &path).map(drop).map_err(|_| refuse("no_folder", "That project's folder is not on this computer any more."))
         });
-        found.await.map_err(|_| refuse("not_kept", "That did not finish.")).and_then(|r| r).map_err(refunded)?;
-        self.may_still_start().map_err(refunded)?;
+        found.await.map_err(|_| refuse("not_kept", "That did not finish.")).and_then(|r| r)?;
+        self.may_still_start()?;
+        let planned = self.still_planned(req, &checked)?;
         let (daemon, params, device, name) = (self.daemon.clone(), planned.create_params(), self.device.clone(), self.name.clone());
+        let (kind, project) = (planned.agent.kind.clone(), planned.project.id.clone());
         match tokio::task::spawn_blocking(move || daemon.create_for_phone(params, &device, &name, |id| planned.summary(id))).await {
             Ok(Ok(info)) => Ok(json!({"type": "ack", "result": "ok", "id": info.spec.id})),
             failed => {
-                // The cause stays on this computer: it can name the command line, its arguments and local paths. The log line holds no
-                // environment (the catalogue's is never in an error).
+                // The cause stays on this computer. The log gets the agent, the project and the error's own cause only: the error's
+                // context names the command line, whose arguments (a profile's) can hold a key.
                 match failed {
-                    Ok(Err(e)) => tracing::warn!("a phone's start of an agent failed: {e:#}"),
-                    Err(e) => tracing::warn!("a phone's start of an agent did not finish: {e}"),
+                    Ok(Err(e)) => tracing::warn!(kind = %kind, project = %project, "a phone's start of an agent failed: {}", e.root_cause()),
+                    Err(e) => tracing::warn!(kind = %kind, project = %project, "a phone's start of an agent did not finish: {e}"),
                     Ok(Ok(_)) => {}
                 }
-                Err(refunded(refuse("not_started", "The session could not be started on the computer. Look there to see why.")))
+                self.daemon.mobile.refund_start(&self.device);
+                Err(refuse("not_started", "The session could not be started on the computer. Look there to see why."))
             }
         }
     }
 
-    /// Whether this phone may still start a session, read again after a wait: it is still paired, may type at this address and is not
-    /// locked. What `handle` checked before the wait may have changed since.
+    /// The start planned again from the catalogue as it is now, after the look on disk: the person may have turned bypass off, hidden the
+    /// agent or removed the project meanwhile (or the app's latest catalogue was refused), and a phone never starts with settings since
+    /// changed. Its arguments and environment are the ones the session gets. Refused as well when the project's folder is no longer the one
+    /// that was looked at (`checked`).
+    fn still_planned(&self, req: &Value, checked: &str) -> Result<launch::Planned, Refusal> {
+        launch::plan(self.daemon.mobile.launch.lock().as_ref().map_err(|m| *m), req)
+            .ok()
+            .filter(|p| p.project.path == checked)
+            .ok_or_else(|| refuse("launch_changed", "Your computer's settings changed; try again."))
+    }
+
+    /// Whether this phone may still start a session, read again after a wait: phone access is on, it is still paired, may type at this
+    /// address and is not locked. What `handle` checked before the wait may have changed since.
     fn may_still_start(&self) -> Result<(), Refusal> {
         let m = &self.daemon.mobile;
+        if !m.is_on() {
+            return Err(refuse("mobile_off", "Phone access was turned off on the computer."));
+        }
         let Some(record) = m.permission(&self.device) else {
             return Err(refuse("unpaired", "This phone is no longer paired with the computer."));
         };

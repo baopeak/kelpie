@@ -134,16 +134,24 @@ class Listener(threading.Thread):
         super().__init__(daemon=True)
         self.conn = ps.kc.Conn()
         self.events = []
+        self.stopped = False
         self.start()
 
     def run(self):
         try:
-            while True:
+            while not self.stopped:
                 kind, body = self.conn.frame()
-                if kind == 1:
+                if kind == 1 and not self.stopped:
                     self.events.append(json.loads(body))
         except Exception:  # noqa: BLE001
             pass
+        finally:
+            self.conn.close()
+
+    def close(self):
+        """Stops keeping events. The thread closes the connection at the next frame: a read under way on a Windows pipe holds the
+        handle, so closing it from here would wait for that frame anyway."""
+        self.stopped = True
 ACP_LOG = os.path.join(work, "acp-agent.log")
 FAKE_ACP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_acp_agent.py")
 
@@ -833,6 +841,11 @@ async def main(d):
     notes = [e for e in log["entries"] if e["action"] == "session_new"]
     check("the audit log says which agent in which project and which session, once, and never the prompt",
           [e["summary"] for e in notes] == [f"Fake agent in Shop (session {sid})"] and "hello from the phone" not in json.dumps(log), notes)
+    only = d.call("mobile.audit", {"limit": 50, "action": "session_new"})
+    check("the starts can be read on their own, as the app reads back those it missed while closed",
+          [e["summary"] for e in only["entries"]] == [e["summary"] for e in notes] and "from" not in only, only)
+    events.close()
+    plain.close()
     # Three at once, then one every ten seconds. However long the steps above took on this machine, the bucket holds three at most and
     # refills a tenth of a start each second: starts sent back to back are refused by the fourth.
     more = []

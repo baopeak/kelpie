@@ -135,11 +135,19 @@ impl AuditLog {
     /// The newest `limit` entries, newest first, and whether the current file's chain holds together. Reads the file: call it
     /// off the event loop.
     pub fn read(&self, limit: usize) -> Value {
+        self.read_of(limit, None)
+    }
+
+    /// `read`, of the entries whose action is `action` only when one is named (the chain is checked over every line all the same).
+    /// `from` is there when older lines than those it covers were left out (past `limit`, or in the file rotated away, which is not
+    /// read): the time of the oldest line it covers. Every entry of the kind asked for that is newer than that is in `entries`.
+    pub fn read_of(&self, limit: usize, action: Option<&str>) -> Value {
         self.flush();
         let text = std::fs::read_to_string(self.dir.join(FILE)).unwrap_or_default();
         let mut entries: Vec<Value> = Vec::new();
         let mut intact = true;
         let mut prev: Option<String> = None;
+        let mut first: Option<Value> = None;
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             // A line that does not parse holds no entry. If it was one, the next line's `prev` no longer matches and that shows;
             // a line cut short while being written was never part of the chain.
@@ -150,11 +158,20 @@ impl AuditLog {
                 intact = false;
             }
             prev = Some(text("hash"));
-            entries.push(json!({"at": v["at"], "device": v["device"], "action": v["action"], "summary": v["summary"]}));
+            first.get_or_insert_with(|| v["at"].clone());
+            if action.is_none_or(|a| v["action"] == a) {
+                entries.push(json!({"at": v["at"], "device": v["device"], "action": v["action"], "summary": v["summary"]}));
+            }
         }
         let limit = limit.clamp(1, READ_MAX);
+        let cut = entries.len() > limit;
         let newest: Vec<Value> = entries.into_iter().rev().take(limit).collect();
-        json!({"entries": newest, "intact": intact})
+        let from = if cut { newest.last().map(|e| e["at"].clone()) } else { first.filter(|_| self.dir.join(OLD_FILE).exists()) };
+        let mut read = json!({"entries": newest, "intact": intact});
+        if let Some(from) = from {
+            read["from"] = from;
+        }
+        read
     }
 }
 
@@ -228,6 +245,33 @@ mod tests {
         std::fs::write(d.join(FILE), text.replacen(second, &second[..second.len() / 2], 1)).unwrap();
         let later = AuditLog::new(&d).read(10);
         assert_eq!(later["intact"], false, "{later}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn one_kind_of_line_is_read_on_its_own_and_lines_left_out_are_said() {
+        let d = dir("kind");
+        let log = AuditLog::new(&d);
+        for i in 0..5 {
+            log.add("d1", "session_new", &format!("start {i}"));
+            log.add("d1", "input", "1 bytes");
+        }
+        let starts = log.read_of(10, Some("session_new"));
+        let summaries: Vec<&str> = starts["entries"].as_array().unwrap().iter().map(|e| e["summary"].as_str().unwrap()).collect();
+        assert_eq!(summaries, ["start 4", "start 3", "start 2", "start 1", "start 0"], "newest first, the starts only");
+        assert_eq!(starts["intact"], true);
+        assert!(starts.get("from").is_none(), "nothing was left out: {starts}");
+        assert_eq!(log.read_of(10, None)["entries"].as_array().unwrap().len(), 10, "no action: every kind, as before");
+        assert_eq!(log.read(10), log.read_of(10, None));
+        // Past the limit: the time of the oldest one given, every newer start being in the answer.
+        let cut = log.read_of(2, Some("session_new"));
+        assert_eq!(cut["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(cut["from"], cut["entries"][1]["at"], "{cut}");
+        // Lines rotated into the older file are not read: the current file's first line is where the answer starts.
+        std::fs::write(d.join(OLD_FILE), "").unwrap();
+        let rotated = log.read_of(10, Some("session_new"));
+        let first: Value = serde_json::from_str(std::fs::read_to_string(d.join(FILE)).unwrap().lines().next().unwrap()).unwrap();
+        assert_eq!(rotated["from"], first["at"], "{rotated}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -63,11 +63,13 @@ class Conn:
             self.f = open(ep, "r+b", buffering=0)
             self.read = self.f.read
             self.write = self.f.write
+            self.close = self.f.close
         else:
             s = socket.socket(socket.AF_UNIX)
             s.connect(ep)
             self.read = lambda n: s.recv(n, socket.MSG_WAITALL)
             self.write = s.sendall
+            self.close = s.close
         self.next_id = 1
         token = user_token()
         if token:

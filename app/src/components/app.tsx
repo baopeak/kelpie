@@ -96,9 +96,10 @@ export function App() {
   let launchTimer: ReturnType<typeof setTimeout> | undefined;
   let launchRefused: string | null = null;
   createEffect(() => {
+    // A push still pending when the connection drops is dropped with it: sent on a closed connection it would fail, and be told as a refusal.
+    clearTimeout(launchTimer);
     if (!store.connected() || store.daemonApi() < NEW_SESSION_API) return;
     const catalogue = buildLaunchCatalogue(store.state, agentPresets(), (kind) => store.profileLaunch(kind));
-    clearTimeout(launchTimer);
     launchTimer = setTimeout(
       () =>
         void daemonCall("mobile.set_launch", catalogue).then(

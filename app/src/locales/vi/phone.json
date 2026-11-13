@@ -327,6 +327,8 @@
   "The first prompt is too long.": "Prompt đầu tiên quá dài.",
   "This phone may read but not type, so it cannot start sessions.": "Điện thoại này chỉ được đọc, không được gõ, nên không khởi động được phiên.",
   "Kelpie restarted on your computer. Try again.": "Kelpie trên máy tính vừa khởi động lại. Bạn hãy thử lại.",
+  "Your computer's settings changed; try again.": "Cài đặt trên máy tính vừa thay đổi, nên bạn hãy thử lại.",
+  "Phone access was turned off on your computer.": "Quyền truy cập từ điện thoại vừa bị tắt trên máy tính của bạn.",
   "Start a session": "Khởi động phiên",
   "Asking your computer what can be started…": "Đang hỏi máy tính những gì có thể khởi động…",
   "No project on your computer can be started from the phone.": "Không có dự án nào trên máy tính khởi động được từ điện thoại.",

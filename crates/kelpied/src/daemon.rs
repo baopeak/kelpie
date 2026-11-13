@@ -2263,8 +2263,13 @@ impl Daemon {
                 })?;
                 return Ok(None);
             }
-            // What phones did: newest first, and whether the log's hash chain holds.
-            "mobile.audit" => self.mobile.audit_entries(params.get("limit").and_then(Value::as_u64).unwrap_or(200) as usize),
+            // What phones did: newest first, and whether the log's hash chain holds. `action` keeps one kind of line only (the app reads
+            // back the phones' starts, `session_new`, among a line for every key typed); left out, every kind as before. `from` says
+            // older lines were left out.
+            "mobile.audit" => {
+                let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(200) as usize;
+                self.mobile.audit_of(limit, params.get("action").and_then(Value::as_str).filter(|a| !a.is_empty()))
+            }
             // Forget every phone, make new keys, turn phone access off (also the way out of an unreadable store file). Always verified.
             "mobile.reset" => {
                 self.after_verifying(client, tx, id, &params, crate::user_presence::Prompt::Reset, |me| {

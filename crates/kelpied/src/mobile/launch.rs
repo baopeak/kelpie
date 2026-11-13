@@ -53,6 +53,9 @@ pub const MAX_PROJECT_NAME: usize = 256;
 pub const MAX_PATH: usize = 4096;
 pub const MAX_KIND: usize = 64;
 pub const MAX_LABEL: usize = 128;
+/// Most bytes of a name in an agent's environment. A name is never empty and holds neither `=` nor a control character (NUL among them):
+/// the operating system could not set it, or would read it as another variable.
+pub const MAX_ENV_KEY: usize = 128;
 
 #[derive(Deserialize, Clone, PartialEq, Debug)]
 pub struct Project {
@@ -111,6 +114,10 @@ pub fn parse(params: &Value) -> Result<Catalogue, String> {
         }
         if a.args.len() > MAX_ARGS {
             return Err(format!("at most {MAX_ARGS} arguments for one agent"));
+        }
+        // Values are passed as they are; what is refused is never quoted.
+        if !a.env.keys().all(|k| plain(k, MAX_ENV_KEY) && !k.contains('=')) {
+            return Err(format!("each name in an agent's environment needs at most {MAX_ENV_KEY} bytes, without \"=\" or control characters"));
         }
     }
     Ok(c)
@@ -221,6 +228,9 @@ mod tests {
         let named = |name: &str, label: &str| json!({"projects": [{"id": "p", "name": name, "path": "/p"}], "agents": [{"kind": "claude", "label": label}]});
         assert!(parse(&named(&"n".repeat(MAX_PROJECT_NAME), &"l".repeat(MAX_LABEL))).is_ok(), "at the bounds");
         assert!(parse(&named("", "")).is_ok(), "an empty name or label is shown as the id or the kind");
+        let env_named = |key: &str| json!({"projects": [], "agents": [{"kind": "claude", "label": "C", "env": {key: "v=1"}}]});
+        assert!(parse(&env_named(&"K".repeat(MAX_ENV_KEY))).is_ok(), "a name at the bound; a value may hold \"=\"");
+        assert!(!parse(&env_named("A=sk-leak")).unwrap_err().contains("sk-leak"), "a refused name is not quoted");
         for bad in [
             json!({}),
             json!({"projects": [], "agents": [{"kind": "", "label": "C"}]}),
@@ -231,6 +241,11 @@ mod tests {
             named("a\u{7}b", "C"),
             named("n", "C\nD"),
             json!({"projects": [{"id": "p", "name": "n", "path": "/p\u{0}q"}], "agents": []}),
+            env_named(""),
+            env_named("A=B"),
+            env_named("A\u{0}B"),
+            env_named("A\nB"),
+            env_named(&"K".repeat(MAX_ENV_KEY + 1)),
         ] {
             assert!(parse(&bad).is_err(), "{bad}");
         }

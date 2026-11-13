@@ -29,13 +29,19 @@ export const STILL_STARTING_MS = 1000;
 export const STILL_STARTING_TRIES = 20;
 
 /** Sends a start. While the computer says that very start is still under way (`in_progress`: this phone sent it again, after a reconnect,
- *  while the first was running), asks again with the same request, so the same cid: once the first one is done, that is its answer. */
+ *  while the first was running), asks again with the same request, so the same cid: once the first one is done, that is its answer.
+ *
+ *  Once the computer has said it is starting it, the start is under way there whatever comes next: a dropped connection (`offline`) or no
+ *  answer (`unknown`) is then said as "still starting it", never as something to start again later, which would start a second session. */
 export async function sendStart(send: () => Promise<Outcome>, wait: (ms: number) => Promise<void>): Promise<Outcome> {
   let o = await send();
+  let underWay = false;
   for (let i = 0; i < STILL_STARTING_TRIES && o.t === "error" && o.code === "in_progress"; i++) {
+    underWay = true;
     await wait(STILL_STARTING_MS);
     o = await send();
   }
+  if (underWay && (o.t === "offline" || o.t === "unknown")) return { t: "error", code: "in_progress", message: "That is still being done on the computer." };
   return o;
 }
 
@@ -104,6 +110,10 @@ function refusal(code: string, message: string): string {
       return t("This phone may read but not type, so it cannot start sessions.");
     case "epoch":
       return t("Kelpie restarted on your computer. Try again.");
+    case "launch_changed":
+      return t("Your computer's settings changed; try again.");
+    case "mobile_off":
+      return t("Phone access was turned off on your computer.");
     default:
       return message;
   }

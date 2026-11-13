@@ -567,17 +567,24 @@ record (another tab) is told to forget a pairing that stands. A close frame that
   trust by the folder) with exactly the catalogue's `args` and `env`, nothing of the phone's but the prompt (through `typed_text`, at most
   `subs::MAX_TASK` characters; one that starts with `-` is typed, never passed where the agent would read it as an option), at 120 × 32, and
   answers `ack {result: ok, id}`. The checks that cost nothing come first, then the look on disk (installed, folder), then the device is checked
-  again (still paired, may type, not locked) before the session is created. It is refused as `not_ready`, `launch_refused`, `no_project`,
-  `no_agent`, `not_installed`, `no_folder`, `too_long`, `busy` (load L3), `rate_limited` (three at once, then one every 10 s per device; a start
-  refused after its token was taken gives it back), `unpaired` or `not_started` (a plain sentence: the cause, which can name the command line,
-  stays in the daemon's log), besides `read_only`, `epoch` and `locked`. A repeat of its `cid` within 10 minutes gets the first reply, marked
-  `dup`, and starts nothing; a repeat that comes while the first is still running (over another connection, after a reconnect) waits for it up
-  to 2 s and is otherwise refused as `in_progress`, not kept, which the phone asks again with the same `cid`. The start is audited as
-  `session_new` ("{agent} in {project} (session {id})", never the prompt), and only then broadcast as
+  again (phone access on, still paired, may type, not locked) and the start is planned again from the catalogue as it is then, whose `args` and
+  `env` the session gets (a project or agent gone, or a folder that is not the one looked at, is refused as `launch_changed`), before the
+  session is created. It is refused as `not_ready`, `launch_refused`, `no_project`, `no_agent`, `not_installed`, `no_folder`, `too_long`,
+  `busy` (load L3), `rate_limited` (three at once, then one every 10 s per device; the token is spent once the cheap checks pass, by a start the
+  look on disk refuses too, and given back only when a start that passed every check could not be created), `mobile_off`, `unpaired`,
+  `launch_changed` or `not_started` (a plain sentence: the daemon's log gets the agent, the project and the error's own cause, never the command
+  line), besides `read_only`, `epoch` and `locked`. A repeat of its `cid` within 10 minutes gets the first reply, marked `dup`, and starts
+  nothing; a repeat that comes while the first is still running (over another connection, after a reconnect) waits for it up to 1 s (it holds
+  up its connection's heartbeats meanwhile) and is otherwise refused as `in_progress`, not kept, which the phone asks again with the same `cid`;
+  once told `in_progress`, the phone says a dropped link or a lost reply as "still starting it", never as something to start again. The start is
+  audited as `session_new` ("{agent} in {project} (session {id})", never the prompt), and only then broadcast as
   `mobile.session_started {id, device, name, kind, project_id}`, which the app shows as a toast and an Activity entry with Show; phones see the
-  new session in their list. It works with the window closed: the daemon owns the session, and the app, when it next connects, reads
-  `mobile.audit` and adds each `session_new` newer than the time it remembers (`phoneStartsSeen`, also moved by the live event) to Activity once,
-  without a popup (`app/src/lib/phone-starts.ts`).
+  new session in their list. It works with the window closed: the daemon owns the session, and the app, when it next connects, reads the starts
+  back with `mobile.audit {action: "session_new", limit: 2000}` (`action` keeps one kind of line, since every key a phone types has a line too;
+  left out, every kind as before) and adds each one newer than the time it remembered when it connected (`phoneStartsSeen`, also moved by the
+  live event) to Activity once, without a popup (`app/src/lib/phone-starts.ts`). When the answer says older lines were left out (`from`: past
+  the limit, or in the rotated file) and begins after that time, one Activity line says some starts may not be listed and points to
+  Settings → Mobile → What phones did.
 - **One-shot approvals**: a phone's answer holds for this one request. For a chat the daemon keeps a list of the answer shapes
   known to be one-shot for each kind of request (`chat::answer_is_one_shot`: Claude's allow or deny, Codex's `accept`, `decline`,
   `cancel` or a permission grant for this `turn`, ACP's `allow_once` and `reject_once`, a form's answers) and refuses anything else as

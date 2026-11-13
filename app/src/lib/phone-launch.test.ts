@@ -84,8 +84,29 @@ describe("the launch catalogue a phone starts from", () => {
       { id: "p4", name: "Long folder", path: "C:/" + "x".repeat(LAUNCH_LIMITS.path) },
       { id: "p".repeat(LAUNCH_LIMITS.projectId + 1), name: "Long id", path: "C:/work/y" },
     ];
-    const odd = [...PRESETS, preset("bad\u0001kind", "Odd", []), preset("many", "Many args", []), preset("long", "L".repeat(200) + "\u001b[31m", [])];
-    const launch = (kind: string) => (kind === "many" ? { args: Array(LAUNCH_LIMITS.args + 1).fill("-x") } : launchOf(s)(kind));
+    const badEnv: Record<string, Record<string, string>> = {
+      envEq: { "A=B": "1" },
+      envNul: { "A\u0000B": "1" },
+      envCtl: { "A\nB": "1" },
+      envEmpty: { "": "1" },
+      envLong: { ["K".repeat(LAUNCH_LIMITS.envKey + 1)]: "1" },
+    };
+    const odd = [
+      ...PRESETS,
+      preset("bad\u0001kind", "Odd", []),
+      preset("many", "Many args", []),
+      preset("long", "L".repeat(200) + "\u001b[31m", []),
+      preset("envOk", "Env at the bound", []),
+      ...Object.keys(badEnv).map((k) => preset(k, k, [])),
+    ];
+    const launch = (kind: string) =>
+      kind === "many"
+        ? { args: Array(LAUNCH_LIMITS.args + 1).fill("-x") }
+        : kind === "envOk"
+          ? { args: [], env: { ["K".repeat(LAUNCH_LIMITS.envKey)]: "v=1" } }
+          : badEnv[kind]
+            ? { args: [], env: badEnv[kind] }
+            : launchOf(s)(kind);
     const c = buildLaunchCatalogue(s, odd, launch);
     expect(c.projects.map((p) => p.id)).toEqual(["p1", "p2"]);
     expect(c.projects[0].name).toBe("Shopfront");
@@ -94,6 +115,8 @@ describe("the launch catalogue a phone starts from", () => {
     const kinds = c.agents.map((a) => a.kind);
     expect(kinds).not.toContain("bad\u0001kind");
     expect(kinds, "its arguments are never cut: it is left out").not.toContain("many");
+    for (const k of Object.keys(badEnv)) expect(kinds, `an environment name the daemon refuses: ${k} is left out, its environment never cut`).not.toContain(k);
+    expect(kinds, "a name at the bound, a value with =").toContain("envOk");
     expect(c.agents.find((a) => a.kind === "long")!.label).toBe("L".repeat(LAUNCH_LIMITS.label));
     // Past the most the daemon keeps, the rest are left out.
     const crowded = { ...s, projects: Array.from({ length: LAUNCH_LIMITS.projects + 3 }, (_, i) => ({ id: `p${i}`, name: `P${i}`, path: `C:/p${i}` })) };

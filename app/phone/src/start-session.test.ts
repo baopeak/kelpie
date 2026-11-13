@@ -29,6 +29,8 @@ describe("starting a session from the phone", () => {
     expect(said("no_folder")).toBe("That project's folder is not on your computer any more.");
     expect(said("read_only")).toContain("cannot start sessions");
     expect(said("not_started"), "in the phone's words, never anything of the computer's").toBe("The session could not be started on your computer. Look there to see why.");
+    expect(said("launch_changed")).toBe("Your computer's settings changed; try again.");
+    expect(said("mobile_off")).toBe("Phone access was turned off on your computer.");
     expect(said("some_new_code")).toBe("English from the computer");
     for (const code of ["busy", "not_installed", "not_ready", "rate_limited", "no_project"]) expect(refused(code).ok).toBe(false);
   });
@@ -48,6 +50,19 @@ describe("starting a session from the phone", () => {
     n = 0;
     expect(startOutcome(await sendStart(async () => (n++, { t: "error", code: "in_progress", message: "x" } as Outcome), async () => {})).ok).toBe(false);
     expect(n).toBe(STILL_STARTING_TRIES + 1);
+  });
+
+  it("says the computer is still starting it, never to start it later, when the link drops after the computer said it was under way", async () => {
+    const inProgress = { t: "error", code: "in_progress", message: "x" } as Outcome;
+    for (const after of [{ t: "offline" }, { t: "unknown" }] as Outcome[]) {
+      const answers = [inProgress, after];
+      let n = 0;
+      const o = startOutcome(await sendStart(async () => answers[n++], async () => {}));
+      expect(o.ok, after.t).toBe(false);
+      expect((o as { message: string }).message, after.t).toBe("Your computer is still starting it. Look in the list in a moment.");
+    }
+    // Before the computer said anything of it, offline is offline: nothing was started.
+    expect(startOutcome(await sendStart(async () => ({ t: "offline" }), async () => {}))).toEqual({ ok: false, message: "You are offline. Start it when the connection is back." });
   });
 
   it("says nothing started when it cannot know, and never keeps a start to send later", () => {
