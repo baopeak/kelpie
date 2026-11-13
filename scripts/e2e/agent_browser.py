@@ -9,17 +9,25 @@ agent's MCP client would. The app is plain `cargo build -p kelpie` (dev mode: it
 from the repository unless the port is already taken, then it stops). Needs tauri-driver (PATH or ~/.cargo/bin) and msedgedriver matching
 WebView2 (PATH or MSEDGEDRIVER).
 
-Checks: tools absent and calls refused while browser control is off; with it on, an agent opens the fixture with kelpie_open_page, lists it,
-snapshots it (compact, no password value), types and clicks through a sign-in and sees "Welcome" in what changed (the site receives the values;
-never printed), reads console errors, waits for text, reloads, gets a confirm() dismissed and reported; eval refused until turned on, then only
-in a pane opened for the agent; refusals: another project's session sees nothing, a same-project session cannot use the agent's pane, a pane
-the person shares is usable by the project's sessions but not for leaving its site, act within 10 s of the person's input, a second session
-while the first holds the pane, Stop on the banner ends access; pages opened for agents are private (tabs says so, the person's pane
-does not): the agent's sign-in on the fixture (a cookie) is not in the person's pane, the person's sign-in is not in an agent page opened
-after it, and a private agent page may go to https://example.com/ (without network only the absence of a refusal is checked); the audit has a line per act call with no typed text, and no file of the data
-folder holds the password; with the app gone a call fails fast and says so; timing of snapshot and click (printed, checked against budgets).
-On Windows also: in the tab shown a click is trusted (the page sees event.isTrusted) and a screenshot is a PNG at most 1280 px wide, saved
-to a file; the network list has the sign-in request; with the tab in the background a screenshot is refused and a click is synthetic.
+Checks: with browser control off, no browser tool is listed and a call is refused before the app; with it on (read and act), the tools and
+the guide are listed, an agent opens the fixture with kelpie_open_page and tabs lists it as its own, in the background, with synthetic input
+and a private profile; the snapshot is marked as a page's content, compact (at most 2 KB) and shows the fields without the password's value;
+the agent types (the text is not echoed) and clicks through a sign-in and sees "Welcome" in what changed (the site receives the values; never
+printed), reads a console error, waits for text (met, and not met with a clear failure), reloads, gets a confirm() dismissed and reported,
+and an unknown ref is refused; eval is refused until turned on, then runs in the agent's pane; another project's session sees and uses
+nothing, and a same-project session cannot use a pane opened for another session; timing of snapshot and click with what changed (printed,
+p95 checked against 500 ms and 1 s); with the tab shown, an act right after the person's input is refused while reading still works; a pane
+the person shares is listed only to that project's sessions, is readable, refuses navigation to another site and eval; a second session
+cannot act while the first holds the pane; Stop on the banner ends access. Private session: the person's shared pane is not private, the
+agent's sign-in on the fixture (a cookie) is not in the person's pane, the person's sign-in is not in an agent page opened after it, which is
+listed as private and may go to https://example.com/ (without network only the absence of a refusal is checked). Audit: a line per act call
+with session, tool and target and no typed text, and no file of the data folder holds the password. With the app gone, a call fails within
+1 s and says the window is not open.
+On Windows also: in the tab shown, tabs says trusted input and screenshots; a click is trusted (the page sees event.isTrusted) and the main
+window keeps its keyboard focus; typing is trusted and lands; a key on an option that takes no focus and typing into a field that refuses focus on mousedown still land;
+an agent's Control+V is synthetic and pastes nothing; a screenshot is a PNG at most 1280 px wide, saved to a file, and one element can be
+pictured; the network list has POST 200 /api/login; with the tab in the background, tabs says so, a screenshot is refused and a click is
+synthetic. Not covered here: a phone's takeover of a pane, and macOS/Linux behaviour.
 """
 import base64
 import json
