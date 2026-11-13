@@ -303,6 +303,12 @@ fn engine_js(nonce: &str, func: &str, args: &Value) -> String {
     format!("(window.__kelpieAgent?window.__kelpieAgent.{func}({},{args}):null)", quoted(nonce))
 }
 
+/// An agent's expression, run as the page's own script would; the engine only turns its value (or what it threw) into JSON. The script
+/// carries no nonce: the expression may call functions the page replaced, which can read the source of the script that called them.
+fn eval_js(expr: &str) -> String {
+    format!("(()=>{{const k=window.__kelpieAgent;if(!k)return null;let v;try{{v=(\n{expr}\n);}}catch(e){{return k.value(e,true);}}return k.value(v);}})()")
+}
+
 /// Ends the dialog answering an action started, without waiting for the page.
 fn dialogs_off(app: &AppHandle, label: &str, wv: &Webview) {
     if let Some(nonce) = app.state::<Browsers>().agent_nonce(label) {
@@ -720,6 +726,8 @@ impl Call<'_> {
         let after = args["snapshot_after"].as_str().unwrap_or("diff");
         let r = args["ref"].as_str();
         let id = r.map(|r| self.resolve(r, &info.doc)).transpose()?;
+        // A call refused for want of time takes no lease (no banner for an act that never happened).
+        may_act(self.left())?;
         self.take_lease();
         // The page before, to compare with; only when there is time for both snapshots.
         let before = if after == "diff" && self.left() > ACT_NEED + Duration::from_secs(4) { self.take_snapshot("compact", None, DIFF_CHARS).await.ok() } else { None };
@@ -846,8 +854,8 @@ impl Call<'_> {
         } else if !matches!(action, Some("back" | "forward" | "reload")) {
             return Err("give either `url` or `action` (back, forward or reload)".into());
         }
-        self.take_lease();
         may_act(self.left())?;
+        self.take_lease();
         self.alive()?;
         let navs = browsers.navs(self.label).0;
         let target = match (url, action) {
@@ -988,12 +996,9 @@ impl Call<'_> {
     async fn eval(&self, args: &Value) -> Result<Value, String> {
         let info = self.gate(Class::Eval).await?;
         let expr = args["expression"].as_str().ok_or("missing `expression`")?;
-        self.take_lease();
         may_act(self.left())?;
-        // The expression runs as the page's own script would; the engine only turns its value (or what it threw) into JSON.
-        let n = quoted(&self.nonce);
-        let js = format!("(()=>{{const k=window.__kelpieAgent;if(!k)return null;let v;try{{v=(\n{expr}\n);}}catch(e){{return k.value({n},e,true);}}return k.value({n},v);}})()");
-        let v = page_raw(&self.wv, js, PAGE_CALL.min(self.left())).await.map_err(|f| match f {
+        self.take_lease();
+        let v = page_raw(&self.wv, eval_js(expr), PAGE_CALL.min(self.left())).await.map_err(|f| match f {
             Fail::Absent => "The expression did not run: it is not one valid JavaScript expression, or the page is between two documents.".to_string(),
             f => f.text(),
         })?;
@@ -1062,6 +1067,16 @@ async fn idle_watch(app: AppHandle, label: String, pane: Arc<Pane>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_expression_runs_without_the_engine_nonce() {
+        let js = eval_js("document.title");
+        assert!(js.contains("\ndocument.title\n") && js.contains("k.value(v)") && js.contains("k.value(e,true)"));
+        // Nothing in the script names a nonce: the expression could read the source of the script that called it.
+        let engine = include_str!("../browser_agent.js");
+        assert!(engine.contains("value: (v, thrown) => value(v, thrown)"));
+        assert!(!js.contains("NONCE") && !js.contains('"'));
+    }
 
     fn ctx(kind: &str) -> Ctx {
         Ctx { session: "s1".into(), session_name: "Claude".into(), kind: kind.into(), origins: vec!["https://app.example.com".into()], may_eval: true }

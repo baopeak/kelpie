@@ -6,6 +6,7 @@
 // document start, so a page can spoof only its own content, not the address, the document or the answer channel. Values of password,
 // one-time-code, card and other secret fields never leave the page.
 (() => {
+  "use strict";
   if (window.top !== window || window.__kelpieAgent) return;
   const NONCE = "__KELPIE_AGENT_NONCE__", AGENT_PANE = __KELPIE_AGENT_PANE__;
   const W = window, D = document, O = Object, call = Function.prototype.call;
@@ -473,7 +474,8 @@
   O.defineProperty(W, "__kelpieAgent", {
     value: O.freeze({
       snapshot: wrap(snapshot), act: wrap(act), check: wrap(check), console: wrap(readConsole), info: wrap(info),
-      value: (k, v, thrown) => (k === NONCE ? value(v, thrown) : null),
+      // Only turns a value into JSON, so it needs no nonce (and the script that calls it must not carry one: see `eval_js`).
+      value: (v, thrown) => value(v, thrown),
       go: wrap((a) => { (a.delta < 0 ? back : forward)(hist); return ok(true); }),
       // The window around Kelpie's own trusted input in which input does not count as the person's.
       busy: wrap((a) => { busyTill = now() + min(+a.ms || 0, 10000); return ok(true); }),
