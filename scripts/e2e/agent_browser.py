@@ -301,6 +301,17 @@ def scenario(run, d):
     tabs_data = (res.get("structuredContent") or {}).get("tabs") or []
     pane = tabs_data[0]["pane"] if tabs_data else ""
     check("tabs lists the page as the agent's, in the background, synthetic input", ok and "opened by you" in text and "background" in text and "synthetic" in text, text)
+    if not ok:
+        # Where the call got lost: does the window hear agents' requests, and does the app still reach the daemon?
+        w.js_async("const done = arguments[arguments.length-1]; window.__seen = []; import('/src/lib/ipc.ts').then(m => m.onEvent('agent-browser-request', (e) => window.__seen.push([e.preq, e.tool]))).then(() => done(1), (e) => done(String(e)));")
+        t0 = time.time()
+        r = m1.call("kelpie_browser_tabs", timeout=30)
+        t_tabs = time.time() - t0
+        t0 = time.time()
+        info = w.invoke("daemon_call", {"method": "daemon.info", "params": {}})
+        print("DIAG", json.dumps({"tabs_s": round(t_tabs, 1), "tabs": r[1][:160], "seen": w.js("return window.__seen"), "daemon_info_s": round(time.time() - t0, 2), "daemon_info_ok": "ok" in info,
+                                  "connected": w.js(f"return {S}.connected()"), "api": w.js(f"return {S}.daemonApi()"), "panes": w.js(f"return {S}.workspace(arguments[0]).tabs.length", pa)}), flush=True)
+        raise RuntimeError("the window does not answer agents' browser calls")
 
     step("snapshot and sign-in")
     ok, snap, _ = m1.call("kelpie_browser_snapshot")
