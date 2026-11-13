@@ -67,7 +67,7 @@ export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; foc
     setError(null);
     try {
       if (!opened()) {
-        await browserOpen(label, url, rect());
+        await browserOpen(label, url, rect(), { agent: !!props.pane.openedBy });
         setOpened(true);
         setAddress(url);
       } else setAddress(await browserNavigate(label, url));

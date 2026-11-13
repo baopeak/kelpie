@@ -47,11 +47,48 @@ pub fn fit(wv: &tauri::Webview) {
     let _ = wv;
 }
 
-/// On the window thread: normal when shown; when not shown, low if `settled`, else a check again
-/// after `SETTLE`.
+/// Browser panes an agent uses now: they keep the normal target even when not shown, since a
+/// trimmed page can take seconds to answer the agent's calls.
+#[cfg(windows)]
+static KEEP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// An agent starts (`on`) or stops using the view: while it does, the view keeps the normal target.
+pub fn keep_normal(wv: &tauri::Webview, on: bool) {
+    #[cfg(windows)]
+    {
+        let label = wv.label().to_string();
+        let changed = {
+            let mut keep = KEEP.lock().unwrap_or_else(|e| e.into_inner());
+            let had = keep.contains(&label);
+            if on && !had {
+                keep.push(label);
+            } else if !on && had {
+                keep.retain(|l| *l != label);
+            }
+            on != had
+        };
+        if changed {
+            fit(wv);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (wv, on);
+}
+
+/// The view `label` is gone.
+pub fn forget(label: &str) {
+    #[cfg(windows)]
+    KEEP.lock().unwrap_or_else(|e| e.into_inner()).retain(|l| l != label);
+    #[cfg(not(windows))]
+    let _ = label;
+}
+
+/// On the window thread: normal when shown or an agent uses it; when not shown, low if `settled`,
+/// else a check again after `SETTLE`.
 #[cfg(windows)]
 fn apply(wv: &tauri::Webview, settled: bool) {
     let later = wv.clone();
+    let kept = KEEP.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|l| l == wv.label());
     let _ = wv.with_webview(move |pv| unsafe {
         use webview2_com::Microsoft::Web::WebView2::Win32::{
             ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
@@ -61,7 +98,7 @@ fn apply(wv: &tauri::Webview, settled: bool) {
         let controller = pv.controller();
         // An older WebView2 runtime without the interface keeps its default.
         let Ok(core) = controller.CoreWebView2().and_then(|c| c.cast::<ICoreWebView2_19>()) else { return };
-        let want = if crate::browser::shown(&controller) {
+        let want = if kept || crate::browser::shown(&controller) {
             COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
         } else if settled {
             COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW

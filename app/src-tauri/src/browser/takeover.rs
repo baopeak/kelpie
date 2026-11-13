@@ -109,6 +109,11 @@ impl Takeovers {
         self.held.lock().iter().find(|(_, h)| h.pane == pane).map(|(tk, _)| tk.clone())
     }
 
+    /// Whether a phone holds pane `label` now: agents keep off it.
+    pub(super) fn pane_held(&self, label: &str) -> bool {
+        self.tk_of_pane(label).is_some()
+    }
+
     /// The webview streamed for `tk`, while `generation` is its latest.
     fn target(&self, tk: &str, generation: Option<u64>) -> Option<String> {
         self.held.lock().get(tk).filter(|h| generation.is_none_or(|g| g == h.generation)).map(|h| h.target.clone())
@@ -259,6 +264,8 @@ pub async fn browser_takeover_start(app: AppHandle, tk: String, label: String, b
     let generation = state.generation.fetch_add(1, Ordering::Relaxed) + 1;
     let first = target.clone();
     state.held.lock().insert(tk.clone(), Held { pane: label.clone(), target, banner: banner.chars().take(80).collect(), settings: Settings::from(&settings), paused: false, generation, token: None, input, pressed: pressed.clone(), last_frame: Arc::new(AtomicU64::new(now_ms())), last_input: Arc::new(AtomicU64::new(now_ms())), version: 0, fresh: Arc::new(AtomicU64::new(0)) });
+    // An agent acting in the pane loses it to the phone.
+    super::agent::preempted(&app, &label);
     tauri::async_runtime::spawn(inputs(app.clone(), tk.clone(), rx, pressed));
     tauri::async_runtime::spawn(fallback(app.clone(), tk.clone()));
     if let Err(e) = stream_on(&app, &tk).await {
@@ -289,6 +296,8 @@ pub async fn browser_takeover_stop(app: AppHandle, tk: String) -> CmdResult<()> 
 /// The interface's answer to a `provider-request`.
 #[tauri::command]
 pub fn provider_reply(app: AppHandle, preq: u64, result: Option<Value>, error: Option<String>) -> CmdResult<()> {
+    // An agent's request the window answered itself: it will not come back through `agent`.
+    super::agent::forget_request(&app, preq);
     reply(&app, preq, match error {
         Some(e) => Err(e.chars().take(300).collect()),
         None => Ok(result.unwrap_or(Value::Null)),

@@ -150,7 +150,7 @@ async function onRequest(r: AgentRequest) {
     // A pane in a tab nobody has opened since the app started has no page yet: it is created hidden, and showing its tab later shows it.
     if (!hasWebview(label)) {
       try {
-        await browserOpen(label, first.pane.url, OFFSCREEN, true);
+        await browserOpen(label, first.pane.url, OFFSCREEN, { hidden: true, agent: first.pane.kind === "opened" });
       } catch (e) {
         return reply(null, `The page of pane ${first.pane.id} could not be opened: ${String(e).replace(/^Error: /, "")}`);
       }

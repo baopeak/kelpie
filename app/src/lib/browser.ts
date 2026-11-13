@@ -77,11 +77,12 @@ export const hasWebview = (label: string) => webviews.has(label);
 
 /** `hidden`: the webview is created without being shown, for an agent that uses a pane nobody has opened yet; mounting the pane later
  *  moves it into place and shows it. A hidden open of a webview that exists by its turn does nothing: the pane may have been opened on
- *  screen meanwhile, and moving that one away would leave the pane blank. */
-export const browserOpen = (label: string, url: string, rect: Rect, hidden?: boolean) =>
+ *  screen meanwhile, and moving that one away would leave the pane blank. `agent`: the pane was opened for an agent, so its page keeps a
+ *  console log for the agent from the start (fixed when the webview is created). */
+export const browserOpen = (label: string, url: string, rect: Rect, opts: { hidden?: boolean; agent?: boolean } = {}) =>
   inOrder(label, async () => {
-    if (hidden && webviews.has(label)) return;
-    await invoke<void>("browser_open", { label, url, rect, ...(hidden ? { hidden } : {}) });
+    if (opts.hidden && webviews.has(label)) return;
+    await invoke<void>("browser_open", { label, url, rect, ...(opts.hidden ? { hidden: true } : {}), ...(opts.agent ? { agent: true } : {}) });
     webviews.add(label);
   });
 export const browserBounds = (label: string, rect: Rect) => invoke<void>("browser_bounds", { label, rect });
