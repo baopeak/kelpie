@@ -59,8 +59,27 @@
   if (AGENT_PANE) hook();
   on(W, "error", (e) => { const t = e.target; if (el1(t)) log("error", `Failed to load ${tagOf(t)} ${scrub(t.currentSrc || t.src || t.href || "")}`); else log("error", e.message || str(e.error), e.filename ? file(e.filename) + ":" + e.lineno : ""); }, true);
   on(W, "unhandledrejection", (e) => log("error", "Unhandled rejection: " + str(e.reason)), true);
-  let busyTill = 0, person = 0;
-  for (const t of ["pointerdown", "keydown", "wheel"]) on(W, t, (e) => { if (e.isTrusted && now() > busyTill) { person = now(); dlg.mode = ""; } }, { capture: true, passive: true });
+  // `busyTill`: Kelpie's own trusted input runs; `agentTill`: what that input lets the page do (user activation) lasts a little longer.
+  let busyTill = 0, agentTill = 0, person = 0;
+  for (const t of ["pointerdown", "keydown", "wheel"]) on(W, t, (e) => { if (e.isTrusted && now() > busyTill) { person = now(); agentTill = 0; dlg.mode = ""; } }, { capture: true, passive: true });
+  // An agent's trusted input must not open a file picker or go fullscreen on the person's screen: refused, and reported with the action.
+  const asked = [], agentTurn = () => now() <= Math.max(busyTill, agentTill);
+  const refuse = (what) => { if (asked.length < 5 && !asked.includes(what)) asked.push(what); };
+  const isFile = (x) => { try { return el1(x) && tagOf(x) === "input" && (attr(x, "type") || "").toLowerCase() === "file"; } catch { return false; } };
+  const guard = (proto, k, check, refused) => {
+    const orig = proto[k];
+    if (typeof orig !== "function") return;
+    O.defineProperty(proto, k, { configurable: true, writable: true, enumerable: false, value: { [k](...a) { return agentTurn() && check(this) ? refused() : call.call(orig, this, ...a); } }[k] });
+  };
+  for (const k of ["click", "showPicker"]) guard(HTMLInputElement.prototype, k, isFile, () => { refuse("file"); });
+  for (const k of ["requestFullscreen", "webkitRequestFullscreen"]) guard(Element.prototype, k, () => true, () => { refuse("fullscreen"); return Promise.reject(new DOMException("agents cannot use fullscreen", "NotAllowedError")); });
+  for (const k of ["showOpenFilePicker", "showSaveFilePicker", "showDirectoryPicker"]) guard(W, k, () => true, () => { refuse("file"); return Promise.reject(new DOMException("agents cannot pick files", "AbortError")); });
+  // A click on a file input or its label opens the picker without a script, whether a person, Kelpie or the page's own script clicked: its
+  // default action is cancelled.
+  on(W, "click", (e) => {
+    if (!agentTurn()) return;
+    for (let t = e.target; el1(t); t = pe(t)) if (isFile(t) || (tagOf(t) === "label" && isFile(t.control))) { e.preventDefault(); refuse("file"); return; }
+  }, true);
 
   // ---- what an element is ----
   const SECRET = /(passw|passcode|secret|token|api[-_ ]?key|otp|one[-_ ]?time|mfa|2fa|cvv|cvc|card|cc-|ccnum|(^|[^a-z])pin([^a-z]|$)|ssn|security.?code|session|csrf|xsrf|auth|signature|sig$|credential|cookie)/i;
@@ -351,17 +370,68 @@
     if (go) defaults(x, k, m);
     key(x, "keyup", k, m);
   };
+  // Where a click on `x` lands: scrolled into view, its centre (in its own document's viewport) and what is there; or why it cannot be clicked.
+  function aim(x) {
+    if (disabled(x)) return { error: "the element is disabled" };
+    if (tagOf(x) === "input" && typeOf(x) === "file") return { error: "file inputs cannot be used by agents" };
+    scrollIn(x, { block: "center", inline: "center", behavior: "instant" });
+    const r = box(x);
+    if (!r.width && !r.height) return { error: "the element has no size on the page (hidden or collapsed); take a new snapshot" };
+    const p = { x: r.left + r.width / 2, y: r.top + r.height / 2 }, root = rootOf(x);
+    const hit = root.elementFromPoint ? root.elementFromPoint(p.x, p.y) : null;
+    if (hit && !within(hit, x)) { const h = describe(hit); return { error: `the element is covered at its centre by ${h.role}${h.name ? ` "${h.name}"` : ""}; close or move what covers it, or click that instead` }; }
+    return { p, hit };
+  }
+  // Where the viewport of `x`'s document starts in the top page's viewport (same-origin frames are added up).
+  // Where a frame's document starts in its parent's viewport: inside its border and padding.
+  const inside = (f) => { const r = box(f), s = styleOf(f); return { x: r.left + f.clientLeft + (parseFloat(s.paddingLeft) || 0), y: r.top + f.clientTop + (parseFloat(s.paddingTop) || 0) }; };
+  const offset = (x) => {
+    const o = { x: 0, y: 0 };
+    for (let w = (x.ownerDocument || D).defaultView; w && w !== W; ) {
+      const f = w.frameElement;
+      if (!f) return null;
+      const i = inside(f);
+      o.x += i.x; o.y += i.y;
+      w = f.ownerDocument.defaultView;
+    }
+    return o;
+  };
+  const named = (x) => { const w = el1(x) && describe(x); return w ? `${w.role}${w.name ? ` "${w.name}"` : ""}` : "nothing"; };
+  // Frames and plugins: a press there goes to another document, which may be on another site and has none of Kelpie's guards.
+  const EMBED = "iframe,frame,embed,object";
+  const embedded = (x) => { try { return el1(x) && !!x.closest(EMBED); } catch { return false; } };
+  // Whether a press at (x, y) of the top viewport reaches `el` (an element of the top page): what is there, followed into open shadow
+  // roots, is `el` or inside it, and not a frame or a plugin.
+  function reaches(el, x, y) {
+    let h = D.elementFromPoint(x, y);
+    for (let n = 0; h && n < 20; n++) {
+      const s = shadowOf(h);
+      if (s && s.elementFromPoint) { const i = s.elementFromPoint(x, y); if (i && i !== h) { h = i; continue; } }
+      if (within(h, el) && !embedded(h)) return { hit: true };
+      break;
+    }
+    return { hit: false, kind: "point", why: `${named(h)} was at the element's place` };
+  }
+  // Inputs that drop text that does not fit them: typed the synthetic way, which notices.
+  const STRICT = /^(number|date|time|datetime-local|month|week|color|range|file)$/;
+  // What typing into `x` does: picks an option ("select"), fills a field ("field") or an editable area ("editable"); or why it cannot.
+  function typable(x) {
+    const t = tagOf(x), y = typeOf(x);
+    if (disabled(x)) return { error: "the element is disabled" };
+    if (t === "select") return { kind: "select" };
+    if (t === "input" || t === "textarea") {
+      if (t === "input" && /^(checkbox|radio|button|submit|reset|image|file|hidden)$/.test(y)) return { error: y === "file" ? "file inputs cannot be filled by agents" : `this is a ${roleOf(x, t)}: click it instead of typing` };
+      if (x.readOnly) return { error: "the field is read-only" };
+      return { kind: "field" };
+    }
+    if (isEditable(x)) return { kind: "editable" };
+    return { error: "this element does not take text: type into a textbox, a searchbox, a combobox or an editable area" };
+  }
   const OPS = {
     click(x, a) {
-      if (disabled(x)) return fail("the element is disabled");
-      if (tagOf(x) === "input" && typeOf(x) === "file") return fail("file inputs cannot be used by agents");
-      scrollIn(x, { block: "center", inline: "center", behavior: "instant" });
-      const r = box(x);
-      if (!r.width && !r.height) return fail("the element has no size on the page (hidden or collapsed); take a new snapshot");
-      const p = { x: r.left + r.width / 2, y: r.top + r.height / 2 }, root = rootOf(x);
-      const hit = root.elementFromPoint ? root.elementFromPoint(p.x, p.y) : null;
-      if (hit && !within(hit, x)) { const h = describe(hit); return fail(`the element is covered at its centre by ${h.role}${h.name ? ` "${h.name}"` : ""}; close or move what covers it, or click that instead`); }
-      const target = hit || x, m = mods(a), right = a.button === "right";
+      const aimed = aim(x);
+      if (aimed.error) return fail(aimed.error);
+      const p = aimed.p, target = aimed.hit || x, m = mods(a), right = a.button === "right";
       const press = (detail) => {
         mouse(target, "pointerdown", p, right ? 2 : 0, m, detail);
         if (mouse(target, "mousedown", p, right ? 2 : 0, m, detail)) focusIn(target);
@@ -377,9 +447,9 @@
       return ok(describe(x));
     },
     type(x, a) {
-      const t = tagOf(x), y = typeOf(x), text = String(a.text == null ? "" : a.text);
-      if (disabled(x)) return fail("the element is disabled");
-      if (t === "select") {
+      const t = tagOf(x), y = typeOf(x), text = String(a.text == null ? "" : a.text), can = typable(x);
+      if (can.error) return fail(can.error);
+      if (can.kind === "select") {
         const want = norm(text).toLowerCase(), opts = [...x.options], lab = (o) => norm(o.label).toLowerCase();
         const o = opts.find((o) => lab(o) === want) || opts.find((o) => o.value === text) || opts.find((o) => want && lab(o).includes(want));
         if (!o) return fail(`no option of this list matches; its options are ${opts.slice(0, 10).map((o) => json(cut(norm(o.label), 30))).join(", ")}${opts.length > 10 ? ", …" : ""}`);
@@ -387,25 +457,52 @@
         focusIn(x); o.selected = true; input(x); change(x);
         return ok({ ...describe(x), picked: true });
       }
-      if (t === "input" || t === "textarea") {
-        if (t === "input" && /^(checkbox|radio|button|submit|reset|image|file|hidden)$/.test(y)) return fail(y === "file" ? "file inputs cannot be filled by agents" : `this is a ${roleOf(x, t)}: click it instead of typing`);
-        if (x.readOnly) return fail("the field is read-only");
+      if (can.kind === "field") {
         focusIn(x);
         const [g, s] = val[t], old = g(x), v = a.clear === false ? old + text : text;
         s(x, v);
         // A field that refuses the text (a number or date field) is put back as it was, with no events.
         if (v && !g(x)) { s(x, old); return fail(`the field did not take the text (it is a ${y || "text"} field)`); }
         input(x, "insertText", text); change(x);
-      } else if (isEditable(x)) {
+      } else {
         focusIn(x);
         const d = x.ownerDocument, sel = d.getSelection(), rg = d.createRange();
         rg.selectNodeContents(x);
         if (a.clear === false) rg.collapse(false);
         sel.removeAllRanges(); sel.addRange(rg);
         if (!(text ? exec(d, "insertText", false, text) : exec(d, "delete"))) { x.textContent = a.clear === false ? x.textContent + text : text; input(x, "insertText", text); }
-      } else return fail("this element does not take text: type into a textbox, a searchbox, a combobox or an editable area");
+      }
       if (a.submit) pressKey(x, "Enter", {});
       return ok(describe(x));
+    },
+    // For Kelpie's trusted input: what a click or typing would act on and where, in CSS px of the top page's viewport (no point when it is
+    // off screen); for a key, the element focused first. Checks as the synthetic action would, and changes nothing else.
+    locate(x, a) {
+      if (a.for === "press") {
+        if (x) { if (disabled(x)) return fail("the element is disabled"); focusIn(x); }
+        const f = x || active();
+        return ok(el1(f) && f !== D.body ? describe(f) : {});
+      }
+      let kind = "", len = 0;
+      if (a.for === "type") {
+        const can = typable(x);
+        if (can.error) return fail(can.error);
+        if (can.kind === "select") return ok({ ...describe(x), kind: "select" });
+        if (tagOf(x) === "input" && STRICT.test(typeOf(x))) return ok({ ...describe(x), kind: "strict" });
+        kind = can.kind;
+        len = filled(x);
+        if (tagOf(x) === "textarea") kind = "lines";
+      }
+      const aimed = aim(x);
+      if (aimed.error) return fail(aimed.error);
+      // Inside a frame, or a frame or plugin itself: a trusted press would reach another document, so it goes the synthetic way.
+      if ((x.ownerDocument || D) !== D || embedded(x)) return ok({ ...describe(x), kind, len, x: null, y: null, why: "frame" });
+      // Pinch-zoomed, the page's points are not the screen's: no point, so the click goes the synthetic way.
+      const vv = W.visualViewport;
+      if (vv && Math.abs(vv.scale - 1) > 0.001) return ok({ ...describe(x), kind, len, x: null, y: null, why: "zoomed" });
+      const o = aimed.hit && offset(x), px = o && aimed.p.x + o.x, py = o && aimed.p.y + o.y;
+      const on = o && px >= 0 && py >= 0 && px < W.innerWidth && py < W.innerHeight;
+      return ok({ ...describe(x), kind, len, x: on ? px : null, y: on ? py : null });
     },
     press(x, a) {
       const m = mods(a), k = a.key === "Space" ? " " : String(a.key || "");
@@ -419,7 +516,7 @@
     if (a.doc !== DOC) return fail("stale ref: the page changed; take a new snapshot");
     const x = a.id ? lookup(a.id) : null;
     if (a.id && !x) return fail(GONE);
-    if (!x && a.op !== "press") return fail("missing ref");
+    if (!x && a.op !== "press" && !(a.op === "locate" && a.for === "press")) return fail("missing ref");
     if (person && now() - person < (+a.quiet || 0)) return fail("The user is using this pane; agents wait 10 s after the user's own input. Try again shortly.");
     // Dialogs the action opens are answered for 3 s at most (Kelpie ends it sooner, and so does the person's input).
     dlg.mode = a.dialog === "accept" ? "accept" : "dismiss";
@@ -454,7 +551,49 @@
       sinceAgent: !AGENT_PANE,
     });
   }
-  const info = (a) => ok({ doc: DOC, url: location.href, title: D.title, ready: D.readyState, person: person ? now() - person : -1, quiet: mo ? now() - quietSince : -1, dialogs: a.take ? dlg.seen.splice(0) : [] });
+  // The viewport, the document's size and its scroll, in CSS px, and the device pixel ratio; with `id`, that element scrolled into view and its
+  // box in document coordinates (Kelpie's screenshots clip with these).
+  function geometry(a) {
+    const de = D.documentElement, g = { w: W.innerWidth, h: W.innerHeight, dpr: W.devicePixelRatio || 1 };
+    if (a.id) {
+      if (a.doc !== DOC) return fail("stale ref: the page changed; take a new snapshot");
+      const x = lookup(a.id);
+      if (!x) return fail(GONE);
+      scrollIn(x, { block: "nearest", inline: "nearest", behavior: "instant" });
+      const r = box(x), o = offset(x);
+      if (!r.width || !r.height) return fail("the element has no size on the page (hidden or collapsed); take a new snapshot");
+      if (!o) return fail("the element is in a frame Kelpie cannot picture");
+      g.rect = { x: r.left + o.x + W.scrollX, y: r.top + o.y + W.scrollY, w: r.width, h: r.height };
+    }
+    g.sx = W.scrollX; g.sy = W.scrollY;
+    g.dw = Math.max(de.scrollWidth, D.body ? D.body.scrollWidth : 0, g.w);
+    g.dh = Math.max(de.scrollHeight, D.body ? D.body.scrollHeight : 0, g.h);
+    return ok(g);
+  }
+  const info = (a) => ok({ doc: DOC, url: location.href, title: D.title, ready: D.readyState, person: person ? now() - person : -1, quiet: mo ? now() - quietSince : -1, dialogs: a.take ? dlg.seen.splice(0) : [], refused: a.take ? asked.splice(0) : [] });
+  // The characters in a field (its length only: a password's value never leaves the page).
+  const filled = (x) => { const t = tagOf(x); return t === "input" || t === "textarea" ? [...val[t][0](x)].length : [...(x.textContent || "")].length; };
+  // Kelpie's trusted input runs for `ms` more (0: it ended). Then whether its next step may go: the page is still document `doc`, the
+  // element `id` is still on it, and, with `focus`, the focus is in it, or, with a point, a press there reaches it.
+  // The window is set only for a step that may go: a refused one leaves the person's input counted as theirs.
+  function busy(a) {
+    const ms = min(+a.ms || 0, 10000);
+    // Ended: what the run's input lets the page do lasts a little longer (only after a run that sent anything).
+    if (ms <= 0) { if (busyTill) agentTill = now() + 5000; busyTill = 0; return ok({ hit: true }); }
+    const v = verdict(a);
+    if (v.hit) busyTill = now() + ms;
+    return ok(v);
+  }
+  function verdict(a) {
+    if (!a.doc) return { hit: true };
+    if (a.doc !== DOC) return { hit: false, kind: "page", why: "the page changed" };
+    if (!a.id) return { hit: true };
+    const x = lookup(a.id);
+    if (!x) return { hit: false, kind: "gone", why: "the element left the page" };
+    if (a.focus) { const f = active(); return f && within(f, x) ? { hit: true } : { hit: false, kind: "focus", why: `the focus moved to ${named(f)}` }; }
+    return a.x != null ? reaches(x, +a.x, +a.y) : { hit: true };
+  }
+  const length = (a) => { if (a.doc !== DOC) return fail("stale ref: the page changed; take a new snapshot"); const x = lookup(a.id); return x ? ok(filled(x)) : fail(GONE); };
   // The value of an agent's expression as JSON (Kelpie runs the expression itself and hands the value, or what it threw, here).
   function value(v, thrown) {
     try {
@@ -473,12 +612,12 @@
   };
   O.defineProperty(W, "__kelpieAgent", {
     value: O.freeze({
-      snapshot: wrap(snapshot), act: wrap(act), check: wrap(check), console: wrap(readConsole), info: wrap(info),
+      snapshot: wrap(snapshot), act: wrap(act), check: wrap(check), console: wrap(readConsole), info: wrap(info), geometry: wrap(geometry),
       // Only turns a value into JSON, so it needs no nonce (and the script that calls it must not carry one: see `eval_js`).
       value: (v, thrown) => value(v, thrown),
       go: wrap((a) => { (a.delta < 0 ? back : forward)(hist); return ok(true); }),
       // The window around Kelpie's own trusted input in which input does not count as the person's.
-      busy: wrap((a) => { busyTill = now() + min(+a.ms || 0, 10000); return ok(true); }),
+      busy: wrap(busy), length: wrap(length),
       dialogs: wrap(() => { dlg.mode = ""; dlg.until = 0; return ok(true); }),
     }),
     configurable: false, enumerable: false, writable: false,

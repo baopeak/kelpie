@@ -10,7 +10,9 @@
 //! before such an end is refused. While an agent uses a pane, its page keeps the normal memory target: a trimmed page can take seconds to
 //! answer.
 //!
-//! Input is synthetic DOM events on every platform. Typed text, scripts and page content are never logged here.
+//! Input is the engine's synthetic DOM events, or, where the platform has it (`agent_cdp`) and the computer shows the pane, trusted input
+//! through the DevTools protocol; there, too, a shown page can be pictured, and a pane's requests are kept from the first agent call until
+//! agents' use of it ends. Typed text, scripts and page content are never logged here.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,8 +24,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Webview};
 
+use base64::Engine as _;
+
+use super::agent_cdp::{self as cdp, Fallback};
 use super::agent_snapshot::{self as snap, Kind, Refs, Snapshot, STALE};
-use super::{valid_label, Browsers, Takeovers};
+use super::{valid_label, Browsers, Takeovers, NOT_SHOWN};
 use crate::daemon_client::DaemonClient;
 use crate::fs_ops::CmdResult;
 
@@ -50,6 +55,11 @@ const DIFF_LINES: usize = 20;
 const DIFF_CHARS: usize = 20_000;
 /// Requests the window may still pass on.
 const PENDING: usize = 256;
+/// Around each step of Kelpie's own trusted input, the page does not count input as the person's for this long: the longest the step may
+/// take, and a little more. Ended when the input ends.
+const BUSY_MS: u64 = PAGE_CALL.as_millis() as u64 + 500;
+/// How long a call waits for the network list to start (it goes on starting after).
+const NET_START: Duration = Duration::from_millis(1500);
 
 const NOT_RESPONDING: &str = "the page is not responding";
 const UNREACHABLE: &str = "Kelpie cannot reach this page now (it is loading, or shows an error page); try again in a moment";
@@ -246,12 +256,32 @@ struct PaneState {
     /// The idle watcher runs.
     watching: bool,
     refs: Refs,
+    /// The pane's requests, kept while `net_on` (receivers `net_tokens`); `net_gen` changes whenever keeping them stops.
+    net: Arc<Mutex<cdp::NetLog>>,
+    net_on: bool,
+    net_tokens: cdp::Tokens,
+    net_gen: u64,
+    /// The sites the latest call's agent may use: a page elsewhere ends the list (`navigating`).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    net_scope: Option<Scope>,
+}
+
+/// The sites a call's agent may use in a pane.
+#[derive(Clone)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Scope {
+    kind: Kind,
+    isolated: bool,
+    origins: Vec<String>,
+    sites: Vec<String>,
 }
 
 #[derive(Default)]
 struct Pane {
     turn: tokio::sync::Mutex<()>,
     state: Mutex<PaneState>,
+    /// Starting and stopping the network list.
+    net_turn: tokio::sync::Mutex<()>,
 }
 
 /// The agent state of every pane an agent used, the requests the window holds, and the number of the daemon connection.
@@ -360,6 +390,9 @@ fn end(app: &AppHandle, label: &str, reason: &'static str) {
     });
     let (session, name) = lease.map(|l| (l.session, l.name)).unwrap_or_default();
     lease_event(app, label, &session, &name, false, Some(reason));
+    if let Some(pane) = app.state::<AgentPanes>().existing(label) {
+        network_stop(app, label, &pane);
+    }
     if let Some(wv) = app.get_webview(label) {
         dialogs_off(app, label, &wv);
         crate::webview_memory::keep_normal(&wv, false);
@@ -391,10 +424,85 @@ pub(super) fn pane_closed(app: &AppHandle, label: &str) {
         if let Some(l) = lease {
             lease_event(app, label, &l.session, &l.name, false, Some("closed"));
         }
+        network_stop(app, label, &pane);
     }
     crate::webview_memory::forget(label);
 }
 
+/// Stops keeping the pane's requests and forgets those kept: the next agent call starts the list again, numbered on from where it was (a
+/// cursor stays a cursor). The page stops reporting requests (`Network.disable`) unless a newer start came first: starts and stops of a
+/// pane's list take turns (`net_turn`).
+fn network_stop(app: &AppHandle, label: &str, pane: &Arc<Pane>) {
+    let tokens = {
+        let mut st = pane.state.lock();
+        st.net_gen += 1;
+        st.net_on = false;
+        let last = st.net.lock().last();
+        st.net = Arc::new(Mutex::new(cdp::NetLog::after(last)));
+        std::mem::take(&mut st.net_tokens)
+    };
+    let wv = app.get_webview(label);
+    let had = !tokens.is_empty();
+    cdp::network_off(wv.as_ref(), tokens);
+    if let (true, Some(wv)) = (had, wv) {
+        let pane = pane.clone();
+        tauri::async_runtime::spawn(async move {
+            let _turn = pane.net_turn.lock().await;
+            if !pane.state.lock().net_on {
+                cdp::network_disable(&wv).await;
+            }
+        });
+    }
+}
+
+/// Keeps the pane's requests from now on, unless that runs already. Stopped meanwhile (`net_gen` changed), the receivers go again at once.
+async fn network_start(pane: Arc<Pane>, wv: Webview) {
+    let _turn = pane.net_turn.lock().await;
+    let (log, generation) = {
+        let mut st = pane.state.lock();
+        if st.net_on {
+            return;
+        }
+        st.net_on = true;
+        (st.net.clone(), st.net_gen)
+    };
+    let started = cdp::network_on(&wv, log).await;
+    let late = {
+        let mut st = pane.state.lock();
+        match started {
+            Some(tokens) if st.net_gen == generation => {
+                st.net_tokens = tokens;
+                None
+            }
+            Some(tokens) => Some(tokens),
+            None => {
+                if st.net_gen == generation {
+                    st.net_on = false;
+                }
+                None
+            }
+        }
+    };
+    if let Some(tokens) = late {
+        cdp::network_off(Some(&wv), tokens);
+        cdp::network_disable(&wv).await;
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+/// Pane `label`'s page starts loading `url` (main frame). A page there that the agents its requests are kept for may not use ends the
+/// list: what the person does on another site is not kept for agents.
+pub(super) fn navigating(app: &AppHandle, label: &str, url: &str) {
+    let Some(pane) = app.try_state::<AgentPanes>().and_then(|s| s.existing(label)) else { return };
+    let leaves = {
+        let st = pane.state.lock();
+        st.net_on && st.net_scope.as_ref().is_some_and(|s| snap::site_allowed(url, s.kind, s.isolated, &s.origins, &s.sites).is_err())
+    };
+    if leaves {
+        let (app, label) = (app.clone(), label.to_string());
+        tauri::async_runtime::spawn(async move { network_stop(&app, &label, &pane) });
+    }
+}
 /// Runs one tool of an agent in pane `label` and answers the daemon's request `preq`. An error means the daemon was not answered (the
 /// window answers it then); never both.
 #[tauri::command]
@@ -411,7 +519,7 @@ pub async fn browser_agent_run(app: AppHandle, preq: u64, label: String, tool: S
 
 async fn run(app: &AppHandle, label: &str, tool: &str, args: &Value, ctx: &Ctx, p: &Pending) -> Result<Value, String> {
     class_of(tool).ok_or_else(|| format!("unknown browser tool `{tool}`"))?;
-    if matches!(tool, "screenshot" | "network") {
+    if !cdp::AVAILABLE && matches!(tool, "screenshot" | "network") {
         return Err(format!("kelpie_browser_{tool} is not available in this version of Kelpie yet."));
     }
     let wv = app.get_webview(label).ok_or("The pane's page is not open.")?;
@@ -423,6 +531,8 @@ async fn run(app: &AppHandle, label: &str, tool: &str, args: &Value, ctx: &Ctx, 
     may_start(call.left())?;
     call.alive()?;
     call.touch();
+    pane.state.lock().net_scope = Some(Scope { kind: ctx.kind(), isolated: isolated(label), origins: ctx.origins.clone(), sites: p.policy.sites.clone() });
+    call.record_network().await;
     let out = match tool {
         "snapshot" => call.snapshot(args).await,
         "click" | "type" | "press" => call.act(tool, args).await,
@@ -430,6 +540,8 @@ async fn run(app: &AppHandle, label: &str, tool: &str, args: &Value, ctx: &Ctx, 
         "wait" => call.wait(args).await,
         "console" => call.console(args).await,
         "eval" => call.eval(args).await,
+        "screenshot" => call.screenshot(args).await,
+        "network" => call.network(args).await,
         _ => Err(format!("kelpie_browser_{tool} cannot run in a pane")),
     };
     call.touch();
@@ -497,6 +609,31 @@ struct Info {
     /// Ms since the page last changed after an action; -1 when not watched.
     quiet: i64,
     dialogs: Vec<Dialog>,
+    /// What the page asked for during an agent's trusted input and did not get (`file`, `fullscreen`).
+    refused: Vec<String>,
+}
+
+/// How an action went in: what the engine says it acted on, how (`trusted`, `synthetic`, `synthetic: <why>`), a note for the reply, and
+/// whether a double click went as a single one.
+struct Done {
+    target: Value,
+    how: String,
+    note: Option<String>,
+    single: bool,
+}
+
+/// Whether a webview's page has the keyboard focus (none when it does not say in time).
+async fn has_focus(wv: &Webview) -> Option<bool> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let tx = std::sync::Mutex::new(Some(tx));
+    wv.eval_with_callback("document.hasFocus()", move |s| {
+        if let Some(tx) = tx.lock().ok().and_then(|mut t| t.take()) {
+            let _ = tx.send(s);
+        }
+    })
+    .ok()?;
+    let s = tokio::time::timeout(Duration::from_millis(200), rx).await.ok()?.ok()?;
+    serde_json::from_str(&s).ok()
 }
 
 #[derive(Deserialize, Default, Clone, Debug)]
@@ -744,8 +881,9 @@ impl Call<'_> {
         if self.phone() {
             return Err(PHONE.into());
         }
-        let done = self.engine("act", a, false).await?;
-        let target: Target = serde_json::from_value(done).unwrap_or_default();
+        let done = self.input(tool, a, args).await?;
+        let target: Target = serde_json::from_value(done.target).unwrap_or_default();
+        let how = done.how;
         let (now, loaded) = self.settle(navs).await;
         let now = now.unwrap_or_else(|| Info { url: self.wv.url().map(|u| u.to_string()).unwrap_or_default(), ..Info::default() });
         self.landed(&now.url)?;
@@ -757,20 +895,30 @@ impl Call<'_> {
         let what = describe(&target, target_ref.as_deref());
         let mut text = match tool {
             "click" => {
-                let verb = if args["button"].as_str() == Some("right") { "Right-clicked" } else if args["double"].as_bool() == Some(true) { "Double-clicked" } else { "Clicked" };
-                format!("{verb} {what} (synthetic).")
+                let verb = if args["button"].as_str() == Some("right") {
+                    "Right-clicked"
+                } else if args["double"].as_bool() == Some(true) && !done.single {
+                    "Double-clicked"
+                } else {
+                    "Clicked"
+                };
+                format!("{verb} {what} ({how}).")
             }
             "type" if target.picked => format!("Picked the matching option in {what}."),
             "type" => {
                 let n = args["text"].as_str().map_or(0, |t| t.chars().count());
                 let submitted = if args["submit"].as_bool() == Some(true) { " Pressed Enter." } else { "" };
-                format!("Typed {n} character{} into {what}.{submitted}", if n == 1 { "" } else { "s" })
+                format!("Typed {n} character{} into {what} ({how}).{submitted}", if n == 1 { "" } else { "s" })
             }
             _ => {
                 let combo = key_combo(args);
-                if what.is_empty() { format!("Pressed {combo} (synthetic).") } else { format!("Pressed {combo} on {what} (synthetic).") }
+                if what.is_empty() { format!("Pressed {combo} ({how}).") } else { format!("Pressed {combo} on {what} ({how}).") }
             }
         };
+        if let Some(note) = &done.note {
+            text.push(' ');
+            text.push_str(note);
+        }
         self.after_action(&mut text, &info, &now, loaded, popups);
         let audit = json!({"host": host_of(&info.url), "target": if what.is_empty() { key_combo(args) } else { format!("{} {}", target.role, quoted(&target.name)) }});
         // The field typed into never shows its value back.
@@ -789,6 +937,215 @@ impl Call<'_> {
         Ok(json!({"text": text, "page": page_of(&now.url, &now.title), "audit": audit}))
     }
 
+    /// Whether the computer shows the pane now, as far as is known here: the window does not hide it, and its window is not minimised. The
+    /// window thread looks again right before each trusted event (`cdp`).
+    fn shown(&self) -> bool {
+        !self.app.state::<Takeovers>().hidden(self.label) && !self.wv.window().is_minimized().unwrap_or(false)
+    }
+
+    /// One DevTools protocol call within `limit` and the call's time. `guarded`: only while the computer shows the pane, no phone holds it
+    /// and agents' use of it has not ended since the call came, as the window thread finds right before it (else `NOT_SHOWN`).
+    async fn cdp(&self, method: &'static str, params: Value, guarded: bool, limit: Duration) -> Result<Value, String> {
+        let hidden: Option<cdp::Hidden> = guarded.then(|| {
+            let (app, label, pane, received) = (self.app.clone(), self.label.to_string(), self.pane.clone(), self.received);
+            Box::new(move || {
+                let t = app.state::<Takeovers>();
+                t.hidden(&label) || t.pane_held(&label) || pane.state.lock().ended.is_some_and(|(at, _)| at > received)
+            }) as cdp::Hidden
+        });
+        cdp::call(&self.wv, method, params, hidden, limit.min(self.left())).await
+    }
+    /// Keeps the pane's requests from the first agent call on; waits a little for that to start, so that what this call does is in them.
+    async fn record_network(&self) {
+        if !cdp::AVAILABLE || self.pane.state.lock().net_on {
+            return;
+        }
+        let task = tauri::async_runtime::spawn(network_start(self.pane.clone(), self.wv.clone()));
+        let _ = tokio::time::timeout(NET_START, task).await;
+    }
+
+    /// The engine's synthetic events do action `a`; `why` says why they and not trusted input did.
+    async fn synthetic(&self, a: Value, why: Option<&str>) -> Result<Done, String> {
+        let target = self.engine("act", a, false).await?;
+        Ok(Done { target, how: why.map_or_else(|| "synthetic".to_string(), |w| format!("synthetic: {w}")), note: None, single: false })
+    }
+
+    /// Does action `a` (`act`'s arguments) of `tool`: as trusted input where the platform has it and it is safe, else as the engine's
+    /// synthetic events. Trusted input needs the pane shown at 100 % zoom, an element of the top page, a left click, a key without
+    /// Control, Alt or Meta, and a field that takes any text. Each step goes only while nothing ended the agent's use of the pane, with the
+    /// page told the input is Kelpie's, on the same page and element: a press only where the element itself is, typing's keys and text only
+    /// while the focus is in the field. A step refused before anything acted on the page lets the synthetic events do it; one refused
+    /// because the page, the element or the focus changed stops the action, and the agent hears what went.
+    async fn input(&self, tool: &str, a: Value, args: &Value) -> Result<Done, String> {
+        let names: Vec<&str> = args["modifiers"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let mods = cdp::modifiers(&names);
+        let key = args["key"].as_str().unwrap_or_default();
+        if !(cdp::AVAILABLE && self.shown()) {
+            return self.synthetic(a, None).await;
+        }
+        // A trusted right click opens the browser's own menu on the person's screen.
+        if tool == "click" && args["button"].as_str() == Some("right") {
+            return self.synthetic(a, None).await;
+        }
+        if let Some(why) = (tool == "press").then(|| cdp::synthetic_key(key, mods)).flatten() {
+            return self.synthetic(a, Some(why)).await;
+        }
+        if tool != "press" {
+            match cdp::zoom_factor(&self.wv).await {
+                Some(z) if (z - 1.0).abs() < 0.01 => {}
+                Some(_) => return self.synthetic(a, Some("the pane is zoomed")).await,
+                None => return self.synthetic(a, Some("Kelpie could not read the pane's zoom")).await,
+            }
+        }
+        let mut at = a.clone();
+        at["op"] = json!("locate");
+        at["for"] = json!(tool);
+        let spot = self.engine("act", at, false).await?;
+        let kind = spot["kind"].as_str().unwrap_or_default().to_string();
+        // A list's option is picked the engine's way, and a number, date or similar field is typed into it, which notices refused text.
+        if matches!(kind.as_str(), "select" | "strict") {
+            return self.synthetic(a, None).await;
+        }
+        let point = spot["x"].as_f64().zip(spot["y"].as_f64());
+        let text = args["text"].as_str().unwrap_or_default();
+        let (clear, submit, double) = (args["clear"].as_bool() != Some(false), args["submit"].as_bool() == Some(true), args["double"].as_bool() == Some(true));
+        let steps = match (tool, point) {
+            ("press", _) => cdp::key_steps(key, mods, cdp::Effect::Input).ok_or_else(|| format!("Kelpie cannot press the key {}", quoted(key)))?,
+            ("click", Some((x, y))) => cdp::click_steps(x, y, false, double, mods, cdp::Effect::Input),
+            ("type", Some((x, y))) => cdp::type_steps(x, y, text, clear, submit),
+            // No point on screen to press.
+            _ => {
+                let why = match spot["why"].as_str() {
+                    Some("zoomed") => Some("the page is zoomed in"),
+                    Some("frame") => Some("the element is in a frame"),
+                    _ => None,
+                };
+                return self.synthetic(a, why).await;
+            }
+        };
+        may_act(self.left())?;
+        self.alive()?;
+        if self.phone() {
+            return Err(PHONE.into());
+        }
+        let (id, doc) = (a["id"].clone(), a["doc"].clone());
+        // A page that cannot be told the input is Kelpie's would take it for the person's.
+        if !self.engine("busy", json!({"ms": BUSY_MS, "doc": doc, "id": id}), false).await.is_ok_and(|v| v["hit"] != false) {
+            let _ = self.engine("busy", json!({"ms": 0}), false).await;
+            return self.synthetic(a, None).await;
+        }
+        let main_focused = self.main_focus().await;
+        let measure = tool == "type" && matches!(kind.as_str(), "field" | "lines");
+        // Keys go to the focused element: for typing, and for a key pressed on an element, it must be the one.
+        let in_focus = tool == "type" || (tool == "press" && id.as_u64().is_some_and(|i| i > 0));
+        let (stop, length) = (Mutex::new((String::new(), String::new())), Mutex::new(None::<u64>));
+        let sent = cdp::send(&steps, |method, params, guarded| {
+            let press = params["type"] == "mousePressed";
+            let keys = method != "Input.dispatchMouseEvent";
+            let enter = measure && params["key"] == "Enter" && params["type"] == "keyDown";
+            let (id, doc, stop, length) = (&id, &doc, &stop, &length);
+            async move {
+                if guarded {
+                    let mut b = json!({"ms": BUSY_MS, "doc": doc, "id": id});
+                    if press {
+                        b["x"] = params["x"].clone();
+                        b["y"] = params["y"].clone();
+                    } else if keys && in_focus {
+                        b["focus"] = json!(true);
+                    }
+                    match self.engine("busy", b, false).await {
+                        Ok(v) if v["hit"] == false => {
+                            let why = v["why"].as_str().unwrap_or("something changed").to_string();
+                            *stop.lock() = (v["kind"].as_str().unwrap_or("page").to_string(), why);
+                            return Err(cdp::MISSED.to_string());
+                        }
+                        Ok(_) => {}
+                        Err(_) => return Err(cdp::NOT_SENT.to_string()),
+                    }
+                    // The text is in: what the field holds before Enter submits it.
+                    if enter {
+                        let n = self.engine("length", json!({"doc": doc, "id": id}), false).await.ok().and_then(|v| v.as_u64());
+                        *length.lock() = n;
+                    }
+                }
+                self.cdp(method, params, guarded, PAGE_CALL).await
+            }
+        })
+        .await;
+        let _ = self.engine("busy", json!({"ms": 0}), false).await;
+        self.restore_focus(main_focused).await;
+        let trusted = |note: Option<String>, single: bool| Done { target: spot.clone(), how: "trusted".into(), note, single };
+        match sent {
+            cdp::Sent::All => {
+                let mut note = None;
+                if measure {
+                    // Read before Enter submitted it, else now (a submitted field that was not read is not judged).
+                    let before_enter = *length.lock();
+                    let held = match before_enter {
+                        Some(n) => Some(n),
+                        None if submit => None,
+                        None => self.engine("length", json!({"doc": doc, "id": id}), false).await.ok().and_then(|v| v.as_u64()),
+                    };
+                    let typed = cdp::typed_len(text, kind == "lines");
+                    let want = if clear { typed } else { spot["len"].as_u64().unwrap_or(0) + typed };
+                    if let Some(n) = held.filter(|n| *n != want) {
+                        note = Some(format!("The field now holds {n} characters, not {want}: it refused or changed some of the text."));
+                    }
+                }
+                Ok(trusted(note, false))
+            }
+            cdp::Sent::Failed { at, error } if cdp::acted(&steps, at) => Err(format!("{error}; part of the action may have happened: take a snapshot to see the page now.")),
+            cdp::Sent::Failed { error, .. } => Err(error),
+            cdp::Sent::Refused { at, why } => {
+                // A phone took the pane, or agents' use of it ended: nothing more is done.
+                if self.phone() {
+                    return Err(PHONE.into());
+                }
+                self.alive()?;
+                let stopped = stop.lock().clone();
+                let (changed, reason) = match why.as_str() {
+                    cdp::MISSED => stopped,
+                    NOT_SHOWN => ("hidden".to_string(), "the pane was hidden".to_string()),
+                    _ => ("silent".to_string(), "the page did not answer".to_string()),
+                };
+                // A double click whose second press did not go: the first click did.
+                let presses: Vec<usize> = steps.iter().enumerate().filter(|(_, s)| s.params["type"] == "mousePressed").map(|(i, _)| i).collect();
+                if double && presses.get(1) == Some(&at) {
+                    return Ok(trusted(Some(format!("Only the first click went: {reason} before the second.")), true));
+                }
+                // While no more than the preparation for typing went on the same page, the synthetic events do the action on the element
+                // itself; otherwise the agent hears what went, and nothing more is done.
+                match cdp::after_refusal(&steps, at, &changed) {
+                    Fallback::Action => self.synthetic(a, Some(&reason)).await,
+                    Fallback::Submit => {
+                        let mut enter = a;
+                        enter["op"] = json!("press");
+                        enter["key"] = json!("Enter");
+                        enter["modifiers"] = json!([]);
+                        self.engine("act", enter, false).await?;
+                        Ok(Done { target: spot.clone(), how: format!("trusted, then Enter synthetic: {reason}"), note: None, single: false })
+                    }
+                    Fallback::Nothing => Err(cdp::stopped_text(tool, &steps, at, &reason)),
+                }
+            }
+        }
+    }
+
+    /// Whether the main window's own page (Kelpie's, not a web page) has the keyboard focus now; none when it does not say in time.
+    async fn main_focus(&self) -> Option<bool> {
+        has_focus(&self.app.get_webview("main")?).await
+    }
+
+    /// Trusted input may move the keyboard focus into the pane. The main window's page gets it back when it had it before the run
+    /// (`before`), lost it, and the Kelpie window is still the one in front. Focus never goes to a pane: a web page's answer is not trusted.
+    async fn restore_focus(&self, before: Option<bool>) {
+        if before != Some(true) || !self.wv.window().is_focused().unwrap_or(false) || self.main_focus().await != Some(false) {
+            return;
+        }
+        if let Some(main) = self.app.get_webview("main") {
+            let _ = main.set_focus();
+        }
+    }
     /// The lines an action adds about the page: where it is now, dialogs it answered, a window that opened.
     fn after_action(&self, text: &mut String, before: &Info, now: &Info, loaded: bool, popups: usize) {
         if now.url != before.url || now.title != before.title || !loaded {
@@ -796,6 +1153,9 @@ impl Call<'_> {
         }
         for d in &now.dialogs {
             text.push_str(&format!("\nA dialog ({}) said {}; it was {}.", d.kind, quoted(&d.message), d.answer));
+        }
+        for what in &now.refused {
+            text.push_str(&format!("\nThe page asked for {}; agents cannot use that.", if what == "file" { "a file" } else { "fullscreen" }));
         }
         let open = self.app.state::<Browsers>().popups_of(self.label);
         if open.len() > popups {
@@ -993,6 +1353,112 @@ impl Call<'_> {
         Ok(json!({"text": lines.join("\n"), "page": page_of(&info.url, &info.title)}))
     }
 
+    /// A picture of the visible page, of the element `ref`, or of the whole page (`full_page`, at most 8000 px high): at most 1280 px wide,
+    /// a PNG, or a JPEG (no longer than 1.5 MB as base64) when the PNG is large; saved under `browser-shots/agent`. Only of a pane the
+    /// computer shows, and only while the page stays the one checked: a page that changed meanwhile is not handed on.
+    async fn screenshot(&self, args: &Value) -> Result<Value, String> {
+        let info = self.gate(Class::Read).await?;
+        if !self.shown() {
+            return Err(self.not_shown());
+        }
+        let r = args["ref"].as_str();
+        let id = r.map(|r| self.resolve(r, &info.doc)).transpose()?;
+        let full = args["full_page"].as_bool() == Some(true) && id.is_none();
+        let g = self.engine("geometry", json!({"doc": info.doc, "id": id}), true).await?;
+        let g: cdp::Geometry = serde_json::from_value(g).map_err(|e| e.to_string())?;
+        let mut shot = cdp::plan_shot(&g, full);
+        let unreadable = || "the page sent a picture Kelpie cannot read".to_string();
+        let mut png = self.capture(&shot, None).await?;
+        let (mut width, mut height) = cdp::png_size(&png).ok_or_else(unreadable)?;
+        // The page draws at a pixel ratio it may not have told: a picture still too wide is taken again, smaller.
+        if f64::from(width) > cdp::MAX_WIDTH + 0.5 {
+            shot.scale *= cdp::MAX_WIDTH / f64::from(width);
+            png = self.capture(&shot, None).await?;
+            (width, height) = cdp::png_size(&png).ok_or_else(unreadable)?;
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let (mime, ext, data, bytes) = if cdp::jpeg_instead(b64.len()) {
+            let mut found = None;
+            for (quality, by) in cdp::JPEG_TRIES {
+                let smaller = cdp::Shot { scale: shot.scale * by, ..shot.clone() };
+                let jpeg = self.capture(&smaller, Some(quality)).await?;
+                let data = base64::engine::general_purpose::STANDARD.encode(&jpeg);
+                if !cdp::jpeg_instead(data.len()) {
+                    (width, height) = cdp::jpeg_size(&jpeg).ok_or_else(unreadable)?;
+                    found = Some((data, jpeg));
+                    break;
+                }
+            }
+            let (data, jpeg) = found.ok_or("The picture is too large even as a small JPEG; picture one element (ref) or the visible page instead.")?;
+            ("image/jpeg", "jpg", data, jpeg)
+        } else {
+            ("image/png", "png", b64, png)
+        };
+        // The page may have gone elsewhere while it was pictured.
+        let now = self.info(false).await?;
+        if now.doc != info.doc {
+            return Err("The page changed while it was pictured; take the screenshot again.".into());
+        }
+        self.landed(&now.url)?;
+        let path = tauri::async_runtime::spawn_blocking(move || super::save_shot(Some("agent"), &bytes, ext)).await.map_err(|e| e.to_string())??;
+        let what = match r {
+            Some(r) => format!("Screenshot of [{r}]"),
+            None if full => "Screenshot of the whole page".into(),
+            None => "Screenshot of the visible page".into(),
+        };
+        let mut text = format!("{what}{}.", if shot.cut { ", cut at 8000 px high" } else { "" });
+        if mime == "image/jpeg" {
+            text.push_str(" A JPEG: the PNG was over 1.5 MB.");
+        }
+        Ok(json!({
+            "text": text,
+            "image": {"mime": mime, "data": data, "path": path.to_string_lossy(), "width": width, "height": height},
+            "page": page_of(&now.url, &now.title),
+        }))
+    }
+
+    /// Why the pane cannot be used for a picture or trusted input now: a phone holds it, agents' use of it ended, its window is minimised, or
+    /// it is a background tab.
+    fn not_shown(&self) -> String {
+        if self.phone() {
+            return PHONE.into();
+        }
+        if let Err(e) = self.alive() {
+            return e;
+        }
+        if self.wv.window().is_minimized().unwrap_or(false) {
+            return cdp::SHOT_MINIMISED.into();
+        }
+        cdp::SHOT_HIDDEN.into()
+    }
+
+    /// The picture `shot` (a PNG, or a JPEG of quality `jpeg`), within the call's time; refused when the pane cannot be pictured.
+    async fn capture(&self, shot: &cdp::Shot, jpeg: Option<u8>) -> Result<Vec<u8>, String> {
+        let v = self.cdp("Page.captureScreenshot", shot.params(jpeg), true, self.left()).await.map_err(|e| if e == NOT_SHOWN { self.not_shown() } else { e })?;
+        base64::engine::general_purpose::STANDARD.decode(v["data"].as_str().ok_or("the page sent no picture")?).map_err(|e| e.to_string())
+    }
+
+    /// The requests kept since an agent first used the pane (`kelpie_browser_network`): only those made by a page on a site this call may
+    /// use (a page elsewhere refuses the call at `gate`).
+    async fn network(&self, args: &Value) -> Result<Value, String> {
+        let info = self.gate(Class::Read).await?;
+        let log = {
+            let st = self.pane.state.lock();
+            st.net_on.then(|| st.net.clone())
+        };
+        let log = log.ok_or("Kelpie could not keep this page's requests; try again.")?;
+        let q = cdp::NetQuery {
+            filter: args["filter"].as_str(),
+            failed_only: args["failed_only"].as_bool() == Some(true),
+            since: args["since"].as_u64().unwrap_or(0),
+            max: args["max"].as_u64().unwrap_or(50).clamp(1, 300) as usize,
+        };
+        let origin = tauri::Url::parse(&info.url).map(|u| u.origin().ascii_serialization()).unwrap_or_default();
+        let own = isolated(self.label);
+        let allowed = |doc: &str| snap::site_allowed(doc, self.ctx.kind(), own, &self.ctx.origins, &self.policy.sites).is_ok();
+        let text = log.lock().render(&q, &origin, &allowed);
+        Ok(json!({"text": text, "page": page_of(&info.url, &info.title)}))
+    }
     async fn eval(&self, args: &Value) -> Result<Value, String> {
         let info = self.gate(Class::Eval).await?;
         let expr = args["expression"].as_str().ok_or("missing `expression`")?;

@@ -3,6 +3,7 @@
 // panes opened for it or for a session above it (an agent's `kelpie_open_page`, the tab of a server it started), and the panes the person
 // shares with agents in the session's project. Text that goes to agents stays in English: it is read by a program, not shown to the person.
 import { allPanes } from "./layout";
+import { isWindows } from "./platform";
 import type { Project, Workspace } from "./types";
 
 export type BrowserMode = "off" | "read" | "act";
@@ -17,8 +18,14 @@ export interface BrowserFeatures {
   network: boolean;
 }
 
-/** The one place that says what this build can do: each is turned on, per platform, once its backend exists. */
-export const BROWSER_FEATURES: Readonly<BrowserFeatures> = { trustedInput: false, screenshot: false, network: false };
+/** What the app can do in a pane on a platform: Windows drives its panes through the DevTools protocol; elsewhere input is synthetic and
+ *  there are no screenshots or network list yet. */
+export function browserFeatures(windows: boolean): BrowserFeatures {
+  return { trustedInput: windows, screenshot: windows, network: windows };
+}
+
+/** The one place that says what this build can do, on the platform it runs on. */
+export const BROWSER_FEATURES: Readonly<BrowserFeatures> = browserFeatures(isWindows);
 
 export interface PaneCapabilities {
   input: "trusted" | "synthetic";

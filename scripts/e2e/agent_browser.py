@@ -16,10 +16,14 @@ in a pane opened for the agent; refusals: another project's session sees nothing
 the person shares is usable by the project's sessions but not for leaving its site, act within 10 s of the person's input, a second session
 while the first holds the pane, Stop on the banner ends access; the audit has a line per act call with no typed text, and no file of the data
 folder holds the password; with the app gone a call fails fast and says so; timing of snapshot and click (printed, checked against budgets).
+On Windows also: in the tab shown a click is trusted (the page sees event.isTrusted) and a screenshot is a PNG at most 1280 px wide, saved
+to a file; the network list has the sign-in request; with the tab in the background a screenshot is refused and a click is synthetic.
 """
+import base64
 import json
 import os
 import queue
+import re
 import secrets
 import shutil
 import socket
@@ -96,11 +100,14 @@ def free_port():
 
 
 def port_open(p):
-    try:
-        socket.create_connection(("127.0.0.1", p), 0.5).close()
-        return True
-    except OSError:
-        return False
+    """Whether something listens on port `p` of this computer, over IPv4 or IPv6 (a dev server on "localhost" may take either)."""
+    for host in ("127.0.0.1", "::1"):
+        try:
+            socket.create_connection((host, p), 0.5).close()
+            return True
+        except OSError:
+            pass
+    return False
 
 
 LOGIN = """<!doctype html><html><head><title>Fixture sign-in</title></head><body>
@@ -112,6 +119,9 @@ LOGIN = """<!doctype html><html><head><title>Fixture sign-in</title></head><body
 <h2 id=msg></h2>
 <button id=count onclick="window.__count=(window.__count||0)+1; document.getElementById('n').textContent='Clicked '+window.__count">Count</button> <span id=n></span>
 <button id=del onclick="document.getElementById('cr').textContent = confirm('Delete everything?') ? 'confirmed' : 'kept'">Delete account</button> <span id=cr></span>
+<button id=trust onclick="this.textContent = 'Trusted ' + event.isTrusted">Check trust</button>
+<div role=listbox aria-label="Fruits"><div role=option onkeydown="this.textContent = 'Picked ' + event.key">Apple</div></div>
+<input id=sticky aria-label="Sticky" onmousedown="event.preventDefault()">
 <button id=later onclick="setTimeout(() => { const p = document.createElement('p'); p.textContent = 'Ready now'; document.body.appendChild(p); }, 700)">Later</button>
 <a href="https://example.com/">Elsewhere</a>
 <script>
@@ -303,14 +313,14 @@ def scenario(run, d):
     check("tabs lists the page as the agent's, in the background, synthetic input", ok and "opened by you" in text and "background" in text and "synthetic" in text, text)
     if not ok:
         # Where the call got lost: does the window hear agents' requests, and does the app still reach the daemon?
-        w.js_async("const done = arguments[arguments.length-1]; window.__seen = []; import('/src/lib/ipc.ts').then(m => m.onEvent('agent-browser-request', (e) => window.__seen.push([e.preq, e.tool]))).then(() => done(1), (e) => done(String(e)));")
+        w.js_async("const done = arguments[arguments.length-1]; window.__seen = []; const I = window.__TAURI_INTERNALS__, orig = I.invoke; window.__inv = []; I.invoke = function (cmd, args, o) { const p = orig.call(this, cmd, args, o); if (cmd === 'provider_reply' || cmd === 'browser_agent_run') { const rec = [cmd, args && args.preq, 'pending', args && args.error]; window.__inv.push(rec); p.then(() => { rec[2] = 'ok'; }, (e) => { rec[2] = 'err ' + String(e); }); } return p; }; import('/src/lib/ipc.ts').then(m => m.onEvent('agent-browser-request', (e) => window.__seen.push([e.preq, e.tool]))).then(() => done(1), (e) => done(String(e)));")
         t0 = time.time()
         r = m1.call("kelpie_browser_tabs", timeout=30)
         t_tabs = time.time() - t0
         t0 = time.time()
         info = w.invoke("daemon_call", {"method": "daemon.info", "params": {}})
-        print("DIAG", json.dumps({"tabs_s": round(t_tabs, 1), "tabs": r[1][:160], "seen": w.js("return window.__seen"), "daemon_info_s": round(time.time() - t0, 2), "daemon_info_ok": "ok" in info,
-                                  "connected": w.js(f"return {S}.connected()"), "api": w.js(f"return {S}.daemonApi()"), "panes": w.js(f"return {S}.workspace(arguments[0]).tabs.length", pa)}), flush=True)
+        print("DIAG", json.dumps({"tabs_s": round(t_tabs, 1), "tabs": r[1][:160], "seen": w.js("return window.__seen"), "invokes": w.js("return window.__inv"), "daemon_info_s": round(time.time() - t0, 2), "daemon_info_ok": "ok" in info,
+                                  "page_age_s": w.js("return Math.round(performance.now()/1000)"), "nav": w.js("const n = performance.getEntriesByType('navigation')[0]; return n ? n.type : null"), "same": w.js_async("const done = arguments[arguments.length-1]; Promise.all([import('/src/lib/store.ts'), import('/src/lib/agent-browser.ts')]).then(([s, a]) => done({store: s.store === window.__kelpie.store, policy: a.browserPolicy()}), (e) => done(String(e)));"), "connected": w.js(f"return {S}.connected()"), "api": w.js(f"return {S}.daemonApi()"), "panes": w.js(f"return {S}.workspace(arguments[0]).tabs.length", pa)}), flush=True)
         raise RuntimeError("the window does not answer agents' browser calls")
 
     step("snapshot and sign-in")
@@ -394,6 +404,8 @@ def scenario(run, d):
     check("an act right after the person's input is refused", not ok and ("person" in text.lower() or "user" in text.lower()), text)
     ok, text, _ = m1.call("kelpie_browser_snapshot")
     check("reading is still allowed then", ok, text[:120])
+    if os.name == "nt":
+        windows_cdp(w, m1, pane, pa, pb, ref)
 
     step("shared pane")
     # A pane the person opens and shares.
@@ -451,6 +463,72 @@ def scenario(run, d):
     return m1
 
 
+def windows_cdp(w, m1, pane, pa, pb, ref):
+    """Windows: trusted input and screenshots in the tab shown, synthetic input and a clear refusal in a background tab, the network list."""
+    step("windows: trusted input, screenshot, network")
+    line = lambda: (m1.call("kelpie_browser_tabs")[1].split(pane) + ["", ""])[1].split("\n")[0]  # noqa: E731
+    check("tabs says trusted input and screenshots for the tab shown", until(lambda: "input: trusted" in line() and "screenshot: yes" in line(), 10), line())
+    ok, snap, _ = m1.call("kelpie_browser_snapshot")
+    trust = ref(snap, "button", "Check trust")
+    # The person is typing in the main window (a text field of Kelpie's own, e.g. the pane's address bar): an agent's trusted click must not
+    # take the keyboard from them.
+    focus_js = ("const f = [...document.querySelectorAll('input:not([type]),input[type=text],input[type=search],input[type=url]')].find(e => e.offsetParent);"
+                " if (arguments[0] && f) f.focus(); const a = document.activeElement;"
+                " return {has: document.hasFocus(), active: a ? a.tagName + (a.id ? '#' + a.id : '') + (a.getAttribute('placeholder') ? '[' + a.getAttribute('placeholder') + ']' : '') : null, field: !!f};")
+    before = w.js(focus_js, True)
+    # The person's input a moment ago holds agents back for 10 s.
+    clicked = until(lambda: (lambda r: r if r[0] else None)(m1.call("kelpie_browser_click", {"ref": trust})), 20, 1)
+    after = w.js(focus_js, False)
+    print("FOCUS", json.dumps({"before": before, "after": after}), flush=True)
+    ok, text = (clicked or (False, ""))[:2]
+    check("a click in the tab shown is trusted", ok and "(trusted)" in text, text)
+    check("the main window keeps its keyboard focus and focused field through a trusted click", before and before.get("field") and after == before, {"before": before, "after": after})
+    ok, snap, _ = m1.call("kelpie_browser_snapshot")
+    check("the page saw event.isTrusted true", ok and 'button "Trusted true"' in snap, [ln for ln in snap.splitlines() if "Trusted" in ln])
+    email = ref(snap, "textbox", "Email")
+    ok, text, _ = m1.call("kelpie_browser_type", {"ref": email, "text": "trusted@example.test"})
+    ok2, snap, _ = m1.call("kelpie_browser_snapshot")
+    check("typing in the tab shown is trusted and lands in the field", ok and "(trusted)" in text and 'value="trusted@example.test"' in snap, text)
+    # Elements a trusted step cannot reach the usual way still work, through the synthetic path: an option that takes no focus, a field
+    # whose mousedown keeps the focus out.
+    ok, text, _ = m1.call("kelpie_browser_press", {"key": "Enter", "ref": ref(snap, "option", "Apple")})
+    ok2, snap2, _ = m1.call("kelpie_browser_snapshot")
+    check("a key on an option that takes no focus still lands", ok and 'option "Picked Enter"' in snap2, text)
+    ok, text, _ = m1.call("kelpie_browser_type", {"ref": ref(snap, "textbox", "Sticky"), "text": "abc"})
+    ok2, snap2, _ = m1.call("kelpie_browser_snapshot")
+    check("typing into a field that refuses focus on mousedown still lands", ok and 'textbox "Sticky"' in snap2 and 'value="abc"' in snap2, text)
+    # The person's clipboard is out of an agent's reach: Control+V goes to the page only, as a synthetic key that pastes nothing.
+    ok, text, _ = m1.call("kelpie_browser_press", {"key": "v", "modifiers": ["Control"], "ref": email})
+    ok2, snap, _ = m1.call("kelpie_browser_snapshot")
+    check("an agent's Control+V is synthetic and pastes nothing", ok and "synthetic" in text and 'value="trusted@example.test"' in snap, text)
+
+    ok, text, res = m1.call("kelpie_browser_screenshot")
+    images = [c for c in res.get("content", []) if c.get("type") == "image"]
+    data = images[0].get("data", "") if images else ""
+    size = re.search(r"\((\d+)×(\d+)\)", text)
+    path = re.search(r"Saved (.+?) \(\d+×\d+\)", text)
+    head = base64.b64decode(data[:64] + "=" * (-len(data[:64]) % 4)) if data else b""
+    width = int.from_bytes(head[16:20], "big") if head.startswith(b"\x89PNG") else 0
+    check("a screenshot of the tab shown is a PNG", ok and data.startswith("iVBORw0KGgo") and images[0].get("mimeType") == "image/png", text[:200])
+    check("the screenshot is at most 1280 px wide", ok and size and 0 < int(size.group(1)) <= 1280 and 0 < width <= 1280, (size and size.group(0), width))
+    check("the screenshot is saved to a file", ok and path and os.path.isfile(path.group(1).strip()), path and path.group(1))
+    ok, text, _ = m1.call("kelpie_browser_screenshot", {"ref": trust})
+    check("a screenshot of one element", ok and "Screenshot of [" in text, text[:200])
+
+    ok, text, _ = m1.call("kelpie_browser_network", {"filter": "/api/login"})
+    check("network lists the sign-in request", ok and "POST 200 /api/login" in text, text)
+
+    # Another project shown: the pane is a background tab.
+    w.js(f"{S}.switchProject(arguments[0])", pb)
+    check("tabs says the hidden pane is a background tab with synthetic input", until(lambda: "background tab" in line() and "input: synthetic" in line(), 10), line())
+    ok, text, _ = m1.call("kelpie_browser_screenshot")
+    check("a screenshot of a background tab is refused and says why", not ok and "background" in text, text)
+    ok, snap, _ = m1.call("kelpie_browser_snapshot")
+    ok, text, _ = m1.call("kelpie_browser_click", {"ref": ref(snap, "button", "Count")})
+    check("a click in a background tab still works, synthetic", ok and "(synthetic)" in text, text)
+    w.js(f"{S}.switchProject(arguments[0])", pa)
+
+
 def main():
     global SITE_PORT
     site = ThreadingHTTPServer(("127.0.0.1", 0), Site)
@@ -460,7 +538,7 @@ def main():
         raise SystemExit("port 1427 is taken (another Vite dev server?): this script starts the app's own; stop that one first")
     d = ps.Daemon(kelpied, env={"KELPIE_E2E": "1"}).start()
     procs["daemon"] = d.proc
-    procs["vite"] = subprocess.Popen(["cmd", "/c", "pnpm", "exec", "vite", "--port", "1427", "--strictPort"] if os.name == "nt" else ["pnpm", "exec", "vite", "--port", "1427", "--strictPort"], cwd=os.path.join(REPO, "app"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    procs["vite"] = subprocess.Popen(["cmd", "/c", "pnpm", "exec", "vite", "--port", "1427", "--strictPort"] if os.name == "nt" else ["pnpm", "exec", "vite", "--port", "1427", "--strictPort"], cwd=os.path.join(REPO, "app"), stdout=open(os.path.join(scratch, "vite.log"), "w"), stderr=subprocess.STDOUT)
     until(lambda: port_open(1427), 60)
     driver_port = free_port()
     os.environ["KELPIE_E2E_DRIVER"] = f"http://127.0.0.1:{driver_port}"
