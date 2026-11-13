@@ -67,6 +67,6 @@ export async function answerSubRequest(id: string, decision: SubDecision): Promi
   }
   dispatchRequest({ type: "done", id });
   // "Always" changed the policy: the settings page and the next request must see it.
-  if (decision === "always") setSubPolicy(toSubPolicy(await ipc.subPolicyGet().catch(() => null)));
+  if (decision === "always") setSubPolicy(toSubPolicy(await ipc.policyGet().catch(() => null)));
   return true;
 }

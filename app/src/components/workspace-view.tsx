@@ -11,6 +11,7 @@ import { StatusDot } from "./sidebar";
 import { Launcher } from "./welcome";
 import { openLayoutMenu } from "./layout-menu";
 import { browserState, freshPages, openBrowser } from "../lib/browser";
+import { agentLeases } from "../lib/agent-browser";
 import { HostChip } from "./host-target";
 import { projectTarget, sessionTarget } from "../lib/remote";
 import { kindInfo } from "../lib/agents";
@@ -59,6 +60,9 @@ function TabTitle(props: { tab: Tab; project: Project }) {
       <Show when={session()}>{(s) => <KindGlyph kind={s().kind} size={14} />}</Show>
       <Show when={host()}>{(tg) => <HostChip target={tg()} />}</Show>
       <Show when={props.tab.broadcast}><span class="badge broadcast-badge" title={t("Broadcast input is on")}>⇶</span></Show>
+      <Show when={panes().find((p) => agentLeases()[p.id])}>
+        {(p) => <span class="badge agent-browser-badge" data-agent-badge title={t("{name} is using a page in this tab", { name: agentLeases()[p().id]?.name ?? "" })}><Icon name="sparkle" size={10} /></span>}
+      </Show>
       <span class="title">{props.tab.name ?? paneTitle(focus())}</span>
       <Show when={session()}>{(s) => <ContextRing s={s()} size={12} />}</Show>
       <Show when={panes().length > 1}>

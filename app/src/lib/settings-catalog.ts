@@ -1,6 +1,7 @@
 // Searchable index of settings: one entry per row of the settings page. Drives the page's
 // navigation, its search box, and "/" results in the global search.
 import { msg, translated } from "./i18n";
+import { BROWSER_AGENT_API } from "./attention";
 
 export type SettingsSection = "agents" | "agent-setup" | "accounts" | "integrations" | "automations" | "terminal" | "layouts" | "remote" | "mobile" | "appearance" | "notifications" | "usage" | "commands" | "shortcuts" | "daemon" | "plugins" | "voice" | "about";
 
@@ -35,12 +36,18 @@ export interface SettingEntry {
   tradeoff?: string;
   safety?: string;
   phones?: string;
+  /** The daemon API level the row needs: below it the row is not shown, nor found by a search. */
+  api?: number;
 }
 
 export const settingsCatalog: SettingEntry[] = [
   { id: "agent-permissions", section: "agents", label: msg("Permissions"), description: msg("Manual: agents ask before acting, as they normally do. Yolo: start them with their skip-permission flags (agents with their own permission choice below keep it)."), keywords: "yolo dangerously skip bypass approval permission auto" },
   { id: "sub-sessions", section: "agents", label: msg("Sub-sessions"), description: msg("Let an agent open other agent sessions (any installed agent CLI) from its own: it starts them, steers them, and gets their reports back as a new turn. They show nested under it. Ask: you allow each one (once, for the session, or always). Allow: no question. Off: agents cannot. Agents started before this change get the tools after a restart."), keywords: "sub session subagent child parent orchestrate spawn delegate multi agent kelpie_spawn mcp tools allow ask off" },
   { id: "sub-sessions-max", section: "agents", label: msg("Sub-sessions running at once"), description: msg("The most sub-sessions that run at the same time on this computer. Auto picks a number from its processor and memory. A new one is refused, not queued, when this many run or the computer is under heavy load."), keywords: "sub session limit cap max parallel concurrent auto memory cpu" },
+  { id: "browser-agents", section: "agents", api: BROWSER_AGENT_API, label: msg("Browser panes"), description: msg("Let agents use Kelpie's browser panes through Kelpie's tools: the panes opened for them or for the session that started them, and the panes you share with the button in a pane's toolbar. Read only: they read pages. Read and act: they also click, type and go to other pages. A banner shows who acts in a pane, with Stop. Off: agents get no browser tools."), keywords: "browser pane agent web page click type navigate snapshot automation playwright mcp kelpie_browser share" },
+  { id: "browser-agents-eval", section: "agents", api: BROWSER_AGENT_API, label: msg("Agents may run scripts in pages"), description: msg("With Read and act, an agent may run its own JavaScript in the panes opened for it, never in a pane you shared. A script can do anything the page can."), keywords: "browser eval javascript script agent" },
+  { id: "browser-agents-sites", section: "agents", api: BROWSER_AGENT_API, label: msg("Sites agents may open"), description: msg("Besides this computer's own servers (localhost), the sites an agent may open in the panes opened for it. A pane you share stays on the site it showed when you shared it."), keywords: "browser sites allowlist origin domain agent" },
+  { id: "browser-agents-audit", section: "agents", api: BROWSER_AGENT_API, label: msg("Recent agent actions in browser panes"), description: msg("What agents clicked, typed into and opened, as the session daemon logged it. Typed text is never logged."), keywords: "browser audit log history agent actions" },
   { id: "agent-list", section: "agents", label: msg("Agent CLIs"), description: msg("Agents found on this computer. Shown ones appear in launchers and the new-session menu."), keywords: "gemini cursor opencode copilot aider grok amp qwen droid kimi crush cline kiro devin goose installed enable hide" },
   { id: "ai-agent", section: "agents", label: msg("Agent for AI actions"), description: msg("Writes commit messages and pull request descriptions (runs once, without a terminal)."), keywords: "generate commit message pull request ai" },
   { id: "auto-worktree", section: "agents", label: msg("Worktree for new agent sessions"), description: msg("In a git folder, new agent sessions in the New session dialog can start in their own worktree, named from the first prompt. Ask: a box you tick per session. Always: ticked unless you untick it. Never: not offered."), keywords: "worktree isolate branch new session agent automatic auto parallel" },
@@ -132,6 +139,9 @@ export const settingsCatalog: SettingEntry[] = [
 ];
 
 export const catalogEntry = (id: string) => settingsCatalog.find((e) => e.id === id);
+
+/** Whether a row exists with a daemon at API level `api`. */
+export const entryAvailable = (e: SettingEntry, api: number) => api >= (e.api ?? 0);
 
 /** Every word of `query` appears in what the entry shows or in its keywords. */
 export function entryMatches(e: SettingEntry, query: string): boolean {

@@ -13,6 +13,8 @@ import {
   type Annotation, type Rect,
 } from "../lib/browser";
 import { held, stopTakeover } from "../lib/takeover";
+import { agentLeases, browserAgentsOn, paneShares, sharePane, stopAgentsInPane, unsharePane } from "../lib/agent-browser";
+import { webOrigin } from "../lib/agent-browser-panes";
 import { Icon } from "./icons";
 import { LoadBar } from "./load-bar";
 import type { Pane, Project, Tab } from "../lib/types";
@@ -103,6 +105,9 @@ export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; foc
     void browserDesign(label, on).catch((e) => store.notify(String(e)));
   };
 
+  const shared = () => !!paneShares()[props.pane.id];
+  const toggleShare = () => (shared() ? unsharePane(props.pane.id) : sharePane(props.pane.id));
+
   const removeNote = (id: string) => setState(props.pane.id, "notes", (n) => n.filter((x) => x.id !== id));
   const send = (e: MouseEvent, items: Annotation[]) =>
     chooseAgentAndSend(e, props.project.id, annotationPrompt(items), () => setState(props.pane.id, "notes", (n) => n.filter((x) => !items.includes(x))));
@@ -154,6 +159,13 @@ export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; foc
         <button class="icon-btn" title={t("Screenshot of the page")} disabled={!opened()} onClick={() => void screenshot()}><Icon name="camera" size={14} /></button>
         <button class="icon-btn" title={t("Developer tools")} disabled={!opened()} onClick={() => void browserDevtools(label)}><Icon name="code" size={14} /></button>
         <button class="icon-btn" title={t("Open in your browser")} disabled={!s().url} onClick={() => void openUrl(s().url)}><Icon name="external" size={13} /></button>
+        {/* Agents of this project may use the page while it is shared, on the site it shows now (this window only, until it restarts). */}
+        <Show when={browserAgentsOn() || shared()}>
+          <button class={`icon-btn${shared() ? " active" : ""}`} data-agent-share aria-pressed={shared()} disabled={!shared() && !webOrigin(s().url || props.pane.url)}
+            title={shared() ? t("Agents of this project may use this page. Click to stop sharing it.") : t("Let agents use this page")} onClick={toggleShare}>
+            <Icon name="sparkle" size={14} />
+          </button>
+        </Show>
       </div>
       {/* Above the page, never on it: the page is a native view that would cover anything drawn over it. */}
       <Show when={held()[props.pane.id]}>
@@ -162,6 +174,16 @@ export function BrowserPane(props: { pane: Pane; project: Project; tab: Tab; foc
             <Icon name="server" size={13} />
             <span>{t("Controlled from {device}", { device: h().device })}</span>
             <button class="btn" data-takeover-stop onClick={() => void stopTakeover(h().tk)}>{t("Stop")}</button>
+          </div>
+        )}
+      </Show>
+      {/* The phone's banner wins: while a phone controls the pane, no agent acts in it. */}
+      <Show when={held()[props.pane.id] ? undefined : agentLeases()[props.pane.id]}>
+        {(l) => (
+          <div class="takeover-banner" role="status" data-agent-lease={l().session}>
+            <Icon name="sparkle" size={13} />
+            <span>{t("{name} is using this page", { name: l().name })}</span>
+            <button class="btn" data-agent-stop onClick={() => stopAgentsInPane(props.pane.id)}>{t("Stop")}</button>
           </div>
         )}
       </Show>

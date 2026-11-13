@@ -459,5 +459,10 @@
   "Prompt": "Prompt",
   "Result": "Kết quả",
   "Activity": "Hoạt động",
-  "Close": "Đóng"
+  "Close": "Đóng",
+  "Let agents use this page": "Cho agent dùng trang này",
+  "Agents of this project may use this page. Click to stop sharing it.": "Các agent của dự án này được phép dùng trang này. Bạn hãy bấm vào đây để ngừng chia sẻ trang.",
+  "{name} is using this page": "{name} đang dùng trang này",
+  "{session} is using the browser tab {title}": "{session} đang dùng tab trình duyệt {title}",
+  "A page you shared with agents went to another site, so agents can no longer use it. Share it again to let them.": "Một trang bạn chia sẻ với agent đã chuyển sang trang web khác, nên agent không dùng được trang đó nữa. Bạn hãy chia sẻ lại nếu muốn agent tiếp tục dùng."
 }
