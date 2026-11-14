@@ -1,7 +1,7 @@
 """The hosted phone app end to end on this machine: the relay serving the phone app at its own HTTPS origin (`wrangler dev --local`), a daemon
 with no Tailscale and no listener on this network, and a phone-sized Edge that pairs, unlocks, types and gets alerts through the relay alone.
 
-    python -X utf8 scripts/e2e/mobile_hosted.py <debug kelpied.exe> [--edgedriver PATH] [--gui <debug kelpie.exe>] [--tauri-driver PATH]
+    python -X utf8 scripts/e2e/mobile_hosted.py <debug kelpied.exe> [--edgedriver PATH] [--gui <debug kelpie.exe>] [--tauri-driver PATH] [--real-agent]
 
 Before it: `cd app && pnpm install --frozen-lockfile` and `cd relay && pnpm install --frozen-lockfile` (wrangler and Vite are run from there),
 Python's `cryptography`, `websockets` and `psutil`, and an msedgedriver matching the installed Edge (`--edgedriver`, else `KELPIE_EDGEDRIVER`,
@@ -29,9 +29,12 @@ Checks, in order:
   sessions; a program with the phone's own key copied out of the browser and no passkey gets no session data, also with the lock switch off.
 - typing: the phone types into a shell; with the launch catalogue sent as the app would and no window, its + sheet starts a fake plugin agent
   in a project with the catalogue's arguments, environment and a first prompt, audited as `session_new`; `mobile.set_permission control` is refused; a hosted device with its passkey is refused `tk_start`,
-  `screens` and `sc_start`.
-- alerts: the stand-in push service gets an alert whose link is the hosted page's `#s=`; the real service worker shows it, and a synthetic
-  `notificationclick` opens that session on the hosted page.
+  `screens` and `sc_start`. `--real-agent` also starts a real Claude Code session from the + sheet with a one-line prompt (model calls, on this
+  machine's own Claude sign-in), answers the folder trust question with the phone's Enter key, sees the reply on the phone, ends it with /exit
+  typed from the phone, and checks Claude's fullscreen interface was not turned off.
+- alerts: a session that starts needing you buzzes the phone once with 200 ms (`navigator.vibrate`, a stand-in that records the calls); the
+  stand-in push service gets an alert whose link is the hosted page's `#s=`; the real service worker shows it, and a synthetic
+  `notificationclick` opens that session on the hosted page; with vibration unticked in the phone's Settings it buzzes nothing.
 - headers: what is served carries the headers of the bundle's `_headers`; no CSP violation; `scripts/hosted/verify_live.py` exits 0, and 1 once
   one byte of a served file changed.
 - new version: version B replaces the assets and wrangler restarts on the same state; the open page A takes B's worker, still loads A's chat
@@ -86,7 +89,13 @@ parser.add_argument("kelpied", help="a debug build of kelpied")
 parser.add_argument("--edgedriver", default=os.environ.get("KELPIE_EDGEDRIVER") or shutil.which("msedgedriver"))
 parser.add_argument("--gui", metavar="APP", help="also the desktop part, with this debug app (pnpm tauri build --debug --no-bundle)")
 parser.add_argument("--tauri-driver", default=shutil.which("tauri-driver"))
+parser.add_argument("--real-agent", action="store_true", help="also start a real Claude Code session from the hosted page (one tiny prompt: model calls, on this machine's Claude sign-in)")
 args = parser.parse_args()
+if args.real_agent:
+    # The real Claude is started by this run's daemon, which must not take it for one run inside this session's agent or Kelpie session.
+    # (The person's own settings, such as CLAUDE_CONFIG_DIR, stay.)
+    for name in [k for k in os.environ if k.startswith(("CLAUDE_CODE_", "KELPIE_SESSION_")) or k in ("CLAUDECODE", "CLAUDE_PID", "KELPIE_CLI")]:
+        os.environ.pop(name, None)
 
 exe = os.path.abspath(args.kelpied)
 INSTALLED = [os.path.join(os.environ.get("LOCALAPPDATA", "~"), "Kelpie"), os.environ.get("ProgramFiles", "C:\\Program Files"), os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")]
@@ -484,6 +493,8 @@ class Cdp:
 
 
 LOCK_SCREEN = "return document.querySelector('[data-lock-screen]')?.dataset.lockScreen"
+STAND_IN_VIBRATE = "window.__buzz = []; navigator.vibrate = (pattern) => { window.__buzz.push(pattern); return true; };"
+WAITING_ROW = "!!document.querySelector(`.row[data-id=\"${arguments[0]}\"] .dot.waiting`)"
 STATE_JS = "return document.querySelector('.conn')?.dataset.state ?? null"
 CONNECTED = "return ['live', 'busy', 'degraded'].includes(document.querySelector('.conn')?.dataset.state)"
 OPEN_WITH = "return !document.querySelector('[data-lock-screen]') && [...document.querySelectorAll('.row')].some(r => r.textContent.includes(arguments[0]))"
@@ -768,6 +779,91 @@ def started_new_session(phone, dA):
     phone.wait("return !!document.querySelector('.row')", 15)
 
 
+def fullscreen_auto_off():
+    """Whether Claude Code turned its fullscreen interface off by itself (it does after launches killed before they were healthy)."""
+    try:
+        return json.load(open(os.path.join(os.path.expanduser("~"), ".claude.json"), encoding="utf-8")).get("fullscreenAutoDisabled")
+    except (OSError, ValueError):
+        return None
+
+
+def real_agent(phone, dA):
+    """`--real-agent`: the hosted page starts a real Claude Code session through the relay, with a first prompt that costs one short answer; the
+    phone answers the folder trust question with its Enter key if it is asked, sees the reply on its screen, and ends the session with /exit
+    typed from the phone (never killed: a launch killed early counts against Claude's fullscreen interface)."""
+    section("a real agent started from the hosted page")
+    folder = os.path.join(WORK, "real-agent")
+    os.makedirs(folder, exist_ok=True)
+    auto_off = fullscreen_auto_off()
+    dA.call("mobile.set_launch", {"projects": [{"id": "real-proj", "name": "Real project", "path": folder}], "agents": [{"kind": "claude", "label": "Claude Code", "args": [], "env": {}}]})
+    phone.wait("const b = document.querySelector('[data-open-new-session]'); if (!b || b.disabled) return null; b.click(); return true", 15)
+    offered = phone.wait("const s = document.querySelector('[data-new-agent]'); return s && [...s.options].some(o => o.value === 'claude') ? true : null", 20)
+    phone.js("const s = document.querySelector('[data-new-agent]'); s.value = 'claude'; s.dispatchEvent(new Event('change', {bubbles: true}));"
+             " document.querySelector('[data-new-prompt]').value = arguments[0]; document.querySelector('[data-new-prompt]').dispatchEvent(new Event('input', {bubbles: true}));"
+             " document.querySelector('[data-new-start]').click();", "Reply with the word kelpie in capital letters and nothing else.")
+    opened = phone.wait("const id = document.querySelector('.session')?.dataset.id; return !document.querySelector('[data-new-session]') && id ? id : null", 30)
+    row = next((x for x in dA.call("session.list") if x["id"] == opened), {})
+    check("the hosted page starts a real Claude Code session in the project", bool(offered) and row.get("kind") == "claude" and row.get("cwd", folder) == folder, (offered, opened, {k: row.get(k) for k in ("kind", "cwd", "status")}))
+    if not row:
+        return
+    screen = "return document.querySelector('.session')?.innerText ?? ''"
+    trusted = False
+    end = time.time() + 180
+    reply = None
+    while time.time() < end:
+        text = dA.call("session.read", {"handle": row["handle"], "lines": 80})["text"]
+        if not trusted and "trust" in text.lower() and "folder" in text.lower():
+            # Claude asks once per folder whether to trust it: the phone answers with its Enter key, as a person would.
+            trusted = True
+            phone.js("document.querySelector('[data-key=\"enter\"]').click()")
+        shown = phone.js(screen) or ""
+        if "KELPIE" in shown:
+            reply = shown
+            break
+        time.sleep(2)
+    check("the phone shows the agent's reply (KELPIE), through the relay", bool(reply), (trusted, (phone.js(screen) or "")[-600:]))
+    phone.js("const t = document.querySelector('.send textarea'); t.value = '/exit'; t.dispatchEvent(new Event('input', {bubbles: true}));")
+    phone.js("document.querySelector('.send .btn.primary').click()")
+    ended = wait_for(lambda: not next((x for x in dA.call("session.list") if x["id"] == opened), {}).get("alive", False), 60)
+    check("/exit typed from the phone ends the Claude session by itself", bool(ended), next((x for x in dA.call("session.list") if x["id"] == opened), {}).get("status"))
+    if not ended:
+        # Still running a minute after /exit: Claude's own Ctrl+C twice ends it without a kill.
+        for _ in range(2):
+            dA.call("session.input", {"handle": row["handle"], "data": "\x03"})
+            time.sleep(1)
+        wait_for(lambda: not next((x for x in dA.call("session.list") if x["id"] == opened), {}).get("alive", False), 30)
+    check("Claude's fullscreen interface was not turned off by this run", fullscreen_auto_off() == auto_off, (auto_off, fullscreen_auto_off()))
+    dA.call("session.close", {"handle": row["handle"]})
+    dA.call("mobile.set_launch", {"projects": [], "agents": []})
+    phone.js("history.back()")
+    phone.wait("return !!document.querySelector('.row')", 15)
+
+
+def no_buzz_when_off(phone, dA, shell, hook):
+    """Vibration turned off in the phone's Settings: a session that starts needing you again buzzes nothing. Turned on again after, as it was."""
+    phone.wait("return !!document.querySelector('.row')", 15)
+    phone.js(STAND_IN_VIBRATE)
+    phone.js("document.querySelector('[data-open-settings]').click()")
+    box = "document.querySelector('[data-setting=\"vibrate\"] input')"
+    shown = phone.wait(f"return {box} ? {box}.checked : null", 15)
+    phone.js(f"{box}.click()")
+    off = phone.js("return localStorage.getItem('kelpie-vibrate')")
+    check("the phone's Settings offer vibration, on by default, and untick it", shown is True and phone.js(f"return {box}.checked") is False, (shown, off))
+    phone.js("document.querySelector('header .icon').click()")
+    phone.wait("return !document.querySelector('[data-settings]')", 10)
+    hook(dA, shell["id"], "UserPromptSubmit")
+    phone.wait(f"return !{WAITING_ROW}", 15, shell["id"])
+    hook(dA, shell["id"], "PermissionRequest")
+    waiting = phone.wait(f"return {WAITING_ROW}", 20, shell["id"])
+    time.sleep(1)
+    check("with vibration off, a session that starts needing you does not buzz", waiting is True and phone.js("return window.__buzz") == [], (waiting, phone.js("return window.__buzz")))
+    phone.js("document.querySelector('[data-open-settings]').click()")
+    phone.wait(f"return !!{box}", 15)
+    phone.js(f"{box}.checked || {box}.click()")
+    phone.js("document.querySelector('header .icon').click()")
+    phone.wait("return !document.querySelector('[data-settings]')", 10)
+
+
 def main(phone_box, push, dA, wrangler, bundle_a, manifest_a, bundle_b, manifest_b, copy_main):
     # ---------- setup ----------
     section("setup: a new user, relay only")
@@ -885,6 +981,8 @@ def main(phone_box, push, dA, wrangler, bundle_a, manifest_a, bundle_b, manifest
     phone.js("history.back()")
     phone.wait("return !!document.querySelector('.row')", 15)
     started_new_session(phone, dA)
+    if args.real_agent:
+        real_agent(phone, dA)
     raised = refused(lambda: dA.call("mobile.set_permission", {"id": dev["id"], "permission": "control"}))
     check("raising it to control is refused, saying why", raised and "hosted app can read and type" in raised and device(dA, PHONE_NAME)["permission"] == "write", raised)
 
@@ -942,7 +1040,12 @@ def main(phone_box, push, dA, wrangler, bundle_a, manifest_a, bundle_b, manifest
     hook(dA, alert_shell["id"], "UserPromptSubmit")
     wait_for(lambda: next((x for x in dA.call("session.list") if x["id"] == alert_shell["id"]), {}).get("status") == "working", 15)
     before = len(push.at("/push/hosted"))
+    # An Android phone buzzes while the app is open when a session starts needing you (`navigator.vibrate`, which a desktop browser has but never
+    # feels): a stand-in records each call.
+    phone.js(STAND_IN_VIBRATE)
     hook(dA, alert_shell["id"], "PermissionRequest")
+    buzzed = phone.wait(f"return {WAITING_ROW} && window.__buzz.length ? window.__buzz : null", 20, alert_shell["id"])
+    check("a session that starts needing you buzzes the phone once, 200 ms", buzzed == [200], (buzzed, phone.js("return window.__buzz")))
     got = wait_for(lambda: len(push.at("/push/hosted")) > before, 20)
     plain = ps.open_alert(push.at("/push/hosted")[before]["body"], sub) if got else b"{}"
     note = json.loads(plain).get("notification", {})
@@ -976,6 +1079,7 @@ def main(phone_box, push, dA, wrangler, bundle_a, manifest_a, bundle_b, manifest
     if registration is not None:
         sw.close()
     page_cdp.close()
+    no_buzz_when_off(phone, dA, alert_shell, hook)
     dA.call("session.close", {"handle": alert_shell["handle"]})
 
     # ---------- headers and what is served ----------
