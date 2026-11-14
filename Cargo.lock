@@ -2954,7 +2954,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3000,7 +3000,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie-link"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "base64 0.22.1",
  "blake2",
@@ -3014,7 +3014,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie-proto"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "anyhow",
  "fs2",
@@ -3031,7 +3031,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie-rtc"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "if-addrs",
  "parking_lot",
@@ -3043,7 +3043,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie-screen"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "jpeg-encoder",
  "png 0.17.16",
@@ -3054,7 +3054,7 @@ dependencies = [
 
 [[package]]
 name = "kelpie-stt"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "anyhow",
  "bzip2 0.5.2",
@@ -3069,7 +3069,7 @@ dependencies = [
 
 [[package]]
 name = "kelpied"
-version = "0.1.17"
+version = "0.1.18"
 dependencies = [
  "aes-gcm",
  "alacritty_terminal",
