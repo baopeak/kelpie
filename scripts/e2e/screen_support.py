@@ -14,6 +14,7 @@ import asyncio
 import ctypes
 import ctypes.wintypes as wt
 import json
+import math
 import os
 import shutil
 import socket
@@ -105,6 +106,31 @@ def until(fn, timeout=30, step=0.2):
 
 def now_ms():
     return int(time.time() * 1000)
+
+
+def pct(values, q):
+    """The `q` quantile of the finite values, one decimal; None for none."""
+    v = sorted(x for x in values if x is not None and math.isfinite(x))
+    return round(v[min(len(v) - 1, int(round((len(v) - 1) * q)))], 1) if v else None
+
+
+def frame_stats(frames, t0, span_s):
+    """What screen_rtc.py reports of the video frames a phone got over `span_s` seconds, each `(seq, capture_ms, arrived_wall_ms, bytes)`: the
+    rate, the data rate, the pictures' age from capture on the computer (`t0` its stream's start) to arrival, p50 and p95, the longest gap
+    between frames, and the freezes (a gap over a second). screen_net.py computes the rate, data rate and age by the same formulas in its own
+    summary (with its blackhole and warm-up windows, and freezes over 2 s, as Phase 0 measured them); both share `pct`."""
+    span = max(1.0, span_s)
+    ages = [at - (t0 + cap) for _, cap, at, _ in frames] if t0 else []
+    gaps = [b[2] - a[2] for a, b in zip(frames, frames[1:])]
+    return {
+        "frames": len(frames),
+        "fps": round(len(frames) / span, 1),
+        "kbps": round(sum(f[3] for f in frames) * 8 / span / 1000),
+        "age_p50": pct(ages, 0.5),
+        "age_p95": pct(ages, 0.95),
+        "longest_gap_ms": max(gaps) if gaps else None,
+        "freezes_over_1s": sum(1 for g in gaps if g > 1000),
+    }
 
 
 class RECT(ctypes.Structure):

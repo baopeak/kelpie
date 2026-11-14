@@ -80,7 +80,7 @@ Durable Object that counts the rooms made in a day (`src/registrar.ts`), or all 
 | `GET /v1/desktop?t=<ticket>&ts=<ms>&sig=<signature>` (WebSocket) | 101 with `x-kelpie-relay-version: 2`, or 403 a bad ticket, signature or `Origin`, 404 no such room, 429 the month's cap is spent |
 | `GET /v1/phone?t=<ticket>&k=<token>` or `&p=<pairing token>` (WebSocket) | 101, or 403 a bad ticket, an unknown token or an `Origin` the room does not list, 409 eight phones already, 429 the cap |
 | `POST /v1/turn?t=<ticket>`, body `{"ts", "sig"}` (1,024 bytes at most), no `Origin` | `200 {"ice_servers", "username", "expires"}`: TURN credentials for 20 minutes; see "TURN" for the refusals |
-| `POST /v1/turn/revoke?t=<ticket>`, body `{"ts", "sig", "username"}` | `204`: the credential ends now (coturn's cannot: `204`, and it expires on its own) |
+| `POST /v1/turn/revoke?t=<ticket>`, body `{"ts", "sig", "username"}` | `204`: the credential ends now (coturn's cannot: `204`, and it expires on its own); no `Origin` and 1,024 bytes at most as for `/v1/turn`; `403` a bad ticket, signature or time, or no such room; `400` a bad `username`; `404` `turn_not_configured`; `502` Cloudflare refused |
 | any other path under `/v1` | 404, 405 or 426, in plain text |
 | any path outside `/v1` | on Cloudflare: the phone app's static files, or the app's own 404 page, answered without running the Worker; on workerd: 404 in plain text, since a self-hosted relay serves no page |
 
@@ -121,8 +121,7 @@ expired counts, then of the oldest, never of all at once. In the isolate's memor
 For a screen through the relay that cannot go straight between the phone and the computer (`relay/src/turn.ts`, `crates/kelpied/src/mobile/turn.rs`).
 
 - **Signature**: as the desktop's, over `kelpie-relay/1 turn <room> <ts>` to mint and `kelpie-relay/1 turn_revoke <room> <ts> <username>` to
-  revoke; `ts` within 5 minutes and later than the last one the room took for TURN (its sockets keep their own). A bad ticket, signature or
-  time is `403` and counts against the network as a refused socket does.
+  revoke; `ts` within 5 minutes and later than the last one the room took for TURN (its sockets keep their own). A bad ticket is `403` (not counted, as for sockets); a bad signature or time, or a room that no longer exists, is `403` and counts against the network as a refused socket does.
 - **Who**: a room made with the registration key, or any room where `TURN_OPEN_ROOMS` is `1` (else `404` with `x-kelpie-reason:
   turn_not_offered`: the limits count credentials, not bytes, and anyone can make a room on an open relay); the room must have at least one
   phone on its allow-list (`409`, `no_phones`); at most 10 mints an hour and 40 a day per room (`429`, `turn_room_limit`),

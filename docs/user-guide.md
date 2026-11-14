@@ -1276,6 +1276,8 @@ can turn any way off.
 relay, each saying whether it can be used now and why not; the phone remembers your last choice. *Automatic* through the relay shows the picture at
 once over the relay, then moves it to a direct connection between the phone and the computer when the two networks allow one (most home and office
 networks do), which is faster and does not count against the relay's monthly 1 GB; when that does not work, the picture simply stays on the relay.
+With *Relay WebSocket* turned off under *Ways the screen may connect*, *Automatic* through the relay goes only by a connection of its own between the
+phone and the computer (direct or, where the relay offers TURN, through TURN): the picture waits for that connection, and the screen ends if it cannot be made.
 *Direct (peer to peer)* uses only the direct connection and ends the screen if it cannot be made. The line under the picture says which way it goes
 (`P2P · 48 ms round trip · …`), and *Connect through* under it switches the way without ending the screen. A direct connection is set up through
 Kelpie's encrypted link, so the relay cannot see or join it; it is itself encrypted (DTLS). **Each side sees the other's network addresses** (as
@@ -1287,8 +1289,8 @@ on; turning *Direct link (P2P)* off under *Ways the screen may connect* ends any
 offers TURN can carry it instead: *Automatic* then tries the direct connection and TURN together and keeps whichever works (TURN alone when
 *Direct link (P2P)* is turned off), and *Kelpie's relay (TURN)* in *Connect through* uses TURN only. A relay gives TURN only to the rooms its
 operator allows (Kelpie's relay: once its operator turns it on). The relay gives the computer short-lived TURN credentials (20 minutes, renewed while the
-screen lasts) that reach the phone only inside the encrypted link. Because the relay's operator pays for TURN traffic (Cloudflare charges
-past its free allowance), Kelpie holds it to 1 GB a screen, 3 GB a day and 30 GB a month by default, which you can change under Settings →
+screen goes through TURN) that reach the phone only inside the encrypted link. Because the relay's operator pays for TURN traffic (Cloudflare charges
+past its free allowance), Kelpie holds it to 1 GB a screen, 3 GB a day (UTC) and 30 GB a month by default, which you can change under Settings →
 Mobile → Advanced next to this month's use; past a limit the screen goes back to the relay's own connection, or ends if that way is off.
 The line under the picture says `TURN · … · 120 MB through TURN`. A relay without TURN says *This relay offers no TURN*, and the screen
 works as before.
@@ -1319,7 +1321,8 @@ computer's settings, bypass mode included, so that code could do that too. What 
   desktop settings, bypass mode included. Allow typing only on phones you would trust at your keyboard.
 - **The relay itself** sees that a phone and this computer are connected, their internet addresses, when and how much they send, and the
   room's number, never what is said. While this computer is on Tailscale, the room is also told its Tailscale address, as a page it lets
-  in. It keeps no logs of what passes.
+  in. It keeps no logs of what passes. Through its TURN, the TURN service (Cloudflare's, or the operator's own coturn) sees the same of a
+  screen's traffic, both addresses and how much, never the picture, which is encrypted end to end (DTLS).
 - **The hosted app is not told where this computer is.** Kelpie tells it only how to reach the relay, never this computer's Tailscale
   name or its addresses on your network. It does know the computer's name, which pairing gives it to label the computer. A phone whose app
   is locked, on any page, is told no more than how to reach the relay until it is unlocked.
@@ -1501,7 +1504,8 @@ scroll, pinching zooms the phone's view (not the computer's), and two fingers ta
 then a key, or type one letter with it held for a shortcut such as Ctrl+S or Win+E), Esc, Tab, Enter, the arrows, ⊞ (the Windows key alone, for Start) and a few more; the text field types on the computer and
 the phone says *Typed on the computer* or *Not sent*. Under the picture the phone says how it is going (`720p · 15 fps · reduced: computer busy`), and a
 second line the way it connects, the round trip, the data rate, the frames a second, the size and how old the picture is (`Tailscale · 85 ms round trip ·
-1200 kbps · 30 fps · 1080p · 120 ms old`); tap the first line for more. When text stands still it is sent once more as a sharp picture (*Crisp text* in
+1200 kbps · 30 fps · 1080p · 120 ms old`); tap the first line for more, and *Copy measurements* under it copies those numbers (sizes, timings and
+the kind of connection, never what the picture shows) to paste into a note or a bug report. When text stands still it is sent once more as a sharp picture (*Crisp text* in
 Settings → Mobile → Advanced, on by default; it uses more data, so it turns itself off while the connection is slow, mobile data included, and the phone says
 *crisp text off: slow connection*). Then *Sharpen* sends the part you see sharp once, when you need to read it. On a slow connection the picture gets fewer
 frames first, then smaller, down to about 360p at 5 frames a second (a window stays at least 540 lines tall).
@@ -1515,7 +1519,8 @@ with *Stop*. **Ctrl+Alt+Shift+K stops it from anywhere**; it is always on (you c
 tells you if another program holds it). Stop on the phone ends it too, and so do 10 minutes with nothing done, the phone locking or leaving the app (at once,
 with no grace), removing the phone or lowering what it may do (within a second), and closing the shared window. It needs the Kelpie app open on the computer (the phone says so otherwise), works over Tailscale or your HTTPS
 address, or through the relay once you allow it (*Seeing the screen without Tailscale* above), and one phone at a time. Before it starts the
-phone asks which way to connect (*Automatic*, Tailscale, or the relay), says which are available now and why not, and remembers your choice. If the computer is very busy a new screen waits, and after five very busy minutes the picture
+phone asks which way to connect (*Automatic*, *Tailscale*, *Direct (peer to peer)*, the relay and, from a relay with TURN, *Kelpie's relay (TURN)*;
+see *Direct (peer to peer)* above), says which are available now and why not, and remembers your choice. If the computer is very busy a new screen waits, and after five very busy minutes the picture
 pauses until you tap it. The phone says when the computer is locked, when a Windows security prompt (UAC) is up, when an app running as administrator is in
 front, and when the window is minimized: those cannot be seen or answered from the phone. What is typed or clicked is not recorded anywhere: *What phones
 did* says which program was shared (such as `Code.exe`, never the window's title) or that it was a whole screen, when, and why it ended.

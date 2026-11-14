@@ -20,16 +20,21 @@ own addresses are the candidates. The impairment comes from a file read for each
 4. An offer whose hello carries another nonce is closed (`bad_hello`), and the picture stays on the link.
 5. Peer to peer again (`sc_via auto`, a new offer): the picture is back within 3 s, from a keyframe.
 6. 1 % loss and 50 ms each way on the computer's UDP (the impairment hook): a new peer, and the screen keeps going for the run.
-7. Firefox offers in turn: the computer moves to its peer, frames come, a click lands.
-8. Stop ends it; the audit log has the start.
+7. The rules hold peer to peer: turning the peer to peer way off on the computer ends such a screen within a second; the phone locking ends
+   one within a second, after which nothing more comes on the peer (and the phone unlocks again).
+8. Firefox offers in turn: the computer moves to its peer, frames come, a click lands.
+9. Stop ends it; the audit log has the starts.
 
 Writes <scratch-dir>/screen-rtc.json with each step's numbers. Nothing typed is sent; nothing captured is kept beyond the frames' headers.
+
+With --matrix: the screen on the link for --seconds (no impairment: the baseline here), then peer to peer under each condition of MATRIX,
+a new peer each (the impairment is read when a peer is made), measured the same way (`screen_support.frame_stats`): the picture's rate, data
+rate, age p50/p95, longest gap and freezes over a second. Writes <scratch-dir>/screen-rtc-matrix.json and .md.
 """
 import argparse
 import asyncio
 import ctypes
 import json
-import math
 import os
 import subprocess
 import sys
@@ -47,6 +52,7 @@ ap.add_argument("scratch")
 ap.add_argument("app")
 ap.add_argument("--browsers", default="chromium,firefox")
 ap.add_argument("--seconds", type=int, default=20)
+ap.add_argument("--matrix", action="store_true", help="the impairment matrix (1e) instead of the checks: each condition its own peer, --seconds long")
 ARGS = ap.parse_args()
 
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -114,16 +120,78 @@ window.pathNow = async () => (window.peer ? await window.peer.stats() : null);
 """
 
 
+# The 1e conditions on the computer's UDP, both ways: one-way delay, loss, a rate.
+MATRIX = [
+    {"n": 1, "name": "25 ms one way", "impair": "delay_ms:25"},
+    {"n": 2, "name": "50 ms one way (100 ms RTT)", "impair": "delay_ms:50"},
+    {"n": 3, "name": "100 ms one way", "impair": "delay_ms:100"},
+    {"n": 4, "name": "100 ms RTT, 1 % loss", "impair": "delay_ms:50,loss:0.01"},
+    {"n": 5, "name": "100 ms RTT, 5 % loss", "impair": "delay_ms:50,loss:0.05"},
+    {"n": 6, "name": "100 ms RTT, 300 kbps", "impair": "delay_ms:50,kbps:300"},
+]
+
+
+def daemon_mb():
+    """This script's daemon's memory (working set, MB): the kelpied next to the app under test. Another e2e running from the same build folder
+    at the same time would be taken instead (the scripts here run one at a time)."""
+    try:
+        import psutil
+    except ImportError:
+        return None
+    want = os.path.normcase(os.path.abspath(SETUP.kelpied))
+    for proc in psutil.process_iter(["exe", "memory_info"]):
+        if proc.info["exe"] and os.path.normcase(proc.info["exe"]) == want and proc.info["memory_info"]:
+            return round(proc.info["memory_info"].rss / (1024 * 1024), 1)
+    return None
+
+
+async def matrix(p, page, sc, t0, mark, monitor):
+    """The baseline on the link, then each condition peer to peer. A condition the screen does not survive is a finding: the row says so, a
+    new screen starts, and the next condition runs on it."""
+    rows = []
+    await asyncio.sleep(3)
+    began = now_ms()
+    await asyncio.sleep(ARGS.seconds)
+    link = [m for m in p.log[mark:] if m["type"] == "sc_media" and m["kind"] == "video" and m["_w"] >= began]
+    rows.append({"n": 0, "name": "link, no impairment (this machine)", **ss.frame_stats([(m["seq"], m["capture_ms"], m["_w"], m["_size"]) for m in link], t0, (now_ms() - began) / 1000), "kelpied_mb": daemon_mb()})
+    for c in MATRIX:
+        set_impair(c["impair"])
+        at = p.mark()
+        began = time.monotonic()
+        await page.evaluate(f"window.startPeer({json.dumps(sc)})")
+        moved = await wait_path(p, at, lambda m: m.get("path") == "p2p" and m.get("state") == "live", 30)
+        if moved is None:
+            rows.append({"n": c["n"], "name": c["name"], "error": "no peer to peer", "paths": [m for m in p.log[at:] if m["type"] == "sc_path"][-2:]})
+            continue
+        opened = round((time.monotonic() - began) * 1000)
+        await asyncio.sleep(3)
+        r = await run_for(page, ARGS.seconds, t0)
+        ended = [m for m in p.log[at:] if m["type"] == "sc_end"]
+        rows.append({"n": c["n"], "name": c["name"], "open_ms": opened, **r, "survived": not ended, "kelpied_mb": daemon_mb()})
+        print(json.dumps(rows[-1]), flush=True)
+        if ended:
+            sc, t0, again = await start(p, monitor)
+            check(f"a new screen after condition {c['n']} ended", bool(sc), again)
+    set_impair("")
+    return rows, sc
+
+
+def matrix_table(rows):
+    cols = ["fps", "kbps", "age_p50", "age_p95", "longest_gap_ms", "freezes_over_1s", "open_ms", "survived", "kelpied_mb"]
+    lines = ["| # | condition | " + " | ".join(cols) + " |", "|" + "---|" * (len(cols) + 2)]
+    for r in rows:
+        if "error" in r:
+            lines.append(f"| {r['n']} | {r['name']} | {r['error']} |")
+            continue
+        lines.append(f"| {r['n']} | {r['name']} | " + " | ".join("–" if r.get(k) is None else str(r[k]) for k in cols) + " |")
+    return "\n".join(lines)
+
+
 def to_source(x, y, started):
     """A point on the primary monitor (physical pixels) in the picture's source pixels."""
     mw, mh = ctypes.windll.user32.GetSystemMetrics(0), ctypes.windll.user32.GetSystemMetrics(1)
     sw, sh = started.get("w") or mw, started.get("h") or mh
     return round(x * sw / max(mw, 1)), round(y * sh / max(mh, 1))
-
-
-def pct(values, q):
-    v = sorted(x for x in values if x is not None and math.isfinite(x))
-    return round(v[min(len(v) - 1, int(round((len(v) - 1) * q)))], 1) if v else None
 
 
 class Bridge:
@@ -172,15 +240,12 @@ async def frames(page):
 
 
 async def run_for(page, seconds, t0):
-    """The page's frames over `seconds`: rate, age p50/p95 (from capture on the computer to arrival), longest gap."""
+    """The page's frames over `seconds` (`screen_support.frame_stats`)."""
     before = len(await frames(page))
     began = now_ms()
     await asyncio.sleep(seconds)
     got = (await frames(page))[before:]
-    ages = [at - (t0 + cap) for _, cap, at, _, _ in got] if t0 else []
-    gaps = [b[2] - a[2] for a, b in zip(got, got[1:])]
-    span = max(1, (now_ms() - began) / 1000)
-    return {"frames": len(got), "fps": round(len(got) / span, 1), "kbps": round(sum(g[3] for g in got) * 8 / span / 1000), "age_p50": pct(ages, 0.5), "age_p95": pct(ages, 0.95), "longest_gap_ms": max(gaps) if gaps else None}
+    return ss.frame_stats([(seq, cap, at, size) for seq, cap, at, size, _ in got], t0, (now_ms() - began) / 1000)
 
 
 async def click_lands(page, started, x, y):
@@ -189,6 +254,14 @@ async def click_lands(page, started, x, y):
     await page.evaluate(f"window.clickAt({sx}, {sy})")
     landed = await asyncio.to_thread(until, lambda: len(MOTION.clicks_seen()) > seen, 5)
     return bool(landed)
+
+
+async def start(p, monitor):
+    """A screen of the primary monitor, from the emulated phone (Automatic, over its direct link): its id, its clock, the start's answer."""
+    p.sc, p.early = None, 0
+    started = await p.ask(type="sc_start", target=monitor["id"], timeout=20) or {}
+    p.sc = started.get("sc")
+    return p.sc, started.get("t0"), started
 
 
 async def scenario(run, d):
@@ -212,10 +285,7 @@ async def scenario(run, d):
     check("the computer lists peer to peer as a way", paths.get("p2p", {}).get("ok") is True, paths)
     monitor = next((r for r in rows if r["kind"] == "monitor" and r.get("primary")), None) or next((r for r in rows if r["kind"] == "monitor"), None)
     mark = p.mark()
-    p.sc, p.early = None, 0
-    started = await p.ask(type="sc_start", target=monitor["id"], timeout=20) or {}
-    p.sc = started.get("sc")
-    sc, t0 = p.sc, started.get("t0")
+    sc, t0, started = await start(p, monitor)
     check("1. the screen starts on the link (Automatic, direct)", sc and started.get("via") == "tailscale", started)
     check("1. frames come on the link", await p.media(mark, lambda m: m["kind"] == "video", 15) is not None)
     module = await asyncio.to_thread(peer_module)
@@ -224,6 +294,16 @@ async def scenario(run, d):
     async with async_playwright() as pw:
         kinds = [k.strip() for k in ARGS.browsers.split(",") if k.strip()]
         browser, page = await page_for(pw, kinds[0], module, bridge)
+        if ARGS.matrix:
+            try:
+                NUMBERS["matrix"], sc = await matrix(p, page, sc, t0, mark, monitor)
+                rows = NUMBERS["matrix"]
+                check("the matrix ran every condition", len(rows) == len(MATRIX) + 1 and all("error" not in r for r in rows), [r for r in rows if "error" in r])
+                check("the screen survived every condition", all(r.get("survived", True) for r in rows), [r["name"] for r in rows if r.get("survived") is False])
+            finally:
+                await browser.close()
+            await p.ask(type="sc_stop", sc=sc)
+            return NUMBERS
         try:
             # 2. Peer to peer.
             mark = p.mark()
@@ -284,31 +364,64 @@ async def scenario(run, d):
             ended = [m for m in p.log[mark:] if m["type"] == "sc_end"]
             check("6. the screen keeps going under loss", not ended and lossy["frames"] > 0, (ended, lossy))
             set_impair("")
+            # 7. The rules hold peer to peer: the way turned off on the computer ends the screen within a second; the phone locking ends it
+            # at once (both through the hold's task, as on the link).
+            mark = p.mark()
+            await page.evaluate(f"window.startPeer({json.dumps(sc)})")
+            check("7. peer to peer again, impairment off", await wait_path(p, mark, lambda m: m.get("path") == "p2p" and m.get("state") == "live", 15) is not None)
+            at = time.time()
+            await call("mobile.set_screen", {"methods": {"p2p": False}})
+            ended = await p.wait(lambda m: m["type"] == "sc_end", 5, mark)
+            NUMBERS["p2p_off_end_ms"] = round((time.time() - at) * 1000)
+            check("7. turning peer to peer off ends a screen going that way within a second", (ended or {}).get("reason") == "revoked" and NUMBERS["p2p_off_end_ms"] <= 1000, (ended, NUMBERS["p2p_off_end_ms"]))
+            await call("mobile.set_screen", {"methods": {"p2p": True}})
+            sc, t0, started = await start(p, monitor)
+            mark = p.mark()
+            await page.evaluate(f"window.startPeer({json.dumps(sc)})")
+            check("7. a new screen goes peer to peer (the way on again, verified)", await wait_path(p, mark, lambda m: m.get("path") == "p2p" and m.get("state") == "live", 15) is not None)
+            # A locked phone hears nothing of the screen: the desktop's indicator says it ended, as in screen.py.
+            w = run.d
+            shared = "return !!document.querySelector('[data-screen-shared]')"
+            check("7. the desktop shows the screen shared", bool(await asyncio.to_thread(until, lambda: w.js(shared), 5)))
+            at = time.time()
+            await p.send(type="lock_now")
+            gone = await asyncio.to_thread(until, lambda: not w.js(shared), 5, 0.05)
+            NUMBERS["lock_end_ms"] = round((time.time() - at) * 1000)
+            check("7. the phone locking ends a peer to peer screen within a second", bool(gone) and NUMBERS["lock_end_ms"] <= 1000, NUMBERS["lock_end_ms"])
+            # And the peer stops sending: no frame arrives a second after the end.
+            await asyncio.sleep(1)
+            held = len(await frames(page))
+            await asyncio.sleep(1.5)
+            check("7. …and nothing more comes peer to peer", len(await frames(page)) == held, len(await frames(page)) - held)
+            challenge = (await p.ask(type="lock_challenge"))["lock"]["challenge"]
+            unlocked = await p.ask(type="lock_unlock", **passkey.get(challenge))
+            check("7. …and the phone unlocks again", (unlocked or {}).get("result") == "ok", unlocked and unlocked.get("type"))
+            sc, t0, started = await start(p, monitor)
             await page.evaluate("window.peer && window.peer.close()")
         finally:
             await browser.close()
-        # 7. Another browser engine.
+        # 8. Another browser engine.
         for kind in kinds[1:]:
             browser, page = await page_for(pw, kind, module, bridge)
             try:
                 mark = p.mark()
                 await page.evaluate(f"window.startPeer({json.dumps(sc)})")
                 moved = await wait_path(p, mark, lambda m: m.get("path") == "p2p" and m.get("state") == "live", 20)
-                check(f"7. {kind}: the computer moves the picture to its peer", moved is not None, [m for m in p.log[mark:] if m["type"] == "sc_path"])
+                check(f"8. {kind}: the computer moves the picture to its peer", moved is not None, [m for m in p.log[mark:] if m["type"] == "sc_path"])
                 if moved is None:
                     print("browser trace:", json.dumps(await page.evaluate("window.trace")), flush=True)
                 run_k = await run_for(page, 5, t0)
                 NUMBERS[f"{kind}_clean"] = run_k
-                check(f"7. {kind}: frames come peer to peer", run_k["frames"] >= 10, run_k)
-                check(f"7. {kind}: a click lands", await click_lands(page, started, ax + aw // 3, ay + ah // 2))
+                check(f"8. {kind}: frames come peer to peer", run_k["frames"] >= 10, run_k)
+                check(f"8. {kind}: a click lands", await click_lands(page, started, ax + aw // 3, ay + ah // 2))
             finally:
                 await browser.close()
-    # 8. Stop.
+    # 9. Stop.
     mark = p.mark()
     await p.ask(type="sc_stop", sc=sc)
     await asyncio.sleep(0.5)
     audit = (await call("mobile.audit", {"limit": 50})).get("entries", [])
-    check("8. the audit log has the start", any(e.get("action") == "screen_start" for e in audit), audit[-3:])
+    check("9. the audit log has the starts", sum(1 for e in audit if e.get("action") == "screen_start") >= 3, audit[-3:])
     return NUMBERS
 
 
@@ -325,9 +438,14 @@ def main():
         check("scenario ran to completion", False)
     finally:
         ss.finish(SETUP, d, run, "motion")
-    out = os.path.join(SETUP.scratch, "screen-rtc.json")
+    out = os.path.join(SETUP.scratch, "screen-rtc-matrix.json" if ARGS.matrix else "screen-rtc.json")
     with open(out, "w", encoding="utf-8") as f:
         json.dump({"at": time.strftime("%Y-%m-%d %H:%M"), "numbers": NUMBERS, "checks": ss.results}, f, indent=1)
+    if ARGS.matrix and NUMBERS.get("matrix"):
+        table = matrix_table(NUMBERS["matrix"])
+        with open(out[:-5] + ".md", "w", encoding="utf-8") as f:
+            f.write(table + "\n")
+        print(table)
     print(json.dumps(NUMBERS, indent=1))
     failed = [r for r in ss.results if not r[1]]
     print(f"{len(ss.results) - len(failed)}/{len(ss.results)} passed")

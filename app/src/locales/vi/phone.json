@@ -1,4 +1,7 @@
 {
+  "Not copied": "Chưa sao chép được",
+  "Copy measurements": "Sao chép số đo",
+  "Copied": "Đã sao chép",
   "This relay offers no TURN.": "Relay này không cung cấp TURN.",
   "The relay's TURN is used up for now. Try again later.": "TURN của relay đã hết lượt trong lúc này, vì vậy bạn hãy thử lại sau.",
   "This computer's TURN allowance is used up (Kelpie → Settings → Mobile → Advanced).": "Hạn mức TURN của máy tính này đã dùng hết (Kelpie → Settings → Mobile → Advanced).",

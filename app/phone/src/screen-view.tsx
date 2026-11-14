@@ -339,6 +339,23 @@ function Live() {
     setMods([]);
   };
   const toggleMod = (m: Mod) => setMods((all) => (all.includes(m) ? all.filter((x) => x !== m) : [...all, m]));
+  // For a field run (plans: the remote desktop's measurements): what this phone measured of the picture and its way, sizes and timings only,
+  // never what the picture shows, copied to paste into a note.
+  const [copied, setCopied] = createSignal<"yes" | "no" | null>(null);
+  const copyMeasurements = async () => {
+    const st = s();
+    // Sizes, timings and the kind of connection (and the browser, which decodes): never what the picture shows.
+    const summary = { at: new Date().toISOString(), path: st.path, way: st.pathStats, via: st.usedVia, stats: st.stats, age_ms_p50: st.age, phone: { ...times.snapshot(), desynchronized: lowLatency() }, agent: navigator.userAgent };
+    let done: "yes" | "no" = "no";
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(summary));
+      done = "yes";
+    } catch {
+      /* no clipboard here (an insecure page, or refused): said as not copied */
+    }
+    setCopied(done);
+    setTimeout(() => setCopied(null), 2000);
+  };
   const sendText = async () => {
     const value = text();
     // With a modifier held, one letter or digit is a shortcut (Ctrl+S), not text.
@@ -385,6 +402,10 @@ function Live() {
           <button class="btn" data-screen-sharpen onClick={(e) => { e.stopPropagation(); sharpen(); }}>{t("Sharpen")}</button>
         </Show>
       </p>
+      <Show when={debug()}>
+        {/* Outside the picture: a tap here never reaches the computer. */}
+        <button class="btn" data-screen-copy onClick={() => void copyMeasurements()}>{copied() === "yes" ? t("Copied") : copied() === "no" ? t("Not copied") : t("Copy measurements")}</button>
+      </Show>
       <p class="muted screen-details" data-screen-details data-screen-path={s().path ?? ""} data-screen-p2p={s().path === "p2p" ? (s().pathStats?.path ?? "p2p") : ""}>
         {detailsText(s().stats, connected() ? pathText(livePathNow(), t) : null, s().age, t, s().path === "link" ? (s().usedVia === "p2p" ? null : s().usedVia) : s().usedVia, s().path === "p2p" ? (s().pathStats ?? { path: "p2p", local: "", remote: "", relayProtocol: null, rttMs: null, bytesReceived: 0 }) : null)}
       </p>

@@ -14,5 +14,9 @@ Checks that found real bugs in the phase 1d (TURN) review, 2026-11-14:
 - The relay's TURN `ts` is strictly monotonic per room, and the daemon opens a new ureq Agent (TLS) per request, so concurrent signed requests arrive out of order and one gets a 403.
 - Cloudflare TURN FAQ (checked 2026-11-14): an expired credential's connection drops after a short delay, and Refresh needs a valid credential. Revoking does something to live allocations that Cloudflare does not document. The docs suggest `setConfiguration()` for refresh, but whether browsers re-authenticate an existing allocation that way is unverified.
 
+- Phone `screen-view.tsx`: anything rendered inside `.screen-canvas` (the gesture surface, `onPointerDown` with `setPointerCapture`) turns a tap into an `sc_input` click on the computer; `stopPropagation` on `click` does not help. Buttons belong outside it (1e "Copy measurements" did this).
+- Phone *Direct (peer to peer)* through the relay still asks `sc_rtc_servers` and gets TURN, so ICE may pick a TURN pair (docs say "direct only").
+- E2E metric "shared" claims: check the other script really calls the shared helper (1e: screen_net only took `pct`).
+
 **Why:** these passed CI and unit tests in the reviewed commit.
 **How to apply:** for any new screen way or sealed-option field, check the seal form, the placeholder default, the phone's open-peer branches, the watch-vs-stats timing and post-await liveness. Related: [[vault-host-identity]].

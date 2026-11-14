@@ -970,6 +970,17 @@ describe("the screen through the relay's TURN", () => {
     expect(r.peers[0].setup).toEqual({ servers: TURN, relayOnly: false });
   });
 
+  it("Direct (peer to peer) chosen asks for no TURN: STUN only", async () => {
+    const r = on("p2p", { t: "ack", ice_servers: TURN, turn: null });
+    await r.s.openPicker();
+    r.s.choosePath("p2p");
+    await r.s.pick("w:1:2");
+    await flush();
+    expect(r.serverAsks).toEqual([]);
+    expect(r.peers[0].setup.servers[0].urls).toMatch(/^stun:/);
+    expect(r.peers[0].setup.servers).toHaveLength(1);
+  });
+
   it("the relay's TURN chosen opens a peer through TURN alone, and none when the computer has no TURN to give", async () => {
     const r = on("relay", { t: "ack", ice_servers: TURN, turn: null });
     await r.s.openPicker();

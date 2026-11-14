@@ -66,11 +66,7 @@ MOTION_WINDOW = ss.Motion(SETUP)
 area, clicks_seen = MOTION_WINDOW.area, MOTION_WINDOW.clicks_seen
 
 
-def pct(values, q):
-    v = sorted(x for x in values if x is not None and math.isfinite(x))
-    if not v:
-        return None
-    return round(v[min(len(v) - 1, int(round((len(v) - 1) * q)))], 1)
+pct = ss.pct
 
 
 class Phone:
