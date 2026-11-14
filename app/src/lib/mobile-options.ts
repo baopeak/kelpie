@@ -304,8 +304,8 @@ export interface ScreenMethodRow {
   note: string | null;
 }
 
-/** The checkboxes under Advanced. The relay ways count only while the screen without Tailscale is on; the relay's TURN is not built yet, and the choice is
- *  kept for when it is. A direct link (peer to peer) needs a computer at `SCREEN_P2P_API`. */
+/** The checkboxes under Advanced. The relay ways count only while the screen without Tailscale is on. A direct link (peer to peer) needs a computer at
+ *  `SCREEN_P2P_API`, the relay's TURN one at `SCREEN_TURN_API`. */
 export function screenMethodRows(f: OptionFacts): ScreenMethodRow[] {
   const sc = f.status?.screen;
   const disabled = blocked(f, SCREEN_REMOTE_API, !!sc, true);

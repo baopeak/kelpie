@@ -1075,7 +1075,9 @@ export class ScreenSession {
     this.nextPeer = null;
     // Only the newest ask opens a peer: an older one still waiting for its servers gives up.
     const gen = ++this.peerGen;
-    const asked = given ? Promise.resolve<Reply>({ t: "ack", ice_servers: given, turn: null }) : (this.port.servers?.(sc, relayOnly) ?? null);
+    // *Direct (peer to peer)* chosen: STUN only, never TURN (that is the relay's way, with its own choice).
+    const directOnly = this.chosen === "p2p" && !relayOnly;
+    const asked = given ? Promise.resolve<Reply>({ t: "ack", ice_servers: given, turn: null }) : directOnly ? null : (this.port.servers?.(sc, relayOnly) ?? null);
     let setup: PeerSetup = { ...STUN_ONLY, relayOnly };
     if (asked) {
       const r = await asked;
